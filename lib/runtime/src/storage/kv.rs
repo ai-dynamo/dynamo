@@ -365,6 +365,10 @@ impl Manager {
     /// bucket is empty. The NATS store is the exception: it sends no initial `Resync` and replays
     /// existing keys as [`WatchEvent::Put`] events.
     ///
+    /// A non-empty `sub` scopes the watch to the keys under that path, as
+    /// [`Bucket::watch_under`] does: the receiver gets at least those keys, and a backend that
+    /// cannot scope its watch sends the whole bucket. An empty `sub` watches the whole bucket.
+    ///
     /// This method establishes the watch before it returns: [`Bucket::watch`] has captured the
     /// initial snapshot, so every change that follows reaches the receiver, as its own event or
     /// inside a later [`WatchEvent::Resync`] that replaces all earlier state. A caller that also
@@ -380,25 +384,6 @@ impl Manager {
     /// Returns an error when the bucket is unavailable, when the backend cannot establish the
     /// watch, or when `cancel_token` cancels first.
     pub async fn watch(
-        self: Arc<Self>,
-        bucket_name: &str,
-        bucket_ttl: Option<Duration>,
-        cancel_token: CancellationToken,
-    ) -> Result<
-        (
-            tokio::task::JoinHandle<()>,
-            tokio::sync::mpsc::Receiver<WatchEvent>,
-        ),
-        StoreError,
-    > {
-        self.watch_under(bucket_name, "", bucket_ttl, cancel_token)
-            .await
-    }
-
-    /// [`Manager::watch`] for the keys under `sub` (see [`Bucket::watch_under`]). The receiver
-    /// gets at least every change under `sub`; a backend that cannot scope its watch sends the
-    /// whole bucket.
-    pub async fn watch_under(
         self: Arc<Self>,
         bucket_name: &str,
         sub: &str,
@@ -694,7 +679,7 @@ mod tests {
         let cancel_token = CancellationToken::new();
         let (watch_task, mut rx) = manager
             .clone()
-            .watch(BUCKET_NAME, None, cancel_token.clone())
+            .watch(BUCKET_NAME, "", None, cancel_token.clone())
             .await
             .unwrap();
 
@@ -741,7 +726,7 @@ mod tests {
         let cancel_token = CancellationToken::new();
         let (watch_task, mut rx) = manager
             .clone()
-            .watch(BUCKET_NAME, None, cancel_token.clone())
+            .watch(BUCKET_NAME, "", None, cancel_token.clone())
             .await
             .unwrap();
         bucket.delete(&key).await.unwrap();
@@ -780,7 +765,7 @@ mod tests {
         let manager = Arc::new(Manager::file(cancel_token.clone(), root.path()));
 
         let error = manager
-            .watch(BUCKET_NAME, None, cancel_token.clone())
+            .watch(BUCKET_NAME, "", None, cancel_token.clone())
             .await
             .expect_err("a bucket under a file cannot be created");
 
@@ -799,7 +784,7 @@ mod tests {
 
         let error = manager
             .clone()
-            .watch(BUCKET_NAME, None, cancel_token)
+            .watch(BUCKET_NAME, "", None, cancel_token)
             .await
             .expect_err("a cancelled watch establishes no snapshot");
 
@@ -821,7 +806,7 @@ mod tests {
 
         let watch = manager
             .clone()
-            .watch(BUCKET_NAME, None, CancellationToken::new());
+            .watch(BUCKET_NAME, "", None, CancellationToken::new());
         assert!(
             watch.now_or_never().is_none(),
             "the watch completed on its first poll, before its setup task could run"
@@ -838,7 +823,7 @@ mod tests {
     async fn manager_watch_task_ends_when_its_receiver_drops() {
         let manager = Arc::new(Manager::memory());
         let (watch_task, rx) = manager
-            .watch(BUCKET_NAME, None, CancellationToken::new())
+            .watch(BUCKET_NAME, "", None, CancellationToken::new())
             .await
             .unwrap();
 

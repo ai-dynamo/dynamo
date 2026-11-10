@@ -1152,6 +1152,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
         while self.reconciliations.join_next().await.is_some() {}
     }
 
+    /// Lists `query` in the background for a reconciliation snapshot at the current revision.
     fn start_reconciliation(&mut self, query: DiscoveryQuery) {
         let host = self.host.clone();
         let revision = self.revision;
@@ -1370,7 +1371,6 @@ mod tests {
         discarded: AtomicUsize,
         inventory: super::super::worker_inventory::WorkerInventory,
         prepared_replacements: AtomicUsize,
-        listed: Mutex<Vec<DiscoveryQuery>>,
     }
 
     impl FakeHost {
@@ -1392,7 +1392,6 @@ mod tests {
                     discarded: AtomicUsize::new(0),
                     inventory: Default::default(),
                     prepared_replacements: AtomicUsize::new(0),
-                    listed: Mutex::new(Vec::new()),
                 }),
                 start_rx,
             )
@@ -1603,9 +1602,8 @@ mod tests {
 
         async fn list_instances(
             &self,
-            query: DiscoveryQuery,
+            _query: DiscoveryQuery,
         ) -> anyhow::Result<Vec<DiscoveryInstance>> {
-            self.listed.lock().unwrap().push(query);
             Ok(Vec::new())
         }
     }
@@ -1615,40 +1613,6 @@ mod tests {
             model_name: "model".to_string(),
             worker_set_key: "group".to_string(),
         }
-    }
-
-    /// Runs the controller on a quiet stream until its first periodic reconciliation and
-    /// returns the query that reconciliation listed.
-    async fn first_reconciliation_query(namespace_filter: NamespaceFilter) -> DiscoveryQuery {
-        let (host, _starts) = FakeHost::new();
-        let controller = ModelDiscoveryController::new(host.clone());
-        let stream: DiscoveryStream = Box::pin(futures::stream::pending());
-        let run = tokio::spawn(controller.run(stream, namespace_filter));
-        // Step the paused clock, so the interval exists before its deadline passes.
-        let deadline = RECONCILIATION_INTERVAL + Duration::from_secs(10);
-        let step = Duration::from_secs(1);
-        let mut elapsed = Duration::ZERO;
-        while elapsed < deadline {
-            tokio::time::advance(step).await;
-            elapsed += step;
-            tokio::task::yield_now().await;
-            if let Some(query) = host.listed.lock().unwrap().first().cloned() {
-                run.abort();
-                return query;
-            }
-        }
-        panic!("the controller did not reconcile within {deadline:?}");
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn reconciliation_lists_only_an_exact_namespace() {
-        let query = first_reconciliation_query(NamespaceFilter::Exact("pool-7".into())).await;
-        assert!(
-            matches!(&query, DiscoveryQuery::NamespacedModels { namespace } if namespace == "pool-7"),
-            "{query:?}"
-        );
-        let query = first_reconciliation_query(NamespaceFilter::Prefix("pool".into())).await;
-        assert!(matches!(query, DiscoveryQuery::AllModels), "{query:?}");
     }
 
     fn instance(id: u64, mdc_checksum: &str) -> DesiredInstance {

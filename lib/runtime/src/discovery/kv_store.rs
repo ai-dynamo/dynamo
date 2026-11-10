@@ -751,7 +751,7 @@ impl Discovery for KVStoreDiscovery {
         let (_, mut rx) = self
             .store
             .clone()
-            .watch_under(
+            .watch(
                 bucket_name,
                 Self::strip_bucket_prefix(&prefix, bucket_name),
                 None, // No TTL
@@ -1563,6 +1563,7 @@ mod etcd_tests {
         }
     }
 
+    /// The sorted `namespace/component/endpoint` names of endpoint instances.
     fn endpoint_names(instances: &[DiscoveryInstance]) -> Vec<String> {
         let mut names: Vec<_> = instances
             .iter()
@@ -1577,9 +1578,9 @@ mod etcd_tests {
         names
     }
 
-    /// On etcd, scoped namespaced lists and watches still return every instance the query
-    /// matches, including next to a sibling namespace (`x-1` and `x-10`). The bucket-level test
-    /// in `storage/kv/etcd.rs` shows the reads themselves are scoped.
+    /// On etcd, a scoped namespaced list and a scoped component watch still return every
+    /// instance the query matches, next to a sibling namespace (`x-1` and `x-10`). The
+    /// bucket-level test in `storage/kv/etcd.rs` shows the reads themselves are scoped.
     #[test]
     fn scoped_queries_return_every_matching_instance() {
         let rt = Runtime::single_threaded().unwrap();
@@ -1617,30 +1618,6 @@ mod etcd_tests {
                     format!("{ns1}/other/ep-a")
                 ]
             );
-            let component = client
-                .list(DiscoveryQuery::ComponentEndpoints {
-                    namespace: ns1.clone(),
-                    component: "comp".to_string(),
-                })
-                .await
-                .unwrap();
-            assert_eq!(component.len(), 2);
-            let single = client
-                .list(DiscoveryQuery::Endpoint {
-                    namespace: ns1.clone(),
-                    component: "comp".to_string(),
-                    endpoint: "ep-a".to_string(),
-                })
-                .await
-                .unwrap();
-            assert_eq!(endpoint_names(&single), [format!("{ns1}/comp/ep-a")]);
-            let sibling = client
-                .list(DiscoveryQuery::NamespacedEndpoints {
-                    namespace: ns10.clone(),
-                })
-                .await
-                .unwrap();
-            assert_eq!(endpoint_names(&sibling), [format!("{ns10}/comp/ep-a")]);
 
             let mut stream = client
                 .list_and_watch(

@@ -46,15 +46,16 @@ fn validate_kubernetes_publisher_id(publisher_id: u64) -> Result<()> {
 /// reports the persisted result to that update's caller; on failure it has already reported the
 /// error, and the candidate is unchanged.
 type PendingUpdate = Box<dyn FnOnce(&mut DiscoveryMetadata) -> Option<ReportPersisted> + Send>;
-type ReportPersisted = Box<dyn FnOnce(Result<(), Arc<anyhow::Error>>) + Send>;
-type PendingUpdates = Arc<std::sync::Mutex<Vec<PendingUpdate>>>;
+type ReportPersisted = Box<dyn FnOnce(Result<()>) + Send>;
+type PendingUpdates = Arc<parking_lot::Mutex<Vec<PendingUpdate>>>;
 
 /// Applies `update` to the local metadata, persists the result, and commits it locally only
 /// after the persist succeeds.
 ///
 /// Updates that queue while a persist is in flight share the next one: whichever task holds
-/// the metadata lock applies every queued update, in order, and persists once. A lone update
-/// persists at once, as before; nothing waits for a batch to fill.
+/// the metadata lock applies every queued update, in order, and persists once with its own
+/// `persist`, so every caller must pass an equivalent one. A lone update persists at once, as
+/// before; nothing waits for a batch to fill.
 async fn update_metadata_and_persist<T, U, F, Fut>(
     metadata: &Arc<RwLock<DiscoveryMetadata>>,
     pending: &PendingUpdates,
@@ -70,21 +71,14 @@ where
     let (result_tx, result_rx) = tokio::sync::oneshot::channel::<Result<T>>();
     pending
         .lock()
-        .expect("pending discovery updates lock poisoned")
         .push(Box::new(move |candidate: &mut DiscoveryMetadata| {
             // A failed update must not leave half of its changes in the shared candidate.
             let mut updated = candidate.clone();
             match update(&mut updated) {
                 Ok(value) => {
                     *candidate = updated;
-                    Some(Box::new(move |persisted: Result<(), Arc<anyhow::Error>>| {
-                        // The last caller to see a failed persist gets the original error;
-                        // callers that shared it with others get its message.
-                        let result = persisted.map(|()| value).map_err(|error| {
-                            Arc::try_unwrap(error)
-                                .unwrap_or_else(|shared| anyhow::anyhow!("{shared:#}"))
-                        });
-                        let _ = result_tx.send(result);
+                    Some(Box::new(move |persisted: Result<()>| {
+                        let _ = result_tx.send(persisted.map(|()| value));
                     }) as ReportPersisted)
                 }
                 Err(error) => {
@@ -100,11 +94,7 @@ where
     // so they run in a detached task: a cancelled caller drops only its result receiver.
     tokio::spawn(async move {
         let mut metadata = metadata.write().await;
-        let batch = std::mem::take(
-            &mut *pending
-                .lock()
-                .expect("pending discovery updates lock poisoned"),
-        );
+        let batch = std::mem::take(&mut *pending.lock());
         // An earlier task's batch already carried this update.
         if batch.is_empty() {
             return;
@@ -127,17 +117,16 @@ where
                     report(Ok(()));
                 }
             }
-            Err(error) => {
-                let error = Arc::new(error);
-                let mut reports = reports;
-                let last = reports.pop();
-                for report in reports {
-                    report(Err(Arc::clone(&error)));
+            Err(error) => match <[ReportPersisted; 1]>::try_from(reports) {
+                // A lone update keeps the original error; a shared one reaches each caller as
+                // its message.
+                Ok([report]) => report(Err(error)),
+                Err(reports) => {
+                    for report in reports {
+                        report(Err(anyhow::anyhow!("{error:#}")));
+                    }
                 }
-                if let Some(report) = last {
-                    report(Err(error));
-                }
-            }
+            },
         }
     });
 
@@ -1154,153 +1143,86 @@ mod tests {
         .into_instance(1)
     }
 
-    /// A persist that logs how many endpoints it wrote, optionally signals that it started,
-    /// waits for `gate`, and fails when `fail` is set.
-    fn logging_persist(
-        log: Arc<std::sync::Mutex<Vec<usize>>>,
-        started: Option<tokio::sync::oneshot::Sender<()>>,
-        gate: Option<tokio::sync::oneshot::Receiver<()>>,
+    /// Queues `count` endpoint registrations while the test holds the metadata lock, so they
+    /// all share the persist that follows. Update `reject` fails after registering its endpoint,
+    /// and the persist fails when `fail` is set. Returns each caller's result, the endpoint count
+    /// of every persist, and the number of endpoints committed locally.
+    async fn run_one_batch(
+        count: usize,
+        reject: Option<usize>,
         fail: bool,
-    ) -> impl FnOnce(
-        DiscoveryMetadata,
-    )
-        -> std::pin::Pin<Box<dyn Future<Output = Result<DiscoveryMetadata>> + Send>>
-    + Send
-    + 'static {
-        move |candidate| {
-            Box::pin(async move {
-                log.lock()
-                    .unwrap()
-                    .push(candidate.get_all_endpoints().len());
-                if let Some(started) = started {
-                    let _ = started.send(());
-                }
-                if let Some(gate) = gate {
-                    let _ = gate.await;
-                }
-                anyhow::ensure!(!fail, "injected persist failure");
-                Ok(candidate)
+    ) -> (Vec<Result<()>>, Vec<usize>, usize) {
+        let metadata = Arc::new(RwLock::new(DiscoveryMetadata::new()));
+        let pending = PendingUpdates::default();
+        let persisted = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let held = metadata.write().await;
+        let tasks: Vec<_> = (0..count)
+            .map(|i| {
+                let (metadata, pending, persisted) =
+                    (metadata.clone(), pending.clone(), persisted.clone());
+                tokio::spawn(async move {
+                    update_metadata_and_persist(
+                        &metadata,
+                        &pending,
+                        move |candidate| {
+                            candidate.register_endpoint(queued_endpoint(&format!("queued-{i}")))?;
+                            anyhow::ensure!(Some(i) != reject, "rejected update {i}");
+                            Ok(())
+                        },
+                        move |candidate| async move {
+                            persisted
+                                .lock()
+                                .unwrap()
+                                .push(candidate.get_all_endpoints().len());
+                            anyhow::ensure!(!fail, "injected persist failure");
+                            Ok(candidate)
+                        },
+                    )
+                    .await
+                })
             })
-        }
-    }
-
-    /// Starts one update whose persist holds the metadata lock until the returned sender fires,
-    /// and returns once that persist is running.
-    async fn hold_the_lock(
-        metadata: &Arc<RwLock<DiscoveryMetadata>>,
-        pending: &PendingUpdates,
-        log: &Arc<std::sync::Mutex<Vec<usize>>>,
-    ) -> (
-        tokio::sync::oneshot::Sender<()>,
-        tokio::task::JoinHandle<Result<()>>,
-    ) {
-        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
-        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
-        let first = queued_endpoint("first");
-        let task = tokio::spawn({
-            let (metadata, pending) = (metadata.clone(), pending.clone());
-            let persist = logging_persist(log.clone(), Some(started_tx), Some(release_rx), false);
-            async move {
-                update_metadata_and_persist(
-                    &metadata,
-                    &pending,
-                    move |candidate| candidate.register_endpoint(first),
-                    persist,
-                )
-                .await
-            }
-        });
-        started_rx.await.unwrap();
-        (release_tx, task)
-    }
-
-    async fn wait_for_queue(pending: &PendingUpdates, len: usize) {
+            .collect();
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while pending.lock().unwrap().len() < len {
+            while pending.lock().len() < count {
                 tokio::task::yield_now().await;
             }
         })
         .await
         .expect("updates did not queue");
+        drop(held);
+
+        let mut results = Vec::new();
+        for task in tasks {
+            results.push(task.await.unwrap());
+        }
+        let persisted = persisted.lock().unwrap().clone();
+        let committed = metadata.read().await.get_all_endpoints().len();
+        (results, persisted, committed)
     }
 
     #[tokio::test]
-    async fn updates_queued_behind_a_persist_share_the_next_one() {
-        let metadata = Arc::new(RwLock::new(DiscoveryMetadata::new()));
-        let pending = PendingUpdates::default();
-        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let (release, first) = hold_the_lock(&metadata, &pending, &log).await;
-
-        let mut queued = Vec::new();
-        for i in 0..7 {
-            let (metadata, pending) = (metadata.clone(), pending.clone());
-            let persist = logging_persist(log.clone(), None, None, false);
-            let endpoint = queued_endpoint(&format!("queued-{i}"));
-            queued.push(tokio::spawn(async move {
-                update_metadata_and_persist(
-                    &metadata,
-                    &pending,
-                    move |candidate| {
-                        // One update in the batch fails; the rest must not be affected.
-                        anyhow::ensure!(i != 3, "rejected update {i}");
-                        candidate.register_endpoint(endpoint)
-                    },
-                    persist,
-                )
-                .await
-            }));
-        }
-        wait_for_queue(&pending, 7).await;
-        release.send(()).unwrap();
-
-        first.await.unwrap().unwrap();
-        for (i, task) in queued.into_iter().enumerate() {
-            let result = task.await.unwrap();
+    async fn updates_queued_behind_a_persist_share_one_write() {
+        let (results, persisted, committed) = run_one_batch(7, Some(3), false).await;
+        for (i, result) in results.iter().enumerate() {
             assert_eq!(result.is_ok(), i != 3, "update {i}: {result:?}");
         }
-        // The first update persisted alone; the six that succeeded shared one more persist.
-        assert_eq!(*log.lock().unwrap(), vec![1, 7]);
-        assert_eq!(metadata.read().await.get_all_endpoints().len(), 7);
+        // The six accepted updates shared one persist; the rejected one left nothing behind.
+        assert_eq!(persisted, vec![6]);
+        assert_eq!(committed, 6);
     }
 
     #[tokio::test]
     async fn a_failed_shared_persist_fails_and_commits_none_of_its_updates() {
-        let metadata = Arc::new(RwLock::new(DiscoveryMetadata::new()));
-        let pending = PendingUpdates::default();
-        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let (release, first) = hold_the_lock(&metadata, &pending, &log).await;
-
-        let mut queued = Vec::new();
-        for i in 0..3 {
-            let (metadata, pending) = (metadata.clone(), pending.clone());
-            let persist = logging_persist(log.clone(), None, None, true);
-            let endpoint = queued_endpoint(&format!("queued-{i}"));
-            queued.push(tokio::spawn(async move {
-                update_metadata_and_persist(
-                    &metadata,
-                    &pending,
-                    move |candidate| candidate.register_endpoint(endpoint),
-                    persist,
-                )
-                .await
-            }));
-        }
-        wait_for_queue(&pending, 3).await;
-        release.send(()).unwrap();
-
-        first.await.unwrap().unwrap();
-        for task in queued {
-            let error = task.await.unwrap().unwrap_err();
+        let (results, persisted, committed) = run_one_batch(3, None, true).await;
+        for result in results {
+            let error = result.unwrap_err();
             assert!(
                 error.to_string().contains("injected persist failure"),
                 "{error:#}"
             );
         }
-        assert_eq!(*log.lock().unwrap(), vec![1, 4]);
-        assert_eq!(
-            metadata.read().await.get_all_endpoints(),
-            vec![queued_endpoint("first")]
-        );
+        assert_eq!(persisted, vec![3]);
+        assert_eq!(committed, 0);
     }
 
     #[tokio::test]

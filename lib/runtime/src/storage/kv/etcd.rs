@@ -229,9 +229,8 @@ impl EtcdBucket {
     /// The etcd key prefix of the keys under `sub`: `bucket/` for the whole bucket, else
     /// `bucket/sub/`, so a sibling such as `bucket/sub-2` is not included.
     fn key_prefix(&self, sub: &str) -> String {
-        let sub = sub.trim_matches('/');
         if sub.is_empty() {
-            make_key(&self.bucket_name, &"".into())
+            format!("{}/", self.bucket_name)
         } else {
             format!("{}/{sub}/", self.bucket_name)
         }
