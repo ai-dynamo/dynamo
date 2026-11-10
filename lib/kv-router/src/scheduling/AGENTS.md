@@ -118,7 +118,7 @@ PolicyClassQueue("agents")
   reuse the ID only after the previous booking has been released.
 - Before an unpinned retry, exclude every worker already failed by that migration state machine. Preserve caller allowlists and routing constraints. An affinity-derived pin may be invalidated and rebound; an explicit request pin remains exact.
 - A failed stream releases its scheduler booking before the error reaches the retry manager. This ordering prevents a later attempt from overlapping stale cleanup.
-- Cleanup that can outlive an admitted request attempt must carry its internal `AttemptId`. `RequestGuard` fences scheduler mutations with `(request_id, attempt_id)` and the admission lifecycle lease remains request-ID-only until handoff.
+- Cleanup that can outlive an admitted request attempt must carry its internal `AttemptId`. `RequestGuard` fences scheduler mutations with `(request_id, attempt_id)`. Pending admission cleanup must match the lease's lifecycle identity, since a later request may reuse its request ID; admission upgrades that lease to the exact booking before handoff.
 - Prepared candidate rows must not hold anything the actor's bookings change. Load
   inputs are filled on the actor at selection, so each admission still observes
   every earlier booking.
