@@ -10,8 +10,9 @@ Dynamo sidecar builds. Older runtimes without the advertised encoder capabilitie
 cannot run these topologies. Image handoffs support TP/PP/CP=1; video and audio
 encoder handoffs are not supported.
 
-Dynamo supports native NIXL encoder handoff only. Startup requires the engine to
-advertise NIXL as its single encoder transfer backend. Shared-safetensors handoff
+Dynamo supports native NIXL encoder handoff only. Producers must advertise NIXL
+as their single encoder transfer backend and typed abort cleanup support.
+Consumers must accept NIXL and may advertise additional backends. Shared-safetensors handoff
 remains an upstream helper for local experiments and is outside this Dynamo
 integration. Use matching proposal builds with encoder-result release support;
 the baseline OpenEngine package pins do not supply these capabilities.
