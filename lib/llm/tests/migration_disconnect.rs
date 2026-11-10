@@ -7,8 +7,8 @@
 //! unwinds through a retry is not a cancel and records no outcome.
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use dynamo_llm::discovery::ModelManager;
@@ -157,7 +157,6 @@ async fn rest<T: Data>(stream: ManyOut<T>) -> Vec<T> {
         .await
         .expect("the stream ends")
 }
-
 
 /// Every migration outcome `metrics` recorded, as `type/outcome xN`.
 fn migration_outcomes(metrics: &Metrics) -> Vec<String> {
