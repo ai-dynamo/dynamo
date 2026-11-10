@@ -140,26 +140,31 @@ The following route takes a JSON body, checks a bearer token, sends the body to 
 worker endpoint, and returns the replies:
 
 ```python
+import hmac
 import json
 import os
 
 from dynamo.llm import FrontendExtensionContext, FrontendResponse, FrontendRoute
 
-_TOKEN = os.environ["MY_CONTROL_TOKEN"]
+_BEARER = f"Bearer {os.environ['MY_CONTROL_TOKEN']}".encode()
 _client = None
 
 
 async def _broadcast(ctx: FrontendExtensionContext):
-    if ctx.headers.get("authorization") != f"Bearer {_TOKEN}":
+    supplied = ctx.headers.get("authorization", "").encode()
+    if not hmac.compare_digest(supplied, _BEARER):
         return FrontendResponse(401, {"error": "invalid bearer"})
-    request = json.loads(ctx.body)
+    try:
+        request = json.loads(ctx.body)
+    except ValueError:
+        return FrontendResponse(400, {"error": "body must be JSON"})
 
     global _client
     if _client is None:
         _client = await ctx.runtime.endpoint("dynamo.backend.control").client()
 
     replies = {}
-    for instance_id in _client.instance_ids():
+    for instance_id in await _client.wait_for_instances():
         stream = await _client.direct(request, instance_id)
         async for reply in stream:
             replies[str(instance_id)] = reply.data()
@@ -178,9 +183,10 @@ Synchronous handlers execute in a small, dedicated thread pool, separate from in
 tokenization. That pool also starts each async handler, which then runs on the Frontend's event loop.
 Keep handlers fast and non-blocking:
 
-- A handler that exceeds its route's `timeout_s` (30 seconds by default) returns HTTP 503. An async
-  handler is cancelled at the timeout.
-- A client that disconnects does not cancel the handler. It runs until it finishes or times out.
+- A handler that exceeds its route's `timeout_s` (30 seconds by default, measured from request
+  arrival) returns HTTP 503. An async handler is cancelled at the timeout, and one that has not
+  started by then never starts.
+- A client that disconnects does not cancel a running handler.
 - At most 64 handlers can be waiting or running at once. Further requests are rejected with the
   configured overload status code, HTTP 529 by default. An async handler holds its slot until it
   finishes or is cancelled.

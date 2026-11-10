@@ -16,7 +16,7 @@ use dynamo_llm::http::service::{
     FrontendRouteSet,
 };
 use pyo3::{
-    exceptions::{PyTypeError, PyValueError},
+    exceptions::{PyTimeoutError, PyTypeError, PyValueError},
     prelude::*,
     types::{PyBytes, PyDict, PyIterator},
 };
@@ -60,7 +60,7 @@ impl PyFrontendRoute {
         dynamo_llm::http::service::validate_extension_route_path(&path)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let timeout = Some(timeout_s)
-            .filter(|t| t.is_finite() && *t > 0.0)
+            .filter(|t| *t > 0.0)
             .and_then(|t| Duration::try_from_secs_f64(t).ok())
             .ok_or_else(|| {
                 PyValueError::new_err(format!(
@@ -83,11 +83,6 @@ impl PyFrontendRoute {
     #[getter]
     pub fn path(&self) -> String {
         self.path.clone()
-    }
-
-    #[getter]
-    pub fn timeout_s(&self) -> f64 {
-        self.timeout.as_secs_f64()
     }
 }
 
@@ -117,7 +112,7 @@ pub(crate) struct PyFrontendExtensionContext {
     inner: RsFrontendExtensionContext,
     body: Bytes,
     headers: HeaderMap,
-    runtime: PyObject,
+    env: Arc<PyRouteEnv>,
 }
 
 #[pymethods]
@@ -173,7 +168,7 @@ impl PyFrontendExtensionContext {
     /// The frontend's own `DistributedRuntime`.
     #[getter]
     pub fn runtime(&self, py: Python<'_>) -> PyObject {
-        self.runtime.clone_ref(py)
+        self.env.runtime.clone_ref(py)
     }
 }
 
@@ -224,12 +219,7 @@ pub(crate) fn frontend_route_extensions_from_py(
     // `run_input` is awaited from the frontend's event loop, so it is running here.
     let event_loop = py
         .import("asyncio")?
-        .call_method0("get_running_loop")
-        .map_err(|e| {
-            PyValueError::new_err(format!(
-                "frontend route extensions must be registered from a running asyncio event loop: {e}"
-            ))
-        })?
+        .call_method0("get_running_loop")?
         .unbind();
     let env = Arc::new(PyRouteEnv {
         event_loop,
@@ -254,17 +244,18 @@ fn frontend_route_extension_from_routes(
                 timeout: route.timeout,
                 env: env.clone(),
             });
-            let route_context = context.clone();
+            let context = context.clone();
             builder = builder.route(
                 route.method.clone(),
                 route.path.clone(),
                 move |headers: HeaderMap, body: Bytes| {
-                    call_python_frontend_route(
-                        handler.clone(),
-                        route_context.clone(),
-                        headers,
+                    let ctx = PyFrontendExtensionContext {
+                        inner: context.clone(),
                         body,
-                    )
+                        headers,
+                        env: handler.env.clone(),
+                    };
+                    call_python_frontend_route(handler.clone(), ctx)
                 },
             )?;
         }
@@ -282,29 +273,26 @@ static IN_FLIGHT: Semaphore = Semaphore::const_new(EXTENSION_QUEUE_DEPTH);
 
 type ExtensionJob = Box<dyn FnOnce() + Send + 'static>;
 type RouteResult = Result<(StatusCode, Value), RouteError>;
+type RouteSender = tokio::sync::oneshot::Sender<RouteResult>;
 
 /// Rendered under the GIL where it occurs: formatting a `PyErr` takes the GIL,
 /// which a tokio worker must not wait for.
 enum RouteError {
     Failed(String),
-    /// `asyncio.wait_for` hit the route's deadline on the event loop.
+    /// The deadline passed on the event loop, before or during the handler.
     TimedOut,
 }
 
 impl RouteError {
     fn from_py(py: Python<'_>, err: PyErr) -> Self {
-        let timed_out = py
-            .import("asyncio")
-            .and_then(|asyncio| asyncio.getattr("TimeoutError"))
-            .is_ok_and(|timeout| err.is_instance(py, &timeout));
-        if timed_out {
+        // `asyncio.TimeoutError` is `TimeoutError` on Python 3.11+.
+        if err.is_instance_of::<PyTimeoutError>(py) {
             Self::TimedOut
         } else {
             Self::Failed(err.to_string())
         }
     }
 }
-type RouteSender = tokio::sync::oneshot::Sender<RouteResult>;
 
 /// Dedicated pool for Python extension handlers, kept off tokio's shared
 /// `spawn_blocking` pool so a slow handler can't starve inference tokenization.
@@ -346,9 +334,7 @@ fn extension_error_response(status: StatusCode, message: &str) -> Response {
 
 async fn call_python_frontend_route(
     route: Arc<PyRouteHandler>,
-    context: RsFrontendExtensionContext,
-    headers: HeaderMap,
-    body: Bytes,
+    ctx: PyFrontendExtensionContext,
 ) -> Response {
     let timeout = route.timeout;
     let deadline = tokio::time::Instant::now() + timeout;
@@ -364,19 +350,16 @@ async fn call_python_frontend_route(
         return shed();
     };
     let (tx, rx) = tokio::sync::oneshot::channel();
+    let reply = Reply {
+        tx: Some(tx),
+        permit: Some(permit),
+        deadline: deadline.into_std(),
+    };
     let job: ExtensionJob = Box::new(move || {
         // Caller already gave up (timed out/disconnected): skip before the GIL.
-        if tx.is_closed() {
-            return;
+        if !reply.is_closed() {
+            Python::with_gil(|py| run_handler(py, &route, ctx, reply));
         }
-        let request = PendingRequest {
-            context,
-            headers,
-            body,
-            deadline: deadline.into_std(),
-            permit,
-        };
-        Python::with_gil(|py| start_python_frontend_route(py, &route, request, tx));
     });
     if extension_executor().try_send(job).is_err() {
         return shed();
@@ -392,14 +375,14 @@ async fn call_python_frontend_route(
             )
         }
         Ok(Err(_)) => {
-            // The sender was dropped without a value (handler panicked).
+            // The reply was dropped without a value (handler panicked).
             tracing::error!("Python frontend route extension dropped without a response");
             extension_error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "frontend route extension failed",
             )
         }
-        // The loop's `wait_for` and this timer share one deadline; either may fire first.
+        // The event loop and this timer share one deadline; either may fire first.
         Ok(Ok(Err(RouteError::TimedOut))) | Err(_) => {
             tracing::error!(
                 timeout_s = timeout.as_secs_f64(),
@@ -413,128 +396,107 @@ async fn call_python_frontend_route(
     }
 }
 
-/// A request handed from a tokio worker to an extension pool thread.
-struct PendingRequest {
-    context: RsFrontendExtensionContext,
-    headers: HeaderMap,
-    body: Bytes,
-    /// When the caller stops waiting; an async handler is cancelled then too.
-    deadline: std::time::Instant,
-    permit: SemaphorePermit<'static>,
-}
-
-/// Call the handler on a pool thread. A plain result is answered now; an
-/// awaitable is scheduled on the frontend's event loop and answered by a
-/// `RouteCompleter` there, so no tokio worker ever waits on the GIL.
-fn start_python_frontend_route(
+/// On a pool thread: call the handler. A plain result is answered here; an
+/// awaitable is handed to the event loop, where `Reply::start` runs it.
+fn run_handler(
     py: Python<'_>,
     route: &PyRouteHandler,
-    request: PendingRequest,
-    tx: RouteSender,
+    ctx: PyFrontendExtensionContext,
+    mut reply: Reply,
 ) {
-    let PendingRequest {
-        context,
-        headers,
-        body,
-        deadline,
-        permit,
-    } = request;
-    let ctx = PyFrontendExtensionContext {
-        inner: context,
-        body,
-        headers,
-        runtime: route.env.runtime.clone_ref(py),
-    };
     let result = match Py::new(py, ctx).and_then(|ctx| route.handler.call1(py, (ctx,))) {
         Ok(result) => result.into_bound(py),
-        Err(err) => {
-            let _ = tx.send(Err(RouteError::from_py(py, err)));
-            return;
-        }
+        Err(err) => return reply.finish(Err(RouteError::from_py(py, err))),
     };
     if !result.hasattr("__await__").unwrap_or(false) {
-        let response = normalize_route_response(py, result.unbind());
-        let _ = tx.send(response.map_err(|e| RouteError::from_py(py, e)));
-        return;
+        let response = normalize_route_response(py, &result);
+        return reply.finish(response.map_err(|e| RouteError::from_py(py, e)));
     }
-
-    let completer = RouteCompleter {
-        tx: Some(tx),
-        permit: Some(permit),
+    // On failure `reply` is dropped unanswered; the caller answers 500.
+    let Ok(reply) = Py::new(py, reply) else {
+        return;
     };
-    let completer = match Py::new(py, completer) {
-        Ok(completer) => completer,
-        // `tx` is dropped with the error; the caller answers 500.
-        Err(err) => {
-            tracing::error!(error = %err, "failed to create frontend route completer");
-            return;
-        }
-    };
-    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-    if let Err(err) = schedule_on_event_loop(py, route, &result, &completer, remaining) {
-        // Close an unscheduled coroutine to avoid an unawaited-coroutine warning.
+    let scheduled = reply.bind(py).getattr("start").and_then(|start| {
+        route
+            .env
+            .event_loop
+            .call_method1(py, "call_soon_threadsafe", (start, &result))
+    });
+    if let Err(err) = scheduled {
         let _ = result.call_method0("close");
-        completer
+        reply
             .borrow_mut(py)
             .finish(Err(RouteError::from_py(py, err)));
     }
 }
 
-/// Run `awaitable` on the frontend's event loop; `asyncio.wait_for` cancels it
-/// there once `remaining` elapses.
-fn schedule_on_event_loop(
-    py: Python<'_>,
-    route: &PyRouteHandler,
-    awaitable: &Bound<'_, PyAny>,
-    completer: &Py<RouteCompleter>,
-    remaining: Duration,
-) -> PyResult<()> {
-    let asyncio = py.import("asyncio")?;
-    let bounded = asyncio.call_method1("wait_for", (awaitable, remaining.as_secs_f64()))?;
-    let future = asyncio
-        .call_method1(
-            "run_coroutine_threadsafe",
-            (&bounded, route.env.event_loop.bind(py)),
-        )
-        .inspect_err(|_| {
-            let _ = bounded.call_method0("close");
-        })?;
-    future.call_method1("add_done_callback", (completer.clone_ref(py),))?;
-    Ok(())
-}
-
-/// Done-callback for an awaitable handler's `concurrent.futures.Future`. It
-/// runs on the event loop thread, which already holds the GIL.
+/// Answers one request at most once, and holds its in-flight slot until the
+/// handler is done rather than until the caller stops waiting.
 #[pyclass]
-struct RouteCompleter {
+struct Reply {
     tx: Option<RouteSender>,
-    /// Released when the handler finishes, not when the caller stops waiting.
     permit: Option<SemaphorePermit<'static>>,
+    deadline: std::time::Instant,
 }
 
-#[pymethods]
-impl RouteCompleter {
-    fn __call__(&mut self, py: Python<'_>, future: &Bound<'_, PyAny>) {
-        let result = future
-            .call_method0("result")
-            .and_then(|value| normalize_route_response(py, value.unbind()))
-            .map_err(|e| RouteError::from_py(py, e));
-        self.finish(result);
+impl Reply {
+    fn is_closed(&self) -> bool {
+        self.tx.as_ref().is_none_or(|tx| tx.is_closed())
     }
-}
 
-impl RouteCompleter {
+    /// Time left for the handler, or `None` once the caller stopped waiting.
+    fn remaining(&self) -> Option<Duration> {
+        let remaining = self
+            .deadline
+            .saturating_duration_since(std::time::Instant::now());
+        (!self.is_closed() && !remaining.is_zero()).then_some(remaining)
+    }
+
     fn finish(&mut self, result: RouteResult) {
-        self.permit.take();
+        self.permit = None;
         if let Some(tx) = self.tx.take() {
             let _ = tx.send(result);
         }
     }
 }
 
-fn normalize_route_response(py: Python<'_>, result: PyObject) -> PyResult<(StatusCode, Value)> {
-    let bound = result.bind(py);
+#[pymethods]
+impl Reply {
+    /// On the event loop: run `awaitable` until the deadline. Work whose
+    /// caller already gave up never starts.
+    fn start(slf: &Bound<'_, Self>, awaitable: &Bound<'_, PyAny>) {
+        let py = slf.py();
+        let remaining = slf.borrow().remaining();
+        let started = remaining
+            .ok_or_else(|| PyTimeoutError::new_err(()))
+            .and_then(|remaining| {
+                let asyncio = py.import("asyncio")?;
+                let bounded =
+                    asyncio.call_method1("wait_for", (awaitable, remaining.as_secs_f64()))?;
+                let task = asyncio.call_method1("ensure_future", (bounded,))?;
+                task.call_method1("add_done_callback", (slf.getattr("done")?,))?;
+                Ok(())
+            });
+        if let Err(err) = started {
+            let _ = awaitable.call_method0("close");
+            slf.borrow_mut().finish(Err(RouteError::from_py(py, err)));
+        }
+    }
 
+    /// On the event loop: the handler's task finished.
+    fn done(&mut self, task: &Bound<'_, PyAny>) {
+        let py = task.py();
+        let response = task
+            .call_method0("result")
+            .and_then(|result| normalize_route_response(py, &result));
+        self.finish(response.map_err(|e| RouteError::from_py(py, e)));
+    }
+}
+
+fn normalize_route_response(
+    py: Python<'_>,
+    bound: &Bound<'_, PyAny>,
+) -> PyResult<(StatusCode, Value)> {
     // Explicit status override via FrontendResponse.
     if let Ok(resp) = bound.extract::<PyRef<'_, PyFrontendResponse>>() {
         let status = StatusCode::from_u16(resp.status_code)

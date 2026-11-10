@@ -157,8 +157,7 @@ impl FrontendRouteSetBuilder {
         if !self.seen_routes.insert((method.clone(), path.clone())) {
             anyhow::bail!("duplicate frontend route registered: {method} {path}");
         }
-        let filter = MethodFilter::try_from(method.clone())
-            .map_err(|e| anyhow::anyhow!("unsupported frontend route method {method}: {e}"))?;
+        let filter = MethodFilter::try_from(method.clone())?;
         self.route_docs.push(RouteDoc::new(method, path.clone()));
         self.router = self.router.route(&path, on(filter, handler));
         Ok(self)

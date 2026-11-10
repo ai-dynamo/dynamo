@@ -748,11 +748,11 @@ curl -s localhost:8000/metrics | grep dynamo_frontend_inter_token_latency_second
 - **Live state:** `FrontendExtensionContext` exposes `is_ready()`, `is_cancelled()`,
   `has_any_ready_model()`, `is_model_ready_to_serve(name)`, `model_display_names()`, and
   `serving_ready_display_names()`.
-- **Execution limits:** Synchronous handlers run in a small dedicated thread pool. A handler that
-  exceeds the route's `timeout_s` returns 503; an async handler is also cancelled. With 64 handlers
-  already waiting or running, new extension requests are rejected with the configured overload
-  status code, 529 by default. Request bodies are limited by `DYN_HTTP_BODY_LIMIT_MB`, 45 MB by
-  default.
+- **Execution limits:** Synchronous handlers run in a small dedicated thread pool. A handler still
+  running when the route's `timeout_s` has passed since the request arrived returns 503; an async
+  handler is cancelled then, or never started. With 64 handlers already waiting or running, new
+  extension requests are rejected with the configured overload status code, 529 by default.
+  Request bodies are limited by `DYN_HTTP_BODY_LIMIT_MB`, 45 MB by default.
 - **Multiple providers:** Repeating the CLI option or listing whitespace-separated environment
   values loads multiple providers. Duplicate provider names are de-duplicated.
 
