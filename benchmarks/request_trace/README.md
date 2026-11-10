@@ -103,3 +103,95 @@ main pytest suite:
 ```bash
 python3 benchmarks/request_trace/validate_convert_to_perfetto.py
 ```
+
+## Join One Request Across nsys Reports and OTel
+
+`nsys_request_timeline.py` answers "what happened to this one request?" when
+Dynamo processes were captured with `DYN_NVTX=1` under Nsight Systems (one
+report per process or per node, possibly on different hosts) and, optionally,
+traces were exported to Tempo. Request-scoped NVTX ranges and markers use a
+static stage name as their message (for example
+`kv_router.route_request:prefill`) and carry the request in the NVTX 64-bit
+payload (`NVTX_EVENTS.uint64Value`), `rid_key(rid)`: FNV-1a-64 of the UTF-8
+request id with the top bit cleared. Each process also emits identity marks
+`dynamo.request rid=<rid>[ trace=..][ xrid=..][ engine_rid=..]` with the same
+payload, which map the key back to the request id, trace id and x-request-id.
+The tool looks the request up by key, joins it with the request's OTel spans,
+and prints one cross-process timeline.
+
+```bash
+python3 benchmarks/request_trace/nsys_request_timeline.py \
+  frontend.nsys-rep prefill.nsys-rep decode.nsys-rep \
+  --request chatcmpl-11111111-2222-3333-4444-555555555555 \
+  --tempo http://localhost:3200
+```
+
+- `--request` takes a request id, `chatcmpl-<id>`, a W3C trace id (32 hex), or
+  an `x-request-id`. A request id (or `chatcmpl-<id>`) is hashed to its payload
+  key directly; a trace id or x-request-id is looked up in the identity marks
+  (the x-request-id is sanitized like the runtime does) and resolved to its
+  request id. The tool reports how the key was resolved and fails if it matches
+  no request or several.
+- Inputs are `.sqlite` exports, `.nsys-rep` files (exported with
+  `nsys export --type sqlite`, selectable with `--nsys`, reusing an export that
+  is newer than the report), directories, or globs. Use a plain export, not
+  `--ts-normalize`.
+- OTel comes from `--tempo URL` or `--otel-json FILE` (a saved Tempo v1/v2
+  response or OTLP JSON). Tempo only keeps sampled traces for a limited time
+  (about 1h in the local stack), so a missing trace is reported as a warning.
+- Output sections: resolution summary, chronological table (relative time,
+  duration, process, stage, source `nvtx`/`otel`/`both`, OTel-minus-NVTX start
+  delta), TTFT breakdown with unattributed gaps, and per-report zoom windows
+  such as `zoom to 12.3456s-12.5123s in decode.sqlite` (report-relative seconds,
+  as shown in the Nsight timeline). `open` durations are ranges that never
+  closed in the capture.
+- `--json` emits the same data as JSON; `--perfetto OUT` writes Chrome Trace
+  JSON with one process row per captured process plus one per OTel service.
+- Paired OTel/NVTX start deltas are microseconds on one host; larger values
+  across hosts reveal clock skew between the machines.
+
+### Per-stage summary across all requests
+
+```bash
+python3 benchmarks/request_trace/nsys_request_timeline.py \
+  frontend.sqlite prefill.sqlite decode.sqlite --summary [--json]
+```
+
+`--summary` needs no `--request`. It prints, per stage, the count, mean, median,
+p99 (nearest rank) and max duration in milliseconds over every closed
+request-scoped range (a range with a payload) in the given reports. Marks, static
+ranges (no payload) and ranges that never closed are not aggregated. Because the
+names are static, `nsys stats --report nvtx_sum report.nsys-rep` now aggregates
+these ranges natively too, one row per stage instead of one per request.
+
+### Raw-trace queries
+
+The same data is directly queryable in the SQLite export:
+
+```sql
+-- per-stage aggregation
+SELECT text AS stage, count(*) AS n, avg("end" - start) / 1e6 AS avg_ms
+FROM NVTX_EVENTS WHERE eventType = 60 AND uint64Value IS NOT NULL
+  AND "end" <= (SELECT duration FROM ANALYSIS_DETAILS)   -- skip ranges that never closed
+GROUP BY text;
+
+-- request id -> key
+SELECT DISTINCT uint64Value FROM NVTX_EVENTS
+WHERE eventType = 34
+  AND (text = 'dynamo.request rid=<rid>' OR instr(text, 'dynamo.request rid=<rid> ') = 1);
+
+-- every event of that request
+SELECT text, start, "end", globalTid FROM NVTX_EVENTS WHERE uint64Value = :key ORDER BY start;
+```
+
+Ranges registered through `StringIds` have `text` NULL; join `StringIds` on
+`textId` (the tool does this automatically).
+
+Nsys exports embed the profiled process environment, which can contain secrets;
+treat them like logs before sharing.
+
+Run the tests (no network, synthetic nsys SQLite fixtures):
+
+```bash
+python3 -m pytest -m unit benchmarks/request_trace/tests
+```
