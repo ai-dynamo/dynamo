@@ -348,9 +348,10 @@ mod tests {
         assert_eq!(markers(&items), finished(1), "{items:?}");
     }
 
-    /// What the tool-call jail writes when the stream ends with a call still open.
-    async fn jail_after(at_end: fn(&dyn AsyncEngineContext)) -> Markers {
-        let items = through_pipeline::<
+    /// The markers of each item the tool-call parser writes when the stream ends with a call
+    /// still open.
+    async fn jail_after(at_end: fn(&dyn AsyncEngineContext)) -> Vec<Markers> {
+        through_pipeline::<
             _,
             crate::types::openai::chat_completions::NvCreateChatCompletionStreamResponse,
         >(
@@ -359,17 +360,29 @@ mod tests {
             open_tool_call(),
             at_end,
         )
-        .await;
-        markers(&items)
+        .await
+        .iter()
+        .map(|item| markers(std::slice::from_ref(item)))
+        .collect()
     }
 
-    /// On a clean end the jail closes the open call and finishes the answer. After a kill
-    /// it writes nothing of that.
+    /// On a clean end the parser closes the open call and finishes the answer. After a kill
+    /// it writes nothing of that: the output is the part of the clean end's output written
+    /// before the end. A parser may stream part of the call before the end, so that part can
+    /// hold a tool call.
     #[tokio::test]
     async fn the_jail_writes_no_tool_call_or_finish_after_a_kill() {
         let stopped = jail_after(stop).await;
-        assert_ne!(stopped, Markers::default(), "the control must write on end");
-        assert_eq!(jail_after(kill).await, Markers::default());
+        let killed = jail_after(kill).await;
+        assert!(
+            killed.len() < stopped.len(),
+            "the control must write on end: {stopped:?}"
+        );
+        assert_eq!(killed, stopped[..killed.len()], "{stopped:?}");
+        assert!(
+            killed.iter().all(|item| item.finish_reasons.is_empty()),
+            "{killed:?}"
+        );
     }
 
     #[tokio::test]
