@@ -473,6 +473,12 @@ impl WorkerAffinityTarget {
     pub fn new(worker_id: WorkerId, dp_rank: Option<DpRank>) -> Self {
         Self { worker_id, dp_rank }
     }
+
+    /// Whether `worker` is this target; a target without a rank matches every rank.
+    pub fn matches(&self, worker: WorkerWithDpRank) -> bool {
+        self.worker_id == worker.worker_id
+            && self.dp_rank.is_none_or(|dp_rank| dp_rank == worker.dp_rank)
+    }
 }
 
 impl From<WorkerWithDpRank> for WorkerAffinityTarget {
@@ -1136,6 +1142,8 @@ pub struct SelectionLogFields {
     pub logit: f64,
     /// Whether the request pinned the selected worker and rank.
     pub pinned: bool,
+    /// Whether the selected worker matches the request's session affinity target.
+    pub session_affinity: bool,
     /// Host-pinned overlap reported for the selected rank, in blocks.
     pub host_pinned_blocks: usize,
     /// Disk overlap reported for the selected rank, in blocks.

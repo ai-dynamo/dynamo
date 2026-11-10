@@ -494,6 +494,7 @@ fn mock_content_chunk(content: &str) -> NvCreateChatCompletionStreamResponse {
         prompt_logprobs: None,
         llm_metrics: None,
         tool_call_completion: Vec::new(),
+        model_eos: Vec::new(),
     }
 }
 
@@ -540,6 +541,7 @@ fn mock_multi_choice_content_chunk(
         prompt_logprobs: None,
         llm_metrics: None,
         tool_call_completion: Vec::new(),
+        model_eos: Vec::new(),
     }
 }
 
@@ -583,6 +585,7 @@ fn mock_reasoning_only_chunk(reasoning: &str) -> NvCreateChatCompletionStreamRes
         prompt_logprobs: None,
         llm_metrics: None,
         tool_call_completion: Vec::new(),
+        model_eos: Vec::new(),
     }
 }
 
@@ -621,6 +624,7 @@ fn mock_final_chunk() -> NvCreateChatCompletionStreamResponse {
         prompt_logprobs: None,
         llm_metrics: None,
         tool_call_completion: Vec::new(),
+        model_eos: Vec::new(),
     }
 }
 
@@ -652,6 +656,7 @@ fn mock_usage_only_chunk() -> NvCreateChatCompletionStreamResponse {
         prompt_logprobs: None,
         llm_metrics: None,
         tool_call_completion: Vec::new(),
+        model_eos: Vec::new(),
     }
 }
 
@@ -695,6 +700,7 @@ fn mock_multi_choice_final_chunk(indices: &[u32]) -> NvCreateChatCompletionStrea
         prompt_logprobs: None,
         llm_metrics: None,
         tool_call_completion: Vec::new(),
+        model_eos: Vec::new(),
     }
 }
 
@@ -6783,6 +6789,7 @@ async fn backend_arguments_survive_postprocessing_and_aggregation(include_defaul
     for (parser, reasoning) in parser_pairs {
         let preprocessor = build_preprocessor(reasoning, parser);
         let request = streaming_tool_request(ChatCompletionToolChoiceOption::Auto);
+        let requires_complete_call = include_default_on && parser == Some("hermes");
         for finish in [
             None,
             Some(FinishReason::Stop),
@@ -6791,6 +6798,16 @@ async fn backend_arguments_survive_postprocessing_and_aggregation(include_defaul
             Some(FinishReason::ContentFilter),
         ] {
             for arguments in [r#"{"location":"SF"}"#, r#"{"location":"SF""#, ""] {
+                let valid_json = serde_json::from_str::<serde_json::Value>(arguments).is_ok();
+                // Hermes unified parsing completes empty fragments only with a tool terminal.
+                let complete =
+                    valid_json || (arguments.is_empty() && finish == Some(FinishReason::ToolCalls));
+                let expected_finish = match finish {
+                    Some(FinishReason::Length) => FinishReason::Length,
+                    Some(FinishReason::ContentFilter) => FinishReason::ContentFilter,
+                    _ if requires_complete_call && !complete => FinishReason::Length,
+                    _ => FinishReason::ToolCalls,
+                };
                 let mixed_modes: &[bool] = if parser == Some("deepseek_v41") {
                     &[false, true]
                 } else {
@@ -6849,11 +6866,12 @@ async fn backend_arguments_survive_postprocessing_and_aggregation(include_defaul
                             .filter_map(|call| call.function.as_ref()?.arguments.as_deref())
                             .collect();
                         assert_eq!(streamed, arguments, "stream {parser:?}/{finish:?}");
-                        if parser == Some("deepseek_v41")
-                            && matches!(
-                                finish,
-                                None | Some(FinishReason::Stop | FinishReason::ToolCalls)
-                            )
+                        if requires_complete_call
+                            || (parser == Some("deepseek_v41")
+                                && matches!(
+                                    finish,
+                                    None | Some(FinishReason::Stop | FinishReason::ToolCalls)
+                                ))
                         {
                             let streamed_finish = responses
                                 .iter()
@@ -6863,8 +6881,8 @@ async fn backend_arguments_survive_postprocessing_and_aggregation(include_defaul
                                 .next_back();
                             assert_eq!(
                                 streamed_finish,
-                                Some(FinishReason::ToolCalls),
-                                "legacy stream {arguments}/{finish:?}/mixed={mixed}/separate={separate_terminal}"
+                                Some(expected_finish),
+                                "stream finish {parser:?}/{arguments}/{finish:?}/mixed={mixed}/separate={separate_terminal}"
                             );
                         }
                         let response = NvCreateChatCompletionResponse::from_annotated_stream(
@@ -6877,8 +6895,7 @@ async fn backend_arguments_survive_postprocessing_and_aggregation(include_defaul
                         .await
                         .unwrap();
                         let choice = &response.inner.choices[0];
-                        let retained = finish != Some(FinishReason::Length)
-                            || serde_json::from_str::<serde_json::Value>(arguments).is_ok();
+                        let retained = expected_finish != FinishReason::Length || valid_json;
                         assert_eq!(
                             choice.message.tool_calls.is_some(),
                             retained,
@@ -6889,18 +6906,8 @@ async fn backend_arguments_survive_postprocessing_and_aggregation(include_defaul
                             assert_eq!(call.id, "backend-call");
                             assert_eq!(call.function.name, "get_weather");
                             assert_eq!(call.function.arguments, arguments);
-                            assert_eq!(
-                                choice.finish_reason,
-                                Some(match finish {
-                                    Some(FinishReason::Length) => FinishReason::Length,
-                                    Some(FinishReason::ContentFilter) =>
-                                        FinishReason::ContentFilter,
-                                    _ => FinishReason::ToolCalls,
-                                })
-                            );
-                        } else {
-                            assert_eq!(choice.finish_reason, Some(FinishReason::Length));
                         }
+                        assert_eq!(choice.finish_reason, Some(expected_finish));
                         assert_eq!(
                             match &choice.message.content {
                                 Some(ChatCompletionMessageContent::Text(text)) => text.as_str(),
@@ -6928,7 +6935,7 @@ async fn explicit_v2_rejects_legacy_and_mixed_stream_parser_pairs() {
         return;
     }
     for (reasoning, parser) in [
-        (None, Some("hermes")),
+        (None, Some("nemotron_deci")),
         (Some("qwen3"), Some("deepseek_v4")),
         (Some("qwen3"), Some("kimi_k2")),
     ] {
