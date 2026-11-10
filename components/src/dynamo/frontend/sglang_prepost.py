@@ -781,6 +781,7 @@ def build_tool_call_guided_decoding(
 def _serialize_tool_constraint(
     constraint: Any, *, stop_after_first: bool = False
 ) -> dict[str, Any] | None:
+    """Serialize tool guidance for RPC, preserving schemas and single-call limits."""
     if not (isinstance(constraint, tuple) and len(constraint) == 2):
         return None
     if constraint[0] == "json_schema":
