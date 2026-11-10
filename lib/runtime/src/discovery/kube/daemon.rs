@@ -132,15 +132,22 @@ fn cr_event(event: watcher::Event<DynamoWorkerMetadata>) -> Option<CrEvent> {
     }
 }
 
+/// Readiness objects (EndpointSlices or Pods) that carry both discovery labels. One selector
+/// string: `Config::labels` replaces the selector rather than adding a term.
+const READINESS_LABEL_SELECTOR: &str =
+    "nvidia.com/dynamo-discovery-backend=kubernetes,nvidia.com/dynamo-discovery-enabled=true";
+
+fn readiness_watch_config() -> Config {
+    Config::default().labels(READINESS_LABEL_SELECTOR)
+}
+
 impl DiscoverySource {
     fn new(
         pod_info: &PodInfo,
         kube_client: KubeClient,
         events: mpsc::Sender<ReadinessEvent>,
     ) -> Self {
-        let labels = Config::default()
-            .labels("nvidia.com/dynamo-discovery-backend=kubernetes")
-            .labels("nvidia.com/dynamo-discovery-enabled=true");
+        let labels = readiness_watch_config();
 
         match pod_info.mode {
             KubeDiscoveryMode::Pod => {
@@ -1043,5 +1050,16 @@ mod tests {
         );
 
         assert!(managed_fields_summary(&cr).is_none());
+    }
+
+    #[test]
+    fn readiness_watch_selects_on_both_discovery_labels() {
+        assert_eq!(
+            readiness_watch_config().label_selector.as_deref(),
+            Some(
+                "nvidia.com/dynamo-discovery-backend=kubernetes,\
+                 nvidia.com/dynamo-discovery-enabled=true"
+            )
+        );
     }
 }
