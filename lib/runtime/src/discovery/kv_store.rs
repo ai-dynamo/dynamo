@@ -205,6 +205,24 @@ impl KVStoreDiscovery {
                 .is_some_and(|suffix| suffix.starts_with('/'))
     }
 
+    /// BENCH HACK (gr-pools campaign 3), only when `DYN_DISCOVERY_SCOPED_ETCD=1` with the etcd
+    /// store: read and watch the query's own key prefix instead of the whole bucket. An etcd
+    /// "bucket" is just a key prefix, and the client-side `matches_prefix` filter is unchanged,
+    /// so results are the same; only the range sent to etcd shrinks. Without this, every
+    /// namespace-scoped list or watch ranges all of `v1/instances` / `v1/mdc`, which stalls a
+    /// shared etcd past ~10k workers.
+    fn store_scope<'a>(prefix: &'a str, bucket_name: &'a str) -> &'a str {
+        static SCOPED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let scoped = *SCOPED.get_or_init(|| {
+            std::env::var("DYN_DISCOVERY_SCOPED_ETCD").is_ok_and(|value| value == "1")
+        });
+        if scoped && prefix.len() > bucket_name.len() && prefix.starts_with(bucket_name) {
+            prefix.trim_end_matches('/')
+        } else {
+            bucket_name
+        }
+    }
+
     fn bucket_for_prefix(prefix: &str) -> &'static str {
         if prefix == INSTANCES_BUCKET
             || prefix
@@ -689,7 +707,11 @@ impl Discovery for KVStoreDiscovery {
         let bucket_name = Self::bucket_for_prefix(&prefix);
 
         // Get bucket - if it doesn't exist, return empty list
-        let Some(bucket) = self.store.get_bucket(bucket_name).await? else {
+        let Some(bucket) = self
+            .store
+            .get_bucket(Self::store_scope(&prefix, bucket_name))
+            .await?
+        else {
             tracing::debug!(
                 "KVStoreDiscovery::list: bucket missing for query={:?}, prefix={}, bucket={}",
                 query,
@@ -747,7 +769,7 @@ impl Discovery for KVStoreDiscovery {
             .store
             .clone()
             .watch(
-                bucket_name,
+                Self::store_scope(&prefix, bucket_name),
                 None, // No TTL
                 cancel_token,
             )
