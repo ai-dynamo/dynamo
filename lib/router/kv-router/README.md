@@ -96,13 +96,15 @@ cargo clippy -p dynamo-kv-router --all-targets --features http,ingest-zmq,replic
 cargo hack check --locked -p dynamo-kv-router --each-feature --all-targets
 ```
 
-## Removed paths (migration map)
+## Pre-split paths (migration map)
 
 `dynamo-kv-router` is the composition crate. Every path below was a shim over a stage, the
-kernel, or a vocabulary crate; the shims were removed in this release. In-tree hosts import the
-owner's `host` module; plugins import `plugins::prelude`.
+kernel, or a vocabulary crate. The 1.7 paths keep resolving through 1.9 as deprecated named
+re-exports in `src/compat.rs` (plain structs warn with the new path) and are removed in 1.10;
+see the deprecations page. In-tree hosts import the owner's `host` module; plugins import
+`plugins::prelude`.
 
-| Removed path | Owner |
+| Pre-split path | Owner |
 |---|---|
 | root re-exports of stage and kernel items (`WorkerSelectionPolicy`, `LocalScheduler`, `KvSchedulerError`, `SelectionConfig`, ...) | the owner's `host` module, `plugins::prelude`, or `config::` |
 | `protocols::*` | `dynamo_router_protocol`, `dynamo_kv_events` (`event`, `placement`, `residency`), `dynamo_kv_hashing::routing`, `dynamo_kv_hints`, `dynamo_scheduler::protocols` |

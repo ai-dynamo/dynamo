@@ -17,3 +17,7 @@ pub mod selection;
 // The slot-tracker service: an HTTP server over the registry, replicated through the mesh.
 #[cfg(all(feature = "http", feature = "replica-sync-zmq"))]
 pub mod slot_tracker;
+
+// Pre-split paths kept through 1.9 and removed in 1.10; the named list is the inventory in compat.rs.
+#[allow(deprecated)]
+pub use crate::compat::services::overlap;

@@ -52,3 +52,23 @@ pub use service::{
 };
 #[cfg(feature = "ingest-zmq")]
 pub use zmq_ingress::ZmqDirectIngress;
+
+// Pre-split paths kept through 1.9 and removed in 1.10; the named list is the inventory in compat.rs.
+#[allow(deprecated)]
+pub use crate::compat::services::selection::{
+    AffinityBindingEvent, CatalogObserver, CatalogReconciler, DEFAULT_MODEL_NAME,
+    DYN_ROUTER_DECODE_POLICY, DYN_ROUTER_PREFILL_POLICY, DYN_ROUTER_WORKER_SELECTION_POLICY,
+    HostCache, HostEligibility, HostLoad, HostReplicaChannels, HostReplicaSyncFactory,
+    HostReplication, HostTelemetry, KvEventIngress, KvIndexSource, ModelLoadResponse,
+    OutputBlockRequest, OverlapScoresRequest, OverlapScoresResponse, PotentialLoadsRequest,
+    PromptRequest, PromptView, ReadyResponse, ReplicaIngressObserver, ReservationRequest,
+    ReservationResponse, RouterPluginRegistry, SchedulerLoadSink, SelectAndReserveRequest,
+    SelectRequest, SelectResponse, Selected, SelectionAdmission, SelectionCacheConfig,
+    SelectionCore, SelectionError, SelectionHost, SelectionInputTrigger, SelectionOperation,
+    SelectionOutcome, SelectionPartition, SelectionRun, SelectionScheduler,
+    SelectionSessionContext, SelectionWorkerConfig, SelectionWorkerLoad, SessionBinding,
+    SharedCacheOverlapScore, WorkerCatalogRecord, WorkerCatalogSource, WorkerLifecycle,
+    WorkerOverlapScore, WorkerPatchRequest, WorkerRequest, WorkerSelectionPolicyParameters,
+    WorkerSelectionPolicyProvider, WorkerSelectionPolicyProviderError,
+    WorkerSelectionPolicyRegistryError, affinity,
+};
