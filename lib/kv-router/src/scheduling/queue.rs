@@ -902,6 +902,10 @@ struct SchedulerQueueActor<
     write_log: ActorWriteLog,
     /// Where prepared loads' maps go once selection is done with them.
     load_maps: Arc<LoadMapPool>,
+    /// Whether `projected_loads` came from the caller's prepared load, and the ranks the
+    /// actor re-read in it. Set by `with_projected_loads`.
+    adopted_prepared_load: bool,
+    reread_ranks: Vec<WorkerWithDpRank>,
     block_size: u32,
     selector: Sel,
     prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
@@ -1116,6 +1120,8 @@ impl<
             projected_overlap: true,
             write_log: ActorWriteLog::new(Arc::clone(&actor_writes)),
             load_maps: Arc::clone(&load_maps),
+            adopted_prepared_load: false,
+            reread_ranks: Vec::new(),
             block_size,
             selector,
             prefill_load_estimator,
@@ -1618,7 +1624,7 @@ impl<
             None,
             self.exclusive_affinity,
         );
-        let candidates = preparer.prepare(WorkerSelectionInput::configured(
+        let mut candidates = preparer.prepare(WorkerSelectionInput::configured(
             &workers,
             request,
             eligibility,
@@ -1626,6 +1632,7 @@ impl<
         ))?;
         drop(workers);
         let load = self.prepare_load(request, preparer.inputs().contains(WorkerInputs::LOAD));
+        candidates.fill_loads(request, &load.loads);
         Some(Box::new(PreparedAdmission {
             candidates,
             workers_generation,
@@ -2524,9 +2531,19 @@ impl<
             .required_worker_inputs()
             .contains(WorkerInputs::LOAD);
         self.projected_overlap = project_overlap;
+        let mut reread_ranks = std::mem::take(&mut self.reread_ranks);
+        reread_ranks.clear();
         let adopted = prepared_load.and_then(|load| {
-            self.adopt_prepared_load(load, &request, project_overlap, limits.as_ref())
+            self.adopt_prepared_load(
+                load,
+                &request,
+                project_overlap,
+                limits.as_ref(),
+                &mut reread_ranks,
+            )
         });
+        self.adopted_prepared_load = adopted.is_some();
+        self.reread_ranks = reread_ranks;
         let adopted = match adopted {
             Some((loads, full_ranks)) => {
                 request.worker_loads = loads;
@@ -2581,6 +2598,7 @@ impl<
         request: &SchedulingRequest,
         overlap: bool,
         limits: Option<&BusyThresholds>,
+        reread_ranks: &mut Vec<WorkerWithDpRank>,
     ) -> Option<(
         FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
         Option<FullRankCounts>,
@@ -2607,6 +2625,7 @@ impl<
                 full_ranks.rejudge(worker, capacity, projection, &fresh);
             }
             *projection = fresh;
+            reread_ranks.push(worker);
         }
         Some((std::mem::take(&mut load.loads), load.full_ranks.take()))
     }
@@ -2649,6 +2668,18 @@ impl<
             // last advanced the generation is not counted in it yet.
             let prepared = prepared
                 .filter(|_| !workers.has_changed() && prepared_rows_usable)
+                .map(|mut prepared| {
+                    // The rows' loads came from the caller's projection: they hold only when
+                    // this selection uses it, less the ranks the actor read again.
+                    if self.adopted_prepared_load {
+                        prepared
+                            .candidates
+                            .mark_stale_loads(self.reread_ranks.iter().copied());
+                    } else {
+                        prepared.candidates.discard_loads();
+                    }
+                    prepared
+                })
                 .and_then(|prepared| {
                     prepared.into_current(
                         self.workers_generation.load(AtomicOrdering::Relaxed),
@@ -4799,6 +4830,8 @@ policy_classes:
             projected_overlap: true,
             write_log: ActorWriteLog::new(Arc::clone(&queue.actor_writes)),
             load_maps: Arc::clone(&queue.load_maps),
+            adopted_prepared_load: false,
+            reread_ranks: Vec::new(),
             block_size: 16,
             selector,
             prefill_load_estimator: None,
@@ -4941,16 +4974,49 @@ policy_classes:
         assert_eq!(decode_blocks, [5, 5]);
     }
 
+    /// Picks the worker with the fewest active requests, read as the picker's own input;
+    /// ties go to the lowest worker.
+    struct FewestActiveRequests;
+
+    impl crate::plugins::worker_selection::WorkerPicker for FewestActiveRequests {
+        fn required_worker_inputs(&self) -> WorkerInputs {
+            WorkerInputs::ACTIVE_REQUESTS
+        }
+
+        fn pick(
+            &self,
+            _context: &crate::plugins::worker_selection::WorkerSelectionContext<'_>,
+            input: crate::plugins::worker_selection::WorkerInputView<'_>,
+        ) -> Result<usize, crate::WorkerSelectionPolicyError> {
+            let candidates = input.candidates();
+            Ok((0..candidates.len())
+                .min_by_key(|&i| (input.active_requests(i).unwrap(), candidates[i].worker()))
+                .unwrap())
+        }
+    }
+
     fn counting_policy(
         prepared_selections: &Arc<AtomicUsize>,
         exclusive_affinity: bool,
+    ) -> CountingPreparedPolicy {
+        counting_policy_with(
+            prepared_selections,
+            exclusive_affinity,
+            Box::new(LeastLoaded),
+        )
+    }
+
+    fn counting_policy_with(
+        prepared_selections: &Arc<AtomicUsize>,
+        exclusive_affinity: bool,
+        picker: Box<dyn crate::plugins::worker_selection::WorkerPicker>,
     ) -> CountingPreparedPolicy {
         CountingPreparedPolicy {
             inner: crate::plugins::worker_selection::WorkerSelectionPolicy::new(
                 crate::KvRouterConfig::default(),
                 "test",
                 vec![],
-                Box::new(LeastLoaded),
+                picker,
             )
             .with_exclusive_affinity(exclusive_affinity),
             prepared_selections: Arc::clone(prepared_selections),
@@ -4977,7 +5043,7 @@ policy_classes:
     }
 
     fn make_prepared_queue() -> PreparedQueue {
-        make_prepared_queue_with(2, 1, false)
+        make_prepared_queue_with(2, 1, false, Box::new(LeastLoaded))
     }
 
     /// Two workers of `dp_size` ranks, each rank with a 64-token prefill budget.
@@ -4985,6 +5051,7 @@ policy_classes:
         workers: u64,
         dp_size: u32,
         exclusive_affinity: bool,
+        picker: Box<dyn crate::plugins::worker_selection::WorkerPicker>,
     ) -> PreparedQueue {
         let slots = Arc::new(ActiveSequencesMultiWorker::new(
             NoopSequencePublisher,
@@ -5027,7 +5094,7 @@ policy_classes:
             cfg_rx,
             PolicyProfile::synthetic(None, RouterQueuePolicy::Fcfs),
             16,
-            counting_policy(&prepared_selections, exclusive_affinity),
+            counting_policy_with(&prepared_selections, exclusive_affinity, picker),
             None,
             None,
             Some(overloaded_provider),
@@ -5093,9 +5160,15 @@ policy_classes:
     #[tokio::test]
     async fn prepared_rows_see_bookings_made_after_preparation() {
         // With two workers the actor projects again; with 32 it re-reads only the rank it
-        // booked since the caller projected.
-        for workers in [2, 32] {
-            let prepared_queue = make_prepared_queue_with(workers, 1, false);
+        // booked since the caller projected. The picker reads `LOAD` rows, or the active
+        // request counts the rows carry.
+        for (workers, counts_only) in [(2, false), (32, false), (2, true), (32, true)] {
+            let picker: Box<dyn crate::plugins::worker_selection::WorkerPicker> = if counts_only {
+                Box::new(FewestActiveRequests)
+            } else {
+                Box::new(LeastLoaded)
+            };
+            let prepared_queue = make_prepared_queue_with(workers, 1, false, picker);
             let queue = &prepared_queue.queue;
             let (later, later_rx) = make_request("later", 64);
             let prepared = queue.prepare_candidates(&later);
@@ -5109,7 +5182,11 @@ policy_classes:
             // The earlier booking moves this request, though its load was read before it.
             enqueue_prepared(queue, later, prepared).await;
             let later = later_rx.await.unwrap().unwrap().best_worker;
-            assert_eq!(later, WorkerWithDpRank::new(1, 0), "{workers} workers");
+            assert_eq!(
+                later,
+                WorkerWithDpRank::new(1, 0),
+                "{workers} workers, counts only: {counts_only}"
+            );
             assert_eq!(prepared_queue.prepared_selections(), 2);
         }
     }
@@ -5163,7 +5240,7 @@ policy_classes:
 
     #[tokio::test]
     async fn prepared_rows_drop_only_workers_whose_every_rank_is_full() {
-        let prepared_queue = make_prepared_queue_with(2, 2, false);
+        let prepared_queue = make_prepared_queue_with(2, 2, false, Box::new(LeastLoaded));
         let queue = &prepared_queue.queue;
         *prepared_queue.reject.lock().unwrap() = half_budget_reject();
         let select = |request_id: &'static str| async move {
@@ -5194,7 +5271,7 @@ policy_classes:
 
     #[tokio::test]
     async fn prepared_rows_are_rebuilt_for_an_exclusive_affinity_target_once_a_rank_is_full() {
-        let prepared_queue = make_prepared_queue_with(2, 1, true);
+        let prepared_queue = make_prepared_queue_with(2, 1, true, Box::new(LeastLoaded));
         let queue = &prepared_queue.queue;
         *prepared_queue.reject.lock().unwrap() = half_budget_reject();
         hold_prefill(queue, "held", WorkerWithDpRank::new(0, 0), 48).await;

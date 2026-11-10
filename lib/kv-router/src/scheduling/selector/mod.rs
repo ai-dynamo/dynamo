@@ -672,6 +672,7 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
                 candidates,
                 cache_inputs,
                 load_inputs,
+                active_request_inputs,
                 ..
             } = &mut *state;
             if candidates.is_empty() {
@@ -689,15 +690,23 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
                         || load_inputs.len() == candidates.len()
                 );
                 let candidates: &[ScoredWorkerCandidate] = candidates;
+                debug_assert!(
+                    active_request_inputs.is_empty()
+                        || active_request_inputs.len() == candidates.len()
+                );
+                let active_request_inputs: &[u64] = active_request_inputs;
                 let info = |row: usize| worker_info(workers, candidates[row].worker);
-                // The same projection and fallback as the row's LOAD input, so the two agree.
+                // Rows that carried their load hold each count; otherwise the same projection
+                // and fallback as the row's LOAD input, so the two agree.
                 let active_requests = |row: usize| {
-                    WorkerLoadInput::for_worker(
-                        &request.worker_loads,
-                        candidates[row].worker,
-                        || request.unobserved_worker_load(),
-                    )
-                    .active_requests() as u64
+                    active_request_inputs.get(row).copied().unwrap_or_else(|| {
+                        WorkerLoadInput::for_worker(
+                            &request.worker_loads,
+                            candidates[row].worker,
+                            || request.unobserved_worker_load(),
+                        )
+                        .active_requests() as u64
+                    })
                 };
                 let picker_input = WorkerInputView::materialized(
                     candidates,

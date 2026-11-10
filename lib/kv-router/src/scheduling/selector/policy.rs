@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crossbeam_queue::ArrayQueue;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 #[cfg(any(test, feature = "bench"))]
 use super::DefaultWorkerPicker;
@@ -22,6 +23,7 @@ use crate::protocols::{
 use crate::scheduling::config::KvRouterConfig;
 use crate::scheduling::filter::RoutingEligibility;
 use crate::scheduling::types::{KvSchedulerError, SchedulingRequest, WorkerSelectionPolicyError};
+use crate::sequences::WorkerLoadProjection;
 
 use crate::plugins::worker_selection::{
     CacheSnapshot, CandidateData, ScoredWorkerCandidate, WorkerCacheData, WorkerCandidate,
@@ -61,6 +63,9 @@ pub(super) struct ComposedPolicyState {
     pub(super) candidates: Vec<ScoredWorkerCandidate>,
     pub(super) cache_inputs: Vec<WorkerCacheData>,
     pub(super) load_inputs: Vec<WorkerLoadInput>,
+    /// Each picker row's active request count, when the rows carried their load. Empty
+    /// otherwise, and the picker's counts come from the request's projection.
+    pub(super) active_request_inputs: Vec<u64>,
     /// Each unscored row's fetch target and local prefix while its source waits for every row.
     transfer_targets: Vec<Option<(KvTransferTarget, usize)>>,
     /// Row buffers selection is done with, for callers to prepare into next.
@@ -161,6 +166,7 @@ impl WorkerSelectionPolicy {
                 candidates: Vec::new(),
                 cache_inputs: Vec::new(),
                 load_inputs: Vec::new(),
+                active_request_inputs: Vec::new(),
                 transfer_targets: Vec::new(),
                 row_buffers: Arc::new(ArrayQueue::new(ROW_BUFFERS)),
             })),
@@ -400,7 +406,8 @@ impl ComposedPolicyState {
 ///
 /// Rows hold every eligible rank's cache, preferred-taint, and fetch inputs, which
 /// depend only on the request and worker configuration. Load inputs depend on the
-/// actor's earlier bookings, so the actor fills them at selection.
+/// actor's earlier bookings: the caller may fill them from its projection, and selection
+/// fills again every row that projection does not hold for.
 #[derive(Clone)]
 pub struct CandidatePreparer {
     inputs: WorkerInputs,
@@ -413,6 +420,10 @@ pub struct PreparedCandidates {
     max_raw_cached_tokens: Option<usize>,
     kv_transfer_sources: Option<KvTransferSourceSummary>,
     row_buffers: Arc<ArrayQueue<Vec<CandidateData>>>,
+    /// Whether each row's load was filled from a projection selection uses.
+    loads_filled: bool,
+    /// Ranks whose filled load selection reads again.
+    stale_loads: FxHashSet<WorkerWithDpRank>,
 }
 
 impl Drop for PreparedCandidates {
@@ -476,11 +487,43 @@ impl CandidatePreparer {
             max_raw_cached_tokens: input.max_raw_cached_tokens(),
             kv_transfer_sources: input.into_kv_transfer_sources(),
             row_buffers: Arc::clone(&self.row_buffers),
+            loads_filled: false,
+            stale_loads: FxHashSet::default(),
         })
     }
 }
 
 impl PreparedCandidates {
+    /// Fill each row's load from `loads`, for a policy that reads `LOAD` rows or active
+    /// request counts. Selection uses the fills only for a projection that is `loads`
+    /// with the ranks named by [`Self::mark_stale_loads`] read again.
+    pub(crate) fn fill_loads(
+        &mut self,
+        request: &SchedulingRequest,
+        loads: &FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
+    ) {
+        if !self.inputs.contains(WorkerInputs::LOAD)
+            && !self.inputs.contains(WorkerInputs::ACTIVE_REQUESTS)
+        {
+            return;
+        }
+        for row in &mut self.rows {
+            row.load =
+                WorkerLoadInput::for_worker(loads, row.worker, || request.unobserved_worker_load());
+        }
+        self.loads_filled = true;
+    }
+
+    /// The projection selection uses re-read these ranks since the loads were filled.
+    pub(crate) fn mark_stale_loads(&mut self, ranks: impl IntoIterator<Item = WorkerWithDpRank>) {
+        self.stale_loads.extend(ranks);
+    }
+
+    /// The filled loads do not come from the projection selection uses.
+    pub(crate) fn discard_loads(&mut self) {
+        self.loads_filled = false;
+    }
+
     /// Rows are usable only by a policy that would build the same rows: one
     /// without filters, which run as policy callbacks, and with the same inputs.
     pub(super) fn matches(&self, state: &ComposedPolicyState) -> bool {
@@ -536,17 +579,24 @@ pub(super) fn collect_prepared_candidates<C: WorkerConfigLike>(
         candidates,
         cache_inputs,
         load_inputs,
+        active_request_inputs,
         ..
     } = state;
     candidates.clear();
     cache_inputs.clear();
     load_inputs.clear();
+    active_request_inputs.clear();
     // Adopt the prepared rows as the scorer rows rather than copying them; the
     // outgoing buffer goes back to the pool when `prepared` drops.
     std::mem::swap(unscored_candidates, &mut prepared.rows);
-    let fill_load = scorer_picker_inputs.contains(WorkerInputs::LOAD);
+    let picker_counts = picker_inputs.contains(WorkerInputs::ACTIVE_REQUESTS);
+    let needs_load = scorer_picker_inputs.contains(WorkerInputs::LOAD) || picker_counts;
+    // Rows the caller filled need only the ranks re-read since; otherwise every row.
+    let fill_every_row = needs_load && !prepared.loads_filled;
+    let stale = (needs_load && !fill_every_row && !prepared.stale_loads.is_empty())
+        .then_some(&prepared.stale_loads);
     for row in unscored_candidates.iter_mut() {
-        if fill_load {
+        if fill_every_row || stale.is_some_and(|stale| stale.contains(&row.worker)) {
             row.load = WorkerLoadInput::for_worker(&input.request.worker_loads, row.worker, || {
                 input.request.unobserved_worker_load()
             });
@@ -559,6 +609,9 @@ pub(super) fn collect_prepared_candidates<C: WorkerConfigLike>(
             cache_inputs,
             load_inputs,
         );
+        if picker_counts {
+            active_request_inputs.push(row.load.active_requests() as u64);
+        }
     }
     let has_eligible_worker = !candidates.is_empty();
     if scorers.is_empty() {
@@ -592,6 +645,7 @@ pub(super) fn collect_policy_candidates<C: WorkerConfigLike>(
     state.candidates.clear();
     state.cache_inputs.clear();
     state.load_inputs.clear();
+    state.active_request_inputs.clear();
     state.transfer_targets.clear();
     // Only scorers declare KV_TRANSFER; their inputs are filled once every row is built.
     let defer_transfer = request.kv_transfer_candidates.is_some()
