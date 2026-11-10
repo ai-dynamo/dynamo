@@ -1350,7 +1350,11 @@ def test_pareto_on_candidate_uses_full_front_for_dominance_across_cap(
 
     def oc(tag: str, tpg: float, tpu: float) -> None:
         adapter.on_candidate(
-            record(tag, tpg, objectives={"throughput_per_gpu": tpg, "throughput_per_user": tpu})
+            record(
+                tag,
+                tpg,
+                objectives={"throughput_per_gpu": tpg, "throughput_per_user": tpu},
+            )
         )
 
     # Establish 3-point front via on_candidate; with max_candidates=2, C is cap-evicted
@@ -1408,19 +1412,28 @@ def test_pareto_between_round_front_growth_updates_pareto_count(
 
     # First candidate establishes a 1-point front.
     adapter.on_candidate(
-        record("A", 100.0, objectives={"throughput_per_gpu": 100.0, "throughput_per_user": 10.0})
+        record(
+            "A",
+            100.0,
+            objectives={"throughput_per_gpu": 100.0, "throughput_per_user": 10.0},
+        )
     )
     wait_for(lambda: load(tmp_path)["progress"]["evaluated"] >= 1)
 
     # Non-dominated C arrives; no on_round has fired yet.
     adapter.on_candidate(
-        record("C", 80.0, objectives={"throughput_per_gpu": 80.0, "throughput_per_user": 100.0})
+        record(
+            "C",
+            80.0,
+            objectives={"throughput_per_gpu": 80.0, "throughput_per_user": 100.0},
+        )
     )
     wait_for(lambda: load(tmp_path)["progress"]["evaluated"] >= 2)
     snapshot = load(tmp_path)
-    assert tags(snapshot) == sorted(["A", "C"]) or set(tags(snapshot)) == {"A", "C"}, (
-        "both A and C must be in the live snapshot before on_round fires"
-    )
+    assert tags(snapshot) == sorted(["A", "C"]) or set(tags(snapshot)) == {
+        "A",
+        "C",
+    }, "both A and C must be in the live snapshot before on_round fires"
     assert snapshot["progress"].get("paretoFront") == 2, (
         "paretoFront must be 2 immediately after a non-dominated candidate arrives, "
         "not deferred until on_round"
@@ -1926,4 +1939,3 @@ def test_materialization_retry_and_terminal_policy(
         assert snapshot["run"]["error"] == "CandidateMaterializationError"
         assert "cannot render candidate-0" in snapshot["run"]["message"]
         assert len(snapshot["run"]["message"]) <= adapter_module._MAX_ERROR_MESSAGE
-

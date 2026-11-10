@@ -50,4 +50,3 @@ terminal_front = [
     candidate_id_for(by_id[key]["config"]) for key in report["views"]["pareto_front"]
 ]
 print(json.dumps({"records": records, "terminalFront": terminal_front}), flush=True)
-

@@ -488,7 +488,10 @@ class DGDRRunOutputAdapter:
             # For Pareto mode, _live_pareto_front tracks the full unbounded front;
             # a point capped out of _retained may still be in _live_pareto_front.
             if retained is not None:
-                already_seen = retained.id in self._retained or retained.id in self._live_pareto_front
+                already_seen = (
+                    retained.id in self._retained
+                    or retained.id in self._live_pareto_front
+                )
                 if not already_seen:
                     if pareto_update is not None:
                         self._live_pareto_front, self._retained = pareto_update
@@ -496,7 +499,9 @@ class DGDRRunOutputAdapter:
                         # Scalar path.
                         self._retained[retained.id] = retained
                         if len(self._retained) > self._max_candidates:
-                            worst = max(self._retained.values(), key=lambda r: r.rank_key)
+                            worst = max(
+                                self._retained.values(), key=lambda r: r.rank_key
+                            )
                             del self._retained[worst.id]
                     # else: Pareto mode but no objectives — point deferred to on_round().
             self._wake.set()
@@ -1005,4 +1010,3 @@ __all__ = [
     "candidate_id_for",
     "create_adapter",
 ]
-
