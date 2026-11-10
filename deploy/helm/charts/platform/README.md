@@ -222,6 +222,22 @@ own value; rename that variable before upgrading.
 **Existing deployments:** Reconciliation rolls each LPX workload once without an
 authored manifest change.
 
+##### LPX compiler units layout
+
+**Change:** After the upgrade, an LPX workload whose build contains `lpuUnits`
+uses the compiler's units layout. There is no adoption gate.
+
+**Affected:** New and existing LPX workloads whose builds contain `lpuUnits`,
+even when their manifests and build references do not change.
+
+**Action:** Use units-aware runtime images and remove legacy mounts named `config`
+or mounted at `/configs` from LPX role templates before upgrading. The units path
+does not render a runtime ConfigMap. Plan for workload replacement during the upgrade.
+
+**Existing deployments:** The operator replaces the PodCliqueSet when the units
+layout changes its immutable fields. Builds without `lpuUnits` retain the legacy
+layout.
+
 ##### Hybrid LPX conductors require the runtime sidecar
 
 **Change:** Reconciliation rejects a hybrid LPX build whose conductor template declares no
