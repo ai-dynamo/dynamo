@@ -1872,7 +1872,7 @@ def test_connector_work_prevents_idle_until_drained(heartbeat_scheduler, pending
     connector = SimpleNamespace(has_pending_push_work=lambda: False)
     if pending_work == "retained_request":
         request.status = RequestStatus.FINISHED_STOPPED
-        stub.requests[request.request_id] = request
+        stub.requests["r0"] = request
         stub.connector = connector
     else:
         connector.has_pending_push_work = lambda: True
