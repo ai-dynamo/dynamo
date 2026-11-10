@@ -47,7 +47,12 @@ velo-ucx = ["dynamo-runtime/velo-ucx"]
 # to keep the default wheel lean. Production containers and the MM
 # recipes pass this flag explicitly; the dev container's
 # `.devcontainer/post-create.sh` also enables it for local workflows.
-mm-routing = ["dynamo-llm/mm-routing", "dynamo-vllm-sidecar/mm-routing"]
+mm-routing = [
+    "dynamo-llm/mm-routing",
+    "dynamo-vllm-sidecar/mm-routing",
+    "dynamo-sglang-sidecar/mm-routing",
+    "dynamo-trtllm-sidecar/mm-routing",
+]
 # Enable the native S3 destination for the request-trace sink. Production wheel
 # builds enable this flag in container/templates/wheel_builder.Dockerfile so
 # `DYN_REQUEST_TRACE_SINKS=s3` works on shipped artifacts.
@@ -64,8 +69,9 @@ dynamo-mocker = { path = "../../mocker" }
 dynamo-parsers = { version = "=11.0.11" }
 dynamo-backend-common = { path = "../../backend-common" }
 dynamo-sidecar-common = { path = "../../sidecar/common" }
-dynamo-sglang-sidecar = { path = "../../sidecar/sglang" }
-dynamo-trtllm-sidecar = { path = "../../sidecar/trtllm" }
+# default-features = false: sidecar defaults (mm-routing) must not reach the wheel.
+dynamo-sglang-sidecar = { path = "../../sidecar/sglang", default-features = false }
+dynamo-trtllm-sidecar = { path = "../../sidecar/trtllm", default-features = false }
 dynamo-vllm-sidecar = { path = "../../sidecar/vllm", default-features = false }
 
 anyhow = { version = "1" }
