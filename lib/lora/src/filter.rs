@@ -134,6 +134,8 @@ impl LoraFilter {
         selected
     }
 
+    /// Applies the routing-table rules documented on [`Self::filter_worker_ids_for_lora`] to
+    /// workers that already passed `eligible_workers`.
     fn filter_observed(
         &self,
         observed: &LoraObservedSnapshot,
@@ -555,7 +557,6 @@ mod tests {
 
     #[test]
     fn test_inactive_pin_with_adapter_keeps_pin() {
-        // The pin has the adapter loaded, so it stays the single target.
         let rt = LoraRoutingTable::new();
         let st = LoraStateTracker::new();
         set_inactive_pin(&rt, "lora-b", 2);
@@ -569,7 +570,6 @@ mod tests {
 
     #[test]
     fn test_inactive_pin_adapter_loaded_only_on_unavailable_worker_keeps_pin() {
-        // No live worker has the adapter loaded: keep the bounded cold-start pin.
         let rt = LoraRoutingTable::new();
         let st = LoraStateTracker::new();
         set_inactive_pin(&rt, "lora-b", 2);
