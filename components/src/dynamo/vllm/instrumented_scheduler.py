@@ -114,7 +114,12 @@ from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.output import CachedRequestData, NewRequestData, SchedulerOutput
 from vllm.v1.core.single_type_kv_cache_manager import CrossAttentionManager
 from vllm.v1.engine.core import EngineCore
-from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec, SlidingWindowSpec
+from vllm.v1.kv_cache_interface import (
+    CircularBufferSpec,
+    FullAttentionSpec,
+    MambaSpec,
+    SlidingWindowSpec,
+)
 from vllm.v1.request import Request, RequestStatus
 
 from dynamo.common.forward_pass_metrics import (
@@ -3822,6 +3827,12 @@ class InstrumentedScheduler(AsyncScheduler):
                 # the coordinator therefore asks this manager for zero blocks.
                 manager_blocks.append(0)
                 continue
+            if isinstance(getattr(manager, "kv_cache_spec", None), CircularBufferSpec):
+                # vLLM 0.32.0's CircularBufferManager claims one ring block per
+                # request, whatever the request's length or admission cap
+                # (vllm/v1/core/single_type_kv_cache_manager.py:1190-1201).
+                manager_blocks.append(1)
+                continue
             block_size = getattr(manager, "block_size", None)
             if not isinstance(block_size, int) or block_size < 1:
                 continue
@@ -5635,10 +5646,18 @@ class InstrumentedScheduler(AsyncScheduler):
         """Layouts whose decode state must come from each point's own prefill.
 
         A deep parked chain may have evicted the history a shallower point
-        needs (finite windows, including Inkling's convolution cache), and a
-        recurrent state cannot be borrowed from a chain at another depth.
-        Native allocation and forward execution build both exactly. Necessary,
-        not sufficient: the gate also requires experts or state layers.
+        needs (finite windows, including Inkling's convolution cache), a
+        circular buffer holds the keys of the token group that is open at the
+        request's own position, and a recurrent state cannot be borrowed from
+        a chain at another depth. Native allocation and forward execution
+        build all three exactly. Necessary, not sufficient: the gate also
+        requires experts or state layers.
+
+        vLLM 0.32.0's ``CircularBufferSpec``
+        (``vllm/v1/kv_cache_interface.py:909-945``) is one block per request
+        that holds the raw keys of the token group still being compressed, and
+        it is never prefix-cacheable. The indexer-tail layers of GLM-5.3-Flash
+        use it (``vllm/models/glm5next/common/attention.py:170-179``).
         """
         specs = [
             group.kv_cache_spec
@@ -5651,12 +5670,15 @@ class InstrumentedScheduler(AsyncScheduler):
         return (
             not self._bench_random_kda
             and any(
-                finite_window(spec) or self._kvwarm_is_state_spec(spec)
+                finite_window(spec)
+                or isinstance(spec, CircularBufferSpec)
+                or self._kvwarm_is_state_spec(spec)
                 for spec in specs
             )
             and all(
                 isinstance(spec, FullAttentionSpec)
                 or finite_window(spec)
+                or isinstance(spec, CircularBufferSpec)
                 or self._kvwarm_is_state_spec(spec)
                 for spec in specs
             )
