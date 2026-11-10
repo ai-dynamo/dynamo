@@ -128,9 +128,10 @@ fn kvcr_fetch(
     .into_action())
 }
 
-/// Register `kv_fetch` under the `kvcr` worker-selection policy, on by default, so a `kvcr` role
+/// Register `kv_fetch` on by default under the `kvcr` worker-selection policy, so a `kvcr` role
 /// whose entry lists no `hints` sends every committed copy, and best-effort fetches of one block or
-/// more when `kvcr` commits none. Other policies can't list it.
+/// more when `kvcr` commits none. Any other policy runs it only when its role lists it in `hints`,
+/// for example a custom policy whose scorer reads `KV_COPY`.
 pub(crate) fn register(registry: &mut RouterPluginRegistry) -> Result<(), HintPolicyRegistryError> {
     registry.register_hint_policy(
         POLICY_TYPE,
@@ -147,10 +148,13 @@ pub(crate) fn register(registry: &mut RouterPluginRegistry) -> Result<(), HintPo
                 min_additional_blocks,
             }))
         }),
-        [(
-            HintHost::worker_selection(KVCR_POLICY_TYPE),
-            HintDefault::On,
-        )],
+        [
+            (
+                HintHost::worker_selection(KVCR_POLICY_TYPE),
+                HintDefault::On,
+            ),
+            (HintHost::AnyWorkerSelection, HintDefault::Off),
+        ],
     )
 }
 

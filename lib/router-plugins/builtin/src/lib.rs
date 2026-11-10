@@ -45,7 +45,7 @@ use dynamo_kv_router::plugins::{RouterPluginRegistry, RouterPluginRegistryError}
 /// than overriding it.
 pub fn register(registry: &mut RouterPluginRegistry) -> Result<(), RouterPluginRegistryError> {
     default::register(registry)?;
-    // kv_fetch runs only under kvcr, so it registers with it.
+    // kv_fetch names kvcr as a host, where it is on by default, so it registers with it.
     kv_fetch::register(registry)?;
     sticky_min_load::register(registry)?;
     two_tier_cost_fn::register(registry)?;
@@ -162,12 +162,11 @@ worker_selection:
         );
     }
 
-    /// `kv_fetch` runs only under `kvcr`, where it is the default: a `kvcr` role runs it without
-    /// listing it, other policies run no hints, and listing it under another policy is rejected.
+    /// `kv_fetch` is on by default only under `kvcr`: a `kvcr` role runs it without listing it, a
+    /// role under another policy runs it only when it lists it, and other policies run no hints by
+    /// default.
     #[test]
-    fn kv_fetch_runs_only_under_kvcr() {
-        use dynamo_kv_router::plugins::hint_policy::HintPolicyRegistryError;
-
+    fn kv_fetch_is_on_by_default_only_under_kvcr() {
         let policy_file = tempfile::NamedTempFile::new().unwrap();
         let config = |yaml: &str| {
             std::fs::write(policy_file.path(), yaml).unwrap();
@@ -199,15 +198,14 @@ worker_selection:
         assert!(resolved.names(WorkerType::Aggregated).is_empty());
         assert!(resolved.names(WorkerType::Encode).is_empty());
 
-        let Err(error) = registry.resolve_hint_policies(&config(
-            "worker_selection:\n  prefill:\n    type: dynamo-default-cost-fn\n    hints:\n      - type: kv_fetch\n",
-        )) else {
-            panic!("kv_fetch must not run under dynamo-default-cost-fn");
-        };
-        assert!(
-            matches!(error, HintPolicyRegistryError::Unsupported { .. }),
-            "{error}"
-        );
+        // Any other policy runs it only when its role lists it.
+        let listed = registry
+            .resolve_hint_policies(&config(
+                "worker_selection:\n  prefill:\n    type: dynamo-default-cost-fn\n    hints:\n      - type: kv_fetch\n",
+            ))
+            .unwrap();
+        assert_eq!(listed.names(WorkerType::Prefill), [kv_fetch::POLICY_TYPE]);
+        assert!(!listed.uses_defaults(WorkerType::Prefill));
 
         for parameters in ["{min_additional_blocks: 0}", "{min_blocks: 2}"] {
             let yaml = format!(
