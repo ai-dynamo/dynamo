@@ -1005,3 +1005,4 @@ __all__ = [
     "candidate_id_for",
     "create_adapter",
 ]
+

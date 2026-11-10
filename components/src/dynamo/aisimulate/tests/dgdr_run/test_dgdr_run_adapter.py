@@ -1926,3 +1926,4 @@ def test_materialization_retry_and_terminal_policy(
         assert snapshot["run"]["error"] == "CandidateMaterializationError"
         assert "cannot render candidate-0" in snapshot["run"]["message"]
         assert len(snapshot["run"]["message"]) <= adapter_module._MAX_ERROR_MESSAGE
+

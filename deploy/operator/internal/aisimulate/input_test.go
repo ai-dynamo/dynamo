@@ -375,7 +375,6 @@ func TestUnderlayParetoObjective(t *testing.T) {
 	}
 }
 
-
 func TestUnderlayOmitsUnsetTypedFields(t *testing.T) {
 	spec := &v1beta2.DynamoGraphDeploymentRequestSpec{Model: &v1beta2.ModelSpec{Name: "m"}}
 	if got := encode(t, underlay(t, spec)); got != `{"engine":{"model":"m"}}` {
