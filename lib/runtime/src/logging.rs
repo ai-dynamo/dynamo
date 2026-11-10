@@ -660,7 +660,38 @@ pub fn make_inference_request_span<B>(req: &Request<B>) -> Span {
         let _ = span.set_parent(context);
     }
 
+    remember_span_request_id(&span, request_id);
+
     span
+}
+
+/// The request id minted for an inference request span, kept in the span's registry data
+/// so it can be read back even when `DistributedTraceIdLayer` is not installed.
+struct SpanRequestId(String);
+
+fn remember_span_request_id(span: &Span, request_id: String) {
+    span.with_subscriber(|(id, dispatch)| {
+        if let Some(data) = dispatch
+            .downcast_ref::<Registry>()
+            .and_then(|registry| registry.span_data(id))
+        {
+            data.extensions_mut().insert(SpanRequestId(request_id));
+        }
+    });
+}
+
+/// The request id minted by [`make_inference_request_span`] for the current span or its
+/// nearest ancestor. Unlike [`get_distributed_tracing_context`] this does not depend on
+/// `DistributedTraceIdLayer`, which is only installed with OTLP/JSONL logging.
+pub fn current_span_request_id() -> Option<String> {
+    Span::current()
+        .with_subscriber(|(id, dispatch)| {
+            let registry = dispatch.downcast_ref::<Registry>()?;
+            let span = registry.span(id)?;
+            span.scope()
+                .find_map(|s| s.extensions().get::<SpanRequestId>().map(|r| r.0.clone()))
+        })
+        .flatten()
 }
 
 /// Create a span for system endpoints (health, metrics, models, engine, loras, etc.).
@@ -1217,6 +1248,56 @@ pub fn init() {
     });
 }
 
+/// Filter for the NVTX mirror layer: `Some` only when the `nvtx` feature is compiled in and
+/// `DYN_NVTX` is on. It is the console logger's filter, so the mirror sees exactly the spans
+/// the rest of the stack creates and never changes a callsite's cached interest.
+///
+/// This runs before `nvtx::init` (runtime startup), so the layer starts ranges directly
+/// instead of consulting the runtime flag: installing it already implies the switch is on.
+fn nvtx_layer_filter() -> Option<LoggingFilter> {
+    #[cfg(feature = "nvtx")]
+    {
+        crate::nvtx::switch_from_env().then(|| filters(load_config()))
+    }
+    #[cfg(not(feature = "nvtx"))]
+    {
+        None
+    }
+}
+
+/// Build `registry()` + `$stack` as a [`tracing::Dispatch`], with the NVTX mirror layer
+/// underneath when `$nvtx_filter` is `Some`.
+///
+/// Two separate stacks rather than an `Option` layer: an absent `Option` (or `Identity`)
+/// layer answers `register_callsite` with `Interest::always()`, which turns every callsite
+/// the per-layer filters reject into `Interest::sometimes()`, so each disabled `debug!` /
+/// `trace!` would re-run every filter instead of hitting the callsite cache. `$stack` is
+/// expanded once per branch so its generic layers are built for the right subscriber type.
+macro_rules! registry_dispatch {
+    ($nvtx_filter:expr, |$base:ident| $stack:expr) => {{
+        let nvtx_filter: Option<LoggingFilter> = $nvtx_filter;
+        #[cfg(feature = "nvtx")]
+        let dispatch = match nvtx_filter {
+            Some(filter) => {
+                let $base =
+                    tracing_subscriber::registry().with(crate::nvtx::span_layer::layer(filter));
+                tracing::Dispatch::new($stack)
+            }
+            None => {
+                let $base = tracing_subscriber::registry();
+                tracing::Dispatch::new($stack)
+            }
+        };
+        #[cfg(not(feature = "nvtx"))]
+        let dispatch = {
+            debug_assert!(nvtx_filter.is_none());
+            let $base = tracing_subscriber::registry();
+            tracing::Dispatch::new($stack)
+        };
+        dispatch
+    }};
+}
+
 #[cfg(feature = "tokio-console")]
 fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
     let tokio_console_layer = console_subscriber::ConsoleLayer::builder()
@@ -1227,11 +1308,12 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
         .with_default(LevelFilter::ERROR)
         .with_target("runtime", LevelFilter::TRACE)
         .with_target("tokio", LevelFilter::TRACE);
-    let l = console_layer(console_log_format(), FmtSpan::NONE, filters(load_config()));
-    tracing_subscriber::registry()
-        .with(l)
-        .with(tokio_console_layer.with_filter(tokio_console_target))
-        .init();
+    let format = console_log_format();
+    let fmt_filter = filters(load_config());
+    registry_dispatch!(nvtx_layer_filter(), |base| base
+        .with(console_layer(format, FmtSpan::NONE, fmt_filter))
+        .with(tokio_console_layer.with_filter(tokio_console_target)))
+    .init();
     Ok(())
 }
 
@@ -1357,29 +1439,32 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
         let tracer = tracer_provider.tracer(service_name.to_string());
         // Filter outside the `Option`: a bare `None` layer registers interest in every
         // callsite, so each disabled `debug!`/`trace!` would run every per-layer filter
-        // on every call instead of being skipped at its callsite.
-        let otel_logs_layer = logger_provider_opt
-            .as_ref()
-            .map(OpenTelemetryTracingBridge::new)
-            .with_filter(otel_logs_filter_layer);
-
-        let l = console_layer(console_format, span_events, fmt_filter_layer);
-        tracing_subscriber::registry()
+        // on every call instead of being skipped at its callsite. Built inside the stack
+        // because `Filtered` is generic over the subscriber, which differs per branch.
+        registry_dispatch!(nvtx_layer_filter(), |base| base
             .with(
                 tracing_opentelemetry::layer()
                     .with_tracer(tracer)
                     .with_filter(otel_filter_layer),
             )
-            .with(otel_logs_layer)
+            .with(
+                logger_provider_opt
+                    .as_ref()
+                    .map(OpenTelemetryTracingBridge::new)
+                    .with_filter(otel_logs_filter_layer),
+            )
             .with(DistributedTraceIdLayer.with_filter(trace_filter_layer))
-            .with(l)
-            .init();
+            .with(console_layer(console_format, span_events, fmt_filter_layer)))
+        .init();
 
         log_otel_init_status(&service_name, endpoint_opt, console_format);
     } else {
-        let l = console_layer(console_format, span_events, fmt_filter_layer);
-
-        tracing_subscriber::registry().with(l).init();
+        registry_dispatch!(nvtx_layer_filter(), |base| base.with(console_layer(
+            console_format,
+            span_events,
+            fmt_filter_layer
+        )))
+        .init();
     }
 
     Ok(())
@@ -2012,6 +2097,101 @@ pub mod tests {
     use std::io::{BufRead, BufReader};
     use stdio_override::*;
     use tempfile::NamedTempFile;
+
+    /// With no `DistributedTraceIdLayer` (plain registry), the handler must still see the
+    /// id the request span minted rather than minting a second one.
+    #[test]
+    fn span_request_id_is_readable_without_distributed_trace_layer() {
+        let subscriber = tracing_subscriber::registry();
+        tracing::subscriber::with_default(subscriber, || {
+            let req = Request::builder()
+                .uri("/v1/chat/completions")
+                .body(())
+                .unwrap();
+            let span = make_inference_request_span(&req);
+            let minted = span.in_scope(|| {
+                assert!(get_distributed_tracing_context().is_none());
+                current_span_request_id().expect("id on the request span")
+            });
+            Uuid::parse_str(&minted).expect("minted id is a UUID");
+            // Child spans resolve through their ancestor.
+            let child_id =
+                span.in_scope(|| tracing::info_span!("child").in_scope(current_span_request_id));
+            assert_eq!(child_id.as_deref(), Some(minted.as_str()));
+            // Outside any request span there is nothing to reuse.
+            assert!(current_span_request_id().is_none());
+            // Each request gets its own id.
+            let other = make_inference_request_span(&req);
+            assert_ne!(other.in_scope(current_span_request_id), Some(minted));
+        });
+    }
+
+    /// A static DEBUG event callsite, for asking a dispatcher how it registers one.
+    struct DebugCallsite;
+    static DEBUG_CALLSITE: DebugCallsite = DebugCallsite;
+    static DEBUG_EVENT: tracing::Metadata<'static> = tracing::Metadata::new(
+        "disabled debug event",
+        "dynamo_runtime::logging::tests",
+        tracing::Level::DEBUG,
+        None,
+        None,
+        None,
+        tracing::field::FieldSet::new(&[], tracing::callsite::Identifier(&DEBUG_CALLSITE)),
+        tracing::metadata::Kind::EVENT,
+    );
+    impl tracing::callsite::Callsite for DebugCallsite {
+        fn set_interest(&self, _: tracing::subscriber::Interest) {}
+        fn metadata(&self) -> &tracing::Metadata<'_> {
+            &DEBUG_EVENT
+        }
+    }
+
+    fn default_console_filter() -> LoggingFilter {
+        LoggingFilter::Targets(
+            targets_filter(&LoggingConfig::default(), None).expect("default config uses Targets"),
+        )
+    }
+
+    /// With NVTX off, a callsite every filter rejects must still register as `never`, so
+    /// a disabled `debug!` costs one cached check. An absent `Option` layer would answer
+    /// `always` and degrade it to `sometimes`; that is why the stacks are built separately.
+    #[test]
+    fn disabled_callsites_stay_never_with_and_without_the_nvtx_layer() {
+        let off = registry_dispatch!(None, |base| base.with(console_layer(
+            ConsoleLogFormat::Readable,
+            FmtSpan::NONE,
+            default_console_filter()
+        )));
+        assert!(off.register_callsite(&DEBUG_EVENT).is_never());
+
+        #[cfg(feature = "nvtx")]
+        {
+            let on = registry_dispatch!(Some(default_console_filter()), |base| base.with(
+                console_layer(
+                    ConsoleLogFormat::Readable,
+                    FmtSpan::NONE,
+                    default_console_filter()
+                )
+            ));
+            assert!(on.register_callsite(&DEBUG_EVENT).is_never());
+        }
+
+        // The failure mode the separate stacks avoid.
+        let with_absent_layer = tracing::Dispatch::new(
+            tracing_subscriber::registry()
+                .with(None::<tracing_subscriber::layer::Identity>)
+                .with(console_layer(
+                    ConsoleLogFormat::Readable,
+                    FmtSpan::NONE,
+                    default_console_filter(),
+                )),
+        );
+        assert!(
+            with_absent_layer
+                .register_callsite(&DEBUG_EVENT)
+                .is_sometimes()
+        );
+    }
 
     #[test]
     fn unset_dyn_log_uses_configured_default() {
