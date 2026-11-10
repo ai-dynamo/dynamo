@@ -59,6 +59,22 @@ def loads(text: str | bytes) -> Any:
 
 def dumps(value: Any, *, canonical: bool = False) -> str:
     """Serialize Decimal as a JSON number, never a quoted or rounded value."""
+    if (
+        canonical
+        and not isinstance(value, bool)
+        and isinstance(value, (int, float, Decimal))
+    ):
+        number = Decimal(str(value))
+        if not number.is_finite():
+            raise ReplayError("non-finite number")
+        sign, digits, exponent = number.as_tuple()
+        if not any(digits):
+            return "0"
+        while digits[-1] == 0:
+            digits, exponent = digits[:-1], exponent + 1
+        # Avoid Decimal.normalize(), which rounds to the current decimal context.
+        coefficient = ("-" if sign else "") + "".join(str(item) for item in digits)
+        return coefficient + "e" + str(exponent)
     if isinstance(value, Decimal):
         if not value.is_finite():
             raise ReplayError("non-finite decimal")

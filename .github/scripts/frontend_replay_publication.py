@@ -267,7 +267,11 @@ def resolve(
     expected = descriptor.get("index_digest", "") or ""
     if descriptor.get("frontend_staged") is not True or not DIGEST.fullmatch(expected):
         write_json(
-            output, {"status": "target_unavailable", "reason": "no_staged_frontend"}
+            output,
+            {
+                "status": "target_unavailable",
+                "reason": descriptor.get("reason", "no_staged_frontend"),
+            },
         )
         return 2
     started = time.monotonic()
@@ -285,6 +289,15 @@ def resolve(
                 or descriptor.get("platforms", {}).get(platform) != selected
             ):
                 reason = "platform_digest_unavailable_or_mismatched"
+                write_json(
+                    output,
+                    {
+                        "status": "target_unavailable",
+                        "reason": reason,
+                        "resolution_seconds": round(time.monotonic() - started, 3),
+                    },
+                )
+                return 2
             else:
                 target = {
                     "status": "ready",

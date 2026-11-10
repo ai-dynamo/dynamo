@@ -125,6 +125,9 @@ class PublicationTests(unittest.TestCase):
         self.assertEqual(
             json.loads(self.target.read_text())["status"], "target_unavailable"
         )
+        self.assertEqual(
+            json.loads(self.target.read_text())["reason"], "frontend_not_staged"
+        )
 
     def test_staging_errors_do_not_persist_the_secret_reference(self):
         failure = subprocess.CalledProcessError(
@@ -169,17 +172,36 @@ class PublicationTests(unittest.TestCase):
             publication,
             "public_manifest",
             return_value=(self.index_digest, self.manifest),
+        ), patch.object(
+            publication.time,
+            "sleep",
+            side_effect=AssertionError("immutable platform mismatch must not poll"),
         ):
             self.assertEqual(
                 publication.resolve(
                     self.descriptor_path,
                     self.target,
                     "linux/arm64",
-                    0,
+                    7200,
                     self.metadata_path,
                 ),
                 2,
             )
+
+    def test_staging_digest_failure_reason_is_preserved(self):
+        with patch.dict(os.environ, self.environment, clear=True), patch.object(
+            publication.subprocess, "run", side_effect=OSError("unavailable")
+        ):
+            publication.record(self.descriptor_path)
+        self.assertEqual(
+            publication.resolve(
+                self.descriptor_path, self.target, "linux/amd64", 0, self.metadata_path
+            ),
+            2,
+        )
+        self.assertEqual(
+            json.loads(self.target.read_text())["reason"], "staged_digest_unavailable"
+        )
 
     def test_invalid_source_identity_is_rejected_before_registry_access(self):
         self.record()

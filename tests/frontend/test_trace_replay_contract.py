@@ -7,8 +7,6 @@ from __future__ import annotations
 
 import copy
 import gzip
-import subprocess
-import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
@@ -21,6 +19,7 @@ from tests.frontend.trace_replay.__main__ import main
 from tests.frontend.trace_replay.contract import (
     MISSING,
     ReplayError,
+    digest,
     dumps,
     file_digest,
     judge_preprocessed,
@@ -55,25 +54,14 @@ pytestmark = [
 ]
 
 
-def test_publication_preflight_failure_is_an_incomplete_baseline(
-    tmp_path: Path,
+@pytest.mark.parametrize(
+    "status", ["infra_error", "target_unavailable", "provenance_rejected"]
+)
+def test_publication_failure_status_without_identity_is_an_incomplete_baseline(
+    tmp_path: Path, status: str
 ) -> None:
-    helper = (
-        Path(__file__).resolve().parents[2]
-        / ".github/scripts/frontend_replay_publication.py"
-    )
-    subprocess.run(
-        [sys.executable, str(helper), "ensure-report", "--directory", str(tmp_path)],
-        check=True,
-    )
-    assert _baseline(tmp_path, {"harness": "current"}, set()) == (
-        "baseline_incomplete",
-        {},
-    )
-    # Old artifacts used the status without exit_code; they must also remain unjudged.
-    write_json(
-        tmp_path / "summary.json", {"status": "target_unavailable", "executions": 0}
-    )
+    # Publication report generation is independently covered by its stdlib CI hook.
+    write_json(tmp_path / "summary.json", {"status": status, "executions": 0})
     assert _baseline(tmp_path, {"harness": "current"}, set()) == (
         "baseline_incomplete",
         {},
@@ -154,6 +142,23 @@ def test_json_comparison_preserves_numbers_without_boolean_or_string_coercion() 
     assert loads(dumps({"x": loads("1.2345678901234567890123456789")}))["x"] == loads(
         "1.2345678901234567890123456789"
     )
+
+
+def test_semantic_fingerprints_ignore_number_spelling_without_rounding() -> None:
+    for left, right in (
+        ("1", "1.0"),
+        ("100", "1e2"),
+        ("-0.0", "0"),
+        ("9007199254740993", "9007199254740993.0"),
+        ("1.2345678901234567890123456789", "1.234567890123456789012345678900"),
+    ):
+        first, second = {"argument": loads(left)}, {"argument": loads(right)}
+        assert same_json(first, second)
+        assert digest(first) == digest(second)
+    assert digest(1) != digest(True)
+    assert digest(1) != digest("1")
+    assert digest(loads("9007199254740993.0")) != digest(9007199254740992)
+    assert dumps(loads("1.0")) == "1.0"
 
 
 @pytest.mark.parametrize("text", ['{"x":1,"x":2}', "NaN", "Infinity", "-Infinity"])
