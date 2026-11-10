@@ -39,7 +39,10 @@ from dynamo.sglang._compat import supports_disagg_prefill_cancel_anytime
 from dynamo.sglang.args import Config
 from dynamo.sglang.capacity import kv_event_block_size
 from dynamo.sglang.engine_generate import native_generate_payload
-from dynamo.sglang.engine_routes import resolve_configured_engine_routes
+from dynamo.sglang.engine_routes import (
+    normalize_engine_route_result,
+    resolve_configured_engine_routes,
+)
 from dynamo.sglang.gateway import follow_pause_broadcasts
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.cancellation import CancellationMixin
@@ -635,6 +638,16 @@ class BaseWorkerHandler(
                 normalized = -normalized
             return {"priority": normalized}
         return {}
+
+    async def prefetch(self, request: Dict[str, Any]):
+        """Forward explicit KV prefetch to the engine's cache control API."""
+        manager = self.engine.tokenizer_manager if self.engine is not None else None
+        # Older SGLang releases do not expose this opt-in control command.
+        prefetch = getattr(manager, "prefetch", None)
+        if prefetch is None:
+            yield {"success": False, "message": "SGLang KV prefetch is not supported"}
+            return
+        yield normalize_engine_route_result(await prefetch(**request))
 
     async def clear_kv_blocks(self, request: Optional[Dict[str, Any]] = None):
         """Flush SGLang's local cache when no requests are active."""
