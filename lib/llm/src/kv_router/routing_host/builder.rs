@@ -26,12 +26,14 @@ use dynamo_runtime::{
     protocols::annotated::Annotated,
 };
 
-use super::{HostedOccupancy, LoraRouting, RoutingHost, RoutingPolicy};
+use super::{HostedOccupancy, RoutingHost, RoutingPolicy};
 use crate::{
     kv_router::{KvRouter, RoutingLoadContext, metrics::RouterRequestMetrics},
     lora::{LoadEstimator, LoraFilter},
+    lora_routing::LegacyLoraPolicy,
     preprocessor::PreprocessedRequest,
     protocols::common::llm_backend::LLMEngineOutput,
+    routing_policy::HostedCandidatePolicy,
     session_affinity::AffinityCoordinator,
 };
 
@@ -171,7 +173,7 @@ enum PolicyInputs {
     Builtin {
         policy: RoutingPolicy,
         load_context: Arc<RoutingLoadContext>,
-        lora: Option<LoraRouting>,
+        candidate_policy: Option<Arc<dyn HostedCandidatePolicy>>,
     },
 }
 
@@ -209,16 +211,16 @@ impl PolicyInputs {
                     RouterMode::DeviceAwareWeighted => RoutingPolicy::DeviceAwareWeighted,
                     mode => RoutingPolicy::Hosted(hosted_picker(mode)?),
                 };
-                let lora = match (lora, mode) {
+                let candidate_policy = match (lora, mode) {
                     (None, _) => None,
                     (
                         Some((filter, load_estimator)),
                         RouterMode::RoundRobin | RouterMode::Random,
-                    ) => Some(LoraRouting {
+                    ) => Some(LegacyLoraPolicy::hosted(
                         filter,
                         load_estimator,
-                        picker: hosted_picker(mode)?,
-                    }),
+                        hosted_picker(mode)?,
+                    )),
                     (Some(_), mode) => {
                         anyhow::bail!("LoRA filtering is unsupported with {mode:?} routing")
                     }
@@ -226,7 +228,7 @@ impl PolicyInputs {
                 Ok(Self::Builtin {
                     policy,
                     load_context,
-                    lora,
+                    candidate_policy,
                 })
             }
         }
@@ -286,14 +288,14 @@ fn assemble(
                 session_affinity_mode,
                 affinity,
                 hosted_occupancy: None,
-                lora: None,
+                candidate_policy: None,
                 routing_context: load_context,
             })
         }
         PolicyInputs::Builtin {
             policy,
             load_context,
-            lora,
+            candidate_policy,
         } => {
             let hosted_occupancy = matches!(
                 &policy,
@@ -311,7 +313,7 @@ fn assemble(
                 session_affinity_mode,
                 affinity,
                 hosted_occupancy,
-                lora,
+                candidate_policy,
                 routing_context: Some(load_context),
             })
         }
