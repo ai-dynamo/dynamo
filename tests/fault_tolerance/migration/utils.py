@@ -708,10 +708,8 @@ def run_migration_test(
 
     # Step 6: Verify that migration behaved as expected via the frontend's
     # Prometheus metrics (a stable structured surface) instead of asserting on
-    # log strings. `ongoing_request` counts replacement dispatches after an
-    # error on an established stream; a request that cannot retry (limit 0 or
-    # seq-len cap exceeded) is not counted. `max_seq_len_exceeded` records
-    # hitting the migration seq-len cap.
+    # log strings. `ongoing_request` counts only replacement dispatches after a
+    # stream error; `max_seq_len_exceeded` counts hits on the migration seq-len cap.
     exact_metric_counts = expected_ongoing_request_count is not None
     if expected_ongoing_request_count is None:
         expected_ongoing_request_count = expected_ongoing_migrations(
