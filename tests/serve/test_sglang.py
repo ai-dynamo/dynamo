@@ -857,8 +857,7 @@ sglang_configs = {
                 ),
             ),
             pytest.mark.timeout(420),
-            # Temporarily validate the NVDEC frame handoff fix in PR CI.
-            pytest.mark.pre_merge,
+            pytest.mark.post_merge,
         ],
         model="Qwen/Qwen2.5-VL-3B-Instruct",
         # Deliberately does NOT set --multimodal-embedding-cache-capacity-gb, so
