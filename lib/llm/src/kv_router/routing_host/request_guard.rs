@@ -16,13 +16,13 @@ use crate::{
         prefill_router::BYPASS_REMOTE_PREFILL_ANNOTATION,
         request_lease::{RequestAttemptLease, RequestAttemptRelease},
     },
-    lora::LoadEstimator,
     preprocessor::PreprocessedRequest,
     protocols::common::{
         llm_backend::LLMEngineOutput,
         preprocessor::MigrationState,
         timing::{RequestPhase, RequestTracker},
     },
+    routing_policy::AttemptLease,
 };
 use dynamo_kv_router::{
     indexer::{ApproximateAcquireMode, ApproximateLruBlock, RoutingDecisionHashes},
@@ -78,27 +78,6 @@ fn decode_progress_request_supported(request: &PreprocessedRequest) -> bool {
             .stop_token_ids_hidden
             .as_ref()
             .is_none_or(Vec::is_empty)
-}
-
-pub(super) struct LoraLoadGuard {
-    estimator: Arc<LoadEstimator>,
-    lora_name: String,
-}
-
-impl LoraLoadGuard {
-    pub(super) fn new(estimator: Arc<LoadEstimator>, lora_name: String) -> Self {
-        estimator.increment_load(&lora_name);
-        Self {
-            estimator,
-            lora_name,
-        }
-    }
-}
-
-impl Drop for LoraLoadGuard {
-    fn drop(&mut self) {
-        self.estimator.decrement_load(&self.lora_name);
-    }
 }
 
 #[derive(Clone)]
@@ -697,7 +676,7 @@ pub(super) struct RequestGuard {
     migration_state: Option<MigrationState>,
     kv_hit: Option<KvHitTracking>,
     affinity_lease: Option<AffinityLease>,
-    _lora_load: Option<LoraLoadGuard>,
+    _attempt_lease: Option<AttemptLease>,
 }
 
 impl RequestGuard {
@@ -764,10 +743,13 @@ impl RequestGuard {
             output_hashes,
             record_itl_at_completion: false,
             prefill_marked: false,
-            migration_state: request.migration_state.clone(),
+            migration_state: request
+                .migration_state
+                .clone()
+                .filter(|_| crate::routing_policy::execution_requirements(request).allows_replay),
             kv_hit,
             affinity_lease: None,
-            _lora_load: None,
+            _attempt_lease: None,
         }
     }
 
@@ -775,7 +757,7 @@ impl RequestGuard {
         request_metrics: Arc<RouterRequestMetrics>,
         worker_id: u64,
         occupancy_reservation: Option<OccupancyReservation>,
-        lora_load: Option<LoraLoadGuard>,
+        attempt_lease: Option<AttemptLease>,
         request: &PreprocessedRequest,
     ) -> Self {
         request_metrics.requests_started_total.inc();
@@ -795,10 +777,13 @@ impl RequestGuard {
             output_hashes: None,
             record_itl_at_completion: true,
             prefill_marked: false,
-            migration_state: request.migration_state.clone(),
+            migration_state: request
+                .migration_state
+                .clone()
+                .filter(|_| crate::routing_policy::execution_requirements(request).allows_replay),
             kv_hit: None,
             affinity_lease: None,
-            _lora_load: lora_load,
+            _attempt_lease: attempt_lease,
         }
     }
 

@@ -378,7 +378,7 @@ Configure scoring through [default policy parameters](../../developer-guide/know
 </ParamField>
 
 <ParamField path="--router-policy-config" type="string" default="null">
-  Startup-only YAML for shared `router` settings, policy-class queues, and worker-selection instances. When omitted,
+  Startup-only YAML for shared `router` settings, policy-class queues, and per-role worker-selection policies. When omitted,
   `--router-queue-threshold` and `--router-queue-policy` define one synthetic policy class.
   Queueing remains disabled until a threshold is configured. See [Shared Router Settings](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#shared-router-settings), [Policy-class queues](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#policy-class-queues) and [Write Custom Routing Strategies](../../developer-guide/knowledge-base/modular-components/router/custom-worker-selection.mdx).
 
@@ -388,9 +388,10 @@ Configure scoring through [default policy parameters](../../developer-guide/know
 <ParamField path="--router-prefill-policy" type="string" default="null">
   **Deprecated; removal in v1.7.** Set `worker_selection.prefill` in `--router-policy-config`.
 
-  Worker-selection instance for disaggregated prefill workers in the current router process. This
-  option overrides `worker_selection.prefill` from `--router-policy-config`. It is not included in
-  worker model cards. Set it to `default` to use Dynamo's built-in worker selector.
+  Worker-selection policy type for disaggregated prefill workers in the current router process,
+  run with its default parameters. This option overrides `worker_selection.prefill` from
+  `--router-policy-config`. It is not included in worker model cards. Set it to `default` to use
+  Dynamo's built-in worker selector.
 
   Environment variable: `DYN_ROUTER_PREFILL_POLICY`
 </ParamField>
@@ -398,10 +399,11 @@ Configure scoring through [default policy parameters](../../developer-guide/know
 <ParamField path="--router-decode-policy" type="string" default="null">
   **Deprecated; removal in v1.7.** Set `worker_selection.decode` in `--router-policy-config`.
 
-  Worker-selection instance for decode workers in the current router process. This option
-  overrides `worker_selection.decode` from `--router-policy-config`. It is not included in worker
-  model cards. Set it to `default` to use Dynamo's built-in worker selector. Configure an aggregated
-  pool with `worker_selection.aggregated` or `DYN_ROUTER_WORKER_SELECTION_POLICY`.
+  Worker-selection policy type for decode workers in the current router process, run with its
+  default parameters. This option overrides `worker_selection.decode` from `--router-policy-config`.
+  It is not included in worker model cards. Set it to `default` to use Dynamo's built-in worker
+  selector. Configure an aggregated pool with `worker_selection.aggregated` or
+  `DYN_ROUTER_WORKER_SELECTION_POLICY`.
 
   Environment variable: `DYN_ROUTER_DECODE_POLICY`
 </ParamField>

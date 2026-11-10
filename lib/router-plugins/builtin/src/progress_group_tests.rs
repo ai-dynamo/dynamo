@@ -89,6 +89,7 @@ impl Frame {
         let source = WorkerWithDpRank::from_worker_id(id);
         let other = WorkerWithDpRank::from_worker_id(id + 1);
         let mut request = SchedulingRequest {
+            accounting_attribution: Default::default(),
             mode: ScheduleMode::QueryOnly { request_id: None },
             token_seq: None,
             isl_tokens: 16_385,
