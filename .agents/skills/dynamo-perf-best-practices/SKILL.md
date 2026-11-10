@@ -35,7 +35,7 @@ Trace each changed function's callers and work out how often it runs across the 
 | Per output token or stream chunk: millions/s per frontend | `lib/llm/src/http/service`, `lib/llm/src/protocols/openai`, `lib/llm/src/backend.rs`, `components/src/dynamo/{vllm,sglang,trtllm}`, the response transport |
 | Per KV block: blocks per request × workers; millions of entries held | `lib/router/kv-indexer/src`, `lib/router/slot-tracker/src`, `lib/mocker` |
 | Per KV event: every engine step on every worker | event ingest, `lib/runtime/src/transports` |
-| Per request: thousands/s | `lib/llm/src/preprocessor`, `lib/llm/src/kv_router`, `lib/router/kv-router/src/scheduling`, request parsing, `lib/bindings/python/rust` |
+| Per request: thousands/s | `lib/llm/src/preprocessor`, `lib/llm/src/kv_router`, `lib/router/scheduler/src`, `lib/router/worker-selection/src`, request parsing, `lib/bindings/python/rust` |
 | Per connection: thousands open | HTTP accept and serve, transport clients |
 | Per worker or publisher: N in the thousands, at startup and on every discovery change | discovery, subscriptions, sockets, threads |
 
@@ -71,7 +71,7 @@ When the PR description or commit messages claim a speedup, a memory saving, or 
 - **Fair A/B.** Recent main at a stated SHA, the same machine, alternating fresh processes, the same offered load, identical outputs for completed requests, and medians over enough runs to show the noise. For a loss or overload fix, report errors and drops for both arms.
 - **Claims that don't hold.** Counted `perf record -F` samples (use period-weighted `perf report`), closed-loop requests per second on a component that isn't the bottleneck, mocks that don't send production types, numbers from an older head that don't say so, and wall-clock timing in a GIL-saturated process (use `py-spy --gil`).
 - **Tests.** A test that fails on the parent commit when the mechanism is observable (a skip, a removed copy, fewer shared writes), a parity test against the old path for a rewrite, a `const` size assert for size-sensitive Rust types, and no timing thresholds in CI.
-- **Where to reproduce.** The `dynamo-frontend-benchmark` skill; `lib/bench/kv_router/` (protocol in `INDEXER_BENCH.md`); `lib/bench/offline_replay_bench.rs` and the `dynamo-kv-replay-parity` skill; Criterion benches in `lib/{kv-router,llm,runtime}/benches/`.
+- **Where to reproduce.** The `dynamo-frontend-benchmark` skill; `lib/bench/kv_router/` (protocol in `INDEXER_BENCH.md`); `lib/bench/offline_replay_bench.rs` and the `dynamo-kv-replay-parity` skill; Criterion benches in `lib/{router/kv-router,llm,runtime}/benches/`.
 
 ## Report
 
