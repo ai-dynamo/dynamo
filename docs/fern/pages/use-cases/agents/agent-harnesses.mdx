@@ -201,6 +201,14 @@ You need a running Dynamo endpoint. To start a local one, follow [Run an agent o
 
 Send a request from the harness, then follow the trace check in [Run an agent on Dynamo](run-an-agent-on-dynamo.md#check-the-trace). Each request should show a session ID. If it does not, the harness is not sending a session header; see [Identify agent sessions](session-ids.mdx#native-agent-headers) for the headers Dynamo recognizes.
 
+## Run a sandboxed coding benchmark
+
+[Run SWE-bench Verified with Harbor, Pi, and Substrate](harbor-substrate.mdx)
+walks through sandbox preparation, one trial, a concurrent batch, and result
+inspection. Use Dynamo inference or a compatible external endpoint. The
+[runnable example](https://github.com/ai-dynamo/dynamo/tree/main/examples/agents/harbor-substrate)
+contains the environment adapter, prepared-image build, and telemetry configuration.
+
 ## Drive a Harness from Another Agent
 
 Use the repository's `.agents/skills/dynamo-agent-harness` skill when an agent needs to keep a Claude Code, Codex, or OpenCode session open across multiple prompts while Dynamo serves the model. The skill uses Agent Client Protocol (ACP) and injects the provider configuration through the child process environment instead of adding harness configuration files to the delegated worktree.
