@@ -242,7 +242,9 @@ impl RawKvEvent {
 #[derive(Debug, Deserialize, Clone)]
 #[serde(untagged)]
 pub enum ExtraKeyItem {
-    Hash(String),
+    /// Only a msgpack `str`. serde would also read a `bin` that happens to be
+    /// valid UTF-8 as a `String`, and that raw key must reach `Bytes`.
+    Hash(#[serde(deserialize_with = "deserialize_text")] String),
     HashWithSignedOffset((String, i64)),
     HashWithUnsignedOffset((String, u64)),
     /// Raw keys, such as vLLM's prompt-embeds SHA-256 digest, arrive as msgpack `bin`.
@@ -251,4 +253,29 @@ pub enum ExtraKeyItem {
     Unsigned(u64),
     Float(f64),
     Bool(bool),
+}
+
+fn deserialize_text<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct TextVisitor;
+
+    impl serde::de::Visitor<'_> for TextVisitor {
+        type Value = String;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a string")
+        }
+
+        fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<String, E> {
+            Ok(value.to_owned())
+        }
+
+        fn visit_string<E: serde::de::Error>(self, value: String) -> Result<String, E> {
+            Ok(value)
+        }
+    }
+
+    deserializer.deserialize_string(TextVisitor)
 }

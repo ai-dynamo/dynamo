@@ -1953,6 +1953,13 @@ fn prompt_embeds_digest() -> Vec<u8> {
     digest
 }
 
+// A raw key can also be valid UTF-8; on the wire it is still `bin`.
+fn utf8_raw_key() -> Vec<u8> {
+    let key = vec![b'a'; 32];
+    assert!(std::str::from_utf8(&key).is_ok());
+    key
+}
+
 #[test]
 fn non_utf8_extra_key_does_not_fail_the_batch() {
     let events = [
@@ -1973,37 +1980,39 @@ fn non_utf8_extra_key_does_not_fail_the_batch() {
 
 #[test]
 fn binary_extra_key_keeps_block_and_children_out_of_the_index() {
-    let events = [
-        binary_key_stored(11, None, Some(prompt_embeds_digest())),
-        binary_key_stored(12, Some(11), None),
-        binary_key_stored(21, None, None),
-    ];
-    let payload = to_vec_named(&(0.0_f64, events, Some(0_i32))).unwrap();
-    let batch = decode_event_batch(&payload).unwrap();
+    for key in [prompt_embeds_digest(), utf8_raw_key()] {
+        let events = [
+            binary_key_stored(11, None, Some(key.clone())),
+            binary_key_stored(12, Some(11), None),
+            binary_key_stored(21, None, None),
+        ];
+        let payload = to_vec_named(&(0.0_f64, events, Some(0_i32))).unwrap();
+        let batch = decode_event_batch(&payload).unwrap();
 
-    let mut normalizer = ZmqEventNormalizer::new(2);
-    let indexed: Vec<Vec<u64>> = batch
-        .events
-        .into_iter()
-        .enumerate()
-        .map(|(event_id, event)| {
-            let placement = normalizer
-                .normalize(event, event_id as u64, WorkerWithDpRank::new(7, 0))
-                .unwrap();
-            match placement.event.data {
-                KvCacheEventData::Stored(store) => store
-                    .blocks
-                    .iter()
-                    .map(|block| block.block_hash.0)
-                    .collect(),
-                KvCacheEventData::Removed(removed) => {
-                    assert!(removed.block_hashes.is_empty());
-                    Vec::new()
+        let mut normalizer = ZmqEventNormalizer::new(2);
+        let indexed: Vec<Vec<u64>> = batch
+            .events
+            .into_iter()
+            .enumerate()
+            .map(|(event_id, event)| {
+                let placement = normalizer
+                    .normalize(event, event_id as u64, WorkerWithDpRank::new(7, 0))
+                    .unwrap();
+                match placement.event.data {
+                    KvCacheEventData::Stored(store) => store
+                        .blocks
+                        .iter()
+                        .map(|block| block.block_hash.0)
+                        .collect(),
+                    KvCacheEventData::Removed(removed) => {
+                        assert!(removed.block_hashes.is_empty());
+                        Vec::new()
+                    }
+                    KvCacheEventData::Cleared => panic!("no clear was sent"),
                 }
-                KvCacheEventData::Cleared => panic!("no clear was sent"),
-            }
-        })
-        .collect();
+            })
+            .collect();
 
-    assert_eq!(indexed, vec![vec![], vec![], vec![21]]);
+        assert_eq!(indexed, vec![vec![], vec![], vec![21]], "raw key {key:?}");
+    }
 }
