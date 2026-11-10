@@ -79,7 +79,7 @@ its configuration even if the endpoint is unchanged.
 - `--router-prefill-load-model`: Selects the router's prompt-side load model. `none` keeps the existing static prompt load accounting. `ais` predicts one expected prefill duration per admitted request and lazily decays only the oldest active prefill request on each worker.
 - `--router-queue-threshold`: **Deprecated; use `policy_classes[].prefill_busy_threshold_frac` in the policy YAML.** Optional queue threshold fraction for prefill token capacity. Queueing is disabled by default; setting a numeric value enables it. The router holds incoming requests in a priority queue while all eligible workers exceed `threshold * max_num_batched_tokens`, releasing them when capacity frees up. This defers dispatch rather than rejecting work, so routing decisions use the freshest load metrics at the moment a request is sent to a worker. `nvext.agent_hints.strict_priority` selects an absolute pending-queue tier, while `nvext.agent_hints.priority` adjusts ordering within the configured policy. Must be greater than or equal to 0; use `0.0` for maximum queueing sensitivity. See the SGLang note under [Tuning Guidelines](#tuning-guidelines) for caveats around how `max_num_batched_tokens` is populated on that backend, and see [Priority Scheduling](../../../../use-cases/agents/priority-scheduling.mdx) for how router priority differs from backend engine priority.
 - `--router-queue-policy`: **Deprecated; use `policy_classes[].queue_policy` in the policy YAML.** Scheduling policy for the router queue: `fcfs` (default) or `wspt`.
-- `--router-policy-config`: Startup-only YAML path for shared router settings, policy-class queues, per-role worker-selection policies, and hint policies. When omitted, `--router-queue-threshold` and `--router-queue-policy` define one synthetic policy class. The equivalent environment variable is `DYN_ROUTER_POLICY_CONFIG`. See [Worker-Selection Policies](#worker-selection-policies) to select a built-in policy, and [Write Custom Routing Strategies](custom-worker-selection.mdx) for the linked-policy schema.
+- `--router-policy-config`: Startup-only YAML path for shared router settings, policy-class queues, and per-role worker-selection policies. When omitted, `--router-queue-threshold` and `--router-queue-policy` define one synthetic policy class. The equivalent environment variable is `DYN_ROUTER_POLICY_CONFIG`. See [Worker-Selection Policies](#worker-selection-policies) to select a built-in policy, and [Write Custom Routing Strategies](custom-worker-selection.mdx) for the linked-policy schema.
 
 For how queue backpressure differs from candidate filtering and busy-threshold overload handling, see [Router Filtering](worker-filtering.md).
 
@@ -115,7 +115,7 @@ link no catalog and reject a configured policy type at startup.
 |---|---|
 | `default` | Dynamo's built-in selector and cost model. Reserved; always available. |
 | `dynamo-default-cost-fn` | The default cost model with configurable scoring and sampling parameters. |
-| `kvcr` | The default cost model plus credit for the blocks a worker could copy from a peer through a [KV fetch hint](topology-aware-kv-transfer.md#kv-fetch-hints), weighted by `shared_cache_multiplier`. With a multiplier above `0`, the selected worker is committed to the copy its cost assumed, and a [hint policy](#hint-policies) for the same role must send it; startup fails without one. Takes the same parameters as `dynamo-default-cost-fn`. |
+| `kvcr` | The default cost model plus credit for the blocks a worker could copy from a peer through a [KV fetch hint](topology-aware-kv-transfer.md#kv-fetch-hints), weighted by `shared_cache_multiplier`. Takes the same parameters as `dynamo-default-cost-fn`. |
 | `thunderagent` | Honors the paired ThunderAgent classifier's worker/rank preference, then falls back to the least-loaded eligible worker. Enable both roles for program-aware admission and repacking; see [Schedule Agents with ThunderAgent](../../../../use-cases/agents/thunderagent-program-scheduler.md#native-frontend-plugin). |
 | `dynamo-two-tier-cost-fn` | Ranks on two tiers instead of one additive cost: active-request load first, then device-KV prefix overlap. Prefers the worker holding the largest prefix overlap unless load is badly imbalanced. Thresholds and selection order ported from the experimental SGLang router's `cache_aware_zmq` policy. Thresholds are tunable; the defaults reproduce it exactly. |
 | `dynamo-sticky-min-load` | Session-sticky least-loaded placement. A session's first request goes to the eligible worker with the fewest active requests; later requests carrying the same `X-Dynamo-Session-ID` return to that worker until it leaves the candidate set. Ignores cache overlap and load once a session is bound. Requests without a session ID go to the least-loaded worker. Inspired by SMG's `manual` policy with `assignment_mode: min_load`. |
@@ -278,41 +278,6 @@ for that scope, which makes it a quick way to A/B a policy against the default.
 
 To write your own policy instead of using a built-in one, see
 [Write Custom Routing Strategies](custom-worker-selection.mdx).
-
-### Hint Policies
-
-Hint policies are experimental. They add engine-directed KV actions, such as a [KV fetch hint](topology-aware-kv-transfer.md#kv-fetch-hints), to the worker a booking selected. They never change which worker is selected. Dynamo ships one hint-policy type, and linked plugin crates can register more:
-
-| Hint-policy type | Behavior |
-|---|---|
-| `kv_fetch` | Sends the booked worker a `kv.fetch` hint. When the worker-selection policy committed the worker to a copy, as `kvcr` does, it sends that copy. If the copy's source is gone by booking time, the router drops the copy with a warning and books the worker without it. Otherwise it fetches best effort from the worker's eligible source when the fetch adds at least `min_additional_blocks` (default `1`). It is on by default under the `kvcr` worker-selection policy. Under any other worker-selection policy, it runs only when the role lists it in `hints`. |
-
-A role's `worker_selection` entry lists the hint policies that role runs, in order, under `hints`, next to its `type` and `parameters`. Each item has a `type` and optional `parameters`. Add a `name` only when one role lists the same type twice:
-
-```yaml
-worker_selection:
-  prefill:
-    type: kvcr
-    parameters:
-      shared_cache_multiplier: 0.5
-    hints:
-      - type: kv_fetch
-  decode:
-    type: kvcr
-    parameters:
-      shared_cache_multiplier: 0.0
-    hints:
-      - type: kv_fetch
-        parameters:
-          min_additional_blocks: 4
-  aggregated: dynamo-default-cost-fn
-```
-
-- **A role whose entry doesn't list `hints` runs its default hint policies:** the ones registered to run by default under the role's worker-selection policy, in registration order. Today that is `kv_fetch` under `kvcr`; the other worker-selection policies Dynamo ships run none by default, so the `aggregated` role above sends no hints. A bare entry such as `prefill: kvcr` can't list `hints`, and neither can a role that `worker_selection` doesn't list, so both run the defaults. Listing `hints`, even as an empty list, replaces the defaults. The deprecated `instances` form doesn't take `hints`. Default hint policies are passive: they start no resources and don't change how the role is routed.
-- **A role can list any linked hint policy,** whatever its worker-selection policy. A hint policy's registration only decides where it runs by default.
-- **Configured hint policies run only on the KV path,** because the router composes hints when it books a worker. Startup fails when a role whose entry lists `hints` runs under a non-KV `--router-mode`. To use a routing mode's policy with hint policies, run `--router-mode kv` and name the routing type, such as `round-robin`, under `worker_selection` for that role.
-- **The router composes one hint per booking** and numbers its actions `a1`, `a2`, and so on. It sends the hint only to workers that advertise `router_hint`. A policy that fails drops only its own actions. A hint carries at most 32 actions.
-- **Exactly one hint policy per role sends the KV copies a worker-selection policy, such as `kvcr`, commits to.** Startup fails when a role's selection commits copies and none of its hint policies sends them, or when two do. If that hint policy sends nothing for a committed copy, the booking fails and is released. If the copy's source is gone by booking time, or the booked worker no longer advertises `router_hint`, the router logs a warning and books the worker without the copy. Copy offers and copy sources need a local, event-driven KV index; startup fails without one.
 
 ### Policy-Class Queues
 
