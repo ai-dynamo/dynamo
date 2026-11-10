@@ -229,50 +229,16 @@ impl KvEventSender {
     }
 }
 
-/// Enqueues whole-worker removals on the same FIFO mutation queue as KV events.
-#[derive(Clone)]
-pub struct RemoveWorkerSender {
-    mutation_tx: mpsc::Sender<MutationRequest>,
-}
-
-impl RemoveWorkerSender {
-    /// Wraps the indexer's FIFO mutation queue so removals share ordering with KV events.
-    pub(crate) fn new(mutation_tx: mpsc::Sender<MutationRequest>) -> Self {
-        Self { mutation_tx }
-    }
-
-    /// Enqueues removal of every rank of `worker`, ordered after mutations already queued.
-    ///
-    /// Returns once the request is queued, not once it has been applied.
-    pub async fn send(&self, worker: WorkerId) -> Result<(), mpsc::error::SendError<WorkerId>> {
-        self.mutation_tx
-            .send(MutationRequest::RemoveWorker { worker_id: worker })
-            .await
-            .map_err(|error| match error.0 {
-                MutationRequest::RemoveWorker { worker_id } => mpsc::error::SendError(worker_id),
-                _ => unreachable!("remove worker sender only enqueues RemoveWorker mutations"),
-            })
-    }
-
-    /// Capacity of the shared mutation queue (events and removals combined).
-    pub fn max_capacity(&self) -> usize {
-        self.mutation_tx.max_capacity()
-    }
-
-    /// Test helper: reserves `n` slots in the mutation queue to simulate backpressure.
-    #[cfg(all(test, feature = "standalone-indexer"))]
-    pub(crate) async fn reserve_many(
-        &self,
-        n: usize,
-    ) -> Result<mpsc::PermitIterator<'_, MutationRequest>, mpsc::error::SendError<()>> {
-        self.mutation_tx.reserve_many(n).await
-    }
-}
-
 /// Applies one queued mutation (KV event or worker/rank removal) to the tree.
 ///
-/// Every tree mutation flows through here in queue order, so removals can never
-/// overtake events enqueued before them.
+/// KV events and removals share this FIFO, so a removal never overtakes events
+/// queued before it.
+///
+/// NOTE: this only orders mutations already in this queue. Routing decisions
+/// (`routing_rx`) are applied after pending mutations, and `deregister` cancels a
+/// listener without waiting for it to exit, so the rest of an in-flight batch can
+/// still land after the removal.
+/// TODO: await listener exit in `deregister`, or fence stale events by worker generation.
 fn apply_mutation(
     trie: &mut RadixTree,
     approximate_lru_lane: &mut ApproximateLruLane,
@@ -375,7 +341,7 @@ impl KvIndexerBuilder {
 pub struct KvIndexer {
     /// A `CancellationToken` for managing shutdown.
     cancel: CancellationToken,
-    /// The FIFO sender shared by events and acknowledged rank resets.
+    /// The FIFO sender shared by KV events and worker/rank removals.
     mutation_tx: mpsc::Sender<MutationRequest>,
     /// A sender for `MatchRequest`s.
     match_tx: mpsc::Sender<MatchRequest>,
@@ -785,13 +751,9 @@ impl KvIndexer {
         self.dump_tx.clone()
     }
 
-    /// Get a sender for worker removal requests.
-    ///
-    /// ### Returns
-    ///
-    /// A sender that enqueues whole-worker removals on the FIFO mutation queue.
-    pub fn remove_worker_sender(&self) -> RemoveWorkerSender {
-        RemoveWorkerSender::new(self.mutation_tx.clone())
+    #[cfg(all(test, feature = "standalone-indexer"))]
+    pub(crate) fn mutation_tx_for_test(&self) -> mpsc::Sender<MutationRequest> {
+        self.mutation_tx.clone()
     }
 
     /// Get a sender for get workers requests.
@@ -1068,8 +1030,12 @@ impl Drop for KvIndexer {
 
 #[cfg(test)]
 mod fifo_reset_tests {
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
     use super::*;
-    use crate::test_utils::make_store_event_with_dp_rank;
+    use crate::indexer::KvIndexerDelegate;
+    use crate::test_utils::{create_store_event, make_store_event_with_dp_rank};
 
     #[tokio::test]
     async fn post_reset_event_survives_fifo_rank_reset() {
@@ -1117,91 +1083,109 @@ mod fifo_reset_tests {
         assert_eq!(new_scores.scores.get(&worker), Some(&1));
     }
 
-    /// Removing one dp_rank must apply after already-queued stores and keep sibling ranks.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn remove_worker_dp_rank_does_not_overtake_queued_stores() {
-        use crate::test_utils::make_store_event_with_dp_rank;
+    /// Parks the indexer thread on its first `on_create` until the test releases it.
+    struct Gate {
+        armed: AtomicBool,
+        entered: Mutex<Option<oneshot::Sender<()>>>,
+        open: Mutex<std::sync::mpsc::Receiver<()>>,
+    }
 
-        let mut resurrected = 0;
-        let mut sibling_lost = 0;
-        let attempts = 20;
-        for _ in 0..attempts {
-            let indexer = KvIndexer::new(
-                CancellationToken::new(),
-                32,
-                Arc::new(KvIndexerMetrics::new_unregistered()),
-            );
-            // A sibling rank of the same worker must survive removal of rank 0.
-            let sibling_hashes: Vec<u64> = (900_000_001..=900_000_016).collect();
-            indexer
-                .apply_event(make_store_event_with_dp_rank(7, &sibling_hashes, 1))
-                .await;
-
-            let n = 2000u64;
-            for i in 0..n {
-                let base = i * 1000;
-                let hashes: Vec<u64> = (base + 1..=base + 64).collect();
-                indexer
-                    .apply_event(make_store_event_with_dp_rank(7, &hashes, 0))
-                    .await;
-            }
-            indexer.remove_worker_dp_rank(7, 0).await;
-            indexer.flush().await;
-
-            let last = (n - 1) * 1000;
-            let q: Vec<LocalBlockHash> = (last + 1..=last + 64).map(LocalBlockHash).collect();
-            let scores = indexer.find_matches(q).await.unwrap();
-            if scores.scores.contains_key(&WorkerWithDpRank::new(7, 0)) {
-                resurrected += 1;
-            }
-
-            let q: Vec<LocalBlockHash> =
-                sibling_hashes.iter().copied().map(LocalBlockHash).collect();
-            let scores = indexer.find_matches(q).await.unwrap();
-            if !scores.scores.contains_key(&WorkerWithDpRank::new(7, 1)) {
-                sibling_lost += 1;
+    impl KvIndexerDelegate for Gate {
+        fn on_create(&self, _: ExternalSequenceBlockHash) {
+            if self.armed.swap(false, Ordering::SeqCst) {
+                if let Some(entered) = self.entered.lock().unwrap().take() {
+                    let _ = entered.send(());
+                }
+                let _ = self.open.lock().unwrap().recv();
             }
         }
-        assert_eq!(
-            resurrected, 0,
+
+        fn on_remove(&self, _: ExternalSequenceBlockHash) {}
+    }
+
+    /// Returns an indexer whose thread is parked, plus the sender that releases it.
+    ///
+    /// Until release, mutations only queue up, so the test fixes their order. Only
+    /// enqueue-only calls are safe before release; `flush` or `find_matches` would deadlock.
+    async fn parked_indexer() -> (KvIndexer, std::sync::mpsc::Sender<()>) {
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let (open_tx, open_rx) = std::sync::mpsc::channel();
+        let gate = Arc::new(Gate {
+            armed: AtomicBool::new(true),
+            entered: Mutex::new(Some(entered_tx)),
+            open: Mutex::new(open_rx),
+        });
+        let indexer = KvIndexer::builder(
+            CancellationToken::new(),
+            32,
+            Arc::new(KvIndexerMetrics::new_unregistered()),
+        )
+        .delegate(gate)
+        .build();
+        indexer
+            .apply_event(create_store_event(99, 0, vec![1], None))
+            .await;
+        entered_rx.await.unwrap();
+        (indexer, open_tx)
+    }
+
+    /// Removing one dp_rank must apply after already-queued stores and keep sibling ranks.
+    #[tokio::test]
+    async fn remove_worker_dp_rank_does_not_overtake_queued_stores() {
+        let hashes = [11, 12, 13, 14];
+        let (indexer, release) = parked_indexer().await;
+        indexer
+            .apply_event(make_store_event_with_dp_rank(7, &hashes, 1))
+            .await;
+        indexer
+            .apply_event(make_store_event_with_dp_rank(7, &hashes, 0))
+            .await;
+        indexer.remove_worker_dp_rank(7, 0).await;
+        release.send(()).unwrap();
+        indexer.flush().await;
+
+        let scores = indexer
+            .find_matches(hashes.map(LocalBlockHash).to_vec())
+            .await
+            .unwrap();
+        assert!(
+            !scores.scores.contains_key(&WorkerWithDpRank::new(7, 0)),
             "removed dp_rank came back from queued stores"
         );
-        assert_eq!(sibling_lost, 0, "sibling dp_rank was removed");
+        assert_eq!(
+            scores.scores.get(&WorkerWithDpRank::new(7, 1)),
+            Some(&4),
+            "sibling dp_rank was removed"
+        );
     }
 
     /// Removing a worker must apply after already-queued stores, so it cannot be resurrected.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[tokio::test]
     async fn remove_worker_does_not_overtake_queued_stores() {
-        use crate::test_utils::create_store_event;
+        let hashes = vec![11, 12, 13, 14];
+        let (indexer, release) = parked_indexer().await;
+        indexer
+            .apply_event(create_store_event(7, 0, hashes.clone(), None))
+            .await;
+        indexer
+            .apply_event(create_store_event(8, 0, hashes.clone(), None))
+            .await;
+        indexer.remove_worker(7).await;
+        release.send(()).unwrap();
+        indexer.flush().await;
 
-        let mut resurrected = 0;
-        let attempts = 20;
-        for _ in 0..attempts {
-            let indexer = KvIndexer::new(
-                CancellationToken::new(),
-                32,
-                Arc::new(KvIndexerMetrics::new_unregistered()),
-            );
-            let n = 2000u64;
-            for i in 0..n {
-                let base = i * 1000;
-                let hashes: Vec<u64> = (base + 1..=base + 64).collect();
-                indexer
-                    .apply_event(create_store_event(7, i, hashes, None))
-                    .await;
-            }
-            indexer.remove_worker(7).await;
-            indexer.flush().await;
-            let last = (n - 1) * 1000;
-            let q: Vec<LocalBlockHash> = (last + 1..=last + 64).map(LocalBlockHash).collect();
-            let scores = indexer.find_matches(q).await.unwrap();
-            if scores.scores.contains_key(&WorkerWithDpRank::new(7, 0)) {
-                resurrected += 1;
-            }
-        }
-        assert_eq!(
-            resurrected, 0,
+        let scores = indexer
+            .find_matches(hashes.into_iter().map(LocalBlockHash).collect())
+            .await
+            .unwrap();
+        assert!(
+            !scores.scores.contains_key(&WorkerWithDpRank::new(7, 0)),
             "removed worker came back from queued stores"
+        );
+        assert_eq!(
+            scores.scores.get(&WorkerWithDpRank::new(8, 0)),
+            Some(&4),
+            "other worker's stores were not applied"
         );
     }
 }

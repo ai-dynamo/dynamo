@@ -941,9 +941,12 @@ mod tests {
         let Indexer::Single { primary, .. } = indexer else {
             unreachable!();
         };
-        let sender = primary.remove_worker_sender();
+        let mutation_tx = primary.mutation_tx_for_test();
         // Reserve the entire queue so removal must yield without blocking the executor.
-        let permits = sender.reserve_many(sender.max_capacity()).await.unwrap();
+        let permits = mutation_tx
+            .reserve_many(mutation_tx.max_capacity())
+            .await
+            .unwrap();
         let removal = async {
             match removal {
                 "worker" => registry.deregister(1, "test-model", "default").await,

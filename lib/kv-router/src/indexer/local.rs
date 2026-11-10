@@ -644,11 +644,6 @@ impl LocalKvIndexer {
         self.indexer.snapshot_event_sender()
     }
 
-    /// Get a sender for worker removal requests.
-    pub fn remove_worker_sender(&self) -> super::RemoveWorkerSender {
-        self.indexer.remove_worker_sender()
-    }
-
     /// Get a sender for get workers requests.
     pub fn get_workers_sender(&self) -> mpsc::Sender<GetWorkersRequest> {
         self.indexer.get_workers_sender()
