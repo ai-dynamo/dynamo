@@ -172,6 +172,13 @@ struct Args {
     max_error_fraction: f64,
     #[arg(long, default_value_t = 300)]
     ready_timeout_secs: u64,
+    /// Touched once this process's workers are registered (and relay streams open).
+    #[arg(long)]
+    ready_file: Option<PathBuf>,
+    /// Wait for this file before starting load, so processes sharing a service
+    /// start together.
+    #[arg(long)]
+    start_file: Option<PathBuf>,
     #[arg(long)]
     out: PathBuf,
 }
@@ -1204,6 +1211,15 @@ async fn main() -> anyhow::Result<()> {
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
     eprintln!("{} workers registered and ready", ctx.args.workers);
+    if let Some(path) = &ctx.args.ready_file {
+        std::fs::write(path, b"ready\n")?;
+    }
+    if let Some(path) = &ctx.args.start_file {
+        eprintln!("waiting for {}", path.display());
+        while !path.exists() {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
 
     for slot in 0..ctx.args.concurrency {
         tokio::spawn(Arc::clone(&ctx).run_slot(slot));
