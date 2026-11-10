@@ -6,13 +6,13 @@
 # container/compliance/overrides.py via license_overrides.lookup(), which every
 # NOTICES generator calls before falling back to UNKNOWN.
 #
-# Match is by (ecosystem, name) — version-agnostic. If a package legitimately
-# changes license across versions, add separate entries with the version baked
-# into the name (e.g. cuda-nvcc-12-9 vs cuda-nvcc-13-0).
+# Match is by (ecosystem, name), optionally restricted to an exact version.
+# Exact-version entries take precedence; entries without version remain broad.
 #
 # Schema:
 #   ecosystem: rust | go | python | dpkg | native
 #   name:      package name (must match exactly what the SBOM/metadata reports)
+#   version:   optional exact package version; omitted means any version
 #   license:   SPDX expression OR LicenseRef-* identifier
 #   source:    REQUIRED audit trail — link to the upstream LICENSE/EULA URL
 #              that establishes this license, OR a justification for why we're
@@ -1050,3 +1050,115 @@ overrides:
   - { ecosystem: python, name: instanttensor, license: "Apache-2.0", source: "https://github.com/scitix/InstantTensor/blob/v0.1.9/LICENSE" }
   - { ecosystem: python, name: sigstore-models, license: "MIT", source: "https://github.com/astral-sh/sigstore-models/blob/v0.0.6/LICENSE" }
   - { ecosystem: rust, name: tsp-asn1, license: "Apache-2.0", source: "https://github.com/trailofbits/rfc3161-client/blob/v1.0.8/LICENSE" }
+
+  # --- Audited TokenSpeed stack (exact versions; no KDA override) ---
+  - ecosystem: python
+    name: hf_transfer
+    version: "0.1.9"
+    license: "Apache-2.0"
+    source: "Exact wheel LICENSE; https://github.com/huggingface/hf_transfer/blob/16bbc5045ff4036be9d8bcd0050108d82229a216/LICENSE. Static Rust/OpenSSL attribution is tracked separately."
+  - ecosystem: python
+    name: tokenspeed-deepep
+    version: "2.1.0.post20260810"
+    license: "MIT"
+    source: "Exact arm64 wheel LICENSE: Copyright 2025 DeepSeek; https://pypi.org/project/tokenspeed-deepep/2.1.0.post20260810/"
+  - ecosystem: python
+    name: tokenspeed-deepgemm
+    version: "2.8.0.post20260924"
+    license: "MIT AND BSD-3-Clause"
+    source: "Exact wheel LICENSE (DeepSeek MIT), plus NVIDIA BSD-3-Clause notices in bundled deep_gemm/include/cutlass/cutlass.h and cute/config.hpp; https://pypi.org/project/tokenspeed-deepgemm/2.8.0.post20260924/"
+  - ecosystem: python
+    name: tokenspeed-flashmla
+    version: "1.0.0.post20260924"
+    license: "MIT"
+    source: "Exact arm64 wheel LICENSE: Copyright 2025 DeepSeek; https://pypi.org/project/tokenspeed-flashmla/1.0.0.post20260924/"
+  - ecosystem: python
+    name: tokenspeed-quack
+    version: "0.6.4.post20260923"
+    license: "Apache-2.0"
+    source: "Exact wheel LICENSE and source author notices; https://pypi.org/project/tokenspeed-quack/0.6.4.post20260923/"
+  - ecosystem: python
+    name: tokenspeed-scheduler
+    version: "0.1.49"
+    license: "MIT AND BSD-3-Clause AND OpenSSL"
+    source: "Exact wheel MIT LICENSE and dynamically bundled OpenSSL 1.1.1k; source CMake incorporates nanobind (BSD-3-Clause) and spdlog (MIT). Original bundled-component notices/provenance remain unresolved. https://github.com/lightseekorg/tokenspeed/blob/ee5b468f165af2ec33e6a581d683b7d4a396e00f/tokenspeed-scheduler/CMakeLists.txt"
+  - ecosystem: python
+    name: tokenspeed_kernel
+    version: "0.1.4.post20261106"
+    license: "MIT AND Apache-2.0 AND BSD-3-Clause"
+    source: "Exact nightly wheel LICENSE and THIRDPARTYNOTICES; original CUDA object/source attribution remains separately tracked. https://github.com/lightseekorg/tokenspeed/blob/ee5b468f165af2ec33e6a581d683b7d4a396e00f/tokenspeed-kernel/python/THIRDPARTYNOTICES"
+  - ecosystem: dpkg
+    name: catch2
+    version: "3.4.0-1build1"
+    license: "BSL-1.0 AND BSD-3-Clause"
+    source: "Exact Ubuntu copyright uses Boost-1.0 and BSD-3 aliases; https://ports.ubuntu.com/ubuntu-ports/pool/universe/c/catch2/catch2_3.4.0-1build1_arm64.deb"
+  - ecosystem: dpkg
+    name: libevent-2.1-7t64
+    version: "2.1.12-stable-9ubuntu2.2"
+    license: "BSD-3-Clause AND ISC"
+    source: "Exact Ubuntu binary copyright and payload: GPL m4/libtool.m4 and m4/acx_pthread.m4 are source-build scripts absent from the binary package; https://ports.ubuntu.com/ubuntu-ports/pool/main/libe/libevent/libevent-2.1-7t64_2.1.12-stable-9ubuntu2.2_arm64.deb"
+  - ecosystem: dpkg
+    name: libevent-extra-2.1-7t64
+    version: "2.1.12-stable-9ubuntu2.2"
+    license: "BSD-3-Clause"
+    source: "Exact Ubuntu runtime DSO; source GPL M4 macros are absent from binary payload; https://ports.ubuntu.com/ubuntu-ports/pool/main/libe/libevent/libevent-extra-2.1-7t64_2.1.12-stable-9ubuntu2.2_arm64.deb"
+  - ecosystem: dpkg
+    name: libevent-openssl-2.1-7t64
+    version: "2.1.12-stable-9ubuntu2.2"
+    license: "BSD-3-Clause"
+    source: "Exact Ubuntu OpenSSL adapter DSO; source GPL M4 macros are absent. Dynamically linked OpenSSL is attributed separately; https://ports.ubuntu.com/ubuntu-ports/pool/main/libe/libevent/libevent-openssl-2.1-7t64_2.1.12-stable-9ubuntu2.2_arm64.deb"
+  - ecosystem: dpkg
+    name: libevent-dev
+    version: "2.1.12-stable-9ubuntu2.2"
+    license: "BSD-3-Clause AND ISC AND MIT AND curl"
+    source: "Exact headers/archives and examples include curl-licensed hostcheck.c and MIT openssl_hostname_validation.c; GPL source M4 files are not shipped; https://ports.ubuntu.com/ubuntu-ports/pool/main/libe/libevent/libevent-dev_2.1.12-stable-9ubuntu2.2_arm64.deb"
+  - ecosystem: dpkg
+    name: libhwloc-dev
+    version: "2.10.0-1build1"
+    license: "BSD-3-Clause"
+    source: "Exact Ubuntu headers/archive use hwloc BSD-3-Clause; generic copyright GPL paragraph concerns Debian packaging; https://ports.ubuntu.com/ubuntu-ports/pool/universe/h/hwloc/libhwloc-dev_2.10.0-1build1_arm64.deb"
+  - ecosystem: dpkg
+    name: libgfortran-13-dev
+    version: "13.3.0-6ubuntu2~24.04.1"
+    license: "GPL-3.0-or-later WITH GCC-exception-3.1"
+    source: "Exact ISO_Fortran_binding.h and gcc-13-base copyright explicitly carry GCC Runtime Library Exception 3.1; this corrects classification, not policy approval; https://ports.ubuntu.com/ubuntu-ports/pool/main/g/gcc-13/libgfortran-13-dev_13.3.0-6ubuntu2~24.04.1_arm64.deb"
+  - ecosystem: dpkg
+    name: libltdl7
+    version: "2.4.7-7build1"
+    license: "LGPL-2.0-or-later WITH Libtool-exception"
+    source: "Exact libtool 2.4.7 ltdl.c/ltdl.h identify LGPL-2.0-or-later with Libtool exception; generic whole-libtool GPL is overbroad. This does not approve an exception; https://ftp.gnu.org/gnu/libtool/libtool-2.4.7.tar.xz"
+  - ecosystem: dpkg
+    name: gfortran-13
+    version: "13.3.0-6ubuntu2~24.04.1"
+    license: "GPL-3.0-or-later"
+    source: "Exact gcc-13-base copyright identifies compiler GPL-3.0-or-later, not the unrelated GPL-2 reference selected by the fallback parser; https://ports.ubuntu.com/ubuntu-ports/pool/main/g/gcc-13/gcc-13-base_13.3.0-6ubuntu2~24.04.1_arm64.deb"
+  - ecosystem: dpkg
+    name: gfortran-13-aarch64-linux-gnu
+    version: "13.3.0-6ubuntu2~24.04.1"
+    license: "GPL-3.0-or-later"
+    source: "Exact compiler payload shares gcc-13-base GPL-3.0-or-later copyright; the GCC Runtime Library Exception does not make the compiler permissive; https://ports.ubuntu.com/ubuntu-ports/pool/main/g/gcc-13/gcc-13-base_13.3.0-6ubuntu2~24.04.1_arm64.deb"
+  - ecosystem: dpkg
+    name: m4
+    version: "1.4.19-4build1"
+    license: "GPL-3.0-or-later"
+    source: "Exact Ubuntu copyright explicitly specifies GPL version 3 or later; generic common-licenses/GPL fallback misidentifies GPL-2; https://ports.ubuntu.com/ubuntu-ports/pool/main/m/m4/m4_1.4.19-4build1_arm64.deb"
+  - ecosystem: dpkg
+    name: autotools-dev
+    version: "20220109.1"
+    license: "GPL-3.0-or-later WITH Autoconf-exception-generic"
+    source: "Exact Ubuntu copyright specifies GPL3-or-later plus the Autoconf-generated-config additional permission; this is not a permissive relicense; https://ports.ubuntu.com/ubuntu-ports/pool/main/a/autotools-dev/autotools-dev_20220109.1_all.deb"
+  - ecosystem: dpkg
+    name: openmpi-bin
+    version: "4.1.6-7ubuntu2"
+    license: "BSD-3-Clause"
+    source: "Exact Ubuntu launchers/wrappers/profiling scripts/manuals; legacy ptmalloc2 and libltdl source paragraphs are absent from this binary payload. Linked runtime libraries are separate components; https://ports.ubuntu.com/ubuntu-ports/pool/universe/o/openmpi/openmpi-bin_4.1.6-7ubuntu2_arm64.deb"
+  - ecosystem: dpkg
+    name: openmpi-common
+    version: "4.1.6-7ubuntu2"
+    license: "BSD-3-Clause"
+    source: "Exact Ubuntu help/configuration/AMCA/wrapper data and docs contain no allocator/libltdl source, ELF objects or archives covered by the legacy source-wide paragraphs; https://ports.ubuntu.com/ubuntu-ports/pool/universe/o/openmpi/openmpi-common_4.1.6-7ubuntu2_all.deb"
+  - ecosystem: dpkg
+    name: libltdl-dev
+    version: "2.4.7-7build1"
+    license: "(LGPL-2.0-or-later WITH Libtool-exception) AND (GPL-2.0-or-later WITH Libtool-exception) AND FSFAP AND FSFUL AND FSFULLR AND FSFULLRWD"
+    source: "Exact Ubuntu payload includes LGPL ltdl sources/headers and Makefile inputs, GPL configure with Libtool exception, and distinct permissive grants in generated scripts/README. This correction does not approve policy exceptions; https://ports.ubuntu.com/ubuntu-ports/pool/main/libt/libtool/libltdl-dev_2.4.7-7build1_arm64.deb"

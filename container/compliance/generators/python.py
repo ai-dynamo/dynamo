@@ -292,25 +292,36 @@ def _resolve_site_packages(search_paths: list[Path]) -> list[Path]:
 
 
 def _read_license_text(dist_info_dir: Path) -> str | None:
-    """Return the upstream LICENSE text for a wheel, if present.
+    """Return upstream license and notice texts for a wheel, if present.
 
     Modern wheels put it under <dist-info>/licenses/LICENSE (PEP 639). Older
     wheels use <dist-info>/LICENSE or LICENSE.txt at the top of the dir.
     """
-    candidates = [
-        dist_info_dir / "licenses" / "LICENSE",
-        dist_info_dir / "licenses" / "LICENSE.txt",
-        dist_info_dir / "LICENSE",
-        dist_info_dir / "LICENSE.txt",
-        dist_info_dir / "LICENSE.md",
-    ]
+    if not dist_info_dir.is_dir():
+        return None
+    # PEP 639 can distribute multiple nested license/notice files. Keep all
+    # of them, including THIRDPARTYNOTICES, rather than only the first LICENSE.
+    license_dir = dist_info_dir / "licenses"
+    candidates = sorted(license_dir.rglob("*")) if license_dir.is_dir() else []
+    candidates.extend(
+        path
+        for path in sorted(dist_info_dir.iterdir())
+        if path.name.upper().startswith(
+            ("LICENSE", "LICENCE", "COPYING", "NOTICE", "THIRDPARTY", "THIRD_PARTY")
+        )
+    )
+    texts: list[tuple[str, str]] = []
     for path in candidates:
         if path.is_file():
             try:
-                return path.read_text(encoding="utf-8", errors="replace")
+                text = path.read_text(encoding="utf-8", errors="replace")
             except OSError:
                 continue
-    return None
+            if text.strip():
+                texts.append((str(path.relative_to(dist_info_dir)), text))
+    if len(texts) == 1:
+        return texts[0][1]
+    return "\n\n".join(f"--- {name} ---\n{text}" for name, text in texts) or None
 
 
 def _extract_metadata_field(

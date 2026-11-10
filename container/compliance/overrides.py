@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Hand-curated license override lookup.
 
-Reads container/compliance/license_overrides.yaml — the version-agnostic
-(ecosystem, name) → SPDX map used by every NOTICES generator to correct
+Reads container/compliance/license_overrides.yaml — the optional-version-scoped
+(ecosystem, name, version) → SPDX map used by every NOTICES generator to correct
 upstream metadata that is empty, malformed, or wrong (NVIDIA-proprietary
 dpkgs misclassified as GPL-3, openssl's unparseable DEP-5, PyPI wheels
 with empty License field, etc.).
@@ -32,7 +32,7 @@ Ecosystem = str  # "rust" | "go" | "python" | "dpkg" | "native"
 _DEFAULT_OVERRIDES_PATH = Path(__file__).resolve().parent / "license_overrides.yaml"
 
 
-def _load_overrides(path: Path) -> dict[tuple[Ecosystem, str], str]:
+def _load_overrides(path: Path) -> dict[tuple[Ecosystem, str, str], str]:
     """Load license_overrides.yaml.
 
     Returns {} if the file is absent. PyYAML is a hard dependency of every
@@ -42,27 +42,22 @@ def _load_overrides(path: Path) -> dict[tuple[Ecosystem, str], str]:
     if not path.is_file():
         return {}
     data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    out: dict[tuple[Ecosystem, str], str] = {}
+    out: dict[tuple[Ecosystem, str, str], str] = {}
     for e in data.get("overrides", []) or []:
-        out[(e["ecosystem"], e["name"])] = e["license"]
+        out[(e["ecosystem"], e["name"], str(e.get("version", "")))] = e["license"]
     return out
 
 
 @functools.lru_cache(maxsize=1)
-def _overrides() -> dict[tuple[Ecosystem, str], str]:
+def _overrides() -> dict[tuple[Ecosystem, str, str], str]:
     return _load_overrides(_DEFAULT_OVERRIDES_PATH)
 
 
 @functools.lru_cache(maxsize=None)
 def lookup(ecosystem: Ecosystem, name: str, version: str = "") -> str | None:
-    """Return the override SPDX expression for (ecosystem, name), or None.
-
-    `version` is accepted but unused — overrides are version-agnostic. It
-    stays in the signature so call sites that pass a version (because they
-    have one handy) remain readable.
-    """
-    del version  # version-agnostic by design
-    return _overrides().get((ecosystem, name))
+    """Prefer an exact version override, then the existing version-agnostic entry."""
+    entries = _overrides()
+    return entries.get((ecosystem, name, version), entries.get((ecosystem, name, "")))
 
 
 def reset_caches() -> None:
