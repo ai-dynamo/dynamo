@@ -10240,8 +10240,7 @@ def test_power_window_stops_when_a_repeat_cannot_be_built(monkeypatch):
 
 
 def test_power_window_nvml_failure_keeps_the_group_iterating(monkeypatch):
-    import pynvml
-
+    pynvml = pytest.importorskip("pynvml")
     error = pynvml.NVMLError(pynvml.NVML_ERROR_NO_PERMISSION)
     reason = instrumented_scheduler_module._bench_nvml_reason(error)
     point = BenchmarkPoint(point_type="decode", total_kv_read_tokens=128, batch_size=2)
