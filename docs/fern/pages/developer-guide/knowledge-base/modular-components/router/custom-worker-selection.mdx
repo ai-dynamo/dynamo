@@ -466,7 +466,7 @@ Declare `ACTIVE_REQUESTS` instead of `LOAD` when a request count is all the pick
 
 A scorer reads `KV_COPY` through `WorkerCandidate::kv_copy()`. Filters and pickers do not receive it, and declaring it there has no effect. The host picks each worker's copy offer with the [KV fetch hint](topology-aware-kv-transfer.md#kv-fetch-hints) rules, including topology islands.
 
-A policy whose scorer reads `KV_COPY` commits the selected worker to its offer, so the worker's role must run a [hint policy](hint-policies.md) that sends it. Its earlier names, `KV_TRANSFER`, `kv_transfer()` and `WorkerTransferInput`, are deprecated aliases.
+A policy whose scorer reads `KV_COPY` commits the selected worker to its offer, so the worker's role must run a [hint policy](hint-policies.md) that sends it, such as `kv_fetch`. Its earlier names, `KV_TRANSFER`, `kv_transfer()` and `WorkerTransferInput`, are deprecated aliases.
 
 This scorer charges each worker for the prompt blocks it can neither reuse nor copy. A worker without copy data still counts its own cache:
 

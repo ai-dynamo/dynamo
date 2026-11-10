@@ -7,10 +7,7 @@ SPDX-License-Identifier: Apache-2.0
 
 These examples deploy two aggregated vLLM workers on separate GPU nodes and
 use KVCR as a secondary KV-cache tier over RDMA. Both variants use one
-KVCR-capable Dynamo vLLM runtime image for every process. The Frontend selects
-workers with the `kvcr` policy (`DYN_ROUTER_WORKER_SELECTION_POLICY=kvcr`),
-which sends each booked worker a `kv.fetch` hint naming a peer that holds KV
-it lacks. The default policy sends no fetch hints.
+KVCR-capable Dynamo vLLM runtime image for every process.
 
 ## Prerequisites
 
