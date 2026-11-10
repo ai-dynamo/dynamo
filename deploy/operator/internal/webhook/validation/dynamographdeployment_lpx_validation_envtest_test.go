@@ -913,6 +913,27 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			},
 		},
 		{
+			name:                   "LPX accepts a root termination delay",
+			wantRootProviderTarget: "PodCliqueSet",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.ProviderOverride = groveProviderOverride("", `{"spec":{"template":{"terminationDelay":"2m"}}}`)
+			}),
+		},
+		{
+			name:                   "v1alpha1 LPX accepts a root termination delay after conversion",
+			wantRootProviderTarget: "PodCliqueSet",
+			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				dgd.Spec.ProviderOverride = alphaGroveProviderOverride("", `{"spec":{"template":{"terminationDelay":"2m"}}}`)
+			}),
+		},
+		{
+			name: "LPX still rejects root topology with a termination delay",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.ProviderOverride = groveProviderOverride("", `{"spec":{"template":{"terminationDelay":"2m","topologyConstraint":{}}}}`)
+			}),
+			wantWebhookErrs: []string{"spec.providerOverride: Forbidden: LPX does not support Grove topology overrides on the deployment"},
+		},
+		{
 			name: "LPX admits an ordinary component provider override",
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				frontend := *betaDGDForAdmission(nil).GetComponentByName("frontend")
