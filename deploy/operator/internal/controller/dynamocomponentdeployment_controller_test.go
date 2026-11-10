@@ -931,6 +931,8 @@ func TestDynamoComponentDeploymentReconciler_LeaderWorkerSetNameFitsStatefulSetR
 		lwsNames["kimi-k3-sglang-gb200-disagg-agentic-decodeworker-978c2008"])
 }
 
+// Test_reconcileLeaderWorkerSetResources_DeletesOversizedLegacyLeaderWorkerSet
+// checks migration and scaling without interrupting supported or serving legacy workers.
 func Test_reconcileLeaderWorkerSetResources_DeletesOversizedLegacyLeaderWorkerSet(t *testing.T) {
 	require.NoError(t, leaderworkersetv1.AddToScheme(scheme.Scheme))
 	const dcdName = "kimi-k3-sglang-gb200-disagg-agentic-prefillworker-978c2008"
@@ -1196,6 +1198,8 @@ func TestDynamoComponentDeploymentReconciler_LegacyAlphaWorkloadComponentTypeWit
 	require.Equal(t, commonconsts.ComponentTypeWorker, componentType)
 }
 
+// TestDynamoComponentDeploymentReconciler_LegacyAlphaWorkloadComponentTypeFromLeaderWorkerSet
+// checks that a long legacy LWS preserves worker identity without a Service fallback.
 func TestDynamoComponentDeploymentReconciler_LegacyAlphaWorkloadComponentTypeFromLeaderWorkerSet(t *testing.T) {
 	t.Log("Create a long legacy LWS whose worker identity has no Service fallback")
 	s := scheme.Scheme
@@ -1400,6 +1404,8 @@ func (m *mockDockerSecretRetriever) GetSecrets(namespace, imageName string) ([]s
 	return m.GetSecretsFunc(namespace, imageName)
 }
 
+// TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet checks that the
+// selected workload name and desired replica count reach the rendered resource.
 func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.T) {
 	var limit = new(resource.MustParse("250Mi"))
 	limit.SetMilli(new(resource.MustParse("1Gi")).MilliValue() / 2)
