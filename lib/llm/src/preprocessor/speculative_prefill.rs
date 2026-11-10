@@ -654,6 +654,7 @@ mod tests {
         NvCreateChatCompletionRequest {
             preserve_thinking: None,
             responses_tools: None,
+            chat_template_tools: None,
             inner: CreateChatCompletionRequest {
                 model: "mock-llama".to_string(),
                 messages,

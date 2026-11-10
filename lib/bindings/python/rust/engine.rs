@@ -269,6 +269,9 @@ impl
                     // serialized with the request; add them at the top level, as
                     // the client sent them.
                     let dict = object.downcast::<PyDict>()?;
+                    if let Some(tools) = &request.chat_template_tools {
+                        dict.set_item("chat_template_tools", pythonize(py, tools.as_ref())?)?;
+                    }
                     for (key, value) in request.passthrough_extra_fields() {
                         dict.set_item(key, pythonize(py, value)?)?;
                     }

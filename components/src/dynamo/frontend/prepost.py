@@ -23,6 +23,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedFunction,
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
+    ChatCompletionToolsParam,
 )
 from vllm.reasoning import ReasoningParser
 from vllm.renderers import ChatParams
@@ -730,7 +731,13 @@ def _prepare_request(
     )
 
     if tool_dicts and isinstance(request, dict):
-        tool_dicts = request.get("responses_template_tools", tool_dicts)
+        if catalog := request.get("chat_template_tools"):
+            tool_dicts = [
+                ChatCompletionToolsParam.model_validate(tool).model_dump()
+                for tool in catalog
+            ]
+        else:
+            tool_dicts = request.get("responses_template_tools", tool_dicts)
 
     chat_template = responses_history_template(
         resolved_responses_template or request_for_sampling.chat_template,

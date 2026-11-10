@@ -21,6 +21,7 @@ use crate::protocols::common::extensions::{
 };
 
 pub mod aggregator;
+pub(crate) mod allowed_tools;
 pub(crate) mod custom_tools;
 mod delta;
 pub mod tool_parser_v2;
@@ -117,6 +118,11 @@ pub struct NvCreateChatCompletionRequest {
     #[serde(skip)]
     #[schema(ignore)]
     pub responses_tools: Option<super::responses::ResponsesToolContext>,
+
+    /// Full catalog for rendering when Chat Completions limits callable tools.
+    #[serde(skip)]
+    #[schema(ignore)]
+    pub chat_template_tools: Option<std::sync::Arc<[dynamo_protocols::types::ChatCompletionTool]>>,
 
     /// OpenAI-style thinking control from client request payloads.
     /// Normalized into `chat_template_args` before preprocessing.
