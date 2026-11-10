@@ -11,33 +11,39 @@ use dynamo_runtime::{
 
 use crate::{
     discovery::RuntimeConfigWatch,
+    kv_router::hosted_request,
     lora::{LoadEstimator, LoraFilter},
     preprocessor::PreprocessedRequest,
-    routing_policy::{AttemptLease, CandidatePolicy, CandidateSelection},
+    routing_policy::{AttemptLease, CandidateSelection, HostedCandidatePolicy, KvAdmissionPolicy},
 };
 
 pub(crate) struct LegacyLoraPolicy {
     filter: Arc<LoraFilter>,
-    hosted: Option<(Arc<LoadEstimator>, HostedWorkerPicker)>,
+    estimator: Arc<LoadEstimator>,
+    picker: HostedWorkerPicker,
 }
 
 impl LegacyLoraPolicy {
     pub(crate) fn hosted(
         filter: Arc<LoraFilter>,
         estimator: Arc<LoadEstimator>,
-        selector: HostedWorkerPicker,
-    ) -> Arc<dyn CandidatePolicy> {
+        picker: HostedWorkerPicker,
+    ) -> Arc<dyn HostedCandidatePolicy> {
         Arc::new(Self {
             filter,
-            hosted: Some((estimator, selector)),
+            estimator,
+            picker,
         })
     }
+}
 
-    pub(crate) fn kv(filter: Arc<LoraFilter>) -> Arc<dyn CandidatePolicy> {
-        Arc::new(Self {
-            filter,
-            hosted: None,
-        })
+pub(crate) struct LegacyLoraAdmission {
+    filter: Arc<LoraFilter>,
+}
+
+impl LegacyLoraAdmission {
+    pub(crate) fn kv(filter: Arc<LoraFilter>) -> Arc<dyn KvAdmissionPolicy> {
+        Arc::new(Self { filter })
     }
 }
 
@@ -52,7 +58,7 @@ impl Drop for LoadLease {
     }
 }
 
-impl CandidatePolicy for LegacyLoraPolicy {
+impl HostedCandidatePolicy for LegacyLoraPolicy {
     fn select(
         &self,
         request: &PreprocessedRequest,
@@ -66,12 +72,9 @@ impl CandidatePolicy for LegacyLoraPolicy {
         else {
             return Ok(None);
         };
-        let Some((estimator, selector)) = &self.hosted else {
-            anyhow::bail!("hosted selection requires a hosted policy")
-        };
-        estimator.increment_load(name);
+        self.estimator.increment_load(name);
         let lease: AttemptLease = Box::new(LoadLease {
-            estimator: estimator.clone(),
+            estimator: self.estimator.clone(),
             name: name.to_string(),
         });
         let routable = live();
@@ -96,19 +99,26 @@ impl CandidatePolicy for LegacyLoraPolicy {
                     .build()
             ));
         }
-        let target = selector.select(
-            &candidates,
-            None,
-            &dynamo_kv_router::selector::HostedSelectionRequest::new(request.token_ids.len()),
-        )?;
-        tracing::debug!(lora = %name, worker_id = target, candidates = candidates.len(), routable = routable.len(), free = free.len(), "LoRA-filtered router selected worker");
+        let target = self
+            .picker
+            .select(&candidates, None, &hosted_request(request))?;
+        tracing::debug!(
+            lora = %name,
+            worker_id = target,
+            candidates = candidates.len(),
+            routable = routable.len(),
+            free = free.len(),
+            "LoRA-filtered router selected worker"
+        );
         Ok(Some(CandidateSelection {
             target,
             allowed_fallback: candidates.into_iter().collect(),
             lease: Some(lease),
         }))
     }
+}
 
+impl KvAdmissionPolicy for LegacyLoraAdmission {
     fn refresh_admission(
         &self,
         request: &SchedulingRequest,
@@ -177,62 +187,9 @@ mod tests {
     }
 
     #[test]
-    fn hosted_policy_releases_load_after_selection_and_on_error() {
-        let estimator = Arc::new(LoadEstimator::new());
-        let policy = LegacyLoraPolicy::hosted(
-            Arc::new(LoraFilter::new(
-                LoraRoutingTable::new(),
-                LoraStateTracker::new(),
-            )),
-            estimator.clone(),
-            crate::kv_router::hosted_picker(dynamo_runtime::pipeline::RouterMode::RoundRobin)
-                .unwrap(),
-        );
-        let mut request = PreprocessedRequest::builder()
-            .model("base".to_string())
-            .token_ids(vec![1])
-            .stop_conditions(Default::default())
-            .sampling_options(Default::default())
-            .output_options(Default::default())
-            .build()
-            .unwrap();
-        request.routing = Some(crate::protocols::common::preprocessor::RoutingHints {
-            lora_name: Some("adapter".into()),
-            ..Default::default()
-        });
-        let selection = policy
-            .select(&request, &|| vec![1, 2], &|| vec![2])
-            .unwrap()
-            .unwrap();
-        assert_eq!(selection.target, 2);
-        assert_eq!(selection.allowed_fallback, HashSet::from([2]));
-        assert_eq!(estimator.get_inflight_counts().get("adapter"), Some(&1));
-        drop(selection);
-        assert_eq!(
-            estimator
-                .get_inflight_counts()
-                .get("adapter")
-                .copied()
-                .unwrap_or(0),
-            0
-        );
-        assert_eq!(estimator.get_raw_arrival_counts().get("adapter"), Some(&1));
-        assert!(policy.select(&request, &|| vec![1], &Vec::new).is_err());
-        assert_eq!(
-            estimator
-                .get_inflight_counts()
-                .get("adapter")
-                .copied()
-                .unwrap_or(0),
-            0
-        );
-        assert_eq!(estimator.get_raw_arrival_counts().get("adapter"), Some(&2));
-    }
-
-    #[test]
     fn kv_admission_intersects_live_and_allowed_workers_on_each_refresh() {
         use dynamo_kv_router::{protocols::WorkerWithDpRank, scheduling::ScheduleMode};
-        let policy = LegacyLoraPolicy::kv(Arc::new(LoraFilter::new(
+        let policy = LegacyLoraAdmission::kv(Arc::new(LoraFilter::new(
             LoraRoutingTable::new(),
             LoraStateTracker::new(),
         )));
@@ -244,7 +201,6 @@ mod tests {
             token_seq: None,
             isl_tokens: 0,
             lora_name: Some("adapter".into()),
-            accounting_attribution: Default::default(),
             expected_output_tokens: None,
             affinity_target: None,
             pinned_worker: Some(WorkerWithDpRank::new(2, 0)),

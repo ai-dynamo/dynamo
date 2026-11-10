@@ -149,7 +149,6 @@ mod tests {
 
     fn request() -> SchedulingRequest {
         SchedulingRequest {
-            accounting_attribution: Default::default(),
             mode: ScheduleMode::QueryOnly { request_id: None },
             token_seq: None,
             isl_tokens: 16,

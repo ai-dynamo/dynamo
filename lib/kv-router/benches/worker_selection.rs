@@ -204,7 +204,6 @@ fn fixture_with_preferred_taints(
     }
 
     let request = SchedulingRequest {
-        accounting_attribution: Default::default(),
         mode: ScheduleMode::QueryOnly { request_id: None },
         token_seq: None,
         isl_tokens: 2_048,

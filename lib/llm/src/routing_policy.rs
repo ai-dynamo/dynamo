@@ -14,7 +14,7 @@ pub(crate) struct CandidateSelection {
     pub lease: Option<AttemptLease>,
 }
 
-pub(crate) trait CandidatePolicy: Send + Sync {
+pub(crate) trait HostedCandidatePolicy: Send + Sync {
     /// `Ok(None)` defers to normal selection; policy rejections return `Err`, never fallback.
     fn select(
         &self,
@@ -22,6 +22,9 @@ pub(crate) trait CandidatePolicy: Send + Sync {
         live: &dyn Fn() -> Vec<u64>,
         free: &dyn Fn() -> Vec<u64>,
     ) -> Result<Option<CandidateSelection>, Error>;
+}
+
+pub(crate) trait KvAdmissionPolicy: Send + Sync {
     /// `None` leaves availability unrestricted; `Some(empty)` excludes every worker.
     fn refresh_admission(
         &self,

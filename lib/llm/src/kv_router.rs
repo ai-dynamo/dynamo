@@ -70,6 +70,7 @@ mod request_lease;
 mod routing_host;
 #[cfg(test)]
 pub(crate) use routing_host::hosted_picker;
+pub(crate) use routing_host::hosted_request;
 pub(crate) mod routing_load;
 pub mod sequence;
 pub mod shared_cache;
@@ -601,7 +602,6 @@ fn cancelled_error(context_id: &str) -> anyhow::Error {
 /// A KvRouter only decides which worker you should use. It doesn't send you there.
 /// TODO: Rename this to indicate it only selects a worker, it does not route.
 pub struct KvRouter {
-    pub(crate) candidate_policy: Option<Arc<dyn crate::routing_policy::CandidatePolicy>>,
     indexer: Indexer,
     selection: embedded::EmbeddedSelection,
     required_worker_inputs: dynamo_kv_router::plugins::worker_selection::WorkerInputs,
@@ -850,10 +850,9 @@ impl KvRouter {
         let registration_availability_provider: metrics::RegistrationAvailabilityProvider =
             Arc::new(move || client_for_registration.available_instance_ids());
 
-        let candidate_policy = lora_filter.map(crate::lora_routing::LegacyLoraPolicy::kv);
+        let admission_policy = lora_filter.map(crate::lora_routing::LegacyLoraAdmission::kv);
         let client_for_availability = client.clone();
         let workers_for_availability = workers_with_configs.clone();
-        let admission_policy = candidate_policy.clone();
         let available_worker_provider: WorkerAvailabilityProvider = Arc::new(move |request| {
             let available = client_for_availability.available_instance_ids();
             match admission_policy.as_ref() {
@@ -901,7 +900,6 @@ impl KvRouter {
         tracing::info!("KV Routing initialized");
         let cancellation_token = cancellation_guard.disarm();
         Ok(Self {
-            candidate_policy,
             indexer,
             selection,
             required_worker_inputs,
@@ -1356,7 +1354,6 @@ impl KvRouter {
         } = self
             .selection
             .run_selection(SelectionOperation {
-                accounting_attribution: Default::default(),
                 key: self.selection.partition_key().clone(),
                 prompt: PromptView {
                     token_ids: Some(tokens),

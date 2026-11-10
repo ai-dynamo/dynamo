@@ -5,7 +5,7 @@ use dynamo_kv_router::selector::HostedSelectionRequest;
 
 /// The request metadata a hosted picker reads. The routing host tracks no KV block size, so
 /// [`request_blocks`](dynamo_kv_router::plugins::worker_selection::WorkerSelectionContext::request_blocks) reads 0.
-pub(super) fn hosted_request(request: &PreprocessedRequest) -> HostedSelectionRequest {
+pub(crate) fn hosted_request(request: &PreprocessedRequest) -> HostedSelectionRequest {
     HostedSelectionRequest::new(request.token_ids.len())
 }
 
@@ -152,7 +152,7 @@ impl RoutingHost {
             })
             .transpose()?
             .flatten();
-        let (lora_target, lora_fallback, lora_load) = match selected {
+        let (policy_target, policy_fallback, policy_lease) = match selected {
             Some(selection) => (
                 Some(selection.target),
                 Some(selection.allowed_fallback),
@@ -160,7 +160,7 @@ impl RoutingHost {
             ),
             None => (None, None, None),
         };
-        let (selection, mut operation) = if let Some(target) = lora_target {
+        let (selection, mut operation) = if let Some(target) = policy_target {
             (
                 HostedSelection {
                     initial_worker: target,
@@ -216,7 +216,7 @@ impl RoutingHost {
             self.request_metrics.clone(),
             initial_worker,
             occupancy_reservation,
-            lora_load,
+            policy_lease,
             &request,
         );
         let tracker = request.tracker.clone();
@@ -305,7 +305,7 @@ impl RoutingHost {
                 self.inner.direct_within_prepared(
                     request,
                     initial_worker,
-                    lora_fallback.as_ref(),
+                    policy_fallback.as_ref(),
                     |request, worker_id| {
                         let occupancy = guard.retarget_worker(worker_id);
                         let target = target_for_worker(worker_id);

@@ -56,10 +56,11 @@ mod kv_selection;
 mod occupancy;
 mod request_guard;
 
-use crate::routing_policy::CandidatePolicy;
+use crate::routing_policy::HostedCandidatePolicy;
 pub(crate) use builder::hosted_picker;
 pub use builder::{LlmDispatch, MultimodalCache, RoutingHostBuilder};
 use cancellation::{CleanupBudget, DispatchCancellation, StagedKv, await_with_cleanup_policy};
+pub(crate) use hosted::hosted_request;
 use kv_selection::{RoutingRequestParts, SelectionOptions, WorkerSelection};
 use occupancy::HostedOccupancy;
 pub(crate) use request_guard::prompt_private_blocks;
@@ -301,7 +302,7 @@ pub struct RoutingHost {
     affinity: Option<AffinityCoordinator>,
     session_affinity_mode: SessionAffinityMode,
     hosted_occupancy: Option<HostedOccupancy>,
-    candidate_policy: Option<Arc<dyn CandidatePolicy>>,
+    candidate_policy: Option<Arc<dyn HostedCandidatePolicy>>,
     /// Retains the shared client, overload state, and cancellation subtree for this host.
     ///
     /// Required for every mode except KV, where the [`KvRouter`] owns the client.
