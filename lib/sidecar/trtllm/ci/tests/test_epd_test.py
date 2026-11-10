@@ -33,6 +33,8 @@ class EpdHarnessTests(unittest.TestCase):
                 encoder_only=role == "encoder",
                 accepts_cache=role != "encoder",
                 transfer_backends=[runner.BACKEND],
+                supports_abort_cleanup=role == "encoder",
+                requires_cache=role != "encoder",
             )
             runner.require_encoder_support(
                 SimpleNamespace(encoder=SimpleNamespace(**capability)), role
@@ -45,6 +47,12 @@ class EpdHarnessTests(unittest.TestCase):
             ]
             if role != "encoder":
                 invalid.append({**capability, "accepts_cache": False})
+                invalid.append({**capability, "requires_cache": False})
+            else:
+                invalid.append({**capability, "supports_abort_cleanup": False})
+                invalid.append(
+                    {**capability, "transfer_backends": [runner.BACKEND, "other"]}
+                )
             for fields in invalid:
                 info = SimpleNamespace(
                     encoder=SimpleNamespace(**fields) if fields else None

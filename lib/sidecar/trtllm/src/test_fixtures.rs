@@ -60,13 +60,13 @@ pub(crate) fn encoder_model_info(role: &str) -> pb::ModelInfo {
             encoder_only: role == "encode",
             accepts_cache: role == "consume",
             transfer_backends: vec!["trtllm-nixl-encoder-v1".into()],
+            supports_abort_cleanup: role == "encode",
+            requires_cache: role == "consume",
         }),
         extra: Some(
             dynamo_sidecar_common::json_to_struct(
                 json!({
                     "trtllm_supported_modalities": ["image"],
-                    "trtllm_encoder_cache_release": true,
-                    "trtllm_requires_encoder_cache": role == "consume",
                 }),
                 "test",
             )

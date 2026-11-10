@@ -100,6 +100,9 @@ def require_encoder_support(info, role):
         or capability.schema_version != 1
         or capability.encoder_only != encoder
         or (not encoder and not capability.accepts_cache)
+        or (encoder and not getattr(capability, "supports_abort_cleanup", False))
+        or (not encoder and not getattr(capability, "requires_cache", False))
+        or (encoder and list(capability.transfer_backends) != [BACKEND])
         or BACKEND not in capability.transfer_backends
     ):
         raise RuntimeError(

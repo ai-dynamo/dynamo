@@ -237,15 +237,6 @@ impl Control for ControlledService {
         Err(Status::unimplemented("engine shutdown is not implemented"))
     }
 
-    async fn transfer_encoder_cache(
-        &self,
-        _request: Request<pb::TransferEncoderCacheRequest>,
-    ) -> Result<Response<pb::TransferEncoderCacheResponse>, Status> {
-        Err(Status::unimplemented(
-            "native NIXL transfer requires an engine",
-        ))
-    }
-
     async fn get_server_info(
         &self,
         request: Request<pb::GetServerInfoRequest>,

@@ -281,7 +281,10 @@ impl TrtllmClient {
                 supported_media: Some(supported_media),
                 encoder_only,
                 encoder_consumer,
-                requires_encoder_cache: has_model_flag(&info, "trtllm_requires_encoder_cache"),
+                requires_encoder_cache: info
+                    .encoder
+                    .as_ref()
+                    .is_some_and(|caps| caps.requires_cache),
                 encoder_nixl: encoder_backend(&info, "trtllm-nixl-encoder-v1"),
                 encoder_shared_safetensors: encoder_backend(&info, "trtllm-shared-safetensors-v1"),
                 supports_image_routing: supported_media.image && has_image_routing_v1(&info),
@@ -539,41 +542,29 @@ fn encoder_roles(
     info: &pb::ModelInfo,
     media: SupportedMedia,
 ) -> Result<(bool, bool), &'static str> {
-    if has_model_flag(info, "trtllm_requires_encoder_cache")
-        && !info
-            .encoder
-            .as_ref()
-            .is_some_and(|capabilities| capabilities.accepts_cache)
-    {
-        return Err(
-            "TensorRT-LLM requires encoder caches without advertising a compatible encoder consumer",
-        );
-    }
     let Some(capabilities) = info.encoder.as_ref() else {
         return Ok((false, false));
     };
+    if capabilities.requires_cache && (!capabilities.accepts_cache || capabilities.encoder_only) {
+        return Err(
+            "incompatible TensorRT-LLM encoder role: requires_cache needs an encoder-cache consumer",
+        );
+    }
     if !capabilities.encoder_only && !capabilities.accepts_cache {
         return Ok((false, false));
     }
     if capabilities.encoder_only == capabilities.accepts_cache
         || capabilities.schema_version != 1
         || !media.image
-        || capabilities.transfer_backends.as_slice() != ["trtllm-nixl-encoder-v1"]
-        || !has_model_flag(info, "trtllm_encoder_cache_release")
+        || !encoder_backend(info, "trtllm-nixl-encoder-v1")
+        || (capabilities.encoder_only
+            && (capabilities.transfer_backends.len() != 1 || !capabilities.supports_abort_cleanup))
     {
         return Err(
-            "incompatible TensorRT-LLM encoder role: require schema v1, image support, exactly one encoder role, only the trtllm-nixl-encoder-v1 transfer backend, and trtllm_encoder_cache_release=true",
+            "incompatible TensorRT-LLM encoder role: require schema v1, image support and one role with native NIXL; producers require one backend and supports_abort_cleanup",
         );
     }
     Ok((capabilities.encoder_only, capabilities.accepts_cache))
-}
-
-fn has_model_flag(info: &pb::ModelInfo, key: &str) -> bool {
-    info.extra
-        .as_ref()
-        .and_then(|extra| extra.fields.get(key))
-        .and_then(|value| value.kind.as_ref())
-        .is_some_and(|kind| matches!(kind, prost_types::value::Kind::BoolValue(true)))
 }
 
 #[cfg(test)]
@@ -589,13 +580,21 @@ mod encoder_capability_tests {
         };
         assert_eq!(encoder_roles(&info, media).unwrap(), (false, false));
         info = crate::test_fixtures::encoder_model_info("encode");
-        info.extra
-            .as_mut()
-            .unwrap()
-            .fields
-            .remove("trtllm_encoder_cache_release");
+        info.encoder.as_mut().unwrap().supports_abort_cleanup = false;
+        info.extra.as_mut().unwrap().fields.insert(
+            "trtllm_encoder_cache_release".into(),
+            prost_types::Value {
+                kind: Some(prost_types::value::Kind::BoolValue(true)),
+            },
+        );
         assert!(encoder_roles(&info, media).is_err());
-        info = crate::test_fixtures::encoder_model_info("encode");
+        info.encoder.as_mut().unwrap().supports_abort_cleanup = true;
+        info.extra.as_mut().unwrap().fields.insert(
+            "trtllm_encoder_cache_release".into(),
+            prost_types::Value {
+                kind: Some(prost_types::value::Kind::BoolValue(false)),
+            },
+        );
         assert_eq!(encoder_roles(&info, media).unwrap(), (true, false));
         info.encoder.as_mut().unwrap().transfer_backends =
             vec!["trtllm-shared-safetensors-v1".into()];
@@ -606,6 +605,7 @@ mod encoder_capability_tests {
         info.encoder.as_mut().unwrap().accepts_cache = true;
         assert!(encoder_roles(&info, media).is_err());
         info.encoder.as_mut().unwrap().encoder_only = false;
+        info.encoder.as_mut().unwrap().supports_abort_cleanup = false;
         assert_eq!(encoder_roles(&info, media).unwrap(), (false, true));
         info.encoder.as_mut().unwrap().schema_version = 2;
         assert!(encoder_roles(&info, media).is_err());
@@ -614,6 +614,9 @@ mod encoder_capability_tests {
             "trtllm-nixl-encoder-v1".into(),
             "trtllm-shared-safetensors-v1".into(),
         ];
+        assert_eq!(encoder_roles(&info, media).unwrap(), (false, true));
+        info.encoder.as_mut().unwrap().encoder_only = true;
+        info.encoder.as_mut().unwrap().accepts_cache = false;
         assert!(encoder_roles(&info, media).is_err());
         info.encoder.as_mut().unwrap().transfer_backends = vec!["unknown".into()];
         assert!(encoder_roles(&info, media).is_err());
@@ -627,9 +630,14 @@ mod encoder_capability_tests {
             ..Default::default()
         };
         assert_eq!(encoder_roles(&info, media).unwrap(), (false, true));
+        info.encoder.as_mut().unwrap().accepts_cache = false;
+        assert!(encoder_roles(&info, media).is_err());
+        info.encoder = Some(pb::EncoderCapabilities {
+            requires_cache: true,
+            ..Default::default()
+        });
+        assert!(encoder_roles(&info, media).is_err());
         info.encoder = None;
-        assert!(encoder_roles(&info, media).is_err());
-        info.encoder = Some(pb::EncoderCapabilities::default());
-        assert!(encoder_roles(&info, media).is_err());
+        assert_eq!(encoder_roles(&info, media).unwrap(), (false, false));
     }
 }

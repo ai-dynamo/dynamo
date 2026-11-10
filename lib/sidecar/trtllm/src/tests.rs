@@ -426,15 +426,6 @@ impl pb::control_server::Control for FakeTrtllm {
         Err(Status::unimplemented("engine shutdown is not implemented"))
     }
 
-    async fn transfer_encoder_cache(
-        &self,
-        _request: Request<pb::TransferEncoderCacheRequest>,
-    ) -> Result<Response<pb::TransferEncoderCacheResponse>, Status> {
-        Err(Status::unimplemented(
-            "native NIXL transfer requires an engine",
-        ))
-    }
-
     async fn get_kv_event_sources(
         &self,
         _request: Request<pb::GetKvEventSourcesRequest>,
@@ -1405,6 +1396,9 @@ async fn incompatible_encoder_advertisements_fail_startup_before_dispatch() {
                 "mixed",
                 "release",
             ] {
+                if role == "consume" && matches!(case, "mixed" | "release") {
+                    continue;
+                }
                 let mut info = encoder_model_info(role);
                 let encoder = info.encoder.as_mut().unwrap();
                 match case {
@@ -1412,11 +1406,7 @@ async fn incompatible_encoder_advertisements_fail_startup_before_dispatch() {
                     "backend" => encoder.transfer_backends = vec!["unknown".into()],
                     "image" => info.extra = None,
                     "release" => {
-                        info.extra
-                            .as_mut()
-                            .unwrap()
-                            .fields
-                            .remove("trtllm_encoder_cache_release");
+                        encoder.supports_abort_cleanup = false;
                     }
                     "ambiguous" => {
                         encoder.encoder_only = true;
@@ -1458,10 +1448,16 @@ async fn optional_encoder_consumers_can_start_without_encoder_routing() {
         for mode in [AGG, PREFILL] {
             for required in [false, true] {
                 let mut info = encoder_model_info("consume");
+                info.encoder.as_mut().unwrap().requires_cache = required;
+                info.encoder
+                    .as_mut()
+                    .unwrap()
+                    .transfer_backends
+                    .push("trtllm-shared-safetensors-v1".into());
                 info.extra.as_mut().unwrap().fields.insert(
                     "trtllm_requires_encoder_cache".into(),
                     prost_types::Value {
-                        kind: Some(prost_types::value::Kind::BoolValue(required)),
+                        kind: Some(prost_types::value::Kind::BoolValue(!required)),
                     },
                 );
                 let service = FakeTrtllm::default();

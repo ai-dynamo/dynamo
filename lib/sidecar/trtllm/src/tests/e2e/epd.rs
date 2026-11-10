@@ -197,22 +197,29 @@ async fn worker(
     (engine, info.limits)
 }
 
-async fn reject_replay(endpoint: &str, cache: pb::EncoderCacheRef) -> String {
-    let mut control = pb::control_client::ControlClient::connect(endpoint.to_owned())
+async fn reject_replay(endpoint: &str, mut request: pb::GenerateRequest) -> String {
+    static REPLAY_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    request.request_id = format!(
+        "replay-{}",
+        REPLAY_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
+    assert!(request.encoder.as_ref().unwrap().cache.is_some());
+    assert!(request.kv.as_ref().is_none_or(|kv| kv.session.is_none()));
+    let mut inference = pb::inference_client::InferenceClient::connect(endpoint.to_owned())
         .await
-        .expect("connect the encoder transfer control service");
-    // A spent export must be rejected before receiver-descriptor validation.
-    let status = control
-        .transfer_encoder_cache(pb::TransferEncoderCacheRequest {
-            cache: Some(cache),
-            destination: b"{}".to_vec(),
-        })
-        .await
-        .expect_err("replaying the consumed producer export must fail");
+        .expect("connect the consumer inference service");
+    let status = match inference.generate(request).await {
+        Err(status) => status,
+        Ok(response) => response
+            .into_inner()
+            .message()
+            .await
+            .expect_err("replay must fail before emitting an inference event"),
+    };
     assert_eq!(status.code(), tonic::Code::InvalidArgument);
     assert!(
         status.message().contains("expired or was already consumed"),
-        "replay must reject the spent export, not merely an invalid destination: {status}"
+        "replay must reject the spent export: {status}"
     );
     status.to_string()
 }
@@ -233,8 +240,8 @@ async fn run(disaggregated: bool) {
     let (encoder, encoder_limits) =
         worker(&encoder_endpoint, &model, DisaggregationMode::Encode).await;
     let mode = if disaggregated { PREFILL } else { AGG };
-    let (consumer, consumer_limits) =
-        worker(&required("TRTLLM_E2E_PREFILL_ENDPOINT"), &model, mode).await;
+    let consumer_endpoint = required("TRTLLM_E2E_PREFILL_ENDPOINT");
+    let (consumer, consumer_limits) = worker(&consumer_endpoint, &model, mode).await;
     let decode = if disaggregated {
         Some(
             worker(
@@ -292,17 +299,7 @@ async fn run(disaggregated: bool) {
         );
         assert_eq!(encoder_wire.input, consumer_wire.input);
         let outputs = collect(&consumer, request.clone()).await;
-        let replay_error = reject_replay(
-            &encoder_endpoint,
-            consumer_wire
-                .encoder
-                .as_ref()
-                .unwrap()
-                .cache
-                .clone()
-                .unwrap(),
-        )
-        .await;
+        let replay_error = reject_replay(&consumer_endpoint, consumer_wire.clone()).await;
         let mut prefill_prompt_tokens = None;
         let outputs = if let Some((decode, limits)) = &decode {
             assert!(outputs.iter().all(|output| output.token_ids.is_empty()));
