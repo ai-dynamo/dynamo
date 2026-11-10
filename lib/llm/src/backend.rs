@@ -29,8 +29,8 @@ use dynamo_runtime::dynamo_nvtx_range;
 use dynamo_runtime::{
     error::{DynamoError, ErrorClass},
     pipeline::{
-        AsyncEngineContext, AsyncEngineContextProvider, ManyOut, Operator, ResponseStream, ServerStreamingEngine,
-        SingleIn, async_trait,
+        AsyncEngineContext, AsyncEngineContextProvider, ManyOut, Operator, ResponseStream,
+        ServerStreamingEngine, SingleIn, async_trait,
     },
     protocols::{annotated::Annotated, maybe_error::MaybeError},
 };

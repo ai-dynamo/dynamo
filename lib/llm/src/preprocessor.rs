@@ -5872,7 +5872,11 @@ impl OpenAIPreprocessor {
         guided_tool_constraint: crate::protocols::openai::GuidedToolConstraint,
         tool_processing_route: ToolProcessingRoute,
     ) -> anyhow::Result<
-        Pin<Box<dyn Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static>>,
+        Pin<
+            Box<
+                dyn Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
+            >,
+        >,
     >
     where
         S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
