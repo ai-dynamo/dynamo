@@ -187,7 +187,7 @@ The frontend also records these request and pipeline metrics:
 Metrics for [request migration](../../kubernetes/fault-tolerance/request-migration.md), the mechanism that continues in-flight requests on a healthy worker when the original worker fails. See [Request Migration Architecture](../../developer-guide/knowledge-base/concepts/fault-tolerance/request-migration-architecture.md) for the internals.
 
 <ParamField path="dynamo_frontend_model_migration_total" type="counter">
-  Total request migrations due to worker unavailability. Labeled by `model` and [`migration_type`](metric-labels.mdx#metric-specific-labels) (`new_request` for an initial connection failure, `ongoing_request` for a mid-stream disconnection).
+  Total requests sent to a replacement worker after a worker failure. A failure that is not retried, because `--migration-limit` is `0`, the limit is used up, or the request exceeded `--migration-max-seq-len`, is not counted. Labeled by `model` and [`migration_type`](metric-labels.mdx#metric-specific-labels), which names the failure that caused the replacement (`new_request` for a failed connection to a worker, `ongoing_request` for a mid-stream disconnection).
 </ParamField>
 
 <ParamField path="dynamo_frontend_model_migration_duration_seconds" type="histogram">
@@ -334,7 +334,7 @@ The remaining model gauges are populated from worker backend registration. When 
 </ParamField>
 
 <ParamField path="dynamo_frontend_model_migration_limit" type="gauge">
-  Request migration limit for a worker serving the model. Sourced from the Model Deployment Card.
+  Maximum number of migrations the Frontend allows for a request to the model. Set from the Frontend's `--migration-limit`.
 </ParamField>
 
 ### System One Requests

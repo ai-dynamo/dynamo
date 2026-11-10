@@ -26,6 +26,7 @@ from .request_utils import (
 )
 from .utils import (
     DynamoFrontendProcess,
+    expected_ongoing_migrations,
     managed_processes_concurrently,
     run_migration_test,
     wait_for_endpoint_instances,
@@ -468,7 +469,9 @@ def test_request_migration_trtllm_aggregated(
                 max_tokens=AGGREGATED_MAX_TOKENS,
                 use_long_prompt=True,
                 long_prompt_repetitions=AGGREGATED_PROMPT_REPETITIONS,
-                expected_ongoing_request_count=1,
+                expected_ongoing_request_count=expected_ongoing_migrations(
+                    migration_limit, migration_max_seq_len
+                ),
                 verify_replacement_worker=True,
                 force_max_output_tokens=True,
             )
@@ -544,7 +547,9 @@ def test_request_migration_trtllm_prefill(
                     stream=stream,
                     max_tokens=PREFILL_MAX_TOKENS,
                     use_long_prompt=True,
-                    expected_ongoing_request_count=1,
+                    expected_ongoing_request_count=expected_ongoing_migrations(
+                        migration_limit, migration_max_seq_len
+                    ),
                 )
 
 
@@ -659,7 +664,9 @@ def test_request_migration_trtllm_kv_transfer(
                 use_long_prompt=True,
                 long_prompt_repetitions=KV_TRANSFER_PROMPT_REPETITIONS,
                 wait_for_new_response_before_stop=True,
-                expected_ongoing_request_count=1,
+                expected_ongoing_request_count=expected_ongoing_migrations(
+                    migration_limit, migration_max_seq_len
+                ),
                 verify_replacement_worker=True,
                 force_max_output_tokens=True,
                 expected_output_prefix=stable_output_prefix,
@@ -752,7 +759,9 @@ def test_request_migration_trtllm_decode(
                 stream=True,
                 max_tokens=DECODE_MAX_TOKENS,
                 wait_for_new_response_before_stop=True,
-                expected_ongoing_request_count=1,
+                expected_ongoing_request_count=expected_ongoing_migrations(
+                    migration_limit, migration_max_seq_len
+                ),
                 verify_replacement_worker=True,
                 force_max_output_tokens=True,
             )
