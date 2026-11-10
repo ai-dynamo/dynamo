@@ -56,10 +56,14 @@ use super::{
     },
     service_v2::{self, BackendErrorCheck},
 };
+use crate::discovery::{ModelManager, WorkerSet};
 use crate::engines::ValidateRequest;
+use crate::lora::runtime::{
+    RuntimeLoraConfig, RuntimeLoraError, RuntimeLoraSelection, resolve_runtime_lora_model,
+};
 use crate::preprocessor::{
     PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY, REQUEST_PARSING_OPTIONS_CONTEXT_KEY,
-    decode_base64_to_floats,
+    RUNTIME_LORA_CONTEXT_KEY, decode_base64_to_floats,
 };
 use crate::protocols::common::extensions::{
     AGENT_CONTEXT_CONTEXT_KEY, AgentContext, InputTrigger, NvExt as CommonNvExt,
@@ -1029,7 +1033,7 @@ impl ErrorMessage {
 
     /// Parse first, so a code outside the HTTP status space cannot reach the
     /// response, then let [`BackendStatusAction::triage`] decide. A 5xx keeps
-    /// its own status only when it is 503 or the configured overload code,
+    /// its own status only when it is 503, 504 or the configured overload code,
     /// which is what makes a deliberate load shed distinguishable from an
     /// internal error. The body text is sanitized either way.
     pub fn from_http_error(class: ErrorClass, err: HttpError) -> ErrorResponse {
@@ -1279,6 +1283,106 @@ fn copy_context_metadata<T: Send + Sync + 'static, U: Send + Sync + 'static>(
             session_affinity.as_ref().clone(),
         );
     }
+    if let Ok(runtime_lora) = source.get::<RuntimeLoraSelection>(RUNTIME_LORA_CONTEXT_KEY) {
+        target.insert(RUNTIME_LORA_CONTEXT_KEY, runtime_lora.as_ref().clone());
+    }
+}
+
+fn request_id_annotation<T>(
+    annotations: Option<Vec<String>>,
+    request_id: &str,
+) -> Option<Annotated<T>> {
+    if !annotations?
+        .iter()
+        .any(|annotation| annotation == ANNOTATION_REQUEST_ID)
+    {
+        return None;
+    }
+    Annotated::from_annotation(ANNOTATION_REQUEST_ID, &request_id).ok()
+}
+
+fn runtime_lora_error_response(error: RuntimeLoraError) -> ErrorResponse {
+    match error {
+        RuntimeLoraError::InvalidModelId => ErrorMessage::from_http_error(
+            ErrorClass::InvalidRequest,
+            HttpError {
+                code: 400,
+                message: "invalid_lora_model_id".to_string(),
+            },
+        ),
+        RuntimeLoraError::BaseModelRequired => ErrorMessage::from_http_error(
+            ErrorClass::InvalidRequest,
+            HttpError {
+                code: 400,
+                message: "runtime_lora_base_model_required".to_string(),
+            },
+        ),
+        RuntimeLoraError::BaseModelNotFound => ErrorMessage::from_http_error(
+            ErrorClass::NotFound,
+            HttpError {
+                code: 404,
+                message: "model_not_found".to_string(),
+            },
+        ),
+        RuntimeLoraError::BaseModelUnsupported(_) => ErrorMessage::from_http_error(
+            ErrorClass::InvalidRequest,
+            HttpError {
+                code: 400,
+                message: "runtime_lora_unsupported".to_string(),
+            },
+        ),
+        RuntimeLoraError::InvalidConfiguration(message) => {
+            ErrorMessage::internal_server_error_with_details(
+                "Runtime LoRA configuration is invalid",
+                message,
+            )
+        }
+    }
+}
+
+fn runtime_lora_selection(
+    manager: &ModelManager,
+    config: &RuntimeLoraConfig,
+    requested_model: &str,
+    supports_surface: fn(&WorkerSet) -> bool,
+) -> Result<Option<RuntimeLoraSelection>, ErrorResponse> {
+    if !config.enabled {
+        return Ok(None);
+    }
+    if requested_model.is_empty() {
+        return Ok(None);
+    }
+    let requested_canonical = manager.resolve_canonical_name(requested_model);
+    if manager.get_committed_model(&requested_canonical).is_some() {
+        return Ok(None);
+    }
+    let selection = resolve_runtime_lora_model(
+        requested_model,
+        config,
+        |name| {
+            let canonical = manager.resolve_canonical_name(name);
+            manager.get_committed_model(&canonical).is_some()
+        },
+        |name| {
+            let canonical = manager.resolve_canonical_name(name);
+            manager
+                .get_committed_model(&canonical)
+                .filter(|model| model.has_runtime_lora_base_surface(supports_surface))
+                .map(|_| canonical)
+        },
+        || manager.infer_runtime_lora_base_model(supports_surface),
+    )
+    .map_err(runtime_lora_error_response)?;
+    if selection.as_ref().is_some_and(|selection| {
+        !manager
+            .get_committed_model(&selection.base_model_name)
+            .is_some_and(|model| model.has_runtime_lora_base_deployment(supports_surface))
+    }) {
+        return Err(ErrorMessage::service_unavailable_with_body(
+            "runtime_lora_capability_unavailable".to_string(),
+        ));
+    }
+    Ok(selection)
 }
 
 /// Warn once when the disabled NvExt policy discards a field or routing header.
@@ -1311,9 +1415,22 @@ async fn handler_completions(
         delta_common::force_include_usage(&mut request.inner.stream_options);
     }
 
-    // return a 503 if the service or model is not ready
+    // Match chat-completions precedence: process readiness is authoritative
+    // before model parsing or runtime-LoRA selection.
     check_ready(&state)?;
-    check_model_serving_ready(&state, &request.inner.model)?;
+    let runtime_lora = runtime_lora_selection(
+        state.manager(),
+        state.runtime_lora_config(),
+        &request.inner.model,
+        WorkerSet::has_completions_engine,
+    )?;
+    let serving_model = runtime_lora
+        .as_ref()
+        .map(|selection| selection.base_model_name.as_str())
+        .unwrap_or(&request.inner.model);
+
+    // return a 503 if the selected base model is not ready
+    check_model_serving_ready(&state, serving_model)?;
 
     if !state.nvext_enabled() {
         warn_nvext_disabled(
@@ -1332,7 +1449,7 @@ async fn handler_completions(
     let request_id = get_or_create_request_id(&headers);
     let streaming = request.inner.stream.unwrap_or(false);
     // Canonicalize alias → primary for the metric label.
-    let canonical_model = state.manager().resolve_canonical_name(&request.inner.model);
+    let canonical_model = state.manager().resolve_canonical_name(serving_model);
     let cancellation_labels = CancellationLabels {
         model: state
             .manager()
@@ -1341,10 +1458,13 @@ async fn handler_completions(
         endpoint: Endpoint::Completions.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
-    let request =
+    let mut request =
         context_from_headers_with_input_trigger(request, request_id, &headers, |request| {
             Some(classify_completion_request(request))
         })?;
+    if let Some(runtime_lora) = runtime_lora {
+        request.insert(RUNTIME_LORA_CONTEXT_KEY, runtime_lora);
+    }
     let context = request.context();
 
     // create the connection handles
@@ -1424,11 +1544,22 @@ async fn completions_single(
     // canonical primary (matching vLLM/SGLang, where an alias request still
     // responds with the primary served name). Non-aliases pass through, so
     // metric_model_for still applies its unknown-model cardinality guard.
-    let canonical = state.manager().resolve_canonical_name(&request.inner.model);
-    if canonical != request.inner.model {
-        request.inner.model = canonical;
-    }
-    let model = request.inner.model.clone();
+    let runtime_lora = request
+        .get_optional::<RuntimeLoraSelection>(RUNTIME_LORA_CONTEXT_KEY)
+        .ok()
+        .flatten();
+    let response_model = runtime_lora
+        .as_deref()
+        .map(|selection| selection.requested_model.clone());
+    let model = if let Some(selection) = runtime_lora.as_deref() {
+        selection.base_model_name.clone()
+    } else {
+        let canonical = state.manager().resolve_canonical_name(&request.inner.model);
+        if canonical != request.inner.model {
+            request.inner.model = canonical.clone();
+        }
+        canonical
+    };
     let metric_model = state.manager().metric_model_for(&model).to_string();
 
     // Create inflight_guard early to ensure all errors are counted
@@ -1446,7 +1577,9 @@ async fn completions_single(
     let nvtx_lookup = dynamo_nvtx_range!("frontend.http.completions.engine_lookup");
     let (engine, parsing_options) = state
         .manager()
-        .get_completions_engine_with_parsing(&model)
+        .get_completions_engine_with_parsing_where(&model, |worker_set| {
+            runtime_lora.is_none() || worker_set.supports_runtime_lora()
+        })
         .map_err(|e| {
             let err_response = ErrorMessage::from_model_error(&e);
             inflight_guard.mark_error(extract_error_type_from_response(&err_response));
@@ -1475,42 +1608,31 @@ async fn completions_single(
     })?;
     drop(nvtx_generate);
 
-    // capture the context to cancel the stream if the client disconnects
+    // Capture cancellation context before adapting the engine stream.
     let ctx = stream.context();
-
-    let annotations = annotations.map_or(Vec::new(), |annotations| {
-        annotations
-            .iter()
-            .filter_map(|annotation| {
-                if annotation == ANNOTATION_REQUEST_ID {
-                    Annotated::<NvCreateCompletionResponse>::from_annotation(
-                        ANNOTATION_REQUEST_ID,
-                        &request_id,
-                    )
-                    .ok()
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>()
+    let stream = stream.map(move |mut response| {
+        if let (Some(model), Some(data)) = (response_model.as_ref(), response.data.as_mut()) {
+            data.inner.model = model.clone();
+        }
+        response
     });
+
+    let annotations = request_id_annotation(annotations, &request_id);
 
     // apply any annotations to the front of the stream
     let stream = stream::iter(annotations).chain(stream);
 
     if streaming {
-        // Same pre-commit check as chat_completions: a backend error before
-        // the first item maps to its HTTP status instead of an SSE frame
-        // behind an HTTP 200.
-        let stream = until_client_disconnects(
-            check_for_backend_error_info(stream, state.streaming_backend_error_check()),
-            &ctx,
-        )
-        .await
-        .inspect_err(|error_response| {
-            log_pre_commit_error(&request_id, error_response);
-            inflight_guard.mark_error(extract_error_type_from_response(error_response));
-        })?;
+        // Honor the configured peek window. Later backend errors are SSE frames
+        // behind HTTP 200, including runtime LoRA resolution failures.
+        let error_check = state.streaming_backend_error_check();
+        let stream =
+            until_client_disconnects(check_for_backend_error_info(stream, error_check), &ctx)
+                .await
+                .inspect_err(|error_response| {
+                    log_pre_commit_error(&request_id, error_response);
+                    inflight_guard.mark_error(extract_error_type_from_response(error_response));
+                })?;
 
         // For streaming, we'll drop the http_queue_guard on the first token
         let mut http_queue_guard = Some(http_queue_guard);
@@ -1737,11 +1859,22 @@ async fn completions_batch(
     let request_id = request.id().to_string();
     let streaming = request.inner.stream.unwrap_or(false);
     // Resolve alias → primary served name (see completions_single).
-    let canonical = state.manager().resolve_canonical_name(&request.inner.model);
-    if canonical != request.inner.model {
-        request.inner.model = canonical;
-    }
-    let model = request.inner.model.clone();
+    let runtime_lora = request
+        .get_optional::<RuntimeLoraSelection>(RUNTIME_LORA_CONTEXT_KEY)
+        .ok()
+        .flatten();
+    let response_model = runtime_lora
+        .as_deref()
+        .map(|selection| selection.requested_model.clone());
+    let model = if let Some(selection) = runtime_lora.as_deref() {
+        selection.base_model_name.clone()
+    } else {
+        let canonical = state.manager().resolve_canonical_name(&request.inner.model);
+        if canonical != request.inner.model {
+            request.inner.model = canonical.clone();
+        }
+        canonical
+    };
     let metric_model = state.manager().metric_model_for(&model).to_string();
 
     // Create inflight_guard early to ensure all errors are counted
@@ -1758,7 +1891,9 @@ async fn completions_batch(
     let nvtx_lookup = dynamo_nvtx_range!("frontend.http.completions.engine_lookup");
     let (engine, parsing_options) = state
         .manager()
-        .get_completions_engine_with_parsing(&model)
+        .get_completions_engine_with_parsing_where(&model, |worker_set| {
+            runtime_lora.is_none() || worker_set.supports_runtime_lora()
+        })
         .map_err(|e| {
             let err_response = ErrorMessage::from_model_error(&e);
             inflight_guard.mark_error(extract_error_type_from_response(&err_response));
@@ -1826,8 +1961,12 @@ async fn completions_batch(
         // Remap choice indices: choice.index += prompt_idx * n
         let prompt_idx_u32 = prompt_idx as u32;
         let n_u32 = n as u32;
+        let response_model = response_model.clone();
         let remapped_stream = stream.map(move |mut response| {
             if let Some(ref mut data) = response.data {
+                if let Some(model) = response_model.as_ref() {
+                    data.inner.model = model.clone();
+                }
                 for choice in &mut data.inner.choices {
                     choice.index += prompt_idx_u32 * n_u32;
                 }
@@ -1871,25 +2010,10 @@ async fn completions_batch(
     // monitor kills, so the monitor below observes the same stop signal.
     let ctx = parent_ctx;
 
-    let annotations_vec = annotations.map_or(Vec::new(), |annotations| {
-        annotations
-            .iter()
-            .filter_map(|annotation| {
-                if annotation == ANNOTATION_REQUEST_ID {
-                    Annotated::<NvCreateCompletionResponse>::from_annotation(
-                        ANNOTATION_REQUEST_ID,
-                        &request_id,
-                    )
-                    .ok()
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>()
-    });
+    let annotations = request_id_annotation(annotations, &request_id);
 
     // apply any annotations to the front of the stream
-    let merged_stream = stream::iter(annotations_vec).chain(merged_stream);
+    let merged_stream = stream::iter(annotations).chain(merged_stream);
 
     if streaming {
         // For streaming, we'll drop the http_queue_guard on the first token
@@ -2672,8 +2796,25 @@ async fn handler_chat_completions(
         return Err(error);
     }
     let resolved_model = resolve_request_model(&request.inner.model, template.as_ref());
-    if !resolved_model.is_empty()
-        && let Err(error) = check_model_serving_ready(&state, resolved_model)
+    let runtime_lora = match runtime_lora_selection(
+        state.manager(),
+        state.runtime_lora_config(),
+        resolved_model,
+        WorkerSet::has_runtime_lora_chat_engine,
+    ) {
+        Ok(selection) => selection,
+        Err(error) => {
+            lifecycle_request.record_session(&request_id, None);
+            terminal.finish(terminal_outcome_for_error_response(&error));
+            return Err(error);
+        }
+    };
+    let serving_model = runtime_lora
+        .as_ref()
+        .map(|selection| selection.base_model_name.as_str())
+        .unwrap_or(resolved_model);
+    if !serving_model.is_empty()
+        && let Err(error) = check_model_serving_ready(&state, serving_model)
     {
         lifecycle_request.record_session(&request_id, None);
         terminal.finish(terminal_outcome_for_error_response(&error));
@@ -2695,9 +2836,8 @@ async fn handler_chat_completions(
 
     // create the context for the request
     let streaming = request.inner.stream.unwrap_or(false);
-    let resolved_model = resolve_request_model(&request.inner.model, template.as_ref());
     // Canonicalize alias → primary for the metric label.
-    let canonical_model = state.manager().resolve_canonical_name(resolved_model);
+    let canonical_model = state.manager().resolve_canonical_name(serving_model);
     let cancellation_labels = CancellationLabels {
         model: state
             .manager()
@@ -2716,6 +2856,9 @@ async fn handler_chat_completions(
                 return Err(error);
             }
         };
+    if let Some(runtime_lora) = runtime_lora {
+        request.insert(RUNTIME_LORA_CONTEXT_KEY, runtime_lora);
+    }
     if let Some(captured) = crate::request_trace::payload::capture_http_headers(&headers) {
         request.insert(
             crate::request_trace::payload::HTTP_HEADERS_CONTEXT_KEY,
@@ -3117,7 +3260,16 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
             return Some(BackendErrorInfo {
                 message,
                 status: code,
-                semantic: if overloaded { semantic.cloned() } else { None },
+                semantic: semantic
+                    .filter(|error| {
+                        overloaded
+                            || (error.public_details().is_some()
+                                && matches!(
+                                    http_action_for_error(error),
+                                    ClientErrorAction::Respond { status, .. } if status == code
+                                ))
+                    })
+                    .cloned(),
                 sanitized: overloaded.then_some(SanitizedError::Overloaded),
                 metric_error_type,
             });
@@ -3210,7 +3362,7 @@ fn is_annotation_frame<T>(e: &Annotated<T>) -> bool {
 }
 
 /// Cap on how many leading annotation frames `check_for_backend_error`
-/// will buffer before giving up the inspection. A pathological backend
+/// will buffer before rejecting the response. A pathological backend
 /// (or attacker who can influence the engine output) that emits only
 /// annotation frames must not be able to pin unbounded memory per
 /// request. The handful of real annotations a frontend prepends
@@ -3266,7 +3418,13 @@ where
             return Ok(Box::pin(futures::stream::iter(buffered)));
         };
 
-        if is_annotation_frame(&event) && buffered.len() < MAX_LEADING_ANNOTATIONS {
+        if is_annotation_frame(&event) {
+            if buffered.len() == MAX_LEADING_ANNOTATIONS {
+                return Err(BackendErrorInfo::from_status(
+                    "Too many leading backend annotations".to_string(),
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                ));
+            }
             buffered.push(event);
             continue;
         }
@@ -3726,14 +3884,33 @@ async fn chat_completions(
     // engine routing, metrics, and the OpenAI response.model all use the
     // canonical primary (matching vLLM/SGLang). Non-aliases pass through so
     // metric_model_for still applies its unknown-model cardinality guard.
-    let canonical = state.manager().resolve_canonical_name(&request.inner.model);
-    if canonical != request.inner.model {
-        request.inner.model = canonical;
-    }
-    let model = request.inner.model.clone();
+    let runtime_lora = request
+        .get_optional::<RuntimeLoraSelection>(RUNTIME_LORA_CONTEXT_KEY)
+        .ok()
+        .flatten();
+    let response_model = runtime_lora
+        .as_deref()
+        .map(|selection| selection.requested_model.clone());
+    let model = if let Some(selection) = runtime_lora.as_deref() {
+        selection.base_model_name.clone()
+    } else {
+        let canonical = state.manager().resolve_canonical_name(&request.inner.model);
+        if canonical != request.inner.model {
+            request.inner.model = canonical.clone();
+        }
+        canonical
+    };
     let metric_model = state.manager().metric_model_for(&model).to_string();
 
-    tracing::trace!("Received chat completions request: {:?}", request.content());
+    if let Some(selection) = runtime_lora.as_deref() {
+        tracing::trace!(
+            model = %selection.base_model_name,
+            lora = %selection.adapter_key,
+            "Received runtime LoRA chat completions request"
+        );
+    } else {
+        tracing::trace!("Received chat completions request: {:?}", request.content());
+    }
 
     // Create inflight_guard early to ensure all errors (including validation) are counted
     let mut inflight_guard = state.metrics_clone().create_inflight_guard(
@@ -3802,7 +3979,9 @@ async fn chat_completions(
     let nvtx_lookup = dynamo_nvtx_range!("frontend.http.chat.engine_lookup");
     let (engine, parsing_options) = state
         .manager()
-        .get_chat_completions_engine_with_parsing(&model)
+        .get_chat_completions_engine_with_parsing_where(&model, |worker_set| {
+            runtime_lora.is_none() || worker_set.supports_runtime_lora_chat()
+        })
         .map_err(|e| {
             let err_response = ErrorMessage::from_model_error(&e);
             inflight_guard.mark_error(extract_error_type_from_response(&err_response));
@@ -3885,22 +4064,17 @@ async fn chat_completions(
     })?;
     drop(nvtx_generate);
 
-    // capture the context to cancel the stream if the client disconnects
+    // Capture cancellation context before adapting the engine stream.
     let ctx = stream.context();
+    let stream = stream.map(move |mut response| {
+        if let (Some(model), Some(data)) = (response_model.as_ref(), response.data.as_mut()) {
+            data.inner.model = model.clone();
+        }
+        response
+    });
 
     // prepare any requested annotations
-    let annotations = annotations.map_or(Vec::new(), |annotations| {
-        annotations
-            .iter()
-            .filter_map(|annotation| {
-                if annotation == ANNOTATION_REQUEST_ID {
-                    Annotated::from_annotation(ANNOTATION_REQUEST_ID, &request_id).ok()
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>()
-    });
+    let annotations = request_id_annotation(annotations, &request_id);
 
     // apply any annotations to the front of the stream
     let stream = stream::iter(annotations).chain(stream);
@@ -3920,15 +4094,14 @@ async fn chat_completions(
         // `UntilFirstEvent` ends on the first event or on the client
         // disconnecting, and on nothing else.
         let stream = custom_tools.stream(stream);
-        let stream = until_client_disconnects(
-            check_for_backend_error_info(stream, state.streaming_backend_error_check()),
-            &ctx,
-        )
-        .await
-        .inspect_err(|err_response| {
-            log_pre_commit_error(&request_id, err_response);
-            inflight_guard.mark_error(extract_error_type_from_response(err_response));
-        })?;
+        let error_check = state.streaming_backend_error_check();
+        let stream =
+            until_client_disconnects(check_for_backend_error_info(stream, error_check), &ctx)
+                .await
+                .inspect_err(|err_response| {
+                    log_pre_commit_error(&request_id, err_response);
+                    inflight_guard.mark_error(extract_error_type_from_response(err_response));
+                })?;
 
         let mut http_queue_guard = Some(http_queue_guard);
         let tool_dispatch_enabled = state.streaming_tool_dispatch_enabled();
@@ -7141,6 +7314,81 @@ mod tests {
         assert!(!already_recorded);
     }
 
+    #[tokio::test]
+    #[serial_test::serial(failure_metrics)]
+    async fn json_error_middleware_preserves_semantic_422_and_normalizes_extractors() {
+        use dynamo_runtime::error::{DynamoError, ErrorClass, ErrorReason};
+        use tower::ServiceExt;
+
+        let router = Router::new()
+            .route(
+                "/semantic",
+                axum::routing::get(|| async {
+                    ErrorMessage::from_anyhow(
+                        DynamoError::builder()
+                            .class(ErrorClass::InvalidRequest)
+                            .reason(ErrorReason::unprocessable_entity())
+                            .diagnostic("private token=secret")
+                            .build()
+                            .into(),
+                        "failed",
+                    )
+                }),
+            )
+            .route(
+                "/http",
+                axum::routing::get(|| async {
+                    ErrorMessage::from_backend_http_error(HttpError {
+                        code: 422,
+                        message: "private token=secret".to_string(),
+                    })
+                }),
+            )
+            .route(
+                "/extractor",
+                axum::routing::post(|Json(_): Json<Vec<u32>>| async {}),
+            )
+            .route(
+                "/raw",
+                axum::routing::get(|| async {
+                    (StatusCode::UNPROCESSABLE_ENTITY, "raw validator rejection")
+                }),
+            )
+            .layer(middleware::from_fn(smart_json_error_middleware));
+
+        for (path, expected) in [
+            ("/semantic", 422),
+            ("/http", 422),
+            ("/extractor", 400),
+            ("/raw", 400),
+        ] {
+            let mut request = Request::builder().uri(path);
+            let body = if path == "/extractor" {
+                request = request
+                    .method("POST")
+                    .header("content-type", "application/json");
+                Body::from("{\"valid\":true}")
+            } else {
+                Body::empty()
+            };
+            let response = router
+                .clone()
+                .oneshot(request.body(body).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status().as_u16(), expected, "{path}");
+            let bytes = axum::body::to_bytes(response.into_body(), get_body_limit())
+                .await
+                .unwrap();
+            let body: ErrorMessage = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(body.code, expected, "{path}");
+            assert!(
+                !String::from_utf8_lossy(&bytes).contains("secret"),
+                "{path}"
+            );
+        }
+    }
+
     #[test]
     fn test_check_ready_rejects_draining_service() {
         let service = service_v2::HttpService::builder().build().unwrap();
@@ -7398,7 +7646,7 @@ mod tests {
         // The client sees a generic 500 while the asserted status survives in
         // `details`. 507 is a WebDAV code no Dynamo component emits; 501 is
         // what the previous blanket pass-through forwarded verbatim.
-        for code in [501u16, 502, 504, 507] {
+        for code in [501u16, 502, 507] {
             let response = ErrorMessage::from_http_error(
                 ErrorClass::InvalidRequest,
                 HttpError {
@@ -7692,6 +7940,215 @@ mod tests {
 
         assert_eq!(response.0.as_u16(), 499);
         assert_eq!(response.1.message, "Request cancelled");
+    }
+
+    #[test]
+    #[serial_test::serial(failure_metrics)]
+    fn explicit_backend_status_survives_semantic_wire_and_legacy_rendering() {
+        use dynamo_runtime::error::{
+            BackendError, DynamoError, ErrorClass, ErrorReason, ErrorType,
+        };
+
+        let message = "private backend detail token=secret";
+        for (code, class) in [
+            (400, ErrorClass::InvalidRequest),
+            (404, ErrorClass::NotFound),
+            (422, ErrorClass::InvalidRequest),
+            (429, ErrorClass::RateLimited),
+            (503, ErrorClass::Unavailable),
+            (504, ErrorClass::DeadlineExceeded),
+            (500, ErrorClass::Internal),
+        ] {
+            let diagnostic = serde_json::json!({"message": message, "code": code}).to_string();
+            let builder = DynamoError::builder().class(class).diagnostic(&diagnostic);
+            let builder = if code == 422 {
+                builder.reason(ErrorReason::unprocessable_entity())
+            } else {
+                builder
+            };
+            let wire = serde_json::to_value(builder.build()).unwrap();
+            if code == 422 {
+                assert_eq!(wire["reason"], "request.invalid");
+                assert_eq!(wire["http_status"], 422);
+            }
+            let semantic: DynamoError = serde_json::from_value(wire).unwrap();
+            let unary = ErrorMessage::from_anyhow(anyhow::Error::new(semantic.clone()), "failed");
+            let streaming = |error| {
+                let event = Annotated::<NvCreateChatCompletionStreamResponse> {
+                    data: None,
+                    id: None,
+                    event: Some("error".to_string()),
+                    comment: None,
+                    error: Some(error),
+                };
+                backend_error_response(extract_backend_error_if_present(&event).unwrap(), false)
+            };
+            let legacy = DynamoError::builder()
+                .error_type(ErrorType::Backend(BackendError::Unknown))
+                .message(diagnostic)
+                .build();
+            let direct = ErrorMessage::from_backend_http_error(HttpError {
+                code,
+                message: message.to_string(),
+            });
+            for (path, response) in [
+                ("semantic unary", unary),
+                ("semantic streaming", streaming(semantic)),
+                ("legacy streaming", streaming(legacy)),
+                ("direct HTTP", direct),
+            ] {
+                assert_eq!(response.0.as_u16(), code, "{path} {code}");
+                assert_eq!(response.1.code, code, "{path} {code}");
+                if code == 422 {
+                    assert!(response.1.details.is_none(), "{path} {code}");
+                }
+                assert!(
+                    !serde_json::to_string(&response.1.0)
+                        .unwrap()
+                        .contains("secret"),
+                    "{path} {code}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn public_details_do_not_override_legacy_backend_status() {
+        let error = DynamoError::builder()
+            .class(ErrorClass::InvalidRequest)
+            .diagnostic(
+                serde_json::json!({"code": 415, "message": "private token=secret"}).to_string(),
+            )
+            .public_message("safe but incompatible status")
+            .build();
+        let event = Annotated::<serde_json::Value> {
+            data: None,
+            id: None,
+            event: Some("error".to_string()),
+            comment: None,
+            error: Some(error),
+        };
+        let response =
+            backend_error_response(extract_backend_error_if_present(&event).unwrap(), false);
+        assert_eq!(response.0, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(response.1.message, "Unsupported Media Type");
+        assert!(
+            !serde_json::to_string(&response.1.0)
+                .unwrap()
+                .contains("secret")
+        );
+    }
+
+    #[test]
+    fn public_runtime_symbols_survive_legacy_envelope_rendering() {
+        use dynamo_runtime::error::{DynamoError, ErrorClass, ErrorReason};
+
+        for (status, class, symbol) in [
+            (400, ErrorClass::InvalidRequest, "invalid_lora_model_id"),
+            (404, ErrorClass::NotFound, "lora_not_found"),
+            (422, ErrorClass::InvalidRequest, "invalid_lora_adapter"),
+            (429, ErrorClass::RateLimited, "lora_capacity_exceeded"),
+            (500, ErrorClass::Internal, "lora_plugin_error"),
+            (503, ErrorClass::Unavailable, "lora_resolver_unavailable"),
+            (
+                504,
+                ErrorClass::DeadlineExceeded,
+                "runtime_lora_resolve_timeout",
+            ),
+        ] {
+            let builder = DynamoError::builder()
+                .class(class)
+                .diagnostic(
+                    serde_json::json!({
+                        "code": status,
+                        "message": "private token=secret provider:///path",
+                    })
+                    .to_string(),
+                )
+                .public_message(symbol);
+            let builder = if status == 422 {
+                builder.reason(ErrorReason::unprocessable_entity())
+            } else {
+                builder
+            };
+            let error =
+                serde_json::from_value(serde_json::to_value(builder.build()).unwrap()).unwrap();
+            let event = Annotated::<serde_json::Value> {
+                data: None,
+                id: None,
+                event: Some("error".to_string()),
+                comment: None,
+                error: Some(error),
+            };
+            let response =
+                backend_error_response(extract_backend_error_if_present(&event).unwrap(), false);
+            assert_eq!(response.0.as_u16(), status);
+            assert_eq!(response.1.message, symbol);
+            assert!(
+                !serde_json::to_string(&response.1.0)
+                    .unwrap()
+                    .contains("secret")
+            );
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(failure_metrics)]
+    fn direct_unprocessable_reason_is_read_without_a_compatibility_marker() {
+        let error: DynamoError = serde_json::from_value(serde_json::json!({
+            "class": "InvalidRequest",
+            "reason": "request.unprocessable_entity",
+            "diagnostic": "private token=secret",
+        }))
+        .unwrap();
+        assert_eq!(error.reason().as_str(), "request.unprocessable_entity");
+        let response = ErrorMessage::from_anyhow(error.into(), "failed");
+        assert_eq!(response.0, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(response.1.code, 422);
+        assert!(
+            !serde_json::to_string(&response.1.0)
+                .unwrap()
+                .contains("secret")
+        );
+    }
+
+    #[test]
+    fn backend_resolver_timeout_keeps_sanitized_gateway_status() {
+        use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
+
+        let message = "private timeout at /srv/provider.py token=secret";
+        let unary = ErrorMessage::from_backend_http_error(HttpError {
+            code: 504,
+            message: message.to_string(),
+        });
+        let event = Annotated::<NvCreateChatCompletionStreamResponse> {
+            data: None,
+            id: None,
+            event: Some("error".to_string()),
+            comment: None,
+            error: Some(
+                DynamoError::builder()
+                    .error_type(ErrorType::Backend(BackendError::Unknown))
+                    .message(serde_json::json!({"message": message, "code": 504}).to_string())
+                    .build(),
+            ),
+        };
+        let streaming = backend_error_response(
+            extract_backend_error_if_present(&event).expect("backend timeout envelope"),
+            false,
+        );
+        for response in [unary, streaming] {
+            assert_eq!(response.0, StatusCode::GATEWAY_TIMEOUT);
+            assert_eq!(response.1.code, 504);
+            assert_eq!(response.1.error_type, "Gateway Timeout");
+            assert_eq!(response.1.message, "Internal server error");
+            assert!(response.1.details.is_none());
+            assert!(
+                !serde_json::to_string(&response.1.0)
+                    .unwrap()
+                    .contains("secret")
+            );
+        }
     }
 
     #[test]
@@ -9933,6 +10390,7 @@ mod tests {
             (501, 500),
             (507, 500),
             (503, 503),
+            (504, 504),
         ] {
             let error_json =
                 format!(r#"{{"message":"engine failed at /srv/engine.py:88","code":{code}}}"#);
@@ -10084,6 +10542,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_request_id_annotations_do_not_hide_backend_error() {
+        use futures::stream;
+
+        let annotations = request_id_annotation::<serde_json::Value>(
+            Some(vec![ANNOTATION_REQUEST_ID.to_string(); 32]),
+            "req-123",
+        )
+        .into_iter()
+        .collect::<Vec<_>>();
+        assert_eq!(annotations.len(), 1);
+        assert_eq!(annotations[0].event.as_deref(), Some(ANNOTATION_REQUEST_ID));
+        assert_eq!(
+            annotations[0].comment,
+            Some(vec![r#""req-123""#.to_string()])
+        );
+        let error = Annotated {
+            data: None,
+            id: None,
+            event: Some("error".to_string()),
+            comment: Some(vec![r#"{"message":"private","code":400}"#.to_string()]),
+            error: None,
+        };
+        let events = stream::iter(annotations).chain(stream::once(async { error }));
+        let response =
+            match check_for_backend_error(events, BackendErrorCheck::UntilFirstEvent).await {
+                Err(response) => response,
+                Ok(_) => panic!("duplicate annotations must not hide the backend error"),
+            };
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_check_for_backend_error_rejects_excess_leading_annotations() {
+        use futures::stream;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        for check in [
+            BackendErrorCheck::UntilFirstEvent,
+            BackendErrorCheck::Bounded(std::time::Duration::from_secs(1)),
+        ] {
+            let polled = Arc::new(AtomicUsize::new(0));
+            let annotations = stream::iter((0..MAX_LEADING_ANNOTATIONS + 1).map(|_| {
+                Annotated::<serde_json::Value>::from_annotation(ANNOTATION_REQUEST_ID, &"req-123")
+                    .expect("request-id annotation")
+            }));
+            let errors = stream::once(async {
+                Annotated::<serde_json::Value>::from_error("private backend failure")
+            });
+            let events = annotations.chain(errors).inspect({
+                let polled = polled.clone();
+                move |_| {
+                    polled.fetch_add(1, Ordering::Relaxed);
+                }
+            });
+
+            let response = match check_for_backend_error(events, check).await {
+                Err(response) => response,
+                Ok(_) => panic!("annotation overflow must not commit HTTP success"),
+            };
+            assert_eq!(response.0, StatusCode::INTERNAL_SERVER_ERROR);
+            assert_eq!(polled.load(Ordering::Relaxed), MAX_LEADING_ANNOTATIONS + 1);
+            assert!(!response.1.0.message.contains("private"));
+        }
+    }
+
+    #[tokio::test]
     async fn test_check_for_backend_error_replays_leading_annotation_frames() {
         use crate::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
         use dynamo_protocols::types::CreateChatCompletionStreamResponse;
@@ -10121,16 +10645,21 @@ mod tests {
             error: None,
         };
 
-        let test_stream = stream::iter(vec![annotation, normal_event]);
+        let test_stream = stream::iter(vec![annotation; MAX_LEADING_ANNOTATIONS])
+            .chain(stream::once(async { normal_event }));
         let result = check_for_backend_error(test_stream, BackendErrorCheck::UntilFirstEvent).await;
 
         assert!(result.is_ok());
         let mut returned: Vec<_> = result.unwrap().collect().await;
-        assert_eq!(returned.len(), 2, "annotation + data event must replay");
+        assert_eq!(returned.len(), MAX_LEADING_ANNOTATIONS + 1);
         let first = returned.remove(0);
         assert_eq!(first.event.as_deref(), Some(ANNOTATION_REQUEST_ID));
-        let second = returned.remove(0);
-        assert_eq!(second.id, Some("msg-1".to_string()));
+        assert!(
+            returned[..MAX_LEADING_ANNOTATIONS - 1]
+                .iter()
+                .all(|event| event.event.as_deref() == Some(ANNOTATION_REQUEST_ID))
+        );
+        assert_eq!(returned.last().unwrap().id.as_deref(), Some("msg-1"));
     }
 
     /// The timeout branch of a `Bounded` check is the one path that hands back
@@ -10181,6 +10710,29 @@ mod tests {
         );
         assert_eq!(returned[0].event.as_deref(), Some(ANNOTATION_REQUEST_ID));
         assert_eq!(returned[1].id.as_deref(), Some("msg-1"));
+    }
+
+    #[tokio::test]
+    async fn bounded_precommit_preserves_late_backend_error_for_sse() {
+        use futures::StreamExt;
+
+        let stream = async_stream::stream! {
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+            yield Annotated::<serde_json::Value>::from_error("backend failure");
+        };
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            check_for_backend_error_info(
+                stream,
+                BackendErrorCheck::Bounded(std::time::Duration::from_millis(5)),
+            ),
+        )
+        .await
+        .expect("bounded precommit must return before a silent backend");
+        let Ok(mut stream) = result else {
+            panic!("the late error must be delivered in the stream");
+        };
+        assert!(stream.next().await.unwrap().error.is_some());
     }
 
     #[tokio::test]
@@ -10323,6 +10875,195 @@ mod tests {
             classify_error_for_metrics(StatusCode::FORBIDDEN),
             ErrorType::Validation
         );
+    }
+
+    #[test]
+    fn runtime_lora_unknown_base_does_not_echo_source_prefix() {
+        let error = resolve_runtime_lora_model(
+            "opaque-secret-reference|provider-reference",
+            &crate::lora::runtime::RuntimeLoraConfig { enabled: true },
+            |_| false,
+            |_| None,
+            || Err(RuntimeLoraError::BaseModelRequired),
+        )
+        .expect_err("unknown base must fail");
+        assert!(!error.to_string().contains("opaque-secret-reference"));
+        assert!(!format!("{error:?}").contains("opaque-secret-reference"));
+        let response = runtime_lora_error_response(error);
+        assert_eq!(response.0, StatusCode::NOT_FOUND);
+        assert_eq!(response.1.0.message, "model_not_found");
+        assert!(!response.1.0.message.contains("opaque-secret-reference"));
+    }
+
+    #[test]
+    fn runtime_lora_rejects_custom_chat_processors_without_affecting_completions() {
+        use crate::engines::{StreamingEngineAdapter, make_echo_engine};
+        use crate::model_card::ModelDeploymentCard;
+        use crate::model_type::{ModelInput, ModelType};
+        use crate::worker_type::WorkerType;
+
+        for custom_processor in [false, true] {
+            let manager = ModelManager::new();
+            let mut card = ModelDeploymentCard::default();
+            card.model_input = ModelInput::Tokens;
+            card.model_type = ModelType::Chat | ModelType::Completions;
+            card.worker_type = Some(WorkerType::Aggregated);
+            card.runtime_config
+                .taints
+                .insert("dynamo.runtime-lora/v2".into());
+            for (key, value) in [
+                ("supports_runtime_lora_resolution", serde_json::json!(true)),
+                ("runtime_lora_protocol_versions", serde_json::json!([2])),
+                ("runtime_lora_schemes", serde_json::json!(["custom"])),
+            ] {
+                card.runtime_config.set_engine_specific(key, value).unwrap();
+            }
+            let mut workers = WorkerSet::new("workers".into(), "checksum".into(), card.clone());
+            workers.chat_engine = Some(Arc::new(StreamingEngineAdapter::new(make_echo_engine())));
+            workers.completions_engine =
+                Some(Arc::new(StreamingEngineAdapter::new(make_echo_engine())));
+            workers.uses_custom_chat_processor = custom_processor;
+            let (_instances, instance_rx) = tokio::sync::watch::channel(vec![1]);
+            let (_configs, config_rx) = tokio::sync::watch::channel(
+                std::collections::HashMap::from([(1, card.runtime_config)]),
+            );
+            workers.set_instance_watcher(instance_rx);
+            workers.set_runtime_config_watcher(config_rx);
+            assert!(manager.add_worker_set("base", "workers", workers));
+            let config = RuntimeLoraConfig { enabled: true };
+            let chat_surface = WorkerSet::has_runtime_lora_chat_engine;
+            let result =
+                runtime_lora_selection(&manager, &config, "base|custom:///adapter", chat_surface);
+            if custom_processor {
+                let error = result.unwrap_err();
+                assert_eq!(error.0, StatusCode::BAD_REQUEST);
+                assert_eq!(error.1.0.message, "runtime_lora_unsupported");
+            } else {
+                assert!(result.unwrap().is_some());
+            }
+            assert!(
+                runtime_lora_selection(&manager, &config, "base", chat_surface)
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                runtime_lora_selection(
+                    &manager,
+                    &config,
+                    "base|custom:///adapter",
+                    WorkerSet::has_completions_engine,
+                )
+                .unwrap()
+                .is_some()
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_lora_unsupported_base_maps_to_bad_request() {
+        let response = runtime_lora_error_response(RuntimeLoraError::BaseModelUnsupported(
+            "known-base".to_string(),
+        ));
+
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        assert_eq!(response.1.0.message, "runtime_lora_unsupported");
+    }
+
+    #[test]
+    fn runtime_lora_selection_recovers_after_capability_loss() {
+        use crate::engines::{StreamingEngineAdapter, make_echo_engine};
+        use crate::model_card::ModelDeploymentCard;
+        use crate::model_type::{ModelInput, ModelType};
+        use crate::worker_type::WorkerType;
+
+        let manager = ModelManager::new();
+        let mut card = ModelDeploymentCard::default();
+        card.model_input = ModelInput::Tokens;
+        card.model_type = ModelType::Chat | ModelType::Completions;
+        card.worker_type = Some(WorkerType::Aggregated);
+        card.runtime_config
+            .taints
+            .insert("dynamo.runtime-lora/v2".into());
+        for (key, value) in [
+            ("supports_runtime_lora_resolution", serde_json::json!(true)),
+            ("runtime_lora_protocol_versions", serde_json::json!([2])),
+            ("runtime_lora_schemes", serde_json::json!(["custom"])),
+        ] {
+            card.runtime_config.set_engine_specific(key, value).unwrap();
+        }
+        let mut worker_set = WorkerSet::new("workers".into(), "checksum".into(), card.clone());
+        worker_set.chat_engine = Some(Arc::new(StreamingEngineAdapter::new(make_echo_engine())));
+        worker_set.completions_engine =
+            Some(Arc::new(StreamingEngineAdapter::new(make_echo_engine())));
+        let (instances, instance_rx) = tokio::sync::watch::channel(vec![1]);
+        let (configs, config_rx) = tokio::sync::watch::channel(std::collections::HashMap::new());
+        worker_set.set_instance_watcher(instance_rx);
+        worker_set.set_runtime_config_watcher(config_rx);
+        assert!(manager.add_worker_set("base", "workers", worker_set));
+        assert!(manager.register_alias("base-alias", "base"));
+        let config = RuntimeLoraConfig { enabled: true };
+        let requests = [
+            "base|opaque-private-reference",
+            "base-alias|opaque-private-reference",
+            "opaque-private-reference",
+        ];
+
+        for (worker_ids, advertised) in [
+            (vec![1], false),
+            (vec![1], true),
+            (Vec::new(), true),
+            (vec![1], true),
+        ] {
+            let available = !worker_ids.is_empty() && advertised;
+            instances.send_replace(worker_ids);
+            configs.send_replace(if advertised {
+                std::collections::HashMap::from([(1, card.runtime_config.clone())])
+            } else {
+                std::collections::HashMap::new()
+            });
+            for surface in [
+                WorkerSet::has_chat_engine as fn(&WorkerSet) -> bool,
+                WorkerSet::has_completions_engine,
+            ] {
+                assert!(
+                    runtime_lora_selection(&manager, &config, "base", surface)
+                        .unwrap()
+                        .is_none()
+                );
+                for requested in requests {
+                    let result = runtime_lora_selection(&manager, &config, requested, surface);
+                    if available {
+                        let selection = result.unwrap().unwrap();
+                        assert_eq!(selection.base_model_name, "base");
+                        assert_eq!(selection.source_uri.as_str(), "opaque-private-reference");
+                    } else {
+                        let response = result.unwrap_err();
+                        assert_eq!(response.0, StatusCode::SERVICE_UNAVAILABLE);
+                        assert_eq!(response.1.0.message, "runtime_lora_capability_unavailable");
+                        assert_eq!(
+                            extract_error_type_from_response(&response),
+                            ErrorType::Unavailable
+                        );
+                        assert!(
+                            !serde_json::to_string(&response.1.0)
+                                .unwrap()
+                                .contains("opaque-private-reference")
+                        );
+                    }
+                }
+            }
+        }
+        for requested in requests {
+            let response = runtime_lora_selection(
+                &manager,
+                &config,
+                requested,
+                WorkerSet::has_embeddings_engine,
+            )
+            .unwrap_err();
+            assert_eq!(response.0, StatusCode::BAD_REQUEST);
+            assert_eq!(response.1.0.message, "runtime_lora_unsupported");
+        }
     }
 
     #[test]

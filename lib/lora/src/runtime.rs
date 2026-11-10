@@ -25,6 +25,26 @@ fn capability_taint(protocol_version: u16) -> String {
     format!("dynamo.runtime-lora/v{protocol_version}")
 }
 
+/// Only these exact worker status/symbol pairs are safe for client rendering.
+pub fn public_error_code(status: u16, code: &str) -> Option<&'static str> {
+    Some(match (status, code) {
+        (400, "invalid_lora_model_id") => "invalid_lora_model_id",
+        (400, "runtime_lora_identity_mismatch") => "runtime_lora_identity_mismatch",
+        (400, "runtime_lora_unsupported") => "runtime_lora_unsupported",
+        (400, "unsupported_lora_scheme") => "unsupported_lora_scheme",
+        (404, "lora_not_found") => "lora_not_found",
+        (422, "invalid_lora_adapter") => "invalid_lora_adapter",
+        (429, "lora_capacity_exceeded") => "lora_capacity_exceeded",
+        (500, "lora_load_failed") => "lora_load_failed",
+        (500, "lora_plugin_error") => "lora_plugin_error",
+        (500, "runtime_lora_identity_collision") => "runtime_lora_identity_collision",
+        (500, "runtime_lora_source_changed") => "runtime_lora_source_changed",
+        (503, "lora_resolver_unavailable") => "lora_resolver_unavailable",
+        (504, "runtime_lora_resolve_timeout") => "runtime_lora_resolve_timeout",
+        _ => return None,
+    })
+}
+
 /// Borrowed discovery metadata, without a dependency on model cards.
 pub trait RuntimeLoraWorkerFacts {
     fn runtime_value(&self, key: &str) -> Option<&serde_json::Value>;
@@ -427,6 +447,35 @@ mod tests {
             HashSet::from([RUNTIME_LORA_CAPABILITY_TAINT.to_string()]),
             Default::default(),
         )
+    }
+
+    #[test]
+    fn public_error_codes_require_exact_status_and_symbol() {
+        for (status, symbol) in [
+            (400, "invalid_lora_model_id"),
+            (400, "runtime_lora_identity_mismatch"),
+            (400, "runtime_lora_unsupported"),
+            (400, "unsupported_lora_scheme"),
+            (404, "lora_not_found"),
+            (422, "invalid_lora_adapter"),
+            (429, "lora_capacity_exceeded"),
+            (500, "lora_load_failed"),
+            (500, "lora_plugin_error"),
+            (500, "runtime_lora_identity_collision"),
+            (500, "runtime_lora_source_changed"),
+            (503, "lora_resolver_unavailable"),
+            (504, "runtime_lora_resolve_timeout"),
+        ] {
+            assert_eq!(public_error_code(status, symbol), Some(symbol));
+            assert_eq!(public_error_code(status + 1, symbol), None);
+            assert_eq!(
+                public_error_code(status, &format!("{symbol}: token=secret")),
+                None
+            );
+            assert_eq!(public_error_code(status, &format!("{symbol}\n")), None);
+        }
+        assert_eq!(public_error_code(500, "lora_unknown"), None);
+        assert_eq!(public_error_code(500, "provider:///private/path"), None);
     }
 
     #[test]

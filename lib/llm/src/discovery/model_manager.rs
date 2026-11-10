@@ -494,6 +494,26 @@ impl ModelManager {
         views
     }
 
+    /// Infer a bare source from a unique committed generation base before checking live capability.
+    pub(crate) fn infer_runtime_lora_base_model(
+        &self,
+        supports_surface: fn(&WorkerSet) -> bool,
+    ) -> Result<String, crate::lora::runtime::RuntimeLoraError> {
+        use crate::lora::runtime::RuntimeLoraError;
+        let catalog = self.catalog.load();
+        let mut bases = catalog.models.iter().filter(|(name, model)| {
+            !catalog.aliases.contains_key(name.as_str()) && model.has_generation_base_deployment()
+        });
+        let (name, model) = bases.next().ok_or(RuntimeLoraError::BaseModelRequired)?;
+        if bases.next().is_some() {
+            return Err(RuntimeLoraError::BaseModelRequired);
+        }
+        if !model.has_runtime_lora_base_surface(supports_surface) {
+            return Err(RuntimeLoraError::BaseModelUnsupported(name.clone()));
+        }
+        Ok(name.clone())
+    }
+
     fn get_model_internal(&self, model_name: &str) -> Option<Arc<Model>> {
         self.models
             .get(model_name)
@@ -1618,12 +1638,26 @@ impl ModelManager {
         ),
         ModelManagerError,
     > {
+        self.get_chat_completions_engine_with_parsing_where(model, |_| true)
+    }
+
+    pub(crate) fn get_chat_completions_engine_with_parsing_where(
+        &self,
+        model: &str,
+        predicate: impl Fn(&WorkerSet) -> bool,
+    ) -> Result<
+        (
+            OpenAIChatCompletionsStreamingEngine,
+            crate::protocols::openai::ParsingOptions,
+        ),
+        ModelManagerError,
+    > {
         self.catalog
             .load()
             .models
             .get(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
-            .get_chat_engine_with_parsing()
+            .get_chat_engine_with_parsing_where(predicate)
     }
 
     pub fn get_completions_engine_with_parsing(
@@ -1636,12 +1670,26 @@ impl ModelManager {
         ),
         ModelManagerError,
     > {
+        self.get_completions_engine_with_parsing_where(model, |_| true)
+    }
+
+    pub(crate) fn get_completions_engine_with_parsing_where(
+        &self,
+        model: &str,
+        predicate: impl Fn(&WorkerSet) -> bool,
+    ) -> Result<
+        (
+            OpenAICompletionsStreamingEngine,
+            crate::protocols::openai::ParsingOptions,
+        ),
+        ModelManagerError,
+    > {
         self.catalog
             .load()
             .models
             .get(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
-            .get_completions_engine_with_parsing()
+            .get_completions_engine_with_parsing_where(predicate)
     }
 
     pub fn get_generate_engine_with_parsing(
@@ -3796,6 +3844,119 @@ mod tests {
         assert!(mm.get_model("llama").is_some());
         // A second worker set for the same primary is fine (replicas share a name).
         assert!(mm.add_worker_set("llama", "ns2", make_worker_set("ns2", "abc")));
+    }
+
+    #[test]
+    fn runtime_lora_base_inference_is_stable_across_surface_and_capability_changes() {
+        use crate::lora::runtime::RuntimeLoraError;
+        let mm = ModelManager::new();
+        let mut embedding_card = ModelDeploymentCard::default();
+        embedding_card.model_type = crate::model_type::ModelType::Embedding;
+        assert!(mm.add_worker_set(
+            "embedding",
+            "embedding",
+            WorkerSet::new("embedding".into(), "embedding".into(), embedding_card)
+        ));
+        let mut token_card = ModelDeploymentCard::default();
+        token_card.model_input = crate::model_type::ModelInput::Tokens;
+        token_card.model_type = crate::model_type::ModelType::Chat;
+        token_card
+            .runtime_config
+            .taints
+            .insert("dynamo.runtime-lora/v2".into());
+        token_card
+            .runtime_config
+            .set_engine_specific("supports_runtime_lora_resolution", true)
+            .unwrap();
+        token_card
+            .runtime_config
+            .set_engine_specific("runtime_lora_protocol_versions", vec![2_u32])
+            .unwrap();
+        token_card
+            .runtime_config
+            .set_engine_specific("runtime_lora_schemes", vec!["custom"])
+            .unwrap();
+        let mut token_ws = WorkerSet::new("tokens".into(), "def".into(), token_card.clone());
+        token_ws.chat_engine = Some(make_chat_engine());
+        let (instances, instance_rx) = tokio::sync::watch::channel(vec![1]);
+        let (configs, config_rx) =
+            tokio::sync::watch::channel(HashMap::from([(1, token_card.runtime_config.clone())]));
+        token_ws.set_instance_watcher(instance_rx);
+        token_ws.set_runtime_config_watcher(config_rx);
+        let token_ws = Arc::new(token_ws);
+        assert!(mm.add_worker_set_arc("token-base", "tokens", token_ws.clone()));
+        assert!(mm.register_alias("base-alias", "token-base"));
+        assert!(mm.add_worker_set_arc("base-alias", "tokens", token_ws,));
+        let mut adapter_card = token_card.clone();
+        adapter_card.lora = Some(crate::model_card::LoraInfo {
+            name: "adapter".into(),
+            max_gpu_lora_count: None,
+        });
+        assert!(mm.add_worker_set(
+            "adapter",
+            "adapter",
+            WorkerSet::new("adapter".into(), "adapter".into(), adapter_card)
+        ));
+        assert_eq!(
+            mm.infer_runtime_lora_base_model(WorkerSet::has_chat_engine),
+            Ok("token-base".to_string())
+        );
+        assert_eq!(
+            mm.infer_runtime_lora_base_model(WorkerSet::has_completions_engine),
+            Err(RuntimeLoraError::BaseModelUnsupported("token-base".into()))
+        );
+        configs.send_replace(HashMap::new());
+        assert_eq!(
+            mm.infer_runtime_lora_base_model(WorkerSet::has_chat_engine),
+            Ok("token-base".into())
+        );
+        configs.send_replace(HashMap::from([(1, token_card.runtime_config.clone())]));
+        instances.send_replace(Vec::new());
+        assert_eq!(
+            mm.infer_runtime_lora_base_model(WorkerSet::has_chat_engine),
+            Ok("token-base".into())
+        );
+        instances.send_replace(vec![1]);
+        assert_eq!(
+            mm.infer_runtime_lora_base_model(WorkerSet::has_chat_engine),
+            Ok("token-base".into())
+        );
+
+        token_card.model_type = crate::model_type::ModelType::Completions;
+        let mut second_ws = WorkerSet::new("second".into(), "second".into(), token_card.clone());
+        second_ws.completions_engine = Some(Arc::new(crate::engines::StreamingEngineAdapter::new(
+            crate::engines::make_echo_engine(),
+        )));
+        let (_second_instances, second_instance_rx) = tokio::sync::watch::channel(vec![2]);
+        let (_second_configs, second_config_rx) =
+            tokio::sync::watch::channel(HashMap::from([(2, token_card.runtime_config.clone())]));
+        second_ws.set_instance_watcher(second_instance_rx);
+        second_ws.set_runtime_config_watcher(second_config_rx);
+        assert!(mm.add_worker_set("other-base", "second", second_ws));
+        assert_eq!(
+            mm.infer_runtime_lora_base_model(WorkerSet::has_chat_engine),
+            Err(RuntimeLoraError::BaseModelRequired)
+        );
+        assert_eq!(
+            mm.infer_runtime_lora_base_model(WorkerSet::has_completions_engine),
+            Err(RuntimeLoraError::BaseModelRequired)
+        );
+        instances.send_replace(Vec::new());
+        assert_eq!(
+            mm.infer_runtime_lora_base_model(WorkerSet::has_completions_engine),
+            Err(RuntimeLoraError::BaseModelRequired)
+        );
+        mm.remove_worker_set("other-base", "second");
+        assert_eq!(
+            mm.infer_runtime_lora_base_model(WorkerSet::has_completions_engine),
+            Err(RuntimeLoraError::BaseModelUnsupported("token-base".into()))
+        );
+        instances.send_replace(vec![1]);
+        drop(configs);
+        assert_eq!(
+            mm.infer_runtime_lora_base_model(WorkerSet::has_chat_engine),
+            Ok("token-base".into())
+        );
     }
 
     #[test]

@@ -61,6 +61,7 @@ pub struct RequestPayloadHandle {
     requested_streaming: bool,
     request_id: String,
     model: String,
+    response_model_override: Option<String>,
     event_time: SystemTime,
     request: Arc<NvCreateChatCompletionRequest>,
     http_request_headers: Option<Arc<BTreeMap<String, String>>>,
@@ -75,11 +76,20 @@ impl RequestPayloadHandle {
         &self.request_id
     }
 
+    fn apply_response_model_override(
+        &self,
+        response: &mut Option<Arc<NvCreateChatCompletionResponse>>,
+    ) {
+        if let (Some(response), Some(model)) = (response.as_mut(), &self.response_model_override) {
+            Arc::make_mut(response).inner.model = model.clone();
+        }
+    }
+
     /// Consume the handle to publish one request payload record.
     /// Pass a `drop_reason` for a missing or partial response.
     pub fn emit(
         self,
-        response: Option<Arc<NvCreateChatCompletionResponse>>,
+        mut response: Option<Arc<NvCreateChatCompletionResponse>>,
         drop_reason: Option<String>,
     ) {
         let payload_complete = response.is_some() && drop_reason.is_none();
@@ -88,6 +98,7 @@ impl RequestPayloadHandle {
             (false, Some(reason)) => Some(reason),
             (false, None) => Some(DROP_UNSPECIFIED.to_string()),
         };
+        self.apply_response_model_override(&mut response);
         super::record::emit_request_payload(
             super::RequestTracePayload {
                 request_id: self.request_id,
@@ -109,6 +120,15 @@ pub fn create_handle(
     request_id: &str,
     http_request_headers: Option<Arc<BTreeMap<String, String>>>,
 ) -> Option<RequestPayloadHandle> {
+    create_handle_with_model_override(req, request_id, http_request_headers, None)
+}
+
+pub(crate) fn create_handle_with_model_override(
+    req: &NvCreateChatCompletionRequest,
+    request_id: &str,
+    http_request_headers: Option<Arc<BTreeMap<String, String>>>,
+    model_override: Option<&str>,
+) -> Option<RequestPayloadHandle> {
     let policy = super::policy();
     // `capture_enabled()` is `policy.enabled && CAPTURE_ACTIVE`: it additionally
     // requires request trace initialization, so a stale payload handle cannot be
@@ -119,6 +139,7 @@ pub fn create_handle(
         super::config::capture_enabled(),
         policy.emit_request_payload_records(),
         http_request_headers,
+        model_override,
     )
 }
 
@@ -134,13 +155,19 @@ fn create_handle_with_config(
     enabled: bool,
     emit_request_payload: bool,
     http_request_headers: Option<Arc<BTreeMap<String, String>>>,
+    model_override: Option<&str>,
 ) -> Option<RequestPayloadHandle> {
     if !enabled || !emit_request_payload {
         return None;
     }
     let requested_streaming = req.inner.stream.unwrap_or(false);
-    let model = req.inner.model.clone();
+    let response_model_override = model_override.map(str::to_string);
+    let model = response_model_override
+        .as_deref()
+        .unwrap_or(&req.inner.model)
+        .to_string();
     let mut trace_request = req.clone();
+    trace_request.inner.model = model.clone();
     if let Some(nvext) = trace_request.nvext.as_mut() {
         // Upload destinations contain capabilities and signed header values.
         nvext.metadata_upload = None;
@@ -150,6 +177,7 @@ fn create_handle_with_config(
         requested_streaming,
         request_id: request_id.to_string(),
         model,
+        response_model_override,
         // Snapshot ingress fields without upload capabilities, before stream/
         // usage overrides, and stamp arrival time on the producing thread.
         event_time: SystemTime::now(),
@@ -194,7 +222,7 @@ mod tests {
     #[test]
     fn request_payload_records_emit_even_when_store_is_false() {
         let request = create_test_request("test-model", false);
-        let handle = create_handle_with_config(&request, "test-id", true, true, None);
+        let handle = create_handle_with_config(&request, "test-id", true, true, None, None);
 
         assert!(
             handle.is_some(),
@@ -208,7 +236,8 @@ mod tests {
             "model": "test", "messages": [{"role": "user", "content": "hello"}],
             "nvext": {"extra_fields": ["timing"], "metadata_upload": {"kind": "generation_artifact", "contents": [], "mode": "object_store", "destination": {"kind": "presigned_http_put", "url": "https://storage.example/object?sig=secret", "required_headers": {"x-token": "private-token"}, "expires_at": "2030-01-01T00:00:00Z", "max_bytes": 1024, "object_id": "object-1"}}}
         })).unwrap();
-        let handle = create_handle_with_config(&request, "test-id", true, true, None).unwrap();
+        let handle =
+            create_handle_with_config(&request, "test-id", true, true, None, None).unwrap();
         assert!(request.nvext.as_ref().unwrap().metadata_upload.is_some());
         let trace = serde_json::to_string(&handle.request).unwrap();
         assert!(!trace.contains("metadata_upload"));
@@ -223,12 +252,51 @@ mod tests {
     #[test]
     fn request_payload_records_disabled_skips_store_true_payloads() {
         let request = create_test_request("test-model", true);
-        let handle = create_handle_with_config(&request, "test-id", true, false, None);
+        let handle = create_handle_with_config(&request, "test-id", true, false, None, None);
 
         assert!(
             handle.is_none(),
             "request_payload records disabled should skip payloads even with store=true"
         );
+    }
+
+    #[test]
+    fn request_payload_model_override_is_applied_after_capture_gate() {
+        let request = create_test_request("base|secret-source", true);
+        let handle = create_handle_with_config(&request, "test-id", true, true, None, Some("base"))
+            .expect("payload handle");
+
+        assert_eq!(handle.model, "base");
+        assert_eq!(handle.request.inner.model, "base");
+        assert_eq!(request.inner.model, "base|secret-source");
+    }
+
+    #[test]
+    fn response_model_override_is_applied_only_for_sanitized_runtime_payloads() {
+        let runtime_request = create_test_request("base|secret-source", true);
+        let runtime_handle = create_handle_with_config(
+            &runtime_request,
+            "runtime-id",
+            true,
+            true,
+            None,
+            Some("base"),
+        )
+        .expect("runtime payload handle");
+        let mut runtime_response = Some(Arc::new(create_test_response("ok")));
+        runtime_handle.apply_response_model_override(&mut runtime_response);
+        assert_eq!(runtime_response.unwrap().inner.model, "base");
+
+        let ordinary_request = create_test_request("served-alias", true);
+        let ordinary_handle =
+            create_handle_with_config(&ordinary_request, "ordinary-id", true, true, None, None)
+                .expect("ordinary payload handle");
+        let mut ordinary_response = Some(Arc::new(create_test_response("ok")));
+        Arc::make_mut(ordinary_response.as_mut().unwrap())
+            .inner
+            .model = "canonical".to_string();
+        ordinary_handle.apply_response_model_override(&mut ordinary_response);
+        assert_eq!(ordinary_response.unwrap().inner.model, "canonical");
     }
 
     #[test]
@@ -315,6 +383,7 @@ mod tests {
                 requested_streaming: streaming,
                 request_id: request_id.to_string(),
                 model: model.to_string(),
+                response_model_override: None,
                 event_time: SystemTime::now(),
                 request: Arc::new(create_test_request(model, true)),
                 http_request_headers: None,
