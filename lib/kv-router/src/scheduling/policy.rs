@@ -208,6 +208,7 @@ mod tests {
             .map(|(worker, overlap)| (*worker, *overlap as usize * 16))
             .collect();
         SchedulingRequest {
+            accounting_attribution: Default::default(),
             mode: ScheduleMode::QueryOnly { request_id: None },
             token_seq: None,
             isl_tokens,
