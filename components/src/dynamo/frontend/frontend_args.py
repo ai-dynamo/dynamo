@@ -923,7 +923,8 @@ class FrontendArgGroup(ArgGroup):
                 "copy a delimiter token out of untrusted input and have it parsed as "
                 "a real tool call. Requests whose content the chat template rewrites "
                 "are rejected rather than encoded unsafely. Requires "
-                "--dyn-chat-processor=sglang."
+                "--dyn-chat-processor=sglang. Evaluate against your model before "
+                "enabling."
             ),
             env=self.env,
         )
