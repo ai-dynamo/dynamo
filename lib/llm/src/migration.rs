@@ -483,8 +483,7 @@ where
     /// Delivered tokens replayed in the active attempt's prompt. The worker counts them in its
     /// `prompt_tokens` although the client received them as completion.
     replayed_tokens: u32,
-    /// The span current when the request was dispatched. The response body polls this stream
-    /// without entering the request span, so a mid-stream retry runs in this one.
+    /// The span current when the request was dispatched, which a mid-stream retry runs in.
     span: tracing::Span,
 }
 

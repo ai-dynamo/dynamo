@@ -1721,7 +1721,7 @@ impl HttpServiceConfigBuilder {
         let mut all_docs = Vec::new();
         let mut seen_route_docs = HashSet::new();
 
-        // Shared on_response callback for both system and inference routes
+        // Shared on_response callback for the TraceLayer routes: system, admin, RL and fallback
         let on_response = |response: &Response<Body>, latency: Duration, _span: &tracing::Span| {
             log_response(response, latency)
         };

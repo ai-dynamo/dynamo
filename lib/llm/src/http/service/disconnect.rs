@@ -1039,14 +1039,13 @@ mod tests {
         );
         let model = "span-parent";
         let metrics = Arc::new(Metrics::new());
-        let guard = tracing::info_span!("http-request").in_scope(|| {
-            metrics.clone().create_inflight_guard(
-                model,
-                Endpoint::ChatCompletions,
-                true,
-                "req-span",
-            )
-        });
+        let guard = metrics.clone().create_inflight_guard_in(
+            tracing::info_span!("http-request"),
+            model,
+            Endpoint::ChatCompletions,
+            true,
+            "req-span",
+        );
         let context: Arc<dyn AsyncEngineContext> = Arc::new(MockContext::new());
         let (tx, _rx) = tokio::sync::oneshot::channel();
         let stream = futures::stream::iter([Err(axum::Error::new("backend failed"))]);
