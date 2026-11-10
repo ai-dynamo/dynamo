@@ -865,6 +865,8 @@ func (r *DynamoComponentDeploymentReconciler) dcdIngressSpec(dcd *nvidiacomv1bet
 	return dynamo.GenerateDefaultIngressSpec(parentDGD, r.Config.Ingress), true, nil
 }
 
+// generateDeployment renders a Deployment whose selector matches its Pod template.
+// opt.dynamoComponentDeployment must be non-nil.
 //nolint:nakedret
 func (r *DynamoComponentDeploymentReconciler) generateDeployment(ctx context.Context, opt generateResourceOption) (kubeDeployment *appsv1.Deployment, toDelete bool, err error) {
 	kubeNs := opt.dynamoComponentDeployment.Namespace

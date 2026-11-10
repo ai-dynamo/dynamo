@@ -369,6 +369,9 @@ func (r *dcdWorkloadRenderer) generatePodTemplateSpec(
 	)
 }
 
+// generateComponentPodTemplateSpec renders a component's Pod template with its
+// bounded workload selector. It updates podLabels and podAnnotations in place;
+// component and both maps must be non-nil.
 func (r *dcdWorkloadRenderer) generateComponentPodTemplateSpec(
 	ctx context.Context,
 	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
