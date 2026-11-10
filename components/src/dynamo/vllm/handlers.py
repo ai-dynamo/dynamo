@@ -4142,12 +4142,14 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                             )
                         yield tok
                 except (VLLMClientError, GracefulHTTPError):
-                    # vLLM raises these from validation and admission
-                    # control before the request reaches EngineCore, so
-                    # no KV read has started and the prefill worker's
-                    # blocks can be released now instead of at lease
-                    # expiry. Once an output was seen the request was
-                    # admitted, and the normal finish path owns cleanup.
+                    # The scheduler and KV connector have not seen the
+                    # request yet (frontend admission or EngineCore
+                    # preprocess validation), so release the prefill
+                    # blocks now. GenerationError is excluded on purpose:
+                    # for a paused engine, EngineCore already frees the
+                    # remote blocks itself. Once an output was seen the
+                    # request was admitted, and the normal finish path
+                    # owns cleanup.
                     if not engine_output_seen:
                         await _notify_kv_transfer_request_rejected(
                             self.engine_client, request_id, kv_params, dp_rank

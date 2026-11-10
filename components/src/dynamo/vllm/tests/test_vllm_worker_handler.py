@@ -2261,6 +2261,34 @@ async def test_decode_error_after_engine_output_does_not_release_prefill_kv():
 
 
 @pytest.mark.asyncio
+async def test_decode_retryable_error_before_output_does_not_release_prefill_kv():
+    """A paused-engine RetryableRequestError must not release the prefill KV.
+
+    EngineCore frees the remote blocks itself when it returns
+    RetryableRequestError (abort_immediately), so a second notify would be a
+    double release. GenerationError and its subclasses stay out of the
+    rejection tuple; this fails if someone widens it.
+    """
+    from vllm import exceptions as vllm_exceptions
+
+    error = vllm_exceptions.RetryableRequestError("engine paused")
+
+    async def _retryable_generate_tokens(*args, **kwargs):
+        raise error
+        yield  # pragma: no cover
+
+    handler = _make_rejecting_decode_handler(_retryable_generate_tokens)
+
+    with pytest.raises(vllm_exceptions.RetryableRequestError) as exc_info:
+        await _drain_token_mode(
+            handler, _make_remote_prefill_request(_REMOTE_PREFILL_KV_PARAMS)
+        )
+
+    assert exc_info.value is error
+    handler.engine_client.notify_kv_transfer_request_rejected.assert_not_called()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "kv_params",
     [None, {"do_remote_prefill": False, "remote_request_id": "prefill-req"}],
@@ -2323,9 +2351,6 @@ async def test_decode_cancellation_does_not_release_prefill_kv():
         )
 
     handler.engine_client.notify_kv_transfer_request_rejected.assert_not_called()
-
-
-# ── Deferred abort (disagg decode KV-transfer safety) tests ────────
 
 
 # ── Abort monitor tests ────────
