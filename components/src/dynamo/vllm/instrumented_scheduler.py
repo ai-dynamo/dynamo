@@ -2654,8 +2654,12 @@ class InstrumentedScheduler(AsyncScheduler):
 
     def _compute_queued(self) -> QueuedRequestMetrics:
         """Classify requests across vLLM's waiting queues by their next work."""
-        prefill = WelfordAccumulator()
-        decode_kv = WelfordAccumulator()
+        prefill_count = prefill_sum = decode_count = decode_sum = 0
+        prefill_mean = prefill_m2 = decode_mean = decode_m2 = 0.0
+        decode_statuses = (
+            RequestStatus.PREEMPTED,
+            RequestStatus.WAITING_FOR_REMOTE_KVS,
+        )
         # vLLM 0.31 splits waiting queues by whether requests hold KV blocks.
         if hasattr(self, "kv_holding_waiting"):
             other_waiting = self.kv_holding_waiting
@@ -2663,21 +2667,28 @@ class InstrumentedScheduler(AsyncScheduler):
             other_waiting = self.skipped_waiting
 
         for request in chain(self.waiting, other_waiting):
-            if request.status in (
-                RequestStatus.PREEMPTED,
-                RequestStatus.WAITING_FOR_REMOTE_KVS,
-            ):
-                decode_kv.add(request.num_computed_tokens)
+            if request.status in decode_statuses:
+                value = request.num_computed_tokens
+                decode_count += 1
+                decode_sum += value
+                delta = value - decode_mean
+                decode_mean += delta / decode_count
+                decode_m2 += delta * (value - decode_mean)
             else:
-                prefill.add(request.num_tokens)
+                value = request.num_tokens
+                prefill_count += 1
+                prefill_sum += value
+                delta = value - prefill_mean
+                prefill_mean += delta / prefill_count
+                prefill_m2 += delta * (value - prefill_mean)
 
         return QueuedRequestMetrics(
-            num_prefill_requests=prefill.n,
-            sum_prefill_tokens=prefill.s,
-            var_prefill_length=prefill.variance(),
-            num_decode_requests=decode_kv.n,
-            sum_decode_kv_tokens=decode_kv.s,
-            var_decode_kv_tokens=decode_kv.variance(),
+            num_prefill_requests=prefill_count,
+            sum_prefill_tokens=prefill_sum,
+            var_prefill_length=prefill_m2 / prefill_count if prefill_count else 0.0,
+            num_decode_requests=decode_count,
+            sum_decode_kv_tokens=decode_sum,
+            var_decode_kv_tokens=decode_m2 / decode_count if decode_count else 0.0,
         )
 
     # ------------------------------------------------------------------
