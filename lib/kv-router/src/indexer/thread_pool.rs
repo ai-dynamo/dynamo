@@ -733,6 +733,8 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
 
     /// Enqueue an event and report whether the worker queue accepted it.
     pub fn enqueue_event(&self, event: RouterEvent) -> Result<(), KvRouterError> {
+        #[cfg(feature = "bench")]
+        bench_counters::record(&event);
         let (thread_idx, second_idx) = self.event_thread_indices(&event);
         if let Some(second_idx) = second_idx {
             self.worker_event_channels[thread_idx]
@@ -1673,5 +1675,44 @@ mod tests {
             .collect::<Vec<_>>();
         ids.sort_unstable();
         assert_eq!(ids, [10, 20]);
+    }
+}
+
+/// Process-wide counts of events handed to indexer lanes, for benchmarks that cannot
+/// see the ingest path (the event plane applies events inside dynamo-llm).
+#[cfg(feature = "bench")]
+pub mod bench_counters {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use crate::protocols::{KvCacheEventData, RouterEvent};
+
+    pub static EVENTS: AtomicU64 = AtomicU64::new(0);
+    pub static STORED_BLOCKS: AtomicU64 = AtomicU64::new(0);
+    pub static REMOVED_BLOCKS: AtomicU64 = AtomicU64::new(0);
+    pub static CLEARED: AtomicU64 = AtomicU64::new(0);
+
+    pub(super) fn record(event: &RouterEvent) {
+        EVENTS.fetch_add(1, Ordering::Relaxed);
+        match &event.event.data {
+            KvCacheEventData::Stored(store) => {
+                STORED_BLOCKS.fetch_add(store.blocks.len() as u64, Ordering::Relaxed);
+            }
+            KvCacheEventData::Removed(remove) => {
+                REMOVED_BLOCKS.fetch_add(remove.block_hashes.len() as u64, Ordering::Relaxed);
+            }
+            KvCacheEventData::Cleared => {
+                CLEARED.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// `(events, stored blocks, removed blocks, cleared)` so far.
+    pub fn snapshot() -> (u64, u64, u64, u64) {
+        (
+            EVENTS.load(Ordering::Relaxed),
+            STORED_BLOCKS.load(Ordering::Relaxed),
+            REMOVED_BLOCKS.load(Ordering::Relaxed),
+            CLEARED.load(Ordering::Relaxed),
+        )
     }
 }

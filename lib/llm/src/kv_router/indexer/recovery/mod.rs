@@ -14,9 +14,8 @@ mod worker_query_state;
 mod worker_query_transport;
 
 pub(crate) use state_agent::start_state_agent_router;
-pub(crate) use subscriber::{
-    KvEventSubscriptionHandle, RecoverySupervisor, start_subscriber, start_target_subscriber,
-};
+pub use subscriber::KvEventSubscriptionHandle;
+pub(crate) use subscriber::{RecoverySupervisor, start_subscriber, start_target_subscriber};
 pub(crate) use target::{IndexerRecoveryTarget, RecoveryResetReason, RecoveryTarget};
 pub(crate) use worker_query::DEFAULT_RECOVERY_ATTEMPT_TIMEOUT;
 pub(crate) use worker_query::TargetFaultDisposition;

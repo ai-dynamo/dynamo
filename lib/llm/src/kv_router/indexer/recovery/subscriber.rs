@@ -364,7 +364,7 @@ pub(super) fn clear_mismatch_metric_on_cancellation(
 
 /// Dropping this handle cancels the KV event subscription and its health monitor.
 #[must_use = "dropping the handle cancels the KV event subscription and health monitor"]
-pub(crate) struct KvEventSubscriptionHandle {
+pub struct KvEventSubscriptionHandle {
     cancel: CancellationToken,
     completions: Vec<oneshot::Receiver<()>>,
     runtime: tokio::runtime::Handle,

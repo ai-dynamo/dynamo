@@ -40,11 +40,12 @@ pub use self::embedding_cache::{
 };
 use self::remote::RemoteIndexer;
 pub use self::remote::{ServedIndexerHandle, ServedIndexerMode, ensure_served_indexer_service};
+pub use recovery::KvEventSubscriptionHandle;
 #[cfg(feature = "ckf-diagnostics")]
 pub(crate) use recovery::WorkerQueryHealthSnapshot;
 pub(crate) use recovery::{
-    DEFAULT_RECOVERY_ATTEMPT_TIMEOUT, KvEventSubscriptionHandle, RecoveryResetReason,
-    RecoverySupervisor, RecoveryTarget, TargetFaultDisposition, start_target_subscriber,
+    DEFAULT_RECOVERY_ATTEMPT_TIMEOUT, RecoveryResetReason, RecoverySupervisor, RecoveryTarget,
+    TargetFaultDisposition, start_target_subscriber,
 };
 pub(crate) use recovery::{
     KvStateAgentStatusCell, start_subscriber, start_worker_kv_query_endpoint,
@@ -52,6 +53,31 @@ pub(crate) use recovery::{
 };
 #[cfg(test)]
 pub(crate) use recovery::{WorkerQueryClient, WorkerQueryTransport};
+
+/// Subscribe `indexer` to `endpoint`'s KV events exactly as the frontend's KV router does
+/// (event-plane transport, gap recovery, source health), for benchmarks that host an index
+/// outside the frontend. Dropping the handle cancels the subscription.
+pub async fn subscribe_kv_events_for_bench(
+    endpoint: dynamo_runtime::component::Endpoint,
+    indexer: Indexer,
+    membership_watch: crate::discovery::KvSourceMembershipWatch,
+    block_size: u32,
+    model: String,
+    cancellation_token: CancellationToken,
+) -> Result<KvEventSubscriptionHandle> {
+    start_subscriber(
+        endpoint,
+        indexer,
+        membership_watch,
+        block_size,
+        model,
+        None,
+        super::KvEventSourceRequirement::CacheAwareRouting,
+        "decode",
+        cancellation_token,
+    )
+    .await
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ResolvedApproximatePrimaryPolicy {

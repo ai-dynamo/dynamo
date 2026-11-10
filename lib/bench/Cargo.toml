@@ -85,7 +85,13 @@ gr-full-kv = [
   "dynamo-kv-router/standalone-selection",
   "dynamo-mocker/zmq-events",
   "dep:async-trait",
+  "dep:axum",
   "dep:bytes",
+  "dep:dynamo-llm",
+  "dep:dynamo-runtime",
+  "dep:hyper-util",
+  "dep:rustc-hash",
+  "dep:tokio-util",
   "dep:dynamo-mocker",
   "dep:dynamo-router-policies",
   "dep:futures-util",
@@ -168,6 +174,16 @@ name = "gr_core_host"
 path = "kv_router/gr_core_host.rs"
 required-features = ["gr-full-kv"]
 
+[[bin]]
+name = "gr_pool_relay"
+path = "kv_router/gr_pool_relay.rs"
+required-features = ["gr-full-kv"]
+
+[[bin]]
+name = "gr_loadgen"
+path = "kv_router/gr_loadgen.rs"
+required-features = ["gr-full-kv"]
+
 [[bench]]
 name = "active_sequences_bench"
 path = "kv_router/active_sequences_bench.rs"
@@ -194,6 +210,7 @@ required-features = ["dc-ckf-relay"]
 [dependencies]
 anyhow = { workspace = true }
 async-trait = { workspace = true, optional = true }
+axum = { version = "=0.8.4", default-features = false, features = ["http1", "json", "tokio"], optional = true }
 blake3 = { workspace = true, optional = true }
 bytes = { workspace = true, optional = true }
 chrono = { workspace = true, optional = true }
@@ -202,6 +219,7 @@ crossbeam-channel = { version = "0.5", optional = true }
 flate2 = { version = "1", optional = true }
 futures-util = { workspace = true, optional = true }
 hf-hub = { workspace = true, features = ["ureq"], optional = true }
+hyper-util = { version = "=0.1.17", features = ["server-auto", "service", "tokio"], optional = true }
 indicatif = { version = "0.18", optional = true }
 prometheus = { workspace = true, optional = true }
 rand = { workspace = true, optional = true }
@@ -225,6 +243,8 @@ dynamo-data-gen = { workspace = true, optional = true }
 dynamo-mocker = { workspace = true, optional = true }
 dynamo-kv-router = { workspace = true }
 dynamo-router-policies = { workspace = true, optional = true }
+dynamo-llm = { workspace = true, optional = true }
+dynamo-runtime = { workspace = true, optional = true }
 velo = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]

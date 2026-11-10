@@ -23,6 +23,9 @@ pub const OPEN_HANDLER: &str = "gr_relay_open";
 #[derive(Debug, Serialize, Deserialize)]
 pub struct OpenRequest {
     pub worker_ids: Vec<u64>,
+    /// The pool these workers belong to (the Global Router's routing entry).
+    #[serde(default)]
+    pub pool: u32,
 }
 
 /// One anchor handle per requested worker, in request order.

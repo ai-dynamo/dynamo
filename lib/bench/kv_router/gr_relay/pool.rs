@@ -17,7 +17,7 @@
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::Context as _;
 use bytes::Bytes;
@@ -28,9 +28,10 @@ use dynamo_mocker::services::zmq_events::encode_event_batch;
 use serde::Serialize;
 use tokio::sync::{mpsc, oneshot};
 use velo::streaming::ByteItemBuilder;
-use velo::{PeerInfo, StreamAnchorHandle, StreamSender, Velo};
+use velo::{StreamAnchorHandle, StreamSender, Velo};
 
 use crate::relay_common::{OPEN_HANDLER, OpenReply, OpenRequest, VeloOptions, build_velo};
+use crate::relay_peer::read_peer_file;
 
 #[derive(Default)]
 pub struct RelayCounters {
@@ -151,6 +152,7 @@ impl PoolRelay {
                     .context("core's relay handler did not appear")??;
                 let request = rmp_serde::to_vec(&OpenRequest {
                     worker_ids: worker_ids.clone(),
+                    pool: 0,
                 })?;
                 let reply = velo
                     .unary(OPEN_HANDLER)?
@@ -195,29 +197,6 @@ impl Drop for PoolRelay {
     fn drop(&mut self) {
         if let Some(runtime) = self.runtime.take() {
             runtime.shutdown_background();
-        }
-    }
-}
-
-/// Wait for the core's peer file.
-pub async fn read_peer_file(path: &Path, timeout: Duration) -> anyhow::Result<PeerInfo> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        match std::fs::read(path) {
-            Ok(bytes) => {
-                return rmp_serde::from_slice(&bytes).with_context(|| {
-                    format!("peer file {} is not velo peer info", path.display())
-                });
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                anyhow::ensure!(
-                    Instant::now() < deadline,
-                    "no peer file at {} after {timeout:?}",
-                    path.display()
-                );
-                tokio::time::sleep(Duration::from_millis(200)).await;
-            }
-            Err(error) => return Err(error.into()),
         }
     }
 }
