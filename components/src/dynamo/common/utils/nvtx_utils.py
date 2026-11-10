@@ -35,13 +35,21 @@ Usage — same syntax as the bare nvtx module:
     with _nvtx.annotate("my:block", color="cyan"):
         result = await some_coroutine()
 
+Request-scoped helpers (request_mark, start_request_range/end_request_range,
+request_range, handler_stages) tag a range with the request id so it can be joined
+with the same request's other processes and OpenTelemetry spans. They are
+emitted by dynamo._core, never through the nvtx package (see the section at the
+bottom of this module).
+
 When enabled, uses a named nvtx.Domain and pre-allocated EventAttributes
 objects (cached lazily by (message, color)) so that repeated calls to
 start_range incur only a single dict lookup — no object allocation
 or domain cache lookups on the hot path. Color names used by Dynamo are resolved
 here without requiring matplotlib.
 """
+import contextlib
 import functools
+import importlib
 import inspect
 import logging
 import os
@@ -73,6 +81,11 @@ def _parse_enabled(name: str) -> bool:
 
 
 ENABLED: bool = _parse_enabled(ENV_VAR)
+
+# Request-scoped markers (bottom of this module) are emitted by dynamo._core, not
+# the nvtx package, so they follow the switch alone: an image without the
+# package still gets them.
+REQUEST_ENABLED: bool = ENABLED
 
 if ENABLED:
     try:
@@ -207,3 +220,214 @@ else:
             return func
 
         return decorator
+
+
+# --------------------------------------------------------------------------- #
+# Request-scoped markers and ranges
+# --------------------------------------------------------------------------- #
+#
+# Each range or marker is named by its static stage and carries the request as a
+# 64-bit NVTX payload key; ``attrs`` (such as ``engine_rid``) go into a
+# ``dynamo.request rid=<id> ...`` identity marker with the same key. The Rust
+# runtime (``dynamo._core``) owns that encoding, shared with the tracing mirror
+# layer. These calls bypass the ``nvtx`` package and ``_attr_cache`` above: both
+# register every distinct message in an unbounded cache, and identity markers
+# are unique per request.
+#
+# Everything here is gated on ``REQUEST_ENABLED`` (DYN_NVTX alone; the ``nvtx``
+# package is not required), and builds no strings or dicts while disabled.
+
+_logger = logging.getLogger(__name__)
+
+# None: not resolved yet. False: unavailable (warned once). Otherwise the
+# (nvtx_request_mark, nvtx_request_range) pair from dynamo._core.
+_core_api: "tuple | bool | None" = None
+
+
+_warned_rust_off = False
+
+
+def _request_api():
+    """Resolve the Rust request-scoped bindings once; None if unavailable."""
+    global _core_api, _warned_rust_off
+    api = _core_api
+    if api is None:
+        try:
+            core = importlib.import_module("dynamo._core")
+            api = (core.nvtx_request_mark, core.nvtx_request_range)
+            rust_enabled = core.nvtx_enabled()
+        except (ImportError, AttributeError) as exc:
+            _logger.warning(
+                f"{ENV_VAR} is set but dynamo._core does not provide request-scoped "
+                f"NVTX ({exc}); request-scoped NVTX markers are disabled"
+            )
+            _core_api = False
+            return None
+        if not rust_enabled:
+            # Built without the `nvtx` feature, or asked before the runtime read
+            # DYN_NVTX at startup: not cached, so a later call can still succeed.
+            if not _warned_rust_off:
+                _warned_rust_off = True
+                _logger.warning(
+                    f"{ENV_VAR} is set but the Rust runtime reports NVTX off (built "
+                    f"without the nvtx feature, or not initialized yet); "
+                    f"request-scoped NVTX markers are skipped"
+                )
+            return None
+        _core_api = api
+    return api or None
+
+
+def _attrs_or_none(attrs: dict) -> "dict[str, str] | None":
+    # Drop None so call sites can pass optional values (engine_rid=None) as-is.
+    clean = {k: str(v) for k, v in attrs.items() if v is not None}
+    return clean or None
+
+
+def request_mark(stage: str, request_id: str, **attrs: str) -> None:
+    """Emit an instantaneous request-scoped marker (no-op unless enabled)."""
+    if not REQUEST_ENABLED:
+        return
+    api = _request_api()
+    if api is not None:
+        api[0](stage, request_id, _attrs_or_none(attrs))
+
+
+def start_request_range(stage: str, request_id: str, **attrs: str):
+    """Open a request-scoped range; returns a handle for end_request_range.
+
+    Returns None when disabled or unavailable. The range also ends when the
+    handle is garbage collected, but callers should end it in ``finally``.
+    """
+    if not REQUEST_ENABLED:
+        return None
+    api = _request_api()
+    if api is None:
+        return None
+    return api[1](stage, request_id, _attrs_or_none(attrs))
+
+
+def end_request_range(handle) -> None:
+    """End a range from start_request_range. Idempotent; accepts None."""
+    if handle is not None:
+        handle.end()
+
+
+@contextlib.contextmanager
+def request_range(stage: str, request_id: str, **attrs: str):
+    """Context manager form of start_request_range / end_request_range."""
+    handle = start_request_range(stage, request_id, **attrs)
+    try:
+        yield handle
+    finally:
+        end_request_range(handle)
+
+
+class _HandlerStages:
+    """The two per-request handler ranges every backend emits.
+
+    ``worker.handler.prepare:<role>`` runs from construction (handler body
+    entry) to ``engine_start``; ``worker.engine.first_output:<role>`` runs from
+    ``engine_start`` (the engine generate call) to ``first_output`` or, if the
+    engine yields nothing, to ``close``. Callers MUST call ``close`` in a
+    ``finally`` that covers the whole handler body so that exceptions, asyncio
+    cancellation and early async-generator close still end the ranges.
+    """
+
+    __slots__ = (
+        "_role",
+        "_rid",
+        "_engine_rid",
+        "_prepare",
+        "_first",
+        "first_output_pending",
+    )
+
+    def __init__(self, role: str, request_id: str) -> None:
+        self._role = role
+        self._rid = request_id
+        self._engine_rid: "str | None" = None
+        self._first = None
+        self.first_output_pending = False
+        self._prepare = start_request_range(
+            f"worker.handler.prepare:{role}", request_id
+        )
+
+    def end_prepare(self, engine_rid: "str | None" = None) -> None:
+        """The handler hands the request to the engine: ends prepare.
+
+        ``engine_rid`` is remembered for ``start_first_output``, for engines whose
+        generate call is lazy and only submits once its stream is consumed.
+        """
+        end_request_range(self._prepare)
+        self._prepare = None
+        if engine_rid is not None:
+            self._engine_rid = engine_rid
+
+    def start_first_output(self, engine_rid: "str | None" = None) -> None:
+        """Open first_output. ``engine_rid`` is omitted when equal to rid."""
+        if engine_rid is None:
+            engine_rid = self._engine_rid
+        if self._first is None:
+            self._first = start_request_range(
+                f"worker.engine.first_output:{self._role}",
+                self._rid,
+                engine_rid=engine_rid if engine_rid != self._rid else None,
+            )
+            self.first_output_pending = self._first is not None
+
+    def engine_start(self, engine_rid: "str | None" = None) -> None:
+        """Mark the engine generate call: ends prepare, opens first_output."""
+        self.end_prepare()
+        self.start_first_output(engine_rid)
+
+    def first_output(self) -> None:
+        """The engine produced its first output; ends first_output."""
+        self.first_output_pending = False
+        end_request_range(self._first)
+        self._first = None
+
+    def close(self) -> None:
+        """End whatever is still open. Idempotent."""
+        self.first_output_pending = False
+        end_request_range(self._prepare)
+        end_request_range(self._first)
+        self._prepare = None
+        self._first = None
+
+
+class _NoStages:
+    """Shared inert stand-in used while request-scoped NVTX is off."""
+
+    __slots__ = ()
+    first_output_pending = False
+
+    def end_prepare(self, engine_rid: "str | None" = None) -> None:
+        pass
+
+    def start_first_output(self, engine_rid: "str | None" = None) -> None:
+        pass
+
+    def engine_start(self, engine_rid: "str | None" = None) -> None:
+        pass
+
+    def first_output(self) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+
+NO_STAGES = _NoStages()
+
+
+def handler_stages(role: str, request_id: str) -> "_HandlerStages | _NoStages":
+    """Begin the handler prepare/first-output ranges for one request.
+
+    ``role`` is one of prefill, decode, aggregated. Returns a shared no-op
+    object (no allocation, no string building) when NVTX is off. Hot loops
+    should guard ``first_output()`` with ``stages.first_output_pending``.
+    """
+    if not REQUEST_ENABLED or _request_api() is None:
+        return NO_STAGES
+    return _HandlerStages(role, request_id)
