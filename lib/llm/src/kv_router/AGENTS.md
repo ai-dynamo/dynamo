@@ -29,7 +29,8 @@ and the booking lifecycle these rules protect.
     booking.
   - `routing_host/cancellation.rs`: what a client disconnect cancels, and the cleanup budget.
 - `prefill_router/`: `PrefillRouter`, the optional prefill hop in front of decode.
-  - `activation.rs`: target and binding lifecycle; how the prefill hop's routing mode is chosen.
+  - `activation.rs`: target and binding lifecycle. The rules for the prefill hop's routing
+    settings are in `discovery/role_routing.rs`, beside the serving sets' rules.
   - `admission.rs`: consumes the prefill stream, in the foreground or as a background task.
   - `handoff.rs`: keeps prefill running while decode runs and reports prefill failures.
   - `conditional_bypass.rs`: conditional disaggregation's decision to skip remote prefill.

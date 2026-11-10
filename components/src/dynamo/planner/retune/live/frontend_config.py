@@ -418,7 +418,7 @@ def evaluate_premises(
         p4.extend(analysis.p4_violations)
         p4.extend(_startup_errors(startup, retune, mode))
     # A worker's advertised router configuration replaces the frontend's for
-    # its worker set (watcher.rs effective_router_config), whatever the
+    # its worker set (role_routing.rs serving_set_routing), whatever the
     # frontend's flags say.
     p4.extend(_worker_router_errors(dgd, components, warnings))
 

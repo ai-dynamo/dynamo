@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -64,6 +63,7 @@ use crate::{
 };
 
 use super::readiness::normalize_legacy_prefill_topology;
+use super::role_routing;
 use super::{
     ModelManager,
     controller::{ControllerHost, DesiredInstance, GroupKey, GroupSpec, ModelDiscoveryController},
@@ -463,11 +463,8 @@ impl ModelWatcher {
                  exact video routing disabled for this group"
             );
         }
-        // Use per-worker-set router config if the worker provided one in its MDC,
-        // otherwise fall back to the frontend-level global config. Policy selections
-        // are process-local, so preserve them when the MDC supplies the base config.
         let router_config =
-            effective_router_config(card.router_config.as_ref(), &self.router_config);
+            role_routing::serving_set_routing(card.router_config.as_ref(), &self.router_config);
 
         let component = self
             .drt
@@ -552,6 +549,14 @@ impl ModelWatcher {
 
             return Ok(PreparedWorkerSet::new(worker_set, card.clone()));
         }
+
+        role_routing::log_serving_set_routing(
+            card.name(),
+            &spec.key.id(),
+            effective_worker_type(card.worker_type, card.model_type),
+            card.router_config.is_some(),
+            &router_config,
+        );
 
         if card.model_input == ModelInput::Tokens
             && (card.model_type.supports_chat() || card.model_type.supports_completions())
@@ -1161,7 +1166,8 @@ impl ControllerHost for ModelWatcher {
         self.apply_tokenizer_overrides(&mut card);
         validate_card_shape(&card)?;
         let router_mode =
-            effective_router_config(card.router_config.as_ref(), &self.router_config).router_mode;
+            role_routing::serving_set_routing(card.router_config.as_ref(), &self.router_config)
+                .router_mode;
         anyhow::ensure!(
             card.model_input != ModelInput::Text || !router_mode.is_kv_routing(),
             "model '{}': KV routing is incompatible with text-input workers (e.g. vLLM \
@@ -1535,27 +1541,6 @@ fn load_threshold_handle(router_config: &RouterConfig) -> LoadThresholdHandle {
         );
     }
     LoadThresholdHandle::disabled()
-}
-
-fn effective_router_config<'a>(
-    worker_config: Option<&'a RouterConfig>,
-    frontend_config: &'a RouterConfig,
-) -> Cow<'a, RouterConfig> {
-    let Some(worker_config) = worker_config else {
-        return Cow::Borrowed(frontend_config);
-    };
-
-    let mut effective = worker_config.clone();
-    effective.kv_router_config.router_prefill_policy = frontend_config
-        .kv_router_config
-        .router_prefill_policy
-        .clone();
-    effective.kv_router_config.router_decode_policy = frontend_config
-        .kv_router_config
-        .router_decode_policy
-        .clone();
-    effective.session_affinity_mode = frontend_config.session_affinity_mode;
-    Cow::Owned(effective)
 }
 
 /// A custom policy factory cannot infer whether an untyped legacy card is
@@ -3744,34 +3729,6 @@ request_classifier:
 
         card.worker_type = Some(WorkerType::Decode);
         assert!(should_validate_parser_version(&card));
-    }
-
-    #[test]
-    fn worker_router_config_preserves_frontend_policy_selections() {
-        let mut frontend = RouterConfig::default();
-        frontend.kv_router_config.router_prefill_policy = Some("frontend-prefill".to_string());
-        frontend.kv_router_config.router_decode_policy = Some("frontend-decode".to_string());
-
-        let mut worker = RouterConfig::default();
-        worker.kv_router_config.router_temperature = 0.75;
-        worker.kv_router_config.router_policy_config = Some("worker-policy.yaml".to_string());
-
-        let effective = effective_router_config(Some(&worker), &frontend);
-        assert_eq!(effective.kv_router_config.router_temperature, 0.75);
-        assert_eq!(
-            effective.kv_router_config.router_policy_config.as_deref(),
-            Some("worker-policy.yaml")
-        );
-        assert_eq!(
-            effective.kv_router_config.router_prefill_policy.as_deref(),
-            Some("frontend-prefill")
-        );
-        assert_eq!(
-            effective.kv_router_config.router_decode_policy.as_deref(),
-            Some("frontend-decode")
-        );
-        assert!(worker.kv_router_config.router_prefill_policy.is_none());
-        assert!(worker.kv_router_config.router_decode_policy.is_none());
     }
 
     #[tokio::test]
