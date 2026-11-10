@@ -62,7 +62,8 @@ from aisimulate.output_adapter import (
     OUTPUT_ADAPTER_API_VERSION,
     RecommendationOutputCallbacks,
 )
-from aisimulate.sweeper.config import Candidate as AISCandidate, OptimizationTarget, SmartSearchConfig
+from aisimulate.sweeper.config import Candidate as AISCandidate
+from aisimulate.sweeper.config import OptimizationTarget, SmartSearchConfig
 from aisimulate.sweeper.result import SweepResult
 from aisimulate.sweeper.score import pareto_front as ais_pareto_front
 from aisimulate_core.sdk.perf_database import load_system_spec

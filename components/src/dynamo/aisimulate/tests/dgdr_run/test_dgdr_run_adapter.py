@@ -1144,7 +1144,8 @@ def test_pareto_live_front_size_exceeds_max_candidates(
     pareto_front() to derive the 3-point true front.  With maxCandidates=1, the snapshot
     must report paretoFront=3 and publish exactly 1 candidate.
     """
-    from aisimulate.sweeper.config import Candidate as AISCandidate, OptimizationTarget
+    from aisimulate.sweeper.config import Candidate as AISCandidate
+    from aisimulate.sweeper.config import OptimizationTarget
 
     # f0, f1, f2 are mutually non-dominated (trade off tpg vs tpu).
     # f3 is dominated by f0 on both objectives and must be excluded from the front.
@@ -1197,7 +1198,8 @@ def test_pareto_on_round_replaces_dominated_points_with_true_front(
     With pareto_objectives, the adapter calls ais_pareto_front([A,B,C], objectives) and
     correctly identifies {A, C}.
     """
-    from aisimulate.sweeper.config import Candidate as AISCandidate, OptimizationTarget
+    from aisimulate.sweeper.config import Candidate as AISCandidate
+    from aisimulate.sweeper.config import OptimizationTarget
 
     def ais_point(tag: str, tpg: float, tpu: float) -> AISCandidate:
         return AISCandidate(
@@ -1438,7 +1440,7 @@ def test_subscribe_with_pareto_objectives_in_config_enables_live_selection(
     extract objectives from the workload (which is a bare Workload, not a SmartSearchConfig),
     always failing silently and leaving pareto_objectives=None.
     """
-    from aisimulate.sweeper.config import Candidate as AISCandidate, OptimizationTarget
+    from aisimulate.sweeper.config import Candidate as AISCandidate
 
     plugin = create_adapter()
     config = {
