@@ -1505,8 +1505,7 @@ class VllmProcessor:
                         choice = post.process_output(output)
                         if include_completion_ids:
                             # vLLM's OutputProcessor already drops IDs after a
-                            # local stop string and keeps a hidden EOS, so its
-                            # delta needs no stop-boundary trimming here.
+                            # local stop and keeps hidden EOS; no trimming here.
                             completion_ids.extend(output.token_ids or [])
                         if output.index == output_idx:
                             if choice_top_logprobs is not None:
