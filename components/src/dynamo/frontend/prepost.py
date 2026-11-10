@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import weakref
@@ -56,6 +57,8 @@ else:
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
+
+logger = logging.getLogger(__name__)
 
 
 class _Renderer(Protocol):
@@ -574,6 +577,76 @@ def _prompt_leaves_reasoning_open(
     return tail.rstrip().endswith(start)
 
 
+def _response_format_after_reasoning(
+    guided_decoding: dict[str, Any],
+    prompt_token_ids: Sequence[int],
+    *,
+    tokenizer: TokenizerLike,
+    reasoning_parser_class: type[ReasoningParser] | None,
+    chat_template_kwargs: dict[str, Any],
+    model_config: ModelConfig | None,
+) -> dict[str, Any] | None:
+    """A ``response_format`` JSON constraint that starts after the reasoning block.
+
+    vLLM holds a grammar back until reasoning ends only when its engine has a
+    reasoning parser. With the parser configured on the frontend only (the
+    vLLM chat processor), a prompt that opens reasoning gets the JSON grammar
+    from the first token: the model writes the JSON inside the reasoning block
+    and ``content`` comes back empty. Accept free text up to the parser's end
+    marker, then the JSON, as vLLM's own tool-call structural tags do with
+    ``reasoning=True``. Returns None when the constraint should stay as is.
+    """
+    schema = guided_decoding.get("json")
+    if schema is None or set(guided_decoding) != {"json"}:
+        return None
+    # Same gate as the parser that will read the output: without it, the
+    # reasoning block would be returned as content.
+    if not prompt_token_ids or not _reasoning_parser_enabled(
+        reasoning_parser_class, chat_template_kwargs
+    ):
+        return None
+    parser = reasoning_parser_class(
+        tokenizer,
+        chat_template_kwargs=chat_template_kwargs,
+        model_config=model_config,
+    )
+    start = getattr(parser, "reasoning_start_str", None)
+    if not isinstance(start, str) or not start:
+        return None
+    tail = tokenizer.decode(
+        list(prompt_token_ids[-_REASONING_START_TAIL_TOKENS:]),
+        skip_special_tokens=False,
+    )
+    if not tail.rstrip().endswith(start):
+        return None
+    end = getattr(parser, "reasoning_end_str", None)
+    if not isinstance(end, str) or not end:
+        logger.warning(
+            "reasoning parser %s has no reasoning end marker: response_format is "
+            "constrained from the first token, inside the reasoning block. Give "
+            "the worker's engine the same reasoning parser (--reasoning-parser).",
+            reasoning_parser_class.__name__,
+        )
+        return None
+    return {
+        "structural_tag": {
+            "type": "structural_tag",
+            "format": {
+                "type": "sequence",
+                "elements": [
+                    {
+                        "type": "tag",
+                        "begin": "",
+                        "content": {"type": "any_text"},
+                        "end": end,
+                    },
+                    {"type": "json_schema", "json_schema": schema},
+                ],
+            },
+        }
+    }
+
+
 def _prepare_request(
     request: dict[str, Any] | ChatCompletionRequest,
     *,
@@ -923,6 +996,25 @@ async def preprocess_chat_request(
         guided_decoding = adjusted_structured_guidance
     elif assistant_guided_decoding is not None and not is_forced_tool_choice:
         guided_decoding = assistant_guided_decoding
+        # A JSON response_format applies to the answer. When the engine will not
+        # hold it back until reasoning ends, start it after the reasoning block.
+        response_format_type = getattr(validated_request.response_format, "type", None)
+        if (
+            not structural_tag_excludes_reasoning
+            and not has_explicit_output_constraint
+            and response_format_type in ("json_object", "json_schema")
+        ):
+            guided_decoding = (
+                _response_format_after_reasoning(
+                    guided_decoding,
+                    tokens,
+                    tokenizer=tokenizer,
+                    reasoning_parser_class=reasoning_parser_class,
+                    chat_template_kwargs=chat_template_kwargs,
+                    model_config=model_config,
+                )
+                or guided_decoding
+            )
     else:
         guided_decoding = tool_guided_decoding
     # build_tool_call_guided_decoding falls back to Dynamo's generic JSON schema

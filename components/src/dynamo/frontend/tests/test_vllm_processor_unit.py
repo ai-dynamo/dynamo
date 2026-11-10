@@ -5626,3 +5626,205 @@ def test_prepare_request_preserves_responses_native_tools(native, choice, exclud
     )
     assert selected_template == (default if excluded else template)
     assert request["tools"][0]["function"]["name"] == "read"
+
+
+def _prompt_reasoning_parser_with_end(
+    start: str | None = "<think>", end: str | None = "</think>"
+):
+    class PromptReasoningParser(_prompt_reasoning_parser(start)):
+        reasoning_end_str = end
+
+    return PromptReasoningParser
+
+
+_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {"city": {"type": "string"}},
+    "required": ["city"],
+}
+
+
+class TestResponseFormatReasoningStart:
+    """A JSON response_format applies to the answer, after the reasoning block.
+
+    With the reasoning parser on the frontend only, the worker engine has no
+    reasoner and applies a grammar from the first token. A prompt that opens
+    reasoning then forces the model to write the JSON inside the reasoning
+    block (content null). The frontend must start the JSON after the parser's
+    end marker unless the engine already holds the grammar back.
+    """
+
+    @staticmethod
+    async def _guided(
+        tokenizer,
+        *,
+        prompt_text,
+        reasoning_parser_class,
+        structural_tag_excludes_reasoning=False,
+        response_format=None,
+        extra=None,
+    ):
+        request = {
+            "model": MODEL,
+            "messages": [{"role": "user", "content": "Weather city as JSON"}],
+            "response_format": response_format or {"type": "json_object"},
+            **(extra or {}),
+        }
+        result = await prepost_module.preprocess_chat_request(
+            request,
+            tokenizer=tokenizer,
+            renderer=SimpleNamespace(
+                render_messages_async=AsyncMock(
+                    return_value=(
+                        None,
+                        {
+                            "prompt_token_ids": tokenizer.encode(
+                                prompt_text, add_special_tokens=False
+                            )
+                        },
+                    )
+                )
+            ),
+            tool_parser_class=None,
+            reasoning_parser_class=reasoning_parser_class,
+            structural_tag_excludes_reasoning=structural_tag_excludes_reasoning,
+        )
+        return result.guided_decoding
+
+    @staticmethod
+    def _after_reasoning(schema, end="</think>"):
+        return {
+            "structural_tag": {
+                "type": "structural_tag",
+                "format": {
+                    "type": "sequence",
+                    "elements": [
+                        {
+                            "type": "tag",
+                            "begin": "",
+                            "content": {"type": "any_text"},
+                            "end": end,
+                        },
+                        {"type": "json_schema", "json_schema": schema},
+                    ],
+                },
+            }
+        }
+
+    @pytest.mark.parametrize(
+        ("prompt_text", "parser", "excludes_reasoning", "wrapped"),
+        [
+            # The template opened reasoning and the engine has no reasoner.
+            (
+                "<|im_start|>assistant\n<think>",
+                _prompt_reasoning_parser_with_end(),
+                False,
+                True,
+            ),
+            (
+                "<|im_start|>assistant\n<think>\n",
+                _prompt_reasoning_parser_with_end(),
+                False,
+                True,
+            ),
+            # The worker engine already holds the grammar until reasoning ends.
+            (
+                "<|im_start|>assistant\n<think>",
+                _prompt_reasoning_parser_with_end(),
+                True,
+                False,
+            ),
+            # Thinking off: the template already closed reasoning.
+            (
+                "<|im_start|>assistant\n<think>\n\n</think>\n\n",
+                _prompt_reasoning_parser_with_end(),
+                False,
+                False,
+            ),
+            # No reasoning marker in the prompt: the model emits its own opener.
+            (
+                "<|im_start|>assistant\n",
+                _prompt_reasoning_parser_with_end(),
+                False,
+                False,
+            ),
+            # A parser without an end marker cannot bound the reasoning block.
+            (
+                "<|im_start|>assistant\n<think>",
+                _prompt_reasoning_parser_with_end(end=None),
+                False,
+                False,
+            ),
+            # No reasoning parser at all.
+            ("<|im_start|>assistant\n<think>", None, False, False),
+        ],
+        ids=[
+            "prompt-opened",
+            "prompt-opened-trailing-newline",
+            "engine-gated",
+            "prompt-closed",
+            "marker-free-prompt",
+            "parser-without-end",
+            "no-reasoning-parser",
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_json_object(
+        self, tokenizer, prompt_text, parser, excludes_reasoning, wrapped
+    ):
+        guided = await self._guided(
+            tokenizer,
+            prompt_text=prompt_text,
+            reasoning_parser_class=parser,
+            structural_tag_excludes_reasoning=excludes_reasoning,
+        )
+        plain = {"json": {"type": "object"}}
+        assert guided == (self._after_reasoning(plain["json"]) if wrapped else plain)
+
+    @pytest.mark.asyncio
+    async def test_json_schema_keeps_the_schema(self, tokenizer):
+        guided = await self._guided(
+            tokenizer,
+            prompt_text="<|im_start|>assistant\n<think>",
+            reasoning_parser_class=_prompt_reasoning_parser_with_end(),
+            response_format={
+                "type": "json_schema",
+                "json_schema": {"name": "city", "schema": _JSON_SCHEMA},
+            },
+        )
+        assert guided == self._after_reasoning(_JSON_SCHEMA)
+
+    @pytest.mark.asyncio
+    async def test_parser_end_marker_is_used(self, tokenizer):
+        guided = await self._guided(
+            tokenizer,
+            prompt_text="<|im_start|>assistant\n<think>",
+            reasoning_parser_class=_prompt_reasoning_parser_with_end(
+                end="<|end_of_thought|>"
+            ),
+        )
+        assert guided == self._after_reasoning(
+            {"type": "object"}, end="<|end_of_thought|>"
+        )
+
+    @pytest.mark.asyncio
+    async def test_thinking_disabled_by_request_is_not_wrapped(self, tokenizer):
+        guided = await self._guided(
+            tokenizer,
+            prompt_text="<|im_start|>assistant\n<think>",
+            reasoning_parser_class=_prompt_reasoning_parser_with_end(),
+            extra={"chat_template_kwargs": {"enable_thinking": False}},
+        )
+        assert guided == {"json": {"type": "object"}}
+
+    @pytest.mark.asyncio
+    async def test_explicit_guided_json_is_not_wrapped(self, tokenizer):
+        # guided_json / structured_outputs constrain the whole token stream.
+        guided = await self._guided(
+            tokenizer,
+            prompt_text="<|im_start|>assistant\n<think>",
+            reasoning_parser_class=_prompt_reasoning_parser_with_end(),
+            response_format={"type": "text"},
+            extra={"structured_outputs": {"json": _JSON_SCHEMA}},
+        )
+        assert guided == {"json": _JSON_SCHEMA}
