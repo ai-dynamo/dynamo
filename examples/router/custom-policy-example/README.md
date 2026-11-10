@@ -245,7 +245,19 @@ dynamo_custom_policy_example_catalog::register(&mut registry)?;
 run(Some(registry)).await
 ```
 
-Run the binary in standalone mode:
+In Runtime mode (`DYN_EPP_MODE=dynamo`, the default), the runner adds Dynamo's shipped named providers (`dynamo-default-cost-fn` and the other types from `dynamo_router_policies::register`) to that registry, then installs the full catalog once into the process registry that ModelManager uses for typed Prefill and Decode selection. Custom worker-selection providers you already registered are preserved. Do not pre-register Dynamo's shipped type names in the registry passed to `run`; that is a startup error rather than a silent override. Stock `run(None)` still gets the shipped named providers through the same path. Standalone mode keeps the supplied registry on the selector path and does not use the process-wide installer.
+
+A configured `request_classifier` is rejected at Runtime EPP startup until classifier lifecycle support lands. Registering a classifier provider remains allowed; selecting one in policy YAML is not.
+
+Run the binary against Dynamo-runtime workers:
+
+```bash
+DYN_ROUTER_POLICY_CONFIG=/path/to/worker-selection.yaml \
+DYN_ROUTER_WORKER_SELECTION_POLICY=simple-filter-score-pick \
+  cargo run --release -p dynamo-custom-policy-example-epp
+```
+
+Or in standalone mode:
 
 ```bash
 DYN_EPP_MODE=standalone \
@@ -254,7 +266,7 @@ DYN_ROUTER_WORKER_SELECTION_POLICY=simple-filter-score-pick \
   cargo run --release -p dynamo-custom-policy-example-epp
 ```
 
-Standalone EPP supplies `WorkerType::Aggregated` because it selects from one full-request worker pool. `disagg-filter-score-pick` intentionally rejects that role and is only usable with disaggregated frontend pools. The Rust EPP's Dynamo-runtime mode has native prefill/decode routing, but linked custom policy catalogs are not supported in that mode.
+Standalone EPP supplies `WorkerType::Aggregated` because it selects from one full-request worker pool. `disagg-filter-score-pick` intentionally rejects that role and is only usable with disaggregated Prefill/Decode pools (the Python frontend or Runtime EPP). Runtime mode resolves the matching YAML role selections through the installed catalog.
 
 Follow the [standalone EPP guide](../../../docs/fern/pages/kubernetes/kv-aware-routing/vanilla-vllm-onramp.mdx) for discovery, KV events, tokenization, and Kubernetes resources.
 

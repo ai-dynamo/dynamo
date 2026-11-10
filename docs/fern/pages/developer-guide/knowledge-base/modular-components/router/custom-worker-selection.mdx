@@ -586,15 +586,17 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
-Run the custom binary in standalone mode:
+In Runtime mode (`DYN_EPP_MODE=dynamo`, the default), the runner registers Dynamo's shipped named providers onto that registry, then installs the full catalog once into the process registry used by ModelManager for Prefill and Decode. Custom providers already in the registry are preserved. Do not pre-register Dynamo's shipped type names; a duplicate fails startup. Stock `run(None)` receives the same shipped named providers. Policies remain build-time linked; there is no dynamic plugin loading. A selected `request_classifier` is rejected at Runtime EPP startup until classifier lifecycle support lands.
+
+Run the custom binary against Dynamo-runtime workers, or set `DYN_EPP_MODE=standalone` for the selector-only path:
 
 ```bash
 # Run the linked EPP from its crate directory.
 cd "$POLICY_DIR/epp"
-DYN_EPP_MODE=standalone DYN_ROUTER_POLICY_CONFIG="$POLICY_DIR/worker-selection.yaml" cargo run --release
+DYN_ROUTER_POLICY_CONFIG="$POLICY_DIR/worker-selection.yaml" cargo run --release
 ```
 
-Standalone EPP supplies `WorkerType::Aggregated` because it selects from one full-request worker pool. It resolves only `worker_selection.aggregated` and logs a startup warning when it ignores a prefill, decode, or encode selection. Its catalog does not need policy types referenced only by those ignored selections.
+Standalone EPP keeps the supplied registry on the selector path and does not use the process-wide installer. It supplies `WorkerType::Aggregated` because it selects from one full-request worker pool, resolves only `worker_selection.aggregated`, and logs a startup warning when it ignores a prefill, decode, or encode selection. Its catalog does not need policy types referenced only by those ignored selections. Runtime mode resolves the matching YAML role selections through the installed catalog.
 
 </Tab>
 </Tabs>

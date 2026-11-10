@@ -16,7 +16,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use dashmap::DashMap;
-use dynamo_kv_router::config::{RouterConfigOverride, try_kv_router_config_from_dynamo_env};
+use dynamo_kv_router::config::{
+    KvRouterConfig, RouterConfigOverride, try_kv_router_config_from_dynamo_env,
+};
 use dynamo_kv_router::protocols::{RoutingConstraints, WorkerWithDpRank};
 use dynamo_llm::discovery::{ModelManager, WORKER_TYPE_DECODE};
 use dynamo_llm::kv_router::prefill_router::PrefillReservation;
@@ -216,6 +218,22 @@ fn decode_router_config_override(is_disaggregated: bool) -> Option<RouterConfigO
     })
 }
 
+/// Runtime EPP preserves classifier providers in the process catalog but does not
+/// run them yet. Reject a selected classifier so configuration cannot silently
+/// no-op.
+fn ensure_runtime_request_classifier_unsupported(config: &KvRouterConfig) -> Result<()> {
+    if config
+        .request_classifier_config()
+        .map_err(anyhow::Error::msg)?
+        .is_some()
+    {
+        anyhow::bail!(
+            "request_classifier is configured, but Runtime EPP does not execute request classifiers yet"
+        );
+    }
+    Ok(())
+}
+
 /// Resolve a typed request's body inputs together with the HTTP headers.
 fn cache_namespace_from_request<R: NvExtProvider>(
     request: &R,
@@ -292,6 +310,7 @@ impl Router {
         // generation-suffixed worker namespace changes during a rolling update.
         let mut kv_router_config =
             try_kv_router_config_from_dynamo_env().map_err(anyhow::Error::msg)?;
+        ensure_runtime_request_classifier_unsupported(&kv_router_config)?;
         // TODO(epp-multi-replica): Provide authoritative admission across EPP
         // replicas; replica-sync alone does not close the selection-to-booking race.
         kv_router_config.skip_initial_worker_wait = true;
@@ -1921,6 +1940,24 @@ mod tests {
 
     use super::*;
     use k8s_openapi::api::core::v1::Pod;
+
+    #[test]
+    fn configured_request_classifier_is_rejected_for_runtime_epp() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), "request_classifier: {type: pass-through}\n").unwrap();
+        let config = KvRouterConfig {
+            router_policy_config: Some(file.path().display().to_string()),
+            ..Default::default()
+        };
+        let error = ensure_runtime_request_classifier_unsupported(&config).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Runtime EPP does not execute request classifiers yet"),
+            "{error}"
+        );
+        ensure_runtime_request_classifier_unsupported(&KvRouterConfig::default()).unwrap();
+    }
 
     #[test]
     fn global_namespace_discovery_does_not_restrict_worker_pod_labels() {
