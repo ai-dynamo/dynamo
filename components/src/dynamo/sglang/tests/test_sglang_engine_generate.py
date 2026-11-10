@@ -21,6 +21,7 @@ pytestmark = [
 
 
 def _engine(responses):
+    """Provide a tokenizer manager that returns the retained response iterator."""
     return SimpleNamespace(
         tokenizer_manager=SimpleNamespace(
             generate_request=lambda request, http: responses
@@ -29,9 +30,11 @@ def _engine(responses):
 
 
 async def test_early_close_awaits_inner_cleanup():
+    """Closing the outer generator must finish cleanup before returning."""
     closed = False
 
     async def responses():
+        """Keep a suspended generator whose cleanup can be observed."""
         nonlocal closed
         try:
             yield {"output_ids": [1]}
@@ -47,9 +50,11 @@ async def test_early_close_awaits_inner_cleanup():
 
 
 async def test_normal_completion_preserves_responses():
+    """Iterator ownership must not change response envelopes or token IDs."""
     payloads = [{"output_ids": [1]}, {"output_ids": [], "meta_info": {"done": True}}]
 
     async def responses():
+        """Yield native response payloads without modifying them."""
         for payload in payloads:
             yield payload
 
@@ -61,10 +66,12 @@ async def test_normal_completion_preserves_responses():
 
 
 async def test_task_cancellation_closes_inner_iterator():
+    """Cancelling a pending read must await the inner generator's cleanup."""
     entered = asyncio.Event()
     closed = False
 
     async def responses():
+        """Signal entry before blocking so cancellation needs no sleep."""
         nonlocal closed
         try:
             entered.set()
@@ -87,16 +94,21 @@ async def test_task_cancellation_closes_inner_iterator():
 
 @pytest.mark.parametrize("early_close", [False, True])
 async def test_cleanup_failure_is_reported(early_close):
+    """Surface cleanup-only failures on exhaustion and explicit outer close."""
+
     class Responses:
         def __aiter__(self):
+            """Return the owned iterator."""
             return self
 
         async def __anext__(self):
+            """Yield a chunk for early close, or complete immediately."""
             if early_close:
                 return {"output_ids": [1]}
             raise StopAsyncIteration
 
         async def aclose(self):
+            """Fail cleanup independently of iteration."""
             raise RuntimeError("cleanup failed")
 
     outer = native_generate_stream(_engine(Responses()), None)
@@ -112,16 +124,21 @@ async def test_cleanup_failure_is_reported(early_close):
     "failure", [ValueError("engine failed"), asyncio.CancelledError()]
 )
 async def test_cleanup_failure_does_not_replace_primary_error(failure, caplog):
+    """Keep the original failure and log a secondary cleanup failure."""
+
     class Responses:
         closed = False
 
         def __aiter__(self):
+            """Return the owned iterator."""
             return self
 
         async def __anext__(self):
+            """Raise the original engine error or cancellation."""
             raise failure
 
         async def aclose(self):
+            """Record attempted cleanup before raising a secondary failure."""
             self.closed = True
             raise RuntimeError("cleanup failed")
 
