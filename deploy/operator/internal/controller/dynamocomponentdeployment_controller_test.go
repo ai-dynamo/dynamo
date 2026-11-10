@@ -807,7 +807,7 @@ func TestDynamoComponentDeploymentReconciler_LWSNameDoesNotCollideWithComponentS
 	require.NoError(t, err)
 	require.False(t, toDelete)
 
-	lws, toDelete, err := r.generateLeaderWorkerSet(context.Background(), generateResourceOption{dynamoComponentDeployment: dcd})
+	lws, toDelete, err := r.generateLeaderWorkerSet(context.Background(), generateResourceOption{dynamoComponentDeployment: dcd}, leaderWorkerSetName(dcd))
 	require.NoError(t, err)
 	require.False(t, toDelete)
 
@@ -895,10 +895,10 @@ func TestDynamoComponentDeploymentReconciler_LeaderWorkerSetNameFitsStatefulSetR
 			dcd := multinodeLWSTestDCD(t, tt.dcdName)
 			r := multinodeLWSTestReconciler(dcd)
 
-			lws, toDelete, err := r.generateLeaderWorkerSet(context.Background(), generateResourceOption{dynamoComponentDeployment: dcd})
+			lws, toDelete, err := r.generateLeaderWorkerSet(context.Background(), generateResourceOption{dynamoComponentDeployment: dcd}, leaderWorkerSetName(dcd))
 			require.NoError(t, err)
 			require.False(t, toDelete)
-			again, _, err := r.generateLeaderWorkerSet(context.Background(), generateResourceOption{dynamoComponentDeployment: dcd})
+			again, _, err := r.generateLeaderWorkerSet(context.Background(), generateResourceOption{dynamoComponentDeployment: dcd}, leaderWorkerSetName(dcd))
 			require.NoError(t, err)
 			require.Equal(t, lws.Name, again.Name, "LWS name must be deterministic")
 			require.NotEqual(t, tt.dcdName, lws.Name, "LWS name must not collide with the component Service name")
@@ -940,6 +940,7 @@ func Test_reconcileLeaderWorkerSetResources_DeletesOversizedLegacyLeaderWorkerSe
 		readyReplicas      int32
 		ownedByDCD         bool
 		failReplacementLWS bool
+		replacementExists  bool
 		wantLegacyGone     bool
 		legacyBecomesReady bool
 		foreignReplacement bool
@@ -947,12 +948,12 @@ func Test_reconcileLeaderWorkerSetResources_DeletesOversizedLegacyLeaderWorkerSe
 		{name: "legacy LWS controlled by the DCD is deleted", ownedByDCD: true, wantLegacyGone: true},
 		{name: "legacy LWS controlled by another object is kept", ownedByDCD: false, wantLegacyGone: false},
 		{name: "legacy LWS is kept when the replacement fails to sync", ownedByDCD: true, failReplacementLWS: true, wantLegacyGone: false},
-		{name: "serving 51-character legacy LWS is kept", dcdName: strings.Repeat("a", 49), readyReplicas: 1, ownedByDCD: true},
-		{name: "serving 52-character legacy LWS is kept", dcdName: strings.Repeat("a", 50), readyReplicas: 1, ownedByDCD: true},
-		{name: "partly serving legacy LWS is kept", readyReplicas: 1, ownedByDCD: true},
-		{name: "old 50-character name is kept even while unready", dcdName: strings.Repeat("a", 48), ownedByDCD: true},
+		{name: "serving 51-character legacy LWS is kept", dcdName: strings.Repeat("a", 49), readyReplicas: 1, ownedByDCD: true, replacementExists: true},
+		{name: "serving 52-character legacy LWS is kept", dcdName: strings.Repeat("a", 50), readyReplicas: 1, ownedByDCD: true, replacementExists: true},
+		{name: "partly serving legacy LWS is kept", readyReplicas: 1, ownedByDCD: true, replacementExists: true},
+		{name: "old 50-character name is kept even while unready", dcdName: strings.Repeat("a", 48), ownedByDCD: true, replacementExists: true},
 		{name: "legacy becomes ready while replacement is created", dcdName: strings.Repeat("a", 49), ownedByDCD: true, legacyBecomesReady: true},
-		{name: "serving legacy keeps another component's replacement", readyReplicas: 1, ownedByDCD: true, foreignReplacement: true},
+		{name: "serving legacy keeps another component's replacement", readyReplicas: 1, ownedByDCD: true, replacementExists: true, foreignReplacement: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -989,7 +990,7 @@ func Test_reconcileLeaderWorkerSetResources_DeletesOversizedLegacyLeaderWorkerSe
 				}
 			}
 			r := multinodeLWSTestReconciler(dcd, legacy)
-			if tt.ownedByDCD && !tt.wantLegacyGone && !tt.failReplacementLWS && !tt.legacyBecomesReady {
+			if tt.replacementExists {
 				r = multinodeLWSTestReconciler(dcd, legacy, replacement)
 			}
 			if tt.failReplacementLWS || tt.legacyBecomesReady {
@@ -1047,9 +1048,9 @@ func Test_reconcileLeaderWorkerSetResources_DeletesOversizedLegacyLeaderWorkerSe
 				require.Equal(t, []string{legacyName}, result.serviceReplicaStatus.ComponentNames)
 				t.Log("Scale past group index 9 without renaming the existing legacy LWS")
 				dcd.Spec.Replicas = new(int32(11))
-				again, _, err := r.generateLeaderWorkerSet(ctx, generateResourceOption{dynamoComponentDeployment: dcd})
+				again, err := r.reconcileLeaderWorkerSetResources(ctx, dcd)
 				require.NoError(t, err)
-				require.Equal(t, legacyName, again.Name)
+				require.Equal(t, []string{legacyName}, again.serviceReplicaStatus.ComponentNames)
 			}
 			err = r.Get(ctx, types.NamespacedName{Name: legacyName, Namespace: "default"}, &leaderworkersetv1.LeaderWorkerSet{})
 			if tt.wantLegacyGone {
@@ -1869,7 +1870,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 				DockerSecretRetriever: tt.fields.DockerSecretRetriever,
 				// Scheme: s, // Pass scheme if reconciler uses it directly, often client uses it
 			}
-			got, got1, err := r.generateLeaderWorkerSet(tt.args.ctx, tt.args.opt)
+			got, got1, err := r.generateLeaderWorkerSet(tt.args.ctx, tt.args.opt, leaderWorkerSetName(tt.args.opt.dynamoComponentDeployment))
 			if (err != nil) != tt.wantErr {
 				t.Errorf("DynamoComponentDeploymentReconciler.generateLeaderWorkerSet() error = %v, wantErr %v", err, tt.wantErr)
 				return

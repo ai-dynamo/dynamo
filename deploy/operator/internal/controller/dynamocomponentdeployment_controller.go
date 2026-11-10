@@ -427,10 +427,25 @@ func (r *DynamoComponentDeploymentReconciler) reconcileDeploymentResources(ctx c
 // reconcileLeaderWorkerSetResources syncs the selected LWS and removes unused controlled
 // resources without deleting serving legacy groups before reporting workload status.
 func (r *DynamoComponentDeploymentReconciler) reconcileLeaderWorkerSetResources(ctx context.Context, dynamoComponentDeployment *nvidiacomv1beta1.DynamoComponentDeployment) (ComponentReconcileResult, error) {
+	// Reuse an existing supported or serving LWS so an operator upgrade does not restart it.
+	selectedName := leaderWorkerSetName(dynamoComponentDeployment)
+	legacy := &leaderworkersetv1.LeaderWorkerSet{}
+	legacyKey := types.NamespacedName{Name: legacyLeaderWorkerSetName(dynamoComponentDeployment.Name), Namespace: dynamoComponentDeployment.Namespace}
+	if legacyKey.Name != selectedName {
+		if err := r.Get(ctx, legacyKey, legacy); err == nil {
+			if metav1.IsControlledBy(legacy, dynamoComponentDeployment) && preserveLegacyLeaderWorkerSet(legacy) {
+				selectedName = legacy.Name
+			}
+		} else if !k8serrors.IsNotFound(err) {
+			return ComponentReconcileResult{}, fmt.Errorf("failed to sync the LeaderWorkerSet: get legacy LeaderWorkerSet: %w", err)
+		}
+	}
+
+	// Construct and sync the selected workload before cleaning up the unused name.
 	leaderWorkerSetModified, lwsObj, err := commonController.SyncResource(ctx, r, dynamoComponentDeployment, func(ctx context.Context) (*leaderworkersetv1.LeaderWorkerSet, bool, error) {
 		return r.generateLeaderWorkerSet(ctx, generateResourceOption{
 			dynamoComponentDeployment: dynamoComponentDeployment,
-		})
+		}, selectedName)
 	})
 	if err != nil {
 		return ComponentReconcileResult{}, fmt.Errorf("failed to sync the LeaderWorkerSet: %w", err)
@@ -624,28 +639,14 @@ func checkMainContainer(spec *corev1.PodSpec) error {
 }
 
 // generateLeaderWorkerSet creates a single LeaderWorkerSet resource from the DynamoComponentDeployment
-// with Spec.Replicas set to the desired replica count, allowing LWS to natively manage scaling.
-func (r *DynamoComponentDeploymentReconciler) generateLeaderWorkerSet(ctx context.Context, opt generateResourceOption) (*leaderworkersetv1.LeaderWorkerSet, bool, error) {
+// using the name selected by reconciliation and the desired replica count for native scaling.
+func (r *DynamoComponentDeploymentReconciler) generateLeaderWorkerSet(ctx context.Context, opt generateResourceOption, selectedName string) (*leaderworkersetv1.LeaderWorkerSet, bool, error) {
 	logs := log.FromContext(ctx)
 	logs.Info("Generating LeaderWorkerSet")
 
 	leaderPodTemplateSpec, workerPodTemplateSpec, err := r.workloadRenderer().renderMultinodePodTemplateSpecs(ctx, opt.dynamoComponentDeployment)
 	if err != nil {
 		return nil, false, errors.Wrap(err, "generateLeaderWorkerSet: failed to render multinode pod templates")
-	}
-
-	// Reuse an existing supported or serving LWS so an operator upgrade does not restart it.
-	kubeName := leaderWorkerSetName(opt.dynamoComponentDeployment)
-	legacy := &leaderworkersetv1.LeaderWorkerSet{}
-	legacyKey := types.NamespacedName{Name: legacyLeaderWorkerSetName(opt.dynamoComponentDeployment.Name), Namespace: opt.dynamoComponentDeployment.Namespace}
-	if legacyKey.Name != kubeName {
-		if err := r.Get(ctx, legacyKey, legacy); err == nil {
-			if metav1.IsControlledBy(legacy, opt.dynamoComponentDeployment) && preserveLegacyLeaderWorkerSet(legacy) {
-				kubeName = legacy.Name
-			}
-		} else if !k8serrors.IsNotFound(err) {
-			return nil, false, fmt.Errorf("get legacy LeaderWorkerSet: %w", err)
-		}
 	}
 
 	kubeNs := opt.dynamoComponentDeployment.Namespace
@@ -656,7 +657,7 @@ func (r *DynamoComponentDeploymentReconciler) generateLeaderWorkerSet(ctx contex
 	}
 
 	leaderWorkerSet := &leaderworkersetv1.LeaderWorkerSet{
-		Name:      kubeName,
+		Name:      selectedName,
 		Namespace: kubeNs,
 		Labels:    labels,
 	}
