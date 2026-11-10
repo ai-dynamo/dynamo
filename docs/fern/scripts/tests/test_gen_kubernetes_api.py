@@ -351,6 +351,22 @@ def test_render_mdx_carries_frontmatter_and_no_body_h1(
     )
 
 
+def test_render_mdx_labels_crd_version_lifecycles(
+    reference: kubernetes_api_discovery.KubernetesReference,
+) -> None:
+    """Version jump cards and package sections expose each CRD lifecycle."""
+    text = kubernetes_api_rendering.render_mdx(reference)
+    for version, lifecycle in (
+        ("nvidia.com/v1alpha1", "Deprecated"),
+        ("nvidia.com/v1beta1", "Current"),
+        ("nvidia.com/v1beta2", "Upcoming"),
+    ):
+        anchor = version.replace(".", "-").replace("/", "-")
+        assert f'href="#{anchor}">{lifecycle} · ' in text
+        section = text.split(f"## {version}", 1)[1]
+        assert f"**Lifecycle status:** {lifecycle}." in section
+
+
 def test_render_mdx_preserves_dedup_anchors_for_deep_links(
     reference: kubernetes_api_discovery.KubernetesReference,
 ) -> None:

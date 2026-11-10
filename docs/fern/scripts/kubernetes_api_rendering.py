@@ -51,6 +51,14 @@ SOURCE_PATH_MD = (
 )
 GENERATOR_PATH = "docs/fern/scripts/gen_kubernetes_api.py"
 
+# Keep lifecycle labels in the renderer so generated package cards and headings
+# stay consistent when the API reference is regenerated.
+_PACKAGE_LIFECYCLE = {
+    "nvidia.com/v1alpha1": "Deprecated",
+    "nvidia.com/v1beta1": "Current",
+    "nvidia.com/v1beta2": "Upcoming",
+}
+
 _FRONTMATTER = (
     "---\n"
     "# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION "
@@ -66,10 +74,11 @@ _WARNING = (
     "> [!WARNING]\n"
     "> **Auto-generated from source.** This page is regenerated from the "
     f"Dynamo operator CRDs by `{GENERATOR_PATH}` and covers "
-    "**every** type across all three API packages: the deprecated "
-    "`nvidia.com/v1alpha1` surface, the supported `nvidia.com/v1beta1` surface, "
-    "and the operator's own `operator.config.dynamo.nvidia.com/v1alpha1` "
-    "configuration. The trimmed "
+    "**every** type across all three Dynamo CRD API versions: the deprecated "
+    "`nvidia.com/v1alpha1` surface, the current `nvidia.com/v1beta1` surface, "
+    "and the upcoming `nvidia.com/v1beta2` surface. It also includes the "
+    "operator's own `operator.config.dynamo.nvidia.com/v1alpha1` configuration. "
+    "The trimmed "
     "[DGD](dynamo-graph-deployment.mdx), "
     "[DGDR](dynamo-graph-deployment-request.mdx), and "
     "[DCD](dynamo-component-deployment.mdx) references cover "
@@ -117,9 +126,13 @@ def _package_index(reference: KubernetesReference) -> str:
         "<CardGroup cols={3}>",
     ]
     for pkg in reference.packages:
+        lifecycle = _PACKAGE_LIFECYCLE.get(pkg.name)
+        type_count = f"{len(pkg.types)} types"
+        if lifecycle:
+            type_count = f"{lifecycle} · {type_count}"
         lines.append(
             f'<Card title="{_attr(pkg.name)}" href="#{pkg.anchor}">'
-            f"{len(pkg.types)} types</Card>"
+            f"{type_count}</Card>"
         )
     lines.append("</CardGroup>")
     return "\n".join(lines)
@@ -130,6 +143,9 @@ def _package_section(package: KubernetesPackage, valid_anchors: set[str]) -> str
     # A bare <div> target, not an <a>: package tables link to #anchor, but an
     # <a> with no text is an empty link to assistive tech.
     lines = [f'<div id="{_attr(package.anchor)}" />', "", f"## {package.name}"]
+    lifecycle = _PACKAGE_LIFECYCLE.get(package.name)
+    if lifecycle:
+        lines += ["", f"**Lifecycle status:** {lifecycle}."]
     if package.description:
         lines += ["", _prose(package.description)]
     if package.resource_types:
