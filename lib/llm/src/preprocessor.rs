@@ -12214,7 +12214,7 @@ responses_tools: None,
         ) {
             return;
         }
-        for (tool, reasoning) in [("hermes", None), ("qwen3_coder", Some("hermes"))] {
+        for (tool, reasoning) in [("llama3_json", None), ("qwen3_coder", Some("deepseek_r1"))] {
             let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
             let mut card = ModelDeploymentCard::load_from_disk(model_path, None).unwrap();
@@ -13067,15 +13067,17 @@ responses_tools: None,
     }
 
     const HARMONY_CALL_TOKEN_ID: TokenIdType = 42;
+    const HARMONY_RETURN_TOKEN_ID: TokenIdType = 43;
 
     struct HiddenStopTokenizer;
 
     impl crate::tokenizers::traits::Encoder for HiddenStopTokenizer {
         fn encode(&self, input: &str) -> anyhow::Result<Encoding> {
-            if input != "<|call|>" {
-                anyhow::bail!("unexpected Harmony tool-call end token {input:?}");
+            match input {
+                "<|call|>" => Ok(Encoding::Sp(vec![HARMONY_CALL_TOKEN_ID])),
+                "<|return|>" => Ok(Encoding::Sp(vec![HARMONY_RETURN_TOKEN_ID])),
+                _ => anyhow::bail!("unexpected Harmony tool-call end token {input:?}"),
             }
-            Ok(Encoding::Sp(vec![HARMONY_CALL_TOKEN_ID]))
         }
 
         fn encode_batch(&self, inputs: &[&str]) -> anyhow::Result<Vec<Encoding>> {
@@ -13135,19 +13137,25 @@ responses_tools: None,
         assert!(none.inner.tools.is_none());
 
         let preprocessor = hidden_stop_preprocessor();
-        let mut dynamic_hidden = vec![HARMONY_CALL_TOKEN_ID, 7];
+        let mut dynamic_hidden = vec![HARMONY_CALL_TOKEN_ID, HARMONY_RETURN_TOKEN_ID, 7];
         let dynamic_visible = preprocessor
             .remove_tool_parser_end_tokens_from_hidden_stops(&dynamic, &mut dynamic_hidden)
             .unwrap();
-        assert_eq!(dynamic_visible, [HARMONY_CALL_TOKEN_ID]);
+        assert_eq!(
+            dynamic_visible,
+            [HARMONY_CALL_TOKEN_ID, HARMONY_RETURN_TOKEN_ID]
+        );
         assert_eq!(dynamic_hidden, [7]);
 
-        let mut none_hidden = vec![HARMONY_CALL_TOKEN_ID, 7];
+        let mut none_hidden = vec![HARMONY_CALL_TOKEN_ID, HARMONY_RETURN_TOKEN_ID, 7];
         let none_visible = preprocessor
             .remove_tool_parser_end_tokens_from_hidden_stops(&none, &mut none_hidden)
             .unwrap();
         assert!(none_visible.is_empty());
-        assert_eq!(none_hidden, [HARMONY_CALL_TOKEN_ID, 7]);
+        assert_eq!(
+            none_hidden,
+            [HARMONY_CALL_TOKEN_ID, HARMONY_RETURN_TOKEN_ID, 7]
+        );
     }
 
     async fn apply_kimi_k3_no_tools(
@@ -14480,7 +14488,18 @@ responses_tools: None,
                 true,
                 "gemma4 paired → required",
             ),
-            (Some("hermes"), None, false, "hermes → not required"),
+            (
+                Some("hermes"),
+                None,
+                true,
+                "hermes → required (unified Hermes grammar preserves special tokens)",
+            ),
+            (
+                Some("llama3_json"),
+                None,
+                false,
+                "llama3_json (legacy JSON parser) → not required",
+            ),
             (
                 Some("harmony"),
                 None,
@@ -16216,7 +16235,8 @@ responses_tools: None,
             None,
         )
         .unwrap();
-        mdc.runtime_config.tool_call_parser = Some("hermes".to_string());
+        // llama3_json has no unified family, so it still takes the legacy jail.
+        mdc.runtime_config.tool_call_parser = Some("llama3_json".to_string());
         let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
         let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
             "model": "test-model",
