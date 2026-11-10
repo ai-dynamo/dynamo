@@ -518,68 +518,84 @@ impl PreprocessedRouting {
 mod tests {
     use super::*;
 
-    #[test]
-    fn invalid_runtime_lora_configuration_fails_before_waiting_for_workers() {
-        temp_env::with_vars(
-            [
-                ("DYN_LORA_ENABLED", Some("false")),
-                ("DYN_LORA_RUNTIME_LOAD_ENABLED", Some("true")),
-                ("DYN_ROUTER_MIN_INITIAL_WORKERS", Some("1")),
-            ],
-            || {
-                tokio::runtime::Runtime::new().unwrap().block_on(async {
-                    let runtime = dynamo_runtime::Runtime::from_current().unwrap();
-                    let distributed = DistributedRuntime::new(
-                        runtime.clone(),
-                        dynamo_runtime::distributed::DistributedConfig::process_local(),
-                    )
-                    .await
-                    .unwrap();
-                    let client = distributed
-                        .namespace("invalid-runtime-lora".to_string())
-                        .unwrap()
-                        .component("workers")
-                        .unwrap()
-                        .endpoint("generate")
-                        .client()
-                        .await
-                        .unwrap();
-                    let load_context = RoutingLoadContext::start(
-                        client.clone(),
-                        crate::kv_router::RouterLoadSource::Aggregated,
-                        crate::discovery::LoadThresholdHandle::new(Default::default()),
-                        &distributed.child_token(),
-                        None,
-                    )
-                    .await
-                    .unwrap();
-                    let result = tokio::time::timeout(
-                        Duration::from_millis(100),
-                        build_preprocessed_routing(
-                            &client,
-                            Arc::new(ModelManager::new()),
-                            RouterMode::RoundRobin,
-                            load_context,
-                            None,
-                            None,
-                            None,
-                            false,
-                            None,
-                        ),
-                    )
-                    .await
-                    .expect("invalid configuration must fail before the worker wait");
-                    assert!(
-                        result
-                            .err()
-                            .unwrap()
-                            .to_string()
-                            .contains("requires DYN_LORA_ENABLED")
-                    );
-                    runtime.shutdown();
-                })
-            },
+    #[tokio::test]
+    async fn invalid_runtime_lora_configuration_fails_before_waiting_for_workers() {
+        // Invalid process-wide flags must not affect concurrent frontend startup tests.
+        const TEST: &str = concat!(
+            module_path!(),
+            "::invalid_runtime_lora_configuration_fails_before_waiting_for_workers"
         );
+        let test_name = TEST.split_once("::").unwrap().1;
+        if std::env::var("DYNAMO_INVALID_LORA_CONFIG_TEST").as_deref() != Ok(test_name) {
+            let mut child = tokio::process::Command::new(std::env::current_exe().unwrap());
+            child
+                .args(["--exact", test_name, "--nocapture"])
+                .env("DYNAMO_INVALID_LORA_CONFIG_TEST", test_name)
+                .env("DYN_LORA_ENABLED", "false")
+                .env("DYN_LORA_RUNTIME_LOAD_ENABLED", "true")
+                .env("DYN_ROUTER_MIN_INITIAL_WORKERS", "1")
+                .kill_on_drop(true);
+            let output = tokio::time::timeout(Duration::from_secs(30), child.output())
+                .await
+                .expect("invalid configuration subprocess must finish within its deadline")
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success() && stdout.contains("test result: ok. 1 passed;"),
+                "{stdout}\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let runtime = dynamo_runtime::Runtime::from_current().unwrap();
+        let distributed = DistributedRuntime::new(
+            runtime.clone(),
+            dynamo_runtime::distributed::DistributedConfig::process_local(),
+        )
+        .await
+        .unwrap();
+        let client = distributed
+            .namespace("invalid-runtime-lora".to_string())
+            .unwrap()
+            .component("workers")
+            .unwrap()
+            .endpoint("generate")
+            .client()
+            .await
+            .unwrap();
+        let load_context = RoutingLoadContext::start(
+            client.clone(),
+            crate::kv_router::RouterLoadSource::Aggregated,
+            crate::discovery::LoadThresholdHandle::new(Default::default()),
+            &distributed.child_token(),
+            None,
+        )
+        .await
+        .unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_millis(100),
+            build_preprocessed_routing(
+                &client,
+                Arc::new(ModelManager::new()),
+                RouterMode::RoundRobin,
+                load_context,
+                None,
+                None,
+                None,
+                false,
+                None,
+            ),
+        )
+        .await
+        .expect("invalid configuration must fail before the worker wait");
+        assert!(
+            result
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("requires DYN_LORA_ENABLED")
+        );
+        runtime.shutdown();
     }
 
     #[test]
