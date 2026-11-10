@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""DynamoGraphDeployment output adapter for AISimulate recommendations."""
+"""DynamoGraphDeployment output adapter for AISim recommendations."""
 
 from dynamo.aisimulate.output.dgd.renderers import (
     CandidateMaterializationError,

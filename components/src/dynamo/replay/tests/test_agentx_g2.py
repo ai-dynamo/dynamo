@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-# ruff: noqa: E402 -- optional AISimulate preflight precedes integration imports.
+# ruff: noqa: E402 -- optional AISim preflight precedes integration imports.
 
 """Real AgentX G2 qualification through Dynamo's existing replay API."""
 
@@ -14,11 +14,11 @@ from pathlib import Path
 import pytest
 
 pytest.importorskip(
-    "aisimulate.sweeper", reason="AISimulate is an optional simulation dependency"
+    "aisim.sweeper", reason="AISim is an optional simulation dependency"
 )
 
-from aisimulate.sweeper.provider import AdapterReplaySpec, RuntimeHookSpec
-from aisimulate.sweeper.replay import (
+from aisim.sweeper.provider import AdapterReplaySpec, RuntimeHookSpec
+from aisim.sweeper.replay import (
     BackendDeploymentSpec,
     ReplayOutputRequirements,
     ReplaySpec,

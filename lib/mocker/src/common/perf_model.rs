@@ -4,7 +4,7 @@
 //! Performance model for timing simulations in the mocker.
 //!
 //! `Polynomial` remains a legacy configuration marker. Its implementation is
-//! owned by `aisimulate_core::engine`; this module only implements external NPZ and
+//! owned by `aisim_core::engine`; this module only implements external NPZ and
 //! AI Configurator providers.
 
 use anyhow::{Context, Result};
@@ -82,10 +82,10 @@ impl DecodeInterpolator for DecodeInterp2D {
 /// Performance model for predicting prefill and decode timing
 #[derive(Default)]
 pub enum PerfModel {
-    /// Select the built-in AISimulate polynomial timing model.
+    /// Select the built-in AISim polynomial timing model.
     #[default]
     Polynomial,
-    /// Constant per-pass latencies owned by the AISimulate engine.
+    /// Constant per-pass latencies owned by the AISim engine.
     Fixed { prefill_ms: f64, decode_ms: f64 },
     /// Interpolation-based model using profiler data
     /// Decode axes: (scheduled logical KV tokens, mean context length)
@@ -289,7 +289,7 @@ impl PerfModel {
         prefix: usize,
     ) -> Result<f64> {
         if matches!(self, Self::Polynomial | Self::Fixed { .. }) {
-            anyhow::bail!("built-in timing is implemented by the AISimulate engine");
+            anyhow::bail!("built-in timing is implemented by the AISim engine");
         }
         let new_tokens_per_req = isl.saturating_sub(prefix);
         if batch_size == 0 || new_tokens_per_req == 0 {
@@ -325,7 +325,7 @@ impl PerfModel {
         _total_kv_tokens: usize,
     ) -> Result<f64> {
         if matches!(self, Self::Polynomial | Self::Fixed { .. }) {
-            anyhow::bail!("built-in timing is implemented by the AISimulate engine");
+            anyhow::bail!("built-in timing is implemented by the AISim engine");
         }
         if batch_size == 0 {
             return Ok(0.0);

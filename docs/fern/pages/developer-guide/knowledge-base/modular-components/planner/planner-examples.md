@@ -20,7 +20,7 @@ examples pass the Planner configuration as inline JSON through `--config`, with
 configuration or profiling-data ConfigMap.
 
 The Planner bootstraps from worker self-benchmark results when available. With a
-configured `ais_perf_model`, supported deployments can use native AISimulate
+configured `ais_perf_model`, supported deployments can use native AISim
 estimates before live FPM regression is ready. These examples leave that setting
 unset, so without benchmark data the model learns from live Forward Pass Metrics
 (FPM), and SLA scaling can report `model_not_ready` during warmup. Update the inline
@@ -43,7 +43,7 @@ AIPerf to compare existing endpoints; deployment cost telemetry is not collected
 
 To replay a trace through one Planner configuration and inspect each scaling
 or retune decision, see
-[Simulate Planner Decisions with AISimulate](aisimulate-planner-replay.mdx).
+[Simulate Planner Decisions with AISim](aisimulate-planner-replay.mdx).
 
 ## Custom Load Predictors
 

@@ -411,7 +411,7 @@ Configure scoring through [default policy parameters](../../developer-guide/know
 ## AIS prefill load model
 
 <ParamField path="--ais-perf-config" type="JSON object or JSON/YAML file" default="null">
-  Complete AISimulate `ForwardPassPerfModelConfig`, including immutable worker role,
+  Complete AISim `ForwardPassPerfModelConfig`, including immutable worker role,
   data roots, selection policy and nested estimator controls. Defaults to
   `estimation_mode: auto` and `fallback_policy: deny`. Do not combine this input
   with flat AIS identity flags. Cold regression is rejected by Router and Mocker.

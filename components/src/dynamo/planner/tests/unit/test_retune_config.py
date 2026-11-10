@@ -13,8 +13,8 @@ from typing import get_args
 import pytest
 
 pytest.importorskip(
-    "aisimulate.sweeper",
-    reason="AI Simulate is an optional Dynamo simulation dependency",
+    "aisim.sweeper",
+    reason="AISim is an optional Dynamo simulation dependency",
 )
 
 from pydantic import ValidationError
@@ -38,7 +38,7 @@ pytestmark = [
     pytest.mark.planner,
 ]
 
-# AISimulate recommend syntax. An omitted AISimulate knob searches its default
+# AISim recommend syntax. An omitted AISim knob searches its default
 # domain, so temperature is pinned with a scalar: a 2 x 2 grid.
 ROUTER = {
     "overlap_score_credit": {"choices": [0.0, 1.0]},

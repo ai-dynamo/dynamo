@@ -10,8 +10,8 @@ import json
 import pytest
 
 pytest.importorskip(
-    "aisimulate.replay",
-    reason="AI Simulate is an optional Dynamo simulation dependency",
+    "aisim.replay",
+    reason="AISim is an optional Dynamo simulation dependency",
 )
 
 import dynamo.planner.offline.replay_adapter as replay_adapter_module

@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Planner-owned engine-level queries over AISimulate forward-pass estimates.
+"""Planner-owned engine-level queries over AISim forward-pass estimates.
 
-``aisimulate_core.sdk.RustForwardPassPerfModel`` owns native AISimulate
+``aisim_core.sdk.RustForwardPassPerfModel`` owns native AISim
 estimation, online correction, and regression fallback. This module owns the
 Dynamo policy above that forward-pass abstraction: queue-drain estimates,
 TTFT/ITL derivation, engine-limit checks, and bounded capacity searches.
@@ -19,7 +19,7 @@ from itertools import pairwise
 from typing import Any, Callable, Literal, Optional
 
 import msgspec
-from aisimulate_core.sdk import RustForwardPassPerfModel as AISForwardPassPerfModel
+from aisim_core.sdk import RustForwardPassPerfModel as AISForwardPassPerfModel
 
 from dynamo.common.forward_pass_metrics import (
     FPM_VERSION,
@@ -184,7 +184,7 @@ class _PrefillChunkPlan:
 
 
 class AISCoreEnginePerfModel:
-    """Dynamo engine-query layer backed by the AISimulate SDK shipped in AISimulate."""
+    """Dynamo engine-query layer backed by the AISim SDK shipped in AISim."""
 
     def __init__(
         self,
@@ -243,7 +243,7 @@ class AISCoreEnginePerfModel:
         diagnostics = self._model.diagnostics()
         if not isinstance(diagnostics, dict):
             raise TypeError(
-                "AISimulate diagnostics must be a mapping, "
+                "AISim diagnostics must be a mapping, "
                 f"got {type(diagnostics).__name__}"
             )
         return diagnostics
@@ -622,11 +622,11 @@ class AISCoreEnginePerfModel:
             return None
         if not math.isfinite(estimate_ms):
             raise ValueError(
-                f"AISimulate forward-pass estimate must be finite, got {estimate_ms}"
+                f"AISim forward-pass estimate must be finite, got {estimate_ms}"
             )
         return _checked_duration_seconds(
             max(0.0, estimate_ms) / 1000.0,
-            "AISimulate forward-pass estimate",
+            "AISim forward-pass estimate",
         )
 
 

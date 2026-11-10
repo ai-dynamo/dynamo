@@ -30,8 +30,8 @@ from typing import Any, Optional
 import pytest
 
 pytest.importorskip(
-    "aisimulate.sweeper",
-    reason="AI Simulate is an optional Dynamo simulation dependency",
+    "aisim.sweeper",
+    reason="AISim is an optional Dynamo simulation dependency",
 )
 
 from dynamo.planner.config.planner_config import (
@@ -111,7 +111,7 @@ CREDIT = "overlap_score_credit"
 SCALE = "prefill_load_scale"
 TEMP = "router_temperature"
 KEYS = (CREDIT, SCALE, TEMP)
-# The searched router domain of live_config(), by AISimulate knob name.
+# The searched router domain of live_config(), by AISim knob name.
 ROUTER = {
     "overlap_score_credit": {"choices": [0.5, 1.0]},
     "prefill_load_scale": 1.0,

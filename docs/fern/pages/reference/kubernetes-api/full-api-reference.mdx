@@ -4738,14 +4738,14 @@ AISimRunStatus reports the exact public recommendation input used for this execu
 **Appears in:** [DynamoGraphDeploymentRunStatus](#dynamographdeploymentrunstatus)
 
 <ParamField path="input" type="RawExtension">
-Input is the fully lowered AISimulate input after typed fields, derived defaults and spec.aisim.inputOverrides have been merged. Field names and nesting use the upstream AISimulate JSON contract.
+Input is the fully lowered AISim input after typed fields, derived defaults and spec.aisim.inputOverrides have been merged. Field names and nesting use the upstream AISim JSON contract.
 See [RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg).
 **Validation:** Type: object  Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
 <Accordion id="aisimspec" title="AISimSpec">
-AISimSpec supplies public recommendation input to the AISimulate version in the operator's configured
+AISimSpec supplies public recommendation input to the AISim version in the operator's configured
 planner image.
 
 
@@ -4753,14 +4753,14 @@ planner image.
 **Appears in:** [DynamoGraphDeploymentRequestNativeSpec](#v1beta2-dynamographdeploymentrequestnativespec), [DynamoGraphDeploymentRequestSpec](#v1beta2-dynamographdeploymentrequestspec), [DynamoGraphDeploymentRunSpec](#dynamographdeploymentrunspec), [NativeSearchInput](#nativesearchinput)
 
 <ParamField path="inputOverrides" type="RawExtension">
-InputOverrides is an RFC 7386 JSON Merge Patch over the input lowered from the typed fields. It uses the upstream AISimulate JSON contract, including snake_case names. Values here take precedence, and null deletes a lowered field. The dgdr_run member must remain an object, and its operator-owned transport, identity, and runtime fields name, max_candidates, snapshot_dir, runtime_image, runtime_version_override, derive_runtime_images, num_gpus_per_node, and namespace are operator-owned. Request and Run admission rejects them, and the Run controller enforces its values while lowering the immutable snapshot. A typed spec.workload.trace is an underlay like the other typed fields: it supplies the default traffic.source (type trace, format dynamo and the mounted trace file in paths) and the recorded-arrival traffic.load. Overrides can replace those values, including traffic.source.type, format, and paths, and null deletes the named field or parent object; the Run controller does not restore it. The typed PersistentVolumeClaim source alone decides the Run Job's trace mount and its claim dependency, so overriding a native path adds no volume mount. The operator runs the AISimulate version from its configured planner image; Requests and Runs cannot select a different image or version. Request and Run creation validate the merged input against the bundled AISimulate input schema. Request spec changes require the same validation; Run specs are immutable. Unchanged specs remain metadata-updatable after a bundled schema change.
+InputOverrides is an RFC 7386 JSON Merge Patch over the input lowered from the typed fields. It uses the upstream AISim JSON contract, including snake_case names. Values here take precedence, and null deletes a lowered field. The dgdr_run member must remain an object, and its operator-owned transport, identity, and runtime fields name, max_candidates, snapshot_dir, runtime_image, runtime_version_override, derive_runtime_images, num_gpus_per_node, and namespace are operator-owned. Request and Run admission rejects them, and the Run controller enforces its values while lowering the immutable snapshot. A typed spec.workload.trace is an underlay like the other typed fields: it supplies the default traffic.source (type trace, format dynamo and the mounted trace file in paths) and the recorded-arrival traffic.load. Overrides can replace those values, including traffic.source.type, format, and paths, and null deletes the named field or parent object; the Run controller does not restore it. The typed PersistentVolumeClaim source alone decides the Run Job's trace mount and its claim dependency, so overriding a native path adds no volume mount. The operator runs the AISim version from its configured planner image; Requests and Runs cannot select a different image or version. Request and Run creation validate the merged input against the bundled AISim input schema. Request spec changes require the same validation; Run specs are immutable. Unchanged specs remain metadata-updatable after a bundled schema change.
 See [RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg).
 **Validation:** Type: object  Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
 <Accordion id="backend" title="Backend">
-Backend identifies an inference backend searched by AISimulate and used by generated candidates.
+Backend identifies an inference backend searched by AISim and used by generated candidates.
 
 
 **Kind:** `enum`
@@ -4776,7 +4776,7 @@ Backend identifies an inference backend searched by AISimulate and used by gener
 </Accordion>
 
 <Accordion id="branchprogress" title="BranchProgress">
-BranchProgress reports progress for one independently optimized AISimulate branch.
+BranchProgress reports progress for one independently optimized AISim branch.
 
 
 **Kind:** `type`
@@ -4837,7 +4837,7 @@ DGDRRunProgress contains branch-aware optimizer and evaluation outcome counters.
 **Appears in:** [DynamoGraphDeploymentRunStatus](#dynamographdeploymentrunstatus)
 
 <ParamField path="branches" type="BranchProgress array">
-Branches reports independently optimized AISimulate branches.
+Branches reports independently optimized AISim branches.
 See [BranchProgress](#branchprogress).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -4958,7 +4958,7 @@ See [ModelSpec](#modelspec).
 </ParamField>
 
 <ParamField path="backends" type="Backend array">
-Backends lists one or more inference backends searched by AISimulate and used by generated candidates.
+Backends lists one or more inference backends searched by AISim and used by generated candidates.
 See [Backend](#backend).
 **Validation:** Enum: [vllm sglang trtllm]  MinItems: 1  Optional: \&#123;\&#125;
 </ParamField>
@@ -4982,7 +4982,7 @@ See [ObjectiveSpec](#objectivespec).
 </ParamField>
 
 <ParamField path="aisim" type="AISimSpec">
-AISim supplies public recommendation input to the operator's AISimulate execution bundle.
+AISim supplies public recommendation input to the operator's AISim execution bundle.
 See [AISimSpec](#aisimspec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -4994,7 +4994,7 @@ See [RecommendationSpec](#recommendationspec).
 </ParamField>
 
 <ParamField path="overrides" type="OverridesSpec">
-Overrides customizes the generated DGD without changing AISimulate execution.
+Overrides customizes the generated DGD without changing AISim execution.
 See [OverridesSpec](#v1beta2-overridesspec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -5046,7 +5046,7 @@ See [ModelSpec](#modelspec).
 </ParamField>
 
 <ParamField path="backends" type="Backend array">
-Backends lists one or more inference backends searched by AISimulate and used by generated candidates.
+Backends lists one or more inference backends searched by AISim and used by generated candidates.
 See [Backend](#backend).
 **Validation:** Enum: [vllm sglang trtllm]  MinItems: 1  Optional: \&#123;\&#125;
 </ParamField>
@@ -5070,7 +5070,7 @@ See [ObjectiveSpec](#objectivespec).
 </ParamField>
 
 <ParamField path="aisim" type="AISimSpec">
-AISim supplies public recommendation input to the operator's AISimulate execution bundle.
+AISim supplies public recommendation input to the operator's AISim execution bundle.
 See [AISimSpec](#aisimspec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -5082,7 +5082,7 @@ See [RecommendationSpec](#recommendationspec).
 </ParamField>
 
 <ParamField path="overrides" type="OverridesSpec">
-Overrides customizes the generated DGD without changing AISimulate execution.
+Overrides customizes the generated DGD without changing AISim execution.
 See [OverridesSpec](#v1beta2-overridesspec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -5181,7 +5181,7 @@ See [ModelSpec](#modelspec).
 </ParamField>
 
 <ParamField path="backends" type="Backend array">
-Backends lists one or more inference backends searched by AISimulate and used by generated candidates.
+Backends lists one or more inference backends searched by AISim and used by generated candidates.
 See [Backend](#backend).
 **Validation:** Enum: [vllm sglang trtllm]  MinItems: 1  Optional: \&#123;\&#125;
 </ParamField>
@@ -5205,7 +5205,7 @@ See [ObjectiveSpec](#objectivespec).
 </ParamField>
 
 <ParamField path="aisim" type="AISimSpec">
-AISim supplies public recommendation input to the operator's AISimulate execution bundle.
+AISim supplies public recommendation input to the operator's AISim execution bundle.
 See [AISimSpec](#aisimspec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -5217,7 +5217,7 @@ See [RecommendationSpec](#recommendationspec).
 </ParamField>
 
 <ParamField path="overrides" type="OverridesSpec">
-Overrides customizes the generated DGD without changing AISimulate execution.
+Overrides customizes the generated DGD without changing AISim execution.
 See [OverridesSpec](#v1beta2-overridesspec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -5249,7 +5249,7 @@ See [DGDRRunProgress](#dgdrrunprogress).
 </ParamField>
 
 <ParamField path="aisim" type="AISimRunStatus">
-AISim reports the effective input executed by AISimulate.
+AISim reports the effective input executed by AISim.
 See [AISimRunStatus](#aisimrunstatus).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -5336,12 +5336,12 @@ GPUHardwareSpec describes accelerator identity and the maximum allocation per ca
 **Appears in:** [HardwareSpec](#v1beta2-hardwarespec)
 
 <ParamField path="sku" type="string">
-SKU identifies the accelerator using the AISimulate hardware catalog name. Known values in the bundled AISimulate release are `a100_pcie`, `a100_sxm`, `a30`, `b200_sxm`, `b300_sxm`, `b60`, `gb200`, `gb300`, `h100_pcie`, `h100_sxm`, `h200_sxm`, `l4`, `l40s`, and `rtx_pro_6000_server`. The field remains open so an external AISimulate systems catalog can add identifiers. Admission passes an unknown identifier through unchanged and warns when `budget` and the parent `numGpusPerNode` are also explicit. Without both, it rejects the identifier because cluster discovery cannot associate capacity or topology with it. When omitted from a nonempty hardware object, admission discovers the accelerator.
+SKU identifies the accelerator using the AISim hardware catalog name. Known values in the bundled AISim release are `a100_pcie`, `a100_sxm`, `a30`, `b200_sxm`, `b300_sxm`, `b60`, `gb200`, `gb300`, `h100_pcie`, `h100_sxm`, `h200_sxm`, `l4`, `l40s`, and `rtx_pro_6000_server`. The field remains open so an external AISim systems catalog can add identifiers. Admission passes an unknown identifier through unchanged and warns when `budget` and the parent `numGpusPerNode` are also explicit. Without both, it rejects the identifier because cluster discovery cannot associate capacity or topology with it. When omitted from a nonempty hardware object, admission discovers the accelerator.
 **Validation:** MinLength: 1  Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="budget" type="integer">
-Budget is the maximum total number of GPUs one candidate may use. When omitted for a known SKU, admission derives the available GPU budget from the cluster. An SKU unknown to the bundled AISimulate catalog requires an explicit `budget` and an explicit `numGpusPerNode` in the parent hardware object.
+Budget is the maximum total number of GPUs one candidate may use. When omitted for a known SKU, admission derives the available GPU budget from the cluster. An SKU unknown to the bundled AISim catalog requires an explicit `budget` and an explicit `numGpusPerNode` in the parent hardware object.
 **Validation:** Minimum: 1  Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
@@ -5361,7 +5361,7 @@ See [GPUHardwareSpec](#gpuhardwarespec).
 </ParamField>
 
 <ParamField path="numGpusPerNode" type="integer">
-NumGPUsPerNode is the number of GPUs available to one candidate on each node. It lowers to AISimulate's num_gpus_per_node input. An explicit value is authoritative. In a nonempty hardware object, admission discovers an omitted value from the selected cluster node shape. The Run controller never discovers this value. An exactly empty hardware object opts out of all operator hardware discovery and typed hardware defaults, leaving AISimulate input and defaults authoritative.
+NumGPUsPerNode is the number of GPUs available to one candidate on each node. It lowers to AISim's num_gpus_per_node input. An explicit value is authoritative. In a nonempty hardware object, admission discovers an omitted value from the selected cluster node shape. The Run controller never discovers this value. An exactly empty hardware object opts out of all operator hardware discovery and typed hardware defaults, leaving AISim input and defaults authoritative.
 **Validation:** Minimum: 1  Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
@@ -5431,7 +5431,7 @@ See [ModelSpec](#modelspec).
 </ParamField>
 
 <ParamField path="backends" type="Backend array">
-Backends lists one or more inference backends searched by AISimulate and used by generated candidates.
+Backends lists one or more inference backends searched by AISim and used by generated candidates.
 See [Backend](#backend).
 **Validation:** Enum: [vllm sglang trtllm]  MinItems: 1  Optional: \&#123;\&#125;
 </ParamField>
@@ -5455,7 +5455,7 @@ See [ObjectiveSpec](#objectivespec).
 </ParamField>
 
 <ParamField path="aisim" type="AISimSpec">
-AISim supplies public recommendation input to the operator's AISimulate execution bundle.
+AISim supplies public recommendation input to the operator's AISim execution bundle.
 See [AISimSpec](#aisimspec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -5467,14 +5467,14 @@ See [RecommendationSpec](#recommendationspec).
 </ParamField>
 
 <ParamField path="overrides" type="OverridesSpec">
-Overrides customizes the generated DGD without changing AISimulate execution.
+Overrides customizes the generated DGD without changing AISim execution.
 See [OverridesSpec](#v1beta2-overridesspec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
 <Accordion id="objectivemetric" title="ObjectiveMetric">
-ObjectiveMetric is a metric optimized by AISimulate.
+ObjectiveMetric is a metric optimized by AISim.
 
 
 **Kind:** `type`
@@ -5563,7 +5563,7 @@ OverridesSpec patches the generated deployment independently for every selected 
 **Appears in:** [DynamoGraphDeploymentRequestNativeSpec](#v1beta2-dynamographdeploymentrequestnativespec), [DynamoGraphDeploymentRequestSpec](#v1beta2-dynamographdeploymentrequestspec), [DynamoGraphDeploymentRunSpec](#dynamographdeploymentrunspec), [NativeSearchInput](#nativesearchinput)
 
 <ParamField path="dgd" type="RawExtension">
-DGD is one partial nvidia.com/v1beta1 DynamoGraphDeployment applied by the publisher using the DGD schema's Server-Side Apply merge rules. Other API versions are not supported. Components must already exist; named containers may be added. Atomic lists, including container command and args, replace the generated lists. The supported customization $patch: \&#123;args: append\&#125; on a container appends to its explicit generated args list; both the container and its args must already exist. No other $patch operation is supported. Application is atomic: a merge failure retains the unchanged generated deployment with Valid=False. A successful merge is checked by strict server-side dry-run; the dry-run response and its defaults are discarded. The Candidate retains the unpruned payload from before the check. Invalid Candidates count toward maxCandidates. Overrides may change any deployment configuration. Evaluation metrics are not recomputed and continue to describe the original AISimulate configuration. DGD labels and annotations become Candidate labels and annotations. A failed merge retains only the original generated metadata; a successful merge followed by failed dry-run validation retains the merged metadata on the invalid Candidate. Other metadata and publisher-owned keys cannot be overridden; such attempts fail atomically. The complete Candidate metadata must satisfy Kubernetes limits, including generated and reserved annotations. An override that exceeds those limits fails atomically.
+DGD is one partial nvidia.com/v1beta1 DynamoGraphDeployment applied by the publisher using the DGD schema's Server-Side Apply merge rules. Other API versions are not supported. Components must already exist; named containers may be added. Atomic lists, including container command and args, replace the generated lists. The supported customization $patch: \&#123;args: append\&#125; on a container appends to its explicit generated args list; both the container and its args must already exist. No other $patch operation is supported. Application is atomic: a merge failure retains the unchanged generated deployment with Valid=False. A successful merge is checked by strict server-side dry-run; the dry-run response and its defaults are discarded. The Candidate retains the unpruned payload from before the check. Invalid Candidates count toward maxCandidates. Overrides may change any deployment configuration. Evaluation metrics are not recomputed and continue to describe the original AISim configuration. DGD labels and annotations become Candidate labels and annotations. A failed merge retains only the original generated metadata; a successful merge followed by failed dry-run validation retains the merged metadata on the invalid Candidate. Other metadata and publisher-owned keys cannot be overridden; such attempts fail atomically. The complete Candidate metadata must satisfy Kubernetes limits, including generated and reserved annotations. An override that exceeds those limits fails atomically.
 See [RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg).
 **Validation:** EmbeddedResource: \&#123;\&#125;  Optional: \&#123;\&#125;
 </ParamField>
@@ -5644,7 +5644,7 @@ See [KVCapacityFractionSpec](#kvcapacityfractionspec).
 </Accordion>
 
 <Accordion id="staticworkloadspec" title="StaticWorkloadSpec">
-StaticWorkloadSpec defines AISimulate synthetic traffic. Admission completes a nonempty
+StaticWorkloadSpec defines AISim synthetic traffic. Admission completes a nonempty
 object with the omitted static defaults; an explicit empty object opts out of them.
 
 
@@ -5670,7 +5670,7 @@ See [StaticLoadSpec](#staticloadspec).
 
 <Accordion id="traceformat" title="TraceFormat">
 TraceFormat identifies the decoder of a recorded request trace. Lowering translates it to
-AISimulate's native traffic.source.format.
+AISim's native traffic.source.format.
 
 
 **Kind:** `enum`
@@ -5680,7 +5680,7 @@ AISimulate's native traffic.source.format.
 
 **Allowed values**
 
-- <Badge intent="note" minimal>Dynamo</Badge> TraceFormatDynamo is the Dynamo request trace (dynamo.request.trace.v1) that the frontend records, as JSON Lines or gzip-compressed JSON Lines. It lowers to AISimulate's dynamo format.
+- <Badge intent="note" minimal>Dynamo</Badge> TraceFormatDynamo is the Dynamo request trace (dynamo.request.trace.v1) that the frontend records, as JSON Lines or gzip-compressed JSON Lines. It lowers to AISim's dynamo format.
 </Accordion>
 
 <Accordion id="tracepvcsource" title="TracePVCSource">
@@ -5691,7 +5691,7 @@ TracePVCSource names one trace file on a PersistentVolumeClaim in the Request na
 **Appears in:** [TraceSourceSpec](#tracesourcespec)
 
 <ParamField path="claimName" type="string" required={true}>
-ClaimName is the PersistentVolumeClaim, in the Request namespace, that holds the trace. The Run Job mounts only the trace file from it, read-only, and only into the AISimulate container. Each Run protects the claim with the finalizer `nvidia.com/dgdr-run-<run-uid>` until the Run completes or, for a Run deleted before it completes, until no Job of the Run is left. Garbage collection deletes the Job of a deleted Run before the Job's pod, so the finalizer of a deleted Run can be released while that pod still stops; Kubernetes PersistentVolumeClaim protection keeps the claim until no pod uses it. Deleting the claim cancels the Runs that read it.
+ClaimName is the PersistentVolumeClaim, in the Request namespace, that holds the trace. The Run Job mounts only the trace file from it, read-only, and only into the AISim container. Each Run protects the claim with the finalizer `nvidia.com/dgdr-run-<run-uid>` until the Run completes or, for a Run deleted before it completes, until no Job of the Run is left. Garbage collection deletes the Job of a deleted Run before the Job's pod, so the finalizer of a deleted Run can be released while that pod still stops; Kubernetes PersistentVolumeClaim protection keeps the claim until no pod uses it. Deleting the claim cancels the Runs that read it.
 **Validation:** MaxLength: 253  MinLength: 1  Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`  Required: \&#123;\&#125;
 </ParamField>
 
@@ -5702,7 +5702,7 @@ SubPath names one trace file relative to the root of the claim; the Run Job moun
 </Accordion>
 
 <Accordion id="tracereplayspec" title="TraceReplaySpec">
-TraceReplaySpec configures how AISimulate replays a decoded trace.
+TraceReplaySpec configures how AISim replays a decoded trace.
 
 
 **Kind:** `type`
@@ -5764,7 +5764,7 @@ trace are mutually exclusive.
 **Appears in:** [DynamoGraphDeploymentRequestNativeSpec](#v1beta2-dynamographdeploymentrequestnativespec), [DynamoGraphDeploymentRequestSpec](#v1beta2-dynamographdeploymentrequestspec), [DynamoGraphDeploymentRunSpec](#dynamographdeploymentrunspec), [NativeSearchInput](#nativesearchinput)
 
 <ParamField path="static" type="StaticWorkloadSpec">
-Static defines AISimulate synthetic traffic. When omitted without a trace, admission supplies the complete static default. An explicit empty object opts out; any nonempty object is completed with omitted inputTokens, outputTokens and load defaults.
+Static defines AISim synthetic traffic. When omitted without a trace, admission supplies the complete static default. An explicit empty object opts out; any nonempty object is completed with omitted inputTokens, outputTokens and load defaults.
 See [StaticWorkloadSpec](#staticworkloadspec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>

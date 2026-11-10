@@ -7,7 +7,7 @@ subtitle: Configures Planner optimization targets, scaling modes, and PlannerCon
 
 The Dynamo Planner is an autoscaling controller that adjusts prefill and decode engine replica counts at runtime to meet latency SLAs. It reads traffic signals (Prometheus metrics or load predictor output) and engine performance models to decide when to scale up or down.
 
-Forward Pass Metrics (FPM) are per-iteration scheduler records from inference workers. They describe batch composition, queue depth, token counts, and forward-pass duration. The Planner uses these records to tune its performance model from live traffic or to build a regression model when a native AISimulate estimate is unavailable.
+Forward Pass Metrics (FPM) are per-iteration scheduler records from inference workers. They describe batch composition, queue depth, token counts, and forward-pass duration. The Planner uses these records to tune its performance model from live traffic or to build a regression model when a native AISim estimate is unavailable.
 
 For a quick overview, see the [Planner overview](overview.md). For architecture internals, see [Planner Design](planner-design.md).
 
@@ -25,7 +25,7 @@ The planner supports four optimization targets that determine how scaling decisi
 - Start with **`throughput`** (the default) — it works immediately with no configuration.
 - Switch to **`latency`** if your workload has strict latency requirements and you prefer to over-provision rather than queue.
 - Use **`load`** when you want direct control through prefill queue and decode KV utilization thresholds.
-- Use **`sla`** when you want to target specific TTFT/ITL values with native AISimulate estimates, optional bootstrap profiling data, or live FPM warmup.
+- Use **`sla`** when you want to target specific TTFT/ITL values with native AISim estimates, optional bootstrap profiling data, or live FPM warmup.
 
 ## PlannerConfig Reference
 
@@ -75,7 +75,7 @@ Advisory mode is suggestion-only. The Planner computes recommended replica count
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `optimization_target` | string | `throughput` | `throughput`: scale based on queue/utilization thresholds. `latency`: aggressive low-latency thresholds. `load`: user-defined prefill queue and decode KV utilization thresholds. `sla`: AISimulate performance modeling with `ttft_ms`/`itl_ms` targets. |
+| `optimization_target` | string | `throughput` | `throughput`: scale based on queue/utilization thresholds. `latency`: aggressive low-latency thresholds. `load`: user-defined prefill queue and decode KV utilization thresholds. `sla`: AISim performance modeling with `ttft_ms`/`itl_ms` targets. |
 
 When `optimization_target` is `throughput`, `latency`, or `load`, load-based scaling is automatically enabled and throughput-based scaling is disabled. The `ttft_ms`/`itl_ms` fields are ignored.
 
@@ -95,8 +95,8 @@ At least one scaling mode must be enabled when using `optimization_target: sla`.
 | `pre_deployment_sweeping_mode` | string | `rapid` | How to generate optional bootstrap performance data: `rapid` (AIC simulation, ~30s), `thorough` (real GPUs, 2-4h), or `none` (skip). |
 
 SLA mode constructs each role's model through
-`aisimulate_core.sdk.RustForwardPassPerfModel.best_available(config)`. Set
-`ais_perf_model.roles` to the complete AISimulate configuration for each deployed
+`aisim_core.sdk.RustForwardPassPerfModel.best_available(config)`. Set
+`ais_perf_model.roles` to the complete AISim configuration for each deployed
 role: `prefill` and `decode` for disaggregated deployments, or `aggregated` for an
 aggregated deployment. Each role key must match its `worker_type`.
 
@@ -432,7 +432,7 @@ In the current workflow, run profiling independently for each intended pool, the
 - [Planner overview](overview.md) — Why LLM inference needs a different autoscaler
 - [Planner Design](planner-design.md) — Architecture and algorithm internals
 - [Planner Examples](planner-examples.md) — Planner-specific configuration examples
-- [Simulate Planner Decisions with AISimulate](aisimulate-planner-replay.mdx) — Replay a trace through the Planner offline, including retune
+- [Simulate Planner Decisions with AISim](aisimulate-planner-replay.mdx) — Replay a trace through the Planner offline, including retune
 - [DGDR Templates](../../../../recipes/kubernetes-templates/dgdr.mdx) — DGDR YAML examples, sample configurations, advanced patterns
 - [Global Planner Guide](global-planner-guide.md) — Multi-DGD coordination, shared GPU budgets, single-endpoint multi-pool deployments
 - [Profiler Guide](../profiler/profiler-guide.md) — How profiling data is generated

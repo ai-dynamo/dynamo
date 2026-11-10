@@ -316,7 +316,7 @@ RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.
     # Dynamo's own wheels — --no-deps preserves upstream's solve.
     uv pip install --no-deps /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl && \
     uv pip install --no-deps /opt/dynamo/wheelhouse/ai_dynamo*any.whl && \
-    uv pip install --no-deps /opt/dynamo/wheelhouse/aisimulate*.whl && \
+    uv pip install --no-deps /opt/dynamo/wheelhouse/aisim-*.whl && \
     \
     # Third-party deps Dynamo wheels declare but upstream lacks. The
     # requirements.trtllm.txt file itself carries a `--no-binary imageio-ffmpeg`

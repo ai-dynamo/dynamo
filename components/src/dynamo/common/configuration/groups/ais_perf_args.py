@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""AISimulate configuration input; the upstream SDK owns the estimator schema."""
+"""AISim configuration input; the upstream SDK owns the estimator schema."""
 
 import argparse
 import json
@@ -106,7 +106,7 @@ class AisPerfConfigBase(ConfigBase):
         if missing:
             raise ValueError("AIS perf config requires " + ", ".join(missing))
         # The upstream class preserves estimator_config, ordered roots and policy.
-        from aisimulate_core.sdk import ForwardPassPerfModelConfig
+        from aisim_core.sdk import ForwardPassPerfModelConfig
 
         rates = getattr(self, "ais_nextn_accept_rates", None)
         if config.get("nextn", 0) and rates is not None:
@@ -118,7 +118,7 @@ class AisPerfConfigBase(ConfigBase):
 
 class AisPerfArgGroup(ArgGroup):
     def add_arguments(self, parser) -> None:
-        group = parser.add_argument_group("AISimulate Perf Model Options")
+        group = parser.add_argument_group("AISim Perf Model Options")
         group.add_argument(
             "--ais-perf-config",
             type=parse_ais_perf_config,
@@ -137,6 +137,6 @@ class AisPerfArgGroup(ArgGroup):
                 help=(
                     "Comma-separated conditional acceptance rates: entry i is P(draft i accepted | all earlier drafts were accepted)."
                     if name == "nextn_accept_rates"
-                    else f"AISimulate {flag}; DYN_AIS_{name.upper()}. Legacy aic spelling accepted."
+                    else f"AISim {flag}; DYN_AIS_{name.upper()}. Legacy aic spelling accepted."
                 ),
             )

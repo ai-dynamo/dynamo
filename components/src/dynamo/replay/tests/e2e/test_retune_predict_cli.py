@@ -7,9 +7,9 @@
 The workload is the one in ``test_retune_replay.py``: a dense 20 s head and a
 sparse tail on 4 workers, where greedy routing (``router_temperature: 0``)
 beats near-random routing (``100``) under a tight TTFT SLA. The CLI runs the
-replay in AISimulate's supervised execution process, so this also covers the
+replay in AISim's supervised execution process, so this also covers the
 spawned sweep workers under that supervisor. Traffic that retune cannot
-replay is rejected by the replay, in AISimulate's terms.
+replay is rejected by the replay, in AISim's terms.
 """
 
 from __future__ import annotations
@@ -23,8 +23,8 @@ import pytest
 import yaml
 
 pytest.importorskip(
-    "aisimulate.config.cli",
-    reason="AISimulate is an optional Dynamo simulation dependency",
+    "aisim.config.cli",
+    reason="AISim is an optional Dynamo simulation dependency",
 )
 
 pytestmark = [
@@ -117,7 +117,7 @@ def _config() -> dict:
                 "interval_seconds": 120,
                 "grace_seconds": 1,
                 "max_parallel": 2,
-                # AISimulate recommend syntax: credit and scale pinned at
+                # AISim recommend syntax: credit and scale pinned at
                 # the router's values, temperature searched.
                 "router": {
                     "overlap_score_credit": 1.0,
@@ -137,7 +137,7 @@ def _predict(tmp_path: Path, config: dict) -> subprocess.CompletedProcess[str]:
         [
             sys.executable,
             "-m",
-            "aisimulate",
+            "aisim",
             "predict",
             "--stack",
             "dynamo",

@@ -25,8 +25,8 @@ from typing import get_args
 import pytest
 
 pytest.importorskip(
-    "aisimulate.sweeper",
-    reason="AI Simulate is an optional Dynamo simulation dependency",
+    "aisim.sweeper",
+    reason="AISim is an optional Dynamo simulation dependency",
 )
 
 from dynamo.planner.config.planner_config import PlannerConfig, RetuneObjective
@@ -167,7 +167,7 @@ def test_only_goodput_objectives_ignore_the_drain():
             {"mean_output_token_throughput_per_user": math.inf},
             "finite",
         ),
-        # AISimulate scores a latency without samples as infinite; retune
+        # AISim scores a latency without samples as infinite; retune
         # leaves that candidate unscored instead.
         ("TTFT", {"num_ttft_samples": 0}, "positive num_ttft_samples"),
         ("E2ELatency", {"num_e2e_latency_samples": 0}, "positive num_e2e"),

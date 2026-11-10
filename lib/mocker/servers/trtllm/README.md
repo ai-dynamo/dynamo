@@ -100,7 +100,7 @@ preemption. A prompt that leaves no room for output is rejected. Set an explicit
 ## Engine arguments
 
 `--extra-engine-args` takes inline JSON or a file path and is merged into
-the canonical AISimulate launch configuration. `engine.backend` defaults to `trtllm`;
+the canonical AISim launch configuration. `engine.backend` defaults to `trtllm`;
 passing another backend is an error. Put scheduler settings such as `block_size`
 and `max_model_len` under `engine`. `--context-length` controls the context
 length advertised by the gRPC mock server.

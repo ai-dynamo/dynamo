@@ -6,7 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 # Sweeper DGD comparison cases
 
 This directory compares DGDs generated for the same deployment intent by the existing DGDR
-v1beta1 profiler and AI Simulate Sweeper. See [DESIGN.md](DESIGN.md) for the file contracts and
+v1beta1 profiler and AISim Sweeper. See [DESIGN.md](DESIGN.md) for the file contracts and
 the distinction between cases, hardware configurations, suites, goldens, and local diagnostics.
 
 `testsuite-issue-8469.yaml` retains the rows from issue #8469. Every row has paired v1beta1 and

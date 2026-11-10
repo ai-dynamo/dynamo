@@ -5,5 +5,5 @@
 
 package aisimulate
 
-// SchemaVersion is the AISimulate version pinned by this operator release.
-const SchemaVersion = "0.13.0.dev202610290000000087"
+// SchemaVersion is the AISim version pinned by this operator release.
+const SchemaVersion = "0.14.0"

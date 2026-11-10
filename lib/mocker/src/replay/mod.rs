@@ -17,10 +17,10 @@ use crate::common::protocols::{DirectRequest, MockerConfig};
 use dynamo_kv_router::PrefillLoadEstimator;
 
 pub use agentic::AgenticReplayOptions;
-/// Backward-compatible Dynamo Mocker name for [`aisimulate_core::ReplayReport`].
-pub use aisimulate_core::ReplayReport as TraceSimulationReport;
-pub(crate) use aisimulate_core::replay::TraceCollector;
-pub use aisimulate_core::replay::{
+/// Backward-compatible Dynamo Mocker name for [`aisim_core::ReplayReport`].
+pub use aisim_core::ReplayReport as TraceSimulationReport;
+pub(crate) use aisim_core::replay::TraceCollector;
+pub use aisim_core::replay::{
     CanonicalReplayCoverage, CanonicalReplayRecord, LifecycleOperation, OfflineRuntimeEvidence,
     PerRequestRecord, ReplayCaptureOptions, ReplayDeterminism, ReplayTerminalStatus, SlaThresholds,
     TraceDistributionStats, TraceGoodputStats, TraceInterTokenLatencyStats, TraceLatencyStats,
@@ -65,8 +65,8 @@ impl OfflineDisaggReplayConfig {
     }
 }
 
-pub use aisimulate_core::replay::TrafficStats;
-pub use aisimulate_core::replay::{
+pub use aisim_core::replay::TrafficStats;
+pub use aisim_core::replay::{
     ReplayScalingDecision, ReplayScalingPolicy, ReplayScalingSnapshot,
     ReplaySchedulerIntervalMetrics, ReplaySchedulerMetricsSnapshot, ReplayTelemetryObserver,
     ReplayTelemetrySampleKind, ReplayTelemetrySnapshot, ReplayTrafficMetricsSnapshot,

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Dynamo-owned DGD output adapter for AISimulate recommendations."""
+"""Dynamo-owned DGD output adapter for AISim recommendations."""
 
 from __future__ import annotations
 
@@ -9,9 +9,9 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, Literal
 
-from aisimulate.output_adapter import OUTPUT_ADAPTER_API_VERSION
-from aisimulate.sweeper.config import SmartSearchConfig
-from aisimulate.sweeper.result import SweepResult
+from aisim.output_adapter import OUTPUT_ADAPTER_API_VERSION
+from aisim.sweeper.config import SmartSearchConfig
+from aisim.sweeper.result import SweepResult
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from dynamo.aisimulate.output.dgd.renderers import (
@@ -149,7 +149,7 @@ def _workload(result: SweepResult) -> Any:
 
 
 class DGDOutputAdapter:
-    """Render final AISimulate recommendation selections as Dynamo artifacts."""
+    """Render final AISim recommendation selections as Dynamo artifacts."""
 
     name = "dgd"
     api_version = OUTPUT_ADAPTER_API_VERSION
@@ -212,7 +212,7 @@ class DGDOutputAdapter:
 
 
 def create_adapter() -> DGDOutputAdapter:
-    """Create the Dynamo adapter discovered by AISimulate."""
+    """Create the Dynamo adapter discovered by AISim."""
     return DGDOutputAdapter()
 
 

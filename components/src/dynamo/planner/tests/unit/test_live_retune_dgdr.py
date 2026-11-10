@@ -28,8 +28,8 @@ from typing import Any, Optional
 import pytest
 
 pytest.importorskip(
-    "aisimulate.sweeper",
-    reason="AI Simulate is an optional Dynamo simulation dependency",
+    "aisim.sweeper",
+    reason="AISim is an optional Dynamo simulation dependency",
 )
 
 from dynamo.planner.config.planner_config import (
@@ -575,7 +575,7 @@ def test_plan_shards_splits_uneven_dimension_and_rejects_impossible_grids():
         )
         return [shard.size for shard in shards]
 
-    # A shard is added only when it saves an evaluation round (AISimulate
+    # A shard is added only when it saves an evaluation round (AISim
     # runs the first candidate alone, so single points save one).
     assert sizes(max_shards=3, parallelism=8) == [8]
     assert sizes(max_shards=16, parallelism=8) == [1] * 8

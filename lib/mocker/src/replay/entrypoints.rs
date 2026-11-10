@@ -2546,11 +2546,11 @@ mod tests {
     use crate::common::protocols::{EngineType, NativeHostOffloadConfig, WorkerType};
     use crate::loadgen::{SessionTrace, TurnTrace};
     use crate::replay::ReplayRuntimeObservers;
-    use aisimulate_core::replay::{
+    use aisim_core::replay::{
         ForwardPassSnapshot, ReplayRequestPool, ReplayScalingDecision, ReplayScalingPolicy,
         ReplayScalingSnapshot,
     };
-    use aisimulate_core::replay::{PerRequestRecord, PerRequestRoutingRecord};
+    use aisim_core::replay::{PerRequestRecord, PerRequestRoutingRecord};
     use rstest::rstest;
     use std::cell::RefCell;
     use std::collections::BTreeSet;
@@ -2989,10 +2989,10 @@ mod tests {
         let assert_invalid_spec = |error: anyhow::Error, message: &str| {
             assert!(
                 matches!(
-                    error.downcast_ref::<aisimulate_core::replay::ReplayError>(),
-                    Some(aisimulate_core::replay::ReplayError::InvalidSpec(_))
+                    error.downcast_ref::<aisim_core::replay::ReplayError>(),
+                    Some(aisim_core::replay::ReplayError::InvalidSpec(_))
                 ),
-                "expected native AISimulate validation, got {error:#}"
+                "expected native AISim validation, got {error:#}"
             );
             assert!(error.to_string().contains(message), "{error:#}");
         };
@@ -3307,7 +3307,7 @@ mod tests {
                 let dp_rank = route.dp_rank.expect("dp rank");
                 assert!(dp_rank < dp_size, "{pool:?} dp_rank {dp_rank} out of range");
                 if router_mode == ReplayRouterMode::KvRouter {
-                    // KvRouterPlacement hands AISimulate worker * dp_size + dp_rank as
+                    // KvRouterPlacement hands AISim worker * dp_size + dp_rank as
                     // the scheduler id; the report must round-trip it to the same rank.
                     assert_eq!(
                         route.scheduler_id,
@@ -3352,8 +3352,8 @@ mod tests {
             // reject it earlier using a second backend support matrix.
             let error = result.unwrap_err();
             assert!(matches!(
-                error.downcast_ref::<aisimulate_core::replay::ReplayError>(),
-                Some(aisimulate_core::replay::ReplayError::Invariant(_))
+                error.downcast_ref::<aisim_core::replay::ReplayError>(),
+                Some(aisim_core::replay::ReplayError::Invariant(_))
             ));
             assert!(error.to_string().contains("matching backend engine types"));
             return;

@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use aisimulate_core::engine::{
+use aisim_core::engine::{
     Admission, HandoffId as EngineHandoffId, LifecycleEvent, Output, Request,
     TransferTimingMode as EngineTransferTimingMode,
 };
@@ -74,6 +74,7 @@ impl CompatibilityState {
                 .replay_context
                 .and_then(|context| context.session_id().map(str::to_owned)),
             images: Vec::new(),
+            cache_salt: request.cache_salt,
             kv_hint: None,
         })
     }
@@ -415,7 +416,7 @@ mod tests {
         let error = state
             .lifecycle_event(LifecycleEvent::TtftMilestone {
                 request_id: Uuid::from_u128(12),
-                stage: aisimulate_core::engine::TtftMilestone::Received,
+                stage: aisim_core::engine::TtftMilestone::Received,
                 at_ms: 0.0,
             })
             .unwrap_err();
@@ -426,7 +427,7 @@ mod tests {
     fn unhandled_request_fields_do_not_mutate_compatibility_state() {
         let state = CompatibilityState::new(MockerConfig::default());
         let mut request = DirectRequest {
-            kv_hints: Some(aisimulate_core::replay::AuthoredKvHints {
+            kv_hints: Some(aisim_core::replay::AuthoredKvHints {
                 source_worker: 0,
                 source_dp_rank: 0,
             }),
@@ -441,11 +442,11 @@ mod tests {
         );
         assert!(state.request_accounting.lock().is_empty());
         request.kv_hints = None;
-        request.images.push(aisimulate_core::engine::ImageSpec {
+        request.images.push(aisim_core::engine::ImageSpec {
             identity: 1,
             token_start: 0,
             token_end: 1,
-            encoder: aisimulate_core::engine::EncoderShape {
+            encoder: aisim_core::engine::EncoderShape {
                 sequences: 1,
                 patch_tokens: 1,
                 transformer_tokens: 1,

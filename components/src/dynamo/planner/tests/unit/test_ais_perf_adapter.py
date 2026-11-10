@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for Planner's AISimulate performance-model adapter."""
+"""Unit tests for Planner's AISim performance-model adapter."""
 
 import pytest
 

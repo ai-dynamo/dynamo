@@ -7,7 +7,7 @@ SPDX-License-Identifier: Apache-2.0
 
 Planner Gym uses the native replay runtime and Planner preparation helpers
 from the same Dynamo checkout. Rebuild the binding after updating Rust or
-AISimulate dependencies; Python-only installs can leave an incompatible native
+AISim dependencies; Python-only installs can leave an incompatible native
 runtime behind. The setup script checks the scaling-policy and telemetry APIs.
 
 ## Integration boundary
@@ -25,7 +25,7 @@ runtime behind. The setup script checks the scaling-policy and telemetry APIs.
 3. It passes the resulting engine to `ReplayPlannerAdapter` and enters the
    adapter as a context manager. For the builtin Planner, Arena loads configured
    predictor-warmup observations and mirrors current Dynamo selection of
-   runner-neutral performance-model metadata, role-specific or shared AISimulate
+   runner-neutral performance-model metadata, role-specific or shared AISim
    sessions, bootstrap FPMs, and bootstrap provenance. Rival engines explicitly
    opt out of that Planner-only preparation.
 4. It calls `dynamo._core.run_mocker_trace_replay()` with the adapter as
@@ -100,11 +100,11 @@ helper for the builtin Planner path:
 - configured `load_predictor_warmup_trace` data is converted with Dynamo's
   `extract_traffic_observations_from_trace()` and passed into
   `ReplayPlannerAdapter`;
-- Match Config preserves role-specific identities through Dynamo's canonical AISimulate configuration; omitted AISimulate versions are backfilled per
+- Match Config preserves role-specific identities through Dynamo's canonical AISim configuration; omitted AISim versions are backfilled per
   role from Dynamo's lowered engine arguments;
 - Dynamo's current performance-model selection, session-argument, FPM
   generation, and digest helpers remain authoritative;
-- one AISimulate session is shared only when the resolved prefill and decode session
+- one AISim session is shared only when the resolved prefill and decode session
   arguments are equal; and
 - bootstrap status metadata and load-only failure fallback match
   `prepare_planner_replay()`.
@@ -146,12 +146,12 @@ The Dynamo/Arena boundary is intentionally narrow:
   `scaling_policy` callbacks, terminal request capture, summary metrics,
   telemetry JSONL emission, and Planner adapter lifecycle.
 - The Arena owns policy factories, rival policy implementations, FPM
-  aggregation for those rivals, AISimulate bootstrap selection, strict telemetry
+  aggregation for those rivals, AISim bootstrap selection, strict telemetry
   JSONL ingestion and timeline projection, and multi-profile scoring.
 
 Rival engines expose a no-op `install_regressions_from_fpms()` method to match
 the replay adapter's extended engine surface. Their
-`supports_ais_bootstrap = False` marker skips AISimulate benchmark generation before
+`supports_ais_bootstrap = False` marker skips AISim benchmark generation before
 that no-op; only the Planner engine consumes fitted regression data.
 
 This keeps the upstream adapter unchanged while allowing every policy to run
@@ -177,5 +177,5 @@ file and callback sinks under `telemetry_options`; only the low-level binding
 exposes `telemetry_jsonl_path` and `telemetry_sample_interval_ms` as direct
 arguments.
 
-AISimulate dependency pins and performance-data availability are separate substrate
+AISim dependency pins and performance-data availability are separate substrate
 concerns; they do not change the unified replay-policy boundary described here.

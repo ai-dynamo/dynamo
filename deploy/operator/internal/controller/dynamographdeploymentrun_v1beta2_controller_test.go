@@ -1349,7 +1349,7 @@ func assertDGDRRunJobIsolation(
 	if sweeper.Image != plannerImage {
 		t.Fatalf("sweeper image = %q, want operator-configured planner image %q", sweeper.Image, plannerImage)
 	}
-	if want := []string{"aisimulate"}; !reflect.DeepEqual(sweeper.Command, want) {
+	if want := []string{"aisim"}; !reflect.DeepEqual(sweeper.Command, want) {
 		t.Fatalf("sweeper command = %q, want %q", sweeper.Command, want)
 	}
 	if want := []string{

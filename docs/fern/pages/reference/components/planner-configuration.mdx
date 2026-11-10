@@ -118,8 +118,8 @@ When `optimization_target` is `throughput`, `latency`, or `load`, the Planner fo
 </ParamField>
 
 <ParamField path="ais_perf_model" type="AISPerfModelSpec" default="null">
-  Role-indexed AISimulate forward-pass configurations. Constructs each model through
-  `aisimulate_core.sdk.RustForwardPassPerfModel.best_available(config)` without an
+  Role-indexed AISim forward-pass configurations. Constructs each model through
+  `aisim_core.sdk.RustForwardPassPerfModel.best_available(config)` without an
   interpolation sweep. Configure model identity and estimator controls through
   `ais_perf_model.roles`, or select local dataset manifests with `dataset_profiles`;
   the retired `aic_perf_model` and `hf_id` / pick shape
@@ -135,7 +135,7 @@ When `optimization_target` is `throughput`, `latency`, or `load`, the Planner fo
   </ParamField>
   <ParamField path="dataset_profiles" type="object" default="{}">
     Maps `prefill`, `decode`, or `aggregated` to an execution-profile manifest in a
-    local AISimulate dataset. The manifest supplies the complete
+    local AISim dataset. The manifest supplies the complete
     canonical configuration; Planner does not override its model, runtime, or pin.
   </ParamField>
   <ParamField path="dataset_profiles.&lt;role&gt;.root" type="string">
@@ -144,13 +144,13 @@ When `optimization_target` is `throughput`, `latency`, or `load`, the Planner fo
   </ParamField>
   <ParamField path="dataset_profiles.&lt;role&gt;.manifest" type="string">
     Required path relative to `root`, selecting an execution-profile manifest for that
-    role. AISimulate validates artifact hashes, the compiled graph, and retained inputs.
+    role. AISim validates artifact hashes, the compiled graph, and retained inputs.
     Planner prepares a private temporary directory once per role/source and retains it
     across worker-limit changes. Provide writable temporary storage and bundled or
     existing local model metadata. Restart Planner to adopt changed dataset contents.
   </ParamField>
   <ParamField path="roles.&lt;role&gt;.model / system / backend" type="string" required={true}>
-    Model identifier, AISimulate system identifier, and inference backend
+    Model identifier, AISim system identifier, and inference backend
     (`vllm`, `sglang`, or `trtllm`). Optional `backend_version`, `tp`, `pp`,
     `attention_dp`, MoE axes, quantization, KV block size, and speculation fields
     use the upstream schema. Published worker capabilities must agree with the
@@ -174,16 +174,16 @@ When `optimization_target` is `throughput`, `latency`, or `load`, the Planner fo
     correction sampling, fit settings, feature weights, and correction bounds.
     Explicit settings override Planner sampling defaults. A legacy total bucket
     count of 16 maps to `bins_per_axis: [4, 4]`. Unknown fields are rejected by
-    AISimulate. See the [AISimulate core API](https://github.com/ai-dynamo/aisimulate/blob/main/docs/core-api.md).
+    AISim. See the [AISim core API](https://github.com/ai-dynamo/aisimulate/blob/main/docs/core-api.md).
   </ParamField>
 </Indent>
 
 ### Local execution-profile datasets
 
-Download the AISimulate dataset snapshot into the container image during the image
+Download the AISim dataset snapshot into the container image during the image
 build, or mount a local copy before starting Planner. Use the
-generic AISimulate wheel; measurements do not belong inside the wheel. Use matching
-AISimulate Python and Rust releases that support execution profiles through the
+generic AISim wheel; measurements do not belong inside the wheel. Use matching
+AISim Python and Rust releases that support execution profiles through the
 common forward-pass query API. This integration pins Python
 `0.13.0.dev202610290000000087` and Rust `0.13.0-dev.202610290000000087`,
 which include that support. Use version-2 execution profiles; version 1 retains
@@ -207,7 +207,7 @@ serving, supply separate `prefill` and `decode` sources. For `mode: agg`, use an
 containing `estimator_config.op_level.execution_profile` also work through `roles`.
 
 Planner applies its existing workload estimates, including queue scaling,
-prefix-cache discounts, and next-request estimates, before calling AISimulate's
+prefix-cache discounts, and next-request estimates, before calling AISim's
 common forward-pass query API. The prediction path is the same for built-in and
 external inputs, including mixed steps. If it cannot estimate the resulting shape, Planner skips scaling decisions that
 depend on that estimate.
@@ -723,10 +723,10 @@ The Planner runs the builtin plugin pipeline by default. `scheduling` controls p
     Number of sweep worker processes of executor `local`. Must be at least 1. Each worker replays one candidate at a time, so memory grows with this value and the window size. Executor `dgdr` ignores it and uses `dgdr.run.parallelism`.
   </ParamField>
   <ParamField path="router" type="object | string" default="null">
-    Router search domain, written like the `router` section of `aisimulate recommend --stack dynamo` (see [Search domains](#search-domains)). A knob omitted from the map searches its AISimulate default domain; write a scalar to pin it. `default` searches the whole AISimulate default domain. `null` (or no `router` field) keeps every router parameter at its startup value; an empty map `{}` is rejected. A searched router requires `router_mode="kv_router"` (`router.policy: kv_router` in `aisimulate predict`) with the default worker-selection policy, no `overlap_score_weight`, and conditional disaggregation disabled.
+    Router search domain, written like the `router` section of `aisimulate recommend --stack dynamo` (see [Search domains](#search-domains)). A knob omitted from the map searches its AISim default domain; write a scalar to pin it. `default` searches the whole AISim default domain. `null` (or no `router` field) keeps every router parameter at its startup value; an empty map `{}` is rejected. A searched router requires `router_mode="kv_router"` (`router.policy: kv_router` in `aisimulate predict`) with the default worker-selection policy, no `overlap_score_weight`, and conditional disaggregation disabled.
   </ParamField>
   <ParamField path="planner" type="object | string" default="null">
-    Planner search domain, written like the `planner` section of `aisimulate recommend --stack dynamo` and limited to what a running Planner can change (see [Search domains](#search-domains)). `default` searches the parts of the AISimulate default domain that apply to this Planner. `null` (or no `planner` field) keeps every Planner field unchanged; an empty map `{}` is rejected. A written knob or group requires load or throughput scaling, and the scaling mode that uses it: for example, `load_sensitivity` needs load scaling, and `load_predictor` needs `optimization_target: sla` with throughput scaling. A searched field must have a value in the Planner config. `ttft_ms` and `itl_ms` are never searched.
+    Planner search domain, written like the `planner` section of `aisimulate recommend --stack dynamo` and limited to what a running Planner can change (see [Search domains](#search-domains)). `default` searches the parts of the AISim default domain that apply to this Planner. `null` (or no `planner` field) keeps every Planner field unchanged; an empty map `{}` is rejected. A written knob or group requires load or throughput scaling, and the scaling mode that uses it: for example, `load_sensitivity` needs load scaling, and `load_predictor` needs `optimization_target: sla` with throughput scaling. A searched field must have a value in the Planner config. `ttft_ms` and `itl_ms` are never searched.
   </ParamField>
   <ParamField path="executor" type="string" default="local">
     Where sweeps run. `local` replays the candidates in worker processes of the Planner and runs only inside planner-in-the-loop replay; a live Planner rejects it at startup with `planner.retune is replay-only with executor 'local'; use executor: dgdr`. `dgdr` runs each sweep as DGDR v1beta2 Requests from a live Planner on Kubernetes and requires the `dgdr` section below. **Experimental**, development clusters only: see [Planner Live Retune](../../kubernetes/auto-deployment/planner-live-retune.md).
@@ -755,13 +755,13 @@ The Planner runs the builtin plugin pipeline by default. `scheduling` controls p
       Window phase. Window `k` is `[phase_seconds + k × interval_seconds, phase_seconds + (k+1) × interval_seconds)` in epoch seconds, so a restarted Planner continues the same windows. Must be 0 or greater.
     </ParamField>
     <ParamField path="model" type="string" required={true}>
-      Hugging Face repository id the workers serve, written as each Request's `spec.model.name`. The Run Job has no Hugging Face credentials or model mount, so it must be a public repository that AISimulate can resolve.
+      Hugging Face repository id the workers serve, written as each Request's `spec.model.name`. The Run Job has no Hugging Face credentials or model mount, so it must be a public repository that AISim can resolve.
     </ParamField>
     <ParamField path="sku" type="string" required={true}>
       GPU SKU, written as each Request's `spec.hardware.gpu.sku`.
     </ParamField>
     <ParamField path="engine" type="object" required={true}>
-      The pinned AISimulate `engine` section, written as each Request's `spec.aisim.inputOverrides.engine`. Every value must be a scalar, each worker role of `mode` sets one `parallelism.preset` entry and both scheduler knobs, and `replicas` must not be set: the Planner fills them in from the DGD spec at each launch. See [Engine section](../../kubernetes/auto-deployment/planner-live-retune.md#engine-section).
+      The pinned AISim `engine` section, written as each Request's `spec.aisim.inputOverrides.engine`. Every value must be a scalar, each worker role of `mode` sets one `parallelism.preset` entry and both scheduler knobs, and `replicas` must not be set: the Planner fills them in from the DGD spec at each launch. See [Engine section](../../kubernetes/auto-deployment/planner-live-retune.md#engine-section).
     </ParamField>
     <ParamField path="cut_budget_seconds" type="number" default="900.0">
       Deadline of the subprocess that cuts a window file from the segments. Must be greater than 0.
@@ -774,10 +774,10 @@ The Planner runs the builtin plugin pipeline by default. `scheduling` controls p
     </ParamField>
     <Indent>
       <ParamField path="parallelism" type="integer" default="8">
-        AISimulate `optimizer.parallelism` of each Run. Must be at least 1. The Run Job's CPU and memory may lower the effective value.
+        AISim `optimizer.parallelism` of each Run. Must be at least 1. The Run Job's CPU and memory may lower the effective value.
       </ParamField>
       <ParamField path="candidate_timeout_seconds" type="number" default="1800.0">
-        AISimulate `optimizer.candidate_timeout_seconds` of each Run. Must be greater than 0.
+        AISim `optimizer.candidate_timeout_seconds` of each Run. Must be greater than 0.
       </ParamField>
       <ParamField path="max_shards" type="integer" default="3">
         Most grid shards, one Request each, per window. A shard is a Cartesian sub-grid of at most 100 points. The common-random-numbers probe and off-grid points are extra single-point Requests and do not count. Must be in [1, 16].
@@ -803,9 +803,9 @@ The Planner runs the builtin plugin pipeline by default. `scheduling` controls p
 
 ### Objectives
 
-`retune.objective` takes the values of the DGDR v1beta2 `spec.objective.metric` enum, spelled the same, and scores each as the AISimulate optimization target the Dynamo operator maps it to. Scores are in the metric's units, and decisions record them as `baseline_score` and `best_score`.
+`retune.objective` takes the values of the DGDR v1beta2 `spec.objective.metric` enum, spelled the same, and scores each as the AISim optimization target the Dynamo operator maps it to. Scores are in the metric's units, and decisions record them as `baseline_score` and `best_score`.
 
-| Value | AISimulate target | Score | Better |
+| Value | AISim target | Score | Better |
 |---|---|---|---|
 | `Throughput` | `throughput` | Output tokens per second of the replay | Higher |
 | `ThroughputPerGPU` | `throughput_per_gpu` | `Throughput` divided by the average provisioned GPUs | Higher |
@@ -830,7 +830,7 @@ The Planner runs the builtin plugin pipeline by default. `scheduling` controls p
   - A bare list (`[0.5, 1.0]`) is rejected; write `{choices: [0.5, 1.0]}`.
   - In YAML, write floats with a decimal point and a signed exponent (`1.0e-3`): YAML 1.1 reads `1e-3` as a string, which the schema rejects.
 - **Infeasible points.** When the Planner starts, a Planner grid point that fails `PlannerConfig` validation or does not fit the deployment, such as a `decode_scale_up_kv_rate` not above the `decode_scale_down_kv_rate` it is combined with, or a throughput-scaling policy the configuration cannot run, is dropped, and one warning reports how many points were dropped. Startup fails only when some value of a searched Planner knob other than a scaling-policy field fits in no grid point, or when a load-predictor candidate is invalid. A decision that would apply Planner fields that no longer validate or fit, for example after a runtime threshold change, is `failed`.
-- **Omitted knobs.** A knob that has an AISimulate default domain searches it when omitted, as in `aisimulate recommend`. The retune-only knobs in the tables below and the `scaling_policy` group keep their current value unless written. Knobs fixed at startup always keep their running value.
+- **Omitted knobs.** A knob that has an AISim default domain searches it when omitted, as in `aisimulate recommend`. The retune-only knobs in the tables below and the `scaling_policy` group keep their current value unless written. Knobs fixed at startup always keep their running value.
 - **User constraints.** Worker minimums and GPU budgets (`min_workers`, `prefill_min_workers`, `decode_min_workers`, `max_num_gpus`, `min_num_gpus`, and their live names) are never searched: they bound what the Planner may provision, and every candidate replays within them. Change them through the Planner config or the [runtime configuration API](#system-port-reconfiguration-api).
 - **Names.** Write the public names below. A live name, such as `router_temperature`, is rejected with the public name to use. Decisions and `report.planner.retune_events` record the live names: the PATCH `/router_policy` parameter names and the `PlannerConfig` field names.
 
@@ -1085,7 +1085,7 @@ The Planner enforces these cross-field rules at startup and rejects a config tha
   <Card title="Planner Overview" icon="circle-info" href="../../developer-guide/knowledge-base/modular-components/planner/overview.md">
     Why LLM inference needs a different autoscaler.
   </Card>
-  <Card title="Simulate Planner Decisions with AISimulate" icon="flask" href="../../developer-guide/knowledge-base/modular-components/planner/aisimulate-planner-replay.mdx">
+  <Card title="Simulate Planner Decisions with AISim" icon="flask" href="../../developer-guide/knowledge-base/modular-components/planner/aisimulate-planner-replay.mdx">
     Replay a trace through the Planner offline, including retune.
   </Card>
   <Card title="DGDR Reference" icon="diagram-project" href="../kubernetes-api/dynamo-graph-deployment-request.mdx">

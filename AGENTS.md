@@ -18,7 +18,7 @@ SPDX-License-Identifier: Apache-2.0
 | `docs/fern/` | Fern docs site; pages are in `pages/` |
 | `examples/`, `recipes/` | Runnable examples and deployment recipes |
 | `benchmarks/`, `tests/` | Benchmark harnesses and the top-level pytest suite |
-| `.ai/` | Topic guidelines for agents (pytest, Python, CI, launch scripts, AISimulate, and metrics, logs, and traces); read the matching one before writing that kind of code |
+| `.ai/` | Topic guidelines for agents (pytest, Python, CI, launch scripts, AISim, and metrics, logs, and traces); read the matching one before writing that kind of code |
 | `.agents/skills/` | Agent skills (see [Skills](#skills)) |
 | `agents/`, `agent-docs/` | Role contracts, guides, and rules for the recipe optimization loop |
 
@@ -30,7 +30,7 @@ Dynamo serves [vLLM](https://github.com/vllm-project/vllm),
 [TokenSpeed](https://github.com/lightseekorg/tokenspeed). Related projects:
 [NIXL](https://github.com/ai-dynamo/nixl) (KV-cache transfer),
 [AIPerf](https://github.com/ai-dynamo/aiperf) (load generation),
-[AISimulate](https://pypi.org/project/aisimulate/) (offline configuration search),
+[AISim](https://pypi.org/project/aisim/) (offline configuration search),
 [ModelExpress](https://github.com/ai-dynamo/modelexpress) (GPU-to-GPU weight streaming), and
 [Grove](https://github.com/ai-dynamo/grove) (Kubernetes gang scheduling).
 

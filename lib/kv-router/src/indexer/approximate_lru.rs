@@ -4,13 +4,13 @@
 //! Router-owned physical-capacity model for local approximate indexing.
 //!
 //! This intentionally mirrors the useful behavioral contract of the simulator
-//! without depending on `aisimulate-core`, whose API is not yet stable enough
+//! without depending on `aisim-core`, whose API is not yet stable enough
 //! for a production dependency.
 //!
 //! NOTE/TODO: This shared lifecycle and capacity model may eventually motivate
 //! a unified slot-tracker and cache-evictor substrate, similar in spirit to a
 //! HiCache-style unified residency/load model. Keep this implementation narrowly
-//! scoped and compositional while `aisimulate-core` remains experimental and fluid.
+//! scoped and compositional while `aisim-core` remains experimental and fluid.
 //!
 //! NOTE: LRU bookkeeping is intentionally not rolled back if a synthetic radix
 //! event fails to apply. The request release still makes its copies inactive,

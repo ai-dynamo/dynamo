@@ -1,14 +1,14 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Dynamo compatibility entrypoints over the packaged AISimulate Replayer.
+//! Dynamo compatibility entrypoints over the packaged AISim Replayer.
 //!
 //! This module lowers Dynamo configuration into Replay-owned contracts. It
 //! must never include or compile implementation sources from another crate.
 
 use std::collections::VecDeque;
 
-use aisimulate_core::replay::{
+use aisim_core::replay::{
     CURRENT_REPLAY_SPEC_VERSION, ProviderSpec, ReplayAdapters, ReplayCaptureOptions,
     ReplayComposition, ReplayEngineConfig, ReplayRuntimeInput, ReplayScalingPolicy, ReplaySpec,
     ReplayTopology, Replayer, WorkerPoolSpec,
@@ -440,7 +440,7 @@ pub fn run_offline_handoff_conformance(
         arrival_timestamp_ms: Some(0.0),
         ..Default::default()
     };
-    Ok(aisimulate_core::replay::run_engine_handoff_conformance(engine, factory, request)?.into())
+    Ok(aisim_core::replay::run_engine_handoff_conformance(engine, factory, request)?.into())
 }
 
 pub(crate) fn generate_trace_worker_artifacts(
@@ -971,7 +971,7 @@ mod agentic_host_offload_tests {
             ));
         }
         let mut invalid = args(None);
-        invalid.timing_model = aisimulate_core::engine::TimingModelConfig::External {
+        invalid.timing_model = aisim_core::engine::TimingModelConfig::External {
             provider: "ais".to_string(),
             config: serde_json::json!({"backend": "sglang"}),
         };
@@ -992,7 +992,7 @@ mod agentic_host_offload_tests {
             "agentic host offload requires speculative decoding disabled",
         ));
         let mut invalid = args(None);
-        invalid.timing_model = aisimulate_core::engine::TimingModelConfig::External {
+        invalid.timing_model = aisim_core::engine::TimingModelConfig::External {
             provider: "ais".to_string(),
             config: serde_json::json!({"speculation": {"nextn": 2}}),
         };

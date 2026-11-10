@@ -66,8 +66,8 @@ keywords = ["llm", "genai", "inference", "nvidia", "distributed"]
 [workspace.dependencies]
 dynamo-router-policies = { path = "lib/router-plugins/builtin", version = "1.7.0" }
 dynamo-generate-format-catalog = { path = "lib/generate-format-catalog", version = "1.7.0" }
-# Published separately by https://github.com/ai-dynamo/aisimulate.
-aisimulate-core = { version = "=0.13.0-dev.202610290000000087" }
+# Temporary source qualification of AISim #796; use published artifacts before merging.
+aisim-core = { git = "https://github.com/ai-dynamo/aisimulate", rev = "9d61bdfb902cb3269a3cf47eb33abb80b05489da" }
 
 # Local crates
 dynamo-runtime = { path = "lib/runtime", version = "1.7.0" }

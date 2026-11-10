@@ -166,7 +166,7 @@ Upgrading? Pick the version you run today to see the dependency migration and th
 
   > **Migrate:** Raise `max_throughput_scaling_replicas` in the Planner configuration if you rely on larger single-step scaling.
 
-<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Performance-model options renamed from AIConfigurator to AISimulate** (`--aic-*` -> `--ais-*`, `aic_perf_model` -> `ais_perf_model.roles`) across the Planner, Mocker, and replay tools ([#15063](https://github.com/ai-dynamo/dynamo/pull/15063)). Retired `DYN_AIC_*` environment variables now fail at startup.
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Performance-model options renamed from AIConfigurator to AISim** (`--aic-*` -> `--ais-*`, `aic_perf_model` -> `ais_perf_model.roles`) across the Planner, Mocker, and replay tools ([#15063](https://github.com/ai-dynamo/dynamo/pull/15063)). Retired `DYN_AIC_*` environment variables now fail at startup.
 
   > **Migrate:** Rename `--aic-*` flags to their `--ais-*` equivalents, replace `DYN_AIC_*` environment variables with their AIS equivalents, and move Planner performance-model settings under `ais_perf_model.roles`. The old CLI spellings are accepted only temporarily.
 
@@ -298,9 +298,9 @@ Upgrading? Pick the version you run today to see the dependency migration and th
 
   > **Migrate:** Drop the unified-backend flag from SGLang/vLLM launch commands and use the standard worker invocation shown in the updated CLI templates.
 
-<span className="dynref-badge dynref-badge--red">Removed</span> **AIConfigurator renamed to AISimulate: aiconfigurator wheels replaced by the `aisimulate` package, and the `python -m dynamo.replay` CLI removed** ([#13665](https://github.com/ai-dynamo/dynamo/pull/13665)).
+<span className="dynref-badge dynref-badge--red">Removed</span> **AIConfigurator renamed to AISim: aiconfigurator wheels replaced by the `aisimulate` package, and the `python -m dynamo.replay` CLI removed** ([#13665](https://github.com/ai-dynamo/dynamo/pull/13665)).
 
-  > **Migrate:** Install the consolidated `aisimulate` wheel/`aisimulate-core` crate instead of the separate `aiconfigurator` packages (compatibility import namespaces ship inside the AISimulate wheel).
+  > **Migrate:** Install the consolidated `aisimulate` wheel/`aisimulate-core` crate instead of the separate `aiconfigurator` packages (compatibility import namespaces ship inside the AISim wheel).
 
 <span className="dynref-badge dynref-badge--red">Removed</span> **Planner performance-model and Mocker engine bindings removed from `dynamo._core`** ([#12454](https://github.com/ai-dynamo/dynamo/pull/12454), [#12446](https://github.com/ai-dynamo/dynamo/pull/12446), [#12525](https://github.com/ai-dynamo/dynamo/pull/12525)).
 

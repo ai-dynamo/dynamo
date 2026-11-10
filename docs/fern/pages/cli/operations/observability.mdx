@@ -278,13 +278,13 @@ planner: {policy: disabled}
 Add every shard to `traffic.source.paths`, then run the offline prediction:
 
 ```bash
-aisimulate predict \
+aisim predict \
   --stack dynamo \
   --config /tmp/request-trace-prediction.yaml \
   --output-dir /tmp/request-trace-prediction
 ```
 
-No Mooncake conversion is required. AISimulate derives and validates the trace block size. It preserves
+No Mooncake conversion is required. AISim derives and validates the trace block size. It preserves
 session dependencies and tool waits when every request has session context and rejects mixed
 session-aware and context-free trace sets.
 

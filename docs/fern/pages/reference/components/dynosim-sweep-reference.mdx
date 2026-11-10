@@ -5,14 +5,14 @@ title: DynoSim Sweep Reference
 subtitle: Configuration domains, optimizer controls, and output for aisimulate recommend
 ---
 
-`aisimulate recommend --stack dynamo` searches AISimulate engine configuration plus Dynamo Router
+`aisimulate recommend --stack dynamo` searches AISim engine configuration plus Dynamo Router
 and Planner domains. Each selected result is a concrete prediction YAML. For a guided workflow, see
 [Sweep DynoSim Configurations](../../cli/operations/simulation-with-dynosim/dynosim-sweeps.mdx).
 
 ## Command
 
 ```bash
-aisimulate recommend --stack dynamo --config recommendation.yaml
+aisim recommend --stack dynamo --config recommendation.yaml
 ```
 
 | Option | Default | Purpose |
@@ -21,7 +21,7 @@ aisimulate recommend --stack dynamo --config recommendation.yaml
 | `--stack` | `engine` | Set to `dynamo` to load the Dynamo runner and adapters |
 | `--set PATH=YAML_VALUE` | None | Override a configuration path after loading YAML; repeatable |
 | `--output-dir` | `./aisimulate-output` | Recommendation output directory |
-| `--overwrite` | `false` | Replace known AISimulate output files while preserving unrelated files |
+| `--overwrite` | `false` | Replace known AISim output files while preserving unrelated files |
 | `--format` | `table` | Standard-output format: `table` or `json` |
 
 ## Configuration Sections
@@ -79,7 +79,7 @@ A preset covers every knob in its smallest configuration group.
 - Set `preset: false` or `preset: {}` to search the group's independent knob domains.
 - Do not combine an active preset with an independent domain covered by that preset.
 
-Parallelism presets are special. The default invokes AISimulate's feasible parallel-configuration
+Parallelism presets are special. The default invokes AISim's feasible parallel-configuration
 enumeration and projection. A custom list treats each complete parallelism mapping as one flat
 choice. With `preset: false`, each parallelism knob becomes an independent dimension before
 feasibility filtering.
@@ -153,7 +153,7 @@ Each numbered YAML contains one concrete prediction configuration with no `optim
 `optimizer`, preset, domain, or `auto` value. Run any result directly:
 
 ```bash
-aisimulate predict \
+aisim predict \
   --stack dynamo \
   --config aisimulate-output/recommendations/0001.yaml
 ```

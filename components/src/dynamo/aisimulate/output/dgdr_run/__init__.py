@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Live DynamoGraphDeploymentRun output adapter for AISimulate (``dgdr_run``)."""
+"""Live DynamoGraphDeploymentRun output adapter for AISim (``dgdr_run``)."""
 
 from dynamo.aisimulate.output.dgdr_run.adapter import (
     DGDRRunOutputAdapter,

@@ -400,7 +400,7 @@ class FrontendArgGroup(ArgGroup):
     Args:
         env: Another process's env (see ``ArgEnv``). Nothing then reads the
             local filesystem: ``--model-path`` is not checked, and the
-            AISimulate perf-model arguments, whose values name files, are not
+            AISim perf-model arguments, whose values name files, are not
             registered.
     """
 

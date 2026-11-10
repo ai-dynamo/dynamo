@@ -12,29 +12,29 @@ from pathlib import Path
 import pytest
 
 pytest.importorskip(
-    "aisimulate.sweeper",
-    reason="AI Simulate is an optional Dynamo simulation dependency",
+    "aisim.sweeper",
+    reason="AISim is an optional Dynamo simulation dependency",
 )
 
-from aisimulate.sweeper.config import OptimizationTarget, SmartSearchConfig
-from aisimulate.sweeper.deploy import build_backend_deployment
-from aisimulate.sweeper.kv_estimate import resolve_backend_version
-from aisimulate.sweeper.provider import (
+from aisim.sweeper.config import OptimizationTarget, SmartSearchConfig
+from aisim.sweeper.deploy import build_backend_deployment
+from aisim.sweeper.kv_estimate import resolve_backend_version
+from aisim.sweeper.provider import (
     AdapterReplaySpec,
     CandidateContext,
     RuntimeHookSpec,
     SweepContext,
 )
-from aisimulate.sweeper.replay import (
+from aisim.sweeper.replay import (
     BackendDeploymentSpec,
     ReplayOutputRequirements,
     ReplaySpec,
 )
-from aisimulate.sweeper.sample import unroll_sample
-from aisimulate.sweeper.sampler import Suggestion
-from aisimulate.sweeper.score import objective_value
-from aisimulate.sweeper.search import Sweeper
-from aisimulate.sweeper.search_space import enumerate_branches
+from aisim.sweeper.sample import unroll_sample
+from aisim.sweeper.sampler import Suggestion
+from aisim.sweeper.score import objective_value
+from aisim.sweeper.search import Sweeper
+from aisim.sweeper.search_space import enumerate_branches
 
 from dynamo.planner.simulation import create_provider as create_planner_provider
 from dynamo.replay.simulation import DynamoReplayRunnerFactory

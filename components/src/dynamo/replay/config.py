@@ -10,7 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Protocol
 
-from aisimulate.runner import canonical_performance_config
+from aisim.runner import canonical_performance_config
 
 from dynamo.mocker.args import resolve_planner_profile_data as _resolve_profile
 from dynamo.mocker.config import normalize_mocker_config
@@ -35,5 +35,5 @@ def resolve_planner_profile_data(
 
 
 def load_engine_args(raw_args: str | Mapping[str, Any] | None) -> dict[str, Any] | None:
-    """Load a canonical AISimulate launch config with optional Dynamo runtime options."""
+    """Load a canonical AISim launch config with optional Dynamo runtime options."""
     return None if raw_args is None else normalize_mocker_config(raw_args)

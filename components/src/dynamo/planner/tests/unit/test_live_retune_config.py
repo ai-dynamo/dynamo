@@ -19,11 +19,11 @@ import math
 import pytest
 
 pytest.importorskip(
-    "aisimulate.sweeper",
-    reason="AI Simulate is an optional Dynamo simulation dependency",
+    "aisim.sweeper",
+    reason="AISim is an optional Dynamo simulation dependency",
 )
 
-from aisimulate.config.engine import ParallelismRecommendationConfig
+from aisim.config.engine import ParallelismRecommendationConfig
 from pydantic import ValidationError
 
 from dynamo.planner.config.planner_config import (
@@ -382,12 +382,12 @@ def _rejects_engine(match: str, engine: dict, mode: str = "agg") -> None:
             ("workers", "aggregated", "parallelism", "preset", 0, "decode_context"),
             1,
             r"preset\[0\].decode_context is not accepted \(P5\); the pinned "
-            r"AISimulate preset schema has no decode_context",
+            r"AISim preset schema has no decode_context",
         ),
         (
             ("workers", "aggregated", "parallelism", "preset", 0, "prefill_context"),
             2,
-            r"preset\[0\].prefill_context must be 1 or omitted \(P5\); AISimulate "
+            r"preset\[0\].prefill_context must be 1 or omitted \(P5\); AISim "
             r"recommend rejects context parallelism above 1, got 2",
         ),
         (
@@ -399,7 +399,7 @@ def _rejects_engine(match: str, engine: dict, mode: str = "agg") -> None:
             ("workers", "aggregated", "scheduler", "max_batched_tokens"),
             None,
             r"scheduler.max_batched_tokens must be a positive integer \(P5\); "
-            r"omitted, AISimulate searches its default domain",
+            r"omitted, AISim searches its default domain",
         ),
         (
             ("mode",),

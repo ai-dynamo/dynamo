@@ -34,7 +34,7 @@ of a replay. Sweeper imports a provider only when its adapter name appears in th
 `Sweeper` is the only public execution interface. Supply a replay runtime explicitly:
 
 ```python
-from aisimulate.sweeper import SmartSearchConfig, Sweeper
+from aisim.sweeper import SmartSearchConfig, Sweeper
 
 config = SmartSearchConfig.from_yaml("sweep.yaml")
 candidates = Sweeper(runner_factory=my_runner_factory).run(config)
@@ -50,5 +50,5 @@ SDK configuration and an explicitly injected runtime.
 - The runner advertises supported `ReplaySpec` versions, backend/topology pairs, and runtime hooks
   before a study starts.
 - Every `Sweeper.run` call owns fresh optimizer studies, result caches, runners, and worker pools.
-- KVBM search fields are rejected. The AISimulate engine and replay path do not support those
+- KVBM search fields are rejected. The AISim engine and replay path do not support those
   fields and provide no adapter migration for the old host or disk offload settings.

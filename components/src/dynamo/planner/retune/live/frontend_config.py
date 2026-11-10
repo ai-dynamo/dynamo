@@ -3,7 +3,7 @@
 
 """Frontend router startup parsed from the DGD spec, and the spec premises.
 
-Live retune replays each window in DGDR with AISimulate's router defaults
+Live retune replays each window in DGDR with AISim's router defaults
 plus the searched knobs, while the live frontends start from whatever their
 argv and env say. The two agree only when the frontend leaves every
 unsearched routing field at its default (premise P4), so the planner reads
@@ -472,7 +472,7 @@ def evaluate_premises(
     if startup is not None and startup.replicas > 1 and not startup.replica_sync:
         others.append(
             f"P8: the frontend has {startup.replicas} replicas without "
-            "router_replica_sync; AISimulate models a single router"
+            "router_replica_sync; AISim models a single router"
         )
 
     # P9: worker replicas only change through the DGD spec, and one planner.
@@ -498,7 +498,7 @@ def evaluate_premises(
         )
         others.extend(_admin_listener_errors(analysis.env, warnings))
 
-    # P6 (warn only): AISimulate resolves the model by its HF id.
+    # P6 (warn only): AISim resolves the model by its HF id.
     warning = _model_warning(dgdr.model)
     if warning is not None:
         warnings.append(warning)
@@ -2330,20 +2330,20 @@ def _model_warning(model: str) -> Optional[str]:
     try:
         # Optional dependency of a warn-only premise: without it, P6 is not
         # checked.
-        from aisimulate_core.sdk.common import DefaultHFModels
+        from aisim_core.sdk.common import DefaultHFModels
     except ImportError:
         return None
     except Exception as error:  # noqa: BLE001 - evaluate_premises never raises
-        logger.exception("live retune could not load AISimulate's default HF models")
+        logger.exception("live retune could not load AISim's default HF models")
         return (
-            f"P6: cannot check retune.dgdr.model {model!r} against AISimulate's "
+            f"P6: cannot check retune.dgdr.model {model!r} against AISim's "
             f"default HF models ({type(error).__name__}: {error}); each DGDR Run "
             "must be able to download it"
         )
     if model in DefaultHFModels:
         return None
     return (
-        f"P6: retune.dgdr.model {model!r} is not an AISimulate default HF model; "
+        f"P6: retune.dgdr.model {model!r} is not an AISim default HF model; "
         "each DGDR Run must be able to download it"
     )
 

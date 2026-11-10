@@ -24,7 +24,7 @@ python scripts/run_match_config.py configs/match.jev.example.yaml
 The pilot compares Jev, Planner, KEDA/HPA port, reactive, and static 4P4D on
 flat, staircase, and flash-crowd synthetic workloads. It pins Jev to
 `jev-1.13.0` and the serving performance model to vLLM `0.24.0` on H200.
-Check that the installed AISimulate performance data supports that serving version. Validation
+Check that the installed AISim performance data supports that serving version. Validation
 does not import the Jev adapter or contact TypeSafe.
 
 There are three Jev cells, each capped at 100 calls with no retry. A missing API

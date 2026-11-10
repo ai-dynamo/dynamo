@@ -75,7 +75,7 @@ def test_normalize_quant_mode(value, expected):
 
 
 def test_resolve_quant_mode_per_field():
-    common = pytest.importorskip("aisimulate_core.sdk.common")
+    common = pytest.importorskip("aisim_core.sdk.common")
 
     assert _resolve_quant_mode("gemm", "int4") == common.GEMMQuantMode.int4_wo
     assert _resolve_quant_mode("gemm", "fp8") == common.GEMMQuantMode.fp8
@@ -89,7 +89,7 @@ def test_resolve_quant_mode_per_field():
 
 
 def test_resolve_quant_mode_rejects_unsupported_per_field():
-    pytest.importorskip("aisimulate_core.sdk.common")
+    pytest.importorskip("aisim_core.sdk.common")
 
     # `int4` -> `int4_wo` is valid for GEMM/MoE but not for KV cache or FMHA,
     # which have narrower vocabularies. The error must name the field and the
@@ -119,7 +119,7 @@ class _CanonicalEstimator:
 
 @pytest.fixture
 def canonical_estimator(monkeypatch):
-    from aisimulate_core.sdk.rust_engine_step import RustForwardPassPerfModel
+    from aisim_core.sdk.rust_engine_step import RustForwardPassPerfModel
 
     created = []
 
@@ -179,7 +179,7 @@ def test_session_decode_preserves_stride_kv_and_verification_width(
 
 
 def test_session_rejects_cold_regression(monkeypatch):
-    from aisimulate_core.sdk.rust_engine_step import RustForwardPassPerfModel
+    from aisim_core.sdk.rust_engine_step import RustForwardPassPerfModel
 
     from dynamo._internal.ais import AisSession
 
@@ -195,7 +195,7 @@ def test_session_rejects_cold_regression(monkeypatch):
 @pytest.mark.parametrize("nextn,attention_dp", [(0, 1), (2, 1), (0, 2), (2, 2)])
 def test_canonical_session_matches_native_static_query_oracle(nextn, attention_dp):
     # Only packaged model metadata/performance tables are loaded, no weights or GPU.
-    from aisimulate_core.sdk.engine import EngineHandle
+    from aisim_core.sdk.engine import EngineHandle
 
     from dynamo._internal.ais import AisSession
 
@@ -229,7 +229,7 @@ def test_canonical_session_matches_native_static_query_oracle(nextn, attention_d
 
 
 def test_canonical_capacity_forwards_scheduler_options(monkeypatch):
-    import aisimulate.capacity
+    import aisim.capacity
 
     from dynamo._internal.ais import estimate_canonical_num_gpu_blocks
 
@@ -239,9 +239,7 @@ def test_canonical_capacity_forwards_scheduler_options(monkeypatch):
         calls.append(raw)
         return {**raw, "num_gpu_blocks": 123}
 
-    monkeypatch.setattr(
-        aisimulate.capacity, "materialize_aic_num_gpu_blocks", materialize
-    )
+    monkeypatch.setattr(aisim.capacity, "materialize_aic_num_gpu_blocks", materialize)
     config = {
         "model": "model",
         "system": "h200_sxm",

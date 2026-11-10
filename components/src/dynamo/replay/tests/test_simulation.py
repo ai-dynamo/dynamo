@@ -13,13 +13,13 @@ from dataclasses import replace
 import pytest
 
 pytest.importorskip(
-    "aisimulate.sweeper",
-    reason="AI Simulate is an optional Dynamo simulation dependency",
+    "aisim.sweeper",
+    reason="AISim is an optional Dynamo simulation dependency",
 )
 
-from aisimulate.runner import materialize_engine_launch_config
-from aisimulate.sweeper.provider import AdapterReplaySpec, RuntimeHookSpec
-from aisimulate.sweeper.replay import (
+from aisim.runner import materialize_engine_launch_config
+from aisim.sweeper.provider import AdapterReplaySpec, RuntimeHookSpec
+from aisim.sweeper.replay import (
     BackendDeploymentSpec,
     ReplayOutputRequirements,
     ReplaySpec,
@@ -988,8 +988,8 @@ def test_public_prediction_bootstrap_prefers_canonical_worker_policy():
     from pathlib import Path
 
     import yaml
-    from aisimulate.compiler import prediction_to_replay_spec
-    from aisimulate.config.cli import CorePredictionConfig
+    from aisim.compiler import prediction_to_replay_spec
+    from aisim.config.cli import CorePredictionConfig
 
     from dynamo.replay.planner import _ais_session_kwargs
 
@@ -1022,7 +1022,7 @@ def test_public_prediction_bootstrap_prefers_canonical_worker_policy():
     ],
 )
 def test_custom_timing_uses_shared_capacity_resolution(monkeypatch, timing):
-    import aisimulate.capacity
+    import aisim.capacity
 
     calls = []
 
@@ -1030,7 +1030,7 @@ def test_custom_timing_uses_shared_capacity_resolution(monkeypatch, timing):
         calls.append(kwargs)
         return 4096
 
-    monkeypatch.setattr(aisimulate.capacity, "estimate_num_gpu_blocks", capacity_lookup)
+    monkeypatch.setattr(aisim.capacity, "estimate_num_gpu_blocks", capacity_lookup)
     args = _launch_config(
         {
             "engine_type": "vllm",
@@ -1060,8 +1060,8 @@ def test_compiled_custom_timing_consumes_capacity_only_fields(timing):
     from pathlib import Path
 
     import yaml
-    from aisimulate.compiler import prediction_to_replay_spec
-    from aisimulate.config.cli import CorePredictionConfig
+    from aisim.compiler import prediction_to_replay_spec
+    from aisim.config.cli import CorePredictionConfig
 
     path = (
         Path(__file__).parent

@@ -8,12 +8,12 @@ from __future__ import annotations
 from collections.abc import Mapping
 from copy import deepcopy
 
-from aisimulate.config.common import Choices
-from aisimulate.config_adapter import (
+from aisim.config.common import Choices
+from aisim.config_adapter import (
     PredictionAdapterContext,
     RecommendationAdapterContext,
 )
-from aisimulate.sweeper.provider import (
+from aisim.sweeper.provider import (
     AdapterReplaySpec,
     AdapterSearchPlan,
     CandidateContext,
@@ -103,8 +103,8 @@ def _ais_perf_config_from_candidate(
     # Fixed/polynomial worker timing does not create a worker estimator. The
     # Router may still select an AIS load estimate: use the same Core-owned
     # role request builder, retaining policies, roots and estimator controls.
-    from aisimulate.sweeper.config import SearchSpace
-    from aisimulate.sweeper.forward_pass_estimator import ForwardPassEstimatorResolver
+    from aisim.sweeper.config import SearchSpace
+    from aisim.sweeper.forward_pass_estimator import ForwardPassEstimatorResolver
 
     request_space = dict(core_search_space)
     request_space.setdefault("model_name", sample["model_name"])
@@ -127,7 +127,7 @@ def _ais_perf_config_from_prediction(
         return None
     from dataclasses import fields
 
-    from aisimulate_core.sdk import ForwardPassPerfModelConfig
+    from aisim_core.sdk import ForwardPassPerfModelConfig
 
     engine = context.engine
     role = (

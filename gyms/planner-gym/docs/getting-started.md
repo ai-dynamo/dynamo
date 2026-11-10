@@ -15,7 +15,7 @@ Use Linux with Git, Python 3.12, Rust through `rustup`, and the compiler and
 system libraries listed in Dynamo's
 [source-build guide](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/advanced-customizations/building-from-source.md).
 Internet access is needed to install dependencies and resolve performance data.
-The pinned AISimulate package currently provides Linux wheels only.
+The pinned AISim package currently provides Linux wheels only.
 
 For a new checkout:
 
@@ -107,6 +107,6 @@ For missing Mooncake data, verify
 `lib/bench/testdata/mooncake_trace_1000.jsonl` exists in the containing Dynamo
 checkout. `DYNAMO_DIR` can explicitly select another checkout.
 
-For unsupported model/system/backend errors, check the installed AISimulate
+For unsupported model/system/backend errors, check the installed AISim
 performance data and the model settings in the config. Config validation alone
 does not resolve that data.

@@ -17,15 +17,15 @@ from typing import Any
 import pytest
 
 pytest.importorskip(
-    "aisimulate.sweeper",
-    reason="AI Simulate is an optional Dynamo simulation dependency",
+    "aisim.sweeper",
+    reason="AISim is an optional Dynamo simulation dependency",
 )
 
-from aisimulate.config_adapter import (
+from aisim.config_adapter import (
     PredictionAdapterContext,
     RecommendationAdapterContext,
 )
-from aisimulate.sweeper.provider import SweepContext
+from aisim.sweeper.provider import SweepContext
 
 from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.retune.window import read_trace_history
@@ -39,7 +39,7 @@ pytestmark = [
     pytest.mark.planner,
 ]
 
-# AISimulate recommend syntax with public names; credit and scale are pinned.
+# AISim recommend syntax with public names; credit and scale are pinned.
 _RETUNE: dict[str, Any] = {
     "interval_seconds": 120,
     "grace_seconds": 1,
@@ -296,8 +296,8 @@ def _live_base(**overrides: Any) -> dict[str, Any]:
 
 
 def test_retune_sweep_replays_the_live_base_with_each_point() -> None:
-    from aisimulate.sweeper.provider import CandidateContext
-    from aisimulate.sweeper.replay import BackendDeploymentSpec
+    from aisim.sweeper.provider import CandidateContext
+    from aisim.sweeper.replay import BackendDeploymentSpec
 
     provider = create_provider()
     base = _live_base()

@@ -17,7 +17,7 @@ domain semantics, see the
 ## Prerequisites
 
 Run from the repository root. Create and activate a virtual environment, build the runtime bindings,
-and install Dynamo. The editable Dynamo installation installs the pinned AISimulate release and
+and install Dynamo. The editable Dynamo installation installs the pinned AISim release and
 registers the Dynamo-owned `dgd` output adapter:
 
 ```bash
@@ -29,7 +29,7 @@ uv pip install -e .
 uv pip install scikit-learn==1.7.2
 ```
 
-Do not install the standalone `aiconfigurator` package. AISimulate includes the performance-model
+Do not install the standalone `aiconfigurator` package. AISim includes the performance-model
 compatibility code used by the Dynamo stack.
 
 <Steps toc={true}>
@@ -38,11 +38,11 @@ compatibility code used by the Dynamo stack.
 Save the complete configuration below as `/tmp/dynosim-recommend.yaml`. It is one input file with
 two parts:
 
-- `traffic` through `optimizer` configure AISimulate's simulation and search.
+- `traffic` through `optimizer` configure AISim's simulation and search.
 - `dgd` configures the Dynamo output adapter selected by `--output dgd`.
 
 ```yaml
-# AISimulate recommendation input: workload, search space, and optimizer.
+# AISim recommendation input: workload, search space, and optimizer.
 traffic:
   source: {type: synthetic, input_tokens: 1024, output_tokens: 128}
   load: {type: concurrency, concurrency: 8}
@@ -92,7 +92,7 @@ dgd:
 
 Each parallelism preset is a complete mapping and becomes one categorical choice. Router and
 scheduler domains add independent search dimensions. `engine.model` identifies the model that
-AISimulate evaluates and that the generated DGD serves. `dgd.name` is only the Kubernetes resource
+AISim evaluates and that the generated DGD serves. `dgd.name` is only the Kubernetes resource
 name, while `dgd.output_file` is the output filename relative to `--output-dir`. Neither field
 selects the model. `dgd.namespace` is optional; when omitted or empty, the output manifest does not
 set `metadata.namespace`.
@@ -114,14 +114,14 @@ its effective defaults, scaling flags, and GPU limits when passed to `predict`.
 <Step title="Run the recommendation" id="run-the-recommendation">
 
 ```bash
-aisimulate recommend \
+aisim recommend \
   --stack dynamo \
   --config /tmp/dynosim-recommend.yaml \
   --output dgd \
   --output-dir /tmp/dynosim-recommendations
 ```
 
-AISimulate first applies any `--set` overrides. Because the command requests `--output dgd`, it then
+AISim first applies any `--set` overrides. Because the command requests `--output dgd`, it then
 removes the top-level `dgd` mapping before validating the recommendation input and passes that mapping
 to the Dynamo adapter. Omitting the `dgd` mapping while requesting `--output dgd` is an error.
 
@@ -129,7 +129,7 @@ The command prints ranked candidates and produces:
 
 ```text
 /tmp/dynosim-recommendations/
-├── recommendations/   # AISimulate's concrete ranked candidate configurations
+├── recommendations/   # AISim's concrete ranked candidate configurations
 ├── deployment.yaml     # DGD rendered from the selected scalar candidate
 └── index.json          # Index of artifacts written by the DGD adapter
 ```
@@ -162,7 +162,7 @@ For a Pareto optimization, `{index}` is required in `name` and in the active out
 (`output_file` or `output_dir`); scalar targets reject the placeholder. For example,
 `name: candidate-{index}` with `output_dir: candidate-{index}` creates one independently deployable
 Kustomize bundle per selected candidate. The adapter substitutes a three-digit, zero-based index:
-`candidate-000`, `candidate-001`, and so on. AISimulate's recommendation files use a separate
+`candidate-000`, `candidate-001`, and so on. AISim's recommendation files use a separate
 four-digit, one-based sequence, so `candidate-000` is the DGD for `recommendations/0001.yaml`.
 
 </Step>
@@ -171,7 +171,7 @@ four-digit, one-based sequence, so `candidate-000` is the DGD for `recommendatio
 Pass the highest-ranked recommendation directly to `predict`:
 
 ```bash
-aisimulate predict \
+aisim predict \
   --stack dynamo \
   --config /tmp/dynosim-recommendations/recommendations/0001.yaml \
   --output-dir /tmp/dynosim-best-prediction
@@ -193,7 +193,7 @@ curl -sL \
 Override the workload while retaining the engine and search domains:
 
 ```bash
-aisimulate recommend \
+aisim recommend \
   --stack dynamo \
   --config /tmp/dynosim-recommend.yaml \
   --set 'traffic.source={type: trace, format: mooncake, paths: [/tmp/toolagent_trace.jsonl], block_size: 512}' \

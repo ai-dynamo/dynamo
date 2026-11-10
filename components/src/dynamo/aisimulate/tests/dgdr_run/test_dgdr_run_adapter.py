@@ -690,7 +690,7 @@ def test_concrete_candidate_sku_uses_aisimulates_system_spec_loader(
 
     monkeypatch.setattr(adapter_module, "load_system_spec", load)
     config = make_config(tmp_path, num_gpus_per_node=None)
-    # AISimulate unrolls engine.hardware:auto and per-candidate choices before
+    # AISim unrolls engine.hardware:auto and per-candidate choices before
     # publishing the CandidateRecord, so its config always carries a concrete SKU.
     candidate_parameters: dict[str, Any] = {"hardware_sku": hardware_sku}
     if systems_paths is not None:
@@ -755,7 +755,7 @@ def test_malformed_system_spec_topology_is_rejected(
 
     with pytest.raises(
         CandidateMaterializationError,
-        match="AISimulate system spec.*(object|positive integer)",
+        match="AISim system spec.*(object|positive integer)",
     ):
         config.generation_options("vllm", {"hardware_sku": "malformed_system"})
 
@@ -977,9 +977,9 @@ def test_pinned_aisimulate_dispatches_the_complete_lifecycle_to_dgdr_run(
     monkeypatch: pytest.MonkeyPatch,
     search_fails: bool,
 ) -> None:
-    import aisimulate.recommend as recommendation
-    from aisimulate.config import CoreRecommendationConfig
-    from aisimulate.sweeper import search
+    import aisim.recommend as recommendation
+    from aisim.config import CoreRecommendationConfig
+    from aisim.sweeper import search
 
     config = CoreRecommendationConfig.model_validate(
         {
@@ -1023,7 +1023,7 @@ def test_pinned_aisimulate_dispatches_the_complete_lifecycle_to_dgdr_run(
     result = _final_result(1)
     search_error = RuntimeError("search crashed")
 
-    # Use the real pinned AISimulate lifecycle dispatcher around a deterministic search.
+    # Use the real pinned AISim lifecycle dispatcher around a deterministic search.
     monkeypatch.setattr(
         recommendation, "resolve_budget", lambda *args, **kwargs: {"cpu_limit": 1}
     )

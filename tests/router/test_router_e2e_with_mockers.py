@@ -214,13 +214,13 @@ COUNTER_TEST_PAYLOAD: Dict[str, Any] = {
 
 def _require_router_ais() -> dict[str, Any]:
     pytest.importorskip(
-        "aisimulate_core",
+        "aisim_core",
         reason="router AIS test requires aisimulate-core",
     )
     # The native AIS callback requires the matching Python SDK.
     pytest.importorskip(
-        "aisimulate_core.sdk.engine",
-        reason="router AIS test requires aisimulate_core.sdk.engine",
+        "aisim_core.sdk.engine",
+        reason="router AIS test requires aisim_core.sdk.engine",
     )
     return ROUTER_AIS_CONFIG.copy()
 

@@ -83,10 +83,10 @@ RUN --mount=type=bind,source=./container/deps/requirements.planner.txt,target=/t
         --requirement /tmp/requirements.benchmark.txt \
         /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
         /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
-        /opt/dynamo/wheelhouse/aisimulate*.whl
+        /opt/dynamo/wheelhouse/aisim-*.whl
 
 # Copy only the subset of the repository needed for planner/profiler service
-# startup and the component-local planner-family test suites. AI Simulate
+# startup and the component-local planner-family test suites. AISim
 # runtime code comes from the published wheel installed above. The Router
 # adapter, replay bridge, and unified CLI E2E tests also run here because this
 # image installs that wheel.

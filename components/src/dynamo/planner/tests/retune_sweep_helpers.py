@@ -6,7 +6,7 @@
 Sweeps start their workers with ``spawn`` and pass the evaluator by
 reference, so the fake evaluators here are module-level functions that a
 worker imports as ``dynamo.planner.tests.retune_sweep_helpers``. This module
-imports the sweep, which needs AI Simulate: test modules check for it with
+imports the sweep, which needs AISim: test modules check for it with
 ``pytest.importorskip`` before importing this one.
 """
 

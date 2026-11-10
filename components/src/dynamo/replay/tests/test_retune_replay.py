@@ -26,8 +26,8 @@ from pathlib import Path
 import pytest
 
 pytest.importorskip(
-    "aisimulate.replay",
-    reason="AI Simulate is an optional Dynamo simulation dependency",
+    "aisim.replay",
+    reason="AISim is an optional Dynamo simulation dependency",
 )
 
 from dynamo.llm import KvRouterConfig
@@ -54,7 +54,7 @@ _LAUNCH_S = 125.0
 _DECIDE_S = 130.0
 _HEAD_REQUESTS = 500
 _TAIL_REQUESTS = 125
-# AISimulate recommend syntax: credit and scale pinned at the router's
+# AISim recommend syntax: credit and scale pinned at the router's
 # startup values, so the grid is the two temperatures.
 _ROUTER_DOMAIN = {
     "overlap_score_credit": 1.0,
@@ -384,7 +384,7 @@ def test_planner_replay_does_not_depend_on_the_tick_deadline(tmp_path):
     # tick to completion. Under the deadline, a tick that outlived it (on a
     # slow or loaded host; here a 1 ns deadline) became skip_tick_timeout and
     # changed the scaling path. The static-threshold load planner
-    # (optimization_target throughput) leaves AISimulate's forward-pass
+    # (optimization_target throughput) leaves AISim's forward-pass
     # performance model out.
     traces = _write_workload(tmp_path, blocks=16, output_tokens=128)
 

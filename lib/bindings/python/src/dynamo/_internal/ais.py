@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Shared AISimulate session helpers used by internal Dynamo integrations."""
+"""Shared AISim session helpers used by internal Dynamo integrations."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ _NEXTN_ACCEPT_RATES_LEN = 5
 # Dynamo's historical default when conditional acceptance rates are omitted.
 _DEFAULT_NEXTN_ACCEPT_RATES = [0.85, 0.3, 0.0, 0.0, 0.0]
 
-# Resolve defaults through the queryable slots in the pinned AISimulate perf DB.
+# Resolve defaults through the queryable slots in the pinned AISim perf DB.
 DEFAULT_BACKEND_VERSIONS = {
     "vllm": "current",
     "sglang": "current",
@@ -55,7 +55,7 @@ def _resolve_quant_mode(field: str, value: str | None):
     normalized = _normalize_quant_mode(value)
     if normalized is None:
         return None
-    from aisimulate_core.sdk import common
+    from aisim_core.sdk import common
 
     enum_cls = {
         "gemm": common.GEMMQuantMode,
@@ -113,14 +113,14 @@ def _pad_nextn_accept_rates(
 
 
 class AisSession:
-    """One canonical AISimulate estimator with static latency query adapters.
+    """One canonical AISim estimator with static latency query adapters.
 
     The estimator owns identity, data selection and tuning. Dynamo only maps its
     existing static query convention to one forward-pass workload at a time.
     """
 
     def __init__(self, config, *, worker_type: str | None = None):
-        from aisimulate_core.sdk import RustForwardPassPerfModel
+        from aisim_core.sdk import RustForwardPassPerfModel
 
         if os.environ.get("DYNAMO_AIS_DISABLE_COMPILED_ENGINE"):
             raise ValueError(
@@ -204,7 +204,7 @@ def create_session(config, *, worker_type: str | None = None) -> AisSession:
 
 def estimate_canonical_num_gpu_blocks(config, **scheduler_options) -> int:
     """Estimate capacity from the exact resolved canonical estimator identity."""
-    from aisimulate.capacity import materialize_aic_num_gpu_blocks
+    from aisim.capacity import materialize_aic_num_gpu_blocks
 
     payload = config.to_dict() if hasattr(config, "to_dict") else dict(config)
     payload.setdefault("estimation_mode", "auto")

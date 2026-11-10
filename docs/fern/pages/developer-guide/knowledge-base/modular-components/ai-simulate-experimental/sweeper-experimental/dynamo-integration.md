@@ -2,31 +2,31 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Dynamo Sweeper Integration
-subtitle: Install and compose Planner, Router, and Dynamo Replay with AISimulate
+subtitle: Install and compose Planner, Router, and Dynamo Replay with AISim
 ---
 
 > [!WARNING]
-> **Experimental.** The AISimulate CLI, adapter ABI, and replay contracts may change without a
+> **Experimental.** The AISim CLI, adapter ABI, and replay contracts may change without a
 > standard deprecation period.
 
-AISimulate's Sweeper core does not depend on Dynamo. Dynamo owns its optional Planner and Router
+AISim's Sweeper core does not depend on Dynamo. Dynamo owns its optional Planner and Router
 sweep configuration providers and `DynamoReplayRunnerFactory`.
 
 ## Install
 
-AISimulate requires Python 3.11 through 3.13.
+AISim requires Python 3.11 through 3.13.
 
 For a prebuilt environment, use a released `dynamo-planner` image with its bundled Dynamo and
-AISimulate artifacts. The AISimulate Python wheel and Rust crate must come from the same source
+AISim artifacts. The AISim Python wheel and Rust crate must come from the same source
 revision.
 
 For source development, start at the Dynamo checkout root in an activated Python environment with
 the [source-build prerequisites](../../../../advanced-customizations/building-from-source.md).
-Install the AISimulate dependency declared by that checkout and rebuild Dynamo's bindings:
+Install the AISim dependency declared by that checkout and rebuild Dynamo's bindings:
 
 ```bash
 python3 -m pip install pip "maturin[patchelf]"
-python3 -m pip install -r container/deps/requirements.aisimulate.txt
+python3 -m pip install -r container/deps/requirements.aisim.txt
 cd lib/bindings/python
 maturin develop --uv --release --features ais-forward-pass
 cd ../../..
@@ -36,12 +36,12 @@ python3 tests/frontend/router_ais_image_smoke.py
 ```
 
 The final command verifies that the installed Python wheel and embedded Rust estimator work
-together. A Git-pinned dependency builds AISimulate from source and requires its Rust build
+together. A Git-pinned dependency builds AISim from source and requires its Rust build
 toolchain. Such development pins do not imply that a matching release wheel or crate is published;
 container builds require the published pair and matching release pins.
 
-On supported Python versions, `ai-dynamo` declares AISimulate as a base dependency. Keep that pin,
-`container/deps/requirements.aisimulate.txt`, and the `aisimulate-core` Cargo pins aligned when
+On supported Python versions, `ai-dynamo` declares AISim as a base dependency. Keep that pin,
+`container/deps/requirements.aisim.txt`, and the `aisimulate-core` Cargo pins aligned when
 upgrading. No `ai-dynamo[simulation]` extra is required.
 
 ## Run the Unified CLI
@@ -50,8 +50,8 @@ Select the Dynamo stack explicitly to load the runner plus any configured Router
 adapters:
 
 ```bash
-aisimulate predict --stack dynamo --config prediction.yaml
-aisimulate recommend --stack dynamo --config recommendation.yaml
+aisim predict --stack dynamo --config prediction.yaml
+aisim recommend --stack dynamo --config recommendation.yaml
 ```
 
 The `--stack` option defaults to `engine`. Without `--stack dynamo`, top-level `router` and
@@ -61,10 +61,10 @@ The `ai-dynamo` distribution registers:
 
 | Entry-point group | Name | Purpose |
 |---|---|---|
-| `aisimulate.runner_factories` | `dynamo` | Execute a complete replay through Dynamo composition |
-| `aisimulate.config_adapters` | `dynamo.router` | Validate and materialize the public `router` section |
-| `aisimulate.config_adapters` | `dynamo.planner` | Validate and materialize the public `planner` section |
-| `aisimulate.sweep_config_providers` | `dynamo.router`, `dynamo.planner` | Preserve the legacy Sweeper Python API |
+| `aisim.runner_factories` | `dynamo` | Execute a complete replay through Dynamo composition |
+| `aisim.config_adapters` | `dynamo.router` | Validate and materialize the public `router` section |
+| `aisim.config_adapters` | `dynamo.planner` | Validate and materialize the public `planner` section |
+| `aisim.sweep_config_providers` | `dynamo.router`, `dynamo.planner` | Preserve the legacy Sweeper Python API |
 
 ## Use the Python SDK
 
@@ -72,7 +72,7 @@ Call the retained Sweeper Python API only when an application needs the legacy `
 contract and explicit runner injection:
 
 ```python
-from aisimulate.sweeper import SmartSearchConfig, Sweeper
+from aisim.sweeper import SmartSearchConfig, Sweeper
 from dynamo.replay.simulation import DynamoReplayRunnerFactory
 
 config = SmartSearchConfig.from_yaml("smart_sweep.yaml")
@@ -134,7 +134,7 @@ hook.
 ## Replay Composition
 
 `DynamoReplayRunnerFactory` converts each serializable `ReplaySpec` into an invocation of the
-shared AISimulate Replayer. It resolves materialized Planner and Router hooks into Dynamo-owned
+shared AISim Replayer. It resolves materialized Planner and Router hooks into Dynamo-owned
 scaling and placement policies, while the Replayer continues to own traffic execution and report
 generation.
 

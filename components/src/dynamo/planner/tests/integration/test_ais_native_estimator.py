@@ -1,12 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Planner integration coverage against the real AISimulate native estimator."""
+"""Planner integration coverage against the real AISim native estimator."""
 
 from __future__ import annotations
 
 import pytest
-from aisimulate_core.sdk.engine import compile_engine
+from aisim_core.sdk.engine import compile_engine
 
 from dynamo.common.forward_pass_metrics import (
     ForwardPassMetrics,

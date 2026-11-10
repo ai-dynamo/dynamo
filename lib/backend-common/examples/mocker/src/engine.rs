@@ -98,7 +98,7 @@ struct Args {
     #[arg(long, default_value = "")]
     model_path: String,
 
-    /// KV cache block size in tokens. Omit to use the AISimulate backend default.
+    /// KV cache block size in tokens. Omit to use the AISim backend default.
     #[arg(long)]
     block_size: Option<usize>,
 

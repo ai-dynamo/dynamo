@@ -6,7 +6,7 @@ subtitle: Command options, YAML sections, constraints, and output for aisimulate
 ---
 
 `aisimulate predict --stack dynamo` evaluates one concrete workload and deployment configuration
-through the Dynamo simulation stack. AISimulate owns the traffic and engine schema. The `ai-dynamo`
+through the Dynamo simulation stack. AISim owns the traffic and engine schema. The `ai-dynamo`
 package supplies the Dynamo runner and the optional `router` and `planner` configuration adapters.
 
 For an end-to-end workflow, see
@@ -15,7 +15,7 @@ search configuration domains, see
 [Sweep DynoSim Configurations](../../cli/operations/simulation-with-dynosim/dynosim-sweeps.mdx).
 
 <Warning>
-The former Replay `online` mode has no replacement in the unified AISimulate CLI yet. `aisimulate
+The former Replay `online` mode has no replacement in the unified AISim CLI yet. `aisimulate
 predict` and `aisimulate recommend` are offline-only. The separate `python3 -m dynamo.mocker`
 command remains available for launching live workers but does not provide replay orchestration.
 </Warning>
@@ -23,7 +23,7 @@ command remains available for launching live workers but does not provide replay
 ## Command
 
 ```bash
-aisimulate predict --stack dynamo --config prediction.yaml
+aisim predict --stack dynamo --config prediction.yaml
 ```
 
 <ParamField path="-c, --config" type="path" required={true}>
@@ -47,7 +47,7 @@ aisimulate predict --stack dynamo --config prediction.yaml
 </ParamField>
 
 <ParamField path="--overwrite" type="flag" default="false">
-  Replace known AISimulate output files in an existing nonempty output directory. Unrelated files
+  Replace known AISim output files in an existing nonempty output directory. Unrelated files
   are preserved.
 </ParamField>
 
@@ -67,11 +67,11 @@ The YAML document uses these top-level sections:
 
 | Section | Required | Owner | Purpose |
 |---|---|---|---|
-| `traffic` | No | AISimulate | Request source, load pattern, and stopping condition |
-| `engine` | Yes | AISimulate | Model, backend, hardware, topology, worker parallelism, scheduler, KV cache, and timing |
+| `traffic` | No | AISim | Request source, load pattern, and stopping condition |
+| `engine` | Yes | AISim | Model, backend, hardware, topology, worker parallelism, scheduler, KV cache, and timing |
 | `router` | No | Dynamo adapter | Round-robin or KV-aware routing |
 | `planner` | No | Dynamo adapter | Planner policy and scaling behavior |
-| `evaluation` | No | AISimulate | Service-level objective (SLO) thresholds used for reporting |
+| `evaluation` | No | AISim | Service-level objective (SLO) thresholds used for reporting |
 
 Unknown fields are rejected. `predict` accepts only concrete values. Use `aisimulate recommend` for
 `choices`, `range`, or `preset` domains.
@@ -146,7 +146,7 @@ evaluation:
   cutoff may finish afterward.
 
 For Dynamo request traces, omit `traffic.source.block_size`; Dynamo derives it from the source and
-rejects mixed block sizes across shards. For Weka corpora, AISimulate derives the block size from the
+rejects mixed block sizes across shards. For Weka corpora, AISim derives the block size from the
 source. An explicitly configured Weka block size is only an assertion against the published source
 metadata. Dynamo format accepts multiple trace shards. Weka accepts one file or directory; other
 formats accept exactly one file.
@@ -167,7 +167,7 @@ at 1 second with a child timestamp of 2 seconds is interpreted as 3 seconds with
 as 2 seconds with `absolute`. `auto` chooses 2 seconds for that corpus unless another child
 provides evidence for relative timestamps.
 
-AISimulate's Weka importer also changes two behaviors from the former Dynamo importer:
+AISim's Weka importer also changes two behaviors from the former Dynamo importer:
 
 - A source request with `out: 0` retains zero output tokens and runs as a prefill-only request.
   The former importer used `max(1, out)`. Output-token counts, throughput, and timing metrics
@@ -184,8 +184,8 @@ require `trace_timestamps`.
 
 ### Canonical Python Engine Configuration
 
-Pass an AISimulate engine launch mapping to `extra_engine_args`, `prefill_engine_args`, or
-`decode_engine_args`. Dynamo owns the optional `dynamo` runtime options; AISimulate owns the
+Pass an AISim engine launch mapping to `extra_engine_args`, `prefill_engine_args`, or
+`decode_engine_args`. Dynamo owns the optional `dynamo` runtime options; AISim owns the
 `engine` schema, topology, defaults, and validation.
 
 ```python
@@ -220,13 +220,13 @@ constructor calls and flat engine JSON with mappings in this shape:
 
 Use `json.dumps` and `json.loads` to save and restore configuration mappings. Keep
 `num_gpu_blocks_is_explicit` when saving a normalized configuration: `false` preserves automatic
-AISimulate capacity estimation. Providing `engine.num_gpu_blocks` without that marker selects an
+AISim capacity estimation. Providing `engine.num_gpu_blocks` without that marker selects an
 explicit capacity. Set `engine.max_num_seqs` or `engine.max_num_batched_tokens` to `null` (`None` in Python)
 for an unlimited scheduler limit; omit the field to use the engine default.
 
 ### Typed agentic replay through the Dynamo API
 
-AISimulate owns public Weka ingestion, validation, and lowering into the canonical
+AISim owns public Weka ingestion, validation, and lowering into the canonical
 `ValidatedAgenticGraph`. The lower-level
 `dynamo.replay.run_trace_replay(...)` API keeps `trace_format="weka"` as a compatibility adapter,
 but delegates graph construction directly to `aisimulate-core` before Dynamo composes its Router
@@ -281,7 +281,7 @@ predecessor, a `dispatch` or `completion` trigger, a nonnegative delay, and a `s
 
 Agentic Mooncake v2 remains an optional materialized interchange format. Dynamo intentionally does
 not ship a Weka parser, lowering implementation, or Weka-to-v2 converter; those source semantics
-and any future materialization tooling belong to AISimulate.
+and any future materialization tooling belong to AISim.
 
 ### AgentX host offload and lifecycle controls
 
@@ -304,7 +304,7 @@ G3 and online AgentX G2 replay are outside this support boundary.
 Each role can omit offload or select `dp_rank_local` or `cluster_shared`.
 Shared roles must agree on layout, total capacity, and shared directional
 bandwidths. `num_host_blocks` is the capacity of one shared pool and is counted
-once. AISimulate's public engine materializer derives the layout identity for
+once. AISim's public engine materializer derives the layout identity for
 CLI and ReplaySpec inputs; direct canonical configuration callers must supply
 a compatible `kv_layout_id` in `engine.native_host_offload` for a shared pool. Host-tier events
 remain distinct from GPU residency, while the KV router retains its configured
@@ -317,7 +317,7 @@ separately when the geometries differ.
 
 The Python `run_trace_replay` API also accepts `agentic_snapshot` (a mapping
 containing `seed`), `agentic_warmup` (default `False`), and `agentic_profile`
-(AISimulate's duration, response-grace, and cancellation-drain options).
+(AISim's duration, response-grace, and cancellation-drain options).
 These phase controls require offline replay. Snapshots require positive
 `agentic_lanes`; warmup and profiling require a
 snapshot. Profiling cannot be combined with `max_sim_time_ms`. Warmup retains
@@ -341,7 +341,7 @@ hardware offload recipe.
   TensorRT-LLM disaggregated serving.
 - Each `parallelism` mapping is concrete and contains `replicas`, `tensor`, `pipeline`,
   `attention_data`, `moe_tensor`, and `moe_expert`.
-- `engine.context_length` defaults to `max`, which AISimulate resolves from the model's Hugging Face
+- `engine.context_length` defaults to `max`, which AISim resolves from the model's Hugging Face
   configuration. Default KV block sizes are 64 for vLLM, 1 for SGLang, and 32 for TensorRT-LLM.
 - Scheduler defaults are 8,192 batched tokens for every role and 256 sequences for aggregated and
   decode workers. Prefill workers default to one sequence.
@@ -396,7 +396,7 @@ seconds, defaults to 300, and must be finite and between 1 and 31,536,000 inclus
 input YAML:
 
 ```bash
-aisimulate predict \
+aisim predict \
   --stack dynamo \
   --config prediction.yaml \
   --set engine.workers.aggregated.parallelism.replicas=4 \

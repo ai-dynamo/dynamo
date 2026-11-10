@@ -171,7 +171,7 @@ Pull, deploy, and install with every artifact pinned to the v1.4.0 release set.
 
 #### Spica Simulation
 
-- **Experimental Spica Simulator Integration:** Moved the experimental Spica simulator from aiconfigurator into Dynamo as an independent `aisimulate` distribution with import `aisimulate.spica` and CLI `python -m aisimulate.spica` ([#11923](https://github.com/ai-dynamo/dynamo/pull/11923)), and stopped emitting synthetic arrival intervals for closed-loop workloads so Replay receives only `replay_concurrency` ([#12824](https://github.com/ai-dynamo/dynamo/pull/12824)).
+- **Experimental Spica Simulator Integration:** Moved the experimental Spica simulator from aiconfigurator into Dynamo as an independent `aisimulate` distribution with import `aisim.spica` and CLI `python -m aisim.spica` ([#11923](https://github.com/ai-dynamo/dynamo/pull/11923)), and stopped emitting synthetic arrival intervals for closed-loop workloads so Replay receives only `replay_concurrency` ([#12824](https://github.com/ai-dynamo/dynamo/pull/12824)).
 - **SATF Request-Trace Conversion:** Added a Rust API and CLI (`request_trace_to_satf`) that converts Dynamo request-trace JSONL and gzip JSONL shards into SATF 2.0 performance-layer artifacts, preserving token counts, timing, KV block identity, request metrics, and tool-call structure for downstream simulation and analysis without altering the existing capture format ([#11375](https://github.com/ai-dynamo/dynamo/pull/11375)).
 
 #### Mocker
