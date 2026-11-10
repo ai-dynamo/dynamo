@@ -68,7 +68,6 @@ pub mod prefill_router;
 pub mod publisher;
 mod request_lease;
 mod routing_host;
-#[cfg(test)]
 pub(crate) use routing_host::hosted_picker;
 pub(crate) use routing_host::hosted_request;
 pub(crate) mod routing_load;
@@ -602,6 +601,7 @@ fn cancelled_error(context_id: &str) -> anyhow::Error {
 /// A KvRouter only decides which worker you should use. It doesn't send you there.
 /// TODO: Rename this to indicate it only selects a worker, it does not route.
 pub struct KvRouter {
+    pub(crate) admission_policy: Option<Arc<dyn crate::routing_policy::KvAdmissionPolicy>>,
     indexer: Indexer,
     selection: embedded::EmbeddedSelection,
     required_worker_inputs: dynamo_kv_router::plugins::worker_selection::WorkerInputs,
@@ -710,7 +710,7 @@ impl KvRouter {
             model_name,
             is_eagle,
             shared_cache,
-            lora_filter,
+            lora_filter.map(crate::lora_routing::LoraKvPolicy::kv),
             scheduler_load,
             parent_token,
         )
@@ -732,7 +732,7 @@ impl KvRouter {
         model_name: Option<String>,
         is_eagle: bool,
         shared_cache: Option<Arc<dyn SharedKvCache>>,
-        lora_filter: Option<Arc<crate::lora::LoraFilter>>,
+        admission_policy: Option<Arc<dyn crate::routing_policy::KvAdmissionPolicy>>,
         scheduler_load: SchedulerLoadSender,
         parent_token: CancellationToken,
     ) -> Result<Self> {
@@ -850,12 +850,12 @@ impl KvRouter {
         let registration_availability_provider: metrics::RegistrationAvailabilityProvider =
             Arc::new(move || client_for_registration.available_instance_ids());
 
-        let admission_policy = lora_filter.map(crate::lora_routing::LegacyLoraAdmission::kv);
         let client_for_availability = client.clone();
         let workers_for_availability = workers_with_configs.clone();
+        let policy_for_availability = admission_policy.clone();
         let available_worker_provider: WorkerAvailabilityProvider = Arc::new(move |request| {
             let available = client_for_availability.available_instance_ids();
-            match admission_policy.as_ref() {
+            match policy_for_availability.as_ref() {
                 Some(policy) => {
                     policy.refresh_admission(request, available, &workers_for_availability)
                 }
@@ -900,6 +900,7 @@ impl KvRouter {
         tracing::info!("KV Routing initialized");
         let cancellation_token = cancellation_guard.disarm();
         Ok(Self {
+            admission_policy,
             indexer,
             selection,
             required_worker_inputs,
@@ -1298,6 +1299,7 @@ impl KvRouter {
             allowed_worker_ids,
             routing_constraints,
             FindBestMatchAdmission::WithAdmission,
+            Default::default(),
         )
         .await
     }
@@ -1323,6 +1325,7 @@ impl KvRouter {
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
         admission: FindBestMatchAdmission,
+        accounting_attribution: dynamo_kv_router::scheduling::AccountingAttribution,
     ) -> anyhow::Result<AdmittedFindBestMatchOutcome> {
         let start = Instant::now();
         if update_states && context_id.is_none() {
@@ -1354,6 +1357,7 @@ impl KvRouter {
         } = self
             .selection
             .run_selection(SelectionOperation {
+                accounting_attribution,
                 key: self.selection.partition_key().clone(),
                 prompt: PromptView {
                     token_ids: Some(tokens),
@@ -1380,6 +1384,7 @@ impl KvRouter {
                 admission: core_admission,
                 track_active_blocks: self.kv_router_config.router_track_active_blocks,
                 return_routing_hashes: return_routing_hashes || session_index_context.is_some(),
+                // Hosted selections do not populate the public reservation replay cache.
                 replay_id: None,
             })
             .await;
@@ -2779,6 +2784,7 @@ mod tests {
                     None,
                     RoutingConstraints::default(),
                     admission,
+                    Default::default(),
                 )
                 .await
                 .unwrap();
@@ -2964,6 +2970,7 @@ mod tests {
                     None,
                     RoutingConstraints::default(),
                     FindBestMatchAdmission::WithAdmission,
+                    Default::default(),
                 )
                 .await
                 .unwrap();
@@ -3112,6 +3119,7 @@ mod tests {
                 None,
                 RoutingConstraints::default(),
                 FindBestMatchAdmission::WithAdmission,
+                Default::default(),
             )
             .await
             .unwrap();

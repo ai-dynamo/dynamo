@@ -140,31 +140,41 @@ impl RoutingHost {
         // the first stage that can spend it.
         let budget = CleanupBudget::default();
         let staged_kv = StagedKv::for_request(request.content());
-        let selected = self
+        check_candidate_policy(request.content(), self.candidate_policy.is_some())?;
+        let candidate = self
             .candidate_policy
             .as_ref()
             .map(|policy| {
                 policy.select(
                     request.content(),
+                    explicit.map(|pin| pin.worker_id),
                     &|| self.inner.client.instance_ids_avail(),
                     &|| self.inner.client.instance_ids_free(),
                 )
             })
             .transpose()?
             .flatten();
-        let (policy_target, policy_fallback, policy_lease) = match selected {
+        let (candidate_target, candidate_fallback, attempt_lease) = match candidate {
             Some(selection) => (
-                Some(selection.target),
-                Some(selection.allowed_fallback),
+                Some(selection.worker),
+                Some(selection.fallback),
                 selection.lease,
             ),
             None => (None, None, None),
         };
-        let (selection, mut operation) = if let Some(target) = policy_target {
+        if let (Some(target), Some(policy)) = (candidate_target, self.candidate_policy.as_ref()) {
+            policy.check_selected(
+                request.content(),
+                target,
+                explicit.map(|pin| pin.worker_id),
+                &|| self.inner.client.instance_ids_avail(),
+            )?;
+        }
+        let (selection, mut operation) = if let Some(target) = candidate_target {
             (
                 HostedSelection {
                     initial_worker: target,
-                    target_constraint: None,
+                    target_constraint: explicit.filter(|pin| pin.worker_id == target),
                     occupancy_reservation: None,
                     candidate_count: 0,
                     selected_occupancy: None,
@@ -216,7 +226,7 @@ impl RoutingHost {
             self.request_metrics.clone(),
             initial_worker,
             occupancy_reservation,
-            policy_lease,
+            attempt_lease,
             &request,
         );
         let tracker = request.tracker.clone();
@@ -305,8 +315,16 @@ impl RoutingHost {
                 self.inner.direct_within_prepared(
                     request,
                     initial_worker,
-                    policy_fallback.as_ref(),
+                    candidate_fallback.as_ref(),
                     |request, worker_id| {
+                        if let Some(policy) = self.candidate_policy.as_ref() {
+                            policy.check_selected(
+                                request,
+                                worker_id,
+                                explicit.map(|pin| pin.worker_id),
+                                &|| self.inner.client.instance_ids_avail(),
+                            )?;
+                        }
                         let occupancy = guard.retarget_worker(worker_id);
                         let target = target_for_worker(worker_id);
                         request.routing_mut().dp_rank = target.dp_rank;
@@ -394,11 +412,50 @@ impl RoutingHost {
 
 #[cfg(test)]
 mod tests {
+    use crate::local_model::runtime_config::ModelRuntimeConfig;
+    use dynamo_kv_router::protocols::RoutingConstraints;
     use dynamo_kv_router::selector::HostedWorkerPicker;
     use dynamo_runtime::pipeline::RouterMode;
+    use std::collections::{HashMap, HashSet};
 
     use super::super::builder::hosted_picker;
     use super::*;
+
+    fn runtime_config(capability: &str, scheme: &str) -> ModelRuntimeConfig {
+        let mut config = ModelRuntimeConfig::default();
+        config.taints.insert(capability.to_string());
+        config
+            .set_engine_specific("supports_runtime_lora_resolution", true)
+            .unwrap();
+        config
+            .set_engine_specific("runtime_lora_protocol_versions", vec![2_u32])
+            .unwrap();
+        config
+            .set_engine_specific("runtime_lora_schemes", vec![scheme])
+            .unwrap();
+        config
+    }
+
+    #[test]
+    fn runtime_lora_routing_excludes_stale_heterogeneous_worker() {
+        let capability = "dynamo.runtime-lora/v2";
+        let configs = HashMap::from([
+            (1, runtime_config(capability, "custom")),
+            (2, runtime_config(capability, "wandb-artifact")),
+        ]);
+        let constraints = RoutingConstraints {
+            required_taints: HashSet::from([capability.to_string()]),
+            ..Default::default()
+        };
+        let routable = dynamo_lora::runtime::constrain_runtime_lora_workers(
+            true,
+            None,
+            &HashSet::from([2]),
+            &configs,
+            &constraints,
+        );
+        assert_eq!(routable, Some(HashSet::from([2])));
+    }
 
     fn request() -> HostedSelectionRequest {
         HostedSelectionRequest::new(0)
