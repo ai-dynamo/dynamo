@@ -1,14 +1,13 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Typed discovery from SGLang's metadata RPCs, and the engine's view of it.
-//!
-//! The sidecar serves an SGLang deployment with one data-parallel rank, and
-//! so one Rust-server listener. Discovery rejects a deployment with more.
+//! Typed discovery from SGLang's metadata RPCs, and the engine's view of one
+//! Rust-server listener.
 
 use dynamo_backend_common::{DisaggregationMode, DynamoError};
 
 use crate::client::{self, LocalKvEventSource, NodeMetadata};
+use crate::node::NodeTable;
 use crate::proto as pb;
 
 /// Metadata exposed by the discovery RPCs.
@@ -85,7 +84,7 @@ pub(crate) fn parse_discovery(
     })
 }
 
-/// Discovery metadata as the engine consumes it.
+/// One listener's discovery metadata as the engine consumes it.
 ///
 /// A `Result` field holds a reported value that is validated only when the
 /// engine resolves it, so startup fails at that point rather than during
@@ -111,6 +110,12 @@ pub(crate) struct EngineInfo {
     pub incremental_streaming_output: bool,
     /// Native HTTP port, when the server reports one.
     pub http_port: Option<Result<u16, DynamoError>>,
+    /// The DP rank this listener serves.
+    pub dp_rank: u32,
+    /// Every DP rank of the deployment, at least one.
+    pub dp_size: u32,
+    /// The node's listeners, as this listener reports them.
+    pub table: NodeTable,
     pub page_size: Option<u32>,
     /// Decode context-parallel size, at least one.
     pub dcp_size: u32,
@@ -211,8 +216,8 @@ pub(crate) fn hicache_offloading_capacity(
     }
 }
 
-/// Map typed discovery to the engine's view. Fails for a deployment with more
-/// than one data-parallel rank.
+/// Map one listener's typed discovery to the engine's view. Fails when its
+/// node's listener table is unusable (see [`NodeTable::from_discovery`]).
 pub(crate) fn engine_info(discovery: Discovery) -> Result<EngineInfo, DynamoError> {
     let Discovery {
         model_path,
@@ -223,18 +228,17 @@ pub(crate) fn engine_info(discovery: Discovery) -> Result<EngineInfo, DynamoErro
         server_info,
         deployment_info: deployment,
     } = discovery;
-    // Attention DP and replica DP both report every rank in dp_size. Each
-    // rank has its own Rust-server listener, which this sidecar cannot yet
-    // serve together.
-    if deployment.dp_size > 1 {
-        return Err(client::invalid_arg(format!(
-            "DP>1 is not supported yet: SGLang reports dp_size {} (enable_dp_attention={}), \
-             but the Dynamo SGLang sidecar serves a single data-parallel rank; launch SGLang \
-             with --dp-size 1 and --attn-dp-size 1 (without --enable-dp-attention); DP>1 \
-             needs a later Dynamo release",
-            deployment.dp_size, deployment.enable_dp_attention
-        )));
-    }
+    let table = NodeTable::from_discovery(&server_info, &deployment)?;
+    // max_running_requests is launch-wide. SGLang splits it across
+    // attention-DP ranks, and each replica-DP rank takes all of it; dp_size
+    // counts attention-DP ranks.
+    let max_num_seqs = deployment.max_running_requests.map(|requests| {
+        if deployment.enable_dp_attention {
+            (requests / u64::from(deployment.dp_size.max(1))).max(1)
+        } else {
+            requests
+        }
+    });
     // An empty string is proto3's unset value.
     let disaggregation_mode =
         disaggregation_mode(match server_info.disaggregation_mode.as_str() {
@@ -251,17 +255,25 @@ pub(crate) fn engine_info(discovery: Discovery) -> Result<EngineInfo, DynamoErro
         disaggregation_mode,
         disaggregation_bootstrap_port: deployment.disaggregation_bootstrap_port.map(u64::from),
         host: Some(server_info.host.clone()).filter(|host| !host.is_empty()),
-        dist_init_addr: deployment.dist_init_addr.clone(),
+        // The rendezvous names node 0. A Rust-server prefill listener on any
+        // other node serves its bootstrap registry on its own node.
+        dist_init_addr: deployment
+            .dist_init_addr
+            .clone()
+            .filter(|_| deployment.node_rank == 0),
         reasoning_parser: non_empty(&model_info.reasoning_parser),
         tool_call_parser: non_empty(&model_info.tool_call_parser),
         skip_tokenizer_init: server_info.skip_tokenizer_init,
         incremental_streaming_output: server_info.incremental_streaming_output,
         http_port: http_port(server_info.port),
+        dp_rank: deployment.dp_rank.unwrap_or(0),
+        dp_size: deployment.dp_size.max(1),
+        table,
         page_size: deployment.page_size,
         dcp_size: deployment.dcp_size.max(1),
         max_total_num_tokens: server_info.max_total_num_tokens,
         max_prefill_tokens: Some(deployment.max_prefill_tokens).filter(|tokens| *tokens > 0),
-        max_num_seqs: deployment.max_running_requests,
+        max_num_seqs,
         speculative_algorithm: deployment.speculative_algorithm.clone(),
         num_reserved_tokens: draft_reserve(
             server_info.num_reserved_tokens,
@@ -338,8 +350,9 @@ fn hicache_native_offloading_capacity(
     hicache_offloading_capacity(device_tokens, policy, host_tokens)
 }
 
-/// The engine's KV-event publishers, validated now and resolved against the
-/// registration at start.
+/// This listener's KV-event publishers, validated now and resolved against
+/// the registration at start. Its own DP rank is checked with the node's
+/// listener table.
 fn kv_events(deployment: &pb::DeploymentInfo) -> Result<NodeMetadata, DynamoError> {
     let metadata = NodeMetadata::new(
         deployment.node_rank,
@@ -358,13 +371,6 @@ fn kv_events(deployment: &pb::DeploymentInfo) -> Result<NodeMetadata, DynamoErro
             .collect(),
     )
     .map_err(|error| client::protocol_error(error.to_string()))?;
-    let dp_rank = deployment.dp_rank.unwrap_or(0);
-    if dp_rank >= deployment.dp_size {
-        return Err(client::protocol_error(format!(
-            "GetServerInfo dp_rank {dp_rank} is outside deployment DP size {}",
-            deployment.dp_size
-        )));
-    }
     Ok(metadata)
 }
 
@@ -415,13 +421,6 @@ mod tests {
     fn discovery_requires_incremental_streaming() {
         let error = info(|server| server.incremental_streaming_output = false).unwrap_err();
         assert_invalid_argument(error, "--incremental-streaming-output");
-    }
-
-    #[test]
-    fn dp_above_one_fails_discovery() {
-        let error =
-            info(|server| server.deployment_info.as_mut().unwrap().dp_size = 2).unwrap_err();
-        assert_invalid_argument(error, "DP>1 is not supported yet");
     }
 
     #[test]
