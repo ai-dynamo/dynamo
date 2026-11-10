@@ -14,11 +14,8 @@ use dynamo_bench::kv_router_common::issuer::pin_current_thread;
 use dynamo_bench::kv_router_common::replay::NoopSequencePublisher;
 use dynamo_bench::kv_router_common::trace_gen::WorkerTimelines;
 use dynamo_kv_router::protocols::{PrefillLoadHint, WorkerWithDpRank};
-use dynamo_kv_router::{
-    ActiveSequencesMultiWorker, SequenceError, SequenceRequest, WorkerLoadProjection,
-};
+use dynamo_kv_router::{ActiveSequencesMultiWorker, SequenceError, SequenceRequest};
 use dynamo_tokens::SequenceHash;
-use rustc_hash::FxHashMap;
 use serde::Serialize;
 use tokio::sync::oneshot;
 
@@ -600,7 +597,7 @@ struct CompletionRecord {
 }
 
 pub(crate) fn summarize_worker_projections(
-    projections: &FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
+    projections: &dynamo_kv_router::WorkerLoadMap,
 ) -> (u64, u64) {
     let mut inspected = 0u64;
     let mut digest = 0u64;
@@ -651,8 +648,8 @@ struct LaneResult {
 thread_local! {
     // One reused projection map per runtime thread, like the production scheduler queue's
     // single reused map. Per-lane maps would keep `lanes x workers` entries cache-cold.
-    static PROJECTIONS: RefCell<FxHashMap<WorkerWithDpRank, WorkerLoadProjection>> =
-        RefCell::new(FxHashMap::default());
+    static PROJECTIONS: RefCell<dynamo_kv_router::WorkerLoadMap> =
+        RefCell::new(Default::default());
 }
 
 fn execute_payload(

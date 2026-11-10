@@ -146,7 +146,7 @@ impl BusyThresholds {
         &self,
         worker: WorkerWithDpRank,
         capacity: WorkerCapacity,
-        loads: &FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
+        loads: &crate::WorkerLoadMap,
     ) -> bool {
         let load = WorkerLoadInput::for_worker(loads, worker, WorkerLoadProjection::default);
         !self.has_room(&load, capacity)
@@ -157,7 +157,7 @@ impl BusyThresholds {
         &self,
         worker_id: WorkerId,
         config: &C,
-        loads: &FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
+        loads: &crate::WorkerLoadMap,
     ) -> bool {
         let capacity = WorkerCapacity::of(config);
         let start = config.data_parallel_start_rank();
@@ -1476,7 +1476,7 @@ models:
     fn unobserved_rank_row_is_unavailable_and_idle() {
         let seen = WorkerWithDpRank::new(1, 0);
         let unseen = WorkerWithDpRank::new(1, 1);
-        let mut loads = FxHashMap::default();
+        let mut loads = crate::WorkerLoadMap::default();
         loads.insert(
             seen,
             WorkerLoadProjection {
@@ -1515,7 +1515,7 @@ models:
             active_prefill_tokens: 11,
             ..Default::default()
         };
-        let mut loads = FxHashMap::default();
+        let mut loads = crate::WorkerLoadMap::default();
 
         loads.insert(WorkerWithDpRank::new(5, 2), busy);
         // Rank 3 has no projection and counts as idle.
@@ -1527,7 +1527,7 @@ models:
         assert!(limits.worker_is_full(5, &config, &loads));
 
         // A rank outside the worker's range does not stand in for one inside it.
-        loads.remove(&WorkerWithDpRank::new(5, 3));
+        loads.swap_remove(&WorkerWithDpRank::new(5, 3));
         loads.insert(WorkerWithDpRank::new(5, 0), busy);
         assert!(!limits.worker_is_full(5, &config, &loads));
     }

@@ -10,7 +10,7 @@ use std::time::Duration;
 use arc_swap::ArcSwapOption;
 use crossbeam_queue::SegQueue;
 use parking_lot::Mutex;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashSet;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
 
@@ -803,7 +803,7 @@ struct SchedulerQueueActor<
     turn: u64,
     /// Rows prepared for the request enqueued this turn, dropped when the turn ends.
     turn_prepared: Option<Box<PreparedAdmission>>,
-    projected_loads: FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
+    projected_loads: crate::WorkerLoadMap,
     /// Ranks the current request's load projection found past the host's reject thresholds,
     /// counted per worker. Refilled by `with_projected_loads`; empty while nothing is full.
     full_ranks: FullRankCounts,
@@ -1008,7 +1008,7 @@ impl<
             candidate_preparer: Arc::clone(&candidate_preparer),
             turn: 0,
             turn_prepared: None,
-            projected_loads: FxHashMap::default(),
+            projected_loads: Default::default(),
             full_ranks: FullRankCounts::default(),
             block_size,
             selector,
@@ -3718,7 +3718,7 @@ mod tests {
             overlap: OverlapSignals::default(),
             kv_transfer_candidates: None,
             retain_kv_transfer_chain: false,
-            worker_loads: FxHashMap::default(),
+            worker_loads: Default::default(),
             track_prefill_tokens: true,
             router_config_override: None,
             lora_name: None,
@@ -4554,7 +4554,7 @@ policy_classes:
             candidate_preparer: Arc::clone(&queue.candidate_preparer),
             turn: 0,
             turn_prepared: None,
-            projected_loads: FxHashMap::with_capacity_and_hasher(8, Default::default()),
+            projected_loads: crate::WorkerLoadMap::with_capacity_and_hasher(8, Default::default()),
             full_ranks: FullRankCounts::default(),
             block_size: 16,
             selector,

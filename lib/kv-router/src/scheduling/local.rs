@@ -129,7 +129,7 @@ where
             kv_transfer_candidates,
             retain_kv_transfer_chain,
             shared_cache_hits,
-            worker_loads: FxHashMap::default(),
+            worker_loads: Default::default(),
             resp_tx,
         };
 
@@ -463,7 +463,7 @@ where
                 .build_classify_request(request, ingress_at, worker_inputs);
         // The rows own their copy. Free the projection so a queued request does not retain
         // one entry per worker; the actor projects load again before selection.
-        request.worker_loads = FxHashMap::default();
+        request.worker_loads = Default::default();
         classifier
             .classify_with(classification, workers)
             .await

@@ -175,7 +175,8 @@ fn fixture_with_preferred_taints(
         FxHashMap::with_capacity_and_hasher(worker_count, Default::default());
     let mut effective_cached_tokens =
         FxHashMap::with_capacity_and_hasher(worker_count, Default::default());
-    let mut worker_loads = FxHashMap::with_capacity_and_hasher(worker_count, Default::default());
+    let mut worker_loads =
+        dynamo_kv_router::WorkerLoadMap::with_capacity_and_hasher(worker_count, Default::default());
 
     for worker_id in 0..worker_count as WorkerId {
         let worker = WorkerWithDpRank::from_worker_id(worker_id);
@@ -486,7 +487,7 @@ fn worker_projection(c: &mut Criterion) {
         });
         #[cfg(feature = "bench")]
         {
-            let mut projections = FxHashMap::default();
+            let mut projections = dynamo_kv_router::WorkerLoadMap::default();
             group.bench_function(BenchmarkId::new("reuse", count), |b| {
                 b.iter(|| {
                     slots.bench_project_worker_loads_into(

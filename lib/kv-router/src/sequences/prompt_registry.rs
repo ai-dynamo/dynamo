@@ -53,6 +53,10 @@ impl WorkerLoadProjection {
     }
 }
 
+/// Every rank's [`WorkerLoadProjection`] for one request, in the load table's order, so
+/// the projection pass refreshes a reused map by position instead of hashing each rank.
+pub type WorkerLoadMap = IndexMap<WorkerWithDpRank, WorkerLoadProjection, FxBuildHasher>;
+
 pub type PotentialLoadMaps = (
     FxHashMap<WorkerWithDpRank, usize>,
     FxHashMap<WorkerWithDpRank, usize>,
@@ -400,7 +404,7 @@ impl PromptRegistry {
         &self,
         token_sequence: Option<&[SequenceHash]>,
         decay_now: Instant,
-        projections: &mut FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
+        projections: &mut WorkerLoadMap,
         full_ranks: Option<&mut FullRankCounts>,
     ) {
         let query_len = token_sequence.map_or(0, |query| query.len());
@@ -416,7 +420,7 @@ impl PromptRegistry {
         query_len: usize,
         depths: &OverlapDepths,
         decay_now: Instant,
-        projections: &mut FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
+        projections: &mut WorkerLoadMap,
         full_ranks: Option<&mut FullRankCounts>,
     ) {
         let loads = self.loads.read();
@@ -426,16 +430,18 @@ impl PromptRegistry {
         };
 
         // A reused map usually still holds the previous request's projection over the same
-        // workers. Overwriting values in place avoids re-inserting every worker; any key-set
-        // mismatch falls back to a rebuild. Equal lengths plus every worker found means the
-        // key sets are equal because worker keys are unique.
+        // ranks in the same order. Overwriting each value by position avoids hashing every
+        // rank; the first rank found out of place falls back to a rebuild in table order.
         let Some(full_ranks) = full_ranks else {
             if projections.len() == loads.len()
-                && loads.iter().all(|(worker, load)| {
-                    projections
-                        .get_mut(&worker)
-                        .map(|projection| *projection = project(worker, load))
-                        .is_some()
+                && loads.iter().enumerate().all(|(index, (worker, load))| {
+                    match projections.get_index_mut(index) {
+                        Some((key, projection)) if *key == worker => {
+                            *projection = project(worker, load);
+                            true
+                        }
+                        _ => false,
+                    }
                 })
             {
                 return;
@@ -454,13 +460,14 @@ impl PromptRegistry {
         // The same two shapes, judging each rank as its projection is written.
         if projections.len() == loads.len() {
             let refreshed = loads.iter_indexed().all(|(index, worker, load)| {
-                projections
-                    .get_mut(&worker)
-                    .map(|projection| {
+                match projections.get_index_mut(index) {
+                    Some((key, projection)) if *key == worker => {
                         *projection = project(worker, load);
                         full_ranks.record(worker, loads.capacity_at(index), projection);
-                    })
-                    .is_some()
+                        true
+                    }
+                    _ => false,
+                }
             });
             if refreshed {
                 return;
@@ -742,7 +749,7 @@ mod tests {
 
         registry.assert_consistent_with_workers(&expected_loads, &expected_blocks);
         assert_eq!(registry.active_tokens(now).get(&worker).copied(), Some(9));
-        let mut projections = FxHashMap::default();
+        let mut projections = super::WorkerLoadMap::default();
         registry.project_worker_loads_into(None, now, &mut projections, None);
         assert_eq!(
             registry.worker_load_reader(now).get(worker),
@@ -815,11 +822,11 @@ mod tests {
         registry.apply_membership_delta_and_load(worker_b, store(&[1], 0), worker_load_snapshot(1));
 
         let fresh_projection = || {
-            let mut projections = FxHashMap::default();
+            let mut projections = super::WorkerLoadMap::default();
             registry.project_worker_loads_into(Some(&query), decay_now, &mut projections, None);
             projections
         };
-        let mut reused = FxHashMap::default();
+        let mut reused = super::WorkerLoadMap::default();
         registry.project_worker_loads_into(Some(&query), decay_now, &mut reused, None);
         assert_eq!(reused, fresh_projection());
 
@@ -860,7 +867,7 @@ mod tests {
         registry.replace_worker_load_state(worker_a, worker_load_snapshot(7));
         registry.replace_worker_load_state(worker_b, worker_load_snapshot(7));
 
-        let mut projections = FxHashMap::default();
+        let mut projections = super::WorkerLoadMap::default();
         let mut full_ranks = FullRankCounts::default();
         full_ranks.reset(limits);
         registry.project_worker_loads_into(

@@ -45,7 +45,7 @@ pub use self::multi_worker_sequence::{
     SequencePublisher, SequenceRequest, SequenceSubscriber,
 };
 pub use self::sequence::{ActiveSequences, RequestId};
-pub use self::sequences::{PrefillTokenDeltas, WorkerLoadProjection};
+pub use self::sequences::{PrefillTokenDeltas, WorkerLoadMap, WorkerLoadProjection};
 pub use concurrent_radix_tree_compressed::ConcurrentRadixTreeCompressed;
 pub use config::{
     ConditionalDisaggPolicyKind, KvRouterConfig, RouterConfigOverride, RouterPrefillLoadModel,

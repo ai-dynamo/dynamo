@@ -218,7 +218,7 @@ mod tests {
             },
             kv_transfer_candidates: None,
             retain_kv_transfer_chain: false,
-            worker_loads: FxHashMap::default(),
+            worker_loads: Default::default(),
             track_prefill_tokens: true,
             router_config_override: None,
             lora_name: None,

@@ -36,12 +36,11 @@ use dynamo_kv_router::services::selection::affinity::{
 use dynamo_kv_router::{
     ActiveSequencesMultiWorker, RadixTree, RoutingPartitionRef, SchedulingRequest, SequenceRequest,
     SessionContext, SessionPrefixIndexer, TrackingHashAlgorithm, TrackingHashContext,
-    TrackingHashScope, WorkerLoadProjection, WorkerSelectionInput, WorkerSelector,
+    TrackingHashScope, WorkerSelectionInput, WorkerSelector,
 };
 use dynamo_tokens::SequenceHash;
 use futures::executor::block_on;
 use futures::future::try_join_all;
-use rustc_hash::FxHashMap;
 use tokio::time::Instant;
 use uuid::Uuid;
 
@@ -448,7 +447,7 @@ impl PendingRequest {
     /// into it; callers that still need them take them back from the result.
     fn scheduling_request(
         &mut self,
-        worker_loads: FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
+        worker_loads: dynamo_kv_router::WorkerLoadMap,
     ) -> SchedulingRequest {
         SchedulingRequest {
             mode: ScheduleMode::Tracked {
@@ -1542,7 +1541,7 @@ impl OfflineReplayRouter {
     }
 
     fn request_workers_busy(
-        worker_loads: &FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
+        worker_loads: &dynamo_kv_router::WorkerLoadMap,
         workers: &HashMap<WorkerId, ReplayWorkerConfig>,
         class: &PolicyClassConfig,
         request: &PendingRequest,
@@ -1569,7 +1568,7 @@ impl OfflineReplayRouter {
     }
 
     fn all_workers_busy_with(
-        worker_loads: &FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
+        worker_loads: &dynamo_kv_router::WorkerLoadMap,
         workers_with_configs: &HashMap<WorkerId, ReplayWorkerConfig>,
         class: &PolicyClassConfig,
     ) -> bool {
@@ -1580,7 +1579,7 @@ impl OfflineReplayRouter {
     }
 
     fn snapshot_for(&self, request: &mut PendingRequest) -> QueueSnapshot {
-        let scheduling_request = request.scheduling_request(FxHashMap::default());
+        let scheduling_request = request.scheduling_request(Default::default());
         let cached_tokens = SchedulingContext::new(&scheduling_request, &self.workers_with_configs)
             .best_cached_tokens();
         request.token_seq = scheduling_request.token_seq;
@@ -1640,7 +1639,6 @@ mod tests {
         WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
     };
     use dynamo_kv_router::{PrefillLoadEstimator, TrackingHashAlgorithm};
-    use rustc_hash::FxHashMap;
     use serde_json::Value;
     use tempfile::NamedTempFile;
     use uuid::Uuid;
@@ -2300,7 +2298,7 @@ mod tests {
                 Some("session-a".to_string()),
             )
             .unwrap();
-        let scheduling_request = pending.scheduling_request(FxHashMap::default());
+        let scheduling_request = pending.scheduling_request(Default::default());
 
         assert_eq!(
             scheduling_request

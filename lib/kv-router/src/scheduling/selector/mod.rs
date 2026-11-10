@@ -885,7 +885,7 @@ mod test_support {
             },
             kv_transfer_candidates: None,
             retain_kv_transfer_chain: false,
-            worker_loads: FxHashMap::default(),
+            worker_loads: Default::default(),
             track_prefill_tokens: true,
             router_config_override: None,
             lora_name: None,
@@ -905,7 +905,7 @@ mod test_support {
 
     pub(super) fn worker_loads_with_active_decode(
         decode_blocks: FxHashMap<WorkerWithDpRank, usize>,
-    ) -> FxHashMap<WorkerWithDpRank, crate::sequences::WorkerLoadProjection> {
+    ) -> crate::WorkerLoadMap {
         decode_blocks
             .into_iter()
             .map(|(worker, active_decode_blocks)| {

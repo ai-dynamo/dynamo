@@ -5,7 +5,6 @@
 
 use crate::protocols::{SharedCacheHits, WorkerConfigLike, WorkerId, WorkerWithDpRank};
 use crate::sequences::WorkerLoadProjection;
-use rustc_hash::FxHashMap;
 use std::cell::OnceCell;
 use std::ops::BitOr;
 
@@ -616,7 +615,7 @@ impl WorkerLoadInput {
     /// queue, and offline replay all build rows here or in [`Self::from_observed`], so they
     /// read the same row for the same worker by construction.
     pub(crate) fn for_worker(
-        loads: &FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
+        loads: &crate::WorkerLoadMap,
         worker: WorkerWithDpRank,
         unobserved: impl FnOnce() -> WorkerLoadProjection,
     ) -> Self {

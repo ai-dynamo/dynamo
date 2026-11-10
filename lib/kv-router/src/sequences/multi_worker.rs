@@ -11,7 +11,6 @@
 
 use dynamo_tokens::SequenceHash;
 use parking_lot::Mutex;
-use rustc_hash::FxHashMap;
 use std::collections::HashMap;
 use std::env;
 use std::future::Future;
@@ -32,7 +31,7 @@ use super::single::{
     PromptMembershipDelta, RequestId,
 };
 use super::topology::{WorkerDpRange, WorkerTable, WorkerTopologyChange, WorkerTopologyError};
-use super::{PotentialLoadMaps, PrefillTokenDeltas, WorkerLoadProjection};
+use super::{PotentialLoadMaps, PrefillTokenDeltas};
 use crate::plugins::worker_selection::WorkerCapacity;
 use crate::protocols::{
     ActiveSequenceEvent, ActiveSequenceEventData, PrefillLoadHint, WorkerId, WorkerWithDpRank,
@@ -1307,8 +1306,8 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         &self,
         token_sequence: Option<&[SequenceHash]>,
         decay_now: Instant,
-    ) -> FxHashMap<WorkerWithDpRank, WorkerLoadProjection> {
-        let mut projections = FxHashMap::default();
+    ) -> crate::WorkerLoadMap {
+        let mut projections = crate::WorkerLoadMap::default();
         self.project_worker_loads_into(token_sequence, decay_now, &mut projections, None);
         projections
     }
@@ -1319,7 +1318,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         &self,
         token_sequence: Option<&[SequenceHash]>,
         decay_now: Instant,
-        projections: &mut FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
+        projections: &mut crate::WorkerLoadMap,
         full_ranks: Option<&mut FullRankCounts>,
     ) {
         self.prompt_registry.project_worker_loads_into(
@@ -1357,7 +1356,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         &self,
         token_sequence: Option<&[SequenceHash]>,
         decay_now: Instant,
-        projections: &mut FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
+        projections: &mut crate::WorkerLoadMap,
     ) {
         self.project_worker_loads_into(token_sequence, decay_now, projections, None);
     }
@@ -2798,7 +2797,7 @@ mod tests {
         assert_eq!(actual.1, expected.1);
         assert_eq!(
             projections.get(&worker_a).copied(),
-            Some(WorkerLoadProjection {
+            Some(crate::WorkerLoadProjection {
                 active_prefill_tokens: 0,
                 active_decode_blocks: 2,
                 active_requests: 1,
@@ -2807,7 +2806,7 @@ mod tests {
         );
         assert_eq!(
             projections.get(&worker_b).copied(),
-            Some(WorkerLoadProjection {
+            Some(crate::WorkerLoadProjection {
                 active_prefill_tokens: 12,
                 active_decode_blocks: 3,
                 active_requests: 1,

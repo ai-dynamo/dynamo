@@ -1998,7 +1998,7 @@ mod tests {
         let worker0 = WorkerWithDpRank::from_worker_id(0);
         let worker1 = WorkerWithDpRank::from_worker_id(1);
         let mut request = base_request(16);
-        request.worker_loads = FxHashMap::from_iter([
+        request.worker_loads = crate::WorkerLoadMap::from_iter([
             (
                 worker0,
                 crate::sequences::WorkerLoadProjection {
@@ -2055,7 +2055,7 @@ mod tests {
         }
 
         let mut request = base_request(16);
-        request.worker_loads = FxHashMap::from_iter([(
+        request.worker_loads = crate::WorkerLoadMap::from_iter([(
             WorkerWithDpRank::from_worker_id(0),
             crate::sequences::WorkerLoadProjection {
                 active_requests: 4,

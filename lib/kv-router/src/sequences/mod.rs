@@ -16,5 +16,5 @@ pub mod topology;
 pub use multi_worker::*;
 pub use prefill_tracker::PrefillTokenDeltas;
 pub(crate) use prompt_registry::WorkerLoadReader;
-pub use prompt_registry::{PotentialLoadMaps, WorkerLoadProjection};
+pub use prompt_registry::{PotentialLoadMaps, WorkerLoadMap, WorkerLoadProjection};
 pub use single::*;

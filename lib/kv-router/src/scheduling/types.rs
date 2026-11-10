@@ -501,7 +501,7 @@ pub struct SchedulingRequest {
     pub shared_cache_hits: Option<SharedCacheHits>,
 
     // Load state computed during admission.
-    pub worker_loads: FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
+    pub worker_loads: crate::WorkerLoadMap,
 
     /// Sender half of the admission ownership handoff. For tracked requests,
     /// the actor must book before sending and undo the booking if delivery fails.
@@ -680,7 +680,7 @@ mod tests {
         worker: WorkerWithDpRank,
     ) -> SchedulingRequest {
         let token_seq = token_seq_blocks.map(|blocks| (0..blocks as SequenceHash).collect());
-        let mut worker_loads = FxHashMap::default();
+        let mut worker_loads = crate::WorkerLoadMap::default();
         worker_loads.insert(
             worker,
             WorkerLoadProjection {
