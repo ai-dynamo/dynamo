@@ -5692,19 +5692,29 @@ class TestResponseFormatReasoningStart:
         return result.guided_decoding
 
     @staticmethod
-    def _after_reasoning(schema, end="</think>"):
+    def _after_reasoning(schema, end):
+        """Expected tag; ``end`` is a token id, or the text of a multi-token end."""
+        if isinstance(end, int):
+            reasoning = {
+                "type": "tag",
+                "begin": "",
+                "content": {"type": "any_tokens", "exclude_tokens": [end]},
+                "end": {"type": "token", "token": end},
+            }
+        else:
+            reasoning = {
+                "type": "tag",
+                "begin": "",
+                "content": {"type": "any_text"},
+                "end": end,
+            }
         return {
             "structural_tag": {
                 "type": "structural_tag",
                 "format": {
                     "type": "sequence",
                     "elements": [
-                        {
-                            "type": "tag",
-                            "begin": "",
-                            "content": {"type": "any_text"},
-                            "end": end,
-                        },
+                        reasoning,
                         {"type": "json_schema", "json_schema": schema},
                     ],
                 },
@@ -5779,7 +5789,10 @@ class TestResponseFormatReasoningStart:
             structural_tag_excludes_reasoning=excludes_reasoning,
         )
         plain = {"json": {"type": "object"}}
-        assert guided == (self._after_reasoning(plain["json"]) if wrapped else plain)
+        end = tokenizer.convert_tokens_to_ids("</think>")
+        assert guided == (
+            self._after_reasoning(plain["json"], end) if wrapped else plain
+        )
 
     @pytest.mark.asyncio
     async def test_json_schema_keeps_the_schema(self, tokenizer):
@@ -5792,10 +5805,14 @@ class TestResponseFormatReasoningStart:
                 "json_schema": {"name": "city", "schema": _JSON_SCHEMA},
             },
         )
-        assert guided == self._after_reasoning(_JSON_SCHEMA)
+        assert guided == self._after_reasoning(
+            _JSON_SCHEMA, tokenizer.convert_tokens_to_ids("</think>")
+        )
 
     @pytest.mark.asyncio
-    async def test_parser_end_marker_is_used(self, tokenizer):
+    async def test_multi_token_end_marker_is_matched_as_text(self, tokenizer):
+        # No single token to match, so the end marker's text bounds reasoning.
+        assert len(tokenizer.encode("<|end_of_thought|>", add_special_tokens=False)) > 1
         guided = await self._guided(
             tokenizer,
             prompt_text="<|im_start|>assistant\n<think>",
@@ -5806,6 +5823,25 @@ class TestResponseFormatReasoningStart:
         assert guided == self._after_reasoning(
             {"type": "object"}, end="<|end_of_thought|>"
         )
+
+    @pytest.mark.asyncio
+    async def test_other_reasoning_end_tokens_are_excluded(self, tokenizer):
+        # The parser also ends reasoning at a tool-call opener; the block must
+        # not contain it, or grammar and parser disagree on where JSON starts.
+        end = tokenizer.convert_tokens_to_ids("</think>")
+        tool_call = tokenizer.convert_tokens_to_ids("<tool_call>")
+
+        class Parser(_prompt_reasoning_parser_with_end()):
+            reasoning_end_token_ids = frozenset({end, tool_call})
+
+        guided = await self._guided(
+            tokenizer,
+            prompt_text="<|im_start|>assistant\n<think>",
+            reasoning_parser_class=Parser,
+        )
+        reasoning = guided["structural_tag"]["format"]["elements"][0]
+        assert reasoning["content"]["exclude_tokens"] == sorted({end, tool_call})
+        assert reasoning["end"] == {"type": "token", "token": end}
 
     @pytest.mark.asyncio
     async def test_thinking_disabled_by_request_is_not_wrapped(self, tokenizer):

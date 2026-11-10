@@ -577,6 +577,30 @@ def _prompt_leaves_reasoning_open(
     return tail.rstrip().endswith(start)
 
 
+def _reasoning_block_until(
+    end: str, tokenizer: TokenizerLike, parser: ReasoningParser
+) -> dict[str, Any]:
+    """Structural-tag element for free reasoning up to and including ``end``.
+
+    When ``end`` is one vocabulary token, match that token rather than its text.
+    The grammar would otherwise also accept ``end`` spelled with ordinary tokens,
+    which the streaming reasoning parsers do not treat as the end of reasoning,
+    so the JSON would stream as reasoning. For the same reason, no other token
+    the parser reads as the end of reasoning (a tool-call opener, for example)
+    may appear inside the block.
+    """
+    end_ids = tokenizer.encode(end, add_special_tokens=False)
+    if len(end_ids) != 1:
+        return {"type": "tag", "begin": "", "content": {"type": "any_text"}, "end": end}
+    excluded = set(end_ids) | set(getattr(parser, "reasoning_end_token_ids", ()))
+    return {
+        "type": "tag",
+        "begin": "",
+        "content": {"type": "any_tokens", "exclude_tokens": sorted(excluded)},
+        "end": {"type": "token", "token": end_ids[0]},
+    }
+
+
 def _response_format_after_reasoning(
     guided_decoding: dict[str, Any],
     prompt_token_ids: Sequence[int],
@@ -634,12 +658,7 @@ def _response_format_after_reasoning(
             "format": {
                 "type": "sequence",
                 "elements": [
-                    {
-                        "type": "tag",
-                        "begin": "",
-                        "content": {"type": "any_text"},
-                        "end": end,
-                    },
+                    _reasoning_block_until(end, tokenizer, parser),
                     {"type": "json_schema", "json_schema": schema},
                 ],
             },
@@ -998,7 +1017,8 @@ async def preprocess_chat_request(
         guided_decoding = assistant_guided_decoding
         # A JSON response_format applies to the answer. When the engine will not
         # hold it back until reasoning ends, start it after the reasoning block.
-        response_format_type = getattr(validated_request.response_format, "type", None)
+        response_format = validated_request.response_format
+        response_format_type = response_format.type if response_format else None
         if (
             not structural_tag_excludes_reasoning
             and not has_explicit_output_constraint
