@@ -106,6 +106,17 @@ Apply the following concerns only where the change makes them relevant. They des
     infrastructure where possible. Do not report missing tests alone, stylistic preferences,
     redundant comments, or opportunities for general cleanup.
 
+## Changes needed in more than one place
+
+19. When the change fixes or adds behavior in one place, find the other places that implement
+    the same behavior and that the diff leaves untouched. For this concern, search beyond the
+    changed path: the other HTTP APIs (chat completions, completions, Responses, and Anthropic
+    Messages), the Rust frontend and the Python chat processors, each backend's text and
+    multimodal request paths (including the encode, prefill, and decode workers), and the Rust
+    media loader and the Python media loaders. Report such a place only when its current code
+    still has the old behavior and the same reason applies there, and point to those lines. A
+    follow-up that the pull request or its review already plans is not a finding.
+
 ## Reporting findings
 
 Report as findings only high-confidence, actionable defects introduced by the change. Treat these concerns as directions for investigation, not mandatory findings. Exclude summaries, praise, style preferences, speculative failures, unrelated existing problems, and requests for tests without an identified behavioral defect from findings. When review history is available, read the discussion and author explanations, verify them against the code, and account for withdrawn concerns and explicitly staged follow-ups. Do not post a duplicate finding for an underlying defect already raised there. Separately note previously reported defects that you verify remain present, referencing the original discussion; distinguish them from fixed or unverified concerns. Keep one finding per underlying defect.

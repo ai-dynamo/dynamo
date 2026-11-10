@@ -30,6 +30,12 @@ transport behavior, and repeated work on request paths. Examples include
 [parser configuration reaching its consumer](https://github.com/ai-dynamo/dynamo/pull/12541#discussion_r3866837382),
 [streamed item ordering](https://github.com/ai-dynamo/dynamo/pull/11604#discussion_r3909782413),
 and [preserving HTTP/2 negotiation](https://github.com/ai-dynamo/dynamo/pull/14173#discussion_r3974898972).
+Concern 19 in the frontend prompt comes from a different source: follow-up pull
+requests that had to make a merged change again in another API, processor, or
+media path, such as
+[Anthropic Messages after a Responses fix](https://github.com/ai-dynamo/dynamo/pull/17914),
+[Anthropic error envelopes after a Decisions fix](https://github.com/ai-dynamo/dynamo/pull/17988),
+and [the Python audio loader after a Rust media-loader fix](https://github.com/ai-dynamo/dynamo/pull/17937).
 
 The runtime sample contains 266 selected PRs and their complete 4,443 inline
 comments, 3,632 reviews, and 1,951 general comments. Its recurring concerns include
