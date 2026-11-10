@@ -45,7 +45,8 @@ use runtime::BookedCopy;
 /// tasks, and must be bounded: no I/O, awaits, or unbounded index traversal.
 pub trait HintPolicy: Send + Sync + 'static {
     /// Router data this policy reads, from the documented [`WorkerInputs`] list. Reading
-    /// [`WorkerInputs::KV_COPY`] provides [`HintContext::kv_copy_source`].
+    /// [`WorkerInputs::KV_COPY`] provides [`HintContext::kv_copy_source`]. The router rejects
+    /// a policy that declares any other input, which [`HintContext`] can't serve.
     fn required_worker_inputs(&self) -> WorkerInputs {
         WorkerInputs::NONE
     }

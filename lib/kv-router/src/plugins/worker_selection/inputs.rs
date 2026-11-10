@@ -200,8 +200,8 @@ impl WorkerInputs {
     ///
     /// | Group | Filters | Scorers | Pickers | Hint policies |
     /// | --- | --- | --- | --- | --- |
-    /// | `CACHE`, `LOAD`, `PREFERRED_TAINT` | Yes | Yes | Yes | Starts resources only |
-    /// | `ACTIVE_REQUESTS` | No | No | Yes | No |
+    /// | `CACHE`, `LOAD`, `PREFERRED_TAINT` | Yes | Yes | Yes | Rejected |
+    /// | `ACTIVE_REQUESTS` | No | No | Yes | Rejected |
     /// | `KV_COPY` | No | Yes | No | The booked worker's copy source |
     ///
     /// A scorer that reads it commits the selected worker to its offer: the copy becomes the
