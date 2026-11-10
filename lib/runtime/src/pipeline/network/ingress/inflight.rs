@@ -14,7 +14,9 @@
 //! cannot cross.
 
 use std::collections::HashSet;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 
 use crate::pipeline::PipelineError;
 
@@ -31,7 +33,7 @@ impl InFlightIds {
     ///
     /// [`PipelineError::DuplicateRequestId`] if `id` is already held.
     pub(crate) fn claim(&self, id: &str) -> Result<InFlightClaim<'_>, PipelineError> {
-        let mut ids = self.lock();
+        let mut ids = self.ids.lock();
         if ids.contains(id) {
             return Err(PipelineError::DuplicateRequestId(id.to_string()));
         }
@@ -39,12 +41,6 @@ impl InFlightIds {
         let id: Arc<str> = Arc::from(id);
         ids.insert(id.clone());
         Ok(InFlightClaim { owner: self, id })
-    }
-
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashSet<Arc<str>>> {
-        // A poisoned lock means another thread panicked holding it; the set is
-        // still consistent, because every update is a single insert or remove.
-        self.ids.lock().unwrap_or_else(|e| e.into_inner())
     }
 }
 
@@ -57,7 +53,7 @@ pub(crate) struct InFlightClaim<'a> {
 
 impl Drop for InFlightClaim<'_> {
     fn drop(&mut self) {
-        self.owner.lock().remove(&self.id);
+        self.owner.ids.lock().remove(&self.id);
     }
 }
 
@@ -77,6 +73,6 @@ mod tests {
         drop(claim);
         drop(ids.claim("a").expect("a dropped claim frees its id"));
         drop(other);
-        assert!(ids.lock().is_empty());
+        assert!(ids.ids.lock().is_empty());
     }
 }
