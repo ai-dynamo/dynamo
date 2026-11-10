@@ -775,6 +775,11 @@ def test_router_policy_config_is_unparseable():
     [
         ((*KV_ARGS, "--router-kv-overlap-score-credit", "-1"), {}, "invalid"),
         ((*KV_ARGS, "--router-temperature", "hot"), {}, "cannot parse"),
+        (
+            ("-m", "dynamo.frontend", "--router-mode", "power-of-two"),
+            {},
+            "cannot parse",
+        ),
         ((*KV_ARGS,), {"DYN_ROUTER_TEMPERATURE": "hot"}, "invalid frontend env"),
         (
             (*KV_ARGS, "--router-approximate-cache-policy", "lru"),
@@ -1234,6 +1239,7 @@ def minimax_prefill_worker(*router_args: str) -> dict[str, Any]:
             "router mode 'kv'",
         ),
         (("--router-mode", "fastest"), None, "cannot parse"),
+        (("--router-mode", "power-of-two"), None, "cannot parse"),
         (
             (),
             [{"name": "DYN_ROUTER_TEMPERATURE", "value": "hot"}],
