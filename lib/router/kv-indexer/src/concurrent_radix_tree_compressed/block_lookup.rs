@@ -146,7 +146,9 @@ impl<V> BlockLookup<V> {
     }
 
     pub(crate) fn insert(&mut self, key: ExternalSequenceBlockHash, value: V) -> Option<V> {
-        self.reserve(1);
+        if self.slots.is_empty() {
+            self.reserve(1);
+        }
         match self.probe(key) {
             Ok(i) => self.slots[i]
                 .as_mut()
@@ -251,7 +253,9 @@ impl<V: Copy + Eq> BlockLookup<V> {
     where
         I: Iterator<Item = ExternalSequenceBlockHash> + Clone,
     {
-        self.reserve(1);
+        if self.slots.is_empty() {
+            self.reserve(1);
+        }
         let mut changed = 0;
         self.for_each_prefetched(keys, |lookup, key| match lookup.probe(key) {
             Ok(i) => {
@@ -319,6 +323,28 @@ mod tests {
 
     fn key(k: u64) -> ExternalSequenceBlockHash {
         ExternalSequenceBlockHash(k)
+    }
+
+    #[test]
+    fn existing_keys_do_not_grow_a_full_lookup() {
+        let mut lookup = BlockLookup::default();
+        for k in 0..12 {
+            lookup.insert(key(k), 1u32);
+        }
+        let capacity = lookup.slots.len();
+        assert_eq!(lookup.len() * 4, capacity * 3);
+
+        lookup.insert(key(0), 2);
+        assert_eq!(lookup.slots.len(), capacity);
+        lookup.upsert_all([key(0)].into_iter(), 2, |_| {});
+        assert_eq!(lookup.slots.len(), capacity);
+        lookup.upsert_all([key(0)].into_iter(), 3, |_| {});
+        assert_eq!(lookup.slots.len(), capacity);
+        lookup.upsert_all(std::iter::empty(), 3, |_| {});
+        assert_eq!(lookup.slots.len(), capacity);
+
+        lookup.upsert_all([key(12)].into_iter(), 4, |_| {});
+        assert_eq!(lookup.slots.len(), capacity * 2);
     }
 
     /// Randomized differential test against `HashMap`. A small key space forces long

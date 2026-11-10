@@ -399,6 +399,10 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::kv::LoadThresholdConfig>()?;
     m.add_class::<llm::replay::ReasoningConfig>()?;
     m.add_function(wrap_pyfunction!(llm::replay::_normalize_mocker_config, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        llm::routed_engine::_convert_preprocessed_request,
+        m
+    )?)?;
     #[cfg(feature = "select-service")]
     m.add_class::<llm::kv::SelectionService>()?;
     #[cfg(feature = "select-service")]

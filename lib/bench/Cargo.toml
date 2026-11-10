@@ -180,7 +180,7 @@ sha2 = { version = "0.10", optional = true }
 tempfile = { workspace = true, optional = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true, optional = true }
-tokenizers = { version = "0.21.4", default-features = false, features = [
+tokenizers = { version = "0.23.2", default-features = false, features = [
   "onig",
 ], optional = true }
 tracing = { workspace = true, optional = true }
