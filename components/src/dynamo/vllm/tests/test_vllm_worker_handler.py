@@ -2157,11 +2157,8 @@ async def test_decode_reports_cache_hit_only_without_transferred_kv(
 class TestAbortMonitor:
     """Tests for ``_monitor_abort`` / ``_abort_monitor``.
 
-    A client cancellation aborts the engine request immediately in every
-    mode, including disaggregated decode before the first token. vLLM keeps
-    the blocks of an aborted request until any in-flight KV receive settles,
-    so an early abort is safe; deferring it left cancelled decode requests
-    pinned to engine slots when the KV read stalled.
+    Client cancellation calls ``engine_client.abort`` immediately in every
+    mode, including DECODE before the first output.
     """
 
     @pytest.mark.asyncio
@@ -2251,11 +2248,7 @@ class TestAbortMonitor:
     async def test_generate_token_mode_aborts_before_first_token_in_decode_mode(
         self,
     ):
-        """A cancelled disaggregated-decode request aborts before any output.
-
-        Regression for the deferred abort: a decode request whose KV read never
-        produced a token stayed in the engine after the client went away.
-        """
+        """A DECODE request whose generator never yields is aborted on cancellation."""
         config = _make_config(disaggregation_mode="DECODE")
         handler = _make_handler(config=config)
         handler.engine_client = MagicMock()

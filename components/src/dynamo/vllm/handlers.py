@@ -2260,6 +2260,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 f"Aborting {'Prefill ' if is_prefill else ''}Request ID: {request_id}"
             )
 
+            # Safe during an in-flight remote KV read: vLLM keeps the blocks
+            # of a WAITING_FOR_REMOTE_KVS request until the connector reports
+            # the receive done.
             # Shield the abort so a concurrent CancelledError from
             # _abort_monitor cleanup cannot interrupt it mid-flight.
             try:
@@ -3777,15 +3780,13 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             kv_params = None
 
         mode = cast(DisaggregationMode, self.config.disaggregation_mode)
-        is_decode_only = mode == DisaggregationMode.DECODE
-        if is_decode_only and BYPASS_REMOTE_PREFILL_ANNOTATION in (
+        if mode == DisaggregationMode.DECODE and BYPASS_REMOTE_PREFILL_ANNOTATION in (
             request.get("annotations") or []
         ):
             logger.debug(
                 "DECODE: conditional-disagg bypass annotation present; "
                 "running request as AGG (prefill+decode on this worker)."
             )
-            is_decode_only = False
             mode = DisaggregationMode.AGGREGATED
         has_external_encoder_result = request.get("encoder_result") is not None
         if has_external_encoder_result and mode != DisaggregationMode.AGGREGATED:
