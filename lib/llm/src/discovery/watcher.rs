@@ -1021,8 +1021,10 @@ impl ModelWatcher {
                 let transcriptions_router = PushRouter::<
                     NvCreateAudioTranscriptionRequest,
                     Annotated<NvAudioTranscriptionResponse>,
-                >::from_client_with_monitor(
-                    client.clone(), router_config.router_mode, None
+                >::from_client_with_options(
+                    client.clone(),
+                    router_config.router_mode,
+                    crate::kv_router::plugins::push_router_options(),
                 )
                 .await?;
                 worker_set.transcriptions_engine = Some(Arc::new(transcriptions_router));
@@ -2399,9 +2401,6 @@ mod tests {
             r#"
 worker_selection:
   aggregated: test
-  instances:
-    - name: test
-      type: test
 request_classifier:
   type: test
 "#,
@@ -2705,6 +2704,91 @@ request_classifier:
                 .active_decode_blocks_threshold,
             Some(0.8)
         );
+    }
+
+    #[tokio::test]
+    async fn text_transcriptions_register_under_selector_router_modes() {
+        let runtime = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(runtime, DistributedConfig::process_local())
+            .await
+            .unwrap();
+        for (index, router_mode) in [
+            RouterMode::RoundRobin,
+            RouterMode::Random,
+            RouterMode::LeastLoaded,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let manager = Arc::new(ModelManager::new());
+            let watcher = Arc::new(ModelWatcher::new(
+                drt.clone(),
+                manager.clone(),
+                RouterConfig {
+                    router_mode,
+                    ..Default::default()
+                },
+                0,
+                None,
+                None,
+                None,
+                Arc::new(Metrics::new_with_prefix(Some(format!(
+                    "watcher_transcriptions_test_{index}"
+                )))),
+            ));
+            let model_name = format!("stt-model-{index}");
+            let mcid = ModelCardInstanceId {
+                namespace: format!("stt-ns-{index}"),
+                component: "workers".to_string(),
+                endpoint: "generate".to_string(),
+                instance_id: 1,
+                model_suffix: None,
+            };
+            let mut card = ModelDeploymentCard::with_name_only(&model_name);
+            card.model_input = ModelInput::Text;
+            card.model_type = ModelType::Transcriptions;
+            card.worker_type = Some(WorkerType::Aggregated);
+
+            let endpoint_id = model_card_endpoint_id(&mcid);
+            let key = GroupKey {
+                model_name: card.name().to_string(),
+                worker_set_key: worker_set_key(&endpoint_id, card.model_type, card.worker_type),
+            };
+            let desired = DesiredInstance {
+                key: mcid.to_path(),
+                mcid,
+                endpoint_id,
+                mdc_checksum: card.mdcsum().to_string(),
+                projection_fingerprint: lora_projection_fingerprint(&card).unwrap(),
+                video_contract: qwen_video_contract_digest(&card),
+                card,
+                group_key: key.clone(),
+            };
+            let spec = GroupSpec {
+                key,
+                mdc_checksum: desired.mdc_checksum.clone(),
+                fingerprint: desired.mdc_checksum.clone(),
+                generation: 1,
+                representative: desired.clone(),
+                video_contract: desired.video_contract.clone(),
+            };
+            let (_admission_tx, admission_rx) = tokio::sync::watch::channel(vec![1]);
+            let prepared = watcher
+                .prepare_worker_set(&spec, admission_rx, CancellationToken::new())
+                .await
+                .unwrap_or_else(|err| panic!("{router_mode:?}: {err:#}"));
+            watcher
+                .commit_group(&spec, prepared, &[desired], &[])
+                .unwrap();
+
+            assert!(
+                manager
+                    .get_model(&model_name)
+                    .unwrap()
+                    .has_transcriptions_engine(),
+                "{router_mode:?}: transcription engine not registered"
+            );
+        }
     }
 
     #[tokio::test]
@@ -3440,7 +3524,7 @@ request_classifier:
         }
 
         let mut card = ModelDeploymentCard::with_name_only("model");
-        card.runtime_config.tool_call_parser = Some("hermes".to_string());
+        card.runtime_config.tool_call_parser = Some("llama3_json".to_string());
         card.model_type = ModelType::Embedding;
         assert!(validate_card_parser_version(&card, false).is_ok());
         card.model_type = ModelType::Chat;

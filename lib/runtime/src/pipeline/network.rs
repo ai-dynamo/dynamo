@@ -1217,12 +1217,26 @@ where
 }
 
 /// Result of encoding one response item for the request plane.
-pub struct EncodedResponseFrame {
-    pub bytes: Bytes,
+///
+/// `B` is `()` when the bytes went into the caller's buffer instead, through
+/// [`IngressResponseEncoder::encode_response_into`].
+pub struct EncodedResponseFrame<B = Bytes> {
+    pub bytes: B,
     pub is_error: bool,
     /// Stop consuming the engine stream after publishing this frame. The
     /// normal complete-final frame is still sent.
     pub stop_stream: bool,
+}
+
+impl<B> EncodedResponseFrame<B> {
+    /// The same frame, with `f` applied to its bytes.
+    pub fn map<C>(self, f: impl FnOnce(B) -> C) -> EncodedResponseFrame<C> {
+        EncodedResponseFrame {
+            bytes: f(self.bytes),
+            is_error: self.is_error,
+            stop_stream: self.stop_stream,
+        }
+    }
 }
 
 /// Converts request-plane bytes into the item consumed by an ingress engine.
@@ -1248,6 +1262,31 @@ where
         response: Option<U>,
         complete_final: bool,
     ) -> impl std::future::Future<Output = std::result::Result<EncodedResponseFrame, PipelineError>> + Send;
+
+    /// Encode a response like [`encode_response`](Self::encode_response), but
+    /// append its bytes to `buffer`, after the frame header a transport may
+    /// already have written there.
+    ///
+    /// The default copies `encode_response`'s bytes in. That is the one copy a
+    /// transport would otherwise make to frame them; an adapter that serializes
+    /// straight into `buffer` saves it.
+    fn encode_response_into(
+        &self,
+        payload_codec: RequestPlanePayloadCodec,
+        response: Option<U>,
+        complete_final: bool,
+        buffer: &mut Vec<u8>,
+    ) -> impl std::future::Future<
+        Output = std::result::Result<EncodedResponseFrame<()>, PipelineError>,
+    > + Send {
+        async move {
+            let frame = self
+                .encode_response(payload_codec, response, complete_final)
+                .await?;
+            buffer.extend_from_slice(&frame.bytes);
+            Ok(frame.map(drop))
+        }
+    }
 }
 
 /// Complete request/response payload adapter for an ingress engine.
@@ -1292,6 +1331,35 @@ where
     }
 }
 
+impl SerdeIngressPayloadAdapter {
+    fn serialize_response<U: Serialize + MaybeError>(
+        payload_codec: RequestPlanePayloadCodec,
+        response: Option<U>,
+        complete_final: bool,
+        buffer: &mut Vec<u8>,
+    ) -> std::result::Result<EncodedResponseFrame<()>, PipelineError> {
+        let is_error = response
+            .as_ref()
+            .is_some_and(|response| response.err().is_some());
+        let wrapper = NetworkStreamWrapper {
+            data: response,
+            complete_final,
+        };
+        payload_codec.encode_into(&wrapper, buffer).map_err(|err| {
+            PipelineError::SerializationError(format!(
+                "Failed serializing {} request-plane response: {}",
+                payload_codec.name(),
+                err
+            ))
+        })?;
+        Ok(EncodedResponseFrame {
+            bytes: (),
+            is_error,
+            stop_stream: false,
+        })
+    }
+}
+
 impl<U> IngressResponseEncoder<U> for SerdeIngressPayloadAdapter
 where
     U: Data + Serialize + MaybeError,
@@ -1304,29 +1372,26 @@ where
         complete_final: bool,
     ) -> impl std::future::Future<Output = std::result::Result<EncodedResponseFrame, PipelineError>> + Send
     {
-        let is_error = response
-            .as_ref()
-            .is_some_and(|response| response.err().is_some());
-        let wrapper = NetworkStreamWrapper {
-            data: response,
-            complete_final,
-        };
         let mut bytes = Vec::with_capacity(RESPONSE_ENCODE_CAPACITY_HINT);
-        let encoded = payload_codec
-            .encode_into(&wrapper, &mut bytes)
-            .map(|()| bytes)
-            .map_err(|err| {
-                PipelineError::SerializationError(format!(
-                    "Failed serializing {} request-plane response: {}",
-                    payload_codec.name(),
-                    err
-                ))
-            });
-        std::future::ready(encoded.map(|bytes| EncodedResponseFrame {
-            bytes: bytes.into(),
-            is_error,
-            stop_stream: false,
-        }))
+        let encoded = Self::serialize_response(payload_codec, response, complete_final, &mut bytes);
+        std::future::ready(encoded.map(|frame| frame.map(|()| bytes.into())))
+    }
+
+    fn encode_response_into(
+        &self,
+        payload_codec: RequestPlanePayloadCodec,
+        response: Option<U>,
+        complete_final: bool,
+        buffer: &mut Vec<u8>,
+    ) -> impl std::future::Future<
+        Output = std::result::Result<EncodedResponseFrame<()>, PipelineError>,
+    > + Send {
+        std::future::ready(Self::serialize_response(
+            payload_codec,
+            response,
+            complete_final,
+            buffer,
+        ))
     }
 }
 
