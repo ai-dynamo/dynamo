@@ -36,7 +36,11 @@ class MistralImagePlaceholders:
         img, img_break, img_end = (
             getattr(special_ids, name, None) for name in ("img", "img_break", "img_end")
         )
-        if not all(type(token_id) is int for token_id in (img, img_break, img_end)):
+        if (
+            type(img) is not int
+            or type(img_break) is not int
+            or type(img_end) is not int
+        ):
             return None
         return cls(encoder=encoder, img=img, img_break=img_break, img_end=img_end)
 
