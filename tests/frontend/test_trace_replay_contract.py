@@ -9,9 +9,13 @@ import copy
 import gzip
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from typing import Any
 
 import pytest
+import requests
 
+from tests.frontend.trace_replay import runner
+from tests.frontend.trace_replay.__main__ import main
 from tests.frontend.trace_replay.contract import (
     MISSING,
     ReplayError,
@@ -25,8 +29,14 @@ from tests.frontend.trace_replay.contract import (
     same_json,
     scheduled_events,
     validate_source,
+    write_json,
 )
 from tests.frontend.trace_replay.runner import (
+    RunOptions,
+    _baseline,
+    _environment,
+    _execution_configuration,
+    _sse_lines,
     _write_junit,
     assemble_sse,
     compare_baseline,
@@ -232,6 +242,113 @@ def test_sse_accumulates_typed_tool_arguments_and_detects_wrong_value() -> None:
     assert judge_response(case, response)[0]["path"] == "/message"
 
 
+@pytest.mark.parametrize("character", ["\u0085", "\u2028", "\u2029"])
+def test_requests_sse_preserves_unicode_line_characters(character: str) -> None:
+    text = "before" + character + "after"
+    chunks = [_chunk({"role": "assistant", "content": text}), _chunk({}, "stop")]
+    response = requests.Response()
+    response.status_code = 200
+    response.encoding = "utf-8"
+    response._content = ("\n".join(_stream(chunks)) + "\n").encode("utf-8")
+    response._content_consumed = True
+    # Exercise requests' real byte-line splitter with a character that its
+    # decode_unicode=True path incorrectly treats as a new HTTP line.
+    assert assemble_sse(_sse_lines(response))["message"]["content"] == text
+
+
+def test_requests_sse_rejects_invalid_utf8() -> None:
+    response = requests.Response()
+    response._content = b"data: \xff\n\n"
+    response._content_consumed = True
+    with pytest.raises(ReplayError, match="UTF-8"):
+        list(_sse_lines(response))
+
+
+@pytest.mark.parametrize("invalid", [None, False, [], "wrong"])
+def test_nonobject_unary_and_streamed_choices_fail_as_replay_errors(
+    invalid: Any,
+) -> None:
+    payload = {"id": "response-1", "choices": [invalid]}
+    with pytest.raises(ReplayError, match="choice.*object"):
+        normalize_unary(payload)
+    with pytest.raises(ReplayError, match="choice.*object"):
+        assemble_sse(_stream([payload]))
+
+
+@pytest.mark.parametrize("invalid", [None, False, [], "wrong"])
+@pytest.mark.parametrize("field", ["tool_call", "function"])
+def test_nonobject_tool_fields_fail_as_replay_errors(invalid: Any, field: str) -> None:
+    call = {"index": 0, "id": "call-1", "type": "function", "function": invalid}
+    if field == "tool_call":
+        call = invalid
+    message = {"role": "assistant", "content": None, "tool_calls": [call]}
+    payload = {
+        "choices": [{"index": 0, "finish_reason": "tool_calls", "message": message}]
+    }
+    with pytest.raises(ReplayError):
+        normalize_unary(payload)
+    with pytest.raises(ReplayError):
+        assemble_sse(_stream([_chunk(message, "tool_calls")]))
+
+
+@pytest.mark.parametrize("mode", ["unary", "sse"])
+def test_malformed_wire_response_is_a_product_failure_with_complete_worker_receipts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    corpus = load_corpus(FIXTURES, 1)
+    case = corpus.cases[0]
+
+    def malformed_response(
+        session: requests.Session, url: str, **kwargs: Any
+    ) -> requests.Response:
+        request = loads(kwargs["data"])
+        annotation = request["nvext"]["annotations"][-1]
+        execution_id = loads(annotation.removeprefix(runner.ANNOTATION_PREFIX))[
+            "execution_id"
+        ]
+        ingress = {
+            "token_ids": case.expected_preprocessed["token_ids"],
+            "sampling_options": {"temperature": 0, "seed": 0, "n": 1},
+            "stop_conditions": {"max_tokens": 4096, "stop_token_ids_hidden": [1]},
+            "eos_token_ids": [1],
+        }
+        write_json(tmp_path / "worker" / f"{execution_id}.request.json", ingress)
+        write_json(
+            tmp_path / "worker" / f"{execution_id}.emission.json",
+            {
+                "state": "completed",
+                "terminal_count": 1,
+                "token_ids": [
+                    token
+                    for event in case.worker_events
+                    for token in event["token_ids"]
+                ],
+            },
+        )
+        payload = {"id": "response-1", "choices": [None]}
+        response = requests.Response()
+        response.status_code = 200
+        response.encoding = "utf-8"
+        response._content = (
+            "\n".join(_stream([payload])) + "\n" if mode == "sse" else dumps(payload)
+        ).encode("utf-8")
+        response._content_consumed = True
+        return response
+
+    monkeypatch.setattr(requests.Session, "post", malformed_response)
+    result = runner._exchange(
+        case,
+        mode,
+        "whole",
+        corpus,
+        RunOptions(FIXTURES, tmp_path, tmp_path),
+        "http://unused",
+    )
+    assert result["status"] == "fail"
+    assert result["infra_errors"] == []
+    assert result["failures"][0]["path"] == "/wire"
+
+
 @pytest.mark.parametrize(
     "variant", ["no_done", "after_finish", "double_finish", "changed_id"]
 )
@@ -312,3 +429,165 @@ def test_baseline_separates_fix_from_unjudged_change() -> None:
     assert compare_baseline(current, previous) == "unjudged_change"
     current["status"] = "fail"
     assert compare_baseline(current, previous) == "new_failure"
+    assert compare_baseline(current, None) == "infrastructure_unjudged"
+
+
+def _baseline_files(directory: Path, *, exit_code: int = 0, completed: int = 1) -> str:
+    key = dumps(["case", "unary", "whole"])
+    summary = {
+        "identity": {"test": "identity"},
+        "exit_code": exit_code,
+        "coverage": {"executions_planned": 1, "executions_completed": completed},
+    }
+    (directory / "summary.json").write_text(dumps(summary))
+    (directory / "observations.jsonl").write_text(
+        dumps({"key": loads(key), "status": "pass"}) + "\n"
+    )
+    return key
+
+
+@pytest.mark.parametrize(
+    "variant", ["exit_2", "preflight_exit_2", "partial_coverage", "missing_row"]
+)
+def test_incomplete_baseline_does_not_create_product_attention(
+    tmp_path: Path, variant: str
+) -> None:
+    key = _baseline_files(
+        tmp_path,
+        exit_code=2 if variant in ("exit_2", "preflight_exit_2") else 0,
+        completed=0 if variant == "partial_coverage" else 1,
+    )
+    if variant == "missing_row":
+        (tmp_path / "observations.jsonl").write_text("")
+    if variant == "preflight_exit_2":
+        write_json(tmp_path / "summary.json", {"exit_code": 2, "status": "infra_error"})
+    assert _baseline(tmp_path, {"test": "identity"}, {key}) == (
+        "baseline_incomplete",
+        {},
+    )
+
+
+@pytest.mark.parametrize("record", [None, {}, {"key": None}, {"key": ["case"]}])
+def test_malformed_baseline_rows_raise_replay_error(
+    tmp_path: Path, record: Any
+) -> None:
+    key = _baseline_files(tmp_path)
+    (tmp_path / "observations.jsonl").write_text(dumps(record) + "\n")
+    with pytest.raises(ReplayError, match="baseline observation"):
+        _baseline(tmp_path, {"test": "identity"}, {key})
+
+
+def test_complete_baseline_is_comparable(tmp_path: Path) -> None:
+    key = _baseline_files(tmp_path)
+    status, rows = _baseline(tmp_path, {"test": "identity"}, {key})
+    assert status == "compared" and rows[key]["status"] == "pass"
+
+
+@pytest.mark.parametrize("failure", ["options", "corpus", "assets"])
+def test_cli_preflight_failure_writes_summary_and_junit(
+    tmp_path: Path, failure: str
+) -> None:
+    output = tmp_path / "results"
+    args = [
+        "run",
+        "--corpus",
+        str(tmp_path / "missing" if failure == "corpus" else FIXTURES),
+        "--model-dir",
+        str(tmp_path / "missing-assets"),
+        "--output-dir",
+        str(output),
+    ]
+    if failure == "options":
+        args += ["--concurrency", "0"]
+    assert main(args) == 2
+    assert loads((output / "summary.json").read_bytes())["status"] == "infra_error"
+    suite = ET.parse(output / "junit.xml").getroot()
+    assert suite.attrib["errors"] == "1"
+    assert suite.find("testcase/error") is not None
+
+
+def test_cli_malformed_baseline_writes_summary_and_junit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    baseline = tmp_path / "baseline"
+    baseline.mkdir()
+    output = tmp_path / "results"
+    options = RunOptions(FIXTURES, tmp_path, output, baseline=baseline)
+    identity = runner.comparison_identity(load_corpus(FIXTURES), options, {})
+    write_json(
+        baseline / "summary.json",
+        {
+            "identity": identity,
+            "exit_code": 0,
+            "coverage": {"executions_planned": 1, "executions_completed": 1},
+        },
+    )
+    (baseline / "observations.jsonl").write_text('{"status":"pass"}\n')
+    monkeypatch.setattr(runner, "verify_assets", lambda *_: {})
+    assert (
+        main(
+            [
+                "run",
+                "--corpus",
+                str(FIXTURES),
+                "--model-dir",
+                str(tmp_path),
+                "--output-dir",
+                str(output),
+                "--baseline",
+                str(baseline),
+            ]
+        )
+        == 2
+    )
+    summary = loads((output / "summary.json").read_bytes())
+    assert "baseline observation" in summary["infrastructure_errors"][0]
+    assert ET.parse(output / "junit.xml").getroot().attrib["errors"] == "1"
+
+
+def test_replay_environment_drops_inherited_routes_and_does_not_report_secrets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DYN_MIGRATION_LIMIT", "99")
+    monkeypatch.setenv("DYN_DEFAULT_CHAT_TEMPLATE_KWARGS", '{"enable_thinking":false}')
+    monkeypatch.setenv("DYN_TOKENIZER", "wrong-model")
+    monkeypatch.setenv("DYN_REPLAY_HARNESS_REVISION", "parent-metadata")
+    monkeypatch.setenv("HF_TOKEN", "test-credential-must-not-be-reported")
+    env = _environment(tmp_path)
+    assert (
+        not {
+            "DYN_MIGRATION_LIMIT",
+            "DYN_DEFAULT_CHAT_TEMPLATE_KWARGS",
+            "DYN_TOKENIZER",
+            "DYN_REPLAY_HARNESS_REVISION",
+        }
+        & env.keys()
+    )
+    assert env["DYN_DISCOVERY_BACKEND"] == "file"
+    report = _execution_configuration(["worker"], ["frontend"], env)
+    assert report["environment"]["DYN_FILE_KV"] == str(tmp_path / "discovery")
+    assert "HF_TOKEN" not in report["environment"]
+    assert "test-credential-must-not-be-reported" not in dumps(report)
+
+
+def test_startup_report_pins_migration_and_preserves_parent_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(runner, "verify_assets", lambda *_: {})
+    monkeypatch.setattr(runner, "allocate_port", lambda *_: 12345)
+    monkeypatch.setattr(runner, "deallocate_port", lambda *_: None)
+    monkeypatch.setenv("DYN_REPLAY_HARNESS_REVISION", "harness-metadata")
+
+    def unavailable_process(**kwargs: Any) -> None:
+        raise RuntimeError("test startup failure")
+
+    monkeypatch.setattr(runner, "ManagedProcess", unavailable_process)
+    code, summary = runner.run(RunOptions(FIXTURES, tmp_path, tmp_path / "results"))
+    assert code == 2
+    command = summary["build"]["execution"]["frontend_command"]
+    assert command[command.index("--migration-limit") + 1] == "0"
+    assert summary["harness_revision"] == "harness-metadata"
+    assert (
+        "DYN_REPLAY_HARNESS_REVISION"
+        not in summary["build"]["execution"]["environment"]
+    )

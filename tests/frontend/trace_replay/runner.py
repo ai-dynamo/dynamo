@@ -46,6 +46,13 @@ from .contract import (
 ANNOTATION_PREFIX = "frontend_replay:"
 MODES = ("unary", "sse")
 SCHEDULES = ("whole", "one_token", "fixed32", "recorded")
+REPLAY_ENVIRONMENT = (
+    "PYTHONPATH",
+    "PYTHONNOUSERSITE",
+    "HF_HUB_OFFLINE",
+    "TRANSFORMERS_OFFLINE",
+    "CUDA_VISIBLE_DEVICES",
+)
 
 
 def prepare_assets(corpus_path: Path, model_dir: Path) -> dict[str, str]:
@@ -121,6 +128,16 @@ def _sse_payloads(lines: Iterable[str]) -> list[dict[str, Any]]:
     return payloads
 
 
+def _sse_lines(response: requests.Response) -> Iterable[str]:
+    # requests' Unicode line splitter also splits legal JSON characters such as
+    # U+2028. Split HTTP bytes first so only CR/LF delimit SSE lines.
+    for line in response.iter_lines():
+        try:
+            yield line.decode("utf-8", errors="strict")
+        except UnicodeDecodeError as exc:
+            raise ReplayError("SSE line is not valid UTF-8") from exc
+
+
 def assemble_sse(lines: Iterable[str]) -> dict[str, Any]:
     """Independent Chat Completions accumulator with terminal/order checks."""
     payloads = _sse_payloads(lines)
@@ -148,6 +165,8 @@ def assemble_sse(lines: Iterable[str]) -> dict[str, Any]:
         if not choices:
             continue
         choice = choices[0]
+        if not isinstance(choice, dict):
+            raise ReplayError("streamed choice must be an object")
         if choice.get("index") != 0:
             raise ReplayError("unexpected streamed choice index")
         delta = choice.get("delta")
@@ -175,6 +194,8 @@ def assemble_sse(lines: Iterable[str]) -> dict[str, Any]:
         if not isinstance(call_deltas, list):
             raise ReplayError("streamed tool_calls must be an array")
         for call in call_deltas:
+            if not isinstance(call, dict):
+                raise ReplayError("streamed tool call must be an object")
             index = call.get("index")
             if type(index) is not int or index < 0:
                 raise ReplayError("invalid tool-call index")
@@ -192,7 +213,9 @@ def assemble_sse(lines: Iterable[str]) -> dict[str, Any]:
                 target["id"] = call["id"]
             if call.get("type") not in (None, "function"):
                 raise ReplayError("invalid streamed tool type")
-            function = call.get("function") or {}
+            function = call.get("function", {})
+            if not isinstance(function, dict):
+                raise ReplayError("streamed function must be an object")
             for key in ("name", "arguments"):
                 value = function.get(key)
                 if value is not None:
@@ -227,6 +250,8 @@ def normalize_unary(payload: Any) -> dict[str, Any]:
     ):
         raise ReplayError("expected one unary choice")
     choice = payload["choices"][0]
+    if not isinstance(choice, dict):
+        raise ReplayError("unary choice must be an object")
     if choice.get("index") != 0 or choice.get("finish_reason") not in (
         "stop",
         "tool_calls",
@@ -407,8 +432,7 @@ def _exchange(
                 else:
                     try:
                         if mode == "sse":
-                            response.encoding = "utf-8"
-                            raw = list(response.iter_lines(decode_unicode=True))
+                            raw = list(_sse_lines(response))
                             result["response"] = assemble_sse(raw)
                         else:
                             raw = response.text
@@ -491,20 +515,55 @@ def _exchange(
 
 
 def _baseline(
-    directory: Path | None, identity: dict[str, Any]
+    directory: Path | None,
+    identity: dict[str, Any],
+    expected_keys: set[str],
 ) -> tuple[str, dict[str, dict[str, Any]]]:
     if directory is None or not (directory / "summary.json").is_file():
         return "baseline_unavailable", {}
     summary = loads((directory / "summary.json").read_bytes())
+    if not isinstance(summary, dict):
+        raise ReplayError("baseline summary must be an object")
+    if not isinstance(summary.get("identity"), dict):
+        # CLI preflight failures cannot compute an identity or coverage yet.
+        if type(summary.get("exit_code")) is int and summary["exit_code"] == 2:
+            return "baseline_incomplete", {}
+        raise ReplayError("baseline summary requires an identity object")
     if not same_json(summary.get("identity"), identity):
         return "baseline_not_comparable", {}
+    coverage = summary.get("coverage")
+    if (
+        type(summary.get("exit_code")) is not int
+        or summary["exit_code"] not in (0, 1, 2)
+        or not isinstance(coverage, dict)
+        or any(
+            type(coverage.get(name)) is not int or coverage[name] < 0
+            for name in ("executions_planned", "executions_completed")
+        )
+        or coverage["executions_completed"] > coverage["executions_planned"]
+    ):
+        raise ReplayError("baseline summary requires valid exit code and coverage")
+    if (
+        summary["exit_code"] == 2
+        or coverage["executions_completed"] != coverage["executions_planned"]
+    ):
+        return "baseline_incomplete", {}
     path = directory / "observations.jsonl"
     if not path.is_file():
-        return "baseline_unavailable", {}
+        return "baseline_incomplete", {}
     rows = {}
-    with path.open(encoding="utf-8") as stream:
+    with path.open("rb") as stream:
         for line in stream:
             record = loads(line)
+            if (
+                not isinstance(record, dict)
+                or not isinstance(record.get("key"), list)
+                or len(record["key"]) != 3
+                or any(not isinstance(part, str) for part in record["key"])
+                or record.get("status")
+                not in ("pass", "fail", "unjudged", "infra_error")
+            ):
+                raise ReplayError("invalid baseline observation key or status")
             key = dumps(record["key"])
             if key in rows:
                 raise ReplayError("duplicate baseline observation key")
@@ -517,12 +576,14 @@ def _baseline(
                     "response_judged",
                 )
             }
+    if len(rows) != coverage["executions_completed"] or set(rows) != expected_keys:
+        return "baseline_incomplete", {}
     return "compared", rows
 
 
 def compare_baseline(current: dict[str, Any], previous: dict[str, Any] | None) -> str:
     if previous is None:
-        return "missing_observation"
+        return "infrastructure_unjudged"
     if previous["status"] == "infra_error" or current["status"] == "infra_error":
         return "infrastructure_unjudged"
     if previous["status"] == "fail" and current["status"] != "fail":
@@ -539,7 +600,9 @@ def compare_baseline(current: dict[str, Any], previous: dict[str, Any] | None) -
 
 
 def _environment(output_dir: Path) -> dict[str, str]:
-    env = dict(os.environ)
+    env = {
+        name: value for name, value in os.environ.items() if not name.startswith("DYN_")
+    }
     root = Path(__file__).resolve().parents[3]
     env.update(
         PYTHONPATH=str(root),
@@ -551,7 +614,6 @@ def _environment(output_dir: Path) -> dict[str, str]:
         TRANSFORMERS_OFFLINE="1",
         CUDA_VISIBLE_DEVICES="",
     )
-    env.pop("DYN_SYSTEM_PORT", None)
     for name in (
         "DYN_TCP_RPC_HOST",
         "DYN_TCP_RESPONSE_STREAM_HOST",
@@ -559,6 +621,21 @@ def _environment(output_dir: Path) -> dict[str, str]:
     ):
         env[name] = "127.0.0.1"
     return env
+
+
+def _execution_configuration(
+    worker_command: list[str], frontend_command: list[str], env: dict[str, str]
+) -> dict[str, Any]:
+    # Record only runner-owned controls, never inherited credentials or tokens.
+    return {
+        "worker_command": worker_command,
+        "frontend_command": frontend_command,
+        "environment": {
+            name: value
+            for name, value in env.items()
+            if name.startswith("DYN_") or name in REPLAY_ENVIRONMENT
+        },
+    }
 
 
 def _write_junit(
@@ -615,7 +692,13 @@ def run(options: RunOptions) -> tuple[int, dict[str, Any]]:
     corpus = load_corpus(options.corpus, options.limit)
     assets = verify_assets(corpus, options.model_dir)
     identity = comparison_identity(corpus, options, assets)
-    baseline_status, previous = _baseline(options.baseline, identity)
+    expected_keys = {
+        dumps([case.identifier, mode, schedule])
+        for case in corpus.cases
+        for mode in options.modes
+        for schedule in options.schedules
+    }
+    baseline_status, previous = _baseline(options.baseline, identity, expected_keys)
     rows: list[dict[str, Any]] = []
     invariants: dict[str, tuple[str | None, str | None]] = {}
     comparisons: dict[str, int] = {}
@@ -660,8 +743,12 @@ def run(options: RunOptions) -> tuple[int, dict[str, Any]]:
         "zmq",
         "--router-mode",
         "round-robin",
+        "--migration-limit",
+        "0",
     ]
-    build = None
+    build = {
+        "execution": _execution_configuration(worker_command, frontend_command, env)
+    }
     infrastructure = []
     observation_path = options.output_dir / "observations.jsonl"
     try:
@@ -678,7 +765,7 @@ def run(options: RunOptions) -> tuple[int, dict[str, Any]]:
                     display_name="replay-worker",
                 )
             )
-            build = loads(ready.read_bytes())
+            build.update(loads(ready.read_bytes()))
             if (
                 build.get("manifest_sha256") != corpus.manifest_sha256
                 or build.get("selected_ids_sha256") != identity["selected_ids_sha256"]
@@ -780,9 +867,7 @@ def run(options: RunOptions) -> tuple[int, dict[str, Any]]:
         status: sum(row["status"] == status for row in rows)
         for status in ("pass", "fail", "unjudged", "infra_error")
     }
-    attention = comparisons.get("unjudged_change", 0) + comparisons.get(
-        "missing_observation", 0
-    )
+    attention = comparisons.get("unjudged_change", 0)
     exit_code = (
         2
         if infrastructure or counts["infra_error"]

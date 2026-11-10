@@ -28,6 +28,7 @@ class PublicationTests(unittest.TestCase):
         self.directory = Path(self.temporary.name)
         self.descriptor_path = self.directory / "publication.json"
         self.target = self.directory / "target.json"
+        self.metadata_path = self.directory / "run.json"
         self.platform_digest = "sha256:" + "a" * 64
         self.manifest = {
             "manifests": [
@@ -47,6 +48,21 @@ class PublicationTests(unittest.TestCase):
             "FRONTEND_STAGED": "true",
             "STAGING_REFERENCE": "private.invalid/secret/image:tag",
         }
+        self.metadata = {
+            "id": 42,
+            "run_attempt": 1,
+            "head_sha": self.environment["SOURCE_SHA"],
+            "repository": {"full_name": "ai-dynamo/dynamo"},
+            "head_repository": {"full_name": "ai-dynamo/dynamo"},
+            "path": ".github/workflows/nightly-ci.yml",
+            "name": "Nightly CI Pipeline",
+            "head_branch": "main",
+            "event": "schedule",
+            "status": "completed",
+            "pull_requests": [],
+            "conclusion": "failure",
+        }
+        publication.write_json(self.metadata_path, self.metadata)
 
     def record(self):
         commands = [
@@ -71,7 +87,11 @@ class PublicationTests(unittest.TestCase):
         ) as fetch:
             self.assertEqual(
                 publication.resolve(
-                    self.descriptor_path, self.target, "linux/amd64", 0
+                    self.descriptor_path,
+                    self.target,
+                    "linux/amd64",
+                    0,
+                    self.metadata_path,
                 ),
                 0,
             )
@@ -91,7 +111,11 @@ class PublicationTests(unittest.TestCase):
         with patch.object(publication, "public_manifest") as fetch:
             self.assertEqual(
                 publication.resolve(
-                    self.descriptor_path, self.target, "linux/amd64", 0
+                    self.descriptor_path,
+                    self.target,
+                    "linux/amd64",
+                    0,
+                    self.metadata_path,
                 ),
                 2,
             )
@@ -124,7 +148,11 @@ class PublicationTests(unittest.TestCase):
         ):
             self.assertEqual(
                 publication.resolve(
-                    self.descriptor_path, self.target, "linux/amd64", 0
+                    self.descriptor_path,
+                    self.target,
+                    "linux/amd64",
+                    0,
+                    self.metadata_path,
                 ),
                 2,
             )
@@ -142,7 +170,11 @@ class PublicationTests(unittest.TestCase):
         ):
             self.assertEqual(
                 publication.resolve(
-                    self.descriptor_path, self.target, "linux/arm64", 0
+                    self.descriptor_path,
+                    self.target,
+                    "linux/arm64",
+                    0,
+                    self.metadata_path,
                 ),
                 2,
             )
@@ -154,7 +186,13 @@ class PublicationTests(unittest.TestCase):
         publication.write_json(self.descriptor_path, descriptor)
         with patch.object(publication, "public_manifest") as fetch:
             with self.assertRaisesRegex(ValueError, "invalid publication descriptor"):
-                publication.resolve(self.descriptor_path, self.target, "linux/amd64", 0)
+                publication.resolve(
+                    self.descriptor_path,
+                    self.target,
+                    "linux/amd64",
+                    0,
+                    self.metadata_path,
+                )
         fetch.assert_not_called()
 
     def test_startup_failures_have_junit_infrastructure_evidence(self):
@@ -164,11 +202,70 @@ class PublicationTests(unittest.TestCase):
         self.assertEqual(summary["executions"], 0)
         self.assertIn('errors="1"', (self.directory / "junit.xml").read_text())
         publication.write_json(self.directory / "summary.json", {"executions": 20})
+        (self.directory / "junit.xml").unlink()
         publication.ensure_report(self.directory)
+        self.assertTrue((self.directory / "junit.xml").is_file())
         self.assertEqual(
             json.loads((self.directory / "summary.json").read_text()),
             {"executions": 20},
         )
+
+    def test_only_completed_main_nightly_can_supply_evidence(self):
+        for event in ("schedule", "workflow_dispatch"):
+            metadata = {**self.metadata, "event": event}
+            self.assertEqual(
+                publication.verify_run(metadata, "ai-dynamo/dynamo", "42")["id"], 42
+            )
+        changed_fields = {
+            "id": 43,
+            "run_attempt": 0,
+            "head_sha": "short",
+            "repository": {"full_name": "another/repository"},
+            "head_repository": {"full_name": "fork/dynamo"},
+            "path": ".github/workflows/pr.yaml",
+            "name": "PR",
+            "head_branch": "feature",
+            "event": "pull_request",
+            "status": "in_progress",
+            "pull_requests": [{"number": 1}],
+        }
+        for field, value in changed_fields.items():
+            with self.subTest(field=field):
+                with self.assertRaises(ValueError):
+                    publication.verify_run(
+                        {**self.metadata, field: value}, "ai-dynamo/dynamo", "42"
+                    )
+        for run_id in ("0", "-1", "42\nimage=bad", "main"):
+            with self.assertRaises(ValueError):
+                publication.verify_run(self.metadata, "ai-dynamo/dynamo", run_id)
+
+    def test_descriptor_must_match_trusted_run_before_registry_access(self):
+        self.record()
+        for field, value in {"id": 43, "run_attempt": 2, "head_sha": "f" * 40}.items():
+            publication.write_json(self.metadata_path, {**self.metadata, field: value})
+            with self.subTest(field=field), patch.object(
+                publication, "public_manifest"
+            ) as fetch:
+                with self.assertRaisesRegex(ValueError, "trusted nightly run"):
+                    publication.resolve(
+                        self.descriptor_path,
+                        self.target,
+                        "linux/amd64",
+                        0,
+                        self.metadata_path,
+                    )
+                fetch.assert_not_called()
+
+    def test_target_unavailable_reason_is_not_replaced_by_generic_infra(self):
+        publication.write_json(
+            self.target,
+            {"status": "target_unavailable", "reason": "frontend_not_staged"},
+        )
+        publication.ensure_report(self.directory, self.target)
+        summary = json.loads((self.directory / "summary.json").read_text())
+        self.assertEqual(summary["status"], "target_unavailable")
+        self.assertEqual(summary["reason"], "frontend_not_staged")
+        self.assertIn('errors="1"', (self.directory / "junit.xml").read_text())
 
 
 if __name__ == "__main__":

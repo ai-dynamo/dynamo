@@ -1334,7 +1334,7 @@ jobs:
         continue-on-error: true
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
-          name: frontend-replay-publication
+          name: frontend-replay-publication-${{ github.run_attempt }}
           path: ${{ runner.temp }}/frontend-replay-publication/publication.json
           if-no-files-found: warn
           retention-days: 30

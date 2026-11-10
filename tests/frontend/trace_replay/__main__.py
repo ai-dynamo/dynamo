@@ -10,14 +10,14 @@ import sys
 from pathlib import Path
 
 from .contract import ReplayError, dumps, write_json
-from .runner import RunOptions, prepare_assets, run
+from .runner import RunOptions, _write_junit, prepare_assets, run
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m tests.frontend.trace_replay")
     commands = parser.add_subparsers(dest="command", required=True)
     assets = commands.add_parser(
-        "prepare-assets", help="fetch only the four pinned native model assets"
+        "prepare-assets", help="fetch only the pinned native model assets"
     )
     assets.add_argument("--corpus", type=Path, required=True)
     assets.add_argument("--model-dir", type=Path, required=True)
@@ -58,8 +58,11 @@ def main(argv: list[str] | None = None) -> int:
             "exit_code": 2,
             "infrastructure_errors": [str(exc)],
         }
-        if args.command == "run" and not (args.output_dir / "summary.json").exists():
-            write_json(args.output_dir / "summary.json", summary)
+        if args.command == "run":
+            if not (args.output_dir / "summary.json").exists():
+                write_json(args.output_dir / "summary.json", summary)
+            if not (args.output_dir / "junit.xml").exists():
+                _write_junit(args.output_dir / "junit.xml", [], [str(exc)])
         print(dumps(summary))
         return 2
     print(dumps(summary))

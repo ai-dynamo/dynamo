@@ -31,14 +31,13 @@ jobs:
       (github.event.workflow_run.head_branch == 'main' &&
        github.event.workflow_run.head_repository.full_name == github.repository)
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 150
     env:
       REPLAY_CORPUS: tests/frontend/trace_replay/fixtures/deepseek_v4/manifest.json
     steps:
       - name: Checkout the reviewed harness
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
           persist-credentials: false
 
       - name: Set isolated output paths
@@ -46,21 +45,32 @@ jobs:
           echo "REPLAY_OUTPUT=${RUNNER_TEMP}/frontend-replay" >> "${GITHUB_ENV}"
           echo "REPLAY_ASSETS=${RUNNER_TEMP}/frontend-replay-assets" >> "${GITHUB_ENV}"
 
+      - name: Verify publication came from a completed main nightly
+        id: publication
+        env:
+          PUBLICATION_RUN_ID: ${{ github.event.workflow_run.id || inputs.publication_run_id }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python3 .github/scripts/frontend_replay_publication.py validate-run \
+            --repository "${GITHUB_REPOSITORY}" --run-id "${PUBLICATION_RUN_ID}" \
+            --output "${RUNNER_TEMP}/frontend-replay-target/run.json"
+
       - name: Download this nightly's publication descriptor
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
         with:
-          name: frontend-replay-publication
+          name: frontend-replay-publication-${{ steps.publication.outputs.run_attempt }}
           path: ${{ runner.temp }}/frontend-replay-publication
           github-token: ${{ github.token }}
-          run-id: ${{ github.event.workflow_run.id || inputs.publication_run_id }}
+          run-id: ${{ steps.publication.outputs.run_id }}
 
       - name: Wait for the identical artifact to reach the public registry
         id: target
         run: |
           python3 .github/scripts/frontend_replay_publication.py resolve \
             --descriptor "${RUNNER_TEMP}/frontend-replay-publication/publication.json" \
+            --run-metadata "${RUNNER_TEMP}/frontend-replay-target/run.json" \
             --output "${RUNNER_TEMP}/frontend-replay-target/target.json" \
-            --wait-seconds 600
+            --wait-seconds 7200
 
       - name: Pull the immutable CPU frontend image
         env:
@@ -84,7 +94,7 @@ jobs:
       - name: Replay both frontend boundaries without modifying the product
         env:
           IMAGE: ${{ steps.target.outputs.image }}
-          HARNESS_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+          HARNESS_SHA: ${{ github.sha }}
         run: |
           docker run --rm --entrypoint /bin/bash \
             --user "$(id -u):$(id -g)" --cpus 4 --memory 8g \
@@ -103,7 +113,8 @@ jobs:
         if: always()
         run: |
           python3 .github/scripts/frontend_replay_publication.py ensure-report \
-            --directory "${REPLAY_OUTPUT}"
+            --directory "${REPLAY_OUTPUT}" \
+            --target "${RUNNER_TEMP}/frontend-replay-target/target.json"
           cat "${REPLAY_OUTPUT}/summary.json" >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Upload replay evidence, including failures
