@@ -9,6 +9,7 @@ from dynamo.common.multimodal.nvdec_decoder import nvdec_available
 from dynamo.common.utils.install_media_decoders import VALIDATED_SPECS
 from dynamo.common.utils.paths import WORKSPACE_DIR
 from tests.serve.conftest import MULTIMODAL_VIDEO_EXPECTED
+from tests.utils.gpu_args import pynvvideocodec_reserved_bytes
 from tests.utils.multimodal import (
     MmCase,
     MultimodalModelProfile,
@@ -767,13 +768,6 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
 ]
 
 
-# vLLM's per-engine PyNvVideoCodec reservation: PYNVVIDEOCODEC_DEFAULT_HW_DECODERS
-# x PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES + PYNVVIDEOCODEC_CUDA_CONTEXT_BYTES
-# (vllm/multimodal/video_decoders). Kept as a literal because importing vLLM at
-# collection mutates the environment; test_vllm.py checks it against vLLM.
-PYNVVIDEOCODEC_RESERVED_BYTES = 2 * 128 * 1024**2 + int(1.8 * 1024 * 1024**2)
-
-
 def _reserve_for_pynvvideocodec(profiles: list[MultimodalModelProfile]) -> None:
     """Add vLLM's PyNvVideoCodec decoder reservation back to each topology.
 
@@ -781,9 +775,9 @@ def _reserve_for_pynvvideocodec(profiles: list[MultimodalModelProfile]) -> None:
     reservation from the requested KV cache. Topologies that select another
     loader are left unchanged.
     """
-    if os.environ.get("VLLM_VIDEO_LOADER_BACKEND") != "pynvvideocodec":
+    reserved = pynvvideocodec_reserved_bytes()
+    if not reserved:
         return
-    reserved = PYNVVIDEOCODEC_RESERVED_BYTES
     for profile in profiles:
         for topo in profile.topologies.values():
             if topo.env.get("VLLM_VIDEO_LOADER_BACKEND", "pynvvideocodec") != (

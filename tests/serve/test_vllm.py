@@ -18,12 +18,12 @@ from tests.serve.common import (
 from tests.serve.conftest import MULTIMODAL_IMG_URL
 from tests.serve.lora_utils import MinioLoraConfig
 from tests.serve.multimodal_profiles.vllm import (
-    PYNVVIDEOCODEC_RESERVED_BYTES,
     VLLM_MULTIMODAL_PROFILES,
     VLLM_TOPOLOGY_SCRIPTS,
 )
 from tests.utils.constants import DefaultPort
 from tests.utils.engine_process import EngineConfig
+from tests.utils.gpu_args import PYNVVIDEOCODEC_RESERVED_BYTES
 from tests.utils.multimodal import make_multimodal_configs
 from tests.utils.payload_builder import (
     chat_payload,
