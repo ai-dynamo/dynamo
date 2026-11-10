@@ -192,9 +192,19 @@ impl RetainedFlow {
         let stream_context = context.clone();
         let stream = async_stream::stream! {
             let mut capture = Capture::default();
+            let mut terminal = None;
             while let Some(mut item) = response.next().await {
                 capture.observe(&mut item);
-                yield item;
+                // Consumers may stop at the terminal frame instead of polling EOF.
+                // Observe a trailing frame before releasing the prior terminal.
+                if let Some(previous) = terminal.take() {
+                    yield previous;
+                }
+                if item.data.as_ref().is_some_and(|data| data.finish_reason.is_some()) {
+                    terminal = Some(item);
+                } else {
+                    yield item;
+                }
             }
             if capture.successful && !capture.invalid
                 && !stream_context.is_stopped() && !stream_context.is_killed()
@@ -215,6 +225,9 @@ impl RetainedFlow {
                         "Observed private decoder export"
                     );
                 }
+            }
+            if let Some(terminal) = terminal {
+                yield terminal;
             }
         };
         ResponseStream::new(Box::pin(stream), context)
@@ -779,13 +792,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn export_waits_for_clean_stream_end_and_uses_router_observed_worker() {
+    async fn clean_eof_commits_before_consumer_stops_at_terminal() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
         let fixture = fixture().await;
         let (flow, _) = flow(&fixture).await;
         let catalog = flow.catalog.clone();
         let scope = flow.scope.clone();
-        let mut response = flow.observe(response(vec![terminal()]));
+        let exhausted = Arc::new(AtomicBool::new(false));
+        let source_exhausted = exhausted.clone();
+        let source = async_stream::stream! {
+            yield terminal();
+            source_exhausted.store(true, Ordering::Release);
+        };
+        let mut response = flow.observe(ResponseStream::new(
+            Box::pin(source),
+            SingleIn::new(()).context(),
+        ));
         let item = response.next().await.unwrap();
+        assert!(exhausted.load(Ordering::Acquire));
         assert!(
             item.data
                 .unwrap()
@@ -794,8 +819,8 @@ mod tests {
                 .get(PRIVATE_KEY)
                 .is_none()
         );
-        assert!(catalog.claim(&scope, &[1, 2, 3], Instant::now()).is_none());
-        assert!(response.next().await.is_none());
+        // Public consumers need not request a frame after the terminal.
+        drop(response);
         let donor = catalog
             .claim(&scope, &[1, 2, 3, 9], Instant::now())
             .unwrap();
@@ -810,7 +835,7 @@ mod tests {
             let (flow, _) = flow(&fixture).await;
             let catalog = flow.catalog.clone();
             let scope = flow.scope.clone();
-            let mut items = vec![terminal()];
+            let mut items = vec![output(vec![], None, None), terminal()];
             if !retire {
                 items.push(Annotated::from_annotation("error", &"late legacy error").unwrap());
             }
@@ -831,7 +856,7 @@ mod tests {
             let (flow, _) = flow(&fixture).await;
             let catalog = flow.catalog.clone();
             let scope = flow.scope.clone();
-            let mut response = flow.observe(response(vec![terminal()]));
+            let mut response = flow.observe(response(vec![output(vec![], None, None), terminal()]));
             assert!(response.next().await.is_some());
             if cancellation != "drop" {
                 if cancellation == "kill" {
@@ -839,7 +864,7 @@ mod tests {
                 } else {
                     response.context().stop_generating();
                 }
-                assert!(response.next().await.is_none());
+                while response.next().await.is_some() {}
             }
             drop(response);
             assert!(catalog.claim(&scope, &[1, 2, 3], Instant::now()).is_none());
