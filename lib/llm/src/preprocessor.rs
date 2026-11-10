@@ -5720,7 +5720,7 @@ impl OpenAIPreprocessor {
         reasoning_disabled: bool,
     ) -> Pin<Box<dyn Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>>
     where
-        S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
+        S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + Unpin + 'static,
     {
         let stream: Pin<Box<dyn Stream<Item = _> + Send>> = Box::pin(
             Self::apply_tool_call_response_policy(stream, emit_tool_calls),
@@ -6078,8 +6078,6 @@ impl OpenAIPreprocessor {
                 start_token,
             ))
         } else {
-            // Already boxed: boxing it again would cost an allocation per request and a call
-            // per item.
             stream
         };
         // A MiniMax M3 parser can also release held text in an end-of-stream
@@ -6151,7 +6149,7 @@ impl OpenAIPreprocessor {
         tool_call_parsing_enabled: bool,
     ) -> Pin<Box<dyn Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static>>
     where
-        S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
+        S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + Unpin + 'static,
     {
         if tool_call_parsing_enabled {
             return Box::pin(stream);
@@ -6179,7 +6177,7 @@ impl OpenAIPreprocessor {
         stream: S,
     ) -> impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static
     where
-        S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
+        S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + Unpin + 'static,
     {
         let mut role_emitted_choices = HashSet::new();
 
@@ -6219,9 +6217,7 @@ impl OpenAIPreprocessor {
         )
     }
 
-    /// The response transform over `stream`, Backend's items. The stream is held as it is, not
-    /// boxed: on the Dynamo path it is already a box, and a second one cost an allocation per
-    /// request.
+    /// The response transform over `stream`, Backend's items.
     #[allow(clippy::too_many_arguments)]
     fn transform_postprocessor_stream_with_image_tokens<S, Resp>(
         stream: S,
@@ -6232,7 +6228,7 @@ impl OpenAIPreprocessor {
         trace_finish_reason_metadata: Option<crate::request_trace::SharedFinishReasonMetadata>,
         mm_counts: MultimodalCounts,
         image_tokens: Option<usize>,
-    ) -> impl Stream<Item = Annotated<Resp>> + Send + use<S, Resp>
+    ) -> impl Stream<Item = Annotated<Resp>> + Send
     where
         S: Stream<Item = Annotated<BackendOutput>> + Send + Unpin + 'static,
         Resp: Send + Sync + Clone + 'static + std::fmt::Debug,
@@ -6302,11 +6298,8 @@ impl OpenAIPreprocessor {
             image_tokens,
         };
 
-        /// The response stream: a stream that owns its state, in place of `unfold` and
-        /// `fuse`, which moved the state (with its buffered usage chunk, the size of an item)
-        /// and the item through a new future on every item. `None` once the stream has ended,
-        /// which drops the state, and so flushes the detokenize metrics, when this stream
-        /// ends rather than when its caller drops it.
+        /// The response stream. `state` is `None` once the stream has ended, so the state,
+        /// and with it the detokenize metrics guard, drops when the stream ends.
         struct Postprocessed<S, Resp>
         where
             Resp: Send + Sync + Clone + 'static + std::fmt::Debug,
@@ -6386,7 +6379,6 @@ impl OpenAIPreprocessor {
                             request_id = self.context.id(),
                             "Cancellation issued last message; closing stream"
                         );
-                        // self.finished = true; // Mark as finished
                         return Poll::Ready(None);
                     }
 
@@ -6474,8 +6466,8 @@ impl OpenAIPreprocessor {
 
                     Poll::Ready(Some(response))
                 } else {
-                    // Stream has ended - must set finished to true to prevent unfold from polling
-                    // again. The stream is exhausted and will panic if polled after None.
+                    // The stream has ended. Set `finished` so the exhausted `response_stream`
+                    // is not polled again.
                     self.finished = true;
 
                     if self.finish_reason_sent && !self.usage_chunk_sent {
@@ -12580,10 +12572,14 @@ responses_tools: None,
                     family,
                     true,
                 );
-                let output =
-                    OpenAIPreprocessor::apply_unified_response_policies(raw, true, false, true)
-                        .collect::<Vec<_>>()
-                        .await;
+                let output = OpenAIPreprocessor::apply_unified_response_policies(
+                    Box::pin(raw),
+                    true,
+                    false,
+                    true,
+                )
+                .collect::<Vec<_>>()
+                .await;
                 let mut text = String::new();
                 for choice in output
                     .iter()
@@ -13226,9 +13222,12 @@ responses_tools: None,
             ]),
         );
 
-        OpenAIPreprocessor::apply_tool_call_response_policy(jailed, tool_call_parsing_enabled)
-            .collect()
-            .await
+        OpenAIPreprocessor::apply_tool_call_response_policy(
+            Box::pin(jailed),
+            tool_call_parsing_enabled,
+        )
+        .collect()
+        .await
     }
 
     async fn apply_kimi_k3_dynamic_tools(
@@ -13273,9 +13272,12 @@ responses_tools: None,
             ]),
         );
 
-        OpenAIPreprocessor::apply_tool_call_response_policy(jailed, tool_call_parsing_enabled)
-            .collect()
-            .await
+        OpenAIPreprocessor::apply_tool_call_response_policy(
+            Box::pin(jailed),
+            tool_call_parsing_enabled,
+        )
+        .collect()
+        .await
     }
 
     #[tokio::test]
