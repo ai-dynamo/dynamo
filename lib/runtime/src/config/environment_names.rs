@@ -451,6 +451,11 @@ pub mod llm {
     pub const DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION: &str =
         "DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION";
 
+    /// Render control-token spellings in chat request text as ordinary text
+    /// under every chat template, so only the template's own markers encode as
+    /// control tokens. Harmony templates render this way without it.
+    pub const DYN_REQUEST_CONTROL_TOKENS_AS_TEXT: &str = "DYN_REQUEST_CONTROL_TOKENS_AS_TEXT";
+
     /// Master switch for the frontend's HTTP admin API surface.
     /// The admin API is **disabled by default**. Truthy values (`1` / `true` / `yes` /
     /// `on`, case-insensitive) start the admin listener (see `DYN_FRONTEND_ADMIN_HOST` /
@@ -1240,6 +1245,7 @@ mod tests {
             llm::DYN_DISABLE_FRONTEND_NVEXT,
             llm::DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS,
             llm::DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION,
+            llm::DYN_REQUEST_CONTROL_TOKENS_AS_TEXT,
             llm::DYN_ENABLE_FRONTEND_ADMIN_API,
             llm::DYN_FRONTEND_ADMIN_HOST,
             llm::DYN_FRONTEND_ADMIN_PORT,

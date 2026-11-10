@@ -25,6 +25,11 @@ use crate::reasoning_field::ReasoningField;
 pub(crate) static DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION: LazyLock<bool> =
     LazyLock::new(|| env_is_truthy(env_llm::DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION));
 
+/// Process-wide: whether control-token spellings in chat request text render as
+/// ordinary text under every chat template. Read when the first prompt formatter is built.
+pub(crate) static REQUEST_CONTROL_TOKENS_AS_TEXT: LazyLock<bool> =
+    LazyLock::new(|| env_is_truthy(env_llm::DYN_REQUEST_CONTROL_TOKENS_AS_TEXT));
+
 /// Metrics naming controls for frontend-owned services.
 ///
 /// Contains the optional metric name prefix resolved from `--metrics-prefix` or

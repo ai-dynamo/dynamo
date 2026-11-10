@@ -395,6 +395,14 @@ impl MediaRequestExt for NvCreateCompletionRequest {
 /// HF `tokenizer_config.json` template (and any separate chat-template file)
 /// and builds via [`PromptFormatter::from_parts`].
 pub fn prompt_formatter_from_mdc(mdc: &ModelDeploymentCard) -> Result<PromptFormatter> {
+    prompt_formatter_from_mdc_with(mdc, *crate::frontend_config::REQUEST_CONTROL_TOKENS_AS_TEXT)
+}
+
+/// [`prompt_formatter_from_mdc`] with `DYN_REQUEST_CONTROL_TOKENS_AS_TEXT` given, not read.
+pub(crate) fn prompt_formatter_from_mdc_with(
+    mdc: &ModelDeploymentCard,
+    request_control_tokens_as_text: bool,
+) -> Result<PromptFormatter> {
     // Prefer the authoritative `model_type` from config.json — it's set by the
     // model author and survives any `--served-model-name` rename. An empty
     // `model_type` carries no signal — normalize to `None` so the display-name
@@ -452,6 +460,7 @@ pub fn prompt_formatter_from_mdc(mdc: &ModelDeploymentCard) -> Result<PromptForm
                     .with_tokenizer_json(&tokenizer_json)
                     .with_context(|| format!("added_tokens in '{}'", path.display()))?;
             }
+            config = config.with_request_control_tokens_as_text(request_control_tokens_as_text);
 
             // Some HF models (e.g. Llama-4-Maverick) store the chat template in a
             // separate file, or it may be a custom template provided via CLI flag.
