@@ -975,7 +975,6 @@ _GEMMA4_EMPTY_THOUGHT_CHANNEL = (
 )
 
 
-@lru_cache(maxsize=8)
 def is_gemma4_parser_pair(
     tool_parser_class: type[ToolParser] | None,
     reasoning_parser_class: type[ReasoningParser] | None,

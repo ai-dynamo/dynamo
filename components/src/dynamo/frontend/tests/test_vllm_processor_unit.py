@@ -24,6 +24,7 @@ from _tool_guidance_parity import (
     tool_choice_value,
 )
 from transformers import AutoTokenizer
+from vllm.reasoning import ReasoningParserManager
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.tool_parsers import ToolParser, ToolParserManager
 
@@ -3568,8 +3569,6 @@ _G4_LABEL_WITHOUT_CHANNEL = [
 
 
 def _gemma4_parser_classes():
-    from vllm.reasoning import ReasoningParserManager
-
     return (
         ToolParserManager.get_tool_parser("gemma4"),
         ReasoningParserManager.get_reasoning_parser("gemma4"),
