@@ -310,6 +310,100 @@ fn default_picker_sampling_buffers_are_safe_across_threads_and_roles() {
     }
 }
 
+#[derive(Clone, Copy)]
+struct SingleRank;
+impl dynamo_kv_router::protocols::WorkerConfigLike for SingleRank {
+    fn data_parallel_start_rank(&self) -> u32 {
+        0
+    }
+    fn data_parallel_size(&self) -> u32 {
+        1
+    }
+    fn max_num_batched_tokens(&self) -> Option<u64> {
+        None
+    }
+    fn total_kv_blocks(&self) -> Option<u64> {
+        Some(16384)
+    }
+}
+
+/// Picks between two workers for a 10-block prompt. Each worker is
+/// `(device blocks, host blocks, active prefill tokens, active decode blocks)`.
+fn pick_with_shared_hits(
+    hits: dynamo_kv_router::SharedCacheHits,
+    shared_cache_multiplier: f64,
+    shapes: [(usize, usize, usize, usize); 2],
+) -> u64 {
+    let (_, mut request) = fixture(1, 160);
+    request.overlap = Default::default();
+    request.worker_loads.clear();
+    request.shared_cache_hits = Some(hits);
+    for (id, (device, host, prefill_tokens, decode_blocks)) in (0..).zip(shapes) {
+        let worker = WorkerWithDpRank::new(id, 0);
+        let tiers = &mut request.overlap.tier_overlap_blocks;
+        tiers.device.insert(worker, device);
+        tiers.host_pinned.insert(worker, host);
+        request
+            .overlap
+            .effective_overlap_blocks
+            .insert(worker, device as f64);
+        request
+            .overlap
+            .effective_cached_tokens
+            .insert(worker, device * 16);
+        request.worker_loads.insert(
+            worker,
+            dynamo_kv_router::WorkerLoadProjection {
+                active_prefill_tokens: prefill_tokens,
+                active_decode_blocks: decode_blocks,
+                ..Default::default()
+            },
+        );
+    }
+    let config = KvRouterConfig {
+        overlap_score_credit: 1.0,
+        host_cache_hit_weight: 0.75,
+        disk_cache_hit_weight: 0.0,
+        shared_cache_multiplier: Some(shared_cache_multiplier),
+        ..Default::default()
+    };
+    let workers: HashMap<u64, SingleRank> = (0..2).map(|id| (id, SingleRank)).collect();
+    DefaultWorkerSelector::new_seeded(Some(config), "test", 42)
+        .select_worker(selection_input(&workers, &request, 16))
+        .unwrap()
+        .worker
+        .worker_id
+}
+
+#[test]
+fn shared_cache_credit_counts_only_the_run_a_worker_can_load() {
+    use dynamo_kv_router::SharedCacheHits;
+
+    // Block 2 is missing from the shared cache, so idle worker 0 can load only
+    // blocks 0-1, while worker 1 holds 0-3 on GPU and can load 4-9.
+    let gap = SharedCacheHits::from_ranges(vec![0..2, 3..10]);
+    assert_eq!(
+        pick_with_shared_hits(gap, 0.5, [(0, 0, 0, 0), (4, 0, 0, 4)]),
+        1
+    );
+
+    // Worker 0's host blocks 0-7 earn host credit only, not shared credit again.
+    #[allow(clippy::single_range_in_vec_init)]
+    let full = SharedCacheHits::from_ranges(vec![0..10]);
+    assert_eq!(
+        pick_with_shared_hits(full, 0.5, [(0, 8, 80, 0), (0, 0, 0, 0)]),
+        1
+    );
+
+    // The engine skips runs shorter than four blocks.
+    #[allow(clippy::single_range_in_vec_init)]
+    let short = SharedCacheHits::from_ranges(vec![0..3]).with_min_load_blocks(4);
+    assert_eq!(
+        pick_with_shared_hits(short, 1.0, [(0, 0, 0, 0), (2, 0, 0, 1)]),
+        1
+    );
+}
+
 #[test]
 fn seeded_selection_matches_reference_across_cache_and_load_shapes() {
     for temperature in [0.0, 0.7] {

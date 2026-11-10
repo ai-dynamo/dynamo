@@ -325,11 +325,15 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
         let load = &row.load;
         let effective_overlap_blocks = cache.effective_overlap_blocks;
         let device_overlap_blocks = cache.device_overlap_blocks;
-        let shared_beyond_device_blocks = context
+        // Host and disk blocks already earn their own tier credit; the shared
+        // cache extends the prefix from where the worker's ends.
+        let shared_beyond_local_blocks = context
             .request
             .and_then(|request| request.shared_cache_hits.as_ref())
             .map_or(0, |hits| {
-                hits.hits_beyond(device_overlap_blocks.round().max(0.0) as u32)
+                let local_blocks =
+                    device_overlap_blocks + cache.host_overlap_blocks + cache.disk_overlap_blocks;
+                hits.loadable_beyond(local_blocks.round().max(0.0) as u32)
             });
         // Blocks a fetch would add beyond everything this worker already holds.
         // Raw device overlap: `cache.device_overlap_blocks` may be the effective estimate.
@@ -345,7 +349,7 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
                     .saturating_add(cache.disk_overlap_blocks as usize);
                 source_blocks.saturating_sub(u32::try_from(local_blocks).unwrap_or(u32::MAX))
             });
-        let remote_blocks = shared_beyond_device_blocks + fetchable_blocks;
+        let remote_blocks = shared_beyond_local_blocks + fetchable_blocks;
         let shared_overlap_blocks = weights.shared_cache_multiplier * remote_blocks as f64;
         // Normalize backlog above the least-loaded eligible worker by this request's
         // size. The rational decay softly trades cache locality for prefill balance,

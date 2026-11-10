@@ -12,6 +12,7 @@ from dynamo.sglang.capacity import (
     model_card_dp_rank_bounds,
     per_rank_max_running_requests,
     publishes_kv_events,
+    sglang_attention_tp_size,
     sglang_dp_layout,
 )
 
@@ -121,6 +122,29 @@ def _attn_dp_args(attn_dp_size: int, **kwargs) -> SimpleNamespace:
 )
 def test_sglang_dp_layout(server_args, expected):
     assert sglang_dp_layout(server_args) == expected
+
+
+@pytest.mark.parametrize(
+    ("server_args", "expected"),
+    [
+        (_args(tp_size=8), 8),
+        # Pure DP replicas each keep the full TP group.
+        (_args(tp_size=8, dp_size=4), 8),
+        (_args(tp_size=8, dp_size=4, enable_dp_attention=True), 2),
+        (
+            _args(
+                tp_size=8, dp_size=4, enable_dp_attention=True, attn_dp_size=object()
+            ),
+            2,
+        ),
+        (_attn_dp_args(8, tp_size=8), 1),
+        (_attn_dp_args(2, tp_size=8, attn_cp_size=2), 2),
+        (_args(tp_size=8, ep_join_mode="scale"), 8),
+        (SimpleNamespace(), 1),
+    ],
+)
+def test_sglang_attention_tp_size(server_args, expected):
+    assert sglang_attention_tp_size(server_args) == expected
 
 
 def test_resolved_dump_with_legacy_flag_slices_every_attn_dp_rank():
