@@ -546,8 +546,6 @@ impl
                         })
                         .unwrap_or((None, None));
 
-                    // Mark this choice as finished, here or on the engine. Once all
-                    // expected choices are finished, stop the upstream generator.
                     if finish_reason.is_some() || data.finish_reason.is_some() {
                         if data.finish_reason.is_some() {
                             state.engine_finished_choices.insert(choice_idx);
