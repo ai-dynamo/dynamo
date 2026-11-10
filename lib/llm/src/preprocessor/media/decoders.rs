@@ -56,6 +56,10 @@ pub struct MediaDecoder {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub video: Option<VideoDecoder>,
     // TODO: audio decoder
+    /// Rotate by the EXIF orientation tag as vllm-rs reads it: no XMP, no PNG eXIf after IDAT.
+    /// Not in `image`: older frontends reject unknown `image` fields but ignore them here.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub apply_exif_orientation: bool,
 }
 
 impl MediaDecoder {
@@ -71,4 +75,31 @@ pub enum DecodedMediaMetadata {
     Image(ImageMetadata),
     #[cfg(feature = "media-ffmpeg")]
     Video(VideoMetadata),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exif_orientation_is_off_unless_the_card_sets_it() {
+        let old_card: MediaDecoder =
+            serde_json::from_value(serde_json::json!({"image": {}})).unwrap();
+        assert!(!old_card.apply_exif_orientation);
+        let default = serde_json::to_value(&old_card).unwrap();
+        assert!(default.get("apply_exif_orientation").is_none());
+
+        let card = serde_json::to_value(MediaDecoder {
+            apply_exif_orientation: true,
+            ..old_card
+        })
+        .unwrap();
+        assert_eq!(card["apply_exif_orientation"], true);
+        assert!(card["image"].get("apply_exif_orientation").is_none());
+        assert!(
+            serde_json::from_value::<MediaDecoder>(card)
+                .unwrap()
+                .apply_exif_orientation
+        );
+    }
 }

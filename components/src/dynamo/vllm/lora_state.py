@@ -8,6 +8,7 @@ import weakref
 from vllm.lora.request import LoRARequest
 
 from dynamo.common.lora.manager import LoRAInfo
+from dynamo.llm.exceptions import InvalidArgument
 
 
 class LoRAState:
@@ -36,8 +37,8 @@ class LoRAState:
         """Resolve a model name to a loaded LoRA request.
 
         Returns None for missing model name, base-model aliases, and uncommitted
-        placeholder reservations (id=-1). Raises ValueError for unknown non-base
-        names when LoRA is enabled.
+        placeholder reservations (id=-1). Raises InvalidArgument for unknown
+        non-base names when LoRA is enabled.
         """
         if not model_name or model_name in base_model_names:
             return None
@@ -49,7 +50,9 @@ class LoRAState:
             if lora.id == -1:
                 if lora_enabled:
                     # Treat as loading/unknown during the reservation window
-                    raise ValueError(f"unknown model or LoRA adapter: '{model_name}'")
+                    raise InvalidArgument(
+                        f"unknown model or LoRA adapter: '{model_name}'"
+                    )
                 return None
 
             return LoRARequest(
@@ -59,7 +62,7 @@ class LoRAState:
             )
 
         if lora_enabled:
-            raise ValueError(f"unknown model or LoRA adapter: '{model_name}'")
+            raise InvalidArgument(f"unknown model or LoRA adapter: '{model_name}'")
 
         return None
 

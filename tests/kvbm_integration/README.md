@@ -2,7 +2,7 @@
 
 ## Overview
 
-This suite validates the determinism properties of the API-backed LLM under fixed sampling parameters and, optionally, across prefix cache resets. The tests can automatically start a local LLM server—either a vLLM server or a TensorRT-LLM server—warm it up, and compare responses for identical prompts over multiple iterations. The suite also automatically detects whether the vLLM or TensorRT-LLM wheel is installed and starts the corresponding server.
+This suite validates the determinism properties of the API-backed LLM under fixed sampling parameters and, optionally, across prefix cache resets. The tests can automatically start a local vLLM server, warm it up, and compare responses for identical prompts over multiple iterations. The suite also automatically detects whether the vLLM wheel is installed and starts the server.
 
 ## Files
 
@@ -19,7 +19,7 @@ This suite validates the determinism properties of the API-backed LLM under fixe
 
 ## How It Works
 
-- A `LLMServerManager` fixture (`llm_server`) launches `vllm serve` or `trtllm-serve` with the Dynamo connector and optional cache block overrides.
+- A `LLMServerManager` fixture (`llm_server`) launches `vllm serve` with the Dynamo connector and optional cache block overrides.
 - A `tester` fixture binds the test client to the running server's base URL.
 - The test performs a comprehensive warmup across prompts, then executes repeated requests and checks that responses are identical (deterministic). An optional cache reset phase re-validates determinism across the reset boundary.
 
