@@ -22,7 +22,7 @@ use crate::protocols::{
 };
 
 /// Prefill's last `engine_data`.
-pub(super) type PrefillOutput = Option<serde_json::Value>;
+pub(super) type PrefillOutput = Option<Box<serde_json::Value>>;
 
 /// Dropping the observer detaches the task: client disconnects must not abort a
 /// prefill whose KV transfer may still be needed by the decode worker.
@@ -30,7 +30,7 @@ pub(super) struct PrefillTask(JoinHandle<Result<PrefillOutput, PrefillError>>);
 
 /// Prefill's output as a stream item tagged with [`PREFILL_OUTPUT_ANNOTATION`].
 fn output_item(output: PrefillOutput) -> Option<Annotated<LLMEngineOutput>> {
-    let engine_data = Some(Box::new(output?));
+    let engine_data = Some(output?);
     Some(Annotated {
         event: Some(PREFILL_OUTPUT_ANNOTATION.to_string()),
         ..Annotated::from_data(LLMEngineOutput {
@@ -553,7 +553,10 @@ mod tests {
             let mut tx = Some(tx);
             let output = serde_json::json!({"sglang_response": {}});
             if prefill_first {
-                tx.take().unwrap().send(Ok(Some(output.clone()))).unwrap();
+                tx.take()
+                    .unwrap()
+                    .send(Ok(Some(Box::new(output.clone()))))
+                    .unwrap();
                 tokio::task::yield_now().await;
             }
             let decode: ManyOut<Annotated<LLMEngineOutput>> = ResponseStream::new(
@@ -574,7 +577,10 @@ mod tests {
                 .unwrap();
             if !prefill_first {
                 assert!(response.next().now_or_never().is_none());
-                tx.take().unwrap().send(Ok(Some(output.clone()))).unwrap();
+                tx.take()
+                    .unwrap()
+                    .send(Ok(Some(Box::new(output.clone()))))
+                    .unwrap();
             }
             let item = response.next().await.unwrap();
             assert_eq!(item.event.as_deref(), Some(PREFILL_OUTPUT_ANNOTATION));
@@ -636,7 +642,7 @@ mod tests {
         tokio::pin!(terminal);
         assert!((&mut terminal).now_or_never().is_none());
         let output = serde_json::json!({"sglang_response": {}});
-        tx.send(Ok(Some(output.clone()))).unwrap();
+        tx.send(Ok(Some(Box::new(output.clone())))).unwrap();
         let item = terminal.await.unwrap();
         assert_eq!(item.event.as_deref(), Some(PREFILL_OUTPUT_ANNOTATION));
         assert_eq!(item.data.unwrap().engine_data, Some(Box::new(output)));
@@ -658,7 +664,7 @@ mod tests {
     async fn before_first_does_not_repoll_ended_decode() {
         for result in [
             Ok(None),
-            Ok(Some(serde_json::json!({"prefill": true}))),
+            Ok(Some(Box::new(serde_json::json!({"prefill": true})))),
             failure(),
         ] {
             let expected = result.as_ref().ok().cloned().flatten();
@@ -699,7 +705,7 @@ mod tests {
                 assert_eq!(outputs.len(), 1);
                 let output = outputs.into_iter().next().unwrap();
                 assert_eq!(output.event.as_deref(), Some(PREFILL_OUTPUT_ANNOTATION));
-                assert_eq!(output.data.unwrap().engine_data, Some(Box::new(expected)));
+                assert_eq!(output.data.unwrap().engine_data, Some(expected));
             } else {
                 assert!(outputs.is_empty());
             }

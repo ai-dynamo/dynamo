@@ -584,14 +584,14 @@ mod tests {
     }
 
     /// The outputs are stream items, moved several times per token: their size is a cost
-    /// per item. A field that is `None` on the default path and larger than a pointer is held
-    /// in a `Box`. Raise these limits only with a measured reason.
+    /// per item. `disaggregated_params`, `encoder_result`, `worker_trace_link`, `extra_args`,
+    /// `engine_data` and `routing_data` are held in a `Box`. Raise these limits only with a
+    /// measured reason.
     #[cfg(target_pointer_width = "64")]
     #[test]
     fn engine_and_backend_outputs_stay_small() {
-        use dynamo_runtime::protocols::annotated::Annotated;
-        assert!(std::mem::size_of::<Annotated<LLMEngineOutput>>() <= 632);
-        assert!(std::mem::size_of::<Annotated<BackendOutput>>() <= 592);
+        assert!(std::mem::size_of::<LLMEngineOutput>() <= 456);
+        assert!(std::mem::size_of::<BackendOutput>() <= 416);
     }
 
     /// Decoder checkpoints retain the legacy optional-string wire shape while keeping

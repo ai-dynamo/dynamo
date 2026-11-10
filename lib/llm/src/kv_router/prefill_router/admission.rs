@@ -90,7 +90,7 @@ impl PrefillRouter {
                     while let Some(output) = prefill_response.next().await {
                         PrefillTask::check_output(&output)?;
                         if let Some(engine_data) = output.data.and_then(|data| data.engine_data) {
-                            prefill_output = Some(*engine_data);
+                            prefill_output = Some(engine_data);
                         }
                     }
                     // Bootstrap details unblock decode, but do not mean prefill is
