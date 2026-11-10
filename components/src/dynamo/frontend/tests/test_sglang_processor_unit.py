@@ -186,6 +186,27 @@ class TestBuildDynamoPreproc:  # FRONTEND.7 — worker subprocess preproc constr
         assert sampling["frequency_penalty"] == 0.0
         assert sampling["repetition_penalty"] == 1.0
         assert sampling["seed"] is None
+        assert sampling["logit_bias"] is None
+
+    @pytest.mark.core
+    @pytest.mark.parametrize(
+        ("request_data", "expected"),
+        [
+            pytest.param({"logit_bias": {"151667": 2}}, {151667: 2.0}, id="positive"),
+            pytest.param({}, None, id="omitted"),
+            pytest.param({"logit_bias": None}, None, id="null"),
+            pytest.param({"logit_bias": {}}, None, id="empty"),
+        ],
+    )
+    def test_logit_bias_projection(self, request_data, expected):
+        request = {"model": "test", "messages": [], **request_data}
+        result = _build_dynamo_preproc(request, [1, 2], "test", None)
+        assert result["sampling_options"]["logit_bias"] == expected
+        if expected is not None:
+            # The preproc holds its own copy, so the request map stays isolated.
+            assert result["sampling_options"]["logit_bias"] is not (
+                request["logit_bias"]
+            )
 
     @pytest.mark.parametrize(
         ("request_data", "expected"),
