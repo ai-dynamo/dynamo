@@ -51,6 +51,8 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
         formatter.write_str("a kv event encoded as a tagged map or sequence")
     }
 
+    /// Decodes tagged event maps, ignoring unknown fields and image stores
+    /// whose tokens cannot be mapped without TRT-LLM routing metadata.
     fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
     where
         A: MapAccess<'de>,

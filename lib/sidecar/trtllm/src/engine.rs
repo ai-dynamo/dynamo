@@ -336,6 +336,8 @@ impl TrtllmSidecarEngine {
 
 #[async_trait]
 impl LLMEngine for TrtllmSidecarEngine {
+    /// Discovers engine limits and routing sources before starting publishers.
+    /// Warns about missing image routing only when KV event sources are enabled.
     async fn start(&self, _worker_id: u64) -> Result<EngineConfig, DynamoError> {
         if self.started.initialized() {
             return Err(client::engine_shutdown(ALREADY_STARTED));
