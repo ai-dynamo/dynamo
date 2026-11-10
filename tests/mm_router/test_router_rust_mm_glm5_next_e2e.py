@@ -24,10 +24,11 @@ template, processor config and token ids.
 
 Block size: the engines size KV blocks for the hybrid layers themselves. vLLM
 raises the requested 64 tokens until an attention page is at least as large as
-a linear-attention state, and SGLang can raise its page size as well (on
-GB200, vLLM advertised 4352 tokens and SGLang 256). The router hashes at the
-size the worker advertises, so the module reads that size from the frontend's
-metrics and derives the image sizes and every block assertion from it.
+a linear-attention state, and SGLang can raise its page size as well (on GB200
+in November 2026, vLLM advertised 4352 tokens and SGLang 256). The router
+hashes at the size the worker advertises, so the module reads that size from
+the frontend's metrics and derives the image sizes and every block assertion
+from it.
 
 Checks, per engine:
   1. Worker expansion, on every request: the router's ``total_blocks``
@@ -43,17 +44,18 @@ Checks, per engine:
      the first image's blocks and invalidates exactly the blocks from the
      boundary on.
 
-Hardware: GLM5-Next's DSA layers need sparse MLA attention, which vLLM 0.32
-and SGLang 0.5.22 implement only for Hopper and Blackwell (FlashMLA sparse,
-FlashAttention-3, NSA). The checkpoint is small but cannot run on the 24 GiB
-Ada runners behind the post-merge lanes, so this file is ``nightly`` +
+Hardware: GLM5-Next's DSA layers need sparse MLA attention, which vLLM and
+SGLang implement only for Hopper and Blackwell as of November 2026 (FlashMLA
+sparse, FlashAttention-3, NSA). The checkpoint is small but cannot run on the
+24 GiB Ada runners behind the post-merge lanes, so this file is ``nightly`` +
 ``h100`` and runs in the ``vllm-h100-test`` / ``sglang-h100-test`` lanes.
 
-SGLang builds that carry sgl-project/sglang#43043 (0.5.23 and later) fill
-image tokens with pad values of their own. Since #17126 the router keeps every
-block from the first such value on out of its index, and every image prompt
-here holds one in its first block, so on those builds the SGLang tests skip
-until exact SGLang image routing lands in #17082.
+SGLang builds that fill image tokens with pad values of their own (see
+``sglang_has_wide_mm_pad_values``) publish KV events the router cannot match
+to image content: it keeps every block from the first such value on out of
+its index, and every image prompt here holds one in its first block. The
+SGLang tests skip on those builds; the skip reason names the change that
+restores exact routing.
 """
 
 from __future__ import annotations

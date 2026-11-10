@@ -124,6 +124,7 @@ pub(super) trait ImageRoutingBackend: Send + Sync {
     }
 
     /// Check model-specific layout constraints before expanding placeholders.
+    /// The default applies no constraints.
     fn validate_image_prompt(
         &self,
         _token_ids: &[TokenIdType],
@@ -176,10 +177,14 @@ impl ImageRoutingBackend for RegistryImageRoutingBackend {
 }
 
 impl ImageRoutingProcessor {
-    /// Returns `Err` when required processor configuration is missing or invalid,
-    /// or no registered processor matches `model_id` / `model_type`. Callers
+    /// Returns `Err` when the processor configuration is missing or invalid,
+    /// or no registered processor matches `model_id` / `model_type`. A
+    /// `glm5_next` checkpoint needs `config.json` plus
+    /// `preprocessor_config.json`, or `processor_config.json` when that file
+    /// is absent; every other model needs `preprocessor_config.json`. Callers
     /// should treat the error as "MM-aware routing disabled for this model"
-    /// rather than failing the request.
+    /// rather than failing the request: the preprocessor logs a warning and
+    /// routes by text prefix only.
     ///
     /// Uses sync filesystem I/O. This is intentional: `try_new` is called
     /// once per model during preprocessor construction (a startup-time path
@@ -190,6 +195,10 @@ impl ImageRoutingProcessor {
     pub fn try_new(model_id: &str, model_type: Option<&str>, model_dir: &Path) -> Result<Self> {
         // GLM checkpoints may ship only the nested processor_config.json. Let
         // the shared registry resolve it before the legacy flat-config path.
+        // Only model_type "glm5_next" takes this path. Other GLM model types
+        // use the legacy path below, which fails without
+        // preprocessor_config.json; the caller then logs why MM-aware
+        // routing is off.
         if model_type == Some("glm5_next") {
             return Ok(Self {
                 processor: Box::new(glm5_next::Glm5NextImageRoutingBackend::try_new(model_dir)?),
