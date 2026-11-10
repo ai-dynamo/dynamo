@@ -473,7 +473,18 @@ def _validate_stop_token_ids(
             batch = [("sampling_params.stop_token_ids", sampling_params)]
         for label, params in batch:
             if isinstance(params, dict) and params.get("stop_token_ids"):
-                handler._validate_token_ids(params["stop_token_ids"], label=label)
+                # Match SamplingParams.__post_init__ before checking the range.
+                try:
+                    stop_token_ids = [
+                        int(token_id)
+                        for token_id in params["stop_token_ids"]
+                        if token_id is not None
+                    ]
+                except (TypeError, ValueError, OverflowError) as error:
+                    raise HttpError(
+                        400, f"{label} must contain token IDs convertible to integers"
+                    ) from error
+                handler._validate_token_ids(stop_token_ids, label=label)
         return
 
     if handler.use_sglang_tokenizer:

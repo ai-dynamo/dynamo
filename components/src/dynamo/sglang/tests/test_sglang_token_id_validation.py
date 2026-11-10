@@ -621,8 +621,19 @@ def _native_stop_request(sampling_params):
             ],
             r"sampling_params\[1\]\.stop_token_ids\[0\]",
         ),
+        (
+            {"min_new_tokens": 1, "stop_token_ids": [None, str(MAX_TOKEN_ID + 1)]},
+            r"sampling_params\.stop_token_ids\[0\]",
+        ),
+        (
+            [
+                {"min_new_tokens": 1, "stop_token_ids": ["5"]},
+                {"min_new_tokens": 1, "stop_token_ids": [None, -1.0]},
+            ],
+            r"sampling_params\[1\]\.stop_token_ids\[0\]",
+        ),
     ],
-    ids=["single", "batch"],
+    ids=["single", "batch", "coerced-single", "coerced-batch"],
 )
 async def test_native_generate_rejects_out_of_vocab_stop_id_before_the_engine(
     sampling_params, label
@@ -636,12 +647,49 @@ async def test_native_generate_rejects_out_of_vocab_stop_id_before_the_engine(
 
 
 @pytest.mark.asyncio
-async def test_native_generate_passes_boundary_stop_ids_to_the_engine():
+@pytest.mark.parametrize("batched", [False, True], ids=["single", "batch"])
+@pytest.mark.parametrize(
+    "stop_token_ids",
+    [[0, MAX_TOKEN_ID], [5.0], ["5"], [None, 5], [None], [True], [5.9]],
+    ids=[
+        "boundaries",
+        "float",
+        "string",
+        "null-and-int",
+        "null-only",
+        "bool",
+        "fraction",
+    ],
+)
+async def test_native_generate_passes_sglang_compatible_stop_ids_to_the_engine(
+    stop_token_ids, batched
+):
     handler = _decode_handler_for_generate(_native_engine())
-    sampling_params = {"min_new_tokens": 1, "stop_token_ids": [0, MAX_TOKEN_ID]}
+    sampling_params = {"min_new_tokens": 1, "stop_token_ids": stop_token_ids}
+    if batched:
+        sampling_params = [{"stop_token_ids": [0]}, sampling_params]
 
     with pytest.raises(_Reached):
         await anext(handler.generate(_native_stop_request(sampling_params), _context()))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("batched", [False, True], ids=["single", "batch"])
+@pytest.mark.parametrize("stop_id", ["invalid", {}, [], float("inf"), float("nan")])
+async def test_native_generate_rejects_stop_ids_that_cannot_convert_to_integers(
+    stop_id, batched
+):
+    handler = _decode_handler_for_generate(_native_engine())
+    sampling_params = {"stop_token_ids": [stop_id]}
+    label = r"sampling_params\.stop_token_ids"
+    if batched:
+        sampling_params = [{"stop_token_ids": [0]}, sampling_params]
+        label = r"sampling_params\[1\]\.stop_token_ids"
+
+    with pytest.raises(HttpError, match=label) as error:
+        await anext(handler.generate(_native_stop_request(sampling_params), _context()))
+
+    assert error.value.code == 400
 
 
 @pytest.mark.asyncio
