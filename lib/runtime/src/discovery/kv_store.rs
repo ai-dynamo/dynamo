@@ -1577,8 +1577,9 @@ mod etcd_tests {
         names
     }
 
-    /// On etcd, namespaced lists and watches read only their own keys, and still return every
-    /// key the query matches, including next to a sibling namespace (`x-1` and `x-10`).
+    /// On etcd, scoped namespaced lists and watches still return every instance the query
+    /// matches, including next to a sibling namespace (`x-1` and `x-10`). The bucket-level test
+    /// in `storage/kv/etcd.rs` shows the reads themselves are scoped.
     #[test]
     fn scoped_queries_return_every_matching_instance() {
         let rt = Runtime::single_threaded().unwrap();
