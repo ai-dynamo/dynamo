@@ -341,11 +341,11 @@ Queue limits are configured per discovered worker endpoint with
 configured value multiplied by the current number of discovered endpoints.
 Limits are checked against current usage before adding the incoming request,
 so the request that crosses a limit is accepted and the next queued request is
-rejected with HTTP 529 and the effective total. Worker removal does not evict
+rejected with HTTP 429 (`error.type` `Too Many Requests`) and the effective total. Worker removal does not evict
 queued requests; new arrivals reject until usage drains or capacity returns.
 A class with any queue limit set to `0` never queues: it admits a request
 while an eligible worker is below the class's busy thresholds. If every
-eligible worker is busy, it rejects the request with HTTP 529. Use this for
+eligible worker is busy, it rejects the request with HTTP 429. Use this for
 a class that should fail fast instead of waiting when its workers are full.
 DRR charges the uncached-token snapshot captured at enqueue, while raw, cached,
 and uncached snapshots remain unchanged for limits, WSPT, counters, and later
@@ -418,8 +418,9 @@ no separate first-stage admission queue or global cross-class cap.
 
 This is intentionally not behavior preserving. Class limits are worker-scaled
 and class-local rather than global; rejection returns the structured
-policy-class HTTP 529 response rather than the previous overload 429 path; and
-it does not exclude the entire router instance.
+policy-class HTTP 429 response (`error.type` `Too Many Requests`); worker and
+engine overload stays HTTP 529; and it does not exclude the entire router
+instance.
 
 #### Migrate from Policy Families and Cache Buckets
 

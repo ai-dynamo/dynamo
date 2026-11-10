@@ -88,12 +88,13 @@ both their own rank's limits and the remaining combined capacity; unranked reque
 combined capacity. These rules apply to both engine limits and queue space, so ranked and unranked
 requests can hold each other back when the worker's combined capacity is full.
 
-**Rejection scope.** Every rejection reaches the client as an overload, HTTP 529 by default. When the
-worker could still admit or queue other requests, such as requests for another rank, the rejection
-names the rejected request's rank, and the Frontend keeps routing new requests to the worker. When the
-worker could neither admit nor queue any request, the rejection applies to the whole worker, and the
-Frontend stops routing new requests to it for up to one second. Rejections of unranked requests always
-apply to the whole worker.
+**Rejection scope.** A rejection reaches the client as an overload, HTTP 529 by default. If
+migration finds every eligible worker overloaded, the Frontend instead returns HTTP 429, as for a
+router admission refusal. When the worker could still admit or queue other requests, such as
+requests for another rank, the rejection names the rejected request's rank, and the Frontend keeps
+routing new requests to the worker. When the worker could neither admit nor queue any request, the
+rejection applies to the whole worker, and the Frontend stops routing new requests to it for up to
+one second. Rejections of unranked requests always apply to the whole worker.
 
 ### Configuration
 
