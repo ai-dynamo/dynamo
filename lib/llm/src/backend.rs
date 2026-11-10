@@ -264,13 +264,11 @@ impl
 /// Backend's response stream: detokenizes each item of `S` in place and converts it to a
 /// [`BackendOutput`] once, on its way out.
 ///
-/// A stream that owns its state, in place of `unfold`, `fuse` and `map`: `unfold` moves its
-/// state and the item through a new future on every item, and each combinator moves the item
-/// again, about a third of a stream item's cost (1 KB each). Edited through `&mut`, the item
-/// moves only where it changes type.
+/// The stream owns its state and edits each item through `&mut`, so an item (1 KB) moves only
+/// where it changes type.
 struct DecoderStream<S> {
-    /// `None` once the stream has ended. That drops the stream below and the decoders when this
-    /// stream ends, not when its caller drops it, as `unfold` did.
+    /// `None` once the stream has ended, so the stream below and the decoders drop when this
+    /// stream ends.
     state: Option<DecoderState<S>>,
 }
 
@@ -326,11 +324,7 @@ where
         };
 
         match output {
-            Some(mut item) => {
-                let output = &mut item;
-                // move to state.process_output
-                // handle any error conditions / unwraps here
-
+            Some(mut output) => {
                 // events are pass thru
                 if output.is_event() || output.data.is_none() {
                     // A genuine stream-level error ends generation for every choice at
@@ -343,7 +337,7 @@ where
                     if output.is_error() {
                         self.finished_choices.extend(self.decoders.keys().copied());
                     }
-                    return Poll::Ready(Some(item));
+                    return Poll::Ready(Some(output));
                 }
 
                 // Top-logprob text is independent of the selected token text. An engine may
@@ -478,10 +472,10 @@ where
                             data.jailed_text = decoder.checkpoint();
                         }
                     }
-                    return Poll::Ready(Some(item));
+                    return Poll::Ready(Some(output));
                 }
 
-                let data = output.data.as_ref().unwrap();
+                let data = output.data.as_mut().unwrap();
                 let choice_idx = data.index.unwrap_or(0);
                 // Snapshot the choice count before borrowing a specific decoder mutably
                 // below: that borrow stays alive until this choice's `checkpoint()` call
@@ -494,12 +488,10 @@ where
                     tracing::error!(
                         "engine emitted choice index {choice_idx}, but only {decoders_count} choices were requested"
                     );
-                    if let Some(data) = &mut output.data {
-                        data.finish_reason = Some(FinishReason::Error(format!(
-                            "invalid choice index {choice_idx}"
-                        )));
-                    }
-                    return Poll::Ready(Some(item));
+                    data.finish_reason = Some(FinishReason::Error(format!(
+                        "invalid choice index {choice_idx}"
+                    )));
+                    return Poll::Ready(Some(output));
                 };
 
                 // Per-token text is read only with this chunk's logprobs (`create_logprobs`).
@@ -525,11 +517,9 @@ where
                             self.stream.context().stop_generating();
                             self.finished = true;
                         }
-                        if let Some(data) = &mut output.data {
-                            data.finish_reason =
-                                Some(FinishReason::Error(format!("decode error: {e}")));
-                        }
-                        return Poll::Ready(Some(item));
+                        data.finish_reason =
+                            Some(FinishReason::Error(format!("decode error: {e}")));
+                        return Poll::Ready(Some(output));
                     }
                 };
 
@@ -548,7 +538,8 @@ where
                         // A stop string can win over the EOS token's trigger.
                         // Only the consumed prefix supplies evidence of model EOS.
                         if self.retain_model_stop_token_text
-                            && data.token_ids[..result.tokens.len()].last()
+                            && data.token_ids[..result.tokens.len()]
+                                .last()
                                 .is_some_and(|id| decoder.system_stop_ids.contains(id))
                         {
                             reason = FinishReason::EoS;
@@ -584,9 +575,6 @@ where
                     }
                 }
 
-                // update output in-place
-                let data = output.data.as_mut().unwrap();
-
                 // NOTE: If `finish_reason.is_some()`, then one of the stop conditions was triggered
                 // by the token generation. We should update the `data.finish_reason` in that case.
                 // However, if `finish_reason.is_none()`, it is possible that we are in the case where
@@ -597,7 +585,11 @@ where
                 // Local stop detection must not turn the worker's error into success.
                 if finish_reason.is_some()
                     && !matches!(data.finish_reason, Some(FinishReason::Error(_)))
-                    && !(self.retain_model_stop_token_text && matches!(data.finish_reason, Some(FinishReason::Length | FinishReason::Cancelled)))
+                    && !(self.retain_model_stop_token_text
+                        && matches!(
+                            data.finish_reason,
+                            Some(FinishReason::Length | FinishReason::Cancelled)
+                        ))
                 {
                     data.finish_reason = finish_reason;
                     data.stop_reason = stop_reason.or(data.stop_reason.take());
@@ -629,7 +621,7 @@ where
                     data.jailed_text = decoder.checkpoint();
                 }
 
-                Poll::Ready(Some(item))
+                Poll::Ready(Some(output))
             }
 
             None => {
@@ -716,7 +708,6 @@ fn backend_output(output: Annotated<LLMEngineOutput>) -> Annotated<BackendOutput
         error,
     }
 }
-
 
 #[async_trait]
 impl
@@ -2401,7 +2392,7 @@ mod tests {
     }
 
     /// When the tokenizer's decode() returns Err, Decoder::process_token_ids()
-    /// should propagate the error. In the backend unfold closure, this error
+    /// should propagate the error. In Backend's response stream, this error
     /// gets caught and converted to FinishReason::Error.
     #[test]
     fn test_decoder_process_token_ids_propagates_decode_error() {
@@ -2432,8 +2423,8 @@ mod tests {
         );
     }
 
-    /// Verify that the error message format matches what the backend unfold
-    /// closure would wrap into FinishReason::Error.
+    /// Verify that the error message format matches what Backend's response
+    /// stream would wrap into FinishReason::Error.
     #[test]
     fn test_decoder_error_message_format_for_finish_reason() {
         let tokenizer: Arc<dyn traits::Tokenizer> = Arc::new(FailingDecoder);
@@ -2453,7 +2444,7 @@ mod tests {
         let result = decoder.process_token_ids(&[42]);
         let err = result.err().expect("should be Err");
 
-        // This is what the backend unfold closure does:
+        // This is what Backend's response stream does:
         let finish_reason = FinishReason::Error(format!("decode error: {err}"));
         match &finish_reason {
             FinishReason::Error(msg) => {
@@ -2540,11 +2531,12 @@ mod tests {
     /// Wraps an inner stream and flips a shared flag if it is ever polled again after
     /// already returning `None` once -- used to verify the backend's `stream_ended` guard
     /// actually prevents re-polling `stream`, which most `Stream` impls do not guarantee
-    /// is safe.
+    /// is safe. Another flag records when the stream is dropped.
     struct EndGuardStream {
         inner: std::pin::Pin<Box<dyn futures::Stream<Item = Annotated<LLMEngineOutput>> + Send>>,
         ended: bool,
         overpolled: Arc<std::sync::atomic::AtomicBool>,
+        dropped: Arc<std::sync::atomic::AtomicBool>,
     }
 
     impl futures::Stream for EndGuardStream {
@@ -2566,66 +2558,92 @@ mod tests {
         }
     }
 
-    struct BareEofMultiChoiceEngine {
+    impl Drop for EndGuardStream {
+        fn drop(&mut self) {
+            self.dropped
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// Sends `chunks`, then ends, through an [`EndGuardStream`]. With `pending`, the stream
+    /// returns `Pending` once before each chunk.
+    #[derive(Default)]
+    struct GuardedEngine {
+        chunks: Vec<Annotated<LLMEngineOutput>>,
+        pending: bool,
         overpolled: Arc<std::sync::atomic::AtomicBool>,
+        dropped: Arc<std::sync::atomic::AtomicBool>,
     }
 
     #[async_trait]
     impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
-        for BareEofMultiChoiceEngine
+        for GuardedEngine
     {
         async fn generate(
             &self,
             request: SingleIn<PreprocessedRequest>,
         ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
-            // Both choices withhold "STOP" as a never-completed partial match against
-            // "STOPPED", then the stream ends with no `finish_reason` ever sent for
-            // either -- a "bare EOF", as from an engine that simply drops the connection.
-            let chunks = vec![
-                Annotated::from_data(LLMEngineOutput {
-                    token_ids: vec![1],
-                    index: Some(0),
-                    ..Default::default()
-                }),
-                Annotated::from_data(LLMEngineOutput {
-                    token_ids: vec![2],
-                    index: Some(0),
-                    ..Default::default()
-                }),
-                Annotated::from_data(LLMEngineOutput {
-                    token_ids: vec![1],
-                    index: Some(1),
-                    ..Default::default()
-                }),
-                Annotated::from_data(LLMEngineOutput {
-                    token_ids: vec![2],
-                    index: Some(1),
-                    ..Default::default()
-                }),
-            ];
+            let chunks = futures::stream::iter(self.chunks.clone());
+            let inner: std::pin::Pin<Box<dyn futures::Stream<Item = _> + Send>> = if self.pending {
+                Box::pin(chunks.then(|chunk| async move {
+                    tokio::task::yield_now().await;
+                    chunk
+                }))
+            } else {
+                Box::pin(chunks)
+            };
             let guarded = EndGuardStream {
-                inner: Box::pin(futures::stream::iter(chunks)),
+                inner,
                 ended: false,
                 overpolled: self.overpolled.clone(),
+                dropped: self.dropped.clone(),
             };
             Ok(ResponseStream::new(Box::pin(guarded), request.context()))
         }
     }
 
-    #[tokio::test]
-    async fn backend_flushes_multiple_jailed_choices_on_bare_eof_without_repolling() {
+    /// Backend's response to `request`, from `engine`.
+    async fn guarded_response(
+        request: PreprocessedRequest,
+        engine: GuardedEngine,
+    ) -> ManyOut<Annotated<BackendOutput>> {
         let tokenizer: Arc<dyn traits::Tokenizer> = Arc::new(JailingTokenizer);
         let backend = Backend::from_tokenizer(Tokenizer::from(tokenizer));
-        let request = jailing_request(2);
-        let overpolled = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let engine: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
-            Arc::new(BareEofMultiChoiceEngine {
-                overpolled: overpolled.clone(),
-            });
-
-        let stream = Operator::generate(backend.as_ref(), SingleIn::new(request), engine)
+            Arc::new(engine);
+        Operator::generate(backend.as_ref(), SingleIn::new(request), engine)
             .await
-            .expect("backend generation succeeds");
+            .expect("backend generation succeeds")
+    }
+
+    /// Both choices withhold "STOP" as a never-completed partial match against "STOPPED",
+    /// then the stream ends with no `finish_reason` ever sent for either -- a "bare EOF", as
+    /// from an engine that simply drops the connection.
+    fn bare_eof_multi_choice_chunks() -> Vec<Annotated<LLMEngineOutput>> {
+        [(1, 0), (2, 0), (1, 1), (2, 1)]
+            .into_iter()
+            .map(|(token, index)| {
+                Annotated::from_data(LLMEngineOutput {
+                    token_ids: vec![token],
+                    index: Some(index),
+                    ..Default::default()
+                })
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn backend_flushes_multiple_jailed_choices_on_bare_eof_without_repolling() {
+        let overpolled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stream = guarded_response(
+            jailing_request(2),
+            GuardedEngine {
+                chunks: bare_eof_multi_choice_chunks(),
+                overpolled: overpolled.clone(),
+                ..Default::default()
+            },
+        )
+        .await;
         let outputs: Vec<_> = stream.collect().await;
 
         // 2 normal chunks per choice (releasing "abc", withholding "STOP") + one
@@ -2656,52 +2674,6 @@ mod tests {
         );
     }
 
-    /// The engine's stream, which records when it is dropped.
-    struct DropFlagStream {
-        inner: std::pin::Pin<Box<dyn futures::Stream<Item = Annotated<LLMEngineOutput>> + Send>>,
-        dropped: Arc<std::sync::atomic::AtomicBool>,
-    }
-
-    impl futures::Stream for DropFlagStream {
-        type Item = Annotated<LLMEngineOutput>;
-
-        fn poll_next(
-            mut self: std::pin::Pin<&mut Self>,
-            cx: &mut std::task::Context<'_>,
-        ) -> std::task::Poll<Option<Self::Item>> {
-            self.inner.as_mut().poll_next(cx)
-        }
-    }
-
-    impl Drop for DropFlagStream {
-        fn drop(&mut self) {
-            self.dropped
-                .store(true, std::sync::atomic::Ordering::SeqCst);
-        }
-    }
-
-    /// Sends `chunks`, then ends, through a [`DropFlagStream`].
-    struct DropFlagEngine {
-        chunks: Vec<Annotated<LLMEngineOutput>>,
-        dropped: Arc<std::sync::atomic::AtomicBool>,
-    }
-
-    #[async_trait]
-    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
-        for DropFlagEngine
-    {
-        async fn generate(
-            &self,
-            request: SingleIn<PreprocessedRequest>,
-        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
-            let stream = DropFlagStream {
-                inner: Box::pin(futures::stream::iter(self.chunks.clone())),
-                dropped: self.dropped.clone(),
-            };
-            Ok(ResponseStream::new(Box::pin(stream), request.context()))
-        }
-    }
-
     /// Backend's response, from an engine that sends `chunks` for `request`, and the flag that
     /// says the engine's stream was dropped.
     async fn drop_flag_response(
@@ -2711,18 +2683,13 @@ mod tests {
         ManyOut<Annotated<BackendOutput>>,
         Arc<std::sync::atomic::AtomicBool>,
     ) {
-        let tokenizer: Arc<dyn traits::Tokenizer> = Arc::new(JailingTokenizer);
-        let backend = Backend::from_tokenizer(Tokenizer::from(tokenizer));
         let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let engine: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
-            Arc::new(DropFlagEngine {
-                chunks,
-                dropped: dropped.clone(),
-            });
-        let stream = Operator::generate(backend.as_ref(), SingleIn::new(request), engine)
-            .await
-            .expect("backend generation succeeds");
-        (stream, dropped)
+        let engine = GuardedEngine {
+            chunks,
+            dropped: dropped.clone(),
+            ..Default::default()
+        };
+        (guarded_response(request, engine).await, dropped)
     }
 
     /// Backend lets go of the engine's stream when its own stream ends, not when its caller
@@ -2766,6 +2733,33 @@ mod tests {
             "the engine's stream must be dropped when a local stop ends Backend's stream"
         );
         assert!(stream.next().await.is_none(), "an ended stream stays ended");
+    }
+
+    /// An engine stream that returns `Pending` before each chunk gives the same output as one
+    /// that is always ready.
+    #[tokio::test]
+    async fn backend_output_is_the_same_when_the_engine_is_pending_between_chunks() {
+        async fn outputs(
+            pending: bool,
+        ) -> Vec<(Option<u32>, Option<String>, Option<FinishReason>)> {
+            let engine = GuardedEngine {
+                chunks: bare_eof_multi_choice_chunks(),
+                pending,
+                ..Default::default()
+            };
+            guarded_response(jailing_request(2), engine)
+                .await
+                .map(|output| {
+                    let data = output.data.expect("every chunk carries data");
+                    (data.index, data.text, data.finish_reason)
+                })
+                .collect()
+                .await
+        }
+
+        let ready = outputs(false).await;
+        assert_eq!(ready.len(), 6, "{ready:?}");
+        assert_eq!(outputs(true).await, ready);
     }
 
     struct ErrorThenBareEofEngine;
