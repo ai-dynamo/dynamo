@@ -3051,9 +3051,34 @@ fn split_logprobs_by_token_spans(
             Some(ChatCompletionMessageContent::Text(text)) if !text.is_empty()
         )
     };
+    // Hidden owners carry reasoning or a tool call. Boundary-only choices own no
+    // tokens: a downstream projection would hand their scores to the message
+    // that ends.
+    let is_hidden_owner = |choice: &ChatChoiceStream| {
+        !has_text(choice)
+            && (choice
+                .delta
+                .reasoning_content
+                .as_deref()
+                .is_some_and(|text| !text.is_empty())
+                || choice
+                    .delta
+                    .tool_calls
+                    .as_ref()
+                    .is_some_and(|calls| !calls.is_empty()))
+    };
+    // Walk the choices in order. Reasoning text appears verbatim in the chunk, so
+    // it moves the cursor past itself and a later visible text cannot match an
+    // earlier hidden occurrence of the same string.
     let mut text_spans = Vec::new();
     let mut cursor = 0;
     for (index, choice) in choices.iter().enumerate() {
+        if let Some(reasoning) = choice.delta.reasoning_content.as_deref()
+            && !reasoning.is_empty()
+            && let Some(offset) = raw[cursor..].find(reasoning)
+        {
+            cursor += offset + reasoning.len();
+        }
         if let Some(ChatCompletionMessageContent::Text(text)) = choice.delta.content.as_ref()
             && !text.is_empty()
         {
@@ -3066,7 +3091,7 @@ fn split_logprobs_by_token_spans(
         }
     }
     let hidden_choices: Vec<usize> = (0..choices.len())
-        .filter(|index| !has_text(&choices[*index]))
+        .filter(|index| is_hidden_owner(&choices[*index]))
         .collect();
     if text_spans.is_empty() || hidden_choices.is_empty() {
         return Err(logprobs);
@@ -3120,6 +3145,12 @@ fn split_logprobs_by_token_spans(
                 .unwrap_or(choices.len() - 1)
         })
         .collect();
+    // The chat record must stay in generation order. Owners that go backwards
+    // (a prefix control token with no hidden owner before the text) would
+    // reorder it, so the record stays whole instead.
+    if owners.windows(2).any(|pair| pair[0] > pair[1]) {
+        return Err(logprobs);
+    }
 
     let entries = logprobs.content.take().unwrap_or_default();
     let mut per_choice: Vec<Vec<ChatCompletionTokenLogprob>> = vec![Vec::new(); choices.len()];
@@ -11414,6 +11445,119 @@ pub(crate) mod tests {
             .flat_map(|choice| choice_tokens(choice))
             .collect();
         assert_eq!(all, tokens);
+    }
+
+    fn split_choices(
+        raw: &str,
+        tokens: &[&str],
+        choices: &mut [ChatChoiceStream],
+    ) -> Result<(), ChatChoiceLogprobs> {
+        let content: Vec<serde_json::Value> = tokens
+            .iter()
+            .enumerate()
+            .map(|(i, token)| {
+                serde_json::json!({"token": token, "logprob": -(i as f64 + 1.0) / 10.0, "bytes": token.as_bytes(), "top_logprobs": []})
+            })
+            .collect();
+        let logprobs: ChatChoiceLogprobs =
+            serde_json::from_value(serde_json::json!({"content": content, "refusal": null}))
+                .unwrap();
+        split_logprobs_by_token_spans(raw, logprobs, choices)
+    }
+
+    fn text_choice(text: &str) -> ChatChoiceStream {
+        let mut choice = empty_choice(0);
+        choice.delta.content = Some(ChatCompletionMessageContent::Text(text.to_string()));
+        choice
+    }
+
+    fn reasoning_choice(text: &str) -> ChatChoiceStream {
+        let mut choice = empty_choice(0);
+        choice.delta.reasoning_content = Some(text.to_string());
+        choice
+    }
+
+    fn tool_choice() -> ChatChoiceStream {
+        let mut choice = empty_choice(0);
+        choice.delta.tool_calls = Some(vec![ChatCompletionMessageToolCallChunk {
+            custom: None,
+            index: 0,
+            id: Some("call_1".into()),
+            r#type: Some(FunctionType::Function),
+            function: Some(FunctionCallStream {
+                name: Some("get_weather".into()),
+                arguments: Some("{\"city\":\"Paris\"}".into()),
+            }),
+        }]);
+        choice
+    }
+
+    /// Boundary-only choices own no tokens: the tool record goes to the tool-call
+    /// choice, not to the message-end choice before it.
+    #[test]
+    fn split_skips_boundary_only_choices() {
+        let tokens = [
+            "Checking.",
+            "<|eom|>",
+            "<tool_call>",
+            "Paris",
+            "</tool_call>",
+            "<|start|>",
+            "Done.",
+        ];
+        let mut choices = vec![
+            text_choice("Checking."),
+            empty_choice(0),
+            tool_choice(),
+            empty_choice(0),
+            text_choice("Done."),
+        ];
+        split_choices(&tokens.concat(), &tokens, &mut choices).unwrap();
+        assert_eq!(choice_tokens(&choices[0]), ["Checking."]);
+        assert!(choices[1].logprobs.is_none());
+        assert_eq!(
+            choice_tokens(&choices[2]),
+            [
+                "<|eom|>",
+                "<tool_call>",
+                "Paris",
+                "</tool_call>",
+                "<|start|>"
+            ]
+        );
+        assert!(choices[3].logprobs.is_none());
+        assert_eq!(choice_tokens(&choices[4]), ["Done."]);
+    }
+
+    /// Hidden reasoning that repeats the visible text does not capture the visible
+    /// token: the reasoning advances the cursor before the text is searched.
+    #[test]
+    fn split_searches_visible_text_after_reasoning() {
+        let tokens = ["<think>", "same", "</think>", "same"];
+        let mut choices = vec![reasoning_choice("same"), text_choice("same")];
+        split_choices(&tokens.concat(), &tokens, &mut choices).unwrap();
+        assert_eq!(choice_tokens(&choices[0]), ["<think>", "same", "</think>"]);
+        assert_eq!(choice_tokens(&choices[1]), ["same"]);
+    }
+
+    /// A prefix control token with no hidden owner before the text would have to
+    /// move to a later choice and reorder the chat record, so the split is refused
+    /// and the record stays whole.
+    #[test]
+    fn split_refuses_to_reorder_the_record() {
+        let tokens = ["<think>", "</think>", "Checking.", "<tool_call>"];
+        let mut choices = vec![text_choice("Checking."), tool_choice()];
+        let whole = split_choices(&tokens.concat(), &tokens, &mut choices).unwrap_err();
+        assert_eq!(
+            whole
+                .content
+                .unwrap()
+                .iter()
+                .map(|e| e.token.as_str())
+                .collect::<Vec<_>>(),
+            tokens
+        );
+        assert!(choices.iter().all(|choice| choice.logprobs.is_none()));
     }
 
     /// Tokens that do not tile the chunk text (an opaque token id label) keep the
