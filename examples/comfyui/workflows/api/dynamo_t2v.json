@@ -1,0 +1,36 @@
+{
+  "1": {
+    "class_type": "DynamoEndpointConfig",
+    "inputs": {
+      "base_url": "http://localhost:8000",
+      "api_key": "",
+      "timeout_s": 1800
+    }
+  },
+  "2": {
+    "class_type": "DynamoTextToVideo",
+    "inputs": {
+      "model": "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
+      "prompt": "a dog running on a sunny beach, cinematic",
+      "size": "832x480",
+      "num_frames": 30,
+      "fps": 24,
+      "steps": 20,
+      "guidance_scale": 5.0,
+      "seed": 42,
+      "negative_prompt": "static, low quality",
+      "response_format": "b64_json",
+      "base_url": "http://localhost:8000",
+      "api_key": "",
+      "timeout_s": 1800,
+      "endpoint": ["1", 0]
+    }
+  },
+  "3": {
+    "class_type": "SaveVideo",
+    "inputs": {
+      "filename_prefix": "dynamo_t2v",
+      "video": ["2", 0]
+    }
+  }
+}
