@@ -20,7 +20,6 @@ import dynamo.planner.retune.controller as controller_module
 from dynamo.llm import KvRouterConfig
 from dynamo.planner.config.planner_config import PlannerConfig, RetuneEngineSpec
 from dynamo.planner.core.types import (
-    EngineCapabilities,
     RetuneInputs,
     RetuneParams,
     TrafficObservation,
@@ -806,6 +805,56 @@ async def test_predictor_presweep_winner_is_applied_with_warmup(
     assert decision.predictor_presweep == presweep
 
 
+@pytest.mark.parametrize("warmup_error", [None, "ValueError: too few points"])
+async def test_a_new_throughput_interval_is_applied_with_its_own_warmup(
+    sweeps, warmup_error
+):
+    # Throughput scaling every 10 s; retune may move it to 20 s.
+    policies = [
+        {
+            "enable_throughput_scaling": True,
+            "enable_load_scaling": False,
+            "throughput_adjustment_interval_seconds": interval,
+            "load_adjustment_interval_seconds": 5,
+        }
+        for interval in (10, 20)
+    ]
+    config = _config(
+        "agg",
+        {"router": None, "planner": {"scaling_policy": {"preset": policies}}},
+        optimization_target="sla",
+        enable_load_scaling=False,
+        enable_throughput_scaling=True,
+        throughput_adjustment_interval_seconds=10,
+    )
+
+    def buckets(interval):
+        return tuple(
+            TrafficObservation(float(interval), float(i), 1.0, 1.0) for i in range(5)
+        )
+
+    sweeps.default = _scored(
+        lambda c, _r: 2.0
+        if c.planner["throughput_adjustment_interval_seconds"] == 20
+        else 1.0,
+        interval_observations={10: buckets(10), 20: buckets(20)},
+        predictor_warmup_errors={} if warmup_error is None else {20: warmup_error},
+    )
+    controller = _controller(config)
+
+    ticks = await _run(controller, 70)
+
+    ((_, decision),) = _decisions(ticks)
+    if warmup_error is not None:
+        assert decision.outcome == "failed"
+        assert decision.reason == f"predictor warmup rejected: {warmup_error}"
+        return
+    assert decision.outcome == "applied"
+    assert decision.planner_changes == {"throughput_adjustment_interval_seconds": 20}
+    # The predictor steps every 20 s now: warmed on 20-s buckets.
+    assert decision.predictor_warmup == buckets(20)
+
+
 def _sla_predictor_config(planner, **overrides):
     return _config(
         "agg",
@@ -1047,51 +1096,77 @@ def test_planner_grid_points_that_do_not_fit_are_dropped(caplog):
     assert "retune drops 3 of 12 planner grid points" in record.getMessage()
 
 
-def test_planner_values_that_never_fit_the_deployment_raise():
+LOAD_THRESHOLDS = {
+    "optimization_target": "load",
+    "decode_scale_up_kv_rate": 80.0,
+    "decode_scale_down_kv_rate": 50.0,
+}
+
+
+def test_planner_values_that_never_fit_raise():
+    # Each point is validated as a full PlannerConfig: an up rate must exceed
+    # the running down rate, so 40 fits no point.
     config = _config(
         "agg",
-        {"router": None, "planner": {"min_workers": {"choices": [1, 4]}}},
-        optimization_target="throughput",
-        max_gpu_budget=2,
+        {"router": None, "planner": {"decode_scale_up_kv_rate": {"choices": [40, 90]}}},
+        **LOAD_THRESHOLDS,
     )
-    capabilities = WorkerCapabilities(decode=EngineCapabilities(num_gpu=1))
 
     with pytest.raises(
-        ValueError, match="no retune.planner candidate with min_endpoint=4 fits"
+        ValueError, match="no retune.planner candidate with decode_scale_up_kv_rate=40"
     ):
-        _controller(config, capabilities=capabilities)
+        _controller(config)
+
+
+def test_points_that_fail_validation_are_dropped():
+    # Up 60 fails with down 70 only: the point is dropped, both values stay.
+    config = _config(
+        "agg",
+        {
+            "router": None,
+            "planner": {
+                "decode_scale_up_kv_rate": {"choices": [60, 90]},
+                "decode_scale_down_kv_rate": {"choices": [40, 70]},
+            },
+        },
+        **LOAD_THRESHOLDS,
+    )
+
+    grid = {
+        (p.planner["decode_scale_up_kv_rate"], p.planner["decode_scale_down_kv_rate"])
+        for p in _controller(config)._grid
+    }
+
+    assert grid == {(60.0, 40.0), (90.0, 40.0), (90.0, 70.0)}
 
 
 async def test_planner_changes_that_no_longer_fit_fail_the_decision(sweeps):
-    # A grid point fit at startup, but the budget dropped before the decision.
+    # A grid point was valid at startup, but the down rate rose before the
+    # decision.
     config = _config(
         "agg",
-        {"router": None, "planner": {"min_workers": {"choices": [1, 2]}}},
-        optimization_target="throughput",
-        max_gpu_budget=4,
+        {"router": None, "planner": {"decode_scale_up_kv_rate": {"choices": [60, 90]}}},
+        **LOAD_THRESHOLDS,
     )
     sweeps.default = _scored(
-        lambda c, _r: 2.0 if c.planner["min_endpoint"] == 2 else 1.0
+        lambda c, _r: 2.0 if c.planner["decode_scale_up_kv_rate"] == 60.0 else 1.0
     )
-    controller = _controller(
-        config, capabilities=WorkerCapabilities(decode=EngineCapabilities(num_gpu=1))
-    )
+    controller = _controller(config)
 
-    def lower_budget(now, _result):
+    def raise_down_rate(now, _result):
         if now == 65.0:
-            config.max_gpu_budget = 1
+            config.decode_scale_down_kv_rate = 70.0
 
-    ticks = await _run(controller, 70, after_tick=lower_budget)
+    ticks = await _run(controller, 70, after_tick=raise_down_rate)
 
     ((_, decision),) = _decisions(ticks)
     assert decision.outcome == "failed"
     assert decision.reason.startswith("planner candidate ")
-    assert decision.reason.endswith(
-        "cannot run on this deployment: minimum endpoint footprint requires "
-        "2 GPUs, exceeding max_gpu_budget=1"
+    assert "decode_scale_up_kv_rate must be greater than decode_scale_down_kv_rate" in (
+        decision.reason
     )
     assert decision.planner_changes == {}
-    assert controller.current_point().planner["min_endpoint"] == 1
+    assert controller.current_point().planner["decode_scale_up_kv_rate"] == 80.0
 
 
 def test_scaling_retune_rejects_external_plugin_gateways():

@@ -28,9 +28,10 @@ pub enum FieldClass {
     /// Output-side deltas: chunks append, decode reports them, and a retry
     /// keeps appending.
     Delta,
-    /// A prompt-side value repeated in full on every chunk: prefill computes
-    /// it in P/D, and the first attempt's value survives migration because a
-    /// retry's prompt includes the delivered tokens.
+    /// A prompt-side value: prefill computes it in P/D, and an engine may
+    /// send it only once, so a later empty or absent value keeps the earlier
+    /// one. The first attempt's value survives migration because a retry's
+    /// prompt includes the delivered tokens.
     Prompt,
     /// Base64 rows for the whole sequence, on the final chunk only: prefill's
     /// bytes replace decode's stale prompt rows, and a retry's value already
@@ -187,7 +188,10 @@ impl RuleSet {
 
     /// Join the next streamed chunk onto the response so far.
     fn join_step(&self, joined: &mut Value, mut next: Value) {
-        for field in self.of(FieldClass::Delta) {
+        for field in self
+            .of(FieldClass::Delta)
+            .chain(self.of(FieldClass::Prompt))
+        {
             let Some(head) = object(joined, &field.parent).and_then(|o| o.remove(&field.key))
             else {
                 continue;
@@ -196,6 +200,11 @@ impl RuleSet {
                 continue;
             };
             match (head, slot(target, &field.key)) {
+                (head, tail) if field.class == FieldClass::Prompt => {
+                    if tail.is_null() || tail.as_array().is_some_and(Vec::is_empty) {
+                        *tail = head;
+                    }
+                }
                 (Value::Array(mut head), Value::Array(tail)) => {
                     head.append(tail);
                     *tail = head;
