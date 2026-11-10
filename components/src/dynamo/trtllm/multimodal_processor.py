@@ -48,6 +48,7 @@ from dynamo.common.multimodal.media_source import decode_data_uri, describe_medi
 from dynamo.common.multimodal.nvdec_decoder import probe_video_codec, should_use_nvdec
 from dynamo.common.multimodal.video_loader import VideoLoader
 from dynamo.common.utils.token_ids import token_ids_to_list
+from dynamo.llm.exceptions import InvalidArgument
 from dynamo.runtime.logging import configure_dynamo_logging
 
 configure_dynamo_logging()
@@ -124,15 +125,14 @@ def _mm_item_order(
     when the model's chat template groups placeholders that way
     (``prompt_modality_order``); the frontend's order does not include that
     step. ``counts`` is the number of loaded items per modality, and the order
-    must name each of them once.
+    must name each of them once. Otherwise this raises ``InvalidArgument``: a
+    400 whose message reaches the client.
     """
     entries = multi_modal_order if isinstance(multi_modal_order, list) else None
     if entries is None:
-        raise HttpStatusError(
-            400,
+        raise InvalidArgument(
             "Cannot order the request's media items: the request has no "
-            "multi_modal_order",
-            "multi_modal_order",
+            "multi_modal_order"
         )
     order: List[Dict[str, Any]] = []
     for entry in entries:
@@ -149,11 +149,9 @@ def _mm_item_order(
     expected = {(m, i) for m, n in counts.items() for i in range(n)}
     named = {(e["modality"], e["index"]) for e in order}
     if len(order) != len(expected) or named != expected:
-        raise HttpStatusError(
-            400,
+        raise InvalidArgument(
             "Cannot order the request's media items: multi_modal_order does not "
-            f"name each loaded item exactly once (loaded: {counts})",
-            "multi_modal_order",
+            f"name each loaded item exactly once (loaded: {counts})"
         )
     if prompt_modality_order:
         rank = {m: i for i, m in enumerate(prompt_modality_order)}
@@ -675,11 +673,9 @@ class MultimodalRequestProcessor:
             # the media as decoded. Video-only requests are unchanged.
             image_and_video = bool(video_items) and "image" in processed_mm_data
             if image_and_video and self.model_type in _SHARED_RESCALE_FLAG_MODEL_TYPES:
-                raise HttpStatusError(
-                    400,
+                raise InvalidArgument(
                     "This model cannot take an image and a video in the same "
-                    "request yet; send them in separate requests",
-                    "multi_modal_data",
+                    "request yet; send them in separate requests"
                 )
             uint8_videos = image_and_video and self._prefers_np_video()
             videos = []

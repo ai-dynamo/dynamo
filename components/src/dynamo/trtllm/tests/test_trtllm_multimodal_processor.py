@@ -37,6 +37,7 @@ from dynamo.common.http import HttpConfigurationError, HttpStatusError, HttpTime
 from dynamo.common.http.aiohttp_client import AiohttpClient
 from dynamo.common.http.base import HttpClient
 from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
+from dynamo.llm.exceptions import InvalidArgument
 from dynamo.trtllm import multimodal_processor as mmp
 from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
 
@@ -437,15 +438,12 @@ async def test_image_and_video_request_is_rejected_for_a_shared_rescale_flag(
     processor, _ = image_video_processor(None, model_type)
     _route_video(monkeypatch, "nvdec", _pt_video(_decoded_frames()))
 
-    with pytest.raises(HttpStatusError) as excinfo:
+    with pytest.raises(InvalidArgument) as excinfo:
         await processor.process_openai_request(
             _request(), embeddings=None, ep_disaggregated_params=None
         )
 
-    assert excinfo.value.status == 400
-    assert "cannot take an image and a video in the same request" in (
-        excinfo.value.message
-    )
+    assert "cannot take an image and a video in the same request" in str(excinfo.value)
     mmp.fetch_bytes.assert_not_awaited()
 
 
@@ -567,12 +565,11 @@ async def test_an_item_order_that_does_not_match_the_loaded_items_is_rejected(
     request = _request()
     request["multi_modal_order"].pop(0)  # the order leaves the image out
 
-    with pytest.raises(HttpStatusError) as excinfo:
+    with pytest.raises(InvalidArgument) as excinfo:
         await processor.process_openai_request(
             request, embeddings=None, ep_disaggregated_params=None
         )
-    assert excinfo.value.status == 400
-    assert "does not name each loaded item exactly once" in excinfo.value.message
+    assert "does not name each loaded item exactly once" in str(excinfo.value)
 
 
 @pytest.mark.asyncio
@@ -589,13 +586,12 @@ async def test_image_and_video_request_without_an_item_order_is_rejected(
     request = _request()
     del request["multi_modal_order"]
 
-    with pytest.raises(HttpStatusError) as excinfo:
+    with pytest.raises(InvalidArgument) as excinfo:
         await processor.process_openai_request(
             request, embeddings=None, ep_disaggregated_params=None
         )
-    assert excinfo.value.status == 400
-    assert "the request has no multi_modal_order" in excinfo.value.message
-    assert "cannot take an image and a video" not in excinfo.value.message
+    assert "the request has no multi_modal_order" in str(excinfo.value)
+    assert "cannot take an image and a video" not in str(excinfo.value)
 
 
 def test_item_order_maps_each_frontend_modality_by_name() -> None:
