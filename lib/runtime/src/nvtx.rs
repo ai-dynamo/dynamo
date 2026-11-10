@@ -369,6 +369,24 @@ pub fn mark_impl<M: std::fmt::Display>(name: M) {
     let _ = name;
 }
 
+/// Record a marker with an optional precomputed request key. Prefer
+/// [`dynamo_nvtx_keyed_mark!`].
+#[doc(hidden)]
+#[inline(always)]
+pub fn keyed_mark_impl<M: std::fmt::Display>(stage: M, key: Option<u64>) {
+    #[cfg(feature = "nvtx")]
+    {
+        if NVTX_ENABLED.load(Ordering::Relaxed) {
+            match key {
+                Some(key) => ffi::mark_payload(stage, key),
+                None => ffi::mark(stage),
+            }
+        }
+    }
+    #[cfg(not(feature = "nvtx"))]
+    let _ = (stage, key);
+}
+
 /// Name the current OS thread in the Nsight Systems timeline.
 /// No-op (compiled out) when the `nvtx` feature is off.
 #[inline(always)]
@@ -794,6 +812,19 @@ macro_rules! dynamo_nvtx_keyed_range {
     };
 }
 
+/// Record an NVTX marker named `$stage` with the precomputed request key `$key:
+/// Option<u64>` as its payload; a `None` key records it without one. The marker
+/// counterpart of [`dynamo_nvtx_keyed_range!`]. Zero-cost when the `nvtx` Cargo feature
+/// is off.
+#[macro_export]
+macro_rules! dynamo_nvtx_keyed_mark {
+    ($stage:expr, $key:expr) => {
+        if $crate::nvtx::enabled() {
+            $crate::nvtx::keyed_mark_impl($stage, $key);
+        }
+    };
+}
+
 /// Annotate the current OS thread in the Nsight Systems timeline.
 /// Zero-cost when the `nvtx` Cargo feature is off.
 #[macro_export]
@@ -1176,10 +1207,13 @@ mod tests {
         assert_eq!(super::request_key("a"), None);
         let _keyed = dynamo_nvtx_keyed_range!("test.keyed", super::request_key("a"));
         let _unkeyed = dynamo_nvtx_keyed_range!("test.keyed", None);
+        dynamo_nvtx_keyed_mark!("test.keyed_mark", super::request_key("a"));
         #[cfg(feature = "nvtx")]
         {
             flag.store(true);
             let key = super::request_key("a");
+            dynamo_nvtx_keyed_mark!("test.keyed_mark", key);
+            dynamo_nvtx_keyed_mark!("test.keyed_mark", None);
             assert_eq!(key, Some(PIN_A));
             let keyed = dynamo_nvtx_keyed_range!("test.keyed", key);
             let unkeyed = dynamo_nvtx_keyed_range!("test.keyed", None);

@@ -29,7 +29,7 @@ use dynamo_runtime::telemetry::{
     LIFECYCLE_TRACE_CONTEXT_KEY, LifecycleStage, LifecycleTerminal, LifecycleTrace, TerminalOutcome,
 };
 use dynamo_runtime::{
-    dynamo_nvtx_mark, dynamo_nvtx_range,
+    dynamo_nvtx_keyed_mark, dynamo_nvtx_keyed_range,
     engine::AsyncEngineContext,
     pipeline::{AsyncEngineContextProvider, Context},
     protocols::annotated::AnnotationsProvider,
@@ -1417,7 +1417,8 @@ async fn completions_single(
     stream_handle: ConnectionHandle,
 ) -> Result<Response, ErrorResponse> {
     // Handler body only; for a streaming request the SSE stream outlives this range.
-    let _nvtx = dynamo_nvtx_range!("frontend.http.completions.handler");
+    let nvtx_key = dynamo_runtime::nvtx::request_key(request.id());
+    let _nvtx = dynamo_nvtx_keyed_range!("frontend.http.completions.handler", nvtx_key);
 
     let request_id = request.id().to_string();
 
@@ -1450,7 +1451,7 @@ async fn completions_single(
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
 
     // todo - error handling should be more robust
-    let nvtx_lookup = dynamo_nvtx_range!("frontend.http.completions.engine_lookup");
+    let nvtx_lookup = dynamo_nvtx_keyed_range!("frontend.http.completions.engine_lookup", nvtx_key);
     let (engine, parsing_options) = state
         .manager()
         .get_completions_engine_with_parsing(&model)
@@ -1469,7 +1470,7 @@ async fn completions_single(
 
     // issue the generate call on the engine
     // Covers preprocessing, routing and the wire handoff to the worker.
-    let nvtx_generate = dynamo_nvtx_range!("frontend.http.completions.generate");
+    let nvtx_generate = dynamo_nvtx_keyed_range!("frontend.http.completions.generate", nvtx_key);
     let stream = engine.generate(request).await.map_err(|e| {
         if super::metrics::request_was_rejected(e.as_ref()) {
             state
@@ -1536,7 +1537,8 @@ async fn completions_single(
                 // Frontend-side SSE conversion for one chunk. The gaps between
                 // consecutive ranges cover both worker time and the frontend's
                 // own unannotated receive/decode path.
-                let _nvtx_chunk = dynamo_nvtx_range!("frontend.http.completions.sse_chunk");
+                let _nvtx_chunk =
+                    dynamo_nvtx_keyed_range!("frontend.http.completions.sse_chunk", nvtx_key);
                 // `echo` rides the chunk as typed metadata up to this boundary.
                 if let Some(data) = response.data.as_mut() {
                     data.fold_echo();
@@ -1600,7 +1602,8 @@ async fn completions_single(
             })?;
 
         // Spans the whole fold, so it includes worker time.
-        let _nvtx_aggregate = dynamo_nvtx_range!("frontend.http.completions.aggregate");
+        let _nvtx_aggregate =
+            dynamo_nvtx_keyed_range!("frontend.http.completions.aggregate", nvtx_key);
         let response = NvCreateCompletionResponse::from_annotated_stream(stream, parsing_options)
             .await
             .map_err(|e| {
@@ -1739,7 +1742,8 @@ async fn completions_batch(
 
     // Same range names as completions_single, so a capture aggregates single and
     // batch requests together. For a streaming request the SSE stream outlives this range.
-    let _nvtx = dynamo_nvtx_range!("frontend.http.completions.handler");
+    let nvtx_key = dynamo_runtime::nvtx::request_key(request.id());
+    let _nvtx = dynamo_nvtx_keyed_range!("frontend.http.completions.handler", nvtx_key);
 
     let request_id = request.id().to_string();
     let streaming = request.inner.stream.unwrap_or(false);
@@ -1762,7 +1766,7 @@ async fn completions_batch(
     // Create http_queue_guard early - tracks time waiting to be processed
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
 
-    let nvtx_lookup = dynamo_nvtx_range!("frontend.http.completions.engine_lookup");
+    let nvtx_lookup = dynamo_nvtx_keyed_range!("frontend.http.completions.engine_lookup", nvtx_key);
     let (engine, parsing_options) = state
         .manager()
         .get_completions_engine_with_parsing(&model)
@@ -1815,7 +1819,8 @@ async fn completions_batch(
 
         // Generate stream for this prompt. One range per prompt: each covers that
         // prompt's preprocessing, routing and wire handoff.
-        let nvtx_generate = dynamo_nvtx_range!("frontend.http.completions.generate");
+        let nvtx_generate =
+            dynamo_nvtx_keyed_range!("frontend.http.completions.generate", nvtx_key);
         let stream = engine.generate(single_request_context).await.map_err(|e| {
             if super::metrics::request_was_rejected(e.as_ref()) {
                 state
@@ -1914,7 +1919,8 @@ async fn completions_batch(
             })
             .map(move |mut response| {
                 // Frontend-side SSE conversion for one chunk of the merged stream.
-                let _nvtx_chunk = dynamo_nvtx_range!("frontend.http.completions.sse_chunk");
+                let _nvtx_chunk =
+                    dynamo_nvtx_keyed_range!("frontend.http.completions.sse_chunk", nvtx_key);
                 // `echo` rides the chunk as typed metadata up to this boundary.
                 if let Some(data) = response.data.as_mut() {
                     data.fold_echo();
@@ -1964,7 +1970,8 @@ async fn completions_batch(
         });
 
         // Spans the whole fold across every prompt, so it includes worker time.
-        let _nvtx_aggregate = dynamo_nvtx_range!("frontend.http.completions.aggregate");
+        let _nvtx_aggregate =
+            dynamo_nvtx_keyed_range!("frontend.http.completions.aggregate", nvtx_key);
         let response = NvCreateCompletionResponse::from_annotated_stream(stream, parsing_options)
             .await
             .map_err(|e| {
@@ -3712,7 +3719,8 @@ async fn chat_completions(
     // Covers the handler body only: template resolution, validation, engine
     // dispatch and response commit. For a streaming request the SSE stream
     // outlives this range, and each chunk is annotated separately below.
-    let _nvtx = dynamo_nvtx_range!("frontend.http.chat.handler");
+    let nvtx_key = dynamo_runtime::nvtx::request_key(request.id());
+    let _nvtx = dynamo_nvtx_keyed_range!("frontend.http.chat.handler", nvtx_key);
 
     // return a 503 if the service is not ready
     check_ready(&state)?;
@@ -3750,7 +3758,7 @@ async fn chat_completions(
         &request_id,
     );
 
-    let nvtx_validate = dynamo_nvtx_range!("frontend.http.chat.validate");
+    let nvtx_validate = dynamo_nvtx_keyed_range!("frontend.http.chat.validate", nvtx_key);
     state
         .chat_template_defaults()
         .apply_to_request(&mut request);
@@ -3806,7 +3814,7 @@ async fn chat_completions(
     // worker set when one served name fronts Beam and non-Beam pools.
     // The lookup sits inside validation, so this range nests in
     // frontend.http.chat.validate, whose duration includes it.
-    let nvtx_lookup = dynamo_nvtx_range!("frontend.http.chat.engine_lookup");
+    let nvtx_lookup = dynamo_nvtx_keyed_range!("frontend.http.chat.engine_lookup", nvtx_key);
     let (engine, parsing_options) = state
         .manager()
         .get_chat_completions_engine_with_parsing(&model)
@@ -3879,7 +3887,7 @@ async fn chat_completions(
     // issue the generate call on the engine
     // Covers preprocessing, routing and the wire handoff to the worker — everything
     // between the validated request and a live response stream.
-    let nvtx_generate = dynamo_nvtx_range!("frontend.http.chat.generate");
+    let nvtx_generate = dynamo_nvtx_keyed_range!("frontend.http.chat.generate", nvtx_key);
     let stream = engine.generate(request).await.map_err(|e| {
         if super::metrics::request_was_rejected(e.as_ref()) {
             state
@@ -3962,7 +3970,7 @@ async fn chat_completions(
                 // consecutive `sse_chunk` ranges cover both the worker producing
                 // the next token and the frontend's own receive/decode path,
                 // which is not annotated — do not read them as pure worker time.
-                let nvtx_chunk = dynamo_nvtx_range!("frontend.http.chat.sse_chunk");
+                let nvtx_chunk = dynamo_nvtx_keyed_range!("frontend.http.chat.sse_chunk", nvtx_key);
                 events.clear();
                 let semantic_error =
                     set_stream_semantic_error(&response, &producer_error_signal);
@@ -3995,7 +4003,7 @@ async fn chat_completions(
                 // prefixed with annotation events (`data: None`) and opens with a
                 // role-only delta, neither of which is a generated token.
                 if first_chunk && response.data.as_ref().is_some_and(chunk_has_generated_tokens) {
-                    dynamo_nvtx_mark!("frontend.http.chat.first_chunk");
+                    dynamo_nvtx_keyed_mark!("frontend.http.chat.first_chunk", nvtx_key);
                     first_chunk = false;
                 }
 
@@ -4143,7 +4151,7 @@ async fn chat_completions(
 
         // Spans the whole fold, so it includes worker time; the per-token frontend
         // cost on this path is not separable from the wait for the next token.
-        let _nvtx_aggregate = dynamo_nvtx_range!("frontend.http.chat.aggregate");
+        let _nvtx_aggregate = dynamo_nvtx_keyed_range!("frontend.http.chat.aggregate", nvtx_key);
         let mut response =
             NvCreateChatCompletionResponse::from_annotated_stream(stream, parsing_options.clone())
                 .await

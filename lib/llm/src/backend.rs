@@ -25,7 +25,7 @@ use anyhow::Result;
 use futures::stream::{self, StreamExt};
 
 use crate::model_card::ModelDeploymentCard;
-use dynamo_runtime::dynamo_nvtx_range;
+use dynamo_runtime::dynamo_nvtx_keyed_range;
 use dynamo_runtime::{
     error::{DynamoError, ErrorClass},
     pipeline::{
@@ -149,6 +149,9 @@ struct DecoderParams {
     // this Backend emits can ever be reseeded into a retry, so there is no point snapshotting
     // the decoder's withheld state onto every chunk via `jailed_text`.
     migration_possible: bool,
+    // Request key for the per-token `detokenize` NVTX range; set by the caller, which
+    // holds the request context.
+    nvtx_key: Option<u64>,
 }
 
 impl DecoderParams {
@@ -175,6 +178,7 @@ impl DecoderParams {
             n: request.sampling_options.n.unwrap_or(1) as u32,
             jail_seed: request.jail_seed.clone(),
             migration_possible: request.migration_state.is_some(),
+            nvtx_key: None,
         }
     }
 }
@@ -214,7 +218,8 @@ impl Backend {
         let n = params.n.max(1);
         let mut decoders = HashMap::with_capacity(n as usize);
         for idx in 0..n {
-            let decoder = Decoder::new_with_checkpoint(tokenizer.clone(), &params)?;
+            let mut decoder = Decoder::new_with_checkpoint(tokenizer.clone(), &params)?;
+            decoder.nvtx_key = params.nvtx_key;
             decoders.insert(idx, decoder);
         }
 
@@ -249,7 +254,8 @@ impl
         request: SingleIn<PreprocessedRequest>,
         next: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     ) -> Result<ManyOut<Annotated<BackendOutput>>> {
-        let decoder_params = DecoderParams::from_request(&request);
+        let mut decoder_params = DecoderParams::from_request(&request);
+        decoder_params.nvtx_key = dynamo_runtime::nvtx::request_key(request.id());
 
         let next_stream = next.generate(request).await?;
 
@@ -714,6 +720,8 @@ pub struct Decoder {
     // would make a fresh incremental decoder treat them as already-consumed context.
     pending_token_ids: Vec<TokenIdType>,
     tracker: Option<Arc<RequestTracker>>,
+    // Request key for the `detokenize` NVTX range; `None` leaves it unkeyed.
+    nvtx_key: Option<u64>,
 
     // do not trigger stop conditions until at least this many tokens have been generated
     min_tokens: u32,
@@ -973,6 +981,7 @@ impl Decoder {
             skip_special_tokens,
             pending_token_ids,
             tracker,
+            nvtx_key: None,
             hidden_stop_ids,
             visible_stop_ids,
             user_stop_ids,
@@ -1039,7 +1048,7 @@ impl Decoder {
         let detokenize_start = self.tracker.as_ref().map(|_| Instant::now());
         self.pending_token_ids.push(token_id);
         let mut decoded_text = {
-            let _nvtx = dynamo_nvtx_range!("detokenize");
+            let _nvtx = dynamo_nvtx_keyed_range!("detokenize", self.nvtx_key);
             self.decode_stream.step(token_id)?
         };
         if decoded_text.is_some() {

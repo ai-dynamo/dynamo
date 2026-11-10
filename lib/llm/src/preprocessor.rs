@@ -41,7 +41,7 @@ use futures::stream::{self, StreamExt};
 use std::borrow::Cow;
 use std::time::Instant;
 
-use dynamo_runtime::dynamo_nvtx_range;
+use dynamo_runtime::dynamo_nvtx_keyed_range;
 use dynamo_runtime::metrics::frontend_perf::{
     DETOKENIZE_TOKEN_COUNT, DETOKENIZE_TOTAL_US, STAGE_DURATION_SECONDS, STAGE_PREPROCESS,
     StageGuard, TEMPLATE_SECONDS, TOKENIZE_SECONDS,
@@ -1928,6 +1928,8 @@ impl<R: NvExtProvider> NvExtProvider for NormalizedArgsRequest<'_, R> {
 #[derive(Clone, Copy, Debug, Default)]
 struct PreprocessRequestOptions {
     preserve_omitted_max_tokens: bool,
+    /// Request key for the `preprocess.*` NVTX ranges, from [`dynamo_runtime::nvtx::request_key`].
+    nvtx_key: Option<u64>,
 }
 
 struct EmbeddingTokenizerState {
@@ -3516,7 +3518,7 @@ impl OpenAIPreprocessor {
 
         let template_start = Instant::now();
         let (formatted_prompt, prompt_injected_reasoning) = {
-            let _nvtx = dynamo_nvtx_range!("preprocess.template");
+            let _nvtx = dynamo_nvtx_keyed_range!("preprocess.template", options.nvtx_key);
             off_runtime(|| self.apply_template_and_prefill(request))
                 .with_context(|| "Failed to apply prompt template")?
         };
@@ -3524,7 +3526,7 @@ impl OpenAIPreprocessor {
 
         let tokenize_start = Instant::now();
         let (token_ids, annotations) = {
-            let _nvtx = dynamo_nvtx_range!("preprocess.tokenize");
+            let _nvtx = dynamo_nvtx_keyed_range!("preprocess.tokenize", options.nvtx_key);
             self.gather_tokens(request, formatted_prompt.as_ref(), tracker)
                 .await
                 .with_context(|| "Failed to gather tokens")?
@@ -8613,6 +8615,7 @@ impl
                 .get::<bool>(PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY)
                 .ok()
                 .is_some_and(|flag| *flag),
+            nvtx_key: dynamo_runtime::nvtx::request_key(context.id()),
         };
 
         // convert the chat completion request to a common completion request
@@ -15749,6 +15752,7 @@ responses_tools: None,
                 Some(100),
                 PreprocessRequestOptions {
                     preserve_omitted_max_tokens: true,
+                    ..Default::default()
                 },
             ),
             None

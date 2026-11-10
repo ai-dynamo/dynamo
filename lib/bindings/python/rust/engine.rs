@@ -21,7 +21,7 @@ use tokio_stream::{Stream, StreamExt, wrappers::ReceiverStream};
 use tokio_util::sync::CancellationToken;
 
 use dynamo_llm::admission_gate::{AdmissionRequest, AdmissionResponse, WorkerAdmissionGate};
-use dynamo_runtime::dynamo_nvtx_range;
+use dynamo_runtime::dynamo_nvtx_keyed_range;
 use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
 use dynamo_runtime::logging::get_distributed_tracing_context;
 use dynamo_runtime::pipeline::network::RequestPlanePayloadCodec;
@@ -89,6 +89,7 @@ pub(crate) async fn invoke_generator<F, G>(
     event_loop: Arc<PyObject>,
     to_python_input: F,
     to_python_kwargs: Option<G>,
+    nvtx_key: Option<u64>,
 ) -> Result<PyItemStream>
 where
     F: FnOnce(Python) -> PyResult<Py<PyAny>> + Send + 'static,
@@ -98,7 +99,7 @@ where
         // Covers GIL acquisition plus the Rust->Python crossing that builds the
         // request object and calls the handler's `generate`. Not token
         // generation: the generator has not been advanced when this range ends.
-        let _nvtx = dynamo_nvtx_range!("pybridge.invoke_generator");
+        let _nvtx = dynamo_nvtx_keyed_range!("pybridge.invoke_generator", nvtx_key);
         Python::with_gil(|py| {
             let python_input = to_python_input(py)?;
 
@@ -120,7 +121,7 @@ where
             }?;
 
             let locals = TaskLocals::new(event_loop.bind(py).clone());
-            demand_driven_python_stream(locals, gen_result.into_bound(py))
+            demand_driven_python_stream(locals, gen_result.into_bound(py), nvtx_key)
         })
     })
     .await
@@ -132,13 +133,14 @@ where
 fn demand_driven_python_stream(
     locals: TaskLocals,
     generator: Bound<'_, PyAny>,
+    nvtx_key: Option<u64>,
 ) -> PyResult<PyItemStream> {
     let anext = generator.getattr("__anext__")?.unbind();
-    let stream = futures::stream::unfold((anext, locals), |(anext, locals)| async move {
+    let stream = futures::stream::unfold((anext, locals), move |(anext, locals)| async move {
         // Only the GIL-bound `__anext__` call is annotated. The `.await` below is
         // the Python generator (and, for a worker, the engine) producing the item,
         // so leaving it outside the range keeps engine time out of the bridge cost.
-        let nvtx_anext = dynamo_nvtx_range!("pybridge.anext_call");
+        let nvtx_anext = dynamo_nvtx_keyed_range!("pybridge.anext_call", nvtx_key);
         let next = Python::with_gil(|py| {
             pyo3_async_runtimes::into_future_with_locals(&locals, anext.bind(py).call0()?)
         });
@@ -466,6 +468,7 @@ where
                 Py::new(py, py_context).map(|context| vec![("context", context.into_any())])
             }
         }),
+        dynamo_runtime::nvtx::request_key(&id),
     )
     .await?;
 
@@ -510,6 +513,7 @@ where
 
 async fn process_item<Resp>(
     item: Result<Py<PyAny>, PyErr>,
+    nvtx_key: Option<u64>,
 ) -> Result<Annotated<Resp>, ResponseProcessingError>
 where
     Resp: Data + for<'de> Deserialize<'de>,
@@ -518,7 +522,7 @@ where
     let response = tokio::task::spawn_blocking(move || {
         // Per-response Python->Rust deserialization: pure Dynamo overhead paid
         // once per streamed chunk.
-        let _nvtx = dynamo_nvtx_range!("pybridge.decode_response");
+        let _nvtx = dynamo_nvtx_keyed_range!("pybridge.decode_response", nvtx_key);
         Python::with_gil(|py| depythonize_annotated::<Resp>(&item.into_bound(py)))
     })
     .await
@@ -621,6 +625,7 @@ where
 
         let mut stream = stream;
         let mut count = 0;
+        let nvtx_key = dynamo_runtime::nvtx::request_key(&request_id);
 
         while let Some(item) = stream.next().await {
             count += 1;
@@ -632,7 +637,7 @@ where
 
             let mut done = false;
 
-            let response = match process_item::<Resp>(item).await {
+            let response = match process_item::<Resp>(item, nvtx_key).await {
                 Ok(response) => response,
                 Err(e) => {
                     done = true;
@@ -714,13 +719,15 @@ fn encoded_python_response_stream(
     payload_codec: RequestPlanePayloadCodec,
     classification: WaitClassification,
 ) -> DataStream<EncodedPythonResponse> {
+    let nvtx_key = dynamo_runtime::nvtx::request_key(&request_id);
     let items = unbuffered_python_response_stream(stream, ctx, request_id);
     Box::pin(futures::stream::unfold(
         (items, classification),
         move |(mut items, classification)| async move {
             let item = items.next().await?;
             let response =
-                encode_python_item(payload_codec, item, classification.classifies()).await;
+                encode_python_item(payload_codec, item, classification.classifies(), nvtx_key)
+                    .await;
             classification.accepted(response.admission_output());
             Some((response, (items, classification)))
         },
@@ -911,6 +918,7 @@ impl AsyncEngine<ManyIn<PythonPayload>, ManyOut<PythonResponseItem>, Error>
                         .map(|c| vec![("context", c.into_any())])
                 }
             }),
+            dynamo_runtime::nvtx::request_key(&request_id),
         )
         .await?;
 
