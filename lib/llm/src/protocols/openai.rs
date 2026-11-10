@@ -578,8 +578,8 @@ impl ParsingOptions {
         chat_completions::unified_parser::supported_family(selected, unsupported)
     }
 
-    /// The unified family that owns this model's raw batch output.
-    pub(crate) fn batch_unified_family(&self) -> Option<&'static str> {
+    /// The unified family resolved from parser configuration, version policy, and tokenizer support.
+    pub(crate) fn resolved_unified_family(&self) -> Option<&'static str> {
         self.supported_unified_family(chat_completions::unified_parser::selected_batch_family(
             self.tool_call_parser.as_deref(),
             self.reasoning_parser.as_deref(),
