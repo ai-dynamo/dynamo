@@ -19,6 +19,42 @@ use crate::services::common::zmq::{
 
 const WATERMARK_UNSET: u64 = u64::MAX;
 
+/// Process-wide ZMQ ingest counters, read by benchmarks that run the listeners
+/// in process.
+#[cfg(feature = "bench")]
+pub mod bench_counters {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    macro_rules! counters {
+        ($($name:ident),* $(,)?) => {
+            $(pub static $name: AtomicU64 = AtomicU64::new(0);)*
+
+            /// Every counter as `(name, value)`.
+            pub fn snapshot() -> Vec<(&'static str, u64)> {
+                vec![$((stringify!($name), $name.load(Ordering::Relaxed)),)*]
+            }
+        };
+    }
+
+    counters!(
+        LIVE_BATCHES,
+        LIVE_PAYLOAD_BYTES,
+        LIVE_EVENTS,
+        DECODE_ERRORS,
+        GAPS,
+        REPLAYS,
+        REPLAYED_BATCHES,
+        LISTENER_FAILURES,
+    );
+}
+
+macro_rules! bench_count {
+    ($name:ident, $value:expr) => {
+        #[cfg(feature = "bench")]
+        bench_counters::$name.fetch_add($value as u64, Ordering::Relaxed);
+    };
+}
+
 fn cursor_from_watermark(watermark: u64) -> CursorState {
     if watermark == WATERMARK_UNSET {
         CursorState::Initial
@@ -197,6 +233,7 @@ impl ListenerLoop {
             "Requesting replay from engine"
         );
 
+        bench_count!(REPLAYS, 1);
         let Some(replay_endpoint) = self.replay_endpoint.as_deref() else {
             tracing::warn!(
                 self.worker_id,
@@ -311,6 +348,7 @@ impl ListenerLoop {
         replay_progress.warn_if_incomplete(worker_id, dp_rank);
 
         let replayed = replay_progress.replayed();
+        bench_count!(REPLAYED_BATCHES, replayed);
         tracing::info!(worker_id, dp_rank, replayed, "Replay complete");
         Ok(replayed)
     }
@@ -318,6 +356,7 @@ impl ListenerLoop {
     async fn handle_gap(&mut self, seq: u64) -> Result<(), String> {
         match self.cursor().observe(seq) {
             CursorObservation::Initial { got } if got > 0 => {
+                bench_count!(GAPS, 1);
                 tracing::warn!(
                     self.worker_id,
                     self.dp_rank,
@@ -328,6 +367,7 @@ impl ListenerLoop {
                 self.replay_gap(0, got).await?;
             }
             CursorObservation::Gap { expected, got } => {
+                bench_count!(GAPS, 1);
                 tracing::warn!(
                     self.worker_id,
                     self.dp_rank,
@@ -345,9 +385,12 @@ impl ListenerLoop {
     }
 
     async fn apply_live_batch(&mut self, seq: u64, payload: &[u8]) -> Result<(), String> {
+        bench_count!(LIVE_BATCHES, 1);
+        bench_count!(LIVE_PAYLOAD_BYTES, payload.len());
         let batch = match decode_event_batch(payload) {
             Ok(batch) => batch,
             Err(error) => {
+                bench_count!(DECODE_ERRORS, 1);
                 tracing::warn!(
                     self.worker_id,
                     self.dp_rank,
@@ -380,6 +423,7 @@ impl ListenerLoop {
                         self.worker_id, self.dp_rank
                     )
                 })?;
+            bench_count!(LIVE_EVENTS, 1);
             self.messages_processed += 1;
         }
         self.watermark.store(seq, Ordering::Release);
@@ -472,6 +516,7 @@ pub fn spawn_zmq_listener(
         )
         .await
         {
+            bench_count!(LISTENER_FAILURES, 1);
             tracing::error!(worker_id, dp_rank, error = %error, "ZMQ listener failed");
             record.try_mark_failed(generation, error);
         }

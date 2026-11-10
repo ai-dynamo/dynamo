@@ -283,7 +283,7 @@ impl RawKvEventSink for ZmqKvEventSink {
     }
 }
 
-pub(crate) fn encode_event_batch(
+pub fn encode_event_batch(
     raw_events: &[RawKvEvent],
     block_size: u32,
     dp_rank: u32,

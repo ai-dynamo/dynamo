@@ -314,7 +314,9 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
             let backend = Arc::clone(&backend);
             let metrics = metrics.clone();
 
-            let handle = std::thread::spawn(move || {
+            let handle = std::thread::Builder::new()
+                .name(format!("kv-lane-{worker_idx}"))
+                .spawn(move || {
                 // This is observability, not recovery: if the worker panics, log
                 // through tracing and then preserve the panic for join().
                 let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -337,7 +339,8 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
                     );
                     std::panic::resume_unwind(panic_payload);
                 }
-            });
+            })
+            .expect("spawn indexer lane thread");
             thread_handles.push(handle);
         }
 
@@ -619,6 +622,15 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
             accepted_ns,
             event_worker: worker_idx,
         })
+    }
+
+    /// Events queued on each lane and not yet applied.
+    #[cfg(feature = "bench")]
+    pub fn queue_depths(&self) -> Vec<usize> {
+        self.worker_event_channels
+            .iter()
+            .map(|channel| channel.len())
+            .collect()
     }
 
     #[cfg(feature = "bench")]

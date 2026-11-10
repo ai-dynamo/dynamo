@@ -36,7 +36,7 @@ pub use core::{
     SelectionPartition, SelectionRun, SelectionScheduler, SelectionServiceConfig, SessionBinding,
 };
 pub use error::SelectionError;
-pub use ingress::KvEventIngress;
+pub use ingress::{KvEventIngress, ZmqDirectIngress};
 pub use input::{PromptRequest, PromptView};
 pub use membership::{CatalogObserver, CatalogReconciler, WorkerCatalogSource};
 pub use pending::SelectionCacheConfig;
