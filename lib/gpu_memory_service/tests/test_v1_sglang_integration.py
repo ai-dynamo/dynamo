@@ -88,12 +88,8 @@ def test_sglang_hooks_capture_models_and_delegate_memory_control(monkeypatch):
 
     original_factory = Mock()
     assert hooks[_FACTORY_TARGET](original_factory, enable=True) is adapter
-    # Graph backends ask for a disabled adapter; the breakable prefill backend
-    # raises if it gets an enabled one.
-    assert (
-        hooks[_FACTORY_TARGET](original_factory, enable=False)
-        is original_factory.return_value
-    )
+    disabled = hooks[_FACTORY_TARGET](original_factory, enable=False)
+    assert disabled is original_factory.return_value
     original_factory.assert_called_once_with(enable=False)
     with (
         adapter.region("weights", enable_cpu_backup=True),

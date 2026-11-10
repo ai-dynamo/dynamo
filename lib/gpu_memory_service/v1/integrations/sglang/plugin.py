@@ -77,14 +77,6 @@ def register_gms_v1_plugin() -> None:
     if os.environ.get("DYN_GMS_USE_V1") != "true":
         return
 
-    def around_create_adapter(original, *args, **kwargs):
-        # Without SGLANG_MEMORY_SAVER_CUDA_GRAPH, graph backends ask for a
-        # disabled adapter; the breakable prefill backend rejects an enabled one.
-        enable = kwargs["enable"] if "enable" in kwargs else args[0]
-        if enable:
-            return _adapter()
-        return original(*args, **kwargs)
-
     def around_create_dsa_index_key_cache(original, *args, **kwargs):
         with _adapter().region("kv_cache"):
             return original(*args, **kwargs)
@@ -106,9 +98,12 @@ def register_gms_v1_plugin() -> None:
         lambda _scheduler: _adapter()._publish_weights(),
         HookType.BEFORE,
     )
+    # Graph backends ask for a disabled adapter unless
+    # SGLANG_MEMORY_SAVER_CUDA_GRAPH is set, and the breakable prefill backend
+    # rejects an enabled one.
     HookRegistry.register(
         "sglang.srt.utils.torch_memory_saver_adapter.TorchMemorySaverAdapter.create",
-        around_create_adapter,
+        lambda original, enable: _adapter() if enable else original(enable=enable),
         HookType.AROUND,
     )
     HookRegistry.register(
