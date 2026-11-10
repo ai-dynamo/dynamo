@@ -15,13 +15,20 @@ use tokio::time::Instant;
 
 use super::PrefillTokenDeltas;
 use super::prefill_tracker::{PrefillLoadSnapshot, PrefillTimeLoadError};
-use super::prompt_membership_trie::PromptMembershipTrie;
+use super::prompt_membership_trie::{OverlapDepths, PromptMembershipTrie};
 use super::sharded_lock::ShardedRwLock;
 use super::single::PromptMembershipDelta;
 use super::topology::WorkerTopologyChange;
 use crate::plugins::worker_selection::WorkerCapacity;
 use crate::protocols::WorkerWithDpRank;
 use crate::scheduling::policy_config::FullRankCounts;
+
+thread_local! {
+    /// Overlap-depth scratch for [`PromptRegistry::project_worker_loads_into`], kept per
+    /// thread so each projection reuses its allocations.
+    static OVERLAP_DEPTHS: std::cell::RefCell<OverlapDepths> =
+        std::cell::RefCell::new(OverlapDepths::default());
+}
 
 /// Ephemeral, request-specific view of worker load.
 ///
@@ -397,10 +404,24 @@ impl PromptRegistry {
         full_ranks: Option<&mut FullRankCounts>,
     ) {
         let query_len = token_sequence.map_or(0, |query| query.len());
-        let matched_depth = self.membership.compute_overlap_depths(token_sequence);
+        OVERLAP_DEPTHS.with_borrow_mut(|depths| {
+            self.membership
+                .compute_overlap_depths_into(token_sequence, depths);
+            self.project_with_depths(query_len, depths, decay_now, projections, full_ranks);
+        });
+    }
+
+    fn project_with_depths(
+        &self,
+        query_len: usize,
+        depths: &OverlapDepths,
+        decay_now: Instant,
+        projections: &mut FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
+        full_ranks: Option<&mut FullRankCounts>,
+    ) {
         let loads = self.loads.read();
         let project = |worker: WorkerWithDpRank, load: WorkerLoadSnapshot| {
-            let overlap_depth = matched_depth.get(&worker).copied().unwrap_or(0);
+            let overlap_depth = depths.get(&worker);
             load.projection(decay_now, query_len.saturating_sub(overlap_depth))
         };
 
