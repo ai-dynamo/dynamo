@@ -92,7 +92,8 @@ impl LoraFilter {
     /// Logic:
     /// - `lora_name` is None: return all workers (base model request)
     /// - Active entry: prefer loaded workers in replica set, fall back to full replica set
-    /// - Inactive entry: return single HRW-pinned worker (cold-start determinism)
+    /// - Inactive entry: return single HRW-pinned worker (cold-start determinism), unless the pin
+    ///   does not have the adapter loaded and a live worker does; then return those live workers
     /// - Not in routing table: prefer known-loaded workers, fall back to all workers
     pub fn filter_worker_ids_for_lora(
         &self,
@@ -203,10 +204,34 @@ impl LoraFilter {
             );
             self.bounded_fallback(observed, lora_name, available)
         } else {
-            // Inactive: cold-start pin
+            // Inactive: cold-start pin. The controller picks the pin by HRW rank alone, so it can
+            // name a worker that does not have the adapter loaded. Prefer live workers that do:
+            // they serve without a new load, and a backend that only serves registered adapters
+            // (the vLLM worker) rejects the request on the pin.
             if let Some(pin_id) = config.replica_set.first().map(|w| w.worker_id)
                 && available.contains(&pin_id)
             {
+                let loaded_ids: HashSet<u64> = observed
+                    .get_loaded_workers(lora_name)
+                    .iter()
+                    .map(|w| w.worker_id)
+                    .collect();
+                if !loaded_ids.contains(&pin_id) {
+                    let live_loaded: Vec<u64> = available
+                        .iter()
+                        .copied()
+                        .filter(|id| loaded_ids.contains(id))
+                        .collect();
+                    if !live_loaded.is_empty() {
+                        tracing::debug!(
+                            lora = lora_name,
+                            worker_id = pin_id,
+                            count = live_loaded.len(),
+                            "Cold-start pin does not have the adapter loaded; narrowed to known-loaded live workers"
+                        );
+                        return live_loaded;
+                    }
+                }
                 tracing::debug!(
                     lora = lora_name,
                     worker_id = pin_id,
