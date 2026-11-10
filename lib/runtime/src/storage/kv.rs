@@ -391,7 +391,28 @@ impl Manager {
         ),
         StoreError,
     > {
+        self.watch_under(bucket_name, "", bucket_ttl, cancel_token)
+            .await
+    }
+
+    /// [`Manager::watch`] for the keys under `sub` (see [`Bucket::watch_under`]). The receiver
+    /// gets at least every change under `sub`; a backend that cannot scope its watch sends the
+    /// whole bucket.
+    pub async fn watch_under(
+        self: Arc<Self>,
+        bucket_name: &str,
+        sub: &str,
+        bucket_ttl: Option<Duration>,
+        cancel_token: CancellationToken,
+    ) -> Result<
+        (
+            tokio::task::JoinHandle<()>,
+            tokio::sync::mpsc::Receiver<WatchEvent>,
+        ),
+        StoreError,
+    > {
         let bucket_name = bucket_name.to_string();
+        let sub = sub.to_string();
         // Backpressure is intentional: discovery state events must never be dropped.
         let (tx, rx) = tokio::sync::mpsc::channel(16384);
         let (established_tx, established_rx) = tokio::sync::oneshot::channel();
@@ -412,7 +433,7 @@ impl Manager {
                 // Bucket::watch atomically establishes its initial snapshot and incremental
                 // stream. A separate entries() read here could replay an older buffered update
                 // after a newer snapshot.
-                let mut stream = match bucket.watch().await {
+                let mut stream = match bucket.watch_under(&sub).await {
                     Ok(stream) => stream,
                     Err(error) => {
                         let _ = established_tx.send(Err(error));
@@ -540,6 +561,23 @@ pub trait Bucket: Send + Sync {
     /// The Key includes the full path including the bucket name.
     /// That means you cannot directory get a Key from `entries` and pass it to `get` or `delete`.
     async fn entries(&self) -> Result<HashMap<Key, bytes::Bytes>, StoreError>;
+
+    /// [`Bucket::entries`] for the keys under `sub`, a path inside the bucket with no leading
+    /// or trailing `/`. An empty `sub` is the whole bucket.
+    ///
+    /// Returns at least every entry under `sub`, so callers still filter. The default reads the
+    /// whole bucket. A backend whose bucket is a key prefix (etcd) reads only `sub`.
+    async fn entries_under(&self, _sub: &str) -> Result<HashMap<Key, bytes::Bytes>, StoreError> {
+        self.entries().await
+    }
+
+    /// [`Bucket::watch`] for the keys under `sub`, scoped as [`Bucket::entries_under`] is.
+    async fn watch_under(
+        &self,
+        _sub: &str,
+    ) -> Result<Pin<Box<dyn futures::Stream<Item = WatchEvent> + Send + '_>>, StoreError> {
+        self.watch().await
+    }
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]

@@ -699,8 +699,11 @@ impl Discovery for KVStoreDiscovery {
             return Ok(Vec::new());
         };
 
-        // Get all entries from the bucket
-        let entries = bucket.entries().await?;
+        // Read only the query's keys where the store can scope the read (etcd); the prefix
+        // filter below still applies to stores that return the whole bucket.
+        let entries = bucket
+            .entries_under(Self::strip_bucket_prefix(&prefix, bucket_name))
+            .await?;
         tracing::debug!(
             "KVStoreDiscovery::list: query={:?}, prefix={}, bucket={}, entries={}",
             query,
@@ -743,11 +746,14 @@ impl Discovery for KVStoreDiscovery {
         // Use the provided cancellation token, or fall back to the default token
         let cancel_token = cancel_token.unwrap_or_else(|| self.cancel_token.clone());
 
+        // Watch only the query's keys where the store can scope the watch (etcd), so this
+        // watcher neither snapshots nor receives changes from the rest of the bucket.
         let (_, mut rx) = self
             .store
             .clone()
-            .watch(
+            .watch_under(
                 bucket_name,
+                Self::strip_bucket_prefix(&prefix, bucket_name),
                 None, // No TTL
                 cancel_token,
             )
@@ -1534,5 +1540,147 @@ mod tests {
         let taints = card_json["runtime_config"]["taints"].as_array().unwrap();
         assert!(taints.contains(&serde_json::json!("third")));
         assert!(!taints.contains(&serde_json::json!("second")));
+    }
+}
+
+#[cfg(feature = "integration")]
+#[cfg(test)]
+mod etcd_tests {
+    use super::*;
+    use crate::Runtime;
+    use crate::component::TransportType;
+    use crate::transports::etcd as etcd_transport;
+    use futures::StreamExt;
+
+    fn endpoint(namespace: &str, component: &str, endpoint: &str) -> DiscoverySpec {
+        DiscoverySpec::Endpoint {
+            namespace: namespace.to_string(),
+            component: component.to_string(),
+            endpoint: endpoint.to_string(),
+            device_type: None,
+            request_plane_codec: None,
+            transport: TransportType::Nats("nats://localhost:4222".to_string()),
+        }
+    }
+
+    fn endpoint_names(instances: &[DiscoveryInstance]) -> Vec<String> {
+        let mut names: Vec<_> = instances
+            .iter()
+            .map(|instance| match instance {
+                DiscoveryInstance::Endpoint(inst) => {
+                    format!("{}/{}/{}", inst.namespace, inst.component, inst.endpoint)
+                }
+                other => panic!("expected an endpoint, got {other:?}"),
+            })
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// On etcd, namespaced lists and watches read only their own keys, and still return every
+    /// key the query matches, including next to a sibling namespace (`x-1` and `x-10`).
+    #[test]
+    fn scoped_queries_return_every_matching_instance() {
+        let rt = Runtime::single_threaded().unwrap();
+        let rt_clone = rt.clone();
+
+        rt_clone.primary().block_on(async move {
+            let etcd_client =
+                etcd_transport::Client::new(etcd_transport::ClientOptions::default(), rt)
+                    .await
+                    .unwrap();
+            let client =
+                KVStoreDiscovery::new(kv::Manager::etcd(etcd_client), CancellationToken::new());
+            let run = uuid::Uuid::new_v4().simple().to_string()[..8].to_string();
+            let (ns1, ns10) = (format!("scope-{run}-1"), format!("scope-{run}-10"));
+            for (ns, comp, ep) in [
+                (&ns1, "comp", "ep-a"),
+                (&ns1, "comp", "ep-b"),
+                (&ns1, "other", "ep-a"),
+                (&ns10, "comp", "ep-a"),
+            ] {
+                client.register(endpoint(ns, comp, ep)).await.unwrap();
+            }
+
+            let namespaced = client
+                .list(DiscoveryQuery::NamespacedEndpoints {
+                    namespace: ns1.clone(),
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                endpoint_names(&namespaced),
+                [
+                    format!("{ns1}/comp/ep-a"),
+                    format!("{ns1}/comp/ep-b"),
+                    format!("{ns1}/other/ep-a")
+                ]
+            );
+            let component = client
+                .list(DiscoveryQuery::ComponentEndpoints {
+                    namespace: ns1.clone(),
+                    component: "comp".to_string(),
+                })
+                .await
+                .unwrap();
+            assert_eq!(component.len(), 2);
+            let single = client
+                .list(DiscoveryQuery::Endpoint {
+                    namespace: ns1.clone(),
+                    component: "comp".to_string(),
+                    endpoint: "ep-a".to_string(),
+                })
+                .await
+                .unwrap();
+            assert_eq!(endpoint_names(&single), [format!("{ns1}/comp/ep-a")]);
+            let sibling = client
+                .list(DiscoveryQuery::NamespacedEndpoints {
+                    namespace: ns10.clone(),
+                })
+                .await
+                .unwrap();
+            assert_eq!(endpoint_names(&sibling), [format!("{ns10}/comp/ep-a")]);
+
+            let mut stream = client
+                .list_and_watch(
+                    DiscoveryQuery::ComponentEndpoints {
+                        namespace: ns1.clone(),
+                        component: "comp".to_string(),
+                    },
+                    None,
+                )
+                .await
+                .unwrap();
+            let mut initial = Vec::new();
+            loop {
+                match stream.next().await.unwrap().unwrap() {
+                    DiscoveryEvent::Added(instance) => initial.push(instance),
+                    DiscoveryEvent::Resync(_) => break,
+                    other => panic!("unexpected startup event {other:?}"),
+                }
+            }
+            assert_eq!(
+                endpoint_names(&initial),
+                [format!("{ns1}/comp/ep-a"), format!("{ns1}/comp/ep-b")]
+            );
+
+            client
+                .register(endpoint(&ns10, "comp", "ep-late"))
+                .await
+                .unwrap();
+            client
+                .register(endpoint(&ns1, "comp", "ep-late"))
+                .await
+                .unwrap();
+            let next = tokio::time::timeout(std::time::Duration::from_secs(10), stream.next())
+                .await
+                .expect("no event within 10 s")
+                .unwrap()
+                .unwrap();
+            let DiscoveryEvent::Added(instance) = next else {
+                panic!("expected an added endpoint, got {next:?}");
+            };
+            assert_eq!(endpoint_names(&[instance]), [format!("{ns1}/comp/ep-late")]);
+        });
     }
 }
