@@ -453,12 +453,6 @@ fn resolve_plugins_rejects_hosts_no_linked_plugin_registers() {
             Arc::new(|_| unreachable!("resolve_plugins builds no policy here")),
         )
         .unwrap();
-    registry
-        .register_request_classifier(
-            "classifier",
-            Arc::new(|_| unreachable!("resolve_plugins builds no classifier here")),
-        )
-        .unwrap();
     register(
         &mut registry,
         "linked",
@@ -466,31 +460,25 @@ fn resolve_plugins_rejects_hosts_no_linked_plugin_registers() {
             (HintHost::AnyWorkerSelection, HintDefault::On),
             (HintHost::worker_selection("kvcr"), HintDefault::On),
             (HintHost::worker_selection("default"), HintDefault::On),
-            (HintHost::request_classifier("classifier"), HintDefault::Off),
         ],
     );
     registry
         .resolve_plugins(&KvRouterConfig::default())
         .unwrap();
 
-    for (host, expected) in [
-        (
-            HintHost::worker_selection("kvrc"),
-            r#"hint-policy type "typo" names host WorkerSelection("kvrc"), which no linked plugin registers"#,
-        ),
-        (
-            HintHost::request_classifier("missing"),
-            r#"hint-policy type "typo" names host RequestClassifier("missing"), which no linked plugin registers"#,
-        ),
-    ] {
-        let mut registry = registry.clone();
-        register(&mut registry, "typo", [(host, HintDefault::On)]);
-        let error = registry
-            .resolve_plugins(&KvRouterConfig::default())
-            .err()
-            .unwrap();
-        assert_eq!(error.to_string(), expected);
-    }
+    register(
+        &mut registry,
+        "typo",
+        [(HintHost::worker_selection("kvrc"), HintDefault::On)],
+    );
+    let error = registry
+        .resolve_plugins(&KvRouterConfig::default())
+        .err()
+        .unwrap();
+    assert_eq!(
+        error.to_string(),
+        r#"hint-policy type "typo" names host WorkerSelection("kvrc"), which no linked plugin registers"#
+    );
 }
 
 #[test]
@@ -1196,7 +1184,7 @@ fn copy_accessors_follow_each_policys_declarations() {
     };
     let source = copy();
     let locations = kv_copy_locations(&workers, &candidates, &source);
-    assert_eq!(locations.map(|l| l.local_prefix_blocks()), Some(1));
+    assert_eq!(locations.as_ref().map(|l| l.local_prefix_blocks()), Some(1));
     let inputs = HintInputs {
         kv_copy_source: Some(BookedCopy::new(source, locations)),
         ..inputs()

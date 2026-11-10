@@ -87,10 +87,6 @@ impl RequestClassifierRegistry {
         self.providers.is_empty()
     }
 
-    pub(crate) fn contains(&self, classifier_type: &str) -> bool {
-        self.providers.contains_key(classifier_type)
-    }
-
     pub fn register(
         &mut self,
         name: impl Into<String>,

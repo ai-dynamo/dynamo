@@ -49,11 +49,25 @@ pub(super) fn booking_hint(
     if policies.is_empty() && booking.kv_copy_source.is_none() {
         return Ok(None);
     }
-    let workers = entry.workers_tx.borrow();
-    let worker_accepts_hints = workers
-        .get(&booking.worker.worker_id)
-        .and_then(|config| config.kv_hint_transfer_metadata_for_dp_rank(booking.worker.dp_rank))
-        .is_some();
+    // Read the worker snapshot here and release its lock before any hint policy runs, so a slow
+    // policy can't hold up worker updates for the partition.
+    let (worker_accepts_hints, booked_copy) = {
+        let workers = entry.workers_tx.borrow();
+        let worker_accepts_hints = workers
+            .get(&booking.worker.worker_id)
+            .and_then(|config| config.kv_hint_transfer_metadata_for_dp_rank(booking.worker.dp_rank))
+            .is_some();
+        let booked_copy = booking
+            .kv_copy_source
+            .filter(|_| worker_accepts_hints)
+            .map(|copy| {
+                let locations = booking
+                    .kv_transfer_candidates
+                    .and_then(|candidates| kv_copy_locations(&*workers, candidates, &copy));
+                BookedCopy::new(copy, locations)
+            });
+        (worker_accepts_hints, booked_copy)
+    };
     if !worker_accepts_hints {
         if committed {
             warn_dropped_copy(
@@ -64,12 +78,6 @@ pub(super) fn booking_hint(
         }
         return Ok(None);
     }
-    let booked_copy = booking.kv_copy_source.map(|copy| {
-        let locations = booking
-            .kv_transfer_candidates
-            .and_then(|candidates| kv_copy_locations(&*workers, candidates, &copy));
-        BookedCopy::new(copy, locations)
-    });
     // A selection that reads copy offers commits the booked worker to its offer, which the
     // role's copy consumer sends. Otherwise the copy source is best effort.
     let (committed_kv_copy, kv_copy_source) = if entry.responsibilities.commit_kv_copy {
@@ -117,7 +125,7 @@ fn warn_dropped_copy(request_id: &str, worker: WorkerWithDpRank, reason: &str) {
 
 /// The router's `kv.fetch` action: every request block from 0 through the source's prefix. The
 /// hint stage numbers it.
-fn router_fetch_action(locations: KvCopyLocations<'_>) -> KvHintAction {
+fn router_fetch_action(locations: &KvCopyLocations<'_>) -> KvHintAction {
     KvHintAction::fetch(
         String::new(),
         KvSourceLocationsPayload {
