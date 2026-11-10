@@ -14809,8 +14809,15 @@ responses_tools: None,
             ) {
                 let version = std::env::var(env_llm::DYN_PARSER_VERSION).unwrap();
                 assert_eq!(
-                    OpenAIPreprocessor::parser_requires_special_tokens(Some("hermes"), None)
-                        .unwrap(),
+                    OpenAIPreprocessor::parser_requires_special_tokens(
+                        crate::protocols::openai::chat_completions::unified_parser::selected_family(
+                            Some("hermes"),
+                            None,
+                        ),
+                        Some("hermes"),
+                        None,
+                    )
+                    .unwrap(),
                     version != "1",
                     "Hermes special-token requirement for DYN_PARSER_VERSION={version}"
                 );

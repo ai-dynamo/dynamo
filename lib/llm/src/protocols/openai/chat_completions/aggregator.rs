@@ -2675,9 +2675,6 @@ mod tests {
         assert!(response.inner.choices[0].message.tool_calls.is_none());
     }
 
-    /// A Mistral call whose closed body is not valid JSON streams to the client as a
-    /// tool call. The non-streaming response must return the same calls: neither the
-    /// malformed call nor its valid sibling may be dropped.
     /// A pre-v11 Mistral model writes a `[TOOL_CALLS]` JSON array that only the v1
     /// parser reads. When the model's tokenizer rules out `mistral_4`, raw batch
     /// output keeps that parser, as the preprocessor's stream path does.
@@ -2729,6 +2726,9 @@ mod tests {
         assert!(call_names(unified).is_empty());
     }
 
+    /// A Mistral call whose closed body is not valid JSON streams to the client as a
+    /// tool call. The non-streaming response must return the same calls: neither the
+    /// malformed call nor its valid sibling may be dropped.
     #[tokio::test]
     async fn mistral_parser_confirmed_call_with_invalid_json_survives_aggregation() {
         let tool = |name: &str, parameter: &str| dynamo_parsers::tool_calling::ToolDefinition {

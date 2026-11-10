@@ -3154,9 +3154,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers-v2"
-version = "0.10.2"
+version = "0.10.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dd946b8d59920320e43e2d1b48b2bbb6553d50bc9c23b511293615714008476a"
+checksum = "f1211739971e54b388ccfe341e9cabb5cb77dfe0c17c43effae542d5c76640ec"
 dependencies = [
  "anyhow",
  "dynamo-structural-tag",
@@ -3211,9 +3211,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-renderer"
-version = "10.1.0"
+version = "10.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "496579bc389ec35a495c9eb64f2d61cd0ec5a322f5aa7e09115b026c0d30eb8a"
+checksum = "175d38c275d5ebf7b728c5479639e1fd1bf5353296a3628928c3c1f27a92f6cb"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3590,15 +3590,16 @@ dependencies = [
 
 [[package]]
 name = "dynamo-tokenizers"
-version = "4.1.2"
+version = "4.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "24dd8e85a6aea1079e33bd1e82ed0e53127751e472539682edc5a4066f360179"
+checksum = "d52363d05d370e0a83e3aea72cb17c2ada4e6f16795d1738c8e6760bfc173a38"
 dependencies = [
  "aho-corasick",
  "anyhow",
  "base64 0.22.1",
  "basetenkenizer",
  "blake3",
+ "fancy-regex 0.13.0",
  "fastokens",
  "moka",
  "rayon",
