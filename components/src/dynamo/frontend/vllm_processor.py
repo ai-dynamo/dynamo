@@ -1312,6 +1312,14 @@ class VllmProcessor:
         prompt_logprobs = PromptLogprobsAccumulator(request)
         pending_terminals: dict[int, dict[str, Any]] = {}
         locally_stopped_requests: set[str] = set()
+        include_completion_ids = nvext_extra_field_requested(
+            request, "completion_token_ids"
+        )
+        include_prompt_ids = nvext_extra_field_requested(request, "prompt_token_ids")
+        # Requested generated IDs wait here while parsing emits no chunk. Rust
+        # rejects completion_token_ids with n > 1, so one list is enough.
+        completion_ids: list[int] = []
+        prompt_ids_sent = False
 
         def attach_usage(output: dict[str, Any], *, finished: bool) -> None:
             # Local completion may precede every backend usage report. Preserve
@@ -1495,6 +1503,11 @@ class VllmProcessor:
                             postprocess_error = True
                             break
                         choice = post.process_output(output)
+                        if include_completion_ids:
+                            # vLLM's OutputProcessor already drops IDs after a
+                            # local stop string and keeps a hidden EOS, so its
+                            # delta needs no stop-boundary trimming here.
+                            completion_ids.extend(output.token_ids or [])
                         if output.index == output_idx:
                             if choice_top_logprobs is not None:
                                 _apply_choice_logprobs(
@@ -1528,11 +1541,23 @@ class VllmProcessor:
                         "model": request["model"],
                         "object": "chat.completion.chunk",
                     }
-                    attach_usage(
-                        dynamo_out,
-                        finished=bool(raw_finish_reason)
-                        or output_request_id in locally_stopped_requests,
+                    chunk_finished = (
+                        bool(raw_finish_reason)
+                        or output_request_id in locally_stopped_requests
                     )
+                    attach_usage(dynamo_out, finished=chunk_finished)
+                    if include_completion_ids:
+                        dynamo_out.setdefault("nvext", {})[
+                            "completion_token_ids"
+                        ] = completion_ids
+                        completion_ids = []
+                    # With n > 1 each choice ends with its own terminal chunk;
+                    # the prompt IDs go on the first one only.
+                    if include_prompt_ids and chunk_finished and not prompt_ids_sent:
+                        dynamo_out.setdefault("nvext", {})["prompt_token_ids"] = list(
+                            tokens
+                        )
+                        prompt_ids_sent = True
                     prompt_logprobs.attach(dynamo_out)
                     if (
                         output_request_id in locally_stopped_requests
