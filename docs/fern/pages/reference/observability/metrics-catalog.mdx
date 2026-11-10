@@ -45,11 +45,12 @@ Metrics defined in Python, such as the planner metrics, also expose a `_created`
 | `dynamo_work_handler_*`, `dynamo_backend_admission_*`, `dynamo_embedding_*` | Backend workers | `/metrics` on `DYN_SYSTEM_PORT` |
 | `trtllm_*` metrics that Dynamo computes | TensorRT-LLM workers | `/metrics` on `DYN_SYSTEM_PORT` |
 | Imitation `vllm:*`, `sglang:*`, and `trtllm_*` metrics | Mocker (`python -m dynamo.mocker`) | `/metrics` on `DYN_SYSTEM_PORT` |
-| `dynamo_quic_response_*` | Every process, with `DYN_RESPONSE_PLANE=quic` | `/metrics` on `DYN_SYSTEM_PORT`; `/metrics` on `DYN_HTTP_PORT` for the frontend |
+| `dynamo_quic_response_*` | Every process, with `--response-plane quic` or `DYN_RESPONSE_PLANE=quic` | `/metrics` on `DYN_SYSTEM_PORT`; `/metrics` on `DYN_HTTP_PORT` for the frontend |
 | `dynamo_planner_*` | Planner (`python -m dynamo.planner`) | `/metrics` on the planner's own port; see [Planner Metrics](#planner-metrics) |
 | `dynamo_kvindexer_*`, `dynamo_kvrouter_*` | Standalone KV indexer (`python -m dynamo.indexer`) | `/metrics` on `--port` |
 | `dynamo_epp_*` | Endpoint picker (Gateway API Inference Extension routing) | `/metrics` on `DYN_EPP_METRICS_PORT` (default 9090) |
 | `dynamo_global_frontend_*` | Global Frontend (`global-frontend`), which forwards each request to a pool frontend | `/metrics` on `--port` (default 8000) |
+| `dynamo_power_agent_*` | Power agent DaemonSet (`deploy/power-agent`) | `/metrics` on `--prometheus-port` (default `0`, off; the Helm chart sets `9100`) |
 | `dynamo_operator_*` | Kubernetes operator | See [Operator Metrics](operator-metrics.mdx) |
 
 Backend workers expose `dynamo_component_*` only when `DYN_SYSTEM_PORT` is set (disabled by default; the Kubernetes operator typically sets `9090`, local examples use `8081`). See [Environment Variables](environment-variables.mdx#system-and-metrics).
@@ -66,7 +67,7 @@ For endpoints that canonicalize aliases, the `model` label holds the primary ser
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
 | `dynamo_frontend_metrics_start_time_seconds` | gauge | — | Unix timestamp in seconds when the HTTP frontend first initializes its metrics in this process. One series per frontend scrape target; all HTTP registries in the process expose the same fixed value. Planner uses it alongside request counters to detect a new exporter lifetime and reset its rate baseline. This is not the OS process start time or a model readiness signal. | Experimental |
-| `dynamo_frontend_active_requests` | gauge | `model` | Requests currently being handled by the frontend, from HTTP handler entry until the response stream completes. The top-level in-flight count with no stage breakdown. | |
+| `dynamo_frontend_active_requests` | gauge | `model` | Requests currently being handled by the frontend, from when the handler accepts the request, after body parsing, readiness checks, and validation, until the response stream completes. The top-level in-flight count with no stage breakdown. | |
 | `dynamo_frontend_stage_requests` | gauge | `stage`, `phase` | Requests currently in a given frontend pipeline stage. See [Stage values](metric-labels.mdx#stage-values) and [Phase values](metric-labels.mdx#phase-values). | |
 | `dynamo_frontend_inflight_requests` | gauge | `model` | In-flight requests, kept for backward compatibility. Use `dynamo_frontend_active_requests`, which has the same value. | Deprecated |
 | `dynamo_frontend_queued_requests` | gauge | `model` | Requests in the HTTP processing queue: counted from when the request passes validation until its first response token, or until it ends without one. Unlike `dynamo_frontend_awaiting_first_token_requests`, it does not count requests during validation or System One requests. | |
@@ -88,13 +89,15 @@ For endpoints that canonicalize aliases, the `model` label holds the primary ser
 | `dynamo_frontend_stage_duration_seconds` | histogram | `stage` | Time spent in each pipeline stage: `preprocess`, `route`, or `transport_roundtrip`. The `preprocess` stage is not recorded for `/v1/completions` or embeddings requests. | |
 | `dynamo_frontend_tokenize_seconds` | histogram | — | Prompt tokenization time per request. Not recorded for `/v1/completions` or embeddings requests. | |
 | `dynamo_frontend_template_seconds` | histogram | — | Chat template rendering time per request. | |
-| `dynamo_frontend_tokenizer_latency_ms` | histogram | `operation` | Tokenizer latency in milliseconds, for `tokenize` and `detokenize`. | |
+| `dynamo_frontend_tokenizer_latency_ms` | histogram | `operation` | Tokenizer latency in milliseconds, one observation per request: `tokenize` is the prompt's tokenization time, and `detokenize` is the average detokenization time per output token. | |
 | `dynamo_frontend_detokenize_total_us` | counter | — | Total detokenization time in microseconds. | |
 | `dynamo_frontend_detokenize_token_count` | counter | — | Tokens detokenized. | |
-| `dynamo_frontend_tokenizer_cache_hits_total` | counter | — | L1 tokenizer prefix-cache hits across all models. One outcome is recorded per encode operation or batch item. | |
+| `dynamo_frontend_tokenizer_cache_hits_total` | counter | — | L1 tokenizer prefix-cache hits across all models. One outcome is recorded per encode operation or batch item. A prompt encoded in segments, as some model renderers produce, records one outcome: a hit when any of its segments of at least 128 bytes is cached, and none when it has no such segment. | |
 | `dynamo_frontend_tokenizer_cache_misses_total` | counter | — | L1 tokenizer prefix-cache misses across all models. | |
 | `dynamo_frontend_tokenizer_cache_cached_tokens_total` | counter | `model` | Tokens returned from the L1 tokenizer prefix cache. | |
 | `dynamo_frontend_tokenizer_cache_uncached_tokens_total` | counter | `model` | Tokens freshly encoded after an L1 tokenizer cache lookup. | |
+
+`dynamo_frontend_awaiting_first_token_requests`, `dynamo_frontend_inflight_input_tokens`, and `dynamo_frontend_input_tokens_total` have a zero-valued series for each registered model, and for `unknown_model`, before the first request. With `--dyn-chat-processor vllm` or `sglang`, chat requests skip Dynamo's preprocessor, so they record no `preprocess` stage and no template, tokenization, detokenization, or tokenizer-cache metrics.
 
 Requests producing output tokens are `clamp_min(dynamo_frontend_active_requests - dynamo_frontend_awaiting_first_token_requests, 0)`; the clamp covers the two gauges being sampled a moment apart. Unlike the sum of `dynamo_frontend_input_sequence_tokens`, which is observed at the first output token, `dynamo_frontend_input_tokens_total` counts every admitted request when it is tokenized.
 
@@ -110,7 +113,7 @@ sum by (model) (rate(dynamo_frontend_tokenizer_cache_cached_tokens_total[5m]))
 )
 ```
 
-The ratio is defined only when the model has an active L1 cache and observed tokens. Partial hits increment both token counters. When the cache is disabled with `DYN_TOKENIZER_CACHE=0`, the per-model series are never created, so they are absent from the scrape rather than reported as zero; detect that state with `absent()`, since a `== 0` comparison never matches a missing series. Only the literal value `0` disables the cache; values such as `false` or `off` leave it enabled. With the cache enabled, the counters remain zero when encoding fails or the tokenizer has no registered special-token boundaries.
+The ratio is defined only when the model has an active L1 cache and observed tokens. Partial hits increment both token counters. When the cache is disabled with `DYN_TOKENIZER_CACHE=0`, the per-model series are never created, so they are absent from the scrape rather than reported as zero; detect that state with `absent()`, since a `== 0` comparison never matches a missing series. Only the literal value `0` disables the cache; values such as `false` or `off` leave it enabled. With the cache enabled, the counters remain zero when encoding fails, or when the tokenizer has no registered special tokens or has special tokens that can overlap, which turns the cache off.
 
 ### Multimodal Requests
 
@@ -129,7 +132,7 @@ Metrics for [request migration](../../kubernetes/fault-tolerance/request-migrati
 
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
-| `dynamo_frontend_model_migration_total` | counter | [`migration_type`](metric-labels.mdx#metric-specific-labels) | Request migrations due to worker unavailability: `new_request` for an initial connection failure, `ongoing_request` for a mid-stream disconnection. | |
+| `dynamo_frontend_model_migration_total` | counter | [`migration_type`](metric-labels.mdx#metric-specific-labels) | Migratable worker failures, one per failed attempt: `new_request` when a response stream cannot be established, `ongoing_request` when an established stream fails. The last failure is counted even when no retry remains, including with the default `--migration-limit 0`, so this is not the number of migrations performed. | |
 | `dynamo_frontend_model_migration_duration_seconds` | histogram | [`migration_type`](metric-labels.mdx#metric-specific-labels), [`outcome`](metric-labels.mdx#metric-specific-labels) | Time from detecting a migratable worker failure until the replacement response stream is established, migration ends without recovery, or the request is cancelled. | |
 | `dynamo_frontend_model_migration_max_seq_len_exceeded_total` | counter | — | Times migration was disabled for a request because its sequence length exceeded `--migration-max-seq-len`. A rising value may indicate the limit needs adjustment. | |
 
@@ -142,7 +145,7 @@ Counters for requests that end early: [cancellations](../../developer-guide/know
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
 | `dynamo_frontend_model_cancellation_total` | counter | [`request_type`](metric-labels.mdx#metric-specific-labels) | Request cancellations detected by the frontend: client disconnect or stream close. `endpoint` is the API route (`chat_completions`, `completions`, `embeddings`, …); `request_type` is `unary` or `stream`. | |
-| `dynamo_frontend_model_rejection_total` | counter | — | Overload responses surfaced to the client as HTTP 529 by default, for worker-scoped `WorkerOverloaded` and pool-scoped `ResourceExhausted` errors. | |
+| `dynamo_frontend_model_rejection_total` | counter | — | Overload responses surfaced to the client as HTTP 529 by default, for worker-scoped `WorkerOverloaded` and pool-scoped `ResourceExhausted` errors. Router queue rejections also return HTTP 529 but are not counted here; see `dynamo_frontend_router_admission_rejected_total`. | |
 
 ### Per-Worker Load and Timing Gauges
 
@@ -185,7 +188,7 @@ The bounded `reason` values describe the current admission or availability condi
 | `checksum_mismatch` | The individual worker's Model Deployment Card checksum differs from the incumbent; emitted only for rejected worker IDs |
 | `materialization_failed` | Creating the serving configuration failed |
 | `commit_blocked` | The serving configuration could not be committed |
-| `invalid_config` | The discovered configuration is invalid |
+| `invalid_config` | The worker's data-parallel rank range is invalid: `data_parallel_size` is 0 or above the supported maximum, or the range overflows |
 | `unavailable` | Absent from the current availability view; includes local inhibition and other availability changes without identifying their exact cause |
 
 When an incumbent is still initializing and an incompatible newcomer is discovered, counts are `discovered=2`, `available=0`, `pending=1`, and `excluded=1`. The incumbent carries `state="pending",reason="initializing"`; only the newcomer carries `state="excluded",reason="checksum_mismatch"`. Once the incumbent is healthy, the same group reports `discovered=2`, `available=1`, `pending=0`, and `excluded=1`. Rejection of the newcomer never makes the incumbent pending or excluded.
@@ -223,7 +226,7 @@ Scope these queries to the target frontend and deployment. Evaluate each Fronten
 
 ### Model Metrics
 
-All `dynamo_frontend_model_*` gauges carry a `model` label. The gauges other than `dynamo_frontend_model_ready` are populated from worker backend registration. Each time a worker group for the model is committed or rebuilt, its configuration overwrites these values, so with several groups, such as prefill and decode, they show the most recently committed one. A worker that joins an existing group does not change them.
+All `dynamo_frontend_model_*` gauges carry a `model` label. The gauges other than `dynamo_frontend_model_ready` are populated from worker backend registration. Each time a worker group for the model is committed or rebuilt, its configuration overwrites these values, so with several groups, such as prefill and decode, they show the most recently committed one. A worker that joins an existing group does not change them. `dynamo_frontend_model_total_kv_blocks`, `dynamo_frontend_model_max_num_seqs`, and `dynamo_frontend_model_max_num_batched_tokens` change only when the committed configuration reports a value: a group that omits one keeps the previous value, and the series is absent until some group reports it.
 
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
@@ -233,31 +236,31 @@ All `dynamo_frontend_model_*` gauges carry a `model` label. The gauges other tha
 | `dynamo_frontend_model_max_num_batched_tokens` | gauge | — | Maximum number of batched tokens for a worker serving the model. | |
 | `dynamo_frontend_model_context_length` | gauge | — | Maximum context length for a worker serving the model, from the Model Deployment Card. | |
 | `dynamo_frontend_model_kv_cache_block_size` | gauge | — | KV cache block size for a worker serving the model, from the Model Deployment Card. | |
-| `dynamo_frontend_model_migration_limit` | gauge | — | Request migration limit for a worker serving the model, from the Model Deployment Card. | |
+| `dynamo_frontend_model_migration_limit` | gauge | — | Migration limit in the worker's Model Deployment Card. Dynamo's workers always set it to `0`; the limit the frontend applies is its own `--migration-limit`, which no metric reports. | |
 
 The frontend evaluates `dynamo_frontend_model_ready` from its live routing catalog at scrape time, so worker registration and removal are reflected in the next scrape. Unlike request-populated metrics, the series appears when the model registers, without requiring an inference request. The series is absent while the model is not registered, and the entire family is absent when no models are registered. Detect this state with `absent(dynamo_frontend_model_ready{model="<model>"})`; a `== 0` comparison does not match an absent series. Aliases get no series of their own: a deployment served under several names emits one series, labeled with its primary name, so query an alias through its primary. `/v1/models` still lists alias names, but only the primary has a readiness series. A LoRA adapter is a distinct model rather than a second name for one, and keeps its own series.
 
 ### System One Requests
 
-Recorded for the experimental System One (`/v1/systemone`) and Decisions (`/v1/decisions`) endpoints, which `DYN_ENABLE_SYSTEMONE_API` enables. These carry `model`.
+Recorded for the experimental System One (`/v1/systemone`) and Decisions (`/v1/decisions`) endpoints, which `--enable-systemone-api` (`DYN_ENABLE_SYSTEMONE_API`) enables. These carry `model`. A request is recorded only after its preflight succeeds, and each phase only when it completes without an error.
 
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
-| `dynamo_frontend_systemone_questions` | histogram | — | Questions per admitted request. | Experimental |
-| `dynamo_frontend_systemone_input_tokens` | histogram | — | Prompt tokens per admitted request, summed over its questions. | Experimental |
-| `dynamo_frontend_systemone_candidate_ids` | histogram | — | Candidate token IDs requested per admitted request. | Experimental |
+| `dynamo_frontend_systemone_questions` | histogram | — | Questions per request. | Experimental |
+| `dynamo_frontend_systemone_input_tokens` | histogram | — | Prompt tokens per request, summed over its questions. | Experimental |
+| `dynamo_frontend_systemone_candidate_ids` | histogram | — | Candidate token IDs per request. | Experimental |
 | `dynamo_frontend_systemone_cached_tokens` | histogram | — | Cached prompt tokens per completed question, when the worker reports them. | Experimental |
 | `dynamo_frontend_systemone_admitted_branches_total` | counter | — | Questions admitted for dispatch. Use `dynamo_frontend_systemone_questions_sum`, which has the same value. | Deprecated |
 | `dynamo_frontend_systemone_phase_seconds` | histogram | `phase` | Time in each phase: `preflight` (validating and tokenizing the request), `first_branch` (running the first question), or `fanout` (running the remaining questions on the same worker). | Experimental |
 
 ### LoRA Allocation
 
-Registered on every frontend and populated only when LoRA serving is enabled with `DYN_LORA_ENABLED`. These carry an `endpoint` label, `namespace/component/endpoint`.
+Registered on every frontend and populated only when LoRA serving is enabled with `DYN_LORA_ENABLED` and the allocation controller is not turned off with `DYN_LORA_ALLOCATION_ENABLED=false`. These carry an `endpoint` label, `namespace/component/endpoint`.
 
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
 | `dynamo_frontend_lora_active_requests` | gauge | `lora` | In-flight requests per LoRA adapter. | |
-| `dynamo_frontend_lora_estimated_load` | gauge | `lora` | Estimated load per adapter (windowed request count). | |
+| `dynamo_frontend_lora_estimated_load` | gauge | `lora` | Estimated load per adapter: the windowed arrival count smoothed by the `DYN_LORA_ALLOCATION_PREDICTOR_TYPE` predictor (`ema` by default; `none` uses the raw count), rounded. | |
 | `dynamo_frontend_lora_raw_arrival_count` | gauge | `lora` | Windowed arrival count per adapter. | |
 | `dynamo_frontend_lora_replica_factor` | gauge | `lora` | Replicas allocated to each adapter. | |
 | `dynamo_frontend_lora_is_active` | gauge | `lora` | 1 if the adapter is active, 0 if not. | |
@@ -286,21 +289,21 @@ Health of the frontend's Tokio async runtime and of its request path to workers.
 | `dynamo_tokio_worker_park_count_total` | counter | `worker` | Times each runtime thread parked. | |
 | `dynamo_tokio_worker_steal_count_total` | counter | `worker` | Tasks each runtime thread stole from other threads. | |
 | `dynamo_tokio_worker_overflow_count_total` | counter | `worker` | Times each runtime thread's local queue overflowed. | |
-| `dynamo_request_plane_inflight_requests` | gauge | — | Requests sent to workers that have not finished. | |
-| `dynamo_request_plane_queue_seconds` | histogram | — | Time from dispatch until the request is sent to a worker. | |
+| `dynamo_request_plane_inflight_requests` | gauge | — | Requests dispatched to workers that have not finished, counted from the start of dispatch. | |
+| `dynamo_request_plane_queue_seconds` | histogram | — | Time from dispatch until the request is ready to send: registering its response stream and encoding it. The send is in `dynamo_request_plane_send_seconds`. | |
 | `dynamo_request_plane_send_seconds` | histogram | — | Time to send a request to a worker and receive its acknowledgement. | |
 | `dynamo_request_plane_roundtrip_ttft_seconds` | histogram | — | Time from sending a request until its first response arrives. | |
 | `dynamo_transport_tcp_bytes_sent_total` | counter | — | Request bytes sent over TCP. | |
 | `dynamo_transport_tcp_bytes_received_total` | counter | — | Acknowledgement bytes received over TCP. Streamed responses are not counted. | |
 | `dynamo_transport_tcp_errors_total` | counter | — | Failed TCP requests, including send failures and timeouts. | |
 | `dynamo_transport_tcp_accept_backoff_total` | counter | — | Response-server accept failures caused by descriptor or memory exhaustion. | |
-| `dynamo_transport_nats_errors_total` | counter | `error_type` | NATS request errors. Only with the NATS request plane. | |
+| `dynamo_transport_nats_errors_total` | counter | `error_type` | NATS request errors. `error_type` is `max_payload_exceeded` (rejected before sending) or `request_failed`. Only with the NATS request plane. | |
 
 ## Component Metrics
 
 Emitted by backend workers (`python -m dynamo.vllm`, `python -m dynamo.sglang`, etc.) at `/metrics` on `DYN_SYSTEM_PORT`. Metrics registered on an endpoint carry the hierarchy labels (`dynamo_namespace`, `dynamo_component`, `dynamo_endpoint`) and `worker_id` — see [Runtime-injected labels](metric-labels.mdx#runtime-injected-labels). Metrics created on a component rather than an endpoint, such as `dynamo_backend_admission_*`, have no `dynamo_endpoint`, and `dynamo_work_handler_*` has no labels. Workers also expose their inference engine's own metrics; see [Engine Metrics](#engine-metrics).
 
-The request metrics below are recorded for every endpoint a process serves. vLLM workers also add `model` and `model_name` on their inference endpoints, except embedding, classify, and multimodal encode workers, which add only `model`. SGLang workers add `model`. TensorRT-LLM workers add `model` and `model_name` only with `--publish-kv-events`, `--publish-metrics`, or forward-pass metrics (`--fpm-trace` or `DYN_FORWARDPASS_METRIC_PORT`). Internal endpoints, such as the `worker_kv_query_source_*` endpoint the router uses to recover a worker's KV index, have no `model` label.
+The request metrics below are recorded for every endpoint a process serves. vLLM workers also add `model` and `model_name` on their inference endpoints, except embedding, classify, and multimodal encode workers, which add only `model`. SGLang workers add `model`, except multimodal encode workers, which add `model` and `model_name`, and image and video diffusion workers, which add neither. TensorRT-LLM workers add `model` and `model_name` only with `--publish-kv-events`, `--publish-metrics`, or forward-pass metrics (`--fpm-trace` or `DYN_FORWARDPASS_METRIC_PORT`). Internal endpoints, such as the `worker_kv_query_source_*` endpoint the router uses to recover a worker's KV index, have no `model` label.
 
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
@@ -324,7 +327,7 @@ With the NATS request plane, all except `dynamo_work_handler_time_to_first_respo
 | `dynamo_work_handler_queue_capacity` | gauge | — | Configured capacity of the bounded TCP work queue, set by `DYN_TCP_WORK_QUEUE_SIZE`. | |
 | `dynamo_work_handler_enqueue_rejected_total` | counter | — | Requests rejected before TCP worker dispatch because the bounded work queue was full or the dispatcher channel was closed. | |
 | `dynamo_work_handler_permit_wait_seconds` | histogram | — | Time a queued request spends waiting for a TCP worker-pool permit after dispatcher pickup. | |
-| `dynamo_work_handler_network_transit_seconds` | histogram | — | Network time from the frontend to the worker, computed from the clocks on both hosts. | |
+| `dynamo_work_handler_network_transit_seconds` | histogram | — | Time from the frontend sending a request until a TCP worker-pool task starts handling it, computed from the clocks on both hosts. For a request that waits in the work queue, it includes the queue time and the wait for a pool permit. | |
 | `dynamo_work_handler_time_to_first_response_seconds` | histogram | — | Time from receiving a request until its response stream opens. This is not the time to the first token. | |
 
 The `dynamo_backend_admission_*` metrics track engine occupancy, queueing, and request outcomes.
@@ -348,7 +351,7 @@ Sum across all `dp_rank` values for worker totals.
 
 ### KV Event Publishing
 
-Workers that publish KV cache events to the router: vLLM, SGLang, TensorRT-LLM with KV events, unified backend workers that declare KV event sources, and the mocker. The `kv_publisher` metrics are created on the component, so they have no `dynamo_endpoint`.
+Workers that publish KV cache events to the router: vLLM and SGLang with `--kv-events-config`, TensorRT-LLM with `--publish-kv-events`, unified backend workers that declare KV event sources, and the mocker. The `kv_publisher` metrics are created on the component, so they have no `dynamo_endpoint`.
 
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
@@ -357,7 +360,7 @@ Workers that publish KV cache events to the router: vLLM, SGLang, TensorRT-LLM w
 | `dynamo_component_kv_publisher_zmq_filtered_events_total` | counter | `event_type`, `reason` | KV events filtered out before conversion. | |
 | `dynamo_component_kv_publisher_zmq_conversion_issues_total` | counter | `event_type`, `reason` | KV events dropped because they could not be converted. | |
 | `dynamo_component_kv_publisher_zmq_suspicious_events_total` | counter | `event_type`, `reason` | Suspicious KV events that were still forwarded. | |
-| `dynamo_component_worker_prefill_completion_enqueue_failures_total` | counter | `reason` | Prefill-completion events dropped because the local publish queue was full or closed. Aggregated and decode workers only. | |
+| `dynamo_component_worker_prefill_completion_enqueue_failures_total` | counter | `reason` | Prefill-completion events dropped because the local publish queue was full or closed. vLLM, SGLang, and TensorRT-LLM aggregated and decode workers only, whether or not they publish KV events. | |
 
 ### Engine State
 
@@ -372,7 +375,7 @@ Label sets depend on the worker type:
 | `dynamo_component_gpu_cache_usage_percent` | gauge | `dp_rank` | GPU KV cache usage, from 0.0 to 1.0. | |
 | `dynamo_component_kv_cache_hit_rate` | gauge | `dp_rank` | Prefix cache hit rate, from 0.0 to 1.0. Registered, but no in-tree engine reports it yet. | |
 | `dynamo_component_model_load_time_seconds` | gauge | — | Time to load the model and start the engine. | |
-| `dynamo_component_drain_time_seconds` | gauge | — | Time a prefill worker waits at shutdown, after the grace period, for in-flight KV transfers to finish, up to `DYN_PREFILL_DRAIN_TIMEOUT_S`. About 0 on aggregated and decode workers. Unified backend workers only. | |
+| `dynamo_component_drain_time_seconds` | gauge | — | Time a prefill worker waits at shutdown, after the grace period, before releasing the engine: until the engine reports its KV transfers done, or for `DYN_PREFILL_DRAIN_TIMEOUT_S` (default 30 seconds, capped at the graceful-shutdown timeout minus 5 seconds). No in-tree engine reports that yet, so prefill workers wait the full time. About 0 on aggregated and decode workers. Unified backend workers only. | |
 | `dynamo_component_cleanup_time_seconds` | gauge | — | Time spent releasing engine resources at shutdown. Unified backend workers only. | |
 
 ### Multimodal and Embedding Caches
@@ -383,7 +386,7 @@ These metrics come from several publishers, so their labels differ:
 - With the `DynamoMultimodalEmbeddingCacheConnector`, the vLLM scheduler records the embedding cache metrics once per data-parallel rank. They carry `model`, `model_name`, `dp_rank`, `dynamo_namespace`, `dynamo_component`, `dynamo_endpoint`, and `worker_id`.
 - The SGLang `dynamo_embedding_*` histograms carry `model`, `model_name`, `dynamo_namespace`, `dynamo_component`, `dynamo_endpoint`, and `worker_id`.
 
-The embedding cache metrics require `--multimodal-embedding-cache-capacity-gb` greater than 0. The image cache metrics are registered on vLLM multimodal workers, and the shared image cache records samples only with `DYN_MM_SHARED_IMAGE_CACHE_ENABLED=1`.
+The embedding cache metrics require `--multimodal-embedding-cache-capacity-gb` greater than 0; TensorRT-LLM workers also need `--publish-kv-events`, `--publish-metrics`, or forward-pass metrics. vLLM encode workers keep an embedding cache but do not export these metrics. The image cache metrics are registered on vLLM multimodal workers, and the shared image cache records samples only with `DYN_MM_SHARED_IMAGE_CACHE_ENABLED=1`.
 
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
@@ -412,9 +415,9 @@ TensorRT-LLM workers started with `--publish-metrics` add these to the engine's 
 | `trtllm_kv_transfer_latency_seconds` | histogram | — | KV cache transfer time per request. | |
 | `trtllm_kv_transfer_bytes` | histogram | — | KV cache transfer size per request, in bytes. | |
 | `trtllm_kv_transfer_speed_gb_s` | histogram | — | KV cache transfer speed per request, in GB/s. | |
-| `trtllm_kv_event_buffer_capacity` | gauge | — | Configured size of the engine's KV event buffer. | |
-| `trtllm_kv_event_drain_batch_size` | histogram | — | KV events returned per polling drain. Only when KV events are polled. | |
-| `trtllm_kv_event_id_gap_events_total` | counter | — | Missing KV event IDs detected by Dynamo. | |
+| `trtllm_kv_event_buffer_capacity` | gauge | — | Configured size of the engine's KV event buffer when KV events are polled; 0 otherwise. | |
+| `trtllm_kv_event_drain_batch_size` | histogram | — | KV events returned per non-empty polling drain. Only when KV events are polled. | |
+| `trtllm_kv_event_id_gap_events_total` | counter | — | Missing KV event IDs detected by Dynamo. Only when KV events are polled. | |
 
 ### Engine Failover
 
@@ -441,14 +444,14 @@ The `dynamo_component_router_worker_registered` sample can appear during schedul
 
 ### Router Request Metrics
 
-`dynamo_component_router_*` histograms and counters for aggregate request-level statistics. Populated per request in every router mode. The KV-specific metrics (`kv_hit_rate`, the [KV-cache reuse](#kv-cache-reuse-telemetry) counters, `non_max_overlap_selections_total`, and `overlap_blocks_lost`) are recorded only with `--router-mode kv`.
+`dynamo_component_router_*` histograms and counters for aggregate request-level statistics. Populated per routing attempt in every router mode. In disaggregated serving, the prefill and decode hops record into the same series, so the request counters count a request once per hop, and the time-to-first-token and output-length histograms also get a prefill-hop sample when the prefill worker returns a token, as vLLM's does. The KV-specific metrics (`kv_hit_rate`, the [KV-cache reuse](#kv-cache-reuse-telemetry) counters, `non_max_overlap_selections_total`, and `overlap_blocks_lost`) are recorded only with `--router-mode kv`, and `non_max_overlap_selections_total` and `overlap_blocks_lost` only by a router that routes to prefill workers; in aggregated serving they stay at zero.
 
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
 | `dynamo_component_router_requests_started_total` | counter | — | Requests admitted by the router scheduler. | |
 | `dynamo_component_router_requests_total` | counter | — | Total requests processed by the router. | |
 | `dynamo_component_router_time_to_first_token_seconds` | histogram | — | Time to first token in seconds. | |
-| `dynamo_component_router_inter_token_latency_seconds` | histogram | — | Average inter-token latency in seconds. With `--router-mode kv`, recorded only when `--router-track-output-blocks` is set; otherwise the histogram stays empty. | |
+| `dynamo_component_router_inter_token_latency_seconds` | histogram | — | Average inter-token latency in seconds, recorded once per request when it completes. With `--router-mode kv`, it is recorded only when `--router-track-output-blocks` is set, as the request's running average at each output block, so a request adds one sample per output block; without the flag the histogram stays empty. | |
 | `dynamo_component_router_input_sequence_tokens` | histogram | `phase`, `model` | Input sequence length per routing attempt, excluding query-only lookups. | |
 | `dynamo_component_router_output_sequence_tokens` | histogram | — | Output sequence length in tokens. | |
 | `dynamo_component_router_kv_hit_rate` | histogram | — | Predicted KV cache hit rate at routing time, from 0.0 to 1.0. | |
@@ -492,7 +495,7 @@ vLLM, SGLang, and TensorRT-LLM workers report F4 on the final response chunk of 
 
 ### Router Queue Metrics
 
-These metrics have series once a KV router starts, whether or not queueing is enabled; the queue metrics stay at zero unless queueing is enabled by `--router-queue-threshold` or a threshold in `--router-policy-config`. They carry `model`, `worker_type`, and `policy_class`, but not the `dynamo_namespace`, `dynamo_component`, and `worker_id` labels of the other router metrics. `policy_class` is the resolved class: a request that names no class is reported as the default class, and a request whose class, after any request-classifier override, is unknown fails before it is queued, so these queue metrics do not count it.
+These metrics have series once a KV router starts, whether or not queueing is enabled. The `dynamo_frontend_router_queue_*` metrics stay at zero unless queueing is enabled by `--router-queue-threshold` or a threshold in `--router-policy-config`; the `dynamo_frontend_router_admission_*` counters are recorded either way. They carry `model`, `worker_type`, and `policy_class`, but not the `dynamo_namespace`, `dynamo_component`, and `worker_id` labels of the other router metrics. `policy_class` is the resolved class: a request that names no class is reported as the default class, and a request whose class, after any request-classifier override, is unknown fails before it is queued, so these queue metrics do not count it.
 
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
@@ -512,14 +515,14 @@ Each rejected attempt is counted once in `dynamo_frontend_router_admission_rejec
 | `dynamo_component_kv_cache_events_applied` | counter | `status`, `event_type` | KV cache events applied to the router's radix-tree index, including events for lower tiers such as host-pinned memory and disk. See [Metric-specific labels](metric-labels.mdx#metric-specific-labels). | |
 | `dynamo_component_ckf_mutation_total` | counter | `outcome` | CKF block-level mutation outcomes recorded by the router indexer. Always 0: nothing increments it. No replacement; remove it from dashboards and alerts. | Deprecated |
 | `dynamo_component_kv_cache_event_warnings` | counter | `warning_kind` | Suspicious KV cache events seen by the index, such as duplicate stores. | |
-| `dynamo_component_router_kv_event_source_mismatch_workers` | gauge | `model`, `worker_type`, `target_namespace`, `target_component`, `target_endpoint` | Serving workers whose KV event source is missing, ambiguous, or disabled. | |
+| `dynamo_component_router_kv_event_source_mismatch_workers` | gauge | `model`, `worker_type`, `target_namespace`, `target_component`, `target_endpoint` | Serving worker DP ranks whose KV event source is missing, ambiguous, or disabled, or that lack an expected recovery target. While the KV event subscription fails, every rank counts. | |
 | `dynamo_component_router_kv_zmq_ingress_sources` | gauge | `state` | KV event sources on the ZMQ event plane, by lifecycle state. | |
 | `dynamo_component_router_kv_zmq_ingress_batches_total` | counter | — | KV event batches received over ZMQ. | |
 | `dynamo_component_router_kv_zmq_ingress_lifecycle_total` | counter | `action` | Lifecycle transitions and errors of ZMQ KV event sources. | |
 | `dynamo_component_router_remote_indexer_query_failures_total` | counter | `router_id` | Failed overlap queries to a remote indexer. Only with `--use-remote-indexer`. | |
 | `dynamo_component_router_remote_indexer_write_failures_total` | counter | `router_id` | Failed routing-decision writes to a remote indexer. Only with `--use-remote-indexer`. | |
 
-`dynamo_component_kv_cache_events_applied` appears, at zero, once the router builds a local KV index: when the worker-selection policy requests `WorkerInputs::CACHE` and `--use-remote-indexer` is not set. It counts the KV events workers publish or, with KV events disabled, the router's own predicted stores and expirations. The standalone indexer exposes the device-tier-only counter `dynamo_kvrouter_kv_cache_events_applied`; see [Standalone KV Indexer Metrics](#standalone-kv-indexer-metrics).
+`dynamo_component_kv_cache_events_applied` appears, at zero, once the router builds a local KV index: when the worker-selection policy requests `WorkerInputs::CACHE` or `WorkerInputs::KV_TRANSFER`, and either `--use-remote-indexer` is not set or `--router-predicted-ttl-secs` is set. It counts the KV events workers publish and the router's own predicted stores and expirations, which it makes with KV events disabled or with `--router-predicted-ttl-secs`. With `--router-event-threads 1`, TTL-based predicted events are not counted. The standalone indexer exposes the device-tier-only counter `dynamo_kvrouter_kv_cache_events_applied`; see [Standalone KV Indexer Metrics](#standalone-kv-indexer-metrics).
 
 ### Shared KV Cache
 
@@ -553,12 +556,12 @@ Track the active-request events each KV router applies to its view of worker loa
 
 ### Approximate Cache
 
-The approximate cache tracks likely-cached blocks when the router does not consume KV events. The two policy gauges are present on every KV router. The LRU metrics update only with `--router-approximate-cache-policy lru` and KV events disabled.
+The approximate cache tracks likely-cached blocks when the router does not consume KV events. The two policy gauges are present on every KV router. The LRU metrics update only with `--router-approximate-cache-policy lru`, KV events disabled, and neither `--use-remote-indexer` nor `--serve-indexer`; with either of those, the router falls back to TTL.
 
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
-| `dynamo_component_router_approximate_cache_configured_policy` | gauge | `policy` | 1 for the configured policy, `ttl` or `lru`; the `disabled` series is always 0. | |
-| `dynamo_component_router_approximate_cache_effective_policy` | gauge | `policy` | 1 for the policy in effect: `disabled` when the router builds no KV index, `lru` with the approximate LRU, and `ttl` otherwise, including when the router consumes KV events. | |
+| `dynamo_component_router_approximate_cache_configured_policy` | gauge | `policy` | 1 for the configured policy, `ttl` or `lru`; the `disabled` series is always 0. | Experimental |
+| `dynamo_component_router_approximate_cache_effective_policy` | gauge | `policy` | 1 for the policy in effect: `disabled` when the router builds no KV index, `lru` with the approximate LRU, and `ttl` otherwise, including when the router consumes KV events. | Experimental |
 | `dynamo_component_router_approximate_lru_ranks` | gauge | `policy` | Index ranks by retention policy: `lru` or `ttl_fallback`. | Experimental |
 | `dynamo_component_router_approximate_lru_blocks` | gauge | `state` | Blocks tracked by the approximate LRU, by state. | Experimental |
 | `dynamo_component_router_approximate_lru_leases` | gauge | — | Live request leases. | Experimental |
@@ -576,10 +579,11 @@ Not all router metrics appear in every deployment. This matrix shows which group
 
 | Metric group | Frontend + KV (agg) | Frontend + KV (disagg) | Frontend + non-KV | Standalone router |
 |---|---|---|---|---|
-| `dynamo_component_router_*` | Registered and populated | Registered and populated | Request, latency, and sequence-length metrics populated; `kv_hit_rate`, `non_max_overlap_selections_total`, `overlap_blocks_lost`, and the shared-cache histograms **always zero**; other KV-specific metrics **not created** | Populated (on `DYN_SYSTEM_PORT`) |
+| `dynamo_component_router_*` | Registered and populated; `non_max_overlap_selections_total`, `overlap_blocks_lost`, and `kv_transfer_estimated_latency_seconds` stay at zero | Registered and populated | Request, latency, and sequence-length metrics populated; `kv_hit_rate`, `non_max_overlap_selections_total`, `overlap_blocks_lost`, and the shared-cache histograms **always zero**; other KV-specific metrics **not created** | Populated (on `DYN_SYSTEM_PORT`) |
 | `dynamo_router_overhead_*` | Registered and populated | Registered and populated | Registered, **always zero** | **Not created** |
 | `dynamo_frontend_router_queue_*` | Registered; populated when a CLI or policy-class queue threshold is set | Registered; populated when a CLI or policy-class queue threshold is set | **Not registered** | **Not created** |
-| `dynamo_component_kv_cache_events_applied` | Populated by KV events, or by predicted events when KV events are disabled | Populated by KV events, or by predicted events when KV events are disabled | **Not registered** | Populated by KV events, or by predicted events when KV events are disabled |
+| `dynamo_frontend_router_admission_*` | Registered and populated | Registered and populated | **Not registered** | **Not created** |
+| `dynamo_component_kv_cache_events_applied` | Populated by KV events, or by predicted events when KV events are disabled, except TTL predictions with `--router-event-threads 1` | Populated by KV events, or by predicted events when KV events are disabled, except TTL predictions with `--router-event-threads 1` | **Not registered** | Populated by KV events, or by predicted events when KV events are disabled, except TTL predictions with `--router-event-threads 1` |
 | `dynamo_frontend_worker_*` | Registered and populated | Registered and populated (`worker_type` = `prefill`/`decode`) | `worker_last_*` populated (`worker_type` = `decode`); `worker_active_*` absent | **Not created** |
 
 **Key:**
@@ -596,7 +600,7 @@ Emitted by every process that runs a Dynamo DistributedRuntime: on the HTTP port
 |---|---|---|---|---|
 | `dynamo_component_uptime_seconds` | gauge | `worker_id` | DistributedRuntime uptime. Updated before each Prometheus scrape on both the frontend and the system-status server. | |
 
-With `DYN_RESPONSE_PLANE=quic`, every process also records:
+With the QUIC response plane (`--response-plane quic` or `DYN_RESPONSE_PLANE=quic`), every process also records:
 
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
@@ -644,9 +648,9 @@ Exposed by `python -m dynamo.planner` at `/metrics` on its own port, set by `met
 | `dynamo_planner_throughput_scaling_decision` | gauge | `dynamo_planner_throughput_scaling_decision` | Reason for the latest throughput-based scaling decision. A Prometheus Enum: the label, named after the metric, holds the reason. One series per reason; the current one is 1. | |
 | `dynamo_planner_signal_unavailable` | gauge | `component`, `signal` | 1 if a required planner input was unavailable at its latest observation. | Experimental |
 | `dynamo_planner_degraded_signals_total` | counter | `component`, `signal` | Times a required input was unavailable for 3 observations in a row. | Experimental |
-| `dynamo_planner_power_budget_total_watts` | gauge | — | Configured total GPU power budget, in watts. Only with power awareness enabled. | |
-| `dynamo_planner_power_projected_watts` | gauge | — | Projected GPU power draw at the current replica counts, in watts. Only with power awareness enabled. | |
-| `dynamo_planner_power_budget_utilization` | gauge | — | Projected power divided by the budget. Only with power awareness enabled. Use `dynamo_planner_power_projected_watts / dynamo_planner_power_budget_total_watts`, which has the same value. | Deprecated |
+| `dynamo_planner_power_budget_total_watts` | gauge | — | Configured total GPU power budget, in watts. Set only with power awareness enabled; 0 otherwise. | |
+| `dynamo_planner_power_projected_watts` | gauge | — | Projected GPU power draw at the current replica counts, in watts. Set only with power awareness enabled; 0 otherwise. | |
+| `dynamo_planner_power_budget_utilization` | gauge | — | Projected power divided by the budget. Set only with power awareness enabled; 0 otherwise. Use `dynamo_planner_power_projected_watts / dynamo_planner_power_budget_total_watts`, which has the same value once both are set. | Deprecated |
 
 ### Plugin Pipeline
 
@@ -669,7 +673,7 @@ Exposed by `python -m dynamo.planner` at `/metrics` on its own port, set by `met
 
 ### Live Retune
 
-Recorded only when live retune is configured (`retune` in the planner configuration). See [Planner Live Retune](../../kubernetes/auto-deployment/planner-live-retune.md).
+Recorded when live retune is configured (`retune` in the planner configuration), and by a planner without `retune` while it cleans up after a removed live retune: resetting the routers it changed and deleting its Leases. See [Planner Live Retune](../../kubernetes/auto-deployment/planner-live-retune.md).
 
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
@@ -681,14 +685,14 @@ Recorded only when live retune is configured (`retune` in the planner configurat
 | `dynamo_planner_retune_initialized` | gauge | — | 1 once the leader finished initializing from the persisted state. | Experimental |
 | `dynamo_planner_retune_rollback_pending` | gauge | — | 1 while routers are being reset to their startup parameters. | Experimental |
 | `dynamo_planner_retune_controller_generation` | gauge | — | Generation of the installed retune controller; it grows on each rebuild. | Experimental |
-| `dynamo_planner_retune_baseline_score` | gauge | — | Objective score of the current parameters on the latest decided window; NaN when not scored. | Experimental |
-| `dynamo_planner_retune_best_score` | gauge | — | Best candidate score on the latest decided window; NaN when there is none. | Experimental |
+| `dynamo_planner_retune_baseline_score` | gauge | — | Objective score of the current parameters on the latest launched window; NaN when not scored. | Experimental |
+| `dynamo_planner_retune_best_score` | gauge | — | Best candidate score on the latest launched window; NaN when there is none. | Experimental |
 | `dynamo_planner_retune_sweep_seconds` | gauge | — | Wall-clock duration of the latest sweep; NaN when it did not run. | Experimental |
 | `dynamo_planner_retune_missing_candidates` | gauge | — | Candidates of the latest sweep without a score. | Experimental |
 | `dynamo_planner_retune_router_converged` | gauge | — | 1 when every frontend router holds the target policy parameters. | Experimental |
 | `dynamo_planner_retune_router_patch_errors_total` | counter | `code` | Failed `/router_policy` PATCH or reset calls, by HTTP status or error kind. | Experimental |
 | `dynamo_planner_retune_trace_sink_missing` | gauge | `pod` | 1 for a Ready frontend pod without its own trace segment directory. | Experimental |
-| `dynamo_planner_retune_trace_dropped_members_total` | counter | — | Trace gzip members that window cuts dropped for a bad CRC, size, or truncation. | Experimental |
+| `dynamo_planner_retune_trace_dropped_members_total` | counter | — | Runs of trace bytes without a valid gzip member that window cuts skipped, such as corrupt members or a segment's unfinished last write. A run counts once, however many members it held. | Experimental |
 
 ## Standalone KV Indexer Metrics
 
@@ -715,6 +719,19 @@ Recorded only when live retune is configured (`retune` in the planner configurat
 | `dynamo_component_kv_state_agent_slots` | gauge | `state` | Agent slots, by state: `total`, `active`, `detached`, or `failed`. | |
 | `dynamo_component_kv_state_agent_capacity_rejected_total` | counter | — | Attach requests rejected because `--max-slots` was reached. | |
 
+## Power Agent Metrics
+
+Emitted by the power agent, a DaemonSet (`deploy/power-agent`) that enforces the per-GPU power limits set by the `dynamo.nvidia.com/gpu-power-limit` Pod annotation. It serves them at `/metrics` on `--prometheus-port` (`PROMETHEUS_PORT`); the default, `0`, turns the endpoint off, and the Helm chart sets `9100`.
+
+| Metric | Type | Labels | Description | Status |
+|---|---|---|---|---|
+| `dynamo_power_agent_applied_limit_watts` | gauge | `gpu` | Power limit last applied to, or read back from, each GPU, in watts. `gpu` is the actuator's GPU index; with the DCGM actuator, a GPU that moves to a new index leaves its old series until the agent restarts. | |
+| `dynamo_power_agent_multi_pod_gpu_total` | counter | `disposition` | Times a GPU had more than one Pod: `agree` when their caps match, `conflict` when they differ. | |
+| `dynamo_power_agent_apply_failures_total` | counter | — | Times a cap could not be applied: the NVML or DCGM write failed, or the DCGM actuator could not verify the GPU's identity before writing. | |
+| `dynamo_power_agent_safe_default_applied_total` | counter | — | Times the agent applied its safe-default cap, after a conflict between Pods or an annotation it could not parse. | |
+| `dynamo_power_agent_cap_clamped_total` | counter | `direction` | Times a requested cap was clamped to the GPU's supported range: `min` (raised to the minimum) or `max` (lowered to the maximum). | |
+| `dynamo_power_agent_k8s_list_failures_total` | counter | — | Times listing the node's Pods failed, so the agent skipped that reconcile cycle and kept the caps already applied. | |
+
 ## Endpoint Picker Metrics
 
 Emitted by the endpoint picker (EPP) when routing through the Gateway API Inference Extension, at `/metrics` on `DYN_EPP_METRICS_PORT` (default 9090). Set the port to `0` to disable the endpoint.
@@ -723,33 +740,43 @@ Emitted by the endpoint picker (EPP) when routing through the Gateway API Infere
 |---|---|---|---|---|
 | `dynamo_epp_cached_tokens` | histogram | `model` | Prompt tokens the model server served from its KV cache per request, read from `usage.prompt_tokens_details.cached_tokens` in the response body. This is the observed cache hit, as opposed to the overlap the KV router estimates at selection time. | |
 
-Buckets match the default buckets of `dynamo_frontend_cached_tokens`, so the two can share a dashboard. The `model` label is the model the pool serves, resolved once at startup rather than from the request body. Recording requires the client to request usage accounting on streaming calls (`"stream_options": {"include_usage": true}`); without it the response carries no usage block and nothing is recorded.
+Buckets match the default buckets of `dynamo_frontend_cached_tokens`, so the two can share a dashboard. The `model` label is the model the pool serves, resolved once at startup rather than from the request body. Recording needs a usage block in the response. On a streaming call the client must set `"stream_options": {"include_usage": true}`, unless the worker's Frontend sidecar sets `DYN_ENABLE_FORCE_INCLUDE_USAGE`; without a usage block, nothing is recorded.
 
 These metrics show where the EPP spends a request's time and when its async runtime stalls. The settings that control them, and the EPP's diagnostic log lines, are in [EPP Runtime Environment](../components/gateway-api-routing.mdx#epp-runtime-environment).
 
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
-| `dynamo_epp_stage_duration_seconds` | histogram | `model`, [`stage`](metric-labels.mdx#epp-stage-values) | Time one routed request spends in each EPP stage. `receive_body`, `pick`, `rewrite` and `first_response` together split the EPP's part of a request's time to first token. | Experimental |
+| `dynamo_epp_stage_duration_seconds` | histogram | `model`, [`stage`](metric-labels.mdx#epp-stage-values) | Time one routed request spends in each EPP stage. `receive_body`, `pick`, `rewrite`, and `first_response` together split the EPP's part of a request's time to first token. | Experimental |
 | `dynamo_epp_event_loop_delay_seconds` | histogram | — | How late a 10 ms sleep on the EPP's async runtime wakes. It runs late only when no worker thread services the runtime's timers, so it shows stalls of the whole runtime, not of one task. | Experimental |
 | `dynamo_epp_task_poll_seconds` | histogram | [`task`](metric-labels.mdx#epp-task-values) | Task polls that held an async worker thread at least `DYN_EPP_TASK_METRICS_MIN_US`. The work a poll runs through `block_in_place` does not count, nor does the rest of the poll once another thread has taken its worker over. Recorded only with `DYN_EPP_TASK_METRICS=1`. | Experimental |
 | `dynamo_epp_task_schedule_delay_seconds` | histogram | [`task`](metric-labels.mdx#epp-task-values) | Waits of at least `DYN_EPP_TASK_METRICS_MIN_US` between a task being woken and being polled. Long waits of `task="h2_connection"` mean a gateway connection, and every stream on it, stood still. Recorded only with `DYN_EPP_TASK_METRICS=1`. | Experimental |
 
 ## Global Frontend Metrics
 
-Emitted by the Global Frontend at `/metrics` on its serving port. It forwards each request, as received, to a pool frontend, so it sees requests and response bytes but not tokens: inter-token latency and token counts come from the pool frontends' `dynamo_frontend_*` metrics. Per-pool series are labeled by `pool`, the pool's `<cluster>/<namespace>/<DGD name>`, and `region`, the pool's region. No label comes from the request body.
+Emitted by the Global Frontend at `/metrics` on its serving port. It forwards each request, as received, to a pool frontend, so it sees requests and response bytes but not tokens: inter-token latency and token counts come from the pool frontends' `dynamo_frontend_*` metrics. Per-pool series are labeled by `pool`, the pool's `<cluster>/<namespace>/<DGD name>`, and `region`, the region Global Discovery reports for the pool, or the cluster for a pool given with `--pool`. No label comes from the request body. The Global Frontend routes to the `--pool` pools or the pools Global Discovery reports. With `--relay-view-port`, a pool is routable only while a Relay view reports its model ready; with `--pool-relay`, this applies only to the pools given a Relay.
 
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
 | `dynamo_global_frontend_requests_total` | counter | `pool`, `region`, `local`, `status` | Requests forwarded to each pool. `status` is the pool's HTTP status code, counted when its response headers arrive; `no_response` when the pool could not be reached or sent no response; or `cancelled` when the client left before the pool's response headers arrived. | Experimental |
-| `dynamo_global_frontend_rejected_requests_total` | counter | `error_type` | Requests the Global Frontend answered without forwarding them: `validation` (the body has no string `model`, or the route is invalid), `not_found` (no pool serves the model), or `unavailable` (no pool can take the request). | Experimental |
+| `dynamo_global_frontend_rejected_requests_total` | counter | `error_type` | Requests the Global Frontend answered without forwarding them: `validation` (the body has no string `model`, or the route is invalid), `not_found` (no routable pool serves the model), or `unavailable` (no pool can take the request). | Experimental |
 | `dynamo_global_frontend_time_to_first_byte_seconds` | histogram | `pool`, `region` | Time from the Global Frontend receiving a request to the first body chunk of its pool's successful (2xx) response. For a streamed request this approximates the time to first token as the client sees it, including the round trip to a pool in another region. | Experimental |
 | `dynamo_global_frontend_request_duration_seconds` | histogram | `pool`, `region` | Time from the Global Frontend receiving a request to the end of its pool's successful (2xx) response, or to the client leaving. | Experimental |
 | `dynamo_global_frontend_response_errors_total` | counter | `pool`, `region` | Successful responses whose body broke off before it ended, for example because the pool frontend restarted mid-stream. The client's response ends early. | Experimental |
-| `dynamo_global_frontend_inflight_requests` | gauge | `pool`, `region` | Requests this Global Frontend has sent to each pool and not yet finished. Other replicas count their own. Read at scrape time, so a pool removed from the configuration loses its series. | Experimental |
+| `dynamo_global_frontend_inflight_requests` | gauge | `pool`, `region` | Requests this Global Frontend has sent to each pool and not yet finished. Other replicas count their own. Read at scrape time for the routable pools, so a pool that stops being routable loses its series. | Experimental |
 
 For a streaming request, a Dynamo pool frontend sends its headers once a worker has the request, so a request the client gives up on while a worker queues it counts under its status in `dynamo_global_frontend_requests_total`, not as `cancelled`. A non-streaming response's headers arrive with its complete body, so a non-streaming request the client abandons before it completes counts as `cancelled`. `local` is `true` for a pool in the Global Frontend's `--region`, `false` for one elsewhere, and `unknown` without `--region`; the share of requests kept in the region is the `local="true"` rate over the total. A body over `DYN_HTTP_BODY_LIMIT_MB` gets 413 before it is read and is not counted as a rejection.
 
 If the pool frontend sends SSE keep-alives before the first token, the first keep-alive counts as the first byte: at the `DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS` interval when set, or after 15 seconds for a request whose output a reasoning parser may hold back. The time-to-first-byte and duration histograms use the `dynamo_frontend_time_to_first_token_seconds` and `dynamo_frontend_request_duration_seconds` default buckets.
+
+With `--router-policy affinity`, the Global Frontend also records how it keeps sessions on their pools. These metrics count requests that carry an `x-dynamo-session-id` header, and they have no `pool` or `region` label. Each scrape adds to the counters what has happened since the previous scrape, so a counter series appears at the first scrape after its first event. The breaker opens after `--affinity-breaker-failures` consecutive `backend` errors or timeouts and stays open for `--affinity-breaker-cooldown-ms`. A request's time in affinity storage is part of its time to first byte and duration.
+
+| Metric | Type | Labels | Description | Status |
+|---|---|---|---|---|
+| `dynamo_global_frontend_affinity_lookups_total` | counter | `outcome` | Pin lookups for session requests: `hit` when the session has a live pin to one of the request's candidate pools, and `miss` when it has no pin, its pin has expired, or its pinned pool is not a candidate. A request whose pin write conflicts is looked up, and counted, a second time. A lookup that fails or runs out of time is not counted. | Experimental |
+| `dynamo_global_frontend_affinity_store_errors_total` | counter | `kind` | Session requests routed without affinity, counted once each: `backend` (the store returned an error), `timeout` (the lookup, write, and retry ran past `--affinity-timeout-ms`), `conflict` (the pin write conflicted on both tries), or `breaker_open` (the store was skipped while the breaker was open). The request goes to the best pool chosen so far. | Experimental |
+| `dynamo_global_frontend_affinity_store_writes_total` | counter | `reason` | Conditional pin writes sent to the affinity store, whether or not they apply: `create` (the session had no live pin), `move` (it was pinned to another pool), `refresh` (same pool, with half or less of `--session-idle-secs` left), or `repair` (replacing a record that could not be decoded). A retry after a conflict counts again. | Experimental |
+| `dynamo_global_frontend_affinity_cache_total` | counter | `outcome` | Pin reads through the in-memory cache in front of DynamoDB: `hit` (a cached entry younger than `--affinity-cache-ttl-ms` answered) or `miss` (the read went to DynamoDB). `invalidation` counts cache entries dropped after a failed read or a conflicting or failed write, and new sessions left uncached because the cache already holds `--affinity-cache-entries` sessions. Only with `--affinity-store dynamodb` and a nonzero `--affinity-cache-ttl-ms`. | Experimental |
+| `dynamo_global_frontend_overhead_affinity_store_ms` | histogram | — | Time each session request spent in affinity storage, in milliseconds: its lookups, writes, and retry, cut off at `--affinity-timeout-ms` (default 20). Not recorded while the breaker is open. Uses the buckets of `dynamo_router_overhead_shared_cache_query_ms`. | Experimental |
 
 ## Mocker Metrics
 
