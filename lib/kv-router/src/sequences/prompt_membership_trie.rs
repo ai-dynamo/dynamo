@@ -3,6 +3,7 @@
 
 use std::collections::VecDeque;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use dynamo_tokens::SequenceHash;
 use parking_lot::RwLock;
@@ -13,11 +14,21 @@ use crate::protocols::WorkerWithDpRank;
 
 type SharedNode = Arc<RwLock<PromptTrieNode>>;
 
+/// Source of [`PromptTrieNode::full_version`] values: unique across every node, so a
+/// (node, version) pair names one exact full-edge worker set even if a node's memory is reused.
+static NEXT_FULL_VERSION: AtomicU64 = AtomicU64::new(1);
+
+fn next_full_version() -> u64 {
+    NEXT_FULL_VERSION.fetch_add(1, Ordering::Relaxed)
+}
+
 #[derive(Debug, Default)]
 pub(super) struct PromptTrieNode {
     edge: Vec<SequenceHash>,
     worker_cutoffs: FxHashMap<WorkerWithDpRank, usize>,
     full_edge_workers: FxHashSet<WorkerWithDpRank>,
+    /// Changes whenever `full_edge_workers` does, from [`next_full_version`].
+    full_version: u64,
     children: FxHashMap<SequenceHash, SharedNode>,
 }
 
@@ -48,7 +59,9 @@ impl PromptTrieNode {
     }
 
     fn drop_worker(&mut self, worker: WorkerWithDpRank) {
-        self.full_edge_workers.remove(&worker);
+        if self.full_edge_workers.remove(&worker) {
+            self.full_version = next_full_version();
+        }
         self.worker_cutoffs.remove(&worker);
         self.clear_children_if_unreachable();
     }
@@ -57,6 +70,7 @@ impl PromptTrieNode {
         if !self.full_edge_workers.contains(&worker) {
             self.worker_cutoffs.remove(&worker);
             self.full_edge_workers.insert(worker);
+            self.full_version = next_full_version();
         }
     }
 
@@ -84,7 +98,9 @@ impl PromptTrieNode {
         if pos == 0 {
             self.drop_worker(worker);
         } else {
-            self.full_edge_workers.remove(&worker);
+            if self.full_edge_workers.remove(&worker) {
+                self.full_version = next_full_version();
+            }
             self.worker_cutoffs.insert(worker, pos);
             self.clear_children_if_unreachable();
         }
@@ -125,8 +141,13 @@ impl CleanableNode for PromptTrieNode {
 #[derive(Debug, Default)]
 pub(super) struct OverlapDepths {
     /// Workers covering the query's shared leading edges; each matches `base_depth`
-    /// unless `overrides` says otherwise.
+    /// unless `overrides` says otherwise. Kept across queries while `base_key` matches.
     base: FxHashSet<WorkerWithDpRank>,
+    /// The first node (address) and its [`PromptTrieNode::full_version`] that `base`
+    /// copies.
+    base_key: Option<(usize, u64)>,
+    /// Whether this query has a base set.
+    has_base: bool,
     base_depth: usize,
     overrides: FxHashMap<WorkerWithDpRank, usize>,
     /// Scratch for the workers still matching past the base set.
@@ -135,21 +156,34 @@ pub(super) struct OverlapDepths {
 
 impl OverlapDepths {
     fn clear(&mut self) {
-        self.base.clear();
+        self.has_base = false;
         self.base_depth = 0;
         self.overrides.clear();
         self.active.clear();
     }
 
+    /// This query's base set, the key identifying its exact contents, and its depth.
+    pub(super) fn base(&self) -> Option<(&FxHashSet<WorkerWithDpRank>, (usize, u64), usize)> {
+        let key = self.base_key?;
+        self.has_base.then_some((&self.base, key, self.base_depth))
+    }
+
+    /// Workers whose depth differs from what the base set gives them.
+    pub(super) fn overrides(&self) -> impl Iterator<Item = (WorkerWithDpRank, usize)> + '_ {
+        self.overrides
+            .iter()
+            .map(|(&worker, &depth)| (worker, depth))
+    }
+
     /// Blocks of the query `worker`'s active prompts share; 0 when it shares none.
-    #[inline]
+    #[cfg(test)]
     pub(super) fn get(&self, worker: &WorkerWithDpRank) -> usize {
         if !self.overrides.is_empty()
             && let Some(&depth) = self.overrides.get(worker)
         {
             return depth;
         }
-        if self.base.contains(worker) {
+        if self.has_base && self.base.contains(worker) {
             self.base_depth
         } else {
             0
@@ -221,6 +255,9 @@ impl PromptMembershipTrie {
             }
         }
 
+        if !to_promote.is_empty() {
+            node.full_version = next_full_version();
+        }
         for worker in to_promote {
             node.worker_cutoffs.remove(&worker);
             node.full_edge_workers.insert(worker);
@@ -231,6 +268,7 @@ impl PromptMembershipTrie {
             edge: suffix_edge,
             worker_cutoffs: suffix_cutoffs,
             full_edge_workers: suffix_full,
+            full_version: next_full_version(),
             children: suffix_children,
         }));
         node.children.insert(suffix_first_hash, suffix);
@@ -249,6 +287,7 @@ impl PromptMembershipTrie {
             edge,
             worker_cutoffs: FxHashMap::default(),
             full_edge_workers: PromptTrieNode::full_edge_workers_for(worker),
+            full_version: next_full_version(),
             children: FxHashMap::default(),
         }))
     }
@@ -596,7 +635,11 @@ impl PromptMembershipTrie {
             let guard = first.read();
             let edge_len = guard.edge.len();
             let match_len = Self::edge_match_len(&guard.edge, &query[query_pos..]);
-            out.base.clone_from(&guard.full_edge_workers);
+            let key = (Arc::as_ptr(&first) as usize, guard.full_version);
+            if out.base_key != Some(key) {
+                out.base.clone_from(&guard.full_edge_workers);
+                out.base_key = Some(key);
+            }
             for (&worker, &cutoff) in &guard.worker_cutoffs {
                 let contribution = cutoff.min(match_len);
                 if contribution > 0 {
@@ -606,6 +649,7 @@ impl PromptMembershipTrie {
             if out.base.is_empty() {
                 return;
             }
+            out.has_base = true;
             depth += match_len;
             out.base_depth = depth;
             if match_len < edge_len {
@@ -984,6 +1028,7 @@ mod tests {
             edge: vec![1, 2, 3, 4],
             worker_cutoffs: FxHashMap::from_iter([(before, 1), (at, 2), (after, 3)]),
             full_edge_workers: PromptTrieNode::full_edge_workers_for(full),
+            full_version: 0,
             children: FxHashMap::default(),
         };
 

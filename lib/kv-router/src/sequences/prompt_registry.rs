@@ -10,7 +10,8 @@ use rustc_hash::{FxBuildHasher, FxHashMap};
 use seqlock::SeqLock;
 use std::collections::HashMap;
 #[cfg(test)]
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::time::Instant;
 
 use super::PrefillTokenDeltas;
@@ -24,10 +25,49 @@ use crate::protocols::WorkerWithDpRank;
 use crate::scheduling::policy_config::FullRankCounts;
 
 thread_local! {
-    /// Overlap-depth scratch for [`PromptRegistry::project_worker_loads_into`], kept per
-    /// thread so each projection reuses its allocations.
-    static OVERLAP_DEPTHS: std::cell::RefCell<OverlapDepths> =
-        std::cell::RefCell::new(OverlapDepths::default());
+    /// Scratch for [`PromptRegistry::project_worker_loads_into`], kept per thread so each
+    /// projection reuses its allocations and, while the base set and the load table are
+    /// unchanged, its base-set bitmap.
+    static PROJECTION_SCRATCH: std::cell::RefCell<ProjectionScratch> =
+        std::cell::RefCell::new(ProjectionScratch::default());
+}
+
+/// Source of [`WorkerLoadTable::version`] values, unique across every table.
+static NEXT_TABLE_VERSION: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Default)]
+struct ProjectionScratch {
+    depths: OverlapDepths,
+    /// Bit `i` is set when the load table's rank at position `i` is in the base set.
+    base_bits: Vec<u64>,
+    /// The base set's key and the load table version `base_bits` was built from.
+    base_bits_key: Option<((usize, u64), u64)>,
+    /// `(table position, depth)` of each override, sorted by position.
+    overrides_at: Vec<(usize, usize)>,
+}
+
+/// Each rank's overlap depth, read in table order without hashing.
+struct DepthCursor<'a> {
+    base: Option<(&'a [u64], usize)>,
+    overrides: &'a [(usize, usize)],
+    next: usize,
+}
+
+impl DepthCursor<'_> {
+    /// `index` must increase from call to call.
+    #[inline]
+    fn depth(&mut self, index: usize) -> usize {
+        if let Some(&(at, depth)) = self.overrides.get(self.next)
+            && at == index
+        {
+            self.next += 1;
+            return depth;
+        }
+        match self.base {
+            Some((bits, depth)) if (bits[index >> 6] >> (index & 63)) & 1 == 1 => depth,
+            _ => 0,
+        }
+    }
 }
 
 /// Ephemeral, request-specific view of worker load.
@@ -153,9 +193,19 @@ struct WorkerLoadTable {
     // slot so the per-request scan streams the same bytes as before and reads capacity only
     // when a pass judges busy thresholds.
     capacities: Vec<WorkerCapacity>,
+    /// Changes whenever a rank is added or removed (and so the order changes).
+    version: u64,
 }
 
 impl WorkerLoadTable {
+    fn bump_version(&mut self) {
+        self.version = NEXT_TABLE_VERSION.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn index_of(&self, worker: WorkerWithDpRank) -> Option<usize> {
+        self.entries.get_index_of(&worker)
+    }
+
     fn len(&self) -> usize {
         self.entries.len()
     }
@@ -200,6 +250,7 @@ impl WorkerLoadTable {
             .or_insert_with(|| WorkerLoadSlot::new(WorkerLoadSnapshot::default()));
         if self.entries.len() > before {
             self.capacities.push(WorkerCapacity::default());
+            self.bump_version();
         }
     }
 
@@ -217,6 +268,7 @@ impl WorkerLoadTable {
         } else {
             self.entries.insert(worker, WorkerLoadSlot::new(load));
             self.capacities.push(WorkerCapacity::default());
+            self.bump_version();
         }
     }
 
@@ -224,6 +276,7 @@ impl WorkerLoadTable {
         // `swap_remove` moves the last entry into the hole; mirror it so indices stay aligned.
         if let Some((index, _, _)) = self.entries.swap_remove_full(&worker) {
             self.capacities.swap_remove(index);
+            self.bump_version();
         }
     }
 }
@@ -408,24 +461,58 @@ impl PromptRegistry {
         full_ranks: Option<&mut FullRankCounts>,
     ) {
         let query_len = token_sequence.map_or(0, |query| query.len());
-        OVERLAP_DEPTHS.with_borrow_mut(|depths| {
+        PROJECTION_SCRATCH.with_borrow_mut(|scratch| {
             self.membership
-                .compute_overlap_depths_into(token_sequence, depths);
-            self.project_with_depths(query_len, depths, decay_now, projections, full_ranks);
+                .compute_overlap_depths_into(token_sequence, &mut scratch.depths);
+            self.project_with_depths(query_len, scratch, decay_now, projections, full_ranks);
         });
     }
 
     fn project_with_depths(
         &self,
         query_len: usize,
-        depths: &OverlapDepths,
+        scratch: &mut ProjectionScratch,
         decay_now: Instant,
         projections: &mut WorkerLoadMap,
         full_ranks: Option<&mut FullRankCounts>,
     ) {
         let loads = self.loads.read();
-        let project = |worker: WorkerWithDpRank, load: WorkerLoadSnapshot| {
-            let overlap_depth = depths.get(&worker);
+        let ProjectionScratch {
+            depths,
+            base_bits,
+            base_bits_key,
+            overrides_at,
+        } = scratch;
+        // Membership in the base set by table position, rebuilt only when the base set or
+        // the table's ranks change.
+        let base_depth = depths.base().map(|(base, key, depth)| {
+            if *base_bits_key != Some((key, loads.version)) {
+                base_bits.clear();
+                base_bits.resize(loads.len().div_ceil(64), 0);
+                for (index, worker) in loads.entries.keys().enumerate() {
+                    if base.contains(worker) {
+                        base_bits[index >> 6] |= 1 << (index & 63);
+                    }
+                }
+                *base_bits_key = Some((key, loads.version));
+            }
+            depth
+        });
+        overrides_at.clear();
+        overrides_at.extend(
+            depths
+                .overrides()
+                .filter_map(|(worker, depth)| loads.index_of(worker).map(|index| (index, depth))),
+        );
+        overrides_at.sort_unstable();
+        let base_bits = &base_bits[..];
+        let overrides_at = &overrides_at[..];
+        let cursor = || DepthCursor {
+            base: base_depth.map(|depth| (base_bits, depth)),
+            overrides: overrides_at,
+            next: 0,
+        };
+        let project = |load: WorkerLoadSnapshot, overlap_depth: usize| {
             load.projection(decay_now, query_len.saturating_sub(overlap_depth))
         };
 
@@ -433,36 +520,40 @@ impl PromptRegistry {
         // ranks in the same order. Overwriting each value by position avoids hashing every
         // rank; the first rank found out of place falls back to a rebuild in table order.
         let Some(full_ranks) = full_ranks else {
-            if projections.len() == loads.len()
-                && loads.iter().enumerate().all(|(index, (worker, load))| {
+            if projections.len() == loads.len() {
+                let mut depth = cursor();
+                if loads.iter().enumerate().all(|(index, (worker, load))| {
                     match projections.get_index_mut(index) {
                         Some((key, projection)) if *key == worker => {
-                            *projection = project(worker, load);
+                            *projection = project(load, depth.depth(index));
                             true
                         }
                         _ => false,
                     }
-                })
-            {
-                return;
+                }) {
+                    return;
+                }
             }
 
             projections.clear();
             projections.reserve(loads.len());
+            let mut depth = cursor();
             projections.extend(
                 loads
                     .iter()
-                    .map(|(worker, load)| (worker, project(worker, load))),
+                    .enumerate()
+                    .map(|(index, (worker, load))| (worker, project(load, depth.depth(index)))),
             );
             return;
         };
 
         // The same two shapes, judging each rank as its projection is written.
         if projections.len() == loads.len() {
+            let mut depth = cursor();
             let refreshed = loads.iter_indexed().all(|(index, worker, load)| {
                 match projections.get_index_mut(index) {
                     Some((key, projection)) if *key == worker => {
-                        *projection = project(worker, load);
+                        *projection = project(load, depth.depth(index));
                         full_ranks.record(worker, loads.capacity_at(index), projection);
                         true
                     }
@@ -478,8 +569,9 @@ impl PromptRegistry {
 
         projections.clear();
         projections.reserve(loads.len());
+        let mut depth = cursor();
         projections.extend(loads.iter_indexed().map(|(index, worker, load)| {
-            let projection = project(worker, load);
+            let projection = project(load, depth.depth(index));
             full_ranks.record(worker, loads.capacity_at(index), &projection);
             (worker, projection)
         }));
@@ -686,6 +778,96 @@ mod tests {
         expected_blocks.insert(worker, hash_set(&[42]));
 
         registry.assert_consistent_with_workers(&expected_loads, &expected_blocks);
+    }
+
+    /// The positional projection (cached base set and bitmap, overrides by position) gives
+    /// every rank the new blocks the hashed overlap depths give, through membership churn and
+    /// rank removal and re-addition, with one reused map and scratch.
+    #[test]
+    fn positional_projection_matches_hashed_depths_under_churn() {
+        let workers: Vec<_> = (0..12).map(|id| worker(id, id as u32 % 2)).collect();
+        let registry = PromptRegistry::new(workers.iter().copied());
+        let shared: Vec<SequenceHash> = vec![100, 101, 102];
+        let prompts: Vec<Vec<SequenceHash>> = vec![
+            [&shared[..], &[1, 2][..]].concat(),
+            [&shared[..], &[1, 3][..]].concat(),
+            [&shared[..], &[4][..]].concat(),
+            shared.clone(),
+            shared[..1].to_vec(),
+            vec![7, 8],
+        ];
+        // One active prompt per rank at most, so membership is that prompt's hashes.
+        let mut stored: Vec<Option<usize>> = vec![None; workers.len()];
+        let mut present = vec![true; workers.len()];
+        let mut projections = WorkerLoadMap::default();
+        let decay_now = Instant::now();
+        let mut seed = 11_u64;
+        let mut next = || {
+            seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            seed >> 16
+        };
+
+        for step in 0..3_000 {
+            let index = next() as usize % workers.len();
+            let worker = workers[index];
+            match next() % 10 {
+                0 if present[index] => {
+                    registry.apply_topology_change_without_cleanup(&WorkerTopologyChange {
+                        added: Vec::new(),
+                        removed: vec![RemovedWorkerState { worker }],
+                    });
+                    present[index] = false;
+                    stored[index] = None;
+                }
+                1 if !present[index] => {
+                    registry.apply_topology_change_without_cleanup(&WorkerTopologyChange {
+                        added: vec![worker],
+                        removed: Vec::new(),
+                    });
+                    present[index] = true;
+                }
+                _ if present[index] => {
+                    let delta = match stored[index].take() {
+                        Some(prompt) => PromptMembershipDelta {
+                            removes: vec![PromptMembershipRemove {
+                                path: prompts[prompt].clone(),
+                                remove_from: 0,
+                            }],
+                            ..Default::default()
+                        },
+                        None => {
+                            let prompt = next() as usize % prompts.len();
+                            stored[index] = Some(prompt);
+                            store(&prompts[prompt], 0)
+                        }
+                    };
+                    registry.apply_membership_delta_and_load(
+                        worker,
+                        delta,
+                        worker_load_snapshot(0),
+                    );
+                }
+                _ => {}
+            }
+
+            for query in &prompts {
+                registry.project_worker_loads_into(Some(query), decay_now, &mut projections, None);
+                let depths = registry.membership.compute_overlap_depths(Some(query));
+                let expected_ranks = present.iter().filter(|&&present| present).count();
+                assert_eq!(projections.len(), expected_ranks, "step {step}");
+                for (index, &worker) in workers.iter().enumerate() {
+                    if !present[index] {
+                        continue;
+                    }
+                    let depth = depths.get(&worker).copied().unwrap_or(0);
+                    assert_eq!(
+                        projections[&worker].additional_active_blocks,
+                        query.len() - depth,
+                        "step {step}, query {query:?}, {worker:?}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
