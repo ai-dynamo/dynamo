@@ -767,8 +767,10 @@ class MultimodalRequestProcessor:
                 # so next to an image, hand videos over as uint8 when the model
                 # asks for that format. Video-only requests are unchanged.
                 if "image" in processed_mm_data and self._prefers_np_video():
+                    # CPU work that grows with the frame count: run it off the
+                    # event loop, as the decode is.
                     videos = [
-                        _video_frames_to_uint8(v)
+                        (await asyncio.to_thread(_video_frames_to_uint8, v))
                         if isinstance(v.frames[0], torch.Tensor)
                         else v
                         for v in videos

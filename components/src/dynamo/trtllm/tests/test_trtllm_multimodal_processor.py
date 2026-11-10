@@ -341,6 +341,27 @@ async def test_video_next_to_an_image_is_handed_over_as_uint8(
 
 
 @pytest.mark.asyncio
+async def test_video_conversion_runs_off_the_event_loop(monkeypatch) -> None:
+    """Converting a clip takes CPU time that grows with its frame count, so it
+    must not hold up other requests on the worker's event loop."""
+    processor, _ = _image_video_processor("np")
+    _route_video(monkeypatch, "nvdec", _pt_video(_decoded_frames()))
+    convert, threads = mmp._video_frames_to_uint8, []
+
+    def spy(video):
+        threads.append(threading.get_ident())
+        return convert(video)
+
+    monkeypatch.setattr(mmp, "_video_frames_to_uint8", spy)
+
+    await processor.process_openai_request(
+        _request(), embeddings=None, ep_disaggregated_params=None
+    )
+
+    assert threads and threading.get_ident() not in threads
+
+
+@pytest.mark.asyncio
 async def test_image_only_request_keeps_pil_images(monkeypatch) -> None:
     processor, image = _image_video_processor("np")
 
