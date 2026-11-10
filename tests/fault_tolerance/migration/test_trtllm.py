@@ -607,7 +607,9 @@ def test_request_migration_trtllm_prefill(
 
 
 @pytest.mark.timeout(350)  # 3x average
-@pytest.mark.nightly
+# TODO: revert to pytest.mark.nightly after pre_merge validation
+# on this PR (see .ai/ci-guidelines.md).
+@pytest.mark.pre_merge
 @pytest.mark.profiled_vram_gib(10.4)
 @pytest.mark.requested_trtllm_kv_tokens(2048)
 @KV_TRANSFER_MIGRATION_PARAMETERS

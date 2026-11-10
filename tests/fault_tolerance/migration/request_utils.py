@@ -63,6 +63,7 @@ def _request_args(
     force_max_output_tokens: bool,
     collect_token_ids: bool = False,
 ) -> dict:
+    """Build greedy request options, with optional fixed length and token IDs."""
     args = {
         "model": FAULT_TOLERANCE_MODEL_NAME,
         "stream": stream,
@@ -108,6 +109,7 @@ def start_request(
         response = MigrationResponse()
 
     def send_request() -> None:
+        """Collect response text, token IDs, and errors for the waiting caller."""
         prompt = "Tell me a long long long story about yourself?"
         if use_long_prompt:
             prompt += " Make sure it is" + " long" * long_prompt_repetitions + "!"
