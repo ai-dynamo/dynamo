@@ -78,9 +78,12 @@ where
                 Ok(value) => {
                     *candidate = updated;
                     Some(Box::new(move |persisted: Result<(), Arc<anyhow::Error>>| {
-                        let result = persisted
-                            .map(|()| value)
-                            .map_err(|error| anyhow::anyhow!("{error:#}"));
+                        // The last caller to see a failed persist gets the original error;
+                        // callers that shared it with others get its message.
+                        let result = persisted.map(|()| value).map_err(|error| {
+                            Arc::try_unwrap(error)
+                                .unwrap_or_else(|shared| anyhow::anyhow!("{shared:#}"))
+                        });
                         let _ = result_tx.send(result);
                     }) as ReportPersisted)
                 }
@@ -126,8 +129,13 @@ where
             }
             Err(error) => {
                 let error = Arc::new(error);
+                let mut reports = reports;
+                let last = reports.pop();
                 for report in reports {
                     report(Err(Arc::clone(&error)));
+                }
+                if let Some(report) = last {
+                    report(Err(error));
                 }
             }
         }
@@ -1293,5 +1301,27 @@ mod tests {
             metadata.read().await.get_all_endpoints(),
             vec![queued_endpoint("first")]
         );
+    }
+
+    #[tokio::test]
+    async fn an_unshared_failed_persist_keeps_the_original_error() {
+        let metadata = Arc::new(RwLock::new(DiscoveryMetadata::new()));
+        let error = update_metadata_and_persist(
+            &metadata,
+            &PendingUpdates::default(),
+            |candidate| candidate.register_endpoint(queued_endpoint("alone")),
+            |_candidate| async {
+                Err::<DiscoveryMetadata, _>(
+                    std::io::Error::new(std::io::ErrorKind::TimedOut, "write timed out").into(),
+                )
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error.downcast_ref::<std::io::Error>().is_some(),
+            "{error:#}"
+        );
+        assert!(metadata.read().await.get_all_endpoints().is_empty());
     }
 }
