@@ -362,6 +362,10 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     #[cfg(feature = "mm-routing")]
     m.add_function(wrap_pyfunction!(resolve_routing_image_token_id, m)?)?;
     m.add_function(wrap_pyfunction!(log_message, m)?)?;
+    m.add_function(wrap_pyfunction!(nvtx_enabled, m)?)?;
+    m.add_function(wrap_pyfunction!(nvtx_request_mark, m)?)?;
+    m.add_function(wrap_pyfunction!(nvtx_request_range, m)?)?;
+    m.add_class::<NvtxRange>()?;
     m.add_function(wrap_pyfunction!(register_model, m)?)?;
     m.add_function(wrap_pyfunction!(unregister_model, m)?)?;
     m.add_function(wrap_pyfunction!(update_model_taints, m)?)?;
@@ -616,6 +620,85 @@ fn run_select_service(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()>
 #[pyo3(text_signature = "(level, message, module, file, line)")]
 fn log_message(level: &str, message: &str, module: &str, file: &str, line: u32) {
     logging::log_message(level, message, module, file, line);
+}
+
+/// True iff built with the `nvtx` feature and `DYN_NVTX` is on (after runtime init).
+#[pyfunction]
+fn nvtx_enabled() -> bool {
+    dynamo_runtime::nvtx::enabled()
+}
+
+/// Record a request-scoped NVTX marker: message `<stage>`, payload `rid_key(request_id)`;
+/// non-empty `attrs` also emit the `dynamo.request rid=... k=v` identity mark.
+/// No formatting or FFI when NVTX is disabled.
+#[pyfunction]
+#[pyo3(signature = (stage, request_id, attrs=None))]
+fn nvtx_request_mark(
+    stage: &str,
+    request_id: &str,
+    attrs: Option<std::collections::HashMap<String, String>>,
+) {
+    if dynamo_runtime::nvtx::enabled() {
+        let attrs = borrowed_attrs(attrs.as_ref());
+        dynamo_runtime::nvtx::request_mark_impl(stage, request_id, &attrs);
+    }
+}
+
+/// Open a request-scoped NVTX start/end range (static stage, payload `rid_key(request_id)`);
+/// non-empty `attrs` also emit the identity mark. Inert when NVTX is disabled.
+#[pyfunction]
+#[pyo3(signature = (stage, request_id, attrs=None))]
+fn nvtx_request_range(
+    stage: &str,
+    request_id: &str,
+    attrs: Option<std::collections::HashMap<String, String>>,
+) -> NvtxRange {
+    let guard = if dynamo_runtime::nvtx::enabled() {
+        let attrs = borrowed_attrs(attrs.as_ref());
+        dynamo_runtime::nvtx::request_range_impl(stage, request_id, &attrs)
+    } else {
+        dynamo_runtime::nvtx::NvtxRangeGuard::inactive()
+    };
+    NvtxRange {
+        guard: std::sync::Mutex::new(Some(guard)),
+    }
+}
+
+fn borrowed_attrs(attrs: Option<&std::collections::HashMap<String, String>>) -> Vec<(&str, &str)> {
+    attrs
+        .into_iter()
+        .flatten()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect()
+}
+
+/// Handle for a request-scoped NVTX range; ends on `end()`, context exit or drop.
+#[pyclass]
+struct NvtxRange {
+    guard: std::sync::Mutex<Option<dynamo_runtime::nvtx::NvtxRangeGuard>>,
+}
+
+#[pymethods]
+impl NvtxRange {
+    /// End the range. Idempotent.
+    fn end(&self) {
+        // Dropping the guard ends the range; a poisoned lock still holds a valid Option.
+        let guard = self
+            .guard
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        drop(guard);
+    }
+
+    fn __enter__(slf: Py<Self>) -> Py<Self> {
+        slf
+    }
+
+    #[pyo3(signature = (*_exc))]
+    fn __exit__(&self, _exc: &Bound<'_, pyo3::types::PyTuple>) {
+        self.end();
+    }
 }
 
 /// Generate a deterministic signed int32 ID from a LoRA name using blake3 hash.

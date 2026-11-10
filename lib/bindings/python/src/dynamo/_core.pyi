@@ -33,6 +33,40 @@ def log_message(level: str, message: str, module: str, file: str, line: int) -> 
     """
     ...
 
+def nvtx_enabled() -> bool:
+    """True iff built with the `nvtx` feature and DYN_NVTX is on (after runtime init)."""
+    ...
+
+def nvtx_request_mark(
+    stage: str, request_id: str, attrs: Optional[Dict[str, str]] = None
+) -> None:
+    """Record a request-scoped NVTX marker: message `<stage>`, payload `rid_key(request_id)`.
+
+    The payload is FNV-1a-64 of the UTF-8 id with the top bit cleared. A non-empty
+    `attrs` first emits an identity mark `dynamo.request rid=<request_id> [attrs]` (keys
+    in the fixed order trace, xrid, engine_rid, then the rest sorted) with the same
+    payload. No formatting or FFI when NVTX is disabled.
+    """
+    ...
+
+def nvtx_request_range(
+    stage: str, request_id: str, attrs: Optional[Dict[str, str]] = None
+) -> NvtxRange:
+    """Open a request-scoped NVTX start/end range (message `<stage>`, payload
+    `rid_key(request_id)`); non-empty `attrs` also emit the identity mark. Inert when
+    NVTX is disabled."""
+    ...
+
+class NvtxRange:
+    """Handle for a request-scoped NVTX range. Ends on `end()`, `with` exit or drop."""
+
+    def end(self) -> None:
+        """End the range. Idempotent."""
+        ...
+
+    def __enter__(self) -> "NvtxRange": ...
+    def __exit__(self, *exc: Any) -> None: ...
+
 def get_tool_parser_names() -> list[str]:
     """Get list of available tool parser names."""
     ...
