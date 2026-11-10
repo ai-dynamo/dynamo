@@ -1207,6 +1207,9 @@ pub struct ResponseMetricCollector {
     // we use is_first_token to distinguish TTFT from ITL. It is true by default and
     // flipped to false when the first token is returned and TTFT is published.
     is_first_token: bool,
+    // Request id for the `frontend.first_token` NVTX marker; captured only while NVTX
+    // annotations are enabled so the off path never clones it.
+    nvtx_request_id: Option<Arc<str>>,
     // we track the last response time so that ITL for the newly returned tokens can
     // be computed.
     last_response_time: Option<Duration>,
@@ -2350,11 +2353,15 @@ impl InflightGuard {
 
     /// Create the [`ResponseMetricCollector`] for this request's responses.
     pub(crate) fn response_collector(&self) -> ResponseMetricCollector {
-        ResponseMetricCollector::new(
+        let mut collector = ResponseMetricCollector::new(
             self.metrics.clone(),
             self.model.clone(),
             self.request.clone(),
-        )
+        );
+        if dynamo_runtime::nvtx::enabled() {
+            collector.nvtx_request_id = Some(Arc::from(self.request_id.as_str()));
+        }
+        collector
     }
 
     pub(crate) fn mark_ok(&mut self) {
@@ -2575,6 +2582,7 @@ impl ResponseMetricCollector {
             audio_count_val: 0,
             multimodal_counts_observed: false,
             is_first_token: true,
+            nvtx_request_id: None,
             last_response_time: None,
             start_time: Instant::now(),
             osl: 0,
@@ -2757,6 +2765,10 @@ impl ResponseMetricCollector {
             // NOTE: when there are multiple tokens in the first response,
             // we use the full response time as TTFT and ignore the ITL
             self.is_first_token = false;
+
+            if let Some(request_id) = &self.nvtx_request_id {
+                dynamo_runtime::dynamo_nvtx_request_mark!("frontend.first_token", request_id);
+            }
 
             // Publish TTFT and store for span recording
             let ttft = self.start_time.elapsed().as_secs_f64();

@@ -1158,7 +1158,8 @@ pub async fn smart_json_error_middleware(request: Request<Body>, next: Next) -> 
 /// Return the request ID for the current request.
 ///
 /// The canonical request ID is minted by `make_inference_request_span()` and stored
-/// in the `DistributedTraceContext` via `DistributedTraceIdLayer`. This function
+/// in the `DistributedTraceContext` via `DistributedTraceIdLayer` (when installed) and in
+/// the span's own registry data. This function
 /// retrieves it, or generates a new UUID when no request span is active.
 ///
 /// Client-supplied ids never become the internal request id: in-flight request state
@@ -1181,6 +1182,12 @@ pub(super) fn get_or_create_request_id(headers: &HeaderMap) -> String {
     if let Some(trace_context) = get_distributed_tracing_context()
         && let Some(request_id) = trace_context.request_id
     {
+        return request_id;
+    }
+
+    // Without `DistributedTraceIdLayer` (no OTLP/JSONL logging) the span still carries
+    // the id it minted; reuse it rather than minting a second one.
+    if let Some(request_id) = dynamo_runtime::logging::current_span_request_id() {
         return request_id;
     }
 

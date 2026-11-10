@@ -1717,10 +1717,22 @@ impl BackendAdmissionGate {
         if !self.enabled {
             return generate.await;
         }
+        // Time queued for capacity, tagged with the request id; ends before the engine
+        // handoff. Test-only callers pass no context and get no range.
+        let nvtx_wait = match context {
+            Some(context) => {
+                dynamo_runtime::dynamo_nvtx_request_range!(
+                    "worker.admission_gate.wait",
+                    context.id()
+                )
+            }
+            None => dynamo_runtime::nvtx::NvtxRangeGuard::inactive(),
+        };
         let (permit, source) = self
             .acquire(context, dp_rank)
             .await
             .map_err(anyhow::Error::new)?;
+        drop(nvtx_wait);
         // Polling `generate` is the engine handoff, and nothing can intervene
         // between here and that first poll, so this — not reserving capacity —
         // is where the request is counted as admitted, exactly once. Whatever
