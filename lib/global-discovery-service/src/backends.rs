@@ -11,4 +11,5 @@ pub mod dynamodb;
 pub mod kubernetes;
 pub mod memory;
 pub mod registered;
+pub mod routers;
 mod stream;

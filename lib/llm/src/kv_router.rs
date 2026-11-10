@@ -68,6 +68,8 @@ pub mod prefill_router;
 pub mod publisher;
 mod request_lease;
 mod routing_host;
+pub(crate) use routing_host::hosted_picker;
+pub(crate) use routing_host::hosted_request;
 pub(crate) mod routing_load;
 pub mod sequence;
 pub mod shared_cache;
@@ -599,6 +601,7 @@ fn cancelled_error(context_id: &str) -> anyhow::Error {
 /// A KvRouter only decides which worker you should use. It doesn't send you there.
 /// TODO: Rename this to indicate it only selects a worker, it does not route.
 pub struct KvRouter {
+    pub(crate) admission_policy: Option<Arc<dyn crate::routing_policy::KvAdmissionPolicy>>,
     indexer: Indexer,
     selection: embedded::EmbeddedSelection,
     required_worker_inputs: dynamo_kv_router::plugins::worker_selection::WorkerInputs,
@@ -707,7 +710,7 @@ impl KvRouter {
             model_name,
             is_eagle,
             shared_cache,
-            lora_filter,
+            lora_filter.map(crate::lora_routing::LoraKvPolicy::kv),
             scheduler_load,
             parent_token,
         )
@@ -729,7 +732,7 @@ impl KvRouter {
         model_name: Option<String>,
         is_eagle: bool,
         shared_cache: Option<Arc<dyn SharedKvCache>>,
-        lora_filter: Option<Arc<crate::lora::LoraFilter>>,
+        admission_policy: Option<Arc<dyn crate::routing_policy::KvAdmissionPolicy>>,
         scheduler_load: SchedulerLoadSender,
         parent_token: CancellationToken,
     ) -> Result<Self> {
@@ -849,36 +852,15 @@ impl KvRouter {
 
         let client_for_availability = client.clone();
         let workers_for_availability = workers_with_configs.clone();
+        let policy_for_availability = admission_policy.clone();
         let available_worker_provider: WorkerAvailabilityProvider = Arc::new(move |request| {
             let available = client_for_availability.available_instance_ids();
-            let (Some(filter), Some(lora_name)) =
-                (lora_filter.as_ref(), request.lora_name.as_deref())
-            else {
-                return available;
-            };
-            let candidates: Vec<_> = match (&request.allowed_worker_ids, available.as_ref()) {
-                (Some(allowed), _) => allowed
-                    .iter()
-                    .filter(|id| {
-                        available
-                            .as_ref()
-                            .is_none_or(|workers| workers.contains(*id))
-                    })
-                    .copied()
-                    .collect(),
-                (None, Some(available)) => available.iter().copied().collect(),
-                (None, None) => workers_for_availability.borrow().keys().copied().collect(),
-            };
-            Some(Arc::new(
-                filter
-                    .filter_worker_ids_for_lora_with_pin(
-                        Some(lora_name),
-                        &candidates,
-                        request.pinned_worker.map(|worker| worker.worker_id),
-                    )
-                    .into_iter()
-                    .collect(),
-            ))
+            match policy_for_availability.as_ref() {
+                Some(policy) => {
+                    policy.refresh_admission(request, available, &workers_for_availability)
+                }
+                None => available,
+            }
         });
 
         let request_leases =
@@ -918,6 +900,7 @@ impl KvRouter {
         tracing::info!("KV Routing initialized");
         let cancellation_token = cancellation_guard.disarm();
         Ok(Self {
+            admission_policy,
             indexer,
             selection,
             required_worker_inputs,
@@ -1316,6 +1299,7 @@ impl KvRouter {
             allowed_worker_ids,
             routing_constraints,
             FindBestMatchAdmission::WithAdmission,
+            Default::default(),
             false,
         )
         .await
@@ -1342,6 +1326,7 @@ impl KvRouter {
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
         admission: FindBestMatchAdmission,
+        accounting_attribution: dynamo_kv_router::scheduling::AccountingAttribution,
         needs_uncached_prefill: bool,
     ) -> anyhow::Result<AdmittedFindBestMatchOutcome> {
         let start = Instant::now();
@@ -1375,6 +1360,7 @@ impl KvRouter {
             .selection
             .run_selection(
                 SelectionOperation {
+                    accounting_attribution,
                     key: self.selection.partition_key().clone(),
                     prompt: PromptView {
                         token_ids: Some(tokens),
@@ -1401,6 +1387,7 @@ impl KvRouter {
                     admission: core_admission,
                     track_active_blocks: self.kv_router_config.router_track_active_blocks,
                     return_routing_hashes: return_routing_hashes || session_index_context.is_some(),
+                    // Hosted selections do not populate the public reservation replay cache.
                     replay_id: None,
                 },
                 !needs_uncached_prefill,
@@ -2802,6 +2789,7 @@ mod tests {
                     None,
                     RoutingConstraints::default(),
                     admission,
+                    Default::default(),
                     false,
                 )
                 .await
@@ -2988,6 +2976,7 @@ mod tests {
                     None,
                     RoutingConstraints::default(),
                     FindBestMatchAdmission::WithAdmission,
+                    Default::default(),
                     false,
                 )
                 .await
@@ -3137,6 +3126,7 @@ mod tests {
                 None,
                 RoutingConstraints::default(),
                 FindBestMatchAdmission::WithAdmission,
+                Default::default(),
                 false,
             )
             .await

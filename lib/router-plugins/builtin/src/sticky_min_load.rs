@@ -32,7 +32,7 @@ use dynamo_kv_router::services::selection::affinity::{
 };
 use parking_lot::Mutex;
 
-/// Policy type selected by `worker_selection.instances[].type`.
+/// Policy type selected under a `worker_selection` role.
 pub const POLICY_TYPE: &str = "dynamo-sticky-min-load";
 
 const DEFAULT_MAX_IDLE_SECS: u64 = 4 * 3600;

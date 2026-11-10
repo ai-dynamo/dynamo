@@ -69,7 +69,7 @@ python -m dynamo.frontend &
 echo "Starting Realtime Transcription worker..."
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
     python -m dynamo.vllm \
-    --realtime \
+    --endpoint-types realtime \
     --model "$MODEL" \
     --enforce-eager \
     --hf-overrides "$HF_OVERRIDES" \
