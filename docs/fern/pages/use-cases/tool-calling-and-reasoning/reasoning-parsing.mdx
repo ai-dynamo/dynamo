@@ -47,6 +47,7 @@ Set `DYN_PARSER_VERSION` in the frontend and backend worker environments before 
     - Beam channel-grammar models: `--dyn-tool-call-parser beam --dyn-reasoning-parser beam`
     - MiniMax M2 style outputs: `--dyn-tool-call-parser minimax_m2 --dyn-reasoning-parser minimax_m2`
     - MiniMax M3 style outputs: `--dyn-tool-call-parser minimax_m3 --dyn-reasoning-parser minimax_m3`
+    - `tencent/Hy4-preview*`: `--dyn-tool-call-parser hy_v4 --dyn-reasoning-parser hy_v4`
 
     <Warning>
     `minimax_append_think` is deprecated for MiniMax M2 tool-calling deployments. Use `--dyn-reasoning-parser minimax_m2` with `--dyn-tool-call-parser minimax_m2` so Dynamo can separate reasoning and pass MiniMax XML tool calls to the tool parser.
@@ -303,6 +304,31 @@ Parsers marked **Force-reasoning: Yes** start reasoning without an opening tag. 
         **Force-reasoning:** <Badge intent="note" minimal>No</Badge>
 
         **Notes:** `<think>...</think>`
+      </Accordion>
+    </AccordionGroup>
+  </Accordion>
+
+  <Accordion title="Tencent Hy">
+    <AccordionGroup>
+      <Accordion title="Hy4 preview">
+        **Parser:** `hy_v4`
+
+        **Upstream name:** vLLM: `hy_v4`; SGLang: `hunyuan`
+
+        **Force-reasoning:** <Badge intent="success" minimal>Yes</Badge>
+
+        **Notes:** `<think:opensource>...</think:opensource>`. The chat template's
+        `reasoning_effort` accepts only `high` (the default) and `no_think`; any
+        other value fails template rendering with a 400, as in vLLM. Send
+        `chat_template_kwargs: {"reasoning_effort": "no_think"}` to answer
+        without reasoning. `--dyn-default-thinking-mode` has no effect on Hy4.
+
+        Dynamo reads the rendered generation prompt: an open
+        `<think:opensource>` starts parsing inside reasoning, and the closed
+        `no_think` pair starts in the answer. Run the engine with its native
+        reasoning parser (vLLM `--reasoning-parser hy_v4`, SGLang
+        `--reasoning-parser hunyuan`) so tool-choice and JSON constraints wait
+        for `</think:opensource>`.
       </Accordion>
     </AccordionGroup>
   </Accordion>

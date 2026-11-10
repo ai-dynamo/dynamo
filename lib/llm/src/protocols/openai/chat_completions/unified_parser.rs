@@ -76,6 +76,9 @@ pub(crate) const GEMMA4_UNIFIED_FAMILY: &str = "gemma4";
 /// The empty thought channel Gemma 4 opens with thinking off.
 pub(crate) const GEMMA4_EMPTY_THOUGHT_CHANNEL: &str = "<|channel>thought\n<channel|>";
 pub(crate) const GLM47_UNIFIED_FAMILY: &str = "glm47";
+/// Tencent Hy4. Its default generation prompt ends with an open `<think:opensource>`;
+/// a `no_think` prompt closes it with `</think:opensource>`.
+pub(crate) const HY_V4_UNIFIED_FAMILY: &str = "hy_v4";
 pub(crate) const MUSE_UNIFIED_FAMILY: &str = "muse_glimmer";
 /// The `dynamo-parsers-v2` unified family that serves Beam. Dynamo has no v1 Beam
 /// parser, so the `beam` + `beam` pair routes to the unified parser without
@@ -884,7 +887,7 @@ fn bare_json_starting_state(family: &str) -> UnifiedParserStartingState {
 fn detect_prefill(family: &str, content: &str) -> anyhow::Result<UnifiedParserStartingState> {
     match family {
         "qwen3" | "deepseek_v4" | "deepseek_v41" | "glm47" | "kimi_k2" | "minimax_m3"
-        | "nemotron_v3" => {
+        | "nemotron_v3" | HY_V4_UNIFIED_FAMILY => {
             let (opener_marker, closer_marker) = reasoning_marker_pair(family)
                 .expect("think-marker families have a configured reasoning pair");
             // Compare FIRST-occurrence positions, not mere presence: a prompt that
@@ -985,6 +988,7 @@ fn reasoning_marker_pair(family: &str) -> Option<(&'static str, &'static str)> {
             Some(("<think>", "</think>"))
         }
         "gemma4" => Some(("<|channel>", "<channel|>")),
+        HY_V4_UNIFIED_FAMILY => Some(("<think:opensource>", "</think:opensource>")),
         _ => None,
     }
 }
@@ -5963,6 +5967,26 @@ pub(crate) mod tests {
             "a leading closer with no prior opener means the prompt pre-opened reasoning, \
              regardless of a later model-opened thought"
         );
+    }
+
+    #[test]
+    fn hy_v4_batch_reparse_reads_prompt_state_from_the_output() {
+        for (content, expected) in [
+            (
+                "plan</think:opensource>answer",
+                UnifiedParserStartingState::Reasoning,
+            ),
+            (
+                "an answer the stream already split",
+                UnifiedParserStartingState::Response,
+            ),
+        ] {
+            assert_eq!(
+                detect_prefill(HY_V4_UNIFIED_FAMILY, content).unwrap(),
+                expected,
+                "{content}"
+            );
+        }
     }
 
     #[test]

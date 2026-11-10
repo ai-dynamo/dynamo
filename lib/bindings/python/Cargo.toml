@@ -142,3 +142,8 @@ tracing-subscriber = { version = "0.3", features = ["registry"] }
 inherits = "release"
 debug = true
 strip = false
+
+# TODO(hy4): drop this patch and pin the released dynamo-parsers-v2 0.10.0 once
+# ai-dynamo/frontend-crates#554 merges and publishes.
+[patch.crates-io]
+dynamo-parsers-v2 = { git = "https://github.com/ai-dynamo/frontend-crates", rev = "22c33e5279dae15c9e3e91b998eadad69def9a32" }
