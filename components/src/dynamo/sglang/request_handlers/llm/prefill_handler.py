@@ -10,6 +10,7 @@ import sglang as sgl
 
 from dynamo._core import Context
 from dynamo.common.backend import logprobs as _shared_logprobs
+from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.health_check import HEALTH_CHECK_KEY
 from dynamo.sglang._compat import cache_salt_kwargs, require_reasoning_kwargs
 from dynamo.sglang._disagg import validate_disagg_parallel_sampling
@@ -106,219 +107,237 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         Yields:
             Bootstrap info dict with host, port, and room for decode worker connection.
         """
-        validate_disagg_parallel_sampling(request)
-        logging.debug(f"New Request ID: {context.id()}")
-        sglang_request_id = new_sglang_request_id()
-        logging.debug(
-            "Submitted SGLang Request ID: %s, Context: %s",
-            sglang_request_id,
-            context.id(),
-        )
-
-        if "request" in request:
-            # DisaggPreprocessedRequest format
-            inner_request = request["request"]
-            sampling_params = request.get("sampling_params", {})
-        else:
-            inner_request = request
-            sampling_opts = request.get("sampling_options", {})
-            stop_conditions = request.get("stop_conditions", {})
-            sampling_params = {
-                "n": sampling_opts.get("n"),
-                "max_new_tokens": stop_conditions.get("max_tokens"),
-                **_sampling_option_params(sampling_opts),
-                **self._get_guided_decoding_params(
-                    sampling_opts.get("guided_decoding")
-                ),
-            }
-            sampling_params = {
-                k: v for k, v in sampling_params.items() if v is not None
-            }
-            _apply_model_default_sampling_params(
-                sampling_params,
-                request,
-                self._default_sampling_params,
-                self.config.dynamo_args.enable_rl,
-            )
-        native_payload = native_generate_payload(inner_request)
-        has_thinking_budget = False
-        if native_payload is None:
-            has_thinking_budget = thinking_budget_requested(inner_request)
-            sampling_params = apply_thinking_budget(
-                inner_request,
-                sampling_params,
-                self.config.server_args,
-                engine=self.engine,
-            )
-            sampling_params["n"] = 1
-            sampling_params["max_new_tokens"] = 1
-
-        # Use provided bootstrap_info if available (e.g., for health checks with FAKE_BOOTSTRAP_HOST)
-        # Otherwise use real bootstrap host/port from engine and generate room locally
-        bootstrap_host = self.bootstrap_host
-        bootstrap_port = self.bootstrap_port
-        bootstrap_room = None
-
-        bootstrap_info_from_req = inner_request.get("bootstrap_info")
-        if isinstance(bootstrap_info_from_req, dict):
-            # Allow overriding bootstrap_host for fake-transfer mode (health checks)
-            if "bootstrap_host" in bootstrap_info_from_req:
-                bootstrap_host = bootstrap_info_from_req["bootstrap_host"]
-                logging.debug(
-                    f"Using request-provided bootstrap_host: {bootstrap_host}"
-                )
-            if "bootstrap_port" in bootstrap_info_from_req:
-                bootstrap_port = bootstrap_info_from_req["bootstrap_port"]
-                logging.debug(
-                    f"Using request-provided bootstrap_port: {bootstrap_port}"
-                )
-            bootstrap_room = bootstrap_info_from_req.get("bootstrap_room")
-            if bootstrap_room is not None:
-                logging.debug(f"Using router-provided bootstrap_room: {bootstrap_room}")
-
-        if bootstrap_room is None:
-            bootstrap_room = self._generate_bootstrap_room()
-            logging.debug(f"Generated bootstrap_room locally: {bootstrap_room}")
-
-        bootstrap_info = {
-            "bootstrap_host": bootstrap_host,
-            "bootstrap_port": bootstrap_port,
-            "bootstrap_room": bootstrap_room,
-        }
-
-        input_param = self._get_input_param(inner_request)
-
-        # Prefill encodes the media so the KV it transfers carries the vision
-        # context; decode extracts the same URLs to match the token layout.
-        raise_if_unextracted_multimodal(inner_request)
-        reject_unconsumed_media(
-            inner_request, consumes_media=engine_consumes_media(self.engine)
-        )
-        mm_kwargs = build_disagg_mm_kwargs(inner_request)
-
-        routing = inner_request.get("routing") or {}
-        priority = routing.get("priority")
-        dp_rank = routing.get("dp_rank")
-
-        if dp_rank is not None and dp_rank == _DP_RANK_UNSET:
-            dp_rank = None
-
-        trace_header = context.trace_headers() if self.enable_trace else None
-
-        lora_path = self._resolve_lora(inner_request)
-        if lora_path:
+        nvtx_stages = _nvtx.handler_stages("prefill", context.id())
+        try:
+            validate_disagg_parallel_sampling(request)
+            logging.debug(f"New Request ID: {context.id()}")
+            sglang_request_id = new_sglang_request_id()
             logging.debug(
-                f"Prefill request {context.id()} will use LoRA adapter: {lora_path}"
+                "Submitted SGLang Request ID: %s, Context: %s",
+                sglang_request_id,
+                context.id(),
             )
 
-        priority_kwargs = self._priority_kwargs(priority)
-        if native_payload is not None:
-            input_ids = input_param.get("input_ids")
-            native_payload_is_batched = _native_payload_is_batched(
-                {"input_ids": input_ids}
-            )
-            if not isinstance(input_ids, list):
-                raise ValueError("native SGLang Generate requires token input")
-            native_request = build_native_generate_request(
-                native_payload,
-                input_ids=input_ids,
-                request_id=sglang_request_id,
-                priority=priority_kwargs.get("priority"),
-                sampling_overrides={"n": 1, "max_new_tokens": 1},
-                bootstrap_host=bootstrap_host,
-                bootstrap_port=bootstrap_port,
-                bootstrap_room=bootstrap_room,
-                external_trace_header=trace_header,
-                routed_dp_rank=dp_rank,
-                lora_path=lora_path,
-                cache_salt=request_cache_salt(inner_request),
-                kv_hint=inner_request.get("kv_hint"),
-            )
-            submitted_request_id = _ordered_cancellation_request_id(
-                sglang_request_id,
-                native_request.sampling_params,
-                supported=getattr(self, "_supports_ordered_cancellation", False),
-                batched=native_payload_is_batched,
-            )
-            results = native_generate_stream(self.engine, native_request)
-        else:
-            submitted_request_id = _ordered_cancellation_request_id(
-                sglang_request_id,
-                sampling_params,
-                supported=getattr(self, "_supports_ordered_cancellation", False),
-                batched=False,
-            )
-            output_options = inner_request.get("output_options", {}) or {}
-            # Prompt logprobs are discarded until the handoff carries their metadata.
-            logprob_kwargs = _shared_logprobs.build_sglang_logprob_kwargs(
-                {"logprobs": output_options.get("logprobs")},
-            )
-            results = await self.engine.async_generate(
-                **input_param,
-                **logprob_kwargs,
-                **mm_kwargs,
-                **cache_salt_kwargs(self.engine, request_cache_salt(inner_request)),
-                sampling_params=sampling_params,
-                stream=True,
-                **require_reasoning_kwargs(
-                    self.engine,
+            if "request" in request:
+                # DisaggPreprocessedRequest format
+                inner_request = request["request"]
+                sampling_params = request.get("sampling_params", {})
+            else:
+                inner_request = request
+                sampling_opts = request.get("sampling_options", {})
+                stop_conditions = request.get("stop_conditions", {})
+                sampling_params = {
+                    "n": sampling_opts.get("n"),
+                    "max_new_tokens": stop_conditions.get("max_tokens"),
+                    **_sampling_option_params(sampling_opts),
+                    **self._get_guided_decoding_params(
+                        sampling_opts.get("guided_decoding")
+                    ),
+                }
+                sampling_params = {
+                    k: v for k, v in sampling_params.items() if v is not None
+                }
+                _apply_model_default_sampling_params(
+                    sampling_params,
+                    request,
+                    self._default_sampling_params,
+                    self.config.dynamo_args.enable_rl,
+                )
+            native_payload = native_generate_payload(inner_request)
+            has_thinking_budget = False
+            if native_payload is None:
+                has_thinking_budget = thinking_budget_requested(inner_request)
+                sampling_params = apply_thinking_budget(
                     inner_request,
-                    thinking_budget_requested=has_thinking_budget,
-                ),
-                bootstrap_host=bootstrap_host,
-                bootstrap_port=bootstrap_port,
-                bootstrap_room=bootstrap_room,
-                external_trace_header=trace_header,
-                rid=sglang_request_id,
-                data_parallel_rank=dp_rank,
-                lora_path=lora_path,
-                **priority_kwargs,
-                **agent_session_kwargs(self.engine, inner_request),
-                **kv_hint_kwargs(self.engine, inner_request),
+                    sampling_params,
+                    self.config.server_args,
+                    engine=self.engine,
+                )
+                sampling_params["n"] = 1
+                sampling_params["max_new_tokens"] = 1
+
+            # Use provided bootstrap_info if available (e.g., for health checks with FAKE_BOOTSTRAP_HOST)
+            # Otherwise use real bootstrap host/port from engine and generate room locally
+            bootstrap_host = self.bootstrap_host
+            bootstrap_port = self.bootstrap_port
+            bootstrap_room = None
+
+            bootstrap_info_from_req = inner_request.get("bootstrap_info")
+            if isinstance(bootstrap_info_from_req, dict):
+                # Allow overriding bootstrap_host for fake-transfer mode (health checks)
+                if "bootstrap_host" in bootstrap_info_from_req:
+                    bootstrap_host = bootstrap_info_from_req["bootstrap_host"]
+                    logging.debug(
+                        f"Using request-provided bootstrap_host: {bootstrap_host}"
+                    )
+                if "bootstrap_port" in bootstrap_info_from_req:
+                    bootstrap_port = bootstrap_info_from_req["bootstrap_port"]
+                    logging.debug(
+                        f"Using request-provided bootstrap_port: {bootstrap_port}"
+                    )
+                bootstrap_room = bootstrap_info_from_req.get("bootstrap_room")
+                if bootstrap_room is not None:
+                    logging.debug(
+                        f"Using router-provided bootstrap_room: {bootstrap_room}"
+                    )
+
+            if bootstrap_room is None:
+                bootstrap_room = self._generate_bootstrap_room()
+                logging.debug(f"Generated bootstrap_room locally: {bootstrap_room}")
+
+            bootstrap_info = {
+                "bootstrap_host": bootstrap_host,
+                "bootstrap_port": bootstrap_port,
+                "bootstrap_room": bootstrap_room,
+            }
+
+            input_param = self._get_input_param(inner_request)
+
+            # Prefill encodes the media so the KV it transfers carries the vision
+            # context; decode extracts the same URLs to match the token layout.
+            raise_if_unextracted_multimodal(inner_request)
+            reject_unconsumed_media(
+                inner_request, consumes_media=engine_consumes_media(self.engine)
             )
-        if inner_request.get(HEALTH_CHECK_KEY):
-            # Canary: stream engine output so the Rust canary sees scheduler output.
-            # No _cancellation_monitor — probe is bounded (max_tokens=1, FAKE_BOOTSTRAP_HOST).
-            async for res in results:
-                yield res
-            return
+            mm_kwargs = build_disagg_mm_kwargs(inner_request)
 
-        # Yield bootstrap_info for PrefillRouter - required for async generator
-        # contract and Rust-side expects disaggregated_params in first output.
-        yield {
-            "token_ids": [],
-            "text": None,
-            "finish_reason": None,
-            "disaggregated_params": bootstrap_info,
-        }
+            routing = inner_request.get("routing") or {}
+            priority = routing.get("priority")
+            dp_rank = routing.get("dp_rank")
 
-        task = asyncio.create_task(
-            self._consume_results(results, submitted_request_id, context)
-        )
-        self._consume_tasks.add(task)
-        task.add_done_callback(self._consume_tasks.discard)
+            if dp_rank is not None and dp_rank == _DP_RANK_UNSET:
+                dp_rank = None
 
-        final_meta_info = await task
-        if final_meta_info is None:
-            return
-        finish_reason = final_meta_info.get("finish_reason")
-        if isinstance(finish_reason, dict) and finish_reason.get("type") == "abort":
-            # Unsolicited error-bearing aborts raise while consuming the stream.
-            # An ordinary backend cancellation must also terminate decode,
-            # rather than looking like a successful prefill handoff.
-            yield {"token_ids": [], "finish_reason": "cancelled"}
-            return
-        # Bootstrap happens before prefill runs, so the cache-hit report for
-        # this attempt needs its own trailing chunk.
-        kv_cache_hit = _kv_cache_hit_engine_data(final_meta_info)
-        if kv_cache_hit:
-            yield {"token_ids": [], "engine_data": {"kv_cache_hit": kv_cache_hit}}
+            trace_header = context.trace_headers() if self.enable_trace else None
+
+            lora_path = self._resolve_lora(inner_request)
+            if lora_path:
+                logging.debug(
+                    f"Prefill request {context.id()} will use LoRA adapter: {lora_path}"
+                )
+
+            priority_kwargs = self._priority_kwargs(priority)
+            if native_payload is not None:
+                input_ids = input_param.get("input_ids")
+                native_payload_is_batched = _native_payload_is_batched(
+                    {"input_ids": input_ids}
+                )
+                if not isinstance(input_ids, list):
+                    raise ValueError("native SGLang Generate requires token input")
+                native_request = build_native_generate_request(
+                    native_payload,
+                    input_ids=input_ids,
+                    request_id=sglang_request_id,
+                    priority=priority_kwargs.get("priority"),
+                    sampling_overrides={"n": 1, "max_new_tokens": 1},
+                    bootstrap_host=bootstrap_host,
+                    bootstrap_port=bootstrap_port,
+                    bootstrap_room=bootstrap_room,
+                    external_trace_header=trace_header,
+                    routed_dp_rank=dp_rank,
+                    lora_path=lora_path,
+                    cache_salt=request_cache_salt(inner_request),
+                    kv_hint=inner_request.get("kv_hint"),
+                )
+                submitted_request_id = _ordered_cancellation_request_id(
+                    sglang_request_id,
+                    native_request.sampling_params,
+                    supported=getattr(self, "_supports_ordered_cancellation", False),
+                    batched=native_payload_is_batched,
+                )
+                # The engine stream is lazy: SGLang submits the request when it is
+                # first consumed, after the bootstrap info below has been yielded.
+                nvtx_stages.end_prepare(sglang_request_id)
+                results = native_generate_stream(self.engine, native_request)
+            else:
+                submitted_request_id = _ordered_cancellation_request_id(
+                    sglang_request_id,
+                    sampling_params,
+                    supported=getattr(self, "_supports_ordered_cancellation", False),
+                    batched=False,
+                )
+                output_options = inner_request.get("output_options", {}) or {}
+                # Prompt logprobs are discarded until the handoff carries their metadata.
+                logprob_kwargs = _shared_logprobs.build_sglang_logprob_kwargs(
+                    {"logprobs": output_options.get("logprobs")},
+                )
+                # The engine stream is lazy: SGLang submits the request when it is
+                # first consumed, after the bootstrap info below has been yielded.
+                nvtx_stages.end_prepare(sglang_request_id)
+                results = await self.engine.async_generate(
+                    **input_param,
+                    **logprob_kwargs,
+                    **mm_kwargs,
+                    **cache_salt_kwargs(self.engine, request_cache_salt(inner_request)),
+                    sampling_params=sampling_params,
+                    stream=True,
+                    **require_reasoning_kwargs(
+                        self.engine,
+                        inner_request,
+                        thinking_budget_requested=has_thinking_budget,
+                    ),
+                    bootstrap_host=bootstrap_host,
+                    bootstrap_port=bootstrap_port,
+                    bootstrap_room=bootstrap_room,
+                    external_trace_header=trace_header,
+                    rid=sglang_request_id,
+                    data_parallel_rank=dp_rank,
+                    lora_path=lora_path,
+                    **priority_kwargs,
+                    **agent_session_kwargs(self.engine, inner_request),
+                    **kv_hint_kwargs(self.engine, inner_request),
+                )
+            if inner_request.get(HEALTH_CHECK_KEY):
+                # Canary: stream engine output so the Rust canary sees scheduler output.
+                # No _cancellation_monitor — probe is bounded (max_tokens=1, FAKE_BOOTSTRAP_HOST).
+                nvtx_stages.start_first_output()
+                async for res in results:
+                    if nvtx_stages.first_output_pending:
+                        nvtx_stages.first_output()
+                    yield res
+                return
+
+            # Yield bootstrap_info for PrefillRouter - required for async generator
+            # contract and Rust-side expects disaggregated_params in first output.
+            yield {
+                "token_ids": [],
+                "text": None,
+                "finish_reason": None,
+                "disaggregated_params": bootstrap_info,
+            }
+
+            task = asyncio.create_task(
+                self._consume_results(
+                    results, submitted_request_id, context, nvtx_stages=nvtx_stages
+                )
+            )
+            self._consume_tasks.add(task)
+            task.add_done_callback(self._consume_tasks.discard)
+
+            final_meta_info = await task
+            if final_meta_info is None:
+                return
+            finish_reason = final_meta_info.get("finish_reason")
+            if isinstance(finish_reason, dict) and finish_reason.get("type") == "abort":
+                # Unsolicited error-bearing aborts raise while consuming the stream.
+                # An ordinary backend cancellation must also terminate decode,
+                # rather than looking like a successful prefill handoff.
+                yield {"token_ids": [], "finish_reason": "cancelled"}
+                return
+            # Bootstrap happens before prefill runs, so the cache-hit report for
+            # this attempt needs its own trailing chunk.
+            kv_cache_hit = _kv_cache_hit_engine_data(final_meta_info)
+            if kv_cache_hit:
+                yield {"token_ids": [], "engine_data": {"kv_cache_hit": kv_cache_hit}}
+        finally:
+            nvtx_stages.close()
 
     async def _consume_results(
         self,
         results: AsyncIterator[Any],
         submitted_request_id: str | None,
         context: Context,
+        nvtx_stages: Any = _nvtx.NO_STAGES,
     ) -> Optional[Dict[str, Any]]:
         """Consume async generator results without forwarding them.
 
@@ -339,7 +358,10 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         ) as cancellation_task:
             # The shared iterator briefly drains after abort so SGLang can
             # clean up, then closes a stream that does not terminate.
+            nvtx_stages.start_first_output()
             async for res in self._stream_until_cancelled(results, cancellation_task):
+                if nvtx_stages.first_output_pending:
+                    nvtx_stages.first_output()
                 meta_info = res.get("meta_info") or (
                     res.get("engine_data", {})
                     .get("sglang_response", {})

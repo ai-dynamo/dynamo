@@ -3536,6 +3536,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         kv_hints=None,
         artifact_session=None,
         emit_routed_experts=True,
+        nvtx_stages=_nvtx.NO_STAGES,
     ):
         try:
             # Log LoRA usage for this generation (debug level to avoid log spam)
@@ -3544,6 +3545,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 request_id,
                 lora_request,
             )
+            nvtx_stages.engine_start()
             gen = self._generate_with_lora_admission_lock(
                 lora_request,
                 lambda admitted_lora_request: self.engine_client.generate(
@@ -3577,6 +3579,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             engine_prompt_token_ids: Optional[list[int]] = None
             async for res in gen:
                 # res is vllm's RequestOutput
+                if nvtx_stages.first_output_pending:
+                    nvtx_stages.first_output()
                 if want_engine_data and engine_prompt_token_ids is None:
                     engine_prompt_token_ids = res.prompt_token_ids
                 if (
@@ -3829,36 +3833,52 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         self._multimodal_request_processor.validate_multimodal_request(request)
         first_token = True
         first_token_output_seen = False
-        with time_and_log_code_section(
-            f"[DECODE] request: {request_id} generate"
-        ) as decode_timer:
-            if self.use_vllm_tokenizer and request.get("encoder_result") is not None:
-                yield {
-                    "finish_reason": (
-                        "error: external encoder results require token-in/token-out "
-                        "mode"
-                    ),
-                    "index": 0,
-                    "token_ids": [],
-                }
-                return
-            if self.use_vllm_tokenizer:
-                # Text-in-text-out mode: use InputParamManager and OpenAI-compatible format
-                generator = self._generate_text_mode(request, context, request_id)
-            else:
-                # Token-in-token-out mode: internal protocol format
-                generator = self._generate_token_mode(request, context, request_id)
+        nvtx_stages = _nvtx.handler_stages(
+            "decode"
+            if self.config.disaggregation_mode == DisaggregationMode.DECODE
+            else "aggregated",
+            request_id,
+        )
+        try:
+            with time_and_log_code_section(
+                f"[DECODE] request: {request_id} generate"
+            ) as decode_timer:
+                if (
+                    self.use_vllm_tokenizer
+                    and request.get("encoder_result") is not None
+                ):
+                    yield {
+                        "finish_reason": (
+                            "error: external encoder results require token-in/token-out "
+                            "mode"
+                        ),
+                        "index": 0,
+                        "token_ids": [],
+                    }
+                    return
+                if self.use_vllm_tokenizer:
+                    # Text-in-text-out mode: use InputParamManager and OpenAI-compatible format
+                    generator = self._generate_text_mode(
+                        request, context, request_id, nvtx_stages=nvtx_stages
+                    )
+                else:
+                    # Token-in-token-out mode: internal protocol format
+                    generator = self._generate_token_mode(
+                        request, context, request_id, nvtx_stages=nvtx_stages
+                    )
 
-            async for chunk in _translate_vllm_client_errors(generator):
-                if first_token:
-                    decode_timer.stop_interval()
-                    first_token = False
-                if not self.use_vllm_tokenizer and not first_token_output_seen:
-                    token_ids = chunk.get("token_ids") or []
-                    if token_ids:
-                        first_token_output_seen = True
-                        context.notify_first_token()
-                yield chunk
+                async for chunk in _translate_vllm_client_errors(generator):
+                    if first_token:
+                        decode_timer.stop_interval()
+                        first_token = False
+                    if not self.use_vllm_tokenizer and not first_token_output_seen:
+                        token_ids = chunk.get("token_ids") or []
+                        if token_ids:
+                            first_token_output_seen = True
+                            context.notify_first_token()
+                    yield chunk
+        finally:
+            nvtx_stages.close()
 
     async def _assemble_custom_encoder_prompt(
         self,
@@ -3995,7 +4015,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         logger.debug("Request %s: prepared external encoder prompt", request_id)
         return prompt
 
-    async def _generate_token_mode(self, request, context, request_id):
+    async def _generate_token_mode(
+        self, request, context, request_id, nvtx_stages=_nvtx.NO_STAGES
+    ):
         """Generate tokens using internal protocol format (token-in-token-out)."""
         # Firstly extract disaggregated params from prefill result if available
         prefill_result = request.get("prefill_result")
@@ -4324,6 +4346,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                             want_engine_data=want_engine_data,
                             kv_hints=kv_hints,
                             artifact_session=artifact_session,
+                            nvtx_stages=nvtx_stages,
                             emit_routed_experts=(
                                 artifact_session is None
                                 or want_engine_data
@@ -4370,7 +4393,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         if artifact_session is not None:
                             artifact_session.close()
 
-    async def _generate_text_mode(self, request, context, request_id):
+    async def _generate_text_mode(
+        self, request, context, request_id, nvtx_stages=_nvtx.NO_STAGES
+    ):
         """Generate text using OpenAI-compatible format (text-in-text-out)."""
         # Get text input using InputParamManager
         input_data = self.input_param_manager.get_input_param(
@@ -4426,6 +4451,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             self._abort_monitor(context, request_id, abort_guard=abort_guard),
         ):
             try:
+                nvtx_stages.engine_start()
                 gen = self.engine_client.generate(
                     prompt,
                     sampling_params,
@@ -4438,6 +4464,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 )
 
                 async for res in gen:
+                    if nvtx_stages.first_output_pending:
+                        nvtx_stages.first_output()
                     if not res.outputs:
                         yield {
                             "id": openai_request_id,
@@ -4546,11 +4574,17 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         logger.debug("Prefill Request ID: %s", request_id)
         self._multimodal_request_processor.validate_multimodal_request(request)
 
-        # Token-in-token-out mode: internal protocol format
-        with time_and_log_code_section(f"[PREFILL] request: {request_id} generate"):
-            generator = self._generate_token_mode(request, context, request_id)
-            async for chunk in _translate_vllm_client_errors(generator):
-                yield chunk
+        nvtx_stages = _nvtx.handler_stages("prefill", request_id)
+        try:
+            # Token-in-token-out mode: internal protocol format
+            with time_and_log_code_section(f"[PREFILL] request: {request_id} generate"):
+                generator = self._generate_token_mode(
+                    request, context, request_id, nvtx_stages=nvtx_stages
+                )
+                async for chunk in _translate_vllm_client_errors(generator):
+                    yield chunk
+        finally:
+            nvtx_stages.close()
 
     def _prefill_kv_protocol(
         self, is_local_probe: bool, sampling_params
@@ -4600,7 +4634,9 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             embedding_params,
         )
 
-    async def _generate_token_mode(self, request, context, request_id):
+    async def _generate_token_mode(
+        self, request, context, request_id, nvtx_stages=_nvtx.NO_STAGES
+    ):
         """Generate prefill using internal protocol format (token-in-token-out)."""
         # Read the marker first: input preparation below can replace the request.
         is_local_probe = is_probe(request)
@@ -4665,6 +4701,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
         async with self._abort_monitor(context, request_id, is_prefill=True):
             try:
+                nvtx_stages.engine_start()
                 gen = self._generate_with_lora_admission_lock(
                     lora_request,
                     lambda admitted_lora_request: self.engine_client.generate(
@@ -4691,6 +4728,8 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 os._exit(1)
 
             async for res in gen:
+                if nvtx_stages.first_output_pending:
+                    nvtx_stages.first_output()
                 logger.debug(f"kv transfer params: {res.kv_transfer_params}")
 
                 token_ids = res.outputs[0].token_ids if res.outputs else []

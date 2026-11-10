@@ -21,6 +21,7 @@ from dynamo.common.multimodal.image_loader import (
     image_cache_scope_from_request,
 )
 from dynamo.common.multimodal.video_loader import VideoLoader
+from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.llm import HttpError
 from dynamo.llm.exceptions import EngineShutdown, InvalidArgument
@@ -742,277 +743,303 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         Raises:
             RuntimeError: If no bootstrap info received from prefill worker.
         """
-        if self.serving_mode == DisaggregationMode.DECODE:
-            validate_disagg_parallel_sampling(request)
-        logging.debug(f"New Request ID: {context.id()}")
-        routing = request.get("routing") or {}
-        if self._first_token_source is not None:
-            self._first_token_source.bind(context, routing.get("dp_rank"))
-        _raise_if_conditional_disagg_bypass(request)
-        sglang_request_id = new_sglang_request_id()
-        input_param = self._get_input_param(request)
-        priority = (request.get("routing") or {}).get("priority")
-        native_payload = native_generate_payload(request)
-        native_session_request_id = None
-        if native_payload is not None:
-            native_session_request_id = _native_session_request_id(
-                native_payload, context.id()
-            )
-            if native_session_request_id is not None:
-                sglang_request_id = native_session_request_id
-        logging.info(
-            "Submitted SGLang Request ID: %s, Context: %s",
-            sglang_request_id,
+        nvtx_stages = _nvtx.handler_stages(
+            "decode"
+            if self.serving_mode == DisaggregationMode.DECODE
+            else "aggregated",
             context.id(),
         )
-        if native_payload is not None:
-            native_sampling_params = native_payload.get("sampling_params")
+        try:
+            if self.serving_mode == DisaggregationMode.DECODE:
+                validate_disagg_parallel_sampling(request)
+            logging.debug(f"New Request ID: {context.id()}")
+            routing = request.get("routing") or {}
+            if self._first_token_source is not None:
+                self._first_token_source.bind(context, routing.get("dp_rank"))
+            _raise_if_conditional_disagg_bypass(request)
+            sglang_request_id = new_sglang_request_id()
+            input_param = self._get_input_param(request)
+            priority = (request.get("routing") or {}).get("priority")
+            native_payload = native_generate_payload(request)
+            native_session_request_id = None
+            if native_payload is not None:
+                native_session_request_id = _native_session_request_id(
+                    native_payload, context.id()
+                )
+                if native_session_request_id is not None:
+                    sglang_request_id = native_session_request_id
+            logging.info(
+                "Submitted SGLang Request ID: %s, Context: %s",
+                sglang_request_id,
+                context.id(),
+            )
+            if native_payload is not None:
+                native_sampling_params = native_payload.get("sampling_params")
+                submitted_request_id = _ordered_cancellation_request_id(
+                    sglang_request_id,
+                    native_sampling_params,
+                    supported=(
+                        getattr(self, "_supports_ordered_cancellation", False)
+                        # Session node IDs are caller-visible. Waiting for SGLang's
+                        # response avoids aborting an unrelated request if a caller
+                        # reuses an active node ID.
+                        and native_session_request_id is None
+                    ),
+                    batched=_native_payload_is_batched(native_payload),
+                )
+                nvtx_stages.engine_start(sglang_request_id)
+                stream = self._native_generate_stream(
+                    request,
+                    native_payload,
+                    input_param,
+                    context,
+                    sglang_request_id,
+                    priority,
+                )
+                async for output in self._process_native_generate_stream(
+                    stream,
+                    context,
+                    submitted_request_id=submitted_request_id,
+                    internal_request_id=sglang_request_id,
+                    response_request_id=native_payload.get("rid") or context.id(),
+                    report_kv_cache_hit=not _has_parallel_prefix_warmup(
+                        native_sampling_params
+                    ),
+                ):
+                    if nvtx_stages.first_output_pending:
+                        nvtx_stages.first_output()
+                    yield output
+                return
+
+            priority_kwargs = self._priority_kwargs(priority)
+            sampling_params = self._build_sampling_params(request)
+            thinking_budget = sampling_params.get("custom_params", {}).get(
+                "thinking_budget"
+            )
+            if thinking_budget is not None:
+                logging.debug("SGLang thinking budget configured: %s", thinking_budget)
             submitted_request_id = _ordered_cancellation_request_id(
                 sglang_request_id,
-                native_sampling_params,
-                supported=(
-                    getattr(self, "_supports_ordered_cancellation", False)
-                    # Session node IDs are caller-visible. Waiting for SGLang's
-                    # response avoids aborting an unrelated request if a caller
-                    # reuses an active node ID.
-                    and native_session_request_id is None
-                ),
-                batched=_native_payload_is_batched(native_payload),
+                sampling_params,
+                supported=getattr(self, "_supports_ordered_cancellation", False),
             )
-            stream = self._native_generate_stream(
-                request,
-                native_payload,
-                input_param,
-                context,
-                sglang_request_id,
-                priority,
+            logprob_kwargs = self._build_logprob_kwargs(request)
+            metadata_uploader = self._metadata_uploader_from_request(request)
+
+            output_options = request.get("output_options", {})
+            (
+                completion_logprobs_count,
+                prompt_logprobs_count,
+            ) = _shared_logprobs.parse_logprob_options(output_options)
+            return_tokens_as_token_ids = bool(
+                output_options.get("return_tokens_as_token_ids")
             )
-            async for output in self._process_native_generate_stream(
-                stream,
-                context,
-                submitted_request_id=submitted_request_id,
-                internal_request_id=sglang_request_id,
-                response_request_id=native_payload.get("rid") or context.id(),
-                report_kv_cache_hit=not _has_parallel_prefix_warmup(
-                    native_sampling_params
-                ),
-            ):
-                yield output
-            return
+            user_stop_token_ids = _user_stop_token_ids(request)
 
-        priority_kwargs = self._priority_kwargs(priority)
-        sampling_params = self._build_sampling_params(request)
-        thinking_budget = sampling_params.get("custom_params", {}).get(
-            "thinking_budget"
-        )
-        if thinking_budget is not None:
-            logging.debug("SGLang thinking budget configured: %s", thinking_budget)
-        submitted_request_id = _ordered_cancellation_request_id(
-            sglang_request_id,
-            sampling_params,
-            supported=getattr(self, "_supports_ordered_cancellation", False),
-        )
-        logprob_kwargs = self._build_logprob_kwargs(request)
-        metadata_uploader = self._metadata_uploader_from_request(request)
-
-        output_options = request.get("output_options", {})
-        (
-            completion_logprobs_count,
-            prompt_logprobs_count,
-        ) = _shared_logprobs.parse_logprob_options(output_options)
-        return_tokens_as_token_ids = bool(
-            output_options.get("return_tokens_as_token_ids")
-        )
-        user_stop_token_ids = _user_stop_token_ids(request)
-
-        lora_path = self._resolve_lora(request)
-        if lora_path:
-            logging.debug(f"Request {context.id()} will use LoRA adapter: {lora_path}")
-
-        if self.serving_mode == DisaggregationMode.DECODE:
-            raise_if_unextracted_multimodal(request)
-            reject_unconsumed_media(
-                request, consumes_media=engine_consumes_media(self.engine)
-            )
-
-            # Check if bootstrap_info is pre-computed in the request (from frontend)
-            bootstrap_info = request.get("bootstrap_info")
-
-            if not bootstrap_info:
-                raise RuntimeError(
-                    "bootstrap_info is required for disaggregated decode but was not provided"
+            lora_path = self._resolve_lora(request)
+            if lora_path:
+                logging.debug(
+                    f"Request {context.id()} will use LoRA adapter: {lora_path}"
                 )
 
-            logging.debug(
-                f"Using bootstrap_info: "
-                f"host={bootstrap_info['bootstrap_host']}, "
-                f"port={bootstrap_info['bootstrap_port']}, "
-                f"room={bootstrap_info['bootstrap_room']}"
-            )
+            if self.serving_mode == DisaggregationMode.DECODE:
+                raise_if_unextracted_multimodal(request)
+                reject_unconsumed_media(
+                    request, consumes_media=engine_consumes_media(self.engine)
+                )
 
-            trace_header = context.trace_headers() if self.enable_trace else None
+                # Check if bootstrap_info is pre-computed in the request (from frontend)
+                bootstrap_info = request.get("bootstrap_info")
 
-            # Extract dp_rank from routing info (set by KV router)
-            routing = request.get("routing") or {}
-            dp_rank = routing.get("dp_rank")
-
-            # Decode re-extracts the media so its token layout matches prefill's
-            # and the transferred KV lines up.
-            decode_mm_kwargs = build_disagg_mm_kwargs(request)
-
-            decode = await self.engine.async_generate(
-                **input_param,
-                **decode_mm_kwargs,
-                **cache_salt_kwargs(self.engine, request_cache_salt(request)),
-                sampling_params=sampling_params,
-                stream=True,
-                **require_reasoning_kwargs(
-                    self.engine,
-                    request,
-                    thinking_budget_requested=thinking_budget_requested(request),
-                ),
-                **self._routed_experts_kwargs,
-                bootstrap_host=bootstrap_info["bootstrap_host"],
-                bootstrap_port=bootstrap_info["bootstrap_port"],
-                bootstrap_room=bootstrap_info["bootstrap_room"],
-                **prefill_dp_rank_kwargs(self.engine, routing.get("prefill_dp_rank")),
-                external_trace_header=trace_header,
-                rid=sglang_request_id,
-                data_parallel_rank=dp_rank,
-                lora_path=lora_path,
-                **logprob_kwargs,
-                **priority_kwargs,
-                **agent_session_kwargs(self.engine, request),
-                **kv_hint_kwargs(self.engine, request),
-            )
-            if not self.use_sglang_tokenizer:
-                async for out in self._process_token_stream(
-                    decode,
-                    context,
-                    return_tokens_as_token_ids,
-                    user_stop_token_ids=user_stop_token_ids,
-                    metadata_uploader=metadata_uploader,
-                    submitted_request_id=submitted_request_id,
-                    prompt_logprobs_count=prompt_logprobs_count,
-                    completion_logprobs_count=completion_logprobs_count,
-                    report_kv_cache_hit=not _has_parallel_prefix_warmup(
-                        sampling_params
-                    ),
-                ):
-                    yield out
-            else:
-                async for out in self._process_text_stream(
-                    decode,
-                    context,
-                    request=request,
-                    user_stop_token_ids=user_stop_token_ids,
-                    metadata_uploader=metadata_uploader,
-                    submitted_request_id=submitted_request_id,
-                ):
-                    yield out
-        else:
-            raise_if_unextracted_multimodal(request)
-            reject_unconsumed_media(
-                request, consumes_media=engine_consumes_media(self.engine)
-            )
-
-            # Extract media URLs for multimodal requests. SGLang's mm_data_processor
-            # handles loading/preprocessing, and the scheduler does vision encoding.
-            mm_data = request.get("multi_modal_data", {})
-            audio_data = extract_media_urls(mm_data, AUDIO_URL_KEY)
-            image_data: list[str] | list[PILImage] | None
-            video_data: list[str] | list[FrontendDecodedVideo] | None
-            if self._enable_frontend_decoding:
-                # Invariant from __init__: _image_loader is non-None iff
-                # _enable_frontend_decoding is True. Assert narrows the
-                # Optional for the type checker without runtime branching.
-                assert self._image_loader is not None
-                image_items = mm_data.get(IMAGE_URL_KEY) or []
-                if image_items:
-                    image_data = await self._image_loader.load_image_batch(
-                        image_items,
-                        cache_scope=image_cache_scope_from_request(request),
+                if not bootstrap_info:
+                    raise RuntimeError(
+                        "bootstrap_info is required for disaggregated decode but was not provided"
                     )
-                else:
-                    image_data = None
 
-                video_items = mm_data.get(VIDEO_URL_KEY) or []
-                if video_items:
-                    assert self._video_loader is not None
-                    decoded_videos = await self._video_loader.load_video_batch(
-                        video_items
-                    )
-                    video_data = [
-                        _as_sglang_video(frames, metadata)
-                        for frames, metadata in decoded_videos
-                    ]
-                else:
-                    video_data = None
-            else:
-                image_data = extract_media_urls(mm_data, IMAGE_URL_KEY)
-                video_data = extract_media_urls(mm_data, VIDEO_URL_KEY)
+                logging.debug(
+                    f"Using bootstrap_info: "
+                    f"host={bootstrap_info['bootstrap_host']}, "
+                    f"port={bootstrap_info['bootstrap_port']}, "
+                    f"room={bootstrap_info['bootstrap_room']}"
+                )
 
-            trace_header = context.trace_headers() if self.enable_trace else None
+                trace_header = context.trace_headers() if self.enable_trace else None
 
-            # Extract dp_rank from routing info (set by KV router)
-            routing = request.get("routing") or {}
-            dp_rank = routing.get("dp_rank")
+                # Extract dp_rank from routing info (set by KV router)
+                routing = request.get("routing") or {}
+                dp_rank = routing.get("dp_rank")
 
-            mm_hashes_kwargs: Dict[str, Any] = {}
-            if self._mm_hashes_supported:
-                forwarded = extract_mm_hashes(request)
-                if forwarded is not None:
-                    mm_hashes_kwargs["mm_hashes"] = forwarded
+                # Decode re-extracts the media so its token layout matches prefill's
+                # and the transferred KV lines up.
+                decode_mm_kwargs = build_disagg_mm_kwargs(request)
 
-            agg = await self.engine.async_generate(
-                **input_param,
-                **cache_salt_kwargs(self.engine, request_cache_salt(request)),
-                image_data=image_data,
-                audio_data=audio_data,
-                video_data=video_data,
-                sampling_params=sampling_params,
-                stream=True,
-                **require_reasoning_kwargs(
-                    self.engine,
-                    request,
-                    thinking_budget_requested=thinking_budget_requested(request),
-                ),
-                **self._routed_experts_kwargs,
-                **mm_hashes_kwargs,
-                external_trace_header=trace_header,
-                rid=sglang_request_id,
-                data_parallel_rank=dp_rank,
-                lora_path=lora_path,
-                **logprob_kwargs,
-                **priority_kwargs,
-                **agent_session_kwargs(self.engine, request),
-                **kv_hint_kwargs(self.engine, request),
-            )
-            if not self.use_sglang_tokenizer:
-                async for out in self._process_token_stream(
-                    agg,
-                    context,
-                    return_tokens_as_token_ids,
-                    user_stop_token_ids=user_stop_token_ids,
-                    metadata_uploader=metadata_uploader,
-                    submitted_request_id=submitted_request_id,
-                    prompt_logprobs_count=prompt_logprobs_count,
-                    completion_logprobs_count=completion_logprobs_count,
-                    report_kv_cache_hit=not _has_parallel_prefix_warmup(
-                        sampling_params
+                nvtx_stages.engine_start(sglang_request_id)
+                decode = await self.engine.async_generate(
+                    **input_param,
+                    **decode_mm_kwargs,
+                    **cache_salt_kwargs(self.engine, request_cache_salt(request)),
+                    sampling_params=sampling_params,
+                    stream=True,
+                    **require_reasoning_kwargs(
+                        self.engine,
+                        request,
+                        thinking_budget_requested=thinking_budget_requested(request),
                     ),
-                ):
-                    yield out
+                    **self._routed_experts_kwargs,
+                    bootstrap_host=bootstrap_info["bootstrap_host"],
+                    bootstrap_port=bootstrap_info["bootstrap_port"],
+                    bootstrap_room=bootstrap_info["bootstrap_room"],
+                    **prefill_dp_rank_kwargs(
+                        self.engine, routing.get("prefill_dp_rank")
+                    ),
+                    external_trace_header=trace_header,
+                    rid=sglang_request_id,
+                    data_parallel_rank=dp_rank,
+                    lora_path=lora_path,
+                    **logprob_kwargs,
+                    **priority_kwargs,
+                    **agent_session_kwargs(self.engine, request),
+                    **kv_hint_kwargs(self.engine, request),
+                )
+                if not self.use_sglang_tokenizer:
+                    async for out in self._process_token_stream(
+                        decode,
+                        context,
+                        return_tokens_as_token_ids,
+                        user_stop_token_ids=user_stop_token_ids,
+                        metadata_uploader=metadata_uploader,
+                        submitted_request_id=submitted_request_id,
+                        prompt_logprobs_count=prompt_logprobs_count,
+                        completion_logprobs_count=completion_logprobs_count,
+                        report_kv_cache_hit=not _has_parallel_prefix_warmup(
+                            sampling_params
+                        ),
+                    ):
+                        if nvtx_stages.first_output_pending:
+                            nvtx_stages.first_output()
+                        yield out
+                else:
+                    async for out in self._process_text_stream(
+                        decode,
+                        context,
+                        request=request,
+                        user_stop_token_ids=user_stop_token_ids,
+                        metadata_uploader=metadata_uploader,
+                        submitted_request_id=submitted_request_id,
+                    ):
+                        if nvtx_stages.first_output_pending:
+                            nvtx_stages.first_output()
+                        yield out
             else:
-                async for out in self._process_text_stream(
-                    agg,
-                    context,
-                    request=request,
-                    user_stop_token_ids=user_stop_token_ids,
-                    metadata_uploader=metadata_uploader,
-                    submitted_request_id=submitted_request_id,
-                ):
-                    yield out
+                raise_if_unextracted_multimodal(request)
+                reject_unconsumed_media(
+                    request, consumes_media=engine_consumes_media(self.engine)
+                )
+
+                # Extract media URLs for multimodal requests. SGLang's mm_data_processor
+                # handles loading/preprocessing, and the scheduler does vision encoding.
+                mm_data = request.get("multi_modal_data", {})
+                audio_data = extract_media_urls(mm_data, AUDIO_URL_KEY)
+                image_data: list[str] | list[PILImage] | None
+                video_data: list[str] | list[FrontendDecodedVideo] | None
+                if self._enable_frontend_decoding:
+                    # Invariant from __init__: _image_loader is non-None iff
+                    # _enable_frontend_decoding is True. Assert narrows the
+                    # Optional for the type checker without runtime branching.
+                    assert self._image_loader is not None
+                    image_items = mm_data.get(IMAGE_URL_KEY) or []
+                    if image_items:
+                        image_data = await self._image_loader.load_image_batch(
+                            image_items,
+                            cache_scope=image_cache_scope_from_request(request),
+                        )
+                    else:
+                        image_data = None
+
+                    video_items = mm_data.get(VIDEO_URL_KEY) or []
+                    if video_items:
+                        assert self._video_loader is not None
+                        decoded_videos = await self._video_loader.load_video_batch(
+                            video_items
+                        )
+                        video_data = [
+                            _as_sglang_video(frames, metadata)
+                            for frames, metadata in decoded_videos
+                        ]
+                    else:
+                        video_data = None
+                else:
+                    image_data = extract_media_urls(mm_data, IMAGE_URL_KEY)
+                    video_data = extract_media_urls(mm_data, VIDEO_URL_KEY)
+
+                trace_header = context.trace_headers() if self.enable_trace else None
+
+                # Extract dp_rank from routing info (set by KV router)
+                routing = request.get("routing") or {}
+                dp_rank = routing.get("dp_rank")
+
+                mm_hashes_kwargs: Dict[str, Any] = {}
+                if self._mm_hashes_supported:
+                    forwarded = extract_mm_hashes(request)
+                    if forwarded is not None:
+                        mm_hashes_kwargs["mm_hashes"] = forwarded
+
+                nvtx_stages.engine_start(sglang_request_id)
+                agg = await self.engine.async_generate(
+                    **input_param,
+                    **cache_salt_kwargs(self.engine, request_cache_salt(request)),
+                    image_data=image_data,
+                    audio_data=audio_data,
+                    video_data=video_data,
+                    sampling_params=sampling_params,
+                    stream=True,
+                    **require_reasoning_kwargs(
+                        self.engine,
+                        request,
+                        thinking_budget_requested=thinking_budget_requested(request),
+                    ),
+                    **self._routed_experts_kwargs,
+                    **mm_hashes_kwargs,
+                    external_trace_header=trace_header,
+                    rid=sglang_request_id,
+                    data_parallel_rank=dp_rank,
+                    lora_path=lora_path,
+                    **logprob_kwargs,
+                    **priority_kwargs,
+                    **agent_session_kwargs(self.engine, request),
+                    **kv_hint_kwargs(self.engine, request),
+                )
+                if not self.use_sglang_tokenizer:
+                    async for out in self._process_token_stream(
+                        agg,
+                        context,
+                        return_tokens_as_token_ids,
+                        user_stop_token_ids=user_stop_token_ids,
+                        metadata_uploader=metadata_uploader,
+                        submitted_request_id=submitted_request_id,
+                        prompt_logprobs_count=prompt_logprobs_count,
+                        completion_logprobs_count=completion_logprobs_count,
+                        report_kv_cache_hit=not _has_parallel_prefix_warmup(
+                            sampling_params
+                        ),
+                    ):
+                        if nvtx_stages.first_output_pending:
+                            nvtx_stages.first_output()
+                        yield out
+                else:
+                    async for out in self._process_text_stream(
+                        agg,
+                        context,
+                        request=request,
+                        user_stop_token_ids=user_stop_token_ids,
+                        metadata_uploader=metadata_uploader,
+                        submitted_request_id=submitted_request_id,
+                    ):
+                        if nvtx_stages.first_output_pending:
+                            nvtx_stages.first_output()
+                        yield out
+        finally:
+            nvtx_stages.close()
 
     async def _process_native_generate_stream(
         self,

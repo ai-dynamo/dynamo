@@ -205,7 +205,7 @@ async def test_native_batched_prefill_disables_ordered_cancellation(monkeypatch)
     handler._resolve_lora = lambda request: None
     handler._priority_kwargs = lambda priority: {}
 
-    async def capture_consume(_results, submitted_request_id, _context):
+    async def capture_consume(_results, submitted_request_id, _context, **_kwargs):
         nonlocal captured_submitted_id
         captured_submitted_id = submitted_request_id
 

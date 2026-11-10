@@ -46,6 +46,7 @@ from dynamo.common.backend.agent_context import session_id_from_request
 from dynamo.common.backend.engine import is_generation_stage
 from dynamo.common.constants import DisaggregationMode as CommonDisaggregationMode
 from dynamo.common.multimodal.cache_uuid import reject_unsupported_multimodal_uuids
+from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.structural_tag import serialize_structural_tag
 from dynamo.common.utils.token_ids import token_ids_to_list
 from dynamo.health_check import HEALTH_CHECK_KEY
@@ -1024,12 +1025,25 @@ class HandlerBase(BaseGenerativeHandler):
                 "token_ids": [],
             }
             return
+        # prefill / decode / aggregated all run through here, so one pair of
+        # request-scoped NVTX ranges covers every role. Built inside the try so a
+        # failure cannot skip _mark_request_finished(); arguments only when enabled.
+        nvtx_stages = _nvtx.NO_STAGES
         try:
+            if _nvtx.REQUEST_ENABLED:
+                nvtx_stages = _nvtx.handler_stages(
+                    self.disaggregation_mode.name.lower(), context.id()
+                )
             async for chunk in self._generate_locally_impl(
-                request, context, embeddings, ep_disaggregated_params
+                request,
+                context,
+                embeddings,
+                ep_disaggregated_params,
+                nvtx_stages=nvtx_stages,
             ):
                 yield chunk
         finally:
+            nvtx_stages.close()
             await self._mark_request_finished()
 
     async def _generate_locally_impl(
@@ -1038,6 +1052,7 @@ class HandlerBase(BaseGenerativeHandler):
         context: Context,
         embeddings: Optional[Union[torch.Tensor, dict]] = None,
         ep_disaggregated_params: Optional[DisaggregatedParams] = None,
+        nvtx_stages: Any = _nvtx.NO_STAGES,
     ) -> AsyncGenerator[dict, None]:
         """
         Generate responses based on the disaggregation mode in the request.
@@ -1332,6 +1347,7 @@ class HandlerBase(BaseGenerativeHandler):
                 "cache_salt": cache_salt,
             }
             generate_async = self.engine.llm.generate_async
+            nvtx_stages.end_prepare()
             try:
                 generation_result = generate_async(**generate_kwargs)
             except RequestError as e:
@@ -1386,6 +1402,13 @@ class HandlerBase(BaseGenerativeHandler):
                 else None,
             )
 
+            # Opened after submission because the executor client id is only
+            # known now; it is the engine-side id for this request.
+            _client_id = getattr(generation_result, "request_id", None)
+            nvtx_stages.start_first_output(
+                str(_client_id) if _client_id is not None else None
+            )
+
             # In disagg decode mode with remote prefill, wrap abort() to defer
             # until the first token is received (KV transfer complete).
             abort_guard = (
@@ -1401,6 +1424,8 @@ class HandlerBase(BaseGenerativeHandler):
                 abort_guard or generation_result, context
             ):
                 async for res in generation_result:
+                    if nvtx_stages.first_output_pending:
+                        nvtx_stages.first_output()
                     # Signal first token to deferred abort guard
                     if abort_guard is not None:
                         abort_guard.signal_first_token()
