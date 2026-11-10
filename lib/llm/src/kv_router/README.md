@@ -231,5 +231,6 @@ Encoder routing policy also comes from the committed consumer card. A consumer d
 activating, or returns an error, and video/audio requests fail before the encoder hop. Text
 requests bypass the encoder. Decode pipelines inherit this requirement from the unique capable
 Prefill target even before an Encode target exists. Consumers without the declaration retain
-optional inline fallback. Dynamo's native TensorRT-LLM handoff requires a single NIXL backend;
-shared-safetensors helpers are outside this integration.
+optional inline fallback. Dynamo's native TensorRT-LLM handoff requires producers to advertise
+NIXL as their single backend; consumers may list additional compatible backends.
+Shared-safetensors helpers are outside this integration.
