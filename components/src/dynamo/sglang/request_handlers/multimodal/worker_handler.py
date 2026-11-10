@@ -229,8 +229,10 @@ class StreamProcessor:
         With stream_output=True (enforced by Dynamo), SGLang sends disjoint segments
         containing only new tokens since the last output. We pass these through directly.
         """
+        received_output = False
         try:
             async for res in stream_source:
+                received_output = True
                 try:
                     # With stream_output=True, output_ids contains only new tokens (disjoint)
                     output_ids = res.get("output_ids", [])
@@ -288,6 +290,10 @@ class StreamProcessor:
                     break
 
         except Exception as e:
+            # SGLang validates the request on the first read of the stream and
+            # raises ValueError for a bad one, before producing any output.
+            if isinstance(e, ValueError) and not received_output:
+                raise InvalidArgument(str(e)) from e
             logger.error(f"Error in stream processing: {e}")
             error_output = {
                 "token_ids": [],
@@ -1148,6 +1154,8 @@ class MultimodalPrefillWorkerHandler(
                         raise RuntimeError(
                             "SGLang prefill stream ended before producing a result"
                         ) from e
+                    except ValueError as e:
+                        raise InvalidArgument(str(e)) from e
                     finally:
                         first_result_task = None
                     first_result_ready = True
@@ -1182,6 +1190,8 @@ class MultimodalPrefillWorkerHandler(
                         raise RuntimeError(
                             "SGLang prefill stream ended before producing a result"
                         ) from e
+                    except ValueError as e:
+                        raise InvalidArgument(str(e)) from e
                     finally:
                         first_result_task = None
                 process_result(first_result)

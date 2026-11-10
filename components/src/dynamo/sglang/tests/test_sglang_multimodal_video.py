@@ -4,6 +4,7 @@
 import asyncio
 import importlib
 import json
+import re
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -485,6 +486,106 @@ async def test_multimodal_prefill_rejects_empty_engine_stream():
     assert owns_tensor.is_set()
     assert request_started.is_set()
     assert released == [23]
+
+
+_SGLANG_VALIDATION_ERROR = "logit_bias must has keys in [0, 151935], got 999999."
+
+
+async def _sglang_rejected_results():
+    if False:
+        yield None
+    raise ValueError(_SGLANG_VALIDATION_ERROR)
+
+
+@pytest.mark.asyncio
+async def test_multimodal_prefill_rejects_invalid_request_before_bootstrap():
+    handler = MultimodalPrefillWorkerHandler.__new__(MultimodalPrefillWorkerHandler)
+    handler.bootstrap_host = "prefill-host"
+    handler.bootstrap_port = 1234
+    handler._consume_tasks = set()
+    released = []
+    handler.embeddings_processor = SimpleNamespace(release_embeddings=released.append)
+    handler._validate_and_parse_disagg_request = lambda request: request
+    handler._generate_bootstrap_room = lambda: 17
+
+    async def start_prefill(request, bootstrap_room, rid=None, context=None):
+        return _sglang_rejected_results(), 23
+
+    async def wait_for_registration(rid):
+        await asyncio.Event().wait()
+
+    handler._start_prefill_generation = start_prefill
+    handler._wait_for_request_registration = wait_for_registration
+    handler._cancellation_monitor = _never_cancels
+
+    stream = handler.generate(
+        SimpleNamespace(sampling_params={}), _FakeContext("request-id")
+    )
+    with pytest.raises(InvalidArgument, match=re.escape(_SGLANG_VALIDATION_ERROR)):
+        await anext(stream)
+
+    assert released == [23]
+
+
+@pytest.mark.asyncio
+async def test_multimodal_prefill_rejects_invalid_request_after_registration():
+    handler = MultimodalPrefillWorkerHandler.__new__(MultimodalPrefillWorkerHandler)
+    released = []
+    handler.embeddings_processor = SimpleNamespace(release_embeddings=released.append)
+
+    async def wait_for_registration(rid):
+        return None
+
+    handler._wait_for_request_registration = wait_for_registration
+    handler._cancellation_monitor = _never_cancels
+    owns_tensor = asyncio.Event()
+    request_started = asyncio.Event()
+
+    with pytest.raises(InvalidArgument, match=re.escape(_SGLANG_VALIDATION_ERROR)):
+        await handler._consume_results(
+            _sglang_rejected_results(),
+            23,
+            "request-id",
+            _FakeContext("request-id"),
+            owns_tensor,
+            request_started,
+        )
+
+    assert owns_tensor.is_set()
+    assert request_started.is_set()
+    assert released == [23]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "serving_mode", [DisaggregationMode.AGGREGATED, DisaggregationMode.DECODE]
+)
+async def test_multimodal_worker_rejects_invalid_request(serving_mode):
+    handler = MultimodalWorkerHandler.__new__(MultimodalWorkerHandler)
+    handler.serving_mode = serving_mode
+    handler.config = SimpleNamespace(server_args=SimpleNamespace())
+    handler.enable_trace = False
+    handler.embeddings_processor = None
+    handler._get_bootstrap_from_prefill = AsyncMock(
+        return_value={
+            "bootstrap_host": "prefill.invalid",
+            "bootstrap_port": 1,
+            "bootstrap_room": 42,
+        }
+    )
+    handler.engine = SimpleNamespace(
+        async_generate=AsyncMock(return_value=_sglang_rejected_results())
+    )
+    request = SglangMultimodalRequest(
+        request=PreprocessedRequest(
+            token_ids=[1, 2, 3],
+            stop_conditions=StopConditions(max_tokens=1),
+            sampling_options=SamplingOptions(),
+        )
+    )
+
+    with pytest.raises(InvalidArgument, match=re.escape(_SGLANG_VALIDATION_ERROR)):
+        await anext(handler.generate(request, _FakeContext("request-id")))
 
 
 @pytest.mark.asyncio
