@@ -12,13 +12,14 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use dynamo_kv_router::services::selection::WorkerSelectionPolicyRegistry;
+use dynamo_kv_router::services::selection::RouterPluginRegistry;
 use dynamo_runtime::namespace::{NamespaceFilter, NamespacePrefixMode};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
 
+use crate::tokio_runtime::{self, TaskKind};
 use crate::{EppMode, EppStandaloneConfig, ExtProcServer, Router, metrics};
 
 const GRPC_PORT: u16 = 9002;
@@ -128,7 +129,7 @@ fn create_tls_acceptor() -> Result<TlsAcceptor> {
 }
 
 /// Run EPP until it exits.
-pub async fn run(policy_registry: Option<WorkerSelectionPolicyRegistry>) -> Result<()> {
+pub async fn run(policy_registry: Option<RouterPluginRegistry>) -> Result<()> {
     init_tracing();
     let mode = EppMode::from_env()?;
     if !matches!(mode, EppMode::Standalone)
@@ -171,6 +172,7 @@ async fn wait_for_shutdown_signal() {
 struct BackgroundTasks {
     health_task: JoinHandle<()>,
     metrics_task: Option<JoinHandle<()>>,
+    stall_watcher: JoinHandle<()>,
     shutdown_task: JoinHandle<()>,
 }
 
@@ -179,6 +181,7 @@ impl BackgroundTasks {
         let Self {
             health_task,
             metrics_task,
+            stall_watcher,
             shutdown_task,
         } = self;
 
@@ -186,17 +189,19 @@ impl BackgroundTasks {
         if let Some(task) = &metrics_task {
             task.abort();
         }
+        stall_watcher.abort();
         shutdown_task.abort();
 
         let _ = health_task.await;
         if let Some(task) = metrics_task {
             let _ = task.await;
         }
+        let _ = stall_watcher.await;
         let _ = shutdown_task.await;
     }
 }
 
-async fn run_inner(mode: EppMode, policy_registry: WorkerSelectionPolicyRegistry) -> Result<()> {
+async fn run_inner(mode: EppMode, policy_registry: RouterPluginRegistry) -> Result<()> {
     let standalone = matches!(mode, EppMode::Standalone);
 
     let config = Config::from_env();
@@ -242,6 +247,9 @@ async fn run_inner(mode: EppMode, policy_registry: WorkerSelectionPolicyRegistry
             }
         }))
     };
+    // Independent of the metrics server: the "EPP runtime stall" lines go to
+    // the log even when `/metrics` is disabled or fails to bind.
+    let stall_watcher = tokio::spawn(tokio_runtime::watch_event_loop());
 
     // Shutdown coordination: on SIGTERM/SIGINT, flip health to NOT_SERVING
     // (the gateway stops routing new requests to this EPP), allow the endpoint
@@ -277,6 +285,7 @@ async fn run_inner(mode: EppMode, policy_registry: WorkerSelectionPolicyRegistry
     let background_tasks = BackgroundTasks {
         health_task,
         metrics_task,
+        stall_watcher,
         shutdown_task,
     };
 
@@ -451,7 +460,7 @@ async fn serve<P: crate::EndpointPicker>(
             let tls_acceptor = tls_acceptor.clone();
             let svc = svc.clone();
 
-            tokio::spawn(async move {
+            tokio_runtime::spawn(TaskKind::H2Connection, async move {
                 let _permit = permit; // released when this task exits (incl. handshake timeout)
                 let tls_stream = match tokio::time::timeout(
                     TLS_HANDSHAKE_TIMEOUT,
@@ -474,16 +483,36 @@ async fn serve<P: crate::EndpointPicker>(
                     }
                 };
 
+                // `task_id` names this task in "EPP runtime stall" lines, and
+                // `conn_id` names the connection in each stream's log lines.
+                let connection = crate::server::Connection::open();
+                let opened = std::time::Instant::now();
+                tracing::info!(
+                    conn_id = connection.id(),
+                    peer = %remote_addr,
+                    task_id = %tokio::task::id(),
+                    "ext_proc connection opened"
+                );
                 let io = hyper_util::rt::TokioIo::new(tls_stream);
-                let hyper_svc = hyper_util::service::TowerToHyperService::new(svc);
-                if let Err(e) = hyper_util::server::conn::auto::Builder::new(
+                let hyper_svc = hyper_util::service::TowerToHyperService::new(WithConnection {
+                    inner: svc,
+                    connection: Arc::clone(&connection),
+                });
+                let served = hyper_util::server::conn::auto::Builder::new(
                     hyper_util::rt::TokioExecutor::new(),
                 )
                 .serve_connection(io, hyper_svc)
-                .await
-                {
-                    tracing::debug!(%remote_addr, error = %e, "Connection ended");
-                }
+                .await;
+                let error = served.err().map(|error| error.to_string());
+                tracing::info!(
+                    conn_id = connection.id(),
+                    peer = %remote_addr,
+                    streams_served = connection.streams_served(),
+                    peak_streams = connection.peak_streams(),
+                    lifetime_s = opened.elapsed().as_secs_f64(),
+                    error = error.as_deref(),
+                    "ext_proc connection closed"
+                );
             });
         };
         readiness_task.abort();
@@ -501,11 +530,42 @@ async fn serve<P: crate::EndpointPicker>(
     }
 }
 
+/// Puts the gateway connection into each request's extensions, where the
+/// ext_proc server finds it to count streams per connection.
+#[derive(Clone)]
+struct WithConnection<S> {
+    inner: S,
+    connection: Arc<crate::server::Connection>,
+}
+
+impl<S, B> tonic::codegen::Service<tonic::codegen::http::Request<B>> for WithConnection<S>
+where
+    S: tonic::codegen::Service<tonic::codegen::http::Request<B>>,
+{
+    type Response = S::Response;
+    type Error = S::Error;
+    type Future = S::Future;
+
+    fn poll_ready(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, mut request: tonic::codegen::http::Request<B>) -> Self::Future {
+        request
+            .extensions_mut()
+            .insert(Arc::clone(&self.connection));
+        self.inner.call(request)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
-    use dynamo_kv_router::WorkerSelectionPolicyFactory;
+    use dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicyFactory;
     use dynamo_kv_router::services::selection::WorkerSelectionPolicyProviderError;
     use tokio::sync::Mutex;
 
@@ -559,9 +619,9 @@ mod tests {
 
     #[tokio::test]
     async fn linked_policy_registry_requires_standalone_mode() {
-        let mut registry = WorkerSelectionPolicyRegistry::default();
+        let mut registry = RouterPluginRegistry::default();
         registry
-            .register(
+            .register_worker_selection(
                 "test",
                 Arc::new(
                     |_| -> std::result::Result<

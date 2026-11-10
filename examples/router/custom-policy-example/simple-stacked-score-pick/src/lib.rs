@@ -8,12 +8,13 @@ mod scorer;
 
 use std::sync::Arc;
 
+use dynamo_kv_router::KvRouterConfig;
+use dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicy;
+use dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicyFactory;
 use dynamo_kv_router::services::selection::{
-    WorkerSelectionPolicyFactory, WorkerSelectionPolicyParameters,
-    WorkerSelectionPolicyProviderError, WorkerSelectionPolicyRegistry,
+    RouterPluginRegistry, WorkerSelectionPolicyParameters, WorkerSelectionPolicyProviderError,
     WorkerSelectionPolicyRegistryError,
 };
-use dynamo_kv_router::{KvRouterConfig, WorkerSelectionPolicy};
 use picker::LowestCostPicker;
 use scorer::{ActiveRequestsScorer, UncachedBlocksScorer};
 
@@ -43,7 +44,7 @@ fn provider(
 
 /// Register the `simple-stacked-score-pick` policy type.
 pub fn register(
-    registry: &mut WorkerSelectionPolicyRegistry,
+    registry: &mut RouterPluginRegistry,
 ) -> Result<(), WorkerSelectionPolicyRegistryError> {
-    registry.register("simple-stacked-score-pick", Arc::new(provider))
+    registry.register_worker_selection("simple-stacked-score-pick", Arc::new(provider))
 }

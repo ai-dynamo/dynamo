@@ -39,7 +39,6 @@ FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS pre_runtime
 
 ARG ENABLE_GPU_MEMORY_SERVICE
 ARG TARGETARCH
-ARG NIXL_REF
 
 # Remove the upstream runtime's Git LFS package without pruning shared dependencies.
 RUN apt-get purge -y git-lfs && rm -rf /var/lib/apt/lists/*
@@ -169,16 +168,15 @@ RUN --mount=type=bind,source=./container/deps/trtllm/_dynamo_pmix_hostname.py,ta
     mkdir -p /opt/dynamo && ln -sfn "$t" /opt/dynamo/mpi && \
     echo "MPI for ${TARGETARCH}: $(readlink -f /opt/dynamo/mpi)"
 
-# LD_PRELOAD pins TRT-LLM's bundled libnixl to dodge ai-dynamo/nixl#1668
-# (nixl-cu13's UCX 1.20.0 hangs with two agents/host); drop it when fixed.
-# NIXL_VERSION= clears the base image's stale value (see nixl-versions.txt).
+# Reuse upstream's native NIXL and matching Python bindings. Only libstdc++
+# needs preloading; loading NIXL into every process adds CI startup overhead.
+# Clear upstream's stale NIXL_VERSION; record installed metadata below.
 ENV DYNAMO_HOME=/workspace \
     HOME=/home/dynamo \
     PATH=/opt/dynamo/mpi/bin:/usr/local/bin/etcd:${PATH} \
-    LD_PRELOAD=/opt/dynamo/libstdc++.so.6:/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/libnixl.so \
+    LD_PRELOAD=/opt/dynamo/libstdc++.so.6 \
     LD_LIBRARY_PATH=/opt/dynamo/mpi/lib:${LD_LIBRARY_PATH} \
     OPAL_PREFIX=/opt/dynamo/mpi \
-    NIXL_PLUGIN_DIR=/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/plugins \
     NIXL_VERSION=
 
 WORKDIR /workspace
@@ -199,8 +197,6 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         librdmacm1 \
         rdma-core \
         libjemalloc2 && \
-    test -f /usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/libnixl.so && \
-    test -d "${NIXL_PLUGIN_DIR}" && \
     ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64") && \
     printf '%s\n' \
         "/usr/local/tensorrt/lib" \
@@ -266,6 +262,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         gpgsm \
         gpgv \
         keyboxd \
+        libbrotli1 \
         libssl3t64 \
         openssl
 
@@ -276,6 +273,15 @@ ENV GRPC_DEFAULT_SSL_ROOTS_FILE_PATH=/etc/ssl/certs/ca-certificates.crt
 # One COPY pulls nats-server, etcd/, uv, uvx into their final paths.
 COPY --from=dynamo_base_export / /
 ENV PATH=/opt/uv/bin:${PATH}
+
+# Upstream ships matching NIXL bindings outside the standard Python search path.
+# Register that directory for system Python and both Dynamo venvs instead of
+# installing a second NIXL/UCX stack. Fail early if the upstream layout changes.
+RUN test -d /opt/nvidia/nvda_nixl/lib/python3/dist-packages/nixl_cu13 && \
+    python3 -c 'import sysconfig; from pathlib import Path; Path(sysconfig.get_path("purelib"), "dynamo-nixl.pth").write_text("/opt/nvidia/nvda_nixl/lib/python3/dist-packages\n")'
+
+RUN python3 -c 'import ctypes, importlib.metadata as m; import nixl._api, nixl._bindings; ctypes.CDLL("libnixl.so"); print("nixl:", m.version("nixl")); print("bindings:", nixl._bindings.__file__)' \
+    > /opt/dynamo/nixl-versions.txt && cat /opt/dynamo/nixl-versions.txt
 
 # dynamo user (group 0 for OpenShift), clear upstream /workspace baggage
 # (otherwise pytest collects broken tutorial test files), and create the
@@ -311,15 +317,6 @@ RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.
     uv pip install --no-deps /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl && \
     uv pip install --no-deps /opt/dynamo/wheelhouse/ai_dynamo*any.whl && \
     uv pip install --no-deps /opt/dynamo/wheelhouse/aisimulate*.whl && \
-    \
-    # nixl/nixl-cu13 for `import nixl` (dynamo.nixl_connect); version from NIXL_REF.
-    # LD_PRELOAD swaps the runtime .so (nixl#1668).
-    echo "${NIXL_REF}" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$' || { echo "NIXL_REF must be a vX.Y.Z release tag; got '${NIXL_REF}'" >&2; exit 1; } && \
-    _nixl_ver="${NIXL_REF#v}" && \
-    uv pip install --no-deps "nixl==${_nixl_ver}" "nixl-cu13==${_nixl_ver}" && \
-    \
-    # Record effective NIXL versions (pip vs loaded .so) for diagnosis.
-    { uv pip show nixl nixl-cu13 | grep -E '^(Name|Version)'; echo "loaded_libnixl: ${LD_PRELOAD##*:}"; } | tee /opt/dynamo/nixl-versions.txt && \
     \
     # Third-party deps Dynamo wheels declare but upstream lacks. The
     # requirements.trtllm.txt file itself carries a `--no-binary imageio-ffmpeg`
@@ -397,19 +394,25 @@ RUN --mount=type=bind,source=./container/compliance/enumerate_bundled_decoders.p
     done; \
     /usr/bin/python3 -c 'import nvidia.dali'
 
-# The base image ships PyNvVideoCodec, and it must be the version
-# requirements.trtllm.txt pins. 2.2.x links libavcodec statically into
-# libavformat, so a filename test cannot see a release that re-enables decoders
-# there. check_pynvvideocodec asserts the version, the bundled libraries against
-# codec_policy.yaml and the single FFmpeg source tarball; the enumeration then
-# reads what the shipped libraries actually register. For 2.2.x it reports "0
-# decoders, 0 encoders" and every "expected present" entry as ABSENT -- that is
-# the correct answer, and the probe fails closed if av_codec_iterate is missing.
+# Replace the base image's PyNvVideoCodec with the version
+# requirements.trtllm.txt pins. The base ships an older release in system site,
+# and the pre_runtime whiteout below drops that copy before the overlay: the
+# overlay COPY cannot delete the base image's files, and the dist-info name
+# carries the version. When the base ships the pin or a newer release, remove
+# this replacement and its pre_runtime whiteout entries. Then move the pin to
+# the base version.
 #
-# If a base bump moves PyNvVideoCodec off the pin, move the pin with it
-# (test_pynvvideocodec_spec.py lists every copy). Replacing the base copy here
-# instead also needs a pre_runtime whiteout: the overlay COPY cannot delete the
-# base image's files.
+# Uninstall first, then remove what is left. The wheel's RECORD is the only full
+# list of what it wrote, including the FFmpeg source tarball under
+# /usr/local/external/ffmpeg.
+#
+# 2.2.x links libavcodec statically into libavformat, so a filename test cannot
+# see a release that re-enables decoders there. check_pynvvideocodec asserts the
+# version, the bundled libraries against codec_policy.yaml and the single FFmpeg
+# source tarball; the enumeration then reads what the shipped libraries actually
+# register. For 2.2.x it reports "0 decoders, 0 encoders" and every "expected
+# present" entry as ABSENT -- that is the correct answer, and the probe fails
+# closed if av_codec_iterate is missing.
 #
 # The venv cross-check reads dist-info directly rather than asking the venv
 # interpreter: the venv is --system-site-packages, so the interpreter would
@@ -420,7 +423,13 @@ RUN --mount=type=bind,source=./container/compliance/enumerate_bundled_decoders.p
 # does not have.
 RUN --mount=type=bind,source=./container/compliance,target=/tmp/compliance/compliance \
     set -eu; \
-    PYTHONPATH=/tmp/compliance /usr/bin/python3 -m compliance.check_pynvvideocodec --pinned 2.2.3; \
+    /usr/bin/python3 -m pip uninstall --break-system-packages --yes pynvvideocodec; \
+    rm -rf /usr/local/lib/python3.12/dist-packages/PyNvVideoCodec \
+        /usr/local/lib/python3.12/dist-packages/pynvvideocodec* \
+        /usr/local/external/ffmpeg; \
+    /usr/bin/python3 -m pip install --break-system-packages --no-cache-dir \
+        'PyNvVideoCodec==2.2.4'; \
+    PYTHONPATH=/tmp/compliance /usr/bin/python3 -m compliance.check_pynvvideocodec --pinned 2.2.4; \
     v=$(/usr/bin/python3 -c 'import importlib.metadata as m; print(m.version("pynvvideocodec"))'); \
     echo "PyNvVideoCodec version: $v"; \
     examined=0; \
@@ -564,6 +573,13 @@ RUN apt-get purge -y git-lfs && rm -rf /var/lib/apt/lists/*
 # would leave the base image's dist-info beside the new one, and the inventory
 # reads that directory, so the upgrade would not show.
 #
+# PyNvVideoCodec is here for the aiohttp reason: runtime_full replaces the base
+# image's copy, and the dist-info name carries the version. Without this entry the
+# image would ship two dist-info directories, and the codec scan runs on this
+# stage. /usr/local/external/ffmpeg is the same package: the wheel installs its
+# FFmpeg source tarball there, outside dist-packages. The overlay restores
+# runtime_full's single tarball, which matches the shipped libraries.
+#
 # Its runtime dependencies are listed for the same reason. pip upgrades those too
 # when the new aiohttp requires versions the base does not carry, and each rename
 # has the same doubling problem. Dropping them here is free: the overlay restores
@@ -585,6 +601,9 @@ RUN rm -rf /workspace /home/ubuntu \
     /usr/local/lib/python3.12/dist-packages/opencv_python_headless* \
     /usr/local/lib/python3.12/dist-packages/nvidia/dali \
     /usr/local/lib/python3.12/dist-packages/nvidia_dali_* \
+    /usr/local/lib/python3.12/dist-packages/PyNvVideoCodec \
+    /usr/local/lib/python3.12/dist-packages/pynvvideocodec* \
+    /usr/local/external/ffmpeg \
     /usr/local/share/jupyter/lab \
     /usr/local/share/jupyter/labextensions/@jupyter-notebook/lab-extension \
     /usr/local/lib/python3.12/dist-packages/jupyter_server \
@@ -690,10 +709,18 @@ RUN --mount=type=bind,source=./container/compliance/enumerate_bundled_decoders.p
     tarballs=$(find /usr/local/external/ffmpeg -name 'ffmpeg-*.tar.*' 2>/dev/null | wc -l); \
     if [ "$tarballs" -gt 1 ]; then \
         echo "ERROR: more than one PyNvVideoCodec FFmpeg source tarball survived" >&2; \
-        echo "       the overlay." >&2; \
+        echo "       the overlay. The /usr/local/external/ffmpeg whiteout entry in" >&2; \
+        echo "       pre_runtime is missing." >&2; \
         find /usr/local/external/ffmpeg -name 'ffmpeg-*.tar.*' >&2; \
         exit 1; \
     fi
+
+# The PyNvVideoCodec replacement in runtime_full needs the same post-overlay
+# check. A missed whiteout leaves the base image's dist-info beside the new one,
+# and the tarball count above cannot see that when both releases ship the same
+# FFmpeg source. The shared guard counts distributions, so it runs again here.
+RUN --mount=type=bind,source=./container/compliance,target=/tmp/compliance/compliance \
+    PYTHONPATH=/tmp/compliance /usr/bin/python3 -m compliance.check_pynvvideocodec --pinned 2.2.4
 
 # The Nsight Systems CLI in the CUDA base ships an optional efa_metrics sampler
 # for EFA network counters. Nothing in the Dynamo tree references it, and AWS
@@ -744,10 +771,9 @@ ENV DYNAMO_HOME=/workspace \
     HOME=/home/dynamo \
     PATH=/opt/dynamo/mpi/bin:/opt/uv/bin:/usr/local/bin/etcd:${PATH} \
     IMAGEIO_FFMPEG_EXE=/usr/local/bin/ffmpeg \
-    LD_PRELOAD=/opt/dynamo/libstdc++.so.6:/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/libnixl.so \
+    LD_PRELOAD=/opt/dynamo/libstdc++.so.6 \
     LD_LIBRARY_PATH=/opt/dynamo/mpi/lib:${LD_LIBRARY_PATH} \
     OPAL_PREFIX=/opt/dynamo/mpi \
-    NIXL_PLUGIN_DIR=/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/plugins \
     NIXL_VERSION=
 {% else %}
 ENV DYNAMO_HOME=/workspace \
@@ -755,10 +781,9 @@ ENV DYNAMO_HOME=/workspace \
     VIRTUAL_ENV=/opt/dynamo/venv \
     PATH=/opt/dynamo/venv/bin:/opt/dynamo/mpi/bin:/opt/uv/bin:/usr/local/bin/etcd:${PATH} \
     IMAGEIO_FFMPEG_EXE=/usr/local/bin/ffmpeg \
-    LD_PRELOAD=/opt/dynamo/libstdc++.so.6:/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/libnixl.so \
+    LD_PRELOAD=/opt/dynamo/libstdc++.so.6 \
     LD_LIBRARY_PATH=/opt/dynamo/mpi/lib:${LD_LIBRARY_PATH} \
     OPAL_PREFIX=/opt/dynamo/mpi \
-    NIXL_PLUGIN_DIR=/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/plugins \
     NIXL_VERSION=
 {% endif %}
 

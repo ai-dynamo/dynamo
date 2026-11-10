@@ -121,6 +121,8 @@ pub struct KvTransferTarget {
 pub struct KvTransferScope {
     /// The shortest local prefix of any target; shorter sources are skipped.
     min_local_prefix_blocks: usize,
+    /// No target can use a continuation starting beyond this depth.
+    max_local_prefix_blocks: usize,
     /// Whether some target takes a source from any island: it has no
     /// transfer domain, or `preferred` enforcement allows a fallback.
     any_island: bool,
@@ -142,6 +144,7 @@ impl KvTransferScope {
     pub fn all() -> Self {
         Self {
             min_local_prefix_blocks: 0,
+            max_local_prefix_blocks: usize::MAX,
             any_island: true,
             islands: IslandScope::Any,
         }
@@ -151,11 +154,13 @@ impl KvTransferScope {
     pub fn of(targets: impl IntoIterator<Item = (KvTransferTarget, usize)>) -> Self {
         let mut scope = Self {
             min_local_prefix_blocks: usize::MAX,
+            max_local_prefix_blocks: 0,
             any_island: false,
             islands: IslandScope::Unused,
         };
         for (target, local_prefix_blocks) in targets {
             scope.min_local_prefix_blocks = scope.min_local_prefix_blocks.min(local_prefix_blocks);
+            scope.max_local_prefix_blocks = scope.max_local_prefix_blocks.max(local_prefix_blocks);
             scope.any_island |= target.transfer_domain.is_none() || target.preferred;
             if let (Some(domain), Some(island)) = (target.transfer_domain, target.transfer_island) {
                 let one = IslandScope::One(domain, island);
@@ -215,14 +220,14 @@ impl CacheOwnerKvTransferKeys {
     }
 }
 
-/// The source a target fetches from, and the prefix it holds in blocks.
+/// The source a target fetches from, and the resulting prefix length in blocks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct KvTransferSourceChoice {
     pub source: KvTransferCandidateSource,
     pub prefix_blocks: usize,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 struct RankedSource {
     choice: KvTransferSourceChoice,
     /// The worker this source belongs to, which never fetches from it.
@@ -248,35 +253,25 @@ impl RankedSource {
 
 /// A group's best source and the best one attached to a different worker, so
 /// the best source not attached to any given target is one of the two.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 struct TopSources {
     best: RankedSource,
     runner_up: Option<RankedSource>,
 }
 
 impl TopSources {
-    fn offer(entry: Entry<'_, impl Hash + Eq, TopSources>, source: RankedSource) {
-        let top = match entry {
-            Entry::Occupied(top) => top.into_mut(),
-            Entry::Vacant(top) => {
-                top.insert(TopSources {
-                    best: source,
-                    runner_up: None,
-                });
-                return;
+    fn offer(&mut self, source: RankedSource) {
+        if source.outranks(&self.best) {
+            if !source.shares_attachment(&self.best) {
+                self.runner_up = Some(self.best);
             }
-        };
-        if source.outranks(&top.best) {
-            if !source.shares_attachment(&top.best) {
-                top.runner_up = Some(top.best);
-            }
-            top.best = source;
-        } else if !source.shares_attachment(&top.best)
-            && top
+            self.best = source;
+        } else if !source.shares_attachment(&self.best)
+            && self
                 .runner_up
                 .is_none_or(|runner_up| source.outranks(&runner_up))
         {
-            top.runner_up = Some(source);
+            self.runner_up = Some(source);
         }
     }
 
@@ -289,11 +284,79 @@ impl TopSources {
     }
 }
 
+/// Root-only queries keep the existing inline top two. Continuations retain
+/// cumulative top two choices at each start depth where the ranking changes.
+/// Expired intervals need no removal: their ends rank below every live interval.
+enum SourceBucket {
+    Root(TopSources),
+    Continuations(Vec<(usize, TopSources)>),
+}
+
+impl SourceBucket {
+    /// Offers must arrive in nondecreasing start order.
+    fn offer(entry: Entry<'_, impl Hash + Eq, Self>, start: usize, source: RankedSource) {
+        let bucket = match entry {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => {
+                let top = TopSources {
+                    best: source,
+                    runner_up: None,
+                };
+                entry.insert(if start == 0 {
+                    Self::Root(top)
+                } else {
+                    Self::Continuations(vec![(start, top)])
+                });
+                return;
+            }
+        };
+        match bucket {
+            Self::Root(top) if start == 0 => top.offer(source),
+            Self::Root(top) => {
+                let mut next = *top;
+                next.offer(source);
+                if next != *top {
+                    *bucket = Self::Continuations(vec![(0, *top), (start, next)]);
+                }
+            }
+            Self::Continuations(by_start) => {
+                if let Some((last_start, top)) = by_start.last_mut() {
+                    debug_assert!(start >= *last_start);
+                    let mut next = *top;
+                    next.offer(source);
+                    if start == *last_start {
+                        *top = next;
+                    } else if next != *top {
+                        by_start.push((start, next));
+                    }
+                }
+            }
+        }
+    }
+
+    fn best_for(
+        &self,
+        worker: WorkerWithDpRank,
+        local_prefix: usize,
+    ) -> Option<KvTransferSourceChoice> {
+        match self {
+            Self::Root(top) => top.best_for(worker),
+            Self::Continuations(by_start) => {
+                let idx = by_start.partition_point(|(start, _)| *start <= local_prefix);
+                by_start
+                    .get(idx.checked_sub(1)?)
+                    .and_then(|(_, top)| top.best_for(worker))
+            }
+        }
+    }
+}
+
 /// The eligible sources of one request, grouped so the source for any target
-/// in its scope is found in O(1) after one pass over the sources.
+/// in its scope is found without scanning sources. Root-prefix lookup is O(1);
+/// continuation lookup is O(log distinct start depths) per applicable bucket.
 pub struct KvTransferSourceSummary {
-    by_type: FxHashMap<u64, TopSources>,
-    by_island: FxHashMap<(u64, u64, u64), TopSources>,
+    by_type: FxHashMap<u64, SourceBucket>,
+    by_island: FxHashMap<(u64, u64, u64), SourceBucket>,
     scope: KvTransferScope,
 }
 
@@ -307,6 +370,7 @@ impl KvTransferSourceSummary {
         scope: KvTransferScope,
     ) -> Self {
         let min_local_prefix_blocks = scope.min_local_prefix_blocks;
+        let max_local_prefix_blocks = scope.max_local_prefix_blocks;
         let needs_islands = scope.islands != IslandScope::Unused;
         let mut summary = Self {
             by_type: FxHashMap::default(),
@@ -314,13 +378,28 @@ impl KvTransferSourceSummary {
             scope,
         };
         let snapshot = candidates.routing_snapshot.as_deref();
-        for &(source, prefix_blocks) in &candidates.owner_prefix_blocks {
-            // A source cannot share more of the prompt than the retained chain.
-            if prefix_blocks <= min_local_prefix_blocks
-                || prefix_blocks > candidates.block_hashes.len()
-            {
-                continue;
-            }
+        let usable = |start, end| {
+            start <= max_local_prefix_blocks
+                && end > min_local_prefix_blocks
+                && end <= candidates.block_hashes.len()
+                && start < end
+        };
+        let roots = candidates
+            .owner_prefix_blocks
+            .iter()
+            .map(|&(source, end)| (source, 0, end))
+            .filter(|&(_, start, end)| usable(start, end));
+        let mut intervals: Vec<_> = candidates
+            .source_intervals
+            .iter()
+            .filter(|interval| usable(interval.start, interval.end))
+            .collect();
+        intervals.sort_unstable_by_key(|interval| interval.start);
+        for (source, start, prefix_blocks) in roots.chain(
+            intervals
+                .into_iter()
+                .map(|interval| (interval.source, interval.start, interval.end)),
+        ) {
             let worker_keys;
             let attached_worker_keys;
             let (worker_type, attachment, topology) = match source {
@@ -370,12 +449,13 @@ impl KvTransferSourceSummary {
                 attachment,
             };
             if summary.scope.any_island {
-                TopSources::offer(summary.by_type.entry(worker_type), ranked);
+                SourceBucket::offer(summary.by_type.entry(worker_type), start, ranked);
             }
             for &(domain, value) in topology {
                 if summary.scope.covers(domain, value) {
-                    TopSources::offer(
+                    SourceBucket::offer(
                         summary.by_island.entry((worker_type, domain, value)),
+                        start,
                         ranked,
                     );
                 }
@@ -393,8 +473,8 @@ impl KvTransferSourceSummary {
         local_prefix_blocks: usize,
     ) -> Option<KvTransferSourceChoice> {
         debug_assert!(local_prefix_blocks >= self.scope.min_local_prefix_blocks);
-        let pick = |top: Option<&TopSources>| {
-            top?.best_for(worker)
+        let pick = |top: Option<&SourceBucket>| {
+            top?.best_for(worker, local_prefix_blocks)
                 .filter(|choice| choice.prefix_blocks > local_prefix_blocks)
         };
         let worker_type = target.worker_type;
@@ -465,6 +545,7 @@ mod tests {
         KvTransferCandidates {
             block_hashes: (101..=104).map(ExternalSequenceBlockHash).collect(),
             owner_prefix_blocks: sources,
+            source_intervals: Vec::new(),
             routing_snapshot: None,
         }
     }
@@ -509,17 +590,83 @@ mod tests {
     }
 
     #[test]
-    fn scope_keeps_one_island_until_targets_differ() {
-        let target = |island| KvTransferTarget {
-            worker_type: 1,
-            transfer_domain: Some(2),
-            transfer_island: Some(island),
-            preferred: false,
-        };
-        let one = KvTransferScope::of([(target(3), 0), (target(3), 1)]);
-        assert!(one.covers(2, 3) && !one.covers(2, 4) && !one.covers(5, 3));
-        let both = KvTransferScope::of([(target(3), 0), (target(4), 0)]);
-        assert!(both.covers(2, 3) && both.covers(2, 6));
+    fn continuation_choices_match_single_source_inventory() {
+        use crate::kv_hints::KvTransferSourceInterval;
+
+        let workers = workers();
+        let mut rng = fastrand::Rng::with_seed(59);
+        for _ in 0..128 {
+            // Independent block inventories, including holes, shared starts and
+            // expired intervals. Query every target frontier against the same summary.
+            let inventories: Vec<_> = (7..=10)
+                .flat_map(|id| (0..2).map(move |rank| WorkerWithDpRank::new(id, rank)))
+                .map(|worker| (worker, (0..12).map(|_| rng.bool()).collect::<Vec<_>>()))
+                .collect();
+            let mut candidates = KvTransferCandidates {
+                block_hashes: (0..12).map(ExternalSequenceBlockHash).collect(),
+                ..Default::default()
+            };
+            for (worker, blocks) in &inventories {
+                let mut pos = 0;
+                while pos < blocks.len() {
+                    if !blocks[pos] {
+                        pos += 1;
+                        continue;
+                    }
+                    let start = pos;
+                    while pos < blocks.len() && blocks[pos] {
+                        pos += 1;
+                    }
+                    if start == 0 {
+                        candidates.owner_prefix_blocks.push(((*worker).into(), pos));
+                    } else {
+                        candidates.source_intervals.push(KvTransferSourceInterval {
+                            source: (*worker).into(),
+                            start,
+                            end: pos,
+                        });
+                    }
+                }
+            }
+            rng.shuffle(&mut candidates.source_intervals);
+            let summary =
+                KvTransferSourceSummary::new(&candidates, &workers, KvTransferScope::all());
+            for target in
+                (7..=9).flat_map(|id| (0..2).map(move |rank| WorkerWithDpRank::new(id, rank)))
+            {
+                for local in 0..=12 {
+                    let expected = inventories
+                        .iter()
+                        .filter(|(worker, _)| {
+                            *worker != target && workers.contains_key(&worker.worker_id)
+                        })
+                        .filter_map(|(worker, blocks)| {
+                            let end = local
+                                + blocks[local..]
+                                    .iter()
+                                    .take_while(|&&present| present)
+                                    .count();
+                            (end > local)
+                                .then_some((KvTransferCandidateSource::Worker(*worker), end))
+                        })
+                        .max_by_key(|&(source, end)| (end, std::cmp::Reverse(source)));
+                    let keys = workers[&target.worker_id].kv_transfer_keys();
+                    let actual = summary
+                        .source_for(target, keys.target().unwrap(), local)
+                        .map(|choice| (choice.source, choice.prefix_blocks));
+                    assert_eq!(actual, expected, "target={target:?}, local={local}");
+                    let scoped = KvTransferSourceSummary::new(
+                        &candidates,
+                        &workers,
+                        KvTransferScope::of([(keys.target().unwrap(), local)]),
+                    );
+                    let actual = scoped
+                        .source_for(target, keys.target().unwrap(), local)
+                        .map(|choice| (choice.source, choice.prefix_blocks));
+                    assert_eq!(actual, expected, "scoped target={target:?}, local={local}");
+                }
+            }
+        }
     }
 
     #[test]
@@ -561,6 +708,25 @@ mod tests {
         assert_eq!(source_for(&candidates, target, 0), Some((other.into(), 2)));
         assert_eq!(
             source_for(&candidates, other, 0),
+            Some((KvTransferCandidateSource::CacheOwner(key(owner(4))), 4))
+        );
+
+        candidates.owner_prefix_blocks.clear();
+        candidates.source_intervals = vec![
+            crate::kv_hints::KvTransferSourceInterval {
+                source: KvTransferCandidateSource::CacheOwner(key(owner(4))),
+                start: 1,
+                end: 4,
+            },
+            crate::kv_hints::KvTransferSourceInterval {
+                source: other.into(),
+                start: 1,
+                end: 3,
+            },
+        ];
+        assert_eq!(source_for(&candidates, target, 1), Some((other.into(), 3)));
+        assert_eq!(
+            source_for(&candidates, other, 1),
             Some((KvTransferCandidateSource::CacheOwner(key(owner(4))), 4))
         );
     }
