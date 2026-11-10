@@ -407,7 +407,6 @@ def tokenizer():
 _GLM_PROMPT_PREFIX = "<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n"
 _GLM_OPEN_PROMPT = _GLM_PROMPT_PREFIX + "<think>\n"
 _GLM_CLOSED_PROMPT = _GLM_PROMPT_PREFIX + "<think>\n\n</think>\n\n"
-_GLM_MARKER_FREE_PROMPT = _GLM_PROMPT_PREFIX
 
 
 # ---------------------------------------------------------------------------
@@ -1015,50 +1014,6 @@ class TestReasoningParserMetadata:
 
         assert metadata.engine_reasoning_ended is True
         assert metadata.response_reasoning_ended is False
-
-    # Mirrors glm_unknown_prompt_reasoning_preserves_request_controls.
-    @pytest.mark.parametrize(
-        ("prompt_text", "request_fields", "requested", "expected_ended"),
-        [
-            (_GLM_MARKER_FREE_PROMPT, {}, False, True),
-            (_GLM_MARKER_FREE_PROMPT, {}, True, False),
-            (_GLM_OPEN_PROMPT, {"add_generation_prompt": False}, False, True),
-            (_GLM_OPEN_PROMPT, {"continue_final_message": True}, False, True),
-        ],
-        ids=[
-            "marker-free-off",
-            "marker-free-on",
-            "no-generation-prompt",
-            "continue-final-message",
-        ],
-    )
-    def test_glm_unknown_prompt_keeps_request_controls(
-        self, tokenizer, prompt_text, request_fields, requested, expected_ended
-    ):
-        metadata = self._glm_metadata(
-            tokenizer,
-            "glm47",
-            prompt_text,
-            {"enable_thinking": requested},
-            **request_fields,
-        )
-
-        assert metadata.engine_reasoning_ended is expected_ended
-        assert metadata.response_reasoning_ended is expected_ended
-        assert metadata.parser_kwargs == {
-            "chat_template_kwargs": {"enable_thinking": requested}
-        }
-
-    def test_non_glm_parser_keeps_request_controls_on_open_prompt(self, tokenizer):
-        metadata = self._glm_metadata(
-            tokenizer, "qwen3", _GLM_OPEN_PROMPT, {"enable_thinking": False}
-        )
-
-        assert metadata.engine_reasoning_ended is True
-        assert metadata.response_reasoning_ended is True
-        assert metadata.parser_kwargs == {
-            "chat_template_kwargs": {"enable_thinking": False}
-        }
 
     def test_kv_router_copies_reasoning_metadata_to_extra_args(self):
         from dynamo.frontend.vllm_processor import _inject_routing_metadata

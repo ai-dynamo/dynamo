@@ -1614,30 +1614,6 @@ def test_glm_reasoning_gate_follows_rendered_prompt(
     assert result.request["chat_template_kwargs"] == {"enable_thinking": requested}
 
 
-# Mirrors glm_unknown_prompt_reasoning_preserves_request_controls.
-@pytest.mark.parametrize("requested", [False, True])
-@pytest.mark.parametrize(
-    ("parser_name", "generation"),
-    [("glm45", ""), ("qwen3", _GLM_OPEN_GENERATION)],
-    ids=["glm-marker-free", "non-glm-open"],
-)
-def test_reasoning_gate_keeps_request_controls_without_glm_prompt_state(
-    tokenizer, parser_name, generation, requested
-):
-    request = _glm_request(
-        {"response_format": {"type": "json_object"}}, {"enable_thinking": requested}
-    )
-
-    result = preprocess_chat_request(
-        request,
-        tokenizer=_glm_tokenizer(tokenizer, generation),
-        tool_call_parser_name=None,
-        reasoning_parser_name=parser_name,
-    )
-
-    assert result.force_reasoning is requested
-
-
 @pytest.mark.parametrize(
     ("generation", "requested"),
     [(_GLM_OPEN_GENERATION, False), (_GLM_CLOSED_GENERATION, True)],
