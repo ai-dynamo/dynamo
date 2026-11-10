@@ -1149,7 +1149,7 @@ def event_plane(request, monkeypatch):
 
 
 @pytest.fixture()
-def runtime_services(request, discovery_backend, request_plane):
+def runtime_services(request, discovery_backend, request_plane, monkeypatch):
     """
     Start runtime services (NATS and/or etcd) based on discovery_backend and request_plane.
 
@@ -1158,18 +1158,34 @@ def runtime_services(request, discovery_backend, request_plane):
     - The event plane follows the runtime default (ZMQ); set DYN_EVENT_PLANE=nats
       for tests that need the NATS event plane.
 
+    NATS_SERVER and ETCD_ENDPOINTS point at the servers started here for the
+    duration of the test. Starting them on the default ports terminates every
+    other nats-server and etcd, including the shared ones whose addresses
+    `runtime_services_session` exports for the whole session, so an inherited
+    value would send child processes to a server that no longer exists.
+
     Returns a tuple of (nats_process, etcd_process) where each has a .port attribute.
     """
     # Port cleanup is now handled in NatsServer and EtcdServer __exit__ methods
     if request_plane == "nats" and discovery_backend == "etcd":
         with NatsServer(request) as nats_process:
             with EtcdServer(request) as etcd_process:
+                monkeypatch.setenv(
+                    "NATS_SERVER", f"nats://localhost:{nats_process.port}"
+                )
+                monkeypatch.setenv(
+                    "ETCD_ENDPOINTS", f"http://localhost:{etcd_process.port}"
+                )
                 yield nats_process, etcd_process
     elif request_plane == "nats":
         with NatsServer(request) as nats_process:
+            monkeypatch.setenv("NATS_SERVER", f"nats://localhost:{nats_process.port}")
             yield nats_process, None
     elif discovery_backend == "etcd":
         with EtcdServer(request) as etcd_process:
+            monkeypatch.setenv(
+                "ETCD_ENDPOINTS", f"http://localhost:{etcd_process.port}"
+            )
             yield None, etcd_process
     else:
         yield None, None
