@@ -83,10 +83,10 @@ pub fn fixture(
     (workers, request)
 }
 
-pub fn selection_input<'a>(
-    workers: &'a HashMap<u64, TestWorker>,
+pub fn selection_input<'a, C: WorkerConfigLike>(
+    workers: &'a HashMap<u64, C>,
     request: &'a SchedulingRequest,
     block_size: u32,
-) -> WorkerSelectionInput<'a, TestWorker> {
+) -> WorkerSelectionInput<'a, C> {
     WorkerSelectionInput::configured(workers, request, request.eligibility(), block_size)
 }

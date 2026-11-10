@@ -59,6 +59,19 @@ pub fn attachment_record_id(publisher_id: PublisherId, generation: u64) -> Publi
 pub enum KvStateIngressProtocol {
     FrameworkV1,
     VllmResidencyV1,
+    /// HiCache backend memory is owned by the attached engine, not a Guard.
+    #[serde(rename = "sglang_hicache_v1")]
+    SglangHiCacheV1,
+}
+
+impl KvStateIngressProtocol {
+    pub fn supports_owned_residency(self) -> bool {
+        matches!(self, Self::VllmResidencyV1 | Self::SglangHiCacheV1)
+    }
+
+    pub fn has_process_local_inventory(self) -> bool {
+        matches!(self, Self::SglangHiCacheV1)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -87,6 +100,9 @@ pub struct KvStateAttachmentIntent {
     pub image_token_id: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub video_token_id: Option<u32>,
+    /// The raw source uses SGLang's wide multimodal pad format.
+    #[serde(default)]
+    pub engine_owned_mm_identity: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub router_hint_source: Option<RouterHintSourceMetadata>,
 }
@@ -324,7 +340,7 @@ pub fn resolve_kv_state_projection(
 #[cfg(test)]
 mod tests {
     use dynamo_kv_router::identity::{
-        CacheSemanticsId, DcId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
+        CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
         StableDpSlotId,
     };
     use dynamo_kv_router::indexer::{KvStateAgentIdentity, KvStateAttachmentStatus};
@@ -348,7 +364,7 @@ mod tests {
                     CacheSemanticsId::new([1; 16], IdentitySource::Explicit),
                     RoutingScopeId::new([2; 16], IdentitySource::Explicit),
                 ),
-                DcId::new(3),
+                ClusterId::new(3),
             ),
             StableDpSlotId::new([4; 16], IdentitySource::Explicit),
         )

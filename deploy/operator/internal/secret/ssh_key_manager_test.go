@@ -17,7 +17,6 @@ import (
 	"github.com/go-logr/logr"
 	"golang.org/x/crypto/ssh"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -120,10 +119,8 @@ func TestEnsureAndReplicate_CreatesSourceWhenMissing(t *testing.T) {
 
 func TestEnsureAndReplicate_SkipsExistingSource(t *testing.T) {
 	existing := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: testSourceNS,
-			Name:      testSecretName,
-		},
+		Namespace: testSourceNS,
+		Name:      testSecretName,
 		Data: map[string][]byte{
 			privateKeyFile: []byte("existing-private"),
 			publicKeyFile:  []byte("existing-public"),
@@ -144,10 +141,8 @@ func TestEnsureAndReplicate_SkipsExistingSource(t *testing.T) {
 
 func TestEnsureAndReplicate_ReplicatesToTargetNamespace(t *testing.T) {
 	source := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: testSourceNS,
-			Name:      testSecretName,
-		},
+		Namespace: testSourceNS,
+		Name:      testSecretName,
 		Data: map[string][]byte{
 			privateKeyFile: []byte("source-private"),
 			publicKeyFile:  []byte("source-public"),
@@ -194,12 +189,12 @@ func TestEnsureAndReplicate_SameNamespaceSkipsReplicate(t *testing.T) {
 
 func TestEnsureAndReplicate_SkipsExistingReplica(t *testing.T) {
 	source := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Namespace: testSourceNS, Name: testSecretName},
-		Data:       map[string][]byte{privateKeyFile: []byte("key"), publicKeyFile: []byte("pub")},
+		Namespace: testSourceNS, Name: testSecretName,
+		Data: map[string][]byte{privateKeyFile: []byte("key"), publicKeyFile: []byte("pub")},
 	}
 	existingReplica := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Namespace: testTargetNS, Name: testSecretName},
-		Data:       map[string][]byte{privateKeyFile: []byte("old-key"), publicKeyFile: []byte("old-pub")},
+		Namespace: testTargetNS, Name: testSecretName,
+		Data: map[string][]byte{privateKeyFile: []byte("old-key"), publicKeyFile: []byte("old-pub")},
 	}
 	gen := &fakeKeyPairGenerator{}
 	mgr := newTestManager(fake.NewClientBuilder().WithScheme(newScheme()).WithObjects(source, existingReplica), gen)

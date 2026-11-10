@@ -8,7 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
@@ -19,39 +19,53 @@ from dynamo.common.forward_pass_metrics import (
     ForwardPassMetrics,
     ScheduledRequestMetrics,
 )
-from dynamo.mocker import MockEngineArgs
+from dynamo.mocker.config import (
+    engine_limit,
+    normalize_mocker_config,
+    performance_config,
+)
 from dynamo.replay.config import canonical_upstream_config
 
 if TYPE_CHECKING:
-    from dynamo.planner.core.types import EngineCapabilities
+    from dynamo.planner.config.planner_config import PlannerConfig
+    from dynamo.planner.core.types import (
+        EngineCapabilities,
+        RetuneInputs,
+        TrafficObservation,
+    )
 
 logger = logging.getLogger(__name__)
 
 
-def _engine_caps(args: MockEngineArgs) -> EngineCapabilities:
+def _engine_caps(args: dict[str, Any]) -> EngineCapabilities:
     """Derive Planner engine capabilities from mock-engine arguments."""
 
     from dynamo.planner.core.types import EngineCapabilities
 
-    dp_size = max(args.dp_size, 1)
-    config = args.ais_perf_config or {}
-    max_kv_tokens = args.num_gpu_blocks * args.block_size * dp_size
+    dp_size = max(args["dp_size"], 1)
+    config = performance_config(args) or {}
+    max_kv_tokens = (
+        args["engine"]["num_gpu_blocks"] * args["engine"]["block_size"] * dp_size
+    )
     return EngineCapabilities(
-        num_gpu=(args.ais_tp_size or 1) * config.get("pp", 1) * dp_size,
-        max_num_batched_tokens=args.max_num_batched_tokens,
-        max_num_seqs=args.max_num_seqs,
-        context_length=args.max_model_len,
+        num_gpu=(args["tensor_parallel_size"] or 1) * config.get("pp", 1) * dp_size,
+        max_num_batched_tokens=engine_limit(args, "max_num_batched_tokens"),
+        max_num_seqs=engine_limit(args, "max_num_seqs"),
+        context_length=args["engine"]["max_model_len"],
         max_kv_tokens=max_kv_tokens if max_kv_tokens > 0 else None,
-        speculative_nextn=args.ais_nextn,
+        speculative_nextn=args["engine"]["aic_nextn"],
     )
 
 
 def _generate_ais_prefill_fpms(
     ais_session,
-    engine_args: MockEngineArgs,
+    engine_args: dict[str, Any],
     granularity: int = 8,
 ) -> list[ForwardPassMetrics]:
-    prefill_max = engine_args.max_num_batched_tokens or 8192
+    prefill_max = (
+        engine_limit(engine_args, "max_num_batched_tokens")
+        or normalize_mocker_config()["engine"]["max_num_batched_tokens"]
+    )
     prefill_step = max(1, (prefill_max - 100) // granularity)
     prefill_fpms: list[ForwardPassMetrics] = []
     for isl in range(100, prefill_max + 1, prefill_step):
@@ -71,16 +85,21 @@ def _generate_ais_prefill_fpms(
 
 def _generate_ais_decode_fpms(
     ais_session,
-    engine_args: MockEngineArgs,
+    engine_args: dict[str, Any],
     granularity: int = 8,
 ) -> list[ForwardPassMetrics]:
-    max_kv_tokens = engine_args.num_gpu_blocks * engine_args.block_size
+    max_kv_tokens = (
+        engine_args["engine"]["num_gpu_blocks"] * engine_args["engine"]["block_size"]
+    )
     if max_kv_tokens <= 0:
         max_kv_tokens = 16384 * 16
 
     decode_fpms: list[ForwardPassMetrics] = []
     ctx_lengths = [500, 2000, 4000, 8000]
-    bs_max = engine_args.max_num_seqs or 256
+    bs_max = (
+        engine_limit(engine_args, "max_num_seqs")
+        or normalize_mocker_config()["engine"]["max_num_seqs"]
+    )
     bs_step = max(1, bs_max // granularity)
     for ctx_len in ctx_lengths:
         for bs in range(1, bs_max + 1, bs_step):
@@ -131,7 +150,8 @@ def _ais_performance_model_config(
             raise TypeError(
                 f"performance_model_metadata.{role}.config must be a mapping"
             )
-        return dict(config)
+        # Runner metadata uses None for unset options; omit them so AIS applies defaults.
+        return {key: value for key, value in config.items() if value is not None}
     return None
 
 
@@ -162,32 +182,43 @@ def _ais_performance_model_configs(
 
 def _ais_session_kwargs(
     perf_config: dict[str, Any] | None,
-    engine_args: MockEngineArgs,
+    engine_args: dict[str, Any],
 ) -> dict[str, Any] | None:
     """Preserve complete canonical identity when bootstrapping a role."""
 
-    canonical = engine_args.ais_perf_config
+    canonical = performance_config(engine_args)
     if canonical is not None:
         return {"config": dict(canonical)}
     if perf_config is None:
         return None
     return {
         "config": canonical_upstream_config(
-            perf_config, worker_type=engine_args.worker_type
+            perf_config, worker_type=engine_args["engine"]["worker_type"]
         )
     }
 
 
 def prepare_planner_replay(
-    extra_engine_args: MockEngineArgs | None,
-    prefill_engine_args: MockEngineArgs | None,
-    decode_engine_args: MockEngineArgs | None,
+    extra_engine_args: dict[str, Any] | None,
+    prefill_engine_args: dict[str, Any] | None,
+    decode_engine_args: dict[str, Any] | None,
     planner_config_arg: str,
     benchmark_granularity: int = 8,
     capture_details: bool = True,
     performance_model_metadata: dict[str, Any] | None = None,
+    retune_inputs_factory: Callable[[PlannerConfig], RetuneInputs] | None = None,
+    warmup_observations: Sequence[TrafficObservation] | None = None,
 ):
-    """Create and bootstrap the scaling component for an offline replay."""
+    """Create and bootstrap the scaling component for an offline replay.
+
+    ``retune_inputs_factory`` builds the retune inputs (trace, time axis and
+    pinned engine) from the parsed planner config. It is required when the
+    config sets ``retune``; only trace replay entry points that support
+    retune provide one. ``warmup_observations``, when set, warm the load
+    predictor instead of the config's ``load_predictor_warmup_trace``. An
+    ``advisory`` config replays as a live advisory planner runs: the
+    deployment stays fixed and the recommendations are only recorded.
+    """
 
     from dynamo.planner.config.planner_config import PlannerConfig
     from dynamo.planner.core.types import WorkerCapabilities
@@ -197,16 +228,17 @@ def prepare_planner_replay(
     )
 
     planner_config = PlannerConfig.from_config_arg(planner_config_arg)
-    planner_config.advisory = True
 
     if planner_config.mode == "agg":
-        extra_engine_args = extra_engine_args or MockEngineArgs()
+        extra_engine_args = normalize_mocker_config(extra_engine_args)
         capabilities = WorkerCapabilities(decode=_engine_caps(extra_engine_args))
     elif planner_config.mode == "disagg":
         if prefill_engine_args is None or decode_engine_args is None:
             raise ValueError(
                 "disagg planner replay requires prefill and decode engine arguments"
             )
+        prefill_engine_args = normalize_mocker_config(prefill_engine_args)
+        decode_engine_args = normalize_mocker_config(decode_engine_args)
         capabilities = WorkerCapabilities(
             prefill=_engine_caps(prefill_engine_args),
             decode=_engine_caps(decode_engine_args),
@@ -217,9 +249,19 @@ def prepare_planner_replay(
             f"got {planner_config.mode!r}"
         )
 
-    warmup_observations = None
-    if planner_config.load_predictor_warmup_trace is not None:
-        warmup_observations = extract_traffic_observations_from_trace(
+    retune_inputs = None
+    if planner_config.retune is not None:
+        if retune_inputs_factory is None:
+            raise ValueError(
+                "planner.retune is only supported by run_trace_replay with "
+                "trace_format='dynamo' (in aisimulate predict, traffic.source "
+                "type: trace with format: dynamo), not by synthetic replay"
+            )
+        retune_inputs = retune_inputs_factory(planner_config)
+
+    warmup = None if warmup_observations is None else list(warmup_observations)
+    if warmup is None and planner_config.load_predictor_warmup_trace is not None:
+        warmup = extract_traffic_observations_from_trace(
             planner_config.load_predictor_warmup_trace,
             planner_config.throughput_adjustment_interval_seconds,
         )
@@ -228,11 +270,13 @@ def prepare_planner_replay(
         planner_config=planner_config,
         capabilities=capabilities,
         benchmark_granularity=benchmark_granularity,
-        warmup_observations=warmup_observations,
+        warmup_observations=warmup,
         capture_details=capture_details,
+        retune_inputs=retune_inputs,
     )
     adapter.set_bootstrap_metadata({"status": "not_required"})
-    if adapter._is_easy_mode():
+    # A retune-only planner (no scaling) never uses the throughput regression.
+    if adapter._is_easy_mode() or not planner_config.scaling_enabled():
         return adapter
 
     perf_configs = _ais_performance_model_configs(
@@ -243,7 +287,7 @@ def prepare_planner_replay(
             extra_engine_args
             or decode_engine_args
             or prefill_engine_args
-            or MockEngineArgs()
+            or normalize_mocker_config()
         )
     else:
         ref_args = (
@@ -251,12 +295,12 @@ def prepare_planner_replay(
             or (
                 decode_engine_args
                 if decode_engine_args is not None
-                and decode_engine_args.ais_perf_config is not None
+                and performance_config(decode_engine_args) is not None
                 else None
             )
             or prefill_engine_args
             or decode_engine_args
-            or MockEngineArgs()
+            or normalize_mocker_config()
         )
     p_args = (
         extra_engine_args if planner_config.mode == "agg" else prefill_engine_args
@@ -357,13 +401,15 @@ def prepare_planner_replay(
 
 @contextmanager
 def planner_replay_adapter(
-    extra_engine_args: MockEngineArgs | None,
-    prefill_engine_args: MockEngineArgs | None,
-    decode_engine_args: MockEngineArgs | None,
+    extra_engine_args: dict[str, Any] | None,
+    prefill_engine_args: dict[str, Any] | None,
+    decode_engine_args: dict[str, Any] | None,
     planner_config_arg: str,
     benchmark_granularity: int = 8,
     capture_details: bool = True,
     performance_model_metadata: dict[str, Any] | None = None,
+    retune_inputs_factory: Callable[[PlannerConfig], RetuneInputs] | None = None,
+    warmup_observations: Sequence[TrafficObservation] | None = None,
 ) -> Iterator:
     """Own Planner preparation, replay execution, and cleanup as one scope."""
 
@@ -375,6 +421,8 @@ def planner_replay_adapter(
         performance_model_metadata=performance_model_metadata,
         benchmark_granularity=benchmark_granularity,
         capture_details=capture_details,
+        retune_inputs_factory=retune_inputs_factory,
+        warmup_observations=warmup_observations,
     )
     with adapter:
         yield adapter

@@ -6,13 +6,17 @@
 use std::collections::HashMap;
 
 use dynamo_backend_common::{
-    DisaggregationMode, DynamoError, LLMEngineOutput, LLMEngineOutputExt, PreprocessedRequest,
-    StopConditions, StopReason, TopLogprob, usage,
+    DisaggregationMode, DynamoError, LLMEngineOutput, LLMEngineOutputExt, MultimodalData,
+    PreprocessedRequest, PromptTokensDetails, StopConditions, StopReason, TopLogprob, usage,
 };
 use serde_json::{Map, Value};
 
-use crate::client;
+use crate::client::{self, MediaSupport};
 use crate::proto as pb;
+
+const IMAGE_URL_KEY: &str = "image_url";
+const VIDEO_URL_KEY: &str = "video_url";
+const AUDIO_URL_KEY: &str = "audio_url";
 
 pub(crate) fn build_generate_request(
     request: &PreprocessedRequest,
@@ -22,6 +26,7 @@ pub(crate) fn build_generate_request(
     bootstrap_port: Option<u16>,
 ) -> Result<pb::GenerateRequest, DynamoError> {
     validate_request(request)?;
+    let [image_data, video_data, audio_data] = media_data(request)?;
     let input_ids = request
         .token_ids
         .iter()
@@ -50,10 +55,14 @@ pub(crate) fn build_generate_request(
             .map_err(|_| client::invalid_request("min_tokens does not fit in i32"))?
     };
 
+    // SGLang keeps a matched stop token in `output_ids` and trims only text,
+    // which is never requested, so visible stops (e.g. Harmony's `<|call|>`)
+    // reach the frontend decoder.
     let mut stop_token_ids = Vec::new();
     for tokens in [
         request.stop_conditions.stop_token_ids.as_ref(),
         request.stop_conditions.stop_token_ids_hidden.as_ref(),
+        request.stop_conditions.stop_token_ids_visible.as_ref(),
     ]
     .into_iter()
     .flatten()
@@ -67,7 +76,36 @@ pub(crate) fn build_generate_request(
         }
     }
 
-    let guided = request.sampling_options.guided_decoding.as_ref();
+    let guided_decoding = request
+        .sampling_options
+        .guided_decoding
+        .as_ref()
+        .and_then(|guided| {
+            let constraint = if let Some(schema) = guided.json.as_ref() {
+                Some(pb::guided_decoding::Constraint::JsonSchema(
+                    json_value_to_string(schema),
+                ))
+            } else if let Some(regex) = guided.regex.as_ref() {
+                Some(pb::guided_decoding::Constraint::Regex(regex.clone()))
+            } else if let Some(grammar) = guided.grammar.as_ref() {
+                Some(pb::guided_decoding::Constraint::Ebnf(grammar.clone()))
+            } else if let Some(choice) = guided.choice.as_ref().filter(|value| !value.is_empty()) {
+                Some(pb::guided_decoding::Constraint::Choice(
+                    pb::ChoiceConstraint {
+                        values: choice.clone(),
+                    },
+                ))
+            } else {
+                guided
+                    .structural_tag
+                    .as_ref()
+                    .map(json_value_to_string)
+                    .map(pb::guided_decoding::Constraint::StructuralTag)
+            };
+            constraint.map(|constraint| pb::GuidedDecoding {
+                constraint: Some(constraint),
+            })
+        });
     let sampling_params = pb::SamplingParams {
         temperature: request.sampling_options.temperature,
         top_p: request.sampling_options.top_p,
@@ -82,10 +120,9 @@ pub(crate) fn build_generate_request(
         stop_token_ids,
         ignore_eos: request.stop_conditions.ignore_eos,
         n: request.sampling_options.n.map(i32::from),
-        json_schema: guided
-            .and_then(|value| value.json.as_ref())
-            .map(json_value_to_string),
-        regex: guided.and_then(|value| value.regex.clone()),
+        seed: request.sampling_options.seed,
+        guided_decoding,
+        ..Default::default()
     };
 
     let output_options = &request.output_options;
@@ -114,6 +151,11 @@ pub(crate) fn build_generate_request(
         .routing
         .as_ref()
         .and_then(|routing| routing.lora_name.clone());
+    let priority = request
+        .routing
+        .as_ref()
+        .and_then(|routing| routing.priority);
+    let kv_hints = request.kv_hint.as_ref().map(kv_hint_to_proto).transpose()?;
 
     let mut trace_headers = HashMap::new();
     dynamo_runtime::logging::inject_trace_headers_into_map(&mut trace_headers);
@@ -131,12 +173,133 @@ pub(crate) fn build_generate_request(
         routed_dp_rank,
         trace_headers,
         session_id: None,
+        priority,
+        require_reasoning: Some(request.require_reasoning),
+        max_thinking_tokens: request.stop_conditions.max_thinking_tokens,
+        kv_hints,
+        return_text: None,
         disaggregated_params: resolve_disaggregated_params(
             request,
             mode,
             bootstrap_host,
             bootstrap_port,
         )?,
+        image_data,
+        video_data,
+        audio_data,
+    })
+}
+
+/// SGLang matches each list to the placeholder runs of that modality in
+/// `input_ids`, so each list keeps the request order.
+fn media_data(request: &PreprocessedRequest) -> Result<[Vec<String>; 3], DynamoError> {
+    let (mut image_data, mut video_data, mut audio_data) = (Vec::new(), Vec::new(), Vec::new());
+    for (key, items) in request.multi_modal_data.iter().flatten() {
+        let data = match key.as_str() {
+            IMAGE_URL_KEY => &mut image_data,
+            VIDEO_URL_KEY => &mut video_data,
+            AUDIO_URL_KEY => &mut audio_data,
+            _ => {
+                return Err(client::invalid_request(
+                    "SGLang's native Generate RPC accepts only image, video, and audio media",
+                ));
+            }
+        };
+        for item in items {
+            data.push(media_source(item)?);
+        }
+    }
+    let media = [image_data, video_data, audio_data];
+    // Text requests ignore these options, but SGLang would decode media with its own defaults.
+    if request.media_io_kwargs.is_some() && media.iter().any(|data| !data.is_empty()) {
+        return Err(client::invalid_request(
+            "media_io_kwargs are not supported by SGLang's native Generate RPC",
+        ));
+    }
+    Ok(media)
+}
+
+/// SGLang reads `file://` URLs and bare paths from the disk of the SGLang server.
+fn media_source(item: &MultimodalData) -> Result<String, DynamoError> {
+    let source = match item {
+        MultimodalData::Url(url) => url.as_str(),
+        MultimodalData::RawUrl(source) => source,
+        MultimodalData::Decoded(_) => {
+            return Err(client::invalid_request(
+                "the SGLang sidecar cannot read frontend-decoded media; configure URL passthrough",
+            ));
+        }
+        MultimodalData::UuidOnly(_) => {
+            return Err(client::invalid_request(
+                "the SGLang sidecar needs a media URL and cannot resolve UUID-only media",
+            ));
+        }
+    };
+    if ["http://", "https://", "data:"]
+        .iter()
+        .any(|scheme| source.starts_with(scheme))
+    {
+        Ok(source.to_string())
+    } else {
+        Err(client::invalid_request(
+            "the SGLang sidecar accepts media only as http://, https://, or data: URLs",
+        ))
+    }
+}
+
+/// SGLang drops media that the server or the model cannot read without an error,
+/// so the model would answer without seeing it.
+pub(crate) fn require_media_support(
+    request: &pb::GenerateRequest,
+    support: MediaSupport,
+) -> Result<(), DynamoError> {
+    for (present, supported, message) in [
+        (
+            !request.image_data.is_empty(),
+            support.image,
+            "this SGLang server does not accept image inputs over gRPC; serve an image model with an SGLang version that supports gRPC media",
+        ),
+        (
+            !request.video_data.is_empty(),
+            support.video,
+            "this SGLang server does not accept video inputs over gRPC; serve a video model with an SGLang version that supports gRPC media",
+        ),
+        (
+            !request.audio_data.is_empty(),
+            support.audio,
+            "this SGLang server does not accept audio inputs over gRPC; serve an audio model with an SGLang version that supports gRPC media",
+        ),
+    ] {
+        if present && !supported {
+            return Err(client::invalid_request(message));
+        }
+    }
+    Ok(())
+}
+
+fn kv_hint_to_proto(
+    hint: &dynamo_backend_common::KvHint,
+) -> Result<pb::KvHintsEnvelope, DynamoError> {
+    let actions = hint
+        .actions
+        .iter()
+        .map(|action| {
+            let payload = Value::Object(action.payload.clone().into_iter().collect());
+            Ok(pb::KvHintAction {
+                action_id: action.action_id.clone(),
+                action_type: action.action_type.clone(),
+                action_version: action.action_version.clone(),
+                payload: Some(dynamo_sidecar_common::json_to_struct(
+                    payload,
+                    "kv hint action payload",
+                )?),
+            })
+        })
+        .collect::<Result<Vec<_>, DynamoError>>()?;
+    Ok(pb::KvHintsEnvelope {
+        protocol_version: hint.protocol_version.clone(),
+        message_id: hint.message_id.clone(),
+        actions,
     })
 }
 
@@ -163,9 +326,24 @@ fn validate_request(request: &PreprocessedRequest) -> Result<(), DynamoError> {
     if request.token_ids.is_empty() {
         return Err(client::invalid_request("token_ids must not be empty"));
     }
-    if request.multi_modal_data.is_some() || request.mm_processor_kwargs.is_some() {
+    if request.mm_processor_kwargs.is_some() {
         return Err(client::invalid_request(
-            "multimodal payloads are not supported by SGLang's native Generate RPC",
+            "mm_processor_kwargs are not supported by SGLang's native Generate RPC",
+        ));
+    }
+    if request
+        .multi_modal_uuids
+        .iter()
+        .flat_map(|uuids| uuids.values().flatten())
+        .any(|uuid| uuid.as_deref().is_some_and(|uuid| !uuid.is_empty()))
+    {
+        return Err(client::invalid_request(
+            "media uuids are not supported by SGLang's native Generate RPC",
+        ));
+    }
+    if request.encoder_result.is_some() {
+        return Err(client::invalid_request(
+            "encoder handoff (encoder_result) is not supported by the SGLang sidecar",
         ));
     }
     if request.sampling_options.n.unwrap_or(1) != 1 {
@@ -183,21 +361,21 @@ fn validate_request(request: &PreprocessedRequest) -> Result<(), DynamoError> {
             "beam search is not represented by SGLang's native gRPC proto",
         ));
     }
+    if request
+        .sampling_options
+        .logit_bias
+        .as_ref()
+        .is_some_and(|bias| !bias.is_empty())
+    {
+        return Err(client::invalid_request(
+            "logit_bias is not represented by SGLang's native gRPC proto",
+        ));
+    }
     if let Some(penalty) = request.sampling_options.length_penalty
         && (penalty - 1.0).abs() > f32::EPSILON
     {
         return Err(client::invalid_request(
             "length_penalty is not represented by SGLang's native gRPC proto",
-        ));
-    }
-    if request.sampling_options.seed.is_some() {
-        return Err(client::invalid_request(
-            "seed is not represented by SGLang's native gRPC proto",
-        ));
-    }
-    if request.stop_conditions.max_thinking_tokens.is_some() {
-        return Err(client::invalid_request(
-            "thinking_token_budget (max_thinking_tokens) is not represented by SGLang's native gRPC proto",
         ));
     }
     if request
@@ -209,43 +387,35 @@ fn validate_request(request: &PreprocessedRequest) -> Result<(), DynamoError> {
             "include_stop_str_in_output is not represented by SGLang's native gRPC proto",
         ));
     }
-    if request
-        .stop_conditions
-        .stop_token_ids_visible
-        .as_ref()
-        .is_some_and(|tokens| !tokens.is_empty())
-    {
-        return Err(client::invalid_request(
-            "visible stop-token semantics are not represented by SGLang's native gRPC proto",
-        ));
-    }
-    if let Some(guided) = request.sampling_options.guided_decoding.as_ref()
-        && (guided
-            .choice
+    if let Some(guided) = request.sampling_options.guided_decoding.as_ref() {
+        let constraint_count = [
+            guided.json.is_some(),
+            guided.regex.is_some(),
+            guided
+                .choice
+                .as_ref()
+                .is_some_and(|value| !value.is_empty()),
+            guided.grammar.is_some(),
+            guided.structural_tag.is_some(),
+        ]
+        .into_iter()
+        .filter(|is_set| *is_set)
+        .count();
+        if constraint_count > 1 {
+            return Err(client::invalid_request(
+                "the native SGLang gRPC proto accepts only one guided-decoding constraint",
+            ));
+        }
+        if guided
+            .backend
             .as_ref()
             .is_some_and(|value| !value.is_empty())
-            || guided.grammar.is_some()
-            || guided
-                .backend
-                .as_ref()
-                .is_some_and(|value| !value.is_empty())
             || guided.whitespace_pattern.is_some()
-            || guided.structural_tag.is_some())
-    {
-        return Err(client::invalid_request(
-            "the native SGLang gRPC proto currently supports only JSON-schema and regex guided decoding",
-        ));
-    }
-    if request
-        .routing
-        .as_ref()
-        .and_then(|routing| routing.priority)
-        .unwrap_or(0)
-        != 0
-    {
-        return Err(client::invalid_request(
-            "engine priority is not represented by SGLang's native gRPC proto",
-        ));
+        {
+            return Err(client::invalid_request(
+                "guided-decoding backend and whitespace modifiers are not represented by SGLang's native gRPC proto",
+            ));
+        }
     }
     Ok(())
 }
@@ -372,6 +542,8 @@ pub(crate) fn terminal_from_meta(
         .and_then(Value::as_str)
         .or_else(|| finish.as_str())
         .ok_or_else(|| client::protocol_error("SGLang finish_reason is missing a type"))?;
+    let mut completion_usage = usage(prompt_tokens, generated);
+    completion_usage.prompt_tokens_details = cached_prompt_tokens(meta, prompt_tokens);
     let mut output = match finish_type {
         "stop" => LLMEngineOutput::stop(),
         "length" => LLMEngineOutput::length(),
@@ -383,7 +555,7 @@ pub(crate) fn terminal_from_meta(
             )));
         }
     }
-    .with_usage(usage(prompt_tokens, generated));
+    .with_usage(completion_usage);
     output.stop_reason = finish.get("matched").and_then(|matched| match matched {
         Value::String(value) => Some(StopReason::String(value.clone())),
         Value::Number(value) => value
@@ -399,6 +571,18 @@ pub(crate) fn terminal_from_meta(
         _ => None,
     });
     Ok(output)
+}
+
+/// SGLang reports the prompt tokens served from its prefix cache as `cached_tokens`.
+fn cached_prompt_tokens(
+    meta: &HashMap<String, String>,
+    prompt_tokens: u32,
+) -> Option<PromptTokensDetails> {
+    meta_u32(meta, "cached_tokens").map(|cached_tokens| PromptTokensDetails {
+        audio_tokens: None,
+        cached_tokens: Some(cached_tokens.min(prompt_tokens)),
+        ..Default::default()
+    })
 }
 
 pub(crate) fn terminal_failure(finish_type: &str, finish: &Value) -> DynamoError {

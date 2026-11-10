@@ -174,7 +174,19 @@ impl SelectionCore {
         req: ReservationRequest,
     ) -> Result<ReservationResponse, SelectionError> {
         self.ensure_running()?;
+        tokio::select! {
+            biased;
+            _ = self.cancel_token.cancelled() => {
+                Err(SelectionError::Scheduler(KvSchedulerError::SubscriberShutdown))
+            }
+            result = self.create_reservation_inner(req) => result,
+        }
+    }
 
+    async fn create_reservation_inner(
+        &self,
+        req: ReservationRequest,
+    ) -> Result<ReservationResponse, SelectionError> {
         let key = RoutingPartitionId::new(req.model_name.clone(), req.routing_group.clone());
 
         // Explicit form: book on the given worker under selection_id, discarding

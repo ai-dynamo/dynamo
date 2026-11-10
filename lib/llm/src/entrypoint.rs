@@ -17,8 +17,8 @@ use dynamo_runtime::{discovery::ModelCardInstanceId, pipeline::RouterMode};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    backend::ExecutionContext, discovery::LoadThresholdConfig, engines::StreamingEngine,
-    local_model::LocalModel, model_card::ModelDeploymentCard,
+    admission_gate::WorkerAdmissionGate, backend::ExecutionContext, discovery::LoadThresholdConfig,
+    engines::StreamingEngine, local_model::LocalModel, model_card::ModelDeploymentCard,
     session_affinity::SessionAffinityMode,
     types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine,
 };
@@ -111,6 +111,9 @@ pub enum EngineConfig {
         model: Box<LocalModel>,
         is_prefill: bool,
         is_decode: bool,
+        /// The admission gate of the worker this config is: every endpoint
+        /// serving it, through this config or a clone, admits through it.
+        admission_gate: WorkerAdmissionGate,
     },
 }
 

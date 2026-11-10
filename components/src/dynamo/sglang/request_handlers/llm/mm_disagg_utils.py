@@ -9,6 +9,10 @@ token layout the transferred KV depends on.
 import logging
 from typing import Any, Dict, Optional
 
+from dynamo.common.http.url_validator import (
+    UrlValidationPolicy,
+    check_remote_url_allowed,
+)
 from dynamo.common.multimodal.cache_uuid import reject_unsupported_multimodal_uuids
 from dynamo.llm.exceptions import InvalidArgument
 
@@ -90,12 +94,43 @@ def raise_if_unextracted_multimodal(request: Dict[str, Any]) -> None:
     raise InvalidArgument(message)
 
 
+def engine_consumes_media(engine: Any) -> bool:
+    """Return False only when SGLang reports a text-only engine."""
+    tokenizer_manager = getattr(engine, "tokenizer_manager", None)
+    model_config = getattr(tokenizer_manager, "model_config", None)
+    return getattr(model_config, "is_multimodal", None) is not False
+
+
+def reject_unconsumed_media(request: Dict[str, Any], *, consumes_media: bool) -> None:
+    """Reject media the engine would drop instead of answering without it.
+
+    SGLang's Engine API skips the HTTP server's text-only media check and
+    silently discards media when the model is not multimodal.
+    """
+    if consumes_media:
+        return
+    content_types = {
+        content_type
+        for content_type, items in _multi_modal_data(request).items()
+        if content_type in _SUPPORTED_MULTIMODAL_CONTENT_TYPES and items
+    } | _raw_multimodal_content_types(request)
+    if not content_types:
+        return
+    content_type = min(content_types)
+    raise InvalidArgument(
+        f"Model does not accept {content_type.removesuffix('_url')} input; "
+        f"received unsupported content type '{content_type}'."
+    )
+
+
 def extract_media_urls(
     mm_data: Optional[Dict[str, Any]], media_key: str
 ) -> list[str] | None:
     """Return the URLs under ``media_key`` (``{"Url": ...}`` or string items), or
     ``None`` if absent. Raises on malformed or frontend-decoded payloads rather
-    than silently degrading a multimodal request to text.
+    than silently degrading a multimodal request to text, and raises
+    ``UrlValidationError`` for an ``http(s)://`` URL when
+    ``DYN_MM_ALLOW_REMOTE_URLS`` is off.
     """
     if not mm_data:
         return None
@@ -128,6 +163,12 @@ def extract_media_urls(
                     f"{media_key}; use URL-based inputs."
                 )
         raise ValueError(f"Unsupported {media_key} item: {item!r}")
+
+    # These URLs go to SGLang's own downloader, so enforce
+    # DYN_MM_ALLOW_REMOTE_URLS before handing them over.
+    policy = UrlValidationPolicy.from_env()
+    for url in urls:
+        check_remote_url_allowed(url, policy)
 
     return urls or None
 

@@ -47,12 +47,20 @@ impl BlockHashValue {
     }
 }
 
+/// Event token ids are decoded as `u64`: SGLang's wide multimodal pad values
+/// (sgl-project/sglang#43043) do not fit in `u32`, and failing to decode them
+/// would drop the whole batch. They are narrowed to `u32` right after decoding.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(untagged)]
 pub enum KvTokenIds {
-    Single(Vec<u32>),
-    Bigram(Vec<(u32, u32)>),
+    Single(Vec<u64>),
+    Bigram(Vec<(u64, u64)>),
 }
+
+/// Stand-in for a decoded token id that does not fit in `u32`. No vocabulary
+/// reaches it, and it is above `MM_PAD_SHIFT_VALUE`, so it always classifies as
+/// an unmapped multimodal value and fails closed.
+pub const WIDE_TOKEN_SENTINEL: u32 = u32::MAX;
 
 /// Per-event storage locality emitted by vLLM alongside `medium`. Absent on
 /// legacy events; vLLM never infers it. `Unknown` captures any future value so

@@ -20,6 +20,7 @@ from dynamo.common.constants import (
     KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY,
 )
 from dynamo.llm import ModelRuntimeConfig, WorkerType
+from dynamo.vllm.kv_connector_protocols import MULTI_CONNECTOR_WRAPPERS
 
 _KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY = "kv_transfer_params"
 _KV_HINT_EXTRA_ARGS_KEY = "kv_hint"
@@ -59,14 +60,21 @@ def _secondary_tiers(engine_args: AsyncEngineArgs) -> list[Mapping[str, Any]]:
     if not isinstance(extra_config, Mapping):
         return []
 
-    secondary_tiers = extra_config.get("secondary_tiers")
-    if not isinstance(secondary_tiers, list):
-        return []
+    extra_configs = [extra_config]
+    if getattr(kv_config, "kv_connector", None) in MULTI_CONNECTOR_WRAPPERS:
+        extra_configs = [
+            child.get("kv_connector_extra_config") or {}
+            for child in extra_config.get("connectors") or []
+        ]
 
     tiers: list[Mapping[str, Any]] = []
-    for tier in secondary_tiers:
-        if isinstance(tier, Mapping):
-            tiers.append(tier)
+    for config in extra_configs:
+        secondary_tiers = config.get("secondary_tiers")
+        if not isinstance(secondary_tiers, list):
+            continue
+        for tier in secondary_tiers:
+            if isinstance(tier, Mapping):
+                tiers.append(tier)
     return tiers
 
 

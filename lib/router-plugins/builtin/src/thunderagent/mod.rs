@@ -39,9 +39,6 @@ request_classifier:
   type: thunderagent
 worker_selection:
   aggregated: thunderagent
-  instances:
-    - name: thunderagent
-      type: thunderagent
 "#,
         )
         .unwrap();

@@ -21,17 +21,14 @@ mod types;
 #[cfg(test)]
 mod tests;
 
-// TODO(v1.7): Remove these compatibility re-exports; use crate::plugins instead.
-pub use crate::plugins::worker_selection::WorkerSelectionPolicyFactory;
 pub use crate::plugins::{
     DYN_ROUTER_DECODE_POLICY, DYN_ROUTER_PREFILL_POLICY, DYN_ROUTER_WORKER_SELECTION_POLICY,
     RouterPluginRegistry, WorkerSelectionPolicyParameters, WorkerSelectionPolicyProvider,
-    WorkerSelectionPolicyProviderError, WorkerSelectionPolicyRegistry,
-    WorkerSelectionPolicyRegistryError,
+    WorkerSelectionPolicyProviderError, WorkerSelectionPolicyRegistryError,
 };
 pub use crate::services::common::replica_sync::{
-    HostReplicaChannels, HostReplicaSyncFactory, ReplicaIngressObserver, ReplicaPeerError,
-    SchedulerLoadSink,
+    AffinityBindingEvent, HostReplicaChannels, HostReplicaSyncFactory, ReplicaIngressObserver,
+    ReplicaPeerError, SchedulerLoadSink,
 };
 pub use core::{
     HostCache, HostEligibility, HostLoad, HostReplication, HostTelemetry, KvIndexSource, Selected,
@@ -45,7 +42,8 @@ pub use membership::{CatalogObserver, CatalogReconciler, WorkerCatalogSource};
 pub use pending::SelectionCacheConfig;
 pub use server::{AppState, run_server};
 pub use service::{
-    SelectionService, SelectionServiceBuilder, warn_for_unserved_worker_selection_policies,
+    SelectionService, SelectionServiceBuilder, SessionBindingUpdates,
+    warn_for_unserved_worker_selection_policies,
 };
 pub use types::{
     DEFAULT_MODEL_NAME, ModelLoadResponse, OutputBlockRequest, OverlapScoresRequest,

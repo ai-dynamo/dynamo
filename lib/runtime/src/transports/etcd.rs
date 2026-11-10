@@ -454,12 +454,7 @@ impl Client {
         key: impl Into<Vec<u8>>,
         options: Option<GetOptions>,
     ) -> Result<Vec<KeyValue>> {
-        let mut get_response = self
-            .connector
-            .get_client()
-            .kv_client()
-            .get(key, options)
-            .await?;
+        let mut get_response = self.connector.kv_client().get(key, options).await?;
         Ok(get_response.take_kvs())
     }
 
@@ -480,7 +475,6 @@ impl Client {
     pub async fn kv_get_prefix(&self, prefix: impl AsRef<str>) -> Result<Vec<KeyValue>> {
         let mut get_response = self
             .connector
-            .get_client()
             .kv_client()
             .get(prefix.as_ref(), Some(GetOptions::new().with_prefix()))
             .await?;
@@ -669,7 +663,7 @@ impl Client {
         prefix: impl AsRef<str> + std::fmt::Display,
         include_existing: bool,
     ) -> Result<(i64, Option<Vec<KeyValue>>)> {
-        let mut kv_client = self.connector.get_client().kv_client();
+        let mut kv_client = self.connector.kv_client();
         let mut get_response = kv_client
             .get(prefix.as_ref(), Some(GetOptions::new().with_prefix()))
             .await?;
@@ -700,7 +694,7 @@ impl Client {
         tx: &mpsc::Sender<WatchEvent>,
         cancel_token: &CancellationToken,
     ) -> Result<()> {
-        let mut kv_client = connector.get_client().kv_client();
+        let mut kv_client = connector.kv_client();
         let get_result = tokio::select! {
             _ = cancel_token.cancelled() => anyhow::bail!("watch resync cancelled"),
             result = tokio::time::timeout(
@@ -785,7 +779,6 @@ impl Client {
     ) -> Result<WatchStream> {
         loop {
             match connector
-                .get_client()
                 .watch_client()
                 .watch(
                     prefix.as_str(),
@@ -1500,6 +1493,54 @@ mod tests {
         assert!(result.is_err(), "");
 
         Ok(())
+    }
+
+    #[test]
+    fn test_prefix_reads_beyond_default_grpc_limit() {
+        let rt = Runtime::single_threaded().unwrap();
+        let rt_clone = rt.clone();
+        let config = DistributedConfig::from_settings();
+
+        rt_clone.primary().block_on(async move {
+            let drt = DistributedRuntime::new(rt, config).await.unwrap();
+            test_large_prefix_reads(drt).await.unwrap();
+        });
+    }
+
+    async fn test_large_prefix_reads(drt: DistributedRuntime) -> Result<()> {
+        let client = Client::new(ClientOptions::default(), drt.runtime().clone())
+            .await
+            .expect("etcd client should be available");
+        let prefix = format!("v1/test_large_prefix_{}/", uuid::Uuid::new_v4());
+
+        // Each 1 MiB put fits etcd's default 1.5 MiB request limit; together the six exceed
+        // tonic's 4 MiB default response limit.
+        let value = vec![b'x'; 1 << 20];
+        let keys = 6;
+        for i in 0..keys {
+            client.kv_put(format!("{prefix}{i}"), &value, None).await?;
+        }
+
+        let listed = client.kv_get_prefix(&prefix).await.map(|kvs| kvs.len());
+        let watched = initial_snapshot_len(&client, &prefix).await;
+
+        client
+            .etcd_client()
+            .kv_client()
+            .delete(prefix, Some(DeleteOptions::new().with_prefix()))
+            .await?;
+
+        assert_eq!(listed?, keys);
+        assert_eq!(watched?, keys);
+        Ok(())
+    }
+
+    async fn initial_snapshot_len(client: &Client, prefix: &str) -> Result<usize> {
+        let (_, mut rx) = client.kv_get_and_watch_prefix(prefix).await?.dissolve();
+        match tokio::time::timeout(Duration::from_secs(10), rx.recv()).await? {
+            Some(WatchEvent::Resync(kvs)) => Ok(kvs.len()),
+            other => anyhow::bail!("expected the initial snapshot, got {other:?}"),
+        }
     }
 
     #[test]

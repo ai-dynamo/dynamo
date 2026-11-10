@@ -25,11 +25,12 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
+// TestPodCheckpointRestoreMutatorNativeRestore checks native restore admission,
+// including candidate cleanup and preservation of the Snapshot restore annotations.
 func TestPodCheckpointRestoreMutatorNativeRestore(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1.AddToScheme(scheme))
@@ -50,12 +51,14 @@ func TestPodCheckpointRestoreMutatorNativeRestore(t *testing.T) {
 	t.Run("shapes one captured source into two engine destinations", func(t *testing.T) {
 		t.Log("Given a native restore candidate pinned to a Ready compatible PodSnapshot")
 		pod := nativeRestoreCandidatePod(snapshot)
+		// The pinned path ignores these, but they must still be stripped.
+		pod.Annotations[consts.SnapshotJobCandidateUIDAnnotation] = "stale-job-uid"
+		pod.Annotations[consts.CheckpointStartupPolicyAnnotation] = string(nvidiacomv1alpha1.CheckpointStartupPolicyImmediate)
 		original := mustMarshalPod(t, pod)
-		req := admission.Request{AdmissionRequest: admissionv1.AdmissionRequest{
+		req := admission.Request{
 			Operation: admissionv1.Create,
 			Namespace: pod.Namespace,
-			Object:    runtime.RawExtension{Raw: original},
-		}}
+			Object:    runtime.RawExtension{Raw: original}}
 
 		t.Log("When the Dynamo admission webhook shapes the Pod")
 		resp := mutator.Handle(ctx, req)
@@ -65,8 +68,21 @@ func TestPodCheckpointRestoreMutatorNativeRestore(t *testing.T) {
 		shaped := applyAdmissionPatches(t, original, resp)
 		assert.Equal(t, snapshot.Name, shaped.Annotations[podcontract.RestoreFromAnnotation])
 		assert.Equal(t, "main=engine-0,main=engine-1", shaped.Annotations[podcontract.RestoreContainerMapAnnotation])
-		assert.NotContains(t, shaped.Annotations, consts.CheckpointRestoreCandidateAnnotation)
-		assert.NotContains(t, shaped.Annotations, consts.RestoreCandidateTargetContainersAnnotation)
+		for _, key := range []string{
+			consts.CheckpointRestoreCandidateAnnotation,
+			consts.CheckpointNameAnnotation,
+			consts.RestoreCandidateSourceKindAnnotation,
+			consts.SnapshotJobCandidateUIDAnnotation,
+			consts.CheckpointStartupPolicyAnnotation,
+			consts.SnapshotCandidateUIDAnnotation,
+			consts.SnapshotCandidateContentAnnotation,
+			consts.SnapshotCandidateGMSModeAnnotation,
+			consts.SnapshotCandidateVersionAnnotation,
+			consts.SnapshotCandidateCompatibilityHashAnnotation,
+			consts.RestoreCandidateTargetContainersAnnotation,
+		} {
+			assert.NotContains(t, shaped.Annotations, key)
+		}
 		require.Len(t, shaped.Spec.Volumes, 1)
 		assert.Equal(t, podcontract.SnapshotControlVolumeName, shaped.Spec.Volumes[0].Name)
 		for _, container := range shaped.Spec.Containers {
@@ -83,19 +99,16 @@ func TestPodCheckpointRestoreMutatorNativeRestore(t *testing.T) {
 		t.Log("Given a native restore candidate whose liveness probe defines engine startup")
 		pod := nativeRestoreCandidatePod(snapshot)
 		pod.Spec.Containers[0].LivenessProbe = &corev1.Probe{
-			ProbeHandler: corev1.ProbeHandler{
-				HTTPGet: &corev1.HTTPGetAction{Path: "/live", Port: intstr.FromString("system")},
-			},
+			HTTPGet:          &corev1.HTTPGetAction{Path: "/live", Port: intstr.FromString("system")},
 			PeriodSeconds:    5,
 			TimeoutSeconds:   4,
 			FailureThreshold: 1,
 		}
 		original := mustMarshalPod(t, pod)
-		req := admission.Request{AdmissionRequest: admissionv1.AdmissionRequest{
+		req := admission.Request{
 			Operation: admissionv1.Create,
 			Namespace: pod.Namespace,
-			Object:    runtime.RawExtension{Raw: original},
-		}}
+			Object:    runtime.RawExtension{Raw: original}}
 
 		t.Log("When the Dynamo admission webhook shapes the Pod")
 		resp := mutator.Handle(ctx, req)
@@ -169,11 +182,10 @@ func TestPodCheckpointRestoreMutatorNativeRestore(t *testing.T) {
 				t.Log("Given a native restore candidate that cannot be proven safe")
 				pod := nativeRestoreCandidatePod(snapshot)
 				test.mutate(pod)
-				req := admission.Request{AdmissionRequest: admissionv1.AdmissionRequest{
+				req := admission.Request{
 					Operation: admissionv1.Create,
 					Namespace: pod.Namespace,
-					Object:    runtime.RawExtension{Raw: mustMarshalPod(t, pod)},
-				}}
+					Object:    runtime.RawExtension{Raw: mustMarshalPod(t, pod)}}
 
 				t.Log("When admission repeats native snapshot validation")
 				resp := mutator.Handle(ctx, req)
@@ -400,15 +412,13 @@ func TestUsesSupportedDynamoRestoreEntrypoint(t *testing.T) {
 
 func nativeRestoreTestSnapshot() *snapshotv1alpha1.PodSnapshot {
 	return &snapshotv1alpha1.PodSnapshot{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "worker-snapshot",
-			Namespace: "default",
-			UID:       types.UID("snapshot-uid"),
-			Annotations: map[string]string{
-				consts.SnapshotCompatibilityVersionAnnotation: consts.SnapshotCompatibilityVersion,
-				consts.SnapshotCompatibilityHashAnnotation:    "compatibility-v1",
-				consts.SnapshotGMSModeAnnotation:              consts.SnapshotGMSModeDisabled,
-			},
+		Name:      "worker-snapshot",
+		Namespace: "default",
+		UID:       types.UID("snapshot-uid"),
+		Annotations: map[string]string{
+			consts.SnapshotCompatibilityVersionAnnotation: consts.SnapshotCompatibilityVersion,
+			consts.SnapshotCompatibilityHashAnnotation:    "compatibility-v1",
+			consts.SnapshotGMSModeAnnotation:              consts.SnapshotGMSModeDisabled,
 		},
 		Spec: snapshotv1alpha1.PodSnapshotSpec{
 			Source: snapshotv1alpha1.PodSnapshotSource{
@@ -419,7 +429,7 @@ func nativeRestoreTestSnapshot() *snapshotv1alpha1.PodSnapshot {
 			},
 		},
 		Status: snapshotv1alpha1.PodSnapshotStatus{
-			BoundPodSnapshotContentName: ptr.To("content-a"),
+			BoundPodSnapshotContentName: new("content-a"),
 			Conditions: []metav1.Condition{{
 				Type:   snapshotv1alpha1.PodSnapshotConditionReady,
 				Status: metav1.ConditionTrue,
@@ -430,27 +440,25 @@ func nativeRestoreTestSnapshot() *snapshotv1alpha1.PodSnapshot {
 
 func nativeRestoreCandidatePod(snapshot *snapshotv1alpha1.PodSnapshot) *corev1.Pod {
 	return &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "worker-0",
-			Namespace: snapshot.Namespace,
-			Labels: map[string]string{
-				consts.KubeLabelDynamoComponent:     "worker",
-				consts.KubeLabelDynamoComponentType: consts.ComponentTypeWorker,
-				consts.KubeLabelDynamoNamespace:     "default-worker",
-				consts.KubeLabelDynamoSelector:      "worker",
-				consts.KubeLabelDynamoWorkerHash:    "worker-v1",
-			},
-			Annotations: map[string]string{
-				consts.CheckpointRestoreCandidateAnnotation:         consts.KubeLabelValueTrue,
-				consts.CheckpointNameAnnotation:                     snapshot.Name,
-				consts.RestoreCandidateSourceKindAnnotation:         consts.RestoreCandidateSourcePodSnapshot,
-				consts.SnapshotCandidateUIDAnnotation:               string(snapshot.UID),
-				consts.SnapshotCandidateContentAnnotation:           "content-a",
-				consts.SnapshotCandidateGMSModeAnnotation:           consts.SnapshotGMSModeDisabled,
-				consts.SnapshotCandidateVersionAnnotation:           consts.SnapshotCompatibilityVersion,
-				consts.SnapshotCandidateCompatibilityHashAnnotation: "compatibility-v1",
-				consts.RestoreCandidateTargetContainersAnnotation:   "engine-0,engine-1",
-			},
+		Name:      "worker-0",
+		Namespace: snapshot.Namespace,
+		Labels: map[string]string{
+			consts.KubeLabelDynamoComponent:     "worker",
+			consts.KubeLabelDynamoComponentType: consts.ComponentTypeWorker,
+			consts.KubeLabelDynamoNamespace:     "default-worker",
+			consts.KubeLabelDynamoSelector:      "worker",
+			consts.KubeLabelDynamoWorkerHash:    "worker-v1",
+		},
+		Annotations: map[string]string{
+			consts.CheckpointRestoreCandidateAnnotation:         consts.KubeLabelValueTrue,
+			consts.CheckpointNameAnnotation:                     snapshot.Name,
+			consts.RestoreCandidateSourceKindAnnotation:         consts.RestoreCandidateSourcePodSnapshot,
+			consts.SnapshotCandidateUIDAnnotation:               string(snapshot.UID),
+			consts.SnapshotCandidateContentAnnotation:           "content-a",
+			consts.SnapshotCandidateGMSModeAnnotation:           consts.SnapshotGMSModeDisabled,
+			consts.SnapshotCandidateVersionAnnotation:           consts.SnapshotCompatibilityVersion,
+			consts.SnapshotCandidateCompatibilityHashAnnotation: "compatibility-v1",
+			consts.RestoreCandidateTargetContainersAnnotation:   "engine-0,engine-1",
 		},
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{
@@ -463,14 +471,12 @@ func nativeRestoreCandidatePod(snapshot *snapshotv1alpha1.PodSnapshot) *corev1.P
 
 func automaticRestoreTestJob(completed bool) *snapshotv1alpha1.SnapshotJob {
 	job := &snapshotv1alpha1.SnapshotJob{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "checkpoint-worker",
-			Namespace: "default",
-			UID:       types.UID("job-uid"),
-			Annotations: map[string]string{
-				consts.CheckpointAutoAnnotation:     consts.KubeLabelValueTrue,
-				consts.CheckpointOwnerUIDAnnotation: "dgd-uid",
-			},
+		Name:      "checkpoint-worker",
+		Namespace: "default",
+		UID:       types.UID("job-uid"),
+		Annotations: map[string]string{
+			consts.CheckpointAutoAnnotation:     consts.KubeLabelValueTrue,
+			consts.CheckpointOwnerUIDAnnotation: "dgd-uid",
 		},
 	}
 	if completed {
@@ -529,11 +535,10 @@ func podCreateAdmissionRequest(t *testing.T, pod *corev1.Pod) admission.Request 
 }
 
 func podCreateAdmissionRequestWithRaw(pod *corev1.Pod, raw []byte) admission.Request {
-	return admission.Request{AdmissionRequest: admissionv1.AdmissionRequest{
+	return admission.Request{
 		Operation: admissionv1.Create,
 		Namespace: pod.Namespace,
-		Object:    runtime.RawExtension{Raw: raw},
-	}}
+		Object:    runtime.RawExtension{Raw: raw}}
 }
 
 func applyAdmissionPatches(t *testing.T, original []byte, response admission.Response) *corev1.Pod {

@@ -149,8 +149,8 @@ mod tests {
         distributed::{DiscoveryBackend, DistributedConfig, RequestPlaneMode},
         engine::{AsyncEngine, AsyncEngineContext},
         pipeline::{
-            AddressedRequest, Context, Error, ManyIn, ManyOut, PushRouter, ResponseStream,
-            RouterMode, SingleIn, StreamingDispatch, context::Controller,
+            AddressedRequest, Context, Error, ManyIn, ManyOut, ResponseStream, RouterMode,
+            SingleIn, StreamingDispatch, context::Controller,
         },
         storage::kv,
         traits::DistributedRuntimeProvider,
@@ -338,11 +338,13 @@ mod tests {
         )
         .await
         .unwrap();
-        let push_router = PushRouter::from_client_with_dispatch(client, mode, dispatch)
-            .await
-            .unwrap();
         let shared = Arc::new(
-            RoutingHost::new_builtin_with_coordinator(push_router, load_context, None).unwrap(),
+            RoutingHost::builder(client, mode)
+                .load_context(load_context)
+                .dispatch(dispatch as crate::kv_router::LlmDispatch)
+                .build()
+                .await
+                .unwrap(),
         );
         let prefill = PrefillRouter::disabled(Arc::new(ModelManager::new()), mode, None);
         prefill.binding.store(Some(Arc::new(
@@ -420,14 +422,15 @@ mod tests {
             .await
             .unwrap(),
         );
-        let push_router =
-            PushRouter::<PreprocessedRequest, LlmResponse>::from_client(client, RouterMode::KV)
-                .await
-                .unwrap();
+        let router = RoutingHost::builder(client, RouterMode::KV)
+            .kv_router(chooser.clone())
+            .build()
+            .await
+            .unwrap();
         let binding = Arc::new(PrefillBinding {
             target_id: crate::discovery::WorkerSetTargetId::Legacy(endpoint_id.clone()),
             endpoint_id,
-            router: Arc::new(RoutingHost::new(push_router, chooser.clone(), None).unwrap()),
+            router: Arc::new(router),
             prefill_router_mode: RouterMode::KV,
         });
         (binding, chooser)
@@ -442,6 +445,85 @@ mod tests {
             std::sync::atomic::Ordering::Release,
         );
         (router, chooser)
+    }
+
+    #[tokio::test]
+    async fn binding_availability_tracks_local_inhibition_and_cancellation() {
+        use crate::kv_router::prefill_router::PrefillRouterLifecycle;
+
+        let (router, chooser) = tracked_prefill_router().await;
+        let endpoint = chooser.client().endpoint.id();
+        chooser.client().override_discovered_instances(vec![7, 8]);
+        assert_eq!(
+            router.available_worker_ids_for("legacy", &endpoint),
+            Some(HashSet::from([7, 8]))
+        );
+        chooser.client().report_instance_down(7);
+        assert_eq!(
+            router.available_worker_ids_for("legacy", &endpoint),
+            Some(HashSet::from([8]))
+        );
+        let mut other = endpoint.clone();
+        other.name = "other".into();
+        assert!(router.available_worker_ids_for("legacy", &other).is_none());
+        router.lifecycle.store(
+            PrefillLifecycleState::Unavailable as u8,
+            std::sync::atomic::Ordering::Release,
+        );
+        assert_eq!(
+            router.available_worker_ids_for("legacy", &endpoint),
+            Some(HashSet::new())
+        );
+        router.lifecycle.store(
+            PrefillLifecycleState::Active as u8,
+            std::sync::atomic::Ordering::Release,
+        );
+        router.cancel_token.cancel();
+        assert_eq!(
+            router.available_worker_ids_for("legacy", &endpoint),
+            Some(HashSet::new())
+        );
+    }
+
+    #[tokio::test]
+    async fn binding_availability_waits_for_rebind_publication() {
+        use crate::kv_router::prefill_router::PrefillRouterLifecycle;
+        use std::sync::mpsc;
+
+        let (router, chooser) = tracked_prefill_router().await;
+        let original = chooser.client().endpoint.id();
+        chooser.client().override_discovered_instances(vec![7]);
+        let (replacement, _) = tracked_binding("availability-replacement").await;
+        let mut target = router.target.lock();
+        *target = Some(crate::discovery::WorkerSetTargetId::Legacy(
+            original.clone(),
+        ));
+        let (started_tx, started_rx) = mpsc::channel();
+        let (result_tx, result_rx) = mpsc::channel();
+        let reader_router = router.clone();
+        let reader = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            result_tx
+                .send(reader_router.available_worker_ids_for("legacy", &original))
+                .unwrap();
+        });
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(matches!(
+            result_rx.recv_timeout(Duration::from_millis(100)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        *target = Some(replacement.target_id.clone());
+        router.binding.store(Some(replacement));
+        router.lifecycle.store(
+            PrefillLifecycleState::Active as u8,
+            std::sync::atomic::Ordering::Release,
+        );
+        drop(target);
+        assert_eq!(
+            result_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            None
+        );
+        reader.join().unwrap();
     }
 
     #[tokio::test]
@@ -511,6 +593,105 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn prefill_reservation_keeps_the_unknown_class_error() {
+        use dynamo_runtime::error::{DynamoError, ErrorType};
+
+        // The tracked prefill router has no policy file, so its synthetic profile has no `priority`.
+        let (router, chooser) = tracked_prefill_router().await;
+        let error = router
+            .reserve_prefill_worker(
+                "epp-prefill/unknown-class",
+                &[1u32; 64],
+                None,
+                None,
+                None,
+                0.0,
+                0,
+                Some("priority".to_string()),
+                None,
+                RoutingConstraints::default(),
+            )
+            .await
+            .err()
+            .expect("prefill class entry must reject an unknown class");
+        let error = error
+            .downcast_ref::<DynamoError>()
+            .expect("the class error must stay a top-level DynamoError");
+        assert_eq!(error.error_type(), ErrorType::InvalidArgument);
+        assert_eq!(error.message(), "unknown policy class \"priority\"");
+        let loads = chooser
+            .get_potential_loads(&[], None, None, None, None)
+            .await
+            .unwrap();
+        assert!(
+            loads.iter().all(|load| load.potential_prefill_tokens == 0),
+            "a rejected class must not book prefill load: {loads:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_class_decode_refusal_stops_pending_prefill() {
+        use super::super::handoff::PrefillTask;
+        use crate::protocols::response_merge::PrefillNeed;
+        use dynamo_runtime::engine::AsyncEngineContextProvider;
+        use dynamo_runtime::error::{DynamoError, ErrorType};
+        use dynamo_runtime::pipeline::context::Controller;
+
+        // This KV routing host stands in for decode: its synthetic profile has no `priority`,
+        // so decode refuses that class when the request enters it, before any dispatch.
+        let (decode, _chooser) = tracked_binding("decode-refusal").await;
+        for output in [
+            PrefillNeed::None,
+            PrefillNeed::BeforeLast,
+            PrefillNeed::BeforeFirst,
+        ] {
+            // Prefill accepted the class and is still running under its own controller.
+            let prefill_context = Arc::new(Controller::default());
+            let task_context = prefill_context.clone();
+            let (cleaned_tx, cleaned_rx) = tokio::sync::oneshot::channel();
+            let prefill = PrefillTask::spawn(
+                async move {
+                    task_context.stopped().await;
+                    let _ = cleaned_tx.send(());
+                    Ok(None)
+                },
+                prefill_context.clone(),
+            );
+            let request = Context::with_id_and_metadata(
+                request(),
+                format!("decode-refusal-{output:?}"),
+                std::collections::BTreeMap::from([(
+                    "policy-class".to_string(),
+                    "priority".to_string(),
+                )]),
+            );
+            let request_context = request.context();
+            let error = prefill
+                .forward_decode(
+                    decode.router.generate(request),
+                    request_context,
+                    output,
+                    prefill_context.clone(),
+                )
+                .await
+                .expect_err("decode routing must refuse the unknown class");
+            let refusal = error
+                .downcast_ref::<DynamoError>()
+                .expect("the refusal keeps its DynamoError");
+            assert_eq!(refusal.error_type(), ErrorType::InvalidArgument);
+            assert_eq!(refusal.message(), "unknown policy class \"priority\"");
+            assert!(
+                prefill_context.is_stopped(),
+                "decode's class refusal left prefill running: {output:?}"
+            );
+            tokio::time::timeout(Duration::from_secs(1), cleaned_rx)
+                .await
+                .expect("stopped prefill must finish its cleanup")
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
     async fn rr_prefill_queries_and_reservations_do_not_advance_dispatch_cursor() {
         let runtime = Runtime::from_current().unwrap();
         let discovery_root = tempfile::tempdir().unwrap();
@@ -573,13 +754,9 @@ mod tests {
         let runtime = Runtime::from_current().unwrap();
         let discovery_root = tempfile::tempdir().unwrap();
 
-        for (index, mode) in [
-            RouterMode::PowerOfTwoChoices,
-            RouterMode::LeastLoaded,
-            RouterMode::DeviceAwareWeighted,
-        ]
-        .into_iter()
-        .enumerate()
+        for (index, mode) in [RouterMode::LeastLoaded, RouterMode::DeviceAwareWeighted]
+            .into_iter()
+            .enumerate()
         {
             let dispatch = Arc::new(RecordingDispatch::pending());
             let (shared, prefill, runtimes, workers) = shared_router(

@@ -23,6 +23,10 @@ from stat import S_ISREG
 
 import pandas as pd
 
+from dynamo.common.container_images import BACKEND_IMAGE_NAMES as BACKEND_IMAGE_NAMES
+from dynamo.common.container_images import PLANNER_IMAGE_NAME as PLANNER_IMAGE_NAME
+from dynamo.common.container_images import derive_backend_image as derive_backend_image
+from dynamo.common.container_images import derive_planner_image as derive_planner_image
 from dynamo.planner.config.planner_config import PlannerPreDeploymentSweepMode
 from dynamo.profiler.utils.config_modifiers.parallelization_mapping import (
     PickedParallelConfig,
@@ -35,82 +39,6 @@ from dynamo.profiler.utils.dgdr_v1beta1_types import (
 from dynamo.profiler.utils.model_cache_paths import normalize_model_cache_path
 
 logger = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# Published container image naming conventions
-# ---------------------------------------------------------------------------
-
-# Mapping from backend name to the image-name component of the published
-# backend runtime image.
-# e.g. vllm → nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
-BACKEND_IMAGE_NAMES: dict[str, str] = {
-    "vllm": "vllm-runtime",
-    "sglang": "sglang-runtime",
-    "trtllm": "tensorrtllm-runtime",
-}
-
-PLANNER_IMAGE_NAME = "dynamo-planner"
-
-
-def _replace_image_name(image_ref: str, new_name: str) -> str:
-    """Replace the image name component in a Docker image reference.
-
-    Preserves the registry path prefix and tag suffix, only replacing the
-    last ``/``-delimited component (before any ``:tag``).
-    """
-    slash_idx = image_ref.rfind("/")
-    prefix = image_ref[: slash_idx + 1] if slash_idx >= 0 else ""
-    suffix = image_ref[slash_idx + 1 :]
-    name_and_tag, has_digest, digest = suffix.partition("@")
-    colon_idx = name_and_tag.rfind(":")
-    tag = name_and_tag[colon_idx:] if colon_idx >= 0 else ""
-    digest_suffix = f"@{digest}" if has_digest else ""
-    return f"{prefix}{new_name}{tag}{digest_suffix}"
-
-
-def derive_planner_image(profiler_image: str) -> str:
-    """Derive the planner service image from the profiler image reference."""
-    return _replace_image_name(profiler_image, PLANNER_IMAGE_NAME)
-
-
-def derive_backend_image(profiler_image: str, backend: str) -> str:
-    """Derive the backend worker image from the profiler image.
-
-    Replaces the image name (the last ``/``-delimited component, before any
-    ``:tag``) with the backend-specific runtime image name, preserving the
-    registry path and tag unchanged.
-
-    Examples::
-
-        derive_backend_image(
-            "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1", "vllm"
-        )
-        # → "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1"
-
-        derive_backend_image("myregistry.io/sglang-runtime:1.1.1", "sglang")
-        # → "myregistry.io/sglang-runtime:1.1.1"
-
-    Args:
-        profiler_image: Any Docker image reference of the form
-            ``[REGISTRY/]NAME[:TAG]``.
-        backend: The resolved backend type (``'vllm'``, ``'sglang'``, or
-            ``'trtllm'``).
-
-    Returns:
-        The backend container image string.
-
-    Raises:
-        ValueError: If *backend* is not a recognised backend.
-    """
-    backend_image_name = BACKEND_IMAGE_NAMES.get(backend)
-    if backend_image_name is None:
-        raise ValueError(
-            f"Cannot derive backend image for unknown backend '{backend}'. "
-            f"Supported backends: {list(BACKEND_IMAGE_NAMES.keys())}"
-        )
-
-    return _replace_image_name(profiler_image, backend_image_name)
-
 
 # ---------------------------------------------------------------------------
 # Operational defaults not part of DynamoGraphDeploymentRequestSpec

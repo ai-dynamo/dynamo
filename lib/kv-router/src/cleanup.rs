@@ -4,12 +4,10 @@
 //! Shared stale-child cleanup machinery for rooted tree structures.
 //!
 //! Provides a throttled, one-in-flight sweep that unlinks empty child nodes
-//! from their parent. It is used by
-//! [`ConcurrentRadixTreeCompressed`](super::concurrent_radix_tree_compressed)
-//! and the sequence-side
+//! from their parent. It is used by the sequence-side
 //! [`PromptMembershipTrie`](super::sequences::prompt_membership_trie::PromptMembershipTrie),
-//! each of which embeds a [`CleanupState`] and implements [`CleanableNode`]
-//! for its node type.
+//! which embeds a [`CleanupState`] and implements [`CleanableNode`] for its
+//! node type.
 //!
 //! # Sweep semantics
 //!
@@ -79,10 +77,6 @@ impl CleanupState {
         self.scheduled
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_ok()
-    }
-
-    pub fn cancel(&self) {
-        self.scheduled.store(false, Ordering::Release);
     }
 }
 

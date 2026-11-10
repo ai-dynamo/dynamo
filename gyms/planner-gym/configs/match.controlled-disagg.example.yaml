@@ -1,0 +1,48 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+schema_version: 1
+name: controlled-disaggregated
+backend:
+  type: sim
+  topology: disagg
+  gpu_budget: 4
+  model: {name: example-model}
+  engines:
+    common:
+      system: h200_sxm
+      backend: vllm
+      tp_size: 1
+      runtime: {cold_start_delay_s: 60}
+      extra_args:
+        timing_model: {type: fixed, prefill_ms: 10, decode_ms: 5}
+        num_gpu_blocks: 65536
+        block_size: 16
+        max_num_seqs: 32
+        max_num_batched_tokens: 8192
+    prefill: {}
+    decode: {}
+  replay:
+    ais_bootstrap: false
+    request_capture: jsonl
+  autoscalers:
+    - name: fixed
+      type: static
+      config: {num_prefill: 1, num_decode: 1}
+evaluations:
+  workloads: [flat, staircase]
+  defaults: {seed: 7, max_requests: 16}
+slo_profiles:
+  - {name: interactive, ttft_ms: 300, itl_ms: 50}
+metrics:
+  rank_by: goodput_per_gpu
+  short_output_itl: skip
+execution:
+  max_parallel_runs: 2
+  timeout_s: 60
+  max_memory_mb: 1024
+publish:
+  artifact_root: runs/controlled-disagg/artifacts
+  destinations:
+    - {type: console}
+    - {type: json, path: runs/controlled-disagg/results.json}
+    - {type: html, path: runs/controlled-disagg/report.html}

@@ -6,10 +6,10 @@ SPDX-License-Identifier: Apache-2.0
 # Cuckoo KV Indexer
 
 This directory contains the Cuckoo-filter (CKF) producer, publication protocol, and
-read-optimized global consumer used by the DC KV Relay architecture. The implementation has two
+read-optimized global consumer used by the Pool Relay architecture. The implementation has two
 different storage roles over one compatible packed-bucket format:
 
-- `DcCkfState` is the single-owner, mutable producer for one DC-local pool.
+- `DcCkfState` is the single-owner, mutable producer for one cluster-local pool.
 - `GlobalCkfIndexer` is the concurrent, transposed consumer for one indexer domain across as many
   as 16 DC pool lanes.
 
@@ -22,11 +22,11 @@ For the higher-level Relay and recovery model, see
 
 ## Core concepts
 
-An `IndexerDomainId` identifies one logical KV indexer namespace. A `PoolId` adds a stable `DcId`
-and identifies exactly one DC-local producer and publication stream:
+An `IndexerDomainId` identifies one logical KV indexer namespace. A `PoolId` adds a stable `ClusterId`
+and identifies exactly one cluster-local producer and publication stream:
 
 ```text
-PoolId = (IndexerDomainId, DcId)
+PoolId = (IndexerDomainId, ClusterId)
 ```
 
 Native runtime endpoints are bindings for a pool, not part of the CKF protocol identity. A global

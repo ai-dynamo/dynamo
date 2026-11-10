@@ -15,12 +15,12 @@ import (
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	podcontract "github.com/ai-dynamo/snapshot/api/podcontract"
 	corev1 "k8s.io/api/core/v1"
 )
 
 const (
 	checkpointInterPodCompatibilityMessage = "Snapshot with gpuMemoryService.mode=InterPod is unsupported"
-	checkpointFailoverCompatibilityMessage = "Snapshot with active/passive failover is temporarily unsupported"
 )
 
 // ValidateCheckpointCompatibility returns unsupported checkpoint combinations
@@ -35,9 +35,6 @@ func ValidateCheckpointCompatibility(experimental *nvidiacomv1beta1.Experimental
 	if experimental.GPUMemoryService != nil &&
 		experimental.GPUMemoryService.Mode == nvidiacomv1beta1.GMSModeInterPod {
 		violations = append(violations, errors.New(checkpointInterPodCompatibilityMessage))
-	}
-	if experimental.Failover != nil {
-		violations = append(violations, errors.New(checkpointFailoverCompatibilityMessage))
 	}
 
 	return violations
@@ -62,6 +59,7 @@ var snapshotRestoreEnvironmentNames = map[string]struct{}{
 	"DYN_PARENT_DGD_K8S_NAME":               {},
 	"DYN_PARENT_DGD_K8S_NAMESPACE":          {},
 	"DYN_REQUEST_PLANE":                     {},
+	"DYN_SERVED_MODEL_NAME":                 {},
 	"DYN_SYSTEM_HEALTH_PATH":                {},
 	"DYN_SYSTEM_HOST":                       {},
 	"DYN_SYSTEM_LIVE_PATH":                  {},
@@ -90,6 +88,7 @@ type snapshotCompatibilityContract struct {
 	BackendFramework      string                     `json:"backendFramework"`
 	GMSMode               string                     `json:"gmsMode"`
 	GMSDeviceClassName    string                     `json:"gmsDeviceClassName,omitempty"`
+	CUDASharedMemory      string                     `json:"cudaSharedMemorySupport,omitempty"`
 	TargetContainer       corev1.Container           `json:"targetContainer"`
 	InitContainers        []corev1.Container         `json:"initContainers,omitempty"`
 	Volumes               []corev1.Volume            `json:"volumes,omitempty"`
@@ -142,6 +141,7 @@ func ComputeSnapshotCompatibilityHash(
 		BackendFramework:      backendFramework,
 		GMSMode:               gmsMode,
 		GMSDeviceClassName:    gmsDeviceClassName,
+		CUDASharedMemory:      podTemplate.Annotations[podcontract.CuInterposeAnnotation],
 		TargetContainer:       canonicalSnapshotContainer(*target, false),
 		HostNetwork:           podTemplate.Spec.HostNetwork,
 		HostPID:               podTemplate.Spec.HostPID,

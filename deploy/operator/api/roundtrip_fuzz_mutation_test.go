@@ -18,6 +18,7 @@
 package api
 
 import (
+	"encoding/json"
 	"fmt"
 	"maps"
 	"reflect"
@@ -30,9 +31,12 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/conversion"
+	"sigs.k8s.io/randfill"
 
 	v1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	v1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 )
 
 type roundTripHubObject interface {
@@ -67,8 +71,9 @@ func fuzzMutatedSpokeCarrier[
 	f := newRoundTripFiller(*fuzzSeed)
 	for i := 0; i < *fuzzIters; i++ {
 		// Stage 1, hub -> spoke: build the spoke carrier with hub-only data preserved in annotations.
+		// Keep this flow on one representation; envelope mutation has dedicated tests below.
 		in := newHub()
-		f.Fill(in)
+		f.FillNoCustom(in)
 		carrier := PS(new(S))
 		if err := carrier.ConvertFrom(in); err != nil {
 			t.Fatalf("%s iter %d ConvertFrom: %v\ninput=%s", name, i, err, mustJSON(in))
@@ -76,7 +81,7 @@ func fuzzMutatedSpokeCarrier[
 
 		// Stage 2, mutation: update the carrier without deleting existing values or annotations.
 		patch := PS(new(S))
-		f.Fill(patch)
+		f.FillNoCustom(patch)
 		sparseFuzzInto(carrier, patch)
 		carrierBeforeYAML := toYAML(t, carrier)
 
@@ -125,8 +130,9 @@ func fuzzMutatedHubCarrier[
 	f := newRoundTripFiller(*fuzzSeed)
 	for i := 0; i < *fuzzIters; i++ {
 		// Stage 1, spoke -> hub: build the hub carrier with spoke-only data preserved in annotations.
+		// Keep this flow on one representation; envelope mutation has dedicated tests below.
 		in := PS(new(S))
-		f.Fill(in)
+		f.FillNoCustom(in)
 		carrier := newHub()
 		if err := in.ConvertTo(carrier); err != nil {
 			t.Fatalf("%s iter %d ConvertTo: %v\ninput=%s", name, i, err, mustJSON(in))
@@ -134,7 +140,7 @@ func fuzzMutatedHubCarrier[
 
 		// Stage 2, mutation: update the carrier without deleting existing values or annotations.
 		patch := newHub()
-		f.Fill(patch)
+		f.FillNoCustom(patch)
 		sparseFuzzInto(carrier, patch)
 		carrierBeforeYAML := toYAML(t, carrier)
 
@@ -162,6 +168,183 @@ func fuzzMutatedHubCarrier[
 			t.Fatalf("%s iter %d spoke->mutated-hub->spoke->hub mismatch (-want +got):\n%s\ninput=%s", name, i, diff, mustJSON(carrier))
 		}
 	}
+}
+
+func fuzzMutatedV1Beta2SpokeEnvelope(t *testing.T) {
+	t.Helper()
+	ops := v1Beta2SpokeEnvelopeMutationOps{
+		t: t,
+		f: newRoundTripFiller(*fuzzSeed),
+	}
+	fuzzMutatedDGDRCarrier(
+		t,
+		"hub->v1beta2-envelope-(mutation)->hub->v1beta2-envelope",
+		ops.buildCarrier,
+		ops.mutateCarrier,
+		ops.convertAway,
+		ops.convertBack,
+	)
+}
+
+func fuzzMutatedV1Beta1HubEnvelope(t *testing.T) {
+	t.Helper()
+	ops := v1Beta1HubEnvelopeMutationOps{
+		t: t,
+		f: newRoundTripFiller(*fuzzSeed),
+	}
+	fuzzMutatedDGDRCarrier(
+		t,
+		"v1beta2->hub-envelope-(mutation)->v1beta2->hub-envelope",
+		ops.buildCarrier,
+		ops.mutateCarrier,
+		ops.convertAway,
+		ops.convertBack,
+	)
+}
+
+type v1Beta2SpokeEnvelopeMutationOps struct {
+	t *testing.T
+	f *randfill.Filler
+}
+
+func (ops v1Beta2SpokeEnvelopeMutationOps) buildCarrier() (*v1beta2.DynamoGraphDeploymentRequest, error) {
+	in := &v1beta1.DynamoGraphDeploymentRequest{}
+	ops.f.FillNoCustom(in)
+	carrier := &v1beta2.DynamoGraphDeploymentRequest{}
+	return carrier, carrier.ConvertFrom(in)
+}
+
+func (ops v1Beta2SpokeEnvelopeMutationOps) mutateCarrier(carrier *v1beta2.DynamoGraphDeploymentRequest) {
+	patch := &v1beta1.DynamoGraphDeploymentRequest{}
+	ops.f.FillNoCustom(patch)
+	sparseFuzzInto(&carrier.ObjectMeta, &patch.ObjectMeta)
+	replaceJSONEnvelope(
+		ops.t,
+		carrier.Spec.V1Beta1,
+		&v1beta1.DynamoGraphDeploymentRequestNativeSpec{},
+		&patch.Spec.DynamoGraphDeploymentRequestNativeSpec,
+	)
+	replaceJSONEnvelope(
+		ops.t,
+		carrier.Status.V1Beta1,
+		&v1beta1.DynamoGraphDeploymentRequestNativeStatus{},
+		&patch.Status.DynamoGraphDeploymentRequestNativeStatus,
+	)
+}
+
+func (v1Beta2SpokeEnvelopeMutationOps) convertAway(
+	carrier *v1beta2.DynamoGraphDeploymentRequest,
+) (*v1beta1.DynamoGraphDeploymentRequest, error) {
+	hub := &v1beta1.DynamoGraphDeploymentRequest{}
+	return hub, carrier.ConvertTo(hub)
+}
+
+func (v1Beta2SpokeEnvelopeMutationOps) convertBack(
+	hub *v1beta1.DynamoGraphDeploymentRequest,
+) (*v1beta2.DynamoGraphDeploymentRequest, error) {
+	out := &v1beta2.DynamoGraphDeploymentRequest{}
+	return out, out.ConvertFrom(hub)
+}
+
+type v1Beta1HubEnvelopeMutationOps struct {
+	t *testing.T
+	f *randfill.Filler
+}
+
+func (ops v1Beta1HubEnvelopeMutationOps) buildCarrier() (*v1beta1.DynamoGraphDeploymentRequest, error) {
+	in := &v1beta2.DynamoGraphDeploymentRequest{}
+	ops.f.FillNoCustom(in)
+	carrier := &v1beta1.DynamoGraphDeploymentRequest{}
+	return carrier, in.ConvertTo(carrier)
+}
+
+func (ops v1Beta1HubEnvelopeMutationOps) mutateCarrier(carrier *v1beta1.DynamoGraphDeploymentRequest) {
+	patch := &v1beta2.DynamoGraphDeploymentRequest{}
+	ops.f.FillNoCustom(patch)
+	sparseFuzzInto(&carrier.ObjectMeta, &patch.ObjectMeta)
+	replaceJSONEnvelope(
+		ops.t,
+		carrier.Spec.V1Beta2,
+		&v1beta2.DynamoGraphDeploymentRequestNativeSpec{},
+		&patch.Spec.DynamoGraphDeploymentRequestNativeSpec,
+	)
+	replaceJSONEnvelope(
+		ops.t,
+		carrier.Status.V1Beta2,
+		&v1beta2.DynamoGraphDeploymentRequestNativeStatus{},
+		&patch.Status.DynamoGraphDeploymentRequestNativeStatus,
+	)
+}
+
+func (v1Beta1HubEnvelopeMutationOps) convertAway(
+	carrier *v1beta1.DynamoGraphDeploymentRequest,
+) (*v1beta2.DynamoGraphDeploymentRequest, error) {
+	spoke := &v1beta2.DynamoGraphDeploymentRequest{}
+	return spoke, spoke.ConvertFrom(carrier)
+}
+
+func (v1Beta1HubEnvelopeMutationOps) convertBack(
+	spoke *v1beta2.DynamoGraphDeploymentRequest,
+) (*v1beta1.DynamoGraphDeploymentRequest, error) {
+	out := &v1beta1.DynamoGraphDeploymentRequest{}
+	return out, spoke.ConvertTo(out)
+}
+
+func fuzzMutatedDGDRCarrier[C, A any](
+	t *testing.T,
+	flow string,
+	buildCarrier func() (C, error),
+	mutateCarrier func(C),
+	convertAway func(C) (A, error),
+	convertBack func(A) (C, error),
+) {
+	t.Helper()
+	t.Logf("%s seed=%d iters=%d", flow, *fuzzSeed, *fuzzIters)
+	for i := 0; i < *fuzzIters; i++ {
+		carrier, err := buildCarrier()
+		if err != nil {
+			t.Fatalf("iter %d build carrier: %v", i, err)
+		}
+
+		mutateCarrier(carrier)
+		carrierBeforeYAML := toYAML(t, carrier)
+
+		away, err := convertAway(carrier)
+		if err != nil {
+			t.Fatalf("iter %d convert away from carrier: %v\ninput=%s", i, err, mustJSON(carrier))
+		}
+		if diff := cmp.Diff(carrierBeforeYAML, toYAML(t, carrier)); diff != "" {
+			t.Fatalf("iter %d conversion mutated input (-before +after):\n%s", i, diff)
+		}
+
+		out, err := convertBack(away)
+		if err != nil {
+			t.Fatalf("iter %d convert back to carrier: %v", i, err)
+		}
+		if diff := cmp.Diff(carrier, out, cmpopts.EquateEmpty()); diff != "" {
+			t.Fatalf("iter %d mutated envelope mismatch (-want +got):\n%s", i, diff)
+		}
+	}
+}
+
+func replaceJSONEnvelope(t *testing.T, envelope *apiextensionsv1.JSON, payload, replacement any) {
+	t.Helper()
+
+	// Require and decode the complete typed payload carried by the envelope.
+	if envelope == nil {
+		t.Fatal("conversion did not create an envelope")
+	}
+	if err := json.Unmarshal(envelope.Raw, payload); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+
+	// Replace the payload with another schema-valid native value. Sparse merging
+	// two valid values can violate cross-field invariants in the combined result.
+	raw, err := json.Marshal(replacement)
+	if err != nil {
+		t.Fatalf("marshal envelope: %v", err)
+	}
+	envelope.Raw = raw
 }
 
 func TestFuzzRoundTripMutability(t *testing.T) {
@@ -195,6 +378,8 @@ func TestFuzzRoundTripMutability(t *testing.T) {
 			func() *v1beta1.DynamoGraphDeploymentRequest { return &v1beta1.DynamoGraphDeploymentRequest{} },
 		)
 	})
+	t.Run("DGDR-v1beta2/hub-to-mutated-spoke-envelope", fuzzMutatedV1Beta2SpokeEnvelope)
+	t.Run("DGDR-v1beta2/spoke-to-mutated-hub-envelope", fuzzMutatedV1Beta1HubEnvelope)
 	t.Run("DGDSA/hub-to-mutated-spoke", func(t *testing.T) {
 		fuzzMutatedSpokeCarrier[*v1beta1.DynamoGraphDeploymentScalingAdapter, v1alpha1.DynamoGraphDeploymentScalingAdapter](t, "DGDSA",
 			func() *v1beta1.DynamoGraphDeploymentScalingAdapter {
@@ -546,14 +731,14 @@ func deepCopyValue(v reflect.Value) reflect.Value {
 }
 
 func isAtomicSparseMergeType(t reflect.Type) bool {
-	return t == reflect.TypeOf(intstr.IntOrString{})
+	return t == reflect.TypeFor[intstr.IntOrString]()
 }
 
 func normalizeComparableRoundTripValue(v reflect.Value) {
 	if !v.IsValid() {
 		return
 	}
-	if v.Type() == reflect.TypeOf(intstr.IntOrString{}) {
+	if v.Type() == reflect.TypeFor[intstr.IntOrString]() {
 		if !v.CanSet() {
 			return
 		}
@@ -572,8 +757,7 @@ func normalizeComparableRoundTripValue(v reflect.Value) {
 			normalizeComparableRoundTripValue(v.Elem())
 		}
 	case reflect.Struct:
-		for i := 0; i < v.NumField(); i++ {
-			field := v.Field(i)
+		for _, field := range v.Fields() {
 			if field.CanSet() || field.Kind() == reflect.Pointer || field.Kind() == reflect.Interface {
 				normalizeComparableRoundTripValue(field)
 			}
@@ -592,8 +776,8 @@ func normalizeComparableRoundTripValue(v reflect.Value) {
 }
 
 func hasUnexportedFields(t reflect.Type) bool {
-	for i := 0; i < t.NumField(); i++ {
-		if t.Field(i).PkgPath != "" {
+	for field := range t.Fields() {
+		if field.PkgPath != "" {
 			return true
 		}
 	}

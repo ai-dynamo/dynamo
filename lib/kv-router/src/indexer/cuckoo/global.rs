@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicU16, Ordering};
 use rustc_hash::FxHashSet;
 use serde::{Deserialize, Serialize};
 
-use crate::identity::{DcId, IdentitySource, IndexerDomainId, PoolId};
+use crate::identity::{ClusterId, IdentitySource, IndexerDomainId, PoolId};
 use crate::protocols::LocalBlockHash;
 
 use super::addressing::{CkfAddressing, CkfProbe};
@@ -71,8 +71,8 @@ impl ProducerIdentity {
         self.pool_id.indexer_domain()
     }
 
-    pub const fn dc_id(self) -> DcId {
-        self.pool_id.dc_id()
+    pub const fn cluster_id(self) -> ClusterId {
+        self.pool_id.cluster_id()
     }
 
     pub const fn producer_incarnation(self) -> u64 {
@@ -142,8 +142,8 @@ impl GlobalCkfManifest {
         pools
             .try_reserve(lanes.len())
             .map_err(|_| GlobalCkfBuildError::AllocationFailed)?;
-        let mut dc_ids = FxHashSet::default();
-        dc_ids
+        let mut cluster_ids = FxHashSet::default();
+        cluster_ids
             .try_reserve(lanes.len())
             .map_err(|_| GlobalCkfBuildError::AllocationFailed)?;
 
@@ -164,9 +164,9 @@ impl GlobalCkfManifest {
                 // because the DC check remains a guard if PoolId gains another dimension later.
                 return Err(GlobalCkfBuildError::DuplicatePool { pool_id });
             }
-            if !dc_ids.insert(pool_id.dc_id()) {
-                return Err(GlobalCkfBuildError::DuplicateDcLane {
-                    dc_id: pool_id.dc_id(),
+            if !cluster_ids.insert(pool_id.cluster_id()) {
+                return Err(GlobalCkfBuildError::DuplicateClusterLane {
+                    cluster_id: pool_id.cluster_id(),
                 });
             }
             configured_lanes |= 1u16 << lane;
@@ -175,9 +175,9 @@ impl GlobalCkfManifest {
             return Err(GlobalCkfBuildError::NoConfiguredLanes);
         }
 
-        // NOTE: One global indexer is exactly one logical domain. DC remains an orthogonal pool
-        // dimension: lanes differ by DcId, never by endpoint identity or routing scope.
-        if dc_ids.len() > 1 && indexer_domain.relies_on_defaults() {
+        // NOTE: One global indexer is exactly one logical domain. Cluster identity is an
+        // orthogonal pool dimension: lanes differ by ClusterId, never by endpoint or routing scope.
+        if cluster_ids.len() > 1 && indexer_domain.relies_on_defaults() {
             let defaulted_dimensions = match (
                 indexer_domain.cache_semantics().source(),
                 indexer_domain.routing_scope().source(),
@@ -191,7 +191,7 @@ impl GlobalCkfManifest {
             };
             tracing::warn!(
                 %indexer_domain,
-                dc_count = dc_ids.len(),
+                cluster_count = cluster_ids.len(),
                 defaulted_dimensions,
                 "joining multiple DC CKF pools using default-derived identity"
             );
@@ -242,8 +242,8 @@ pub enum GlobalCkfBuildError {
     #[error("duplicate global CKF pool {pool_id}")]
     DuplicatePool { pool_id: PoolId },
 
-    #[error("global CKF manifest contains more than one lane for DC {dc_id}")]
-    DuplicateDcLane { dc_id: DcId },
+    #[error("global CKF manifest contains more than one lane for cluster {cluster_id}")]
+    DuplicateClusterLane { cluster_id: ClusterId },
 
     #[error("global CKF lane {lane} is outside 0..{DC_COUNT}")]
     InvalidLane { lane: usize },
@@ -1105,7 +1105,7 @@ mod tests {
                 CacheSemanticsId::new([31; 16], IdentitySource::Explicit),
                 RoutingScopeId::new([29; 16], IdentitySource::Explicit),
             );
-            let pool_id = PoolId::new(domain, DcId::new(41));
+            let pool_id = PoolId::new(domain, ClusterId::new(41));
             let mut lanes = [None; DC_COUNT];
             lanes[3] = Some(pool_id);
             let manifest = GlobalCkfManifest::new(consumer, domain, format, lanes).unwrap();
@@ -1164,14 +1164,14 @@ mod tests {
         );
 
         let mut mixed = [None; DC_COUNT];
-        mixed[0] = Some(PoolId::new(domain, DcId::new(10)));
-        mixed[1] = Some(PoolId::new(foreign_domain, DcId::new(11)));
+        mixed[0] = Some(PoolId::new(domain, ClusterId::new(10)));
+        mixed[1] = Some(PoolId::new(foreign_domain, ClusterId::new(11)));
         assert!(matches!(
             GlobalCkfManifest::new(consumer, domain, format, mixed),
             Err(GlobalCkfBuildError::MixedIndexerDomain { lane: 1, .. })
         ));
 
-        let pool = PoolId::new(domain, DcId::new(10));
+        let pool = PoolId::new(domain, ClusterId::new(10));
         let mut duplicate = [None; DC_COUNT];
         duplicate[0] = Some(pool);
         duplicate[1] = Some(pool);
@@ -1190,8 +1190,8 @@ mod tests {
             RoutingScopeId::new([6; 16], IdentitySource::Explicit),
         );
         let mut lanes = [None; DC_COUNT];
-        lanes[0] = Some(PoolId::new(domain, DcId::new(1)));
-        lanes[1] = Some(PoolId::new(domain, DcId::new(2)));
+        lanes[0] = Some(PoolId::new(domain, ClusterId::new(1)));
+        lanes[1] = Some(PoolId::new(domain, ClusterId::new(2)));
 
         let manifest =
             GlobalCkfManifest::new(ConsumerInstanceId::new(2), domain, format, lanes).unwrap();

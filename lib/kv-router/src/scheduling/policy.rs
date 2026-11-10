@@ -122,11 +122,15 @@ pub enum RouterSchedulingPolicy {
 }
 
 impl RouterSchedulingPolicy {
-    pub fn new(kind: RouterQueuePolicy) -> Self {
+    /// The score policy of a FCFS, LCFS, or WSPT queue. EDF is a valid queue policy with no
+    /// score here: it orders by due time and then enqueue sequence, which this key does not
+    /// receive, so `PolicyQueue` applies it.
+    pub fn score_policy(kind: RouterQueuePolicy) -> Option<Self> {
         match kind {
-            RouterQueuePolicy::Fcfs => Self::Fcfs(FcfsPolicy),
-            RouterQueuePolicy::Lcfs => Self::Lcfs(LcfsPolicy),
-            RouterQueuePolicy::Wspt => Self::Wspt(WsptPolicy),
+            RouterQueuePolicy::Edf => None,
+            RouterQueuePolicy::Fcfs => Some(Self::Fcfs(FcfsPolicy)),
+            RouterQueuePolicy::Lcfs => Some(Self::Lcfs(LcfsPolicy)),
+            RouterQueuePolicy::Wspt => Some(Self::Wspt(WsptPolicy)),
         }
     }
 }
@@ -286,11 +290,37 @@ mod tests {
         let early = Duration::from_secs(1);
         let late = Duration::from_secs(10);
 
-        let fcfs = RouterSchedulingPolicy::new(RouterQueuePolicy::Fcfs);
+        let fcfs = RouterSchedulingPolicy::score_policy(RouterQueuePolicy::Fcfs).unwrap();
         assert!(enqueue_key(&fcfs, early, &req) > enqueue_key(&fcfs, late, &req));
 
-        let lcfs = RouterSchedulingPolicy::new(RouterQueuePolicy::Lcfs);
+        let lcfs = RouterSchedulingPolicy::score_policy(RouterQueuePolicy::Lcfs).unwrap();
         assert!(enqueue_key(&lcfs, late, &req) > enqueue_key(&lcfs, early, &req));
+    }
+
+    #[test]
+    fn score_policy_exists_only_for_score_ordered_queues() {
+        // EDF orders by due time and enqueue sequence, neither of which this key receives.
+        assert!(RouterSchedulingPolicy::score_policy(RouterQueuePolicy::Edf).is_none());
+
+        let boosted = with_strict_priority(request_with(64, 3.0, OverlapScores::default()), 2);
+        let arrival = Duration::from_millis(1500);
+        for (kind, expected) in [
+            (
+                RouterQueuePolicy::Fcfs,
+                enqueue_key(&FcfsPolicy, arrival, &boosted),
+            ),
+            (
+                RouterQueuePolicy::Lcfs,
+                enqueue_key(&LcfsPolicy, arrival, &boosted),
+            ),
+            (
+                RouterQueuePolicy::Wspt,
+                enqueue_key(&WsptPolicy, arrival, &boosted),
+            ),
+        ] {
+            let policy = RouterSchedulingPolicy::score_policy(kind).unwrap();
+            assert_eq!(enqueue_key(&policy, arrival, &boosted), expected, "{kind}");
+        }
     }
 
     #[test]

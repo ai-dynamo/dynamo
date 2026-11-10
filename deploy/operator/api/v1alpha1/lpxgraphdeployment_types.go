@@ -80,6 +80,11 @@ type LPXGraphDeploymentStatus struct {
 	// modelDownload retains the existing remote-build download progress.
 	// +optional
 	ModelDownload *ModelDownloadStatus `json:"modelDownload,omitempty"`
+	// checkpointDownload retains download progress for the checkpoints that
+	// resolved hybrid workloads project into their Cyborg conductors. Its
+	// presence also records that the deployment adopts build checkpoints.
+	// +optional
+	CheckpointDownload *CheckpointDownloadStatus `json:"checkpointDownload,omitempty"`
 }
 
 // ModelDownloadStatus contains the status of remote LPU model downloads.
@@ -90,6 +95,18 @@ type ModelDownloadStatus struct {
 	Builds []string `json:"builds,omitempty"`
 
 	// lastCheckedAt is the last time all remote LPU builds were checked with ModelExpress.
+	// +optional
+	LastCheckedAt *metav1.Time `json:"lastCheckedAt,omitempty"`
+}
+
+// CheckpointDownloadStatus contains the status of Cyborg checkpoint downloads.
+type CheckpointDownloadStatus struct {
+	// checkpoints is the sorted set of checkpoints, as `<model>@<revision>`,
+	// that were successfully downloaded into model-storage.
+	// +optional
+	Checkpoints []string `json:"checkpoints,omitempty"`
+
+	// lastCheckedAt is the oldest Model Express confirmation of the listed checkpoints.
 	// +optional
 	LastCheckedAt *metav1.Time `json:"lastCheckedAt,omitempty"`
 }

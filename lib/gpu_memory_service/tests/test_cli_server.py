@@ -29,10 +29,53 @@ pytestmark = [
 
 def test_v1_socket_path_rejects_af_unix_overflow(monkeypatch):
     monkeypatch.setenv("GMS_SOCKET_DIR", "/" + "s" * 200)
-    monkeypatch.setattr(v1_device, "get_device_uuid", lambda _device: "GPU-0")
 
     with pytest.raises(ValueError, match="too long for AF_UNIX"):
-        v1_device.get_socket_path(0, "weights")
+        v1_device.get_socket_path("GPU-0", "weights")
+
+
+def test_v1_restore_probe_reaches_each_gpu_without_cuda(monkeypatch):
+    probed = []
+
+    class Session:
+        def __init__(self, path, *_args, **_kwargs) -> None:
+            probed.append(path)
+
+        def close(self) -> None:
+            pass
+
+    def init_vmm(*_args):
+        raise AssertionError("the V1 probe must not start CUDA")
+
+    monkeypatch.setenv("DYN_GMS_USE_V1", "true")
+    monkeypatch.setenv("GMS_SOCKET_DIR", "/run/gms")
+    monkeypatch.setattr(
+        server,
+        "node_gpus",
+        lambda: [
+            v1_device.Gpu("0000:18:00.0", 6, "GPU-a"),
+            v1_device.Gpu("0000:29:00.0", 0, "GPU-b"),
+        ],
+    )
+    monkeypatch.setattr(server, "v1_session", Session)
+    monkeypatch.setattr(server, "init_vmm", init_vmm)
+
+    server.main(["--probe-restore-ready"])
+
+    assert probed == [
+        "/run/gms/gms_GPU-a_weights.sock",
+        "/run/gms/gms_GPU-b_weights.sock",
+    ]
+
+
+@pytest.mark.parametrize("flag", ["--no-isolation", "--probe-restore-ready"])
+def test_v1_fails_when_no_gpu_is_visible(monkeypatch, flag):
+    monkeypatch.setenv("DYN_GMS_USE_V1", "true")
+    monkeypatch.setattr(server, "node_gpus", lambda: [])
+    monkeypatch.setattr(server.signal, "signal", lambda *_args: None)
+
+    with pytest.raises(SystemExit, match="found no GPU"):
+        server.main([flag])
 
 
 class _Process:

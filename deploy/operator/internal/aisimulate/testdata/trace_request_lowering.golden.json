@@ -1,0 +1,191 @@
+{
+  "request_spec": {
+    "model": {
+      "name": "Qwen/Qwen3-32B"
+    },
+    "backends": [
+      "vllm"
+    ],
+    "hardware": {
+      "gpu": {
+        "sku": "h200_sxm",
+        "budget": 6
+      }
+    },
+    "workload": {
+      "trace": {
+        "source": {
+          "persistentVolumeClaim": {
+            "claimName": "request-traces",
+            "subPath": "windows/llm/1793000000000-ba081802aba3.jsonl.gz"
+          }
+        }
+      }
+    },
+    "objective": {
+      "mode": "Optimize",
+      "metric": "GoodputPerGPU",
+      "sla": {
+        "ttftMs": 500.0,
+        "itlMs": 30.0
+      }
+    },
+    "recommendation": {
+      "maxCandidates": 8
+    },
+    "aisim": {
+      "inputOverrides": {
+        "engine": {
+          "mode": "aggregated",
+          "backend": "vllm",
+          "context_length": 32768,
+          "workers": {
+            "aggregated": {
+              "parallelism": {
+                "preset": [
+                  {
+                    "tensor": 2,
+                    "pipeline": 1,
+                    "attention_data": 1,
+                    "moe_tensor": 1,
+                    "moe_expert": 1,
+                    "replicas": 3
+                  }
+                ]
+              }
+            },
+            "prefill": null,
+            "decode": null
+          }
+        },
+        "router": {
+          "policy": "kv_router",
+          "prefill_load_model": {
+            "type": "none"
+          },
+          "overlap_score_credit": {
+            "choices": [
+              0.5,
+              1.0
+            ]
+          },
+          "prefill_load_scale": {
+            "choices": [
+              1.0,
+              2.0
+            ]
+          },
+          "temperature": {
+            "choices": [
+              0.0,
+              0.5
+            ]
+          }
+        },
+        "optimizer": {
+          "algorithm": "random",
+          "max_trials": 16,
+          "parallelism": 8,
+          "candidate_timeout_seconds": 300.0
+        },
+        "optimization": {
+          "strict_sla": false
+        },
+        "dgdr_run": {
+          "generator": "direct"
+        }
+      }
+    }
+  },
+  "run_input": {
+    "dgdr_run": {
+      "derive_runtime_images": true,
+      "generator": "direct",
+      "max_candidates": 8,
+      "name": "llm-rt-golden-1",
+      "namespace": "test-ns",
+      "num_gpus_per_node": 8,
+      "runtime_image": "example.com/dynamo-planner:1.2.3",
+      "runtime_version_override": "1.2.3",
+      "snapshot_dir": "/var/run/aisimulate/output"
+    },
+    "engine": {
+      "backend": "vllm",
+      "context_length": 32768,
+      "hardware": "h200_sxm",
+      "mode": "aggregated",
+      "model": "Qwen/Qwen3-32B",
+      "workers": {
+        "aggregated": {
+          "parallelism": {
+            "preset": [
+              {
+                "attention_data": 1,
+                "moe_expert": 1,
+                "moe_tensor": 1,
+                "pipeline": 1,
+                "replicas": 3,
+                "tensor": 2
+              }
+            ]
+          }
+        }
+      }
+    },
+    "evaluation": {
+      "sla": {
+        "itl_ms": 30,
+        "ttft_ms": 500
+      }
+    },
+    "optimization": {
+      "constraints": {
+        "max_candidate_gpus": 6
+      },
+      "strict_sla": false,
+      "target": "goodput_per_gpu"
+    },
+    "optimizer": {
+      "algorithm": "random",
+      "candidate_timeout_seconds": 300,
+      "max_trials": 16,
+      "parallelism": 8
+    },
+    "router": {
+      "overlap_score_credit": {
+        "choices": [
+          0.5,
+          1
+        ]
+      },
+      "policy": "kv_router",
+      "prefill_load_model": {
+        "type": "none"
+      },
+      "prefill_load_scale": {
+        "choices": [
+          1,
+          2
+        ]
+      },
+      "temperature": {
+        "choices": [
+          0,
+          0.5
+        ]
+      }
+    },
+    "traffic": {
+      "load": {
+        "type": "trace_timestamps"
+      },
+      "source": {
+        "format": "dynamo",
+        "paths": [
+          "/var/run/aisimulate/trace/trace.jsonl.gz"
+        ],
+        "type": "trace"
+      }
+    }
+  }
+}

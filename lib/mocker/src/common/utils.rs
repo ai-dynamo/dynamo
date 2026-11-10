@@ -9,7 +9,7 @@ use std::sync::Once;
 use aisimulate_core::engine::{WorkerType as EngineWorkerType, prefill_handoff_delay_ms};
 
 use crate::common::handoff::HandoffTransferTiming;
-use crate::common::protocols::{KvTransferTimingMode, MockEngineArgs, WorkerType};
+use crate::common::protocols::{KvTransferTimingMode, MockerConfig, WorkerType};
 
 pub fn prefill_handoff_transfer_timing(
     num_input_tokens: usize,
@@ -64,16 +64,13 @@ pub fn compute_prefill_handoff_delay_ms(
 /// Compute the KV transfer delay duration for a given number of input tokens.
 ///
 /// Returns `None` if KV transfer simulation is disabled (bandwidth is 0 or not configured).
-pub fn compute_kv_transfer_delay(
-    args: &MockEngineArgs,
-    num_input_tokens: usize,
-) -> Option<Duration> {
+pub fn compute_kv_transfer_delay(args: &MockerConfig, num_input_tokens: usize) -> Option<Duration> {
     compute_prefill_handoff_delay_ms(
         args.worker_type,
         true,
         num_input_tokens,
         args.kv_transfer_bandwidth,
-        args.kv_bytes_per_token,
+        args.kv_transfer_bytes_per_token,
     )
     .map(|delay_ms| Duration::from_secs_f64(delay_ms / 1000.0))
 }
@@ -225,10 +222,11 @@ impl ReusablePreciseTimer {
 }
 
 async fn sleep_until_tokio(deadline: Instant) {
-    if deadline <= Instant::now() {
+    let deadline = tokio::time::Instant::from_std(deadline);
+    if deadline <= tokio::time::Instant::now() {
         tokio::task::yield_now().await;
     } else {
-        tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
+        tokio::time::sleep_until(deadline).await;
     }
 }
 

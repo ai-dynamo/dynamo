@@ -1,0 +1,7 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+source: recipes/llama-3-70b/vllm/disagg-multi-node/deploy.yaml
+requirements:
+  h200-sxm-16gpu:
+    gpus: 16

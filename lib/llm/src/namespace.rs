@@ -8,4 +8,6 @@
 //! same way model discovery does. They are re-exported here so `crate::namespace::…`
 //! keeps working throughout this crate.
 
-pub use dynamo_runtime::namespace::{GLOBAL_NAMESPACE, NamespaceFilter, is_global_namespace};
+pub use dynamo_runtime::namespace::{
+    GLOBAL_NAMESPACE, NamespaceFilter, NamespacePrefixMode, is_global_namespace,
+};

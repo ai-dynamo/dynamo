@@ -116,7 +116,7 @@ The Rust worker selector (`lib/kv-router/src/scheduling/selector.rs`) scores eac
 overlap_credit_blocks = device_overlap_blocks       * effective_device_credit
                       + host_pinned_overlap_blocks  * 0.75  // host_cache_hit_weight, configurable in router config
                       + disk_overlap_blocks         * 0.25  // disk_cache_hit_weight, configurable in router config
-                      + shared_overlap_blocks       * shared_cache_multiplier
+                      + (shared_overlap_blocks + fetchable_blocks) * shared_cache_multiplier
 
 adjusted_prefill_blocks = max(raw_prefill_blocks - overlap_credit_blocks, 0)
 
@@ -127,7 +127,7 @@ logit = prefill_load_scale * adjusted_prefill_blocks   // default 1.0
 
 Before applying the device term, the router computes
 `effective_device_credit = overlap_score_credit / (1 + overlap_score_credit_decay * normalized_excess_prefill)`.
-The host, disk, and shared-cache credits do not decay.
+The host, disk, shared-cache, and fetchable-block credits do not decay. `fetchable_blocks` are the blocks a worker could fetch from a peer through a KV fetch hint, such as from KVCR, beyond everything it holds.
 
 The router picks the worker with the **minimum** logit.
 

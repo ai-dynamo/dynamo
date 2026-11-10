@@ -1366,7 +1366,7 @@ fn report_fault(fault_tx: &flume::Sender<GlobalCkfIngestionFault>, fault: Global
 mod tests {
     use super::*;
     use crate::identity::{
-        CacheSemanticsId, DcId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
+        CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
     };
     use crate::indexer::cuckoo::{
         CkfCommitState, CkfConfig, CkfFailureAction, CkfFailureDomain, ConsumerInstanceId,
@@ -1397,8 +1397,8 @@ mod tests {
                 CacheSemanticsId::new([1; 16], IdentitySource::Explicit),
                 RoutingScopeId::new([9; 16], IdentitySource::Explicit),
             );
-            let dc = DcId::new(7);
-            let pool_id = PoolId::new(domain, dc);
+            let cluster = ClusterId::new(7);
+            let pool_id = PoolId::new(domain, cluster);
             let consumer = ConsumerInstanceId::new(11);
             let lane = 3;
             let mut lanes = [None; super::super::DC_COUNT];
@@ -1553,7 +1553,7 @@ mod tests {
             fixture.identity.indexer_domain().routing_scope(),
         );
         let foreign_identity = ProducerIdentity::new(
-            PoolId::new(foreign_domain, fixture.identity.dc_id()),
+            PoolId::new(foreign_domain, fixture.identity.cluster_id()),
             fixture.identity.producer_incarnation(),
             fixture.identity.layout_generation(),
             fixture.identity.format(),

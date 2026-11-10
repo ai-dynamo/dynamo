@@ -5,16 +5,27 @@
 
 use super::SessionContext;
 use crate::protocols::{WorkerAffinityTarget, WorkerWithDpRank};
+#[cfg(any(test, feature = "bench"))]
 use crate::scheduling::SchedulingRequest;
 
 /// Request-level values available to custom filters, scorers, and pickers.
 pub struct WorkerSelectionContext<'a> {
-    pub(crate) request: &'a SchedulingRequest,
+    // The KV path's full request, for the test and benchmark reference selector; hosted
+    // selection has none. Not exposed to policies.
+    #[cfg(any(test, feature = "bench"))]
+    pub(crate) request: Option<&'a SchedulingRequest>,
+    pub(crate) isl_tokens: usize,
+    pub(crate) session_context: Option<&'a SessionContext>,
+    pub(crate) affinity_target: Option<WorkerAffinityTarget>,
+    pub(crate) expected_output_tokens: Option<u32>,
+    pub(crate) priority_jump: f64,
+    pub(crate) strict_priority: u32,
     pub(crate) request_blocks: u64,
     pub(crate) block_size: u32,
     pub(crate) track_prefill_tokens: bool,
     pub(crate) pinned_worker: Option<WorkerWithDpRank>,
     pub(crate) router_temperature_override: Option<f64>,
+    pub(crate) preview: bool,
 }
 
 impl WorkerSelectionContext<'_> {
@@ -25,15 +36,15 @@ impl WorkerSelectionContext<'_> {
         self.pinned_worker
     }
 
-    /// Exact incoming prompt length in tokens. Borrowed from this request; no rounding,
-    /// cache weighting, or additional storage is involved. Zero when the request carries
-    /// no prompt token IDs, such as embeddings-only input.
-    pub fn prompt_tokens(&self) -> usize {
-        self.request.isl_tokens
+    /// Input sequence length in tokens, the same value classifiers read as
+    /// `ClassifyRequest::isl_tokens`. No rounding or cache weighting is applied.
+    /// Zero when the request carries no prompt token IDs, such as embeddings-only input.
+    pub fn isl_tokens(&self) -> usize {
+        self.isl_tokens
     }
 
-    /// Return the incoming prompt size in KV blocks. Zero when
-    /// [`prompt_tokens`](Self::prompt_tokens) is zero.
+    /// Return the input size in KV blocks. Zero when
+    /// [`isl_tokens`](Self::isl_tokens) is zero.
     pub fn request_blocks(&self) -> u64 {
         self.request_blocks
     }
@@ -50,7 +61,7 @@ impl WorkerSelectionContext<'_> {
 
     /// Return the session metadata available to worker selection.
     pub fn session_context(&self) -> Option<&SessionContext> {
-        self.request.session_context.as_ref()
+        self.session_context
     }
 
     /// Return the session-affinity target resolved by the request host.
@@ -58,26 +69,37 @@ impl WorkerSelectionContext<'_> {
     /// The default selector treats an eligible target as exclusive. Custom policies receive it as
     /// advisory context; it may be absent from their candidate set when unavailable or filtered.
     pub fn affinity_target(&self) -> Option<WorkerAffinityTarget> {
-        self.request.affinity_target
+        self.affinity_target
     }
 
     /// Return the expected output length, if the request supplies one.
     pub fn expected_output_tokens(&self) -> Option<u32> {
-        self.request.expected_output_tokens
+        self.expected_output_tokens
     }
 
     /// Return the request's scheduler priority boost.
     pub fn priority_jump(&self) -> f64 {
-        self.request.priority_jump
+        self.priority_jump
     }
 
     /// Return the request's strict integer priority.
     pub fn strict_priority(&self) -> u32 {
-        self.request.strict_priority
+        self.strict_priority
     }
 
     /// Return the request-level router temperature override, if present.
     pub fn router_temperature_override(&self) -> Option<f64> {
         self.router_temperature_override
+    }
+
+    /// Whether this selection only previews a worker, as a peek does, without routing the
+    /// request to it. A picker that keeps state between selections, such as a rotation
+    /// cursor, should read that state without advancing it. Always `false` when the router
+    /// routes with KV state.
+    // TODO(v1.8): document once custom pickers can run on the hosted path; until then only the
+    // builtin router-mode plugins receive previews.
+    #[doc(hidden)]
+    pub fn is_preview(&self) -> bool {
+        self.preview
     }
 }

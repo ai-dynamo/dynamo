@@ -191,6 +191,7 @@ async def test_scale_get_denial_preserves_scaling_after_external_update(
 
     # An external writer scales to three workers while Scale GET stays forbidden.
     _settle(deployment)
+    connector.kube_api._test_scale_targets["d"] = 3
     deployment["metadata"]["generation"] = 3
     deployment["status"]["observedGeneration"] = 3
     pods[-1].status.phase = "Running"
@@ -269,7 +270,8 @@ async def test_scale_get_denial_holds_until_the_accepted_target_is_observed():
     deployment = _deployment()
     connector = _connector(deployment, _pods())
     await connector.set_component_replicas(_target(1), blocking=False)
-    # Permission can still be revoked after admission; keep guarding that write.
+    # Scale GET is an admission check. Once the write is accepted, the main
+    # DGDSA resource remains the strict authority used to track settlement.
     connector.kube_api.get_service_replica_target = Mock(
         side_effect=ApiException(status=403)
     )
@@ -282,7 +284,7 @@ async def test_scale_get_denial_holds_until_the_accepted_target_is_observed():
     inventory = await connector.get_worker_inventory("p", "d")
     assert inventory is not None and not inventory.decode_scaling_in_progress
     assert connector._startup_scale_down_targets == {}
-    connector.kube_api.get_service_replica_target.assert_called_once()
+    connector.kube_api.get_service_replica_target.assert_not_called()
 
 
 @pytest.mark.asyncio

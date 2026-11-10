@@ -7,8 +7,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-#[cfg(test)]
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use dynamo_tokens::SequenceHash;
@@ -28,25 +27,28 @@ use crate::indexer::{
 use crate::kv_hints::{
     KvHint, KvHintAction, KvSourceLocationsPayload, KvTransferCandidateSource, KvTransferCandidates,
 };
+use crate::plugins::worker_selection::WorkerInputs;
 use crate::protocols::{
-    ActiveSequenceEvent, LocalBlockHash, PrefillLoadHint, SharedCacheHits, WorkerAffinityTarget,
-    WorkerConfigLike, WorkerId, WorkerWithDpRank,
+    LocalBlockHash, PrefillLoadHint, SharedCacheHits, WorkerAffinityTarget, WorkerConfigLike,
+    WorkerId, WorkerWithDpRank,
 };
 use crate::scheduling::queue::SchedulerBookingDescriptor;
-use crate::scheduling::selector::WorkerSelectionPolicy;
+use crate::scheduling::selector::{WorkerSelectionPolicy, WorkerSelector};
 use crate::scheduling::{
     KvSchedulerError, LocalScheduler, LoraWorkerFilter, OverlapAnalysis, OverlapSignals,
-    OverloadedWorkerProvider, PotentialLoad, PrefillLoadEstimator, ScheduleMode, ScheduleRequest,
-    SessionContext, TieredOverlapRefresher, WorkerAvailabilityProvider, effective_prefill_tokens,
-    narrow_allowed_worker_ids_by_lora, prefill_load_hint_from_effective_tokens,
+    OverloadedWorkerProvider, PotentialLoad, PrefillLoadEstimator, RejectThresholdsProvider,
+    ScheduleMode, ScheduleRequest, SessionContext, TieredOverlapRefresher,
+    WorkerAvailabilityProvider, effective_prefill_tokens, narrow_allowed_worker_ids_by_lora,
+    prefill_load_hint_from_effective_tokens,
 };
 use crate::sequences::{
     ActiveSequencesMultiWorker, LifecycleMutationOutcome, ReplicaRequestLeaseObserver,
     ReplicaWorkerPolicy, SequenceRequest, SequenceTrackerOptions, active_request_expiry_duration,
 };
 use crate::services::common::replica_sync::{
-    HostReplicaSyncFactory, ReplicaSyncConfig, SchedulerLoadSink, ScopedReplicaEvent,
-    ScopedSequencePublisher, setup_scoped_replica_sync,
+    AFFINITY_EVENT_CHANNEL_CAPACITY, AffinityMeshSink, HostReplicaSyncFactory, ReplicaInbox,
+    ReplicaSyncConfig, SchedulerLoadSink, ScopedReplicaEvent, ScopedSequencePublisher,
+    setup_scoped_replica_sync,
 };
 use crate::services::indexer::backend::{Indexer, IndexerPolicy};
 use crate::services::indexer::recovery;
@@ -84,8 +86,8 @@ use super::types::{
     SelectResponse, SelectionWorkerConfig, SelectionWorkerLoad, WorkerCatalogRecord,
     WorkerLifecycle, WorkerPatchRequest, WorkerRequest,
 };
-use crate::WorkerSelectionPolicyFactory;
 use crate::WorkerType;
+use crate::plugins::worker_selection::WorkerSelectionPolicyFactory;
 use crate::services::common::replica_sync::AffinityBindingEvent;
 
 pub type SelectionScheduler = LocalScheduler<
@@ -128,11 +130,16 @@ struct SelectionEntry {
     is_eagle: bool,
     indexer: Indexer,
     workers_tx: watch::Sender<HashMap<WorkerId, SelectionWorkerConfig>>,
+    /// Whether a worker in `workers_tx` consumes router hints, set on publish.
+    hint_capable_workers: AtomicBool,
+    /// Whether the selection policy scores fetchable prefixes (`KV_TRANSFER`).
+    scores_kv_transfer: bool,
     scheduler: SelectionScheduler,
-    replica_tx: Option<mpsc::Sender<ActiveSequenceEvent>>,
+    replica_inbox: Option<ReplicaInbox>,
     affinity: OnceCell<SessionAffinity>,
     replica_config: Option<ReplicaSyncConfig>,
     carrier: Arc<CarrierRouter>,
+    affinity_replication: Option<(u64, Arc<dyn super::affinity::AffinityReplicaSink>)>,
 }
 
 impl SelectionEntry {
@@ -148,6 +155,8 @@ impl SelectionEntry {
                     && let Some(sink) = config.affinity_sink(&self.key)
                 {
                     table.enable_replication(config.process_id(), sink);
+                } else if let Some((writer_id, sink)) = &self.affinity_replication {
+                    table.enable_replication(*writer_id, sink.clone());
                 }
                 Ok(table)
             })?;
@@ -185,6 +194,8 @@ pub struct HostLoad {
     pub overloaded_workers: Option<OverloadedWorkerProvider>,
     /// Workers the host can currently reach; others are never selected.
     pub available_workers: Option<WorkerAvailabilityProvider>,
+    /// Live per-rank limits past which workers are shed from selection.
+    pub reject_thresholds: Option<RejectThresholdsProvider>,
 }
 
 /// Where a partition's KV knowledge comes from.
@@ -294,6 +305,8 @@ pub struct SelectionCore {
     carrier_lookup_source: Option<Arc<dyn CarrierLookupSource>>,
     #[cfg(test)]
     carrier_connector_override: parking_lot::Mutex<Option<Arc<dyn CarrierFeedConnector>>>,
+    /// Writer id and publisher for session bindings the host carries to its peers.
+    session_binding_tx: Option<(u64, mpsc::Sender<AffinityBindingEvent>)>,
     /// Worker ids whose upsert fails with `Internal` before any catalog
     /// mutation, so membership tests can exercise per-worker error paths.
     #[cfg(test)]
@@ -331,11 +344,51 @@ impl SelectionCore {
 
     /// Create a local selector and report invalid tracking configuration.
     pub fn try_new_local(
+        kv_router_config: crate::config::KvRouterConfig,
+        indexer_threads: usize,
+        cancel_token: CancellationToken,
+        cache_config: SelectionCacheConfig,
+        policy_factory: WorkerSelectionPolicyFactory,
+    ) -> anyhow::Result<Self> {
+        Self::try_new_local_with_host(
+            kv_router_config,
+            indexer_threads,
+            cancel_token,
+            cache_config,
+            policy_factory,
+            SelectionHost::default(),
+        )
+    }
+
+    /// A standalone core with host-supplied load signals, for benchmarks that measure a
+    /// host-only path such as the reject thresholds.
+    #[cfg(feature = "bench")]
+    #[doc(hidden)]
+    pub fn bench_try_new_local_with_host(
+        kv_router_config: crate::config::KvRouterConfig,
+        indexer_threads: usize,
+        cancel_token: CancellationToken,
+        cache_config: SelectionCacheConfig,
+        policy_factory: WorkerSelectionPolicyFactory,
+        host: SelectionHost,
+    ) -> anyhow::Result<Self> {
+        Self::try_new_local_with_host(
+            kv_router_config,
+            indexer_threads,
+            cancel_token,
+            cache_config,
+            policy_factory,
+            host,
+        )
+    }
+
+    fn try_new_local_with_host(
         mut kv_router_config: crate::config::KvRouterConfig,
         indexer_threads: usize,
         cancel_token: CancellationToken,
         cache_config: SelectionCacheConfig,
         policy_factory: WorkerSelectionPolicyFactory,
+        host: SelectionHost,
     ) -> anyhow::Result<Self> {
         kv_router_config
             .apply_policy_config()
@@ -351,7 +404,7 @@ impl SelectionCore {
             cancel_token,
             None,
             policy_factory,
-            SelectionHost::default(),
+            host,
             WorkerType::Aggregated,
             true,
             cache_config,
@@ -415,6 +468,7 @@ impl SelectionCore {
             carrier_lookup_source,
             #[cfg(test)]
             carrier_connector_override: parking_lot::Mutex::new(None),
+            session_binding_tx: None,
             #[cfg(test)]
             fail_upsert_for: parking_lot::Mutex::default(),
             #[cfg(test)]
@@ -465,6 +519,30 @@ impl SelectionCore {
         *self.carrier_connector_override.lock() = Some(connector);
     }
 
+    /// Export session bindings through a bounded channel for the host to carry.
+    pub(super) fn with_session_binding_publisher(
+        mut self,
+        writer_id: u64,
+    ) -> (Self, mpsc::Receiver<AffinityBindingEvent>) {
+        let (tx, rx) = mpsc::channel(AFFINITY_EVENT_CHANNEL_CAPACITY);
+        self.session_binding_tx = Some((writer_id, tx));
+        (self, rx)
+    }
+
+    fn session_binding_sink(
+        &self,
+        partition: &RoutingPartitionId,
+    ) -> Option<(u64, Arc<dyn super::affinity::AffinityReplicaSink>)> {
+        self.session_binding_tx.as_ref().map(|(writer_id, tx)| {
+            let sink =
+                AffinityMeshSink::new(partition.clone(), tx.clone(), self.cancel_token.clone());
+            (
+                *writer_id,
+                Arc::new(sink) as Arc<dyn super::affinity::AffinityReplicaSink>,
+            )
+        })
+    }
+
     /// Cancel core-scoped tasks (KV-event listeners, scheduling, replica sync,
     /// periodic expiry) without cancelling the parent token. In-flight and
     /// queued selections then fail fast.
@@ -475,7 +553,7 @@ impl SelectionCore {
         self.cancel_token.cancel();
     }
 
-    fn ensure_running(&self) -> Result<(), SelectionError> {
+    pub(super) fn ensure_running(&self) -> Result<(), SelectionError> {
         if self.cancel_token.is_cancelled() {
             return Err(SelectionError::NotReady(
                 "selection service is shutting down".to_string(),
@@ -513,30 +591,8 @@ impl SelectionCore {
             tracing::trace!(%key, "Dropping replica event for unknown selector entry");
             return;
         };
-        if entry.block_size != block_size {
-            tracing::debug!(
-                %key,
-                expected_block_size = entry.block_size,
-                received_block_size = block_size,
-                "Dropping selector replica event with mismatched block size"
-            );
-            return;
-        }
-        let Some(replica_tx) = &entry.replica_tx else {
-            return;
-        };
-        match replica_tx.try_send(event) {
-            Ok(()) => {}
-            Err(mpsc::error::TrySendError::Full(event)) => {
-                tracing::trace!(
-                    %key,
-                    request_id = %event.request_id,
-                    "Selector replica subscriber channel full; dropping event"
-                );
-            }
-            Err(mpsc::error::TrySendError::Closed(_)) => {
-                tracing::debug!(%key, "Selector replica subscriber channel closed");
-            }
+        if let Some(inbox) = &entry.replica_inbox {
+            inbox.deliver(&key, entry.block_size, block_size, event);
         }
     }
 

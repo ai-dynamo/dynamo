@@ -11,7 +11,7 @@ from typing import Any, Dict, Optional, Union
 import torch
 
 import dynamo.nixl_connect as nixl_connect
-from dynamo.common.http import HttpStatusError
+from dynamo.common.http import HttpConfigurationError, HttpStatusError
 from dynamo.common.multimodal.image_loader import (
     ImageLoader,
     image_cache_scope_from_request,
@@ -249,9 +249,16 @@ class EncodeHelper:
             Response with NIXL metadata, shape, dtype, and auxiliary data
         """
         logging.info(f"EncodeHelper: loading embeddings from {embedding_paths[0]}")
-        loaded_data = await multimodal_processor.load_tensor_from_path_or_url(
-            embedding_paths[0]
-        )
+        try:
+            loaded_data = await multimodal_processor.load_tensor_from_path_or_url(
+                embedding_paths[0]
+            )
+        except HttpConfigurationError as e:
+            # A server-side fault. The prefill worker turns an exception from
+            # here into a 400, and an error payload into a 500.
+            logging.error("EncodeHelper: %s", e)
+            yield {"error": str(e)}
+            return
 
         # Handle both tensor and dictionary formats
         if isinstance(loaded_data, dict):

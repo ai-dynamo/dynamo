@@ -21,7 +21,7 @@ Critical and High severity CVEs affecting the supported artifacts are prioritize
 
 Defect fixes ship as new releases on the supported release line. NVIDIA does not backport fixes to earlier releases and does not cut on-demand off-cycle releases in response to individual cases. Cadence follows the standard Dynamo release train.
 
-Bug-fix patch releases on the supported line inherit the release line's support scope once their artifacts are published through the enterprise channel and listed under [Supported Artifacts](supported-artifacts.mdx). A patch does not always carry a full QA validation pass. Design changes and new feature work land in the next release, not in a patch.
+Bug-fix patch releases on the supported line inherit the release line's support scope once their artifacts are published through the enterprise channel and listed under [Supported Artifacts](../reference/general/enterprise-supported-artifacts.mdx). A patch does not always carry a full QA validation pass. Design changes and new feature work land in the next release, not in a patch.
 
 ## Hardware Scope
 

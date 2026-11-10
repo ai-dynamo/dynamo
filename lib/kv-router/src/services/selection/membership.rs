@@ -219,7 +219,7 @@ mod tests {
                 CancellationToken::new(),
                 SelectionCacheConfig::default(),
                 std::sync::Arc::new(|config, role, _| {
-                    crate::WorkerSelectionPolicy::reference(
+                    crate::plugins::worker_selection::WorkerSelectionPolicy::reference(
                         config.clone(),
                         role.default_selector_label(),
                     )

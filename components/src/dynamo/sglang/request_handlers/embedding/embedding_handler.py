@@ -73,6 +73,7 @@ class EmbeddingWorkerHandler(BaseWorkerHandler):
         if isinstance(embedding_input, list) and (
             not embedding_input or not isinstance(embedding_input[0], str)
         ):
+            self._validate_token_ids(embedding_input, label="input")
             request = EmbeddingReqInput(
                 input_ids=embedding_input,
                 external_trace_header=trace_header,

@@ -272,6 +272,9 @@ func expectedSnapshotCompatibilityHashForPod(pod *corev1.Pod) string {
 	return pod.Annotations[consts.SnapshotCandidateCompatibilityHashAnnotation]
 }
 
+// shapeNativeRestorePod builds a restore Pod, applies Dynamo's restore policy,
+// and removes private candidate annotations before validating the Snapshot contract.
+// pod and resolved must be non-nil.
 func (h *PodCheckpointRestoreMutator) shapeNativeRestorePod(
 	pod *corev1.Pod,
 	snapshotName string,
@@ -310,7 +313,7 @@ func (h *PodCheckpointRestoreMutator) shapeNativeRestorePod(
 
 	// Candidate-only annotations must not survive onto the restore target. The
 	// standalone Snapshot annotations emitted by the builder are the wire API.
-	removeRestoreCandidateAnnotations(shaped.Annotations)
+	checkpoint.RemoveRestoreCandidateMetadata(shaped.Annotations)
 	if err := podcontract.Validate(shaped, request); err != nil {
 		return nil, fmt.Errorf("validate native restore Pod: %w", err)
 	}
@@ -430,18 +433,4 @@ func isOperandFreePythonInterpreterFlag(argument string) bool {
 	default:
 		return false
 	}
-}
-
-func removeRestoreCandidateAnnotations(annotations map[string]string) {
-	delete(annotations, consts.CheckpointRestoreCandidateAnnotation)
-	delete(annotations, consts.CheckpointNameAnnotation)
-	delete(annotations, consts.RestoreCandidateSourceKindAnnotation)
-	delete(annotations, consts.SnapshotJobCandidateUIDAnnotation)
-	delete(annotations, consts.CheckpointStartupPolicyAnnotation)
-	delete(annotations, consts.SnapshotCandidateUIDAnnotation)
-	delete(annotations, consts.SnapshotCandidateContentAnnotation)
-	delete(annotations, consts.SnapshotCandidateGMSModeAnnotation)
-	delete(annotations, consts.SnapshotCandidateVersionAnnotation)
-	delete(annotations, consts.SnapshotCandidateCompatibilityHashAnnotation)
-	delete(annotations, consts.RestoreCandidateTargetContainersAnnotation)
 }

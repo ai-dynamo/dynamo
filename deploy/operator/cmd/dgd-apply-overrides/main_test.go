@@ -257,7 +257,7 @@ func mainContainerImage(t *testing.T, dgd *unstructured.Unstructured) string {
 	require.NoError(t, err)
 	require.True(t, found)
 	for _, value := range components {
-		component, ok := value.(map[string]interface{})
+		component, ok := value.(map[string]any)
 		if !ok || (component["name"] != "Worker" && component["name"] != "worker") {
 			continue
 		}
@@ -265,7 +265,7 @@ func mainContainerImage(t *testing.T, dgd *unstructured.Unstructured) string {
 		require.NoError(t, err)
 		require.True(t, found)
 		for _, containerValue := range containers {
-			container, ok := containerValue.(map[string]interface{})
+			container, ok := containerValue.(map[string]any)
 			if ok && container["name"] == "main" {
 				image, ok := container["image"].(string)
 				require.True(t, ok)

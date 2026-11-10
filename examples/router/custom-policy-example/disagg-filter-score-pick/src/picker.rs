@@ -3,9 +3,10 @@
 
 //! Pickers for prefill and decode routing partitions.
 
-use dynamo_kv_router::{
-    WorkerInputView, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicyError, WorkerType,
+use dynamo_kv_router::plugins::worker_selection::{
+    WorkerInputView, WorkerPicker, WorkerSelectionContext,
 };
+use dynamo_kv_router::{WorkerSelectionPolicyError, WorkerType};
 
 /// Finds the candidate row with the lowest accumulated scorer cost.
 fn lowest_cost_row(input: WorkerInputView<'_>) -> Result<usize, WorkerSelectionPolicyError> {
@@ -24,7 +25,7 @@ pub(crate) struct PrefillPicker;
 impl WorkerPicker for PrefillPicker {
     /// Returns the prefill candidate row with the lowest cost.
     fn pick(
-        &mut self,
+        &self,
         _context: &WorkerSelectionContext<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
@@ -38,7 +39,7 @@ pub(crate) struct DecodePicker;
 impl WorkerPicker for DecodePicker {
     /// Returns the decode candidate row with the lowest cost.
     fn pick(
-        &mut self,
+        &self,
         _context: &WorkerSelectionContext<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
@@ -59,7 +60,7 @@ impl UnsupportedWorkerTypePicker {
 
 impl WorkerPicker for UnsupportedWorkerTypePicker {
     fn pick(
-        &mut self,
+        &self,
         _context: &WorkerSelectionContext<'_>,
         _input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {

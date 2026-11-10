@@ -456,6 +456,8 @@ impl PromptMembershipTrie {
 
                 let prev_depth = depth;
                 if first_node {
+                    matched_depth
+                        .reserve(guard.full_edge_workers.len() + guard.worker_cutoffs.len());
                     active = guard.full_edge_workers.clone();
                     active_count = active.len();
                     for (&worker, &cutoff) in &guard.worker_cutoffs {

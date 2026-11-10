@@ -11,7 +11,7 @@ use std::{
 
 use dashmap::{DashMap, mapref::entry::Entry};
 
-use super::{CandidateView, RouteContext, RouteDecision, RoutePicker, RoutePolicy};
+use super::{RouteCandidate, RouteContext, RouteDecision, device_aware};
 use crate::{component::Endpoint, traits::DistributedRuntimeProvider};
 
 /// The result of an atomic load-aware selection and reservation.
@@ -70,33 +70,33 @@ impl RoutingOccupancyState {
         self.increment_locked(worker_id)
     }
 
-    pub(crate) async fn select_exact_min_and_increment(&self, worker_ids: &[u64]) -> Option<u64> {
-        let picker = RoutePicker::new(RoutePolicy::LeastLoaded);
-        self.select_and_admit(
-            &picker,
-            CandidateView::Workers(worker_ids),
-            RouteContext::default(),
-        )
-        .map(|(decision, _)| decision.target.worker_id)
+    /// Increment the least-loaded of `worker_ids`, the first on ties, under the admission lock.
+    #[cfg(test)]
+    pub(crate) fn increment_least_loaded(&self, worker_ids: &[u64]) -> Option<u64> {
+        let _admission = self.admission_lock.lock();
+        let worker_id = worker_ids.iter().copied().min_by_key(|id| self.load(*id))?;
+        self.increment_locked(worker_id);
+        Some(worker_id)
     }
 
-    pub(crate) fn peek(
+    /// Preview a device-aware pick against the live load view, without admitting it.
+    pub(crate) fn peek_device_aware(
         &self,
-        picker: &RoutePicker,
-        candidates: CandidateView<'_>,
+        candidates: &[RouteCandidate],
         context: RouteContext,
     ) -> Option<RouteDecision> {
-        picker.peek(candidates, context, |id| self.load(id))
+        device_aware::select(candidates, context, |id| self.load(id))
     }
 
-    pub(crate) fn select_and_admit(
+    /// Pick a device-aware worker and, unless it holds every embedding the request needs,
+    /// book it under the admission lock.
+    pub(crate) fn select_and_admit_device_aware(
         &self,
-        picker: &RoutePicker,
-        candidates: CandidateView<'_>,
+        candidates: &[RouteCandidate],
         context: RouteContext,
     ) -> Option<(RouteDecision, Option<Arc<AtomicU64>>)> {
         let _admission = self.admission_lock.lock();
-        let decision = picker.select(candidates, context, |id| self.load(id))?;
+        let decision = device_aware::select(candidates, context, |id| self.load(id))?;
         let counter = match decision.admission {
             super::AdmissionKind::None => None,
             super::AdmissionKind::Occupancy => {

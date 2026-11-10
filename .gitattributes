@@ -20,3 +20,9 @@ lib/llm/tests/snapshots/** linguist-vendored
 
 # Preserve the released vLLM proto byte-for-byte, including its trailing blank line.
 lib/backend/vllm-sidecar/proto/vllm_grpc.proto -text diff whitespace=-blank-at-eof
+
+# Generated from the Rust media types: see scripts/generate_media_protocols.py.
+lib/llm/src/protocols/openai/media_schemas/*.json linguist-generated
+components/src/dynamo/common/protocols/audio_protocol.py linguist-generated
+components/src/dynamo/common/protocols/image_protocol.py linguist-generated
+components/src/dynamo/common/protocols/video_protocol.py linguist-generated

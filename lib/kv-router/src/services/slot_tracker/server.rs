@@ -17,6 +17,7 @@ use serde::{Deserialize, Deserializer};
 use crate::identity::{RoutingPartitionId, default_routing_group};
 use crate::protocols::WorkerWithDpRank;
 use crate::sequences::SequenceError;
+use crate::services::common::http::{json_error, json_ok, json_rejection};
 use crate::services::common::replica_sync::PeerManager;
 use crate::services::common::replica_sync_http;
 
@@ -254,22 +255,6 @@ async fn method_not_allowed() -> Response {
     json_error(StatusCode::METHOD_NOT_ALLOWED, "method not allowed")
 }
 
-fn json_ok(status: StatusCode) -> Response {
-    (status, Json(serde_json::json!({"status": "ok"}))).into_response()
-}
-
-fn json_error(status: StatusCode, error: impl fmt::Display) -> Response {
-    (
-        status,
-        Json(serde_json::json!({"error": error.to_string()})),
-    )
-        .into_response()
-}
-
-fn json_rejection(error: JsonRejection) -> Response {
-    json_error(error.status(), error.body_text())
-}
-
 fn registry_error(error: RegistryError) -> Response {
     let status = match &error {
         RegistryError::InvalidBlockSize
@@ -316,10 +301,10 @@ pub(crate) fn create_router(
         .route("/loads", get(list_loads))
         .route("/potential_loads", post(potential_loads))
         .route("/health", get(health))
+        .merge(replica_sync_http::router(peer_manager))
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
         .with_state(state)
-        .merge(replica_sync_http::router(peer_manager))
 }
 
 #[cfg(test)]
@@ -394,18 +379,20 @@ mod tests {
         assert_eq!(route_response.status(), StatusCode::NOT_FOUND);
         assert!(response_json(route_response).await["error"].is_string());
 
-        let method_response = app()
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri("/register")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(method_response.status(), StatusCode::METHOD_NOT_ALLOWED);
-        assert!(response_json(method_response).await["error"].is_string());
+        for uri in ["/register", "/replica_sync/register_peer"] {
+            let method_response = app()
+                .oneshot(
+                    Request::builder()
+                        .method("GET")
+                        .uri(uri)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(method_response.status(), StatusCode::METHOD_NOT_ALLOWED);
+            assert!(response_json(method_response).await["error"].is_string());
+        }
     }
 
     #[tokio::test]

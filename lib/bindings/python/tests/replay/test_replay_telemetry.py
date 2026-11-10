@@ -6,7 +6,7 @@ import json
 import pytest
 
 from dynamo._core import run_mocker_synthetic_trace_replay, run_mocker_trace_replay
-from dynamo.mocker import MockEngineArgs
+from dynamo.mocker.config import normalize_mocker_config
 
 from .replay_utils import _write_multiturn_trace
 
@@ -29,29 +29,41 @@ def _replay_kwargs(topology="aggregated"):
     }
     if topology == "aggregated":
         kwargs.update(
-            extra_engine_args=MockEngineArgs(
-                block_size=4,
-                num_gpu_blocks=32,
-                max_num_seqs=1,
-                speedup_ratio=100.0,
+            extra_engine_args=normalize_mocker_config(
+                {
+                    "engine": {
+                        "block_size": 4,
+                        "num_gpu_blocks": 32,
+                        "max_num_seqs": 1,
+                        "speedup_ratio": 100.0,
+                    }
+                }
             ),
             num_workers=2,
         )
     elif topology == "disaggregated":
         kwargs.update(
-            prefill_engine_args=MockEngineArgs(
-                block_size=4,
-                num_gpu_blocks=32,
-                max_num_seqs=1,
-                speedup_ratio=100.0,
-                worker_type="prefill",
+            prefill_engine_args=normalize_mocker_config(
+                {
+                    "engine": {
+                        "block_size": 4,
+                        "num_gpu_blocks": 32,
+                        "max_num_seqs": 1,
+                        "speedup_ratio": 100.0,
+                        "worker_type": "prefill",
+                    }
+                }
             ),
-            decode_engine_args=MockEngineArgs(
-                block_size=4,
-                num_gpu_blocks=32,
-                max_num_seqs=1,
-                speedup_ratio=100.0,
-                worker_type="decode",
+            decode_engine_args=normalize_mocker_config(
+                {
+                    "engine": {
+                        "block_size": 4,
+                        "num_gpu_blocks": 32,
+                        "max_num_seqs": 1,
+                        "speedup_ratio": 100.0,
+                        "worker_type": "decode",
+                    }
+                }
             ),
             num_prefill_workers=2,
             num_decode_workers=2,
@@ -346,11 +358,15 @@ def test_trace_parse_failure_does_not_truncate_telemetry_output(tmp_path):
     with pytest.raises(Exception, match=r"(?i)failed to parse.*json"):
         run_mocker_trace_replay(
             [trace_path],
-            extra_engine_args=MockEngineArgs(
-                block_size=4,
-                num_gpu_blocks=32,
-                max_num_seqs=1,
-                speedup_ratio=100.0,
+            extra_engine_args=normalize_mocker_config(
+                {
+                    "engine": {
+                        "block_size": 4,
+                        "num_gpu_blocks": 32,
+                        "max_num_seqs": 1,
+                        "speedup_ratio": 100.0,
+                    }
+                }
             ),
             telemetry_jsonl_path=output,
         )

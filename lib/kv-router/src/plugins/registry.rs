@@ -13,7 +13,9 @@ use super::request_classifier::RequestClassifierRegistry;
 use super::request_classifier::{
     RequestClassifierFactory, RequestClassifierProvider, RequestClassifierRegistryError,
 };
-use super::worker_selection::WorkerSelectionPolicyFactory;
+use super::worker_selection::{
+    WorkerSelectionConfig, WorkerSelectionPolicyFactory, WorkerSelectionPolicySelection,
+};
 use crate::WorkerType;
 use crate::config::KvRouterConfig;
 use crate::scheduling::config::WorkerSelectionPolicySelections;
@@ -72,10 +74,6 @@ pub struct RouterPluginRegistry {
     default_factory: Option<WorkerSelectionPolicyFactory>,
 }
 
-/// Existing catalogs can retain their worker-selection registration signature.
-// TODO(v1.7): Remove this compatibility alias; use RouterPluginRegistry.
-pub type WorkerSelectionPolicyRegistry = RouterPluginRegistry;
-
 /// An error from policy registration or startup resolution.
 #[derive(Debug, Error)]
 pub enum WorkerSelectionPolicyRegistryError {
@@ -89,9 +87,7 @@ pub enum WorkerSelectionPolicyRegistryError {
     Duplicate { name: String },
     #[error(transparent)]
     Selection(#[from] crate::scheduling::config::WorkerSelectionPolicyConfigError),
-    #[error("unknown worker-selection instance {name:?}; configured instances: {available}")]
-    UnknownInstance { name: String, available: String },
-    #[error("unknown worker-selection policy type {name:?}; linked policy types: {available}")]
+    #[error("unknown worker-selection policy type {name:?}; available: {available}")]
     UnknownType { name: String, available: String },
     #[error("invalid parameters for worker-selection policy type {policy_type:?}: {source}")]
     Provider {
@@ -165,16 +161,6 @@ impl RouterPluginRegistry {
         self.providers.is_empty() && self.request_classifiers.is_empty()
     }
 
-    /// Compatibility entry point for worker-only catalogs.
-    // TODO(v1.7): Remove this compatibility method; use register_worker_selection.
-    pub fn register(
-        &mut self,
-        name: impl Into<String>,
-        provider: WorkerSelectionPolicyProvider,
-    ) -> Result<(), WorkerSelectionPolicyRegistryError> {
-        self.register_worker_selection(name, provider)
-    }
-
     /// Resolve the configured policy instances once at process startup.
     ///
     /// Aggregated, prefill, decode, and encode pools can select separate instances. The returned
@@ -199,33 +185,36 @@ impl RouterPluginRegistry {
         config: &KvRouterConfig,
         worker_type: WorkerType,
     ) -> Result<Option<WorkerSelectionPolicyFactory>, WorkerSelectionPolicyRegistryError> {
-        let selected = config.selected_worker_selection_policy_instance_for(worker_type)?;
+        let selected = config.selected_worker_selection_policy_instances()?;
+        let selected = match worker_type {
+            WorkerType::Aggregated => selected.aggregated,
+            WorkerType::Prefill => selected.prefill,
+            WorkerType::Decode => selected.decode,
+            WorkerType::Encode => selected.encode,
+        };
         let policy_config = config.worker_selection_config().map_err(|source| {
             crate::scheduling::config::WorkerSelectionPolicyConfigError::Config { source }
         })?;
-        self.resolve_selected(policy_config, selected.as_deref())
+        self.resolve_selected(policy_config, selected.as_ref())
     }
 
     fn resolve_selections(
         &self,
-        policy_config: Option<&crate::scheduling::WorkerSelectionConfig>,
+        policy_config: Option<&WorkerSelectionConfig>,
         selected: WorkerSelectionPolicySelections,
     ) -> Result<Option<WorkerSelectionPolicyFactory>, WorkerSelectionPolicyRegistryError> {
-        let mut resolved = HashMap::new();
+        let mut resolved = Vec::with_capacity(4);
         let aggregated = self.resolve_selected_cached(
             policy_config,
-            selected.aggregated.as_deref(),
+            selected.aggregated.as_ref(),
             &mut resolved,
         )?;
-        let prefill = self.resolve_selected_cached(
-            policy_config,
-            selected.prefill.as_deref(),
-            &mut resolved,
-        )?;
+        let prefill =
+            self.resolve_selected_cached(policy_config, selected.prefill.as_ref(), &mut resolved)?;
         let decode =
-            self.resolve_selected_cached(policy_config, selected.decode.as_deref(), &mut resolved)?;
+            self.resolve_selected_cached(policy_config, selected.decode.as_ref(), &mut resolved)?;
         let encode =
-            self.resolve_selected_cached(policy_config, selected.encode.as_deref(), &mut resolved)?;
+            self.resolve_selected_cached(policy_config, selected.encode.as_ref(), &mut resolved)?;
 
         if aggregated.is_none() && prefill.is_none() && decode.is_none() && encode.is_none() {
             return Ok(self.default_factory.clone());
@@ -255,58 +244,108 @@ impl RouterPluginRegistry {
 
     fn resolve_selected_cached(
         &self,
-        config: Option<&crate::scheduling::WorkerSelectionConfig>,
-        selected: Option<&str>,
-        resolved: &mut HashMap<String, WorkerSelectionPolicyFactory>,
+        config: Option<&WorkerSelectionConfig>,
+        selected: Option<&WorkerSelectionPolicySelection>,
+        resolved: &mut Vec<(WorkerSelectionPolicySelection, WorkerSelectionPolicyFactory)>,
     ) -> Result<Option<WorkerSelectionPolicyFactory>, WorkerSelectionPolicyRegistryError> {
         let Some(selected) = selected else {
             return Ok(None);
         };
-        if let Some(factory) = resolved.get(selected) {
+        if let Some((_, factory)) = resolved.iter().find(|(known, _)| known == selected) {
             return Ok(Some(factory.clone()));
         }
         let factory = self.resolve_selected(config, Some(selected))?;
         if let Some(factory) = factory {
-            resolved.insert(selected.to_owned(), factory.clone());
+            resolved.push((selected.clone(), factory.clone()));
             Ok(Some(factory))
         } else {
             Ok(None)
         }
     }
 
+    /// Resolve one role's selection to a factory.
+    ///
+    /// A bare name is the reserved `default`, a registered policy type with default parameters,
+    /// or (deprecated) an entry in `worker_selection.instances`. An inline spec names its type
+    /// and parameters directly. Roles selecting the same policy share one factory.
     fn resolve_selected(
         &self,
-        config: Option<&crate::scheduling::WorkerSelectionConfig>,
-        selected: Option<&str>,
+        config: Option<&WorkerSelectionConfig>,
+        selected: Option<&WorkerSelectionPolicySelection>,
     ) -> Result<Option<WorkerSelectionPolicyFactory>, WorkerSelectionPolicyRegistryError> {
         let Some(selected) = selected else {
             return Ok(self.default_factory.clone());
         };
-        if selected == "default" {
-            return Ok(self.default_factory.clone());
-        }
-        let instance = config
-            .and_then(|config| config.instance(selected))
-            .ok_or_else(|| WorkerSelectionPolicyRegistryError::UnknownInstance {
-                name: selected.to_owned(),
-                available: config
-                    .map(crate::scheduling::WorkerSelectionConfig::instance_names)
-                    .filter(|names| !names.is_empty())
-                    .map(|names| names.join(", "))
-                    .unwrap_or_else(|| "<none>".to_owned()),
-            })?;
-        let provider = self.providers.get(instance.policy_type()).ok_or_else(|| {
+        let (policy_type, parameters) = match selected {
+            WorkerSelectionPolicySelection::Named(name) if name == "default" => {
+                return Ok(self.default_factory.clone());
+            }
+            WorkerSelectionPolicySelection::Named(name) => {
+                match config.and_then(|config| config.instance(name)) {
+                    Some(instance) => (instance.policy_type(), instance.parameters().clone()),
+                    None if self.providers.contains_key(name.as_str()) => (
+                        name.as_str(),
+                        serde_yaml::Value::Mapping(Default::default()),
+                    ),
+                    None => {
+                        return Err(WorkerSelectionPolicyRegistryError::UnknownType {
+                            name: name.clone(),
+                            available: self.available_selections(config),
+                        });
+                    }
+                }
+            }
+            WorkerSelectionPolicySelection::Inline(instance) => {
+                (instance.policy_type(), instance.parameters().clone())
+            }
+        };
+        let provider = self.providers.get(policy_type).ok_or_else(|| {
             WorkerSelectionPolicyRegistryError::UnknownType {
-                name: instance.policy_type().to_owned(),
+                name: policy_type.to_owned(),
+                available: self.available_policy_types(),
+            }
+        })?;
+        provider(&WorkerSelectionPolicyParameters::new(parameters))
+            .map(Some)
+            .map_err(|source| WorkerSelectionPolicyRegistryError::Provider {
+                policy_type: policy_type.to_owned(),
+                source,
+            })
+    }
+
+    /// Everything a bare selection string may name: registered types, then deprecated instances.
+    fn available_selections(&self, config: Option<&WorkerSelectionConfig>) -> String {
+        let mut available = self.providers.keys().cloned().collect::<Vec<_>>();
+        available.sort_unstable();
+        available.extend(
+            config
+                .map(WorkerSelectionConfig::instance_names)
+                .unwrap_or_default(),
+        );
+        if available.is_empty() {
+            "<none>".to_owned()
+        } else {
+            available.join(", ")
+        }
+    }
+
+    /// Build the factory for one registered policy type with default parameters, as a routing
+    /// mode names it (for example `round-robin`) without a policy file.
+    pub fn resolve_type(
+        &self,
+        policy_type: &str,
+    ) -> Result<WorkerSelectionPolicyFactory, WorkerSelectionPolicyRegistryError> {
+        let provider = self.providers.get(policy_type).ok_or_else(|| {
+            WorkerSelectionPolicyRegistryError::UnknownType {
+                name: policy_type.to_owned(),
                 available: self.available_policy_types(),
             }
         })?;
         provider(&WorkerSelectionPolicyParameters::new(
-            instance.parameters().clone(),
+            serde_yaml::Value::Mapping(Default::default()),
         ))
-        .map(Some)
         .map_err(|source| WorkerSelectionPolicyRegistryError::Provider {
-            policy_type: instance.policy_type().to_owned(),
+            policy_type: policy_type.to_owned(),
             source,
         })
     }
@@ -327,7 +366,7 @@ mod tests {
     use super::*;
     use crate::WorkerSelectionPolicyError;
     use crate::identity::RoutingPartitionRef;
-    use crate::scheduling::selector::{
+    use crate::plugins::worker_selection::{
         WorkerInputView, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicy,
     };
     use std::sync::Mutex;
@@ -363,7 +402,7 @@ mod tests {
 
     impl WorkerPicker for NeverPicker {
         fn pick(
-            &mut self,
+            &self,
             _context: &WorkerSelectionContext<'_>,
             _input: WorkerInputView<'_>,
         ) -> Result<usize, WorkerSelectionPolicyError> {
@@ -394,8 +433,21 @@ mod tests {
         })
     }
 
-    fn config() -> crate::scheduling::WorkerSelectionConfig {
-        crate::scheduling::RouterPolicyConfig::from_yaml(
+    fn named(name: &str) -> WorkerSelectionPolicySelection {
+        WorkerSelectionPolicySelection::Named(name.to_owned())
+    }
+
+    fn selection(yaml: &str) -> WorkerSelectionConfig {
+        crate::scheduling::RouterPolicyConfig::from_yaml(yaml)
+            .unwrap()
+            .worker_selection()
+            .unwrap()
+            .clone()
+    }
+
+    /// The deprecated `instances:` form: roles reference a named `{type, parameters}` pair.
+    fn config() -> WorkerSelectionConfig {
+        selection(
             r#"
 worker_selection:
   aggregated: first
@@ -411,10 +463,94 @@ worker_selection:
         threshold: 2
 "#,
         )
-        .unwrap()
-        .worker_selection()
-        .unwrap()
-        .clone()
+    }
+
+    #[test]
+    fn inline_specs_and_bare_types_resolve_and_share_factories() {
+        let provider_calls = Arc::new(AtomicUsize::new(0));
+        let factory_calls = Arc::new(Mutex::new(Vec::new()));
+        let mut registry = RouterPluginRegistry::default();
+        registry
+            .register_worker_selection(
+                "alpha",
+                recording_provider(provider_calls.clone(), factory_calls.clone()),
+            )
+            .unwrap();
+        let policy_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            policy_file.path(),
+            r#"
+worker_selection:
+  aggregated:
+    type: alpha
+    parameters:
+      threshold: 1
+  prefill: {type: alpha, parameters: {threshold: 1}}
+  decode:
+    type: alpha
+    parameters:
+      threshold: 2
+  encode: default
+"#,
+        )
+        .unwrap();
+        let config = KvRouterConfig {
+            router_policy_config: Some(policy_file.path().display().to_string()),
+            ..Default::default()
+        };
+        let factory = registry
+            .with_default_factory(Arc::new(policy))
+            .resolve(&config)
+            .unwrap()
+            .unwrap();
+        let partition = RoutingPartitionRef::new("model", "default");
+        factory(&config, WorkerType::Aggregated, partition);
+        factory(&config, WorkerType::Prefill, partition);
+        factory(&config, WorkerType::Decode, partition);
+        // Two distinct inline specs: identical ones share a factory.
+        assert_eq!(provider_calls.load(Ordering::Relaxed), 2);
+        assert_eq!(
+            *factory_calls.lock().unwrap(),
+            vec![
+                (1, "aggregated".to_string()),
+                (1, "prefill".to_string()),
+                (2, "decode".to_string()),
+            ]
+        );
+
+        // A bare string that is a registered type resolves with default parameters; the test
+        // provider requires `threshold`, so that surfaces as a provider error rather than an
+        // unknown-type error.
+        let registry = {
+            let mut registry = RouterPluginRegistry::default();
+            registry
+                .register_worker_selection("alpha", Arc::new(provider))
+                .unwrap();
+            registry
+        };
+        assert!(matches!(
+            registry.resolve_selected(None, Some(&named("alpha"))),
+            Err(WorkerSelectionPolicyRegistryError::Provider { policy_type, .. })
+                if policy_type == "alpha"
+        ));
+        // Deprecated instance names still win over a type of the same spelling.
+        let shadowing = selection(
+            r#"
+worker_selection:
+  aggregated: alpha
+  instances:
+    - name: alpha
+      type: alpha
+      parameters:
+        threshold: 3
+"#,
+        );
+        assert!(
+            registry
+                .resolve_selected(Some(&shadowing), Some(&named("alpha")))
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]
@@ -470,26 +606,30 @@ worker_selection:
 
     #[test]
     fn resolves_builtin_default_and_multiple_custom_instances() {
-        let mut registry = WorkerSelectionPolicyRegistry::default();
-        registry.register("alpha", Arc::new(provider)).unwrap();
-        registry.register("beta", Arc::new(provider)).unwrap();
+        let mut registry = RouterPluginRegistry::default();
+        registry
+            .register_worker_selection("alpha", Arc::new(provider))
+            .unwrap();
+        registry
+            .register_worker_selection("beta", Arc::new(provider))
+            .unwrap();
         let config = config();
 
         assert!(
             registry
-                .resolve_selected(Some(&config), Some("default"))
+                .resolve_selected(Some(&config), Some(&named("default")))
                 .unwrap()
                 .is_none()
         );
         assert!(
             registry
-                .resolve_selected(Some(&config), Some("first"))
+                .resolve_selected(Some(&config), Some(&named("first")))
                 .unwrap()
                 .is_some()
         );
         assert!(
             registry
-                .resolve_selected(Some(&config), Some("second"))
+                .resolve_selected(Some(&config), Some(&named("second")))
                 .unwrap()
                 .is_some()
         );
@@ -499,15 +639,15 @@ worker_selection:
     fn resolved_factory_dispatches_role_specific_instances() {
         let provider_calls = Arc::new(AtomicUsize::new(0));
         let factory_calls = Arc::new(Mutex::new(Vec::new()));
-        let mut registry = WorkerSelectionPolicyRegistry::default();
+        let mut registry = RouterPluginRegistry::default();
         registry
-            .register(
+            .register_worker_selection(
                 "alpha",
                 recording_provider(provider_calls.clone(), factory_calls.clone()),
             )
             .unwrap();
         registry
-            .register(
+            .register_worker_selection(
                 "beta",
                 recording_provider(provider_calls.clone(), factory_calls.clone()),
             )
@@ -517,10 +657,10 @@ worker_selection:
             .resolve_selections(
                 Some(&config),
                 WorkerSelectionPolicySelections {
-                    aggregated: Some("first".to_string()),
-                    prefill: Some("first".to_string()),
-                    decode: Some("second".to_string()),
-                    encode: Some("second".to_string()),
+                    aggregated: Some(named("first")),
+                    prefill: Some(named("first")),
+                    decode: Some(named("second")),
+                    encode: Some(named("second")),
                 },
             )
             .unwrap()
@@ -547,11 +687,13 @@ worker_selection:
 
     #[test]
     fn partial_role_selection_requires_an_explicit_fallback() {
-        let mut registry = WorkerSelectionPolicyRegistry::default();
-        registry.register("alpha", Arc::new(provider)).unwrap();
+        let mut registry = RouterPluginRegistry::default();
+        registry
+            .register_worker_selection("alpha", Arc::new(provider))
+            .unwrap();
         let config = config();
         let selections = WorkerSelectionPolicySelections {
-            aggregated: Some("first".to_string()),
+            aggregated: Some(named("first")),
             prefill: None,
             decode: None,
             encode: None,
@@ -569,16 +711,11 @@ worker_selection:
             policy_file.path(),
             r#"
 worker_selection:
-  aggregated: epp
-  prefill: frontend
-  instances:
-    - name: epp
-      type: alpha
-      parameters:
-        threshold: 1
-    - name: frontend
-      type: unlinked
-      parameters: {}
+  aggregated:
+    type: alpha
+    parameters:
+      threshold: 1
+  prefill: unlinked
 "#,
         )
         .unwrap();
@@ -586,8 +723,10 @@ worker_selection:
             router_policy_config: Some(policy_file.path().display().to_string()),
             ..Default::default()
         };
-        let mut registry = WorkerSelectionPolicyRegistry::default();
-        registry.register("alpha", Arc::new(provider)).unwrap();
+        let mut registry = RouterPluginRegistry::default();
+        registry
+            .register_worker_selection("alpha", Arc::new(provider))
+            .unwrap();
 
         assert!(
             registry
@@ -602,65 +741,96 @@ worker_selection:
     }
 
     #[test]
+    fn inline_spec_errors_name_the_offending_key() {
+        let typo = crate::scheduling::RouterPolicyConfig::from_yaml(
+            r#"
+worker_selection:
+  aggregated:
+    type: alpha
+    paramters:
+      x: 1
+"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(typo.contains("worker_selection.aggregated"), "{typo}");
+        assert!(typo.contains("paramters"), "{typo}");
+
+        let scalar =
+            crate::scheduling::RouterPolicyConfig::from_yaml("worker_selection:\n  decode: 5\n")
+                .unwrap_err()
+                .to_string();
+        assert!(
+            scalar.contains("worker_selection.decode must be a policy type name"),
+            "{scalar}"
+        );
+    }
+
+    #[test]
     fn rejects_invalid_and_unknown_names() {
-        let mut registry = WorkerSelectionPolicyRegistry::default();
+        let mut registry = RouterPluginRegistry::default();
         let provider: WorkerSelectionPolicyProvider = Arc::new(provider);
 
         assert!(matches!(
-            registry.resolve_selected(None, Some("missing")),
-            Err(WorkerSelectionPolicyRegistryError::UnknownInstance { available, .. }) if available == "<none>"
+            registry.resolve_selected(None, Some(&named("missing"))),
+            Err(WorkerSelectionPolicyRegistryError::UnknownType { available, .. }) if available == "<none>"
         ));
         assert!(matches!(
-            registry.register("", provider.clone()),
+            registry.register_worker_selection("", provider.clone()),
             Err(WorkerSelectionPolicyRegistryError::EmptyName)
         ));
         assert!(matches!(
-            registry.register("default", provider.clone()),
+            registry.register_worker_selection("default", provider.clone()),
             Err(WorkerSelectionPolicyRegistryError::ReservedDefault)
         ));
-        registry.register("alpha", provider.clone()).unwrap();
+        registry
+            .register_worker_selection("alpha", provider.clone())
+            .unwrap();
         assert!(matches!(
-            registry.register("alpha", provider),
+            registry.register_worker_selection("alpha", provider),
             Err(WorkerSelectionPolicyRegistryError::Duplicate { name }) if name == "alpha"
         ));
 
-        let missing_type = crate::scheduling::RouterPolicyConfig::from_yaml(
+        let missing_type = selection(
             r#"
 worker_selection:
-  aggregated: missing-type
-  instances:
-    - name: missing-type
-      type: missing
-      parameters: {}
+  aggregated:
+    type: missing
+    parameters: {}
 "#,
-        )
-        .unwrap()
-        .worker_selection()
-        .unwrap()
-        .clone();
+        );
         assert!(matches!(
-            registry.resolve_selected(Some(&missing_type), Some("missing-type")),
+            registry.resolve_selected(Some(&missing_type), missing_type.aggregated()),
             Err(WorkerSelectionPolicyRegistryError::UnknownType { name, available })
                 if name == "missing" && available == "alpha"
         ));
-
-        let config = crate::scheduling::RouterPolicyConfig::from_yaml(
+        // A bare name that is neither a type nor a deprecated instance lists both.
+        let shadow = selection(
             r#"
 worker_selection:
-  aggregated: invalid-parameters
+  aggregated: nope
   instances:
-    - name: invalid-parameters
+    - name: legacy
       type: alpha
-      parameters:
-        threshold: 0
 "#,
-        )
-        .unwrap()
-        .worker_selection()
-        .unwrap()
-        .clone();
+        );
         assert!(matches!(
-            registry.resolve_selected(Some(&config), Some("invalid-parameters")),
+            registry.resolve_selected(Some(&shadow), shadow.aggregated()),
+            Err(WorkerSelectionPolicyRegistryError::UnknownType { name, available })
+                if name == "nope" && available == "alpha, legacy"
+        ));
+
+        let config = selection(
+            r#"
+worker_selection:
+  aggregated:
+    type: alpha
+    parameters:
+      threshold: 0
+"#,
+        );
+        assert!(matches!(
+            registry.resolve_selected(Some(&config), config.aggregated()),
             Err(WorkerSelectionPolicyRegistryError::Provider { policy_type, .. })
                 if policy_type == "alpha"
         ));

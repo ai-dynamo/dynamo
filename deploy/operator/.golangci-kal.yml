@@ -1,0 +1,38 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Kubernetes API conventions for the v1beta2 API types, checked by kube-api-linter
+# (sigs.k8s.io/kube-api-linter). It runs through the golangci-lint build that the
+# kube-api-linter module ships, so `make lint-api` uses this configuration alone.
+
+version: "2"
+
+run:
+  timeout: 10m
+
+linters:
+  default: none
+  enable:
+    - kubeapilinter
+  settings:
+    custom:
+      kubeapilinter:
+        type: module
+        description: kube-api-linter checks Kubernetes API conventions.
+        settings:
+          linters:
+            disable:
+              - "*"
+            enable:
+              # Every serialized field carries exactly one of +optional or +required.
+              - optionalorrequired
+  exclusions:
+    generated: strict
+    rules:
+      - linters:
+          - kubeapilinter
+        path-except: ^api/v1beta2/
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

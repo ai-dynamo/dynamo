@@ -3,15 +3,16 @@
 
 //! Lowest-cost picker for the `simple-stacked-score-pick` policy.
 
-use dynamo_kv_router::{
-    WorkerInputView, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicyError,
+use dynamo_kv_router::WorkerSelectionPolicyError;
+use dynamo_kv_router::plugins::worker_selection::{
+    WorkerInputView, WorkerPicker, WorkerSelectionContext,
 };
 
 pub(crate) struct LowestCostPicker;
 
 impl WorkerPicker for LowestCostPicker {
     fn pick(
-        &mut self,
+        &self,
         _context: &WorkerSelectionContext<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {

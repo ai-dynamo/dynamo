@@ -82,7 +82,8 @@ fn scheduler_error_status(error: &KvSchedulerError) -> StatusCode {
         | KvSchedulerError::PinnedWorkerOverloaded { .. }
         | KvSchedulerError::QueueRejected(_)
         | KvSchedulerError::DeadlineExceeded => StatusCode::TOO_MANY_REQUESTS,
-        KvSchedulerError::PinnedWorkerNotAllowed { .. } => StatusCode::BAD_REQUEST,
+        KvSchedulerError::PinnedWorkerNotAllowed { .. }
+        | KvSchedulerError::UnknownPolicyClass(_) => StatusCode::BAD_REQUEST,
         // A duplicate live request id, or a lifecycle the caller ended (or
         // re-registered) mid-classification, is caller-induced, like
         // `BookingFailed` and `SequenceError::DuplicateRequest`.
@@ -164,6 +165,22 @@ mod tests {
         assert_eq!(
             SelectionError::Scheduler(KvSchedulerError::DeadlineExceeded).status_code(),
             StatusCode::TOO_MANY_REQUESTS.as_u16()
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_policy_class_is_a_client_error() {
+        let response =
+            SelectionError::Scheduler(KvSchedulerError::UnknownPolicyClass("missing".to_string()))
+                .into_response();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            body.as_ref(),
+            br#"{"error":"unknown policy class \"missing\""}"#
         );
     }
 

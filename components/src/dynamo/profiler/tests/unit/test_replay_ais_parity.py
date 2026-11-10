@@ -1,11 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import json
 
 import pytest
 
-from dynamo.mocker import MockEngineArgs
+from dynamo.mocker.config import normalize_mocker_config
 from dynamo.replay import run_synthetic_trace_replay
 
 # run_synthetic_trace_replay constructs the Rust AIS callback, which imports
@@ -59,13 +58,18 @@ def _ais_replay_args(backend_name: str):
         },
     }
     if backend_name == "sglang":
-        payload["engine_type"] = "sglang"
+        payload["backend"] = "sglang"
         payload["sglang"] = {
-            "page_size": 512,
             "max_prefill_tokens": 65536,
             "chunked_prefill_size": 65536,
         }
-    return MockEngineArgs.from_json(json.dumps(payload))
+    perf = payload.pop("ais_perf_config")
+    payload["backend"] = backend_name
+    payload["worker_type"] = perf["worker_type"]
+    payload.pop("is_prefill", None)
+    payload.pop("is_decode", None)
+    payload["timing_model"] = {"type": "external", "provider": "ais", "config": perf}
+    return normalize_mocker_config({"engine": payload})
 
 
 def _ais_disagg_replay_args(
@@ -99,13 +103,18 @@ def _ais_disagg_replay_args(
         "is_decode": not is_prefill,
     }
     if backend_name == "sglang":
-        payload["engine_type"] = "sglang"
+        payload["backend"] = "sglang"
         payload["sglang"] = {
-            "page_size": 512,
             "max_prefill_tokens": 65536,
             "chunked_prefill_size": 65536,
         }
-    return MockEngineArgs.from_json(json.dumps(payload))
+    perf = payload.pop("ais_perf_config")
+    payload["backend"] = backend_name
+    payload["worker_type"] = perf["worker_type"]
+    payload.pop("is_prefill", None)
+    payload.pop("is_decode", None)
+    payload["timing_model"] = {"type": "external", "provider": "ais", "config": perf}
+    return normalize_mocker_config({"engine": payload})
 
 
 def _run_aic_static_point(backend_name: str, isl: int, osl: int, batch_size: int):

@@ -33,6 +33,7 @@ while [[ $# -gt 0 ]]; do
             echo "Additional options are passed to both SGLang engines."
             echo
             echo "Environment overrides:"
+            echo "  DYNAMO_SIDECAR_BIN      Require this absolute native binary path (no fallback)"
             echo "  MODEL                                   Model to serve (default: Qwen/Qwen3-0.6B)"
             echo "  SGLANG_PYTHON                           Python with SGLang installed (default: python3)"
             echo "  SGLANG_PREFILL_GPU                      Prefill GPU assignment (default: 0)"
@@ -57,16 +58,19 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+resolve_sidecar sglang SIDECAR_CMD
+
 trap dynamo_exit_trap EXIT
 
 SGLANG_PYTHON="${SGLANG_PYTHON:-python3}"
 SGLANG_HOST="127.0.0.1"
 SGLANG_BOOTSTRAP_HOST="${SGLANG_BOOTSTRAP_HOST:-$SGLANG_HOST}"
-SGLANG_DISAGGREGATION_BOOTSTRAP_PORT="${SGLANG_DISAGGREGATION_BOOTSTRAP_PORT:-8998}"
-SGLANG_PREFILL_HTTP_PORT="${SGLANG_PREFILL_HTTP_PORT:-30000}"
-SGLANG_PREFILL_GRPC_PORT="${SGLANG_PREFILL_GRPC_PORT:-30001}"
-SGLANG_DECODE_HTTP_PORT="${SGLANG_DECODE_HTTP_PORT:-30010}"
-SGLANG_DECODE_GRPC_PORT="${SGLANG_DECODE_GRPC_PORT:-30011}"
+SGLANG_DISAGGREGATION_BOOTSTRAP_PORT="${DYN_DISAGG_BOOTSTRAP_PORT:-${SGLANG_DISAGGREGATION_BOOTSTRAP_PORT:-8998}}"
+# Managed ports are indexed like DYN_SYSTEM_PORT{N}: worker 1 is prefill, 2 is decode.
+SGLANG_PREFILL_HTTP_PORT=$(dyn_port DYN_ENGINE_HTTP_PORT 1 "${SGLANG_PREFILL_HTTP_PORT:-30000}")
+SGLANG_PREFILL_GRPC_PORT=$(dyn_port DYN_ENGINE_GRPC_PORT 1 "${SGLANG_PREFILL_GRPC_PORT:-30001}")
+SGLANG_DECODE_HTTP_PORT=$(dyn_port DYN_ENGINE_HTTP_PORT 2 "${SGLANG_DECODE_HTTP_PORT:-30010}")
+SGLANG_DECODE_GRPC_PORT=$(dyn_port DYN_ENGINE_GRPC_PORT 2 "${SGLANG_DECODE_GRPC_PORT:-30011}")
 SGLANG_PREFILL_GPU="${SGLANG_PREFILL_GPU:-0}"
 SGLANG_DECODE_GPU="${SGLANG_DECODE_GPU:-1}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
@@ -115,12 +119,12 @@ CUDA_VISIBLE_DEVICES="$SGLANG_DECODE_GPU" \
     "${EXTRA_ARGS[@]}" &
 
 DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT1:-8081}" \
-    dynamo-sglang-sidecar \
+    "${SIDECAR_CMD[@]}" \
     --grpc-endpoint "${SGLANG_HOST}:${SGLANG_PREFILL_GRPC_PORT}" \
     --bootstrap-host "$SGLANG_BOOTSTRAP_HOST" &
 
 DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT2:-8082}" \
-    dynamo-sglang-sidecar \
+    "${SIDECAR_CMD[@]}" \
     --grpc-endpoint "${SGLANG_HOST}:${SGLANG_DECODE_GRPC_PORT}" &
 
 wait_any_exit
