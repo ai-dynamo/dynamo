@@ -28,7 +28,7 @@ The `basetenkenizer` backend uses the Baseten Tokenizer implementation exposed b
 
 Use this backend for supported `tokenizer.json` models when you need Baseten Tokenizer behavior, including token-compatible Kimi tokenizer artifacts.
 
-The frontend selects the tokenizer backend as follows. When both `tokenizer.json` and a TikToken artifact are present, `tokenizer.json` takes precedence.
+The Rust frontend selects the tokenizer backend as follows. This diagram does not describe the SGLang chat processor. When both `tokenizer.json` and a TikToken artifact are present, `tokenizer.json` takes precedence.
 
 ```mermaid
 flowchart TD
@@ -62,7 +62,9 @@ flowchart TD
     style L fill:#fdf3d0,stroke:#e0c56e
 ```
 
-#### Compatibility notes:
+#### Rust frontend compatibility notes
+
+The following notes describe the Rust frontend tokenizer path, except where another processor is named.
 
 - Works with standard BPE `tokenizer.json` files (Qwen, LLaMA, GPT-family, Mistral, DeepSeek, etc.).
 - If `fastokens` or `basetenkenizer` cannot load a particular tokenizer file, the frontend logs a warning and transparently falls back to HuggingFace by default. Use `--no-tokenizer-fallback` to reject incompatible tokenizers during model initialization.
@@ -77,8 +79,15 @@ flowchart TD
   counter; routing falls back to text-prefix overlap. See
   [Multimodal KV Routing](../../../../use-cases/image-understanding/vlm-performance-optimization/multimodal-kv-routing.md).
 - Has no effect on TikToken-format tokenizers (`.model` / `.tiktoken` files), which always use the TikToken backend.
-- With `--dyn-chat-processor sglang`, the SGLang chat processor tokenizes prompts in Python. There, `fastokens` selects SGLang's fastokens backend in the main process and in every preprocess worker, and needs the `fastokens` Python package (`pip install fastokens`); `--tokenizer-fallback` applies the same way. `basetenkenizer` has no SGLang equivalent, so that processor logs this and uses HuggingFace.
 - Dedicated vLLM embedding workers let vLLM tokenize raw text by default. When [`--embedding-frontend-tokenization`](../../../../reference/backends/vllm-configuration.mdx) is enabled, raw-text requests use a request-specific Dynamo tokenizer. The request's `add_special_tokens` value overrides `DYN_EMBEDDING_TOKENIZATION_ADD_SPECIAL_TOKENS`; the default is `true`. For `tokenizer.json` models, `true` selects HuggingFace while `false` follows the configured backend selection shown above. TikToken artifacts always use TikToken, and token-ID inputs bypass frontend tokenization.
+
+## SGLang Chat Processor
+
+With `--dyn-chat-processor sglang`, the SGLang chat processor tokenizes prompts in Python. `--tokenizer fastokens` selects SGLang's fastokens backend in the main process and every preprocess worker. The SGLang runtime image already includes the `fastokens` Python package; install it with `pip install fastokens` if it is missing from another image. `basetenkenizer` has no SGLang equivalent, so the processor logs a warning and uses HuggingFace.
+
+If fastokens is not installed or cannot load the tokenizer, the processor logs a warning and falls back to HuggingFace by default. With `--no-tokenizer-fallback`, model initialization fails instead.
+
+Unlike the Rust `FastTokenizer` path, the SGLang processor registers special tokens from `tokenizer_config.json` on its fastokens-backed Transformers tokenizer, preserving their token IDs. The Rust fastokens-specific multimodal routing restriction above does not apply to this processor: it forwards media to the backend and does not construct multimodal routing metadata, regardless of tokenizer backend.
 
 ## Configuration
 
@@ -112,7 +121,7 @@ python -m dynamo.frontend --tokenizer basetenkenizer --no-tokenizer-fallback
 
 ## Dynamo Frontend Behavior
 
-When a non-default backend is selected:
+In the Rust frontend tokenizer path, when a non-default backend is selected:
 
 1. The frontend resolves `--tokenizer` / `DYN_TOKENIZER` and passes the selected backend to the Rust runtime.
 2. `ModelDeploymentCard::tokenizer()` loads the HuggingFace tokenizer first for fallback behavior and L1 cache special-token metadata.
