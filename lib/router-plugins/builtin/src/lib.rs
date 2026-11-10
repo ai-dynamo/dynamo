@@ -220,52 +220,6 @@ worker_selection:
         }
     }
 
-    /// `kvcr` commits copies, and the default `kv_fetch` sends them, so a role whose entry lists no
-    /// `hints` resolves. Listing `hints` without a sender is rejected when the router is built.
-    #[test]
-    fn kvcr_pairs_with_kv_fetch() {
-        use dynamo_kv_router::plugins::worker_selection::WorkerInputs;
-        use dynamo_kv_router::plugins::{PluginConfigError, check_role};
-
-        let policy_file = tempfile::NamedTempFile::new().unwrap();
-        let resolve = |hints: &str| {
-            std::fs::write(
-                policy_file.path(),
-                format!(
-                    "worker_selection:\n  prefill:\n    type: kvcr\n    parameters: {{shared_cache_multiplier: 0.5}}\n{hints}"
-                ),
-            )
-            .unwrap();
-            let config = KvRouterConfig {
-                router_policy_config: Some(policy_file.path().display().to_string()),
-                ..Default::default()
-            };
-            let mut registry = default_registry();
-            register(&mut registry).unwrap();
-            let selection = registry
-                .resolve(&config)
-                .unwrap()
-                .expect("a configured instance resolves to a factory");
-            let partition = RoutingPartitionRef::new("model", "default");
-            let policy = selection(&config, WorkerType::Prefill, partition);
-            let hints = registry.resolve_hint_policies(&config).unwrap();
-            check_role(
-                WorkerType::Prefill,
-                &policy,
-                hints.instances(&config, WorkerType::Prefill, partition),
-                &config,
-            )
-        };
-
-        let defaulted = resolve("").unwrap();
-        assert!(defaulted.contains(WorkerInputs::KV_COPY));
-        resolve("    hints:\n      - type: kv_fetch\n").unwrap();
-        assert!(matches!(
-            resolve("    hints: []\n"),
-            Err(PluginConfigError::UnsentCopies { .. })
-        ));
-    }
-
     /// An unknown parameter key is a mistake, most often a misremembered threshold name. It must
     /// fail startup rather than silently leaving the default in place.
     #[test]

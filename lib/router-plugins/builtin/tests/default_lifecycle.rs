@@ -368,6 +368,55 @@ worker_selection:
     );
 }
 
+/// `kvcr` commits copies, so its role needs a hint that sends them: the default `kv_fetch` when the
+/// entry lists no `hints`, or a listed `kv_fetch`. Listing `hints` without one fails the
+/// partition's setup, and the worker can't be scheduled, with the reason naming the fix.
+#[tokio::test]
+async fn kvcr_partitions_need_a_hint_that_sends_copies() {
+    for (hints, sends_copies) in [
+        ("", true),
+        ("    hints:\n      - type: kv_fetch\n", true),
+        ("    hints: []\n", false),
+    ] {
+        let policy_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            policy_file.path(),
+            format!(
+                "worker_selection:\n  aggregated:\n    type: kvcr\n    parameters: {{shared_cache_multiplier: 0.5}}\n{hints}"
+            ),
+        )
+        .unwrap();
+        let config = KvRouterConfig {
+            use_kv_events: true,
+            router_queue_threshold: None,
+            router_policy_config: Some(policy_file.path().display().to_string()),
+            ..Default::default()
+        };
+        let mut registry = default_registry();
+        register(&mut registry).unwrap();
+        let service = SelectionServiceBuilder::new(config, WorkerType::Aggregated, registry)
+            .indexer_threads(1)
+            .build()
+            .await
+            .unwrap();
+        let record = service
+            .upsert_worker(WorkerRequest {
+                kv_events_endpoint: Some("tcp://127.0.0.1:5557".to_string()),
+                ..worker(1)
+            })
+            .await
+            .unwrap();
+        let reasons = record.not_schedulable_reasons.join("; ");
+        assert_eq!(
+            reasons.contains(
+                "commits KV copies, but none of the hints in worker_selection.aggregated.hints sends them"
+            ),
+            !sends_copies,
+            "hints={hints:?}: {reasons}"
+        );
+    }
+}
+
 /// `kv_fetch` sends a fetch `kvcr` didn't commit only when it adds at least
 /// `min_additional_blocks` beyond the booked worker's own prefix, and always sends a committed one.
 /// Without copy credit, `kvcr` commits nothing.
