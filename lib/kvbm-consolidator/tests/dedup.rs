@@ -40,6 +40,7 @@ fn bs_event(
     lora_name: Option<String>,
 ) -> RawKvEvent {
     RawKvEvent::BlockStored {
+        shared_cache_eligible: false,
         block_hashes: block_hashes
             .into_iter()
             .map(BlockHashValue::Unsigned)
