@@ -1547,9 +1547,8 @@ def test_kimi_k3_auto_tool_sets_reasoning_gate_pool(thinking, monkeypatch):
     assert result.dynamo_preproc["require_reasoning"] is thinking
 
 
-# A GLM-style template that ignores the thinking flags, so the rendered prompt,
-# not the request, decides whether generation starts inside reasoning. Qwen3's
-# tokenizer has GLM's <think>/</think> markers.
+# A GLM-style template that ignores the thinking flags, so the prompt decides
+# the reasoning state. Qwen3's tokenizer has GLM's <think>/</think> markers.
 _GLM_PROMPT_TEMPLATE = (
     "{% for message in messages %}<|im_start|>{{ message.role }}\n"
     "{{ message.content }}<|im_end|>\n{% endfor %}"

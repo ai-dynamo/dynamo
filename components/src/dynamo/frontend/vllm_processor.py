@@ -586,10 +586,8 @@ def _build_reasoning_parser_metadata(
         return _ReasoningParserMetadata(None, None, None)
 
     parser_kwargs = {"chat_template_kwargs": chat_template_kwargs}
-    # A known GLM prompt state overrides the thinking flags, as in the Rust
-    # preprocessor. vLLM's GLM parser treats every marker as content when both
-    # flags are false, so its kwargs must follow the prompt too. The kwargs that
-    # rendered the prompt are left alone.
+    # A known GLM prompt state overrides the thinking flags. vLLM's GLM parser
+    # reads every marker as content when both flags are false, so its kwargs follow.
     glm_open = _glm_prompt_reasoning_open(
         prompt_token_ids,
         tokenizer=tokenizer,

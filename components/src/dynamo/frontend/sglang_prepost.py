@@ -815,8 +815,7 @@ def preprocess_chat_request(
         resolved_responses_template=resolved_responses_template,
     )
     # A known GLM prompt state overrides the thinking flags, as in the Rust
-    # preprocessor; the request's template kwargs stay as rendered. Other
-    # parsers skip the tail decode.
+    # preprocessor; the request's template kwargs stay as rendered.
     if _normalize_sglang_parser_name(reasoning_parser_name) in GLM_REASONING_PARSERS:
         template_kwargs = (
             request.get("chat_template_kwargs")
