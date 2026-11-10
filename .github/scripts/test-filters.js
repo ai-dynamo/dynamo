@@ -156,17 +156,17 @@ const testCases = [
   },
   {
     file: 'examples/backends/tokenspeed/tests/test_validate_disagg.py',
-    expect: { core: true },
-    desc: 'TokenSpeed validator tests trigger the runtime test lane'
+    expect: { core: false, tokenspeed: true },
+    desc: 'TokenSpeed validator tests trigger TokenSpeed build and runtime validation'
   },
   {
     file: 'examples/backends/tokenspeed/launch_disagg.sh',
-    expect: { core: true },
-    desc: 'TokenSpeed example code triggers runtime validation'
+    expect: { core: false, tokenspeed: true },
+    desc: 'TokenSpeed example code triggers TokenSpeed build and runtime validation'
   },
   {
     file: 'examples/backends/tokenspeed/README.md',
-    expect: { core: false },
+    expect: { core: false, tokenspeed: false },
     desc: 'TokenSpeed documentation alone avoids runtime builds'
   },
   {
