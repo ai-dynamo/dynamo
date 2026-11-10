@@ -56,6 +56,13 @@ events emitted inside a request span can therefore include three correlation key
 This is why JSONL logging is required for reliable log-to-trace correlation: the identifiers remain
 separate fields instead of being embedded in formatted text.
 
+When `DYN_NVTX=1`, request-scoped NVTX ranges in Nsight Systems have static stage names and carry a
+64-bit key derived from the same request id (the `chatcmpl-<id>` the client sees, and the
+`request_id` attribute on spans) in their payload. Each process also emits a
+`dynamo.request rid=<id>` identity mark that maps the key back to the request id, trace id, and
+`x-request-id`, so a request found in a trace can also be found in an `nsys` report. See
+[NVTX Annotations](../../../reference/observability/nvtx-annotations.md).
+
 ## Forward Pass Metrics Persistence
 
 Forward Pass Metrics (FPM) tracing branches from the Rust publication path after Dynamo has

@@ -291,6 +291,140 @@ session-aware and context-free trace sets.
 For all variables, compatibility aliases, sinks, record schemas, and supported request shapes, see
 [Request Trace Reference](../../reference/observability/request-traces.mdx).
 
+## Follow One Request into Nsight Systems
+
+Traces show which component handled a slow request but not where its time went inside each process.
+With NVTX annotations on, every Dynamo range for a request has a static stage name and carries a
+64-bit key derived from the request id in its NVTX payload. Each process also emits a
+`dynamo.request rid=<id>` identity mark that maps the key back to the request id, trace id, and
+`x-request-id`. You can capture each process under Nsight Systems (`nsys`), pick the request, and
+print one cross-process timeline with a TTFT breakdown. The request id is the same one that appears
+as `chatcmpl-<id>` in the response and as `request_id` on OpenTelemetry spans.
+
+This covers Dynamo-controlled stages: frontend, routing, worker admission, handler, and response
+publishing. It does not attribute engine internals such as scheduler decisions or kernels to a
+request.
+
+<Warning>
+`nsys` reports and exports embed the profiled process environment, which can include secrets. Treat
+them like logs before sharing them.
+</Warning>
+
+<Steps toc={true}>
+<Step title="Launch each process under nsys" id="launch-under-nsys">
+
+Set `DYN_NVTX=1` and wrap every Dynamo process you want in the timeline, one report per process. Add
+`DYN_LIFECYCLE_TRACE_ENABLED=1` for the lifecycle stages and OTLP export to see the OpenTelemetry
+join (see [Inspect Traces and Exported Logs](#inspect-traces-and-exported-logs)):
+
+```bash
+export DYN_NVTX=1
+export DYN_LIFECYCLE_TRACE_ENABLED=1
+
+nsys profile -t nvtx,osrt -o frontend --force-overwrite true \
+  python -m dynamo.frontend &
+
+nsys profile -t nvtx,osrt -o prefill --force-overwrite true \
+  python -m dynamo.vllm --model Qwen/Qwen3-0.6B --disaggregation-mode prefill &
+
+nsys profile -t nvtx,osrt -o decode --force-overwrite true \
+  python -m dynamo.vllm --model Qwen/Qwen3-0.6B --disaggregation-mode decode &
+```
+
+Use the flags your deployment needs for each worker; the commands above only show the wrapper. If a
+worker forks child processes without `exec`, add `--trace-fork-before-exec=true`.
+
+At high concurrency, capture a window instead of the whole run. Per-token ranges dominate the event
+volume: a full-length capture at about 4096 concurrent streams buffered roughly 25 GB of raw `nsys`
+data in 2.5 minutes, while a 10-second window produced reports of tens of megabytes. Add
+`--delay=<seconds> --duration=<seconds> --kill=none` to each `nsys profile` command, for example
+`--delay=45 --duration=10 --kill=none`, and send the traffic you want to inspect inside that window.
+
+</Step>
+<Step title="Send and identify a request" id="identify-request">
+
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -H 'x-request-id: slow-ttft-001' \
+  -d '{"model": "Qwen/Qwen3-0.6B",
+       "messages": [{"role": "user", "content": "Hello"}],
+       "max_completion_tokens": 100}'
+```
+
+Any of these identifies the request later: the response `id` (`chatcmpl-<rid>`), your
+`x-request-id`, or the trace id from Tempo. The `x-request-id` and trace id are recorded on the
+request's identity mark, which is how the join tool resolves them.
+
+</Step>
+<Step title="Stop the processes" id="stop-processes">
+
+`nsys` writes each report when its process exits. Stop the processes with `SIGINT` (Ctrl+C or
+`kill -INT`) and wait for `frontend.nsys-rep`, `prefill.nsys-rep`, and `decode.nsys-rep` to appear.
+
+If you export OpenTelemetry spans, wait a few seconds after the request finishes before stopping.
+The OTLP batch exporter sends spans every 5 seconds by default (`OTEL_BSP_SCHEDULE_DELAY`, in
+milliseconds), and the frontend's long-lived spans, such as `http-request`, can otherwise be lost at
+shutdown.
+
+</Step>
+<Step title="Print the request timeline" id="print-timeline">
+
+Run the join tool from a repository checkout. Add `--tempo` to join the request's OpenTelemetry
+spans from the local stack:
+
+```bash
+python3 benchmarks/request_trace/nsys_request_timeline.py \
+  frontend.nsys-rep prefill.nsys-rep decode.nsys-rep \
+  --request slow-ttft-001 \
+  --tempo http://localhost:3200
+```
+
+The script is [`nsys_request_timeline.py`](https://github.com/ai-dynamo/dynamo/blob/main/benchmarks/request_trace/nsys_request_timeline.py).
+It exports `.nsys-rep` files to SQLite with `nsys export` and accepts `--request` as a request id,
+`chatcmpl-<id>`, a 32-hex trace id, or an `x-request-id`. A request id is hashed to the payload key
+directly; a trace id or `x-request-id` is looked up in the identity marks. It fails if the key
+matches no request or more than one.
+
+To see per-stage count, mean, median, p99, and max duration across all requests in the reports, use
+`--summary` instead of `--request`:
+
+```bash
+python3 benchmarks/request_trace/nsys_request_timeline.py \
+  frontend.nsys-rep prefill.nsys-rep decode.nsys-rep --summary
+```
+
+The output has four parts:
+
+1. A summary of how the key resolved.
+2. A chronological table across processes: relative time, duration, process, stage, source (`nvtx`,
+   `otel`, or `both`), and the OpenTelemetry-minus-NVTX start offset.
+3. A TTFT breakdown from request arrival to `frontend.first_token`, with time not covered by any
+   stage reported as `gap (unattributed)`. Compare the segments (routing and queueing, admission
+   gate, handler prepare, engine first output, and so on) to see which one grew.
+4. Zoom windows such as `zoom to 12.3456s-12.5123s in decode.sqlite`, in the report-relative seconds
+   the Nsight timeline displays. A duration shown as `open` is a range that never closed in the
+   capture.
+
+Tempo keeps sampled traces for a limited time, so a missing trace is reported as a warning and the
+NVTX data is still printed. Add `--json` for machine-readable output or `--perfetto out.json` for a
+trace you can open in the Perfetto UI.
+
+</Step>
+<Step title="Inspect it in the Nsight Systems GUI" id="inspect-in-gui">
+
+Open each report in Nsight Systems and zoom to the printed window. Range names are static stage
+names and do not show the request id, so search the NVTX rows for the identity mark
+`dynamo.request rid=<id>` to find the request in that process. The request's ranges carry its key in
+their payload, which you can read in a range's tooltip, and they appear next to the CPU and
+OS-runtime rows of that process.
+
+</Step>
+</Steps>
+
+For the message format, stage catalog, costs, and direct SQLite queries, see
+[NVTX Annotations](../../reference/observability/nvtx-annotations.md).
+
 ## Check Deployment Health
 
 Use Dynamo's HTTP health endpoints to check local processes or configure an external supervisor. The

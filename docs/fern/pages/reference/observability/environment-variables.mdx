@@ -446,6 +446,14 @@ See [Measurement Protocol in the Self-Benchmark Artifact](forward-pass-metrics-t
 
 See [Request Trace Reference](request-traces.mdx) for compatibility aliases, sink behavior, and record semantics.
 
+## NVTX profiling
+
+<ParamField path="DYN_NVTX" type="boolean" default="off">
+  Enable NVTX annotations in the Rust runtime and the Python layer, including request-scoped ranges tagged with `rid=<request id>`. Accepts `1`, `true`, `on`, `yes` to enable and `0`, `false`, `off`, `no`, or empty to disable; any other value is rejected at startup. Set it on every process you profile under Nsight Systems.
+</ParamField>
+
+See [NVTX Annotations](nvtx-annotations.md) for the message format, stage catalog, and cost.
+
 ## Related
 
 - [Metrics Catalog](metrics-catalog.mdx) — the `dynamo_*` metrics these variables expose.
