@@ -400,6 +400,17 @@ impl LLMEngine for TrtllmSidecarEngine {
                 }
                 if events_enabled {
                     validate_kv_sources(&sources, dp_size)?;
+                    // Image input and image-aware routing are separate engine capabilities.
+                    if limits.supported_media.is_some_and(|media| media.image)
+                        && !limits.supports_image_routing
+                    {
+                        tracing::warn!(
+                            "TensorRT-LLM reports image input but not trtllm_image_routing_version = 1. \
+                             Image requests will be served, but their image KV blocks will not be \
+                             indexed for KV-aware routing. Image-aware routing needs a TensorRT-LLM \
+                             runtime that includes NVIDIA/TensorRT-LLM#21125"
+                        );
+                    }
                 }
                 if let Some(node) = &node {
                     node.select_local_sources(&mut sources)?;

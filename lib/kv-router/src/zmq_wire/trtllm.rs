@@ -20,12 +20,12 @@ static STORES_WITHOUT_IMAGE_ROUTING: AtomicU64 = AtomicU64::new(0);
 /// tokens cannot be mapped to the hashes the frontend computes. Warns once per
 /// process, so that image inference on a runtime without image routing is not
 /// mistaken for image-aware routing, then logs at debug.
-pub(super) fn record_store_without_image_routing(block_hashes: usize) {
+pub(super) fn record_store_without_image_routing(blocks: usize) {
     let dropped = STORES_WITHOUT_IMAGE_ROUTING.fetch_add(1, Ordering::Relaxed) + 1;
     if dropped == 1 {
         tracing::warn!(
             dropped,
-            block_hashes,
+            blocks,
             "Dropped a TensorRT-LLM image BlockStored event: it has digest-first image tokens but no \
              trtllm_image_routing metadata. Image KV blocks will not enter the routing index, so image \
              requests route by text prefix only. Image-aware KV routing needs a TensorRT-LLM runtime \
@@ -34,7 +34,7 @@ pub(super) fn record_store_without_image_routing(block_hashes: usize) {
     } else {
         tracing::debug!(
             dropped,
-            block_hashes,
+            blocks,
             "Dropped a TensorRT-LLM image BlockStored event without trtllm_image_routing metadata"
         );
     }

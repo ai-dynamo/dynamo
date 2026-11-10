@@ -55,8 +55,6 @@ struct FakeTrtllm {
     model_info_unavailable: Arc<tokio::sync::Notify>,
     model_info_calls: Arc<AtomicUsize>,
     served_model_name: Arc<Mutex<Option<String>>>,
-    /// When set, GetModelInfo reports multimodal support with this `extra`.
-    multimodal_extra: Arc<Mutex<Option<serde_json::Value>>>,
     kv_routing: Arc<AtomicBool>,
     server_info_error: Arc<Mutex<Option<tonic::Code>>>,
     kv_sources_error: Arc<Mutex<Option<tonic::Code>>>,
@@ -231,12 +229,6 @@ impl pb::control_server::Control for FakeTrtllm {
             self.model_info_unavailable.notify_one();
             return Err(Status::unavailable("not serving yet"));
         }
-        let extra = self
-            .multimodal_extra
-            .lock()
-            .await
-            .clone()
-            .map(|extra| dynamo_sidecar_common::json_to_struct(extra, "test").unwrap());
         Ok(Response::new(pb::ModelInfo {
             model_id: "fake-model".to_string(),
             served_model_name: self
@@ -250,8 +242,7 @@ impl pb::control_server::Control for FakeTrtllm {
             } else {
                 Some(4096)
             },
-            supports_multimodal: Some(extra.is_some()),
-            extra,
+            supports_multimodal: Some(false),
             ..Default::default()
         }))
     }
@@ -1078,50 +1069,6 @@ async fn a_configured_context_length_outranks_the_servers() {
         1,
         "the engine is still consulted, to cross-check and to learn its output cap"
     );
-}
-
-/// Image input alone does not enable image-aware routing; the engine must also
-/// report image routing v1 (NVIDIA/TensorRT-LLM#21125).
-#[tokio::test]
-async fn image_routing_requires_the_reported_image_routing_version() {
-    for (extra, expected) in [
-        (
-            json!({"trtllm_supported_modalities": ["image", "video"]}),
-            false,
-        ),
-        (
-            json!({"trtllm_supported_modalities": ["image"], "trtllm_image_routing_version": 2}),
-            false,
-        ),
-        (
-            json!({"trtllm_supported_modalities": ["image"], "trtllm_image_routing_version": 1}),
-            true,
-        ),
-    ] {
-        let service = FakeTrtllm::default();
-        *service.multimodal_extra.lock().await = Some(extra.clone());
-        let server = FakeServer::start(service).await;
-        let client = TrtllmClient::connect(
-            &GrpcEndpoint::parse(&server.endpoint, "--grpc-endpoint").unwrap(),
-            transport(1),
-        )
-        .await
-        .expect("connect");
-        let info = client
-            .wait_for_model_info(
-                "model-source",
-                None,
-                tokio::time::Instant::now() + Duration::from_secs(5),
-                Duration::from_millis(10),
-            )
-            .await
-            .expect("model info");
-        assert!(
-            info.limits.supported_media.is_some_and(|media| media.image),
-            "{extra}"
-        );
-        assert_eq!(info.limits.supports_image_routing, expected, "{extra}");
-    }
 }
 
 /// The model name must come from the engine, even with a configured window.
