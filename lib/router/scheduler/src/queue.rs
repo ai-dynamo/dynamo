@@ -61,6 +61,12 @@ mod capacity;
 /// backlog past it waits, in order, for a slot.
 const ADMISSION_CHANNEL_CAPACITY: usize = 256;
 
+/// Commands the actor takes from the channel in one receive. A receive spends one unit of
+/// the task's cooperative budget whatever it returns, so a backlog costs the actor a yield
+/// to the runtime every 128 batches, not every 128 commands. A taken batch frees its slots
+/// before it is applied, so its rows add to those the channel capacity bounds.
+const ADMISSION_BATCH: usize = 8;
+
 struct ClassQueueCounters {
     pending_count: AtomicUsize,
     pending_isl_tokens: AtomicUsize,
@@ -587,6 +593,19 @@ impl AdmissionCleanup {
     }
 }
 
+/// The next command in arrival order, or `None` once the channel is closed and drained.
+/// Cancel safe: a batch is only taken by a receive that completes.
+async fn next_command(
+    commands: &mut mpsc::Receiver<AdmissionCommand>,
+    inbox: &mut Vec<AdmissionCommand>,
+) -> Option<AdmissionCommand> {
+    if inbox.is_empty() {
+        commands.recv_many(inbox, ADMISSION_BATCH).await;
+        inbox.reverse();
+    }
+    inbox.pop()
+}
+
 fn enqueue_cleanup_entry(
     cleanup: &AdmissionCleanup,
     actor_tx: &mpsc::Sender<AdmissionCommand>,
@@ -781,6 +800,8 @@ struct SchedulerQueueActor<
     RF: OverlapScoresRefresh,
 > {
     commands: mpsc::Receiver<AdmissionCommand>,
+    /// The batch last taken from `commands`, newest first: the next command is popped.
+    inbox: Vec<AdmissionCommand>,
     pending: PolicyQueue<QueuedRequest>,
     class_timers: ClassTimers,
     cleanup: Arc<AdmissionCleanup>,
@@ -1006,6 +1027,7 @@ impl<
         let exclusive_affinity = selector.uses_exclusive_affinity_target();
         let actor = SchedulerQueueActor {
             commands: admission_rx,
+            inbox: Vec::with_capacity(ADMISSION_BATCH),
             pending,
             class_timers: ClassTimers::new(profile.classes().len()),
             cleanup: Arc::clone(&cleanup),
@@ -1561,17 +1583,17 @@ impl<
             self.begin_turn();
             let due_at = self.class_timers.next_deadline();
             let command = if capacity_updates.is_none() && due_at.is_none() {
-                self.commands.recv().await
+                next_command(&mut self.commands, &mut self.inbox).await
             } else {
                 tokio::select! {
-                    command = self.commands.recv() => command,
+                    command = next_command(&mut self.commands, &mut self.inbox) => command,
                     _ = async {
                         if let Some(updates) = &capacity_updates {
                             updates.notified().await;
                         }
                     }, if capacity_updates.is_some() => {
                         let drain_cleanup =
-                            self.commands.is_empty() || commands_since_cleanup == 256;
+                            self.is_caught_up() || commands_since_cleanup == 256;
                         if drain_cleanup {
                             commands_since_cleanup = 0;
                         }
@@ -1590,7 +1612,7 @@ impl<
             };
             let Some(command) = command else { break };
             commands_since_cleanup += 1;
-            let drain_cleanup = self.commands.is_empty() || commands_since_cleanup == 256;
+            let drain_cleanup = self.is_caught_up() || commands_since_cleanup == 256;
             if drain_cleanup {
                 commands_since_cleanup = 0;
             }
@@ -1626,6 +1648,11 @@ impl<
     fn begin_turn(&mut self) {
         self.turn = self.turn.wrapping_add(1);
         self.turn_prepared = None;
+    }
+
+    /// Whether every command sent so far has been applied.
+    fn is_caught_up(&self) -> bool {
+        self.inbox.is_empty() && self.commands.is_empty()
     }
 
     async fn drain_after_command(&mut self, drain: Drain, reply: Option<CommandReply>) {
@@ -2328,7 +2355,7 @@ impl<
                         updates.notified().await;
                     }
                 }, if capacity_updates.is_some() => RefreshEvent::Capacity,
-                command = self.commands.recv() => match command {
+                command = next_command(&mut self.commands, &mut self.inbox) => match command {
                     Some(command) => RefreshEvent::Command(command),
                     None => return RefreshEnd::Shutdown,
                 },
@@ -4337,6 +4364,7 @@ mod tests {
         SchedulerQueueActor {
             // Commands go to the queue's own actor; this one sees a closed channel.
             commands: mpsc::channel(1).1,
+            inbox: Vec::new(),
             pending: PolicyQueue::with_class_budget_expiry(&queue.profile),
             class_timers: ClassTimers::new(queue.profile.classes().len()),
             cleanup: Arc::clone(&queue.cleanup),
@@ -5288,6 +5316,30 @@ mod tests {
                 "worker {worker:?} still has {tokens} active tokens"
             );
         }
+    }
+
+    /// A receive spends one unit of the task's cooperative budget, which runs out after 128.
+    /// A larger backlog is still applied without the actor yielding to the runtime.
+    #[tokio::test]
+    async fn backlog_past_the_cooperative_budget_is_applied_in_one_actor_poll() {
+        const BACKLOG: usize = 200;
+        let (queue, _slots) = make_queue(2, 16, 512, None);
+        let mut responses = Vec::new();
+        for i in 0..BACKLOG {
+            let (request, response) = make_request(&format!("backlog-{i}"), 512);
+            let queue = Arc::clone(&queue);
+            tokio::spawn(async move { queue.enqueue(request).await });
+            responses.push(response);
+        }
+
+        // On this single-threaded runtime every spawned enqueue sends before the actor's next
+        // poll, and this task resumes after that poll.
+        let mut responses = responses.into_iter();
+        responses.next().unwrap().await.unwrap().unwrap();
+        let answered = 1 + responses
+            .filter_map(|mut response| response.try_recv().ok())
+            .count();
+        assert_eq!(answered, BACKLOG);
     }
 
     #[tokio::test(flavor = "multi_thread")]
