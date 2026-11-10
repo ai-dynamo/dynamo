@@ -115,8 +115,10 @@
 //!   span closes; the stage is the span name plus a lowercase `:<phase>` when the span has
 //!   a `phase` field. A span that takes its id from its own field, while its parent does not
 //!   already carry that id, also emits the identity mark (with `trace=` and `xrid=` when
-//!   known). Spans with no request id are ignored, and it never touches
-//!   OpenTelemetry data. It sits behind the console logger's filter, so it mirrors exactly
+//!   known). `trace=` is the inbound trace id when the span has one; otherwise it is the
+//!   trace id OpenTelemetry generated for the span, read after the span's first enter, and
+//!   the mark follows the range start instead of preceding it. Spans with no request id are
+//!   ignored. It sits behind the console logger's filter, so it mirrors exactly
 //!   the spans `DYN_LOG` already creates (the default `info` covers the whole catalog;
 //!   `request_span` spans are always on) and never changes a callsite's cached interest.
 //!   A layer that is absent rather than `None` is what keeps the off path at one cached

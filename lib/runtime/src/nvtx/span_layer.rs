@@ -14,12 +14,15 @@
 //! the span).
 //!
 //! A span that takes its id from its own field while its parent does not already carry the
-//! same id also emits the request identity mark (`dynamo.request rid=... trace=... xrid=...`)
-//! before its range, once per request per process.
+//! same id also emits the request identity mark (`dynamo.request rid=... trace=... xrid=...`),
+//! once per request per process. When the span has a valid `trace_id` field (an inbound
+//! `traceparent`), the mark is emitted before its range. Otherwise the trace id is the one
+//! OpenTelemetry generates for the span, which exists only once the span has been entered,
+//! so the mark is emitted when the span is first exited (or closed, if it never was).
 //!
-//! The layer never touches `OtelData`: forcing an OpenTelemetry span to start in
-//! `on_new_span` would break `span.set_parent(..)`, which Dynamo calls right after
-//! creating request spans.
+//! The layer only reads `OtelData` after the span's first enter, when the OpenTelemetry
+//! layer has already built the span's context. Building it earlier, in `on_new_span`,
+//! would break `span.set_parent(..)`, which Dynamo calls right after creating request spans.
 
 use std::sync::Arc;
 
@@ -68,6 +71,11 @@ struct RequestScope {
 
 /// The live NVTX range of a mirrored span.
 struct MirroredRange<R>(#[allow(dead_code)] R);
+
+/// An identity mark waiting for the span's OpenTelemetry trace id.
+struct PendingIdentity {
+    xrid: Option<String>,
+}
 
 /// Fields of interest, collected without allocating for anything else.
 #[derive(Default)]
@@ -164,26 +172,31 @@ where
             (None, None) => return,
         };
 
+        let mut pending_identity = None;
         if emit_identity {
-            let trace = fields
-                .trace
-                .as_deref()
-                .filter(|t| is_trace_id(t))
-                .map(str::to_ascii_lowercase);
-            let message = identity_message(
-                &scope.rid,
-                &[
-                    ("trace", trace.as_deref().unwrap_or_default()),
-                    ("xrid", fields.xrid.as_deref().unwrap_or_default()),
-                ],
-            );
-            self.sink.identity(&message, scope.key);
+            match fields.trace.as_deref().filter(|t| is_trace_id(t)) {
+                Some(trace) => self.emit_identity(
+                    &scope.rid,
+                    scope.key,
+                    &trace.to_ascii_lowercase(),
+                    fields.xrid.as_deref(),
+                ),
+                None => {
+                    pending_identity = Some(PendingIdentity {
+                        xrid: fields.xrid.take(),
+                    })
+                }
+            }
         }
 
         // Spans below INFO (enabled by a verbose DYN_LOG) pass the request id on to their
         // children but get no range of their own.
         if *span.metadata().level() > Level::INFO {
-            span.extensions_mut().insert(scope);
+            let mut extensions = span.extensions_mut();
+            extensions.insert(scope);
+            if let Some(pending) = pending_identity {
+                extensions.insert(pending);
+            }
             return;
         }
 
@@ -201,13 +214,59 @@ where
         let mut extensions = span.extensions_mut();
         extensions.insert(scope);
         extensions.insert(MirroredRange(range));
+        if let Some(pending) = pending_identity {
+            extensions.insert(pending);
+        }
+    }
+
+    // The OpenTelemetry layer builds the span's context on its first enter, after this
+    // layer's `on_enter`, so the first exit is the earliest point the trace id is readable.
+    fn on_exit(&self, id: &Id, ctx: Context<'_, S>) {
+        if let Some(span) = ctx.span(id) {
+            self.flush_identity(&span);
+        }
     }
 
     fn on_close(&self, id: Id, ctx: Context<'_, S>) {
         if let Some(span) = ctx.span(&id) {
+            self.flush_identity(&span);
             // Dropping the guard ends the range exactly once.
             span.extensions_mut().remove::<MirroredRange<K::Range>>();
         }
+    }
+}
+
+impl<K: RangeSink> NvtxSpanLayer<K> {
+    fn emit_identity(&self, rid: &str, key: u64, trace: &str, xrid: Option<&str>) {
+        let message =
+            identity_message(rid, &[("trace", trace), ("xrid", xrid.unwrap_or_default())]);
+        self.sink.identity(&message, key);
+    }
+
+    /// Emit a deferred identity mark, with the span's OpenTelemetry trace id when it has one.
+    fn flush_identity<S>(&self, span: &tracing_subscriber::registry::SpanRef<'_, S>)
+    where
+        S: Subscriber + for<'a> LookupSpan<'a>,
+    {
+        // Only the request's first span has a pending mark; every other exit stops here.
+        let Some(pending) = span.extensions_mut().remove::<PendingIdentity>() else {
+            return;
+        };
+        let extensions = span.extensions();
+        let Some(scope) = extensions.get::<RequestScope>() else {
+            return;
+        };
+        let trace = extensions
+            .get::<tracing_opentelemetry::OtelData>()
+            .and_then(tracing_opentelemetry::OtelData::trace_id)
+            .map(|t| t.to_string())
+            .filter(|t| is_trace_id(t));
+        self.emit_identity(
+            &scope.rid,
+            scope.key,
+            trace.as_deref().unwrap_or_default(),
+            pending.xrid.as_deref(),
+        );
     }
 }
 
@@ -325,6 +384,10 @@ mod tests {
                 rec.starts(),
                 [pair("http-request", "r1"), pair("request.lifecycle", "r2")]
             );
+            // Without a trace id the mark waits for the first exit.
+            assert!(rec.identities().is_empty());
+            _a.in_scope(|| ());
+            _b.in_scope(|| ());
             assert_eq!(
                 rec.identities(),
                 [
@@ -371,6 +434,7 @@ mod tests {
             );
 
             let other = info_span!(parent: &root, "other", request_id = "r2");
+            other.in_scope(|| ());
             assert_eq!(rec.identities().len(), 2);
             assert_eq!(
                 rec.identities()[1],
@@ -382,12 +446,72 @@ mod tests {
     }
 
     #[test]
-    fn identity_precedes_its_range() {
+    fn identity_precedes_its_range_when_the_trace_id_is_known() {
         with_layer(|rec| {
-            let _a = info_span!("root", request_id = "r1");
+            let _a = info_span!("root", request_id = "r1", trace_id = TRACE);
             let events = rec.events();
             assert!(matches!(events[0], Ev::Identity(..)));
             assert!(matches!(events[1], Ev::Start(..)));
+        });
+    }
+
+    #[test]
+    fn identity_without_trace_id_waits_for_first_exit_and_is_emitted_once() {
+        with_layer(|rec| {
+            let span = info_span!("root", request_id = "r1");
+            assert_eq!(rec.events(), [Ev::Start(0, "root".into(), rid_key("r1"))]);
+            span.in_scope(|| ());
+            span.in_scope(|| ());
+            drop(span);
+            assert_eq!(
+                rec.events(),
+                [
+                    Ev::Start(0, "root".into(), rid_key("r1")),
+                    Ev::Identity("dynamo.request rid=r1".into(), rid_key("r1")),
+                    Ev::End(0),
+                ]
+            );
+        });
+    }
+
+    #[test]
+    fn identity_of_a_never_entered_span_is_emitted_on_close() {
+        with_layer(|rec| {
+            drop(info_span!("root", request_id = "r1"));
+            assert_eq!(
+                rec.identities(),
+                [("dynamo.request rid=r1".to_owned(), rid_key("r1"))]
+            );
+        });
+    }
+
+    /// The production order: NVTX layer below the OpenTelemetry layer. A span with no
+    /// inbound trace id gets the one OpenTelemetry generated for it.
+    #[test]
+    fn identity_carries_the_generated_opentelemetry_trace_id() {
+        use opentelemetry::trace::{TraceContextExt, TracerProvider};
+        use tracing_opentelemetry::OpenTelemetrySpanExt;
+
+        let rec = Recorder::default();
+        let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder().build();
+        let subscriber = Registry::default()
+            .with(
+                NvtxSpanLayer::new(rec.clone())
+                    .with_filter(tracing_subscriber::filter::LevelFilter::TRACE),
+            )
+            .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test")));
+        tracing::subscriber::with_default(subscriber, || {
+            let span = info_span!("http-request", request_id = "r1");
+            span.in_scope(|| ());
+            let trace = span.context().span().span_context().trace_id().to_string();
+            assert!(is_trace_id(&trace));
+            assert_eq!(
+                rec.identities(),
+                [(
+                    format!("dynamo.request rid=r1 trace={trace}"),
+                    rid_key("r1")
+                )]
+            );
         });
     }
 
@@ -401,6 +525,7 @@ mod tests {
             let root = info_span!("root", request_id = "r1");
             let _c = info_span!(parent: &root, "c", dynamo.request.id = "unknown");
             assert_eq!(rec.starts(), [pair("root", "r1"), pair("c", "r1")]);
+            root.in_scope(|| ());
             assert_eq!(rec.identities().len(), 1);
         });
     }
@@ -419,6 +544,7 @@ mod tests {
         with_layer(|rec| {
             let _a = debug_span!("dbg", request_id = "r1");
             assert!(rec.starts().is_empty());
+            _a.in_scope(|| ());
             assert_eq!(rec.identities().len(), 1, "identity is level-agnostic");
 
             let root = info_span!("root", request_id = "r2");
@@ -434,6 +560,8 @@ mod tests {
         with_layer(|rec| {
             let dbg = debug_span!("dbg", request_id = "r1");
             let _child = info_span!(parent: &dbg, "child", request_id = "r1");
+            _child.in_scope(|| ());
+            dbg.in_scope(|| ());
             assert_eq!(rec.identities().len(), 1);
             assert_eq!(rec.starts(), [pair("child", "r1")]);
         });
@@ -467,6 +595,9 @@ mod tests {
                     pair("zerotrace", "r4"),
                 ]
             );
+            for span in [&_b, &_c, &_d] {
+                span.in_scope(|| ());
+            }
             let ids: Vec<String> = rec.identities().into_iter().map(|(m, _)| m).collect();
             assert_eq!(
                 ids,
@@ -492,9 +623,9 @@ mod tests {
             assert_eq!(
                 rec.events(),
                 [
+                    Ev::Start(0, "s".into(), rid_key("r1")),
                     Ev::Identity("dynamo.request rid=r1".into(), rid_key("r1")),
-                    Ev::Start(1, "s".into(), rid_key("r1")),
-                    Ev::End(1)
+                    Ev::End(0)
                 ]
             );
         });

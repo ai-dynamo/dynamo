@@ -126,6 +126,11 @@ and once for `handle_payload` on each worker. An explicit marker or range emits 
 mark only when it carries attributes, such as `engine_rid`. A request can therefore have several
 identity marks in one process; merge their attributes.
 
+When the span already has a trace id (an inbound `traceparent`), its identity mark comes just
+before its range. Otherwise the mark waits until the span is first exited, so that it can carry the
+trace id OpenTelemetry generated for it, and comes just after the range starts. With OpenTelemetry
+export off there is no trace id and the mark has no `trace=`.
+
 Example identity mark and a range that carries its key:
 
 ```text
@@ -150,7 +155,7 @@ a request span is also mirrored, so a profile can contain stages not listed here
 
 | Stage | Type | Meaning |
 | --- | --- | --- |
-| `http-request` | Range | Root HTTP span for the request. Its identity mark carries `trace` and `xrid` when the client sent them. |
+| `http-request` | Range | Root HTTP span for the request. Its identity mark carries `xrid` when the client sent one, and `trace`: the client's trace id from `traceparent`, else the one the frontend generated (only when OpenTelemetry export is on). |
 | `request.lifecycle`*, `request.preprocessing`*, `response.streaming`* | Range | Lifecycle, preprocessing, and response-streaming phases. |
 | `kv_router.select_worker` | Range | Worker selection, including the child stages below. |
 | `kv_router.compute_block_hashes`, `kv_router.compute_seq_hashes`, `kv_router.find_matches`, `kv_router.shared_cache_check` | Range | Prefix hashing and cache matching inside selection. |
