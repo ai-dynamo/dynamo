@@ -11,7 +11,7 @@ use std::{
 use async_trait::async_trait;
 use dynamo_runtime::{
     discovery::{
-        DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryStream,
+        DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery, DiscoveryStream,
         ModelCardInstanceId,
     },
     protocols::EndpointId,
@@ -149,7 +149,10 @@ pub(crate) trait ControllerHost: Send + Sync + 'static {
 
     fn discard_prepared(&self, prepared: Self::Prepared);
 
-    async fn list_instances(&self) -> anyhow::Result<Vec<DiscoveryInstance>>;
+    /// Lists the model cards for a reconciliation snapshot. `query` is the namespace filter's
+    /// [`NamespaceFilter::model_query`], so an exact filter lists only its namespace.
+    async fn list_instances(&self, query: DiscoveryQuery)
+    -> anyhow::Result<Vec<DiscoveryInstance>>;
 }
 
 #[derive(Clone)]
@@ -357,7 +360,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                     }
                 }
                 _ = reconciliation_interval.tick(), if self.reconciliations.is_empty() => {
-                    self.start_reconciliation();
+                    self.start_reconciliation(namespace_filter.model_query());
                 }
                 result = self.reconciliations.join_next(), if !self.reconciliations.is_empty() => {
                     match result {
@@ -1149,13 +1152,13 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
         while self.reconciliations.join_next().await.is_some() {}
     }
 
-    fn start_reconciliation(&mut self) {
+    fn start_reconciliation(&mut self, query: DiscoveryQuery) {
         let host = self.host.clone();
         let revision = self.revision;
         self.reconciliations.spawn(async move {
             ReconciliationResult {
                 revision,
-                instances: host.list_instances().await,
+                instances: host.list_instances(query).await,
             }
         });
     }
@@ -1367,6 +1370,7 @@ mod tests {
         discarded: AtomicUsize,
         inventory: super::super::worker_inventory::WorkerInventory,
         prepared_replacements: AtomicUsize,
+        listed: Mutex<Vec<DiscoveryQuery>>,
     }
 
     impl FakeHost {
@@ -1388,6 +1392,7 @@ mod tests {
                     discarded: AtomicUsize::new(0),
                     inventory: Default::default(),
                     prepared_replacements: AtomicUsize::new(0),
+                    listed: Mutex::new(Vec::new()),
                 }),
                 start_rx,
             )
@@ -1596,7 +1601,11 @@ mod tests {
             self.discarded.fetch_add(1, Ordering::SeqCst);
         }
 
-        async fn list_instances(&self) -> anyhow::Result<Vec<DiscoveryInstance>> {
+        async fn list_instances(
+            &self,
+            query: DiscoveryQuery,
+        ) -> anyhow::Result<Vec<DiscoveryInstance>> {
+            self.listed.lock().unwrap().push(query);
             Ok(Vec::new())
         }
     }
@@ -1606,6 +1615,40 @@ mod tests {
             model_name: "model".to_string(),
             worker_set_key: "group".to_string(),
         }
+    }
+
+    /// Runs the controller on a quiet stream until its first periodic reconciliation and
+    /// returns the query that reconciliation listed.
+    async fn first_reconciliation_query(namespace_filter: NamespaceFilter) -> DiscoveryQuery {
+        let (host, _starts) = FakeHost::new();
+        let controller = ModelDiscoveryController::new(host.clone());
+        let stream: DiscoveryStream = Box::pin(futures::stream::pending());
+        let run = tokio::spawn(controller.run(stream, namespace_filter));
+        // Step the paused clock, so the interval exists before its deadline passes.
+        let deadline = RECONCILIATION_INTERVAL + Duration::from_secs(10);
+        let step = Duration::from_secs(1);
+        let mut elapsed = Duration::ZERO;
+        while elapsed < deadline {
+            tokio::time::advance(step).await;
+            elapsed += step;
+            tokio::task::yield_now().await;
+            if let Some(query) = host.listed.lock().unwrap().first().cloned() {
+                run.abort();
+                return query;
+            }
+        }
+        panic!("the controller did not reconcile within {deadline:?}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reconciliation_lists_only_an_exact_namespace() {
+        let query = first_reconciliation_query(NamespaceFilter::Exact("pool-7".into())).await;
+        assert!(
+            matches!(&query, DiscoveryQuery::NamespacedModels { namespace } if namespace == "pool-7"),
+            "{query:?}"
+        );
+        let query = first_reconciliation_query(NamespaceFilter::Prefix("pool".into())).await;
+        assert!(matches!(query, DiscoveryQuery::AllModels), "{query:?}");
     }
 
     fn instance(id: u64, mdc_checksum: &str) -> DesiredInstance {
