@@ -13,7 +13,7 @@ use dynamo_kv_router::services::selection::{CatalogReconciler, WorkerRequest};
 use tokio::sync::watch;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
-use xxhash_rust::xxh3::Xxh3;
+use xxhash_rust::xxh3::{xxh3_64, xxh3_64_with_seed};
 
 use crate::Pool;
 use crate::selector::reachable;
@@ -26,11 +26,7 @@ const BLOCK_SIZE: u32 = 1;
 /// One per pool id and model, so a pool that changes model is a new worker
 /// and the old one retires like any pool that leaves.
 pub(super) fn worker_id(pool: &Pool) -> WorkerId {
-    let mut hasher = Xxh3::new();
-    hasher.update(pool.id.as_str().as_bytes());
-    hasher.update(&[0]);
-    hasher.update(pool.model.as_bytes());
-    hasher.digest()
+    xxh3_64_with_seed(pool.model.as_bytes(), xxh3_64(pool.id.as_str().as_bytes()))
 }
 
 /// The endpoint is required by the core but never dialed.

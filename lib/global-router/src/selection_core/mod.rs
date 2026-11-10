@@ -89,19 +89,20 @@ impl SelectionCoreSelector {
         request: &RoutingRequest<'_>,
         candidates: &[&'a Pool],
     ) -> Option<(PoolTarget<'a>, InFlightGuard)> {
-        let allowed = candidates
-            .iter()
-            .filter(|pool| reachable(pool))
-            .map(|pool| worker_id(pool))
-            .collect::<HashSet<_>>();
-        if allowed.is_empty() {
-            return None;
-        }
-        let selected = self.pick(request.model, allowed).await?;
-        let Some(pool) = candidates
+        let workers = candidates
             .iter()
             .copied()
-            .find(|pool| worker_id(pool) == selected.worker_id && reachable(pool))
+            .filter(|pool| reachable(pool))
+            .map(|pool| (worker_id(pool), pool))
+            .collect::<Vec<_>>();
+        if workers.is_empty() {
+            return None;
+        }
+        let allowed = workers.iter().map(|(id, _)| *id).collect::<HashSet<_>>();
+        let selected = self.pick(request.model, allowed).await?;
+        let Some(pool) = workers
+            .iter()
+            .find_map(|(id, pool)| (*id == selected.worker_id).then_some(*pool))
         else {
             tracing::warn!(
                 model = request.model,
