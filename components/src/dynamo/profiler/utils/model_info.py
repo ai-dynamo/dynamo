@@ -102,6 +102,20 @@ def _select_weight_files(root_names) -> tuple[Optional[str], list[str]]:
     return None, []
 
 
+def _read_indexed_shards(index_path: Union[str, Path]) -> set[str]:
+    """Return indexed shard names, raising ValueError for unreadable indexes."""
+    try:
+        with open(index_path) as f:
+            weight_map = json.load(f)["weight_map"]
+        if not isinstance(weight_map, dict) or not weight_map:
+            raise ValueError("weight_map must be a nonempty object")
+        if any(not isinstance(name, str) or not name for name in weight_map.values()):
+            raise ValueError("weight_map must contain nonempty shard file names")
+        return set(weight_map.values())
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        raise ValueError(f"Cannot read weight_map from {index_path}: {e!r}") from e
+
+
 def get_local_model_weight_size(
     model_path: Union[str, Path],
 ) -> float:
@@ -129,11 +143,7 @@ def get_local_model_weight_size(
     if ext == ".safetensors" and index_path is not None:
         # Unlike the Hub reader, there is no parameter-count estimate to fall
         # back on, so an unreadable or incomplete index is an error.
-        try:
-            with open(index_path) as f:
-                indexed = set(json.load(f)["weight_map"].values())
-        except (ValueError, KeyError, TypeError, AttributeError) as e:
-            raise ValueError(f"Cannot read weight_map from {index_path}: {e!r}") from e
+        indexed = _read_indexed_shards(index_path)
         missing = indexed.difference(names)
         if missing:
             raise ValueError(
@@ -170,9 +180,8 @@ def _select_hub_checkpoint_files(model_name: str, info, token: Optional[str]) ->
                 revision=info.sha,
                 token=token,
             )
-            with open(index_path) as f:
-                indexed = set(json.load(f)["weight_map"].values())
-        except (OSError, ValueError, KeyError, *HUB_NETWORK_ERRORS) as e:
+            indexed = _read_indexed_shards(index_path)
+        except (OSError, ValueError, *HUB_NETWORK_ERRORS) as e:
             # Gated repos refuse the download; the network can fail.
             logger.warning(
                 "Cannot read %s for %s: %s", SAFETENSORS_INDEX_NAME, model_name, e

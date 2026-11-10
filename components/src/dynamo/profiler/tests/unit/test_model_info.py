@@ -345,6 +345,33 @@ def test_model_weight_size_from_hub_estimates_on_index_transport_error(
     assert get_model_weight_size_from_hub("test/model") == 6
 
 
+@pytest.mark.parametrize(
+    "index_text",
+    [
+        "{not json",
+        json.dumps({"metadata": {}}),
+        json.dumps({"weight_map": None}),
+        json.dumps({"weight_map": []}),
+        json.dumps({"weight_map": {"a": []}}),
+        json.dumps({"weight_map": {}}),
+        json.dumps({"weight_map": {"a": None}}),
+    ],
+)
+def test_model_weight_size_from_hub_estimates_on_bad_index(
+    monkeypatch, tmp_path, index_text
+) -> None:
+    _patch_hub(
+        monkeypatch,
+        tmp_path,
+        [("model.safetensors", 4 * MIB)],
+        index=["model.safetensors"],
+        parameters={"BF16": 3 * MIB},
+    )
+    (tmp_path / "model.safetensors.index.json").write_text(index_text)
+
+    assert get_model_weight_size_from_hub("test/model") == 6
+
+
 def _write_checkpoint(model_dir, files, index=None) -> None:
     """Write sparse files of the given sizes, with an optional safetensors index."""
     for name, size in files.items():
@@ -451,6 +478,11 @@ def test_local_model_weight_size_counts_one_checkpoint_copy(
         ),
         ("{not json", "Cannot read weight_map"),
         (json.dumps({"metadata": {}}), "Cannot read weight_map"),
+        (json.dumps({"weight_map": None}), "Cannot read weight_map"),
+        (json.dumps({"weight_map": []}), "Cannot read weight_map"),
+        (json.dumps({"weight_map": {"a": []}}), "Cannot read weight_map"),
+        (json.dumps({"weight_map": {}}), "Cannot read weight_map"),
+        (json.dumps({"weight_map": {"a": None}}), "Cannot read weight_map"),
     ],
 )
 def test_local_model_weight_size_rejects_bad_index(tmp_path, index_text, match) -> None:
@@ -460,3 +492,21 @@ def test_local_model_weight_size_rejects_bad_index(tmp_path, index_text, match) 
 
     with pytest.raises(ValueError, match=match):
         get_local_model_weight_size(tmp_path)
+
+
+def test_local_model_weight_size_wraps_index_read_error(monkeypatch, tmp_path) -> None:
+    _write_checkpoint(
+        tmp_path, {"model.safetensors": 4 * MIB}, index=["model.safetensors"]
+    )
+    read_error = PermissionError("index is unreadable")
+
+    def unreadable_index(path):
+        raise read_error
+
+    monkeypatch.setattr(
+        "dynamo.profiler.utils.model_info.open", unreadable_index, raising=False
+    )
+
+    with pytest.raises(ValueError, match="Cannot read weight_map") as exc:
+        get_local_model_weight_size(tmp_path)
+    assert exc.value.__cause__ is read_error
