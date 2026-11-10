@@ -15,6 +15,7 @@ from __future__ import annotations
 import dataclasses
 import enum
 import hashlib
+import inspect
 import json
 import logging
 import subprocess
@@ -305,8 +306,13 @@ def test_benchmark_wall_time_starts_at_post_go_schedule_timestamp():
     )
 
 
-def test_benchmark_timing_stops_before_vllm_state_update(monkeypatch):
+@pytest.mark.parametrize("needs_launch_correction", [False, True])
+def test_benchmark_timing_stops_before_vllm_state_update(
+    monkeypatch, needs_launch_correction
+):
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._needs_launch_correction = needs_launch_correction
+    stub._fpm_launches = deque([(object(), 5.0)])
     stub._schedule_times = deque([10.0])
     stub._last_update_time = 0.0
     stub._bench_active = True
@@ -343,6 +349,177 @@ def test_benchmark_timing_stops_before_vllm_state_update(monkeypatch):
     assert result == "parent-result"
     assert stub._extract_metrics.call_args.args[2] == 10.0
     assert stub._last_update_time == 20.0
+
+
+@pytest.mark.parametrize("backend,expected", [("uni", True), ("mp", False)])
+def test_inline_launch_timing_requires_supported_execution(
+    monkeypatch, backend, expected
+):
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            distributed_executor_backend=backend,
+            world_size=1,
+            data_parallel_size=1,
+        ),
+        scheduler_config=SimpleNamespace(async_scheduling=True),
+        model_config=SimpleNamespace(runner_type="generate"),
+        speculative_config=None,
+        additional_config={},
+    )
+    monkeypatch.setattr(
+        instrumented_scheduler_module.AsyncScheduler, "__init__", lambda *a, **kw: None
+    )
+    monkeypatch.setattr(
+        instrumented_scheduler_module, "_FpmPublisherThread", MagicMock()
+    )
+    scheduler = InstrumentedScheduler(config, None, None, block_size=16)
+    assert scheduler._needs_launch_correction is expected
+
+
+@pytest.fixture
+def fpm_timing_run(monkeypatch):
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._needs_launch_correction = True
+    stub._pending_fpm_launch = None
+    stub._fpm_launches = deque()
+    stub._schedule_times = deque()
+    stub._last_update_time = 0.0
+    stub._bench_active = False
+    stub._fpm_worker_id = "timing-test"
+    stub._fpm_dp_rank = 0
+    stub._prompt_len_per_req = {}
+    stub.waiting = deque()
+    stub.skipped_waiting = deque()
+    published = []
+    stub._publisher = SimpleNamespace(publish=published.append)
+    clock = SimpleNamespace(now=1.0, output=None)
+    monkeypatch.setattr(
+        instrumented_scheduler_module.time, "monotonic", lambda: clock.now
+    )
+    monkeypatch.setattr(
+        instrumented_scheduler_module.AsyncScheduler,
+        "schedule",
+        lambda self, *args: clock.output,
+    )
+    monkeypatch.setattr(
+        instrumented_scheduler_module.AsyncScheduler,
+        "get_grammar_bitmask",
+        lambda self, output: None,
+    )
+    monkeypatch.setattr(
+        instrumented_scheduler_module.AsyncScheduler,
+        "update_from_output",
+        lambda self, output, result: result,
+    )
+
+    def schedule(now, *, prefill=0, deferred=False, empty=False):
+        tokens = {} if empty else {"decode": 1}
+        if prefill:
+            tokens["prefill"] = prefill
+        clock.now = now
+        clock.output = SimpleNamespace(
+            total_num_scheduled_tokens=sum(tokens.values()),
+            num_scheduled_tokens=tokens,
+            scheduled_new_reqs=(
+                [_make_new_request("prefill", prefill, 0)] if prefill else []
+            ),
+            scheduled_cached_reqs=_CachedRequestStub(
+                req_ids=[] if empty else ["decode"],
+                num_computed_tokens=[] if empty else [32],
+            ),
+            pending_structured_output_tokens=deferred,
+            finished_req_ids=set(),
+        )
+        return stub._schedule_and_record_time()
+
+    def launch(now, output):
+        clock.now = now
+        return stub.get_grammar_bitmask(output)
+
+    def update(now, output):
+        clock.now = now
+        return stub.update_from_output(output, {})
+
+    return SimpleNamespace(
+        scheduler=stub,
+        published=published,
+        schedule=schedule,
+        launch=launch,
+        update=update,
+    )
+
+
+@pytest.mark.parametrize(
+    "adjust,expected", [(True, [0.002, 0.020, 0.003]), (False, [0.010, 0.013, 0.002])]
+)
+def test_async_fpm_assigns_long_launch_to_its_prefill(fpm_timing_run, adjust, expected):
+    run = fpm_timing_run
+    run.scheduler._needs_launch_correction = adjust
+    decode = run.schedule(1.0)
+    run.launch(1.001, decode)
+    prefill = run.schedule(1.001, prefill=6144)
+    run.launch(1.009, prefill)
+    run.update(1.010, decode)
+    tail = run.schedule(1.0101)
+    run.launch(1.0111, tail)
+    run.update(1.023, prefill)
+    run.update(1.025, tail)
+
+    assert [p.wall_time for p in run.published] == pytest.approx(expected)
+    assert [p.scheduled_requests.sum_prefill_tokens for p in run.published] == [
+        0,
+        6144,
+        0,
+    ]
+    assert sum(p.wall_time for p in run.published) == pytest.approx(0.025)
+    assert not run.scheduler._fpm_launches
+    assert run.scheduler._pending_fpm_launch is None
+
+    empty = run.schedule(1.026, empty=True)
+    run.update(1.027, empty)
+    isolated = run.schedule(1000.0, prefill=6144)
+    run.launch(1000.008, isolated)
+    run.update(1000.022, isolated)
+    assert len(run.published) == 4
+    assert run.published[-1].wall_time == pytest.approx(0.022)
+
+
+def test_deferred_grammar_keeps_fpms_without_charging_the_output_wait(fpm_timing_run):
+    run = fpm_timing_run
+    decode = run.schedule(1.0)
+    run.launch(1.001, decode)
+    deferred = run.schedule(1.002, prefill=6144, deferred=True)
+    run.update(1.010, decode)
+    run.launch(1.011, deferred)
+    tail = run.schedule(1.0111)
+    run.launch(1.0121, tail)
+    run.update(1.023, deferred)
+    run.update(1.025, tail)
+
+    assert [p.wall_time for p in run.published] == pytest.approx([0.010, 0.012, 0.003])
+    assert sum(p.wall_time for p in run.published) == pytest.approx(0.025)
+    assert not run.scheduler._fpm_launches
+
+
+def test_missing_launch_callback_retains_the_output_and_releases_its_snapshot(
+    fpm_timing_run,
+):
+    run = fpm_timing_run
+    output = run.schedule(1.0, prefill=6144)
+    run.update(1.022, output)
+
+    assert len(run.published) == 1
+    assert run.published[0].wall_time == pytest.approx(0.022)
+    assert run.scheduler._pending_fpm_launch is None
+    assert not run.scheduler._fpm_launches
+
+
+def test_fpm_grammar_callback_matches_vllm_signature():
+    assert inspect.signature(
+        InstrumentedScheduler.get_grammar_bitmask, eval_str=True
+    ) == inspect.signature(
+        instrumented_scheduler_module.AsyncScheduler.get_grammar_bitmask, eval_str=True
+    )
 
 
 @pytest.mark.parametrize(
@@ -692,6 +869,7 @@ def test_external_dp_schedulers_publish_on_distinct_global_rank_ports(monkeypatc
 
     for rank in (0, 1):
         config = SimpleNamespace(
+            scheduler_config=SimpleNamespace(async_scheduling=False),
             parallel_config=SimpleNamespace(
                 data_parallel_index=rank,
                 data_parallel_rank=0,
@@ -2433,6 +2611,7 @@ def test_benchmark_hasher_uses_vllm_hash_granularity(monkeypatch, tmp_path):
     )
 
     vllm_config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(async_scheduling=False),
         parallel_config=SimpleNamespace(
             data_parallel_index=0,
             data_parallel_size=1,
@@ -4337,6 +4516,7 @@ def _benchmark_save_stub(point: BenchmarkPoint, fpms: list[dict]):
         fpm.setdefault("dp_rank", 0)
         fpm.setdefault("wall_time", 0.01)
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._needs_launch_correction = False
     stub._bench_grid_digest = None
     stub._bench_current_point = point
     stub._bench_current_fpms = fpms
