@@ -42,14 +42,14 @@ impl TrtllmSidecarEngine {
         {
             if !self.mode.is_encode() {
                 return Err(client::invalid_argument(
-                    "encoder cache release requires an encode worker",
+                    "encoder handoff release requires an encode worker",
                 ));
             }
             let result = request.encoder_result.as_ref().ok_or_else(|| {
-                client::invalid_argument("encoder cache release requires a reference")
+                client::invalid_argument("encoder handoff release requires a reference")
             })?;
             client
-                .release_encoder_cache(crate::convert::encoder_cache_from_result(result)?)
+                .release_encoder_handoff(crate::convert::encoder_handoff_from_result(result)?)
                 .await?;
             ctx.notify_first_token();
             return Ok(Box::pin(futures::stream::once(async {

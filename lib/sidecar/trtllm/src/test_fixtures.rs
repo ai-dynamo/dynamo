@@ -56,12 +56,17 @@ pub(crate) fn encoder_model_info(role: &str) -> pb::ModelInfo {
         max_context_length: Some(4096),
         supports_multimodal: Some(true),
         encoder: Some(pb::EncoderCapabilities {
-            schema_version: 1,
-            encoder_only: role == "encode",
-            accepts_cache: role == "consume",
-            transfer_backends: vec!["trtllm-nixl-encoder-v1".into()],
-            supports_abort_cleanup: role == "encode",
-            requires_cache: role == "consume",
+            schema_version: Some(1),
+            encoder_only: Some(role == "encode"),
+            accepts_handoff: Some(role == "consume"),
+            supported_transfer_backends: if role == "consume" {
+                vec!["trtllm-nixl-encoder-v1".into()]
+            } else {
+                Vec::new()
+            },
+            transfer_backend: (role == "encode").then(|| "trtllm-nixl-encoder-v1".into()),
+            supports_abort_cleanup: Some(role == "encode"),
+            requires_handoff: Some(role == "consume"),
         }),
         extra: Some(
             dynamo_sidecar_common::json_to_struct(
@@ -224,5 +229,12 @@ pub(crate) fn logprob_token(token_id: u32, logprob: f64) -> pb::TokenInfo {
         logprob: Some(logprob),
         rank: Some(1),
         candidates: Vec::new(),
+    }
+}
+
+pub(crate) fn encoder_handoff(options: &pb::EncoderOptions) -> &pb::EncoderHandoffRef {
+    match options.mode.as_ref().expect("encoder mode") {
+        pb::encoder_options::Mode::Handoff(handoff) => handoff,
+        other => panic!("expected consumer handoff, got {other:?}"),
     }
 }

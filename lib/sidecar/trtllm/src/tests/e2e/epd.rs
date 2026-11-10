@@ -172,7 +172,7 @@ async fn worker(
     assert_eq!(
         info.limits.encoder_consumer,
         !mode.is_encode(),
-        "official runtime must advertise a vision-disabled encoder-cache consumer"
+        "official runtime must advertise a vision-disabled encoder-handoff consumer"
     );
     let mut args = vec![
         "sidecar".into(),
@@ -199,7 +199,10 @@ async fn reject_replay(endpoint: &str, mut request: pb::GenerateRequest) -> Stri
         "replay-{}",
         REPLAY_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     );
-    assert!(request.encoder.as_ref().unwrap().cache.is_some());
+    assert!(matches!(
+        request.encoder.as_ref().unwrap().mode,
+        Some(pb::encoder_options::Mode::Handoff(_))
+    ));
     assert!(request.kv.as_ref().is_none_or(|kv| kv.session.is_none()));
     let mut inference = pb::inference_client::InferenceClient::connect(endpoint.to_owned())
         .await
@@ -260,19 +263,18 @@ async fn run(disaggregated: bool) {
             DisaggregationMode::Encode,
         )
         .unwrap();
-        assert!(encoder_wire.encoder.as_ref().unwrap().encode_only);
+        assert!(matches!(
+            encoder_wire.encoder.as_ref().unwrap().mode,
+            Some(pb::encoder_options::Mode::EncodeOnly(_))
+        ));
         let encoded = collect(&encoder, request.clone()).await;
-        assert_eq!(
-            encoded.len(),
-            1,
-            "EncoderReady is the sole encoder terminal"
-        );
+        assert_eq!(encoded.len(), 1, "EncodeReady is the sole encoder terminal");
         assert!(encoded[0].token_ids.is_empty());
         assert_eq!(encoded[0].finish_reason, Some(FinishReason::Stop));
         let handoff = encoded[0]
             .encoder_result
             .clone()
-            .expect("EncoderReady must carry its opaque reference");
+            .expect("EncodeReady must carry its opaque reference");
         assert_eq!(handoff["transfer_backend"], NIXL_BACKEND);
         assert!(
             !handoff["opaque_state"]

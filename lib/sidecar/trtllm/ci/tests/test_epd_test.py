@@ -31,32 +31,49 @@ class EpdHarnessTests(unittest.TestCase):
             capability = dict(
                 schema_version=1,
                 encoder_only=role == "encoder",
-                accepts_cache=role != "encoder",
-                transfer_backends=[runner.BACKEND],
+                accepts_handoff=role != "encoder",
+                supported_transfer_backends=(
+                    [] if role == "encoder" else [runner.BACKEND]
+                ),
                 supports_abort_cleanup=role == "encoder",
-                requires_cache=role != "encoder",
+                requires_handoff=role != "encoder",
             )
-            runner.require_encoder_support(
-                SimpleNamespace(encoder=SimpleNamespace(**capability)), role
-            )
+            if role == "encoder":
+                capability["transfer_backend"] = runner.BACKEND
+
+            def info_for(fields):
+                if fields is None:
+                    return SimpleNamespace(encoder=None)
+                return SimpleNamespace(
+                    encoder=SimpleNamespace(
+                        **fields,
+                        HasField=lambda name: name in fields,
+                    )
+                )
+
+            runner.require_encoder_support(info_for(capability), role)
             invalid = [
                 None,
                 {**capability, "schema_version": 0},
+                {**capability, "schema_version": 2},
                 {**capability, "encoder_only": role != "encoder"},
-                {**capability, "transfer_backends": []},
+                (
+                    {**capability, "transfer_backend": "unknown"}
+                    if role == "encoder"
+                    else {**capability, "supported_transfer_backends": []}
+                ),
+                {k: v for k, v in capability.items() if k != "encoder_only"},
             ]
             if role != "encoder":
-                invalid.append({**capability, "accepts_cache": False})
-                invalid.append({**capability, "requires_cache": False})
+                invalid.append({**capability, "accepts_handoff": False})
+                invalid.append({**capability, "requires_handoff": False})
             else:
                 invalid.append({**capability, "supports_abort_cleanup": False})
                 invalid.append(
-                    {**capability, "transfer_backends": [runner.BACKEND, "other"]}
+                    {**capability, "supported_transfer_backends": [runner.BACKEND]}
                 )
             for fields in invalid:
-                info = SimpleNamespace(
-                    encoder=SimpleNamespace(**fields) if fields else None
-                )
+                info = info_for(fields)
                 with (
                     self.subTest(role=role, fields=fields),
                     self.assertRaisesRegex(RuntimeError, "Published nightly lacks"),

@@ -332,13 +332,14 @@ impl TrtllmSidecarEngine {
                 "sidecar role must match the engine encoder-only role",
             ));
         }
-        // Decode consumes staged KV, not the single-use encoder cache.
+        // Decode consumes staged KV, not the single-use encoder handoff.
         if self.route_to_encoder && !info.limits.encoder_consumer {
             return Err(client::invalid_argument(
-                "--route-to-encoder requires an engine that accepts encoder caches",
+                "--route-to-encoder requires an engine that accepts encoder handoffs",
             ));
         }
-        if !self.mode.is_decode() && info.limits.requires_encoder_cache && !self.route_to_encoder {
+        if !self.mode.is_decode() && info.limits.requires_encoder_handoff && !self.route_to_encoder
+        {
             return Err(client::invalid_argument(
                 "vision-disabled encoder consumers require --route-to-encoder",
             ));

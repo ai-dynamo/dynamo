@@ -597,16 +597,14 @@ fn visible_stop_token_arrives_with_the_terminal_usage() {
 }
 
 #[test]
-fn encoder_ready_is_a_tokenless_terminal_with_an_opaque_handoff() {
+fn encode_ready_is_a_tokenless_terminal_with_an_opaque_handoff() {
     let response = pb::GenerateResponse {
-        event: Some(pb::generate_response::Event::EncoderReady(
-            pb::EncoderReady {
-                cache: Some(pb::EncoderCacheRef {
-                    transfer_backend: NIXL_ENCODER_BACKEND.into(),
-                    opaque_state: vec![1, 2, 3],
-                }),
-            },
-        )),
+        event: Some(pb::generate_response::Event::EncodeReady(pb::EncodeReady {
+            handoff: Some(pb::EncoderHandoffRef {
+                transfer_backend: NIXL_ENCODER_BACKEND.into(),
+                opaque_state: vec![1, 2, 3],
+            }),
+        })),
         ..Default::default()
     };
     let mut encode = ResponseState::new(&request(), DisaggregationMode::Encode);
@@ -621,6 +619,10 @@ fn encoder_ready_is_a_tokenless_terminal_with_an_opaque_handoff() {
         result.encoder_result.unwrap(),
         serde_json::json!({"transfer_backend": NIXL_ENCODER_BACKEND, "opaque_state": [1, 2, 3]})
     );
+    let mut with_usage = response.clone();
+    with_usage.usage = Some(pb::Usage::default());
+    let mut encode = ResponseState::new(&request(), DisaggregationMode::Encode);
+    assert!(encode.convert(with_usage).is_err());
     let mut ordinary = ResponseState::new(&request(), AGG);
     assert!(ordinary.convert(response).is_err());
     let mut encode = ResponseState::new(&request(), DisaggregationMode::Encode);

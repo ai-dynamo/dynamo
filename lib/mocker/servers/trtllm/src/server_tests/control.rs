@@ -42,7 +42,7 @@ async fn abort_reports_aborted_then_already_finished() {
 
     for target in [
         pb::abort_request::Target::KvSession(pb::KvSessionRef::default()),
-        pb::abort_request::Target::EncoderCache(pb::EncoderCacheRef::default()),
+        pb::abort_request::Target::EncoderHandoff(pb::EncoderHandoffRef::default()),
     ] {
         let error = service
             .abort(Request::new(pb::AbortRequest {

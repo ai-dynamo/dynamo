@@ -95,15 +95,23 @@ def _stop_engine(process, log):
 def require_encoder_support(info, role):
     capability = getattr(info, "encoder", None)
     encoder = role == "encoder"
+    required = ("schema_version", "encoder_only", "accepts_handoff") + (
+        ("supports_abort_cleanup", "transfer_backend")
+        if encoder
+        else ("requires_handoff",)
+    )
     if (
         capability is None
+        or any(not capability.HasField(name) for name in required)
         or capability.schema_version != 1
         or capability.encoder_only != encoder
-        or (not encoder and not capability.accepts_cache)
-        or (encoder and not getattr(capability, "supports_abort_cleanup", False))
-        or (not encoder and not getattr(capability, "requires_cache", False))
-        or (encoder and list(capability.transfer_backends) != [BACKEND])
-        or BACKEND not in capability.transfer_backends
+        or capability.accepts_handoff == encoder
+        or (encoder and not capability.supports_abort_cleanup)
+        or (not encoder and not capability.requires_handoff)
+        or (encoder and capability.transfer_backend != BACKEND)
+        or (encoder and capability.supported_transfer_backends)
+        or (not encoder and capability.HasField("transfer_backend"))
+        or (not encoder and BACKEND not in capability.supported_transfer_backends)
     ):
         raise RuntimeError(
             f"Published nightly lacks the required {role} NIXL encoder capability; "

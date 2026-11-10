@@ -43,7 +43,7 @@ struct FakeTrtllm {
     target_dp_ranks: Arc<Mutex<Vec<Option<String>>>>,
     affinity_headers: Arc<Mutex<Vec<(String, String)>>>,
     aborts: Arc<Mutex<Vec<String>>>,
-    released_encoder_caches: Arc<Mutex<Vec<pb::EncoderCacheRef>>>,
+    released_encoder_handoffs: Arc<Mutex<Vec<pb::EncoderHandoffRef>>>,
     peers: Arc<Mutex<Vec<SocketAddr>>>,
     hang: Arc<AtomicBool>,
     /// Simulates a server that has not yet accepted the request, so the RPC
@@ -123,21 +123,17 @@ impl pb::inference_server::Inference for FakeTrtllm {
         self.requests.lock().await.push(request.clone());
 
         let request_id = request.request_id.clone();
-        if request
-            .encoder
-            .as_ref()
-            .is_some_and(|options| options.encode_only)
-        {
+        if request.encoder.as_ref().is_some_and(|options| {
+            matches!(options.mode, Some(pb::encoder_options::Mode::EncodeOnly(_)))
+        }) {
             let stream = futures::stream::iter([Ok(pb::GenerateResponse {
                 request_id,
-                event: Some(pb::generate_response::Event::EncoderReady(
-                    pb::EncoderReady {
-                        cache: Some(pb::EncoderCacheRef {
-                            transfer_backend: "trtllm-nixl-encoder-v1".into(),
-                            opaque_state: vec![1, 2, 3],
-                        }),
-                    },
-                )),
+                event: Some(pb::generate_response::Event::EncodeReady(pb::EncodeReady {
+                    handoff: Some(pb::EncoderHandoffRef {
+                        transfer_backend: "trtllm-nixl-encoder-v1".into(),
+                        opaque_state: vec![1, 2, 3],
+                    }),
+                })),
                 ..Default::default()
             })]);
             return Ok(Response::new(Box::pin(stream)));
@@ -283,8 +279,8 @@ impl pb::control_server::Control for FakeTrtllm {
             Some(pb::abort_request::Target::RequestId(id)) => {
                 self.aborts.lock().await.push(id);
             }
-            Some(pb::abort_request::Target::EncoderCache(cache)) => {
-                self.released_encoder_caches.lock().await.push(cache);
+            Some(pb::abort_request::Target::EncoderHandoff(cache)) => {
+                self.released_encoder_handoffs.lock().await.push(cache);
             }
             other => {
                 return Err(Status::invalid_argument(format!(
@@ -943,11 +939,11 @@ async fn encoder_release_uses_abort_without_generating_or_aborting_a_request() {
         assert_eq!(
             server
                 .service
-                .released_encoder_caches
+                .released_encoder_handoffs
                 .lock()
                 .await
                 .as_slice(),
-            [pb::EncoderCacheRef {
+            [pb::EncoderHandoffRef {
                 transfer_backend: "trtllm-nixl-encoder-v1".into(),
                 opaque_state: vec![1, 2, 3],
             }]
@@ -957,7 +953,7 @@ async fn encoder_release_uses_abort_without_generating_or_aborting_a_request() {
         encoder.cleanup().await.unwrap();
     })
     .await
-    .expect("encoder cache release must finish promptly");
+    .expect("encoder handoff release must finish promptly");
 }
 
 #[tokio::test]
@@ -1411,22 +1407,29 @@ async fn incompatible_encoder_advertisements_fail_startup_before_dispatch() {
                 let mut info = encoder_model_info(role);
                 let encoder = info.encoder.as_mut().unwrap();
                 match case {
-                    "schema" => encoder.schema_version = 2,
-                    "backend" => encoder.transfer_backends = vec!["unknown".into()],
+                    "schema" => encoder.schema_version = Some(2),
+                    "backend" if role == "encode" => {
+                        encoder.transfer_backend = Some("unknown".into())
+                    }
+                    "backend" => encoder.supported_transfer_backends = vec!["unknown".into()],
                     "image" => info.extra = None,
                     "release" => {
-                        encoder.supports_abort_cleanup = false;
+                        encoder.supports_abort_cleanup = Some(false);
                     }
                     "ambiguous" => {
-                        encoder.encoder_only = true;
-                        encoder.accepts_cache = true;
+                        encoder.encoder_only = Some(true);
+                        encoder.accepts_handoff = Some(true);
+                    }
+                    "shared" if role == "encode" => {
+                        encoder.transfer_backend = Some("trtllm-shared-safetensors-v1".into())
                     }
                     "shared" => {
-                        encoder.transfer_backends = vec!["trtllm-shared-safetensors-v1".into()];
+                        encoder.supported_transfer_backends =
+                            vec!["trtllm-shared-safetensors-v1".into()]
                     }
                     "mixed" => {
                         encoder
-                            .transfer_backends
+                            .supported_transfer_backends
                             .push("trtllm-shared-safetensors-v1".into());
                     }
                     _ => unreachable!(),
@@ -1457,11 +1460,11 @@ async fn optional_encoder_consumers_can_start_without_encoder_routing() {
         for mode in [AGG, PREFILL] {
             for required in [false, true] {
                 let mut info = encoder_model_info("consume");
-                info.encoder.as_mut().unwrap().requires_cache = required;
+                info.encoder.as_mut().unwrap().requires_handoff = Some(required);
                 info.encoder
                     .as_mut()
                     .unwrap()
-                    .transfer_backends
+                    .supported_transfer_backends
                     .push("trtllm-shared-safetensors-v1".into());
                 info.extra.as_mut().unwrap().fields.insert(
                     "trtllm_requires_encoder_cache".into(),
@@ -1543,13 +1546,7 @@ async fn image_encoder_and_consumer_exchange_opaque_handoff_over_grpc() {
         );
         let requests = consumer_server.service.requests.lock().await;
         assert_eq!(
-            requests[0]
-                .encoder
-                .as_ref()
-                .unwrap()
-                .cache
-                .as_ref()
-                .unwrap()
+            crate::test_fixtures::encoder_handoff(requests[0].encoder.as_ref().unwrap())
                 .opaque_state,
             [1, 2, 3]
         );
@@ -1616,17 +1613,14 @@ async fn prefill_consumes_encoder_reference_and_decode_uses_only_kv_over_grpc() 
 
         let encoder_requests = encoder_server.service.requests.lock().await;
         assert_eq!(encoder_requests.len(), 1);
-        assert!(encoder_requests[0].encoder.as_ref().unwrap().encode_only);
+        assert!(matches!(
+            encoder_requests[0].encoder.as_ref().unwrap().mode,
+            Some(pb::encoder_options::Mode::EncodeOnly(_))
+        ));
         let prefill_requests = prefill_server.service.requests.lock().await;
         assert_eq!(prefill_requests.len(), 1);
         assert_eq!(
-            prefill_requests[0]
-                .encoder
-                .as_ref()
-                .unwrap()
-                .cache
-                .as_ref()
-                .unwrap()
+            crate::test_fixtures::encoder_handoff(prefill_requests[0].encoder.as_ref().unwrap())
                 .opaque_state,
             [1, 2, 3]
         );

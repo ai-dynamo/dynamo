@@ -63,10 +63,10 @@ pub(crate) fn build_generate_request_with_routing(
     // prove the request impossible nor prove it servable, so checking it would
     // reject requests a wider decode window would serve. Releasing the handoff
     // when decode does reject is the sound fix and belongs on that side.
-    let max_tokens = if mode.is_prefill() || mode.is_encode() {
-        Some(1)
-    } else {
-        max_tokens(&request, limits, request_has_media)?
+    let max_tokens = match mode {
+        DisaggregationMode::Prefill => Some(1),
+        DisaggregationMode::Encode => None,
+        _ => max_tokens(&request, limits, request_has_media)?,
     };
     // The decode worker replays the prefill worker's session; the prefill worker
     // marks its request `context_only` through `extra`.
@@ -85,9 +85,7 @@ pub(crate) fn build_generate_request_with_routing(
         },
         DisaggregationMode::Aggregated | DisaggregationMode::Encode => None,
     };
-    let conditions = stop_conditions(&request);
-    let guided = guided_decoding(&request)?;
-    let guided = if mode.is_encode() { None } else { guided };
+    let guided = guided_decoding(&request, mode)?;
     let session_id = request
         .agent_context
         .as_ref()
@@ -105,7 +103,8 @@ pub(crate) fn build_generate_request_with_routing(
             (allow_dp_rank && rank.is_some()).then_some(request_id)
         })
         .map(str::to_string);
-    let include_stop_in_output = has_visible_stop_tokens(&request).then_some(true);
+    let include_stop_in_output =
+        (!mode.is_encode() && has_visible_stop_tokens(&request)).then_some(true);
     let input = request_input(&mut request, limits)?;
     let sampling = &request.sampling_options;
     let stop = &request.stop_conditions;
@@ -117,34 +116,42 @@ pub(crate) fn build_generate_request_with_routing(
         // served by the loaded model (single-model server).
         model: model.to_string(),
         input: Some(input),
-        sampling: Some(pb::SamplingParams {
-            temperature: sampling.temperature.map(f64::from),
-            top_p: sampling.top_p.map(f64::from),
-            top_k: normalize_top_k(sampling.top_k)?,
-            min_p: sampling.min_p.map(f64::from),
-            frequency_penalty: sampling.frequency_penalty.map(f64::from),
-            presence_penalty: sampling.presence_penalty.map(f64::from),
-            repetition_penalty: sampling.repetition_penalty.map(f64::from),
-            seed: normalize_seed(sampling.seed)?,
-            num_sequences: Some(1),
-        }),
-        stopping: Some(pb::StoppingOptions {
-            max_tokens,
-            // Forwarded on a context-only request too. The minimum only masks
-            // EOS until the sequence reaches it, so it cannot extend a context
-            // phase that `max_tokens` already caps at one token. Dropping it
-            // would let the prefill worker sample EOS on that token, finish with
-            // `Stop` instead of `PrefillReady`, and leave the frontend treating
-            // a request that never met its minimum as complete.
-            min_tokens: stop.min_tokens,
-            conditions,
-            ignore_eos: stop.ignore_eos,
-            // Keeps a matched visible stop token (e.g. Harmony's `<|call|>`) in
-            // the output. A visible token equal to `end_id` finishes as END_ID
-            // and may still be dropped.
-            include_stop_in_output,
-        }),
-        response: Some(pb::ResponseOptions {
+        sampling: if mode.is_encode() {
+            None
+        } else {
+            Some(pb::SamplingParams {
+                temperature: sampling.temperature.map(f64::from),
+                top_p: sampling.top_p.map(f64::from),
+                top_k: normalize_top_k(sampling.top_k)?,
+                min_p: sampling.min_p.map(f64::from),
+                frequency_penalty: sampling.frequency_penalty.map(f64::from),
+                presence_penalty: sampling.presence_penalty.map(f64::from),
+                repetition_penalty: sampling.repetition_penalty.map(f64::from),
+                seed: normalize_seed(sampling.seed)?,
+                num_sequences: Some(1),
+            })
+        },
+        stopping: if mode.is_encode() {
+            None
+        } else {
+            Some(pb::StoppingOptions {
+                max_tokens,
+                // Forwarded on a context-only request too. The minimum only masks
+                // EOS until the sequence reaches it, so it cannot extend a context
+                // phase that `max_tokens` already caps at one token. Dropping it
+                // would let the prefill worker sample EOS on that token, finish with
+                // `Stop` instead of `PrefillReady`, and leave the frontend treating
+                // a request that never met its minimum as complete.
+                min_tokens: stop.min_tokens,
+                conditions: stop_conditions(&request),
+                ignore_eos: stop.ignore_eos,
+                // Keeps a matched visible stop token (e.g. Harmony's `<|call|>`) in
+                // the output. A visible token equal to `end_id` finishes as END_ID
+                // and may still be dropped.
+                include_stop_in_output,
+            })
+        },
+        response: (!mode.is_encode()).then(|| pb::ResponseOptions {
             // A prefill worker streams no tokens to the client, but it must
             // still be asked for logprobs: the context phase produces the first
             // generated token, and its logprob only reaches the decode worker
@@ -719,6 +726,7 @@ fn retained_hidden_stop_ids(request: &PreprocessedRequest) -> BTreeSet<u32> {
 
 fn guided_decoding(
     request: &PreprocessedRequest,
+    mode: DisaggregationMode,
 ) -> Result<Option<pb::GuidedDecoding>, DynamoError> {
     let Some(guided) = request.sampling_options.guided_decoding.as_ref() else {
         return Ok(None);
@@ -729,33 +737,43 @@ fn guided_decoding(
         ));
     }
 
-    use pb::guided_decoding::Guide;
-    let mut guides = Vec::new();
-    if let Some(json) = &guided.json {
-        guides.push(Guide::JsonSchema(json_guide(json)));
-    }
-    if let Some(regex) = &guided.regex {
-        guides.push(Guide::Regex(regex.clone()));
-    }
-    if let Some(grammar) = &guided.grammar {
-        guides.push(Guide::EbnfGrammar(grammar.clone()));
-    }
-    if let Some(tag) = &guided.structural_tag {
-        guides.push(Guide::StructuralTag(json_guide(tag)));
-    }
     if guided.choice.is_some() {
-        // `choice` is in the OpenEngine contract but the TensorRT-LLM server
-        // rejects it; fail fast with a clear message.
         return Err(client::invalid_argument(
             "guided decoding `choice` is not supported by the TensorRT-LLM OpenEngine server",
         ));
     }
-    if guides.len() > 1 {
+    if [
+        guided.json.is_some(),
+        guided.regex.is_some(),
+        guided.grammar.is_some(),
+        guided.structural_tag.is_some(),
+    ]
+    .into_iter()
+    .filter(|present| *present)
+    .count()
+        > 1
+    {
         return Err(client::invalid_argument(
             "only one guided decoding constraint may be set",
         ));
     }
-    Ok(guides.pop().map(|guide| pb::GuidedDecoding {
+    if mode.is_encode() {
+        return Ok(None);
+    }
+    use pb::guided_decoding::Guide;
+    let guide = if let Some(json) = &guided.json {
+        Some(Guide::JsonSchema(json_guide(json)))
+    } else if let Some(regex) = &guided.regex {
+        Some(Guide::Regex(regex.clone()))
+    } else if let Some(grammar) = &guided.grammar {
+        Some(Guide::EbnfGrammar(grammar.clone()))
+    } else {
+        guided
+            .structural_tag
+            .as_ref()
+            .map(|tag| Guide::StructuralTag(json_guide(tag)))
+    };
+    Ok(guide.map(|guide| pb::GuidedDecoding {
         guide: Some(guide),
         backend: String::new(),
     }))
@@ -969,32 +987,40 @@ impl ResponseState {
         if self.encode_only
             && !matches!(
                 &event,
-                pb::generate_response::Event::EncoderReady(_)
+                pb::generate_response::Event::EncodeReady(_)
                     | pb::generate_response::Event::Error(_)
             )
         {
             return Err(client::protocol_error(
-                "encode stream must terminate with EncoderReady",
+                "encode stream must terminate with EncodeReady",
             ));
         }
         match event {
-            pb::generate_response::Event::EncoderReady(ready) => {
-                if !self.encode_only {
+            pb::generate_response::Event::EncodeReady(ready) => {
+                if usage.is_some() {
                     return Err(client::protocol_error(
-                        "unexpected EncoderReady on generation stream",
+                        "EncodeReady must omit generation usage",
                     ));
                 }
-                let cache = ready
-                    .cache
-                    .ok_or_else(|| client::protocol_error("EncoderReady has no cache"))?;
-                validate_encoder_cache(&cache)
+                if !self.encode_only {
+                    return Err(client::protocol_error(
+                        "unexpected EncodeReady on generation stream",
+                    ));
+                }
+                let handoff = ready
+                    .handoff
+                    .ok_or_else(|| client::protocol_error("EncodeReady has no handoff"))?;
+                validate_encoder_handoff(&handoff)
                     .map_err(|error| client::protocol_error(error.to_string()))?;
                 let mut result = serde_json::Map::new();
                 result.insert(
                     "transfer_backend".into(),
-                    serde_json::json!(cache.transfer_backend),
+                    serde_json::json!(handoff.transfer_backend),
                 );
-                result.insert("opaque_state".into(), serde_json::json!(cache.opaque_state));
+                result.insert(
+                    "opaque_state".into(),
+                    serde_json::json!(handoff.opaque_state),
+                );
                 let mut output = LLMEngineOutput::encode_terminal(result);
                 output.extra_args = Some(serde_json::json!({"encoder_result_release": true}));
                 Ok(Some(output))
@@ -1359,21 +1385,21 @@ struct EncoderHandoff {
     opaque_state: Vec<u8>,
 }
 
-fn validate_encoder_cache(cache: &pb::EncoderCacheRef) -> Result<(), DynamoError> {
-    if cache.transfer_backend != NIXL_ENCODER_BACKEND
-        || cache.opaque_state.is_empty()
-        || cache.opaque_state.len() > 64 * 1024
+fn validate_encoder_handoff(handoff: &pb::EncoderHandoffRef) -> Result<(), DynamoError> {
+    if handoff.transfer_backend != NIXL_ENCODER_BACKEND
+        || handoff.opaque_state.is_empty()
+        || handoff.opaque_state.len() > 64 * 1024
     {
         return Err(client::invalid_argument(
-            "unsupported or oversized encoder cache reference",
+            "unsupported or oversized encoder handoff reference",
         ));
     }
     Ok(())
 }
 
-pub(crate) fn encoder_cache_from_result(
+pub(crate) fn encoder_handoff_from_result(
     result: &serde_json::Value,
-) -> Result<pb::EncoderCacheRef, DynamoError> {
+) -> Result<pb::EncoderHandoffRef, DynamoError> {
     if result
         .get("opaque_state")
         .and_then(serde_json::Value::as_array)
@@ -1385,12 +1411,12 @@ pub(crate) fn encoder_cache_from_result(
     }
     let handoff: EncoderHandoff = serde::Deserialize::deserialize(result)
         .map_err(|error| client::invalid_argument(format!("invalid encoder_result: {error}")))?;
-    let cache = pb::EncoderCacheRef {
+    let reference = pb::EncoderHandoffRef {
         transfer_backend: handoff.transfer_backend,
         opaque_state: handoff.opaque_state,
     };
-    validate_encoder_cache(&cache)?;
-    Ok(cache)
+    validate_encoder_handoff(&reference)?;
+    Ok(reference)
 }
 
 fn encoder_options(
@@ -1419,17 +1445,16 @@ fn encoder_options(
             ));
         }
         return Ok(Some(pb::EncoderOptions {
-            encode_only: true,
-            cache: None,
+            mode: Some(pb::encoder_options::Mode::EncodeOnly(pb::EncodeOnly {})),
         }));
     }
     let Some(result) = request.encoder_result.as_ref() else {
-        if limits.is_some_and(|limits| limits.requires_encoder_cache)
+        if limits.is_some_and(|limits| limits.requires_encoder_handoff)
             && has_media(request)
             && !(mode.is_decode() && request.prefill_result.is_some())
         {
             return Err(client::engine_error(
-                "encoder cache consumer received media without encoder_result; check encoder availability and --route-to-encoder",
+                "encoder handoff consumer received media without encoder_result; check encoder availability and --route-to-encoder",
             ));
         }
         return Ok(None);
@@ -1448,9 +1473,8 @@ fn encoder_options(
             "encoder_result requires an aggregated or prefill worker and a capable consumer",
         ));
     }
-    let cache = encoder_cache_from_result(result)?;
+    let handoff = encoder_handoff_from_result(result)?;
     Ok(Some(pb::EncoderOptions {
-        encode_only: false,
-        cache: Some(cache),
+        mode: Some(pb::encoder_options::Mode::Handoff(handoff)),
     }))
 }

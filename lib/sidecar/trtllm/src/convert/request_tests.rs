@@ -1257,7 +1257,14 @@ fn image_encoder_handoff_requires_negotiated_roles() {
         DisaggregationMode::Encode,
     )
     .unwrap();
-    assert!(encoded.encoder.unwrap().encode_only);
+    assert!(matches!(
+        encoded.encoder.unwrap().mode,
+        Some(pb::encoder_options::Mode::EncodeOnly(_))
+    ));
+    assert!(encoded.sampling.is_none());
+    assert!(encoded.stopping.is_none());
+    assert!(encoded.response.is_none());
+    assert!(encoded.guided.is_none());
     source.encoder_result =
         Some(json!({"transfer_backend": NIXL_ENCODER_BACKEND, "opaque_state": [1, 2, 3]}));
     assert!(build_generate_request(source.clone(), "pd", "model", Some(limits), AGG).is_err());
@@ -1265,8 +1272,10 @@ fn image_encoder_handoff_requires_negotiated_roles() {
     let consumed =
         build_generate_request(source.clone(), "pd", "model", Some(limits), AGG).unwrap();
     let options = consumed.encoder.unwrap();
-    assert!(!options.encode_only);
-    assert_eq!(options.cache.unwrap().opaque_state, [1, 2, 3]);
+    assert_eq!(encoder_handoff(&options).opaque_state, [1, 2, 3]);
+    assert!(consumed.sampling.is_some());
+    assert!(consumed.stopping.is_some());
+    assert!(consumed.response.is_some());
     let prefill = build_generate_request(
         source.clone(),
         "p",
@@ -1276,7 +1285,7 @@ fn image_encoder_handoff_requires_negotiated_roles() {
     )
     .expect("prefill can consume encoder output");
     assert_eq!(
-        prefill.encoder.unwrap().cache.unwrap().opaque_state,
+        encoder_handoff(prefill.encoder.as_ref().unwrap()).opaque_state,
         [1, 2, 3]
     );
     assert!(prefill.kv.is_none());
@@ -1326,7 +1335,7 @@ fn encode_validates_consumer_guides_without_forwarding_them() {
 fn encoder_consumers_require_handoffs_only_for_unstaged_media() {
     let mut limits = image_limits(4096).unwrap();
     limits.encoder_consumer = true;
-    limits.requires_encoder_cache = true;
+    limits.requires_encoder_handoff = true;
     for mode in [AGG, PREFILL, DisaggregationMode::Decode] {
         let mut source = request();
         assert!(
@@ -1334,7 +1343,7 @@ fn encoder_consumers_require_handoffs_only_for_unstaged_media() {
         );
         add_images(&mut source, ["https://example.com/image.png"]);
         let optional_limits = ModelLimits {
-            requires_encoder_cache: false,
+            requires_encoder_handoff: false,
             ..limits
         };
         let inline = build_generate_request(
@@ -1379,7 +1388,7 @@ fn nixl_encoder_reference_is_forwarded_without_interpreting_engine_metadata() {
     }));
     let consumed =
         build_generate_request(source.clone(), "pd", "model", Some(limits), AGG).unwrap();
-    let cache = consumed.encoder.unwrap().cache.unwrap();
+    let cache = encoder_handoff(consumed.encoder.as_ref().unwrap());
     assert_eq!(cache.transfer_backend, "trtllm-nixl-encoder-v1");
     assert_eq!(cache.opaque_state, state);
     source.encoder_result = Some(json!({

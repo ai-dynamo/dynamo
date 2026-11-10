@@ -415,7 +415,7 @@ impl ResponseState {
             pb::generate_response::Event::Error(error) => {
                 Err(engine_error(error, engine_label(&self.engine_name)))
             }
-            pb::generate_response::Event::EncoderReady(_) => Err(self.protocol_error(
+            pb::generate_response::Event::EncodeReady(_) => Err(self.protocol_error(
                 "received an encoder event; this sidecar does not support encoder handoffs",
             )),
             pb::generate_response::Event::PrefillReady(_) => Err(self.protocol_error(
