@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::BTreeMap;
+use std::future::poll_fn;
 use std::ops::{Deref, DerefMut};
+use std::pin::pin;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Poll, Waker};
@@ -10,6 +12,7 @@ use std::task::{Poll, Waker};
 use super::{AsyncEngineContext, AsyncEngineContextProvider, Data};
 use crate::engine::{AsyncEngineController, EngineContextGuard};
 use async_trait::async_trait;
+use tokio::sync::Notify;
 
 use super::registry::Registry;
 
@@ -356,8 +359,6 @@ impl<T: Send + Sync + 'static> From<Context<T>> for StreamContext {
 
 // TODO - refactor here - this came from the dynamo.llm-async-engine crate
 
-use tokio::sync::Notify;
-
 // Controller states. A controller only moves forward through them.
 const LIVE: u8 = 0;
 const STOPPED: u8 = 1;
@@ -399,12 +400,10 @@ impl Controller {
         &self.id
     }
 
-    fn transition_to_stopped(&self) {
-        if self
-            .state
-            .compare_exchange(LIVE, STOPPED, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok()
-        {
+    /// Moves the state forward to `to` and wakes the waiters. Never moves it back, so a stop
+    /// leaves a kill in place.
+    fn advance_to(&self, to: u8) {
+        if self.state.fetch_max(to, Ordering::SeqCst) < to {
             self.state_changed.notify_waiters();
         }
     }
@@ -416,9 +415,9 @@ impl Controller {
     /// been notified yet, so the waker an earlier poll registered is still queued and a stop
     /// or kill will wake it: such a poll reads `state` and returns.
     async fn reached(&self, target: u8) {
-        let mut notified = std::pin::pin!(self.state_changed.notified());
+        let mut notified = pin!(self.state_changed.notified());
         let mut registered: Option<Waker> = None;
-        std::future::poll_fn(|cx| {
+        poll_fn(|cx| {
             loop {
                 let state = self.state.load(Ordering::SeqCst);
                 if state >= target {
@@ -437,7 +436,6 @@ impl Controller {
                 }
                 // The state changed without reaching `target`. Wait for the next change on a
                 // new `Notified`, created before `state` is read again.
-                registered = None;
                 notified.set(self.state_changed.notified());
             }
         })
@@ -488,7 +486,7 @@ impl AsyncEngineContext for Controller {
             child.stop_generating();
         }
 
-        self.transition_to_stopped();
+        self.advance_to(STOPPED);
     }
 
     fn stop(&self) {
@@ -504,7 +502,7 @@ impl AsyncEngineContext for Controller {
             child.stop();
         }
 
-        self.transition_to_stopped();
+        self.advance_to(STOPPED);
     }
 
     fn kill(&self) {
@@ -520,8 +518,7 @@ impl AsyncEngineContext for Controller {
             child.kill();
         }
 
-        self.state.store(KILLED, Ordering::SeqCst);
-        self.state_changed.notify_waiters();
+        self.advance_to(KILLED);
     }
 
     fn link_child(&self, child: Arc<dyn AsyncEngineContext>) {
@@ -592,69 +589,58 @@ mod tests {
         assert!(child.is_killed());
     }
 
-    /// Spawns a task that re-polls `stopped()` or `killed()` on every nudge, as a stream
-    /// loop does on every chunk, and returns once the wait completes.
-    fn spawn_waiter(
-        controller: Arc<Controller>,
-        wait_for_kill: bool,
-    ) -> (tokio::sync::mpsc::Sender<()>, tokio::task::JoinHandle<()>) {
-        let (nudge_tx, mut nudge_rx) = tokio::sync::mpsc::channel::<()>(1);
-        let task = tokio::spawn(async move {
-            let wait = if wait_for_kill {
-                controller.killed()
-            } else {
-                controller.stopped()
-            };
-            tokio::pin!(wait);
-            loop {
-                tokio::select! {
-                    biased;
-                    _ = &mut wait => return,
-                    _ = nudge_rx.recv() => {}
-                }
-            }
-        });
-        (nudge_tx, task)
-    }
+    /// A waker that records whether it was woken.
+    #[derive(Default)]
+    struct WakeFlag(std::sync::atomic::AtomicBool);
 
-    async fn nudge(nudge_tx: &tokio::sync::mpsc::Sender<()>) {
-        nudge_tx.send(()).await.unwrap();
-        tokio::task::yield_now().await;
-    }
-
-    #[tokio::test]
-    async fn stop_wakes_a_waiter_repolled_while_live() {
-        let controller = Arc::new(Controller::default());
-        let (nudge_tx, waiter) = spawn_waiter(controller.clone(), false);
-        for _ in 0..3 {
-            nudge(&nudge_tx).await;
+    impl std::task::Wake for WakeFlag {
+        fn wake(self: Arc<Self>) {
+            self.0.store(true, Ordering::SeqCst);
         }
-        assert!(!waiter.is_finished());
+    }
+
+    impl WakeFlag {
+        fn take(&self) -> bool {
+            self.0.swap(false, Ordering::SeqCst)
+        }
+    }
+
+    // Both tests re-poll the wait with one waker, as a stream loop does on every chunk.
+
+    #[test]
+    fn stop_wakes_a_waiter_repolled_while_live() {
+        let controller = Controller::default();
+        let flag = Arc::new(WakeFlag::default());
+        let waker = Waker::from(flag.clone());
+        let mut cx = std::task::Context::from_waker(&waker);
+        let mut wait = controller.stopped();
+        for _ in 0..3 {
+            assert!(wait.as_mut().poll(&mut cx).is_pending());
+        }
 
         controller.stop();
-        tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
-            .await
-            .expect("stop did not wake the waiter")
-            .unwrap();
+        assert!(flag.take(), "stop did not wake the waiter");
+        assert!(wait.as_mut().poll(&mut cx).is_ready());
     }
 
-    #[tokio::test]
-    async fn kill_wakes_a_waiter_that_was_woken_by_a_stop() {
-        let controller = Arc::new(Controller::default());
-        let (nudge_tx, waiter) = spawn_waiter(controller.clone(), true);
-        nudge(&nudge_tx).await;
+    #[test]
+    fn kill_wakes_a_waiter_that_was_woken_by_a_stop() {
+        let controller = Controller::default();
+        let flag = Arc::new(WakeFlag::default());
+        let waker = Waker::from(flag.clone());
+        let mut cx = std::task::Context::from_waker(&waker);
+        let mut wait = controller.killed();
+        assert!(wait.as_mut().poll(&mut cx).is_pending());
 
         controller.stop();
+        assert!(flag.take(), "stop did not wake the waiter");
         for _ in 0..3 {
-            nudge(&nudge_tx).await;
+            assert!(wait.as_mut().poll(&mut cx).is_pending());
         }
-        assert!(!waiter.is_finished());
 
         controller.kill();
-        tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
-            .await
-            .expect("kill did not wake the waiter")
-            .unwrap();
+        assert!(flag.take(), "kill did not wake the waiter");
+        assert!(wait.as_mut().poll(&mut cx).is_ready());
     }
 
     #[test]
