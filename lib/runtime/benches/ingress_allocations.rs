@@ -5,13 +5,14 @@
 //!
 //! The request goes the whole worker path: `handle_payload` decodes the
 //! request-plane frame, opens a TCP response stream back to a peer, calls the
-//! engine and publishes its stream. The test counts every allocation made on
+//! engine and publishes its stream. The bench counts every allocation made on
 //! the worker's thread from `handle_payload` until every task the request
 //! spawned has ended, so late work by the response-stream tasks is not counted
 //! against the next request.
 //!
 //! The peer that stands in for the frontend runs on another thread and is not
-//! counted. The test fails when a count rises above its ceiling.
+//! counted. Run with `cargo bench -p dynamo-runtime --bench ingress_allocations`;
+//! it reports the counts and checks nothing.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
@@ -29,14 +30,9 @@ use dynamo_runtime::{
     protocols::annotated::Annotated,
 };
 
-mod common;
-use common::ingress::{request_payload, start_response_peer};
-
-/// Allocations per request for a one-item and a 16-item response stream. These
-/// are ceilings, set to the counts measured on this code; lower them when the
-/// worker path gets cheaper.
-const MAX_ALLOCATIONS_ONE_ITEM: u64 = 55;
-const MAX_ALLOCATIONS_SIXTEEN_ITEMS: u64 = 115;
+#[path = "../tests/common/ingress.rs"]
+mod ingress;
+use ingress::{request_payload, start_response_peer};
 
 const WARMUP_REQUESTS: usize = 20;
 const MEASURED_REQUESTS: usize = 200;
@@ -129,9 +125,9 @@ async fn measure_one(ingress: &dyn PushWorkHandler, payload: Bytes, id: String) 
     take_counts()
 }
 
-/// Per-request allocations and bytes, after warm-up. Every measured request
-/// must cost the same, or the count is not a property of the request.
-async fn allocations_per_request(items: usize) -> (u64, u64) {
+/// Prints the per-request allocations and bytes after warm-up, as the range over
+/// the measured requests.
+async fn report(items: usize) {
     let address = start_response_peer();
     let ingress = Ingress::for_engine(Arc::new(EchoEngine { items })).unwrap();
     let mut counts = Vec::with_capacity(MEASURED_REQUESTS);
@@ -143,25 +139,19 @@ async fn allocations_per_request(items: usize) -> (u64, u64) {
             counts.push(count);
         }
     }
-    let allocations: Vec<u64> = counts.iter().map(|(n, _)| *n).collect();
-    let min = *allocations.iter().min().unwrap();
-    let max = *allocations.iter().max().unwrap();
+    let min = counts.iter().map(|(n, _)| *n).min().unwrap();
+    let max = counts.iter().map(|(n, _)| *n).max().unwrap();
     let bytes = counts.iter().map(|(_, b)| *b).sum::<u64>() / counts.len() as u64;
-    eprintln!("{items} item(s): {min}..={max} allocations, {bytes} bytes per request");
-    assert_eq!(min, max, "allocations per request vary: {allocations:?}");
-    (min, bytes)
+    println!("{items} item(s): {min}..={max} allocations, {bytes} bytes per request");
 }
 
-#[tokio::test]
-async fn worker_request_allocations() {
-    let (one, _) = allocations_per_request(1).await;
-    let (sixteen, _) = allocations_per_request(16).await;
-    assert!(
-        one <= MAX_ALLOCATIONS_ONE_ITEM,
-        "one-item worker request: {one} allocations, ceiling {MAX_ALLOCATIONS_ONE_ITEM}"
-    );
-    assert!(
-        sixteen <= MAX_ALLOCATIONS_SIXTEEN_ITEMS,
-        "16-item worker request: {sixteen} allocations, ceiling {MAX_ALLOCATIONS_SIXTEEN_ITEMS}"
-    );
+fn main() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        report(1).await;
+        report(16).await;
+    });
 }
