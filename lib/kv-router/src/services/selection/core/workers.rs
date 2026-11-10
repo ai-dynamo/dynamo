@@ -10,7 +10,7 @@ use super::reservations::{ReservationIndexObserver, spawn_reservation_index_swee
 use super::*;
 use crate::kv_hints::hint_capable_partition;
 use crate::plugins::hint_policy::RoleHintPolicies;
-use crate::plugins::resolve_role;
+use crate::plugins::resolve::resolve_role;
 use crate::sequences::topology::MAX_DATA_PARALLEL_RANKS_PER_WORKER;
 
 impl SelectionCore {

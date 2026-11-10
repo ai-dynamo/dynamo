@@ -22,8 +22,8 @@ use crate::indexer::{
     LowerTierQueryOptions, RoutingDecisionHashes, SharedKvCache, TieredMatchDetails,
 };
 use crate::kv_hints::{KvHint, KvTransferCandidates};
-use crate::plugins::RouterResponsibilities;
 use crate::plugins::hint_policy::HintPolicyFactory;
+use crate::plugins::resolve::RouterResponsibilities;
 use crate::protocols::{
     LocalBlockHash, PrefillLoadHint, SharedCacheHits, WorkerAffinityTarget, WorkerConfigLike,
     WorkerId, WorkerWithDpRank,
@@ -189,7 +189,7 @@ pub struct SelectionHost {
 #[derive(Clone, Default)]
 pub struct HostHints {
     /// The resolved hint policies; `None` runs no hint policies. Each partition's role resolves
-    /// them with its worker-selection policy (see [`crate::plugins::resolve_role`]).
+    /// them with its worker-selection policy (see [`crate::plugins::resolve::resolve_role`]).
     pub policies: Option<HintPolicyFactory>,
 }
 

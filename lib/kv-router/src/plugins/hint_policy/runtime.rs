@@ -16,7 +16,7 @@ use crate::protocols::WorkerWithDpRank;
 use crate::scheduling::SessionContext;
 
 /// One hint policy of a partition, with the declarations the stage reads. Built once per role,
-/// in run order, by [`crate::plugins::resolve_role`].
+/// in run order, by [`crate::plugins::resolve::resolve_role`].
 pub(crate) struct HintPolicySlot {
     pub(crate) name: Arc<str>,
     pub(crate) policy: Arc<dyn HintPolicy>,

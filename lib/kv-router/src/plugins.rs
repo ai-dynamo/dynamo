@@ -10,7 +10,7 @@
 pub mod hint_policy;
 mod registry;
 pub mod request_classifier;
-mod resolve;
+pub(crate) mod resolve;
 pub mod worker_selection;
 
 pub use registry::{
@@ -19,7 +19,7 @@ pub use registry::{
     WorkerSelectionPolicyProviderError, WorkerSelectionPolicyRegistryError,
 };
 
-pub use resolve::{PluginConfigError, RouterResponsibilities, resolve_role};
+pub use resolve::{PluginConfigError, check_role};
 
 use hint_policy::HintPolicyRegistryError;
 use request_classifier::{RequestClassifierFactory, RequestClassifierRegistryError};

@@ -224,7 +224,8 @@ worker_selection:
     /// `hints` resolves. Listing `hints` without a sender is rejected when the router is built.
     #[test]
     fn kvcr_pairs_with_kv_fetch() {
-        use dynamo_kv_router::plugins::{PluginConfigError, resolve_role};
+        use dynamo_kv_router::plugins::worker_selection::WorkerInputs;
+        use dynamo_kv_router::plugins::{PluginConfigError, check_role};
 
         let policy_file = tempfile::NamedTempFile::new().unwrap();
         let resolve = |hints: &str| {
@@ -248,7 +249,7 @@ worker_selection:
             let partition = RoutingPartitionRef::new("model", "default");
             let policy = selection(&config, WorkerType::Prefill, partition);
             let hints = registry.resolve_hint_policies(&config).unwrap();
-            resolve_role(
+            check_role(
                 WorkerType::Prefill,
                 &policy,
                 hints.instances(&config, WorkerType::Prefill, partition),
@@ -257,7 +258,7 @@ worker_selection:
         };
 
         let defaulted = resolve("").unwrap();
-        assert!(defaulted.commit_kv_copy());
+        assert!(defaulted.contains(WorkerInputs::KV_COPY));
         resolve("    hints:\n      - type: kv_fetch\n").unwrap();
         assert!(matches!(
             resolve("    hints: []\n"),
