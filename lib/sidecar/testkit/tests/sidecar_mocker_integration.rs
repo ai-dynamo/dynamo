@@ -659,12 +659,13 @@ async fn sglang_native_rejection_recovers_on_same_engine() {
         native_rejection::<support::sglang::Fixture>(32_769),
     )
     .await;
-    assert!(error.to_string().contains("Generate"));
+    let message = error.to_string();
+    assert!(message.contains("Generate"), "{message}");
     assert!(
-        error
-            .to_string()
-            .contains("prompt tokens (3) plus max_new_tokens (32769) exceed context_length 32768")
+        message.contains("maximum context length of 32768 tokens"),
+        "{message}"
     );
+    assert!(message.contains("(code 400)"), "{message}");
 }
 
 /// Another worker would refuse the request the same way, so the sidecar
@@ -786,7 +787,7 @@ async fn vllm_engine_lost_on_not_serving() {
 #[tokio::test]
 async fn sglang_malformed_terminal_fails_then_recovers() {
     bounded("malformed terminal and recovery", async {
-        use dynamo_sglang_sidecar::proto as pb;
+        use sglang_fixture::token_frame;
         let control = Controller::<support::sglang::Adapter>::default();
         let mut fixture =
             support::sglang::Fixture::start(control.clone(), FixtureConfig::default()).await;
@@ -794,19 +795,14 @@ async fn sglang_malformed_terminal_fails_then_recovers() {
         engine.start(0).await.unwrap();
         let ctx = mock_context();
         let handle = control.request(ctx.id(), RequestPlan::default());
-        fixture.respond(
-            ctx.id(),
-            vec![
-                pb::GenerateResponse {
-                    output_ids: vec![101],
-                    ..Default::default()
-                },
-                pb::GenerateResponse {
-                    finished: true,
-                    ..Default::default()
-                },
-            ],
-        );
+        let mut terminal = token_frame(&[], None);
+        if let Some(dynamo_sglang_sidecar::proto::generate_stream_item::Item::Frame(frame)) =
+            terminal.item.as_mut()
+        {
+            frame.meta_info.as_mut().unwrap().finish_reason =
+                Some(dynamo_sglang_sidecar::proto::FinishReason { kind: None });
+        }
+        fixture.respond(ctx.id(), vec![token_frame(&[101], None), terminal]);
         let error = failure(
             collect(
                 &engine,
@@ -817,8 +813,109 @@ async fn sglang_malformed_terminal_fails_then_recovers() {
             &[101],
             BackendError::Unknown,
         );
-        assert!(error.to_string().contains("missing finish_reason"));
+        assert!(
+            error
+                .to_string()
+                .contains("finish_reason is missing a type")
+        );
         bounded("malformed RPC released", handle.wait(Event::Dropped)).await;
+        healthy(&fixture, &engine, &control).await;
+        finish(&mut fixture, &engine).await;
+    })
+    .await;
+}
+
+// The Rust server ends a request's stream with an error item carrying an HTTP
+// status; each code keeps its error category whether or not a token preceded it.
+// A 4xx is the request's fault and any other code the engine's, so neither is a
+// transport failure that migration would retry.
+#[tokio::test]
+async fn sglang_stream_error_codes_map_before_and_after_a_token_then_recover() {
+    bounded("in-stream error codes and recovery", async {
+        use sglang_fixture::{error_item, token_frame};
+        let control = Controller::<sglang_fixture::Adapter>::default();
+        let mut fixture =
+            sglang_fixture::Fixture::start(control.clone(), FixtureConfig::default()).await;
+        let engine = fixture.engine().await;
+        engine.start(0).await.unwrap();
+        for (code, kind) in [
+            (400, BackendError::InvalidArgument),
+            (499, BackendError::Cancelled),
+            (503, BackendError::Unknown),
+        ] {
+            for has_token in [false, true] {
+                let ctx = mock_context();
+                let handle = control.request(ctx.id(), RequestPlan::default());
+                let mut items = Vec::new();
+                if has_token {
+                    items.push(token_frame(&[101], None));
+                }
+                items.push(error_item(code, "native failure"));
+                fixture.respond(ctx.id(), items);
+                let outputs = collect(
+                    &engine,
+                    request("mocker-model", vec![1, 2, 3], 3),
+                    GenerateContext::new(ctx, None),
+                )
+                .await;
+                let tokens: &[u32] = if has_token { &[101] } else { &[] };
+                let error = failure(outputs, tokens, kind);
+                assert!(
+                    error.to_string().contains(&format!("(code {code})")),
+                    "{error}"
+                );
+                assert_eq!(error.public_message(), None, "{code}");
+                bounded("errored RPC released", handle.wait(Event::Dropped)).await;
+            }
+        }
+        healthy(&fixture, &engine, &control).await;
+        finish(&mut fixture, &engine).await;
+    })
+    .await;
+}
+
+// An abort the request did not ask for ends its stream with SGLang's 499
+// item; Abort reports whether it matched an active generation.
+#[tokio::test]
+async fn sglang_abort_rpc_reports_499_and_match_flag() {
+    bounded("Abort RPC", async {
+        let control = Controller::<sglang_fixture::Adapter>::default();
+        let mut fixture = sglang_fixture::Fixture::start(
+            control.clone(),
+            FixtureConfig {
+                speedup_ratio: 0.1,
+                ..Default::default()
+            },
+        )
+        .await;
+        let engine = fixture.engine().await;
+        engine.start(0).await.unwrap();
+        let ctx = mock_context();
+        let id = ctx.id().to_string();
+        let handle = control.request(&id, after_token_responses(1, StreamAction::Continue));
+        let mut stream = engine
+            .generate(
+                request("mocker-model", vec![11, 22, 33], 10_000),
+                GenerateContext::new(ctx.clone(), None),
+            )
+            .await
+            .unwrap();
+        let mut outputs = checkpoint_outputs(&mut stream, &handle).await;
+        fixture.scheduler_active().await;
+        engine.abort(ctx.clone()).await;
+        fixture.wait_aborts(1).await;
+        assert_eq!(fixture.aborts(), [(id.clone(), true)]);
+        handle.release();
+        outputs.extend(bounded("aborted stream", stream.collect::<Outputs>()).await);
+        let error = failure(outputs, &handle.tokens(), BackendError::Cancelled);
+        assert!(error.to_string().contains("(code 499)"), "{error}");
+        bounded("aborted RPC released", handle.wait(Event::Dropped)).await;
+        fixture.scheduler_idle().await;
+
+        // A finished request matches nothing, and repeating Abort is harmless.
+        engine.abort(ctx).await;
+        fixture.wait_aborts(2).await;
+        assert_eq!(fixture.aborts()[1], (id, false));
         healthy(&fixture, &engine, &control).await;
         finish(&mut fixture, &engine).await;
     })
@@ -968,6 +1065,102 @@ async fn http_checkpoint(
     vec![first]
 }
 
+// Native /generate readiness never fails startup: with an HTTP endpoint that
+// never becomes ready, the worker warns, stays on gRPC and does not publish
+// `sglang_generate`, and a native request fails. A multinode engine still
+// publishes its worker group, whose lookup must not find the startup deadline
+// already spent by the readiness wait.
+#[tokio::test]
+async fn sglang_native_http_unready_degrades_to_grpc() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    bounded("unready native HTTP", async {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = u32::from(listener.local_addr().unwrap().port());
+        let unready = tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                tokio::spawn(async move {
+                    let mut request = [0_u8; 1024];
+                    let _ = socket.read(&mut request).await;
+                    let _ = socket
+                        .write_all(
+                            b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        )
+                        .await;
+                });
+            }
+        });
+        let control = Controller::<sglang_fixture::Adapter>::default();
+        let mut fixture =
+            sglang_fixture::Fixture::start(control.clone(), FixtureConfig::default()).await;
+        fixture.override_discovery(
+            None,
+            vec![Box::new(move |info| {
+                info.port = port;
+                let deployment = info.deployment_info.as_mut().unwrap();
+                deployment.nnodes = 2;
+                deployment.dist_init_addr = Some("127.0.0.1:29500".into());
+            })],
+        );
+        let argv = vec![
+            "dynamo-sglang-sidecar".to_string(),
+            "--grpc-endpoint".to_string(),
+            fixture.endpoint(),
+            "--grpc-retry-interval-secs".to_string(),
+            "1".to_string(),
+            // The readiness wait spends what is left of it.
+            "--grpc-startup-deadline-secs".to_string(),
+            "3".to_string(),
+        ];
+        let engine = tokio::task::spawn_blocking(move || {
+            dynamo_sglang_sidecar::SglangSidecarEngine::from_args(Some(argv))
+                .unwrap()
+                .0
+        })
+        .await
+        .unwrap();
+        let config = engine.start(0).await.unwrap();
+        assert!(!config.runtime_data.contains_key("sglang_generate"));
+        assert_eq!(
+            config.runtime_data.get("sglang_worker_group_id"),
+            Some(&json!("dist_init:tcp://127.0.0.1:29500"))
+        );
+
+        healthy(&fixture, &engine, &control).await;
+        let error = engine
+            .generate(http_request(), GenerateContext::new(mock_context(), None))
+            .await
+            .err()
+            .expect("a native request must fail without a ready HTTP endpoint");
+        assert_eq!(
+            error.error_type(),
+            dynamo_backend_common::ErrorType::Backend(BackendError::InvalidArgument)
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("native SGLang Generate is unavailable"),
+            "{error}"
+        );
+        unready.abort();
+        finish(&mut fixture, &engine).await;
+    })
+    .await;
+}
+
+async fn start_http_engine(
+    fixture: &sglang_fixture::Fixture,
+) -> dynamo_sglang_sidecar::SglangSidecarEngine {
+    let engine = fixture.engine().await;
+    let config = engine.start(0).await.unwrap();
+    assert_eq!(
+        config.runtime_data.get("sglang_generate"),
+        Some(&json!(true))
+    );
+    engine
+}
+
 #[tokio::test]
 async fn sglang_http_cancellation_and_drop_abort_only_the_target() {
     bounded("HTTP cancellation phases and recovery", async {
@@ -975,8 +1168,7 @@ async fn sglang_http_cancellation_and_drop_abort_only_the_target() {
         let mut fixture =
             sglang_fixture::Fixture::start_http(control.clone(), FixtureConfig::default()).await;
         let http = fixture.http();
-        let engine = fixture.engine().await;
-        engine.start(0).await.unwrap();
+        let engine = start_http_engine(&fixture).await;
         let mut aborted = Vec::new();
         for is_before_headers in [true, false] {
             for cancellation in [Cancellation::Explicit, Cancellation::ConsumerDrop] {
@@ -1172,6 +1364,7 @@ async fn vllm_generation_controls_preserve_values_over_grpc() {
     .await;
 }
 
+// Decode drains until KV transfer completes before its Abort RPC.
 #[tokio::test]
 async fn sglang_http_decode_cancellation_waits_for_transfer() {
     bounded("HTTP decode transfer-safe cancellation", async {
@@ -1185,8 +1378,7 @@ async fn sglang_http_decode_cancellation_waits_for_transfer() {
         )
         .await;
         let http = fixture.http();
-        let engine = fixture.engine().await;
-        engine.start(0).await.unwrap();
+        let engine = start_http_engine(&fixture).await;
         let mut aborted = Vec::new();
         for is_terminal_without_tokens in [false, true] {
             for cancellation in [Cancellation::Explicit, Cancellation::ConsumerDrop] {
@@ -1336,6 +1528,7 @@ async fn vllm_visible_stop_tokens_preserve_tool_delimiters() {
 async fn sglang_visible_stop_tokens_preserve_tool_delimiters() {
     bounded("visible tool delimiter", async {
         use dynamo_sglang_sidecar::proto as pb;
+        use sglang_fixture::token_frame;
         let control = Controller::<sglang_fixture::Adapter>::default();
         let mut fixture =
             sglang_fixture::Fixture::start(control.clone(), FixtureConfig::default()).await;
@@ -1345,16 +1538,14 @@ async fn sglang_visible_stop_tokens_preserve_tool_delimiters() {
         let handle = control.request(ctx.id(), RequestPlan::default());
         fixture.respond(
             ctx.id(),
-            vec![pb::GenerateResponse {
-                output_ids: vec![42],
-                meta_info: [(
-                    "finish_reason".to_string(),
-                    json!({"type": "stop", "matched": 42}).to_string(),
-                )]
-                .into(),
-                finished: true,
-                ..Default::default()
-            }],
+            vec![token_frame(
+                &[42],
+                Some(pb::finish_reason::Kind::Stop(pb::FinishStop {
+                    matched: Some(pb::Matched {
+                        value: Some(pb::matched::Value::Token(42)),
+                    }),
+                })),
+            )],
         );
         let mut req = request("mocker-model", vec![11, 22, 33], 1);
         req.stop_conditions.stop_token_ids_visible = Some(vec![42]);
@@ -1367,30 +1558,35 @@ async fn sglang_visible_stop_tokens_preserve_tool_delimiters() {
         );
         terminal(outputs, &[42], 3, FinishReason::Stop);
         let wire = handle.native_request().unwrap();
-        assert_eq!(wire.sampling_params.unwrap().stop_token_ids, [2, 42]);
-        assert_eq!(wire.return_text, None);
+        let Some(pb::sampling_params_or_list::Value::One(sampling)) =
+            wire.sampling_params.and_then(|params| params.value)
+        else {
+            panic!("expected one set of sampling params");
+        };
+        assert_eq!(sampling.stop_token_ids.unwrap().items, [2, 42]);
+        assert!(wire.text.is_none());
         finish(&mut fixture, &engine).await;
     })
     .await;
 }
 
-/// SGLang ending `WatchEngineState` after startup resolves `engine_lost`, but
-/// `healthy=false` and a pause do not, since SGLang can clear both; the
-/// process test covers a dropped connection.
+/// SGLang's Rust server has no state stream, so the sidecar polls
+/// GetModelInfo: `healthy=false` does not resolve `engine_lost`, but a server
+/// that stops answering does.
 #[tokio::test]
-async fn sglang_engine_lost_on_state_stream_end() {
+async fn sglang_engine_lost_when_model_info_polls_fail() {
     let mut fixture =
         sglang_fixture::Fixture::start(Controller::default(), FixtureConfig::default()).await;
     let engine = fixture.engine().await;
     engine.start(0).await.unwrap();
     let lost = engine.engine_lost();
     tokio::pin!(lost);
-    fixture.set_engine_state(false, true);
-    tokio::time::timeout(std::time::Duration::from_millis(300), &mut lost)
+    fixture.set_health(Some(false));
+    tokio::time::timeout(std::time::Duration::from_millis(3_500), &mut lost)
         .await
-        .expect_err("an unhealthy or paused engine is not lost");
-    fixture.end_engine_state();
-    let error = bounded("engine lost on stream end", lost).await;
+        .expect_err("an unhealthy engine is not lost");
+    fixture.shutdown().await;
+    let error = bounded("engine lost after shutdown", lost).await;
     assert_eq!(
         error.error_type(),
         dynamo_backend_common::ErrorType::Backend(BackendError::EngineShutdown)
