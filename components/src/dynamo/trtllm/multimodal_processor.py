@@ -98,12 +98,8 @@ def _video_frames_to_uint8(video: VideoData) -> VideoData:
     )
 
 
-# Message content part types that carry a loaded media item.
-_PART_MODALITY = {"image_url": "image", "video_url": "video"}
-
-
 def _mm_item_order(
-    messages: List[Dict],
+    multi_modal_order: Any,
     counts: Dict[str, int],
     prompt_modality_order: Optional[Sequence[str]] = None,
 ) -> List[Dict[str, Any]]:
@@ -111,31 +107,43 @@ def _mm_item_order(
     ``{"modality", "index"}`` per item, ``index`` being the item's position in
     ``multi_modal_data[modality]``.
 
-    Built as trtllm-serve builds it: items in the order their parts appear in
-    the messages, which is the order the chat template writes placeholders in,
-    then grouped by modality when the model's template groups them that way
-    (``prompt_modality_order``). ``counts`` is the number of loaded items per
-    modality; the message parts must account for exactly those.
+    Taken from the frontend's ``multi_modal_order``: the media parts in message
+    order, each as ``{"modality": "image_url", "index": i}`` with ``i`` its
+    position in ``multi_modal_data["image_url"]``, the order the items are
+    loaded in here. As trtllm-serve does, the order is then grouped by modality
+    when the model's chat template groups placeholders that way
+    (``prompt_modality_order``); the frontend's order does not include that
+    step. ``counts`` is the number of loaded items per modality, and the order
+    must name each of them once.
     """
-    order: List[Dict[str, Any]] = []
-    seen = dict.fromkeys(counts, 0)
-    for message in messages:
-        content = message.get("content") if isinstance(message, dict) else None
-        if not isinstance(content, list):
-            continue
-        for part in content:
-            modality = (
-                _PART_MODALITY.get(part.get("type")) if isinstance(part, dict) else None
-            )
-            if modality in seen:
-                order.append({"modality": modality, "index": seen[modality]})
-                seen[modality] += 1
-    if seen != counts:
+    entries = multi_modal_order if isinstance(multi_modal_order, list) else None
+    if entries is None:
         raise HttpStatusError(
             400,
-            "Cannot order the request's images and videos: the messages have "
-            f"{seen} media parts but {counts} items were loaded",
-            "multi_modal_data",
+            "Cannot order the request's media items: the request has no "
+            "multi_modal_order",
+            "multi_modal_order",
+        )
+    order: List[Dict[str, Any]] = []
+    for entry in entries:
+        modality = entry.get("modality") if isinstance(entry, dict) else None
+        index = entry.get("index") if isinstance(entry, dict) else None
+        order.append(
+            {
+                "modality": modality.removesuffix("_url")
+                if isinstance(modality, str)
+                else None,
+                "index": index if type(index) is int else None,
+            }
+        )
+    expected = {(m, i) for m, n in counts.items() for i in range(n)}
+    named = {(e["modality"], e["index"]) for e in order}
+    if len(order) != len(expected) or named != expected:
+        raise HttpStatusError(
+            400,
+            "Cannot order the request's media items: multi_modal_order does not "
+            f"name each loaded item exactly once (loaded: {counts})",
+            "multi_modal_order",
         )
     if prompt_modality_order:
         rank = {m: i for i, m in enumerate(prompt_modality_order)}
@@ -801,7 +809,7 @@ class MultimodalRequestProcessor:
                     # the first modality's tokens only, and the assertion
                     # that catches this stops the engine.
                     processed_inputs["mm_item_order"] = _mm_item_order(
-                        request_messages(request),
+                        request.get("multi_modal_order"),
                         {m: len(items) for m, items in processed_mm_data.items()},
                         self._prompt_modality_order(),
                     )

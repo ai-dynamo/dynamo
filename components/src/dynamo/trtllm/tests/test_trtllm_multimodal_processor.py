@@ -301,7 +301,8 @@ _VIDEO_URL = "http://169.254.169.254/v.mp4"
 
 def _request(image: bool = True, video: bool = True, video_first: bool = False) -> dict:
     """A request as the frontend forwards it: media in ``multi_modal_data``,
-    chat structure in ``extra_args.messages``."""
+    their message order in ``multi_modal_order``, chat structure in
+    ``extra_args.messages``."""
     parts, mm_data = [], {}
     if image:
         mm_data["image_url"] = [{"Url": _IMAGE_URL}]
@@ -312,9 +313,11 @@ def _request(image: bool = True, video: bool = True, video_first: bool = False) 
             0 if video_first else len(parts),
             {"type": "video_url", "video_url": {"url": _VIDEO_URL}},
         )
+    order = [{"modality": part["type"], "index": 0} for part in parts]
     parts.append({"type": "text", "text": "What colors are these?"})
     return {
         "multi_modal_data": mm_data,
+        "multi_modal_order": order,
         "token_ids": [1, 2, 3],
         "extra_args": {"messages": [{"role": "user", "content": parts}]},
     }
@@ -501,22 +504,59 @@ async def test_item_order_follows_the_models_modality_grouping(
 
 
 @pytest.mark.asyncio
-async def test_media_parts_that_do_not_match_the_loaded_items_are_rejected(
+async def test_an_item_order_that_does_not_match_the_loaded_items_is_rejected(
     image_video_processor, monkeypatch
 ) -> None:
-    """Without one message part per loaded item the order is unknown; reject
-    the request instead of letting TRT-LLM fail on it."""
+    """Unless the order names each loaded item once, the items' prompt
+    positions are unknown; reject the request instead of letting TRT-LLM fail
+    on it."""
     processor, _ = image_video_processor("np")
     _route_video(monkeypatch, "nvdec", _pt_video(_decoded_frames()))
     request = _request()
-    request["extra_args"]["messages"][0]["content"].pop(0)  # drop the image part
+    request["multi_modal_order"].pop(0)  # the order leaves the image out
 
     with pytest.raises(HttpStatusError) as excinfo:
         await processor.process_openai_request(
             request, embeddings=None, ep_disaggregated_params=None
         )
     assert excinfo.value.status == 400
-    assert "Cannot order the request's images and videos" in excinfo.value.message
+    assert "does not name each loaded item exactly once" in excinfo.value.message
+
+
+@pytest.mark.asyncio
+async def test_image_and_video_request_without_an_item_order_is_rejected(
+    image_video_processor, monkeypatch
+) -> None:
+    processor, _ = image_video_processor("np")
+    _route_video(monkeypatch, "nvdec", _pt_video(_decoded_frames()))
+    request = _request()
+    del request["multi_modal_order"]
+
+    with pytest.raises(HttpStatusError) as excinfo:
+        await processor.process_openai_request(
+            request, embeddings=None, ep_disaggregated_params=None
+        )
+    assert excinfo.value.status == 400
+    assert "the request has no multi_modal_order" in excinfo.value.message
+
+
+def test_item_order_maps_each_frontend_modality_by_name() -> None:
+    """The frontend names each item by its content part type; ``<m>_url``
+    becomes TRT-LLM's ``<m>``, so a new modality needs no change here."""
+    order = mmp._mm_item_order(
+        [
+            {"modality": "audio_url", "index": 0},
+            {"modality": "image_url", "index": 1},
+            {"modality": "image_url", "index": 0},
+        ],
+        {"image": 2, "audio": 1},
+    )
+
+    assert order == [
+        {"modality": "audio", "index": 0},
+        {"modality": "image", "index": 1},
+        {"modality": "image", "index": 0},
+    ]
 
 
 _IMAGE_TOKEN, _VIDEO_TOKEN = 900, 901
