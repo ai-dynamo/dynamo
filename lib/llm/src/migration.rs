@@ -494,6 +494,7 @@ where
         Ok(slf)
     }
 
+    /// Yield the next response, retrying migratable stream failures within the budget.
     pub async fn next(&mut self) -> Option<Annotated<Resp>> {
         loop {
             let response_stream = match self.next_stream.as_mut() {
@@ -570,6 +571,7 @@ where
         }
     }
 
+    /// Dispatch the initial request or a replacement and record the migration outcome.
     async fn new_stream(&mut self, mut migration_event: Option<MigrationEvent>) -> Result<()> {
         if !self.attempts.has_remaining() {
             if let Some(cause) = self.pending_migration.take() {
@@ -761,6 +763,7 @@ where
         route_trace.map_or_else(|| self.attempts.last(), RouteTraceContext::attempt)
     }
 
+    /// Save the failed attempt and its metric label for the next replacement dispatch.
     fn queue_migration(
         &mut self,
         reason: ErrorType,
@@ -2525,6 +2528,7 @@ mod tests {
         assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 0);
     }
 
+    /// Cancellation before replacement dispatch leaves the counter at zero.
     #[tokio::test]
     async fn test_retry_manager_cancelled_during_migration() {
         dynamo_runtime::logging::init();
