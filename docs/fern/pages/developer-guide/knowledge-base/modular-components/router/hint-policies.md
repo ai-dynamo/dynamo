@@ -1,14 +1,14 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Write a Hint Policy
-subtitle: Attach engine-directed KV actions to the worker a request is routed to
+title: Write a KV Hint Plugin
+subtitle: Attach KV actions, such as a fetch, to the worker a request is routed to
 ---
 
 > [!WARNING]
 > **Experimental.** The hint-policy API, its configuration, and its actions can change.
 
-A hint policy adds engine-directed KV actions, such as a [KV fetch hint](topology-aware-kv-transfer.md#kv-fetch-hints), to the worker the router books for a request. It never changes which worker is selected; the [worker-selection policy](custom-worker-selection.mdx) does that.
+A KV hint plugin, called a hint policy in the API and in the `hints` YAML, adds engine-directed KV actions, such as a [KV fetch hint](topology-aware-kv-transfer.md#kv-fetch-hints), to the worker the router books for a request. It never changes which worker is selected; the [worker-selection policy](custom-worker-selection.mdx) does that.
 
 ## Configure Hints for a Role
 
