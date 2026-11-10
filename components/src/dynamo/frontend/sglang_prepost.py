@@ -4,15 +4,12 @@
 from __future__ import annotations
 
 import copy
-import inspect
 import json
 import logging
 import re
 from dataclasses import dataclass
-from functools import lru_cache
 from typing import Any, TypeAlias
 
-from jinja2.exceptions import TemplateError
 from sglang.srt.entrypoints.openai.protocol import Function as SglangFunction
 from sglang.srt.entrypoints.openai.protocol import Tool as SglangTool
 from sglang.srt.entrypoints.openai.protocol import ToolChoice as SglangToolChoice
@@ -23,16 +20,21 @@ from sglang.srt.function_call.core_types import ToolCallItem
 from sglang.srt.function_call.function_call_parser import FunctionCallParser
 from sglang.srt.function_call.json_array_parser import JsonArrayParser
 from sglang.srt.function_call.utils import get_json_schema_constraint
-from sglang.srt.parser.jinja_template_utils import (
-    detect_jinja_template_content_format,
-    process_content_for_template_format,
-)
 from sglang.srt.parser.reasoning_parser import GptOssDetector, ReasoningParser
 
 from dynamo.common.utils.engine_response import trailing_stop_prefix_len
 from dynamo.common.utils.guided_json import admits_only_empty_object
 from dynamo.llm.exceptions import InvalidArgument
 
+from .responses_history import responses_history_recipients, responses_tools_request
+from .sglang_prompt_renderer import PromptRenderer, build_prompt_renderer
+from .sglang_tool_call_markers import (
+    _callable_accepts_kwarg,
+    _normalize_sglang_parser_name,
+    _parser_tokenizer_kwargs,
+    tool_call_marker_strings,
+    tool_call_marker_token_ids,
+)
 from .structural_tag_policy import (
     ToolChoiceKind,
     effective_tool_strict,
@@ -112,395 +114,7 @@ _THINKING_BY_DEFAULT = {
     "kimi_k2",
     "kimi_k3",
 }
-_THINKING_OPT_IN = {"deepseek-v3", "deepseek-v4", "gemma4"}
-
-_SGLANG_PARSER_NAME_ALIASES = {
-    # Dynamo's Rust parser registry accepts these MiniMax-M3 aliases. SGLang
-    # builds that include MiniMax-M3 expose the parser as "minimax-m3".
-    "minimax_m3": "minimax-m3",
-    "minimax_m3_nom": "minimax-m3",
-    "minimax-m3-nom": "minimax-m3",
-    "kimi-k3": "kimi_k3",
-    "gemma-4": "gemma4",
-}
-
-
-def _normalize_sglang_parser_name(parser_name: str | None) -> str | None:
-    if not parser_name:
-        return parser_name
-    return _SGLANG_PARSER_NAME_ALIASES.get(parser_name, parser_name)
-
-
-# --- Tool-call delimiter tokens ------------------------------------------
-#
-# Most tool-call formats open and close a call with a delimiter that the
-# tokenizer registers as a single added token (``<tool_call>`` is 154843 for
-# GLM-5 and 151657 for Qwen3). Those tokens are not reserved: a literal
-# ``<tool_call>`` inside a tool result or a pasted file encodes to the very
-# same id the model emits to open a call, and decodes back to identical text.
-# SGLang's detectors work on text, so on their own they cannot tell a call
-# the model issued from a delimiter it merely reproduced from its input.
-#
-# The frontend is the one place that still has the token ids. It uses them in
-# two ways:
-#
-# * ``SglangStreamingPostProcessor`` opens the tool-call parser only on the
-#   delimiter *token id* and closes it on the closing id. Delimiter text the
-#   model spells out of ordinary sub-words never reaches the parser and is
-#   returned to the client as content.
-# * With ``isolate_tool_call_markers`` the prompt encoder tokenizes a message
-#   content span that contains a delimiter without added-token matching, so
-#   the model sees ``<``, ``tool``, ``_call``, ``>`` and has no single token
-#   to copy back. Delimiters emitted by the chat template itself keep their
-#   ids.
-_MARKER_CACHE_ATTR = "_dynamo_tool_call_marker_cache"
-
-
-def tool_call_marker_strings(
-    tool_call_parser_name: str | None, tokenizer: Any = None
-) -> tuple[str, str] | None:
-    """``(opening, closing)`` delimiter of the named SGLang detector.
-
-    The detector is built the way ``FunctionCallParser`` builds the active one,
-    with *tokenizer* when its constructor accepts it: Hunyuan resolves suffixed
-    delimiters (``<tool_calls:opensource>``) from the vocabulary, and a bare
-    construction would name delimiters the model never emits. Surrounding
-    whitespace is dropped (``qwen25`` declares ``<tool_call>\\n``); detectors
-    with an empty delimiter on either side return ``None``.
-    """
-    name = _normalize_sglang_parser_name(tool_call_parser_name)
-    if not name:
-        return None
-    detector_cls = FunctionCallParser.ToolCallParserEnum.get(name)
-    if detector_cls is None:
-        return None
-    cache = _tokenizer_marker_cache(tokenizer) if tokenizer is not None else None
-    key = f"strings:{name}"
-    if cache is not None and key in cache:
-        return cache[key]
-    try:
-        detector = detector_cls(**_parser_tokenizer_kwargs(detector_cls, tokenizer))
-    except Exception:  # pragma: no cover - detector-specific constructor
-        # Falling back to text-only parsing here would silently drop the
-        # delimiter-id gate, so surface the failure instead.
-        logger.exception("Could not construct tool-call detector for parser %s", name)
-        raise
-    opening = getattr(detector, "bot_token", "")
-    closing = getattr(detector, "eot_token", "")
-    strings: tuple[str, str] | None = None
-    if isinstance(opening, str) and isinstance(closing, str):
-        opening, closing = opening.strip(), closing.strip()
-        if opening and closing and opening != closing:
-            strings = (opening, closing)
-    if cache is not None:
-        cache[key] = strings
-    return strings
-
-
-def _tokenizer_marker_cache(tokenizer: Any) -> dict[str, Any] | None:
-    cache = getattr(tokenizer, _MARKER_CACHE_ATTR, None)
-    if cache is None:
-        cache = {}
-        try:
-            setattr(tokenizer, _MARKER_CACHE_ATTR, cache)
-        except (AttributeError, TypeError):
-            return None
-    return cache
-
-
-def tool_call_marker_token_ids(
-    tokenizer: Any, tool_call_parser_name: str | None
-) -> dict[int, str]:
-    """Map delimiter token id -> delimiter string for the active parser.
-
-    Both delimiters must encode to exactly one token; otherwise the result is
-    ``{}``, the frontend keeps the text-only parser behaviour, and
-    ``encode_chat_prompt_isolating_markers`` rejects requests instead of
-    encoding them unprotected.
-    """
-    strings = tool_call_marker_strings(tool_call_parser_name, tokenizer)
-    if strings is None:
-        return {}
-    cache = _tokenizer_marker_cache(tokenizer)
-    key = f"ids:{tool_call_parser_name}"
-    if cache is not None and key in cache:
-        return cache[key]
-    ids: dict[int, str] = {}
-    for marker in strings:
-        try:
-            encoded = tokenizer.encode(marker, add_special_tokens=False)
-        except Exception:
-            logger.exception(
-                "Could not encode tool-call delimiter %r for parser %s",
-                marker,
-                tool_call_parser_name,
-            )
-            continue
-        encoded = list(getattr(encoded, "ids", encoded))
-        if len(encoded) == 1 and isinstance(encoded[0], int):
-            ids[encoded[0]] = marker
-    if len(ids) != 2:
-        logger.warning(
-            "Tool-call delimiters %r of parser %s are not single tokens for this "
-            "tokenizer; the delimiter-id gate is off and "
-            "--isolate-tool-call-markers cannot be honoured",
-            strings,
-            tool_call_parser_name,
-        )
-        ids = {}
-    if cache is not None:
-        cache[key] = ids
-    return ids
-
-
-def _marker_free_encoder(
-    tokenizer: Any, markers: tuple[str, ...], active_marker_ids: set[int]
-) -> Any | None:
-    """A copy of the fast tokenizer with the delimiter added-tokens removed.
-
-    Encoding a literal delimiter with it yields ordinary BPE sub-words that
-    decode back to the same text, so the model sees the delimiter as content
-    rather than as structure. ``None`` when the tokenizer cannot be copied, or
-    when the copy still encodes a delimiter to one of *active_marker_ids*
-    (the base vocabulary can reach the same id without the added-token entry).
-    """
-    cache = _tokenizer_marker_cache(tokenizer)
-    key = "encoder:" + "|".join(markers)
-    if cache is not None and key in cache:
-        return cache[key]
-    encoder = None
-    backend = getattr(tokenizer, "backend_tokenizer", None)
-    if backend is not None and hasattr(backend, "to_str"):
-        try:
-            from tokenizers import Tokenizer as HfTokenizer
-
-            spec = json.loads(backend.to_str())
-            spec["added_tokens"] = [
-                tok
-                for tok in spec.get("added_tokens", [])
-                if tok.get("content") not in markers
-            ]
-            encoder = HfTokenizer.from_str(json.dumps(spec))
-            for marker in markers:
-                copied = encoder.encode(marker, add_special_tokens=False).ids
-                if any(token_id in active_marker_ids for token_id in copied):
-                    raise ValueError(
-                        f"delimiter {marker!r} still encodes to an active delimiter id"
-                    )
-        except Exception:
-            logger.exception("Could not build a delimiter-free tokenizer copy")
-            encoder = None
-    if cache is not None:
-        cache[key] = encoder
-    return encoder
-
-
-# A content span is swapped for ``\ue100<index>\ue101`` while the template is
-# rendered a second time; the two renderings are then aligned piece by piece.
-# Content that itself contains either character is treated as a span, so the
-# sentinel cannot be forged from the request.
-_CONTENT_SPAN_SENTINEL_RE = re.compile("\ue100(\\d+)\ue101")
-_CONTENT_SPAN_SENTINEL_CHARS = ("\ue100", "\ue101")
-
-
-def _isolate_marker_spans(
-    messages: list[dict[str, Any]], markers: tuple[str, ...]
-) -> tuple[list[dict[str, Any]], list[str]]:
-    """Replace every content string that contains a delimiter with a sentinel.
-
-    Returns the substituted messages and the original spans, indexed by the
-    number embedded in each sentinel. Content without a delimiter is left as
-    is, so its tokenization is byte-for-byte unchanged.
-
-    Templates that keep list content render adjacent text parts back to back,
-    so a delimiter may only exist in their concatenation (``"<tool_"`` +
-    ``"call>"``). When the joined text of a message's parts contains one,
-    every non-empty text part of that message becomes its own span; spans are
-    tokenized one at a time, so no token can straddle a part boundary.
-    """
-    spans: list[str] = []
-    needles = markers + _CONTENT_SPAN_SENTINEL_CHARS
-
-    def has_needle(text: str) -> bool:
-        return any(n in text for n in needles)
-
-    def substitute(text: str, force: bool = False) -> str:
-        if not text or not (force or has_needle(text)):
-            return text
-        spans.append(text)
-        return f"\ue100{len(spans) - 1}\ue101"
-
-    def is_text_part(item: Any) -> bool:
-        return (
-            isinstance(item, dict)
-            and item.get("type") == "text"
-            and isinstance(item.get("text"), str)
-        )
-
-    out: list[dict[str, Any]] = []
-    for msg in messages:
-        content = msg.get("content")
-        if isinstance(content, str):
-            new_content: Any = substitute(content)
-        elif isinstance(content, list):
-            joined = "".join(item["text"] for item in content if is_text_part(item))
-            force = has_needle(joined)
-            new_content = []
-            for item in content:
-                if is_text_part(item):
-                    item = {**item, "text": substitute(item["text"], force)}
-                new_content.append(item)
-        else:
-            new_content = content
-        out.append(
-            {**msg, "content": new_content} if new_content is not content else msg
-        )
-    return out, spans
-
-
-def _align_spans(
-    rendered: str, skeleton: str, spans: list[str]
-) -> list[tuple[str, bool]] | None:
-    """Split *rendered* into ``(text, is_span)`` pieces using the *skeleton*.
-
-    A span may appear with surrounding whitespace stripped (chat templates
-    commonly ``strip()`` assistant content), so the stripped variants are
-    accepted when the verbatim span does not match. Returns ``None`` when the
-    two renderings cannot be reconciled, including a sentinel whose index is
-    out of range, so the caller can fail closed.
-    """
-    pieces: list[tuple[str, bool]] = []
-    pos = 0
-    for index, part in enumerate(_CONTENT_SPAN_SENTINEL_RE.split(skeleton)):
-        if index % 2 == 0:
-            if part:
-                if not rendered.startswith(part, pos):
-                    return None
-                pieces.append((part, False))
-                pos += len(part)
-            continue
-        span_index = int(part)
-        if span_index >= len(spans):
-            return None
-        span = spans[span_index]
-        for candidate in (span, span.strip(), span.rstrip(), span.lstrip()):
-            if candidate and rendered.startswith(candidate, pos):
-                pieces.append((candidate, True))
-                pos += len(candidate)
-                break
-        else:
-            return None
-    return pieces if pos == len(rendered) else None
-
-
-def encode_chat_prompt_isolating_markers(
-    tokenizer: Any,
-    template_messages: list[dict[str, Any]],
-    template_kwargs: dict[str, Any],
-    tool_call_parser_name: str | None,
-) -> list[int]:
-    """Render and tokenize the chat prompt, keeping delimiters in content as text.
-
-    Content spans that contain a tool-call delimiter are tokenized with the
-    delimiter-free encoder; everything the template itself emits (the tool
-    instructions, prior assistant ``tool_calls``) keeps the delimiter token
-    ids. Prompts whose content has no delimiter tokenize exactly as
-    ``apply_chat_template(tokenize=True)`` does.
-
-    Fails closed: when the parser's delimiters are not single tokens for this
-    tokenizer, when the spans cannot be aligned with the rendered prompt, or
-    when the tokenizer cannot be copied, the request is rejected rather than
-    encoded with the delimiter ids.
-    """
-    strings = tool_call_marker_strings(tool_call_parser_name, tokenizer)
-    marker_ids = tool_call_marker_token_ids(tokenizer, tool_call_parser_name)
-    if strings and not marker_ids:
-        # The parser has delimiters but this tokenizer does not give them
-        # single ids, so neither the output gate nor isolation can tell a
-        # genuine delimiter from a spelled one. Reject rather than pretend.
-        raise PreprocessError(
-            "--isolate-tool-call-markers is enabled but the tool-call delimiters "
-            f"{strings!r} of parser {tool_call_parser_name!r} are not single "
-            "tokens for this tokenizer"
-        )
-    markers: tuple[str, ...] = strings if strings and marker_ids else ()
-    substituted, spans = (
-        _isolate_marker_spans(template_messages, markers) if markers else ([], [])
-    )
-    if not spans:
-        return _normalize_prompt_token_ids(
-            tokenizer.apply_chat_template(template_messages, **template_kwargs)
-        )
-
-    _reject_unsupported_tokenizer_controls(template_kwargs)
-    text_kwargs = {**template_kwargs, "tokenize": False}
-    rendered = tokenizer.apply_chat_template(template_messages, **text_kwargs)
-    skeleton = tokenizer.apply_chat_template(substituted, **text_kwargs)
-    pieces = _align_spans(rendered, skeleton, spans)
-    if pieces is None:
-        logger.warning(
-            "Rejecting request: the chat template rewrote a content span that "
-            "contains a tool-call delimiter, so it cannot be isolated"
-        )
-        raise PreprocessError(
-            "Message content containing tool-call delimiters could not be encoded "
-            "safely for this chat template."
-        )
-    encoder = _marker_free_encoder(tokenizer, markers, set(marker_ids))
-    if encoder is None:
-        logger.error(
-            "Rejecting request: no delimiter-free tokenizer copy is available, so "
-            "tool-call delimiters in message content cannot be isolated"
-        )
-        raise PreprocessError(
-            "Message content containing tool-call delimiters is not supported by "
-            "this tokenizer."
-        )
-
-    prompt_token_ids: list[int] = []
-    for text, is_span in pieces:
-        if is_span:
-            prompt_token_ids.extend(encoder.encode(text, add_special_tokens=False).ids)
-        else:
-            prompt_token_ids.extend(tokenizer.encode(text, add_special_tokens=False))
-    return _truncate_prompt_token_ids(tokenizer, prompt_token_ids, template_kwargs)
-
-
-# apply_chat_template(tokenize=True) forwards these to tokenizer.__call__; the
-# isolated path renders with tokenize=False, so it must apply them itself.
-_UNSUPPORTED_TOKENIZER_CONTROLS = ("padding", "tokenizer_kwargs", "return_tensors")
-
-
-def _reject_unsupported_tokenizer_controls(template_kwargs: dict[str, Any]) -> None:
-    """Fail closed on tokenizer controls that would change the assembled ids."""
-    active = [
-        key
-        for key in _UNSUPPORTED_TOKENIZER_CONTROLS
-        if template_kwargs.get(key) not in (None, False, "do_not_pad", {})
-    ]
-    if active:
-        raise PreprocessError(
-            f"chat_template_kwargs {active!r} are not supported for message content "
-            "that contains tool-call delimiters while --isolate-tool-call-markers "
-            "is enabled"
-        )
-
-
-def _truncate_prompt_token_ids(
-    tokenizer: Any, prompt_token_ids: list[int], template_kwargs: dict[str, Any]
-) -> list[int]:
-    """Apply ``truncation``/``max_length`` as ``tokenizer.__call__`` would."""
-    truncation = template_kwargs.get("truncation")
-    if truncation not in (True, "longest_first", "only_first"):
-        return prompt_token_ids
-    limit = template_kwargs.get("max_length") or getattr(
-        tokenizer, "model_max_length", None
-    )
-    if not limit or len(prompt_token_ids) <= limit:
-        return prompt_token_ids
-    if getattr(tokenizer, "truncation_side", "right") == "left":
-        return prompt_token_ids[-limit:]
-    return prompt_token_ids[:limit]
+_THINKING_OPT_IN = {"deepseek-v3", "deepseek-v4", "deepseek-v41", "gemma4"}
 
 
 def resolve_request_force_reasoning(
@@ -537,6 +151,11 @@ def resolve_request_force_reasoning(
         request.get("chat_template_kwargs") or request.get("chat_template_args") or {}
     )
 
+    if reasoning_parser_name == "hunyuan":
+        # Native Hunyuan serving opens thinking unless explicitly disabled.
+        effort = request.get("reasoning_effort", kwargs.get("reasoning_effort"))
+        return effort not in ("none", "no_think")
+
     if reasoning_parser_name == "minimax-m3":
         return kwargs.get("thinking_mode") != "disabled"
 
@@ -557,7 +176,7 @@ def resolve_request_force_reasoning(
     if reasoning_parser_name in _THINKING_OPT_IN:
         flag_key = (
             "thinking"
-            if reasoning_parser_name in {"deepseek-v3", "deepseek-v4"}
+            if reasoning_parser_name in {"deepseek-v3", "deepseek-v4", "deepseek-v41"}
             else "enable_thinking"
         )
         return kwargs.get(flag_key) is True
@@ -596,17 +215,24 @@ def convert_tools(
     sglang_tools = []
     for tool in tools:
         func = tool.get("function", {})
+        # Retain the chat extension when rebuilding tools for template rendering.
+        # An explicit function-level false takes precedence over the wrapper alias.
+        defer_loading = func.get("defer_loading")
+        if defer_loading is None:
+            defer_loading = tool.get("defer_loading")
         strict = func.get("strict", False)
         if structural_tag_schema is not None:
             strict = effective_tool_strict(func.get("strict"), structural_tag_schema)
         sglang_tools.append(
             SglangTool(
                 type=tool.get("type", "function"),
+                defer_loading=tool.get("defer_loading"),
                 function=SglangFunction(
                     name=func.get("name", ""),
                     description=func.get("description"),
                     parameters=func.get("parameters"),
                     strict=strict,
+                    defer_loading=defer_loading,
                 ),
             )
         )
@@ -772,30 +398,6 @@ def _guided_output_requires_reasoning(
     return guided_decoding is not None and "structural_tag" in guided_decoding
 
 
-def _normalize_deepseek_v4_hint(value: Any) -> str:
-    return str(value or "").lower().replace("-", "").replace("_", "")
-
-
-def _should_use_deepseek_v4_encoding(
-    request: dict[str, Any],
-    *,
-    tokenizer,
-    tool_call_parser_name: str | None,
-    reasoning_parser_name: str | None,
-) -> bool:
-    if getattr(tokenizer, "chat_template", None) is not None:
-        return False
-
-    return any(
-        "deepseekv4" in _normalize_deepseek_v4_hint(value)
-        for value in (
-            request.get("model"),
-            tool_call_parser_name,
-            reasoning_parser_name,
-        )
-    )
-
-
 def _filter_template_tools(
     request: dict[str, Any],
     *,
@@ -811,41 +413,18 @@ def _filter_template_tools(
 
     if _is_named_tool_choice(tool_choice):
         chosen_name = tool_choice["function"]["name"]
-        return [
+        selected = [
             tool.model_dump()
             for tool in sglang_tools
             if tool.function.name == chosen_name
         ]
+        # The forced function renders eagerly, matching the Rust preprocessor.
+        for tool in selected:
+            tool.pop("defer_loading", None)
+            tool["function"].pop("defer_loading", None)
+        return selected
 
     return [tool.model_dump() for tool in sglang_tools]
-
-
-def _flatten_message_content(content: Any) -> Any:
-    """Flatten an OpenAI content-parts array to a plain string for the DSv4 encoder.
-
-    SGLang's DeepSeek-V4 encoder (``encoding_dsv4.encode_messages``) consumes
-    string content; SGLang's own OpenAI server flattens parts-list content before
-    calling it (``serving_chat._process_messages`` runs the ``"string"`` content
-    format over each message). Dynamo invokes ``encode_messages`` directly, so it
-    must do the same flattening or the standard structured form
-    ``[{"type": "text", "text": "..."}]`` crashes the encoder with
-    ``TypeError: sequence item 0: expected str instance, list found``.
-
-    Replicate SGLang's ``"string"``-format behaviour for byte-parity with native
-    SGLang serving: join the text parts with a single space and drop non-text
-    parts (DSv4 is text-only). Non-list content (``str``/``None``) is returned
-    unchanged.
-    """
-    if not isinstance(content, list):
-        return content
-    text_parts = [
-        part["text"]
-        for part in content
-        if isinstance(part, dict)
-        and part.get("type") == "text"
-        and isinstance(part.get("text"), str)
-    ]
-    return " ".join(text_parts)
 
 
 def _with_thinking_template_kwargs(
@@ -873,97 +452,6 @@ def _with_thinking_template_kwargs(
     if chat_template_kwargs:
         request["chat_template_kwargs"] = chat_template_kwargs
     return request
-
-
-def _render_deepseek_v4_prompt_token_ids(
-    request: dict[str, Any],
-    *,
-    messages: list[dict[str, Any]],
-    tokenizer,
-    template_tools: list[dict[str, Any]] | None,
-) -> list[int]:
-    """Render DeepSeek-V4 prompt token ids via SGLang's ``encoding_dsv4``.
-
-    DeepSeek-V4 ships no HF ``chat_template``; SGLang builds the prompt with
-    ``encode_messages`` instead. Flatten each message's content to plain text,
-    re-serialize tool_call ``arguments`` to the JSON string the V4 encoder
-    expects, attach the tool schemas to the system message, then tokenize the
-    rendered prompt.
-    """
-    try:
-        from sglang.srt.entrypoints.openai.encoding_dsv4 import encode_messages
-    except ImportError as exc:
-        raise ValueError(
-            "DeepSeek-V4 preprocessing requires SGLang's "
-            "sglang.srt.entrypoints.openai.encoding_dsv4 encoder. "
-            "Install an SGLang build that includes the DeepSeek-V4 integration."
-        ) from exc
-
-    encoding_messages = copy.deepcopy(messages)
-    for msg in encoding_messages:
-        content = msg.get("content")
-        if content is None:
-            msg["content"] = ""
-        else:
-            msg["content"] = _flatten_message_content(content)
-
-        # encoding_dsv4.encode_arguments_to_dsml expects tool_call.arguments as
-        # the OpenAI-wire JSON *string* (it json.loads() internally).
-        # _normalize_assistant_tool_call_arguments parses arguments to a dict for
-        # Jinja chat templates, but a dict reaching this V4 encoder trips its
-        # json.loads() fallback into a single name="arguments" parameter wrapping
-        # the whole object — which the model then imitates, emitting a spurious
-        # nested {"arguments": {...}} on its next call. SGLang native keeps this
-        # path string-typed (serving_chat.py only dict-parses for the Jinja
-        # branch); mirror that by re-serializing here.
-        for tc in msg.get("tool_calls") or []:
-            if not isinstance(tc, dict):
-                continue
-            fn = tc.get("function")
-            if isinstance(fn, dict) and isinstance(fn.get("arguments"), (dict, list)):
-                fn["arguments"] = json.dumps(fn["arguments"], ensure_ascii=False)
-
-    if template_tools:
-        if not encoding_messages or encoding_messages[0].get("role") != "system":
-            encoding_messages.insert(0, {"role": "system", "content": ""})
-        encoding_messages[0]["tools"] = template_tools
-
-    chat_template_kwargs = dict(
-        request.get("chat_template_kwargs") or request.get("chat_template_args") or {}
-    )
-    thinking_mode = "thinking" if chat_template_kwargs.get("thinking") else "chat"
-    reasoning_effort = (
-        request.get("reasoning_effort")
-        or chat_template_kwargs.get("reasoning_effort")
-        or None
-    )
-    if reasoning_effort not in ("max", "high", None):
-        reasoning_effort = None
-
-    prompt = encode_messages(
-        encoding_messages,
-        thinking_mode=thinking_mode,
-        reasoning_effort=reasoning_effort,
-    )
-    return _normalize_prompt_token_ids(tokenizer.encode(prompt))
-
-
-@lru_cache(maxsize=64)
-def _callable_accepts_kwarg(func: Any, kwarg: str) -> bool:
-    try:
-        signature = inspect.signature(func)
-    except (TypeError, ValueError):
-        return False
-
-    for name, param in signature.parameters.items():
-        if param.kind == inspect.Parameter.VAR_KEYWORD:
-            return True
-        if name == kwarg and param.kind in (
-            inspect.Parameter.POSITIONAL_OR_KEYWORD,
-            inspect.Parameter.KEYWORD_ONLY,
-        ):
-            return True
-    return False
 
 
 def _call_with_optional_parallel_tool_calls(
@@ -998,12 +486,6 @@ def _enforce_function_strict_level(parser: FunctionCallParser) -> None:
     function_level = getattr(type(current_level), "FUNCTION", None)
     if function_level is not None and current_level < function_level:
         parser.tool_strict_level = function_level
-
-
-def _parser_tokenizer_kwargs(parser: Any, tokenizer: Any) -> dict[str, Any]:
-    if tokenizer is not None and _callable_accepts_kwarg(parser, "tokenizer"):
-        return {"tokenizer": tokenizer}
-    return {}
 
 
 def build_tool_call_guided_decoding(
@@ -1192,51 +674,6 @@ def build_response_format_guided_decoding(
     return {"json": schema}
 
 
-def _normalize_prompt_token_ids(prompt_token_ids: Any) -> list[int]:
-    """Flatten ``apply_chat_template`` output to ``list[int]``.
-
-    On transformers v5 the default ``TokenizersBackend`` returns a
-    ``BatchEncoding`` from ``apply_chat_template(..., tokenize=True)``;
-    unwrap to ``.input_ids`` (a flat list for a single conversation).
-    """
-    ids = getattr(prompt_token_ids, "input_ids", prompt_token_ids)
-    if isinstance(ids, dict):
-        ids = ids.get("input_ids", prompt_token_ids)
-    return list(ids)
-
-
-def _normalize_messages_for_template(
-    messages: list[dict[str, Any]], tokenizer: Any
-) -> list[dict[str, Any]]:
-    """Normalize OpenAI media chunks (``image_url``/``video_url``/``audio_url``)
-    to the simple ``image``/``video``/``audio`` types most VLM chat templates
-    branch on. Without this, templates that gate placeholder emission on
-    ``item.type == 'image'`` never fire for raw OpenAI input, and the
-    rendered prompt has no slot for the media bytes that
-    ``extract_mm_urls()`` forwards in parallel. Mirrors the equivalent
-    step in sglang's own OpenAI server and dynamo's Rust default path.
-    """
-    chat_template = getattr(tokenizer, "chat_template", None) or ""
-    content_format = detect_jinja_template_content_format(chat_template)
-    # The media-data side outputs are discarded: dynamo's separate
-    # ``extract_mm_urls()`` channel is the source of truth for the worker.
-    image_sink: list = []
-    video_sink: list = []
-    audio_sink: list = []
-    modality_sink: list = []
-    return [
-        process_content_for_template_format(
-            msg,
-            content_format,
-            image_data=image_sink,
-            video_data=video_sink,
-            audio_data=audio_sink,
-            modalities=modality_sink,
-        )
-        for msg in messages
-    ]
-
-
 def preprocess_chat_request(
     request: dict[str, Any],
     *,
@@ -1249,7 +686,7 @@ def preprocess_chat_request(
     structural_tag_mode: str = "off",
     structural_tag_scope: str = "auto",
     structural_tag_schema: str = "auto",
-    isolate_tool_call_markers: bool = False,
+    prompt_renderer: PromptRenderer | None = None,
 ) -> SglangPreprocessResult:
     """Preprocess a chat request using SGLang tokenizer and parser APIs.
 
@@ -1258,18 +695,27 @@ def preprocess_chat_request(
     the effective per-request value combines it with the configured parser and
     request-level thinking controls.
 
-    ``isolate_tool_call_markers`` tokenizes message content that contains the
-    parser's tool-call delimiters without added-token matching, so the model
-    cannot copy a delimiter token out of its input (see
-    :func:`encode_chat_prompt_isolating_markers`). Requests that take the
-    DeepSeek-V4 encoder path are rejected while it is enabled, because that
-    encoder cannot isolate delimiters yet.
-
     Synchronous -- suitable for both main-process and worker-process execution.
     """
+    resolved_responses_template = None
+    if request.get("responses_native_tools") and not (
+        exclude_tools_when_tool_choice_none and request.get("tool_choice") == "none"
+    ):
+        resolved_responses_template = tokenizer.get_chat_template(
+            chat_template=request.get("chat_template"), tools=request.get("tools")
+        )
+        request = responses_tools_request(request, resolved_responses_template)
     request = _with_thinking_template_kwargs(request, default_thinking_mode)
     legacy_guidance = legacy_guided_decoding(request)
     messages = _materialize_messages(request.get("messages", []))
+    # Materialization copied caller-owned messages. Restore Responses phases by
+    # assistant ordinal, including tool-only messages, before template rendering.
+    recipients = responses_history_recipients(request.get("responses_history_phases"))
+    for index, message in enumerate(
+        m for m in messages if m.get("role") == "assistant"
+    ):
+        if recipient := recipients.get(str(index)):
+            message["recipient"] = recipient
 
     # Generation mode is independent of whether the client wants reasoning
     # separated into reasoning_content or retained in content.
@@ -1317,64 +763,18 @@ def preprocess_chat_request(
         exclude_tools_when_tool_choice_none=exclude_tools_when_tool_choice_none,
     )
 
-    if _should_use_deepseek_v4_encoding(
+    if prompt_renderer is None:
+        prompt_renderer = build_prompt_renderer(
+            tokenizer,
+            tool_call_parser_name=tool_call_parser_name,
+            reasoning_parser_name=reasoning_parser_name,
+        )
+    prompt_token_ids = prompt_renderer.render(
         request,
-        tokenizer=tokenizer,
-        tool_call_parser_name=tool_call_parser_name,
-        reasoning_parser_name=reasoning_parser_name,
-    ):
-        if isolate_tool_call_markers:
-            # The DeepSeek-V4 encoder renders content itself; until it can
-            # isolate delimiters, reject rather than encode them unprotected.
-            raise PreprocessError(
-                "--isolate-tool-call-markers is not supported with the "
-                "DeepSeek-V4 prompt encoder"
-            )
-        prompt_token_ids = _render_deepseek_v4_prompt_token_ids(
-            request,
-            messages=messages,
-            tokenizer=tokenizer,
-            template_tools=template_tools,
-        )
-    else:
-        # Build template kwargs -- single call for rendering + tokenization
-        template_kwargs: dict[str, Any] = {
-            "add_generation_prompt": True,
-            "tokenize": True,
-        }
-        if template_tools:
-            template_kwargs["tools"] = template_tools
-
-        chat_template_kwargs = (
-            request.get("chat_template_kwargs")
-            or request.get("chat_template_args")
-            or {}
-        )
-        if chat_template_kwargs:
-            template_kwargs.update(chat_template_kwargs)
-
-        if (reasoning_effort := request.get("reasoning_effort")) is not None:
-            template_kwargs["reasoning_effort"] = reasoning_effort
-
-        template_messages = _normalize_messages_for_template(messages, tokenizer)
-
-        try:
-            if isolate_tool_call_markers:
-                prompt_token_ids = encode_chat_prompt_isolating_markers(
-                    tokenizer,
-                    template_messages,
-                    template_kwargs,
-                    tool_call_parser_name,
-                )
-            else:
-                rendered = tokenizer.apply_chat_template(
-                    template_messages, **template_kwargs
-                )
-        except (TemplateError, TypeError) as exc:
-            # Jinja filters such as tojson can raise TypeError for invalid inputs.
-            raise PreprocessError(str(exc)) from exc
-        if not isolate_tool_call_markers:
-            prompt_token_ids = _normalize_prompt_token_ids(rendered)
+        messages=messages,
+        template_tools=template_tools,
+        resolved_responses_template=resolved_responses_template,
+    )
 
     response_format_guided_decoding = build_response_format_guided_decoding(request)
     tool_call_guided_decoding = build_tool_call_guided_decoding(
@@ -1646,6 +1046,8 @@ class SglangStreamingPostProcessor:
         self._pending_stop_markers: list[tuple[int, str]] = []
         self._locally_finished = False
         self._local_stop_reason: str | None = None
+        # Decode context, decoded IDs, stop text and hidden stop-token count.
+        self._local_stop_boundary: tuple[list[int], list[int], str, int] | None = None
 
         # Keep a small, known-complete prompt suffix as decode context. Generated
         # tokens are promoted to context only after they decode without a
@@ -1773,6 +1175,25 @@ class SglangStreamingPostProcessor:
         self._decode_context_ids = self._pending_decode_ids
         self._pending_decode_ids = []
         return delta_text
+
+    def _count_tokens_through(
+        self, context_ids: list[int], token_ids: list[int], text: str
+    ) -> int:
+        """Count leading ``token_ids`` whose incremental decode covers ``text``.
+
+        Once a decoded prefix covers ``text``, every longer one does, so bisect
+        instead of decoding every prefix.
+        """
+        context_text = self._decode_ids(context_ids)
+        low, high = 0, len(token_ids)
+        while low < high:
+            count = (low + high) // 2
+            decoded = self._decode_ids(context_ids + token_ids[:count])
+            if decoded[len(context_text) :].startswith(text):
+                high = count
+            else:
+                low = count + 1
+        return low
 
     def _build_openai_logprobs(
         self,
@@ -1916,6 +1337,18 @@ class SglangStreamingPostProcessor:
     def local_stop_reason(self) -> str | None:
         return self._local_stop_reason
 
+    def post_stop_token_count(self) -> int:
+        """Count the latest generated IDs that follow a local stop string.
+
+        The token completing the stop is kept. The count spans IDs withheld by
+        incremental decoding and is computed on demand by re-decoding them.
+        """
+        if self._local_stop_boundary is None:
+            return 0
+        context_ids, decoded_ids, stop_text, hidden_count = self._local_stop_boundary
+        kept = self._count_tokens_through(context_ids, decoded_ids, stop_text)
+        return len(decoded_ids) - kept + hidden_count
+
     @property
     def has_pending_stop_text(self) -> bool:
         return bool(self._pending_stop_text)
@@ -1961,11 +1394,12 @@ class SglangStreamingPostProcessor:
         finish_reason: str | None,
         stop_reason: Any,
         marker: str | None = None,
-    ) -> tuple[str, bool, list[tuple[int | None, str]]]:
+    ) -> tuple[str, int | None, list[tuple[int | None, str]]]:
         """Apply request stop strings to *text*.
 
-        Returns ``(text to emit, locally finished, delimiters)``, where each
-        delimiter is ``(offset in the emitted text, delimiter)`` for a
+        Returns ``(text to emit, stop end, delimiters)``. The stop end is the
+        matched stop string's end in *text* after a local stop, else ``None``.
+        Each delimiter is ``(offset in the emitted text, delimiter)`` for a
         delimiter whose token id the emitted text carries. *marker* is the
         delimiter of the current segment (see :meth:`process_output`); when
         its text is held back as a possible stop-string prefix, the whole
@@ -1973,7 +1407,8 @@ class SglangStreamingPostProcessor:
         parser gate still flips on it. A delimiter whose text cannot be
         located is reported with offset ``None``.
         """
-        held_len = len(self._pending_stop_text)
+        held_text = self._pending_stop_text
+        held_len = len(held_text)
         positions = list(self._pending_stop_markers)
         unlocated: list[tuple[int | None, str]] = []
         if marker is not None:
@@ -1984,7 +1419,7 @@ class SglangStreamingPostProcessor:
                 positions.append((held_len + index, marker))
             else:
                 unlocated.append((None, marker))
-        text = self._pending_stop_text + text
+        text = held_text + text
         self._pending_stop_text = ""
         self._pending_stop_markers = []
 
@@ -2000,13 +1435,14 @@ class SglangStreamingPostProcessor:
                 del self._pending_logprobs_content[-suppressed_count:]
             self._locally_finished = True
             self._local_stop_reason = matched_stop_string
+            stop_end = match_index + len(matched_stop_string) - held_len
             released: list[tuple[int | None, str]] = [
                 (off, m) for off, m in positions if off + len(m) <= retained_end
             ]
-            return text[:retained_end], True, released + unlocated
+            return text[:retained_end], stop_end, released + unlocated
 
         if finish_reason or not text or not self._stop_strings:
-            return text, False, [(off, m) for off, m in positions] + unlocated
+            return text, None, [(off, m) for off, m in positions] + unlocated
 
         pending_len = trailing_stop_prefix_len(text, self._stop_strings)
         if pending_len:
@@ -2020,8 +1456,8 @@ class SglangStreamingPostProcessor:
                 (off - cut, m) for off, m in positions if off >= cut
             ]
             released = [(off, m) for off, m in positions if off < cut]
-            return text[:cut], False, released + unlocated
-        return text, False, [(off, m) for off, m in positions] + unlocated
+            return text[:cut], None, released + unlocated
+        return text, None, [(off, m) for off, m in positions] + unlocated
 
     def _parse_reasoning_delta(
         self, delta_text: str, finish_reason: str | None
@@ -2094,20 +1530,24 @@ class SglangStreamingPostProcessor:
         stop_terminated = engine_response.get(
             "stop_terminated", finish_reason == "stop"
         )
+        generated_ids = token_ids
         if stop_terminated:
-            raw_token_count = len(token_ids)
             token_ids = self._strip_matched_stop_token_ids(list(token_ids), stop_reason)
-            retained_token_count = len(token_ids)
-            if log_probs is not None and len(log_probs) == raw_token_count:
-                log_probs = log_probs[:retained_token_count]
-            if top_logprobs is not None and len(top_logprobs) == raw_token_count:
-                top_logprobs = top_logprobs[:retained_token_count]
+        hidden_ids = generated_ids[len(token_ids) :]
 
         if not self._marker_by_id or not any(
             t in self._marker_by_id for t in token_ids
         ):
             return self._process_segment(
-                token_ids, log_probs, top_logprobs, finish_reason, stop_reason, None
+                token_ids,
+                log_probs,
+                top_logprobs,
+                finish_reason,
+                stop_reason,
+                None,
+                generated_ids=generated_ids,
+                trailing_ids=[],
+                hidden_count=len(hidden_ids),
             )
 
         # Split the batch at delimiter token ids and run each piece through the
@@ -2127,17 +1567,28 @@ class SglangStreamingPostProcessor:
         if run:
             segments.append((run, None))
 
-        sliceable = log_probs is not None and len(log_probs) == len(token_ids)
+        # Logprobs may score the retained ids only, or the hidden stop ids too;
+        # the hidden ids belong to the last segment.
+        scored_count = None
+        if log_probs is not None and len(log_probs) in (
+            len(token_ids),
+            len(generated_ids),
+        ):
+            scored_count = len(log_probs)
         merged: dict[str, Any] | None = None
         offset = 0
         for index, (ids, marker) in enumerate(segments):
             last = index == len(segments) - 1
+            segment_generated = ids + hidden_ids if last else ids
             segment_log_probs = segment_top_logprobs = None
-            if sliceable:
+            if scored_count is not None:
                 assert log_probs is not None
-                segment_log_probs = log_probs[offset : offset + len(ids)]
-                if top_logprobs is not None and len(top_logprobs) == len(token_ids):
-                    segment_top_logprobs = top_logprobs[offset : offset + len(ids)]
+                scored = (
+                    segment_generated if scored_count == len(generated_ids) else ids
+                )
+                segment_log_probs = log_probs[offset : offset + len(scored)]
+                if top_logprobs is not None and len(top_logprobs) == scored_count:
+                    segment_top_logprobs = top_logprobs[offset : offset + len(scored)]
             offset += len(ids)
             choice = self._process_segment(
                 ids,
@@ -2146,6 +1597,9 @@ class SglangStreamingPostProcessor:
                 finish_reason if last else None,
                 stop_reason if last else None,
                 marker,
+                generated_ids=segment_generated,
+                trailing_ids=token_ids[offset:],
+                hidden_count=len(hidden_ids),
             )
             merged = self._merge_choices(merged, choice)
             if self._locally_finished:
@@ -2258,30 +1712,55 @@ class SglangStreamingPostProcessor:
         finish_reason: str | None,
         stop_reason: Any,
         marker: str | None,
+        *,
+        generated_ids: list[int],
+        trailing_ids: list[int],
+        hidden_count: int,
     ) -> dict[str, Any] | None:
         """Run one run of token ids through the stateful text pipeline.
 
         *marker* is the delimiter whose single token id this segment is, or
-        ``None`` for ordinary text; see :meth:`process_output`.
+        ``None`` for ordinary text; see :meth:`process_output`. *generated_ids*
+        is *token_ids* plus, in the batch's last segment, the hidden stop ids
+        that ended the batch. *trailing_ids* are the batch's retained ids after
+        this segment and *hidden_count* its hidden stop ids: a local stop here
+        reports both as following it.
         """
-        delta_text = (
+        context_ids = self._decode_context_ids
+        held_ids = list(self._pending_decode_ids)
+        decoded_text = (
             self._incremental_decode(token_ids, flush=finish_reason is not None)
             if token_ids or finish_reason is not None
             else ""
         )
-        openai_logprobs = None
+        # A hidden stop token is generated output: score it, but do not display it.
+        stop_logprobs: list[dict[str, Any]] = []
         if log_probs is not None:
+            scored_ids = (
+                generated_ids if len(log_probs) == len(generated_ids) else token_ids
+            )
             openai_logprobs = self._build_openai_logprobs(
-                log_probs, top_logprobs, token_ids
+                log_probs, top_logprobs, scored_ids
             )
             if openai_logprobs is not None:
-                self._pending_logprobs_content.extend(openai_logprobs["content"])
+                content = openai_logprobs["content"]
+                self._pending_logprobs_content.extend(content[: len(token_ids)])
+                stop_logprobs = content[len(token_ids) :]
         self._logprob_context_ids = (self._logprob_context_ids + token_ids)[-4:]
-        delta_text, locally_finished, positions = self._filter_stop_string_delta(
-            delta_text, finish_reason, stop_reason, marker
+        delta_text, stop_end, positions = self._filter_stop_string_delta(
+            decoded_text, finish_reason, stop_reason, marker
         )
-        if locally_finished:
+        if stop_end is None:
+            # Queued after stop-string suppression, which matches display text.
+            self._pending_logprobs_content.extend(stop_logprobs)
+        else:
             finish_reason = "stop"
+            self._local_stop_boundary = (
+                context_ids,
+                held_ids + token_ids + trailing_ids,
+                decoded_text[:stop_end],
+                hidden_count,
+            )
 
         # Text released from the stop-string buffer can hold a delimiter
         # together with text that came before or after it; route each part

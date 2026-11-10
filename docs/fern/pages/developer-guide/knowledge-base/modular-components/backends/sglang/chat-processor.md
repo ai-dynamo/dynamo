@@ -37,6 +37,14 @@ CUDA_VISIBLE_DEVICES=0 python -m dynamo.sglang \
   --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}'
 ```
 
+## DeepSeek Prompt Encoding
+
+For DeepSeek V4 and V4.1 checkpoints identified by checkpoint metadata, the processor prefers SGLang's recipe renderer when that module is available, including when the tokenizer has a chat template. An explicit `--chat-template` override takes precedence over checkpoint encoding. This path requires the checkpoint's fast tokenizer and the `deepseek-recipe` package supplied by the SGLang installation. SGLang v0.5.22 keeps the existing V4 encoder path. V4.1 checkpoints without a chat template require the recipe renderer available in SGLang v0.5.23 or newer; they cannot fall back to the V4 encoder.
+
+Recipe encoding rejects `continue_final_message=true` combined with thinking because the current output parser does not track the continued prompt's reasoning state. Continuation with thinking disabled remains supported.
+
+Dynamo continues to own sampling settings, constrained decoding, and output parsing. Image URLs must match the recipe's placeholder order; requests with a different order or UUID-only images are rejected before inference.
+
 ## Frontend Arguments
 
 These arguments are passed to the **frontend** (not the worker) when using `--dyn-chat-processor sglang`:
@@ -119,7 +127,7 @@ Most tool-call formats open and close a call with a delimiter that the tokenizer
 The processor uses the token ids to keep the two apart:
 
 - The tool-call parser is opened only by the opening delimiter's token id and closed by the closing id. Delimiter text the model spells out of ordinary sub-words is returned as `content`, never parsed as a call. A call is held from its opening id to its closing id and parsed whole, so a spelled-out delimiter inside the call cannot end it early or start a second call: a call that contains one is returned as `content`. This is always on when both delimiters of the configured parser are single tokens of the served model's tokenizer (Hunyuan's suffixed delimiters are resolved from that tokenizer, as the parser does).
-- With `--isolate-tool-call-markers`, message content that contains a delimiter is tokenized without added-token matching, so the model sees `<`, `tool`, `_call`, `>` and has no single token to copy back. Delimiters the chat template itself emits (the tool instructions, earlier assistant `tool_calls`) keep their ids, and content without a delimiter tokenizes exactly as before. A request is rejected instead of being encoded with the delimiter ids when the template rewrites delimiter-bearing content in a way the processor cannot align, or when the parser's delimiters are not single tokens for the tokenizer (the gate above cannot work either). The option changes what the model sees for such content; evaluate it against your model before enabling it in production.
+- With `--isolate-tool-call-markers`, message content that contains a delimiter is tokenized without added-token matching, so the model sees `<`, `tool`, `_call`, `>` and has no single token to copy back. Delimiters the chat template itself emits (the tool instructions, earlier assistant `tool_calls`) keep their ids, and content without a delimiter tokenizes exactly as before. A request is rejected instead of being encoded with the delimiter ids when the template rewrites delimiter-bearing content in a way the processor cannot align, when the parser's delimiters are not single tokens for the tokenizer (the gate above cannot work either), or when its `chat_template_kwargs` enable `padding`, pass a non-empty `tokenizer_kwargs`, or request `return_tensors`: the isolated path assembles the token ids itself and cannot apply those controls (`truncation` and `max_length` are honored). Requests without a delimiter in their content are not affected by any of this. The DeepSeek-V4 prompt encoder does not support the option; while it is on, every request on that encoder path is rejected. The option changes what the model sees for such content; evaluate it against your model before enabling it in production.
 
 ## Reasoning Parsing
 

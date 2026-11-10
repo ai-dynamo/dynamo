@@ -25,9 +25,14 @@ from sglang.srt.utils.hf_transformers_utils import get_tokenizer
 
 from dynamo.frontend.sglang_prepost import (
     SglangStreamingPostProcessor,
-    _marker_free_encoder,
-    encode_chat_prompt_isolating_markers,
     preprocess_chat_request,
+)
+from dynamo.frontend.sglang_prompt_renderer import (
+    build_prompt_renderer,
+    encode_chat_prompt_isolating_markers,
+)
+from dynamo.frontend.sglang_tool_call_markers import (
+    _marker_free_encoder,
     tool_call_marker_strings,
     tool_call_marker_token_ids,
 )
@@ -110,6 +115,15 @@ def _rendered(tokenizer, messages):
     )
 
 
+def _renderer(tokenizer, *, isolate, parser=PARSER, reasoning="qwen3"):
+    return build_prompt_renderer(
+        tokenizer,
+        tool_call_parser_name=parser,
+        reasoning_parser_name=reasoning,
+        isolate_tool_call_markers=isolate,
+    )
+
+
 def _prompt_ids(tokenizer, messages, *, isolate=True, tools=TOOLS_JSON, parser=PARSER):
     request = {"model": "qwen", "messages": messages}
     if tools:
@@ -119,7 +133,7 @@ def _prompt_ids(tokenizer, messages, *, isolate=True, tools=TOOLS_JSON, parser=P
         tokenizer=tokenizer,
         tool_call_parser_name=parser,
         reasoning_parser_name="qwen3",
-        isolate_tool_call_markers=isolate,
+        prompt_renderer=_renderer(tokenizer, isolate=isolate, parser=parser),
     ).prompt_token_ids
 
 
@@ -454,6 +468,41 @@ class TestOutputGate:  # FRONTEND.4
         assert len(_tool_calls(choices)) == 1
         assert _content(choices) == "xy"
 
+    @pytest.mark.parametrize("hidden_stop_id", [False, True])
+    def test_post_stop_count_spans_later_segments(
+        self, tokenizer, markers, hidden_stop_id
+    ):
+        # A stop string in an earlier segment: every id after the token that
+        # completes it counts, including later segments and a hidden stop id.
+        post = SglangStreamingPostProcessor(
+            tokenizer=tokenizer,
+            tool_call_parser=FunctionCallParser(tools=TOOLS, tool_call_parser=PARSER),
+            reasoning_parser=None,
+            sglang_tools=TOOLS,
+            tool_call_parser_name=PARSER,
+            stop_strings={"STOP"},
+            eos_token_ids=[tokenizer.eos_token_id],
+        )
+        opening = next(i for i, m in markers.items() if m == "<tool_call>")
+        head = tokenizer.encode("hello STOP tail", add_special_tokens=False)
+        ids = head + [opening] + tokenizer.encode('{"name"', add_special_tokens=False)
+        kept = next(
+            n for n in range(1, len(head) + 1) if "STOP" in tokenizer.decode(head[:n])
+        )
+        response: dict = {"token_ids": list(ids), "finish_reason": None}
+        if hidden_stop_id:
+            response["token_ids"].append(tokenizer.eos_token_id)
+            response.update(
+                finish_reason="stop",
+                stop_terminated=True,
+                stop_reason=tokenizer.eos_token_id,
+            )
+        choice = post.process_output(response)
+        assert choice["delta"]["content"] == "hello "
+        assert choice["finish_reason"] == "stop"
+        assert post.locally_finished
+        assert post.post_stop_token_count() == len(ids) - kept + int(hidden_stop_id)
+
 
 class TestInputIsolation:  # FRONTEND.1
     def test_off_by_default_keeps_delimiter_ids(self, tokenizer, markers):
@@ -538,7 +587,7 @@ class TestInputIsolation:  # FRONTEND.1
             tokenizer=tokenizer,
             tool_call_parser_name=PARSER,
             reasoning_parser_name="qwen3",
-            isolate_tool_call_markers=isolate,
+            prompt_renderer=_renderer(tokenizer, isolate=isolate),
         ).prompt_token_ids
 
     @pytest.mark.parametrize("truncation", [True, "longest_first"])
@@ -703,11 +752,17 @@ class TestInputIsolation:  # FRONTEND.1
             "model": "deepseek-ai/DeepSeek-V4-Pro",
             "messages": [{"role": "user", "content": "hello"}],
         }
+        tokenizer = NoTemplateTokenizer()
         with pytest.raises(PreprocessError, match="DeepSeek-V4"):
             preprocess_chat_request(
                 request,
-                tokenizer=NoTemplateTokenizer(),
+                tokenizer=tokenizer,
                 tool_call_parser_name="deepseekv4",
                 reasoning_parser_name="deepseek-v4",
-                isolate_tool_call_markers=True,
+                prompt_renderer=_renderer(
+                    tokenizer,
+                    isolate=True,
+                    parser="deepseekv4",
+                    reasoning="deepseek-v4",
+                ),
             )
