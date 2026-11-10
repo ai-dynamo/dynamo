@@ -998,6 +998,111 @@ mod tests {
         }
     }
 
+    /// A Stop arriving between select polls must not become an EOF-triggered Kill.
+    #[tokio::test]
+    async fn test_peer_eof_preserves_stop_between_select_polls() {
+        #[derive(Debug)]
+        struct StopDuringPoll {
+            controller: Arc<Controller>,
+            reader_exit: Mutex<Option<oneshot::Sender<Option<IntCounter>>>>,
+            counter: IntCounter,
+        }
+
+        #[async_trait::async_trait]
+        impl AsyncEngineContext for StopDuringPoll {
+            fn id(&self) -> &str {
+                self.controller.id()
+            }
+
+            fn is_stopped(&self) -> bool {
+                self.controller.is_stopped()
+            }
+
+            fn is_killed(&self) -> bool {
+                self.controller.is_killed()
+            }
+
+            async fn stopped(&self) {
+                use std::future::Future;
+
+                let stopped = self.controller.stopped();
+                tokio::pin!(stopped);
+                futures::future::poll_fn(|cx| {
+                    let result = stopped.as_mut().poll(cx);
+                    if result.is_pending()
+                        && let Some(reader_exit) = self.reader_exit.lock().unwrap().take()
+                    {
+                        // Return the observed Pending even though Stop and EOF are now ready.
+                        self.controller.stop();
+                        reader_exit.send(Some(self.counter.clone())).unwrap();
+                    }
+                    result
+                })
+                .await;
+            }
+
+            async fn killed(&self) {
+                self.controller.killed().await;
+            }
+
+            fn stop_generating(&self) {
+                self.controller.stop_generating();
+            }
+
+            fn stop(&self) {
+                self.controller.stop();
+            }
+
+            fn kill(&self) {
+                self.controller.kill();
+            }
+
+            fn link_child(&self, child: Arc<dyn AsyncEngineContext>) {
+                self.controller.link_child(child);
+            }
+        }
+
+        let WriterHarness {
+            mut server,
+            framed_writer,
+            bytes_tx,
+            bytes_rx,
+            alive_tx,
+            alive_rx,
+            controller,
+        } = writer_harness().await;
+        let counter = IntCounter::new("tcp_stop_eof_race", "EOF regression").unwrap();
+        let context = Arc::new(StopDuringPoll {
+            controller: controller.clone(),
+            reader_exit: Mutex::new(Some(alive_tx)),
+            counter: counter.clone(),
+        });
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            drop(
+                handle_writer(framed_writer, bytes_rx, alive_rx, context.clone())
+                    .await
+                    .unwrap(),
+            );
+            assert_eq!(server.read(&mut [0]).await.unwrap(), 0);
+        })
+        .await
+        .expect("Stop racing with EOF must wake an idle writer");
+
+        assert!(context.reader_exit.lock().unwrap().is_none());
+        assert!(controller.is_stopped());
+        assert!(
+            !controller.is_killed(),
+            "EOF must preserve the existing Stop"
+        );
+        assert_eq!(
+            counter.get(),
+            0,
+            "EOF must not count an existing Stop again"
+        );
+        assert!(bytes_tx.is_closed());
+    }
+
     /// Test that handle_writer forwards messages from the channel to the framed writer
     #[tokio::test]
     async fn test_handle_writer_forwards_messages() {
