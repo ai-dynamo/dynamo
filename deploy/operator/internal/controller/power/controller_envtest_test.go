@@ -302,3 +302,43 @@ func TestReconcileRestoresConditionWithStaleCache(t *testing.T) {
 		require.Equal(t, "Ready", meta.FindStatusCondition(dgd.Status.Conditions, "Ready").Reason)
 	}
 }
+
+func TestReconcileRemovesConditionWithStaleCache(t *testing.T) {
+	t.Log("Store an uncapped graph and keep a cached view that misses the power condition written next")
+	env := sharedEnv.ForTest(t)
+	c := env.Client()
+	dgd := testDGD(env.Namespace(), "component")
+	dgd.UID, dgd.Generation = "", 0
+	delete(dgd.Spec.Components[0].PodTemplate.Annotations, consts.KubeAnnotationGPUPowerLimit)
+	require.NoError(t, c.Create(t.Context(), dgd))
+	cached := dgd.DeepCopy()
+	key := client.ObjectKeyFromObject(dgd)
+	applied := metav1.Condition{Type: ConditionType, Status: metav1.ConditionTrue, Reason: "PodAnnotationsMatch", Message: "All live worker Pod annotations match", ObservedGeneration: dgd.Generation}
+	require.NoError(t, applyCondition(t.Context(), c, dgd, &applied))
+	require.NoError(t, c.Get(t.Context(), key, dgd))
+	meta.SetStatusCondition(&dgd.Status.Conditions, metav1.Condition{Type: "Ready", Status: metav1.ConditionTrue, Reason: "Ready"})
+	require.NoError(t, c.Status().Update(t.Context(), dgd))
+	watchClient, err := client.NewWithWatch(env.RESTConfig(), client.Options{Scheme: c.Scheme()})
+	require.NoError(t, err)
+	r := &reconciler{client: interceptor.NewClient(watchClient, interceptor.Funcs{Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+		if graph, ok := obj.(*v1beta1.DynamoGraphDeployment); ok {
+			*graph = *cached.DeepCopy()
+			return nil
+		}
+		return c.Get(ctx, key, obj, opts...)
+	}})}
+
+	t.Log("A reconcile against the stale cache still removes the persisted condition and keeps other status")
+	_, err = r.Reconcile(t.Context(), ctrl.Request{NamespacedName: key})
+	require.NoError(t, err)
+	require.NoError(t, c.Get(t.Context(), key, dgd))
+	require.Nil(t, meta.FindStatusCondition(dgd.Status.Conditions, ConditionType))
+	require.Equal(t, "Ready", meta.FindStatusCondition(dgd.Status.Conditions, "Ready").Reason)
+
+	t.Log("Repeating the removal on a DGD with status writes nothing")
+	resourceVersion := dgd.ResourceVersion
+	_, err = r.Reconcile(t.Context(), ctrl.Request{NamespacedName: key})
+	require.NoError(t, err)
+	require.NoError(t, c.Get(t.Context(), key, dgd))
+	require.Equal(t, resourceVersion, dgd.ResourceVersion)
+}

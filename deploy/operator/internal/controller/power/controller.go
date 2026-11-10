@@ -22,7 +22,6 @@ import (
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -62,12 +61,11 @@ func (r *reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, nil
 	}
 
-	// A graph without supported explicit caps carries no condition.
+	// A graph without supported explicit caps carries no condition. Apply the removal even when the
+	// cached DGD shows none: the cache can miss this controller's last write. Once the DGD has status,
+	// an unchanged removal writes nothing.
 	caps := dynamo.DesiredWorkerPowerCaps(dgd)
 	if len(caps) == 0 {
-		if meta.FindStatusCondition(dgd.Status.Conditions, ConditionType) == nil {
-			return ctrl.Result{}, nil
-		}
 		return ctrl.Result{}, applyCondition(ctx, r.client, dgd, nil)
 	}
 

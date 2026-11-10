@@ -6,13 +6,47 @@ package power
 import (
 	"testing"
 
+	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 )
+
+func TestDGDPredicateIgnoresStatusOutput(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		change func(*v1beta1.DynamoGraphDeployment)
+		want   bool
+	}{
+		{name: "spec edit", change: func(dgd *v1beta1.DynamoGraphDeployment) { dgd.Generation++ }, want: true},
+		{name: "annotation edit", change: func(dgd *v1beta1.DynamoGraphDeployment) {
+			dgd.Annotations = map[string]string{consts.KubeAnnotationWorkloadProvider: "grove"}
+		}, want: true},
+		{name: "power condition written", change: func(dgd *v1beta1.DynamoGraphDeployment) {
+			meta.SetStatusCondition(&dgd.Status.Conditions, metav1.Condition{Type: ConditionType, Status: metav1.ConditionFalse, Reason: "PodPatchFailed"})
+		}},
+		{name: "power condition removed", change: func(dgd *v1beta1.DynamoGraphDeployment) {
+			meta.RemoveStatusCondition(&dgd.Status.Conditions, ConditionType)
+		}},
+		{name: "other status written", change: func(dgd *v1beta1.DynamoGraphDeployment) { dgd.Status.State = v1beta1.DGDStateSuccessful }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Log("Change one field of a DGD that carries the power condition; every write bumps resourceVersion")
+			before := &v1beta1.DynamoGraphDeployment{Name: "graph", Namespace: "default", Generation: 2, ResourceVersion: "10"}
+			meta.SetStatusCondition(&before.Status.Conditions, metav1.Condition{Type: ConditionType, Status: metav1.ConditionTrue, Reason: "PodAnnotationsMatch"})
+			after := before.DeepCopy()
+			tc.change(after)
+			after.ResourceVersion = "11"
+
+			t.Log("Desired-input changes wake the controller; its own status output never does")
+			require.Equal(t, tc.want, dgdPredicate().Update(event.UpdateEvent{ObjectOld: before, ObjectNew: after}))
+		})
+	}
+}
 
 func TestPodCliqueSetPredicateAdmitsStatusOnlyBarrierChanges(t *testing.T) {
 	for _, tc := range []struct {

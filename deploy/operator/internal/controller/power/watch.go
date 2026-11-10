@@ -37,10 +37,7 @@ func Setup(mgr ctrl.Manager, config *configv1alpha1.OperatorConfiguration, runti
 	// No timed retry covers waiting, so every input that can change the outcome wakes the DGD.
 	b := ctrl.NewControllerManagedBy(mgr).
 		Named("dynamographdeployment-power").
-		For(&v1beta1.DynamoGraphDeployment{}, builder.WithPredicates(predicate.Or(
-			predicate.GenerationChangedPredicate{},
-			predicate.AnnotationChangedPredicate{},
-		))).
+		For(&v1beta1.DynamoGraphDeployment{}, builder.WithPredicates(dgdPredicate())).
 		WithEventFilter(commoncontroller.EphemeralDeploymentEventFilter(config, runtimeConfig)).
 		Watches(&corev1.Pod{}, podcontroller.EnqueueOwners(podcontroller.DGDName), builder.WithPredicates(podPredicate()))
 	if r.groveEnabled {
@@ -50,6 +47,12 @@ func Setup(mgr ctrl.Manager, config *configv1alpha1.OperatorConfiguration, runti
 		}), builder.WithPredicates(podCliqueSetPredicate()))
 	}
 	return b.Complete(r)
+}
+
+// dgdPredicate admits DGD changes to desired inputs. A status-only update, including this
+// controller's own condition, never wakes it.
+func dgdPredicate() predicate.Predicate {
+	return predicate.Or(predicate.GenerationChangedPredicate{}, predicate.AnnotationChangedPredicate{})
 }
 
 // podPredicate admits Pod changes that can change label membership, the cap or terminality.

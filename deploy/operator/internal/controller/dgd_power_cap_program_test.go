@@ -135,20 +135,26 @@ func TestPowerCapComponentRestartAppliesToRetainedWorkers(t *testing.T) {
 			require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(dcd), dcd))
 			stamp := dcd.Spec.PodTemplate.Annotations[consts.RestartAnnotation]
 
-			t.Log("Edit only the cap, with a new restart in the restart-with-cap-edit scenario")
+			t.Log("Store an edit of only the cap, with a new restart in the restart-with-cap-edit scenario")
+			key := client.ObjectKeyFromObject(dgd)
+			require.NoError(t, c.Get(t.Context(), key, dgd))
 			dgd.Spec.Components[0].PodTemplate.Annotations[consts.KubeAnnotationGPUPowerLimit] = "350"
 			if scenario == "restart-with-cap-edit" {
 				dgd.Spec.Restart = &v1beta1.Restart{ID: "restart-1"}
 			}
+			require.NoError(t, c.Update(t.Context(), dgd))
 
-			t.Log("Reconcile through convergence, persisting status between passes")
+			t.Log("Reconcile through convergence, persisting the returned status and reloading the DGD between passes")
 			for range 3 {
+				require.NoError(t, c.Get(t.Context(), key, dgd))
 				result, err := root.newComponentProgram().Reconcile(t.Context(), workloadProgramRequest{DGD: dgd})
 				require.NoError(t, err)
 				dgd.Status = result.Status
+				require.NoError(t, c.Status().Update(t.Context(), dgd))
 				require.False(t, rollingUpdateInProgress(dgd.Status.RollingUpdate))
 				require.NotEqual(t, v1beta1.RestartPhaseSuperseded, dgd.Status.Restart.Phase)
 			}
+			require.NoError(t, c.Get(t.Context(), key, dgd))
 
 			t.Log("The retained worker keeps its identity, creation cap and restart stamp, and the restart completes")
 			require.Equal(t, hash, dgd.Annotations[consts.AnnotationCurrentWorkerHashV2])

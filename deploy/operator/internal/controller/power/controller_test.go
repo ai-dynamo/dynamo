@@ -375,10 +375,14 @@ func TestReconcileSkipsUnobservableGraphs(t *testing.T) {
 			require.NoError(t, err)
 			require.Zero(t, result.RequeueAfter)
 
-			t.Log("No Pod is read or patched and no condition is applied, not even an empty one")
+			t.Log("No Pod is read or patched; only a graph out of scope applies the cache-tolerant removal")
 			require.Zero(t, podReads)
 			require.Zero(t, podPatches)
-			require.Zero(t, statusApplies)
+			wantApplies := 0
+			if scenario == "no-caps" {
+				wantApplies = 1
+			}
+			require.Equal(t, wantApplies, statusApplies)
 			require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(pod), pod))
 			require.Equal(t, "300", pod.Annotations[consts.KubeAnnotationGPUPowerLimit])
 			require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(dgd), dgd))
