@@ -3810,17 +3810,10 @@ async fn chat_completions(
         })?;
     drop(nvtx_lookup);
 
-    // Beam route, before generic validation (which rejects what these normalize): a
-    // `strict` tool whose schema is outside OpenAI's strict subset is served as
-    // non-strict instead of rejected, and a legacy `builtin_tools` declaration is
-    // promoted into `tools` (see `tool_choice::relax_noncompliant_strict_tools_for_beam`
-    // and `tool_choice::declare_legacy_builtin_tools_for_beam`).
+    // Beam route, before generic validation (which rejects what this normalizes): a
+    // legacy `builtin_tools` declaration is promoted into `tools` (see
+    // `tool_choice::declare_legacy_builtin_tools_for_beam`).
     crate::preprocessor::tool_choice::declare_legacy_builtin_tools_for_beam(
-        &mut request,
-        parsing_options.tool_call_parser.as_deref(),
-        parsing_options.reasoning_parser.as_deref(),
-    );
-    crate::preprocessor::tool_choice::relax_noncompliant_strict_tools_for_beam(
         &mut request,
         parsing_options.tool_call_parser.as_deref(),
         parsing_options.reasoning_parser.as_deref(),
@@ -4603,6 +4596,16 @@ async fn responses(
     let mut request = context.map(|mut _req| chat_request);
     if response_params.max_output_tokens.is_none() {
         request.insert(PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY, true);
+    }
+    // Clients get public tool names and namespaces, not backend aliases;
+    // request traces record them. Skip the map clone when traces are off.
+    if crate::request_trace::policy().emit_request_end_records()
+        && let Some(tool_names) = response_params.tool_names.clone()
+    {
+        request.insert(
+            crate::request_trace::CLIENT_TOOL_NAMES_CONTEXT_KEY,
+            crate::request_trace::ClientToolNames(std::sync::Arc::new(tool_names)),
+        );
     }
 
     tracing::trace!("Getting chat completions engine for model: {}", model);
@@ -6867,6 +6870,18 @@ mod tests {
         let muse_tool_parser_only = ParsingOptions::new(Some("muse_glimmer".into()), None);
         assert!(request_stream_can_defer_all_output(
             &muse_tool_parser_only,
+            Some(&chat_template_args)
+        ));
+
+        // `reasoning_effort: "none"` reaches here as `thinking_mode: "disabled"`;
+        // M3 may still run its parser, so the fallback stays on.
+        let minimax_m3 = ParsingOptions::new(None, Some("minimax_m3".into()));
+        chat_template_args.insert(
+            "thinking_mode".to_string(),
+            serde_json::Value::String("disabled".to_string()),
+        );
+        assert!(request_stream_can_defer_all_output(
+            &minimax_m3,
             Some(&chat_template_args)
         ));
     }
