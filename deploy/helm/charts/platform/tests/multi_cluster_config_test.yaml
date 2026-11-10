@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: multi-cluster operator configuration
+templates:
+  - charts/dynamo-operator/templates/operator-config.yaml
+tests:
+  - it: exports nothing by default
+    asserts:
+      - notMatchRegex:
+          path: data["config.yaml"]
+          pattern: "multiCluster:"
+
+  - it: passes the MCS implementation to the operator
+    set:
+      dynamo-operator.dynamo.multiCluster.mcsImplementation: karmada
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'multiCluster:\n\s+mcsImplementation: "karmada"'

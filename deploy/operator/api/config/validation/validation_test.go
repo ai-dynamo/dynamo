@@ -86,6 +86,29 @@ func TestValidateOperatorConfiguration_InvalidDiscoveryBackend(t *testing.T) {
 	}
 }
 
+func TestValidateOperatorConfiguration_MCSImplementation(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		implementation configv1alpha1.MCSImplementation
+		wantErrors     int
+	}{
+		{name: "none", implementation: configv1alpha1.MCSImplementationNone},
+		{name: "standard MCS", implementation: configv1alpha1.MCSImplementationStandard},
+		{name: "Karmada", implementation: configv1alpha1.MCSImplementationKarmada},
+		{name: "unknown", implementation: "gke", wantErrors: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Log("Validate a configuration that exports Global Router pools through this implementation")
+			cfg := validConfig()
+			cfg.MultiCluster.MCSImplementation = tc.implementation
+			errs := ValidateOperatorConfiguration(cfg)
+			if len(errs) != tc.wantErrors {
+				t.Errorf("expected %d errors, got %d: %v", tc.wantErrors, len(errs), errs)
+			}
+		})
+	}
+}
+
 func TestValidateOperatorConfiguration_ClusterWideMissingPlannerRole(t *testing.T) {
 	cfg := validConfig()
 	cfg.RBAC.PlannerClusterRoleName = ""
