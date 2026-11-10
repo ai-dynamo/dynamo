@@ -308,6 +308,7 @@ class TokenspeedLLMEngine(LLMEngine):
                 accepted.set_result(result)
 
         def wait() -> None:
+            result: tuple[Any, BaseException | None]
             try:
                 result = (pending.wait(), None)
             except BaseException as error:  # noqa: BLE001 - re-raised on the loop

@@ -9,6 +9,7 @@ import ipaddress
 import os
 import secrets
 import socket
+from collections.abc import Mapping
 from typing import Any
 
 from dynamo.common.constants import DisaggregationMode
@@ -85,7 +86,7 @@ def runtime_disaggregated_endpoint(server_args: Any) -> tuple[str, int]:
 
 
 def bootstrap_kwargs(
-    request: dict[str, Any],
+    request: Mapping[str, Any],
     mode: DisaggregationMode,
     prefill_endpoint: tuple[str, int] | None = None,
     dp_rank: int | None = None,
