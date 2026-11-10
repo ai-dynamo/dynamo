@@ -32,6 +32,8 @@ from functools import lru_cache
 from types import ModuleType
 from typing import Any
 
+from sglang.srt.runtime_context import get_platform as sglang_get_platform
+
 from dynamo.llm.exceptions import InvalidArgument
 
 try:
@@ -76,13 +78,6 @@ except ImportError:
     # The separately pinned XPU SGLang 0.5.11 predates the DSA rename.
     # Remove when the XPU pin is upgraded to 0.5.19+.
     sglang_is_dsa_model = None
-
-try:
-    from sglang.srt.runtime_context import get_platform as sglang_get_platform
-except ImportError:
-    # Older XPU builds lack runtime-context platform facts and DSA DCP.
-    # Remove when the XPU pin includes the runtime-context API.
-    sglang_get_platform = None
 
 try:
     from sglang.srt.runtime_context import publish as _sglang_publish
@@ -160,10 +155,9 @@ def sglang_default_mla_attention_backend(server_args: Any) -> str | None:
                 "KimiK31ForConditionalGeneration",
             )
         ):
-            # Kimi-K3/K3.1 resolve separate prefill/decode backends for DCP. The
-            # platform default (fa3 on Hopper) is not its decode backend.
-            # Defer to the engine's resolved configuration instead of guessing
-            # or running SGLang's kernel capability checks during CLI parsing.
+            # K3 uses split MLA prefill/decode backends; K3.1 uses DSA kernels
+            # resolved by SGLang. Defer to the engine rather than applying the
+            # generic MLA platform default.
             return None
         # SGLang's DeepSeek-family override picks dsa for DSA models before
         # it falls back to the platform default.
@@ -186,8 +180,8 @@ _SGLANG_DSA_SHARDED_DCP_MODULE = "sglang.srt.layers.attention.dsa.dsa_dcp_sharde
 
 @lru_cache(maxsize=2)
 def _sglang_has_dsa_dcp_module(module_name: str) -> bool:
-    # Fallback for SGLang 0.5.21. Remove when the oldest supported build
-    # includes DSA DCP (upstream 0.5.22+).
+    # The SGLang 0.5.19 XPU pin predates DSA DCP. Remove this probe when
+    # every supported build includes the DSA DCP implementation.
     try:
         return importlib.util.find_spec(module_name) is not None
     except (ImportError, ValueError):
@@ -218,10 +212,7 @@ def sglang_dsa_supports_decode_context_parallel(server_args: Any) -> bool | None
     if not sharded:
         if "flashmla_kv" in (prefill, decode):
             return False
-        if sglang_get_platform is None or sglang_get_platform().device_sm not in (
-            100,
-            103,
-        ):
+        if sglang_get_platform().device_sm not in (100, 103):
             return False
     # K3.1's native validator owns its model-specific platform constraints.
     if prefill is None or decode is None:
