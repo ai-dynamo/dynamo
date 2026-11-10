@@ -10,8 +10,7 @@ use serde::de::DeserializeOwned;
 use thiserror::Error;
 
 use super::hint_policy::{
-    HintDefault, HintHost, HintPolicyFactory, HintPolicyProvider, HintPolicyRegistry,
-    HintPolicyRegistryError,
+    HintHost, HintPolicyFactory, HintPolicyProvider, HintPolicyRegistry, HintPolicyRegistryError,
 };
 use super::request_classifier::RequestClassifierRegistry;
 use super::request_classifier::{
@@ -169,13 +168,13 @@ impl RouterPluginRegistry {
     }
 
     /// Register a hint-policy type, a peer of worker-selection and request-classifier plugins,
-    /// with its hosts: the plugins it runs under, and whether each runs it by default.
+    /// with its hosts: the worker-selection plugins it runs under by default.
     ///
-    /// A role may list the hint in its `worker_selection` entry's `hints` only when one of its
-    /// hosts matches the role's worker-selection type. A role whose entry lists no `hints` runs the
-    /// hints registered [`HintDefault::On`] for its type. A host that names one type overrides
-    /// [`HintHost::AnyWorkerSelection`] for that type. Hosts must be distinct, and
-    /// [`Self::resolve_plugins`] rejects one that no linked plugin registers.
+    /// Any role may list the hint in its `worker_selection` entry's `hints`. A role whose entry
+    /// lists no `hints` runs the hints whose hosts include its worker-selection type, directly or
+    /// through [`HintHost::AnyWorkerSelection`]. A hint with no hosts runs only where a role lists
+    /// it. Hosts must be distinct, and [`Self::resolve_plugins`] rejects one that no linked plugin
+    /// registers.
     ///
     /// Default hints are passive: the router starts no resources for what they read, and a non-KV
     /// routing mode skips them instead of failing, so they act only where the role's own
@@ -184,7 +183,7 @@ impl RouterPluginRegistry {
         &mut self,
         name: impl Into<String>,
         provider: HintPolicyProvider,
-        hosts: impl IntoIterator<Item = (HintHost, HintDefault)>,
+        hosts: impl IntoIterator<Item = HintHost>,
     ) -> Result<(), HintPolicyRegistryError> {
         self.hint_policies.register(name, provider, hosts)
     }

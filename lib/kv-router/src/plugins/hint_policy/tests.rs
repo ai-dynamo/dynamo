@@ -226,14 +226,14 @@ fn config_rejects_invalid_hints() {
 
 // ---- Registry ---------------------------------------------------------------------------------
 
-const ANY_ON: [(HintHost, HintDefault); 1] = [(HintHost::AnyWorkerSelection, HintDefault::On)];
-const ANY_OFF: [(HintHost, HintDefault); 1] = [(HintHost::AnyWorkerSelection, HintDefault::Off)];
+const ANY_ON: [HintHost; 1] = [HintHost::AnyWorkerSelection];
+const NO_HOSTS: [HintHost; 0] = [];
 
 /// Register a [`Recorder`] named `name` with `hosts`.
 fn register(
     registry: &mut RouterPluginRegistry,
     name: &'static str,
-    hosts: impl IntoIterator<Item = (HintHost, HintDefault)>,
+    hosts: impl IntoIterator<Item = HintHost>,
 ) {
     registry
         .register_hint_policy(name, recorder_provider(Recorder::new(name)), hosts)
@@ -244,7 +244,7 @@ fn register(
 fn roles_without_hints_run_the_defaults_and_listed_hints_replace_them() {
     let mut registry = RouterPluginRegistry::default();
     register(&mut registry, "fallback", ANY_ON);
-    register(&mut registry, "record", ANY_OFF);
+    register(&mut registry, "record", NO_HOSTS);
     let (config, _file) = config_with(
         r#"
 worker_selection:
@@ -276,29 +276,18 @@ worker_selection:
 }
 
 #[test]
-fn defaults_run_in_registration_order_and_a_named_host_overrides_any() {
+fn defaults_run_in_registration_order() {
     let mut registry = RouterPluginRegistry::default();
     register(&mut registry, "first", ANY_ON);
     register(
         &mut registry,
         "kvcr_only",
-        [
-            (HintHost::AnyWorkerSelection, HintDefault::Off),
-            (HintHost::worker_selection("kvcr"), HintDefault::On),
-        ],
-    );
-    register(
-        &mut registry,
-        "not_under_kvcr",
-        [
-            (HintHost::worker_selection("kvcr"), HintDefault::Off),
-            (HintHost::AnyWorkerSelection, HintDefault::On),
-        ],
+        [HintHost::worker_selection("kvcr")],
     );
     register(
         &mut registry,
         "builtin_only",
-        [(HintHost::worker_selection("default"), HintDefault::On)],
+        [HintHost::worker_selection("default")],
     );
     register(&mut registry, "last", ANY_ON);
     let (config, _file) = config_with(
@@ -318,16 +307,13 @@ worker_selection:
     // `default`, and a role `worker_selection` doesn't list, run the built-in selector.
     assert_eq!(
         factory.names(WorkerType::Aggregated),
-        ["first", "not_under_kvcr", "builtin_only", "last"]
+        ["first", "builtin_only", "last"]
     );
     assert_eq!(
         factory.names(WorkerType::Prefill),
         ["first", "kvcr_only", "last"]
     );
-    assert_eq!(
-        factory.names(WorkerType::Decode),
-        ["first", "not_under_kvcr", "last"]
-    );
+    assert_eq!(factory.names(WorkerType::Decode), ["first", "last"]);
     // A deprecated instance name runs under its type.
     assert_eq!(
         factory.names(WorkerType::Encode),
@@ -365,29 +351,10 @@ fn defaults_are_built_from_empty_parameters() {
 }
 
 #[test]
-fn a_listed_hint_must_run_under_the_role_policy() {
+fn a_role_runs_its_listed_hints_in_order() {
     let mut registry = RouterPluginRegistry::default();
     register(&mut registry, "kv_fetch", ANY_ON);
-    register(
-        &mut registry,
-        "acme_priority",
-        [(HintHost::worker_selection("kvcr"), HintDefault::Off)],
-    );
-    let (config, _file) = config_with(
-        r#"
-worker_selection:
-  prefill:
-    type: dynamo-two-tier-cost-fn
-    hints:
-      - type: acme_priority
-"#,
-    );
-    let error = registry.resolve_hint_policies(&config).err().unwrap();
-    assert_eq!(
-        error.to_string(),
-        r#"hint-policy type "acme_priority" doesn't run under worker-selection type "dynamo-two-tier-cost-fn" (prefill); hints for that type: kv_fetch"#
-    );
-
+    register(&mut registry, "acme_priority", NO_HOSTS);
     let (config, _file) = config_with(
         r#"
 worker_selection:
@@ -421,19 +388,12 @@ fn registry_rejects_bad_names_and_hosts() {
     assert!(!registry.is_empty());
 
     let error = registry
-        .register_hint_policy("x", provider(), [])
-        .unwrap_err();
-    assert_eq!(
-        error.to_string(),
-        r#"hint-policy type "x" registers no hosts"#
-    );
-    let error = registry
         .register_hint_policy(
             "x",
             provider(),
             [
-                (HintHost::worker_selection("kvcr"), HintDefault::On),
-                (HintHost::worker_selection("kvcr"), HintDefault::Off),
+                HintHost::worker_selection("kvcr"),
+                HintHost::worker_selection("kvcr"),
             ],
         )
         .unwrap_err();
@@ -458,20 +418,16 @@ fn resolve_plugins_rejects_hosts_no_linked_plugin_registers() {
         &mut registry,
         "linked",
         [
-            (HintHost::AnyWorkerSelection, HintDefault::On),
-            (HintHost::worker_selection("kvcr"), HintDefault::On),
-            (HintHost::worker_selection("default"), HintDefault::On),
+            HintHost::AnyWorkerSelection,
+            HintHost::worker_selection("kvcr"),
+            HintHost::worker_selection("default"),
         ],
     );
     registry
         .resolve_plugins(&KvRouterConfig::default())
         .unwrap();
 
-    register(
-        &mut registry,
-        "typo",
-        [(HintHost::worker_selection("kvrc"), HintDefault::On)],
-    );
+    register(&mut registry, "typo", [HintHost::worker_selection("kvrc")]);
     let error = registry
         .resolve_plugins(&KvRouterConfig::default())
         .err()
@@ -485,9 +441,9 @@ fn resolve_plugins_rejects_hosts_no_linked_plugin_registers() {
 #[test]
 fn resolution_reports_unknown_types_and_invalid_parameters() {
     let mut registry = RouterPluginRegistry::default();
-    register(&mut registry, "record", ANY_OFF);
+    register(&mut registry, "record", NO_HOSTS);
     registry
-        .register_hint_policy("strict", strict_provider(), ANY_OFF)
+        .register_hint_policy("strict", strict_provider(), NO_HOSTS)
         .unwrap();
 
     let (config, _file) = config_with(
