@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_tokens::SequenceHash;
-use rustc_hash::FxHashMap;
+use rustc_hash::FxHashSet;
 
 use super::compressed_path_arena::{CompressedNodeId, CompressedPathArena};
 
@@ -42,6 +42,8 @@ pub(super) struct RequestBlockChain {
     prompt_tail: Option<CompressedNodeId>,
     prompt_depth: usize,
     output_hashes: Vec<SequenceHash>,
+    output_fraction: f64,
+    fractional_output_len: usize,
 }
 
 impl RequestBlockChain {
@@ -49,7 +51,15 @@ impl RequestBlockChain {
         Self {
             prompt_tail,
             prompt_depth,
-            output_hashes: Vec::new(),
+            ..Self::default()
+        }
+    }
+
+    fn output_weight(&self, index: usize) -> f64 {
+        if index < self.fractional_output_len {
+            self.output_fraction
+        } else {
+            1.0
         }
     }
 }
@@ -65,10 +75,8 @@ pub(super) struct ReleasedPromptPath {
 pub(super) struct BlockTracker {
     arena: CompressedPathArena<BlockNodeMetadata>,
     prompt_total: f64,
-    // Output hashes remain outside the prompt topology. They are unique per
-    // request, but retaining the map preserves active-hash diagnostics and
-    // fractional load accounting.
-    output_blocks: FxHashMap<SequenceHash, f64>,
+    // Output hashes remain outside the prompt topology and unique per request.
+    output_blocks: FxHashSet<SequenceHash>,
     output_total: f64,
 }
 
@@ -186,7 +194,7 @@ impl BlockTracker {
             "random output hash unexpectedly collided with a live block"
         );
         assert!(
-            self.output_blocks.insert(hash, 1.0).is_none(),
+            self.output_blocks.insert(hash),
             "output block hash unexpectedly became live twice"
         );
         self.output_total += 1.0;
@@ -196,12 +204,12 @@ impl BlockTracker {
     /// Release outputs and the request terminal, returning the prompt suffix
     /// that became absent from the worker.
     pub(super) fn release(&mut self, chain: RequestBlockChain) -> Option<ReleasedPromptPath> {
-        for hash in chain.output_hashes {
-            let weight = self
-                .output_blocks
-                .remove(&hash)
-                .expect("request output hash is missing from active bookkeeping");
-            self.output_total -= weight;
+        for (index, hash) in chain.output_hashes.iter().enumerate() {
+            assert!(
+                self.output_blocks.remove(hash),
+                "request output hash is missing from active bookkeeping"
+            );
+            self.output_total -= chain.output_weight(index);
         }
         if self.output_blocks.is_empty() {
             self.output_total = 0.0;
@@ -266,17 +274,15 @@ impl BlockTracker {
     /// Mark the request's structurally exclusive suffix as fractional.
     pub(super) fn set_unique_suffix_fractional(
         &mut self,
-        chain: &RequestBlockChain,
+        chain: &mut RequestBlockChain,
         fraction: f64,
     ) {
-        for hash in &chain.output_hashes {
-            let weight = self
-                .output_blocks
-                .get_mut(hash)
-                .expect("request output hash is missing from active bookkeeping");
-            let old_weight = std::mem::replace(weight, fraction);
-            self.output_total += fraction - old_weight;
+        // Keep sequential additions: combining them changes rounded load counts.
+        for index in 0..chain.output_hashes.len() {
+            self.output_total += fraction - chain.output_weight(index);
         }
+        chain.output_fraction = fraction;
+        chain.fractional_output_len = chain.output_hashes.len();
 
         let mut current = chain.prompt_tail;
         while let Some(node_id) = current {
@@ -304,7 +310,7 @@ impl BlockTracker {
 
     #[cfg(any(test, debug_assertions))]
     pub(super) fn contains_block(&self, hash: &SequenceHash) -> bool {
-        self.output_blocks.contains_key(hash)
+        self.output_blocks.contains(hash)
             || self
                 .arena
                 .nodes
@@ -317,11 +323,12 @@ impl BlockTracker {
         &self,
         chains: impl IntoIterator<Item = &'a RequestBlockChain>,
     ) {
-        use rustc_hash::FxHashSet;
+        use rustc_hash::FxHashMap;
 
         self.arena.assert_topology();
         let mut expected_terminals = FxHashMap::<CompressedNodeId, u32>::default();
         let mut expected_outputs = FxHashSet::default();
+        let mut expected_output_total = 0.0;
         for chain in chains {
             match chain.prompt_tail {
                 Some(tail) => {
@@ -335,11 +342,13 @@ impl BlockTracker {
                 }
                 None => assert_eq!(chain.prompt_depth, 0, "empty prompt retained a depth"),
             }
-            for &hash in &chain.output_hashes {
+            assert!(chain.fractional_output_len <= chain.output_hashes.len());
+            for (index, &hash) in chain.output_hashes.iter().enumerate() {
                 assert!(
                     expected_outputs.insert(hash),
                     "output hash is owned by multiple requests"
                 );
+                expected_output_total += chain.output_weight(index);
             }
         }
 
@@ -359,8 +368,7 @@ impl BlockTracker {
             }
         }
         assert_eq!(
-            expected_outputs,
-            self.output_blocks.keys().copied().collect(),
+            expected_outputs, self.output_blocks,
             "output bookkeeping differs from request ownership"
         );
 
@@ -370,7 +378,6 @@ impl BlockTracker {
             .values()
             .map(|node| node.metadata.edge_weight(node.edge.len()))
             .sum::<f64>();
-        let expected_output_total = self.output_blocks.values().sum::<f64>();
         for (label, actual, expected) in [
             ("prompt", self.prompt_total, expected_prompt_total),
             ("output", self.output_total, expected_output_total),
@@ -400,7 +407,7 @@ impl BlockTracker {
         for node in self.arena.nodes.values() {
             hashes.extend_from_slice(&node.edge);
         }
-        hashes.extend(self.output_blocks.keys().copied());
+        hashes.extend(self.output_blocks.iter().copied());
         hashes.into_iter()
     }
 
@@ -443,7 +450,7 @@ impl BlockTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rustc_hash::FxHashSet;
+    use rustc_hash::{FxHashMap, FxHashSet};
 
     fn released(path: &[SequenceHash], remove_from: usize) -> Option<ReleasedPromptPath> {
         Some(ReleasedPromptPath {
@@ -538,10 +545,10 @@ mod tests {
     #[test]
     fn fractional_unique_suffix_preserves_shared_prefix() {
         let mut tracker = BlockTracker::default();
-        let (longer, _) = tracker.acquire_prompt(&[1, 2, 3]);
+        let (mut longer, _) = tracker.acquire_prompt(&[1, 2, 3]);
         let (shared, _) = tracker.acquire_prompt(&[1, 2]);
 
-        tracker.set_unique_suffix_fractional(&longer, 0.5);
+        tracker.set_unique_suffix_fractional(&mut longer, 0.5);
         assert_eq!(tracker.fraction_for(3), Some(0.5));
         assert_eq!(tracker.fraction_for(1), None);
         assert_eq!(tracker.active_blocks(), 3);
@@ -553,11 +560,11 @@ mod tests {
     #[test]
     fn fraction_mismatch_preserves_split_and_totals() {
         let mut tracker = BlockTracker::default();
-        let (longer, _) = tracker.acquire_prompt(&[1, 2, 3, 4]);
+        let (mut longer, _) = tracker.acquire_prompt(&[1, 2, 3, 4]);
         let longer_tail = longer.prompt_tail.unwrap();
         let (shorter, _) = tracker.acquire_prompt(&[1, 2]);
 
-        tracker.set_unique_suffix_fractional(&longer, 0.5);
+        tracker.set_unique_suffix_fractional(&mut longer, 0.5);
         assert_eq!(tracker.prompt_total, 3.0);
         assert_eq!(tracker.active_blocks(), 3);
 
@@ -575,9 +582,9 @@ mod tests {
     #[test]
     fn equal_fractional_edges_remain_split_and_preserve_child_handle() {
         let mut tracker = BlockTracker::default();
-        let (longer, _) = tracker.acquire_prompt(&[1, 2, 3, 4]);
+        let (mut longer, _) = tracker.acquire_prompt(&[1, 2, 3, 4]);
         let longer_tail = longer.prompt_tail.unwrap();
-        tracker.set_unique_suffix_fractional(&longer, 0.5);
+        tracker.set_unique_suffix_fractional(&mut longer, 0.5);
         let (shorter, _) = tracker.acquire_prompt(&[1, 2]);
 
         assert_eq!(tracker.arena.nodes.len(), 2);
@@ -608,12 +615,12 @@ mod tests {
         assert_eq!(tracker.output_total, 1.0);
         assert_eq!(tracker.active_blocks(), 5);
 
-        tracker.set_unique_suffix_fractional(&left, 0.5);
+        tracker.set_unique_suffix_fractional(&mut left, 0.5);
         assert_eq!(tracker.prompt_total, 3.5);
         assert_eq!(tracker.output_total, 0.5);
         assert_eq!(tracker.active_blocks(), 4);
 
-        tracker.set_unique_suffix_fractional(&left, 0.25);
+        tracker.set_unique_suffix_fractional(&mut left, 0.25);
         assert_eq!(tracker.prompt_total, 3.25);
         assert_eq!(tracker.output_total, 0.25);
         assert_eq!(tracker.active_blocks(), 4);
@@ -638,6 +645,37 @@ mod tests {
         tracker.append_output(&mut chain, 42);
         assert_eq!(first_new, None);
         assert_eq!(tracker.release(chain), None);
+        assert_eq!(tracker.active_blocks(), 0);
+    }
+
+    #[test]
+    fn fractional_outputs_preserve_sequential_rounding() {
+        let mut tracker = BlockTracker::default();
+        let (mut chain, _) = tracker.acquire_prompt(&[]);
+        for block in 1..=5 {
+            tracker.append_output(&mut chain, block);
+            tracker.set_unique_suffix_fractional(&mut chain, 1.0 - block as f64 / 10.0);
+        }
+        assert_eq!(tracker.active_blocks(), 2);
+        assert_eq!(tracker.release(chain), None);
+        assert_eq!(tracker.active_blocks(), 0);
+    }
+
+    #[test]
+    fn fractional_output_prefix_preserves_unweighted_tail_on_release() {
+        let mut tracker = BlockTracker::default();
+        let (mut first, _) = tracker.acquire_prompt(&[]);
+        let (mut second, _) = tracker.acquire_prompt(&[]);
+        tracker.append_output(&mut first, 42);
+        tracker.set_unique_suffix_fractional(&mut first, 0.25);
+        tracker.append_output(&mut first, 43);
+        tracker.append_output(&mut second, 44);
+        tracker.assert_consistent([&first, &second]);
+        assert_eq!(tracker.output_total, 2.25);
+        assert_eq!(tracker.release(first), None);
+        assert_eq!(tracker.output_total, 1.0);
+        tracker.assert_consistent([&second]);
+        assert_eq!(tracker.release(second), None);
         assert_eq!(tracker.active_blocks(), 0);
     }
 
