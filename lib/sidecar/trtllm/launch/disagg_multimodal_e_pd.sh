@@ -104,20 +104,18 @@ max_batch_size: 1
 dtype: bfloat16
 YAML
 CONSUMER_OPTIONS='{"disable_mm_encoder":true,"guided_decoding_backend":"xgrammar","max_batch_size":1,"dtype":"bfloat16"}'
-FRONTEND_ARGS=()
 CONSUMER_ARGS=()
 CONSUMER_GPU="${PD_GPU:-$DEFAULT_ENCODER_GPU}"
 TOPOLOGY="E+PD"
 if [[ "$EPD_MODE" == e_p_d ]]; then
     CONSUMER_OPTIONS='{"disable_mm_encoder":true,"guided_decoding_backend":"xgrammar","max_batch_size":1,"dtype":"bfloat16","cache_transceiver_config":{"backend":"NIXL"}}'
-    FRONTEND_ARGS+=(--no-router-conditional-disagg)
     CONSUMER_ARGS+=(--disaggregation-mode prefill)
     CONSUMER_GPU="${PREFILL_GPU:-$DEFAULT_PREFILL_GPU}"
     TOPOLOGY="E+P+D"
 fi
 build_trtllm_override_args_with_mem --merge-with-json "$CONSUMER_OPTIONS" > "$RUN_DIR/pd.yaml"
 print_launch_banner --multimodal "TensorRT-LLM sidecar image $TOPOLOGY" "$MODEL" "${DYN_HTTP_PORT:-8000}"
-python3 -m dynamo.frontend "${FRONTEND_ARGS[@]}" &
+python3 -m dynamo.frontend &
 TRTLLM_OPENENGINE_ENCODER_ENDPOINT="$(grpc_address "$ENCODER_ADVERTISE_HOST" "$ENCODER_GRPC_PORT")" \
 CUDA_VISIBLE_DEVICES="$ENCODER_GPU" "$TRTLLM_PYTHON" -m tensorrt_llm.commands.serve "$MODEL_PATH" \
     --grpc --grpc-protocol openengine --host "$ENCODER_BIND_HOST" --port "$ENCODER_GRPC_PORT" \

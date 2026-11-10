@@ -307,6 +307,7 @@ struct PrefillBinding {
     /// `PrefillRouter` because it is unknowable until a target is discovered,
     /// and changes when the binding is rebuilt.
     prefill_router_mode: RouterMode,
+    requires_encoder_result: bool,
 }
 
 struct PrefillBuildContext {
@@ -496,16 +497,6 @@ impl
                 .await
             {
                 Ok(Some(decision)) => {
-                    let worker = decision.plan.worker();
-                    tracing::info!(
-                        request_id = %request_id,
-                        worker_id = worker.worker_id,
-                        dp_rank = worker.dp_rank,
-                        net_new_tokens = decision.net_new_tokens,
-                        overlap_tokens = decision.overlap_tokens,
-                        "Conditional disagg routing to decode worker"
-                    );
-
                     let mut conditional_request = conditional_request;
                     if conditional_request.tracker.is_none() {
                         conditional_request.tracker = Some(Arc::new(RequestTracker::new()));
@@ -514,18 +505,31 @@ impl
                         let _decode_permit = tracker.set_phase(RequestPhase::Decode).await;
                     }
 
-                    conditional_request
-                        .annotations
-                        .push(BYPASS_REMOTE_PREFILL_ANNOTATION.to_string());
+                    if decision.allows_encoder_bypass(self) {
+                        let worker = decision.plan.worker();
+                        tracing::info!(
+                            request_id = %request_id,
+                            worker_id = worker.worker_id,
+                            dp_rank = worker.dp_rank,
+                            net_new_tokens = decision.net_new_tokens,
+                            overlap_tokens = decision.overlap_tokens,
+                            "Conditional disagg routing to decode worker"
+                        );
 
-                    let decode_host = self
-                        .decode_routing_host
-                        .get()
-                        .expect("conditional plan requires a decode RoutingHost");
-                    let response_stream = decode_host
-                        .dispatch_kv_plan(conditional_request, decision.plan)
-                        .await?;
-                    return with_bypass_marker(response_stream, client_requested_bypass_marker);
+                        conditional_request
+                            .annotations
+                            .push(BYPASS_REMOTE_PREFILL_ANNOTATION.to_string());
+
+                        let decode_host = self
+                            .decode_routing_host
+                            .get()
+                            .expect("conditional plan requires a decode RoutingHost");
+                        let response_stream = decode_host
+                            .dispatch_kv_plan(conditional_request, decision.plan)
+                            .await?;
+                        return with_bypass_marker(response_stream, client_requested_bypass_marker);
+                    }
+                    (req, context) = conditional_request.into_parts();
                 }
                 Ok(None) => {
                     (req, context) = conditional_request.into_parts();
@@ -1536,7 +1540,7 @@ mod tests {
             ..Default::default()
         };
         let chooser = KvRouter::new(
-            endpoint,
+            endpoint.clone(),
             client.clone(),
             workers,
             None,
@@ -1568,11 +1572,24 @@ mod tests {
             conditional_disagg_eff_isl_ratio_threshold: 2.0,
             ..Default::default()
         });
-        assert!(router.decode_routing_host.set(host).is_ok());
+        assert!(router.decode_routing_host.set(host.clone()).is_ok());
+        let binding = |required| {
+            Arc::new(PrefillBinding {
+                target_id: WorkerSetTargetId::Legacy(endpoint.id()),
+                endpoint_id: endpoint.id(),
+                router: host.clone(),
+                prefill_router_mode: RouterMode::KV,
+                requires_encoder_result: required,
+            })
+        };
+        router.binding.store(Some(binding(false)));
+        router.set_target(Some(WorkerSetTarget::Legacy(endpoint.clone())));
         let downstream = Arc::new(QueryOnlyDecodeHost::default());
 
-        for opted_in in [false, true] {
+        for (opted_in, has_encoder) in [(false, false), (true, false), (false, true), (true, true)]
+        {
             let mut request = query_only_request();
+            request.encoder_result = has_encoder.then(|| serde_json::json!({"opaque": "optional"}));
             request.annotations = if opted_in {
                 vec![BYPASS_REMOTE_PREFILL_ANNOTATION.to_string()]
             } else {
@@ -1604,7 +1621,7 @@ mod tests {
         // The decode hop saw the router-owned marker exactly once per request:
         // the client-supplied copy was stripped and the router's copy added.
         let seen = dispatch.annotations.lock().clone();
-        assert_eq!(seen.len(), 2);
+        assert_eq!(seen.len(), 4);
         for annotations in &seen {
             assert_eq!(
                 annotations
@@ -1615,7 +1632,54 @@ mod tests {
             );
         }
         assert_eq!(downstream.requests.load(Ordering::Relaxed), 0);
+        for required in [true, false] {
+            router.binding.store(Some(binding(required)));
+            for has_encoder in [false, true] {
+                let mut request = inference_request();
+                request.encoder_result =
+                    has_encoder.then(|| serde_json::json!({"opaque": "handoff"}));
+                let decision = router
+                    .plan_conditional_disagg_decode(&SingleIn::new(request), "handoff")
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    decision.is_some(),
+                    !required || !has_encoder,
+                    "only mandatory encoder handoffs must run remote prefill"
+                );
+            }
+        }
+        router.binding.store(Some(binding(false)));
+        let mut request = inference_request();
+        request.encoder_result = Some(serde_json::json!({"opaque": "handoff"}));
+        let decision = router
+            .plan_conditional_disagg_decode(&SingleIn::new(request), "succession")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(decision.allows_encoder_bypass(&router));
+        router.binding.store(Some(binding(true)));
+        assert!(
+            !decision.allows_encoder_bypass(&router),
+            "a held decision must not bypass a successor prefill binding"
+        );
+        drop(decision);
+        router.binding.store(Some(binding(false)));
+        let mut request = inference_request();
+        request.encoder_result = Some(serde_json::json!({"opaque": "handoff"}));
+        let decision = router
+            .plan_conditional_disagg_decode(&SingleIn::new(request), "removal")
+            .await
+            .unwrap()
+            .unwrap();
+        router.set_target(None);
+        assert!(
+            !decision.allows_encoder_bypass(&router),
+            "a removed prefill target must invalidate held handoff decisions"
+        );
+        drop(decision);
         drop(router);
+        drop(host);
         runtime.shutdown();
     }
 

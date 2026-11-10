@@ -4258,9 +4258,9 @@ async fn builtin_stopped_decode_request_reaches_the_worker_on_every_dispatch_pat
 
 #[tokio::test]
 #[serial_test::serial]
-async fn stopped_encoder_handoffs_reach_their_consumers() {
+async fn stopped_encoder_handoffs_cancel_before_consumer_dispatch() {
     for phase in [RequestPhase::Aggregated, RequestPhase::Prefill] {
-        let (host, dispatch, worker_id, runtime) = builtin_host_with_recorded_dispatch(
+        let (host, dispatch, _worker_id, runtime) = builtin_host_with_recorded_dispatch(
             &format!("encoder-cleanup-{phase:?}"),
             RouterMode::RoundRobin,
         )
@@ -4268,9 +4268,13 @@ async fn stopped_encoder_handoffs_reach_their_consumers() {
         let request = stopped_request_in_phase(phase, "encoder-cleanup", None, false).await;
         let (mut input, context) = request.into_parts();
         input.encoder_result = Some(serde_json::json!({"opaque": "handoff"}));
-        let mut stream = host.generate(context.map(|_| input)).await.unwrap();
-        while stream.next().await.is_some() {}
-        assert_eq!(dispatch.worker_ids.lock().unwrap().as_slice(), &[worker_id]);
+        let error = host.generate(context.map(|_| input)).await.unwrap_err();
+        assert!(match_error_chain(
+            error.as_ref(),
+            &[ErrorType::Cancelled],
+            &[]
+        ));
+        assert!(dispatch.worker_ids.lock().unwrap().is_empty());
         drop(host);
         runtime.shutdown();
     }

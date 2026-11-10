@@ -7,7 +7,7 @@ use std::{
     time::Duration,
 };
 
-use futures::stream;
+use futures::{FutureExt, stream};
 use serde_json::json;
 
 use dynamo_runtime::{
@@ -39,6 +39,7 @@ fn stream_of(items: Vec<Annotated<LLMEngineOutput>>) -> ManyOut<Annotated<LLMEng
 struct CaptureEngine {
     request: Mutex<Option<PreprocessedRequest>>,
     behavior: DownstreamBehavior,
+    setup_failed: tokio::sync::Notify,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -48,6 +49,7 @@ enum DownstreamBehavior {
     SetupError,
     TypedError,
     Terminal,
+    Token,
     Pending,
 }
 
@@ -66,7 +68,10 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         let response: futures::stream::BoxStream<'static, Annotated<LLMEngineOutput>> =
             match self.behavior {
                 DownstreamBehavior::Empty => Box::pin(stream::empty()),
-                DownstreamBehavior::SetupError => anyhow::bail!("downstream dispatch rejected"),
+                DownstreamBehavior::SetupError => {
+                    self.setup_failed.notify_one();
+                    anyhow::bail!("downstream dispatch rejected")
+                }
                 DownstreamBehavior::TypedError => Box::pin(stream::iter([Annotated::from_error(
                     "downstream stream rejected",
                 )])),
@@ -75,6 +80,13 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                         Annotated::from_data(LLMEngineOutput::stop()),
                     ]))
                 }
+                DownstreamBehavior::Token => Box::pin(stream::iter([
+                    Annotated::from_data(LLMEngineOutput {
+                        token_ids: vec![42],
+                        ..Default::default()
+                    }),
+                    Annotated::from_data(LLMEngineOutput::stop()),
+                ])),
                 DownstreamBehavior::Pending => Box::pin(stream::pending()),
             };
         Ok(ResponseStream::new(response, request.context()))
@@ -101,6 +113,7 @@ fn multimodal_request() -> PreprocessedRequest {
 struct EncodeWorker(
     u64,
     tokio::sync::mpsc::UnboundedSender<(u64, PreprocessedRequest)>,
+    Arc<tokio::sync::Semaphore>,
 );
 
 #[async_trait]
@@ -118,6 +131,14 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             == Some(&json!(true))
         {
             self.1.send((self.0, request.content().clone())).unwrap();
+            if request
+                .encoder_result
+                .as_ref()
+                .and_then(|value| value.get("block_release"))
+                == Some(&json!(true))
+            {
+                self.2.acquire().await.unwrap().forget();
+            }
             return Ok(ResponseStream::new(
                 Box::pin(stream::iter([
                     Annotated::from_data(LLMEngineOutput::stop()),
@@ -125,8 +146,26 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 request.context(),
             ));
         }
+        if request.sampling_options.n == Some(2) {
+            return Ok(ResponseStream::new(
+                Box::pin(stream::iter([Annotated {
+                    error: Some(
+                        DynamoError::builder()
+                            .class(ErrorClass::InvalidRequest)
+                            .message("encoder accepts n=1 only")
+                            .build(),
+                    ),
+                    data: None,
+                    id: None,
+                    event: Some("error".into()),
+                    comment: None,
+                }])),
+                request.context(),
+            ));
+        }
         let mut output = LLMEngineOutput::encode_terminal(
-            json!({"worker_id": self.0, "request_id": request.id(), "routing": request.routing})
+            json!({"worker_id": self.0, "request_id": request.id(), "routing": request.routing,
+                "block_release": request.extra_args.as_ref().and_then(|extra| extra.get("block_release"))})
                 .as_object()
                 .unwrap()
                 .clone(),
@@ -200,6 +239,7 @@ async fn committed_encoder_admission_survives_membership_changes_and_endpoint_re
     let mut workers = Vec::new();
     let mut runtimes = Vec::new();
     let (releases, mut released) = tokio::sync::mpsc::unbounded_channel();
+    let release_gate = Arc::new(tokio::sync::Semaphore::new(0));
     for _ in 0..3 {
         let drt = DistributedRuntime::new(runtime.clone(), config())
             .await
@@ -216,6 +256,7 @@ async fn committed_encoder_admission_survives_membership_changes_and_endpoint_re
                 Ingress::for_engine(Arc::new(EncodeWorker(
                     drt.connection_id(),
                     releases.clone(),
+                    release_gate.clone(),
                 )))
                 .unwrap(),
             )
@@ -380,6 +421,36 @@ async fn committed_encoder_admission_survives_membership_changes_and_endpoint_re
         .is_err()
     );
 
+    let downstream = Arc::new(CaptureEngine::default());
+    let mut invalid = multimodal_request();
+    invalid.sampling_options.n = Some(2);
+    router.set_required(true);
+    let error = router
+        .generate(SingleIn::new(invalid.clone()), downstream.clone())
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.downcast_ref::<DynamoError>().unwrap().class(),
+        ErrorClass::InvalidRequest
+    );
+    assert!(downstream.request.lock().unwrap().is_none());
+    router.set_required(false);
+    let response = router
+        .generate(SingleIn::new(invalid), downstream.clone())
+        .await
+        .unwrap();
+    drop(response);
+    assert!(
+        downstream
+            .request
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .encoder_result
+            .is_none()
+    );
+
     // Keep several live producers available: cleanup must target the exact
     // producer selected for this request, without another round-robin hop.
     successor_admissions.send_replace(vec![ids[1], ids[2]]);
@@ -387,6 +458,7 @@ async fn committed_encoder_admission_survives_membership_changes_and_endpoint_re
         DownstreamBehavior::SetupError,
         DownstreamBehavior::TypedError,
         DownstreamBehavior::Terminal,
+        DownstreamBehavior::Token,
         DownstreamBehavior::Empty,
         DownstreamBehavior::Pending,
     ] {
@@ -396,16 +468,37 @@ async fn committed_encoder_admission_survives_membership_changes_and_endpoint_re
         });
         let mut original = multimodal_request();
         original.sampling_options.n = Some(3);
-        original.extra_args = Some(json!({"sampling_constraints": "generation-only"}));
+        original.extra_args =
+            Some(json!({"sampling_constraints": "generation-only", "block_release": true}));
         let request = SingleIn::new(original);
         let request_id = request.id().to_string();
-        let result = router.generate(request, downstream.clone()).await;
+        let request_context = request.context();
+        let result = if matches!(behavior, DownstreamBehavior::SetupError) {
+            let dispatch = tokio::spawn({
+                let router = router.clone();
+                let downstream = downstream.clone();
+                async move { router.generate(request, downstream).await }
+            });
+            downstream.setup_failed.notified().await;
+            assert!(
+                dispatch.is_finished(),
+                "setup errors must not await blocked producer release"
+            );
+            dispatch.await.unwrap()
+        } else {
+            router.generate(request, downstream.clone()).await
+        };
         if matches!(behavior, DownstreamBehavior::SetupError) {
             assert!(result.is_err());
         } else {
             let mut response = result.unwrap();
             if !matches!(behavior, DownstreamBehavior::Pending) {
-                while response.next().await.is_some() {}
+                while response
+                    .next()
+                    .now_or_never()
+                    .expect("producer cleanup must not block downstream output")
+                    .is_some()
+                {}
             } else {
                 let producer = downstream
                     .request
@@ -430,8 +523,30 @@ async fn committed_encoder_admission_survives_membership_changes_and_endpoint_re
                     dynamo_runtime::error::ErrorType::WorkerOverloaded
                 );
             }
-            // Also exercises an unpolled stream drop for the pending case.
+            if matches!(behavior, DownstreamBehavior::Pending) {
+                request_context.stop_generating();
+            }
             drop(response);
+        }
+        if matches!(behavior, DownstreamBehavior::Token) {
+            assert!(
+                tokio::time::timeout(Duration::from_millis(500), async {
+                    loop {
+                        let (_, release) = released.recv().await.unwrap();
+                        if release
+                            .encoder_result
+                            .as_ref()
+                            .is_some_and(|payload| payload["request_id"] == request_id)
+                        {
+                            break;
+                        }
+                    }
+                })
+                .await
+                .is_err(),
+                "a token-confirmed handoff must not send producer release"
+            );
+            continue;
         }
         let expected = downstream
             .request
@@ -457,6 +572,7 @@ async fn committed_encoder_admission_survives_membership_changes_and_endpoint_re
         })
         .await
         .expect("every completed or abandoned handoff must release its producer");
+        release_gate.add_permits(1);
         assert_eq!(producer, expected["worker_id"].as_u64().unwrap());
         assert_eq!(cleanup.encoder_result, Some(expected));
         assert!(cleanup.token_ids.is_empty());

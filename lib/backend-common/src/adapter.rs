@@ -340,7 +340,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             link
         };
 
-        // Defer abort until a handoff consumer signals receipt.
+        // Decode must receive staged KV before it can be aborted.
         let is_encoder_release = self.mode.is_encode()
             && request
                 .extra_args
@@ -350,7 +350,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 })
                 .and_then(serde_json::Value::as_bool)
                 == Some(true);
-        let (ft_tx, mut ft_rx) = if self.mode.is_decode() || request.encoder_result.is_some() {
+        let (ft_tx, mut ft_rx) = if self.mode.is_decode() {
             let (tx, rx) = watch::channel(false);
             (Some(tx), Some(rx))
         } else {
@@ -1323,7 +1323,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn encoder_consumers_defer_abort_until_receipt() {
+    async fn encoder_consumers_abort_without_waiting_for_receipt() {
         for mode in [DisaggregationMode::Aggregated, DisaggregationMode::Prefill] {
             let (engine, release, abort_calls) = ParkedEngine::new();
             let adapter = EngineAdapter::new(engine, mode);
@@ -1335,7 +1335,7 @@ mod tests {
 
             ctrl.stop_generating();
             tokio::time::advance(Duration::from_millis(100)).await;
-            assert_eq!(abort_calls.load(Ordering::SeqCst), 0, "{mode:?}");
+            assert_eq!(abort_calls.load(Ordering::SeqCst), 1, "{mode:?}");
             release.notify_one();
             while stream.next().await.is_some() {}
             tokio::time::advance(Duration::from_millis(100)).await;

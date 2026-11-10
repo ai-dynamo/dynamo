@@ -83,8 +83,6 @@ pub(crate) struct ModelLimits {
     pub(crate) encoder_only: bool,
     pub(crate) encoder_consumer: bool,
     pub(crate) requires_encoder_cache: bool,
-    pub(crate) encoder_nixl: bool,
-    pub(crate) encoder_shared_safetensors: bool,
     pub(crate) supports_image_routing: bool,
 }
 
@@ -285,8 +283,6 @@ impl TrtllmClient {
                     .encoder
                     .as_ref()
                     .is_some_and(|caps| caps.requires_cache),
-                encoder_nixl: encoder_backend(&info, "trtllm-nixl-encoder-v1"),
-                encoder_shared_safetensors: encoder_backend(&info, "trtllm-shared-safetensors-v1"),
                 supports_image_routing: supported_media.image && has_image_routing_v1(&info),
             },
             served_model_name: info.served_model_name,
@@ -528,16 +524,6 @@ pub(crate) fn engine_error(message: impl Into<String>) -> DynamoError {
         .build()
 }
 
-fn encoder_backend(info: &pb::ModelInfo, backend: &str) -> bool {
-    info.encoder.as_ref().is_some_and(|capabilities| {
-        capabilities.schema_version == 1
-            && capabilities
-                .transfer_backends
-                .iter()
-                .any(|value| value == backend)
-    })
-}
-
 fn encoder_roles(
     info: &pb::ModelInfo,
     media: SupportedMedia,
@@ -556,7 +542,10 @@ fn encoder_roles(
     if capabilities.encoder_only == capabilities.accepts_cache
         || capabilities.schema_version != 1
         || !media.image
-        || !encoder_backend(info, "trtllm-nixl-encoder-v1")
+        || !capabilities
+            .transfer_backends
+            .iter()
+            .any(|backend| backend == crate::convert::NIXL_ENCODER_BACKEND)
         || (capabilities.encoder_only
             && (capabilities.transfer_backends.len() != 1 || !capabilities.supports_abort_cleanup))
     {

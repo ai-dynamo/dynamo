@@ -63,9 +63,9 @@ ENCODER_GPU=0 PREFILL_GPU=1 DECODE_GPU=2 \
   bash lib/sidecar/trtllm/launch/disagg_multimodal_e_p_d.sh
 ```
 
-The E+P+D launcher enables the native KV transceiver on P and D and starts the
-frontend with `--no-router-conditional-disagg`. D requires the P-produced KV
-handoff; skipping P would leave only an already-consumed encoder reference.
+The E+P+D launcher enables the native KV transceiver on P and D. The router
+keeps image encoder handoffs on the mandatory prefill path because D requires
+P-produced KV. Conditional prefill bypass remains available for text requests.
 Use `--help` for port and device overrides. Managed launches use numbered
 `DYN_ENGINE_GRPC_PORT1/2/3` and `DYN_SYSTEM_PORT1/2/3` for E, P/PD, and D.
 Ordinary text requests bypass the encoder.
@@ -92,8 +92,8 @@ consistent served model name. Resolve the same immutable model revision on each
 host and pass the resulting local path to both engine and sidecar. Set the
 engine's `--served_model_name` to the common served name so host-specific cache
 paths do not change model discovery.
-For E+P+D, start the frontend with `--no-router-conditional-disagg` on every host
-that runs a frontend.
+For E+P+D, the committed prefill capability keeps encoder handoffs on P while
+allowing text requests to use conditional prefill bypass.
 
 - E: `mm_encoder_only: true`, a sidecar with `--disaggregation-mode encode`, and
   `TRTLLM_OPENENGINE_ENCODER_ENDPOINT` set to its reachable control address.

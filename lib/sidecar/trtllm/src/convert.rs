@@ -1350,7 +1350,7 @@ mod request_tests;
 #[cfg(test)]
 mod response_tests;
 
-const ENCODER_BACKEND: &str = "trtllm-shared-safetensors-v1";
+pub(crate) const NIXL_ENCODER_BACKEND: &str = "trtllm-nixl-encoder-v1";
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1360,10 +1360,8 @@ struct EncoderHandoff {
 }
 
 fn validate_encoder_cache(cache: &pb::EncoderCacheRef) -> Result<(), DynamoError> {
-    if !matches!(
-        cache.transfer_backend.as_str(),
-        ENCODER_BACKEND | "trtllm-nixl-encoder-v1"
-    ) || cache.opaque_state.is_empty()
+    if cache.transfer_backend != NIXL_ENCODER_BACKEND
+        || cache.opaque_state.is_empty()
         || cache.opaque_state.len() > 64 * 1024
     {
         return Err(client::invalid_argument(
@@ -1451,15 +1449,6 @@ fn encoder_options(
         ));
     }
     let cache = encoder_cache_from_result(result)?;
-    if !limits.is_some_and(|limits| match cache.transfer_backend.as_str() {
-        ENCODER_BACKEND => limits.encoder_shared_safetensors,
-        "trtllm-nixl-encoder-v1" => limits.encoder_nixl,
-        _ => false,
-    }) {
-        return Err(client::invalid_argument(
-            "encoder consumer does not support the handoff transfer backend",
-        ));
-    }
     Ok(Some(pb::EncoderOptions {
         encode_only: false,
         cache: Some(cache),

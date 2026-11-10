@@ -134,6 +134,9 @@ hops.
    admission and pinned to it), and `dispatch_kv_plan` sends the request with the bypass
    annotation. Otherwise the request takes the remote prefill path.
 
+An encoder handoff to a prefill set declaring `requires_encoder_result` always takes remote
+prefill. Text requests and optional encoder handoffs retain conditional bypass.
+
 A failed decision falls back to remote prefill, except for `Cancelled` and `InvalidArgument`
 errors, which return to the client.
 
@@ -150,7 +153,11 @@ errors, which return to the client.
 | Scoring and accounting overrides | `PreprocessedRequest::router_config_override` |
 | Excluded workers, parked classifier lifecycle | `PreprocessedRequest::migration_state` |
 | Staged KV that only this decode can release | `PreprocessedRequest::staged_kv_cleanup` |
+| Encoder handoff / mandatory prefill | `PreprocessedRequest::encoder_result` and `requires_encoder_result` from the admitted prefill card |
 | Query-only selection (KV plane) | annotation `query_instance_id` in `PreprocessedRequest::annotations` |
+
+The frontend's prefill operator owns the handoff bypass decision. Runtime EPP query and
+reservation inputs are unchanged.
 
 ## Admission modes
 
@@ -206,10 +213,12 @@ newer booking that reused the same request id and worker.
 - Encoder handoffs retain the original downstream request context. When the producer advertises
   `encoder_result_release` on its terminal output, the encoder hop owns a cleanup guard. It sends
   a separate `release_encoder_result` request with the unchanged opaque payload back to that
-  exact producer on downstream dispatch failure, stream error, terminal completion, or stream
-  drop. Cleanup has a fresh controller and a two-second deadline; it never reselects another
-  encoder or carries generation sampling constraints or KV state. Producer release is idempotent
-  after consumption. Backends that do not advertise this extension retain their existing behavior.
+  exact producer when the guard drops after dispatch failure, stream completion, or abandonment.
+  A generated token proves consumption and disarms release. Otherwise cleanup runs in the
+  background with a fresh controller and a two-second deadline, without delaying response
+  delivery or forcing a cancelled request into its consumer. It never reselects another encoder
+  or carries generation sampling constraints or KV state. Producer release is idempotent after
+  consumption. Backends that do not advertise this extension retain their existing behavior.
 
 ## Prefill activation
 

@@ -479,7 +479,7 @@ impl
         }
         .await;
 
-        let mut cleanup = match encode_result {
+        let cleanup = match encode_result {
             Ok((encoder_result, worker_link, cleanup)) => {
                 request.encoder_result = Some(encoder_result);
                 request.migration_link = worker_link;
@@ -487,7 +487,14 @@ impl
             }
             Err(error) => {
                 if required {
-                    return Err(self.unavailable("encoder hop failed").context(error));
+                    let invalid = error
+                        .downcast_ref::<DynamoError>()
+                        .is_some_and(|error| error.class() == ErrorClass::InvalidRequest);
+                    return Err(if invalid {
+                        error
+                    } else {
+                        self.unavailable("encoder hop failed").context(error)
+                    });
                 }
                 tracing::error!(
                     %error,
@@ -498,26 +505,17 @@ impl
                 return next.generate(context.map(|_| request)).await;
             }
         };
-        let mut response = match next.generate(context.map(|_| request)).await {
-            Ok(response) => response,
-            Err(error) => {
-                cleanup.release().await;
-                return Err(error);
-            }
-        };
+        let mut response = next.generate(context.map(|_| request)).await?;
         let response_context = response.context();
         let stream = async_stream::stream! {
+            let mut cleanup = cleanup;
             while let Some(item) = response.next().await {
-                let terminal = item.err().is_some()
-                    || item.data.as_ref().is_some_and(|output| output.finish_reason.is_some());
-                if terminal {
-                    cleanup.release().await;
-                    yield item;
-                    return;
+                if item.data.as_ref().is_some_and(|output| !output.token_ids.is_empty()) {
+                    // A generated token proves the consumer claimed the handoff.
+                    cleanup.request = None;
                 }
                 yield item;
             }
-            cleanup.release().await;
         };
         Ok(ResponseStream::new(Box::pin(stream), response_context))
     }

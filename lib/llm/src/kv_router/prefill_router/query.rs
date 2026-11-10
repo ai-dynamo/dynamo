@@ -363,6 +363,7 @@ mod tests {
                 },
                 router: shared.clone(),
                 prefill_router_mode: mode,
+                requires_encoder_result: false,
             },
         )));
         prefill.lifecycle.store(
@@ -432,6 +433,7 @@ mod tests {
             endpoint_id,
             router: Arc::new(router),
             prefill_router_mode: RouterMode::KV,
+            requires_encoder_result: false,
         });
         (binding, chooser)
     }

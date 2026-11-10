@@ -2732,7 +2732,7 @@ impl ModelManager {
         }
     }
 
-    fn requires_encoder_result(card: &ModelDeploymentCard) -> bool {
+    pub(crate) fn requires_encoder_result(card: &ModelDeploymentCard) -> bool {
         card.runtime_config
             .runtime_data
             .get(crate::protocols::common::preprocessor::REQUIRES_ENCODER_RESULT)

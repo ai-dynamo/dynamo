@@ -174,10 +174,6 @@ async fn worker(
         !mode.is_encode(),
         "official runtime must advertise a vision-disabled encoder-cache consumer"
     );
-    assert!(
-        info.limits.encoder_nixl,
-        "official runtime must advertise {NIXL_BACKEND}; EPD cannot fall back to a shared-file transport"
-    );
     let mut args = vec![
         "sidecar".into(),
         "--grpc-endpoint".into(),
@@ -304,7 +300,7 @@ async fn run(disaggregated: bool) {
         let outputs = if let Some((decode, limits)) = &decode {
             assert!(outputs.iter().all(|output| output.token_ids.is_empty()));
             let terminal = outputs.last().expect("prefill terminal");
-            assert_eq!(terminal.finish_reason, Some(FinishReason::Stop));
+            assert_eq!(terminal.finish_reason, Some(FinishReason::Length));
             let usage = terminal
                 .completion_usage
                 .as_ref()
@@ -323,7 +319,7 @@ async fn run(disaggregated: bool) {
                     .disaggregated_params
                     .clone()
                     .expect("PrefillReady must carry the native KV session"),
-                prompt_tokens_details: None,
+                prompt_tokens_details: usage.prompt_tokens_details.clone(),
             });
             assert_eq!(
                 consumer_wire.extra.as_ref().unwrap().fields[crate::disagg::REQUEST_TYPE_KEY].kind,

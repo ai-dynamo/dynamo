@@ -245,10 +245,7 @@ class EpdLaunchTests(unittest.TestCase):
                         for record in records
                         if "dynamo.frontend" in record["args"]
                     )
-                    self.assertEqual(
-                        "--no-router-conditional-disagg" in frontend["args"],
-                        mode == "e_p_d",
-                    )
+                    self.assertNotIn("--no-router-conditional-disagg", frontend["args"])
                     consumer = next(
                         record
                         for record in sidecars

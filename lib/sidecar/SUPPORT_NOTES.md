@@ -40,7 +40,7 @@ The standard generation path requires one completion per request (`n=1`). It acc
 
 Compatible encoder-handoff builds support experimental image E+PD and E+P+D at TP/PP/CP=1.
 Dynamo carries encoder references and KV sessions; the engines transfer tensors through NIXL.
-E+P+D requires conditional prefill bypass to be disabled.
+The router prevents conditional prefill bypass for mandatory image encoder handoffs.
 See the [encoder-disaggregation launch guide](trtllm/launch/epd.md) for both topologies.
 
 The sidecar publishes routing-load snapshots. These are not the per-iteration Forward Pass Metrics (FPM) that load-based planning needs. Request migration does not retry an output stream that closes early without an error. It also does not retry KV-session or KV-transfer failures.

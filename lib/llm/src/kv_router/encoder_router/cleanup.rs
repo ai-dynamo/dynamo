@@ -61,13 +61,6 @@ impl EncoderResultCleanup {
         Ok(())
     }
 
-    pub(super) async fn release(&mut self) {
-        if let Some(request) = self.request.clone() {
-            Self::release_request(self.router.clone(), self.worker_id, request).await;
-            self.request.take();
-        }
-    }
-
     async fn release_request(
         router: Arc<EncodePushRouter>,
         worker_id: u64,

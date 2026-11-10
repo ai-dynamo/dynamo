@@ -200,7 +200,7 @@ impl RoutingHost {
         // Declared before worker selection because the session-affinity wait is
         // the first stage that can spend it.
         let budget = CleanupBudget::default();
-        let staged_transfer = StagedTransfer::for_request(request.content());
+        let staged_kv = StagedKv::for_request(request.content());
         let (lora_target, lora_fallback, lora_load) =
             match self.select_lora_target(request.content())? {
                 Some(selection) => (
@@ -283,7 +283,7 @@ impl RoutingHost {
             await_with_cleanup_policy(
                 request_context.as_ref(),
                 phase,
-                staged_transfer,
+                staged_kv,
                 "builtin.dispatch_direct",
                 &budget,
                 self.inner.direct_within_prepared(
@@ -316,7 +316,7 @@ impl RoutingHost {
             await_with_cleanup_policy(
                 request_context.as_ref(),
                 phase,
-                staged_transfer,
+                staged_kv,
                 "builtin.dispatch_exact",
                 &budget,
                 self.inner.dispatch_exact(request, target.worker_id),
@@ -328,7 +328,7 @@ impl RoutingHost {
             await_with_cleanup_policy(
                 request_context.as_ref(),
                 phase,
-                staged_transfer,
+                staged_kv,
                 "builtin.dispatch_occupancy",
                 &budget,
                 self.inner.dispatch_preselected_prepared(
@@ -349,7 +349,7 @@ impl RoutingHost {
             await_with_cleanup_policy(
                 request_context.as_ref(),
                 phase,
-                staged_transfer,
+                staged_kv,
                 "builtin.dispatch",
                 &budget,
                 self.inner.direct_within_prepared(

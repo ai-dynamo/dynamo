@@ -602,7 +602,7 @@ fn encoder_ready_is_a_tokenless_terminal_with_an_opaque_handoff() {
         event: Some(pb::generate_response::Event::EncoderReady(
             pb::EncoderReady {
                 cache: Some(pb::EncoderCacheRef {
-                    transfer_backend: ENCODER_BACKEND.into(),
+                    transfer_backend: NIXL_ENCODER_BACKEND.into(),
                     opaque_state: vec![1, 2, 3],
                 }),
             },
@@ -619,7 +619,7 @@ fn encoder_ready_is_a_tokenless_terminal_with_an_opaque_handoff() {
     );
     assert_eq!(
         result.encoder_result.unwrap(),
-        serde_json::json!({"transfer_backend": ENCODER_BACKEND, "opaque_state": [1, 2, 3]})
+        serde_json::json!({"transfer_backend": NIXL_ENCODER_BACKEND, "opaque_state": [1, 2, 3]})
     );
     let mut ordinary = ResponseState::new(&request(), AGG);
     assert!(ordinary.convert(response).is_err());

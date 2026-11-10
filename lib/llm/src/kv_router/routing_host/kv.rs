@@ -20,7 +20,7 @@ impl RoutingHost {
         budget: &CleanupBudget,
     ) -> Result<SelectionOutcome, Error> {
         let context_id = request.context().id().to_string();
-        let staged_transfer = StagedTransfer::for_request(request.content());
+        let staged_kv = StagedKv::for_request(request.content());
         let policy_class = request.metadata().get("policy-class").cloned();
         let session_context = request
             .agent_context
@@ -55,7 +55,7 @@ impl RoutingHost {
         await_with_cleanup_policy(
             request_context.as_ref(),
             phase,
-            staged_transfer,
+            staged_kv,
             "kv.select_worker",
             budget,
             selection_future,
@@ -385,7 +385,7 @@ impl RoutingHost {
         budget: &CleanupBudget,
     ) -> Result<RequestGuard, Error> {
         let context_id = request.context().id().to_string();
-        let staged_transfer = StagedTransfer::for_request(request.content());
+        let staged_kv = StagedKv::for_request(request.content());
         let request_context = request.context().clone();
         let routing_parts = RoutingRequestParts::new(request);
         let chooser = self.kv_router();
@@ -443,7 +443,7 @@ impl RoutingHost {
                     await_with_cleanup_policy(
                         request_context.as_ref(),
                         phase,
-                        staged_transfer,
+                        staged_kv,
                         "kv.record_routing_decision",
                         budget,
                         guard.acquire_approximate_lru(hashes),
@@ -453,7 +453,7 @@ impl RoutingHost {
                     await_with_cleanup_policy(
                         request_context.as_ref(),
                         phase,
-                        staged_transfer,
+                        staged_kv,
                         "kv.record_routing_decision",
                         budget,
                         chooser.record_routing_decision_hashes(hashes, worker),
@@ -517,7 +517,7 @@ impl RoutingHost {
         let context_id = request.context().id().to_string();
         let request_context = request.context().clone();
         let route_trace_context = get_route_trace_context(&request);
-        let staged_transfer = StagedTransfer::for_request(request.content());
+        let staged_kv = StagedKv::for_request(request.content());
         let phase_label = phase.to_string();
         let worker = selection.worker;
         self.warn_if_output_replay_annotation_ignored(&request, &selection);
@@ -559,7 +559,7 @@ impl RoutingHost {
         let dispatch_result = await_with_cleanup_policy(
             request_context.as_ref(),
             phase,
-            staged_transfer,
+            staged_kv,
             "kv.dispatch",
             budget,
             dispatch.instrument(route_span.clone()),

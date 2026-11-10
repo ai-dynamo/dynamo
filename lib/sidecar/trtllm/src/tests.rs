@@ -863,7 +863,7 @@ async fn a_data_parallel_rank_hint_is_rejected_before_dispatch() {
 }
 
 #[tokio::test]
-async fn cancelled_handoff_requests_survive_only_until_the_transfer_lands() {
+async fn cancellation_dispatches_only_staged_kv_handoffs() {
     tokio::time::timeout(Duration::from_secs(10), async {
         for mode in [DisaggregationMode::Decode, AGG] {
             let service = FakeTrtllm::default();
@@ -894,14 +894,16 @@ async fn cancelled_handoff_requests_survive_only_until_the_transfer_lands() {
                 .unwrap();
 
             let first = stream.next().await.unwrap().unwrap();
-            assert_eq!(
-                first.finish_reason, None,
-                "{mode}: transfer must settle first"
-            );
-            assert_eq!(first.token_ids, [42]);
-            let terminal = stream.next().await.unwrap().unwrap();
-            assert_eq!(terminal.finish_reason, Some(FinishReason::Cancelled));
-            assert_eq!(server.service.requests.lock().await.len(), 1);
+            if mode.is_decode() {
+                assert_eq!(first.finish_reason, None);
+                assert_eq!(first.token_ids, [42]);
+                let terminal = stream.next().await.unwrap().unwrap();
+                assert_eq!(terminal.finish_reason, Some(FinishReason::Cancelled));
+                assert_eq!(server.service.requests.lock().await.len(), 1);
+            } else {
+                assert_eq!(first.finish_reason, Some(FinishReason::Cancelled));
+                assert!(server.service.requests.lock().await.is_empty());
+            }
             engine.cleanup().await.unwrap();
         }
     })
@@ -1282,7 +1284,7 @@ async fn cleanup_terminates_an_in_flight_request() {
 }
 
 #[tokio::test]
-async fn cancelled_handoff_dispatch_is_not_abandoned_mid_flight() {
+async fn cancellation_during_dispatch_defers_only_staged_kv() {
     tokio::time::timeout(Duration::from_secs(10), async {
         for mode in [DisaggregationMode::Decode, AGG] {
             let service = FakeTrtllm::default();
@@ -1322,17 +1324,24 @@ async fn cancelled_handoff_dispatch_is_not_abandoned_mid_flight() {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
             context.stop_generating();
-            assert!(
-                tokio::time::timeout(Duration::from_millis(200), &mut dispatch)
+            let mut stream = if mode.is_decode() {
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(200), &mut dispatch)
+                        .await
+                        .is_err()
+                );
+                engine.cleanup().await.unwrap();
+                dispatch.await.unwrap().unwrap()
+            } else {
+                tokio::time::timeout(Duration::from_secs(5), &mut dispatch)
                     .await
-                    .is_err(),
-                "{mode}: dispatch must outlive client cancellation"
-            );
-
-            engine.cleanup().await.unwrap();
-            let mut stream = dispatch.await.unwrap().unwrap();
+                    .expect("encoder consumer cancellation must not wait for headers")
+                    .unwrap()
+                    .unwrap()
+            };
             let terminal = stream.next().await.unwrap().unwrap();
             assert_eq!(terminal.finish_reason, Some(FinishReason::Cancelled));
+            engine.cleanup().await.unwrap();
         }
     })
     .await

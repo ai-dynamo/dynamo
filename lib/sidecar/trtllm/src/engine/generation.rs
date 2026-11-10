@@ -3,8 +3,6 @@
 
 //! Request dispatch, encoder-result release, and cancellation settlement.
 
-use std::time::Duration;
-
 use dynamo_backend_common::{
     DynamoError, GenerateContext, LLMEngineOutput, LLMEngineOutputExt, PreprocessedRequest, usage,
 };
@@ -16,8 +14,6 @@ use crate::client;
 use crate::convert::{
     ResponseState, build_generate_request_with_routing, validate_remote_media_urls,
 };
-
-const ENCODER_CLEANUP_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Terminal output emitted when a request is cancelled, carrying the usage
 /// accumulated so far.
@@ -111,17 +107,7 @@ impl TrtllmSidecarEngine {
             ));
         }
         let mut state = ResponseState::new(&request, self.mode);
-        // Keep a cancelled consumer alive until it claims the upstream handoff.
-        // The first token proves receipt; normal cancellation resumes afterward.
-        let has_encoder_handoff =
-            request.encoder_result.is_some() && request.prefill_result.is_none();
-        let needs_cancellation_deferral =
-            has_encoder_handoff || (self.mode.is_decode() && request.prefill_result.is_some());
-        let cleanup_ctx = ctx.inner_arc();
-        let mut cleanup_timeout = Box::pin(async move {
-            cleanup_ctx.stopped().await;
-            tokio::time::sleep(ENCODER_CLEANUP_TIMEOUT).await;
-        });
+        let needs_cancellation_deferral = self.mode.is_decode() && request.prefill_result.is_some();
         let stopped_ctx = ctx.inner_arc();
         // Hoisted: `stopped()` is an async-trait method, so re-creating it per
         // streamed chunk costs a boxed future and a waker registration on every
@@ -135,12 +121,6 @@ impl TrtllmSidecarEngine {
             biased;
             _ = &mut request_cancellation, if !needs_cancellation_deferral => None,
             _ = &mut shutdown_cancellation => None,
-            _ = &mut cleanup_timeout, if has_encoder_handoff => {
-                return Err(DynamoError::builder()
-                    .error_type(dynamo_backend_common::ErrorType::Cancelled)
-                    .message("encoder handoff cleanup timed out before response headers")
-                    .build());
-            }
             result = async {
                 validate_remote_media_urls(&request, self.allow_remote_media_urls)?;
                 let proto_request = build_generate_request_with_routing(
@@ -176,22 +156,12 @@ impl TrtllmSidecarEngine {
                         yield Ok(cancelled(&state));
                         break;
                     }
-                    _ = &mut cleanup_timeout, if has_encoder_handoff && !is_transfer_settled => {
-                        yield Err(DynamoError::builder()
-                            .error_type(dynamo_backend_common::ErrorType::Cancelled)
-                            .message("encoder handoff cleanup timed out before transfer completion")
-                            .build());
-                        break;
-                    }
                     message = stream.message() => {
                         match message {
                             Ok(Some(response)) => match state.convert(response) {
                                 Ok(Some(output)) => {
                                     is_transfer_settled |= !output.token_ids.is_empty();
                                     let terminal = output.finish_reason.is_some();
-                                    if has_encoder_handoff && (is_transfer_settled || terminal) {
-                                        ctx.notify_first_token();
-                                    }
                                     yield Ok(output);
                                     if terminal {
                                         break;

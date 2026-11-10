@@ -14,7 +14,9 @@ use dynamo_runtime::{
 
 use crate::{preprocessor::PreprocessedRequest, protocols::common::timing::RequestPhase};
 
-/// Bound disconnected requests while they deliver an owned upstream handoff.
+/// How long a disconnected decode request may keep router state alive while it
+/// finishes reaching its worker. On expiry we abandon the operation and release
+/// everything it held, which is what every phase did before the decode carve-out.
 const CLEANUP_DISPATCH_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// One budget for a disconnected request's whole cleanup route.
@@ -41,23 +43,25 @@ impl CleanupBudget {
     }
 }
 
-/// Upstream resources whose receipt must survive caller cancellation.
+/// Whether remote prefill left KV blocks that only this request's decode worker
+/// can release.
+///
+/// This, not the phase alone, is the reason a disconnected request is still
+/// worth dispatching. `RequestPhase::Decode` is the wider set: the
+/// conditional-disaggregation bypass reaches decode without running remote
+/// prefill, so it has nothing staged and nothing to clean up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum StagedTransfer {
+pub(super) enum StagedKv {
     /// Blocks are staged on a prefill worker for one specific decode worker.
-    Kv,
-    /// A completed encoder output must reach its prefill or combined consumer.
-    Encoder,
+    Present,
     /// Nothing is staged, so abandoning the request releases everything it holds.
     Absent,
 }
 
-impl StagedTransfer {
+impl StagedKv {
     pub(super) fn for_request(request: &PreprocessedRequest) -> Self {
         if request.staged_kv_cleanup {
-            Self::Kv
-        } else if request.encoder_result.is_some() && request.prefill_result.is_none() {
-            Self::Encoder
+            Self::Present
         } else {
             Self::Absent
         }
@@ -66,8 +70,9 @@ impl StagedTransfer {
 
 /// Whether a disconnected client's request still reaches its worker.
 ///
-/// Staged KV must reach decode; encoder output must reach its consumer.
-/// Requests without a handoff cancel normally.
+/// A decode leg with staged KV must proceed: only its decode worker's
+/// KV-transfer-complete path frees those blocks. Everything else keeps
+/// cancelling as soon as the client goes away.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum DispatchCancellation {
     /// Abandon the operation when the context is already stopped.
@@ -77,12 +82,10 @@ pub(super) enum DispatchCancellation {
 }
 
 impl DispatchCancellation {
-    pub(super) fn for_request(phase: RequestPhase, staged_transfer: StagedTransfer) -> Self {
-        match (phase, staged_transfer) {
-            (_, StagedTransfer::Encoder) | (RequestPhase::Decode, StagedTransfer::Kv) => {
-                Self::DispatchWhenStopped
-            }
-            (RequestPhase::Decode, StagedTransfer::Absent)
+    pub(super) fn for_request(phase: RequestPhase, staged_kv: StagedKv) -> Self {
+        match (phase, staged_kv) {
+            (RequestPhase::Decode, StagedKv::Present) => Self::DispatchWhenStopped,
+            (RequestPhase::Decode, StagedKv::Absent)
             | (RequestPhase::Prefill, _)
             | (RequestPhase::Aggregated, _) => Self::CancelWhenStopped,
         }
@@ -100,7 +103,7 @@ impl DispatchCancellation {
 pub(super) async fn await_with_cleanup_policy<T>(
     context: &dyn AsyncEngineContext,
     phase: RequestPhase,
-    staged_transfer: StagedTransfer,
+    staged_kv: StagedKv,
     stage: &'static str,
     budget: &CleanupBudget,
     operation: impl Future<Output = T>,
@@ -108,7 +111,7 @@ pub(super) async fn await_with_cleanup_policy<T>(
     // Pinned once here and lent to both arms, so the wrapper's state holds the
     // operation a single time rather than once per arm.
     tokio::pin!(operation);
-    match DispatchCancellation::for_request(phase, staged_transfer) {
+    match DispatchCancellation::for_request(phase, staged_kv) {
         DispatchCancellation::CancelWhenStopped => cancel_on_stop(context, operation).await,
         DispatchCancellation::DispatchWhenStopped => {
             tokio::select! {
@@ -126,19 +129,29 @@ pub(super) async fn await_with_cleanup_policy<T>(
     }
 }
 
-/// Report failed handoff cleanup as `Cancelled` to prevent migration from
-/// retrying an abandoned request on another worker.
+/// The decode leg ran out of cleanup budget before reaching its worker, so the
+/// KV blocks remote prefill staged for that worker are not released and will sit
+/// until they expire. Reported separately from an ordinary client disconnect,
+/// which is not a leak, so the two are distinguishable in logs.
+///
+/// The distinction is carried by the warning and the message, not by a new
+/// [`ErrorType`]. `Cancelled` is listed in `migration::NON_MIGRATABLE`, so any
+/// other type would make migration retry the request on a second worker for a
+/// client that has already gone away — spending a fresh dispatch to fix nothing,
+/// since the blocks are staged for the *original* worker and only it can free
+/// them.
 fn cleanup_budget_exhausted(context_id: &str, stage: &'static str) -> Error {
     tracing::warn!(
         request_id = %context_id,
         stage,
         budget_secs = CLEANUP_DISPATCH_TIMEOUT.as_secs(),
-        "handoff cleanup budget exhausted before the worker was reached; producer cleanup may be required"
+        "decode cleanup budget exhausted before the worker was reached; staged KV \
+         blocks will not be released until they expire"
     );
     DynamoError::builder()
         .error_type(ErrorType::Cancelled)
         .message(format!(
-            "Request {context_id} exhausted its handoff cleanup budget at {stage}"
+            "Request {context_id} exhausted its decode cleanup budget at {stage}"
         ))
         .build()
         .into()
@@ -185,7 +198,7 @@ mod tests {
     };
 
     use super::{
-        CLEANUP_DISPATCH_TIMEOUT, CleanupBudget, StagedTransfer, await_with_cleanup_policy,
+        CLEANUP_DISPATCH_TIMEOUT, CleanupBudget, StagedKv, await_with_cleanup_policy,
         cancel_on_stop,
     };
     use crate::protocols::common::timing::RequestPhase;
@@ -244,7 +257,7 @@ mod tests {
         let error = await_with_cleanup_policy(
             &context,
             RequestPhase::Aggregated,
-            StagedTransfer::Absent,
+            StagedKv::Absent,
             "test",
             &CleanupBudget::default(),
             PendingUntilDropped(dropped.clone()),

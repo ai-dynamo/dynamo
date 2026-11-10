@@ -59,9 +59,7 @@ mod request_guard;
 
 pub(crate) use builder::hosted_picker;
 pub use builder::{LlmDispatch, MultimodalCache, RoutingHostBuilder};
-use cancellation::{
-    CleanupBudget, DispatchCancellation, StagedTransfer, await_with_cleanup_policy,
-};
+use cancellation::{CleanupBudget, DispatchCancellation, StagedKv, await_with_cleanup_policy};
 use kv_selection::{RoutingRequestParts, SelectionOptions, WorkerSelection};
 use occupancy::HostedOccupancy;
 pub(crate) use request_guard::prompt_private_blocks;
@@ -592,10 +590,10 @@ impl RoutingHost {
         requested_target: Option<AffinityTarget>,
         context: &dyn AsyncEngineContext,
         phase: RequestPhase,
-        staged_transfer: StagedTransfer,
+        staged_kv: StagedKv,
         budget: &CleanupBudget,
     ) -> Result<Hold, Error> {
-        match DispatchCancellation::for_request(phase, staged_transfer) {
+        match DispatchCancellation::for_request(phase, staged_kv) {
             DispatchCancellation::CancelWhenStopped => {
                 affinity
                     .acquire_with_context(session_id, requested_target, context)
@@ -604,7 +602,7 @@ impl RoutingHost {
             DispatchCancellation::DispatchWhenStopped => await_with_cleanup_policy(
                 context,
                 phase,
-                staged_transfer,
+                staged_kv,
                 "affinity.acquire",
                 budget,
                 affinity.acquire(session_id, requested_target),
@@ -626,7 +624,7 @@ impl RoutingHost {
         Select: FnMut(Option<AffinityTarget>) -> SelectionFuture,
         SelectionFuture: Future<Output = Result<T, Error>>,
     {
-        let staged_transfer = StagedTransfer::for_request(request.content());
+        let staged_kv = StagedKv::for_request(request.content());
         let Some(affinity) = self.affinity.as_ref() else {
             return Ok((select(None).await?, None));
         };
@@ -650,7 +648,7 @@ impl RoutingHost {
                 None,
                 request_context.as_ref(),
                 phase,
-                staged_transfer,
+                staged_kv,
                 budget,
             )
         };
@@ -661,7 +659,7 @@ impl RoutingHost {
                 explicit,
                 request_context.as_ref(),
                 phase,
-                staged_transfer,
+                staged_kv,
                 budget,
             )
             .await?;

@@ -390,7 +390,6 @@ fn encoder_handoff_preserves_media_uuids_across_worker_roles() {
     let mut limits = image_limits(4096).unwrap();
     limits.encoder_only = true;
     limits.encoder_consumer = true;
-    limits.encoder_shared_safetensors = true;
     limits.supports_image_routing = true;
     for uuid in [
         None,
@@ -417,7 +416,7 @@ fn encoder_handoff_preserves_media_uuids_across_worker_roles() {
             DisaggregationMode::Encode,
         );
         req.encoder_result =
-            Some(json!({"transfer_backend": ENCODER_BACKEND, "opaque_state": [1]}));
+            Some(json!({"transfer_backend": NIXL_ENCODER_BACKEND, "opaque_state": [1]}));
         for mode in [AGG, PREFILL] {
             let consumed =
                 build_generate_request(req.clone(), "consumer", "model", Some(limits), mode);
@@ -1260,10 +1259,9 @@ fn image_encoder_handoff_requires_negotiated_roles() {
     .unwrap();
     assert!(encoded.encoder.unwrap().encode_only);
     source.encoder_result =
-        Some(json!({"transfer_backend": ENCODER_BACKEND, "opaque_state": [1, 2, 3]}));
+        Some(json!({"transfer_backend": NIXL_ENCODER_BACKEND, "opaque_state": [1, 2, 3]}));
     assert!(build_generate_request(source.clone(), "pd", "model", Some(limits), AGG).is_err());
     limits.encoder_consumer = true;
-    limits.encoder_shared_safetensors = true;
     let consumed =
         build_generate_request(source.clone(), "pd", "model", Some(limits), AGG).unwrap();
     let options = consumed.encoder.unwrap();
@@ -1375,7 +1373,6 @@ fn nixl_encoder_reference_is_forwarded_without_interpreting_engine_metadata() {
     add_images(&mut source, ["https://example.com/image.png"]);
     let mut limits = image_limits(4096).unwrap();
     limits.encoder_consumer = true;
-    limits.encoder_nixl = true;
     let state = vec![17_u8; 2048];
     source.encoder_result = Some(json!({
         "transfer_backend": "trtllm-nixl-encoder-v1", "opaque_state": state
@@ -1385,14 +1382,9 @@ fn nixl_encoder_reference_is_forwarded_without_interpreting_engine_metadata() {
     let cache = consumed.encoder.unwrap().cache.unwrap();
     assert_eq!(cache.transfer_backend, "trtllm-nixl-encoder-v1");
     assert_eq!(cache.opaque_state, state);
-    limits.encoder_nixl = false;
-    limits.encoder_shared_safetensors = true;
-    assert!(build_generate_request(source.clone(), "pd", "model", Some(limits), AGG).is_err());
-    limits.encoder_nixl = true;
     source.encoder_result = Some(json!({
-        "transfer_backend": ENCODER_BACKEND, "opaque_state": [1, 2, 3]
+        "transfer_backend": "trtllm-shared-safetensors-v1", "opaque_state": [1, 2, 3]
     }));
-    limits.encoder_shared_safetensors = false;
     assert!(build_generate_request(source.clone(), "pd", "model", Some(limits), AGG).is_err());
     source.encoder_result = Some(json!({
         "transfer_backend": "trtllm-nixl-encoder-v1", "opaque_state": vec![0_u8; 65537]
@@ -1405,7 +1397,7 @@ fn decode_with_a_prefill_handoff_does_not_replay_the_encoder_reference() {
     let mut source = request();
     add_images(&mut source, ["https://example.com/image.png"]);
     source.encoder_result = Some(json!({
-        "transfer_backend": ENCODER_BACKEND, "opaque_state": [1, 2, 3]
+        "transfer_backend": NIXL_ENCODER_BACKEND, "opaque_state": [1, 2, 3]
     }));
     source.prefill_result = Some(dynamo_backend_common::PrefillResult {
         disaggregated_params: crate::disagg::session_to_json(fake_session()).unwrap(),
@@ -1446,7 +1438,6 @@ fn encoder_handoffs_reject_non_image_media_even_when_the_model_supports_it() {
         let mut limits = all_media_limits(4096).unwrap();
         limits.encoder_only = true;
         limits.encoder_consumer = true;
-        limits.encoder_nixl = true;
         let error = build_generate_request(
             source.clone(),
             "e",
