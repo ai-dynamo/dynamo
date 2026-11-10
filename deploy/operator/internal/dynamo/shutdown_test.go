@@ -26,7 +26,7 @@ func TestShutdownBudgetWarningsPreserveExistingPodSpecs(t *testing.T) {
 		{name: "defaults"},
 		{name: "explicit thirty seconds", grace: ptr.To[int64](30)},
 		{name: "legacy sixty seconds", env: []corev1.EnvVar{{Name: "DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT", Value: "60"}}},
-		{name: "config map total", env: []corev1.EnvVar{{Name: "DYN_WORKER_SHUTDOWN_TOTAL_TIMEOUT_SECS", ValueFrom: &corev1.EnvVarSource{ConfigMapKeyRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "settings"}, Key: "timeout"}}}}},
+		{name: "config map total", env: []corev1.EnvVar{{Name: "DYN_WORKER_SHUTDOWN_TOTAL_TIMEOUT_SECS", ValueFrom: &corev1.EnvVarSource{ConfigMapKeyRef: &corev1.ConfigMapKeySelector{Name: "settings", Key: "timeout"}}}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			component := &v1beta1.DynamoComponentDeploymentSharedSpec{
@@ -76,7 +76,7 @@ func TestValidateShutdownBudget(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Log("Validate the final pod grace period against the configured worker total")
-			pod := corev1.PodSpec{TerminationGracePeriodSeconds: ptr.To(tc.grace), Containers: []corev1.Container{{Name: "worker", Env: tc.env}}}
+			pod := corev1.PodSpec{TerminationGracePeriodSeconds: new(tc.grace), Containers: []corev1.Container{{Name: "worker", Env: tc.env}}}
 			if err := validateShutdownBudget(&pod, true); (err != nil) != tc.wantError {
 				t.Fatalf("validation error = %v, want error = %v", err, tc.wantError)
 			}
