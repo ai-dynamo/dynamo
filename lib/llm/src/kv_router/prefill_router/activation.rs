@@ -45,6 +45,7 @@ struct PrefillAdvertisement {
     /// merging with it. `None` here when nothing was advertised at all.
     session_affinity_ttl: Option<Option<std::time::Duration>>,
     is_eagle: bool,
+    requires_encoder_result: bool,
     /// The prefill workers' own block size, which is what their KV events are
     /// keyed on. The decode set's value would index this pool at the wrong
     /// granularity if the two ever differ.
@@ -80,6 +81,7 @@ fn resolve_advertisement_from_cards(
                 .map(std::time::Duration::from_secs)
         }),
         is_eagle: first.runtime_config.enable_eagle,
+        requires_encoder_result: cards.iter().any(ModelManager::requires_encoder_result),
         kv_cache_block_size: first.kv_cache_block_size,
     };
 
@@ -421,6 +423,7 @@ impl PrefillRouter {
             endpoint_id,
             router,
             prefill_router_mode,
+            requires_encoder_result: advertisement.requires_encoder_result,
         })
     }
 
@@ -725,6 +728,36 @@ mod tests {
                 .session_affinity_ttl,
             None,
         );
+    }
+
+    #[test]
+    fn encoder_requirement_follows_the_committed_card() {
+        let mut selected = card(None);
+        assert!(
+            !resolve_advertisement_from_cards(std::slice::from_ref(&selected), RouterMode::KV)
+                .unwrap()
+                .requires_encoder_result
+        );
+        selected.runtime_config.runtime_data.insert(
+            crate::protocols::common::preprocessor::REQUIRES_ENCODER_RESULT.into(),
+            serde_json::json!(true),
+        );
+        assert!(
+            resolve_advertisement_from_cards(std::slice::from_ref(&selected), RouterMode::KV)
+                .unwrap()
+                .requires_encoder_result
+        );
+        let optional = card(None);
+        for cards in [
+            vec![selected.clone(), optional.clone()],
+            vec![optional, selected],
+        ] {
+            assert!(
+                resolve_advertisement_from_cards(&cards, RouterMode::KV)
+                    .unwrap()
+                    .requires_encoder_result
+            );
+        }
     }
 
     #[test]

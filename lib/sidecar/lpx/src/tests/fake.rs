@@ -265,6 +265,13 @@ impl pb::inference_server::Inference for FakeEngine {
 
 #[tonic::async_trait]
 impl pb::control_server::Control for FakeEngine {
+    async fn shutdown(
+        &self,
+        _request: Request<pb::ShutdownRequest>,
+    ) -> Result<Response<pb::ShutdownResponse>, Status> {
+        Err(Status::unimplemented("engine shutdown is not implemented"))
+    }
+
     async fn get_server_info(
         &self,
         _request: Request<pb::GetServerInfoRequest>,

@@ -4,7 +4,7 @@
 //! Optional multimodal encoder hop for token-serving pipelines.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use anyhow::{Context as _, Result};
 use arc_swap::ArcSwapOption;
@@ -14,10 +14,11 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use dynamo_runtime::{
-    engine::AsyncEngine,
+    engine::AsyncEngineContextProvider,
+    error::{DynamoError, ErrorClass},
     pipeline::{
-        Context, ManyOut, Operator, PushRouter, RouterMode, ServerStreamingEngine, SingleIn,
-        async_trait,
+        Context, ManyOut, Operator, PushRouter, ResponseStream, RouterMode, ServerStreamingEngine,
+        SingleIn, async_trait,
     },
     protocols::{EndpointId, annotated::Annotated, maybe_error::MaybeError},
 };
@@ -27,6 +28,9 @@ use crate::protocols::common::{
     llm_backend::{LLMEngineOutput, PreprocessedRequest},
     preprocessor::TraceLink,
 };
+
+mod cleanup;
+use cleanup::EncoderResultCleanup;
 
 type EncodePushRouter = PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>;
 
@@ -66,6 +70,7 @@ pub struct EncoderRouter {
     target_tx: Option<watch::Sender<Option<WorkerSetTarget>>>,
     cancel_token: CancellationToken,
     lifecycle: AtomicU8,
+    required: AtomicBool,
     model_name: String,
     namespace: String,
 }
@@ -135,6 +140,7 @@ impl EncoderRouter {
             target_tx: None,
             cancel_token: CancellationToken::new(),
             lifecycle: AtomicU8::new(EncoderLifecycleState::Pending as u8),
+            required: AtomicBool::new(false),
             model_name: String::new(),
             namespace: String::new(),
         })
@@ -166,6 +172,7 @@ impl EncoderRouter {
             target_tx: Some(target_tx),
             cancel_token: cancel_token.clone(),
             lifecycle: AtomicU8::new(EncoderLifecycleState::Pending as u8),
+            required: AtomicBool::new(false),
             model_name,
             namespace,
         });
@@ -303,6 +310,25 @@ impl EncoderRouter {
         EncoderLifecycleState::load(self.lifecycle.load(Ordering::Acquire))
     }
 
+    pub(crate) fn set_required(&self, required: bool) {
+        self.required.store(required, Ordering::Release);
+    }
+
+    pub(crate) fn is_required(&self) -> bool {
+        self.required.load(Ordering::Acquire)
+    }
+
+    fn unavailable(&self, message: &str) -> anyhow::Error {
+        DynamoError::builder()
+            .class(ErrorClass::Unavailable)
+            .message(format!(
+                "Required encoder for model {} in namespace {}: {message}",
+                self.model_name, self.namespace
+            ))
+            .build()
+            .into()
+    }
+
     /// Update the desired Encode endpoint. Clearing is synchronous so requests
     /// holding an older catalog snapshot stop using a removed endpoint before
     /// the new catalog is published.
@@ -350,6 +376,7 @@ impl EncoderRouter {
 
     async fn consume_encode_stream(
         mut response: ManyOut<Annotated<LLMEngineOutput>>,
+        mut cleanup: Option<(&mut EncoderResultCleanup, &str)>,
     ) -> Result<(serde_json::Value, Option<TraceLink>)> {
         let mut terminal = None;
         while let Some(item) = response.next().await {
@@ -360,6 +387,9 @@ impl EncoderRouter {
                 continue;
             };
             if output.finish_reason.is_some() {
+                if let Some((cleanup, model)) = cleanup.as_mut() {
+                    cleanup.observe(model, &output)?;
+                }
                 terminal = Some(output);
             }
         }
@@ -388,13 +418,38 @@ impl
         next: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>> {
         let (mut request, context) = request.into_parts();
-        if self.lifecycle_state() != EncoderLifecycleState::Active || !Self::should_encode(&request)
+        if !Self::should_encode(&request) {
+            return next.generate(context.map(|_| request)).await;
+        }
+        let required = self.is_required();
+        if required
+            && request.multi_modal_data.as_ref().is_some_and(|media| {
+                media
+                    .iter()
+                    .any(|(kind, items)| kind != "image_url" && !items.is_empty())
+            })
         {
+            return Err(DynamoError::builder().class(ErrorClass::InvalidRequest)
+                .message("This deployment supports image encoder handoffs only; video and audio are unsupported")
+                .build().into());
+        }
+        if self.lifecycle_state() != EncoderLifecycleState::Active {
+            if required {
+                return Err(self.unavailable("no active encoder is available"));
+            }
             return next.generate(context.map(|_| request)).await;
         }
 
+        let mut encode_request = request.clone();
+        if let Some(routing) = &mut encode_request.routing {
+            routing.backend_instance_id = None;
+            routing.prefill_worker_id = None;
+            routing.decode_worker_id = None;
+            routing.dp_rank = None;
+            routing.prefill_dp_rank = None;
+        }
         let encode_context = Context::with_id_and_metadata(
-            request.clone(),
+            encode_request,
             context.id().to_string(),
             context.metadata().clone(),
         );
@@ -403,516 +458,68 @@ impl
                 .binding
                 .load_full()
                 .context("Encoder router is active but not initialized")?;
-            let response = binding.router.generate(encode_context).await?;
-            Self::consume_encode_stream(response).await
+            let worker_id = binding
+                .router
+                .select_next_worker()
+                .context("No encoder worker is available")?;
+            let (worker_id, response) = binding
+                .router
+                .direct_within_prepared(encode_context, worker_id, None, |_, worker_id| {
+                    Ok(worker_id)
+                })
+                .await?;
+            let mut cleanup = EncoderResultCleanup {
+                router: binding.router.clone(),
+                worker_id,
+                request: None,
+            };
+            let (result, link) =
+                Self::consume_encode_stream(response, Some((&mut cleanup, &request.model))).await?;
+            Ok::<_, anyhow::Error>((result, link, cleanup))
         }
         .await;
 
-        match encode_result {
-            Ok((encoder_result, worker_link)) => {
-                // Once the Encode worker has emitted a transfer handle, always hand it
-                // to the downstream worker even if the caller disconnected. The
-                // receiver owns transfer completion and buffer release.
+        let cleanup = match encode_result {
+            Ok((encoder_result, worker_link, cleanup)) => {
                 request.encoder_result = Some(encoder_result);
                 request.migration_link = worker_link;
+                cleanup
             }
             Err(error) => {
+                if required {
+                    let invalid = error
+                        .downcast_ref::<DynamoError>()
+                        .is_some_and(|error| error.class() == ErrorClass::InvalidRequest);
+                    return Err(if invalid {
+                        error
+                    } else {
+                        self.unavailable("encoder hop failed").context(error)
+                    });
+                }
                 tracing::error!(
                     %error,
                     model = %self.model_name,
                     namespace = %self.namespace,
                     "Encoder hop failed; falling back to downstream inline encoding"
                 );
+                return next.generate(context.map(|_| request)).await;
             }
-        }
-        next.generate(context.map(|_| request)).await
+        };
+        let mut response = next.generate(context.map(|_| request)).await?;
+        let response_context = response.context();
+        let stream = async_stream::stream! {
+            let mut cleanup = cleanup;
+            while let Some(item) = response.next().await {
+                if item.data.as_ref().is_some_and(|output| !output.token_ids.is_empty()) {
+                    // A generated token proves the consumer claimed the handoff.
+                    cleanup.request = None;
+                }
+                yield item;
+            }
+        };
+        Ok(ResponseStream::new(Box::pin(stream), response_context))
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use std::{
-        collections::{HashMap, HashSet},
-        sync::Mutex,
-        time::Duration,
-    };
-
-    use futures::stream;
-    use serde_json::json;
-
-    use dynamo_runtime::{
-        DistributedRuntime, Runtime,
-        discovery::EventTransportKind,
-        distributed::{DiscoveryBackend, DistributedConfig, RequestPlaneMode},
-        engine::AsyncEngineContextProvider,
-        pipeline::{Error, ResponseStream, context::Controller, network::Ingress},
-        storage::kv,
-    };
-
-    use crate::discovery::CommittedWorkerSetTarget;
-    use crate::model_card::ModelDeploymentCard;
-    use crate::protocols::common::preprocessor::MultimodalData;
-    use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
-
-    use super::*;
-
-    fn stream_of(items: Vec<Annotated<LLMEngineOutput>>) -> ManyOut<Annotated<LLMEngineOutput>> {
-        ResponseStream::new(
-            Box::pin(stream::iter(items)),
-            Arc::new(Controller::default()),
-        )
-    }
-
-    #[derive(Default)]
-    struct CaptureEngine {
-        request: Mutex<Option<PreprocessedRequest>>,
-    }
-
-    #[async_trait]
-    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
-        for CaptureEngine
-    {
-        async fn generate(
-            &self,
-            request: SingleIn<PreprocessedRequest>,
-        ) -> std::result::Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
-            self.request
-                .lock()
-                .unwrap()
-                .replace(request.content().clone());
-            Ok(ResponseStream::new(
-                Box::pin(stream::empty()),
-                request.context(),
-            ))
-        }
-    }
-
-    fn multimodal_request() -> PreprocessedRequest {
-        PreprocessedRequest::builder()
-            .model("model".to_string())
-            .token_ids(vec![1, 2, 3])
-            .multi_modal_data(Some(HashMap::from([(
-                "image".to_string(),
-                vec![MultimodalData::RawUrl(
-                    "data:image/png;base64,cGF5bG9hZA==".to_string(),
-                )],
-            )])))
-            .stop_conditions(StopConditions::default())
-            .sampling_options(SamplingOptions::default())
-            .output_options(OutputOptions::default())
-            .build()
-            .unwrap()
-    }
-
-    struct EncodeWorker(u64);
-
-    #[async_trait]
-    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
-        for EncodeWorker
-    {
-        async fn generate(
-            &self,
-            request: SingleIn<PreprocessedRequest>,
-        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
-            let output = LLMEngineOutput::encode_terminal(
-                json!({"worker_id": self.0}).as_object().unwrap().clone(),
-            );
-            Ok(ResponseStream::new(
-                Box::pin(stream::iter([Annotated::from_data(output)])),
-                request.context(),
-            ))
-        }
-    }
-
-    async fn encoded_worker(router: &EncoderRouter) -> Option<u64> {
-        let downstream = Arc::new(CaptureEngine::default());
-        router
-            .generate(SingleIn::new(multimodal_request()), downstream.clone())
-            .await
-            .unwrap();
-        downstream
-            .request
-            .lock()
-            .unwrap()
-            .take()
-            .unwrap()
-            .encoder_result
-            .and_then(|result| result["worker_id"].as_u64())
-    }
-
-    #[tokio::test]
-    async fn committed_encoder_admission_survives_membership_changes_and_endpoint_reuse() {
-        // Each request-plane server needs a live runtime for its process-wide
-        // accept loop, independent of the surrounding test harness's runtimes.
-        const TEST: &str = concat!(
-            module_path!(),
-            "::committed_encoder_admission_survives_membership_changes_and_endpoint_reuse"
-        );
-        let test_name = TEST.split_once("::").unwrap().1;
-        if std::env::var("DYNAMO_ROUTING_HOP_TEST").as_deref() != Ok(test_name) {
-            let mut child = tokio::process::Command::new(std::env::current_exe().unwrap());
-            child
-                .args(["--exact", test_name, "--nocapture"])
-                .env("DYNAMO_ROUTING_HOP_TEST", test_name)
-                .env("DYN_TCP_RPC_HOST", "127.0.0.1")
-                .env("DYN_TCP_RPC_PORT", "0")
-                .env("DYN_TCP_RESPONSE_STREAM_HOST", "127.0.0.1")
-                .env("DYN_TCP_RESPONSE_STREAM_PORT", "0")
-                .kill_on_drop(true);
-            let output = tokio::time::timeout(Duration::from_secs(30), child.output())
-                .await
-                .expect("encoder subprocess must finish within its deadline")
-                .unwrap();
-            assert!(
-                output.status.success(),
-                "{}\n{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
-            return;
-        }
-        let runtime = Runtime::from_current().unwrap();
-        let store = tempfile::tempdir().unwrap();
-        let config = || DistributedConfig {
-            discovery_backend: DiscoveryBackend::KvStore(kv::Selector::File(store.path().into())),
-            nats_config: None,
-            request_plane: RequestPlaneMode::Tcp,
-            response_plane: None,
-            event_transport_kind: EventTransportKind::Zmq,
-        };
-        let namespace = format!("encoder-admission-{}", uuid::Uuid::new_v4());
-        let mut workers = Vec::new();
-        let mut runtimes = Vec::new();
-        for _ in 0..3 {
-            let drt = DistributedRuntime::new(runtime.clone(), config())
-                .await
-                .unwrap();
-            let endpoint = drt
-                .namespace(namespace.clone())
-                .unwrap()
-                .component("workers")
-                .unwrap()
-                .endpoint("encode");
-            let worker = endpoint
-                .endpoint_builder()
-                .handler(Ingress::for_engine(Arc::new(EncodeWorker(drt.connection_id()))).unwrap())
-                .start_with_registration()
-                .await
-                .unwrap();
-            workers.push(worker);
-            runtimes.push(drt);
-        }
-        let drt = DistributedRuntime::new(runtime.clone(), config())
-            .await
-            .unwrap();
-        let endpoint = drt
-            .namespace(namespace.clone())
-            .unwrap()
-            .component("workers")
-            .unwrap()
-            .endpoint("encode");
-        let raw_client = endpoint.client().await.unwrap();
-        tokio::time::timeout(Duration::from_secs(5), async {
-            let mut instances = raw_client.instance_source.as_ref().clone();
-            while instances.borrow_and_update().len() != 3 {
-                instances.changed().await.unwrap();
-            }
-        })
-        .await
-        .expect("all three workers must be visible in raw discovery");
-        let ids: Vec<_> = workers
-            .iter()
-            .map(|worker| worker.instance().id())
-            .collect();
-        let (admissions, admitted_ids) = watch::channel(vec![ids[0]]);
-        let card = Arc::new(ModelDeploymentCard::with_name_only("model"));
-        let group_id = endpoint.id().to_string();
-        let target = |generation, admitted_ids| {
-            WorkerSetTarget::Committed(CommittedWorkerSetTarget {
-                endpoint: endpoint.clone(),
-                group: endpoint.id().to_string(),
-                generation,
-                card: card.clone(),
-                admitted_ids,
-            })
-        };
-        let router = EncoderRouter::new("model".into(), namespace);
-        router.set_target(Some(target(1, admitted_ids)));
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                if let Some(worker) = encoded_worker(&router).await {
-                    assert_eq!(worker, ids[0]);
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("committed encoder must activate");
-        assert_eq!(
-            router.available_worker_ids_for(&group_id, &endpoint.id()),
-            Some(HashSet::from([ids[0]]))
-        );
-        assert!(
-            router
-                .available_worker_ids_for("other-group", &endpoint.id())
-                .is_none()
-        );
-        for _ in 0..6 {
-            assert_eq!(encoded_worker(&router).await, Some(ids[0]));
-        }
-
-        admissions.send_replace(vec![ids[0], ids[1]]);
-        tokio::time::timeout(Duration::from_secs(5), async {
-            let mut seen = HashSet::new();
-            while seen.len() < 2 {
-                let worker = encoded_worker(&router).await.unwrap();
-                assert!(
-                    ids[..2].contains(&worker),
-                    "rejected encoder received a request"
-                );
-                seen.insert(worker);
-            }
-        })
-        .await
-        .expect("compatible members must become reachable through the admission channel");
-
-        let retired = router.binding.load_full().unwrap();
-        admissions.send_replace(Vec::new());
-        drop(admissions);
-        router.set_target(None);
-        assert!(
-            router
-                .available_worker_ids_for(&group_id, &endpoint.id())
-                .is_none()
-        );
-        let (_successor_admissions, successor_ids) = watch::channel(vec![ids[2]]);
-        router.set_target(Some(target(2, successor_ids)));
-        assert_eq!(
-            router.available_worker_ids_for(&group_id, &endpoint.id()),
-            Some(HashSet::new())
-        );
-        assert!(
-            router
-                .available_worker_ids_for("other-group", &endpoint.id())
-                .is_none()
-        );
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                if let Some(worker) = encoded_worker(&router).await {
-                    assert_eq!(worker, ids[2]);
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("same-endpoint successor must activate with its own admission");
-        assert_eq!(
-            router.available_worker_ids_for(&group_id, &endpoint.id()),
-            Some(HashSet::from([ids[2]]))
-        );
-        for _ in 0..6 {
-            assert_eq!(encoded_worker(&router).await, Some(ids[2]));
-        }
-        assert!(
-            tokio::time::timeout(
-                Duration::from_secs(5),
-                retired
-                    .router
-                    .generate(SingleIn::new(multimodal_request()),)
-            )
-            .await
-            .expect("retired admission must fail promptly")
-            .is_err()
-        );
-
-        drop(router);
-        for worker in workers {
-            worker.shutdown().await.unwrap();
-        }
-        runtime.shutdown();
-    }
-
-    #[tokio::test]
-    async fn binding_availability_tracks_local_inhibition_and_cancellation() {
-        use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
-        use std::collections::HashSet;
-
-        let runtime = Runtime::from_current().unwrap();
-        let distributed =
-            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
-                .await
-                .unwrap();
-        let endpoint = distributed
-            .namespace("encoder-availability")
-            .unwrap()
-            .component("workers")
-            .unwrap()
-            .endpoint("generate");
-        let router = EncoderRouter::disabled();
-        assert!(
-            router
-                .available_worker_ids_for("legacy", &endpoint.id())
-                .is_none()
-        );
-        let binding = Arc::new(
-            EncoderRouter::build(
-                WorkerSetTarget::Legacy(endpoint.clone()),
-                CancellationToken::new(),
-            )
-            .await
-            .unwrap(),
-        );
-        binding
-            .router
-            .client
-            .override_discovered_instances(vec![1, 2]);
-        router.binding.store(Some(binding.clone()));
-        router
-            .lifecycle
-            .store(EncoderLifecycleState::Active as u8, Ordering::Release);
-        assert_eq!(
-            router.available_worker_ids_for("legacy", &endpoint.id()),
-            Some(HashSet::from([1, 2]))
-        );
-        binding.router.client.report_instance_down(1);
-        assert_eq!(
-            router.available_worker_ids_for("legacy", &endpoint.id()),
-            Some(HashSet::from([2]))
-        );
-        let mut other = endpoint.id();
-        other.name = "other".into();
-        assert!(router.available_worker_ids_for("legacy", &other).is_none());
-        router.cancel_token.cancel();
-        assert_eq!(
-            router.available_worker_ids_for("legacy", &endpoint.id()),
-            Some(HashSet::new())
-        );
-        runtime.shutdown();
-    }
-
-    #[tokio::test]
-    async fn binding_availability_waits_for_rebind_publication() {
-        use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
-        use std::{sync::mpsc, time::Duration};
-
-        let runtime = Runtime::from_current().unwrap();
-        let distributed =
-            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
-                .await
-                .unwrap();
-        let component = distributed
-            .namespace("encoder-rebind")
-            .unwrap()
-            .component("workers")
-            .unwrap();
-        let original = component.endpoint("original");
-        let replacement = Arc::new(
-            EncoderRouter::build(
-                WorkerSetTarget::Legacy(component.endpoint("replacement")),
-                CancellationToken::new(),
-            )
-            .await
-            .unwrap(),
-        );
-        let router = EncoderRouter::disabled();
-        let binding = Arc::new(
-            EncoderRouter::build(
-                WorkerSetTarget::Legacy(original.clone()),
-                CancellationToken::new(),
-            )
-            .await
-            .unwrap(),
-        );
-        binding.router.client.override_discovered_instances(vec![1]);
-        router.binding.store(Some(binding));
-        router
-            .lifecycle
-            .store(EncoderLifecycleState::Active as u8, Ordering::Release);
-        let mut target = router.target.lock();
-        *target = Some(WorkerSetTargetId::Legacy(original.id()));
-        let (started_tx, started_rx) = mpsc::channel();
-        let (result_tx, result_rx) = mpsc::channel();
-        let reader_router = router.clone();
-        let reader = std::thread::spawn(move || {
-            started_tx.send(()).unwrap();
-            result_tx
-                .send(reader_router.available_worker_ids_for("legacy", &original.id()))
-                .unwrap();
-        });
-        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-        assert!(matches!(
-            result_rx.recv_timeout(Duration::from_millis(100)),
-            Err(mpsc::RecvTimeoutError::Timeout)
-        ));
-        *target = Some(replacement.target_id.clone());
-        router.binding.store(Some(replacement));
-        router
-            .lifecycle
-            .store(EncoderLifecycleState::Active as u8, Ordering::Release);
-        drop(target);
-        assert_eq!(
-            result_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
-            None
-        );
-        reader.join().unwrap();
-        runtime.shutdown();
-    }
-
-    #[tokio::test]
-    async fn pending_activation_does_not_keep_router_alive() {
-        let router = EncoderRouter::new("model".into(), "namespace".into());
-        let weak = Arc::downgrade(&router);
-
-        drop(router);
-
-        assert!(weak.upgrade().is_none());
-    }
-
-    #[tokio::test]
-    async fn encoder_failure_falls_back_to_downstream() {
-        let router = EncoderRouter::disabled();
-        router
-            .lifecycle
-            .store(EncoderLifecycleState::Active as u8, Ordering::Release);
-        let downstream = Arc::new(CaptureEngine::default());
-        let next: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
-            downstream.clone();
-
-        let _response = router
-            .generate(SingleIn::new(multimodal_request()), next)
-            .await
-            .expect("encoder failure should fall through to downstream");
-
-        let request = downstream
-            .request
-            .lock()
-            .unwrap()
-            .take()
-            .expect("downstream must receive the original request");
-        assert!(request.encoder_result.is_none());
-        assert!(request.multi_modal_data.is_some());
-    }
-
-    #[tokio::test]
-    async fn consumes_object_shaped_encode_terminal() {
-        let output = LLMEngineOutput::encode_terminal(
-            json!({"schema_version": 1}).as_object().unwrap().clone(),
-        );
-        let (result, _) =
-            EncoderRouter::consume_encode_stream(stream_of(vec![Annotated::from_data(output)]))
-                .await
-                .unwrap();
-        assert_eq!(result, json!({"schema_version": 1}));
-    }
-
-    #[tokio::test]
-    async fn rejects_terminal_without_encoder_result() {
-        let result = EncoderRouter::consume_encode_stream(stream_of(vec![Annotated::from_data(
-            LLMEngineOutput::stop(),
-        )]))
-        .await;
-        assert!(result.is_err());
-    }
-}
+mod tests;

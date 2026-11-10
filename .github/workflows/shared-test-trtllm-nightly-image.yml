@@ -65,10 +65,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        scenario: [image, video, audio, image-routing]
+        scenario: [image, video, audio, image-routing, image-epd, image-epd-disaggregated]
     needs: build
     runs-on: [gpu-1, amd64, v2, us-west-2]
-    timeout-minutes: 30
+    timeout-minutes: ${{ startsWith(matrix.scenario, 'image-epd') && 45 || 30 }}
     container:
       image: ${{ needs.build.outputs.image }}
       env:

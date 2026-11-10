@@ -410,6 +410,9 @@ fn reject_unsupported(request: &pb::GenerateRequest) -> BoxedStatusResult<()> {
     if !request.media.is_empty() {
         return unsupported("multimodal media");
     }
+    if request.encoder.is_some() {
+        return unsupported("encoder handoffs");
+    }
     if !request.lora_name.is_empty() {
         return unsupported("LoRA selection");
     }

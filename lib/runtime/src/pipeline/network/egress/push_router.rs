@@ -1057,6 +1057,22 @@ where
             .await
     }
 
+    /// Release resources owned by one worker even when it rejects new inference.
+    /// Discovery and fault detection remain enabled; transport fallback is forbidden.
+    pub async fn direct_cleanup(
+        &self,
+        request: SingleIn<T>,
+        instance_id: u64,
+    ) -> anyhow::Result<ManyOut<U>> {
+        self.generate_with_fault_detection_inner(
+            instance_id,
+            request,
+            TransportFallback::Deny,
+            OverloadCheck::AlreadyAdmitted,
+        )
+        .await
+    }
+
     /// Dispatch to a selected endpoint with transport fallback.
     ///
     /// Unlike [`Self::direct`], if the selected instance disappears between selection and

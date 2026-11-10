@@ -9,6 +9,8 @@ use dynamo_backend_common::{MultimodalData, MultimodalItemRef};
 
 use super::*;
 
+mod epd;
+
 /// Drives a real disaggregated prefill -> decode handoff against two live
 /// OpenEngine servers, each backed by a TensorRT-LLM engine with a KV cache
 /// transceiver. Ignored by default; run explicitly with both endpoints:
@@ -463,6 +465,15 @@ async fn e2e_real_openengine_image() {
         .start(0)
         .await
         .expect("start against the live image-capable server");
+
+    if std::env::var_os("TRTLLM_E2E_EPD_IMAGES").is_some() {
+        epd::baseline(&engine, &model).await;
+        engine
+            .cleanup()
+            .await
+            .expect("cleanup aggregated EPD baseline");
+        return;
+    }
 
     let token_ids = vec![
         151644, 872, 198, 151652, 151655, 151653, 675, 279, 7987, 504, 2115, 311, 1290, 13, 151645,

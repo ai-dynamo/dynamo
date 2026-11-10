@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::sync::Arc;
+
 use anyhow::Result;
 use dynamo_kv_router::conditional_disagg::ConditionalDisaggDecisionInput;
 use dynamo_runtime::pipeline::SingleIn;
@@ -15,6 +17,20 @@ pub(super) struct ConditionalDisaggDecodeDecision {
     pub plan: RoutePlan,
     pub overlap_tokens: usize,
     pub net_new_tokens: usize,
+    encoder_binding: Option<Arc<super::PrefillBinding>>,
+}
+
+impl ConditionalDisaggDecodeDecision {
+    pub(super) fn allows_encoder_bypass(&self, router: &PrefillRouter) -> bool {
+        self.encoder_binding.as_ref().is_none_or(|expected| {
+            router.lifecycle_state() == super::PrefillLifecycleState::Active
+                && router
+                    .binding
+                    .load()
+                    .as_ref()
+                    .is_some_and(|current| Arc::ptr_eq(current, expected))
+        })
+    }
 }
 
 fn decode_gate_allows_bypass(
@@ -33,6 +49,20 @@ impl PrefillRouter {
         request: &SingleIn<PreprocessedRequest>,
         request_id: &str,
     ) -> Result<Option<ConditionalDisaggDecodeDecision>> {
+        let encoder_binding = if request.encoder_result.is_some() {
+            let Some(binding) = self
+                .binding
+                .load_full()
+                .filter(|binding| !binding.requires_encoder_result)
+            else {
+                // Mandatory encoder handoffs must be consumed by prefill first.
+                return Ok(None);
+            };
+            Some(binding)
+        } else {
+            None
+        };
+
         // Conditional disagg chooses a cache-hot decode worker, so it only
         // applies to a KV-routed decode set.
         if !self.decode_router_mode.is_kv_routing() {
@@ -141,6 +171,7 @@ impl PrefillRouter {
                 plan,
                 overlap_tokens,
                 net_new_tokens,
+                encoder_binding,
             }));
         }
 

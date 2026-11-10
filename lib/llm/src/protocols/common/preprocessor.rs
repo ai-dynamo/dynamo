@@ -27,6 +27,13 @@ use crate::kv_router::RequestAttemptRelease;
 use crate::preprocessor::media::RdmaMediaDataDescriptor;
 use crate::protocols::TokenIdType;
 
+/// Encoder output metadata declaring that an unused result can be returned to its producer.
+pub const ENCODER_RESULT_RELEASE_SUPPORTED: &str = "encoder_result_release";
+/// Internal encode-worker request to release the attached opaque result.
+pub const RELEASE_ENCODER_RESULT: &str = "release_encoder_result";
+/// Deployment metadata for consumers that cannot encode media inline.
+pub const REQUIRES_ENCODER_RESULT: &str = "requires_encoder_result";
+
 /// Routing hints for directing requests to specific workers.
 /// These fields are extracted from nvext and used by the router to determine
 /// which worker(s) should handle the request.
