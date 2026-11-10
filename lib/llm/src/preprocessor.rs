@@ -12214,7 +12214,11 @@ responses_tools: None,
         ) {
             return;
         }
-        for (tool, reasoning) in [("llama3_json", None), ("qwen3_coder", Some("deepseek_r1"))] {
+        for (tool, reasoning) in [
+            ("llama3_json", None),
+            ("qwen3_coder", Some("deepseek_r1")),
+            ("qwen3_coder", Some("hermes")),
+        ] {
             let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
             let mut card = ModelDeploymentCard::load_from_disk(model_path, None).unwrap();
@@ -14457,6 +14461,21 @@ responses_tools: None,
     /// PRE.1 — `skip_special_tokens` default. See `lib/llm/PREPROCESSOR_CASES.md`.
     #[test]
     fn test_parser_requires_special_tokens() {
+        for version in ["auto", "1", "2"] {
+            if !crate::test_utils::run_isolated(
+                concat!(module_path!(), "::test_parser_requires_special_tokens"),
+                &[(env_llm::DYN_PARSER_VERSION, version)],
+            ) {
+                let version = std::env::var(env_llm::DYN_PARSER_VERSION).unwrap();
+                assert_eq!(
+                    OpenAIPreprocessor::parser_requires_special_tokens(Some("hermes"), None)
+                        .unwrap(),
+                    version != "1",
+                    "Hermes special-token requirement for DYN_PARSER_VERSION={version}"
+                );
+                return;
+            }
+        }
         let cases: &[(Option<&str>, Option<&str>, bool, &str)] = &[
             (
                 Some("gemma4"),
@@ -14487,12 +14506,6 @@ responses_tools: None,
                 Some("gemma4"),
                 true,
                 "gemma4 paired → required",
-            ),
-            (
-                Some("hermes"),
-                None,
-                true,
-                "hermes → required (unified Hermes grammar preserves special tokens)",
             ),
             (
                 Some("llama3_json"),
