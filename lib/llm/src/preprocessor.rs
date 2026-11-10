@@ -3811,6 +3811,9 @@ impl OpenAIPreprocessor {
                 strict_priority,
                 priority,
                 lora_name,
+                base_model_name: None,
+                lora_source_uri: None,
+                lora_resolution_version: None,
                 cache_namespace: cache_namespace.clone(),
                 allowed_worker_ids: None,
                 routing_constraints: nvext
