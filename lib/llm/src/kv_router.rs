@@ -9,8 +9,8 @@ use std::{
 };
 
 use anyhow::Result;
+use dynamo_kv_router::plugins::check_role;
 use dynamo_kv_router::plugins::hint_policy::HintPolicyFactory;
-use dynamo_kv_router::plugins::resolve_role;
 #[cfg(test)]
 use dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicy;
 use dynamo_kv_router::{
@@ -172,7 +172,7 @@ impl SelectionPolicySource {
 /// the wrapped factory. This keeps the one-call-per-partition contract while
 /// letting the router read the inputs of the instance that actually serves.
 ///
-/// Preparing also resolves the role's hint policies and checks, with [`resolve_role`], that they
+/// Preparing also resolves the role's hint policies and checks, with [`check_role`], that they
 /// fit the policy, so a bad combination fails when the router is built.
 #[derive(Clone)]
 pub struct PreparedSelectionPolicy {
@@ -196,7 +196,7 @@ impl PreparedSelectionPolicy {
                 &policy,
             );
         let hint_policies = plugins::router_plugin_registry().resolve_hint_policies(config)?;
-        let responsibilities = resolve_role(
+        let prepare_inputs = check_role(
             worker_type,
             &policy,
             hint_policies.instances(config, worker_type, key.as_ref()),
@@ -216,7 +216,7 @@ impl PreparedSelectionPolicy {
         Ok(Self {
             factory,
             inputs,
-            prepare_inputs: responsibilities.prepare_inputs(),
+            prepare_inputs,
             hint_policies,
         })
     }
