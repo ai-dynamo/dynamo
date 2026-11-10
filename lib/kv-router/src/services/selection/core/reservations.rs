@@ -7,6 +7,7 @@
 
 use super::hint::{BookingHint, booking_hint};
 use super::*;
+use crate::scheduling::AccountingAttribution;
 use crate::scheduling::queue::BookingHandle;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -23,6 +24,7 @@ struct ReservationBooking {
     expected_output_tokens: Option<u32>,
     track_prefill_tokens: bool,
     lora_name: Option<String>,
+    accounting_attribution: AccountingAttribution,
     /// Public block hashes to record into an approximate indexer once booked.
     routing_hashes: Option<Vec<LocalBlockHash>>,
     session_id: Option<String>,
@@ -255,6 +257,7 @@ impl SelectionCore {
                 expected_output_tokens: pending.expected_output_tokens,
                 track_prefill_tokens,
                 lora_name: pending.lora_name.clone(),
+                accounting_attribution: pending.accounting_attribution,
                 routing_hashes: pending.routing_hashes.clone(),
                 session_id: pending.session_id.clone(),
                 replay_hint: Some(ReplayHint {
@@ -367,6 +370,8 @@ impl SelectionCore {
                 expected_output_tokens: req.expected_output_tokens,
                 track_prefill_tokens,
                 lora_name: req.prompt.lora_name,
+                // Explicit reservations carry only legacy routing identity, not runtime metadata.
+                accounting_attribution: AccountingAttribution::default(),
                 routing_hashes,
                 session_id: None,
                 replay_hint: None,
@@ -393,6 +398,7 @@ impl SelectionCore {
             expected_output_tokens,
             track_prefill_tokens,
             lora_name,
+            accounting_attribution,
             routing_hashes,
             session_id,
             replay_hint,
@@ -420,7 +426,7 @@ impl SelectionCore {
                 expected_output_tokens,
                 prefill_load_hint,
                 worker,
-                lora_name,
+                lora_name: accounting_attribution.accounting_name(lora_name),
             })?;
         // A replayed selection runs its partition's hint policies for the booked worker. A
         // failure returns while the booking handle is armed, so the booking is freed.

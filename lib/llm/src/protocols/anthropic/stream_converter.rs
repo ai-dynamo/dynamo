@@ -1516,41 +1516,48 @@ mod tests {
 
     #[tokio::test]
     async fn test_stream_stop_sequence_metadata() {
+        // `matched` is the backend's `nvext.stop_reason`; `None` sends no nvext.
         for (finish, matched, expected_reason, expected_sequence) in [
             (
                 FinishReason::Stop,
-                serde_json::json!("</answer>"),
+                Some(serde_json::json!("</answer>")),
                 "stop_sequence",
                 Some("</answer>"),
             ),
             (
                 FinishReason::Stop,
-                serde_json::json!("\n\nHuman:"),
+                Some(serde_json::json!("\n\nHuman:")),
                 "stop_sequence",
                 Some("\n\nHuman:"),
             ),
-            (FinishReason::Stop, serde_json::json!(42), "end_turn", None),
+            (FinishReason::Stop, None, "end_turn", None),
+            (
+                FinishReason::Stop,
+                Some(serde_json::json!(42)),
+                "end_turn",
+                None,
+            ),
             (
                 FinishReason::Length,
-                serde_json::json!("</answer>"),
+                Some(serde_json::json!("</answer>")),
                 "max_tokens",
                 None,
             ),
             (
                 FinishReason::ContentFilter,
-                serde_json::json!("</answer>"),
+                Some(serde_json::json!("</answer>")),
                 "refusal",
                 None,
             ),
             (
                 FinishReason::ToolCalls,
-                serde_json::json!("</answer>"),
+                Some(serde_json::json!("</answer>")),
                 "tool_use",
                 None,
             ),
             (
                 FinishReason::FunctionCall,
-                serde_json::json!("</answer>"),
+                Some(serde_json::json!("</answer>")),
                 "tool_use",
                 None,
             ),
@@ -1564,7 +1571,9 @@ mod tests {
             };
             converter.append_chunk_events(&content, &mut events);
             let mut terminal = finish_chunk(finish);
-            terminal.nvext = Some(serde_json::json!({"stop_reason": matched}));
+            terminal.nvext = matched
+                .clone()
+                .map(|matched| serde_json::json!({"stop_reason": matched}));
             converter.append_chunk_events(&terminal, &mut events);
             converter.append_end_events(&mut events);
             let values = sse_values(events).await;
@@ -1574,20 +1583,25 @@ mod tests {
                 .unwrap();
             assert_eq!(
                 terminal["delta"]["stop_reason"], expected_reason,
-                "{finish:?}: {matched}"
+                "{finish:?}: {matched:?}"
             );
+            // `.get()` tells a missing key from an explicit `null`; the
+            // Anthropic contract always sends the key.
             assert_eq!(
-                terminal["delta"]["stop_sequence"],
-                serde_json::json!(expected_sequence),
-                "{finish:?}: {matched}"
+                terminal["delta"].get("stop_sequence"),
+                Some(&serde_json::json!(expected_sequence)),
+                "{finish:?}: {matched:?}"
             );
-            assert_eq!(
-                values
-                    .iter()
-                    .filter(|event| event["type"] == "message_delta")
-                    .count(),
-                1
-            );
+            for event_type in ["message_delta", "message_stop"] {
+                assert_eq!(
+                    values
+                        .iter()
+                        .filter(|event| event["type"] == event_type)
+                        .count(),
+                    1,
+                    "{finish:?}: {matched:?}: {event_type}"
+                );
+            }
             assert_eq!(values.last().unwrap()["type"], "message_stop");
         }
     }
