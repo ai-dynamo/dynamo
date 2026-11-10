@@ -2638,8 +2638,11 @@ fn parse_chat_completion_request(
     match parse_json_request("chat completions", body) {
         Ok(request) => Ok((request, None)),
         Err(original) => {
-            let request: AllowedToolsRequest =
-                parse_json_request("chat completions", body).map_err(|_| original)?;
+            let request: AllowedToolsRequest = match parse_json_request("chat completions", body) {
+                Ok(request) => request,
+                Err(error) if names_allowed_tools_choice(body) => return Err(error),
+                Err(_) => return Err(original),
+            };
             let (request, allowlist) = request.normalize().map_err(|error| {
                 ErrorMessage::from_anyhow(
                     invalid_argument(error.to_string()).into(),
@@ -2649,6 +2652,20 @@ fn parse_chat_completion_request(
             Ok((request, Some(allowlist)))
         }
     }
+}
+
+fn names_allowed_tools_choice(body: &[u8]) -> bool {
+    #[derive(serde::Deserialize)]
+    struct Probe {
+        tool_choice: Option<serde_json::Value>,
+    }
+
+    serde_json::from_slice::<Probe>(body)
+        .ok()
+        .and_then(|probe| probe.tool_choice)
+        .is_some_and(|choice| {
+            choice.get("type").and_then(|kind| kind.as_str()) == Some("allowed_tools")
+        })
 }
 
 async fn handler_chat_completions(

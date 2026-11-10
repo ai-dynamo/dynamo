@@ -1660,6 +1660,24 @@ async fn chat_allowed_tools_preserves_catalog_and_limits_dispatched_tools() {
             "allowed_tools references unknown function",
         )
         .await;
+        let malformed_mode = chat_allowed_tools_request("bogus", "lookup", false);
+        let mut malformed_sampling = chat_allowed_tools_request("auto", "lookup", false);
+        malformed_sampling["top_p"] = json!("invalid_top_p");
+        let mut ordinary = chat_allowed_tools_request("auto", "lookup", false);
+        ordinary["tool_choice"] = json!("bogus");
+
+        for (request, message) in [
+            (malformed_mode, "unknown variant `bogus`"),
+            (malformed_sampling, "invalid type: string \"invalid_top_p\""),
+            (ordinary, "ChatCompletionToolChoiceOption"),
+        ] {
+            assert_openai_error(
+                post_json(&svc, "/v1/chat/completions", request).await,
+                ExpectedError::Validation,
+                message,
+            )
+            .await;
+        }
         assert!(svc.engine.take_requests().await.is_empty());
         svc.shutdown().await;
     })
