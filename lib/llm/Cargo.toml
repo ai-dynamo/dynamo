@@ -113,7 +113,6 @@ moka = { workspace = true }
 oneshot = { workspace = true }
 parking_lot = { workspace = true }
 percent-encoding = "2.3.2"
-pin-project-lite = { workspace = true }
 prometheus = { workspace = true }
 rand = { workspace = true }
 serde = { workspace = true }
