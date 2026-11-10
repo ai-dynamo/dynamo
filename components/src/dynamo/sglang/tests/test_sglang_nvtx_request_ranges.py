@@ -54,7 +54,8 @@ class _Recorder:
 @pytest.fixture
 def nvtx_log(monkeypatch):
     rec = _Recorder()
-    monkeypatch.setattr(nvtx_utils, "ENABLED", True)
+    # Request ranges follow REQUEST_ENABLED (DYN_NVTX alone), not ENABLED.
+    monkeypatch.setattr(nvtx_utils, "REQUEST_ENABLED", True)
     monkeypatch.setattr(nvtx_utils, "_core_api", (rec.mark, rec.range))
     return rec.log
 
