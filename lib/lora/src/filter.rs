@@ -504,6 +504,64 @@ mod tests {
         );
     }
 
+    fn set_inactive_pin(rt: &LoraRoutingTable, lora_name: &str, pin: u64) {
+        rt.update_allocation(
+            lora_name.to_string(),
+            LoraReplicaConfig {
+                lora_name: lora_name.to_string(),
+                replica_factor: 1,
+                replica_set: vec![make_worker(pin)],
+                updated_at: Instant::now(),
+                is_active: false,
+            },
+        );
+    }
+
+    #[test]
+    fn test_inactive_pin_without_adapter_prefers_live_loaded_worker() {
+        // The live cold-start pin does not have the adapter loaded, but another live worker does.
+        // A backend that only serves registered adapters (the vLLM worker) rejects the request on
+        // the pin, so the request must go to the loaded worker instead (#18521).
+        let rt = LoraRoutingTable::new();
+        let st = LoraStateTracker::new();
+        set_inactive_pin(&rt, "lora-b", 1);
+        st.handle_mdc_addition(make_worker(1), &make_lora_info("lora-a"));
+        st.handle_mdc_addition(make_worker(3), &make_lora_info("lora-b"));
+
+        let filter = LoraFilter::new(rt, st);
+        let result = filter.filter_worker_ids_for_lora(Some("lora-b"), &[1, 2, 3]);
+        assert_eq!(result, vec![3]);
+    }
+
+    #[test]
+    fn test_inactive_pin_with_adapter_keeps_pin() {
+        // The pin already has the adapter loaded: keep the single pin even though another live
+        // worker also has it.
+        let rt = LoraRoutingTable::new();
+        let st = LoraStateTracker::new();
+        set_inactive_pin(&rt, "lora-b", 2);
+        st.handle_mdc_addition(make_worker(2), &make_lora_info("lora-b"));
+        st.handle_mdc_addition(make_worker(3), &make_lora_info("lora-b"));
+
+        let filter = LoraFilter::new(rt, st);
+        let result = filter.filter_worker_ids_for_lora(Some("lora-b"), &[1, 2, 3]);
+        assert_eq!(result, vec![2]);
+    }
+
+    #[test]
+    fn test_inactive_pin_adapter_loaded_only_on_unavailable_worker_keeps_pin() {
+        // No live worker has the adapter loaded: the cold-start pin still bounds the load to one
+        // deterministic worker.
+        let rt = LoraRoutingTable::new();
+        let st = LoraStateTracker::new();
+        set_inactive_pin(&rt, "lora-b", 2);
+        st.handle_mdc_addition(make_worker(9), &make_lora_info("lora-b"));
+
+        let filter = LoraFilter::new(rt, st);
+        let result = filter.filter_worker_ids_for_lora(Some("lora-b"), &[1, 2, 3]);
+        assert_eq!(result, vec![2]);
+    }
+
     #[test]
     fn test_active_all_replicas_unavailable_prefers_known_loaded() {
         // Active entry whose entire replica set is unavailable, but the adapter is still loaded on
