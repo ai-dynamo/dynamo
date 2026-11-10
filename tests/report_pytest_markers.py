@@ -114,6 +114,7 @@ STUB_MODULES = [
     "psutil",
     "requests",
     "numpy",
+    "aisim",
     "aisimulate",
     "aisim.capacity",
     "aisim.config",
