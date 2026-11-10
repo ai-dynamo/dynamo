@@ -433,6 +433,23 @@ where
 }
 
 impl PreprocessedRouting {
+    /// Routing that sends preprocessed requests to `backend_engine`, through `prefill_router`
+    /// and `encoder_router`.
+    pub fn new(
+        backend_engine: ServiceEngine<
+            SingleIn<PreprocessedRequest>,
+            ManyOut<Annotated<LLMEngineOutput>>,
+        >,
+        prefill_router: Arc<PrefillRouter>,
+        encoder_router: Arc<EncoderRouter>,
+    ) -> Self {
+        Self {
+            backend_engine,
+            prefill_router,
+            encoder_router,
+        }
+    }
+
     /// The normal way to build an inference pipeline. Connect this directly to HTTP layer.
     pub fn build_pipeline<Req, Resp>(
         &self,

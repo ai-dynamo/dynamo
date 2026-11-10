@@ -288,6 +288,7 @@ impl RequestClassifierRuntime {
             context_tokens: None,
             progress_updater,
             phase: LifecyclePhase::Registered,
+            drop_cause: None,
         })
     }
 
@@ -388,6 +389,8 @@ pub struct RequestLifecycle {
     context_tokens: Option<usize>,
     progress_updater: RequestProgressUpdater,
     phase: LifecyclePhase,
+    /// The cause a drop before any terminal event aborts with (see [`Self::abort_on_drop`]).
+    drop_cause: Option<Arc<AbortCause>>,
 }
 
 impl std::fmt::Debug for RequestLifecycle {
@@ -491,6 +494,16 @@ impl RequestLifecycle {
             });
     }
 
+    /// Abort with `cause` if the lifecycle is dropped before any terminal event, in place of no
+    /// cause. A holder that ends it with [`Self::complete`] or [`Self::abort`] decides its own
+    /// terminal event, so a cause known early does not end a lifecycle that a later holder may
+    /// still take and finish.
+    pub fn abort_on_drop(&mut self, cause: Arc<AbortCause>) {
+        if self.phase != LifecyclePhase::Terminal {
+            self.drop_cause = Some(cause);
+        }
+    }
+
     pub fn abort(&mut self, error: Option<Arc<AbortCause>>) {
         if self.phase == LifecyclePhase::Terminal {
             return;
@@ -510,7 +523,8 @@ impl RequestLifecycle {
 
 impl Drop for RequestLifecycle {
     fn drop(&mut self) {
-        self.abort(None);
+        let cause = self.drop_cause.take();
+        self.abort(cause);
     }
 }
 
@@ -877,6 +891,54 @@ mod tests {
 
         std::thread::spawn(move || drop(lifecycle)).join().unwrap();
         assert_eq!(event_rx.recv().await.as_deref(), Some("off-runtime-drop"));
+    }
+
+    /// Reports each terminal event as `aborted: <cause>` or `completed`.
+    struct TerminalRecorder {
+        events: mpsc::UnboundedSender<String>,
+    }
+
+    #[async_trait]
+    impl RequestClassifier for TerminalRecorder {
+        async fn on_event(&mut self, event: ClassifyEvent) {
+            let event = match event {
+                ClassifyEvent::Aborted { error, .. } => format!(
+                    "aborted: {}",
+                    error.map_or_else(|| "none".to_string(), |error| error.to_string())
+                ),
+                ClassifyEvent::Completed { .. } => "completed".to_string(),
+                _ => return,
+            };
+            self.events.send(event).unwrap();
+        }
+    }
+
+    /// A cause given with `abort_on_drop` is the cause of a drop before any terminal event, and
+    /// does not end the lifecycle: a holder that completes it later reports a completion.
+    #[tokio::test]
+    async fn abort_on_drop_is_the_cause_of_a_drop_only() {
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let runtime = RequestClassifierRuntime::new(
+            Box::new(TerminalRecorder { events: event_tx }),
+            CancellationToken::new(),
+        );
+        let cause = || Arc::new(std::io::Error::other("client went away")) as Arc<AbortCause>;
+
+        let mut dropped = runtime.begin_request("dropped").unwrap();
+        dropped.abort_on_drop(cause());
+        drop(dropped);
+        assert_eq!(
+            event_rx.recv().await.as_deref(),
+            Some("aborted: client went away")
+        );
+
+        let mut completed = runtime.begin_request("completed").unwrap();
+        completed.abort_on_drop(cause());
+        completed.sent(WorkerWithDpRank::new(9, 1));
+        completed.complete();
+        drop(completed);
+        assert_eq!(event_rx.recv().await.as_deref(), Some("completed"));
+        assert!(event_rx.try_recv().is_err());
     }
 
     struct CountingClassifier {
