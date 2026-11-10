@@ -8,7 +8,7 @@ use std::sync::Arc;
 use serde::de::DeserializeOwned;
 use thiserror::Error;
 
-use super::{HintDefault, HintHost, HintPolicy, HintPolicyEntry};
+use super::{HintHost, HintPolicy, HintPolicyEntry};
 use crate::config::KvRouterConfig;
 use crate::plugins::worker_selection::{
     WorkerSelectionConfig, WorkerSelectionInstance, WorkerSelectionPolicySelection,
@@ -111,21 +111,10 @@ pub enum HintPolicyRegistryError {
         #[source]
         source: HintPolicyProviderError,
     },
-    #[error("hint-policy type {name:?} registers no hosts")]
-    NoHosts { name: String },
     #[error("hint-policy type {name:?} lists host {host:?} more than once")]
     DuplicateHost { name: String, host: HintHost },
     #[error("hint-policy type {name:?} names host {host:?}, which no linked plugin registers")]
     UnknownHost { name: String, host: HintHost },
-    #[error(
-        "hint-policy type {hint:?} doesn't run under worker-selection type {host:?} ({role}); hints for that type: {supported}"
-    )]
-    Unsupported {
-        role: &'static str,
-        host: String,
-        hint: String,
-        supported: String,
-    },
 }
 
 #[derive(Clone)]
@@ -295,24 +284,17 @@ const WORKER_TYPES: [WorkerType; 4] = [
 struct RegisteredHintPolicy {
     name: String,
     provider: HintPolicyProvider,
-    hosts: Vec<(HintHost, HintDefault)>,
+    hosts: Vec<HintHost>,
 }
 
 impl RegisteredHintPolicy {
-    /// Whether this hint runs under the worker-selection type `host`, and if so, whether it runs
-    /// there by default. A host that names `host` overrides [`HintHost::AnyWorkerSelection`].
-    fn runs_under(&self, host: &str) -> Option<HintDefault> {
-        let mut any = None;
-        for (candidate, default) in &self.hosts {
-            match candidate {
-                HintHost::WorkerSelection(policy_type) if policy_type == host => {
-                    return Some(*default);
-                }
-                HintHost::AnyWorkerSelection => any = Some(*default),
-                _ => {}
-            }
-        }
-        any
+    /// Whether a role under the worker-selection type `host` runs this hint when its entry lists
+    /// no `hints`.
+    fn on_by_default_under(&self, host: &str) -> bool {
+        self.hosts.iter().any(|candidate| match candidate {
+            HintHost::AnyWorkerSelection => true,
+            HintHost::WorkerSelection(policy_type) => policy_type == host,
+        })
     }
 
     fn construct(
@@ -333,7 +315,7 @@ impl RegisteredHintPolicy {
     }
 }
 
-/// Linked hint-policy types, in registration order, with the plugins each runs under.
+/// Linked hint-policy types, in registration order, with the plugins each runs under by default.
 #[derive(Clone, Default)]
 pub(crate) struct HintPolicyRegistry {
     policies: Vec<RegisteredHintPolicy>,
@@ -348,7 +330,7 @@ impl HintPolicyRegistry {
         &mut self,
         name: impl Into<String>,
         provider: HintPolicyProvider,
-        hosts: impl IntoIterator<Item = (HintHost, HintDefault)>,
+        hosts: impl IntoIterator<Item = HintHost>,
     ) -> Result<(), HintPolicyRegistryError> {
         let name = name.into();
         if name.is_empty() {
@@ -357,15 +339,12 @@ impl HintPolicyRegistry {
         if self.get(&name).is_some() {
             return Err(HintPolicyRegistryError::Duplicate { name });
         }
-        let mut registered: Vec<(HintHost, HintDefault)> = Vec::new();
-        for (host, default) in hosts {
-            if registered.iter().any(|(known, _)| *known == host) {
+        let mut registered: Vec<HintHost> = Vec::new();
+        for host in hosts {
+            if registered.contains(&host) {
                 return Err(HintPolicyRegistryError::DuplicateHost { name, host });
             }
-            registered.push((host, default));
-        }
-        if registered.is_empty() {
-            return Err(HintPolicyRegistryError::NoHosts { name });
+            registered.push(host);
         }
         self.policies.push(RegisteredHintPolicy {
             name,
@@ -381,7 +360,7 @@ impl HintPolicyRegistry {
         is_linked: impl Fn(&HintHost) -> bool,
     ) -> Result<(), HintPolicyRegistryError> {
         for policy in &self.policies {
-            if let Some((host, _)) = policy.hosts.iter().find(|(host, _)| !is_linked(host)) {
+            if let Some(host) = policy.hosts.iter().find(|host| !is_linked(host)) {
                 return Err(HintPolicyRegistryError::UnknownHost {
                     name: policy.name.clone(),
                     host: host.clone(),
@@ -393,8 +372,8 @@ impl HintPolicyRegistry {
 
     /// Resolve each role's hints once at startup, from the `worker_selection` entry the role runs.
     ///
-    /// Listed hints must run under the role's worker-selection type. A role whose entry lists no
-    /// `hints` runs the hints registered [`HintDefault::On`] for that type, in registration order,
+    /// A role runs the hints its entry lists, of any registered type. A role whose entry lists no
+    /// `hints` runs the hints whose hosts include its worker-selection type, in registration order,
     /// each built from empty parameters.
     pub(crate) fn resolve(
         &self,
@@ -427,7 +406,7 @@ impl HintPolicyRegistry {
                 Some(entries) => ResolvedRole {
                     policies: entries
                         .iter()
-                        .map(|entry| self.listed(worker_type, host, entry))
+                        .map(|entry| self.listed(entry))
                         .collect::<Result<_, _>>()?,
                     defaults: false,
                 },
@@ -435,7 +414,7 @@ impl HintPolicyRegistry {
                     policies: self
                         .policies
                         .iter()
-                        .filter(|policy| policy.runs_under(host) == Some(HintDefault::On))
+                        .filter(|policy| policy.on_by_default_under(host))
                         .map(|policy| {
                             policy.construct(serde_yaml::Value::Mapping(Default::default()))
                         })
@@ -449,11 +428,9 @@ impl HintPolicyRegistry {
         })
     }
 
-    /// Resolve one hint a role lists: a registered type that runs under the role's `host`.
+    /// Resolve one hint a role lists: any registered type.
     fn listed(
         &self,
-        worker_type: WorkerType,
-        host: &str,
         entry: &HintPolicyEntry,
     ) -> Result<ResolvedHintPolicy, HintPolicyRegistryError> {
         let policy =
@@ -462,14 +439,6 @@ impl HintPolicyRegistry {
                     name: entry.policy_type().to_owned(),
                     available: self.available_policy_types(),
                 })?;
-        if policy.runs_under(host).is_none() {
-            return Err(HintPolicyRegistryError::Unsupported {
-                role: worker_type.as_str(),
-                host: host.to_owned(),
-                hint: entry.policy_type().to_owned(),
-                supported: self.policy_types_under(host),
-            });
-        }
         let mut resolved = policy.construct(entry.parameters().clone())?;
         resolved.name = Arc::from(entry.name());
         Ok(resolved)
@@ -489,22 +458,6 @@ impl HintPolicyRegistry {
             .collect::<Vec<_>>();
         available.sort_unstable();
         available.join(", ")
-    }
-
-    /// The hint types that run under the worker-selection type `host`.
-    fn policy_types_under(&self, host: &str) -> String {
-        let mut supported = self
-            .policies
-            .iter()
-            .filter(|policy| policy.runs_under(host).is_some())
-            .map(|policy| policy.name.as_str())
-            .collect::<Vec<_>>();
-        supported.sort_unstable();
-        if supported.is_empty() {
-            "<none>".to_owned()
-        } else {
-            supported.join(", ")
-        }
     }
 }
 
