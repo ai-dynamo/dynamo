@@ -128,6 +128,9 @@ of at most 256 bytes after trimming whitespace. The default is unset (disabled).
 There is no corresponding CLI flag. Both workers require a direct `NixlConnector`
 with `bidirectional_kv_xfer: true` and `kv_load_failure_policy: "recompute"`.
 Configure `decoder_kv_blocks_ttl` for the intended interval between turns.
+The vLLM build must also include the reverse-load recomputation fix in
+[vLLM #64860](https://github.com/vllm-project/vllm/pull/64860). Without that fix,
+a failed retained load can stall a request despite the `recompute` policy.
 
 For example, add these native vLLM settings to each worker's existing transfer
 configuration, preserving its `kv_role`:
