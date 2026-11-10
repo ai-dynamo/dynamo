@@ -385,6 +385,15 @@ impl SharedTcpServer {
                     match accept_result {
                         Ok((stream, peer_addr)) => {
                             tracing::trace!("Accepted TCP connection from {peer_addr}");
+                            // The per-request ACK frame is small; with Nagle on it waits for
+                            // the client's delayed ACK of the previous frame (~40 ms).
+                            if let Err(e) = stream.set_nodelay(true) {
+                                tracing::warn!(
+                                    peer_addr = %peer_addr,
+                                    error = %e,
+                                    "Failed to set TCP_NODELAY on request-plane connection"
+                                );
+                            }
 
                             let handlers = self.handlers.clone();
                             let work_tx = self.work_tx.clone();

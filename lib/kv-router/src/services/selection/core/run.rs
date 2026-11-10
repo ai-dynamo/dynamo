@@ -87,6 +87,7 @@ impl SelectionCore {
         };
         let (selected, endpoint) = self
             .select_or_reject(SelectionOperation {
+                accounting_attribution: Default::default(),
                 key: RoutingPartitionId::new(req.model_name, req.routing_group),
                 prompt: req.prompt.view(),
                 router_config_override: req.router_config_override,
@@ -96,7 +97,8 @@ impl SelectionCore {
                 policy_class,
                 session_context,
                 session,
-                affinity_target: req.affinity_target,
+                // A wire pin is caller-supplied, not derived from session affinity.
+                affinity_target: req.affinity_target.filter(|_| req.pinned_worker.is_none()),
                 pinned_worker: req.pinned_worker,
                 allowed_worker_ids: req.allowed_worker_ids,
                 routing_constraints: req.routing_constraints,
@@ -129,6 +131,7 @@ impl SelectionCore {
         let session = session_binding(session_context.as_ref(), is_steerable, true);
         let (selected, endpoint) = self
             .select_or_reject(SelectionOperation {
+                accounting_attribution: Default::default(),
                 key: RoutingPartitionId::new(req.model_name, req.routing_group),
                 prompt: req.prompt.view(),
                 router_config_override: req.router_config_override,
@@ -138,7 +141,8 @@ impl SelectionCore {
                 policy_class,
                 session_context,
                 session,
-                affinity_target: req.affinity_target,
+                // A wire pin is caller-supplied, not derived from session affinity.
+                affinity_target: req.affinity_target.filter(|_| req.pinned_worker.is_none()),
                 pinned_worker: req.pinned_worker,
                 allowed_worker_ids: req.allowed_worker_ids,
                 routing_constraints: req.routing_constraints,
@@ -266,6 +270,7 @@ impl SelectionCore {
         let SelectionOperation {
             key,
             prompt,
+            accounting_attribution,
             router_config_override,
             expected_output_tokens,
             priority_jump,
@@ -427,6 +432,7 @@ impl SelectionCore {
             retain_kv_transfer_chain,
             router_config_override,
             lora_name: prompt.lora_name.map(str::to_string),
+            accounting_attribution,
             priority_jump,
             strict_priority,
             policy_class,
@@ -544,6 +550,7 @@ impl SelectionCore {
                     expected_output_tokens,
                     track_prefill_tokens,
                     lora_name,
+                    accounting_attribution,
                     routing_hashes,
                     session_id,
                 },

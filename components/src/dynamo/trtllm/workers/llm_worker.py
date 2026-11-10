@@ -24,11 +24,7 @@ from tensorrt_llm.llmapi import (
     SchedulerConfig,
 )
 from tensorrt_llm.llmapi.llm import SamplingParams
-from tensorrt_llm.llmapi.llm_args import (
-    TOKENIZER_ALIASES,
-    KvCacheConnectorConfig,
-    LoadFormat,
-)
+from tensorrt_llm.llmapi.llm_args import TOKENIZER_ALIASES, LoadFormat
 from tensorrt_llm.llmapi.llm_utils import update_llm_args_with_extra_options
 from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
 from tensorrt_llm.metrics import MetricsCollector
@@ -52,7 +48,6 @@ from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.common.utils.topology import apply_topology_config
 from dynamo.common.utils.worker_shutdown import WorkerShutdown, serve_endpoint
 from dynamo.llm import (
-    KvEventPublisher,
     MediaDecoder,
     MediaFetcher,
     ModelInput,
@@ -167,10 +162,8 @@ def _resolve_image_token_id(model_type: str, config: Config) -> Optional[int]:
 def build_kv_connector_config(config: Config):
     if config.connector:
         if config.connector[0] == "kvbm":
-            return KvCacheConnectorConfig(
-                connector_module="kvbm.trtllm_integration.connector",
-                connector_scheduler_class="DynamoKVBMConnectorLeader",
-                connector_worker_class="DynamoKVBMConnectorWorker",
+            raise ValueError(
+                "TRT-LLM KVBM integration has been removed. Use --connector none."
             )
         elif config.connector[0] == "none":
             return None
@@ -451,9 +444,6 @@ async def init_llm_worker(
         free_gpu_memory_fraction=config.free_gpu_memory_fraction
     )
 
-    if config.has_connector("kvbm"):
-        kv_cache_config.enable_partial_reuse = False
-
     dynamic_batch_config = DynamicBatchConfig(
         enable_batch_size_tuning=True,
         enable_max_num_tokens_tuning=False,
@@ -647,42 +637,6 @@ async def init_llm_worker(
             "multimodal KV-aware routing."
         )
 
-    trtllm_zmq_bind_endpoint = None  # Endpoint for TensorRT-LLM to bind and publish
-    consolidator_output_endpoint = (
-        None  # Endpoint where consolidator publishes (workers subscribe to this)
-    )
-
-    try:
-        from kvbm.trtllm_integration.consolidator_config import (
-            get_consolidator_endpoints,
-            should_enable_consolidator,
-        )
-
-        if (
-            kv_event_publication_mode is KvEventPublicationMode.POLLING
-            and should_enable_consolidator(arg_map)
-        ):
-            # get_consolidator_endpoints returns (trtllm_bind_endpoint, output_bind_endpoint, output_connect_endpoint)
-            consolidator_endpoints = get_consolidator_endpoints()
-            trtllm_zmq_bind_endpoint = consolidator_endpoints[0]  # TRTLLM bind endpoint
-            consolidator_output_endpoint = consolidator_endpoints[
-                1
-            ]  # Consolidator output bind endpoint (for KVBM connector)
-            consolidator_output_connect_endpoint = consolidator_endpoints[
-                2
-            ]  # Consolidator output connect endpoint (for worker publisher)
-    except ImportError:
-        # kvbm package is not installed
-        logging.info(
-            "kvbm package not installed - skipping KV event consolidator setup."
-        )
-    except Exception as e:
-        logging.error(
-            f"Failed to set up consolidator endpoints: {e}. "
-            "Continuing without KV event consolidation.",
-            exc_info=True,
-        )
-
     logging.info(f"TensorRT-LLM engine args: {arg_map}")
     engine_args = arg_map
 
@@ -710,11 +664,11 @@ async def init_llm_worker(
         )
     default_sampling_params = SamplingParams()
 
-    # Request-level performance metrics belong to the metrics-publishing path;
-    # KV-event publication does not require them. `cached_tokens` is unaffected:
-    # it comes from `res.cached_tokens`, not from `request_perf_metrics`.
+    # Per-request performance metrics have their own opt-in: TensorRT-LLM
+    # processes them for every finished request in this worker's serving
+    # process, which costs throughput on long prompts.
     if hasattr(default_sampling_params, "return_perf_metrics"):
-        default_sampling_params.return_perf_metrics = config.publish_metrics
+        default_sampling_params.return_perf_metrics = config.publish_per_request_metrics
     model_input = ModelInput.Tokens
 
     # Set model type based on disaggregation mode. Prefill and encode workers
@@ -1109,28 +1063,6 @@ async def init_llm_worker(
                 ),  # Native engine compatibility
             ]
 
-            # Create worker-side publisher for consolidated events if consolidator is enabled
-            # This subscribes to consolidator's ZMQ output and publishes to NATS with worker_id
-            consolidator_publisher = None
-            if (
-                kv_event_publication_mode is KvEventPublicationMode.POLLING
-                and consolidator_output_endpoint
-            ):
-                # Use the connect endpoint directly (already provided by get_consolidator_endpoints)
-                consolidator_publisher = KvEventPublisher(
-                    endpoint=endpoint,
-                    kv_block_size=kv_cache_block_size,
-                    zmq_endpoint=consolidator_output_connect_endpoint,
-                    zmq_topic="",
-                    enable_local_indexer=config.enable_local_indexer,
-                    kv_state_endpoint=config.kv_state_endpoint,
-                    image_token_id=image_token_id,
-                )
-                logging.info(
-                    f"Created worker-side publisher for consolidated events: "
-                    f"subscribing to {consolidator_output_connect_endpoint}, worker_id={endpoint.connection_id()}"
-                )
-
             async with get_publisher(
                 endpoint,
                 engine,
@@ -1140,7 +1072,6 @@ async def init_llm_worker(
                 component_gauges=component_gauges,
                 additional_metrics=additional_metrics,
                 event_buffer_max_size=event_buffer_max_size,
-                zmq_endpoint=trtllm_zmq_bind_endpoint,
                 enable_local_indexer=config.enable_local_indexer,
                 metrics_collector=metrics_collector,
                 kv_state_endpoint=config.kv_state_endpoint,
@@ -1172,9 +1103,6 @@ async def init_llm_worker(
                     health_check_payload=health_check_payload,
                 )
 
-            # Shutdown consolidator publisher if it was created
-            if consolidator_publisher:
-                consolidator_publisher.shutdown()
         else:
             handler = RequestHandlerFactory().get_request_handler(handler_config)
             if config.load_format == "gms":

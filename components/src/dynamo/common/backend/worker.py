@@ -173,6 +173,9 @@ class WorkerConfig:
     kv_state_endpoint: Optional[str] = None
     default_thinking_mode: Optional[str] = None
     response_plane: str = "tcp"
+    # False skips configure_dynamo_logging() in run(), for engines embedded in a
+    # host process that owns its Python logging.
+    configure_logging: bool = True
     # Shutdown timing. Appended like the fields above so positional callers
     # keep working; inserting earlier would silently shift arguments.
     shutdown: ShutdownConfig = field(default_factory=ShutdownConfig)
@@ -250,7 +253,8 @@ class Worker:
         self.config = config
 
     async def run(self) -> None:
-        configure_dynamo_logging()
+        if self.config.configure_logging:
+            configure_dynamo_logging()
 
         if self.config.use_kv_events:
             # The runtime auto-detects NATS now; the field is preserved on

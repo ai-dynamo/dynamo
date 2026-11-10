@@ -434,8 +434,46 @@ pub mod llm {
     /// Enable LoRA adapter support (set to "true" to enable)
     pub const DYN_LORA_ENABLED: &str = "DYN_LORA_ENABLED";
 
+    /// Enable request-time LoRA resolution and worker-local loading.
+    pub const DYN_LORA_RUNTIME_LOAD_ENABLED: &str = "DYN_LORA_RUNTIME_LOAD_ENABLED";
+
+    /// Worker-side Python runtime LoRA resolver import reference.
+    pub const DYN_LORA_DOWNLOADER_PLUGIN: &str = "DYN_LORA_DOWNLOADER_PLUGIN";
+
+    /// Comma-separated runtime LoRA source URI scheme allowlist.
+    pub const DYN_LORA_ALLOWED_SCHEMES: &str = "DYN_LORA_ALLOWED_SCHEMES";
+
+    /// Worker-owned request-time resolution deadline.
+    pub const DYN_LORA_RESOLVE_TIMEOUT_SECONDS: &str = "DYN_LORA_RESOLVE_TIMEOUT_SECONDS";
+
+    /// Maximum concurrent worker resolver calls.
+    pub const DYN_LORA_MAX_CONCURRENT_RESOLUTIONS: &str = "DYN_LORA_MAX_CONCURRENT_RESOLUTIONS";
+
+    /// Maximum distinct unresolved request-time adapter identities.
+    pub const DYN_LORA_MAX_PENDING_RUNTIME_KEYS: &str = "DYN_LORA_MAX_PENDING_RUNTIME_KEYS";
+
+    /// Maximum pending request admissions for resident request-time adapters.
+    pub const DYN_LORA_MAX_PENDING_ADMISSIONS: &str = "DYN_LORA_MAX_PENDING_ADMISSIONS";
+
+    /// Pending request-time adapter lease lifetime before generation activation.
+    pub const DYN_LORA_PENDING_ADMISSION_TIMEOUT_SECONDS: &str =
+        "DYN_LORA_PENDING_ADMISSION_TIMEOUT_SECONDS";
+
+    /// Maximum resident request-time adapters per worker.
+    pub const DYN_LORA_MAX_RESIDENT_RUNTIME_LORAS: &str = "DYN_LORA_MAX_RESIDENT_RUNTIME_LORAS";
+
+    /// Maximum materialized bytes for one request-time adapter.
+    pub const DYN_LORA_MAX_DOWNLOAD_BYTES: &str = "DYN_LORA_MAX_DOWNLOAD_BYTES";
+
+    /// Request-time resolver cache admission bound; exceeding it does not trigger disk eviction.
+    pub const DYN_LORA_MAX_CACHE_BYTES: &str = "DYN_LORA_MAX_CACHE_BYTES";
+
     /// LoRA cache directory path
     pub const DYN_LORA_PATH: &str = "DYN_LORA_PATH";
+
+    /// Skip TLS certificate verification for S3 LoRA downloads (set to "true" to enable).
+    /// Intended for trusted internal networks with private-CA or self-signed S3 endpoints.
+    pub const DYN_LORA_S3_TLS_INSECURE: &str = "DYN_LORA_S3_TLS_INSECURE";
 
     /// Enable the experimental Anthropic Messages API endpoint (/v1/messages)
     pub const DYN_ENABLE_ANTHROPIC_API: &str = "DYN_ENABLE_ANTHROPIC_API";
@@ -884,6 +922,11 @@ pub mod model {
 
 /// KV Router configuration environment variables
 pub mod router {
+    /// Most sessions each session-affinity table holds; defaults to 65,536.
+    /// The Python frontend exports `--router-session-affinity-max-entries` here.
+    pub const DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES: &str =
+        "DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES";
+
     /// Scale applied to adjusted prompt-side prefill load after overlap/cache-hit credits.
     pub const DYN_ROUTER_PREFILL_LOAD_SCALE: &str = "DYN_ROUTER_PREFILL_LOAD_SCALE";
 
@@ -1259,7 +1302,19 @@ mod tests {
             llm::DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS,
             llm::DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS,
             llm::DYN_LORA_ENABLED,
+            llm::DYN_LORA_RUNTIME_LOAD_ENABLED,
+            llm::DYN_LORA_DOWNLOADER_PLUGIN,
+            llm::DYN_LORA_ALLOWED_SCHEMES,
+            llm::DYN_LORA_RESOLVE_TIMEOUT_SECONDS,
+            llm::DYN_LORA_MAX_CONCURRENT_RESOLUTIONS,
+            llm::DYN_LORA_MAX_PENDING_RUNTIME_KEYS,
+            llm::DYN_LORA_MAX_PENDING_ADMISSIONS,
+            llm::DYN_LORA_PENDING_ADMISSION_TIMEOUT_SECONDS,
+            llm::DYN_LORA_MAX_RESIDENT_RUNTIME_LORAS,
+            llm::DYN_LORA_MAX_DOWNLOAD_BYTES,
+            llm::DYN_LORA_MAX_CACHE_BYTES,
             llm::DYN_LORA_PATH,
+            llm::DYN_LORA_S3_TLS_INSECURE,
             llm::DYN_ENABLE_ANTHROPIC_API,
             llm::DYN_SERVING_LOAD_PUBLISH,
             llm::DYN_ENABLE_SYSTEMONE_API,

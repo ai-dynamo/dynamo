@@ -3,16 +3,18 @@
 
 //! Global Frontend. See `dynamo_global_frontend` and the crate's README.
 
+mod affinity;
+
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
-use dynamo_global_common::{PoolIdDeriver, PoolKey, V1PoolIdDeriver};
+use dynamo_global_common::{PoolIdDeriver, PoolKey, RouterRegistration, V1PoolIdDeriver};
 use dynamo_global_frontend::{
-    Metrics, PoolSnapshot, RelayGatedPoolCatalog, app, discover_pools, follow_relays,
-    measure_round_trips, serve, serve_relay_views,
+    Metrics, PoolSnapshot, RelayGatedPoolCatalog, affinity_store_ms, app, discover_pools,
+    follow_relays, measure_round_trips, serve, serve_relay_views,
 };
 use dynamo_global_router::{
     AffinitySelector, InFlightTracker, LeastInFlightSelector, Pool, PoolSelector, PoolSignals,
@@ -24,8 +26,6 @@ use url::Url;
 
 /// How often the round trip to each pool is measured.
 const ROUND_TRIP_INTERVAL: Duration = Duration::from_secs(30);
-/// How often expired session pins are dropped.
-const PIN_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 
 /// How each request picks a pool.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -56,6 +56,12 @@ struct Args {
     /// Router discovery must use a probe independent of pool availability (such as /live).
     #[arg(long, conflicts_with = "pools", requires = "relay_view_port")]
     global_discovery_url: Option<Url>,
+    /// Unique process incarnation (for example a Kubernetes Pod UID).
+    #[arg(long, requires_all = ["router_advertise_url", "global_discovery_url", "relay_view_port"])]
+    router_replica_id: Option<String>,
+    /// Direct address of this replica's Relay receiver, reachable by every PoolRelay.
+    #[arg(long, requires_all = ["router_replica_id", "global_discovery_url", "relay_view_port"])]
+    router_advertise_url: Option<Url>,
     /// A pool as `<cluster>/<namespace>/<DGD name>=<model>@<frontend URL>`,
     /// where the cluster is the ID the pool's PoolRelay runs with. Separate
     /// several frontend URLs with commas, and repeat the flag for each pool.
@@ -82,8 +88,10 @@ struct Args {
     #[arg(long, default_value_t = 2.0)]
     headroom_factor: f64,
     /// `affinity`: how long a session keeps its pool without a request.
-    #[arg(long, default_value_t = 1800)]
+    #[arg(long, default_value_t = 1800, value_parser = clap::value_parser!(u64).range(1..))]
     session_idle_secs: u64,
+    #[command(flatten)]
+    affinity: affinity::AffinityArgs,
 }
 
 fn parse_key(key: &str) -> Result<PoolKey, String> {
@@ -169,7 +177,19 @@ async fn main() -> Result<()> {
     if !(args.headroom_factor >= 1.0 && args.headroom_factor.is_finite()) {
         bail!("--headroom-factor must be at least 1");
     }
+    if args.router_policy != RouterPolicy::Affinity && args.affinity.uses_dynamodb() {
+        bail!("--affinity-store dynamodb requires --router-policy affinity");
+    }
 
+    let registration = args
+        .router_replica_id
+        .zip(args.router_advertise_url)
+        .map(|(replica, url)| RouterRegistration { replica, url });
+    if let Some(registration) = &registration {
+        registration
+            .validate()
+            .context("router self-registration")?;
+    }
     let shutdown = CancellationToken::new();
     let signal = shutdown.clone();
     tokio::spawn(async move {
@@ -181,12 +201,18 @@ async fn main() -> Result<()> {
 
     // Keep the explicit catalog sender alive for the static-pool mode.
     let (_catalog, pools) = watch::channel(Arc::new(PoolSnapshot::new(args.pools)));
-    let pools = if let Some(url) = args.global_discovery_url {
-        let client = dynamo_global_discovery_client::GlobalDiscoveryClient::new(
-            url,
+    let discovery = args
+        .global_discovery_url
+        .map(|url| {
+            dynamo_global_discovery_client::GlobalDiscoveryClient::new(url, Duration::from_secs(5))
+        })
+        .transpose()?;
+    let pools = if let Some(client) = &discovery {
+        discover_pools(
+            client.clone(),
             Duration::from_secs(5),
-        )?;
-        discover_pools(client, Duration::from_secs(5), shutdown.child_token())
+            shutdown.child_token(),
+        )
     } else {
         pools
     };
@@ -232,7 +258,8 @@ async fn main() -> Result<()> {
         .connect_timeout(Duration::from_secs(args.connect_timeout_secs))
         .build()
         .context("build the pool HTTP client")?;
-    let metrics = Metrics::new(args.region.clone(), in_flight.clone());
+    // Only `affinity` has affinity metrics to export.
+    let mut affinity_metrics = None;
     let selector: Arc<dyn PoolSelector> = match args.router_policy {
         RouterPolicy::RoundRobin => Arc::new(RoundRobinSelector::new()),
         RouterPolicy::LeastInFlight => Arc::new(LeastInFlightSelector::new(in_flight.clone())),
@@ -251,21 +278,43 @@ async fn main() -> Result<()> {
                 shutdown.child_token(),
             ));
             let idle = Duration::from_secs(args.session_idle_secs);
-            let selector = Arc::new(AffinitySelector::new(
-                signals,
-                region,
-                args.headroom_factor,
-                idle,
-            ));
-            tokio::spawn(sweep_pins(selector.clone(), shutdown.child_token()));
+            let (affinity, config, counters) =
+                args.affinity.build(idle, shutdown.child_token()).await?;
+            let store_ms = affinity_store_ms();
+            let timer = store_ms.clone();
+            let selector = Arc::new(
+                AffinitySelector::with_stats(
+                    signals,
+                    region,
+                    args.headroom_factor,
+                    affinity,
+                    config,
+                    counters.affinity.clone(),
+                )
+                .with_store_timer(Box::new(move |elapsed| {
+                    timer.observe(elapsed.as_secs_f64() * 1000.0);
+                })),
+            );
+            affinity_metrics = Some((counters, store_ms));
             selector
         }
     };
+    let mut metrics = Metrics::new(args.region.clone(), in_flight.clone());
+    if let Some((counters, store_ms)) = affinity_metrics {
+        metrics = metrics.with_affinity(counters.affinity, counters.cache, store_ms);
+    }
     let app = app(pools, selector, in_flight, http, metrics);
     let address = format!("{}:{}", args.host, args.port);
     let listener = tokio::net::TcpListener::bind(&address)
         .await
         .with_context(|| format!("listen on {address}"))?;
+    let _registration = registration.zip(discovery).map(|(registration, client)| {
+        dynamo_global_discovery_client::RouterHeartbeat::spawn(
+            client,
+            registration,
+            shutdown.child_token(),
+        )
+    });
     tracing::info!(%address, "Global Frontend listening");
     if let Some((relay_listener, catalog)) = receiving {
         let http = async {
@@ -283,18 +332,6 @@ async fn main() -> Result<()> {
     } else {
         serve(listener, app, shutdown).await;
         Ok(())
-    }
-}
-
-/// Drops expired session pins once a `PIN_SWEEP_INTERVAL`, off the request
-/// path, until `cancel` fires.
-async fn sweep_pins(selector: Arc<AffinitySelector>, cancel: CancellationToken) {
-    let mut ticks = tokio::time::interval(PIN_SWEEP_INTERVAL);
-    loop {
-        tokio::select! {
-            _ = cancel.cancelled() => return,
-            _ = ticks.tick() => selector.sweep(),
-        }
     }
 }
 
@@ -363,6 +400,27 @@ mod tests {
     }
 
     #[test]
+    fn router_registration_requires_identity_endpoint_and_discovery() {
+        let base = [
+            "global-frontend",
+            "--global-discovery-url",
+            "http://discovery:8080",
+            "--relay-view-port",
+            "50051",
+        ];
+        let registration = [
+            "--router-replica-id",
+            "pod-uid",
+            "--router-advertise-url",
+            "http://10.0.0.1:50051",
+        ];
+        assert!(Args::try_parse_from([base.as_slice(), registration.as_slice()].concat()).is_ok());
+        assert!(Args::try_parse_from([base.as_slice(), &registration[..2]].concat()).is_err());
+        assert!(Args::try_parse_from([base.as_slice(), &registration[2..]].concat()).is_err());
+        assert!(Args::try_parse_from([&base[..1], registration.as_slice()].concat()).is_err());
+    }
+
+    #[test]
     fn requires_a_pool() {
         assert!(Args::try_parse_from(["global-frontend"]).is_err());
         let discovery = [
@@ -389,6 +447,42 @@ mod tests {
                 .concat()
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn persistent_affinity_requires_table_and_shared_scope() {
+        let base = [
+            "global-frontend",
+            "--pool=east/dynamo/blue=qwen@http://blue:8000",
+            "--router-policy=affinity",
+            "--region=east",
+            "--affinity-store=dynamodb",
+        ];
+        assert!(Args::try_parse_from(base).is_err());
+        assert!(
+            Args::try_parse_from([&base[..], &["--affinity-ddb-table=sessions"]].concat()).is_err()
+        );
+        assert!(
+            Args::try_parse_from([&base[..], &["--affinity-scope=production"]].concat()).is_err()
+        );
+        let complete = [
+            &base[..],
+            &[
+                "--affinity-ddb-table=sessions",
+                "--affinity-scope=production",
+                "--affinity-ddb-region=us-east-2",
+                "--affinity-ddb-endpoint=http://127.0.0.1:18000",
+                "--affinity-consistent-reads=false",
+            ],
+        ]
+        .concat();
+        assert!(Args::try_parse_from(&complete).is_ok());
+        assert!(
+            Args::try_parse_from([&complete[..], &["--affinity-timeout-ms=0"]].concat()).is_err()
+        );
+        assert!(
+            Args::try_parse_from([&complete[..], &["--session-idle-secs=0"]].concat()).is_err()
         );
     }
 }
