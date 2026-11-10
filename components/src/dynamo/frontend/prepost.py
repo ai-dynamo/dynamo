@@ -1208,26 +1208,26 @@ class StreamingPostProcessor:
         return parsed_tool_calls
 
     def _process_dynamo_json_fallback_tool_calls(
-        self, output: Any
+        self, output: Any, *, content: str | None, reasoning: str | None = None
     ) -> dict[str, Any] | None:
         chunks = self._dynamo_json_fallback_chunks.setdefault(output.index, [])
-        if output.text:
-            chunks.append(output.text)
+        if content:
+            chunks.append(content)
+        delta: dict[str, Any] = {}
+        if reasoning and not self._suppress_reasoning_output:
+            delta = {"role": "assistant", "reasoning_content": reasoning}
         if not output.finish_reason:
-            return None
+            return self._build_choice(output, delta) if delta else None
 
         text = "".join(self._dynamo_json_fallback_chunks.pop(output.index))
-        delta: dict[str, Any]
         try:
             tool_calls = self._decode_dynamo_json_fallback_tool_calls(text)
         except (TypeError, ValueError):
-            delta = {"role": "assistant", "content": text} if text else {}
+            if text:
+                delta.update(role="assistant", content=text)
             return self._build_choice(output, delta)
 
-        delta = {
-            "role": "assistant",
-            "tool_calls": tool_calls,
-        }
+        delta.update(role="assistant", tool_calls=tool_calls)
         return self._build_choice(output, delta)
 
     def _should_buffer_for_non_streaming_tool_parse(self) -> bool:
@@ -1532,9 +1532,16 @@ class StreamingPostProcessor:
         # the ones that emit nothing for this chunk.
         if self.reasoning_parser is not None:
             self._reasoning_token_ids.extend(output.token_ids or [])
-        if self._uses_dynamo_json_tool_call_fallback:
-            return self._process_dynamo_json_fallback_tool_calls(output)
-        if self._should_buffer_for_non_streaming_tool_parse():
+        if self._uses_dynamo_json_tool_call_fallback and (
+            self.reasoning_parser is None or self.reasoning_is_done
+        ):
+            return self._process_dynamo_json_fallback_tool_calls(
+                output, content=output.text
+            )
+        if (
+            not self._uses_dynamo_json_tool_call_fallback
+            and self._should_buffer_for_non_streaming_tool_parse()
+        ):
             return self._process_non_streaming_tool_output(output)
 
         # TODO: Emit the role only once per choice here instead of relying on
@@ -1639,7 +1646,11 @@ class StreamingPostProcessor:
                 current_token_ids = []
 
                 tool_start_markers = self._tool_start_markers()
-                if (
+                if self._uses_dynamo_json_tool_call_fallback:
+                    delta_message = self._compose_delta_message(
+                        saved_reasoning, post_content or None
+                    )
+                elif (
                     post_content
                     and self._should_parse_tools()
                     and self.tool_parser is not None
@@ -1709,6 +1720,7 @@ class StreamingPostProcessor:
                 and delta_message.content
                 and not delta_message.reasoning
                 and self._should_parse_tools()
+                and not self._uses_dynamo_json_tool_call_fallback
             ):
                 # Reasoning parser returned content (not reasoning).
                 # The model may have skipped reasoning and gone straight
@@ -1748,6 +1760,15 @@ class StreamingPostProcessor:
                     self._finish_engine_parser(self.tool_parser),
                 )
                 self._tool_parser_streaming_started = False
+
+        if self._uses_dynamo_json_tool_call_fallback:
+            self.previous_text = current_text
+            self.previous_token_ids = current_token_ids
+            return self._process_dynamo_json_fallback_tool_calls(
+                output,
+                content=delta_message.content if delta_message else None,
+                reasoning=delta_message.reasoning if delta_message else None,
+            )
 
         choice = None
         if delta_message is None:

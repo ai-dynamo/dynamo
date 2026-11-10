@@ -1607,9 +1607,7 @@ def test_glm_reasoning_gate_follows_rendered_prompt(
         is prompt_open
     )
     if request_fields.get("tool_choice") == "required":
-        # A forced tool keeps its reasoning parser only while reasoning is open.
         assert (result.reasoning_parser is not None) is prompt_open
-    # The kwargs that rendered the prompt are not rewritten.
     assert result.request["chat_template_kwargs"] == {"enable_thinking": requested}
 
 

@@ -1000,7 +1000,6 @@ class TestReasoningParserMetadata:
                 "enable_thinking": prompt_open,
             }
         }
-        # The kwargs that rendered the prompt are not rewritten.
         assert chat_template_kwargs == {control: requested, "reasoning_effort": "low"}
 
     def test_glm_open_prompt_keeps_include_reasoning_false_engine_hint(self, tokenizer):
@@ -1966,6 +1965,16 @@ async def test_generator_inner_forwards_reasoning_parser_and_model_config(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    ("tool_choice", "include_reasoning", "stream_response"),
+    [
+        (None, True, True),
+        ("required", True, True),
+        ({"type": "function", "function": {"name": "get_weather"}}, False, False),
+    ],
+    ids=["plain", "required-tool", "named-tool-hidden-reasoning"],
+)
+@pytest.mark.parametrize("combined_chunk", [False, True], ids=["split", "combined"])
+@pytest.mark.parametrize(
     ("prompt_text", "chat_template_kwargs", "expected"),
     [
         (_GLM_OPEN_PROMPT, {"enable_thinking": False}, ("plan", "Hello")),
@@ -1986,6 +1995,10 @@ async def test_generator_inner_follows_rendered_glm_reasoning_state(
     prompt_text,
     chat_template_kwargs,
     expected,
+    tool_choice,
+    include_reasoning,
+    stream_response,
+    combined_chunk,
 ):
     """The worker controls and the response parser follow the GLM prompt."""
     from vllm.reasoning import ReasoningParserManager
@@ -2040,13 +2053,21 @@ async def test_generator_inner_follows_rendered_glm_reasoning_state(
             "model": MODEL,
             "messages": [{"role": "user", "content": "Hi"}],
             "chat_template_kwargs": chat_template_kwargs,
-            "stream": True,
+            "stream": stream_response,
+            "include_reasoning": include_reasoning,
+            **(
+                {"tools": TOOL_REQUEST["tools"], "tool_choice": tool_choice}
+                if tool_choice is not None
+                else {}
+            ),
         }
     ):
         pass
 
     dynamo_preproc = captured["dynamo_preproc"]
-    assert dynamo_preproc["reasoning_ended"] is (not prompt_open)
+    assert dynamo_preproc["reasoning_ended"] is (
+        not prompt_open or not include_reasoning
+    )
     assert dynamo_preproc["reasoning_parser_kwargs"] == {
         "chat_template_kwargs": {
             "thinking": prompt_open,
@@ -2057,21 +2078,49 @@ async def test_generator_inner_follows_rendered_glm_reasoning_state(
     assert dynamo_preproc["output_options"]["skip_special_tokens"] is False
 
     post = captured["post"]
+    assert post._uses_dynamo_json_tool_call_fallback is (tool_choice is not None)
     reasoning, content = "", ""
-    for piece in ("plan", "</think>", "Hello"):
+    tool_calls = []
+    answer = "Hello"
+    if tool_choice is not None:
+        answer = (
+            '[{"name":"get_weather","parameters":{"city":"Paris"}}]'
+            if tool_choice == "required"
+            else '{"city":"Paris"}'
+        )
+    pieces = ["plan", "</think>", answer]
+    if tool_choice is not None and not prompt_open:
+        pieces = [answer]
+    if combined_chunk:
+        pieces = ["".join(pieces)]
+    for index, piece in enumerate(pieces):
         choice = post.process_output(
             SimpleNamespace(
                 index=0,
                 text=piece,
                 token_ids=tokenizer.encode(piece, add_special_tokens=False),
-                finish_reason=None,
+                finish_reason="stop" if index == len(pieces) - 1 else None,
                 logprobs=None,
             )
         )
         delta = choice["delta"] if choice else {}
         reasoning += delta.get("reasoning_content") or ""
         content += delta.get("content") or ""
-    assert (reasoning or None, content) == expected
+        tool_calls.extend(delta.get("tool_calls") or [])
+        if index < len(pieces) - 1 and prompt_open and include_reasoning and index == 0:
+            assert delta.get("reasoning_content") == "plan"
+    if tool_choice is None:
+        assert (reasoning or None, content) == expected
+        assert tool_calls == []
+    else:
+        assert reasoning == ("plan" if prompt_open and include_reasoning else "")
+        assert content == ""
+        assert len(tool_calls) == 1
+        assert tool_calls[0]["function"] == {
+            "name": "get_weather",
+            "arguments": '{"city":"Paris"}',
+        }
+        assert choice["finish_reason"] == "tool_calls"
 
 
 def _make_processor(module, routed_engine):
