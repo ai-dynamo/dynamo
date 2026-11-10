@@ -271,11 +271,12 @@ impl KvCopySource {
     }
 }
 
-/// Where one copy's blocks are, borrowed for the booking that sends it. Nothing is copied: the
+/// Where one copy's blocks are, for the booking that sends it. The source address is copied out of
+/// the router's snapshots, so hint policies run without holding them. The chain is borrowed: the
 /// hint policy that sends the copy picks the range of [`Self::chain`] its action carries.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KvCopyLocations<'a> {
-    source_address: &'a str,
+    source_address: String,
     chain: &'a [ExternalSequenceBlockHash],
     local_prefix_blocks: usize,
     source_prefix_blocks: usize,
@@ -284,8 +285,8 @@ pub struct KvCopyLocations<'a> {
 impl<'a> KvCopyLocations<'a> {
     /// The source's KV control endpoint, from the router's current worker and cache-owner
     /// snapshots. Never empty.
-    pub fn source_address(&self) -> &'a str {
-        self.source_address
+    pub fn source_address(&self) -> &str {
+        &self.source_address
     }
 
     /// The request's root-aligned block hashes: `chain()[i]` is request block `i`. It covers at
@@ -311,7 +312,7 @@ impl<'a> KvCopyLocations<'a> {
 /// a control endpoint, or `candidates` no longer covers its prefix.
 #[cfg_attr(not(feature = "standalone-selection"), allow(dead_code))]
 pub(crate) fn kv_copy_locations<'a, C: WorkerConfigLike>(
-    workers: &'a HashMap<WorkerId, C>,
+    workers: &HashMap<WorkerId, C>,
     candidates: &'a KvTransferCandidates,
     copy: &KvCopySource,
 ) -> Option<KvCopyLocations<'a>> {
@@ -338,7 +339,7 @@ pub(crate) fn kv_copy_locations<'a, C: WorkerConfigLike>(
         return None;
     }
     Some(KvCopyLocations {
-        source_address,
+        source_address: source_address.to_string(),
         chain: &candidates.block_hashes,
         local_prefix_blocks: copy.local_prefix_blocks,
         source_prefix_blocks: choice.prefix_blocks,

@@ -46,17 +46,22 @@ pub(super) fn booking_hint(
     if policies.is_empty() && booking.kv_copy_source.is_none() {
         return Ok(None);
     }
-    let workers = entry.workers_tx.borrow();
-    let worker_accepts_hints = workers
-        .get(&booking.worker.worker_id)
-        .and_then(|config| config.kv_hint_transfer_metadata_for_dp_rank(booking.worker.dp_rank))
-        .is_some();
-    let kv_copy_source = booking.kv_copy_source.map(|copy| {
-        let locations = booking
-            .kv_transfer_candidates
-            .and_then(|candidates| kv_copy_locations(&*workers, candidates, &copy));
-        BookedCopy::new(copy, locations)
-    });
+    // Read the worker snapshot here and release its lock before any hint policy runs, so a slow
+    // policy can't hold up worker updates for the partition.
+    let (worker_accepts_hints, kv_copy_source) = {
+        let workers = entry.workers_tx.borrow();
+        let worker_accepts_hints = workers
+            .get(&booking.worker.worker_id)
+            .and_then(|config| config.kv_hint_transfer_metadata_for_dp_rank(booking.worker.dp_rank))
+            .is_some();
+        let kv_copy_source = booking.kv_copy_source.map(|copy| {
+            let locations = booking
+                .kv_transfer_candidates
+                .and_then(|candidates| kv_copy_locations(&*workers, candidates, &copy));
+            BookedCopy::new(copy, locations)
+        });
+        (worker_accepts_hints, kv_copy_source)
+    };
     // The router's own fetch, from the booked worker's copy source.
     let router_fetch = kv_copy_source
         .as_ref()
@@ -78,7 +83,7 @@ pub(super) fn booking_hint(
 
 /// The router's `kv.fetch` action: every request block from 0 through the source's prefix. The
 /// hint stage numbers it.
-fn router_fetch_action(locations: KvCopyLocations<'_>) -> KvHintAction {
+fn router_fetch_action(locations: &KvCopyLocations<'_>) -> KvHintAction {
     KvHintAction::fetch(
         String::new(),
         KvSourceLocationsPayload {

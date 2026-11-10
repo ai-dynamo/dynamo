@@ -120,9 +120,6 @@ impl RouterPluginRegistry {
             HintHost::WorkerSelection(policy_type) => {
                 policy_type == "default" || self.providers.contains_key(policy_type)
             }
-            HintHost::RequestClassifier(classifier_type) => {
-                self.request_classifiers.contains(classifier_type)
-            }
         })?;
         Ok(super::RouterPlugins {
             worker_selection: self.resolve(config)?,

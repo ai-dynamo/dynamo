@@ -56,8 +56,8 @@ impl<'a> BookedCopy<'a> {
         &self.copy
     }
 
-    pub(crate) fn locations(&self) -> Option<KvCopyLocations<'a>> {
-        self.locations
+    pub(crate) fn locations(&self) -> Option<&KvCopyLocations<'a>> {
+        self.locations.as_ref()
     }
 }
 
