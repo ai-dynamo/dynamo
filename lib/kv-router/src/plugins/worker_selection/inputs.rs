@@ -193,8 +193,8 @@ impl WorkerInputs {
     ///
     /// | Group | Filters | Scorers | Pickers | Hint policies |
     /// | --- | --- | --- | --- | --- |
-    /// | `CACHE`, `LOAD`, `PREFERRED_TAINT` | Yes | Yes | Yes | Starts resources only |
-    /// | `ACTIVE_REQUESTS` | No | No | Yes | No |
+    /// | `CACHE`, `LOAD`, `PREFERRED_TAINT` | Yes | Yes | Yes | Rejected |
+    /// | `ACTIVE_REQUESTS` | No | No | Yes | Rejected |
     /// | `KV_TRANSFER` | No | Yes | No | The booked worker's copy source |
     pub const KV_TRANSFER: Self = Self(1 << 6);
     #[cfg(any(test, feature = "bench"))]

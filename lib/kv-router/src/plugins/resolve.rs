@@ -84,6 +84,14 @@ pub enum PluginConfigError {
         "hint policy {policy:?} for {role} reads KV copy sources, which need a local, event-driven KV index without a remote or predicted-TTL indexer; enable KV events or remove the policy"
     )]
     CopySourcesUnavailable { role: &'static str, policy: String },
+    #[error(
+        "hint policy {policy:?} for {role} declares {inputs}, which hint policies can't read; a hint policy may declare only WorkerInputs::KV_TRANSFER"
+    )]
+    UnreadableHintInputs {
+        role: &'static str,
+        policy: String,
+        inputs: String,
+    },
 }
 
 /// Work out the router's responsibilities for one role, or reject the config with a message that
@@ -94,6 +102,10 @@ pub enum PluginConfigError {
 /// configured hint policy reads [`WorkerInputs::KV_TRANSFER`] but the KV index can't keep the
 /// request's block chain. Default hint policies are passive: they add no inputs, never move the
 /// role onto the KV path, and do without copy data where the index can't provide it.
+///
+/// Also rejects any hint policy, default or configured, that declares an input other than
+/// [`WorkerInputs::KV_TRANSFER`]: [`HintContext`](super::hint_policy::HintContext) can't serve
+/// it, so the router would start resources the policy never reads.
 pub fn resolve_role(
     role: WorkerType,
     selection: &WorkerSelectionPolicy,
@@ -108,8 +120,17 @@ pub fn resolve_role(
     let mut others = Vec::with_capacity(policies.len());
     for (name, policy) in policies {
         let slot = HintPolicySlot::new(name, policy);
+        let inputs = slot.policy.required_worker_inputs();
+        let unreadable = inputs.without(WorkerInputs::KV_TRANSFER);
+        if unreadable != WorkerInputs::NONE {
+            return Err(PluginConfigError::UnreadableHintInputs {
+                role: role_label,
+                policy: slot.name.to_string(),
+                inputs: input_names(unreadable),
+            });
+        }
         if !defaults {
-            prepare_inputs = prepare_inputs | slot.policy.required_worker_inputs();
+            prepare_inputs = prepare_inputs | inputs;
             if slot.reads_copy_source && !config.supports_kv_transfer_chain_retention() {
                 return Err(PluginConfigError::CopySourcesUnavailable {
                     role: role_label,
@@ -139,4 +160,19 @@ pub fn resolve_role(
         compute_booked_copy_source: true,
         run_hint_policies: consumers,
     })
+}
+
+/// `inputs` as the constants that name them, for error messages.
+fn input_names(inputs: WorkerInputs) -> String {
+    [
+        (WorkerInputs::CACHE, "CACHE"),
+        (WorkerInputs::LOAD, "LOAD"),
+        (WorkerInputs::PREFERRED_TAINT, "PREFERRED_TAINT"),
+        (WorkerInputs::ACTIVE_REQUESTS, "ACTIVE_REQUESTS"),
+    ]
+    .into_iter()
+    .filter(|(input, _)| inputs.contains(*input))
+    .map(|(_, name)| format!("WorkerInputs::{name}"))
+    .collect::<Vec<_>>()
+    .join(" | ")
 }

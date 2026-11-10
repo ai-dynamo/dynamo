@@ -2434,9 +2434,9 @@ impl ModelManager {
             metric_worker_type,
             model_name.as_deref(),
         )?;
-        // Configured hint policies start the resources they read even when the worker-selection
-        // policy reads none. Without cache input from either, create no shared-cache client and
-        // subscribe to no KV events.
+        // A configured hint policy that reads KV copy sources starts the KV index and its event
+        // subscription even when the worker-selection policy reads none. Only the
+        // worker-selection policy reads cache input; without it, create no shared-cache client.
         let index_inputs = policy.prepare_inputs();
         let wants_cache = index_inputs.contains(WorkerInputs::CACHE);
         let shared_cache: Option<Arc<dyn dynamo_kv_router::SharedKvCache>> = if wants_cache {

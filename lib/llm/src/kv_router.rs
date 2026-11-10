@@ -776,8 +776,8 @@ impl KvRouter {
             metric_worker_type,
             model_name.as_deref(),
         )?;
-        // Configured hint policies start the resources they read, such as the KV index, even when
-        // the worker-selection policy does not read it.
+        // A configured hint policy that reads KV copy sources starts the KV index even when the
+        // worker-selection policy does not read it.
         let required_worker_inputs = prepared.inputs();
         let index_inputs = prepared.prepare_inputs();
         let hint_policies = prepared.hint_policies().clone();
