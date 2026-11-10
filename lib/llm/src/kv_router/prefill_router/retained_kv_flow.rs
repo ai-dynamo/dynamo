@@ -396,7 +396,10 @@ mod tests {
             .unwrap();
         monitor.cancel();
         endpoint.register_endpoint_instance().await.unwrap();
-        client.wait_for_instances().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), client.wait_for_instances())
+            .await
+            .expect("retained-flow endpoint instance registration timed out")
+            .unwrap();
         client.override_discovered_instances(vec![7]);
         client.override_instance_avail(vec![7]);
         let load = RoutingLoadContext::start(

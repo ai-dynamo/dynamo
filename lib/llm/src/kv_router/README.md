@@ -25,9 +25,14 @@ flowchart LR
 `RoutingHost` is the pipeline's terminal engine. `EncoderRouter` and `PrefillRouter` are
 operators in front of it, not `RoutingHost`s. `PrefillRouter` holds a separate `RoutingHost` for
 the prefill worker set (built in `prefill_router/activation.rs`) and sends the prefill hop
-through it. It also keeps a handle to the decode `RoutingHost`, which it uses only to preview
-decode for conditional disaggregation. `EncoderRouter` sends the encode hop through its own
-round-robin `PushRouter`.
+through it. It also keeps a handle to the decode `RoutingHost` for conditional-disaggregation
+previews and, when retained KV reuse is enabled, admitted decoder membership checks.
+`EncoderRouter` sends the encode hop through its own round-robin `PushRouter`.
+
+The optional retained KV path uses `prefill_router/retained_kv.rs` for bounded, exact-prefix,
+one-shot metadata claims and `prefill_router/retained_kv_flow.rs` for private hints, decoder
+export observation, and membership fencing. It preserves ordinary selection and booking;
+the engines own KV allocations and transfer lifetime.
 
 A `RoutingHost` serves one worker set. What it holds (composition, not call order):
 
