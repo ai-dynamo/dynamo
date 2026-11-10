@@ -5,6 +5,7 @@
 
 import base64
 import io
+import warnings
 from unittest.mock import Mock
 
 import numpy as np
@@ -78,19 +79,19 @@ class TestPromptEmbedsDecode:
         "invalid_input,error_match,description",
         [
             # Invalid base64
-            ("not-valid-base64!!!", r"(Invalid base64|Failed to decode)", "bad base64"),
+            ("not-valid-base64!!!", r"not valid base64", "bad base64"),
             # Empty string
             ("", r".", "empty string"),
             # Raw bytes (not PyTorch format)
             (
                 base64.b64encode(b"not a pytorch tensor").decode("utf-8"),
-                r"Failed to decode.*PyTorch",
+                r"Invalid prompt_embeds",
                 "raw bytes",
             ),
             # Corrupted PyTorch format
             (
                 base64.b64encode(b"PK\x03\x04" + b"invalid_data" * 10).decode("utf-8"),
-                r"Failed to decode.*PyTorch",
+                r"Invalid prompt_embeds",
                 "corrupted zip",
             ),
         ],
@@ -133,7 +134,7 @@ class TestPromptEmbedsDecode:
         buffer.seek(0)
         embeddings_base64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
 
-        with pytest.raises(InvalidArgument, match="Failed to decode.*PyTorch"):
+        with pytest.raises(InvalidArgument, match="Invalid prompt_embeds"):
             mock_handler._decode_prompt_embeds(embeddings_base64)
 
     def test_decode_non_tensor_object_rejected(self, mock_handler):
@@ -141,7 +142,18 @@ class TestPromptEmbedsDecode:
         non_tensor = {"key": "value"}
         embeddings_base64 = encode_tensor_to_base64_obj(non_tensor)
 
-        with pytest.raises(InvalidArgument, match="Failed to decode"):
+        with pytest.raises(InvalidArgument, match="Invalid prompt_embeds:"):
+            mock_handler._decode_prompt_embeds(embeddings_base64)
+
+    def test_decode_nested_tensor_is_client_error(self, mock_handler):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            nested = torch.nested.nested_tensor(
+                [torch.randn(3, 4096), torch.randn(5, 4096)]
+            )
+        embeddings_base64 = encode_tensor_to_base64_obj(nested)
+
+        with pytest.raises(ValueError, match="Failed to decode prompt_embeds"):
             mock_handler._decode_prompt_embeds(embeddings_base64)
 
 

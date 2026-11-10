@@ -10,6 +10,7 @@ import random
 import string
 import sys
 import uuid
+from collections.abc import AsyncIterable
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -22,6 +23,25 @@ logger = logging.getLogger(__name__)
 
 NUM_REQUESTS = 100
 BLOCK_SIZE = 16
+
+
+async def read_routed_worker_from_stream(
+    stream: AsyncIterable[Any], request_label: str
+) -> int:
+    """Consume a finished response stream and return its first decode worker ID."""
+    routed_worker = None
+    terminal = None
+    async for response in stream:
+        if not isinstance(response, dict):
+            continue
+        worker_info = (response.get("routing_data") or {}).get("worker_id")
+        if worker_info and routed_worker is None:
+            routed_worker = worker_info.get("decode_worker_id")
+        if response.get("finish_reason") is not None:
+            terminal = response
+    assert terminal is not None, f"{request_label} request did not finish"
+    assert routed_worker is not None, f"{request_label}: no routed worker"
+    return routed_worker
 
 
 def generate_random_suffix() -> str:

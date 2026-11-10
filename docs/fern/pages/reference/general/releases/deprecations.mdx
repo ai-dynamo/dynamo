@@ -53,6 +53,10 @@ Upgrading? Pick the version you run today to see the dependency migration and th
 
   > **Migrate:** Change each callback's receiver to `&self`. Move state that changes between calls behind atomics, a lock or a thread-local, and make sure the plugin type is `Sync`.
 
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **TensorRT-LLM `--publish-metrics` no longer turns on per-request metrics** ([#18170](https://github.com/ai-dynamo/dynamo/pull/18170)). Per-request metrics cost serving throughput on long prompts and now have their own opt-in, `--publish-per-request-metrics`, which requires `--publish-metrics`. Without it, TensorRT-LLM's per-request series, such as `trtllm_request_success_total` and `trtllm_e2e_request_latency_seconds`, and the `trtllm_kv_transfer_*` metrics are not recorded.
+
+  > **Migrate:** Add `--publish-per-request-metrics` to TensorRT-LLM workers whose dashboards or alerts read those series.
+
 <span className="dynref-badge dynref-badge--amber">Deprecated</span> **Deprecated the `WorkerInputs::OCCUPANCY` worker-selection input group** in favor of `WorkerInputs::ACTIVE_REQUESTS`, which custom pickers read through `WorkerInputView::active_requests(row)`. The alias still compiles with a deprecation warning and is slated for removal in Dynamo v1.9.0.
 
   > **Migrate:** Replace `WorkerInputs::OCCUPANCY` with `WorkerInputs::ACTIVE_REQUESTS` in custom worker-selection policies.
