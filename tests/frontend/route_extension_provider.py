@@ -16,12 +16,17 @@ shared constants below) without the ai-dynamo wheel present.
 
 from __future__ import annotations
 
+import asyncio
+import json
 from typing import Any
 
 HELLO_PATH = "/hello_world"
 HELLO_BODY = {"message": "hello world!"}
 
 READINESS_PATH = "/test/ctx/ready"
+ECHO_PATH = "/test/echo"
+ECHO_ASYNC_PATH = "/test/echo_async"
+SLOW_PATH = "/test/slow"
 
 
 def _hello(ctx: Any) -> dict:
@@ -34,6 +39,27 @@ def _readiness(ctx: Any) -> dict:
     return {"ready": ctx.has_any_ready_model()}
 
 
+def _echo(ctx: Any) -> Any:
+    """Synchronous POST handler: returns the parsed JSON request body."""
+    return json.loads(ctx.body)
+
+
+async def _echo_async(ctx: Any) -> dict:
+    """Async POST handler, run on the frontend's event loop."""
+    await asyncio.sleep(0)
+    return {
+        "body": json.loads(ctx.body),
+        "authorization": ctx.headers.get("authorization"),
+        "runtime": type(ctx.runtime).__name__,
+    }
+
+
+async def _slow(ctx: Any) -> dict:
+    """Outlives its route's timeout."""
+    await asyncio.sleep(5)
+    return {}
+
+
 def routes():
     """Provider callable: return the custom routes to register on the frontend."""
     from dynamo.llm import FrontendRoute
@@ -41,6 +67,9 @@ def routes():
     return [
         FrontendRoute("GET", HELLO_PATH, _hello),
         FrontendRoute("GET", READINESS_PATH, _readiness),
+        FrontendRoute("POST", ECHO_PATH, _echo),
+        FrontendRoute("POST", ECHO_ASYNC_PATH, _echo_async),
+        FrontendRoute("POST", SLOW_PATH, _slow, timeout_s=0.5),
     ]
 
 

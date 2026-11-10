@@ -724,7 +724,7 @@ curl -s localhost:8000/metrics | grep dynamo_frontend_inter_token_latency_second
 <ParamField path="--frontend-route-extension" type="string" default="[]">
   Load a trusted HTTP route provider by a name registered in the `dynamo.frontend.routes` entry-point
   group or by an importable `module:function` path. Repeat the option to load multiple providers.
-  Providers can add static `GET` routes but cannot override built-in routes; invalid or duplicate
+  Providers can add static-path routes but cannot override built-in routes; invalid or duplicate
   routes fail startup. Extensions apply only to the HTTP frontend. See
   [Python Route Extensions](../../developer-guide/knowledge-base/modular-components/frontend/python-route-extensions.md) for a packaged and direct-load example.
 
@@ -737,17 +737,22 @@ curl -s localhost:8000/metrics | grep dynamo_frontend_inter_token_latency_second
   If no registered name matches, a value containing `:` is resolved as `module:function`. Unknown
   names fail startup and report the available registered extensions.
 - **Provider return:** The provider callable returns one `FrontendRoute` or an iterable of routes.
-- **Route shape:** Extensions support static-path `GET` routes only. Path parameters, wildcards,
-  other HTTP methods, asynchronous handlers, and duplicates of built-in routes are rejected.
-- **Handler signature:** A synchronous `handler(ctx: FrontendExtensionContext)` returns a
-  JSON-serializable body for HTTP 200, or `FrontendResponse(status_code, body)` to override the
-  status code.
+- **Route shape:** `FrontendRoute(method, path, handler, timeout_s=30.0)`. The method is `GET`,
+  `POST`, `PUT`, `PATCH`, or `DELETE`, and the path is static. Path parameters, wildcards, other
+  methods, and duplicates of a built-in method and path are rejected.
+- **Handler signature:** `handler(ctx: FrontendExtensionContext)` returns a JSON-serializable body
+  for HTTP 200, or `FrontendResponse(status_code, body)` to override the status code. The handler can
+  be an `async def`, which runs on the Frontend's event loop.
+- **Request data:** `FrontendExtensionContext` exposes the request `body` (`bytes`), the request
+  `headers` (a `dict` with lower-case names), and the Frontend's `DistributedRuntime` as `runtime`.
 - **Live state:** `FrontendExtensionContext` exposes `is_ready()`, `is_cancelled()`,
   `has_any_ready_model()`, `is_model_ready_to_serve(name)`, `model_display_names()`, and
   `serving_ready_display_names()`.
-- **Execution limits:** Handlers run in a small dedicated thread pool. A handler that exceeds 30
-  seconds returns 503. A saturated pool rejects new extension requests with the configured overload
-  status code, 529 by default.
+- **Execution limits:** Synchronous handlers run in a small dedicated thread pool. A handler that
+  exceeds the route's `timeout_s` returns 503; an async handler is also cancelled. With 64 handlers
+  already waiting or running, new extension requests are rejected with the configured overload
+  status code, 529 by default. Request bodies are limited by `DYN_HTTP_BODY_LIMIT_MB`, 45 MB by
+  default.
 - **Multiple providers:** Repeating the CLI option or listing whitespace-separated environment
   values loads multiple providers. Duplicate provider names are de-duplicated.
 

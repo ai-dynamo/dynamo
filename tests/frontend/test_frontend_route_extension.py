@@ -29,9 +29,12 @@ import pytest
 import requests
 
 from tests.frontend.route_extension_provider import (
+    ECHO_ASYNC_PATH,
+    ECHO_PATH,
     HELLO_BODY,
     HELLO_PATH,
     READINESS_PATH,
+    SLOW_PATH,
 )
 from tests.utils.constants import DynamoPortRange
 from tests.utils.managed_process import DynamoFrontendProcess
@@ -134,6 +137,31 @@ def test_frontend_route_extension_serves_custom_route(request, tmp_path, selecto
         )
         assert ctx_response.status_code == 200
         assert ctx_response.json() == {"ready": False}
+
+        # Request body reaches a synchronous POST handler.
+        base = f"http://localhost:{frontend.frontend_port}"
+        payload = [{"ticket_id": "t1"}, {"ticket_id": "t2"}]
+        echo = requests.post(f"{base}{ECHO_PATH}", json=payload, timeout=5)
+        assert echo.status_code == 200, echo.text
+        assert echo.json() == payload
+
+        # An async handler gets the body, headers and the frontend's runtime.
+        echo_async = requests.post(
+            f"{base}{ECHO_ASYNC_PATH}",
+            json=payload,
+            headers={"Authorization": "Bearer test-token"},
+            timeout=5,
+        )
+        assert echo_async.status_code == 200, echo_async.text
+        assert echo_async.json() == {
+            "body": payload,
+            "authorization": "Bearer test-token",
+            "runtime": "DistributedRuntime",
+        }
+
+        # The route's own timeout_s (0.5 s) bounds an async handler.
+        slow = requests.post(f"{base}{SLOW_PATH}", json={}, timeout=10)
+        assert slow.status_code == 503, slow.text
 
 
 @pytest.mark.timeout(120)

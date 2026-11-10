@@ -933,14 +933,19 @@ async fn select_engine(
 #[pyo3(signature = (distributed_runtime, input, engine_config, frontend_route_extensions=None))]
 pub fn run_input<'p>(
     py: Python<'p>,
-    distributed_runtime: super::DistributedRuntime,
+    distributed_runtime: Bound<'p, super::DistributedRuntime>,
     input: &str,
     engine_config: EngineConfig,
     frontend_route_extensions: Option<PyObject>,
 ) -> PyResult<Bound<'p, PyAny>> {
     let input_enum: Input = input.parse().map_err(to_pyerr)?;
-    let frontend_route_extensions =
-        super::frontend_routes::frontend_route_extensions_from_py(py, frontend_route_extensions)?;
+    // Route handlers see this same object as `ctx.runtime`.
+    let frontend_route_extensions = super::frontend_routes::frontend_route_extensions_from_py(
+        py,
+        frontend_route_extensions,
+        distributed_runtime.clone().into_any().unbind(),
+    )?;
+    let distributed_runtime = distributed_runtime.borrow().clone();
     let plugins = crate::router_plugins(
         &engine_config
             .inner
