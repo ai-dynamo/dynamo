@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 pub mod config;
+#[cfg(test)]
+pub(crate) mod domain_owner;
 mod filter;
 mod local;
 mod lora_filter;
