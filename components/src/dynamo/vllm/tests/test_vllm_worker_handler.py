@@ -2151,6 +2151,208 @@ async def test_decode_reports_cache_hit_only_without_transferred_kv(
     assert seen_report_flags == [expected_report]
 
 
+# ── Rejected remote-prefill KV release tests ───────────────────────
+
+
+_REMOTE_PREFILL_KV_PARAMS = {
+    "do_remote_prefill": True,
+    "do_remote_decode": False,
+    "remote_request_id": "prefill-req",
+    "remote_block_ids": [1, 2],
+}
+
+
+def _make_rejecting_decode_handler(fake_generate_tokens):
+    """Decode handler whose engine path is replaced by ``fake_generate_tokens``."""
+    config = _make_config(disaggregation_mode="DECODE")
+    handler = _make_handler(config=config)
+    handler.engine_client = MagicMock()
+    handler.engine_client.abort = AsyncMock()
+    handler.engine_client.notify_kv_transfer_request_rejected = AsyncMock()
+    handler.shutdown_event = None
+    handler.runtime = MagicMock()
+    handler.config = config
+    handler.default_sampling_params = {}
+    handler.model_max_len = None
+    handler.dp_range = (0, 2)
+    handler._resolve_lora_request = MagicMock(return_value=None)
+    handler._build_prompt_from_request = MagicMock(return_value=MagicMock())
+    handler._abort_monitor = MagicMock(return_value=nullcontext())
+    handler.generate_tokens = fake_generate_tokens
+    return handler
+
+
+def _make_remote_prefill_request(kv_params: dict | None) -> dict:
+    return {
+        "token_ids": [1, 2, 3],
+        "sampling_options": {},
+        "stop_conditions": {},
+        "output_options": {},
+        "prefill_result": {"disaggregated_params": {"kv_transfer_params": kv_params}},
+        "routing": {"dp_rank": 1},
+        "model": "test-model",
+    }
+
+
+async def _drain_token_mode(handler, request, request_id="req-decode"):
+    chunks = []
+    with patch.object(mod, "_update_kv_transfer_params"):
+        async for chunk in handler._generate_token_mode(
+            request, MagicMock(), request_id
+        ):
+            chunks.append(chunk)
+    return chunks
+
+
+def _vllm_rejection(name: str) -> Exception:
+    from vllm import exceptions as vllm_exceptions
+
+    if name == "QueueOverflowError":
+        return vllm_exceptions.QueueOverflowError()
+    if name == "MaxQueuedTokensError":
+        return vllm_exceptions.MaxQueuedTokensError()
+    return vllm_exceptions.VLLMValidationError("prompt is too long")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error_name",
+    ["QueueOverflowError", "MaxQueuedTokensError", "VLLMValidationError"],
+)
+async def test_decode_rejection_before_admission_releases_prefill_kv(error_name):
+    """A pre-admission rejection must free the prefill worker's pinned KV now."""
+    error = _vllm_rejection(error_name)
+
+    async def _rejecting_generate_tokens(*args, **kwargs):
+        raise error
+        yield  # pragma: no cover
+
+    handler = _make_rejecting_decode_handler(_rejecting_generate_tokens)
+
+    with pytest.raises(type(error)) as exc_info:
+        await _drain_token_mode(
+            handler, _make_remote_prefill_request(_REMOTE_PREFILL_KV_PARAMS)
+        )
+
+    assert exc_info.value is error
+    handler.engine_client.notify_kv_transfer_request_rejected.assert_awaited_once_with(
+        "req-decode", _REMOTE_PREFILL_KV_PARAMS, data_parallel_rank=1
+    )
+    handler.engine_client.abort.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_decode_error_after_engine_output_does_not_release_prefill_kv():
+    """Once the engine produced output the request was admitted; no notify."""
+    from vllm.exceptions import VLLMValidationError
+
+    async def _fail_after_output(*args, **kwargs):
+        yield {"token_ids": [7], "index": 0}
+        raise VLLMValidationError("late failure")
+
+    handler = _make_rejecting_decode_handler(_fail_after_output)
+
+    with pytest.raises(VLLMValidationError):
+        await _drain_token_mode(
+            handler, _make_remote_prefill_request(_REMOTE_PREFILL_KV_PARAMS)
+        )
+
+    handler.engine_client.notify_kv_transfer_request_rejected.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_decode_retryable_error_before_output_does_not_release_prefill_kv():
+    """A paused-engine RetryableRequestError must not release the prefill KV.
+
+    EngineCore frees the remote blocks itself when it returns
+    RetryableRequestError (abort_immediately), so a second notify would be a
+    double release. GenerationError and its subclasses stay out of the
+    rejection tuple; this fails if someone widens it.
+    """
+    from vllm import exceptions as vllm_exceptions
+
+    error = vllm_exceptions.RetryableRequestError("engine paused")
+
+    async def _retryable_generate_tokens(*args, **kwargs):
+        raise error
+        yield  # pragma: no cover
+
+    handler = _make_rejecting_decode_handler(_retryable_generate_tokens)
+
+    with pytest.raises(vllm_exceptions.RetryableRequestError) as exc_info:
+        await _drain_token_mode(
+            handler, _make_remote_prefill_request(_REMOTE_PREFILL_KV_PARAMS)
+        )
+
+    assert exc_info.value is error
+    handler.engine_client.notify_kv_transfer_request_rejected.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "kv_params",
+    [None, {"do_remote_prefill": False, "remote_request_id": "prefill-req"}],
+    ids=["no-prefill-handoff", "local-prefill"],
+)
+async def test_decode_rejection_without_remote_prefill_skips_release(kv_params):
+    """Only a remote-prefill handoff has prefill-side KV to release."""
+    from vllm.exceptions import QueueOverflowError
+
+    async def _rejecting_generate_tokens(*args, **kwargs):
+        raise QueueOverflowError()
+        yield  # pragma: no cover
+
+    handler = _make_rejecting_decode_handler(_rejecting_generate_tokens)
+
+    with pytest.raises(QueueOverflowError):
+        await _drain_token_mode(handler, _make_remote_prefill_request(kv_params))
+
+    handler.engine_client.notify_kv_transfer_request_rejected.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_decode_rejection_preserves_error_when_release_fails():
+    """A failed notify is logged and the original rejection still surfaces."""
+    from vllm.exceptions import QueueOverflowError
+
+    error = QueueOverflowError()
+
+    async def _rejecting_generate_tokens(*args, **kwargs):
+        raise error
+        yield  # pragma: no cover
+
+    handler = _make_rejecting_decode_handler(_rejecting_generate_tokens)
+    handler.engine_client.notify_kv_transfer_request_rejected.side_effect = (
+        RuntimeError("engine core unavailable")
+    )
+
+    with pytest.raises(QueueOverflowError) as exc_info:
+        await _drain_token_mode(
+            handler, _make_remote_prefill_request(_REMOTE_PREFILL_KV_PARAMS)
+        )
+
+    assert exc_info.value is error
+    handler.engine_client.notify_kv_transfer_request_rejected.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_decode_cancellation_does_not_release_prefill_kv():
+    """Cancellation is ambiguous about admission, so the lease stays in charge."""
+
+    async def _cancelled_generate_tokens(*args, **kwargs):
+        raise asyncio.CancelledError()
+        yield  # pragma: no cover
+
+    handler = _make_rejecting_decode_handler(_cancelled_generate_tokens)
+
+    with pytest.raises(asyncio.CancelledError):
+        await _drain_token_mode(
+            handler, _make_remote_prefill_request(_REMOTE_PREFILL_KV_PARAMS)
+        )
+
+    handler.engine_client.notify_kv_transfer_request_rejected.assert_not_called()
+
+
 # ── Abort monitor tests ────────
 
 

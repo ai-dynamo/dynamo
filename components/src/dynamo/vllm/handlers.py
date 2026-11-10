@@ -37,6 +37,7 @@ import torch
 from vllm import PoolingParams
 from vllm.config import ModelConfig
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
+from vllm.exceptions import GracefulHTTPError, VLLMClientError
 from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
@@ -822,6 +823,39 @@ def _update_kv_transfer_params(
     )
     extra_args[_KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY] = dict(kv_transfer_params)
     sampling_params.extra_args = extra_args
+
+
+async def _notify_kv_transfer_request_rejected(
+    engine_client: Any,
+    request_id: str,
+    kv_transfer_params: Mapping[str, Any] | None,
+    data_parallel_rank: int | None,
+) -> None:
+    """Release remote-prefill KV for a request the decode engine never admitted.
+
+    The prefill worker keeps the blocks it computed pinned until the decode
+    worker reads them or the connector's lease expires. When vLLM rejects the
+    decode request before admission (for example ``QueueOverflowError`` from
+    ``--max-num-queued-reqs``), nothing will read them, so notify the connector
+    now, as vLLM's own serving layer does. Failures are logged, not raised, so
+    the original rejection still reaches the caller.
+    """
+    if not kv_transfer_params or not kv_transfer_params.get("do_remote_prefill"):
+        return
+    try:
+        await engine_client.notify_kv_transfer_request_rejected(
+            request_id,
+            dict(kv_transfer_params),
+            data_parallel_rank=data_parallel_rank,
+        )
+    except Exception:
+        logger.warning(
+            "Failed to notify KV connector about rejected request %s",
+            request_id,
+            exc_info=True,
+        )
+    else:
+        logger.debug("Notified KV connector about rejected request %s", request_id)
 
 
 @functools.cache
@@ -4057,6 +4091,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 )
                 accumulated_token_ids: dict[int, list[int]] = {}
                 accumulated_log_probs: dict[int, list[float]] = {}
+                engine_output_seen = False
                 try:
                     async for tok in self.generate_tokens(
                         prompt,
@@ -4081,6 +4116,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                             or _nvext_extra_field_requested(request, "routed_experts")
                         ),
                     ):
+                        engine_output_seen = True
                         if artifact_forced_logprobs:
                             if client_logprob_width is None:
                                 tok = {
@@ -4106,6 +4142,20 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                                 accumulated_log_probs,
                             )
                         yield tok
+                except (VLLMClientError, GracefulHTTPError):
+                    # The scheduler and KV connector have not seen the
+                    # request yet (frontend admission or EngineCore
+                    # preprocess validation), so release the prefill
+                    # blocks now. GenerationError is excluded on purpose:
+                    # for a paused engine, EngineCore already frees the
+                    # remote blocks itself. Once an output was seen the
+                    # request was admitted, and the normal finish path
+                    # owns cleanup.
+                    if not engine_output_seen:
+                        await _notify_kv_transfer_request_rejected(
+                            self.engine_client, request_id, kv_params, dp_rank
+                        )
+                    raise
                 except EngineDeadError as e:
                     logger.error(f"vLLM EngineDeadError: {e}")
                     logger.warning("Initiating Dynamo Runtime shutdown.")
