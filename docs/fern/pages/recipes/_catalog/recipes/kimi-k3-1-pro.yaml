@@ -156,10 +156,10 @@ targets:
     type: agentic-trace-replay
     traffic: Text-only AgentX (semianalysis_cc_traces_weka_062126)
   deploy:
-    asset: recipes/kimi-k3.1-pro/vllm/agg-b200-agentx/deploy-b200-synthetic-al.yaml
+    asset: recipes/kimi-k3.1-pro/vllm/agg-b200-agentx/deploy-b200.yaml
   expected_performance:
     available: true
-    summary: 422.50 output tok/s, 64.02 user tok/s P50, TTFT P50 550.45 ms
+    summary: 422.50 output tok/s, 64.02 user tok/s P50, TTFT P50 550.45 ms (synthetic AL 3.84; enable the commented SPECULATIVE_CONFIG before benchmarking)
   benchmark:
     tool: aiperf
     asset: recipes/kimi-k3.1-pro/perf/perf.yaml
@@ -182,10 +182,10 @@ targets:
     type: agentic-trace-replay
     traffic: Text-only AgentX (semianalysis_cc_traces_weka_062126)
   deploy:
-    asset: recipes/kimi-k3.1-pro/vllm/agg-vr200-agentx/deploy-vr200-synthetic-al.yaml
+    asset: recipes/kimi-k3.1-pro/vllm/agg-vr200-agentx/deploy-vr200.yaml
   expected_performance:
     available: true
-    summary: 2448.08 output tok/s, 153.01 output tok/s/GPU, 57.71 user tok/s P50, TTFT P50 1534 ms
+    summary: 2448.08 output tok/s, 153.01 output tok/s/GPU, 57.71 user tok/s P50, TTFT P50 1534 ms (synthetic AL 3.84; enable the commented SPECULATIVE_CONFIG before benchmarking)
   benchmark:
     tool: aiperf
     asset: recipes/kimi-k3.1-pro/perf/perf.yaml
@@ -209,10 +209,10 @@ targets:
     type: agentic-trace-replay
     traffic: Text-only AgentX (semianalysis_cc_traces_weka_062126)
   deploy:
-    asset: recipes/kimi-k3.1-pro/vllm/disagg-vr200-agentx/deploy-vr200-synthetic-al.yaml
+    asset: recipes/kimi-k3.1-pro/vllm/disagg-vr200-agentx/deploy-vr200.yaml
   expected_performance:
     available: true
-    summary: 2932.63 output tok/s, 122.19 output tok/s/GPU, 73.93 user tok/s P50, TTFT P50 1761 ms
+    summary: 2932.63 output tok/s, 122.19 output tok/s/GPU, 73.93 user tok/s P50, TTFT P50 1761 ms (synthetic AL 3.84; enable the commented SPECULATIVE_CONFIG before benchmarking)
   benchmark:
     tool: aiperf
     asset: recipes/kimi-k3.1-pro/perf/perf.yaml
