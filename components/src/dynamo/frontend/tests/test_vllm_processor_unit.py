@@ -2634,6 +2634,7 @@ class TestRoutedEnginePath:
     async def _run_requested_token_id_stream(
         self, module, tokenizer, items, request_data, *, n=1, stop=None, wrap_post=None
     ):
+        """Process routed token chunks with real vLLM and return response data."""
         sampling_params = SamplingParams(
             n=n, stop=stop, output_kind=module.RequestOutputKind.DELTA
         )
@@ -2749,6 +2750,7 @@ class TestRoutedEnginePath:
                 return getattr(self.inner, name)
 
             def process_output(self, output):
+                """Hold initial output, then release its text with the next choice."""
                 choice = self.inner.process_output(output)
                 if self.held_chunks:
                     self.held_chunks -= 1
@@ -2804,6 +2806,7 @@ class TestRoutedEnginePath:
     async def test_prompt_token_ids_sent_once_with_parallel_choices(
         self, tokenizer, stream, real_vllm_processor_module
     ):
+        """Send prompt IDs on one terminal chunk without adding completion IDs."""
         first = tokenizer.encode("first answer", add_special_tokens=False)
         second = tokenizer.encode("second answer", add_special_tokens=False)
         items = [

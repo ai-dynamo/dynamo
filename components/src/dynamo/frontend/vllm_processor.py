@@ -1243,6 +1243,7 @@ class VllmProcessor:
         mm_routing_info: dict[str, Any] | None = None,
         context: Any | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
+        """Stream routed tokens through vLLM and attach requested response fields."""
         sp = vllm_preproc.sampling_params
         output_request_ids: dict[int, str]
         registered_request_ids: list[str]
@@ -1322,6 +1323,7 @@ class VllmProcessor:
         prompt_ids_sent = False
 
         def attach_usage(output: dict[str, Any], *, finished: bool) -> None:
+            """Attach backend usage or local terminal counts to a response chunk."""
             # Local completion may precede every backend usage report. Preserve
             # sparse metadata when available, and use the same usage projection
             # for synthesized terminal counts and normal backend reports.
