@@ -392,6 +392,10 @@ pub mod llm {
     pub const DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS: &str =
         "DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS";
 
+    /// Action taken when an HTTP client disconnects: `kill` (default) aborts
+    /// immediately, while `stop` requests graceful generation shutdown.
+    pub const DYN_HTTP_CLIENT_DISCONNECT_BEHAVIOR: &str = "DYN_HTTP_CLIENT_DISCONNECT_BEHAVIOR";
+
     /// Maximum stalled downstream write time per connection (default 120 seconds).
     pub const DYN_HTTP_WRITE_IDLE_TIMEOUT_SECS: &str = "DYN_HTTP_WRITE_IDLE_TIMEOUT_SECS";
 
@@ -1185,6 +1189,7 @@ pub mod testing {
 mod tests {
     use super::*;
 
+    /// Verify that the environment-variable inventory contains no duplicate names.
     #[test]
     fn test_no_duplicate_env_var_names() {
         use std::collections::HashSet;
@@ -1268,6 +1273,7 @@ mod tests {
             llm::DYN_BATCH_FILE_TRANSFER_TIMEOUT_SECS,
             llm::DYN_HTTP_LISTEN_BACKLOG,
             llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
+            llm::DYN_HTTP_CLIENT_DISCONNECT_BEHAVIOR,
             llm::DYN_HTTP_WRITE_IDLE_TIMEOUT_SECS,
             llm::DYN_HTTP_OVERLOAD_STATUS_CODE,
             llm::DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS,
