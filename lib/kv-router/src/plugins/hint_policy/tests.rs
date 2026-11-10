@@ -14,11 +14,12 @@ use crate::kv_hints::{
     KvCopySource, KvTransferCandidateSource, KvTransferCandidates, KvTransferSourceChoice,
     MAX_KV_HINT_ACTIONS, kv_copy_locations,
 };
+use crate::plugins::resolve::resolve_role;
 use crate::plugins::worker_selection::{
     WorkerCandidates, WorkerInputView, WorkerPicker, WorkerScorer, WorkerSelectionContext,
     WorkerSelectionPolicy,
 };
-use crate::plugins::{PluginConfigError, RouterPluginRegistry, resolve_role};
+use crate::plugins::{PluginConfigError, RouterPluginRegistry};
 use crate::protocols::{
     ExternalSequenceBlockHash, KvHintTransferWorkerMetadata, WorkerConfigLike, WorkerId,
 };
@@ -663,7 +664,7 @@ fn resolve_role_runs_the_copy_consumer_first_then_configured_order() {
     .unwrap();
     let order: Vec<_> = responsibilities.hint_policy_names().collect();
     assert_eq!(order, ["consumer", "first", "last"]);
-    assert!(!responsibilities.commit_kv_copy());
+    assert!(!responsibilities.commit_kv_copy);
 }
 
 #[test]
@@ -816,8 +817,8 @@ fn a_scorer_that_reads_copy_offers_computes_them_for_every_selection() {
         &KvRouterConfig::default(),
     )
     .unwrap();
-    assert!(responsibilities.commit_kv_copy());
-    assert!(responsibilities.compute_booked_copy_source());
+    assert!(responsibilities.commit_kv_copy);
+    assert!(responsibilities.compute_booked_copy_source);
     assert!(
         responsibilities
             .prepare_inputs()

@@ -14,7 +14,7 @@ use crate::config::KvRouterConfig;
 use crate::plugins::worker_selection::{WorkerInputs, WorkerSelectionPolicy};
 
 /// What the router does for one role, worked out once from its plugins' declarations.
-pub struct RouterResponsibilities {
+pub(crate) struct RouterResponsibilities {
     /// Union of the worker-selection policy's inputs and those of the configured hint policies.
     /// Decides which resources start: the KV index and its event subscription, the shared cache,
     /// load tracking. Default hint policies add nothing.
@@ -31,22 +31,12 @@ pub struct RouterResponsibilities {
 
 impl RouterResponsibilities {
     /// The worker inputs whose resources the router starts for this role.
-    pub fn prepare_inputs(&self) -> WorkerInputs {
+    pub(crate) fn prepare_inputs(&self) -> WorkerInputs {
         self.prepare_inputs
     }
 
-    /// Whether every selection computes copy offers for its candidates.
-    pub fn commit_kv_copy(&self) -> bool {
-        self.commit_kv_copy
-    }
-
-    /// Whether bookings compute the booked worker's copy source.
-    pub fn compute_booked_copy_source(&self) -> bool {
-        self.compute_booked_copy_source
-    }
-
     /// The role's hint-policy names, in run order.
-    pub fn hint_policy_names(&self) -> impl Iterator<Item = &str> {
+    pub(crate) fn hint_policy_names(&self) -> impl Iterator<Item = &str> {
         self.run_hint_policies.iter().map(|slot| slot.name.as_ref())
     }
 }
@@ -106,7 +96,7 @@ pub enum PluginConfigError {
 /// Also rejects any hint policy, default or configured, that declares an input other than
 /// [`WorkerInputs::KV_TRANSFER`]: [`HintContext`](super::hint_policy::HintContext) can't serve
 /// it, so the router would start resources the policy never reads.
-pub fn resolve_role(
+pub(crate) fn resolve_role(
     role: WorkerType,
     selection: &WorkerSelectionPolicy,
     hint_policies: RoleHintPolicies,
@@ -160,6 +150,21 @@ pub fn resolve_role(
         compute_booked_copy_source: true,
         run_hint_policies: consumers,
     })
+}
+
+/// Check, for a routing host building a router, that one role's plugins fit together, and return
+/// the worker inputs whose resources the router starts for that role: the worker-selection
+/// policy's, plus those of the role's configured hint policies.
+///
+/// Rejects the same configurations as the router's own setup, with a message that names the fix.
+pub fn check_role(
+    role: WorkerType,
+    selection: &WorkerSelectionPolicy,
+    hint_policies: RoleHintPolicies,
+    config: &KvRouterConfig,
+) -> Result<WorkerInputs, PluginConfigError> {
+    resolve_role(role, selection, hint_policies, config)
+        .map(|responsibilities| responsibilities.prepare_inputs())
 }
 
 /// `inputs` as the constants that name them, for error messages.
