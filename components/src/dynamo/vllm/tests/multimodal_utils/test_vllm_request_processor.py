@@ -649,7 +649,7 @@ async def test_audio_in_video_rejects_unusable_audio(video_item, audio_error, me
     if audio_error is not None:
         processor.audio_loader.load_audio.side_effect = audio_error
 
-    with pytest.raises((ValueError, RuntimeError), match=message):
+    with pytest.raises((mod.InvalidArgument, RuntimeError), match=message):
         await processor.extract_multimodal_data(
             {"multi_modal_data": {"video_url": [video_item]}},
             "request-audio-error",
@@ -818,7 +818,7 @@ def test_build_tokens_prompt_rejects_malformed_user_uuids(
 ) -> None:
     processor = _processor()
 
-    with pytest.raises(ValueError, match=message):
+    with pytest.raises(mod.InvalidArgument, match=message):
         processor.build_tokens_prompt(
             {
                 "token_ids": [1, 2, 3],
@@ -841,7 +841,7 @@ def test_build_tokens_prompt_reports_uuid_only_cache_miss(
 ) -> None:
     processor = _processor(unified_vision_chunk="vision_chunk" in multi_modal_data)
 
-    with pytest.raises(ValueError, match="require aligned multi_modal_uuids"):
+    with pytest.raises(mod.InvalidArgument, match="require aligned multi_modal_uuids"):
         processor.build_tokens_prompt(
             {"token_ids": [1, 2, 3]},
             multi_modal_data,
@@ -2123,7 +2123,7 @@ def test_k3_pad_expands_for_unified_vision_chunk():
 def test_k3_mismatched_pad_count_is_rejected():
     processor, _ = _k3_processor()
 
-    with pytest.raises(ValueError, match="refusing to expand"):
+    with pytest.raises(mod.InvalidArgument, match="refusing to expand"):
         processor._expand_kimi_k3_pads(
             [_K3_PAD_ID],
             {"image": [object(), object()]},
@@ -2289,6 +2289,53 @@ class TestLoadQwenGridParams:
         assert params.vision_hidden_dim == 2048
         # DeepStack concatenates intermediate outputs with the final vision output.
         assert params.decode_embedding_dim == expected_decode_embedding_dim
+
+
+def test_unsupported_audio_is_rejected_before_any_media_loader(monkeypatch):
+    processor = _processor(media_limits={"image": 8, "video": 8})
+    monkeypatch.setattr(
+        processor, "_supported_modalities", lambda: frozenset({"image", "video"})
+    )
+    request = {
+        "token_ids": [1, 2, 3],
+        "multi_modal_data": {
+            "image_url": [{"Url": "https://example.com/image.png"}],
+            "audio_url": [{"Url": "https://example.com/clip.wav"}],
+        },
+    }
+
+    with pytest.raises(mod.InvalidArgument, match="Model does not support audio input"):
+        processor.validate_multimodal_request(request)
+
+    processor.audio_loader.load_audio_batch.assert_not_awaited()
+    processor.audio_loader.load_audio.assert_not_awaited()
+    processor.image_loader.load_image_batch.assert_not_awaited()
+    processor.video_loader.load_video_batch.assert_not_awaited()
+
+
+def test_image_and_video_remain_allowed_when_audio_is_unsupported(monkeypatch):
+    processor = _processor(media_limits={"image": 8, "video": 1})
+    monkeypatch.setattr(
+        processor, "_supported_modalities", lambda: frozenset({"image", "video"})
+    )
+    processor.validate_multimodal_request(
+        {
+            "multi_modal_data": {
+                "image_url": [{"Url": "https://example.com/image.png"}],
+                "video_url": [{"Url": "https://example.com/video.mp4"}],
+            }
+        }
+    )
+
+
+def test_unified_vision_chunk_image_is_allowed(monkeypatch):
+    processor = _processor(unified_vision_chunk=True, media_limits={"vision_chunk": 8})
+    monkeypatch.setattr(
+        processor, "_supported_modalities", lambda: frozenset({"vision_chunk"})
+    )
+    processor.validate_multimodal_request(
+        {"multi_modal_data": {"image_url": [{"Url": "https://example.com/image.png"}]}}
+    )
 
 
 def test_zero_video_limit_rejects_before_any_media_loader():
