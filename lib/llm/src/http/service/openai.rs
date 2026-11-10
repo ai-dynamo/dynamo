@@ -1457,8 +1457,6 @@ async fn completions_single(
     let metric_model = state.manager().metric_model_for(&model).to_string();
 
     // Create inflight_guard early to ensure all errors are counted
-    // The guard's span gets the request summary and the streamed body's events, so make it
-    // the HTTP request span rather than this function's.
     let mut inflight_guard = state.metrics_clone().create_inflight_guard_in(
         request_span,
         &metric_model,
@@ -1774,8 +1772,6 @@ async fn completions_batch(
     let metric_model = state.manager().metric_model_for(&model).to_string();
 
     // Create inflight_guard early to ensure all errors are counted
-    // The guard's span gets the request summary and the streamed body's events, so make it
-    // the HTTP request span rather than this function's.
     let mut inflight_guard = state.metrics_clone().create_inflight_guard_in(
         request_span,
         &metric_model,
@@ -4217,8 +4213,6 @@ async fn chat_completions(
     tracing::trace!("Received chat completions request: {:?}", request.content());
 
     // Create inflight_guard early to ensure all errors (including validation) are counted
-    // The guard's span gets the request summary and the streamed body's events, so make it
-    // the HTTP request span rather than this function's.
     let mut inflight_guard = state.metrics_clone().create_inflight_guard_in(
         request_span,
         &metric_model,
@@ -4980,8 +4974,6 @@ async fn responses(
 
     // Create http_queue_guard early - tracks time waiting to be processed
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
-    // The guard's span gets the request summary and the streamed body's events, so make it
-    // the HTTP request span rather than this function's.
     let mut inflight_guard = state.metrics_clone().create_inflight_guard_in(
         request_span,
         &metric_model,

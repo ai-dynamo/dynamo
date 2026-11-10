@@ -1184,8 +1184,7 @@ pub struct ResponseMetricCollector {
     metrics: Arc<Metrics>,
     request: Arc<RequestMetrics>,
     model: String,
-    // The span the request summary is recorded on in `Drop`. The collector is dropped while
-    // the response body is polled, where the request span is not entered.
+    // The request's span, which `Drop` records the request summary on.
     span: tracing::Span,
     // Per-model metric handles cached for the request. Most are resolved at construction;
     // ITL is resolved lazily on its first observation so requests that never produce ITL
@@ -2157,7 +2156,8 @@ impl Metrics {
     }
 
     /// Like [`Self::create_inflight_guard`], for a request whose span is `span` rather than the
-    /// current span.
+    /// current span. The guard's span gets the request summary and the streamed body's events,
+    /// so a handler running in a span of its own passes the HTTP request span here.
     pub(crate) fn create_inflight_guard_in(
         self: Arc<Self>,
         span: tracing::Span,
@@ -2369,8 +2369,8 @@ impl InflightGuard {
         self.timer.elapsed().as_millis()
     }
 
-    /// The span current when the guard was created. A streamed response body is polled outside
-    /// it, so events emitted there name it as their parent.
+    /// The request's span. Events emitted while the response body streams name it as their
+    /// parent, since the body is polled outside it.
     pub(crate) fn span(&self) -> &tracing::Span {
         &self.span
     }
