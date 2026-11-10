@@ -122,6 +122,28 @@ pub(crate) fn canonical_family(parser: &str) -> Option<&'static str> {
     dynamo_parsers_v2::canonical_unified_family(parser)
 }
 
+/// Aliases that still route but are scheduled for removal, paired with the family
+/// to configure instead. `muse` predates Muse Spark Open and now reads as "any Muse
+/// model" while it selects only Muse Glimmer; a Spark deployment configured with it
+/// starts without complaint and runs the wrong parser.
+/// TODO(next minor): remove these from `DYNAMO_FAMILY_ALIASES` and `FAMILY_NAMES` so
+/// the alias becomes a startup error.
+pub(crate) const DEPRECATED_FAMILY_ALIASES: &[(&str, &str)] = &[("muse", MUSE_UNIFIED_FAMILY)];
+
+/// The startup warning for a deprecated alias, or `None` for any other selector.
+pub(crate) fn deprecated_alias_warning(parser: &str) -> Option<String> {
+    DEPRECATED_FAMILY_ALIASES
+        .iter()
+        .find(|(alias, _)| *alias == parser)
+        .map(|(alias, family)| {
+            format!(
+                "parser `{alias}` is a deprecated alias of `{family}` and will be removed in a \
+                 future release; configure `{family}` instead. Muse Spark Open is a different \
+                 parser: `muse_spark_open`"
+            )
+        })
+}
+
 pub(crate) static FAMILY_NAMES: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
     let mut names = dynamo_parsers_v2::REGISTERED_UNIFIED_FAMILIES.to_vec();
     names.extend(DYNAMO_FAMILY_ALIASES.iter().map(|(alias, _)| *alias));
@@ -862,7 +884,7 @@ fn bare_json_starting_state(family: &str) -> UnifiedParserStartingState {
 fn detect_prefill(family: &str, content: &str) -> anyhow::Result<UnifiedParserStartingState> {
     match family {
         "qwen3" | "deepseek_v4" | "deepseek_v41" | "glm47" | "kimi_k2" | "minimax_m3"
-        | "nemotron_v3" => {
+        | "nemotron_v3" | "hermes" => {
             let (opener_marker, closer_marker) = reasoning_marker_pair(family)
                 .expect("think-marker families have a configured reasoning pair");
             // Compare FIRST-occurrence positions, not mere presence: a prompt that
@@ -959,9 +981,8 @@ fn beam_prefill(content: &str) -> UnifiedParserStartingState {
 fn reasoning_marker_pair(family: &str) -> Option<(&'static str, &'static str)> {
     match family {
         "minimax_m3" => Some(("<mm:think>", "</mm:think>")),
-        "qwen3" | "deepseek_v4" | "deepseek_v41" | "glm47" | "kimi_k2" | "nemotron_v3" => {
-            Some(("<think>", "</think>"))
-        }
+        "qwen3" | "deepseek_v4" | "deepseek_v41" | "glm47" | "kimi_k2" | "nemotron_v3"
+        | "hermes" => Some(("<think>", "</think>")),
         "gemma4" => Some(("<|channel>", "<channel|>")),
         _ => None,
     }
@@ -12246,6 +12267,24 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn muse_alias_is_deprecated_but_still_routes() {
+        let warning = deprecated_alias_warning("muse").expect("muse is a deprecated alias");
+        assert!(warning.contains("`muse_glimmer`"), "{warning}");
+        assert!(warning.contains("`muse_spark_open`"), "{warning}");
+        for parser in [
+            "muse_glimmer",
+            "muse_spark",
+            "muse_spark_open",
+            "qwen3_coder",
+            "gemma-4",
+        ] {
+            assert_eq!(deprecated_alias_warning(parser), None, "{parser}");
+        }
+        assert_eq!(canonical_family("muse"), Some(MUSE_UNIFIED_FAMILY));
+        assert!(FAMILY_NAMES.contains(&"muse"));
+    }
+
+    #[test]
     fn eight_family_routing_all_modes() {
         for (tool, reason, family) in [
             ("qwen3_coder", "qwen3", QWEN3_UNIFIED_FAMILY),
@@ -12847,7 +12886,7 @@ pub(crate) mod tests {
         }
     }
 
-    fn all_family_native_calls() -> [(&'static str, &'static str); 9] {
+    fn all_family_native_calls() -> [(&'static str, &'static str); 10] {
         [
             (
                 "minimax_m3",
@@ -12868,6 +12907,10 @@ pub(crate) mod tests {
             (
                 "glm47",
                 "<tool_call>get_weather<arg_key>city</arg_key><arg_value>Tokyo</arg_value></tool_call>",
+            ),
+            (
+                "hermes",
+                r#"<tool_call>{"name":"get_weather","arguments":{"city":"Tokyo"}}</tool_call>"#,
             ),
             (
                 "kimi_k2",
@@ -13509,7 +13552,7 @@ pub(crate) mod tests {
         for (tool, reasoning) in [
             (Some("qwen3_coder"), Some("glm47")),
             (Some("qwen3_coder"), Some("deepseek_r1")),
-            (Some("hermes"), None),
+            (Some("unknown_parser"), None),
             (None, Some("deepseek_r1")),
             (None, None),
         ] {
