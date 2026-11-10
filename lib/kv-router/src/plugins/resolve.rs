@@ -94,7 +94,7 @@ pub enum PluginConfigError {
     )]
     CopyOffersUnavailable { role: &'static str },
     #[error(
-        "hint policy {policy:?} for {role} declares {inputs}, which hint policies can't read; a hint policy may declare only WorkerInputs::KV_TRANSFER"
+        "hint policy {policy:?} for {role} declares {inputs}, which hint policies can't read; a hint policy may declare only WorkerInputs::KV_COPY"
     )]
     UnreadableHintInputs {
         role: &'static str,
@@ -117,7 +117,7 @@ pub enum PluginConfigError {
 /// index can't provide it.
 ///
 /// Also rejects any hint policy, default or configured, that declares an input other than
-/// [`WorkerInputs::KV_TRANSFER`]: [`HintContext`](super::hint_policy::HintContext) can't serve
+/// [`WorkerInputs::KV_COPY`]: [`HintContext`](super::hint_policy::HintContext) can't serve
 /// it, so the router would start resources the policy never reads.
 pub fn resolve_role(
     role: WorkerType,
@@ -138,7 +138,7 @@ pub fn resolve_role(
     for (name, policy) in policies {
         let slot = HintPolicySlot::new(name, policy);
         let inputs = slot.policy.required_worker_inputs();
-        let unreadable = inputs.without(WorkerInputs::KV_TRANSFER);
+        let unreadable = inputs.without(WorkerInputs::KV_COPY);
         if unreadable != WorkerInputs::NONE {
             return Err(PluginConfigError::UnreadableHintInputs {
                 role: role_label,

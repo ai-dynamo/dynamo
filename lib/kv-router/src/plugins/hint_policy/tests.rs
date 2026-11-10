@@ -749,7 +749,7 @@ fn resolve_role_rejects_hint_inputs_the_context_cannot_serve() {
             role_policies(
                 vec![(
                     "reader",
-                    reader(WorkerInputs::CACHE | WorkerInputs::KV_TRANSFER),
+                    reader(WorkerInputs::CACHE | WorkerInputs::KV_COPY),
                 )],
                 defaults,
             ),
@@ -764,7 +764,7 @@ fn resolve_role_rejects_hint_inputs_the_context_cannot_serve() {
         assert!(
             error
                 .to_string()
-                .contains("may declare only WorkerInputs::KV_TRANSFER"),
+                .contains("may declare only WorkerInputs::KV_COPY"),
             "{error}"
         );
     }
@@ -772,7 +772,7 @@ fn resolve_role_rejects_hint_inputs_the_context_cannot_serve() {
     let responsibilities = resolve_role(
         WorkerType::Prefill,
         &selection(WorkerInputs::LOAD),
-        role_policies(vec![("reader", reader(WorkerInputs::KV_TRANSFER))], false),
+        role_policies(vec![("reader", reader(WorkerInputs::KV_COPY))], false),
         &KvRouterConfig::default(),
     )
     .unwrap();
@@ -785,7 +785,7 @@ fn resolve_role_rejects_hint_inputs_the_context_cannot_serve() {
 #[test]
 fn configured_policies_add_inputs_and_defaults_add_none() {
     let reader = Recorder {
-        inputs: WorkerInputs::KV_TRANSFER,
+        inputs: WorkerInputs::KV_COPY,
         ..Recorder::new("reader")
     };
     let configured = resolve_role(
@@ -797,7 +797,7 @@ fn configured_policies_add_inputs_and_defaults_add_none() {
     .unwrap();
     assert_eq!(
         configured.prepare_inputs(),
-        WorkerInputs::LOAD | WorkerInputs::KV_TRANSFER
+        WorkerInputs::LOAD | WorkerInputs::KV_COPY
     );
 
     let defaulted = resolve_role(
