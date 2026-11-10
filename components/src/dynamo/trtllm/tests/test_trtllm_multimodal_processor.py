@@ -253,33 +253,41 @@ def _pt_video(frames_u8: np.ndarray):
     )
 
 
-def _image_video_processor(video_format: str | None):
-    """A processor whose image loader returns one PIL image and whose input
-    processor asks for ``video_format`` video (None: no preference)."""
-    processor = MultimodalRequestProcessor(
-        model_type="multimodal",
-        model_dir="unused",
-        max_file_size_mb=10,
-        tokenizer=MagicMock(),
-    )
-    image = Image.new("RGB", (5, 4), (200, 30, 30))
-    processor.image_loader.load_image_batch = AsyncMock(return_value=[image])
-    ip = MagicMock()
-    ip.config = SimpleNamespace(model_type="test_vl")  # not in TRT-LLM's registry
-    ip.get_mm_token_ids.return_value = None
-    ip.get_num_tokens_per_image.return_value = 4
-    ip.get_preferred_media_io_kwargs.return_value = (
-        {"image": {"format": "np"}, "video": {"format": video_format}}
-        if video_format
-        else {}
-    )
-    processor.input_processor = ip
-    return processor, image
+@pytest.fixture
+def image_video_processor(monkeypatch):
+    """Factory for a processor whose image loader returns one PIL image and
+    whose input processor asks for ``video_format`` video (None: no preference).
+
+    The test media URLs are link-local. The processor reads the URL policy when
+    it is built, so internal URLs are allowed before any processor is built."""
+    monkeypatch.setenv("DYN_MM_ALLOW_INTERNAL", "1")
+
+    def make(video_format: str | None):
+        processor = MultimodalRequestProcessor(
+            model_type="multimodal",
+            model_dir="unused",
+            max_file_size_mb=10,
+            tokenizer=MagicMock(),
+        )
+        image = Image.new("RGB", (5, 4), (200, 30, 30))
+        processor.image_loader.load_image_batch = AsyncMock(return_value=[image])
+        ip = MagicMock()
+        ip.config = SimpleNamespace(model_type="test_vl")  # not in TRT-LLM's registry
+        ip.get_mm_token_ids.return_value = None
+        ip.get_num_tokens_per_image.return_value = 4
+        ip.get_preferred_media_io_kwargs.return_value = (
+            {"image": {"format": "np"}, "video": {"format": video_format}}
+            if video_format
+            else {}
+        )
+        processor.input_processor = ip
+        return processor, image
+
+    return make
 
 
 def _route_video(monkeypatch, path: str, video) -> None:
     """Send the next video through NVDEC or the vendor loader, returning ``video``."""
-    monkeypatch.setenv("DYN_MM_ALLOW_INTERNAL", "1")
     monkeypatch.setattr(mmp, "fetch_bytes", AsyncMock(return_value=b"video bytes"))
     monkeypatch.setattr(mmp, "probe_video_codec", lambda content: "h264")
     monkeypatch.setattr(mmp, "should_use_nvdec", lambda codec: path == "nvdec")
@@ -315,13 +323,13 @@ def _request(image: bool = True, video: bool = True, video_first: bool = False) 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("path", ["nvdec", "vendor"])
 async def test_video_next_to_an_image_is_handed_over_as_uint8(
-    path, monkeypatch
+    path, image_video_processor, monkeypatch
 ) -> None:
     """Qwen3-VL rescales images and videos together and rejects a PIL image
     next to float [0,1] video frames. With an image in the request, videos go
     over as the uint8 (N, H, W, 3) array the model asks for, holding exactly
     the decoded pixels; the image and the metadata are untouched."""
-    processor, image = _image_video_processor("np")
+    processor, image = image_video_processor("np")
     frames_u8 = _decoded_frames()
     source = _pt_video(frames_u8)
     _route_video(monkeypatch, path, source)
@@ -341,10 +349,12 @@ async def test_video_next_to_an_image_is_handed_over_as_uint8(
 
 
 @pytest.mark.asyncio
-async def test_video_conversion_runs_off_the_event_loop(monkeypatch) -> None:
+async def test_video_conversion_runs_off_the_event_loop(
+    image_video_processor, monkeypatch
+) -> None:
     """Converting a clip takes CPU time that grows with its frame count, so it
     must not hold up other requests on the worker's event loop."""
-    processor, _ = _image_video_processor("np")
+    processor, _ = image_video_processor("np")
     _route_video(monkeypatch, "nvdec", _pt_video(_decoded_frames()))
     convert, threads = mmp._video_frames_to_uint8, []
 
@@ -362,8 +372,10 @@ async def test_video_conversion_runs_off_the_event_loop(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_image_only_request_keeps_pil_images(monkeypatch) -> None:
-    processor, image = _image_video_processor("np")
+async def test_image_only_request_keeps_pil_images(
+    image_video_processor, monkeypatch
+) -> None:
+    processor, image = image_video_processor("np")
 
     processed = await processor.process_openai_request(
         _request(video=False), embeddings=None, ep_disaggregated_params=None
@@ -375,8 +387,10 @@ async def test_image_only_request_keeps_pil_images(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_video_only_request_keeps_float_frames(monkeypatch) -> None:
-    processor, _ = _image_video_processor("np")
+async def test_video_only_request_keeps_float_frames(
+    image_video_processor, monkeypatch
+) -> None:
+    processor, _ = image_video_processor("np")
     source = _pt_video(_decoded_frames())
     _route_video(monkeypatch, "nvdec", source)
 
@@ -390,8 +404,10 @@ async def test_video_only_request_keeps_float_frames(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_uint8_video_next_to_an_image_is_passed_through(monkeypatch) -> None:
-    processor, _ = _image_video_processor("np")
+async def test_uint8_video_next_to_an_image_is_passed_through(
+    image_video_processor, monkeypatch
+) -> None:
+    processor, _ = image_video_processor("np")
     source = mmp.VideoData(
         frames=_decoded_frames(), metadata={"total_num_frames": 2}, audio=None
     )
@@ -407,11 +423,11 @@ async def test_uint8_video_next_to_an_image_is_passed_through(monkeypatch) -> No
 @pytest.mark.asyncio
 @pytest.mark.parametrize("video_format", [None, "pt"])
 async def test_video_next_to_an_image_keeps_float_frames_without_np_preference(
-    video_format, monkeypatch
+    video_format, image_video_processor, monkeypatch
 ) -> None:
     """Models that do not ask for uint8 video (Nemotron-H takes PIL or tensor
     frames only) get the frames as decoded."""
-    processor, _ = _image_video_processor(video_format)
+    processor, _ = image_video_processor(video_format)
     source = _pt_video(_decoded_frames())
     _route_video(monkeypatch, "nvdec", source)
 
@@ -447,11 +463,11 @@ def test_video_frames_to_uint8_round_trips_every_value() -> None:
     ids=["image_first", "video_first"],
 )
 async def test_image_and_video_request_carries_the_prompt_item_order(
-    video_first, expected, monkeypatch
+    video_first, expected, image_video_processor, monkeypatch
 ) -> None:
     """TRT-LLM matches each item to its tokens and embeddings through
     ``mm_item_order`` when a request has more than one modality."""
-    processor, _ = _image_video_processor("np")
+    processor, _ = image_video_processor("np")
     _route_video(monkeypatch, "nvdec", _pt_video(_decoded_frames()))
 
     processed = await processor.process_openai_request(
@@ -464,10 +480,12 @@ async def test_image_and_video_request_carries_the_prompt_item_order(
 
 
 @pytest.mark.asyncio
-async def test_item_order_follows_the_models_modality_grouping(monkeypatch) -> None:
+async def test_item_order_follows_the_models_modality_grouping(
+    image_video_processor, monkeypatch
+) -> None:
     """A chat template that writes all image placeholders before the video ones
     (TRT-LLM's ``prompt_modality_order``) decides the order, not the messages."""
-    processor, _ = _image_video_processor(None)
+    processor, _ = image_video_processor(None)
     _route_video(monkeypatch, "nvdec", _pt_video(_decoded_frames()))
     monkeypatch.setattr(
         mmp.MULTIMODAL_PLACEHOLDER_REGISTRY,
@@ -484,11 +502,11 @@ async def test_item_order_follows_the_models_modality_grouping(monkeypatch) -> N
 
 @pytest.mark.asyncio
 async def test_media_parts_that_do_not_match_the_loaded_items_are_rejected(
-    monkeypatch,
+    image_video_processor, monkeypatch
 ) -> None:
     """Without one message part per loaded item the order is unknown; reject
     the request instead of letting TRT-LLM fail on it."""
-    processor, _ = _image_video_processor("np")
+    processor, _ = image_video_processor("np")
     _route_video(monkeypatch, "nvdec", _pt_video(_decoded_frames()))
     request = _request()
     request["extra_args"]["messages"][0]["content"].pop(0)  # drop the image part
@@ -498,6 +516,7 @@ async def test_media_parts_that_do_not_match_the_loaded_items_are_rejected(
             request, embeddings=None, ep_disaggregated_params=None
         )
     assert excinfo.value.status == 400
+    assert "Cannot order the request's images and videos" in excinfo.value.message
 
 
 _IMAGE_TOKEN, _VIDEO_TOKEN = 900, 901
@@ -547,13 +566,13 @@ class _ExpandingInputProcessor:
 
 @pytest.mark.asyncio
 async def test_image_and_video_request_after_single_modality_requests_passes_trtllm_hashing(
-    monkeypatch,
+    image_video_processor, monkeypatch
 ) -> None:
     """A worker sees image-only and video-only requests first, which settles
     TRT-LLM's hashing as supported; after that a failure in it is raised and
     stops the engine. Image + video requests, in either order, must then hash
     with every item at its own tokens."""
-    processor, _ = _image_video_processor("np")
+    processor, _ = image_video_processor("np")
     _route_video(monkeypatch, "nvdec", _pt_video(_decoded_frames()))
     input_processor = _ExpandingInputProcessor()
     hashed = create_input_processor_with_hash(input_processor)
@@ -995,12 +1014,12 @@ async def test_expanded_prompt_len_skipped_when_kwargs_override() -> None:
 
 @pytest.mark.asyncio
 async def test_expanded_prompt_len_left_to_engine_when_request_has_video(
-    monkeypatch,
+    image_video_processor, monkeypatch
 ) -> None:
     """The estimate counts image tokens only. With a video as well it would
     drop the video's tokens and size max_tokens past the context, so a request
     with video gets no hint, as a video-only request already does."""
-    processor, _ = _image_video_processor("np")
+    processor, _ = image_video_processor("np")
     _route_video(monkeypatch, "nvdec", _pt_video(_decoded_frames()))
 
     mixed = await processor.process_openai_request(
