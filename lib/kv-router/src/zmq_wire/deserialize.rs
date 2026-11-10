@@ -155,7 +155,10 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                         };
                         (tokens, false)
                     }
-                    _ => return Ok(RawKvEvent::Ignored),
+                    (MapTokenIds::DigestFirst(_), None) => {
+                        trtllm::record_store_without_image_routing(block_hashes.len());
+                        return Ok(RawKvEvent::Ignored);
+                    }
                 };
                 let medium = normalize_medium(medium.unwrap_or(None));
                 let lora_name = lora_name.unwrap_or(None);

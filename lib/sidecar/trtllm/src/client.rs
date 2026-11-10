@@ -265,6 +265,16 @@ impl TrtllmClient {
                 }
             }
         }
+        let supports_image_routing = supported_media.image && has_image_routing_v1(&info);
+        if supported_media.image && !supports_image_routing {
+            // Image input and image-aware routing are separate engine capabilities.
+            tracing::warn!(
+                "TensorRT-LLM reports image input but not trtllm_image_routing_version = 1. Image \
+                 requests will be served, but their image KV blocks will not be indexed for \
+                 KV-aware routing. Image-aware routing needs a TensorRT-LLM runtime that includes \
+                 NVIDIA/TensorRT-LLM#21125"
+            );
+        }
         Ok(ModelInfo {
             limits: ModelLimits {
                 context_length: info.max_context_length.filter(|len| *len > 0),
@@ -272,7 +282,7 @@ impl TrtllmClient {
                 max_output_tokens: info.max_output_tokens.filter(|cap| *cap > 0),
                 supported_inputs,
                 supported_media: Some(supported_media),
-                supports_image_routing: supported_media.image && has_image_routing_v1(&info),
+                supports_image_routing,
             },
             served_model_name: info.served_model_name,
         })

@@ -98,6 +98,40 @@ fn trtllm_invalid_image_metadata_fails_closed() {
     }
 }
 
+/// A runtime without TRT-LLM image routing v1 sends digest-first image tokens
+/// and `mm_keys` hashes, but no `trtllm_image_routing` metadata and no UUIDs.
+/// The store stays dropped (nothing is invented), and the drop is recorded.
+#[test]
+fn trtllm_digest_first_store_without_image_routing_is_dropped_and_recorded() {
+    let digest = "c".repeat(64);
+    let mut token_ids: Vec<serde_json::Value> = (1..=31).map(|id| serde_json::json!(id)).collect();
+    token_ids.insert(27, serde_json::json!(digest));
+    let store = serde_json::json!({
+        "type": "BlockStored", "block_hashes": [100, 101], "parent_block_hash": null,
+        "token_ids": token_ids, "block_size": 16,
+        "mm_keys": [[], [{"hash": digest, "start_offset": 0}]],
+    });
+    let batch = serde_json::json!([0.0, [store.clone(), store,
+        {"type": "BlockRemoved", "block_hashes": [100]}
+    ], 0]);
+
+    // The counter is process-wide and other tests decode in parallel; only
+    // this test feeds this shape, so the delta is at least this test's drops.
+    let before = trtllm::stores_without_image_routing();
+    let decoded = decode_event_batch(&to_vec_named(&batch).unwrap()).unwrap();
+    assert!(matches!(decoded.events[0], RawKvEvent::Ignored));
+    assert!(matches!(decoded.events[1], RawKvEvent::Ignored));
+    assert!(matches!(decoded.events[2], RawKvEvent::BlockRemoved { .. }));
+    assert!(trtllm::stores_without_image_routing() - before >= 2);
+
+    // Plain token IDs without the metadata remain an ordinary text store.
+    let text = serde_json::json!({
+        "type": "BlockStored", "block_hashes": [100], "token_ids": [1, 2], "block_size": 2,
+    });
+    let raw: RawKvEvent = from_slice(&to_vec_named(&text).unwrap()).unwrap();
+    assert!(matches!(raw, RawKvEvent::BlockStored { .. }));
+}
+
 #[test]
 fn trtllm_unmapped_image_continuations_do_not_drop_subsequent_removals() {
     let event = serde_json::json!([0.0, [
