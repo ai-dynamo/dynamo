@@ -93,7 +93,7 @@ impl Parameters {
 
 thread_local! {
     /// Each row's active request count, read once per pick.
-    static ACTIVE_REQUESTS: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
+    static ACTIVE_REQUEST_COUNTS: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
 }
 
 fn least_loaded(load: &[u64], rows: impl Iterator<Item = usize>) -> Option<usize> {
@@ -159,7 +159,7 @@ impl WorkerPicker for TwoTierCostFnPicker {
         let cache = input
             .cache()
             .ok_or_else(|| WorkerSelectionPolicyError::failed("cache input unavailable"))?;
-        ACTIVE_REQUESTS.with_borrow_mut(|load| {
+        ACTIVE_REQUEST_COUNTS.with_borrow_mut(|load| {
             load.clear();
             for row in 0..input.len() {
                 load.push(input.active_requests(row).ok_or_else(|| {
