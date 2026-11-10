@@ -3,7 +3,9 @@
 
 use std::collections::BTreeMap;
 use std::ops::{Deref, DerefMut};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
+use std::task::{Poll, Waker};
 
 use super::{AsyncEngineContext, AsyncEngineContextProvider, Data};
 use crate::engine::{AsyncEngineController, EngineContextGuard};
@@ -354,21 +356,20 @@ impl<T: Send + Sync + 'static> From<Context<T>> for StreamContext {
 
 // TODO - refactor here - this came from the dynamo.llm-async-engine crate
 
-use tokio::sync::watch::{Receiver, Sender, channel};
+use tokio::sync::Notify;
 
-#[derive(Debug, Eq, PartialEq)]
-enum State {
-    Live,
-    Stopped,
-    Killed,
-}
+// Controller states. A controller only moves forward through them.
+const LIVE: u8 = 0;
+const STOPPED: u8 = 1;
+const KILLED: u8 = 2;
 
 /// A context implementation with cancellation propagation.
 #[derive(Debug)]
 pub struct Controller {
     id: String,
-    tx: Sender<State>,
-    rx: Receiver<State>,
+    state: AtomicU8,
+    /// Notified after every change of `state`.
+    state_changed: Notify,
     child_context: Mutex<Vec<Arc<dyn AsyncEngineContext>>>,
     retained: Mutex<Vec<RetainedGuard>>,
 }
@@ -385,11 +386,10 @@ impl std::fmt::Debug for RetainedGuard {
 
 impl Controller {
     pub fn new(id: String) -> Self {
-        let (tx, rx) = channel(State::Live);
         Self {
             id,
-            tx,
-            rx,
+            state: AtomicU8::new(LIVE),
+            state_changed: Notify::new(),
             child_context: Mutex::new(Vec::new()),
             retained: Mutex::new(Vec::new()),
         }
@@ -400,13 +400,48 @@ impl Controller {
     }
 
     fn transition_to_stopped(&self) {
-        self.tx.send_if_modified(|state| {
-            if *state != State::Live {
-                return false;
+        if self
+            .state
+            .compare_exchange(LIVE, STOPPED, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            self.state_changed.notify_waiters();
+        }
+    }
+
+    /// Waits until the state is `target` or later.
+    ///
+    /// Stream loops poll this on every chunk, almost always while the context is live, and a
+    /// pending `Notified` locks the waiter list on each poll. A live state means no change has
+    /// been notified yet, so the waker an earlier poll registered is still queued and a stop
+    /// or kill will wake it: such a poll reads `state` and returns.
+    async fn reached(&self, target: u8) {
+        let mut notified = std::pin::pin!(self.state_changed.notified());
+        let mut registered: Option<Waker> = None;
+        std::future::poll_fn(|cx| {
+            loop {
+                let state = self.state.load(Ordering::SeqCst);
+                if state >= target {
+                    return Poll::Ready(());
+                }
+                if state == LIVE
+                    && registered
+                        .as_ref()
+                        .is_some_and(|waker| waker.will_wake(cx.waker()))
+                {
+                    return Poll::Pending;
+                }
+                if notified.as_mut().poll(cx).is_pending() {
+                    registered = Some(cx.waker().clone());
+                    return Poll::Pending;
+                }
+                // The state changed without reaching `target`. Wait for the next change on a
+                // new `Notified`, created before `state` is read again.
+                registered = None;
+                notified.set(self.state_changed.notified());
             }
-            *state = State::Stopped;
-            true
-        });
+        })
+        .await
     }
 }
 
@@ -425,29 +460,19 @@ impl AsyncEngineContext for Controller {
     }
 
     fn is_stopped(&self) -> bool {
-        *self.rx.borrow() != State::Live
+        self.state.load(Ordering::SeqCst) != LIVE
     }
 
     fn is_killed(&self) -> bool {
-        *self.rx.borrow() == State::Killed
+        self.state.load(Ordering::SeqCst) == KILLED
     }
 
     async fn stopped(&self) {
-        let mut rx = self.rx.clone();
-        loop {
-            if *rx.borrow_and_update() != State::Live || rx.changed().await.is_err() {
-                return;
-            }
-        }
+        self.reached(STOPPED).await
     }
 
     async fn killed(&self) {
-        let mut rx = self.rx.clone();
-        loop {
-            if *rx.borrow_and_update() == State::Killed || rx.changed().await.is_err() {
-                return;
-            }
-        }
+        self.reached(KILLED).await
     }
 
     fn stop_generating(&self) {
@@ -495,7 +520,8 @@ impl AsyncEngineContext for Controller {
             child.kill();
         }
 
-        let _ = self.tx.send(State::Killed);
+        self.state.store(KILLED, Ordering::SeqCst);
+        self.state_changed.notify_waiters();
     }
 
     fn link_child(&self, child: Arc<dyn AsyncEngineContext>) {
@@ -564,6 +590,71 @@ mod tests {
 
         child.stop_generating();
         assert!(child.is_killed());
+    }
+
+    /// Spawns a task that re-polls `stopped()` or `killed()` on every nudge, as a stream
+    /// loop does on every chunk, and returns once the wait completes.
+    fn spawn_waiter(
+        controller: Arc<Controller>,
+        wait_for_kill: bool,
+    ) -> (tokio::sync::mpsc::Sender<()>, tokio::task::JoinHandle<()>) {
+        let (nudge_tx, mut nudge_rx) = tokio::sync::mpsc::channel::<()>(1);
+        let task = tokio::spawn(async move {
+            let wait = if wait_for_kill {
+                controller.killed()
+            } else {
+                controller.stopped()
+            };
+            tokio::pin!(wait);
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = &mut wait => return,
+                    _ = nudge_rx.recv() => {}
+                }
+            }
+        });
+        (nudge_tx, task)
+    }
+
+    async fn nudge(nudge_tx: &tokio::sync::mpsc::Sender<()>) {
+        nudge_tx.send(()).await.unwrap();
+        tokio::task::yield_now().await;
+    }
+
+    #[tokio::test]
+    async fn stop_wakes_a_waiter_repolled_while_live() {
+        let controller = Arc::new(Controller::default());
+        let (nudge_tx, waiter) = spawn_waiter(controller.clone(), false);
+        for _ in 0..3 {
+            nudge(&nudge_tx).await;
+        }
+        assert!(!waiter.is_finished());
+
+        controller.stop();
+        tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+            .await
+            .expect("stop did not wake the waiter")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn kill_wakes_a_waiter_that_was_woken_by_a_stop() {
+        let controller = Arc::new(Controller::default());
+        let (nudge_tx, waiter) = spawn_waiter(controller.clone(), true);
+        nudge(&nudge_tx).await;
+
+        controller.stop();
+        for _ in 0..3 {
+            nudge(&nudge_tx).await;
+        }
+        assert!(!waiter.is_finished());
+
+        controller.kill();
+        tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+            .await
+            .expect("kill did not wake the waiter")
+            .unwrap();
     }
 
     #[test]
