@@ -441,6 +441,23 @@ impl SessionContext {
     }
 }
 
+/// Whether routing identity contributes to per-adapter demand accounting.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum AccountingAttribution {
+    #[default]
+    UseRoutingName,
+    Exclude,
+}
+
+impl AccountingAttribution {
+    pub(crate) fn accounting_name(self, routing_name: Option<String>) -> Option<String> {
+        match self {
+            Self::UseRoutingName => routing_name,
+            Self::Exclude => None,
+        }
+    }
+}
+
 /// Validated request accepted by [`LocalScheduler`](super::LocalScheduler).
 pub struct ScheduleRequest {
     pub mode: ScheduleMode,
@@ -448,6 +465,7 @@ pub struct ScheduleRequest {
     pub block_hashes: Option<Vec<LocalBlockHash>>,
     pub isl_tokens: usize,
     pub lora_name: Option<String>,
+    pub accounting_attribution: AccountingAttribution,
     pub expected_output_tokens: Option<u32>,
     /// A session-affinity target resolved by the request host.
     ///
@@ -479,6 +497,7 @@ pub struct SchedulingRequest {
     pub token_seq: Option<Vec<SequenceHash>>,
     pub isl_tokens: usize,
     pub lora_name: Option<String>,
+    pub accounting_attribution: AccountingAttribution,
     pub expected_output_tokens: Option<u32>,
 
     // Routing constraints and request-level config.
@@ -707,6 +726,7 @@ mod tests {
         );
 
         SchedulingRequest {
+            accounting_attribution: Default::default(),
             mode: ScheduleMode::QueryOnly {
                 request_id: Some("test".into()),
             },

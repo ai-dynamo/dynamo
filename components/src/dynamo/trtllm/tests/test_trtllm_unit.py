@@ -21,6 +21,7 @@ if not torch.cuda.is_available():
     )
 
 from tensorrt_llm.llmapi import KvCacheConfig
+from tensorrt_llm.llmapi.llm import SamplingParams
 
 from dynamo.trtllm.args import Config, parse_args
 from dynamo.trtllm.constants import DisaggregationMode, Modality
@@ -177,6 +178,24 @@ def test_publish_metrics_is_independent_from_kv_events(monkeypatch):
     assert config.publish_kv_events is False
     assert config.publish_metrics is True
     assert config.use_kv_events is False
+
+
+def test_publish_per_request_metrics_is_a_separate_opt_in(monkeypatch):
+    monkeypatch.delenv("DYN_TRTLLM_PUBLISH_METRICS", raising=False)
+    monkeypatch.delenv("DYN_TRTLLM_PUBLISH_PER_REQUEST_METRICS", raising=False)
+    assert parse_args(["--publish-metrics"]).publish_per_request_metrics is False
+    config = parse_args(["--publish-metrics", "--publish-per-request-metrics"])
+    assert config.publish_metrics is True
+    assert config.publish_per_request_metrics is True
+
+
+def test_publish_per_request_metrics_requires_publish_metrics(monkeypatch):
+    monkeypatch.delenv("DYN_TRTLLM_PUBLISH_METRICS", raising=False)
+    monkeypatch.delenv("DYN_TRTLLM_PUBLISH_PER_REQUEST_METRICS", raising=False)
+    with pytest.raises(
+        ValueError, match="--publish-per-request-metrics requires --publish-metrics"
+    ):
+        parse_args(["--publish-per-request-metrics"])
 
 
 def test_deprecated_publish_events_flag_alias_maps_to_both_controls(
@@ -536,35 +555,54 @@ def test_config_publish_forward_pass_metrics_opt_in(
 
 
 @pytest.mark.parametrize(
-    ("publish_flags", "fpm_port_env", "expected_iter_perf_stats"),
+    (
+        "publish_flags",
+        "fpm_port_env",
+        "expected_iter_perf_stats",
+        "expected_request_perf_metrics",
+    ),
     [
-        (["--publish-kv-events"], None, False),
-        (["--publish-metrics"], None, True),
-        (["--fpm-trace"], None, True),
-        ([], "20380", True),
-        ([], None, False),
-        (["--publish-kv-events", "--publish-metrics"], None, True),
-        (["--publish-events-and-metrics"], None, True),
+        (["--publish-kv-events"], None, False, False),
+        (["--publish-metrics"], None, True, False),
+        (["--publish-metrics", "--publish-per-request-metrics"], None, True, True),
+        (["--fpm-trace"], None, True, False),
+        ([], "20380", True, False),
+        ([], None, False, False),
+        (["--publish-kv-events", "--publish-metrics"], None, True, False),
+        (["--publish-events-and-metrics"], None, True, False),
     ],
 )
 @pytest.mark.asyncio
 async def test_init_llm_worker_engine_args_without_overrides(
-    monkeypatch, publish_flags, fpm_port_env, expected_iter_perf_stats
+    monkeypatch,
+    publish_flags,
+    fpm_port_env,
+    expected_iter_perf_stats,
+    expected_request_perf_metrics,
 ):
     """Iteration stats follow --publish-metrics and the forward-pass metrics
-    opt-in, never --publish-kv-events alone; the engine-level
-    return_perf_metrics default stays off regardless."""
+    opt-in, never --publish-kv-events alone. Per-request perf metrics follow
+    only --publish-per-request-metrics, and the engine-level return_perf_metrics
+    default stays off regardless."""
     monkeypatch.delenv("DYN_TRTLLM_MAX_NUM_TOKENS", raising=False)
     monkeypatch.delenv("DYN_TRTLLM_MAX_BATCH_SIZE", raising=False)
     monkeypatch.delenv("DYN_TRTLLM_EXTRA_ENGINE_ARGS", raising=False)
     monkeypatch.delenv("DYN_TRTLLM_OVERRIDE_ENGINE_ARGS", raising=False)
     monkeypatch.delenv("DYN_TRTLLM_PUBLISH_KV_EVENTS", raising=False)
     monkeypatch.delenv("DYN_TRTLLM_PUBLISH_METRICS", raising=False)
+    monkeypatch.delenv("DYN_TRTLLM_PUBLISH_PER_REQUEST_METRICS", raising=False)
     monkeypatch.delenv("DYN_TRTLLM_PUBLISH_EVENTS_AND_METRICS", raising=False)
     monkeypatch.delenv("DYN_FORWARDPASS_METRIC_PORT", raising=False)
     monkeypatch.setenv("DYN_FPM_TRACE", "0")
     if fpm_port_env is not None:
         monkeypatch.setenv("DYN_FORWARDPASS_METRIC_PORT", fpm_port_env)
+
+    sampling_params = []
+
+    def _record_sampling_params(*args, **kwargs):
+        params = SamplingParams(*args, **kwargs)
+        sampling_params.append(params)
+        return params
 
     if publish_flags == ["--publish-events-and-metrics"]:
         with pytest.warns(
@@ -583,6 +621,10 @@ async def test_init_llm_worker_engine_args_without_overrides(
             "dynamo.trtllm.workers.llm_worker.get_llm_engine",
             side_effect=_mock_get_llm_engine,
         ),
+        mock.patch(
+            "dynamo.trtllm.workers.llm_worker.SamplingParams",
+            side_effect=_record_sampling_params,
+        ),
     ):
         with pytest.raises(EngineArgsCaptured) as exc_info:
             await init_llm_worker(
@@ -597,6 +639,8 @@ async def test_init_llm_worker_engine_args_without_overrides(
         assert engine_args["return_perf_metrics"] is False
         assert engine_args["enable_iter_perf_stats"] is expected_iter_perf_stats
         assert engine_args["kv_connector_config"] is None
+        assert len(sampling_params) == 1
+        assert sampling_params[0].return_perf_metrics is expected_request_perf_metrics
 
 
 @pytest.mark.asyncio
