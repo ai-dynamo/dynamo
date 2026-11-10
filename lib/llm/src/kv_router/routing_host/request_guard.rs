@@ -5,6 +5,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use prometheus::IntCounter;
 
+use crate::routing_policy::AttemptLease;
 use crate::{
     kv_router::{
         KvRouter,
@@ -13,7 +14,6 @@ use crate::{
         prefill_router::BYPASS_REMOTE_PREFILL_ANNOTATION,
         request_lease::{RequestAttemptLease, RequestAttemptRelease},
     },
-    lora::LoadEstimator,
     preprocessor::PreprocessedRequest,
     protocols::common::{
         llm_backend::LLMEngineOutput,
@@ -37,27 +37,6 @@ use dynamo_runtime::{
     pipeline::OccupancyReservation,
     protocols::annotated::Annotated,
 };
-
-pub(super) struct LoraLoadGuard {
-    estimator: Arc<LoadEstimator>,
-    lora_name: String,
-}
-
-impl LoraLoadGuard {
-    pub(super) fn new(estimator: Arc<LoadEstimator>, lora_name: String) -> Self {
-        estimator.increment_load(&lora_name);
-        Self {
-            estimator,
-            lora_name,
-        }
-    }
-}
-
-impl Drop for LoraLoadGuard {
-    fn drop(&mut self) {
-        self.estimator.decrement_load(&self.lora_name);
-    }
-}
 
 #[derive(Clone)]
 struct OutputHashBranch {
@@ -619,7 +598,7 @@ pub(super) struct RequestGuard {
     migration_state: Option<MigrationState>,
     kv_hit: Option<KvHitTracking>,
     affinity_lease: Option<AffinityLease>,
-    _lora_load: Option<LoraLoadGuard>,
+    _attempt_lease: Option<AttemptLease>,
 }
 
 impl RequestGuard {
@@ -679,7 +658,7 @@ impl RequestGuard {
             migration_state: request.migration_state.clone(),
             kv_hit,
             affinity_lease: None,
-            _lora_load: None,
+            _attempt_lease: None,
         }
     }
 
@@ -687,7 +666,7 @@ impl RequestGuard {
         request_metrics: Arc<RouterRequestMetrics>,
         worker_id: u64,
         occupancy_reservation: Option<OccupancyReservation>,
-        lora_load: Option<LoraLoadGuard>,
+        attempt_lease: Option<AttemptLease>,
         request: &PreprocessedRequest,
     ) -> Self {
         request_metrics.requests_started_total.inc();
@@ -710,7 +689,7 @@ impl RequestGuard {
             migration_state: request.migration_state.clone(),
             kv_hit: None,
             affinity_lease: None,
-            _lora_load: lora_load,
+            _attempt_lease: attempt_lease,
         }
     }
 
