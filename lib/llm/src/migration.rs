@@ -2568,7 +2568,6 @@ mod tests {
             .downcast_ref::<DynamoError>()
             .expect("error should be a DynamoError");
         assert_eq!(dynamo_error.error_type(), ErrorType::Cancelled);
-        // The retry was cancelled before it reached a replacement worker.
         assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 0);
         assert_eq!(
             migration_duration_count(
