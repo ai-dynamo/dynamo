@@ -34,7 +34,6 @@ use crate::{
         KvRouter, metrics::RouterRequestMetrics, request_lease::RequestAttemptRelease,
         to_worker_selection_session_context,
     },
-    lora::{LoadEstimator, LoraFilter},
     preprocessor::PreprocessedRequest,
     protocols::common::{
         FinishReason,
@@ -57,13 +56,15 @@ mod kv_selection;
 mod occupancy;
 mod request_guard;
 
+use crate::routing_policy::HostedCandidatePolicy;
 pub(crate) use builder::hosted_picker;
 pub use builder::{LlmDispatch, MultimodalCache, RoutingHostBuilder};
 use cancellation::{CleanupBudget, DispatchCancellation, StagedKv, await_with_cleanup_policy};
+pub(crate) use hosted::hosted_request;
 use kv_selection::{RoutingRequestParts, SelectionOptions, WorkerSelection};
 use occupancy::HostedOccupancy;
 pub(crate) use request_guard::prompt_private_blocks;
-use request_guard::{KvRequestCleanup, LoraLoadGuard, RequestGuard};
+use request_guard::{KvRequestCleanup, RequestGuard};
 
 const OUTPUT_REPLAY_ID_ANNOTATION_KEY: &str = "output_replay_id";
 const OUTPUT_REPLAY_CONSUMER_RUNTIME_KEY: &str = "output_replay_consumer";
@@ -274,18 +275,6 @@ enum RoutingPolicy {
     DeviceAwareWeighted,
 }
 
-struct LoraRouting {
-    filter: Arc<LoraFilter>,
-    load_estimator: Arc<LoadEstimator>,
-    picker: HostedWorkerPicker,
-}
-
-struct LoraSelection {
-    target: u64,
-    allowed_fallback: HashSet<u64>,
-    load_guard: LoraLoadGuard,
-}
-
 struct HostedSelection {
     initial_worker: u64,
     target_constraint: Option<AffinityTarget>,
@@ -313,7 +302,7 @@ pub struct RoutingHost {
     affinity: Option<AffinityCoordinator>,
     session_affinity_mode: SessionAffinityMode,
     hosted_occupancy: Option<HostedOccupancy>,
-    lora: Option<LoraRouting>,
+    candidate_policy: Option<Arc<dyn HostedCandidatePolicy>>,
     /// Retains the shared client, overload state, and cancellation subtree for this host.
     ///
     /// Required for every mode except KV, where the [`KvRouter`] owns the client.

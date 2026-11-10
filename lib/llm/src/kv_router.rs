@@ -67,6 +67,9 @@ pub mod prefill_router;
 pub mod publisher;
 mod request_lease;
 mod routing_host;
+#[cfg(test)]
+pub(crate) use routing_host::hosted_picker;
+pub(crate) use routing_host::hosted_request;
 pub(crate) mod routing_load;
 pub mod sequence;
 pub mod shared_cache;
@@ -856,38 +859,17 @@ impl KvRouter {
         let registration_availability_provider: metrics::RegistrationAvailabilityProvider =
             Arc::new(move || client_for_registration.available_instance_ids());
 
+        let admission_policy = lora_filter.map(crate::lora_routing::LegacyLoraAdmission::kv);
         let client_for_availability = client.clone();
         let workers_for_availability = workers_with_configs.clone();
         let available_worker_provider: WorkerAvailabilityProvider = Arc::new(move |request| {
             let available = client_for_availability.available_instance_ids();
-            let (Some(filter), Some(lora_name)) =
-                (lora_filter.as_ref(), request.lora_name.as_deref())
-            else {
-                return available;
-            };
-            let candidates: Vec<_> = match (&request.allowed_worker_ids, available.as_ref()) {
-                (Some(allowed), _) => allowed
-                    .iter()
-                    .filter(|id| {
-                        available
-                            .as_ref()
-                            .is_none_or(|workers| workers.contains(*id))
-                    })
-                    .copied()
-                    .collect(),
-                (None, Some(available)) => available.iter().copied().collect(),
-                (None, None) => workers_for_availability.borrow().keys().copied().collect(),
-            };
-            Some(Arc::new(
-                filter
-                    .filter_worker_ids_for_lora_with_pin(
-                        Some(lora_name),
-                        &candidates,
-                        request.pinned_worker.map(|worker| worker.worker_id),
-                    )
-                    .into_iter()
-                    .collect(),
-            ))
+            match admission_policy.as_ref() {
+                Some(policy) => {
+                    policy.refresh_admission(request, available, &workers_for_availability)
+                }
+                None => available,
+            }
         });
 
         let request_leases =

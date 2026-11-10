@@ -45,9 +45,11 @@ RoutingHost
  │   └─ DeviceAwareWeighted
  ├─ affinity: AffinityCoordinator    session affinity (optional; crate::session_affinity)
  ├─ hosted_occupancy                 in-flight tracking for load-based builtin modes (optional)
- ├─ lora: LoraRouting                LoRA filter (optional)
+ ├─ candidate_policy                 hosted worker selection hook (optional)
  └─ request_metrics
 ```
+
+An optional hosted candidate policy selects a worker before dispatch. The legacy LoRA policy intersects eligible workers with currently available capacity and keeps its attempt lease in the request guard; transport fallback stays within those candidates. Hosted requests without a policy selection continue through the usual affinity and occupancy paths. KV routing uses a separate admission policy in its availability callback; the KV routing host holds no hosted candidate policy.
 
 What a KV request does in `RoutingHost::generate` (call order):
 
