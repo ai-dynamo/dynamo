@@ -14,6 +14,9 @@ source "$SCRIPT_DIR/../../../../examples/common/gpu_utils.sh"
 # shellcheck disable=SC1091 # Resolved relative to this script at runtime.
 source "$SCRIPT_DIR/../../../../examples/common/launch_utils.sh"
 
+# The sidecar needs SGLang's Rust server (sglang.api.v1).
+export SGLANG_RUST_SERVER=1
+
 MODEL="${MODEL:-silence09/DeepSeek-R1-Small-2layers}"
 
 EXTRA_ARGS=()

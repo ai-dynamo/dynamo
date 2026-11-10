@@ -11,6 +11,11 @@ SGLang and the Dynamo sidecar in one runtime container. Slime connects through
 stable Kubernetes Services. Slime uses the Dynamo frontend for incremental
 streaming responses.
 
+> [!WARNING]
+> This example runs SGLang's Python server. The Dynamo SGLang sidecar now speaks
+> only `sglang.api.v1`, which SGLang serves only from its Rust server
+> (`SGLANG_RUST_SERVER=1`), and this example does not enable it.
+
 This example uses the external-engine and streaming support from
 [THUDM/slime#2272](https://github.com/THUDM/slime/pull/2272). Slime queries
 `/server_info` on each engine. Slime registers the fixed addresses with its

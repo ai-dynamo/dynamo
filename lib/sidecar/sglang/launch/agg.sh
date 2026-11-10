@@ -17,6 +17,9 @@ source "$SCRIPT_DIR/../../../../examples/common/gpu_utils.sh"   # build_sglang_g
 # shellcheck disable=SC1091 # Resolved relative to this script at runtime.
 source "$SCRIPT_DIR/../../../../examples/common/launch_utils.sh" # print_launch_banner, wait_any_exit
 
+# The sidecar needs SGLang's Rust server (sglang.api.v1).
+export SGLANG_RUST_SERVER=1
+
 MODEL="${MODEL:-Qwen/Qwen3-0.6B}"
 
 EXTRA_ARGS=()

@@ -23,7 +23,7 @@ native gRPC API.
 | Tool calling through the Dynamo frontend | Supported | Supported | Supported |
 | Disaggregated prefill/decode serving | Supported | Supported | Supported |
 | KV-aware routing | Supported | Supported | Supported |
-| Multimodal input | Supported: image, video, audio | Supported: image, video, audio | Limited: images and video |
+| Multimodal input | Supported: image, video, audio | No | Limited: images and video |
 | Separate multimodal encoder workers | Supported | No | No |
 | LoRA adapters | Supported | No | No |
 | Structured output and logprobs | Supported | Supported | Supported: no prompt logprobs |
