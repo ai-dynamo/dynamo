@@ -2,9 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 worker_selection:
-  aggregated: soft-pin-repin
-  instances:
-    - name: soft-pin-repin
-      type: soft-pin-repin
-      parameters:
-        max_active_requests: 0
+  aggregated:
+    type: soft-pin-repin
+    parameters:
+      max_active_requests: 0

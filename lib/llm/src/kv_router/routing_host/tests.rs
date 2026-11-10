@@ -10,14 +10,15 @@ use std::{
     time::{Duration, Instant},
 };
 
+use super::builder::hosted_picker;
 use crate::kv_router::SelectionPolicySource;
 use dynamo_kv_router::plugins::worker_selection::WorkerCandidates;
 use dynamo_kv_router::{
     config::KvRouterConfig,
-    protocols::RoutingConstraints,
-    scheduling::{
+    plugins::request_classifier::{
         ClassifierError, ClassifyEvent, ClassifyFuture, ClassifyRequest, RequestClassifier,
     },
+    protocols::RoutingConstraints,
 };
 use dynamo_runtime::{
     DistributedRuntime, Runtime,
@@ -106,13 +107,12 @@ fn selector_state_remains_owned_by_the_scheduler_actor() {
 #[test]
 fn builtin_policies_declare_capabilities() {
     for mode in [RouterMode::RoundRobin, RouterMode::Random] {
-        let selector = BuiltinWorkerSelector::new(mode).unwrap();
-        assert_eq!(selector.required_worker_inputs(), WorkerInputs::NONE);
+        assert_eq!(hosted_picker(mode).unwrap().inputs(), WorkerInputs::NONE);
     }
-    for mode in [RouterMode::PowerOfTwoChoices, RouterMode::LeastLoaded] {
-        let selector = BuiltinWorkerSelector::new(mode).unwrap();
-        assert_eq!(selector.required_worker_inputs(), WorkerInputs::OCCUPANCY);
-    }
+    assert_eq!(
+        hosted_picker(RouterMode::LeastLoaded).unwrap().inputs(),
+        WorkerInputs::ACTIVE_REQUESTS
+    );
 }
 
 #[tokio::test]
@@ -142,21 +142,21 @@ async fn builtin_host_constructs_only_declared_capabilities() {
 
     client.override_discovered_instances(vec![1, 2]);
     client.override_instance_avail(vec![1, 2]);
-    let host = RoutingHost::builder(client, RouterMode::PowerOfTwoChoices)
+    let host = RoutingHost::builder(client, RouterMode::LeastLoaded)
         .load_context(load_context)
         .build()
         .await
         .unwrap();
-    let RoutingPolicy::Builtin(selector) = &host.policy else {
+    let RoutingPolicy::Hosted(picker) = &host.policy else {
         unreachable!()
     };
-    assert_eq!(host.required_worker_inputs(), WorkerInputs::OCCUPANCY);
+    assert_eq!(host.required_worker_inputs(), WorkerInputs::ACTIVE_REQUESTS);
     assert!(host.hosted_occupancy.is_some());
     let selection = host
         .hosted_occupancy
         .as_ref()
         .unwrap()
-        .select_and_reserve(&host.inner, selector, Some(1))
+        .select_and_reserve(&host.inner, picker, &request(), Some(1))
         .unwrap();
     assert_eq!(selection.worker_id, 1);
     assert_eq!(selection.occupancy, 1);
@@ -271,15 +271,15 @@ async fn builtin_occupancy_selection_uses_all_selectable_workers() {
         .build()
         .await
         .unwrap();
-    let RoutingPolicy::Builtin(selector) = &host.policy else {
+    let RoutingPolicy::Hosted(picker) = &host.policy else {
         unreachable!()
     };
     let occupancy = host.hosted_occupancy.as_ref().unwrap();
     let first = occupancy
-        .select_and_reserve(&host.inner, selector, Some(1))
+        .select_and_reserve(&host.inner, picker, &request(), Some(1))
         .unwrap();
     let second = occupancy
-        .select_and_reserve(&host.inner, selector, None)
+        .select_and_reserve(&host.inner, picker, &request(), None)
         .unwrap();
 
     assert_eq!(first.worker_id, 1);
@@ -556,7 +556,6 @@ async fn builtin_affinity_uses_common_host_for_every_policy() {
     for (index, mode) in [
         RouterMode::RoundRobin,
         RouterMode::Random,
-        RouterMode::PowerOfTwoChoices,
         RouterMode::LeastLoaded,
         RouterMode::DeviceAwareWeighted,
         RouterMode::Direct,
@@ -621,7 +620,7 @@ async fn builtin_soft_affinity_clears_dp_rank_after_worker_fallback() {
 
     for (index, (mode, transport_fallback)) in [
         (RouterMode::RoundRobin, false),
-        (RouterMode::PowerOfTwoChoices, false),
+        (RouterMode::LeastLoaded, false),
         (RouterMode::RoundRobin, true),
     ]
     .into_iter()
@@ -741,7 +740,7 @@ async fn builtin_soft_affinity_rebinds_after_worker_exit() {
         .component("workers".to_string())
         .unwrap();
 
-    for (index, mode) in [RouterMode::RoundRobin, RouterMode::PowerOfTwoChoices]
+    for (index, mode) in [RouterMode::RoundRobin, RouterMode::LeastLoaded]
         .into_iter()
         .enumerate()
     {
@@ -2533,7 +2532,10 @@ async fn tracked_admission_without_lifecycle_bypasses_classifier() {
 }
 
 struct TokenContractClassifier {
-    classified: mpsc::UnboundedSender<(usize, dynamo_kv_router::scheduling::RequestProgress)>,
+    classified: mpsc::UnboundedSender<(
+        usize,
+        dynamo_kv_router::plugins::request_classifier::RequestProgress,
+    )>,
     completed: mpsc::UnboundedSender<usize>,
 }
 
@@ -4911,6 +4913,205 @@ async fn hard_parent_group_recovers_when_the_bound_worker_leaves() {
     assert!(matches!(operation, Some(Hold::Initialize(_))));
     assert_eq!(affinity.query_target(&group, None).unwrap(), None);
 
+    runtime.shutdown();
+}
+
+#[derive(Debug, Default, Clone)]
+struct CapturedEvent {
+    message: String,
+    fields: HashMap<String, String>,
+}
+
+impl tracing::field::Visit for CapturedEvent {
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        if field.name() == "message" {
+            self.message = value.to_string();
+        } else {
+            self.fields
+                .insert(field.name().to_string(), value.to_string());
+        }
+    }
+
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "message" {
+            self.message = format!("{value:?}");
+        } else {
+            self.fields
+                .insert(field.name().to_string(), format!("{value:?}"));
+        }
+    }
+}
+
+#[derive(Clone, Default)]
+struct SelectedWorkerCapture(Arc<Mutex<Vec<CapturedEvent>>>);
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SelectedWorkerCapture {
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        let mut captured = CapturedEvent::default();
+        event.record(&mut captured);
+        if captured.message.starts_with("Selected") {
+            self.0.lock().unwrap().push(captured);
+        }
+    }
+}
+
+impl SelectedWorkerCapture {
+    /// Capture on the current thread. Tests run on a current-thread runtime, so the
+    /// scheduler actor's events land here too.
+    fn install(&self) -> tracing::subscriber::DefaultGuard {
+        use tracing_subscriber::layer::SubscriberExt;
+        tracing::subscriber::set_default(tracing_subscriber::registry().with(self.clone()))
+    }
+
+    fn events(&self) -> Vec<CapturedEvent> {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn kv_session_affinity_hit_logs_selected_worker_and_records_kv_metrics() {
+    let (mut router, runtime) = router_with_workers(Some(Duration::from_secs(10)), &[7]).await;
+    router.request_metrics = crate::kv_router::metrics::RouterRequestMetrics::for_test(
+        &dynamo_runtime::MetricsRegistry::new(),
+    );
+    let session_id = SessionAffinityId::new("kv-affinity-hit-observability");
+    bind_affinity_target(&router, &session_id, AffinityTarget::new(7, Some(0))).await;
+    let hit_rate_samples = router.request_metrics.kv_hit_rate.get_sample_count();
+
+    let tracker = Arc::new(RequestTracker::new());
+    let mut input = request();
+    input.tracker = Some(Arc::clone(&tracker));
+    let mut request = Context::new(input);
+    request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_id);
+
+    let capture = SelectedWorkerCapture::default();
+    let (mut selection, guard) = {
+        let _capture = capture.install();
+        let (mut selection, _hold) = router
+            .select_with_affinity(
+                &request,
+                RequestPhase::Aggregated,
+                false,
+                &CleanupBudget::default(),
+            )
+            .await
+            .unwrap();
+        let guard = track_selection(
+            &router,
+            &request,
+            &mut selection,
+            RequestPhase::Aggregated,
+            &CleanupBudget::default(),
+        )
+        .await
+        .unwrap();
+        (selection, guard)
+    };
+    assert_eq!(selection.worker, WorkerWithDpRank::new(7, 0));
+
+    let events = capture.events();
+    assert!(
+        events
+            .iter()
+            .all(|event| !event.message.starts_with("Selected pinned worker")),
+        "{events:?}"
+    );
+    let selected: Vec<_> = events
+        .iter()
+        .filter(|event| event.message == "Selected worker")
+        .collect();
+    assert_eq!(selected.len(), 1, "{events:?}");
+    let fields = &selected[0].fields;
+    assert_eq!(fields.get("router_mode").map(String::as_str), Some("kv"));
+    assert_eq!(fields.get("worker_id").map(String::as_str), Some("7"));
+    assert_eq!(fields.get("dp_rank").map(String::as_str), Some("0"));
+    assert_eq!(
+        fields.get("selection").map(String::as_str),
+        Some("session_affinity")
+    );
+
+    assert_eq!(
+        router.request_metrics.kv_hit_rate.get_sample_count(),
+        hit_rate_samples + 1
+    );
+
+    selection.booking.take();
+    drop(guard);
+    drop(router);
+    runtime.shutdown();
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn builtin_hard_affinity_hit_logs_selected_worker() {
+    let runtime = Runtime::from_current().unwrap();
+    let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+        .await
+        .unwrap();
+    let endpoint = distributed
+        .namespace("builtin-affinity-hit-log".to_string())
+        .unwrap()
+        .component("workers".to_string())
+        .unwrap()
+        .endpoint("round-robin");
+    let client = endpoint.client().await.unwrap();
+    let load_context = test_load_context(&client).await;
+    endpoint.register_endpoint_instance().await.unwrap();
+    let worker_id = client.wait_for_instances().await.unwrap()[0].id();
+    let dispatch = Arc::new(CompletedBuiltinDispatch::default());
+    let (host, _affinity) = builtin_host_with_affinity(
+        client,
+        RouterMode::RoundRobin,
+        Arc::clone(&dispatch) as Arc<dyn StreamingDispatch<_, _>>,
+        load_context,
+        crate::session_affinity::SessionAffinityMode::Hard,
+    )
+    .await;
+
+    let session_id = "builtin-affinity-hit-log";
+    let mut first = host
+        .generate(affinity_request(session_id, None))
+        .await
+        .unwrap();
+    while first.next().await.is_some() {}
+
+    // The second request hits the binding and dispatches through `dispatch_exact`.
+    let capture = SelectedWorkerCapture::default();
+    {
+        let _capture = capture.install();
+        let mut second = host
+            .generate(affinity_request(session_id, None))
+            .await
+            .unwrap();
+        while second.next().await.is_some() {}
+    }
+    assert_eq!(
+        dispatch.worker_ids.lock().unwrap().as_slice(),
+        &[worker_id; 2]
+    );
+
+    let events = capture.events();
+    let selected: Vec<_> = events
+        .iter()
+        .filter(|event| event.message == "Selected worker")
+        .collect();
+    assert_eq!(selected.len(), 1, "{events:?}");
+    let fields = &selected[0].fields;
+    assert_eq!(
+        fields.get("router_mode").map(String::as_str),
+        Some("round-robin")
+    );
+    assert_eq!(
+        fields.get("worker_id").map(String::as_str),
+        Some(worker_id.to_string().as_str())
+    );
+
+    drop(host);
     runtime.shutdown();
 }
 

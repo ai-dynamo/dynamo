@@ -97,7 +97,7 @@ class _TraceReplayOptions(_CommonReplayOptions, total=False):
     trace_num_prefix_groups: int
     report_jsonl_path: str | os.PathLike[str] | None
     max_sim_time_ms: float | None
-    # Internal to retune sweeps; not part of the public API.
+    # Internal; not part of the public API.
     _planner_warmup_observations: "Sequence[TrafficObservation] | None"
     _deterministic: bool
 
@@ -110,6 +110,7 @@ class _SyntheticReplayOptions(_CommonReplayOptions, total=False):
     shared_prefix_ratio: float
     num_prefix_groups: int
     inter_turn_delay_ms: float
+    accumulate_session_deltas: bool
 
 
 def _normalize_trace_files(trace_files):
@@ -155,6 +156,14 @@ def _retune_inputs(
     AISimulate setting.
     """
 
+    retune = config.retune
+    if retune is not None and retune.executor != "local":
+        # Replay runs local sweeps only; executor 'dgdr' needs a live
+        # Planner, so do not silently replay it as a local sweep.
+        raise ValueError(
+            f"planner.retune executor {retune.executor!r} is not supported in "
+            "replay; replay retune runs executor 'local'"
+        )
     if trace_format != "dynamo":
         raise ValueError(
             "planner.retune replays a Dynamo request trace: it requires "
@@ -420,8 +429,9 @@ def run_trace_replay(
     # Internal: a retune sweep's inner planner is warmed with the history it
     # already bucketed instead of its load_predictor_warmup_trace.
     _planner_warmup_observations=None,
-    # Internal: a retune sweep replays the baseline and every candidate with
-    # the canonical router seed and ordinal request ids (common random numbers).
+    # Internal: replay with the canonical router seed and ordinal request ids
+    # (common random numbers). Retune sweeps and every trace replay through
+    # the Sweeper's Dynamo runner set it.
     _deterministic=False,
 ) -> ReplayReport | dict[str, Any]:
     """Run trace replay.
@@ -652,6 +662,7 @@ def run_synthetic_trace_replay(
     shared_prefix_ratio=0.0,
     num_prefix_groups=0,
     inter_turn_delay_ms=0.0,
+    accumulate_session_deltas=False,
     model_name=None,
     sla_ttft_ms=None,
     sla_itl_ms=None,
@@ -666,6 +677,10 @@ def run_synthetic_trace_replay(
 ) -> ReplayReport | dict[str, Any]:
     """Run synthetic replay with the same optional ``TelemetryOptions`` and
     ``kv_event_lag_ms`` contracts as :func:`run_trace_replay`.
+
+    ``accumulate_session_deltas`` treats ``input_tokens`` as each turn's new
+    input: every later turn's prompt starts with the session's earlier prompts
+    and generated outputs. It requires ``replay_mode="offline"``.
 
     ``arrival_seed`` seeds request-arrival generation only, not KV-router worker
     selection. With ``router_mode="kv_router"``, equal-cost workers are selected
@@ -693,6 +708,7 @@ def run_synthetic_trace_replay(
         "shared_prefix_ratio": shared_prefix_ratio,
         "num_prefix_groups": num_prefix_groups,
         "inter_turn_delay_ms": inter_turn_delay_ms,
+        "accumulate_session_deltas": accumulate_session_deltas,
         "model_name": model_name,
         "sla_ttft_ms": sla_ttft_ms,
         "sla_itl_ms": sla_itl_ms,

@@ -201,7 +201,7 @@ spec:
                     --tokenizer-mode deepseek_v4 \
                     --dyn-reasoning-parser deepseek_v4 \
                     --dyn-tool-call-parser deepseek_v4 \
-                    --attention-config '{"use_fp4_indexer_cache":true}' \
+                    --attention-config '{"indexer_kv_dtype":"mxfp4"}' \
                     --moe-backend deep_gemm_mega_moe \
                     --compilation-config '{"mode":3,"cudagraph_mode":"FULL_AND_PIECEWISE","custom_ops":["all"]}' \
                     --speculative-config "${SPECULATIVE_CONFIG}" \
