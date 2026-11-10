@@ -464,9 +464,7 @@ For MoE models, AIS requires `ais_tp_size * ais_attention_dp_size == ais_moe_tp_
 ## Fault tolerance
 
 <ParamField path="--migration-limit" type="integer" default="0">
-  Maximum replacement worker attempts per request for ordinary migration. `0` disables
-  ordinary migration; a separately configured drain policy can still allow pre-execution
-  drain retries. The initial dispatch does not count as a replacement attempt.
+  Maximum replacement worker attempts per request. `0` disables migration.
 
   For `/v1/realtime`, this is a lifetime budget for one client WebSocket. Recovery is
   experimental and supports acknowledged transcription sessions with PCM input,
@@ -486,39 +484,6 @@ For MoE models, AIS requires `ais_tp_size * ais_attention_dp_size == ais_moe_tp_
   output gap.
 
   Environment variable: `DYN_MIGRATION_LIMIT`
-</ParamField>
-
-<ParamField path="--migration-limit-draining" type="integer" default="0">
-  **Experimental.** Set the drain-specific ceiling for explicit, pre-execution
-  drain rejections. Must be from `0` through `4294967295`.
-  This setting applies to LLM request recovery, not realtime WebSocket recovery.
-
-  Let `M` be `--migration-limit`, `D` this setting, and `r` the number of replacement
-  attempts already made for the request. The initial dispatch is not counted. A drain
-  rejection permits another replacement while `r < max(M, D)`; ordinary migratable
-  errors require `r < M`. Each replacement increments the shared count, so the limits
-  are not added. For example, with `M=2` and `D=5`, continuous drain rejections permit
-  five replacements. If three drain replacements are followed by an ordinary error,
-  recovery stops because the ordinary limit has already been exceeded.
-
-  Workers encode a drain rejection as the known `backend.worker_unavailable` error
-  with an optional `retry_hint: "draining"`. The frontend applies drain accounting
-  only when the hint accompanies the validated worker-unavailable error identity.
-  An absent or unknown hint keeps ordinary migration behavior. Frontends that
-  already recognize `WorkerUnavailable`, including v1.6.0, ignore the hint and
-  retain ordinary recovery under `M`. Rejections from workers without the hint
-  use only the ordinary allowance.
-
-  The drain-specific extension applies only before any response data has started.
-  If an earlier worker produced data and a replacement rejects before producing data,
-  continuation recovery can use the remaining ordinary allowance `M`, subject to
-  existing replay eligibility checks. A worker that has already produced data cannot
-  claim a pre-execution drain rejection. Explicit worker targets remain authoritative.
-
-  Omitted and explicit `0` have the same behavior: no drain-specific extension beyond
-  `M`. The CLI value takes precedence over the environment variable.
-
-  Environment variable: `DYN_MIGRATION_LIMIT_DRAINING`
 </ParamField>
 
 <ParamField path="--migration-max-seq-len" type="integer" default="null">

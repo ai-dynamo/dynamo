@@ -217,7 +217,6 @@ async fn run_with_router_plugins(
 
             let router_config = model.router_config();
             let migration_limit = model.migration_limit();
-            let migration_limit_draining = model.migration_limit_draining();
             let migration_max_seq_len = model.migration_max_seq_len();
             // Listen for models registering themselves, add them to HTTP service
             // Create namespace filter from model configuration
@@ -234,7 +233,6 @@ async fn run_with_router_plugins(
                 http_service.state().manager_clone(),
                 router_config.clone(),
                 migration_limit,
-                migration_limit_draining,
                 migration_max_seq_len,
                 namespace_filter,
                 Arc::new(http_service.clone()),
@@ -323,7 +321,6 @@ async fn run_watcher(
     model_manager: Arc<ModelManager>,
     router_config: RouterConfig,
     migration_limit: u32,
-    migration_limit_draining: Option<u32>,
     migration_max_seq_len: Option<u32>,
     namespace_filter: NamespaceFilter,
     http_service: Arc<HttpService>,
@@ -356,7 +353,6 @@ async fn run_watcher(
         metrics.clone(),
         plugins,
     );
-    watch_obj.set_migration_limit_draining(migration_limit_draining);
     watch_obj.set_local_model_path(local_model_path);
     watch_obj.set_tokenizer_backend(tokenizer_backend);
     watch_obj.set_tokenizer_fallback_enabled(tokenizer_fallback_enabled);

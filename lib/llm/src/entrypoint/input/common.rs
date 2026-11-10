@@ -289,7 +289,6 @@ pub async fn prepare_engine(
                 prefill_load_estimator,
                 metrics,
             );
-            watcher.set_migration_limit_draining(local_model.migration_limit_draining());
             if !local_model.path().as_os_str().is_empty() {
                 watcher.set_local_model_path(Some(local_model.path().to_path_buf()));
             }
@@ -447,14 +446,12 @@ where
 
 impl PreprocessedRouting {
     /// The normal way to build an inference pipeline. Connect this directly to HTTP layer.
-    #[allow(clippy::too_many_arguments)]
     pub fn build_pipeline<Req, Resp>(
         &self,
         card: &ModelDeploymentCard,
         preprocessor: Arc<OpenAIPreprocessor>,
         tokenizer: crate::tokenizers::Tokenizer,
         migration_limit: u32,
-        migration_limit_draining: Option<u32>,
         migration_max_seq_len: Option<u32>,
         metrics: Arc<Metrics>,
     ) -> anyhow::Result<ServiceEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>>>
@@ -471,14 +468,8 @@ impl PreprocessedRouting {
         let frontend = SegmentSource::<SingleIn<Req>, ManyOut<Annotated<Resp>>>::new();
         let preprocessor_op = preprocessor.into_operator();
         let token_backend = Backend::from_tokenizer(tokenizer).into_operator();
-        let migration = Migration::from_mdc(
-            card,
-            migration_limit,
-            migration_limit_draining,
-            migration_max_seq_len,
-            metrics,
-        )
-        .into_operator_for::<BackendOutput>();
+        let migration = Migration::from_mdc(card, migration_limit, migration_max_seq_len, metrics)
+            .into_operator_for::<BackendOutput>();
         let prefill_op = self.prefill_router.into_operator();
         let encoder_op = self.encoder_router.into_operator();
         let backend = ServiceBackend::from_engine(self.backend_engine.clone());
@@ -506,7 +497,6 @@ impl PreprocessedRouting {
         &self,
         card: &ModelDeploymentCard,
         migration_limit: u32,
-        migration_limit_draining: Option<u32>,
         migration_max_seq_len: Option<u32>,
         metrics: Arc<Metrics>,
     ) -> anyhow::Result<
@@ -516,14 +506,8 @@ impl PreprocessedRouting {
             SingleIn<PreprocessedRequest>,
             ManyOut<Annotated<LLMEngineOutput>>,
         >::new();
-        let migration = Migration::from_mdc(
-            card,
-            migration_limit,
-            migration_limit_draining,
-            migration_max_seq_len,
-            metrics,
-        )
-        .into_operator_for::<LLMEngineOutput>();
+        let migration = Migration::from_mdc(card, migration_limit, migration_max_seq_len, metrics)
+            .into_operator_for::<LLMEngineOutput>();
         let prefill_op = self.prefill_router.into_operator();
         let encoder_op = self.encoder_router.into_operator();
         let backend = ServiceBackend::from_engine(self.backend_engine.clone());

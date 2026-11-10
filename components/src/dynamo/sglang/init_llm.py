@@ -21,7 +21,10 @@ from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.llm import ModelInput, ModelType, WorkerType
 from dynamo.runtime import DistributedRuntime
 from dynamo.sglang.args import Config
-from dynamo.sglang.drain_controls import configure_worker_drain
+from dynamo.sglang.drain_controls import (
+    configure_worker_drain,
+    unregister_worker_drain_controls,
+)
 from dynamo.sglang.gateway import (
     attached_engine_load_time,
     gateway_child_index,
@@ -303,10 +306,6 @@ async def init_decode(
         enable_frontend_decoding=dynamo_args.frontend_decoding,
         first_token_source=first_token_source,
     )
-    handler.register_engine_routes(runtime)
-    if attached_engine is not None:
-        handler.follow_shared_pause_state()
-
     if config.serving_mode == DisaggregationMode.DECODE:
         health_check_payload = SglangDisaggHealthCheckPayload(
             engine, use_text_input=dynamo_args.use_sglang_tokenizer
@@ -339,13 +338,23 @@ async def init_decode(
             ready_event,
             shutdown_event,
             terminal_event or shutdown_event,
+            enable_admin=(
+                decode_worker_type == WorkerType.Aggregated and attached_engine is None
+            ),
         )
+        handler.register_engine_routes(runtime)
+        if attached_engine is not None:
+            handler.follow_shared_pause_state()
         await state_agent.start(engine, config, generate_endpoint)
         gather_tasks = [
             generate_endpoint.serve_endpoint(
                 drain.wrap(handler.generate),
                 graceful_shutdown=True,
                 metrics_labels=metrics_labels,
+                track_response_completion=(
+                    getattr(handler, "_drain_controls_enabled", False)
+                    and dynamo_args.response_plane == "tcp"
+                ),
                 health_check_payload=health_check_payload,
             ),
             load_lora_endpoint.serve_endpoint(
@@ -387,8 +396,7 @@ async def init_decode(
     finally:
         try:
             if drain is not None:
-                if runtime.system_status_server_url() is not None:
-                    runtime.unregister_engine_http_handler("worker_lifecycle")
+                unregister_worker_drain_controls(handler, runtime)
                 await drain.close()
         finally:
             try:
@@ -496,10 +504,6 @@ async def init_prefill(
     handler = PrefillWorkerHandler(
         engine, config, publisher, generate_endpoint, shutdown_event
     )
-    handler.register_engine_routes(runtime)
-    if attached_engine is not None:
-        handler.follow_shared_pause_state()
-
     health_check_payload = SglangPrefillHealthCheckPayload(engine).to_dict()
 
     body_failed = True
@@ -512,7 +516,11 @@ async def init_prefill(
             ready_event,
             shutdown_event,
             terminal_event or shutdown_event,
+            enable_admin=False,
         )
+        handler.register_engine_routes(runtime)
+        if attached_engine is not None:
+            handler.follow_shared_pause_state()
         await state_agent.start(engine, config, generate_endpoint)
         await asyncio.gather(
             generate_endpoint.serve_endpoint(
@@ -567,8 +575,7 @@ async def init_prefill(
     finally:
         try:
             if drain is not None:
-                if runtime.system_status_server_url() is not None:
-                    runtime.unregister_engine_http_handler("worker_lifecycle")
+                unregister_worker_drain_controls(handler, runtime)
                 await drain.close()
         finally:
             try:

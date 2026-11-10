@@ -406,14 +406,6 @@ async def async_main():
         f"Request migration {'enabled' if config.migration_limit > 0 else 'disabled'} "
         f"(limit: {config.migration_limit}{max_seq_info})"
     )
-    if max(config.migration_limit, config.migration_limit_draining) > 0:
-        logger.info(
-            "Worker-draining recovery uses a shared replacement ceiling of %d "
-            "(ordinary migration limit: %d, draining limit: %d)",
-            max(config.migration_limit, config.migration_limit_draining),
-            config.migration_limit,
-            config.migration_limit_draining,
-        )
     # Warn if DYN_SYSTEM_PORT is set (frontend doesn't use system metrics server)
     if os.environ.get("DYN_SYSTEM_PORT"):
         logger.warning(
@@ -462,7 +454,6 @@ async def async_main():
         "kv_cache_block_size": config.kv_cache_block_size,
         "router_config": router_config,
         "migration_limit": config.migration_limit,
-        "migration_limit_draining": config.migration_limit_draining,
         "metrics_prefix": metrics_prefix,
         "enable_anthropic_api": config.enable_anthropic_api,
         "enable_systemone_api": config.enable_systemone_api,

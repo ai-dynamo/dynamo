@@ -181,7 +181,7 @@ class Endpoint:
 
     async def first_token_source(self, worker_type: WorkerType) -> Optional[FirstTokenSource]: ...
 
-    async def serve_endpoint(self, handler: RequestHandler, graceful_shutdown: bool = True, metrics_labels: Optional[List[Tuple[str, str]]] = None, health_check_payload: Optional[Dict[str, Any]] = None) -> None:
+    async def serve_endpoint(self, handler: RequestHandler, graceful_shutdown: bool = True, metrics_labels: Optional[List[Tuple[str, str]]] = None, health_check_payload: Optional[Dict[str, Any]] = None, *, track_response_completion: bool = False) -> None:
         """
         Serve an endpoint discoverable by all connected clients at
         `{{ namespace }}/components/{{ component_name }}/endpoints/{{ endpoint_name }}`
@@ -192,6 +192,7 @@ class Endpoint:
             metrics_labels: Optional list of metrics labels to add to the metrics
             health_check_payload: Optional dict containing the health check request payload
                                   that will be used to verify endpoint health
+            track_response_completion: Keep requests in flight until the TCP writer exits
         """
         ...
 
@@ -246,6 +247,10 @@ class Endpoint:
         Returns:
             A PyRuntimeMetrics object for callback registration
         """
+        ...
+
+    def inflight_requests(self) -> Optional[int]:
+        """Return worker ingress requests through response completion."""
         ...
 
     async def unregister_endpoint_instance(self) -> None:
@@ -3202,7 +3207,6 @@ class EntrypointArgs:
         tokenizer_backend: Optional[str] = None,
         tokenizer_fallback: Optional[bool] = None,
         batch_gateway_url: Optional[str] = None,
-        migration_limit_draining: Optional[int] = None,
         reject_media: Optional[bool] = None,
         reject_media_status_code: Optional[int] = None,
         default_chat_template_kwargs: Optional[Mapping[str, Any]] = None,
@@ -3233,8 +3237,6 @@ class EntrypointArgs:
             is_prefill: Whether this is a prefill worker
             is_decode: Whether this is a decode worker (disaggregated); pairs with a prefill peer for readiness
             migration_limit: Maximum number of request migrations (0=disabled)
-            migration_limit_draining: Optional drain retry ceiling, combined with
-                migration_limit using max before response data starts; None means zero
             migration_max_seq_len: Optional max sequence length for migration
             chat_engine_factory: Optional Python chat completions engine factory callback
             ais_perf_config: Canonical AIS configuration for default KV routing

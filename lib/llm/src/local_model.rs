@@ -72,7 +72,6 @@ pub struct LocalModelBuilder {
     tls_key_path: Option<PathBuf>,
     tls_client_ca_cert_path: Option<PathBuf>,
     migration_limit: u32,
-    migration_limit_draining: Option<u32>,
     migration_max_seq_len: Option<u32>,
     is_mocker: bool,
     extra_engine_args: Option<PathBuf>,
@@ -107,7 +106,6 @@ impl Default for LocalModelBuilder {
             template_file: Default::default(),
             router_config: Default::default(),
             migration_limit: Default::default(),
-            migration_limit_draining: None,
             migration_max_seq_len: Default::default(),
             is_mocker: Default::default(),
             extra_engine_args: Default::default(),
@@ -288,11 +286,6 @@ impl LocalModelBuilder {
         self
     }
 
-    pub fn migration_limit_draining(&mut self, limit: Option<u32>) -> &mut Self {
-        self.migration_limit_draining = limit;
-        self
-    }
-
     pub fn migration_max_seq_len(&mut self, max_seq_len: Option<u32>) -> &mut Self {
         self.migration_max_seq_len = max_seq_len;
         self
@@ -402,7 +395,6 @@ impl LocalModelBuilder {
                 namespace: self.namespace.clone(),
                 namespace_prefix: self.namespace_prefix.clone(),
                 migration_limit: self.migration_limit,
-                migration_limit_draining: self.migration_limit_draining,
                 migration_max_seq_len: self.migration_max_seq_len,
                 self_host_metadata: self.self_host_metadata,
             });
@@ -467,7 +459,6 @@ impl LocalModelBuilder {
             namespace: self.namespace.clone(),
             namespace_prefix: self.namespace_prefix.clone(),
             migration_limit: self.migration_limit,
-            migration_limit_draining: self.migration_limit_draining,
             migration_max_seq_len: self.migration_max_seq_len,
             self_host_metadata: self.self_host_metadata,
         })
@@ -494,7 +485,6 @@ pub struct LocalModel {
     namespace: Option<String>,
     namespace_prefix: Option<String>,
     migration_limit: u32,
-    migration_limit_draining: Option<u32>,
     migration_max_seq_len: Option<u32>,
     self_host_metadata: bool,
 }
@@ -656,10 +646,6 @@ impl LocalModel {
 
     pub fn migration_limit(&self) -> u32 {
         self.migration_limit
-    }
-
-    pub fn migration_limit_draining(&self) -> Option<u32> {
-        self.migration_limit_draining
     }
 
     pub fn migration_max_seq_len(&self) -> Option<u32> {
@@ -975,27 +961,6 @@ mod local_source_tests {
 
     fn model_dir() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/sample-models/TinyLlama_v1.1")
-    }
-
-    #[tokio::test]
-    async fn draining_limit_stays_frontend_local() {
-        let mut expected_checksum = None;
-        for limit in [None, Some(0), Some(5)] {
-            let model = LocalModelBuilder::default()
-                .model_name(Some("drain-config".to_string()))
-                .migration_limit(Some(2))
-                .migration_limit_draining(limit)
-                .build()
-                .await
-                .unwrap();
-            assert_eq!(model.migration_limit_draining(), limit);
-            let checksum = model.card().mdcsum().to_owned();
-            if let Some(expected) = &expected_checksum {
-                assert_eq!(&checksum, expected);
-            } else {
-                expected_checksum = Some(checksum);
-            }
-        }
     }
 
     #[tokio::test]

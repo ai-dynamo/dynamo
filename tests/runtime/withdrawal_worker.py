@@ -37,7 +37,9 @@ async def main():
     handler = SimpleNamespace(
         generate_endpoint=endpoint,
         _engine_route_lock=asyncio.Lock(),
-        engine=SimpleNamespace(tokenizer_manager=SimpleNamespace(is_pause=False)),
+        engine=SimpleNamespace(
+            tokenizer_manager=SimpleNamespace(is_pause=False, rid_to_state={})
+        ),
         config=SimpleNamespace(
             dynamo_args=SimpleNamespace(response_plane="tcp", engine_routes=[])
         ),
@@ -94,7 +96,9 @@ async def main():
     )
     ready.set()
     await endpoint.serve_endpoint(
-        observed, health_check_payload={HEALTH_CHECK_KEY: True}
+        observed,
+        health_check_payload={HEALTH_CHECK_KEY: True},
+        track_response_completion=True,
     )
 
 

@@ -184,129 +184,45 @@ Dynamo parses and resolves the complete route list during worker startup. Startu
 - **[Configuration and Tuning](../../router/configuration-and-tuning.md)**: KV-aware routing configuration
 
 
-## Experimental worker withdrawal
+## Experimental Worker Drain
 
-**Experimental.** Enable `DYN_SYSTEM_PORT` on `python -m dynamo.sglang` LLM
-workers to expose reversible, pre-delete withdrawal on the existing system
-listener. No additional worker feature flag is required. This applies to
-aggregated, decode, and prefill handlers. Without a system listener, the worker
-still installs admission and shutdown handling, but does not register these HTTP
-controls.
-
-Withdrawal supports TCP and Velo response planes. QUIC workers start normally,
-but an `unpublish` call returns 409 before changing worker state because discovery
-removal currently cancels active QUIC responses. The operation does not use
-SGLang's `pause_generation`, abort requests, or stop the engine.
-
-Configure frontend recovery separately from endpoint availability. Set
-`--migration-limit-draining D` or `DYN_MIGRATION_LIMIT_DRAINING=D` on the frontend.
-For a pre-execution drain rejection before response data starts, the retry limit is
-`max(M, D)`, where `M` is `--migration-limit`. Workers keep the known
-`backend.worker_unavailable` wire reason and add `retry_hint: "draining"`; the Python
-exception remains `WorkerDraining`.
-Replacement attempts share one count; the initial dispatch does not count.
-Ordinary errors remain limited to `M`. Omitted and explicit `D=0` both add no drain
-allowance beyond `M`.
-
-If an earlier worker produced data and a replacement rejects before producing data,
-continuation recovery can use the remaining ordinary allowance, subject to existing
-replay eligibility checks. The drain-specific extension does not apply after output.
-A worker that has already produced data cannot claim a pre-execution drain rejection.
-Workers do not read these frontend settings. The frontend reads configuration when
-constructing the model pipeline, not on every request. See
-[Frontend Configuration](../../../../../reference/components/frontend-configuration.mdx#fault-tolerance)
-for budget interactions and configuration precedence.
-
-While drain recovery remains possible, the final ordinary attempt retains its
-replay reference to the shared prompt-token buffer until first response data.
-Once neither ordinary migration nor drain recovery can retry, the frontend
-releases that reference. With no drain allowance beyond the ordinary limit, that
-reference is released after the final ordinary dispatch.
-
-Environment changes apply to newly created Pods, not running processes. Under
-Grove OnDelete, deploy compatible frontend and worker images and enable frontend
-recovery before using withdrawal for subsequent releases.
-
-Keeping an `Arc` reference does not copy token data, but can extend the allocation's
-lifetime. For `C` requests waiting for first response data, token-buffer retention
-can be up to `4 * sum(token_vector_capacity)` bytes (`u32` tokens), excluding other
-request state. At a capacity of 128 Ki tokens and 1,024 waiting requests, that is
-512 MiB. This is a sizing example, not measured RSS growth; model limits and actual
-concurrency determine the budget. Other owners may already retain these buffers.
-
-Frontends that already recognize `WorkerUnavailable`, including v1.6.0, ignore
-the optional hint and retain ordinary recovery under `M`, including during
-SIGTERM without a system listener. New frontends apply drain accounting only
-when the hint accompanies the validated
-worker-unavailable error identity. An absent or unknown hint keeps ordinary
-behavior. Rejections from older workers without the hint use only the ordinary
-allowance. The hint does not bypass response-data, explicit-target, or replay
-eligibility checks.
-
-Use the selected worker's system listener directly, rather than a load-balanced
-Service. The listener follows the existing engine-control network boundary; keep
-it accessible only to trusted administrators.
+**Experimental.** Enable `DYN_SYSTEM_PORT` on a SGLang aggregated worker to expose
+the worker lifecycle API. Use the selected worker's system listener directly
+and restrict access to trusted administrators. Workers that share an engine
+across multiple Dynamo gateway processes do not expose these controls.
 
 | Method | Worker system path | Behavior |
 | --- | --- | --- |
-| `POST` | `/engine/worker_lifecycle/unpublish` | Withdraw from discovery, allow routing convergence, then close new request admission |
-| `GET` | `/engine/worker_lifecycle/status` | Report local withdrawal and admission state |
-| `POST` | `/engine/worker_lifecycle/resume` | Reopen admission and restore discovery registration |
+| `POST` | `/engine/drain` | Withdraw from discovery, allow routing convergence, then close admission |
+| `GET` | `/engine/status` | Report the worker ID, lifecycle state, and reason |
+| `POST` | `/engine/resume` | Cancel drain and restore admission and discovery |
 
-Requests must have no body or an empty JSON object. Invalid methods return 405;
-invalid bodies return 400. Startup and terminal-shutdown conflicts return 409;
-discovery failures return 503. State-changing operations require model readiness
-and observation of this exact endpoint instance's initial registration. Status
-remains available during startup. Unsupported QUIC withdrawal returns 409.
+Send no body or an empty JSON object. Drain returns 202 while completion is
+pending. Status and a successful resume return 200. Conflicts return 409.
+Manual drain requires the TCP response plane. Other response planes return 409.
 
-```bash
-curl --fail-with-body -X POST "$WORKER_SYSTEM_URL/engine/worker_lifecycle/unpublish"
-curl --fail-with-body "$WORKER_SYSTEM_URL/engine/worker_lifecycle/status"
-curl --fail-with-body -X POST "$WORKER_SYSTEM_URL/engine/worker_lifecycle/resume"
-```
+Drain lets previously admitted requests run and keeps internal health probes
+available. During routing convergence the worker can still accept requests.
+Configure that interval with `DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS` (default
+5 seconds). After admission closes, late requests receive a worker-unavailable
+error. Frontend pipelines that support migration can reselect using the existing
+`--migration-limit` and ordinary routing and replay rules. A zero limit disables
+reselection.
 
-The routing-convergence window uses `DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS`
-(default: 5 seconds). After successful unregistration, the worker continues
-accepting new requests during this interval while frontends process discovery
-withdrawal. Increasing the interval delays admission closure; it does not wait
-for engine requests or KV transfers to complete. The same setting also controls
-the existing SIGTERM routing-convergence grace.
+SGLang's `pause_generation` and drain are mutually exclusive. Continue
+generation before draining a paused worker. Resume a draining or drained worker
+before pausing it. SIGTERM moves the worker to `stopping`, prevents resume, and
+follows the existing shutdown sequence.
 
-```text
-unregister succeeds → continue accepting during grace → close business admission
-previously admitted work continues independently ─────────────────────────────→
-```
+Poll status for `drained`. The worker reaches this state after business
+admission closes, worker ingress requests and their response streams finish,
+and the SGLang tokenizer manager has no remaining request IDs. While draining,
+`reason` indicates whether the worker is waiting for routing grace, Dynamo
+ingress, SGLang requests, or an available completion check.
 
-Expiry establishes local admission closure, not acknowledgement from every
-frontend or permission to delete the Pod. After admission closes, a late request
-receives a typed worker-draining rejection. A supporting frontend can reselect
-according to its configured drain policy, before response data and subject to
-explicit routing constraints. Transport failures do not receive the drain
-allowance.
-Internal worker health probes remain callable during manual withdrawal.
+> [!NOTE]
+> `drained` confirms request-level completion. Background scheduler and KV
+> cache operations may still be in progress.
 
-Manual withdrawal remains in force across native engine controls. Resume is
-rejected while SGLang generation is paused; continue the engine first, then
-resume the worker. SIGTERM fences resume immediately but preserves the existing
-discovery-first shutdown grace before admission closes.
-
-Status progresses from `serving` to `withdrawing` during discovery withdrawal and
-the routing-convergence window, then to `withdrawn` when discovery unregistration
-has succeeded and local new-request admission is closed. `admin_withdrawn` records
-the successful manual discovery withdrawal; it may already be `true` during the
-convergence window. `starting` and `stopping` fence control operations.
-
-> [!WARNING]
-> `withdrawn` describes routing withdrawal, not completion of engine requests or KV
-> transfers. This API neither tracks nor waits for that work and provides no
-> `drained` or safe-to-delete signal. Discovery propagation is asynchronous, so
-> it also does not prove that every frontend has observed the change. Engine work
-> completion and Pod-deletion timing remain the responsibility of the engine and
-> operator. This increment alone does not guarantee a lossless release.
-
-Worker state is process-local. A restart creates a new worker identity; confirm
-Pod UID and instance identity before any maintenance action. WorkerSet batching,
-automatic Pod deletion, and replacement inference-admission gating are separate
-increments in the [manual Grove OnDelete release proposal](https://github.com/ai-dynamo/dynamo/issues/17568).
-Engine completion reporting and real targeted inference validation before a
-replacement enters business traffic remain follow-up work.
+Replacement admission and Pod deletion remain part of the
+[manual Grove OnDelete release workflow](https://github.com/ai-dynamo/dynamo/issues/17568).

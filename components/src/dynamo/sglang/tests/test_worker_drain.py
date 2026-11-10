@@ -135,6 +135,25 @@ async def test_discovery_failures_are_observable_and_resume_can_retry(endpoint, 
 
 
 @pytest.mark.asyncio
+async def test_shutdown_supersedes_drain_during_discovery_withdrawal(endpoint, ready):
+    terminal = asyncio.Event()
+    endpoint.unregister_endpoint_instance.side_effect = terminal.set
+    drain = WorkerDrain(
+        endpoint,
+        lock=asyncio.Lock(),
+        shutdown_event=asyncio.Event(),
+        terminal_event=terminal,
+        ready_event=ready,
+        is_paused=lambda: False,
+        grace_period=0,
+    )
+
+    with pytest.raises(DrainConflict, match="shutdown superseded drain"):
+        await drain.drain({})
+    assert (await drain.status({}))["state"] == "stopping"
+
+
+@pytest.mark.asyncio
 async def test_shutdown_during_resume_undoes_registration(endpoint, ready):
     entered = asyncio.Event()
     release = asyncio.Event()
@@ -157,6 +176,7 @@ async def test_shutdown_during_resume_undoes_registration(endpoint, ready):
     endpoint.register_endpoint_instance.side_effect = register
     request = asyncio.create_task(drain.resume({}))
     await asyncio.wait_for(entered.wait(), 1)
+    assert not (await drain.status({}))["accepting_requests"]
     shutdown.set()
     release.set()
     with pytest.raises(DrainConflict, match="superseded"):
@@ -253,7 +273,7 @@ async def test_startup_controls_are_fenced_but_health_remains_callable(
 
 
 @pytest.mark.asyncio
-async def test_resume_does_not_override_engine_pause(endpoint, ready):
+async def test_drain_requires_running_generation(endpoint, ready):
     paused = True
     drain = WorkerDrain(
         endpoint,
@@ -264,13 +284,16 @@ async def test_resume_does_not_override_engine_pause(endpoint, ready):
         is_paused=lambda: paused,
         grace_period=0,
     )
-    await drain.drain({})
     with pytest.raises(DrainConflict, match="continue engine"):
-        await drain.resume({})
-    endpoint.register_endpoint_instance.assert_not_awaited()
-    assert drain.withdrawn
+        await drain.drain({})
+    endpoint.unregister_endpoint_instance.assert_not_awaited()
+
     paused = False
+    await drain.drain({})
+    with pytest.raises(DrainConflict, match="resume worker"):
+        drain.check_generation_control()
     assert (await drain.resume({}))["state"] == "serving"
+    drain.check_generation_control()
 
 
 @pytest.mark.asyncio

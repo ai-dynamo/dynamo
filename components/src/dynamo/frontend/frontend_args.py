@@ -205,7 +205,6 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
     namespace_prefix: Optional[str] = None
 
     migration_limit: int
-    migration_limit_draining: int
     migration_max_seq_len: Optional[int]
     model_name: Optional[str]
     model_path: Optional[str]
@@ -297,13 +296,6 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
         if self.migration_limit < 0 or self.migration_limit > _U32_MAX:
             raise ValueError(
                 f"--migration-limit must be between 0 and {_U32_MAX} (0=disabled)"
-            )
-        if (
-            self.migration_limit_draining < 0
-            or self.migration_limit_draining > _U32_MAX
-        ):
-            raise ValueError(
-                f"--migration-limit-draining must be between 0 and {_U32_MAX}"
             )
         if self.migration_max_seq_len is not None and (
             self.migration_max_seq_len < 1 or self.migration_max_seq_len > _U32_MAX
@@ -641,22 +633,6 @@ class FrontendArgGroup(ArgGroup):
                 "incomplete streams, and worker-local overload rejection. Also limits replacement "
                 "attempts over the lifetime of an explicit-commit PCM realtime transcription "
                 "session; unfinished audio is replayed to a compatible warm worker."
-            ),
-            arg_type=int,
-            env=self.env,
-        )
-
-        add_argument(
-            g,
-            flag_name="--migration-limit-draining",
-            env_var="DYN_MIGRATION_LIMIT_DRAINING",
-            default=0,
-            help=(
-                "Retry ceiling for pre-execution worker-draining rejections: the greater of "
-                "this value and --migration-limit, with a shared replacement counter. "
-                "Defaults to zero, adding no drain-specific allowance beyond --migration-limit. "
-                "The drain-specific extension applies only before response data starts; "
-                "continuations use the ordinary migration limit."
             ),
             arg_type=int,
             env=self.env,

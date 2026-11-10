@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from dynamo.sglang.drain import DrainConflict, WorkerDrain
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 
 pytestmark = [
@@ -251,3 +252,58 @@ async def test_manual_drain_survives_native_engine_route_discovery_sync(handler)
     await handler._invoke_engine_route(engine_control, {})
     handler.generate_endpoint.unregister_endpoint_instance.assert_awaited_once()
     handler.generate_endpoint.register_endpoint_instance.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("first", ["pause", "drain"])
+async def test_pause_and_drain_are_serialized(handler, first):
+    manager = handler.engine.tokenizer_manager
+    ready, terminal = asyncio.Event(), asyncio.Event()
+    ready.set()
+    drain = WorkerDrain(
+        handler.generate_endpoint,
+        lock=handler._engine_route_lock,
+        shutdown_event=asyncio.Event(),
+        terminal_event=terminal,
+        ready_event=ready,
+        is_paused=lambda: manager.is_pause,
+        grace_period=0,
+    )
+    handler._worker_drain = drain
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def pause(_body):
+        if first == "pause":
+            started.set()
+            await release.wait()
+        manager.is_pause = True
+        return {"status": "ok"}
+
+    async def unregister():
+        if first == "drain":
+            started.set()
+            await release.wait()
+
+    handler.generate_endpoint.unregister_endpoint_instance.side_effect = unregister
+    pause_http = handler._wrap_generation_control_http(pause)
+
+    async def request_pause():
+        return await pause_http({"path": "", "body": None})
+
+    first_call, second_call = (
+        (request_pause, lambda: drain.drain({}))
+        if first == "pause"
+        else (lambda: drain.drain({}), request_pause)
+    )
+    leading = asyncio.create_task(first_call())
+    await asyncio.wait_for(started.wait(), 1)
+    competing = asyncio.create_task(second_call())
+    release.set()
+    await asyncio.wait_for(leading, 1)
+    if first == "pause":
+        with pytest.raises(DrainConflict, match="continue engine"):
+            await asyncio.wait_for(competing, 1)
+    else:
+        assert (await asyncio.wait_for(competing, 1))["status"] == 409
+        assert not manager.is_pause

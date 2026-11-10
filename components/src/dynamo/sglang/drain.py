@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Reversible routing withdrawal without engine completion tracking."""
+"""Reversible request draining for an SGLang worker."""
 
 import asyncio
 import math
@@ -28,6 +28,7 @@ class WorkerDrain:
         ready_event: asyncio.Event,
         is_paused: Callable[[], bool],
         grace_period: float,
+        pending_engine_requests: Callable[[], int | None] | None = None,
     ) -> None:
         if not math.isfinite(grace_period) or grace_period < 0:
             raise ValueError("drain grace period must be finite and non-negative")
@@ -38,6 +39,7 @@ class WorkerDrain:
         self._ready_event = ready_event
         self._is_paused = is_paused
         self._grace_period = grace_period
+        self._pending_engine_requests = pending_engine_requests
         self._state = "starting"
         self._accepting = True
         self._withdrawn = False
@@ -52,6 +54,17 @@ class WorkerDrain:
         elif self._state == "starting" and self._ready_event.is_set():
             self._state = "serving"
         return self._state == "stopping"
+
+    def check_generation_control(self) -> None:
+        """Check the generation transition while the lifecycle lock is held."""
+        if self._is_stopping():
+            raise DrainConflict("worker shutdown has started")
+        if not self._ready_event.is_set():
+            raise DrainConflict("worker registration is not ready")
+        if self._state in ("withdrawing", "withdrawn", "drained"):
+            raise DrainConflict(
+                "resume worker routing before changing generation state"
+            )
 
     @property
     def withdrawn(self) -> bool:
@@ -104,8 +117,30 @@ class WorkerDrain:
     async def status(self, body: dict) -> dict:
         self._validate_body(body)
         self._is_stopping()
+        reason = None
+        if self._state == "withdrawing":
+            reason = "routing_grace"
+        elif (
+            self._state == "withdrawn"
+            and not self._accepting
+            and self._pending_engine_requests is not None
+        ):
+            inflight = self._endpoint.inflight_requests()
+            if inflight is None:
+                reason = "completion_check_unavailable"
+            elif inflight != 0:
+                reason = "dynamo_inflight"
+            else:
+                pending = self._pending_engine_requests()
+                if pending is None:
+                    reason = "completion_check_unavailable"
+                elif pending:
+                    reason = "sglang_inflight"
+                else:
+                    self._state = "drained"
         return {
             "state": self._state,
+            "reason": reason,
             "admin_withdrawn": self._withdrawn,
             "accepting_requests": self._ready_event.is_set() and self._accepting,
             "last_error": self._last_error,
@@ -137,8 +172,12 @@ class WorkerDrain:
                 raise DrainConflict("worker shutdown has started")
             if not self._ready_event.is_set():
                 raise DrainConflict("worker registration is not ready")
-            if self._state in ("withdrawing", "withdrawn"):
+            if self._state in ("withdrawing", "withdrawn", "drained"):
                 return await self.status({})
+            if self._is_paused():
+                raise DrainConflict(
+                    "continue engine generation before draining the worker"
+                )
             self._state = "withdrawing"
             self._last_error = None
             try:
@@ -149,12 +188,13 @@ class WorkerDrain:
                     self._state = "serving"
                 raise
             self._withdrawn = True
-            if not self._is_stopping():
-                if self._grace_period == 0:
-                    self._accepting = False
-                    self._state = "withdrawn"
-                else:
-                    self._grace_task = asyncio.create_task(self._close_after_grace())
+            if self._is_stopping():
+                raise DrainConflict("worker shutdown superseded drain")
+            if self._grace_period == 0:
+                self._accepting = False
+                self._state = "withdrawn"
+            else:
+                self._grace_task = asyncio.create_task(self._close_after_grace())
             return await self.status({})
 
     async def _close_after_grace(self) -> None:
@@ -181,7 +221,6 @@ class WorkerDrain:
             if self._state == "serving":
                 return await self.status({})
             self._cancel_grace()
-            self._accepting = True
             try:
                 await self._endpoint.register_endpoint_instance()
             except Exception as error:
@@ -199,6 +238,7 @@ class WorkerDrain:
                     raise
                 self._withdrawn = True
                 raise DrainConflict("worker shutdown superseded resume")
+            self._accepting = True
             self._state = "serving"
             self._last_error = None
             return await self.status({})

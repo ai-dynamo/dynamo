@@ -84,9 +84,9 @@ class _DiscoveryMirror:
 
 @pytest.mark.timeout(30)
 @pytest.mark.parametrize("num_system_ports", [2], indirect=True)
-@pytest.mark.parametrize("draining_limit", [0, 1])
+@pytest.mark.parametrize("migration_limit", [0, 1])
 def test_withdrawal_survives_stale_discovery_and_healthy_probes(
-    request, tmp_path, dynamo_dynamic_ports, draining_limit
+    request, tmp_path, dynamo_dynamic_ports, migration_limit
 ):
     model_path = (
         Path(__file__).resolve().parents[2]
@@ -109,7 +109,6 @@ def test_withdrawal_survives_stale_discovery_and_healthy_probes(
     env = {
         **os.environ,
         "DYN_FILE_KV": str(live),
-        "DYN_MIGRATION_LIMIT_DRAINING": str(draining_limit),
         "DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS": "5",
         "DYN_HEALTH_CHECK_ENABLED": "true",
         "DYN_CANARY_WAIT_TIME": "1",
@@ -154,7 +153,7 @@ def test_withdrawal_survives_stale_discovery_and_healthy_probes(
             DynamoFrontendProcess(
                 request,
                 frontend_port=dynamo_dynamic_ports.frontend_port,
-                migration_limit=0,
+                migration_limit=migration_limit,
                 extra_args=[
                     "--namespace",
                     namespace,
@@ -180,7 +179,7 @@ def test_withdrawal_survives_stale_discovery_and_healthy_probes(
                 .get("data", [])
             }
         )
-        _until(lambda: control(0, "worker_lifecycle/status")["state"] == "serving")
+        _until(lambda: control(0, "status")["state"] == "serving")
 
         def generate(max_tokens=2, stream=False, allow_rejection=False):
             response = requests.post(
@@ -216,19 +215,21 @@ def test_withdrawal_survives_stale_discovery_and_healthy_probes(
                 break
             list(response.iter_lines())
         assert state(0)["held"]
-        drained = control(0, "worker_lifecycle/unpublish", "POST")
-        assert drained["state"] == "withdrawing"
-        assert drained["accepting_requests"]
+        draining = control(0, "drain", "POST")
+        assert draining["state"] == "draining"
+        assert draining["reason"] == "routing_grace"
+        assert draining["worker_id"] == str(worker_a)
         admitted = state(0)["business"]
         for _ in range(2):
             generate()
         assert state(0)["business"] > admitted
         _until(lambda: worker_a not in state(1)["instances"])
         _until(lambda: state(0)["state"] == "withdrawn")
+        assert control(0, "status")["reason"] == "dynamo_inflight"
         before = state(0)
         other = state(1)["business"]
         late_responses = [generate(allow_rejection=True) for _ in range(2)]
-        if draining_limit:
+        if migration_limit:
             assert all(response.status_code == 200 for response in late_responses)
         else:
             assert any(response.status_code == 503 for response in late_responses)
@@ -253,4 +254,11 @@ def test_withdrawal_survives_stale_discovery_and_healthy_probes(
             b'"finish_reason":"stop"' in line.replace(b" ", b"") for line in completed
         ), completed
         assert not any(b'"error"' in line for line in completed), completed
-        assert state(0)["state"] == "withdrawn"
+        _until(lambda: control(0, "status")["state"] == "drained")
+        assert control(0, "status") == {
+            "worker_id": str(worker_a),
+            "state": "drained",
+            "reason": None,
+        }
+        assert control(0, "resume", "POST")["state"] == "serving"
+        _until(lambda: worker_a in state(1)["instances"])
