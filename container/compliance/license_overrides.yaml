@@ -1162,3 +1162,8 @@ overrides:
     version: "2.4.7-7build1"
     license: "(LGPL-2.0-or-later WITH Libtool-exception) AND (GPL-2.0-or-later WITH Libtool-exception) AND FSFAP AND FSFUL AND FSFULLR AND FSFULLRWD"
     source: "Exact Ubuntu payload includes LGPL ltdl sources/headers and Makefile inputs, GPL configure with Libtool exception, and distinct permissive grants in generated scripts/README. This correction does not approve policy exceptions; https://ports.ubuntu.com/ubuntu-ports/pool/main/libt/libtool/libltdl-dev_2.4.7-7build1_arm64.deb"
+  - ecosystem: dpkg
+    name: gfortran-13-x86-64-linux-gnu
+    version: "13.3.0-6ubuntu2~24.04.1"
+    license: GPL-3.0-or-later
+    source: "Exact amd64 gcc-13-base copyright identifies compiler GPL-3.0-or-later; CI reported this compiler variant as GPL-2 via the generic fallback. This does not approve a policy exception; https://archive.ubuntu.com/ubuntu/pool/main/g/gcc-13/gcc-13-base_13.3.0-6ubuntu2~24.04.1_amd64.deb"
