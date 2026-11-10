@@ -62,8 +62,8 @@ pub struct SelectionWorkerConfig {
     /// Per-global-DP-rank KV control endpoints a hint target fetches from.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub router_hint_source_control_endpoints: HashMap<u32, String>,
-    /// How the worker publishes KV events. A `state_agent_v2` worker's blocks are
-    /// served by its cache owner, so it advertises no source control endpoint.
+    /// How the worker publishes KV events; a `state_agent_v2` worker is never
+    /// a router-hint source.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kv_event_source_mode: Option<String>,
     /// Derived from the fields above on first use; published configs are
@@ -121,13 +121,15 @@ impl WorkerConfigLike for SelectionWorkerConfig {
         if worker_type.is_empty() {
             return None;
         }
+        // A state-agent worker's blocks are served by its cache owner.
+        let is_source = self.kv_event_source_mode.as_deref() != Some("state_agent_v2");
         Some(KvHintTransferWorkerMetadata {
             worker_type,
             source_control_endpoint: self
                 .router_hint_source_control_endpoints
                 .get(&dp_rank)
                 .map(String::as_str)
-                .filter(|endpoint| !endpoint.is_empty()),
+                .filter(|endpoint| is_source && !endpoint.is_empty()),
         })
     }
 

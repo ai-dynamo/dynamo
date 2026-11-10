@@ -125,7 +125,7 @@ impl<'a> HintContext<'a> {
     /// are: the source's current address, the request's block chain, and both prefixes. The view
     /// is borrowed and the policy picks the range its action sends. `None` when the source no
     /// longer advertises a control endpoint, or for any other copy.
-    pub fn kv_copy_locations(&self, copy: &KvCopySource) -> Option<KvCopyLocations<'a>> {
+    pub fn kv_copy_locations(&self, copy: &KvCopySource) -> Option<&'a KvCopyLocations<'a>> {
         [self.committed_kv_copy, self.kv_copy_source]
             .into_iter()
             .flatten()
@@ -142,19 +142,12 @@ pub enum HintHost {
     AnyWorkerSelection,
     /// One worker-selection type.
     WorkerSelection(String),
-    /// One request-classifier type. Checked at startup; matches no role yet.
-    RequestClassifier(String),
 }
 
 impl HintHost {
     /// The worker-selection type `policy_type`; `default` is the built-in selector.
     pub fn worker_selection(policy_type: impl Into<String>) -> Self {
         Self::WorkerSelection(policy_type.into())
-    }
-
-    /// The request-classifier type `classifier_type`.
-    pub fn request_classifier(classifier_type: impl Into<String>) -> Self {
-        Self::RequestClassifier(classifier_type.into())
     }
 }
 

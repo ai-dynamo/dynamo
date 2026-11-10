@@ -22,15 +22,9 @@ pub(super) fn build(
         config.decode_active_request_weight != 0.0,
         config.shared_cache_multiplier != 0.0,
     ) {
-        (false, false) => Box::new(CopyCreditScorer(DefaultScorer::<false, false>::new(
-            config,
-            worker_label,
-        ))),
+        // Without copy credit, the cost is the default policy's.
+        (_, false) => super::scorer::build(config, worker_label),
         (false, true) => Box::new(CopyCreditScorer(DefaultScorer::<false, true>::new(
-            config,
-            worker_label,
-        ))),
-        (true, false) => Box::new(CopyCreditScorer(DefaultScorer::<true, false>::new(
             config,
             worker_label,
         ))),
@@ -43,21 +37,12 @@ pub(super) fn build(
 
 /// The default cost, with the blocks a worker could copy from its offered source counted toward
 /// the shared-cache credit. It reads [`WorkerInputs::KV_COPY`], so the router commits the selected
-/// worker to that copy, only when the multiplier gives copies credit.
-struct CopyCreditScorer<const REQUEST_COST: bool, const SHARED_CREDIT: bool>(
-    DefaultScorer<REQUEST_COST, SHARED_CREDIT>,
-);
+/// worker to that copy. Built only when the multiplier gives copies credit.
+struct CopyCreditScorer<const REQUEST_COST: bool>(DefaultScorer<REQUEST_COST, true>);
 
-impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool> WorkerScorer
-    for CopyCreditScorer<REQUEST_COST, SHARED_CREDIT>
-{
+impl<const REQUEST_COST: bool> WorkerScorer for CopyCreditScorer<REQUEST_COST> {
     fn required_worker_inputs(&self) -> WorkerInputs {
-        let inputs = self.0.required_worker_inputs();
-        if SHARED_CREDIT {
-            inputs | WorkerInputs::KV_COPY
-        } else {
-            inputs
-        }
+        self.0.required_worker_inputs() | WorkerInputs::KV_COPY
     }
 
     fn score(
@@ -68,14 +53,9 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool> WorkerScorer
     ) -> Result<(), WorkerSelectionPolicyError> {
         let prepared = self.0.prepare(context, candidates)?;
         for (candidate, cost) in candidates.iter().zip(costs) {
-            let copyable = if SHARED_CREDIT {
-                copyable_blocks(candidate)
-            } else {
-                0.0
-            };
-            *cost = self
-                .0
-                .score_worker(&prepared, context, candidate, copyable)?;
+            *cost =
+                self.0
+                    .score_worker(&prepared, context, candidate, copyable_blocks(candidate))?;
         }
         Ok(())
     }
