@@ -5664,6 +5664,10 @@ class TestResponseFormatReasoningStart:
         response_format=None,
         extra=None,
     ):
+        """Preprocess a JSON request whose rendered prompt is ``prompt_text``.
+
+        Returns the guided decoding that the frontend sends to the engine.
+        """
         request = {
             "model": MODEL,
             "messages": [{"role": "user", "content": "Weather city as JSON"}],
@@ -5782,6 +5786,7 @@ class TestResponseFormatReasoningStart:
     async def test_json_object(
         self, tokenizer, prompt_text, parser, excludes_reasoning, wrapped
     ):
+        """json_object starts after reasoning only when the prompt opened it."""
         guided = await self._guided(
             tokenizer,
             prompt_text=prompt_text,
