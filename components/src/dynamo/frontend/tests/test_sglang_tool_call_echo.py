@@ -766,3 +766,26 @@ class TestInputIsolation:  # FRONTEND.1
                     reasoning="deepseek-v4",
                 ),
             )
+
+    def test_kimi_k3_encoder_path_fails_closed(self):
+        class NoTemplateTokenizer:
+            chat_template = None
+
+            def apply_chat_template(self, *args, **kwargs):
+                raise AssertionError("the Kimi K3 encoder must not run")
+
+        request = {
+            "model": "moonshotai/Kimi-K3",
+            "messages": [{"role": "user", "content": "hello"}],
+        }
+        tokenizer = NoTemplateTokenizer()
+        with pytest.raises(PreprocessError, match="Kimi K3"):
+            preprocess_chat_request(
+                request,
+                tokenizer=tokenizer,
+                tool_call_parser_name="kimi_k3",
+                reasoning_parser_name="kimi_k3",
+                prompt_renderer=_renderer(
+                    tokenizer, isolate=True, parser="kimi_k3", reasoning="kimi_k3"
+                ),
+            )

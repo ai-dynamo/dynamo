@@ -27,7 +27,12 @@ from dynamo.common.utils.guided_json import admits_only_empty_object
 from dynamo.llm.exceptions import InvalidArgument
 
 from .responses_history import responses_history_recipients, responses_tools_request
-from .sglang_prompt_renderer import PromptRenderer, build_prompt_renderer
+from .sglang_prompt_renderer import (
+    KimiK3PromptRenderer,
+    PromptRenderer,
+    build_prompt_renderer,
+    resolve_prompt_renderer,
+)
 from .sglang_tool_call_markers import (
     _callable_accepts_kwarg,
     _normalize_sglang_parser_name,
@@ -398,11 +403,30 @@ def _guided_output_requires_reasoning(
     return guided_decoding is not None and "structural_tag" in guided_decoding
 
 
+def _kimi_k3_named_tool_choice_message(
+    request: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Build the K3 forced-call instruction for a named ``tool_choice``."""
+    tool_choice: Any = request.get("tool_choice")
+    if not _is_named_tool_choice(tool_choice):
+        return None
+
+    return {
+        "role": "system",
+        "content": (
+            "The system is invoked with `tool_choice=specified`.\n"
+            f"You MUST call the tool `{tool_choice['function']['name']}` "
+            "in the next message."
+        ),
+    }
+
+
 def _filter_template_tools(
     request: dict[str, Any],
     *,
     sglang_tools: list[SglangTool] | None,
     exclude_tools_when_tool_choice_none: bool,
+    filter_named_choice: bool = True,
 ) -> list[dict[str, Any]] | None:
     if not sglang_tools:
         return None
@@ -411,7 +435,7 @@ def _filter_template_tools(
     if exclude_tools_when_tool_choice_none and tool_choice == "none":
         return None
 
-    if _is_named_tool_choice(tool_choice):
+    if filter_named_choice and _is_named_tool_choice(tool_choice):
         chosen_name = tool_choice["function"]["name"]
         selected = [
             tool.model_dump()
@@ -717,6 +741,32 @@ def preprocess_chat_request(
         if recipient := recipients.get(str(index)):
             message["recipient"] = recipient
 
+    if prompt_renderer is None:
+        prompt_renderer = build_prompt_renderer(
+            tokenizer,
+            tool_call_parser_name=tool_call_parser_name,
+            reasoning_parser_name=reasoning_parser_name,
+        )
+    prompt_renderer = resolve_prompt_renderer(prompt_renderer, request)
+    kimi_k3_bridge = isinstance(prompt_renderer, KimiK3PromptRenderer)
+    if kimi_k3_bridge and _is_named_tool_choice(request.get("tool_choice")):
+        # K3's encoder cannot express a named choice. Its Rust formatter disables
+        # thinking and emits a typed ``tool-choice`` XTML system message; the
+        # SGLang tokenizer renders only plain system messages, so carry the same
+        # constraint as text.
+        chat_template_kwargs = dict(
+            request.get("chat_template_kwargs")
+            or request.get("chat_template_args")
+            or {}
+        )
+        chat_template_kwargs["thinking"] = False
+        chat_template_kwargs["enable_thinking"] = False
+        request["chat_template_kwargs"] = chat_template_kwargs
+        request.pop("chat_template_args", None)
+        named_tool_message = _kimi_k3_named_tool_choice_message(request)
+        assert named_tool_message is not None
+        messages.append(named_tool_message)
+
     # Generation mode is independent of whether the client wants reasoning
     # separated into reasoning_content or retained in content.
     force_reasoning = resolve_request_force_reasoning(
@@ -761,14 +811,9 @@ def preprocess_chat_request(
         request,
         sglang_tools=sglang_tools,
         exclude_tools_when_tool_choice_none=exclude_tools_when_tool_choice_none,
+        filter_named_choice=not kimi_k3_bridge,
     )
 
-    if prompt_renderer is None:
-        prompt_renderer = build_prompt_renderer(
-            tokenizer,
-            tool_call_parser_name=tool_call_parser_name,
-            reasoning_parser_name=reasoning_parser_name,
-        )
     prompt_token_ids = prompt_renderer.render(
         request,
         messages=messages,
