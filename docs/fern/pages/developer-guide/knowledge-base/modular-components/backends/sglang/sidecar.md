@@ -29,8 +29,12 @@ for the architecture.
 | Disaggregated | Yes |
 | KV routing | Yes |
 | Kubernetes multinode tensor parallelism (TP) | Yes |
-| Data parallelism (DP>1) | Not yet |
+| Attention DP (`--attn-dp-size N`) | Yes, one sidecar per node |
+| Replica DP (`--dp-size N`) | Aggregated and decode; SGLang rejects it for prefill |
 | Image, video, and audio input | No |
+
+SGLang's Rust server runs one listener per DP rank. One sidecar per node serves
+all of the node's listeners as one worker.
 
 Media-aware KV routing on wide-token SGLang builds is not supported by the sidecar; see the [multimodal compatibility limits](multimodal.md#wide-token-sglang-builds).
 
@@ -73,7 +77,9 @@ kubectl port-forward -n <namespace> svc/sglang-sidecar-agg-frontend 8000:8000
 Multinode deployments require complete `leader` and `worker` role PodTemplates. Set
 `backendFramework: sglang` as the examples do; the operator does not infer a backend from
 a native engine launch. The templates own the native engine commands and
-sidecar placement. See the [TP example](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/sglang/deploy/multinode_tp.yaml). Engine-failure KV recovery remains
+sidecar placement. See the [TP example](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/sglang/deploy/multinode_tp.yaml) and
+[attention-DP example](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/sglang/deploy/multinode_dp.yaml). DP>1 needs SGLang main at or after [sgl-project/sglang#46637](https://github.com/sgl-project/sglang/pull/46637); v0.5.23 does not have it.
+Engine-failure KV recovery remains
 incomplete and is tracked in [DEP #14897](https://github.com/ai-dynamo/dynamo/issues/14897).
 
 The examples use `DYNAMO_RANK` and `DYNAMO_LEADER_ADDRESS`, which exist only in
@@ -99,6 +105,8 @@ node holds the remaining TP ranks.
 
 ![When one SGLang engine spans two nodes with tensor parallelism, only the leader node runs a Dynamo Sidecar. The Dynamo Frontend sends requests over the request plane to the sidecar on Node 0.](../../../../../../assets/img/sidecar-sglang-multinode-tp.svg)
 
-### Data Parallelism
+### Multi-Node DP
 
-Not supported yet; see the [support matrix](#support-matrix).
+Attention DP across two nodes, with one sidecar per node.
+
+![With attention DP across two nodes, each node runs one Dynamo Sidecar that registers that node's DP ranks and calls its own SGLang listeners.](../../../../../../assets/img/sidecar-sglang-multinode-dp.svg)

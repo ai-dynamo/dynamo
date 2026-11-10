@@ -602,6 +602,10 @@ sidecar_configs = {
             pytest.mark.post_merge,
             pytest.mark.timeout(1200),
             pytest.mark.requested_sglang_kv_tokens(2048),
+            pytest.mark.skip(
+                reason="DP>1 needs SGLang at or after sgl-project/sglang#46637; "
+                "the v0.5.23 pin lacks it"
+            ),
         ],
         model="silence09/DeepSeek-R1-Small-2layers",
         health_check_workers=True,
