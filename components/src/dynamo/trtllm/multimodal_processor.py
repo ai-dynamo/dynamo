@@ -59,6 +59,16 @@ _EMBEDDING_FETCH_MIN_RATE = 64 * 1024
 # A server that sends nothing for this long fails the download, in seconds.
 _EMBEDDING_FETCH_READ_TIMEOUT_S = 300.0
 
+# Model types whose TRT-LLM input processor rescales images and videos with
+# one flag. Next to float video frames, a PIL image would reach such a model
+# unscaled, so image + video requests are refused for them (MiniCPM-V 4.6's
+# processor currently refuses the mix itself as well).
+# TODO: remove once images go to TRT-LLM as float tensors for models without
+# a preferred image format, as trtllm-serve sends them.
+_SHARED_RESCALE_FLAG_MODEL_TYPES = frozenset(
+    {"qwen2_vl", "qwen2_5_vl", "exaone4_5", "minicpmv4_6"}
+)
+
 
 def _nvdec_video_data(content: bytes, num_frames: int) -> VideoData:
     """Decode H.264/H.265 via NVDEC into TRT-LLM's ``VideoData`` (format="pt").
@@ -654,6 +664,24 @@ class MultimodalRequestProcessor:
                 raise HttpStatusError(
                     400, "Malformed video_url field: expected a list", str(video_items)
                 )
+            # Images reach the model as PIL (not rescaled) and both video
+            # decode paths give float [0,1] tensors (rescaled). A processor that
+            # takes one rescale flag for both modalities cannot take that mix:
+            # Qwen3-VL's rejects it, and Qwen2/2.5-VL's would leave the image
+            # unscaled. Next to an image, videos therefore go over as uint8
+            # when the model asks for that format, as Qwen3-VL does. For the
+            # models in _SHARED_RESCALE_FLAG_MODEL_TYPES, which do not, the
+            # request is refused before any video is fetched; other models get
+            # the media as decoded. Video-only requests are unchanged.
+            image_and_video = bool(video_items) and "image" in processed_mm_data
+            if image_and_video and self.model_type in _SHARED_RESCALE_FLAG_MODEL_TYPES:
+                raise HttpStatusError(
+                    400,
+                    "This model cannot take an image and a video in the same "
+                    "request yet; send them in separate requests",
+                    "multi_modal_data",
+                )
+            uint8_videos = image_and_video and self._prefers_np_video()
             videos = []
             for item in video_items:
                 url = item.get("Url") if isinstance(item, dict) else item
@@ -769,12 +797,7 @@ class MultimodalRequestProcessor:
                         source,
                     ) from e
             if videos:
-                # Images reach the model as PIL (not rescaled) and both video
-                # decode paths give float [0,1] tensors (rescaled). A processor
-                # that rescales the two together (Qwen3-VL) rejects that mix,
-                # so next to an image, hand videos over as uint8 when the model
-                # asks for that format. Video-only requests are unchanged.
-                if "image" in processed_mm_data and self._prefers_np_video():
+                if uint8_videos:
                     # CPU work that grows with the frame count: run it off the
                     # event loop, as the decode is.
                     videos = [

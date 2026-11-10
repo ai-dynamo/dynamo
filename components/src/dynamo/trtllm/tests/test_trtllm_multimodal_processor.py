@@ -255,16 +255,17 @@ def _pt_video(frames_u8: np.ndarray):
 
 @pytest.fixture
 def image_video_processor(monkeypatch):
-    """Factory for a processor whose image loader returns one PIL image and
-    whose input processor asks for ``video_format`` video (None: no preference).
+    """Factory for a processor of ``model_type`` whose image loader returns one
+    PIL image and whose input processor asks for ``video_format`` video (None:
+    no preference).
 
     The test media URLs are link-local. The processor reads the URL policy when
     it is built, so internal URLs are allowed before any processor is built."""
     monkeypatch.setenv("DYN_MM_ALLOW_INTERNAL", "1")
 
-    def make(video_format: str | None):
+    def make(video_format: str | None, model_type: str = "multimodal"):
         processor = MultimodalRequestProcessor(
-            model_type="multimodal",
+            model_type=model_type,
             model_dir="unused",
             max_file_size_mb=10,
             tokenizer=MagicMock(),
@@ -424,21 +425,72 @@ async def test_uint8_video_next_to_an_image_is_passed_through(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("video_format", [None, "pt"])
-async def test_video_next_to_an_image_keeps_float_frames_without_np_preference(
-    video_format, image_video_processor, monkeypatch
+@pytest.mark.parametrize(
+    "model_type", ["qwen2_vl", "qwen2_5_vl", "exaone4_5", "minicpmv4_6"]
+)
+async def test_image_and_video_request_is_rejected_for_a_shared_rescale_flag(
+    model_type, image_video_processor, monkeypatch
 ) -> None:
-    """Models that do not ask for uint8 video (Nemotron-H takes PIL or tensor
-    frames only) get the frames as decoded."""
-    processor, _ = image_video_processor(video_format)
+    """These models' processors take one rescale flag for images and videos,
+    so next to float frames the PIL image would go in unscaled (Qwen2/2.5-VL).
+    Refuse the request, before the video is fetched."""
+    processor, _ = image_video_processor(None, model_type)
+    _route_video(monkeypatch, "nvdec", _pt_video(_decoded_frames()))
+
+    with pytest.raises(HttpStatusError) as excinfo:
+        await processor.process_openai_request(
+            _request(), embeddings=None, ep_disaggregated_params=None
+        )
+
+    assert excinfo.value.status == 400
+    assert "cannot take an image and a video in the same request" in (
+        excinfo.value.message
+    )
+    mmp.fetch_bytes.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_single_modality_requests_are_served_for_a_shared_rescale_flag(
+    image_video_processor, monkeypatch
+) -> None:
+    processor, image = image_video_processor(None, "qwen2_5_vl")
+    source = _pt_video(_decoded_frames())
+    _route_video(monkeypatch, "nvdec", source)
+
+    image_only = await processor.process_openai_request(
+        _request(video=False), embeddings=None, ep_disaggregated_params=None
+    )
+    video_only = await processor.process_openai_request(
+        _request(image=False), embeddings=None, ep_disaggregated_params=None
+    )
+
+    assert image_only["multi_modal_data"] == {"image": [image]}
+    assert video_only["multi_modal_data"]["video"] == [source]
+    assert "mm_item_order" not in image_only and "mm_item_order" not in video_only
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_type", ["glm5_next", "NemotronH_Nano_VL_V2"])
+async def test_image_and_video_request_keeps_float_frames_for_other_models(
+    model_type, image_video_processor, monkeypatch
+) -> None:
+    """Other models that do not ask for uint8 video get the decoded frames,
+    and the item order as the frontend sends it."""
+    processor, image = image_video_processor(None, model_type)
     source = _pt_video(_decoded_frames())
     _route_video(monkeypatch, "nvdec", source)
 
     processed = await processor.process_openai_request(
-        _request(), embeddings=None, ep_disaggregated_params=None
+        _request(video_first=True), embeddings=None, ep_disaggregated_params=None
     )
 
-    assert processed["multi_modal_data"]["video"] == [source]
+    assert processed["multi_modal_data"]["image"] == [image]
+    assert processed["multi_modal_data"]["video"][0] is source
+    assert isinstance(source.frames[0], torch.Tensor)
+    assert [(e["modality"], e["index"]) for e in processed["mm_item_order"]] == [
+        ("video", 0),
+        ("image", 0),
+    ]
 
 
 def test_video_frames_to_uint8_round_trips_every_value() -> None:
@@ -488,7 +540,7 @@ async def test_item_order_follows_the_models_modality_grouping(
 ) -> None:
     """A chat template that writes all image placeholders before the video ones
     (TRT-LLM's ``prompt_modality_order``) decides the order, not the messages."""
-    processor, _ = image_video_processor(None)
+    processor, _ = image_video_processor("np")
     _route_video(monkeypatch, "nvdec", _pt_video(_decoded_frames()))
     monkeypatch.setattr(
         mmp.MULTIMODAL_PLACEHOLDER_REGISTRY,
@@ -524,10 +576,15 @@ async def test_an_item_order_that_does_not_match_the_loaded_items_is_rejected(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "video_format, model_type", [("np", "multimodal"), (None, "glm5_next")]
+)
 async def test_image_and_video_request_without_an_item_order_is_rejected(
-    image_video_processor, monkeypatch
+    video_format, model_type, image_video_processor, monkeypatch
 ) -> None:
-    processor, _ = image_video_processor("np")
+    """A frontend that does not send ``multi_modal_order`` gets its own 400,
+    not the one for models that cannot take the mix."""
+    processor, _ = image_video_processor(video_format, model_type)
     _route_video(monkeypatch, "nvdec", _pt_video(_decoded_frames()))
     request = _request()
     del request["multi_modal_order"]
@@ -538,6 +595,7 @@ async def test_image_and_video_request_without_an_item_order_is_rejected(
         )
     assert excinfo.value.status == 400
     assert "the request has no multi_modal_order" in excinfo.value.message
+    assert "cannot take an image and a video" not in excinfo.value.message
 
 
 def test_item_order_maps_each_frontend_modality_by_name() -> None:
