@@ -472,7 +472,8 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             let mut itl_samples_ms: Vec<f64> = Vec::new();
             let mut last_token_at: Option<Instant> = None;
             // Moving an item is a ~1 KB copy: defer the error as a flag and
-            // edit `item` in place.
+            // edit `item` in place. The flag is never cleared: the `Err` arm
+            // always ends the loop.
             let mut needs_shutdown_error = false;
             loop {
                 let mut item = if needs_shutdown_error {
