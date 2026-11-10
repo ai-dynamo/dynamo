@@ -63,8 +63,9 @@ const ADMISSION_CHANNEL_CAPACITY: usize = 256;
 
 /// Commands the actor takes from the channel in one receive. A receive spends one unit of
 /// the task's cooperative budget whatever it returns, so a backlog costs the actor a yield
-/// to the runtime every 128 batches, not every 128 commands. A taken batch frees its slots
-/// before it is applied, so its rows add to those the channel capacity bounds.
+/// to the runtime every 128 batches, not every 128 commands. The size also sets how long the
+/// actor holds its thread under a backlog: at 32 its longest polls reached 0.33 to 0.66 s.
+/// A taken batch has freed its channel slots, so its rows add to those the capacity bounds.
 const ADMISSION_BATCH: usize = 8;
 
 struct ClassQueueCounters {
@@ -593,19 +594,6 @@ impl AdmissionCleanup {
     }
 }
 
-/// The next command in arrival order, or `None` once the channel is closed and drained.
-/// Cancel safe: a batch is only taken by a receive that completes.
-async fn next_command(
-    commands: &mut mpsc::Receiver<AdmissionCommand>,
-    inbox: &mut Vec<AdmissionCommand>,
-) -> Option<AdmissionCommand> {
-    if inbox.is_empty() {
-        commands.recv_many(inbox, ADMISSION_BATCH).await;
-        inbox.reverse();
-    }
-    inbox.pop()
-}
-
 fn enqueue_cleanup_entry(
     cleanup: &AdmissionCleanup,
     actor_tx: &mpsc::Sender<AdmissionCommand>,
@@ -793,15 +781,45 @@ impl Drop for RequestLifecycleLease {
     }
 }
 
+/// The actor's end of the admission channel. Commands leave the channel a batch at a time
+/// and are handed out in arrival order.
+struct CommandInbox {
+    rx: mpsc::Receiver<AdmissionCommand>,
+    /// Taken from `rx` and not yet handed out, newest first.
+    batch: Vec<AdmissionCommand>,
+}
+
+impl CommandInbox {
+    fn new(rx: mpsc::Receiver<AdmissionCommand>) -> Self {
+        Self {
+            rx,
+            batch: Vec::with_capacity(ADMISSION_BATCH),
+        }
+    }
+
+    /// `None` once the channel is closed and drained. Cancel safe: a batch is only taken by
+    /// a receive that completes.
+    async fn next(&mut self) -> Option<AdmissionCommand> {
+        if self.batch.is_empty() {
+            self.rx.recv_many(&mut self.batch, ADMISSION_BATCH).await;
+            self.batch.reverse();
+        }
+        self.batch.pop()
+    }
+
+    /// No command is waiting, taken or still in the channel.
+    fn is_empty(&self) -> bool {
+        self.batch.is_empty() && self.rx.is_empty()
+    }
+}
+
 struct SchedulerQueueActor<
     P: SequencePublisher,
     C: WorkerConfigLike,
     Sel: WorkerSelector<C>,
     RF: OverlapScoresRefresh,
 > {
-    commands: mpsc::Receiver<AdmissionCommand>,
-    /// The batch last taken from `commands`, newest first: the next command is popped.
-    inbox: Vec<AdmissionCommand>,
+    commands: CommandInbox,
     pending: PolicyQueue<QueuedRequest>,
     class_timers: ClassTimers,
     cleanup: Arc<AdmissionCleanup>,
@@ -1026,8 +1044,7 @@ impl<
         ));
         let exclusive_affinity = selector.uses_exclusive_affinity_target();
         let actor = SchedulerQueueActor {
-            commands: admission_rx,
-            inbox: Vec::with_capacity(ADMISSION_BATCH),
+            commands: CommandInbox::new(admission_rx),
             pending,
             class_timers: ClassTimers::new(profile.classes().len()),
             cleanup: Arc::clone(&cleanup),
@@ -1576,6 +1593,7 @@ impl<
     RF: OverlapScoresRefresh + Send + Sync + 'static,
 > SchedulerQueueActor<P, C, Sel, RF>
 {
+    /// Runs one turn per command, capacity wake, or class timer until every sender is gone.
     async fn run(mut self) {
         let mut commands_since_cleanup = 0usize;
         let capacity_updates = self.capacity_updates.clone();
@@ -1583,17 +1601,17 @@ impl<
             self.begin_turn();
             let due_at = self.class_timers.next_deadline();
             let command = if capacity_updates.is_none() && due_at.is_none() {
-                next_command(&mut self.commands, &mut self.inbox).await
+                self.commands.next().await
             } else {
                 tokio::select! {
-                    command = next_command(&mut self.commands, &mut self.inbox) => command,
+                    command = self.commands.next() => command,
                     _ = async {
                         if let Some(updates) = &capacity_updates {
                             updates.notified().await;
                         }
                     }, if capacity_updates.is_some() => {
                         let drain_cleanup =
-                            self.is_caught_up() || commands_since_cleanup == 256;
+                            self.commands.is_empty() || commands_since_cleanup == 256;
                         if drain_cleanup {
                             commands_since_cleanup = 0;
                         }
@@ -1612,7 +1630,7 @@ impl<
             };
             let Some(command) = command else { break };
             commands_since_cleanup += 1;
-            let drain_cleanup = self.is_caught_up() || commands_since_cleanup == 256;
+            let drain_cleanup = self.commands.is_empty() || commands_since_cleanup == 256;
             if drain_cleanup {
                 commands_since_cleanup = 0;
             }
@@ -1648,11 +1666,6 @@ impl<
     fn begin_turn(&mut self) {
         self.turn = self.turn.wrapping_add(1);
         self.turn_prepared = None;
-    }
-
-    /// Whether every command sent so far has been applied.
-    fn is_caught_up(&self) -> bool {
-        self.inbox.is_empty() && self.commands.is_empty()
     }
 
     async fn drain_after_command(&mut self, drain: Drain, reply: Option<CommandReply>) {
@@ -2355,7 +2368,7 @@ impl<
                         updates.notified().await;
                     }
                 }, if capacity_updates.is_some() => RefreshEvent::Capacity,
-                command = next_command(&mut self.commands, &mut self.inbox) => match command {
+                command = self.commands.next() => match command {
                     Some(command) => RefreshEvent::Command(command),
                     None => return RefreshEnd::Shutdown,
                 },
@@ -4363,8 +4376,7 @@ mod tests {
     {
         SchedulerQueueActor {
             // Commands go to the queue's own actor; this one sees a closed channel.
-            commands: mpsc::channel(1).1,
-            inbox: Vec::new(),
+            commands: CommandInbox::new(mpsc::channel(1).1),
             pending: PolicyQueue::with_class_budget_expiry(&queue.profile),
             class_timers: ClassTimers::new(queue.profile.classes().len()),
             cleanup: Arc::clone(&queue.cleanup),
@@ -5318,28 +5330,29 @@ mod tests {
         }
     }
 
-    /// A receive spends one unit of the task's cooperative budget, which runs out after 128.
-    /// A larger backlog is still applied without the actor yielding to the runtime.
+    /// A backlog comes out in arrival order within one poll. A receive spends one unit of the
+    /// task's cooperative budget, which runs out after 128: one command per receive would yield.
     #[tokio::test]
-    async fn backlog_past_the_cooperative_budget_is_applied_in_one_actor_poll() {
+    async fn inbox_hands_out_a_backlog_in_order_without_yielding() {
         const BACKLOG: usize = 200;
-        let (queue, _slots) = make_queue(2, 16, 512, None);
-        let mut responses = Vec::new();
-        for i in 0..BACKLOG {
-            let (request, response) = make_request(&format!("backlog-{i}"), 512);
-            let queue = Arc::clone(&queue);
-            tokio::spawn(async move { queue.enqueue(request).await });
-            responses.push(response);
+        let (tx, rx) = mpsc::channel(BACKLOG);
+        let mut acks = Vec::new();
+        for _ in 0..BACKLOG {
+            let (ack_tx, ack_rx) = oneshot::channel();
+            tx.try_send(AdmissionCommand::Update { ack_tx }).unwrap();
+            acks.push(ack_rx);
         }
-
-        // On this single-threaded runtime every spawned enqueue sends before the actor's next
-        // poll, and this task resumes after that poll.
-        let mut responses = responses.into_iter();
-        responses.next().unwrap().await.unwrap().unwrap();
-        let answered = 1 + responses
-            .filter_map(|mut response| response.try_recv().ok())
-            .count();
-        assert_eq!(answered, BACKLOG);
+        let mut inbox = CommandInbox::new(rx);
+        let drain = std::pin::pin!(async {
+            for ack in &mut acks {
+                let Some(AdmissionCommand::Update { ack_tx }) = inbox.next().await else {
+                    panic!("expected a queued update");
+                };
+                ack_tx.send(()).unwrap();
+                ack.try_recv().unwrap();
+            }
+        });
+        assert!(futures_util::poll!(drain).is_ready());
     }
 
     #[tokio::test(flavor = "multi_thread")]
