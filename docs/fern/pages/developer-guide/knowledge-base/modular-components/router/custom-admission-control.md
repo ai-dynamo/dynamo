@@ -332,6 +332,5 @@ Start the frontend against existing workers with matching discovery configuratio
 
 ```bash
 DYN_HTTP_OVERLOAD_STATUS_CODE=429 python3 -m dynamo.frontend \
-  --router-mode kv \
   --router-policy-config "$PLUGIN_DIR/admission.yaml"
 ```

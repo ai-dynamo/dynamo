@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Disaggregated serving with a different policy per worker role: prefill
+# workers are chosen by prefix-cache overlap and load, and decode workers take
+# turns.
+#
+#   python3 -m dynamo.frontend --router-policy-config kv-prefill-round-robin-decode.yaml
+#
+# The file selects each role's policy, so the frontend takes no --router-mode
+# and the workers take no router flags.
+worker_selection:
+  prefill: dynamo-default-cost-fn
+  decode: round-robin

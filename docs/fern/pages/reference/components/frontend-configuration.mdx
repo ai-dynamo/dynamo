@@ -124,10 +124,22 @@ router. See [Router Guide](../../developer-guide/knowledge-base/modular-componen
 ### Routing and readiness
 
 <ParamField path="--router-mode" type="string" default="round-robin">
-  Routing strategy. In disaggregated prefill mode, `least-loaded` uses the synchronous prefill
-  fallback path.
+  The worker-selection policy type every worker role uses, with the type's default parameters:
+  `round-robin`, `random`, `least-loaded`, or any other
+  [registered policy type](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#worker-selection-policies),
+  such as `dynamo-default-cost-fn` or `dynamo-two-tier-cost-fn`. The frontend rejects an
+  unregistered type at startup. `kv` is an alias for the default KV cost function. `direct` and
+  `device-aware-weighted` are routing modes, not policy types. In disaggregated prefill mode,
+  `least-loaded` uses the synchronous prefill fallback path.
 
-  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>round-robin</Badge> <Badge intent="note" minimal>random</Badge> <Badge intent="note" minimal>kv</Badge> <Badge intent="note" minimal>direct</Badge> <Badge intent="note" minimal>least-loaded</Badge> <Badge intent="note" minimal>device-aware-weighted</Badge></span>
+  Mutually exclusive with `--router-policy-config`, which selects each role's policy separately;
+  only `kv` may accompany a policy file. When neither is set the mode is `round-robin`; when only
+  a policy file is set, the file selects each role's policy.
+
+  A worker's own `--router-mode` takes routing modes only, so set a policy type on the frontend,
+  not in an environment shared with workers.
+
+  <span className="enum-values"><span className="enum-label">Routing modes:</span> <Badge intent="note" minimal>round-robin</Badge> <Badge intent="note" minimal>random</Badge> <Badge intent="note" minimal>kv</Badge> <Badge intent="note" minimal>direct</Badge> <Badge intent="note" minimal>least-loaded</Badge> <Badge intent="note" minimal>device-aware-weighted</Badge></span>
 
   Environment variable: `DYN_ROUTER_MODE`
 </ParamField>
@@ -378,7 +390,9 @@ Configure scoring through [default policy parameters](../../developer-guide/know
 </ParamField>
 
 <ParamField path="--router-policy-config" type="string" default="null">
-  Startup-only YAML for shared `router` settings, policy-class queues, and per-role worker-selection policies. When omitted,
+  Startup-only YAML for shared `router` settings, policy-class queues, and per-role worker-selection policies.
+  The file selects each role's policy, so pass it without `--router-mode`; any `--router-mode` other
+  than `kv` alongside it is an error. When omitted,
   `--router-queue-threshold` and `--router-queue-policy` define one synthetic policy class.
   Queueing remains disabled until a threshold is configured. See [Shared Router Settings](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#shared-router-settings), [Policy-class queues](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#policy-class-queues) and [Write Custom Routing Strategies](../../developer-guide/knowledge-base/modular-components/router/custom-worker-selection.mdx).
 

@@ -136,8 +136,6 @@ spec:
           - -m
           - dynamo.frontend
           args:
-          - --router-mode
-          - kv
           - --router-policy-config
           - /etc/dynamo/router/worker-selection.yaml
           volumeMounts:

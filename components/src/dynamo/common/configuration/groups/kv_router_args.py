@@ -68,6 +68,7 @@ _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "router_temperature",
     "router_queue_threshold",
     "router_policy_config",
+    "router_worker_selection_policy",
     "router_prefill_policy",
     "router_decode_policy",
     "router_queue_policy",
@@ -197,6 +198,9 @@ class KvRouterConfigBase(ConfigBase):
     router_approximate_cache_policy: str = "ttl"
     router_queue_threshold: Optional[float]
     router_policy_config: Optional[str] = None
+    # The policy type the frontend's --router-mode selected for every role. It
+    # has no flag of its own.
+    router_worker_selection_policy: Optional[str] = None
     router_prefill_policy: Optional[str] = None
     router_decode_policy: Optional[str] = None
     router_event_threads: int
@@ -628,6 +632,8 @@ class KvRouterArgGroup(ArgGroup):
             help=(
                 "KV Router: Startup-only YAML configuration for shared router settings, "
                 "policy-class queues, and per-role worker-selection policies. "
+                "On the frontend it needs no --router-mode: the file selects each "
+                "role's policy, and any --router-mode other than kv is an error. "
                 "When omitted, router_queue_threshold and router_queue_policy define "
                 "one synthetic policy class; queueing remains disabled unless "
                 "router_queue_threshold is set."

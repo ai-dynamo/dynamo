@@ -22,6 +22,7 @@ from dynamo.common.configuration.groups.kv_router_args import (
 from dynamo.common.configuration.groups.router_args import (
     RouterArgGroup,
     RouterConfigBase,
+    resolve_router_mode,
 )
 from dynamo.common.configuration.utils import (
     ArgEnv,
@@ -259,6 +260,9 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
 
         if self.load_aware:
             self.router_mode = "kv"
+        self.router_mode, self.router_worker_selection_policy = resolve_router_mode(
+            self.router_mode, self.router_policy_config
+        )
         self.apply_router_config()
 
         # Fail at startup on an invalid DYN_MM_* value, not on every request.
@@ -601,7 +605,7 @@ class FrontendArgGroup(ArgGroup):
 
         # Router options (shared with dynamo.router)
         RouterArgGroup(
-            default_router_mode="round-robin",
+            default_router_mode=None,
             include_frontend_only=True,
             env=self.env,
         ).add_arguments(parser)

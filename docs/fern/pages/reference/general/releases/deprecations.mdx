@@ -21,6 +21,10 @@ Upgrading? Pick the version you run today to see the dependency migration and th
 
 ## v1.7.0 - Upcoming
 
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **The frontend rejects `--router-policy-config` combined with a `--router-mode` other than `kv`.** A policy file now selects each role's worker-selection policy without `--router-mode kv`, and `--router-mode` accepts any registered policy type, which every role then uses with its default parameters. Previously, a policy file passed with `round-robin`, `random`, `least-loaded`, `direct`, or `device-aware-weighted` was silently ignored, and so was a policy file passed with no `--router-mode`: that frontend ran `round-robin` and now routes by the file. `--router-mode kv` still works, with or without a policy file.
+
+  > **Migrate:** If you pass a policy file with a `--router-mode` other than `kv`, remove one of the two. If you set `--router-policy-config` or `DYN_ROUTER_POLICY_CONFIG` with no `--router-mode` and want to keep `round-robin`, remove the file. `--router-mode kv --router-policy-config <file>` can drop `--router-mode kv`.
+
 <span className="dynref-badge dynref-badge--amber">Deprecated</span> **Deprecated `worker_selection.instances` in the router policy YAML** in favor of writing each role's policy inline. A role (`aggregated`, `prefill`, `decode`, `encode`) is now a policy type name, or a mapping with `type` and `parameters`. The `instances` list and name references still load with a warning and are scheduled for removal in v1.8.0. `DYN_ROUTER_WORKER_SELECTION_POLICY`, `DYN_ROUTER_PREFILL_POLICY`, and `DYN_ROUTER_DECODE_POLICY` now accept a policy type as well as an instance name.
 
   > **Migrate:** Replace `aggregated: my-instance` plus its `instances` entry with `aggregated: {type: <type>, parameters: {...}}`, or just `aggregated: <type>` when the type needs no parameters.

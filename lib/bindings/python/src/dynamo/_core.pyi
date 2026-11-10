@@ -1925,6 +1925,7 @@ class KvRouterConfig:
         router_policy_config: Optional[str] = None,
         router_prefill_policy: Optional[str] = None,
         router_decode_policy: Optional[str] = None,
+        router_worker_selection_policy: Optional[str] = None,
         router_tracking_hash: Literal["public-xxh3-v1", "keyed-xxh3-v1"] = "public-xxh3-v1",
         router_tracking_key_file: Optional[str | os.PathLike[str]] = None,
         router_tracking_key_id: Optional[str] = None,
@@ -1974,6 +1975,8 @@ class KvRouterConfig:
                 worker_selection.prefill for disaggregated prefill workers.
             router_decode_policy: Process-local override of worker_selection.decode
                 for decode workers in this router process.
+            router_worker_selection_policy: Process-local policy type every role
+                uses, as set by the frontend's `--router-mode <type>`.
             router_event_threads: Number of KV indexer worker threads (default: 4).
                 When > 1, uses a concurrent radix tree with a thread pool,
                 including for approximate routing when KV events are disabled.
@@ -2015,8 +2018,8 @@ class KvRouterConfig:
         Serialize this configuration as JSON that `from_json` accepts.
 
         The serialization is lossy: the process-local fields
-        `router_approximate_cache_policy`, `router_prefill_policy` and
-        `router_decode_policy` are not serialized, so `from_json` restores
+        `router_approximate_cache_policy`, `router_worker_selection_policy`,
+        `router_prefill_policy` and `router_decode_policy` are not serialized, so `from_json` restores
         their defaults. Re-serializing the parsed result yields the same JSON:
         `KvRouterConfig.from_json(config.to_json()).to_json() == config.to_json()`.
         """
