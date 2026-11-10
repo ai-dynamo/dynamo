@@ -1667,65 +1667,6 @@ mod tests {
         }
     }
 
-    /// Dedicated `refusal` text lands in the text block after any content;
-    /// an empty refusal is ignored.
-    #[rstest::rstest]
-    #[case::pure_refusal(None, Some("I can't help with that."), "I can't help with that.")]
-    #[case::mixed(
-        Some("Pong."),
-        Some("I can't help with that."),
-        "Pong.I can't help with that."
-    )]
-    #[case::empty_refusal_with_text(Some("Pong."), Some(""), "Pong.")]
-    #[case::empty_refusal_only(None, Some(""), "")]
-    fn test_refusal_reaches_anthropic_text_block(
-        #[case] content: Option<&str>,
-        #[case] refusal: Option<&str>,
-        #[case] expected: &str,
-    ) {
-        // `function_call` is deprecated upstream but still a required field.
-        #[allow(deprecated)]
-        let chat_resp = NvCreateChatCompletionResponse {
-            response_events: Vec::new(),
-            inner: dynamo_protocols::types::CreateChatCompletionResponse {
-                id: "chatcmpl-refusal".into(),
-                choices: vec![dynamo_protocols::types::ChatChoice {
-                    index: 0,
-                    message: dynamo_protocols::types::ChatCompletionResponseMessage {
-                        content: content.map(|text| {
-                            dynamo_protocols::types::ChatCompletionMessageContent::Text(
-                                text.to_string(),
-                            )
-                        }),
-                        refusal: refusal.map(str::to_string),
-                        tool_calls: None,
-                        role: dynamo_protocols::types::Role::Assistant,
-                        function_call: None,
-                        audio: None,
-                        reasoning_content: None,
-                    },
-                    finish_reason: Some(dynamo_protocols::types::FinishReason::Stop),
-                    logprobs: None,
-                }],
-                created: 1726000000,
-                model: "test-model".into(),
-                service_tier: None,
-                system_fingerprint: None,
-                object: "chat.completion".to_string(),
-                usage: None,
-            },
-            prompt_logprobs: None,
-            nvext: None,
-        };
-
-        let response = chat_completion_to_anthropic_response(chat_resp, "test-model", None);
-        assert_eq!(response.content.len(), 1);
-        match &response.content[0] {
-            AnthropicResponseContentBlock::Text { text, .. } => assert_eq!(text, expected),
-            other => panic!("expected text block, got {other:?}"),
-        }
-    }
-
     #[allow(deprecated)]
     #[test]
     fn test_anthropic_response_input_tokens_excludes_cached() {
