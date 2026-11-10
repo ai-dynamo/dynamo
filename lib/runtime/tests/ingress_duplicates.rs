@@ -21,10 +21,9 @@ use dynamo_runtime::{
     pipeline::{
         ManyOut, PipelineError, ResponseStream, SegmentSource, ServiceBackend, ServiceEngine,
         SingleIn, Source,
-        network::{Ingress, PushWorkHandler, SerdeIngressPayloadAdapter},
+        network::{Ingress, PushWorkHandler},
     },
     protocols::annotated::Annotated,
-    telemetry::LifecycleOperationRole,
 };
 
 mod common;
@@ -198,63 +197,49 @@ async fn dropped_request_frees_its_id() {
     assert_eq!(worker.arrival().await, ANSWER);
 }
 
-/// Every constructor serves a request and refuses a duplicate inside the engine
-/// call, including those that take a `SegmentSource` pipeline.
+/// A request to an `Ingress` with no engine yet fails; it does not panic the task.
 #[tokio::test]
-async fn every_constructor_serves_and_refuses_duplicates() {
-    fn pipeline(
-        engine: TestEngine,
-    ) -> Arc<SegmentSource<SingleIn<String>, ManyOut<Annotated<String>>>> {
+async fn request_without_an_engine_is_an_error() {
+    let worker = Worker::start_with(|_engine| {
+        Ingress::<SingleIn<String>, ManyOut<Annotated<String>>>::new()
+    });
+    let result = tokio::time::timeout(Duration::from_secs(10), worker.spawn("id", ANSWER))
+        .await
+        .expect("request did not finish");
+    let error = result
+        .expect("a request without an engine must not panic")
+        .expect_err("a request without an engine must fail");
+    assert!(
+        matches!(error, PipelineError::GenerateError(_)),
+        "unexpected error: {error:?}"
+    );
+}
+
+/// `attach` takes a `SegmentSource` pipeline rather than an engine. It serves a request and
+/// refuses a duplicate inside the engine call, as `for_engine` does.
+#[tokio::test]
+async fn attach_serves_and_refuses_duplicates() {
+    let mut worker = Worker::start_with(|engine| {
         let frontend = SegmentSource::new();
-        frontend
+        let pipeline = frontend
             .link(ServiceBackend::from_engine(engine))
             .unwrap()
             .link_terminal(frontend)
-            .unwrap()
-    }
-    type Build = fn(TestEngine) -> Arc<dyn PushWorkHandler>;
-    let constructors: [(&str, Build); 7] = [
-        ("for_engine", |engine| Ingress::for_engine(engine).unwrap()),
-        ("for_engine_with_lifecycle_role", |engine| {
-            Ingress::for_engine_with_lifecycle_role(engine, LifecycleOperationRole::Worker).unwrap()
-        }),
-        ("for_engine_with_adapter", |engine| {
-            Ingress::for_engine_with_adapter(engine, SerdeIngressPayloadAdapter).unwrap()
-        }),
-        ("for_engine_with_adapter_and_lifecycle_role", |engine| {
-            Ingress::for_engine_with_adapter_and_lifecycle_role(
-                engine,
-                SerdeIngressPayloadAdapter,
-                LifecycleOperationRole::Worker,
-            )
-            .unwrap()
-        }),
-        ("for_pipeline", |engine| {
-            Ingress::for_pipeline(pipeline(engine)).unwrap()
-        }),
-        ("link", |engine| Ingress::link(pipeline(engine)).unwrap()),
-        ("attach", |engine| {
-            let ingress = Ingress::new();
-            ingress.attach(pipeline(engine)).unwrap();
-            ingress
-        }),
-    ];
-    for (name, build) in constructors {
-        let mut worker = Worker::start_with(build);
-        worker
-            .send("id", ANSWER)
-            .await
-            .unwrap_or_else(|error| panic!("{name}: request failed: {error:?}"));
-        assert_eq!(worker.arrival().await, ANSWER, "{name}");
+            .unwrap();
+        let ingress = Ingress::new();
+        ingress.attach(pipeline).unwrap();
+        ingress
+    });
+    worker.send("id", ANSWER).await.expect("request failed");
+    assert_eq!(worker.arrival().await, ANSWER);
 
-        let first = worker.spawn("same-id", PARK_IN_CALL);
-        assert_eq!(worker.arrival().await, PARK_IN_CALL, "{name}");
-        let error = worker
-            .send("same-id", ANSWER)
-            .await
-            .expect_err("a duplicate inside the engine call must be refused");
-        assert!(is_duplicate_id(&error, "same-id"), "{name}: {error:?}");
-        first.abort();
-        assert!(first.await.unwrap_err().is_cancelled(), "{name}");
-    }
+    let first = worker.spawn("same-id", PARK_IN_CALL);
+    assert_eq!(worker.arrival().await, PARK_IN_CALL);
+    let error = worker
+        .send("same-id", ANSWER)
+        .await
+        .expect_err("a duplicate inside the engine call must be refused");
+    assert!(is_duplicate_id(&error, "same-id"), "{error:?}");
+    first.abort();
+    assert!(first.await.unwrap_err().is_cancelled());
 }
