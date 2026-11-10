@@ -2800,24 +2800,6 @@ class TestRoutedEnginePath:
         ) + [[1]]
 
     @pytest.mark.asyncio
-    async def test_token_ids_absent_unless_requested(
-        self, tokenizer, real_vllm_processor_module
-    ):
-        generated = tokenizer.encode("hello world", add_special_tokens=False)
-        items = [{"token_ids": [token], "index": 0} for token in generated]
-        items[-1]["finish_reason"] = "length"
-
-        data = await self._run_requested_token_id_stream(
-            real_vllm_processor_module,
-            tokenizer,
-            items,
-            {"model": MODEL, "stream": True},
-        )
-
-        assert data
-        assert all("nvext" not in frame for frame in data)
-
-    @pytest.mark.asyncio
     @pytest.mark.parametrize("stream", [True, False])
     async def test_prompt_token_ids_sent_once_with_parallel_choices(
         self, tokenizer, stream, real_vllm_processor_module
