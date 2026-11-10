@@ -55,17 +55,35 @@ runs:
       run: |
         python -m pip install --upgrade pip
         python -m pip install \
-          "pydantic>=2,<3" \
+          "pydantic==2.13.5" \
           "black==23.1.0" \
           "pyyaml>=6.0" \
           "pytest==9.0.3" \
           "pytest-timeout==2.4.0"
+        # RCs share a Python version; export from the exact runtime source revision.
+        python - <<'PY'
+        import os
+        import subprocess
+        import tomllib
+        from pathlib import Path
+
+        root = Path("../..").resolve()
+        patch = tomllib.loads((root / "Cargo.toml").read_text())["patch"]["crates-io"]["aisim-core"]
+        source = Path(os.environ["RUNNER_TEMP"]) / "operator-aisim-schema-source"
+        subprocess.run(["git", "init", str(source)], check=True)
+        subprocess.run(["git", "-C", str(source), "fetch", "--depth=1",
+                        "https://github.com/ai-dynamo/aisimulate.git", patch["rev"]], check=True)
+        subprocess.run(["git", "-C", str(source), "checkout", "--detach", "FETCH_HEAD"], check=True)
+        with Path(os.environ["GITHUB_ENV"]).open("a") as stream:
+            stream.write(f"AISIMULATE_SOURCE_DIR={source}\n")
+        PY
 
     - name: Check operator generated files
       if: ${{ inputs.component == 'operator' }}
       shell: bash
       working-directory: ./deploy/operator
       run: |
+        python -m unittest discover -s hack -p test_generate_aisimulate_schema.py
         make check
 
     - name: Test Go/Python integration boundaries
