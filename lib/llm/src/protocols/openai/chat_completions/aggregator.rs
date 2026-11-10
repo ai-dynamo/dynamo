@@ -678,7 +678,7 @@ impl DeltaAggregator {
 
         // One configured unified family owns raw batch output before legacy parsing.
         // Worker-parsed choices already carry tool calls and skip this safety net.
-        let selected_unified_family = parsing_options.batch_unified_family();
+        let selected_unified_family = parsing_options.resolved_unified_family();
         if selected_unified_family.is_none() {
             let version = super::tool_parser_v2::selected_version().map_err(|error| {
                 DynamoError::builder()

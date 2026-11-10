@@ -63,7 +63,7 @@ fn apply_request_tool_call_parsing_options(
     mut parsing_options: ParsingOptions,
     request: &NvCreateChatCompletionRequest,
 ) -> Result<ParsingOptions, DynamoError> {
-    let unified_family = parsing_options.batch_unified_family();
+    let unified_family = parsing_options.resolved_unified_family();
     parsing_options.reasoning_disabled = OpenAIPreprocessor::request_disables_reasoning_with_family(
         request,
         parsing_options.tool_call_parser.as_deref(),
