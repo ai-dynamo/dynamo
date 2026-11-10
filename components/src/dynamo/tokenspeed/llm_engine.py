@@ -349,9 +349,14 @@ class TokenspeedLLMEngine(LLMEngine):
         except asyncio.CancelledError:
             raise
         except Exception as error:
-            if not self._stopping:
-                logger.error("TokenSpeed output stream failed: %s", error)
-            self._fail_streams(f"TokenSpeed output stream failed: {error}")
+            message = f"TokenSpeed output stream failed: {error}"
+            self._fail_streams(message)
+            if self._stopping:
+                return
+            # Every later request would fail too; stop so the worker leaves
+            # the routing pool instead of staying registered.
+            logger.error("%s; shutting down the worker", message)
+            os.kill(os.getpid(), signal.SIGTERM)
 
     async def _watch_launcher(self) -> None:
         """Shut the worker down if the engine launcher exits on its own."""

@@ -1165,7 +1165,9 @@ async def test_stream_ended_by_engines_raises(native):
         await engine.cleanup()
 
 
-async def test_closed_frontend_fails_in_flight_and_new_requests(native):
+async def test_closed_frontend_fails_requests_and_stops_worker(monkeypatch, native):
+    kill = Mock()
+    monkeypatch.setattr(llm_engine.os, "kill", kill)
     native.respond = lambda request: [wire_output([20])]
     engine = make_engine()
     await engine.start(worker_id=1)
@@ -1177,6 +1179,7 @@ async def test_closed_frontend_fails_in_flight_and_new_requests(native):
             await drain(stream)
         with pytest.raises(RuntimeError, match="frontend is closed"):
             await drain(engine.generate({"token_ids": [10]}, context("late")))
+        kill.assert_called_once_with(llm_engine.os.getpid(), signal.SIGTERM)
     finally:
         await stream.aclose()
         await engine.cleanup()
@@ -1205,8 +1208,9 @@ async def test_cleanup_does_not_stop_worker(monkeypatch, native):
     monkeypatch.setattr(llm_engine.os, "kill", kill)
     engine = make_engine()
     await engine.start(worker_id=1)
+    tasks = [engine._monitor, engine._dispatcher]
     await engine.cleanup()
-    await asyncio.sleep(0.05)
+    await asyncio.gather(*tasks, return_exceptions=True)
     kill.assert_not_called()
     assert native.launches[0].returncode == 0
 

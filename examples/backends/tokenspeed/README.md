@@ -216,8 +216,19 @@ worker IDs, overlap scores, timings, and a `passed` result.
   generation budget.
 - `--kv-events-config '{"enable_kv_cache_events":true}'` enables native cache
   mutation events. Prefix caching must remain enabled. KV events require attention
-  DP=1; with attention DP > 1, run the frontend with `--router-mode kv
-  --no-router-kv-events`, or with a non-KV router mode.
+  DP=1. With attention DP > 1, turn them off on the workers and the router.
+  `launch_disagg.sh` enables them by default, so set `KV_EVENTS_CONFIG` for the
+  workers and pass `--no-router-kv-events` to the frontend:
+
+  ```bash
+  KV_EVENTS_CONFIG='{"enable_kv_cache_events":false}' \
+    bash examples/backends/tokenspeed/launch_disagg.sh prefill --data-parallel-size 4
+  KV_EVENTS_CONFIG='{"enable_kv_cache_events":false}' \
+    bash examples/backends/tokenspeed/launch_disagg.sh decode --data-parallel-size 4
+  bash examples/backends/tokenspeed/launch_disagg.sh frontend --no-router-kv-events
+  ```
+
+  A non-KV router mode also works.
 - With attention DP > 1, the worker registers its DP size, and a KV-mode router
   picks a rank per request. A prefill request always runs on rank
   `bootstrap_room % dp_size`, where decode looks for its KV cache; the router mints
