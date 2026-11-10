@@ -466,7 +466,7 @@ Declare `ACTIVE_REQUESTS` instead of `LOAD` when a request count is all the pick
 
 A scorer reads `KV_COPY` through `WorkerCandidate::kv_copy()`. Filters and pickers do not receive it, and declaring it there has no effect. The host picks each worker's copy offer with the [KV fetch hint](topology-aware-kv-transfer.md#kv-fetch-hints) rules, including topology islands.
 
-A policy whose scorer reads `KV_COPY` commits the selected worker to its offer, because its cost assumed that copy. The worker's role must then run exactly one [hint policy](configuration-and-tuning.md#hint-policies) that sends committed copies, one that declares `Commitments::KV_COPY`; the router rejects the configuration at startup otherwise. If that hint policy sends nothing for a committed copy, the booking fails and is released. If the copy's source is gone by booking time, or the booked worker no longer advertises `router_hint`, the router logs a warning and books the worker without the copy. Copies are best effort once sent: the source may no longer hold the blocks when the request runs. `KV_COPY` also needs a local, event-driven KV index. Its earlier names, `KV_TRANSFER`, `kv_transfer()` and `WorkerTransferInput`, are deprecated aliases.
+A policy whose scorer reads `KV_COPY` commits the selected worker to its offer, so the worker's role must run a [hint policy](hint-policies.md) that sends it. Its earlier names, `KV_TRANSFER`, `kv_transfer()` and `WorkerTransferInput`, are deprecated aliases.
 
 This scorer charges each worker for the prompt blocks it can neither reuse nor copy. A worker without copy data still counts its own cache:
 
@@ -663,10 +663,8 @@ worker_selection:
 
 The provider also accepts `overlap_score_credit_decay`, `decode_active_request_weight`,
 `host_cache_hit_weight`, `disk_cache_hit_weight`, and `shared_cache_multiplier`. The `kvcr`
-policy takes the same parameters and also credits the blocks a worker can copy from a peer at
-the shared-cache multiplier, so set the multiplier to enable that credit without shared cache.
-With a multiplier above `0`, `kvcr` reads `KV_COPY` and commits copies. Values must be finite
-and non-negative. Per-request score and temperature
+policy takes the same parameters and also credits blocks a worker can copy from a peer at that
+multiplier. Values must be finite and non-negative. Per-request score and temperature
 overrides do not apply to this policy.
 
 Omitted parameters normally inherit router configuration. When the resolved
