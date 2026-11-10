@@ -76,7 +76,7 @@ data:
     {{- else if and .Values.global .Values.global.etcd .Values.global.etcd.install }}
       {{- $etcdAddr = printf "%s-etcd.%s.svc.cluster.local:2379" .Release.Name .Release.Namespace }}
     {{- end }}
-    {{- if or $natsAddr $etcdAddr .Values.modelExpressURL .Values.dynamo.metrics.prometheusEndpoint .Values.natsTLSCAPath .Values.natsTLSClientCertPath .Values.natsTLSClientKeyPath .Values.tcpTLSCertPath .Values.tcpTLSKeyPath .Values.tcpTLSCAPath .Values.tcpTLSClientCertPath .Values.tcpTLSClientKeyPath .Values.tcpTLSClientCAPath .Values.tcpTLSServerName }}
+    {{- if or $natsAddr $etcdAddr .Values.modelExpressURL .Values.modelExpressServerCache .Values.dynamo.metrics.prometheusEndpoint .Values.natsTLSCAPath .Values.natsTLSClientCertPath .Values.natsTLSClientKeyPath .Values.tcpTLSCertPath .Values.tcpTLSKeyPath .Values.tcpTLSCAPath .Values.tcpTLSClientCertPath .Values.tcpTLSClientKeyPath .Values.tcpTLSClientCAPath .Values.tcpTLSServerName }}
     infrastructure:
       {{- if $natsAddr }}
       natsAddress: {{ $natsAddr | quote }}
@@ -86,6 +86,9 @@ data:
       {{- end }}
       {{- if .Values.modelExpressURL }}
       modelExpressURL: {{ .Values.modelExpressURL | quote }}
+      {{- end }}
+      {{- if .Values.modelExpressServerCache }}
+      modelExpressServerCache: true
       {{- end }}
       {{- if .Values.dynamo.metrics.prometheusEndpoint }}
       prometheusEndpoint: {{ .Values.dynamo.metrics.prometheusEndpoint | quote }}

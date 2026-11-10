@@ -227,6 +227,12 @@ type InfrastructureConfiguration struct {
 	ETCDAddress string `json:"etcdAddress"`
 	// ModelExpressURL is the URL of the Model Express server to inject into all pods
 	ModelExpressURL string `json:"modelExpressURL"`
+	// ModelExpressServerCache makes workers without shared model storage (no PVC, hostPath or NFS
+	// mount) fetch model files through the Model Express server and set HF_HUB_OFFLINE=1, instead of
+	// each replica downloading from Hugging Face on its own. It requires ModelExpressURL, a worker image
+	// whose Model Express client supports the server cache (0.7.0 or newer), and is opt-in so that an
+	// operator upgrade does not roll existing workloads.
+	ModelExpressServerCache bool `json:"modelExpressServerCache,omitempty"`
 	// PrometheusEndpoint is the URL of the Prometheus endpoint to use for metrics
 	PrometheusEndpoint string `json:"prometheusEndpoint"`
 	// NATSTLSCAPath is the CA certificate path for verifying the NATS server

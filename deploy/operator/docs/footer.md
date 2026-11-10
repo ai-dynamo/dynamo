@@ -189,6 +189,8 @@ These are injected into all components when the corresponding infrastructure ser
 | `ETCD_ENDPOINTS` | etcd endpoint addresses for distributed state | — | `string` | Set when `infrastructure.etcdAddress` is configured |
 | `MODEL_EXPRESS_URL` | Model Express service URL for model management | — | `string` | Set when `infrastructure.modelExpressURL` is configured |
 | `PROMETHEUS_ENDPOINT` | Prometheus endpoint for metrics collection | — | `string` | Set when `infrastructure.prometheusEndpoint` is configured |
+| `MODEL_EXPRESS_NO_SHARED_STORAGE` | Fetch model files through the Model Express server instead of from Hugging Face | — | `string` (boolean) | Set to `true` on worker components with no PVC, hostPath or NFS mount when `infrastructure.modelExpressServerCache` and `infrastructure.modelExpressURL` are configured; a user-set value is kept |
+| `HF_HUB_OFFLINE` | Stop Hugging Face clients from contacting the Hub once Model Express supplies the model files | — | `string` | Set to `1` together with `MODEL_EXPRESS_NO_SHARED_STORAGE`; a user-set value is kept |
 
 ### Frontend Components
 
