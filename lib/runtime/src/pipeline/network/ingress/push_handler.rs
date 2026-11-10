@@ -12,7 +12,7 @@ use crate::metrics::work_handler_perf::{
 use crate::pipeline::network::{StreamPrologueError, velo_response};
 use crate::pipeline::{ManyIn, RequestStream};
 use crate::telemetry::{LifecycleStage, LifecycleTrace};
-use crate::{dynamo_nvtx_mark, dynamo_nvtx_range};
+use crate::{dynamo_nvtx_keyed_range, dynamo_nvtx_request_mark, dynamo_nvtx_request_range};
 use futures::StreamExt;
 use prometheus::{Histogram, IntCounter, IntCounterVec, IntGauge};
 use serde::Deserialize;
@@ -358,19 +358,21 @@ where
         Adapter: IngressResponseEncoder<U>,
     {
         let context = stream.context();
+        let nvtx_key = crate::nvtx::request_key(context.id());
 
         // TODO: Detect end-of-stream using Server-Sent Events (SSE)
         let mut send_complete_final = true;
         let mut saw_error_response = false;
+        let mut first_chunk_published = false;
         while let Some(resp) = stream.next().await {
             // Everything inside this range is Dynamo-side egress work for one
             // chunk. The gaps *between* consecutive `worker.egress.chunk` ranges
             // are the engine producing the next token — that split is the whole
             // point of the worker annotations. (Frontend-side receive/decode is
             // a separate, currently unannotated cost; do not attribute it here.)
-            let _nvtx_chunk = dynamo_nvtx_range!("worker.egress.chunk");
+            let _nvtx_chunk = dynamo_nvtx_keyed_range!("worker.egress.chunk", nvtx_key);
             tracing::trace!("Sending response: {:?}", resp);
-            let nvtx_encode = dynamo_nvtx_range!("worker.egress.encode");
+            let nvtx_encode = dynamo_nvtx_keyed_range!("worker.egress.encode", nvtx_key);
             let encoded = match self
                 .encode_frame(publisher, payload_codec, Some(resp), false)
                 .await
@@ -400,7 +402,7 @@ where
             if let Some(m) = self.metrics() {
                 m.response_bytes.inc_by(payload.len() as u64);
             }
-            let nvtx_publish = dynamo_nvtx_range!("worker.egress.publish");
+            let nvtx_publish = dynamo_nvtx_keyed_range!("worker.egress.publish", nvtx_key);
             let publish_result = payload.publish(publisher).await;
             drop(nvtx_publish);
             if let Err(send_err) = publish_result {
@@ -436,6 +438,10 @@ where
                         .inc();
                 }
                 break;
+            }
+            if !first_chunk_published {
+                first_chunk_published = true;
+                dynamo_nvtx_request_mark!("worker.egress.first_chunk", context.id());
             }
             if encoded.stop_stream {
                 // Dropping the engine stream after the terminal frame is sent
@@ -827,7 +833,8 @@ where
         // Dispatch into the engine. For a Python worker this covers the pyo3
         // bridge crossing that builds the response generator, not token
         // generation itself.
-        let nvtx_generate = dynamo_nvtx_range!("worker.ingress.generate");
+        let nvtx_generate =
+            dynamo_nvtx_request_range!("worker.ingress.generate", request_context.id());
         let stream = async {
             self.segment
                 .get()
@@ -872,7 +879,7 @@ where
                     })?;
                 }
                 if prologue_sent {
-                    dynamo_nvtx_mark!("worker.ingress.prologue_sent");
+                    dynamo_nvtx_request_mark!("worker.ingress.prologue_sent", request_context.id());
                 }
                 WORK_HANDLER_TIME_TO_FIRST_RESPONSE_SECONDS
                     .observe(start_time.elapsed().as_secs_f64());
@@ -948,7 +955,10 @@ where
     {
         // Outer band for one request's entire time inside the worker, from wire
         // arrival to terminal frame. Held across awaits, hence a start/end range.
-        let _nvtx_request = dynamo_nvtx_range!("worker.ingress.request");
+        // Keyed from the transport's `request-id` header, which is known before the body
+        // is parsed; without one these ranges carry no key.
+        let nvtx_key = request_id.as_deref().and_then(crate::nvtx::request_key);
+        let _nvtx_request = dynamo_nvtx_keyed_range!("worker.ingress.request", nvtx_key);
 
         let t2_wallclock_ns = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -989,7 +999,7 @@ where
         // readers capture the current span and live until the request ends.
         // They must inherit handle_payload, not prolong worker.admission.
         let worker_admission = lifecycle.start(LifecycleStage::WorkerAdmission);
-        let nvtx_parse = dynamo_nvtx_range!("worker.ingress.parse_request");
+        let nvtx_parse = dynamo_nvtx_keyed_range!("worker.ingress.parse_request", nvtx_key);
         let ParsedRequest {
             request,
             response_connection_info,
@@ -1023,7 +1033,8 @@ where
         match advertised_mode {
             ResponsePlaneMode::Tcp => {
                 tracing::trace!("creating tcp response stream");
-                let nvtx_open = dynamo_nvtx_range!("worker.ingress.open_response_stream");
+                let nvtx_open =
+                    dynamo_nvtx_keyed_range!("worker.ingress.open_response_stream", nvtx_key);
                 let publisher = tcp::client::TcpClient::create_response_stream(
                     request.context(),
                     response_connection_info,
@@ -1084,7 +1095,8 @@ where
             }
             ResponsePlaneMode::Quic => {
                 tracing::trace!("creating QUIC response sender");
-                let nvtx_open = dynamo_nvtx_range!("worker.ingress.open_response_stream");
+                let nvtx_open =
+                    dynamo_nvtx_keyed_range!("worker.ingress.open_response_stream", nvtx_key);
                 let response_pool = self.quic_response_client_pool()?;
                 let publisher = response_pool
                     .sender_with_cancellation_metric(

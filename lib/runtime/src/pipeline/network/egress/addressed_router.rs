@@ -10,7 +10,7 @@ use super::unified_client::RequestPlaneClient;
 use super::*;
 use crate::component::Instance;
 use crate::discovery::EndpointInstanceId;
-use crate::dynamo_nvtx_range;
+use crate::dynamo_nvtx_request_range;
 use crate::engine::{AsyncEngine, AsyncEngineContextProvider, Data, EngineContextGuard};
 use crate::error::{DynamoError, ErrorClass, ErrorType};
 use crate::logging::inject_trace_headers_into_map;
@@ -952,7 +952,8 @@ impl AddressedPushRouter {
             .await?;
         }
 
-        let _nvtx_wait = dynamo_nvtx_range!("transport.response.wait_backend");
+        let _nvtx_wait =
+            dynamo_nvtx_request_range!("transport.response.wait_backend", context.id());
         tracing::trace!(request_id = context.id(), "awaiting transport handshake");
 
         // Dropping the pending wait on expiry removes the response registration.
@@ -1090,7 +1091,7 @@ impl AddressedPushRouter {
             .as_nanos() as u64;
         headers.insert("x-frontend-send-ts-ns".to_string(), send_ts_ns.to_string());
 
-        let _nvtx_send = dynamo_nvtx_range!("transport.tcp.send");
+        let _nvtx_send = dynamo_nvtx_request_range!("transport.tcp.send", request_id);
         let ack = self
             .req_client
             .send_request(address, buffer, headers)
