@@ -24,6 +24,9 @@ pub(crate) use dynamo_kv_router::indexer::TieredMatchDetails;
 #[allow(unused_imports)]
 pub(crate) use dynamo_kv_router::indexer::WireTieredMatchDetails;
 pub use dynamo_kv_router::services::indexer::backend::{Indexer, RemotePrimary, SideIndexer};
+use dynamo_kv_router::services::indexer::mamba_checkpoints::{
+    MambaCheckpointIndex, mamba_checkpoint_cap_enabled,
+};
 pub(crate) use dynamo_kv_router::services::indexer::recording::ApproximateRequestLease;
 use dynamo_kv_router::services::indexer::session_updates::SessionUpdateSender;
 use dynamo_runtime::component::Component;
@@ -171,6 +174,7 @@ pub(crate) async fn build(
                 approx: None,
                 primary_records_routing_decisions: true,
                 session_updates,
+                mamba_checkpoints: None,
             });
         }
 
@@ -191,6 +195,7 @@ pub(crate) async fn build(
             approx: None,
             primary_records_routing_decisions: true,
             session_updates,
+            mamba_checkpoints: None,
         });
     }
 
@@ -201,6 +206,11 @@ pub(crate) async fn build(
         cancellation_token.child_token(),
     );
 
+    let mamba_checkpoints =
+        mamba_checkpoint_cap_enabled().then(|| Arc::new(MambaCheckpointIndex::new()));
+    if mamba_checkpoints.is_some() {
+        tracing::info!("Mamba checkpoint overlap cap enabled (DYN_ROUTER_MAMBA_CHECKPOINT_CAP)");
+    }
     if kv_router_config.router_event_threads > 1 {
         let kv_indexer_metrics = KvIndexerMetrics::from_component(component);
         let primary = Arc::new(ThreadPoolIndexer::new_with_metrics(
@@ -223,6 +233,7 @@ pub(crate) async fn build(
             approx,
             primary_records_routing_decisions: false,
             session_updates,
+            mamba_checkpoints,
         });
     }
 
@@ -242,6 +253,7 @@ pub(crate) async fn build(
         approx,
         primary_records_routing_decisions: false,
         session_updates,
+        mamba_checkpoints,
     })
 }
 

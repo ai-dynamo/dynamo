@@ -8,7 +8,7 @@ use rmp_serde::{from_slice, to_vec, to_vec_named};
 use serde::Serialize;
 
 use crate::protocols::{
-    BlockExtraInfo, BlockHashOptions, BlockMmObjectInfo, ExternalSequenceBlockHash,
+    BlockExtraInfo, BlockHashOptions, BlockMmObjectInfo, CacheGroup, ExternalSequenceBlockHash,
     KvCacheEventData, PlacementEvent, PlacementOwner, StorageTier, WorkerWithDpRank,
     compute_block_hash_for_seq,
 };
@@ -1914,6 +1914,175 @@ fn test_unrecognized_media_do_not_pollute_cache_namespace_state() {
     let child = normalizer
         .preprocess(gpu_child, worker)
         .expect("unrecognized-media event must not make the parent ambiguous");
+    let RawKvEvent::BlockStored {
+        cache_namespace, ..
+    } = child
+    else {
+        panic!("expected BlockStored");
+    };
+    assert_eq!(cache_namespace.as_deref(), Some("tenant-a"));
+}
+
+fn stored_event(kind: Option<KvCacheSpecKind>, group_idx: u32, hashes: &[u64]) -> RawKvEvent {
+    RawKvEvent::BlockStored {
+        block_hashes: hashes
+            .iter()
+            .map(|h| BlockHashValue::Unsigned(*h))
+            .collect(),
+        parent_block_hash: None,
+        token_ids: vec![10; hashes.len() * 16],
+        block_size: 16,
+        medium: None,
+        lora_name: None,
+        cache_namespace: None,
+        block_mm_infos: None,
+        is_eagle: Some(false),
+        group_idx: Some(group_idx),
+        kv_cache_spec_kind: kind,
+        kv_cache_spec_sliding_window: None,
+        locality: None,
+        ownership: None,
+        session_id: None,
+    }
+}
+
+fn removed_event(group_idx: u32, hashes: &[u64]) -> RawKvEvent {
+    RawKvEvent::BlockRemoved {
+        block_hashes: hashes
+            .iter()
+            .map(|h| BlockHashValue::Unsigned(*h))
+            .collect(),
+        medium: None,
+        group_idx: Some(group_idx),
+        kv_cache_spec_kind: None,
+        kv_cache_spec_sliding_window: None,
+        locality: None,
+        ownership: None,
+    }
+}
+
+fn mamba_normalizer() -> ZmqEventNormalizer {
+    ZmqEventNormalizer::new(16).with_mamba_forwarding(true)
+}
+
+#[test]
+fn mamba_event_is_filtered_unless_forwarding_is_enabled() {
+    let worker = WorkerWithDpRank::new(1, 0);
+    let mut default = ZmqEventNormalizer::new(16);
+    let result = default
+        .preprocess_with_reason(stored_event(Some(KvCacheSpecKind::Mamba), 1, &[10]), worker);
+    assert_eq!(
+        result.unwrap_err(),
+        ZmqEventFilterReason::NonMainAttentionKind
+    );
+
+    let mut forwarding = mamba_normalizer();
+    assert!(
+        forwarding
+            .preprocess_with_reason(stored_event(Some(KvCacheSpecKind::Mamba), 1, &[10]), worker)
+            .is_ok()
+    );
+}
+
+#[test]
+fn forwarding_does_not_unfilter_other_non_main_kinds() {
+    let worker = WorkerWithDpRank::new(1, 0);
+    let mut normalizer = mamba_normalizer();
+    let result = normalizer.preprocess_with_reason(
+        stored_event(Some(KvCacheSpecKind::SlidingWindow), 2, &[10]),
+        worker,
+    );
+    assert_eq!(
+        result.unwrap_err(),
+        ZmqEventFilterReason::NonMainAttentionKind
+    );
+}
+
+#[test]
+fn mamba_stored_event_is_tagged_and_keeps_hashes() {
+    let worker = WorkerWithDpRank::new(1, 0);
+    let mut normalizer = mamba_normalizer();
+    let placement = normalizer
+        .normalize(
+            stored_event(Some(KvCacheSpecKind::Mamba), 1, &[10, 11]),
+            7,
+            worker,
+        )
+        .unwrap();
+    assert_eq!(placement.cache_group, Some(CacheGroup::Mamba));
+    match placement.event.data {
+        KvCacheEventData::Stored(stored) => {
+            let hashes: Vec<u64> = stored.blocks.iter().map(|b| b.block_hash.0).collect();
+            assert_eq!(hashes, vec![10, 11]);
+        }
+        other => panic!("expected Stored, got {other:?}"),
+    }
+}
+
+#[test]
+fn mamba_removed_event_is_tagged_from_learned_group_metadata() {
+    let worker = WorkerWithDpRank::new(1, 0);
+    let mut normalizer = mamba_normalizer();
+    // The Stored event teaches group 1 -> Mamba; the Removed event carries no kind.
+    normalizer
+        .normalize(
+            stored_event(Some(KvCacheSpecKind::Mamba), 1, &[10]),
+            1,
+            worker,
+        )
+        .unwrap();
+    let placement = normalizer
+        .normalize(removed_event(1, &[10]), 2, worker)
+        .unwrap();
+    assert_eq!(placement.cache_group, Some(CacheGroup::Mamba));
+    assert!(matches!(placement.event.data, KvCacheEventData::Removed(_)));
+}
+
+#[test]
+fn attention_event_is_not_tagged() {
+    let worker = WorkerWithDpRank::new(1, 0);
+    let mut normalizer = mamba_normalizer();
+    let placement = normalizer
+        .normalize(
+            stored_event(Some(KvCacheSpecKind::FullAttention), 3, &[10]),
+            1,
+            worker,
+        )
+        .unwrap();
+    assert_eq!(placement.cache_group, None);
+}
+
+#[test]
+fn mamba_event_does_not_poison_the_attention_cache_namespace() {
+    let worker = WorkerWithDpRank::new(1, 0);
+    let mut normalizer = mamba_normalizer();
+    // Attention block 10 in a salted namespace, then a Mamba checkpoint with the same hash.
+    let mut salted = stored_event(Some(KvCacheSpecKind::FullAttention), 3, &[10]);
+    if let RawKvEvent::BlockStored {
+        cache_namespace, ..
+    } = &mut salted
+    {
+        *cache_namespace = Some("tenant-a".to_string());
+    }
+    normalizer.normalize(salted, 1, worker).unwrap();
+    normalizer
+        .normalize(
+            stored_event(Some(KvCacheSpecKind::Mamba), 1, &[10]),
+            2,
+            worker,
+        )
+        .unwrap();
+    // A child of block 10 must still inherit the namespace (not fail as Ambiguous).
+    let mut child = stored_event(Some(KvCacheSpecKind::FullAttention), 3, &[11]);
+    if let RawKvEvent::BlockStored {
+        parent_block_hash, ..
+    } = &mut child
+    {
+        *parent_block_hash = Some(BlockHashValue::Unsigned(10));
+    }
+    let child = normalizer
+        .preprocess(child, worker)
+        .expect("a Mamba event with the same hash must not make the parent ambiguous");
     let RawKvEvent::BlockStored {
         cache_namespace, ..
     } = child

@@ -5,13 +5,28 @@ use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 
 use dynamo_kv_router::protocols::{
-    ExternalSequenceBlockHash, KvCacheRemoveData, KvCacheStoreData, ResidencyDomain, StorageTier,
+    CacheGroup, ExternalSequenceBlockHash, KvCacheRemoveData, KvCacheStoreData, ResidencyDomain,
+    StorageTier,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum EventDedupPolicy {
     RefCounted,
     SetLike,
+}
+
+impl EventDedupPolicy {
+    /// Tagged cache-group events bypass refcounting: their hashes equal the
+    /// attention block hash at the same boundary, so sharing refcounts would
+    /// suppress attention and checkpoint removals. Router checkpoint indexes
+    /// are sets, so passing every Store and Remove is safe.
+    pub(super) fn for_cache_group(self, cache_group: Option<CacheGroup>) -> Self {
+        if cache_group.is_some() {
+            Self::SetLike
+        } else {
+            self
+        }
+    }
 }
 
 /// Policy-driven deduplication filter for publisher KV cache events.

@@ -404,8 +404,13 @@ impl LocalKvIndexer {
     /// Stored and Removed events are recorded after successful queue admission; this does not
     /// wait for the physical mutation to complete. Cleared is intentionally a stronger ordering
     /// barrier and waits for every affected physical indexer before it is recorded.
+    ///
+    /// Non-attention cache-group events (for example Mamba checkpoints) are recorded for
+    /// recovery replay but never applied to the local radix trees, which index attention only.
     pub async fn apply_event_with_buffer(&self, event: RouterEvent) -> Result<(), KvRouterError> {
-        self.apply_event_by_tier(&event).await?;
+        if event.cache_group.is_none() {
+            self.apply_event_by_tier(&event).await?;
+        }
         self.record_event(event);
         Ok(())
     }
@@ -959,6 +964,65 @@ mod tests {
             .await
             .unwrap();
         assert!(overlap.scores.is_empty());
+    }
+
+    #[tokio::test]
+    async fn cache_group_events_are_buffered_without_touching_the_tree() {
+        use crate::protocols::CacheGroup;
+        let indexer = LocalKvIndexer::new(
+            CancellationToken::new(),
+            4,
+            Arc::new(KvIndexerMetrics::new_unregistered()),
+            16,
+        );
+        let stored = |event_id: u64| {
+            RouterEvent::new(
+                7,
+                KvCacheEvent {
+                    event_id,
+                    data: KvCacheEventData::Stored(KvCacheStoreData {
+                        parent_hash: None,
+                        start_position: None,
+                        blocks: vec![KvCacheStoredBlockData {
+                            block_hash: ExternalSequenceBlockHash(101),
+                            tokens_hash: LocalBlockHash(11),
+                            mm_extra_info: None,
+                        }],
+                    }),
+                    dp_rank: 0,
+                },
+            )
+        };
+        let mamba = stored(1).with_cache_group(CacheGroup::Mamba);
+
+        indexer
+            .apply_event_with_buffer(mamba.clone())
+            .await
+            .unwrap();
+        let _ = indexer.flush().await;
+
+        let overlap = indexer
+            .find_matches(vec![LocalBlockHash(11)])
+            .await
+            .unwrap();
+        assert!(overlap.scores.is_empty());
+        assert_eq!(indexer.get_all_events_in_buffer(), vec![mamba.clone()]);
+        assert_eq!(indexer.current_event_id(), 1);
+
+        let attention = stored(2);
+        indexer
+            .apply_event_with_buffer(attention.clone())
+            .await
+            .unwrap();
+        let _ = indexer.flush().await;
+
+        let overlap = indexer
+            .find_matches(vec![LocalBlockHash(11)])
+            .await
+            .unwrap();
+        assert_eq!(overlap.scores.len(), 1);
+        assert_eq!(indexer.get_all_events_in_buffer(), vec![mamba, attention]);
+        assert_eq!(indexer.current_event_id(), 2);
     }
 
     #[tokio::test]

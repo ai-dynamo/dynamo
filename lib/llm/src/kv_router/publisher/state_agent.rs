@@ -41,6 +41,7 @@ use dynamo_kv_router::{
         KvCacheEvent, KvCacheEventData, PlacementEvent, ResidencyDomain, ResidencyOwner,
         RouterEvent, RouterHintSourceMetadata, StorageTier, WorkerWithDpRank,
     },
+    services::indexer::mamba_checkpoints::mamba_checkpoint_cap_enabled,
     zmq_wire::{KvEventOwnership, ZmqEventFilterReason, ZmqEventNormalizer},
 };
 use dynamo_runtime::{
@@ -659,8 +660,10 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
                 ResidencyDomain::Worker => EventDedupPolicy::RefCounted,
                 // This state agent creates CacheOwner events only from KVCR ownership.
                 ResidencyDomain::CacheOwner => EventDedupPolicy::SetLike,
-            };
+            }
+            .for_cache_group(placement_event.cache_group);
             let session_id = placement_event.session_id;
+            let cache_group = placement_event.cache_group;
             let mut event = placement_event.event;
             if event.dp_rank != self.slot_dp_rank {
                 self.fail_source(
@@ -735,6 +738,7 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
                 ),
             };
             router_event.session_id = session_id;
+            router_event.cache_group = cache_group;
             // NOTE: Stored/Removed intentionally use the legacy lossy contract: queue
             // admission and one best-effort publish, with no completion acknowledgement.
             // Cleared is stronger and completes every affected tier before publication.
@@ -1701,7 +1705,9 @@ async fn run_vllm_listener(task: VllmListenerTask<'_>) -> Result<()> {
         status,
         cancel,
     } = task;
-    let mut framework_normalizer = source.normalizer(kv_block_size);
+    let mut framework_normalizer = source
+        .normalizer(kv_block_size)
+        .with_mamba_forwarding(mamba_checkpoint_cap_enabled());
     let mut cache_owner_normalizer = source.normalizer(kv_block_size);
     loop {
         if !status
@@ -2074,6 +2080,96 @@ mod tests {
             .map(|chunk| event_block_count(chunk))
             .collect();
         assert_eq!(blocks, [1, MAX_INGRESS_BLOCKS + 1, 1]);
+    }
+
+    #[tokio::test]
+    async fn mamba_tag_survives_and_bypasses_dedup() {
+        use dynamo_kv_router::protocols::{CacheGroup, KvCacheRemoveData};
+        let worker = WorkerWithDpRank::new(17, 3);
+        let identity = KvStateAgentIdentity {
+            cache_owner_id: cache_owner_id(),
+            publisher_id: 41,
+            protocol_version: KvStateProtocolVersion::V2,
+        };
+        let status = Arc::new(KvStateAgentStatusCell::new(KvStateAgentStatus {
+            identity: identity.clone(),
+            attachment: None,
+            cache_owner_ready: true,
+            outbound_cursor: 0,
+        }));
+        let local_indexer = Arc::new(LocalKvIndexer::new(
+            CancellationToken::new(),
+            4,
+            Arc::new(KvIndexerMetrics::new_unregistered()),
+            32,
+        ));
+        let (_control_tx, control_rx) = mpsc::channel(CONTROL_QUEUE_CAPACITY);
+        let (_ingress_tx, ingress_rx) = mpsc::unbounded_channel();
+        let publisher = RecordingSink::default();
+        let mut coordinator = Coordinator {
+            publisher: publisher.clone(),
+            local_indexer,
+            identity,
+            slot_dp_rank: 3,
+            status,
+            withdrawal_tx: mpsc::unbounded_channel().0,
+            control_rx,
+            ingress_rx,
+            attachment: None,
+            ingress_generation: None,
+            next_outbound_id: 1,
+            next_attachment_generation: 1,
+            source_cursor: SourceCursorState::default(),
+            dedup: EventDedupFilter::new(),
+            worker_domain_failed: false,
+            cache_owner_domain_failed: false,
+            source_failed: false,
+        };
+        let mut attachment = test_attachment(worker, "tcp://framework");
+        coordinator.attach(&mut attachment).await.unwrap();
+
+        let removed = |event: PlacementEvent| {
+            let mut event = event;
+            event.event.data = KvCacheEventData::Removed(KvCacheRemoveData {
+                block_hashes: vec![ExternalSequenceBlockHash(10)],
+            });
+            event
+        };
+        let attention = || store(worker, ResidencyDomain::Worker, None, 10, 10);
+        let mamba = || attention().with_cache_group(CacheGroup::Mamba);
+        coordinator
+            .handle_ingress(IngressBatch {
+                generation: attachment.generation,
+                source_cursor: 1,
+                chunk_index: 0,
+                final_chunk: true,
+                events: vec![attention(), mamba(), removed(attention()), removed(mamba())],
+                source_fault: None,
+                cache_owner_fault: None,
+            })
+            .await
+            .unwrap();
+
+        let shape = publisher
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|event| match &event.event.data {
+                KvCacheEventData::Stored(_) => Some(("stored", event.cache_group)),
+                KvCacheEventData::Removed(_) => Some(("removed", event.cache_group)),
+                KvCacheEventData::Cleared => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            shape,
+            vec![
+                ("stored", None),
+                ("stored", Some(CacheGroup::Mamba)),
+                ("removed", None),
+                ("removed", Some(CacheGroup::Mamba)),
+            ]
+        );
     }
 
     fn raw_store(medium: Option<&str>, ownership: Option<&str>, block: u64) -> RawKvEvent {

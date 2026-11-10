@@ -48,6 +48,7 @@ impl<K: Eq> PlacementEventCoalescer<K> {
             pending_key == &key
                 && pending.event.dp_rank == event.event.dp_rank
                 && pending.session_id == event.session_id
+                && pending.cache_group == event.cache_group
                 && compatible_data(&pending.event.data, &event.event.data)
         });
         if can_merge {
@@ -191,28 +192,21 @@ impl BatchingState {
         let tier = placement_event.placement.tier;
         let domain = placement_event.placement.residency_domain;
         let session_id = placement_event.session_id;
+        let cache_group = placement_event.cache_group;
+        let dedup_policy =
+            EventDedupPolicy::for_cache_group(EventDedupPolicy::RefCounted, cache_group);
         let mut event = placement_event.event;
         event.data = match event.data {
             KvCacheEventData::Removed(data) => {
-                let Some(filtered) = dedup.filter_remove_in_domain(
-                    event.dp_rank,
-                    tier,
-                    domain,
-                    EventDedupPolicy::RefCounted,
-                    data,
-                ) else {
+                let Some(filtered) =
+                    dedup.filter_remove_in_domain(event.dp_rank, tier, domain, dedup_policy, data)
+                else {
                     return;
                 };
                 KvCacheEventData::Removed(filtered)
             }
             KvCacheEventData::Stored(data) => {
-                dedup.track_store_in_domain(
-                    event.dp_rank,
-                    tier,
-                    domain,
-                    EventDedupPolicy::RefCounted,
-                    &data,
-                );
+                dedup.track_store_in_domain(event.dp_rank, tier, domain, dedup_policy, &data);
                 KvCacheEventData::Stored(data)
             }
             KvCacheEventData::Cleared => {
@@ -227,6 +221,7 @@ impl BatchingState {
             domain,
             event,
             session_id,
+            cache_group,
             output,
         )
         .await;
@@ -326,6 +321,22 @@ mod tests {
             &output[0].event.data,
             KvCacheEventData::Stored(data) if data.blocks.len() == 1
         ));
+    }
+
+    #[test]
+    fn cache_group_prevents_mamba_attention_coalescing() {
+        use dynamo_kv_router::protocols::CacheGroup;
+        let mut coalescer = PlacementEventCoalescer::new(128);
+        let mut output = Vec::new();
+        for input in [removed(1), removed(1).with_cache_group(CacheGroup::Mamba)] {
+            let key = input.placement.clone();
+            output.extend(coalescer.push(key, input).into_iter().flatten());
+        }
+        output.extend(coalescer.flush());
+
+        assert_eq!(output.len(), 2);
+        assert_eq!(output[0].cache_group, None);
+        assert_eq!(output[1].cache_group, Some(CacheGroup::Mamba));
     }
 
     #[test]
