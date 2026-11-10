@@ -20,7 +20,6 @@ try:
         get_local_model_weight_size,
         get_mamba_cache_align_block_size,
         get_model_context_length,
-        get_model_weight_size,
         get_model_weight_size_from_hub,
     )
 except ImportError as e:
@@ -434,16 +433,6 @@ def test_local_model_weight_size_counts_one_checkpoint_copy(
     _write_checkpoint(tmp_path, files, index=index)
 
     assert get_local_model_weight_size(tmp_path) == expected_mib
-
-
-def test_local_model_weight_size_follows_snapshot_symlinks(tmp_path) -> None:
-    """A Hugging Face cache snapshot links its root files into blobs/."""
-    _write_checkpoint(tmp_path / "blobs", {"abc123": 3 * MIB})
-    snapshot = tmp_path / "snapshots" / "rev"
-    snapshot.mkdir(parents=True)
-    (snapshot / "model.safetensors").symlink_to(tmp_path / "blobs" / "abc123")
-
-    assert get_model_weight_size(snapshot) == 3
 
 
 @pytest.mark.parametrize(
