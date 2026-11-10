@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use rmp_serde::{from_slice, to_vec, to_vec_named};
 use serde::Serialize;
+use serde_bytes::ByteBuf;
 
 use crate::protocols::{
     BlockExtraInfo, BlockHashOptions, BlockMmObjectInfo, ExternalSequenceBlockHash,
@@ -1923,14 +1924,6 @@ fn test_unrecognized_media_do_not_pollute_cache_namespace_state() {
     assert_eq!(cache_namespace.as_deref(), Some("tenant-a"));
 }
 
-struct BinaryKey(Vec<u8>);
-
-impl Serialize for BinaryKey {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_bytes(&self.0)
-    }
-}
-
 #[derive(Serialize)]
 struct BinaryKeyStored {
     #[serde(rename = "type")]
@@ -1939,7 +1932,7 @@ struct BinaryKeyStored {
     parent_block_hash: Option<u64>,
     token_ids: Vec<u32>,
     block_size: usize,
-    extra_keys: Vec<Option<Vec<BinaryKey>>>,
+    extra_keys: Vec<Option<Vec<ByteBuf>>>,
 }
 
 fn binary_key_stored(hash: u64, parent: Option<u64>, key: Option<Vec<u8>>) -> BinaryKeyStored {
@@ -1949,7 +1942,7 @@ fn binary_key_stored(hash: u64, parent: Option<u64>, key: Option<Vec<u8>>) -> Bi
         parent_block_hash: parent,
         token_ids: vec![0, 0],
         block_size: 2,
-        extra_keys: vec![key.map(|key| vec![BinaryKey(key)])],
+        extra_keys: vec![key.map(|key| vec![ByteBuf::from(key)])],
     }
 }
 
