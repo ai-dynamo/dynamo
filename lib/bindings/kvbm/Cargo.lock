@@ -35,7 +35,7 @@ dependencies = [
 [[package]]
 name = "aisim-core"
 version = "0.14.0"
-source = "git+https://github.com/ai-dynamo/aisimulate?rev=9d61bdfb902cb3269a3cf47eb33abb80b05489da#9d61bdfb902cb3269a3cf47eb33abb80b05489da"
+source = "git+https://github.com/ai-dynamo/aisimulate?rev=fd5b1b592b86935bf4929f3d452ca05ceff4317c#fd5b1b592b86935bf4929f3d452ca05ceff4317c"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
@@ -2744,7 +2744,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -7154,7 +7154,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -7222,7 +7222,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -8020,7 +8020,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

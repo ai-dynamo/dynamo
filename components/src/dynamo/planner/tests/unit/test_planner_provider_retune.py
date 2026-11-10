@@ -21,10 +21,7 @@ pytest.importorskip(
     reason="AISim is an optional Dynamo simulation dependency",
 )
 
-from aisim.config_adapter import (
-    PredictionAdapterContext,
-    RecommendationAdapterContext,
-)
+from aisim.config_adapter import PredictionAdapterContext, RecommendationAdapterContext
 from aisim.sweeper.provider import SweepContext
 
 from dynamo.planner.config.planner_config import PlannerConfig

@@ -684,7 +684,7 @@ COPY examples/router/custom-policy-example/ /opt/dynamo/examples/router/custom-p
 COPY deploy/inference-gateway/ext-proc/ /opt/dynamo/deploy/inference-gateway/ext-proc/
 COPY deploy/inference-gateway/sidecar/ /opt/dynamo/deploy/inference-gateway/sidecar/
 
-{% if target == "planner" or (target == "runtime" and framework in ("vllm", "sglang", "trtllm")) %}
+{% if target in ("planner", "frontend") or (target == "runtime" and framework in ("vllm", "sglang", "trtllm", "triton")) %}
 COPY container/deps/requirements.aisim.txt /opt/dynamo/container/deps/requirements.aisim.txt
 
 # Build the exact source-pinned AISim wheel until #796 has published artifacts.
@@ -692,6 +692,7 @@ COPY container/deps/requirements.aisim.txt /opt/dynamo/container/deps/requiremen
 RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=shared \
     export UV_CACHE_DIR=/root/.cache/uv && \
     source ${VIRTUAL_ENV}/bin/activate && \
+    python -m pip install --no-deps --requirement /opt/dynamo/container/deps/requirements.aisim.txt && \
     python -m pip wheel \
         --no-deps \
         --wheel-dir /opt/dynamo/dist \
@@ -736,6 +737,13 @@ RUN set -u; injected=0; \
             && injected=$((injected+1)) || echo "::warning::wheel NOTICES bundling failed for $whl (SBOM retained)"; \
     done; \
     echo "wheel NOTICES bundled into $injected wheel(s)"
+
+{% if target in ("planner", "frontend") or (target == "runtime" and framework in ("vllm", "sglang", "trtllm", "triton")) %}
+# Run after NOTICES bundling so the manifest hashes the final wheel bytes.
+COPY container/aisim_source_provenance.py /opt/dynamo/container/aisim_source_provenance.py
+RUN ${VIRTUAL_ENV}/bin/python /opt/dynamo/container/aisim_source_provenance.py \
+    /opt/dynamo/container/deps/requirements.aisim.txt /opt/dynamo/dist
+{% endif %}
 
 # Compliance source archival: vendor the workspace lockfile for the OSRB
 # bundle. Gated on ENABLE_SOURCE_ARCHIVAL so PR builds skip the ~200-400 MB

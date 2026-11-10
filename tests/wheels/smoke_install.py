@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import shutil
@@ -260,6 +261,27 @@ def pip_install(venv_python: Path, wheelhouse: Path, requirements: list[str]) ->
     # The root wheel's temporary Git requirement must resolve to the exact
     # source-built artifact shipped in this image, without needing a compiler.
     staged_aisim = require_one_wheel(wheelhouse, "aisim")
+    provenance = json.loads((wheelhouse / "aisim-source.json").read_text())
+    requirements_metadata = wheel_metadata(require_one_wheel(wheelhouse, "ai-dynamo"))[
+        "Requires-Dist"
+    ]
+    pins = [
+        re.search(
+            r"aisim\s*@\s*git\+[^\s@]+@([0-9a-f]{40})#subdirectory=python/aisim",
+            str(value),
+        )
+        for value in requirements_metadata
+    ]
+    pins = [match[1] for match in pins if match]
+    assert len(pins) == 1, "component wheel must declare one exact AISim source pin"
+    assert provenance["source"]["vcs_info"]["commit_id"] == pins[0]
+    assert provenance["source"]["subdirectory"] == "python/aisim"
+    assert provenance["wheel"] == staged_aisim.name
+    with staged_aisim.open("rb") as stream:
+        assert (
+            provenance["sha256"] == hashlib.file_digest(stream, "sha256").hexdigest()
+        ), "staged AISim wheel differs from its source provenance"
+
     find_links = []
     for path in (wheelhouse, wheelhouse / "nixl"):
         if path.exists():
@@ -274,7 +296,7 @@ def pip_install(venv_python: Path, wheelhouse: Path, requirements: list[str]) ->
                 "install",
                 "--python",
                 str(venv_python),
-                "--override",
+                "--overrides",
                 overrides.name,
                 *find_links,
                 *requirements,

@@ -123,6 +123,7 @@ ${LD_LIBRARY_PATH:-}
 # pip from replacing that stack. Dev/local-dev build from source later in the
 # shared dev stage after the workspace is bind-mounted.
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
+COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/aisim-source.json /opt/dynamo/wheelhouse/
 
 {% if device == "xpu" %}
 RUN pip install --no-deps \

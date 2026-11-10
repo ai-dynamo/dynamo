@@ -66,7 +66,7 @@ request-trace-s3 = ["dynamo-llm/request-trace-s3"]
 # former AIC crate surface. The `python` feature is required for
 # AicEngineBuilder; this extension supplies the interpreter, so the dependency
 # must not enable `extension-module`.
-aisim-core = { git = "https://github.com/ai-dynamo/aisimulate", rev = "9d61bdfb902cb3269a3cf47eb33abb80b05489da", optional = true, features = ["python"] }
+aisim-core = { git = "https://github.com/ai-dynamo/aisimulate", rev = "fd5b1b592b86935bf4929f3d452ca05ceff4317c", optional = true, features = ["python"] }
 dynamo-runtime = { path = "../../runtime" }
 dynamo-mocker = { path = "../../mocker" }
 dynamo-parsers = { version = "=11.0.11" }

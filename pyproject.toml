@@ -14,7 +14,7 @@ license-files = ["LICENSE"]
 requires-python = ">=3.11"
 dependencies = [
     "ai-dynamo-runtime==1.7.0",
-    "aisim @ git+https://github.com/ai-dynamo/aisimulate.git@9d61bdfb902cb3269a3cf47eb33abb80b05489da#subdirectory=python/aisim ; python_version >= '3.11' and python_version < '3.14'",
+    "aisim @ git+https://github.com/ai-dynamo/aisimulate.git@fd5b1b592b86935bf4929f3d452ca05ceff4317c#subdirectory=python/aisim ; python_version >= '3.11' and python_version < '3.14'",
     "aiohttp>=3.14.3,<4.0",
     # Set the CA bundle floor for transitive HTTP clients outside containers too.
     "certifi>=2026.10.23",

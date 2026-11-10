@@ -16,10 +16,7 @@ from enum import Enum
 from typing import Any, cast
 
 from aisim.config.common import Choices, IntegerRange, NumericRange
-from aisim.config_adapter import (
-    PredictionAdapterContext,
-    RecommendationAdapterContext,
-)
+from aisim.config_adapter import PredictionAdapterContext, RecommendationAdapterContext
 from aisim.sweeper.provider import (
     AdapterReplaySpec,
     AdapterSearchPlan,

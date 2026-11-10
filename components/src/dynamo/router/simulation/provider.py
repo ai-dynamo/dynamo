@@ -9,10 +9,7 @@ from collections.abc import Mapping
 from copy import deepcopy
 
 from aisim.config.common import Choices
-from aisim.config_adapter import (
-    PredictionAdapterContext,
-    RecommendationAdapterContext,
-)
+from aisim.config_adapter import PredictionAdapterContext, RecommendationAdapterContext
 from aisim.sweeper.provider import (
     AdapterReplaySpec,
     AdapterSearchPlan,

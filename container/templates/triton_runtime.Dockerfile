@@ -121,16 +121,19 @@ ENV VIRTUAL_ENV=/opt/dynamo/venv \
 # Dynamo wheels built from source in wheel_builder — keeps the image in lockstep
 # with this repository, like the other backend runtimes.
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
+COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/aisim-source.json /opt/dynamo/wheelhouse/
 
-RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+RUN --mount=type=bind,source=./container/deps/overrides.aisim.txt,target=/tmp/overrides.aisim.txt \
+    --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     export UV_CACHE_DIR=/root/.cache/uv && \
     \
     # Dynamo's own wheels — with deps (unlike other backends) so the Python
     # packages the Triton base lacks come from PyPI.
-    uv pip install \
+    uv pip install --overrides /tmp/overrides.aisim.txt \
         certifi==2026.10.23 pip==26.2.2 \
         /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
-        /opt/dynamo/wheelhouse/ai_dynamo*any.whl && \
+        /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
+        /opt/dynamo/wheelhouse/aisim-*.whl && \
     \
     # Triton's Python bindings (from the release image) and the tritonclient gRPC client.
     uv pip install --no-deps /opt/tritonserver/python/tritonserver*.whl && \

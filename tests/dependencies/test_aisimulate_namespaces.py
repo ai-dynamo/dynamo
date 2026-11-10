@@ -5,13 +5,17 @@
 
 from __future__ import annotations
 
+import hashlib
+import importlib.util
 import json
 import subprocess
 import sys
 import textwrap
 import tomllib
+import zipfile
 from importlib import metadata, resources
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from packaging.requirements import Requirement
@@ -231,3 +235,73 @@ def test_pinned_aisimulate_materializes_shared_host_offload() -> None:
         "block_size": engine["block_size"],
         "bytes_per_token": 1024,
     }
+
+
+@pytest.mark.parametrize("failure", [None, "source", "payload", "version"])
+def test_staged_wheel_provenance_matches_reviewed_git_payload(
+    tmp_path, monkeypatch, failure
+):
+    helper_path = ROOT / "container/aisim_source_provenance.py"
+    helper_spec = importlib.util.spec_from_file_location(
+        "aisim_source_provenance", helper_path
+    )
+    helper = importlib.util.module_from_spec(helper_spec)
+    helper_spec.loader.exec_module(helper)
+    requirement_path = ROOT / "container/deps/requirements.aisim.txt"
+    pin = Requirement(
+        next(
+            line
+            for line in requirement_path.read_text().splitlines()
+            if line.startswith("aisim @")
+        )
+    )
+    commit = pin.url.split("@", 1)[1].split("#", 1)[0]
+    origin = {
+        "url": "https://github.com/ai-dynamo/aisimulate.git",
+        "vcs_info": {"vcs": "git", "commit_id": commit},
+        "subdirectory": "python/aisim",
+    }
+    if failure == "source":
+        origin["vcs_info"]["commit_id"] = "0" * 40
+    installed = tmp_path / "installed/aisim/__init__.py"
+    installed.parent.mkdir(parents=True)
+    installed.write_bytes(b"canonical source")
+    distribution = SimpleNamespace(
+        version="0.14.0",
+        read_text=lambda _: json.dumps(origin),
+        locate_file=lambda name: tmp_path / "installed" / name,
+    )
+    monkeypatch.setattr(
+        helper.importlib.metadata, "distribution", lambda _: distribution
+    )
+    wheelhouse = tmp_path / "wheels"
+    wheelhouse.mkdir()
+    wheel = wheelhouse / "aisim-0.14.0-py3-none-any.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr(
+            "aisim/__init__.py",
+            b"tampered" if failure == "payload" else installed.read_bytes(),
+        )
+        archive.writestr(
+            "aisim-0.14.0.dist-info/METADATA",
+            "Name: aisim\nVersion: "
+            + ("0.13.0" if failure == "version" else "0.14.0")
+            + "\n",
+        )
+    if failure is not None:
+        with pytest.raises(
+            ValueError,
+            match={
+                "source": "source differs",
+                "payload": "payload differs",
+                "version": "metadata differs",
+            }[failure],
+        ):
+            helper.write_provenance(requirement_path, wheelhouse)
+        assert not (wheelhouse / "aisim-source.json").exists()
+    else:
+        helper.write_provenance(requirement_path, wheelhouse)
+        proof = json.loads((wheelhouse / "aisim-source.json").read_text())
+        assert proof["source"] == origin
+        assert proof["wheel"] == wheel.name
+        assert proof["sha256"] == hashlib.sha256(wheel.read_bytes()).hexdigest()

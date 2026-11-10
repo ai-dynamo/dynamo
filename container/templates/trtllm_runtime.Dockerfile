@@ -307,6 +307,9 @@ ENV VIRTUAL_ENV=/opt/dynamo/venv \
 # Place wheels in /opt/dynamo/wheelhouse unconditionally — dev/local-dev images
 # install from source and skip the pip install RUN below.
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
+{% if target not in ("dev", "local-dev") %}
+COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/aisim-source.json /opt/dynamo/wheelhouse/
+{% endif %}
 
 {% if target not in ("dev", "local-dev") %}
 RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \

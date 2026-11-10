@@ -18,10 +18,7 @@ from enum import Enum
 from numbers import Real
 from typing import Any
 
-from aisim.runner import (
-    EngineReplayRunnerFactory,
-    materialize_engine_launch_config,
-)
+from aisim.runner import EngineReplayRunnerFactory, materialize_engine_launch_config
 from aisim.sweeper.provider import JSONValue, RuntimeHookSpec
 from aisim.sweeper.replay import (
     HookCapability,
