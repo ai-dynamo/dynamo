@@ -1301,9 +1301,8 @@ func validateDGDRRunJobSpec(spec *batchv1.JobSpec) error {
 		spec.TTLSecondsAfterFinished != nil || spec.ManagedBy != nil {
 		return errors.New("Job execution policy differs")
 	}
-	// A Job from an operator without the disruption rule has no pod failure policy, and the API
-	// server defaults its replacement policy to TerminatingOrFailed. A Job with the rule replaces a
-	// pod only after it failed, so two publishers never run at once.
+	// Jobs from earlier operators have no pod failure policy. With the disruption rule, a pod is
+	// replaced only after it failed, so two publishers never run at once.
 	if spec.PodFailurePolicy == nil {
 		if spec.PodReplacementPolicy != nil && *spec.PodReplacementPolicy != batchv1.TerminatingOrFailed {
 			return errors.New("Job execution policy differs")
@@ -1521,10 +1520,8 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) buildJob(
 	return job
 }
 
-// dgdrRunPodFailurePolicy lets the Job replace a pod that a node disruption ended, such as a
-// node-pressure eviction, a preemption or an API eviction, instead of failing the Run. The backoff
-// limit of 0 still fails the Run on the first sweeper or publisher failure. The search and its
-// publication are idempotent, so the replacement pod can run them again.
+// dgdrRunPodFailurePolicy replaces a pod that a node disruption ended instead of failing the Run;
+// the search and its publication are idempotent, so the replacement can run them again.
 func dgdrRunPodFailurePolicy() *batchv1.PodFailurePolicy {
 	return &batchv1.PodFailurePolicy{Rules: []batchv1.PodFailurePolicyRule{{
 		Action: batchv1.PodFailurePolicyActionIgnore,
