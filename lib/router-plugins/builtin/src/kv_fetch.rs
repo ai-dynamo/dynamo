@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use dynamo_kv_router::plugins::RouterPluginRegistry;
 use dynamo_kv_router::plugins::hint_policy::{
-    HintContext, HintDefault, HintHost, HintPolicy, HintPolicyConstructor, HintPolicyError,
+    HintContext, HintHost, HintPolicy, HintPolicyConstructor, HintPolicyError,
     HintPolicyProviderError, HintPolicyRegistryError, KvHintAction,
 };
 use dynamo_kv_router::plugins::worker_selection::{Commitments, KvCopySource, WorkerInputs};
@@ -148,13 +148,7 @@ pub(crate) fn register(registry: &mut RouterPluginRegistry) -> Result<(), HintPo
                 min_additional_blocks,
             }))
         }),
-        [
-            (
-                HintHost::worker_selection(KVCR_POLICY_TYPE),
-                HintDefault::On,
-            ),
-            (HintHost::AnyWorkerSelection, HintDefault::Off),
-        ],
+        [HintHost::worker_selection(KVCR_POLICY_TYPE)],
     )
 }
 

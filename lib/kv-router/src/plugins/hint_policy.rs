@@ -134,7 +134,8 @@ impl<'a> HintContext<'a> {
     }
 }
 
-/// A plugin a hint runs under. A hint names its hosts when it registers.
+/// A plugin under which a hint runs by default, when the role's entry lists no `hints`. A hint
+/// names these hosts when it registers. Any role can still list any hint.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum HintHost {
@@ -149,13 +150,6 @@ impl HintHost {
     pub fn worker_selection(policy_type: impl Into<String>) -> Self {
         Self::WorkerSelection(policy_type.into())
     }
-}
-
-/// Whether a host runs the hint when the role's entry has no `hints`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum HintDefault {
-    On,
-    Off,
 }
 
 /// A policy failure reported to the router. The message is included in logs and errors.

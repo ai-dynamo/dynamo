@@ -103,14 +103,14 @@ impl crate::plugins::hint_policy::HintPolicy for TestFetch {
 /// [`TestFetch`] registered on by default under every worker-selection policy, as hosts register
 /// `kv_fetch`.
 fn default_hints() -> SelectionHost {
-    use crate::plugins::hint_policy::{HintDefault, HintHost, HintPolicyConstructor};
+    use crate::plugins::hint_policy::{HintHost, HintPolicyConstructor};
 
     let mut registry = crate::plugins::RouterPluginRegistry::default();
     registry
         .register_hint_policy(
             "kv_fetch",
             Arc::new(|_| Ok(HintPolicyConstructor::shared(TestFetch))),
-            [(HintHost::AnyWorkerSelection, HintDefault::On)],
+            [HintHost::AnyWorkerSelection],
         )
         .expect("one default");
     let factory = registry
