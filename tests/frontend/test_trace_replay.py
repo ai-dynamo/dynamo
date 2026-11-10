@@ -26,13 +26,13 @@ pytestmark = [
 
 
 @pytest.mark.timeout(300)
-def test_deepseek_v4_five_captures_through_real_frontend(tmp_path: Path) -> None:
+def test_deepseek_v41_five_captures_through_real_frontend(tmp_path: Path) -> None:
     configured = os.environ.get("DYN_REPLAY_MODEL_DIR")
     if configured is None:
         pytest.fail(
             "set DYN_REPLAY_MODEL_DIR to the hash-verified native model bundle; see trace_replay/README.md"
         )
-    corpus = Path(__file__).parent / "trace_replay" / "fixtures" / "deepseek_v4"
+    corpus = Path(__file__).parent / "trace_replay" / "fixtures" / "deepseek_v41"
     code, summary = run(
         RunOptions(
             corpus=corpus, model_dir=Path(configured), output_dir=tmp_path / "replay"

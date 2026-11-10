@@ -44,7 +44,7 @@ from tests.frontend.trace_replay.runner import (
     normalize_unary,
 )
 
-FIXTURES = Path(__file__).parent / "trace_replay" / "fixtures" / "deepseek_v4"
+FIXTURES = Path(__file__).parent / "trace_replay" / "fixtures" / "deepseek_v41"
 pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.gpu_0,
@@ -84,10 +84,6 @@ def test_v41_native_bundle_can_omit_nonexistent_generation_config(
 ) -> None:
     corpus = load_corpus(FIXTURES)
     manifest = copy.deepcopy(corpus.manifest)
-    manifest["profile"]["runtime_config"].update(
-        tool_call_parser="deepseek_v41", reasoning_parser="deepseek_v41"
-    )
-    manifest["profile"]["model"]["assets"].pop("generation_config.json")
     source = FIXTURES / manifest["traces"][0]["path"]
     (tmp_path / source.name).write_bytes(source.read_bytes())
     (tmp_path / "manifest.json").write_text(dumps(manifest))
@@ -98,6 +94,28 @@ def test_v41_native_bundle_can_omit_nonexistent_generation_config(
     (tmp_path / "manifest.json").write_text(dumps(manifest))
     with pytest.raises(ReplayError, match="hashed native"):
         load_corpus(tmp_path)
+    manifest["profile"]["model"]["assets"]["generation_config.json"] = "0" * 64
+    (tmp_path / "manifest.json").write_text(dumps(manifest))
+    assert len(load_corpus(tmp_path).profile["model"]["assets"]) == 4
+
+
+def test_public_v41_fixtures_have_five_reviewed_responses_and_native_assets() -> None:
+    corpus = load_corpus(FIXTURES)
+    assert [case.identifier for case in corpus.cases] == [
+        "bfcl.simple_python_245.thinking-disabled",
+        "bfcl.multiple_2.thinking-enabled",
+        "bfcl.parallel_82.thinking-enabled",
+        "bfcl.parallel_multiple_48.thinking-disabled",
+        "bfcl.irrelevance_28.thinking-disabled",
+    ]
+    assert all(case.expected_response is not None for case in corpus.cases)
+    assert corpus.profile["runtime_config"]["tool_call_parser"] == "deepseek_v41"
+    assert corpus.profile["runtime_config"]["reasoning_parser"] == "deepseek_v41"
+    assert set(corpus.profile["model"]["assets"]) == {
+        "config.json",
+        "tokenizer.json",
+        "tokenizer_config.json",
+    }
 
 
 @pytest.mark.parametrize(
@@ -247,6 +265,7 @@ def test_sse_accumulates_typed_tool_arguments_and_detects_wrong_value() -> None:
         _chunk(
             {
                 "role": "assistant",
+                "content": case.expected_response["message"]["content"],
                 "tool_calls": [
                     {
                         "index": 0,

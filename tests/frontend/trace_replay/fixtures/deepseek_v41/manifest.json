@@ -1,0 +1,147 @@
+{
+  "schema": "dynamo-frontend-replay/v1",
+  "profile": {
+    "name": "deepseek-v41-flash-bfcl",
+    "model_name": "deepseek-v41-flash",
+    "model": {
+      "repo_id": "deepseek-ai/DeepSeek-V4.1-Flash",
+      "revision": "2cba9e42aa026125f3ed06c6d98c1db82f7ca027",
+      "assets": {
+        "config.json": "8be45ce0476004a3f529fd896115a4a2e800a129ad2d3ec05b16050f52e21879",
+        "tokenizer.json": "c90dfa01249db1be4245780a052ede752e1361c612ac6d08e2bdada7d599476b",
+        "tokenizer_config.json": "6ac8c8dc065ed118161d02dd532749ae3f52c243deac27872134fae2f50d8547"
+      }
+    },
+    "runtime_config": {
+      "tool_call_parser": "deepseek_v41",
+      "reasoning_parser": "deepseek_v41",
+      "context_length": 32768
+    }
+  },
+  "traces": [
+    {
+      "path": "cases.jsonl",
+      "sha256": "f8b82d961ed3a9672ab24e1883639a0d1d965d093e34ce7320bfb4cde7bf3486",
+      "count": 5
+    }
+  ],
+  "provenance": {
+    "benchmark": {
+      "name": "Berkeley Function Calling Leaderboard",
+      "revision": "6ea57973c7a6097fd7c5915698c54c17c5b1b6c8",
+      "license": "Apache-2.0",
+      "selection": "first BFCL turn of the five selected cases; original captured thinking settings preserved"
+    },
+    "capture": {
+      "engine": "vLLM 0.30.1rc1.dev493+gac9126e58",
+      "engine_image": {
+        "image_ref": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0-deepseek-v4.1-flash-dev.2-post.1",
+        "image_digest": "sha256:a16bc24d474919b5305a9d53a306ae27e35f0c21fcf54430a2047be39cc963b4"
+      },
+      "recorded": [
+        "request bytes (SHA-256)",
+        "prompt token IDs",
+        "output token IDs including EOS",
+        "terminal evidence"
+      ],
+      "request_adaptations": [
+        "BFCL source adaptations are retained per record in reference.capture.bfcl",
+        "remove capture-only return_token_ids",
+        "select unary or SSE transport at execution time"
+      ],
+      "worker_schedule": "synthetic rechunking of captured output IDs; original streaming timing is not asserted",
+      "date_utc": "2026-11-10",
+      "count": 5,
+      "terminal_normalization": "All five outputs retain EOS token 1 and null stop reason; API stop/tool_calls maps to worker stop using that EOS evidence; frontend derives API tool_calls independently"
+    },
+    "prompt_audit": {
+      "schema": "dynamo-frontend-replay-prompt-audit/v1",
+      "source": {
+        "repo_id": "deepseek-ai/DeepSeek-V4.1-Flash",
+        "revision": "2cba9e42aa026125f3ed06c6d98c1db82f7ca027",
+        "encoder_sha256": "502bdaec8a3fd88ebc24c4721a7038fbe42f2063c664638127056107920035c1",
+        "tokenizer_sha256": "c90dfa01249db1be4245780a052ede752e1361c612ac6d08e2bdada7d599476b"
+      },
+      "method": "pinned official vendor encode_messages plus pinned native tokenizer; exact ID comparison against independently captured stock-engine prompt IDs",
+      "tokenizers_version": "0.21.4",
+      "requests_sha256": "035fdceaafc82b96ab3cd8e9ff96433f711f577c529a932ca37f634108b30f7d",
+      "count": 5,
+      "request_set_scope": {
+        "kind": "full_upstream_capture",
+        "count": 9392,
+        "note": "requests_sha256 identifies the complete upstream capture request set, not a five-request document"
+      },
+      "path": "prompt-audit.json.gz",
+      "sha256": "c809c36c9e10810189cf1a0242b184959071358fdc56e875e4cd6d50146c071d"
+    },
+    "golden_review": {
+      "ids": [
+        "bfcl.simple_python_245.thinking-disabled",
+        "bfcl.multiple_2.thinking-enabled",
+        "bfcl.parallel_82.thinking-enabled",
+        "bfcl.parallel_multiple_48.thinking-disabled",
+        "bfcl.irrelevance_28.thinking-disabled"
+      ],
+      "approved_capture_identities": {
+        "source": {
+          "repo_id": "deepseek-ai/DeepSeek-V4.1-Flash",
+          "revision": "2cba9e42aa026125f3ed06c6d98c1db82f7ca027",
+          "encoder_sha256": "502bdaec8a3fd88ebc24c4721a7038fbe42f2063c664638127056107920035c1",
+          "tokenizer_sha256": "c90dfa01249db1be4245780a052ede752e1361c612ac6d08e2bdada7d599476b"
+        },
+        "records": {
+          "bfcl.simple_python_245.thinking-disabled": {
+            "request_bytes_sha256": "f697dcd890a5f2f3aeea68f65bb4d5af9f8d649a6a0d3f4d78be852dc3fb834e",
+            "prompt_token_ids_sha256": "e84c7dbe36d2479183367b4dfa8ab305477f3870dbd8894d11fcd1c17711558c",
+            "output_token_ids_sha256": "c790a809604a63da39ac23b4bb9a0c620149415ae8dae57a79762424a0ac3370"
+          },
+          "bfcl.multiple_2.thinking-enabled": {
+            "request_bytes_sha256": "acbdf4f46cf0ec8cb2d09c613330b08b56d1ff721a54f4b0c2b57b52582e51b3",
+            "prompt_token_ids_sha256": "78f618b0236b2cd01bb8abeee80689a673e4bb278b39bf14b5a02f084a7d1e92",
+            "output_token_ids_sha256": "0f460f69f9f1c4a8da3f3193267d05b240ca680c702f5717b546a13a5cc947ee"
+          },
+          "bfcl.parallel_82.thinking-enabled": {
+            "request_bytes_sha256": "8dddcc1617b56d682c00afbac935d70b0c7c3bb493a01994e37799cda240d09a",
+            "prompt_token_ids_sha256": "a1e534fe6aa035c1d7e68e98977667ce75ef99a5c652ba1714f8e2a76d252604",
+            "output_token_ids_sha256": "28fdb7699c3806ab3b3e20ddfd87429548c0d696c29c5678aba1432c0d319bff"
+          },
+          "bfcl.parallel_multiple_48.thinking-disabled": {
+            "request_bytes_sha256": "0991d7310ed9501a5bbf45fe9faccfb4e7ba7229b5c87a55067af09c4bb61efc",
+            "prompt_token_ids_sha256": "64bd0d852d4d834cd60d58225c16407c66e7af40e05dea51af2f99c576223b4a",
+            "output_token_ids_sha256": "e3da25eb203fa4d57df6319ad370f711031660f20408796457baff4db5eeb42f"
+          },
+          "bfcl.irrelevance_28.thinking-disabled": {
+            "request_bytes_sha256": "6a7a2a5f81dc2eef17d3fcd66c93d9b660307152a9bce4b2f0417e4a0c058e89",
+            "prompt_token_ids_sha256": "f38bb6b6c433f6864a0e8017e1e12c2b0a412bbe13dcba9f07a5c4e3682b6ea2",
+            "output_token_ids_sha256": "9c4fd48c293b9fd6c7a5e4e709882a0c65cd878a7d9fdc16b9dfbb0d2a91153d"
+          }
+        }
+      },
+      "method": "independent pinned vendor encoder and tokenizer, never candidate Dynamo output",
+      "encoder": {
+        "path": "encoding/encoding.py",
+        "repo_id": "deepseek-ai/DeepSeek-V4.1-Flash",
+        "revision": "2cba9e42aa026125f3ed06c6d98c1db82f7ca027",
+        "sha256": "502bdaec8a3fd88ebc24c4721a7038fbe42f2063c664638127056107920035c1"
+      },
+      "tokenizers_version": "0.21.4",
+      "prompt_check": "All five selected prompt arrays match the pinned offline vendor audit receipt; the complete source audit covers 9392 requests",
+      "response_check": "all five fresh V4.1 completion parse/render byte roundtrips include EOS; render at continuation index with captured reasoning effort; consume structural two-newline DSML separator; project empty channels to null",
+      "reference_policy": "Peer parsed messages remain diagnostic; these five response expectations were independently reviewed against the pinned vendor reference"
+    },
+    "source_selection": {
+      "method": "original JSONL record bytes selected verbatim, including original number spelling and whitespace",
+      "source_commit": "08ad3b8c44967d8bd36f3cd5d9bb4a59dbe22e66",
+      "source_manifest_sha256": "4bf6599f7a888fc66cb491ef410a6c3aef7dd895c11886ae412a3376a0241f18",
+      "source_prompt_audit_sha256": "7680afb9c820addbadf5d34e32c8f5c53b4cdf9fee635f8f60d52360f313cfe8",
+      "source_capture_count": 9392,
+      "selected_ids": [
+        "bfcl.simple_python_245.thinking-disabled",
+        "bfcl.multiple_2.thinking-enabled",
+        "bfcl.parallel_82.thinking-enabled",
+        "bfcl.parallel_multiple_48.thinking-disabled",
+        "bfcl.irrelevance_28.thinking-disabled"
+      ]
+    }
+  }
+}

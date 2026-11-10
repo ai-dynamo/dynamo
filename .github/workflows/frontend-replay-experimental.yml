@@ -25,7 +25,7 @@ concurrency:
 
 jobs:
   replay:
-    name: Five public DeepSeek V4 traces (advisory)
+    name: Five public DeepSeek V4.1 traces (advisory)
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.head_branch == 'main' &&
@@ -33,7 +33,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 150
     env:
-      REPLAY_CORPUS: tests/frontend/trace_replay/fixtures/deepseek_v4/manifest.json
+      REPLAY_CORPUS: tests/frontend/trace_replay/fixtures/deepseek_v41/manifest.json
     steps:
       - name: Checkout the reviewed harness
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2

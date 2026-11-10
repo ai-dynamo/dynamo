@@ -3,7 +3,7 @@
 
 # Experimental frontend trace replay
 
-Replay recorded requests through the installed `dynamo.frontend`, observe the actual `PreprocessedRequest` at a registered CPU token worker, and inject recorded raw worker output before frontend decoding and parsing. This exercises the real HTTP, renderer, tokenizer, stop filter, reasoning/tool parser and response aggregation paths without model weights, GPUs or an inference engine. The initial public corpus contains five DeepSeek V4 BFCL captures; the same runner accepts a pinned DeepSeek V4.1 profile.
+Replay recorded requests through the installed `dynamo.frontend`, observe the actual `PreprocessedRequest` at a registered CPU token worker, and inject recorded raw worker output before frontend decoding and parsing. This exercises the real HTTP, renderer, tokenizer, stop filter, reasoning/tool parser and response aggregation paths without model weights, GPUs or an inference engine. The public corpus contains five independently reviewed DeepSeek V4.1 Flash BFCL captures.
 
 The checks establish the covered frontend contracts, not model quality or backend correctness. They do not exercise real sampling, engine grammar enforcement, GPU kernels, multimodal processing or distributed KV transfer. Whole-output and one-token schedules are synthetic regroupings of real generated IDs; they make no timing claim.
 
@@ -13,11 +13,11 @@ Use the target image's Python interpreter. The helper checkout must supply `test
 
 ```bash
 python -m tests.frontend.trace_replay prepare-assets \
-  --corpus tests/frontend/trace_replay/fixtures/deepseek_v4 \
+  --corpus tests/frontend/trace_replay/fixtures/deepseek_v41 \
   --model-dir /tmp/replay-model
 
 python -m tests.frontend.trace_replay run \
-  --corpus tests/frontend/trace_replay/fixtures/deepseek_v4 \
+  --corpus tests/frontend/trace_replay/fixtures/deepseek_v41 \
   --model-dir /tmp/replay-model \
   --output-dir /tmp/replay-results-unique \
   --modes unary,sse --schedules whole,one_token --concurrency 4
@@ -36,7 +36,7 @@ The default public run performs five cases × two modes × two schedules = 20 ex
 Manifest schema is `dynamo-frontend-replay/v1`:
 
 ```json
-{"schema":"dynamo-frontend-replay/v1","profile":{"name":"deepseek-v4","model_name":"deepseek-v4-flash","model":{"repo_id":"org/model","revision":"<40-character commit>","assets":{"config.json":"<sha256>","generation_config.json":"<sha256>","tokenizer.json":"<sha256>","tokenizer_config.json":"<sha256>"}},"runtime_config":{"tool_call_parser":"deepseek_v4","reasoning_parser":"deepseek_v4","context_length":32768}},"traces":[{"path":"cases.jsonl","sha256":"<sha256>","count":5}]}
+{"schema":"dynamo-frontend-replay/v1","profile":{"name":"deepseek-v41","model_name":"deepseek-v41-flash","model":{"repo_id":"deepseek-ai/DeepSeek-V4.1-Flash","revision":"<40-character commit>","assets":{"config.json":"<sha256>","tokenizer.json":"<sha256>","tokenizer_config.json":"<sha256>"}},"runtime_config":{"tool_call_parser":"deepseek_v41","reasoning_parser":"deepseek_v41","context_length":32768}},"traces":[{"path":"cases.jsonl","sha256":"<sha256>","count":5}]}
 ```
 
 Each JSONL object has `id`, `source`, `request`, `replay.worker_events` and `expect.preprocessed`. `source.kind` is required and is exactly one of `benchmark`, `production`, `custom_report`, `agent_report`, `authored`. `source.context` is an optional object; its optional `ref`, `pr`, `issue` values are strings. Both `{"kind":"authored"}` and `{"kind":"benchmark","context":{}}` are valid. No URL or nonempty-string constraint is imposed on context values.
@@ -47,7 +47,7 @@ Each JSONL object has `id`, `source`, `request`, `replay.worker_events` and `exp
 
 Optional `expect.response` contains `http_status`, a canonical assistant `message`, `finish_reason` and independently expected usage fields. Canonical tool calls contain `type:function` and `function:{name,arguments}`, with typed JSON arguments rather than generated call IDs. `reference.message` is retained as diagnostic provenance, never promoted to a golden. A missing response expectation is reported as `unjudged` even if consistency checks pass.
 
-The reviewed V4 goldens use the pinned vendor encoder, not candidate Dynamo output or unreviewed peer parsing. In particular, the vendor format owns the two newlines before a DSML call block, so those newlines are absent from the two parallel-call content goldens. Reference and capture provenance are recorded in the fixture manifest and [NOTICE.md](fixtures/NOTICE.md).
+The reviewed V4.1 goldens use the pinned vendor encoder, not candidate Dynamo output or unreviewed peer parsing. The five original JSONL records are preserved byte-for-byte. The vendor format owns the two newlines before a DSML call block, so those structural newlines are excluded from visible content. A five-record prompt-audit receipt and approved request/prompt/output identities accompany the fixtures. Its request-set hash explicitly identifies the full upstream capture set, while its record count covers only these five cases. Reference and capture provenance are recorded in the fixture manifest and [NOTICE.md](fixtures/NOTICE.md).
 
 ## Judgments and results
 
