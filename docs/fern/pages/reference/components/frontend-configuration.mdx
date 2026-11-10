@@ -1049,9 +1049,9 @@ A frontend that serves text-only models can refuse media before routing. A refus
 
 ### Client multimodal kwargs
 
-`/v1/chat/completions` accepts `mm_processor_kwargs` and `media_io_kwargs` in the request body and forwards them to the worker. A request value overrides the worker's own `--mm-processor-kwargs`, so a client can raise a limit such as `max_pixels` and increase the image token count, encoder memory, and processor-cache size. The frontend can refuse these fields before it fetches or decodes any media. A refused request never reaches a worker and receives HTTP `400` with a message that starts with `Validation: `.
+`/v1/chat/completions` accepts `mm_processor_kwargs` and `media_io_kwargs` in the request body, and `/v1/pooling` and `/v1/classify` accept `mm_processor_kwargs`. The frontend forwards them to the worker. A request value overrides the worker's own `--mm-processor-kwargs`, so a client can raise a limit such as `max_pixels` and increase the image token count, encoder memory, and processor-cache size. The frontend can refuse these fields before it fetches or decodes any media. A refused request never reaches a worker and receives HTTP `400` with a message that starts with `Validation: `.
 
-This policy covers `/v1/chat/completions`. It does not apply to `/v1/pooling` or `/v1/classify`, which also accept `mm_processor_kwargs`.
+The policy applies to all three endpoints. On `/v1/pooling` and `/v1/classify` the `400` message has no `Validation: ` prefix, like their other request errors.
 
 <ParamField path="DYN_MM_REQUEST_KWARGS_POLICY" type="string" default="allow">
   How the frontend treats client-supplied `mm_processor_kwargs` and `media_io_kwargs`:

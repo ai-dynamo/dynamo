@@ -538,6 +538,7 @@ fn strict_tool_requests(function: Value) -> [(&'static str, Value); 3] {
     ]
 }
 
+/// `BASE_ENV` with the multimodal kwargs policy and allowlist set.
 fn mm_policy_env(
     policy: &'static str,
     allowlist: Option<&'static str>,
@@ -551,6 +552,7 @@ fn mm_policy_env(
     env
 }
 
+/// A minimal chat request with `extra` fields merged into the body.
 fn mm_chat_request(extra: Value) -> Value {
     let mut body = json!({"model":MODEL,"messages":[{"role":"user","content":"hi"}]});
     body.as_object_mut()
@@ -559,6 +561,7 @@ fn mm_chat_request(extra: Value) -> Value {
     body
 }
 
+/// A one-chunk engine script that finishes with "ok".
 fn mm_ok_script() -> Script {
     vec![Annotated::from_data(
         serde_json::from_value(json!({

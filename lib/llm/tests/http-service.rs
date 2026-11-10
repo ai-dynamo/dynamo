@@ -3610,6 +3610,99 @@ async fn test_pooling_family_validation_errors_are_metered() {
     task.await.unwrap().unwrap();
 }
 
+/// `/v1/pooling` and `/v1/classify` apply the multimodal kwargs policy to
+/// `mm_processor_kwargs` before reaching the engine, and meter the 400s.
+#[tokio::test]
+async fn test_pooling_family_mm_kwargs_policy() {
+    use dynamo_llm::http::service::service_v2::MmRequestKwargsPolicy;
+
+    for (policy, accepted_key) in [
+        (MmRequestKwargsPolicy::Deny, None),
+        (
+            MmRequestKwargsPolicy::Allowlist(vec!["use_audio_in_video".to_string()]),
+            Some("use_audio_in_video"),
+        ),
+    ] {
+        let (listener, port) = bind_random_port().await;
+        let service = HttpService::builder()
+            .port(port)
+            .mm_request_kwargs_policy(policy)
+            .build()
+            .unwrap();
+        service
+            .enable_model_endpoint(dynamo_llm::endpoint_type::EndpointType::Classify, true)
+            .unwrap();
+        service
+            .enable_model_endpoint(dynamo_llm::endpoint_type::EndpointType::Pooling, true)
+            .unwrap();
+        let state = service.state_clone();
+        let token = CancellationToken::new();
+        let cancel_token = token.clone();
+        let task =
+            tokio::spawn(async move { service.run_with_listener(token.clone(), listener).await });
+        wait_for_service_ready(port).await;
+
+        let card = ModelDeploymentCard::with_name_only("foo");
+        let engine = Arc::new(UncalledPoolingFamilyEngine {});
+        let manager = state.manager();
+        manager
+            .add_classify_model("foo", card.mdcsum(), engine.clone())
+            .unwrap();
+        manager
+            .add_pooling_model("foo", card.mdcsum(), engine)
+            .unwrap();
+        let metrics = state.metrics_clone();
+        let registry = Registry::new();
+        metrics.register(&registry).unwrap();
+        let client = reqwest::Client::new();
+
+        for (path, endpoint) in [
+            ("classify", Endpoint::Classify),
+            ("pooling", Endpoint::Pooling),
+        ] {
+            let response = client
+                .post(format!("http://localhost:{port}/v1/{path}"))
+                .json(&serde_json::json!({
+                    "model": "foo", "input": "hi", "mm_processor_kwargs": {"max_pixels": 1}
+                }))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{path}");
+            let body: serde_json::Value = response.json().await.unwrap();
+            let message = body["message"].as_str().unwrap();
+            assert!(message.contains("`mm_processor_kwargs`"), "{message}");
+            assert!(!message.starts_with("Validation: "), "{message}");
+            compare_counter(
+                &metrics,
+                "foo",
+                &endpoint,
+                &RequestType::Unary,
+                &Status::Error,
+                &ErrorType::Validation,
+                1,
+            );
+
+            // An allowlisted key passes validation and reaches the (failing)
+            // engine, so the response is not the policy's 400.
+            if let Some(key) = accepted_key {
+                let response = client
+                    .post(format!("http://localhost:{port}/v1/{path}"))
+                    .json(&serde_json::json!({
+                        "model": "foo", "input": "hi", "mm_processor_kwargs": {key: true}
+                    }))
+                    .send()
+                    .await
+                    .unwrap();
+                assert_ne!(response.status(), StatusCode::BAD_REQUEST, "{path}");
+            }
+        }
+
+        cancel_token.cancel();
+        task.await.unwrap().unwrap();
+    }
+}
+
 // =============================================================================
 // Images route error surfacing: worker exception -> annotated error event ->
 // stream fold -> from_anyhow classification -> HTTP status/body.

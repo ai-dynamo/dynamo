@@ -2197,6 +2197,14 @@ async fn classify(
         return Err(err_response);
     }
 
+    if let Err(err_response) = validate_pooling_family_mm_kwargs(
+        state.mm_request_kwargs_policy(),
+        request.mm_processor_kwargs.as_ref(),
+    ) {
+        inflight.mark_error(ErrorType::Validation);
+        return Err(err_response);
+    }
+
     // Create http_queue_guard early - tracks time waiting to be processed
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
 
@@ -2551,6 +2559,14 @@ async fn pooling(
     // `Validation` (anything else falls back to `Internal`). These messages
     // stay verbatim vLLM-compatible, so the prefix is not an option here.
     if let Err(err_response) = validate_pooling_cache_salt(request.cache_salt.as_deref()) {
+        inflight.mark_error(ErrorType::Validation);
+        return Err(err_response);
+    }
+
+    if let Err(err_response) = validate_pooling_family_mm_kwargs(
+        state.mm_request_kwargs_policy(),
+        request.mm_processor_kwargs.as_ref(),
+    ) {
         inflight.mark_error(ErrorType::Validation);
         return Err(err_response);
     }
@@ -4565,6 +4581,20 @@ pub fn validate_chat_completion_unsupported_fields(
     Ok(())
 }
 
+/// Builds the 400 for a field `policy` rejected. `prefix` is `VALIDATION_PREFIX`
+/// for chat and empty for the pooling family, whose messages stay vLLM-style.
+fn mm_kwargs_rejection(prefix: &str, field: &str, key: Option<String>) -> ErrorResponse {
+    let message = match key {
+        Some(key) => format!(
+            "{prefix}`{field}` key `{key}` is not allowed by this server's multimodal request kwargs policy"
+        ),
+        None => format!(
+            "{prefix}`{field}` is not allowed by this server's multimodal request kwargs policy"
+        ),
+    };
+    ErrorMessage::from_http_error(ErrorClass::InvalidRequest, HttpError { code: 400, message })
+}
+
 /// Rejects client-supplied `mm_processor_kwargs` and `media_io_kwargs` that
 /// `policy` does not accept. A client value overrides the worker's own
 /// `--mm-processor-kwargs`, so without this a server limit such as `max_pixels`
@@ -4582,21 +4612,25 @@ pub fn validate_chat_completion_mm_kwargs(
     ];
     for (field, value) in fields {
         if let Err(key) = policy.check(value) {
-            let message = match key {
-                Some(key) => format!(
-                    "{VALIDATION_PREFIX}`{field}` key `{key}` is not allowed by this server's multimodal request kwargs policy"
-                ),
-                None => format!(
-                    "{VALIDATION_PREFIX}`{field}` is not allowed by this server's multimodal request kwargs policy"
-                ),
-            };
-            return Err(ErrorMessage::from_http_error(
-                ErrorClass::InvalidRequest,
-                HttpError { code: 400, message },
-            ));
+            return Err(mm_kwargs_rejection(VALIDATION_PREFIX, field, key));
         }
     }
     Ok(())
+}
+
+/// Applies `policy` to the `mm_processor_kwargs` of a `/v1/pooling` or
+/// `/v1/classify` request.
+fn validate_pooling_family_mm_kwargs(
+    policy: &service_v2::MmRequestKwargsPolicy,
+    mm_processor_kwargs: Option<&HashMap<String, serde_json::Value>>,
+) -> Result<(), ErrorResponse> {
+    let Some(map) = mm_processor_kwargs.filter(|map| !map.is_empty()) else {
+        return Ok(());
+    };
+    let value = serde_json::Value::Object(map.clone().into_iter().collect());
+    policy
+        .check(Some(&value))
+        .map_err(|key| mm_kwargs_rejection("", "mm_processor_kwargs", key))
 }
 
 /// Normalizes OpenAI-style reasoning controls before chat completion validation.

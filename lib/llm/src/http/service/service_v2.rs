@@ -432,6 +432,8 @@ impl MmRequestKwargsPolicy {
         )
     }
 
+    /// Builds the policy from the raw values of the policy and allowlist
+    /// environment variables.
     fn parse(
         policy: Result<String, std::env::VarError>,
         allowlist: Result<String, std::env::VarError>,
@@ -453,8 +455,19 @@ impl MmRequestKwargsPolicy {
             "" | "allow" => Self::Allow,
             "deny" => Self::Deny,
             "allowlist" => {
-                let keys: Vec<String> = allowlist
-                    .unwrap_or_default()
+                let raw = match allowlist {
+                    Ok(value) => value,
+                    Err(std::env::VarError::NotPresent) => String::new(),
+                    Err(error @ std::env::VarError::NotUnicode(_)) => {
+                        tracing::error!(
+                            env = env_llm::DYN_MM_REQUEST_KWARGS_ALLOWLIST,
+                            %error,
+                            "invalid multimodal request kwargs allowlist; rejecting client kwargs"
+                        );
+                        String::new()
+                    }
+                };
+                let keys: Vec<String> = raw
                     .split(',')
                     .map(str::trim)
                     .filter(|key| !key.is_empty())
@@ -4196,6 +4209,14 @@ mod tests {
         );
         // A typo fails closed.
         assert_eq!(mm_policy(Some("denny"), None), MmRequestKwargsPolicy::Deny);
+        // A non-unicode allowlist is an empty allowlist, not an unrestricted one.
+        assert_eq!(
+            MmRequestKwargsPolicy::parse(
+                Ok("allowlist".into()),
+                Err(std::env::VarError::NotUnicode("fps".into()))
+            ),
+            MmRequestKwargsPolicy::Allowlist(Vec::new())
+        );
         assert_eq!(
             MmRequestKwargsPolicy::parse(
                 Err(std::env::VarError::NotUnicode("deny".into())),
