@@ -504,12 +504,76 @@ fn worker_projection(c: &mut Criterion) {
     group.finish();
 }
 
+/// Load projection with active prompts: every rank holds requests behind one fleet-wide
+/// shared prefix, as a common system prompt leaves it. `overlap` passes the request's blocks,
+/// so the pass also finds each rank's overlap with its active prompts, which only `LOAD` rows
+/// read; `no_overlap` reads each rank's load alone, as the scheduler does when no policy
+/// component declares `LOAD`.
+fn worker_projection_active_prompts(c: &mut Criterion) {
+    const SHARED_BLOCKS: u64 = 64;
+    const SUFFIX_BLOCKS: u64 = 64;
+    const REQUESTS_PER_RANK: u64 = 8;
+
+    let mut group = c.benchmark_group("worker_projection_active_prompts");
+    group.warm_up_time(Duration::from_secs(2));
+    group.measurement_time(Duration::from_secs(5));
+    group.sample_size(50);
+    for count in [2_048, 8_192] {
+        let slots = dynamo_slot_tracker::ActiveSequencesMultiWorker::new(
+            dynamo_slot_tracker::NoopSequencePublisher,
+            16,
+            (0..count).map(|id| (id, (0, 1))).collect(),
+            false,
+            0,
+            "bench",
+        );
+        let now = tokio::time::Instant::now();
+        let shared: Vec<u64> = (0..SHARED_BLOCKS).collect();
+        let mut next_hash = SHARED_BLOCKS;
+        let mut prompt = || {
+            let suffix = next_hash..next_hash + SUFFIX_BLOCKS;
+            next_hash += SUFFIX_BLOCKS;
+            shared.iter().copied().chain(suffix).collect::<Vec<_>>()
+        };
+        for worker_id in 0..count {
+            for request in 0..REQUESTS_PER_RANK {
+                slots
+                    .add_request(
+                        dynamo_slot_tracker::SequenceRequest {
+                            request_id: format!("{worker_id}-{request}"),
+                            token_sequence: Some(prompt()),
+                            track_prefill_tokens: true,
+                            expected_output_tokens: None,
+                            prefill_load_hint: None,
+                            worker: WorkerWithDpRank::from_worker_id(worker_id),
+                            lora_name: None,
+                        },
+                        now,
+                    )
+                    .unwrap();
+            }
+        }
+        let query = prompt();
+        let mut projections = FxHashMap::default();
+        for (name, token_sequence) in [("overlap", Some(query.as_slice())), ("no_overlap", None)] {
+            group.bench_function(BenchmarkId::new(name, count), |b| {
+                b.iter(|| {
+                    slots.project_worker_loads_into(token_sequence, now, &mut projections, None);
+                    black_box(&projections);
+                })
+            });
+        }
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     worker_selection,
     custom_worker_selection,
     unused_preferred_taint_metadata,
     default_policy_wrapper,
-    worker_projection
+    worker_projection,
+    worker_projection_active_prompts
 );
 criterion_main!(benches);
