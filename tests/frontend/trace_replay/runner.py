@@ -526,7 +526,13 @@ def _baseline(
         raise ReplayError("baseline summary must be an object")
     if not isinstance(summary.get("identity"), dict):
         # CLI preflight failures cannot compute an identity or coverage yet.
-        if type(summary.get("exit_code")) is int and summary["exit_code"] == 2:
+        if (
+            type(summary.get("exit_code")) is int and summary["exit_code"] == 2
+        ) or summary.get("status") in (
+            "infra_error",
+            "target_unavailable",
+            "provenance_rejected",
+        ):
             return "baseline_incomplete", {}
         raise ReplayError("baseline summary requires an identity object")
     if not same_json(summary.get("identity"), identity):

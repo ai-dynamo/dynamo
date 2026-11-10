@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -34,14 +35,24 @@ ACCEPT = ", ".join(
 )
 
 
+class ProvenanceError(ValueError):
+    def __init__(self, message: str, reason: str):
+        super().__init__(message)
+        self.reason = reason
+
+
 def verify_run(value: Any, repository: str, run_id: str) -> dict[str, Any]:
     """Only completed default-branch nightlies can supply publication evidence."""
     if not re.fullmatch(r"[1-9][0-9]*", run_id):
-        raise ValueError("publication run ID must be a positive integer")
+        raise ProvenanceError(
+            "publication run ID must be a positive integer", "invalid_run_id"
+        )
     if (
         not isinstance(value, dict)
         or type(value.get("id")) is not int
         or value["id"] != int(run_id)
+        or not isinstance(value.get("repository"), dict)
+        or not isinstance(value.get("head_repository"), dict)
         or value.get("repository", {}).get("full_name") != repository
         or value.get("head_repository", {}).get("full_name") != repository
         or value.get("path") != ".github/workflows/nightly-ci.yml"
@@ -50,11 +61,15 @@ def verify_run(value: Any, repository: str, run_id: str) -> dict[str, Any]:
         or value.get("event") not in ("schedule", "workflow_dispatch")
         or value.get("status") != "completed"
         or value.get("pull_requests") != []
-        or not COMMIT.fullmatch(value.get("head_sha", ""))
+        or not isinstance(value.get("head_sha"), str)
+        or not COMMIT.fullmatch(value["head_sha"])
         or type(value.get("run_attempt")) is not int
         or value["run_attempt"] < 1
     ):
-        raise ValueError("publication evidence must come from a completed main nightly")
+        raise ProvenanceError(
+            "publication evidence must come from a completed main nightly",
+            "ineligible_nightly_run",
+        )
     return {
         key: value[key]
         for key in (
@@ -73,25 +88,55 @@ def verify_run(value: Any, repository: str, run_id: str) -> dict[str, Any]:
     }
 
 
-def validate_run(repository: str, run_id: str, output: Path) -> None:
+def validate_run(
+    repository: str, run_id: str, output: Path, target: Path, event_attempt: str = ""
+) -> int:
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
-        raise ValueError("invalid GitHub repository")
+        raise ProvenanceError("invalid GitHub repository", "invalid_repository")
     if not re.fullmatch(r"[1-9][0-9]*", run_id):
-        raise ValueError("publication run ID must be a positive integer")
-    request = urllib.request.Request(
-        f"https://api.github.com/repos/{repository}/actions/runs/{run_id}",
-        headers={
-            "Accept": "application/vnd.github+json",
-            "Authorization": "Bearer " + os.environ["GITHUB_TOKEN"],
-            "User-Agent": "dynamo-frontend-replay",
-        },
-    )
+        raise ProvenanceError(
+            "publication run ID must be a positive integer", "invalid_run_id"
+        )
+    if event_attempt and not re.fullmatch(r"[1-9][0-9]*", event_attempt):
+        raise ProvenanceError("invalid triggering run attempt", "invalid_run_attempt")
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "Authorization": "Bearer " + os.environ["GITHUB_TOKEN"],
+        "User-Agent": "dynamo-frontend-replay",
+    }
+    base = f"https://api.github.com/repos/{repository}/actions/runs/{run_id}"
+    url = base + f"/attempts/{event_attempt}" if event_attempt else base
+    request = urllib.request.Request(url, headers=headers)
     with urllib.request.urlopen(request, timeout=30) as response:
         metadata = verify_run(json.load(response), repository, run_id)
+    if event_attempt and metadata["run_attempt"] != int(event_attempt):
+        raise ProvenanceError(
+            "nightly run attempt differs from triggering event", "run_attempt_mismatch"
+        )
     write_json(output, metadata)
+    artifact_name = f"frontend-replay-publication-{metadata['run_attempt']}"
+    query = urllib.parse.urlencode({"name": artifact_name, "per_page": 100})
+    request = urllib.request.Request(base + "/artifacts?" + query, headers=headers)
+    with urllib.request.urlopen(request, timeout=30) as response:
+        artifacts = json.load(response).get("artifacts", [])
+    if not any(
+        item.get("name") == artifact_name and item.get("expired") is False
+        for item in artifacts
+    ):
+        write_json(
+            target,
+            {
+                "status": "target_unavailable",
+                "reason": "publication_not_rerun_in_attempt"
+                if metadata["run_attempt"] > 1
+                else "publication_descriptor_missing",
+            },
+        )
+        return 2
     with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as stream:
         stream.write(f"run_id={metadata['id']}\n")
         stream.write(f"run_attempt={metadata['run_attempt']}\n")
+    return 0
 
 
 def write_json(path: Path, data: dict[str, Any]) -> None:
@@ -200,20 +245,24 @@ def resolve(
     descriptor = json.loads(descriptor_path.read_text(encoding="utf-8"))
     metadata = json.loads(run_metadata_path.read_text(encoding="utf-8"))
     if (
-        descriptor.get("schema") != SCHEMA
+        not isinstance(descriptor, dict)
+        or descriptor.get("schema") != SCHEMA
         or descriptor.get("repository") != REPOSITORY
         or not COMMIT.fullmatch(descriptor.get("source_sha", ""))
         or not TAG.fullmatch(descriptor.get("tag", ""))
         or descriptor["tag"][9:] != descriptor["source_sha"][:7]
     ):
-        raise ValueError("invalid publication descriptor")
+        raise ProvenanceError(
+            "invalid publication descriptor", "invalid_publication_descriptor"
+        )
     if (
         descriptor.get("run_id") != str(metadata["id"])
         or descriptor.get("run_attempt") != str(metadata["run_attempt"])
         or descriptor["source_sha"] != metadata["head_sha"]
     ):
-        raise ValueError(
-            "publication descriptor does not match its trusted nightly run"
+        raise ProvenanceError(
+            "publication descriptor does not match its trusted nightly run",
+            "publication_run_identity_mismatch",
         )
     expected = descriptor.get("index_digest", "") or ""
     if descriptor.get("frontend_staged") is not True or not DIGEST.fullmatch(expected):
@@ -253,7 +302,7 @@ def resolve(
                     with open(github_output, "a", encoding="utf-8") as stream:
                         stream.write(f"image={target['image']}\n")
                 return 0
-        except (OSError, ValueError, KeyError):
+        except (OSError, ValueError, KeyError, http.client.HTTPException):
             pass
         if time.monotonic() >= deadline:
             write_json(
@@ -273,15 +322,22 @@ def ensure_report(directory: Path, target: Path | None = None) -> None:
         observation = (
             json.loads(target.read_text()) if target and target.is_file() else {}
         )
+        rejected = observation.get("status") == "provenance_rejected"
         unavailable = observation.get("status") == "target_unavailable" or (
             target is not None and not target.is_file()
         )
         write_json(
             directory / "summary.json",
             {
-                "status": "target_unavailable" if unavailable else "infra_error",
-                "reason": observation.get("reason", "publication_evidence_unavailable")
+                "schema": "dynamo-frontend-replay-result/v1",
+                "exit_code": 2,
+                "status": "provenance_rejected"
+                if rejected
+                else "target_unavailable"
                 if unavailable
+                else "infra_error",
+                "reason": observation.get("reason", "publication_evidence_unavailable")
+                if unavailable or rejected
                 else "replay_did_not_complete",
                 "executions": 0,
             },
@@ -305,6 +361,8 @@ def main() -> int:
     trusted.add_argument("--run-id", required=True)
     trusted.add_argument("--repository", required=True)
     trusted.add_argument("--output", type=Path, required=True)
+    trusted.add_argument("--target", type=Path, required=True)
+    trusted.add_argument("--event-attempt", default="")
     verify = commands.add_parser("resolve")
     verify.add_argument("--descriptor", type=Path, required=True)
     verify.add_argument("--run-metadata", type=Path, required=True)
@@ -315,20 +373,40 @@ def main() -> int:
     report.add_argument("--directory", type=Path, required=True)
     report.add_argument("--target", type=Path)
     args = parser.parse_args()
-    if args.command == "record":
-        record(args.output)
-    elif args.command == "validate-run":
-        validate_run(args.repository, args.run_id, args.output)
-    elif args.command == "resolve":
-        return resolve(
-            args.descriptor,
-            args.output,
-            args.platform,
-            args.wait_seconds,
-            args.run_metadata,
+    try:
+        if args.command == "record":
+            record(args.output)
+        elif args.command == "validate-run":
+            return validate_run(
+                args.repository,
+                args.run_id,
+                args.output,
+                args.target,
+                args.event_attempt,
+            )
+        elif args.command == "resolve":
+            return resolve(
+                args.descriptor,
+                args.output,
+                args.platform,
+                args.wait_seconds,
+                args.run_metadata,
+            )
+        else:
+            ensure_report(args.directory, args.target)
+    except (ValueError, KeyError, TypeError) as exc:
+        if args.command not in ("validate-run", "resolve"):
+            raise
+        write_json(
+            args.target if args.command == "validate-run" else args.output,
+            {
+                "status": "provenance_rejected",
+                "reason": exc.reason
+                if isinstance(exc, ProvenanceError)
+                else "invalid_publication_evidence",
+            },
         )
-    else:
-        ensure_report(args.directory, args.target)
+        return 2
     return 0
 
 

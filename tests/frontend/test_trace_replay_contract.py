@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import copy
 import gzip
+import subprocess
+import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
@@ -51,6 +53,31 @@ pytestmark = [
     pytest.mark.core,
     pytest.mark.parallel,
 ]
+
+
+def test_publication_preflight_failure_is_an_incomplete_baseline(
+    tmp_path: Path,
+) -> None:
+    helper = (
+        Path(__file__).resolve().parents[2]
+        / ".github/scripts/frontend_replay_publication.py"
+    )
+    subprocess.run(
+        [sys.executable, str(helper), "ensure-report", "--directory", str(tmp_path)],
+        check=True,
+    )
+    assert _baseline(tmp_path, {"harness": "current"}, set()) == (
+        "baseline_incomplete",
+        {},
+    )
+    # Old artifacts used the status without exit_code; they must also remain unjudged.
+    write_json(
+        tmp_path / "summary.json", {"status": "target_unavailable", "executions": 0}
+    )
+    assert _baseline(tmp_path, {"harness": "current"}, set()) == (
+        "baseline_incomplete",
+        {},
+    )
 
 
 def test_startup_failure_is_a_junit_error_even_with_zero_executions(

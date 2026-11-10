@@ -4,7 +4,9 @@
 """Publication must select this run's image or report incomplete evaluation."""
 
 import hashlib
+import http.client
 import importlib.util
+import io
 import json
 import os
 import subprocess
@@ -199,6 +201,7 @@ class PublicationTests(unittest.TestCase):
         publication.ensure_report(self.directory)
         summary = json.loads((self.directory / "summary.json").read_text())
         self.assertEqual(summary["status"], "infra_error")
+        self.assertEqual(summary["exit_code"], 2)
         self.assertEqual(summary["executions"], 0)
         self.assertIn('errors="1"', (self.directory / "junit.xml").read_text())
         publication.write_json(self.directory / "summary.json", {"executions": 20})
@@ -266,6 +269,140 @@ class PublicationTests(unittest.TestCase):
         self.assertEqual(summary["status"], "target_unavailable")
         self.assertEqual(summary["reason"], "frontend_not_staged")
         self.assertIn('errors="1"', (self.directory / "junit.xml").read_text())
+
+    def test_missing_descriptor_path_has_incomplete_evaluation_report(self):
+        publication.ensure_report(self.directory, self.target)
+        summary = json.loads((self.directory / "summary.json").read_text())
+        self.assertEqual(summary["status"], "target_unavailable")
+        self.assertEqual(summary["reason"], "publication_evidence_unavailable")
+        self.assertEqual(summary["exit_code"], 2)
+
+    def test_truncated_manifest_response_is_retried_within_budget(self):
+        self.record()
+        with patch.object(
+            publication,
+            "public_manifest",
+            side_effect=[
+                http.client.IncompleteRead(b""),
+                (self.index_digest, self.manifest),
+            ],
+        ) as fetch, patch.object(
+            publication.time, "monotonic", return_value=0
+        ), patch.object(
+            publication.time, "sleep"
+        ):
+            self.assertEqual(
+                publication.resolve(
+                    self.descriptor_path,
+                    self.target,
+                    "linux/amd64",
+                    1,
+                    self.metadata_path,
+                ),
+                0,
+            )
+        self.assertEqual(fetch.call_count, 2)
+
+    def test_missing_attempt_descriptor_is_distinct_from_delayed_promotion(self):
+        for attempt, reason in (
+            (1, "publication_descriptor_missing"),
+            (2, "publication_not_rerun_in_attempt"),
+        ):
+            metadata = {**self.metadata, "run_attempt": attempt}
+            responses = [
+                io.BytesIO(json.dumps(metadata).encode()),
+                io.BytesIO(b'{"artifacts":[]}'),
+            ]
+            with patch.dict(os.environ, {"GITHUB_TOKEN": "test-only"}), patch.object(
+                publication.urllib.request, "urlopen", side_effect=responses
+            ):
+                self.assertEqual(
+                    publication.validate_run(
+                        "ai-dynamo/dynamo",
+                        "42",
+                        self.metadata_path,
+                        self.target,
+                        str(attempt),
+                    ),
+                    2,
+                )
+            self.assertEqual(json.loads(self.target.read_text())["reason"], reason)
+
+    def test_trigger_attempt_is_verified_before_descriptor_download(self):
+        metadata = {**self.metadata, "run_attempt": 2}
+        responses = [
+            io.BytesIO(json.dumps(metadata).encode()),
+            io.BytesIO(
+                b'{"artifacts":[{"name":"frontend-replay-publication-2","expired":false}]}'
+            ),
+        ]
+        output = self.directory / "github-output"
+        with patch.dict(
+            os.environ, {"GITHUB_TOKEN": "test-only", "GITHUB_OUTPUT": str(output)}
+        ), patch.object(
+            publication.urllib.request, "urlopen", side_effect=responses
+        ) as fetch:
+            self.assertEqual(
+                publication.validate_run(
+                    "ai-dynamo/dynamo", "42", self.metadata_path, self.target, "2"
+                ),
+                0,
+            )
+        self.assertTrue(
+            fetch.call_args_list[0].args[0].full_url.endswith("/attempts/2")
+        )
+        self.assertIn("run_attempt=2\n", output.read_text())
+        with patch.dict(os.environ, {"GITHUB_TOKEN": "test-only"}), patch.object(
+            publication.urllib.request,
+            "urlopen",
+            return_value=io.BytesIO(json.dumps(self.metadata).encode()),
+        ):
+            with self.assertRaises(publication.ProvenanceError):
+                publication.validate_run(
+                    "ai-dynamo/dynamo", "42", self.metadata_path, self.target, "2"
+                )
+
+    def test_provenance_rejections_keep_their_own_report_status(self):
+        self.record()
+        publication.write_json(self.metadata_path, {**self.metadata, "run_attempt": 2})
+        commands = [
+            [
+                "validate-run",
+                "--repository",
+                "ai-dynamo/dynamo",
+                "--run-id",
+                "0",
+                "--output",
+                str(self.metadata_path),
+                "--target",
+                str(self.target),
+            ],
+            [
+                "resolve",
+                "--descriptor",
+                str(self.descriptor_path),
+                "--run-metadata",
+                str(self.metadata_path),
+                "--output",
+                str(self.target),
+                "--wait-seconds",
+                "0",
+            ],
+        ]
+        for args in commands:
+            with patch("sys.argv", ["publication.py", *args]), patch.object(
+                publication, "public_manifest"
+            ) as fetch:
+                self.assertEqual(publication.main(), 2)
+                fetch.assert_not_called()
+            self.assertEqual(
+                json.loads(self.target.read_text())["status"], "provenance_rejected"
+            )
+        publication.ensure_report(self.directory, self.target)
+        self.assertEqual(
+            json.loads((self.directory / "summary.json").read_text())["status"],
+            "provenance_rejected",
+        )
 
 
 if __name__ == "__main__":
