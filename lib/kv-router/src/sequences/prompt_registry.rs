@@ -142,6 +142,8 @@ struct WorkerLoadTable {
     // slot so the per-request scan streams the same bytes as before and reads capacity only
     // when a pass judges busy thresholds.
     capacities: Vec<WorkerCapacity>,
+    /// Changes whenever a rank is added or removed.
+    version: u64,
 }
 
 impl WorkerLoadTable {
@@ -189,6 +191,7 @@ impl WorkerLoadTable {
             .or_insert_with(|| WorkerLoadSlot::new(WorkerLoadSnapshot::default()));
         if self.entries.len() > before {
             self.capacities.push(WorkerCapacity::default());
+            self.version += 1;
         }
     }
 
@@ -206,6 +209,7 @@ impl WorkerLoadTable {
         } else {
             self.entries.insert(worker, WorkerLoadSlot::new(load));
             self.capacities.push(WorkerCapacity::default());
+            self.version += 1;
         }
     }
 
@@ -213,6 +217,7 @@ impl WorkerLoadTable {
         // `swap_remove` moves the last entry into the hole; mirror it so indices stay aligned.
         if let Some((index, _, _)) = self.entries.swap_remove_full(&worker) {
             self.capacities.swap_remove(index);
+            self.version += 1;
         }
     }
 }
@@ -467,6 +472,34 @@ impl PromptRegistry {
             full_ranks.record(worker, loads.capacity_at(index), &projection);
             (worker, projection)
         }));
+    }
+
+    /// Changes whenever a rank is added or removed. Read before a projection, a matching
+    /// value later means that projection covered every rank there is.
+    pub(super) fn load_table_version(&self) -> u64 {
+        self.loads.read().version
+    }
+
+    /// One rank's entry in [`Self::project_worker_loads_into`] and its capacity, or None
+    /// when the rank is not registered.
+    pub(super) fn project_worker_load(
+        &self,
+        token_sequence: Option<&[SequenceHash]>,
+        decay_now: Instant,
+        worker: WorkerWithDpRank,
+    ) -> Option<(WorkerLoadProjection, WorkerCapacity)> {
+        let (load, capacity) = {
+            let loads = self.loads.read();
+            let index = loads.entries.get_index_of(&worker)?;
+            (loads.entries[index].snapshot(), loads.capacity_at(index))
+        };
+        let additional_active_blocks = token_sequence.map_or(0, |token_sequence| {
+            self.additional_active_blocks(token_sequence, worker)
+        });
+        Some((
+            load.projection(decay_now, additional_active_blocks),
+            capacity,
+        ))
     }
 
     pub(super) fn worker_load_reader(&self, decay_now: Instant) -> WorkerLoadReader<'_> {

@@ -425,6 +425,11 @@ impl Drop for PreparedCandidates {
 }
 
 impl CandidatePreparer {
+    /// The inputs the rows are prepared for.
+    pub(crate) fn inputs(&self) -> WorkerInputs {
+        self.inputs
+    }
+
     /// Returns `None` when no rank is eligible, so that selection reports why.
     pub(crate) fn prepare<C: WorkerConfigLike>(
         &self,

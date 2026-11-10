@@ -205,6 +205,44 @@ impl FullRankCounts {
         }
     }
 
+    /// A pass judged against `limits`.
+    pub(crate) fn new(limits: BusyThresholds) -> Self {
+        Self {
+            limits,
+            full_ranks: FxHashMap::default(),
+        }
+    }
+
+    pub(crate) fn limits(&self) -> &BusyThresholds {
+        &self.limits
+    }
+
+    /// Judge one rank again after its projection changed from `old` to `new`.
+    pub(crate) fn rejudge(
+        &mut self,
+        worker: WorkerWithDpRank,
+        capacity: WorkerCapacity,
+        old: &WorkerLoadProjection,
+        new: &WorkerLoadProjection,
+    ) {
+        let has_room = |projection: &WorkerLoadProjection| {
+            self.limits
+                .has_room(&WorkerLoadInput::from_projection(*projection), capacity)
+        };
+        match (has_room(old), has_room(new)) {
+            (true, false) => *self.full_ranks.entry(worker.worker_id).or_insert(0) += 1,
+            (false, true) => {
+                if let Some(full) = self.full_ranks.get_mut(&worker.worker_id) {
+                    *full -= 1;
+                    if *full == 0 {
+                        self.full_ranks.remove(&worker.worker_id);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     pub(crate) fn is_empty(&self) -> bool {
         self.full_ranks.is_empty()
     }

@@ -1330,6 +1330,24 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         );
     }
 
+    /// Changes whenever a rank is added or removed; see
+    /// [`PromptRegistry::load_table_version`].
+    pub(crate) fn load_table_version(&self) -> u64 {
+        self.prompt_registry.load_table_version()
+    }
+
+    /// One rank's entry in [`Self::project_worker_loads_into`] and its capacity, or None
+    /// when the rank is not registered.
+    pub(crate) fn project_worker_load(
+        &self,
+        token_sequence: Option<&[SequenceHash]>,
+        decay_now: Instant,
+        worker: WorkerWithDpRank,
+    ) -> Option<(WorkerLoadProjection, WorkerCapacity)> {
+        self.prompt_registry
+            .project_worker_load(token_sequence, decay_now, worker)
+    }
+
     /// `worker`'s `additional_active_blocks` in a projection of `token_sequence`, computed
     /// for that rank alone.
     pub(crate) fn additional_active_blocks(

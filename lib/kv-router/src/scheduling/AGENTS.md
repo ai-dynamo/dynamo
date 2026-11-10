@@ -48,6 +48,14 @@ sequenceDiagram
   reject thresholds, and the request is admitted in the actor turn that received it.
   Otherwise it rebuilds them, and rows for a request that stays queued are dropped
   when that turn ends.
+- With the rows, the handle projects every rank's load for the request, after loading
+  the count of the actor's own writes (bookings, rollbacks, and cleanup releases). In
+  the turn that receives the rows, the actor re-reads each rank it wrote since and
+  selects with that projection. It projects every rank itself when its log no longer
+  holds those writes, when more ranks changed than `PREPARED_LOAD_MAX_STALE` allows, or
+  when the reject thresholds, the overlap the pass counted, or the set of ranks changed.
+  Other tasks' load updates are read when the handle projected, not at selection; they
+  race with selection either way.
 - `SchedulerQueueActor` routes every request through the policy queue and drains the
   ready backlog in the same actor turn, so freed capacity can go to another class's
   queued head under DRR rather than to the arriving request. The direct path remains
@@ -120,8 +128,10 @@ PolicyClassQueue("agents")
 - A failed stream releases its scheduler booking before the error reaches the retry manager. This ordering prevents a later attempt from overlapping stale cleanup.
 - Cleanup that can outlive an admitted request attempt must carry its internal `AttemptId`. `RequestGuard` fences scheduler mutations with `(request_id, attempt_id)` and the admission lifecycle lease remains request-ID-only until handoff.
 - Prepared candidate rows must not hold anything the actor's bookings change. Load
-  inputs are filled on the actor at selection, so each admission still observes
-  every earlier booking.
+  inputs are filled on the actor at selection, from a projection that has re-read every
+  rank the actor wrote since it was taken, so each admission still observes every
+  earlier booking. Record every actor-side write to a rank's load in `ActorWriteLog`
+  after the write, or a prepared projection misses it.
 - `SchedulerQueueActor::admit_one` is the required admission path: compute projected
   load, reject a request whose due time has passed, select a worker, skip the capacity
   reservation if the response receiver is closed or the due time has passed, then reserve

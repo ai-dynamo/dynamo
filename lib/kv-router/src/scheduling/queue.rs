@@ -3,12 +3,14 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::marker::PhantomData;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
+use std::sync::atomic::{
+    AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering as AtomicOrdering,
+};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use arc_swap::ArcSwapOption;
-use crossbeam_queue::SegQueue;
+use crossbeam_queue::{ArrayQueue, SegQueue};
 use parking_lot::Mutex;
 use rustc_hash::{FxHashMap, FxHashSet};
 use tokio::sync::{mpsc, oneshot, watch};
@@ -108,13 +110,100 @@ struct QueuedRequest {
 /// configuration, availability, and overload it reads at selection match the ones
 /// the rows were built from. Load inputs and the ranks past the host's reject
 /// thresholds depend on the actor's earlier bookings, so it fills the loads and drops
-/// the rows of workers whose every rank is full at selection.
+/// the rows of workers whose every rank is full at selection, from the caller's
+/// projection with the ranks it wrote since re-read.
 struct PreparedAdmission {
     candidates: PreparedCandidates,
     /// Configuration generation, loaded before the configuration was read.
     workers_generation: u64,
     available_worker_ids: Option<Arc<WorkerIdSet>>,
     overloaded_worker_ids: Option<Arc<HashSet<WorkerId>>>,
+    load: Option<PreparedLoad>,
+}
+
+/// Projected loads the caller read for its request. The actor re-reads the ranks it
+/// changed since, then selects with them instead of projecting every rank itself.
+struct PreparedLoad {
+    loads: FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
+    /// Counted in the same pass, when reject thresholds were configured.
+    full_ranks: Option<FullRankCounts>,
+    /// The actor's write count, loaded before any rank was read.
+    actor_writes: u64,
+    /// The load table's version, loaded before any rank was read.
+    load_table_version: u64,
+    decay_now: Instant,
+    /// Whether the pass counted each rank's overlap with the request's active prompts.
+    overlap: bool,
+    pool: Arc<LoadMapPool>,
+}
+
+impl Drop for PreparedLoad {
+    fn drop(&mut self) {
+        // Back to the pool for the next preparation; a full pool drops it instead.
+        if self.loads.capacity() > 0 {
+            let _ = self.pool.push(std::mem::take(&mut self.loads));
+        }
+    }
+}
+
+/// Reused projection maps, so a caller's pass refreshes one in place.
+type LoadMapPool = ArrayQueue<FxHashMap<WorkerWithDpRank, WorkerLoadProjection>>;
+const LOAD_MAPS: usize = 64;
+
+/// Ranks the actor counted every write of, by its own bookings and releases, so a prepared
+/// load can be brought up to date with them.
+const ACTOR_WRITE_LOG: usize = 1024;
+/// A prepared load is re-read rank by rank only while at most one rank in this many
+/// changed; past that, projecting every rank costs about as much.
+const PREPARED_LOAD_MAX_STALE: usize = 16;
+
+/// The ranks the actor's own bookings and releases changed, in order. Only the actor
+/// writes or reads the ranks; callers read the count.
+struct ActorWriteLog {
+    /// Writes so far. Stored after each write's load and prompt updates, so a reader that
+    /// loads it first sees every write it counts.
+    count: Arc<AtomicU64>,
+    ranks: Box<[(AtomicU64, AtomicU32)]>,
+}
+
+impl ActorWriteLog {
+    fn new(count: Arc<AtomicU64>) -> Self {
+        Self {
+            count,
+            ranks: (0..ACTOR_WRITE_LOG)
+                .map(|_| (AtomicU64::new(0), AtomicU32::new(0)))
+                .collect(),
+        }
+    }
+
+    /// Count a write to `worker`, once its load and prompt updates are done.
+    fn record(&self, worker: WorkerWithDpRank) {
+        let count = self.count.load(AtomicOrdering::Relaxed);
+        let (worker_id, dp_rank) = &self.ranks[count as usize % ACTOR_WRITE_LOG];
+        worker_id.store(worker.worker_id, AtomicOrdering::Relaxed);
+        dp_rank.store(worker.dp_rank, AtomicOrdering::Relaxed);
+        self.count.store(count + 1, AtomicOrdering::Release);
+    }
+
+    /// How many writes followed the first `since`, and the rank each wrote, or None when
+    /// the log no longer holds them all.
+    fn written_since(
+        &self,
+        since: u64,
+    ) -> Option<(usize, impl Iterator<Item = WorkerWithDpRank> + '_)> {
+        let count = self.count.load(AtomicOrdering::Relaxed);
+        let written = count.checked_sub(since)?;
+        (written <= ACTOR_WRITE_LOG as u64).then(|| {
+            let ranks = (since..count).map(|write| {
+                let (worker_id, dp_rank) = &self.ranks[write as usize % ACTOR_WRITE_LOG];
+                WorkerWithDpRank::new(
+                    worker_id.load(AtomicOrdering::Relaxed),
+                    dp_rank.load(AtomicOrdering::Relaxed),
+                )
+            });
+            (written as usize, ranks)
+        })
+    }
 }
 
 impl PreparedAdmission {
@@ -810,6 +899,9 @@ struct SchedulerQueueActor<
     /// Whether `projected_loads` counts each rank's overlap with the request's active
     /// prompts, which only `LOAD` rows read. Set by `with_projected_loads`.
     projected_overlap: bool,
+    write_log: ActorWriteLog,
+    /// Where prepared loads' maps go once selection is done with them.
+    load_maps: Arc<LoadMapPool>,
     block_size: u32,
     selector: Sel,
     prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
@@ -859,6 +951,11 @@ pub struct SchedulerQueue<
     /// Per-candidate cost capture for admitted selections, installed once by the host.
     selection_trace: Arc<OnceLock<SelectionTraceSpec>>,
     reject_thresholds: Option<RejectThresholdsProvider>,
+    /// Read by callers to project their request's load before the actor selects.
+    slots: Arc<ActiveSequencesMultiWorker<P>>,
+    /// The actor's write count; see `ActorWriteLog`.
+    actor_writes: Arc<AtomicU64>,
+    load_maps: Arc<LoadMapPool>,
     #[allow(clippy::type_complexity)]
     // Covariant type markers, without ownership or auto-trait bounds.
     _marker: PhantomData<fn() -> (P, C, Sel, RF)>,
@@ -994,6 +1091,9 @@ impl<
             selector.candidate_preparer().map(Arc::new),
         ));
         let exclusive_affinity = selector.uses_exclusive_affinity_target();
+        let actor_writes = Arc::new(AtomicU64::new(0));
+        let load_maps = Arc::new(LoadMapPool::new(LOAD_MAPS));
+        let caller_slots = Arc::clone(&slots);
         let actor = SchedulerQueueActor {
             commands: admission_rx,
             pending,
@@ -1014,6 +1114,8 @@ impl<
             projected_loads: FxHashMap::default(),
             full_ranks: FullRankCounts::default(),
             projected_overlap: true,
+            write_log: ActorWriteLog::new(Arc::clone(&actor_writes)),
+            load_maps: Arc::clone(&load_maps),
             block_size,
             selector,
             prefill_load_estimator,
@@ -1048,6 +1150,9 @@ impl<
             non_max_overlap_selection_observer,
             selection_trace,
             reject_thresholds,
+            slots: caller_slots,
+            actor_writes,
+            load_maps,
             _marker: PhantomData,
         }
     }
@@ -1519,12 +1624,47 @@ impl<
             eligibility,
             self.block_size,
         ))?;
+        drop(workers);
+        let load = self.prepare_load(request, preparer.inputs().contains(WorkerInputs::LOAD));
         Some(Box::new(PreparedAdmission {
             candidates,
             workers_generation,
             available_worker_ids,
             overloaded_worker_ids,
+            load: Some(load),
         }))
+    }
+
+    /// Project every rank's load for `request` on the caller task, as the actor would with
+    /// no writes of its own in between.
+    fn prepare_load(&self, request: &SchedulingRequest, overlap: bool) -> PreparedLoad {
+        // Both before any rank is read: a write this count includes is visible below, and a
+        // matching table version at selection means no rank was added or removed since.
+        let actor_writes = self.actor_writes.load(AtomicOrdering::Acquire);
+        let load_table_version = self.slots.load_table_version();
+        let decay_now = Instant::now();
+        let mut loads = self.load_maps.pop().unwrap_or_default();
+        let mut full_ranks = self
+            .reject_thresholds
+            .as_ref()
+            .map(|provider| provider())
+            .filter(BusyThresholds::is_configured)
+            .map(FullRankCounts::new);
+        self.slots.project_worker_loads_into(
+            request.token_seq.as_deref().filter(|_| overlap),
+            decay_now,
+            &mut loads,
+            full_ranks.as_mut(),
+        );
+        PreparedLoad {
+            loads,
+            full_ranks,
+            actor_writes,
+            load_table_version,
+            decay_now,
+            overlap,
+            pool: Arc::clone(&self.load_maps),
+        }
     }
 
     fn prepare_block_hashes_for_refresh(
@@ -1947,17 +2087,21 @@ impl<
                             unmanaged_request_ids.insert(request_id);
                             Ok(())
                         }
-                        Some(AdmissionLifecycleCleanup::Booking(booking)) => self
-                            .slots
-                            .free_if_booking(
-                                &booking.request_id,
-                                booking.worker,
-                                booking.attempt_id,
-                                Instant::now(),
-                            )
-                            .map(|outcome| {
-                                made_ready |= outcome.is_applied();
-                            }),
+                        Some(AdmissionLifecycleCleanup::Booking(booking)) => {
+                            let result = self
+                                .slots
+                                .free_if_booking(
+                                    &booking.request_id,
+                                    booking.worker,
+                                    booking.attempt_id,
+                                    Instant::now(),
+                                )
+                                .map(|outcome| {
+                                    made_ready |= outcome.is_applied();
+                                });
+                            self.write_log.record(booking.worker);
+                            result
+                        }
                         None => Ok(()),
                     };
                     if let Err(error) = result {
@@ -1976,6 +2120,7 @@ impl<
                         .map(|outcome| {
                             made_ready |= outcome.is_applied();
                         });
+                    self.write_log.record(booking.worker);
                     if let Err(error) = result {
                         tracing::error!(
                             request_id = %booking.request_id,
@@ -1998,6 +2143,7 @@ impl<
                         .map(|outcome| {
                             made_ready |= outcome.is_applied();
                         });
+                    self.write_log.record(booking.worker);
                     if let Err(error) = result {
                         tracing::error!(
                             request_id = %booking.request_id,
@@ -2363,26 +2509,14 @@ impl<
         &mut self,
         mut request: SchedulingRequest,
         decay_now: Instant,
+        prepared_load: Option<PreparedLoad>,
         handle: impl FnOnce(&Self, &mut SchedulingRequest) -> R,
     ) -> R {
-        request.worker_loads = std::mem::take(&mut self.projected_loads);
-        // The host's reject thresholds are judged in the same pass that projects each rank's
-        // load, so selection only consults the ranks found full: no second read per rank.
-        let full_ranks = match self
+        let limits = self
             .reject_thresholds
             .as_ref()
             .map(|provider| provider())
-            .filter(BusyThresholds::is_configured)
-        {
-            Some(limits) => {
-                self.full_ranks.reset(limits);
-                Some(&mut self.full_ranks)
-            }
-            None => {
-                self.full_ranks.clear();
-                None
-            }
-        };
+            .filter(BusyThresholds::is_configured);
         // Each rank's overlap with the request's active prompts walks the prompt trie, and
         // only `LOAD` rows read it. Without them, only the selected rank's is computed.
         let project_overlap = self
@@ -2390,15 +2524,91 @@ impl<
             .required_worker_inputs()
             .contains(WorkerInputs::LOAD);
         self.projected_overlap = project_overlap;
-        self.slots.project_worker_loads_into(
-            request.token_seq.as_deref().filter(|_| project_overlap),
-            decay_now,
-            &mut request.worker_loads,
-            full_ranks,
-        );
+        let adopted = prepared_load.and_then(|load| {
+            self.adopt_prepared_load(load, &request, project_overlap, limits.as_ref())
+        });
+        let adopted = match adopted {
+            Some((loads, full_ranks)) => {
+                request.worker_loads = loads;
+                match full_ranks {
+                    Some(full_ranks) => self.full_ranks = full_ranks,
+                    None => self.full_ranks.clear(),
+                }
+                true
+            }
+            None => {
+                request.worker_loads = std::mem::take(&mut self.projected_loads);
+                // The host's reject thresholds are judged in the same pass that projects each
+                // rank's load, so selection only consults the ranks found full: no second read
+                // per rank.
+                let full_ranks = match limits {
+                    Some(limits) => {
+                        self.full_ranks.reset(limits);
+                        Some(&mut self.full_ranks)
+                    }
+                    None => {
+                        self.full_ranks.clear();
+                        None
+                    }
+                };
+                self.slots.project_worker_loads_into(
+                    request.token_seq.as_deref().filter(|_| project_overlap),
+                    decay_now,
+                    &mut request.worker_loads,
+                    full_ranks,
+                );
+                false
+            }
+        };
         let result = handle(self, &mut request);
-        self.projected_loads = std::mem::take(&mut request.worker_loads);
+        let loads = std::mem::take(&mut request.worker_loads);
+        if adopted {
+            let _ = self.load_maps.push(loads);
+        } else {
+            self.projected_loads = loads;
+        }
         result
+    }
+
+    /// The caller's projection with every rank this actor wrote since re-read, at the
+    /// caller's instant. None when it no longer stands for the pass this actor would run:
+    /// other reject thresholds or overlap, a rank added or removed, or more writes than the
+    /// log holds or than re-reading them beats projecting every rank.
+    #[allow(clippy::type_complexity)]
+    fn adopt_prepared_load(
+        &self,
+        mut load: PreparedLoad,
+        request: &SchedulingRequest,
+        overlap: bool,
+        limits: Option<&BusyThresholds>,
+    ) -> Option<(
+        FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
+        Option<FullRankCounts>,
+    )> {
+        if load.overlap != overlap
+            || load.full_ranks.as_ref().map(FullRankCounts::limits) != limits
+            || load.load_table_version != self.slots.load_table_version()
+        {
+            return None;
+        }
+        let (written, ranks) = self.write_log.written_since(load.actor_writes)?;
+        if written.saturating_mul(PREPARED_LOAD_MAX_STALE) > load.loads.len() {
+            return None;
+        }
+        let token_sequence = request.token_seq.as_deref().filter(|_| overlap);
+        for worker in ranks {
+            let Some(projection) = load.loads.get_mut(&worker) else {
+                continue;
+            };
+            let (fresh, capacity) =
+                self.slots
+                    .project_worker_load(token_sequence, load.decay_now, worker)?;
+            if let Some(full_ranks) = &mut load.full_ranks {
+                full_ranks.rejudge(worker, capacity, projection, &fresh);
+            }
+            *projection = fresh;
+        }
+        Some((std::mem::take(&mut load.loads), load.full_ranks.take()))
     }
 
     /// `admitted` selections may carry the installed selection trace; advisory
@@ -2551,7 +2761,7 @@ impl<
         request: SchedulingRequest,
         decay_now: Instant,
     ) -> Result<AdvisorySchedulingResponse, KvSchedulerError> {
-        self.with_projected_loads(request, decay_now, |actor, request| {
+        self.with_projected_loads(request, decay_now, None, |actor, request| {
             let selected = actor.select_worker_for_request(request, false, None)?;
 
             Ok(AdvisorySchedulingResponse {
@@ -2582,12 +2792,13 @@ impl<
         context: AdmissionContext,
         request: SchedulingRequest,
         decay_now: Instant,
-        prepared: Option<Box<PreparedAdmission>>,
+        mut prepared: Option<Box<PreparedAdmission>>,
     ) -> Admission {
         if prepared.is_some() {
             self.refresh_workers_generation();
         }
-        self.with_projected_loads(request, decay_now, |actor, request| {
+        let prepared_load = prepared.as_mut().and_then(|prepared| prepared.load.take());
+        self.with_projected_loads(request, decay_now, prepared_load, |actor, request| {
             actor.admit_one_projected(context, request, prepared)
         })
     }
@@ -2733,6 +2944,7 @@ impl<
                 return Admission::Refused;
             }
         };
+        self.write_log.record(worker);
         if let Some(transfer) = lifecycle_transfer {
             transfer.arm_booking(SchedulerBookingDescriptor {
                 request_id: request_id.clone(),
@@ -2757,6 +2969,7 @@ impl<
         {
             tracing::error!(%request_id, %error, "Failed to roll back scheduler booking");
         }
+        self.write_log.record(worker);
         Admission::Refused
     }
 
@@ -4584,6 +4797,8 @@ policy_classes:
             projected_loads: FxHashMap::with_capacity_and_hasher(8, Default::default()),
             full_ranks: FullRankCounts::default(),
             projected_overlap: true,
+            write_log: ActorWriteLog::new(Arc::clone(&queue.actor_writes)),
+            load_maps: Arc::clone(&queue.load_maps),
             block_size: 16,
             selector,
             prefill_load_estimator: None,
@@ -4762,20 +4977,24 @@ policy_classes:
     }
 
     fn make_prepared_queue() -> PreparedQueue {
-        make_prepared_queue_with(1, false)
+        make_prepared_queue_with(2, 1, false)
     }
 
     /// Two workers of `dp_size` ranks, each rank with a 64-token prefill budget.
-    fn make_prepared_queue_with(dp_size: u32, exclusive_affinity: bool) -> PreparedQueue {
+    fn make_prepared_queue_with(
+        workers: u64,
+        dp_size: u32,
+        exclusive_affinity: bool,
+    ) -> PreparedQueue {
         let slots = Arc::new(ActiveSequencesMultiWorker::new(
             NoopSequencePublisher,
             16,
-            (0..2).map(|id| (id, (0, dp_size))).collect(),
+            (0..workers).map(|id| (id, (0, dp_size))).collect(),
             false,
             0,
             "test",
         ));
-        let configs = (0..2)
+        let configs = (0..workers)
             .map(|id| {
                 let config = SimpleWorkerConfig {
                     max_num_batched_tokens: Some(64),
@@ -4852,24 +5071,47 @@ policy_classes:
         ack_rx.await.unwrap();
     }
 
+    #[test]
+    fn actor_write_log_holds_the_latest_writes() {
+        let log = ActorWriteLog::new(Arc::new(AtomicU64::new(0)));
+        let rank = |id| WorkerWithDpRank::new(id, 0);
+        log.record(rank(100));
+        log.record(rank(101));
+        let (written, ranks) = log.written_since(1).unwrap();
+        assert_eq!((written, ranks.collect::<Vec<_>>()), (1, vec![rank(101)]));
+
+        for id in 0..ACTOR_WRITE_LOG as u64 {
+            log.record(rank(id));
+        }
+        // The log wrapped: it still holds every write after the second, not the second.
+        assert!(log.written_since(1).is_none());
+        let (written, ranks) = log.written_since(2).unwrap();
+        assert_eq!(written, ACTOR_WRITE_LOG);
+        assert!(ranks.eq((0..ACTOR_WRITE_LOG as u64).map(rank)));
+    }
+
     #[tokio::test]
     async fn prepared_rows_see_bookings_made_after_preparation() {
-        let prepared_queue = make_prepared_queue();
-        let queue = &prepared_queue.queue;
-        let (later, later_rx) = make_request("later", 64);
-        let prepared = queue.prepare_candidates(&later);
-        assert!(prepared.is_some());
+        // With two workers the actor projects again; with 32 it re-reads only the rank it
+        // booked since the caller projected.
+        for workers in [2, 32] {
+            let prepared_queue = make_prepared_queue_with(workers, 1, false);
+            let queue = &prepared_queue.queue;
+            let (later, later_rx) = make_request("later", 64);
+            let prepared = queue.prepare_candidates(&later);
+            assert!(prepared.is_some());
 
-        let (earlier, earlier_rx) = make_request("earlier", 64);
-        queue.enqueue(earlier).await;
-        let earlier = earlier_rx.await.unwrap().unwrap().best_worker;
-        assert_eq!(earlier, WorkerWithDpRank::new(0, 0));
+            let (earlier, earlier_rx) = make_request("earlier", 64);
+            queue.enqueue(earlier).await;
+            let earlier = earlier_rx.await.unwrap().unwrap().best_worker;
+            assert_eq!(earlier, WorkerWithDpRank::new(0, 0));
 
-        // Load inputs are read at selection, so the earlier booking moves this request.
-        enqueue_prepared(queue, later, prepared).await;
-        let later = later_rx.await.unwrap().unwrap().best_worker;
-        assert_eq!(later, WorkerWithDpRank::new(1, 0));
-        assert_eq!(prepared_queue.prepared_selections(), 2);
+            // The earlier booking moves this request, though its load was read before it.
+            enqueue_prepared(queue, later, prepared).await;
+            let later = later_rx.await.unwrap().unwrap().best_worker;
+            assert_eq!(later, WorkerWithDpRank::new(1, 0), "{workers} workers");
+            assert_eq!(prepared_queue.prepared_selections(), 2);
+        }
     }
 
     #[tokio::test]
@@ -4921,7 +5163,7 @@ policy_classes:
 
     #[tokio::test]
     async fn prepared_rows_drop_only_workers_whose_every_rank_is_full() {
-        let prepared_queue = make_prepared_queue_with(2, false);
+        let prepared_queue = make_prepared_queue_with(2, 2, false);
         let queue = &prepared_queue.queue;
         *prepared_queue.reject.lock().unwrap() = half_budget_reject();
         let select = |request_id: &'static str| async move {
@@ -4952,7 +5194,7 @@ policy_classes:
 
     #[tokio::test]
     async fn prepared_rows_are_rebuilt_for_an_exclusive_affinity_target_once_a_rank_is_full() {
-        let prepared_queue = make_prepared_queue_with(1, true);
+        let prepared_queue = make_prepared_queue_with(2, 1, true);
         let queue = &prepared_queue.queue;
         *prepared_queue.reject.lock().unwrap() = half_budget_reject();
         hold_prefill(queue, "held", WorkerWithDpRank::new(0, 0), 48).await;
@@ -5010,7 +5252,7 @@ policy_classes:
             configs.remove(&0);
         });
         assert!(
-            actor.with_projected_loads(request, Instant::now(), |actor, request| {
+            actor.with_projected_loads(request, Instant::now(), None, |actor, request| {
                 actor.admit_one_projected(AdmissionContext::untracked(0, None), request, prepared)
                     == Admission::Booked
             })
@@ -5180,7 +5422,7 @@ policy_classes:
             let now = Instant::now();
             let expected = slots.project_worker_loads(None, now);
             let (request, mut rx) = make_request(id, 64);
-            let storage = actor.with_projected_loads(request, now, |actor, request| {
+            let storage = actor.with_projected_loads(request, now, None, |actor, request| {
                 assert_eq!(request.worker_loads, expected);
                 assert!(!request.worker_loads.contains_key(&stale));
                 let storage = request.worker_loads.get(&worker).unwrap() as *const _;
