@@ -1,0 +1,18 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: verl Integration
+subtitle: Run verl rollouts through Dynamo on Kubernetes
+hide-toc: true
+---
+
+<Tooltip tip="Validated with Dynamo 1.5.1, verl 6cbca9ce, verl-recipe 242c73fc, and KubeRay 1.7.1 on H100 GPUs. Manifests and flags can change between releases."><Badge intent="warning" minimal>Experimental</Badge></Tooltip> [verl](https://github.com/verl-project/verl) trains on KubeRay while the [Dynamo rollout backend](https://github.com/verl-project/verl-recipe/tree/main/dynamo) from verl-recipe starts a Dynamo frontend and vLLM engines inside the training job to generate its rollouts.
+
+<CardGroup cols={2}>
+  <Card title="Installation and Setup" icon="regular download" href="installation.mdx">
+    Install KubeRay, then build verl onto a shared volume and download the model and dataset.
+  </Card>
+  <Card title="Train with verl on KubeRay" icon="regular brain" href="train.mdx">
+    Run GRPO on Qwen2.5-7B-Instruct with GSM8K for 15 steps in a RayJob that starts its own Dynamo frontend and vLLM engines.
+  </Card>
+</CardGroup>

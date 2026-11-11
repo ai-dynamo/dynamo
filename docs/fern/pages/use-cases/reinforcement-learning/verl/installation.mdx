@@ -1,0 +1,228 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Install and Set Up verl with Dynamo
+subtitle: Install KubeRay, then build verl and stage the model and dataset on a shared volume
+---
+
+## Prerequisites
+
+- A [Kubernetes](https://kubernetes.io/docs/setup/) cluster with a node that has 8 NVIDIA H100 or H200 GPUs, NVIDIA driver 580 or later, and the [NVIDIA GPU Operator](https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/getting-started.html)
+- [`kubectl`](https://kubernetes.io/docs/tasks/tools/)
+- [Helm](https://helm.sh/docs/intro/install/)
+
+You don't need the Dynamo Kubernetes platform. The verl recipe starts Dynamo from the Python packages in the container image.
+
+## Install KubeRay
+
+<Steps toc={true}>
+  <Step title="Install the KubeRay operator" id="install-the-kuberay-operator">
+
+KubeRay runs the verl trainer as a `RayJob`. Install the operator with Helm:
+
+```bash
+helm repo add kuberay https://ray-project.github.io/kuberay-helm/
+helm repo update
+helm install kuberay-operator kuberay/kuberay-operator \
+  --version 1.7.1 \
+  --namespace kuberay \
+  --create-namespace
+```
+
+Confirm that the operator is running:
+
+```bash
+kubectl get pods -n kuberay
+```
+
+```text
+NAME                                READY   STATUS    RESTARTS   AGE
+kuberay-operator-6b9c8d7f5d-x2q7z   1/1     Running   0          1m
+```
+
+  </Step>
+  <Step title="Verify the installation" id="verify-the-installation">
+
+```bash
+kubectl get crd rayjobs.ray.io rayclusters.ray.io
+```
+
+```text
+NAME                 CREATED AT
+rayjobs.ray.io       2026-07-09T18:47:36Z
+rayclusters.ray.io   2026-07-09T18:47:32Z
+```
+
+  </Step>
+</Steps>
+
+## Build verl and Stage the Model
+
+<Steps toc={true}>
+  <Step title="Choose a StorageClass" id="choose-a-storageclass">
+
+The setup Job and the Ray head share one volume for verl, its packages, the model, the dataset, and each run's logs. List the StorageClasses in your cluster:
+
+```bash
+kubectl get storageclass
+```
+
+Pick one that your GPU nodes can mount. The tutorial runs on one node, so the volume needs only the `ReadWriteOnce` access mode. Some providers, such as Azure Premium SSD, raise a disk's throughput with its size, and a faster disk loads the model faster. Set the StorageClass and the namespace that the rest of these pages use:
+
+```bash
+export NAMESPACE=verl-dynamo
+export STORAGE_CLASS=<storage-class>
+```
+
+  </Step>
+  <Step title="Create the namespace and shared volume" id="create-the-namespace-and-shared-volume">
+
+Create the namespace and a 100 GiB claim on the StorageClass. The setup Job and the Ray head mount this claim at `/data`:
+
+```bash
+kubectl create namespace "$NAMESPACE"
+kubectl apply -n "$NAMESPACE" -f - <<EOF
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: verl-data
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: ${STORAGE_CLASS}
+  resources:
+    requests:
+      storage: 100Gi
+EOF
+```
+
+Depending on the StorageClass, the claim can stay `Pending` until the setup Job mounts it. With a zonal StorageClass, that first Pod also fixes the volume's zone.
+
+  </Step>
+  <Step title="Build verl and download the model and dataset" id="build-verl-and-download-the-model-and-dataset">
+
+Run a one-time Job in Dynamo's vLLM runtime image. The image has Dynamo 1.5.1 and vLLM 0.28.0, the vLLM version that the recipe tests, but not verl or Ray. The Job does four things:
+
+1. Clones verl at `6cbca9ce`, the commit that the recipe pins, and the recipe at `242c73fc` into the checkout's `recipe` directory. It installs verl with its dependencies, Ray 2.60.0, and TransferQueue 0.1.9, which verl's V1 trainer uses. It also upgrades accelerate to 1.13.0, because the image's 1.12.0 fails to load 7B models with transformers 5.
+2. Compiles flash-attn 2.8.3.post1 for H100 and H200 GPUs (`FLASH_ATTN_CUDA_ARCHS=90`). verl's default attention implementation needs it, and no prebuilt wheel matches the image's PyTorch 2.13 and CUDA 13. The compile needs `git` and the CUDA development headers, which the Job installs first.
+3. Saves every package that it added to the image as a wheel in `/data/wheelhouse`. The Job lists them in `/data/wheelhouse/requirements.txt` by comparing `pip freeze` before and after the installs. Each Pod starts from a fresh copy of the image, so the Ray head installs these wheels when it starts.
+4. Downloads Qwen2.5-7B-Instruct, and converts GSM8K to verl's Parquet format with verl's preprocessing script. Each prompt asks for the final answer after `####`.
+
+```bash
+kubectl apply -n "$NAMESPACE" -f - <<'EOF'
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: verl-setup
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: setup
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.1
+          command: ["bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              apt-get update -qq
+              DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+                git cuda-libraries-dev-13-0 cuda-cudart-dev-13-0
+              python3 -m pip freeze --all --exclude-editable | LC_ALL=C sort > /tmp/before.txt
+
+              rm -rf /data/verl /data/wheelhouse
+              git clone https://github.com/verl-project/verl.git /data/verl
+              cd /data/verl
+              git checkout 6cbca9ce7208100d11b4d1b06eccf098cc9e76aa
+              git submodule update --init recipe
+              git -C recipe checkout 242c73fcadf331e7214c4b48f67423f45239cea8
+              python3 -m pip install -e /data/verl "ray[default]==2.60.0"
+              python3 -m pip install TransferQueue==0.1.9
+              python3 -m pip install --no-deps accelerate==1.13.0
+
+              python3 -m pip install packaging psutil ninja einops
+              python3 -m pip wheel --no-build-isolation --no-deps \
+                --wheel-dir /data/wheelhouse flash-attn==2.8.3.post1
+              python3 -m pip install --no-deps /data/wheelhouse/flash_attn-*.whl
+
+              python3 -m pip freeze --all --exclude-editable | LC_ALL=C sort > /tmp/after.txt
+              LC_ALL=C comm -13 /tmp/before.txt /tmp/after.txt > /data/wheelhouse/requirements.txt
+              python3 -m pip wheel --quiet --no-deps --wheel-dir /data/wheelhouse \
+                -r /data/wheelhouse/requirements.txt
+
+              python3 -c 'from huggingface_hub import snapshot_download; snapshot_download("Qwen/Qwen2.5-7B-Instruct", local_dir="/data/models/Qwen2.5-7B-Instruct")'
+              python3 /data/verl/examples/data_preprocess/gsm8k.py --local_save_dir /data/gsm8k
+              ls /data/gsm8k /data/models
+          env:
+            - name: HF_HOME
+              value: /data/hf-home
+            - name: CUDA_HOME
+              value: /usr/local/cuda
+            - name: FLASH_ATTN_CUDA_ARCHS
+              value: "90"
+            - name: TORCH_CUDA_ARCH_LIST
+              value: "9.0"
+            - name: MAX_JOBS
+              value: "32"
+            - name: NVCC_THREADS
+              value: "2"
+          securityContext:
+            runAsUser: 0
+          resources:
+            requests:
+              cpu: "48"
+              memory: 384Gi
+              nvidia.com/gpu: "1"
+            limits:
+              cpu: "48"
+              memory: 384Gi
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - name: verl-data
+              mountPath: /data
+      volumes:
+        - name: verl-data
+          persistentVolumeClaim:
+            claimName: verl-data
+EOF
+```
+
+The Job runs as root to install packages into the image's Python environment. It requests one GPU so that it runs on a GPU node, which has the CPUs and memory that the compile needs, and so that a zonal volume is created in the GPU nodes' zone. If your GPU nodes have taints, add matching tolerations. `MAX_JOBS` sets the number of parallel compile jobs, each of which can use about 9 GB of memory.
+
+Wait for the Job to finish, then read the end of its log:
+
+```bash
+kubectl wait -n "$NAMESPACE" --for=condition=complete job/verl-setup --timeout=60m
+kubectl logs -n "$NAMESPACE" job/verl-setup --tail=6
+```
+
+On a node that has the image cached, the Job takes about 13 minutes, 9 of them for the flash-attn compile. Pulling the image, about 10 GB, adds about 5 minutes. The log ends with the directory listing:
+
+```text
+/data/gsm8k:
+test.parquet
+train.parquet
+
+/data/models:
+Qwen2.5-7B-Instruct
+```
+
+  </Step>
+</Steps>
+
+## Included in the Image
+
+You don't install Dynamo, vLLM, PyTorch, etcd, or NATS. Dynamo's vLLM runtime image, `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.1`, includes Dynamo 1.5.1, vLLM 0.28.0, PyTorch 2.13 with CUDA 13.0, Python 3.12, and the `etcd` and `nats-server` binaries that the recipe starts. The setup Job adds verl, the recipe, Ray 2.60.0, TransferQueue 0.1.9, flash-attn 2.8.3.post1, accelerate 1.13.0, and the versions of verl's dependencies that pip resolves, such as transformers 5.10.4.
+
+KubeRay runs `ray job submit` from Ray's own image, `rayproject/ray:2.60.0-py312`, so you don't need Ray on your workstation.
+
+The tutorial was validated with these images and KubeRay 1.7.1 on Azure Kubernetes Service (AKS) with H100 80 GB GPUs and an Azure Premium SSD volume.
+
+## Hugging Face Access
+
+The setup Job downloads the public `Qwen/Qwen2.5-7B-Instruct` model and `openai/gsm8k` dataset, so it needs no token. For a gated model, create a Secret with your token and expose it as `HF_TOKEN` to the setup Job, which runs the downloads.
+
+## Next Steps
+
+[Train with verl on KubeRay](train.mdx) to run GRPO with rollouts served by Dynamo.

@@ -131,7 +131,7 @@ The built-in disk update can flush SGLang's local cache. Validate any additional
 
 The public verl recipe sends generation through Dynamo but keeps sleep, wake, and weight transfer in recipe-owned Ray actors and a ZMQ/CUDA IPC bridge. Do not replace this path with public worker discovery unless the integration itself changes.
 
-Verify that every data-parallel shard receives the same trainer step, old cache state is handled, and every worker resumes before post-update rollout generation. See [verl Integration](verl.md#verify-the-run).
+Verify that every data-parallel shard receives the same trainer step, old cache state is handled, and every worker resumes before post-update rollout generation. See [Train with verl on KubeRay](verl/train.mdx#verify-the-run).
 
 ## NeMo RL Managed Update
 
