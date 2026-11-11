@@ -4,20 +4,17 @@
 use std::collections::HashSet;
 
 use super::check_candidate_policy;
-use dynamo_kv_router::{
-    RouterConfigOverride,
-    indexer::RoutingDecisionHashes,
-    kv_hints::KvHint,
-    protocols::{
-        BlockExtraInfo, RoutingConstraints, WorkerAffinityTarget, WorkerId, WorkerWithDpRank,
-    },
-    scheduling::{
-        AdvisoryWorkerLoad, QueueRejection, RequestLifecycle, RoutingEligibility,
-        queue::BookingHandle,
-    },
-};
-
+use dynamo_admission::host::QueueRejection;
+use dynamo_kv_hashing::multimodal::BlockExtraInfo;
+use dynamo_kv_hints::KvHint;
+use dynamo_kv_indexer::host::RoutingDecisionHashes;
+use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 use dynamo_runtime::{dynamo_nvtx_range, pipeline::Error};
+use dynamo_scheduler::host::{
+    AdvisoryWorkerLoad, BookingHandle, RequestLifecycle, RouterConfigOverride, RoutingConstraints,
+    RoutingEligibility,
+};
+use dynamo_session_affinity::host::WorkerAffinityTarget;
 
 use crate::{
     kv_router::{FindBestMatchAdmission, FindBestMatchOutcome, routing_host::RoutingHost},
@@ -88,12 +85,12 @@ pub(super) struct SelectionOptions {
     pub(super) affinity_target: Option<AffinityTarget>,
     pub(super) planned_worker: Option<WorkerWithDpRank>,
     pub(super) policy_class: Option<String>,
-    pub(super) session_context: Option<dynamo_kv_router::SessionContext>,
+    pub(super) session_context: Option<dynamo_router_protocol::session::SessionContext>,
     pub(super) admission: FindBestMatchAdmission,
 }
 
 struct BestMatchArgs<'a> {
-    accounting_attribution: dynamo_kv_router::scheduling::AccountingAttribution,
+    accounting_attribution: dynamo_scheduler::host::AccountingAttribution,
     context_id: &'a str,
     routing_parts: RoutingRequestParts<'a>,
     router_config_override: Option<&'a RouterConfigOverride>,
@@ -104,7 +101,7 @@ struct BestMatchArgs<'a> {
     priority_jump: f64,
     strict_priority: u32,
     policy_class: Option<String>,
-    session_context: Option<dynamo_kv_router::SessionContext>,
+    session_context: Option<dynamo_router_protocol::session::SessionContext>,
     expected_output_tokens: Option<u32>,
     needs_uncached_prefill: bool,
     affinity_target: Option<WorkerAffinityTarget>,
@@ -518,10 +515,8 @@ mod tests {
     use dynamo_runtime::error::{DynamoError, ErrorType};
     use std::collections::{HashMap, HashSet};
 
-    use dynamo_kv_router::{
-        protocols::{RoutingConstraints, WorkerWithDpRank},
-        scheduling::{RoutingEligibility, WorkerEligibilityError},
-    };
+    use dynamo_router_protocol::worker::WorkerWithDpRank;
+    use dynamo_scheduler::host::{RoutingConstraints, RoutingEligibility, WorkerEligibilityError};
 
     use super::*;
     use crate::{
