@@ -157,15 +157,27 @@ impl KvHint {
 }
 
 /// Actions that would take a hint past [`MAX_KV_HINT_ACTIONS`].
-#[derive(Debug, thiserror::Error)]
-#[error(
-    "a hint carries at most {max} actions; it has {present} and {added} more were offered",
-    max = MAX_KV_HINT_ACTIONS
-)]
+#[derive(Debug)]
 pub struct KvHintActionLimitError {
     present: usize,
     added: usize,
 }
+
+impl std::fmt::Display for KvHintActionLimitError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "a hint carries at most {MAX_KV_HINT_ACTIONS} actions; "
+        )?;
+        write!(
+            formatter,
+            "it has {} and {} more were offered",
+            self.present, self.added
+        )
+    }
+}
+
+impl std::error::Error for KvHintActionLimitError {}
 
 /// Who holds a KV prefix a target could fetch: a worker rank, or a cache owner by its compact
 /// residency key. The indexer produces it with a match and owns it; this crate keeps the
