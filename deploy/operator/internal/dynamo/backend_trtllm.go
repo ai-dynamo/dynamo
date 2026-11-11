@@ -167,11 +167,8 @@ func (b *TRTLLMBackend) setupLeaderContainer(container *corev1.Container, number
 	// Use --allow-run-as-root only when the container is running as root (UID 0).
 	// When running as a non-root user, mpirun works without this flag and omitting
 	// it avoids masking accidental root execution.
-	//
-	// -H lists each host without a slot count. Open MPI 4 then spreads the
-	// oversubscribed ranks evenly over the hosts, but Open MPI 5 (the arm64
-	// runtime image) maps by core and puts every rank on the first host.
-	// --map-by ppr:<GPUs>:node pins GPUs-per-pod ranks to each host on both.
+	// Open MPI 5 (arm64 image) puts every rank of an unslotted -H list on the first host;
+	// --map-by ppr:<GPUs>:node places GPUs-per-pod ranks on each host.
 	mapByFlag := ""
 	if mapByNode {
 		mapByFlag = fmt.Sprintf(" --map-by ppr:%d:node", containerGPUs)
