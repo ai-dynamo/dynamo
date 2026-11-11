@@ -8,16 +8,7 @@
 
 use std::sync::Arc;
 
-use dynamo_kv_router::plugins::worker_selection::{
-    ScoredWorkerCandidate, WorkerInputView, WorkerInputs, WorkerPicker, WorkerSelectionContext,
-    WorkerSelectionPolicy, WorkerSelectionPolicyError, WorkerSelectionPolicyFactory,
-};
-use dynamo_kv_router::plugins::{
-    RouterPluginRegistry, WorkerSelectionPolicyParameters, WorkerSelectionPolicyProviderError,
-    WorkerSelectionPolicyRegistryError,
-};
-use dynamo_kv_router::protocols::WorkerWithDpRank;
-use dynamo_kv_router::{KvRouterConfig, WorkerType};
+use dynamo_kv_router::plugins::prelude::*;
 use parking_lot::Mutex;
 use rustc_hash::FxHashSet;
 
@@ -284,7 +275,7 @@ fn provider(
     let parameters: Parameters = parameters.deserialize()?;
     parameters.validate()?;
     Ok(Arc::new(
-        move |config: &KvRouterConfig, worker_type, _partition| {
+        move |config: &SelectionConfig, worker_type, _partition| {
             if worker_type != WorkerType::Decode {
                 tracing::warn!(
                     policy = POLICY_TYPE,
@@ -314,11 +305,9 @@ pub fn register(
 mod tests {
     use std::collections::{HashMap, HashSet};
 
-    use dynamo_kv_router::protocols::{RoutingConstraints, WorkerConfigLike};
-    use dynamo_kv_router::scheduling::{OverlapSignals, ScheduleMode};
-    use dynamo_kv_router::{
-        SchedulingRequest, WorkerLoadProjection, WorkerSelectionInput, WorkerSelector,
-    };
+    use dynamo_kv_router::plugins::prelude::*;
+    use dynamo_scheduler::host::WorkerSelectionInput;
+    use dynamo_scheduler::host::WorkerSelector;
 
     use super::*;
 
@@ -635,7 +624,7 @@ mod tests {
     /// The host's `WorkerSelectionPolicy` around `picker`, as `provider` builds it for decode.
     fn host_policy(picker: KvCapacityAwarePicker) -> WorkerSelectionPolicy {
         WorkerSelectionPolicy::new(
-            KvRouterConfig::default(),
+            SelectionConfig::default(),
             "decode",
             Vec::new(),
             Box::new(picker),
@@ -665,6 +654,7 @@ mod tests {
         worker: impl Fn(u64) -> TestWorker,
     ) -> u64 {
         let mut request = SchedulingRequest {
+            accounting_attribution: Default::default(),
             mode: ScheduleMode::QueryOnly { request_id: None },
             token_seq: None,
             isl_tokens: 160,
@@ -785,7 +775,7 @@ mod tests {
     /// does not fit (which the default `D + 1000 N` would pick), and prefill still constructs.
     #[test]
     fn resolves_alongside_the_decode_weight_flag() {
-        use dynamo_kv_router::{RoutingPartitionRef, WorkerType};
+        use dynamo_kv_router::plugins::prelude::*;
 
         const POLICY_YAML: &str = r#"
 worker_selection:
@@ -820,19 +810,31 @@ worker_selection:
 
         // The YAML resolves and builds both stages.
         let (_file, config, factory) = configured(POLICY_YAML);
-        factory(&config, WorkerType::Decode, partition);
-        factory(&config, WorkerType::Prefill, partition);
+        factory(
+            &SelectionConfig::from(&config),
+            WorkerType::Decode,
+            partition,
+        );
+        factory(
+            &SelectionConfig::from(&config),
+            WorkerType::Prefill,
+            partition,
+        );
 
         // Same shape with a capacity of 1,000 blocks for workers that report none, so the two
         // policies disagree on one state.
         let small = POLICY_YAML.replace("20000", "1000");
         let (_file, config, factory) = configured(&small);
         let workers = [(950, 100, 0), (100, 100, 1), (100, 100, 2)];
-        let decode = factory(&config, WorkerType::Decode, partition);
+        let decode = factory(
+            &SelectionConfig::from(&config),
+            WorkerType::Decode,
+            partition,
+        );
         assert_eq!(host_select(&decode, None, &workers), 2);
         // Like the default, the policy binds session-affinity targets.
         assert!(WorkerSelector::<TestWorker>::uses_exclusive_affinity_target(&decode));
-        let default_decode = crate::default_policy(config.clone(), "decode");
+        let default_decode = crate::default_policy(SelectionConfig::from(&config), "decode");
         assert_eq!(host_select(&default_decode, None, &workers), 1);
     }
 

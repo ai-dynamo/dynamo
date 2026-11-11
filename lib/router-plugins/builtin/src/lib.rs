@@ -16,8 +16,7 @@ mod sticky_min_load;
 mod thunderagent;
 mod two_tier_cost_fn;
 pub use default::{
-    DefaultWorkerSelector, DefaultWorkerSelectorControl, default_factory, default_policy,
-    startup_policy_parameters,
+    default_factory, default_policy, default_policy_with_rng, startup_policy_parameters,
 };
 
 /// Registry every host links: the required default plus the routing modes
@@ -35,7 +34,7 @@ pub fn with_defaults(registry: RouterPluginRegistry) -> RouterPluginRegistry {
     registry
 }
 
-use dynamo_kv_router::plugins::{RouterPluginRegistry, RouterPluginRegistryError};
+use dynamo_kv_router::plugins::prelude::*;
 
 /// Register the named providers Dynamo ships, without changing the host's default factory.
 ///
@@ -53,9 +52,7 @@ pub fn register(registry: &mut RouterPluginRegistry) -> Result<(), RouterPluginR
 
 #[cfg(test)]
 mod tests {
-    use dynamo_kv_router::plugins::WorkerSelectionPolicyRegistryError;
-    use dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicyFactory;
-    use dynamo_kv_router::{KvRouterConfig, RoutingPartitionRef, WorkerType};
+    use dynamo_kv_router::plugins::prelude::*;
 
     use super::*;
 
@@ -102,7 +99,7 @@ worker_selection:
             WorkerType::Prefill,
             WorkerType::Decode,
         ] {
-            factory(&config, worker_type, partition);
+            factory(&SelectionConfig::from(&config), worker_type, partition);
         }
     }
 
@@ -134,7 +131,7 @@ worker_selection:
             WorkerType::Prefill,
             WorkerType::Decode,
         ] {
-            factory(&config, worker_type, partition);
+            factory(&SelectionConfig::from(&config), worker_type, partition);
         }
     }
 
@@ -158,7 +155,7 @@ worker_selection:
             .unwrap()
             .expect("a configured policy resolves to a factory");
         factory(
-            &config,
+            &SelectionConfig::from(&config),
             WorkerType::Decode,
             RoutingPartitionRef::new("model", "default"),
         );
