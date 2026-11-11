@@ -25,6 +25,7 @@ PolicyClassQueue
 ├── ready_by_lane[Worker(Affinity(worker, rank))] sessionless ranked soft affinity
 ├── ready_by_lane[Worker(WorkerAffinity(worker))] sessionless worker-only soft affinity
 ├── blocked_lanes: lane -> BlockReason           Capacity, Gate, or Fallback
+├── shared_blocked                               lanes refused as SharedCapacity: one answer for all
 ├── candidate_lane_heads                         unblocked lane roots
 ├── fallback_heads                               roots whose target is gone; compete every pass
 ├── recheck: RecheckPlan                         which blocked lanes the next dispatch re-asks
@@ -32,7 +33,11 @@ PolicyClassQueue
 ```
 
 The scheduler supplies `QueueLane` and answers each head with a `LaneCheck`: `Dispatch`, or
-`Blocked(reason)`; a `bool` answer blocks on capacity. The admission stage owns no worker
+`Blocked(reason)`; a `bool` answer blocks on capacity. A head whose eligible workers are the
+class's, with no pin, allow-list, LoRA, or exclusive target, is refused as `SharedCapacity`:
+every such head gets the same answer, so a capacity recheck probes one of the group and visits
+the rest only when that one may go, which keeps a worker free at one walk per class as the
+shared heap had it. The admission stage owns no worker
 capacity or eligibility state. A blocked lane keeps its reason and leaves the candidate index
 until a recheck that can free it: `recheck_worker` re-asks the lanes pinned or bound to that
 worker and every session lane blocked on capacity; `recheck_affinity_lanes` (the scheduler's

@@ -2,33 +2,32 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Write an Admission Control Plugin
-subtitle: Admit, defer, or reject requests with a Rust request classifier
+subtitle: Queue, hold, or reject requests with a Rust request classifier
 ---
 
 > [!WARNING]
 > **Experimental.** The request-classifier API and its inputs can change.
 
-Implement `RequestClassifier` to control when NVIDIA Dynamo admits a request to the KV router's scheduling queue. Use it to wait for capacity, assign a policy class, or reject a request that has exceeded its wait budget.
+Implement `RequestClassifier` to control how NVIDIA Dynamo queues a request in the KV router: assign its policy class, deadline, cost, or preferred worker, reject it, or, through a dispatch gate, hold it in the queue until capacity or a session is ready.
 
-The built-in [ThunderAgent plugin](../../../../use-cases/agents/thunderagent-program-scheduler.md#native-frontend-plugin) uses this API to hold requests from paused or busy sessions. Select it through router-policy YAML if it fits your workload. Write a custom classifier when you need a different admission rule.
+The built-in [ThunderAgent plugin](../../../../use-cases/agents/thunderagent-program-scheduler.md#native-frontend-plugin) uses this API to hold turns of paused or busy sessions. Select it through router-policy YAML if it fits your workload. Write a custom classifier when you need a different admission rule.
 
 ## How It Works
 
-Dynamo calls `classify` before queueing a request. Return `Ok(request)` to admit it, wait asynchronously to defer it, or return an error to reject it. Before admitting the request, the classifier can set its policy class, queue deadline, scheduling cost, or preferred worker.
+Dynamo calls `classify` before queueing a request. It runs synchronously: return `Ok(request)` to queue it, with its policy class, queue deadline, scheduling cost, or preferred worker set, or return an error to reject it. A classifier that must wait for something returns a dispatch gate, which Dynamo asks about each queue head before it dispatches.
 
 ```mermaid
 flowchart TD
     Request["Incoming request"] --> Classify
     subgraph Plugin["RequestClassifier"]
         Classify["classify(request)"]
-        Classify -->|Admit| Settings["Set policy class<br/>(optional)"]
-        Classify -->|Defer| Wait["Wait for capacity<br/>or session readiness"]
-        Wait -->|Ready| Settings
+        Classify -->|Queue| Settings["Set policy class, deadline,<br/>cost, worker preference"]
         Classify -->|Reject| Error["Return an error"]
-        Wait -->|Wait budget exhausted| Error
     end
     Settings -->|"Ok(request)"| Queue["Dynamo scheduling queue"]
-    Queue --> Select["Worker selection and dispatch"]
+    Queue -->|"Each head, each dispatch"| Gate["DispatchGate (optional)"]
+    Gate -->|Go| Select["Worker selection and dispatch"]
+    Gate -->|Hold| Queue
     Error --> Client["Error response to client"]
 ```
 
@@ -76,9 +75,8 @@ Put the classifier in `classifier/src/lib.rs`. `set_due_at` tells Dynamo when to
 use std::time::Duration;
 
 use dynamo_kv_router::plugins::request_classifier::{
-    ClassifierError, ClassifyFuture, ClassifyRequest, RequestClassifier,
+    ClassifierError, ClassifyRequest, RequestClassifier, WorkerView,
 };
-use dynamo_kv_router::plugins::worker_selection::WorkerCandidates;
 use dynamo_runtime::error::{DynamoError, ErrorClass};
 use tokio::time::Instant;
 
@@ -87,21 +85,23 @@ struct QueueBudget {
 }
 
 impl RequestClassifier for QueueBudget {
-    fn classify(&mut self, mut request: ClassifyRequest, _workers: WorkerCandidates<'_>) -> ClassifyFuture {
+    fn classify(
+        &mut self,
+        mut request: ClassifyRequest,
+        _workers: &dyn WorkerView,
+    ) -> Result<ClassifyRequest, Box<ClassifierError>> {
         let deadline = request.ingress_at() + self.budget;
-        Box::pin(async move {
-            if Instant::now() >= deadline {
-                return Err(Box::new(
-                    DynamoError::builder()
-                        .class(ErrorClass::CapacityExhausted)
-                        .diagnostic("admission wait budget exhausted")
-                        .public_message("Admission wait budget exhausted; retry later")
-                        .build(),
-                ) as Box<ClassifierError>);
-            }
-            request.set_due_at(deadline);
-            Ok(request)
-        })
+        if Instant::now() >= deadline {
+            return Err(Box::new(
+                DynamoError::builder()
+                    .class(ErrorClass::CapacityExhausted)
+                    .diagnostic("admission wait budget exhausted")
+                    .public_message("Admission wait budget exhausted; retry later")
+                    .build(),
+            ) as Box<ClassifierError>);
+        }
+        request.set_due_at(deadline);
+        Ok(request)
     }
 }
 ```
@@ -235,9 +235,9 @@ A classifier can read the per-worker cache and load data that [worker-selection 
 
 ```rust
 use dynamo_kv_router::plugins::request_classifier::{
-    ClassifyFuture, ClassifyRequest, RequestClassifier,
+    ClassifierError, ClassifyRequest, RequestClassifier, WorkerView,
 };
-use dynamo_kv_router::plugins::worker_selection::{WorkerCandidates, WorkerInputs};
+use dynamo_kv_router::plugins::worker_selection::WorkerInputs;
 
 struct LoadAwareClass {
     max_active_requests: usize,
@@ -248,19 +248,22 @@ impl RequestClassifier for LoadAwareClass {
         WorkerInputs::LOAD
     }
 
-    fn classify(&mut self, mut request: ClassifyRequest, workers: WorkerCandidates<'_>) -> ClassifyFuture {
+    fn classify(
+        &mut self,
+        mut request: ClassifyRequest,
+        workers: &dyn WorkerView,
+    ) -> Result<ClassifyRequest, Box<ClassifierError>> {
         // Count only observed loads, and require at least one.
-        let mut loads = workers
-            .iter()
-            .filter_map(|worker| worker.load())
-            .filter(|load| load.is_available())
+        let mut loads = (0..workers.len())
+            .filter_map(|row| workers.load(row))
+            .filter(|load| load.available)
             .peekable();
         let saturated = loads.peek().is_some()
-            && loads.all(|load| load.active_requests() >= self.max_active_requests);
+            && loads.all(|load| load.active_requests >= self.max_active_requests);
         if saturated {
             request.set_policy_class("batch");
         }
-        Box::pin(async move { Ok(request) })
+        Ok(request)
     }
 }
 ```
@@ -268,7 +271,7 @@ impl RequestClassifier for LoadAwareClass {
 Dynamo builds these rows with the same code that worker selection uses, so `CACHE`, `LOAD`, and `PREFERRED_TAINT` have the same meaning in both plugins. Dynamo reads `required_worker_inputs` once, when it installs the classifier. With the default `WorkerInputs::NONE`, Dynamo builds no rows and `workers` is empty.
 
 - Rows cover each worker rank that is eligible for the request, including overloaded workers. Row order is unspecified.
-- `workers` is a snapshot taken for this `classify` call and is lent only for its duration. Dynamo frees the rows when `classify` returns, so a deferred classification holds none of them. Copy into the returned future whatever it needs, and do not treat that copy as current load when the request is admitted later.
+- `workers` is a snapshot taken for this `classify` call and is lent only for its duration. Dynamo frees the rows when `classify` returns. Do not treat a copy as current load when the request dispatches later.
 - Worker selection takes its own snapshot when it picks a worker, so it can pick a different worker than the classifier expected. Use `set_worker_selection_target` to state a preference.
 
 Every row also returns its `WorkerInfo` from `info()` without a declaration. To ask whether a rank has room, declare `WorkerInputs::LOAD` and call `has_room` on the thresholds with the row's `load()` and `info().capacity()`. Both are rank-level checks on one row, the same ones the router runs: `queue_thresholds().has_room(...)` says whether this rank is within the class's queue thresholds (the queue holds a request only when every eligible rank is past them), and `reject_thresholds().has_room(...)` whether this rank is within the reject thresholds (selection skips a worker only when all of its ranks are past them).
@@ -285,11 +288,47 @@ Every row also returns its `WorkerInfo` from `info()` without a declaration. To 
 
 Use a class name from the [router policy configuration](configuration-and-tuning.md) with `set_policy_class`. A name that matches no configured class fails the request; it does not fall back to the default class. Dynamo refreshes cache estimates when the admitted request enters the queue and applies the classifier's explicit overrides.
 
-## Defer Requests and Track Their Lifecycle
+## Hold Requests and Track Their Lifecycle
 
-Defer a request when it may become admissible later, such as when another request finishes or a paused session resumes. Wait inside the future returned by `classify`, then return `Ok(request)` when the condition is met. Dynamo continues processing other requests and delivering lifecycle events while this request waits.
+`classify` cannot wait: it runs under the router-wide classifier lock and returns at once. A request that may become admissible later, such as when another request finishes or a paused session resumes, is held in the router queue by a dispatch gate. The queue keeps the request's order, class budget, expiry, and wakeups; the gate only answers whether the head of a lane may go now.
 
-Give the wait its own timeout if admission has a time budget. `set_due_at` limits queue waiting after admission; it does not end the classifier's wait or stop a running generation.
+### Hold Queued Requests With a Dispatch Gate
+
+Implement `DispatchGate` and return it from `dispatch_gate`. Dynamo queues every request at once and asks the gate about each queue head before it dispatches:
+
+```rust
+use dynamo_kv_router::plugins::request_classifier::{
+    DispatchDecision, DispatchGate, DispatchHead, DispatchRecheck,
+};
+use tokio::time::Instant;
+
+impl DispatchGate for SessionGate {
+    fn check(&self, head: &DispatchHead<'_>) -> DispatchDecision {
+        match self.room_for(head.session_context(), head.isl_tokens()) {
+            Some(worker) => DispatchDecision::Go { target: Some(worker) },
+            // Held long enough: let it go and leave placement to the selector.
+            None if Instant::now() >= head.queued_at() + self.max_hold => {
+                DispatchDecision::Go { target: None }
+            }
+            None => DispatchDecision::Hold { until: Some(head.queued_at() + self.max_hold) },
+        }
+    }
+
+    fn dispatched(&self, head: &DispatchHead<'_>, target: Option<WorkerWithDpRank>) {
+        self.reserve(head.request_id(), target);
+    }
+
+    fn attach(&self, recheck: DispatchRecheck) {
+        self.recheck.set(recheck).ok();
+    }
+}
+```
+
+- `check` runs inside the router's dispatch loop and may be asked more than once about the same head: keep it a read, with no waiting.
+- `Hold` keeps the request queued. Dynamo asks again when a worker's capacity changes, when the gate calls `notify` on the handle it received in `attach`, and no later than `until`. An `until` that has already passed sets no timer, so return `Go` once a hold should end rather than a past `until`. A held request still spends its policy class's waiting budget.
+- `Go` lets the request through Dynamo's own capacity checks; `target` becomes its soft worker preference unless it carries a hard pin. `dispatched` runs once when Dynamo takes the request out of the queue, before selection. Admission can still fail, and the request's lifecycle then ends with `Aborted`.
+- A request that has a session context waits in a lane of its own session, so a held session never blocks other sessions in its class. A held request without a session blocks the class's shared lane.
+- A class with a zero queue limit never queues, so Dynamo admits its requests without asking the gate. The classifier learns of them from `Sent`. Do not give gated traffic such a class if every request must pass the gate.
 
 Implement `on_event` when the classifier tracks active requests or session capacity. For example, use completion or abort events to release capacity and wake waiting requests:
 
