@@ -21,7 +21,7 @@ Wire format (``lib/llm/src/http/service/router_policy.rs``)::
 
 A PATCH replaces only the keys it names; ``reset: true`` restores every
 parameter to the router's startup values. Both bump the router's revision
-(``lib/kv-router/src/plugins/worker_selection/runtime.rs``), and GET never
+(``lib/router/worker-selection/src/runtime.rs``), and GET never
 returns the startup values, so the actuator latches them itself: the
 configuration of a router seen at revision 0, or returned by a reset, is that
 router's initial.

@@ -323,6 +323,6 @@ cargo test -p dynamo-global-common -p dynamo-global-router -p dynamo-global-fron
 ```
 
 The common `PoolId` identifies a DGD using its deployment coordinates. It is
-distinct from `dynamo_kv_router::identity::PoolId`, which identifies an indexer
+distinct from `dynamo_router_protocol::identity::PoolId`, which identifies an indexer
 domain/DC lane. Relay routing scope supplies the DGD boundary; catalog producer
 identities retain the indexer-domain/DC scope.

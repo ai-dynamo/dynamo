@@ -90,7 +90,7 @@ A complete CKF lane is encoded as dense `u64` bucket words. Each chunk body is:
 
 Each word packs four 16-bit slots, least-significant slot first; zero means empty.
 For example, bytes `34 12 00 00 cd ab 01 00` encode slots `[0x1234, 0, 0xabcd, 1]`.
-See the shared [CKF addressing](../../../../../../kv-router/src/indexer/cuckoo/addressing.rs)
+See the shared [CKF addressing](../../../../../../router/kv-indexer/src/cuckoo/addressing.rs)
 for fingerprint and candidate-bucket derivation from a canonical sequence hash.
 
 One chunk contains at most 512 Ki buckets, or 4 MiB of bucket words. `SnapshotAssembly` accepts only

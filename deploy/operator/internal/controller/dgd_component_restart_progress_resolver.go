@@ -22,10 +22,12 @@ import (
 	"fmt"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -36,7 +38,10 @@ type componentRestartProgressResolver struct {
 	reader client.Reader
 }
 
-const dcdNotFoundReason = "resource not found"
+const (
+	dcdNotFoundReason           = "resource not found"
+	dcdRestartNotObservedReason = "DynamoComponentDeployment has not observed the requested restart"
+)
 
 func newComponentRestartProgressResolver(reader client.Reader) *componentRestartProgressResolver {
 	return &componentRestartProgressResolver{reader: reader}
@@ -64,9 +69,12 @@ func (r *componentRestartProgressResolver) checkComponentFullyUpdated(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	componentName string,
 ) (bool, string) {
+	// Restart progress is only resolved while a restart ID is requested.
+	restartID := ptr.Deref(dgd.Spec.Restart, nvidiacomv1beta1.Restart{}).ID
+
 	if currentWorkerHashes(dgd).empty() {
 		resourceName := dynamo.GetDCDResourceName(dgd, componentName, "")
-		return checkDCDReady(ctx, r.reader, resourceName, dgd.Namespace)
+		return checkDCDReady(ctx, r.reader, resourceName, dgd.Namespace, restartID)
 	}
 
 	hashes, err := desiredWorkerHashes(dgd)
@@ -77,7 +85,7 @@ func (r *componentRestartProgressResolver) checkComponentFullyUpdated(
 	var lastReason string
 	for _, hash := range activeWorkerHashCandidates(dgd, hashes) {
 		resourceName := dynamo.GetDCDResourceName(dgd, componentName, hash)
-		ready, reason := checkDCDReady(ctx, r.reader, resourceName, dgd.Namespace)
+		ready, reason := checkDCDReady(ctx, r.reader, resourceName, dgd.Namespace, restartID)
 		if ready || reason != dcdNotFoundReason {
 			return ready, reason
 		}
@@ -91,6 +99,7 @@ func checkDCDReady(
 	reader client.Reader,
 	resourceName string,
 	namespace string,
+	restartID string,
 ) (bool, string) {
 	logger := log.FromContext(ctx)
 	dcd := &nvidiacomv1beta1.DynamoComponentDeployment{}
@@ -118,6 +127,15 @@ func checkDCDReady(
 		return false, fmt.Sprintf("spec not yet processed: generation=%d, observedGeneration=%d", dcd.Generation, dcd.Status.ObservedGeneration)
 	}
 
+	// A ready DCD from the previous revision must not satisfy a new restart,
+	// for example when the first write of the restarted DCD failed.
+	if restartID != "" && !componentRestartApplied(dcd, restartID) {
+		logger.V(1).Info("DynamoComponentDeployment has not observed the requested restart",
+			"resourceName", resourceName,
+			"restartID", restartID)
+		return false, dcdRestartNotObservedReason
+	}
+
 	for _, condition := range dcd.Status.Conditions {
 		if condition.Type != nvidiacomv1beta1.DynamoComponentDeploymentConditionTypeAvailable {
 			continue
@@ -135,4 +153,20 @@ func checkDCDReady(
 
 	logger.V(1).Info("DynamoComponentDeployment missing Available condition", "resourceName", resourceName)
 	return false, "Available condition not found"
+}
+
+// componentRestartApplied requires the requested restart on every effective
+// pod template of the DCD. dcd is non-nil and is never mutated.
+func componentRestartApplied(dcd *nvidiacomv1beta1.DynamoComponentDeployment, restartID string) bool {
+	// Check the shared template and every role template the DCD renders.
+	templates := dynamo.ComponentPodTemplates(&dcd.Spec.DynamoComponentDeploymentSharedSpec)
+	if len(templates) == 0 {
+		return false
+	}
+	for _, template := range templates {
+		if template.Annotations[consts.RestartAnnotation] != restartID {
+			return false
+		}
+	}
+	return true
 }
