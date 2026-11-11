@@ -26,10 +26,8 @@ use dynamo_kv_hashing::routing::{
     BlockHashOptions, complete_block_count, compute_block_hash_for_seq, compute_seq_hash_for_block,
 };
 use dynamo_router_protocol::WorkerType;
-pub use dynamo_worker_selection::conditional_disagg::{
-    ConditionalDisaggConfig, ConditionalDisaggPolicyKind,
-};
-use dynamo_worker_selection::conditional_disagg::{
+pub use dynamo_worker_selection::{ConditionalDisaggConfig, ConditionalDisaggPolicyKind};
+use dynamo_worker_selection::{
     default_conditional_disagg_eff_isl_ratio_threshold,
     default_conditional_disagg_eff_isl_threshold,
 };
@@ -378,9 +376,9 @@ fn kv_router_config_from_lookup(
     Ok(config)
 }
 
-pub use dynamo_kv_indexer::config::ApproximateCachePolicyKind;
+pub use dynamo_kv_indexer::ApproximateCachePolicyKind;
 
-pub use dynamo_admission::profile::RouterQueuePolicy;
+pub use dynamo_admission::RouterQueuePolicy;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -1328,7 +1326,7 @@ fn random_sequence_hashes(num_blocks: usize) -> Vec<u64> {
     (0..num_blocks).map(|_| fastrand::u64(..)).collect()
 }
 
-impl From<&KvRouterConfig> for dynamo_kv_indexer::config::IndexerConfig {
+impl From<&KvRouterConfig> for dynamo_kv_indexer::IndexerConfig {
     fn from(config: &KvRouterConfig) -> Self {
         Self {
             use_kv_events: config.use_kv_events,
