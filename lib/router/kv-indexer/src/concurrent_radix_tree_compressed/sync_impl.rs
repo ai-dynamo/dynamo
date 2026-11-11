@@ -4,7 +4,8 @@
 use super::*;
 #[cfg(feature = "bench")]
 use crate::WorkerObservationState;
-use crate::{AnchorCapableSyncIndexer, ApproximateLruLane, ApproximateLruTask};
+use crate::approximate_lru::ApproximateLruLane;
+use crate::{AnchorCapableSyncIndexer, ApproximateLruTask};
 
 // ============================================================================
 // SyncIndexer implementation for ConcurrentRadixTreeCompressed
@@ -56,7 +57,7 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
                         ..
                     } = task;
                     let result = approximate_lru.apply(command).and_then(|output| {
-                        let crate::ApproximateLruApplyOutput {
+                        let crate::approximate_lru::ApproximateLruApplyOutput {
                             events,
                             reply,
                             ttl_update,
