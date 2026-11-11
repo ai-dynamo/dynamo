@@ -2632,16 +2632,27 @@ class TestRoutedEnginePath:
         )
 
     async def _run_requested_token_id_stream(
-        self, module, tokenizer, items, request_data, *, n=1, stop=None, wrap_post=None
+        self,
+        module,
+        tokenizer,
+        items,
+        request_data,
+        *,
+        n=1,
+        stop=None,
+        wrap_post=None,
+        processed_prompt_ids=None,
     ):
         """Process routed token chunks with real vLLM and return response data."""
+        if processed_prompt_ids is None:
+            processed_prompt_ids = [1]
         sampling_params = SamplingParams(
             n=n, stop=stop, output_kind=module.RequestOutputKind.DELTA
         )
         vllm_request = module.EngineCoreRequest(
             request_id="token-ids",
             external_req_id="token-ids",
-            prompt_token_ids=[1],
+            prompt_token_ids=processed_prompt_ids,
             mm_features=None,
             sampling_params=sampling_params,
             pooling_params=None,
@@ -2661,7 +2672,7 @@ class TestRoutedEnginePath:
                 tokenizer=tokenizer,
                 request_for_sampling=chat_request,
                 sampling_params=sampling_params,
-                prompt_token_ids=[1],
+                prompt_token_ids=processed_prompt_ids,
                 tool_parser=None,
                 reasoning_parser_class=None,
                 chat_template_kwargs={},
@@ -2800,10 +2811,12 @@ class TestRoutedEnginePath:
         ) + [[1]]
 
     @pytest.mark.asyncio
+    # Multimodal preprocessing can expand the helper's raw [1] prompt.
+    @pytest.mark.parametrize("processed_prompt_ids", [[1], [1, 99, 99, 2]])
     async def test_prompt_token_ids_sent_once_with_parallel_choices(
-        self, tokenizer, real_vllm_processor_module
+        self, tokenizer, real_vllm_processor_module, processed_prompt_ids
     ):
-        """Send prompt IDs on one terminal chunk without adding completion IDs."""
+        """Send processed prompt IDs once without adding completion IDs."""
         first = tokenizer.encode("first answer", add_special_tokens=False)
         second = tokenizer.encode("second answer", add_special_tokens=False)
         items = [
@@ -2822,6 +2835,7 @@ class TestRoutedEnginePath:
                 "nvext": {"extra_fields": ["prompt_token_ids"]},
             },
             n=2,
+            processed_prompt_ids=processed_prompt_ids,
         )
 
         finished = {
@@ -2835,7 +2849,7 @@ class TestRoutedEnginePath:
             frame for frame in data if "prompt_token_ids" in frame.get("nvext", {})
         ]
         assert len(prompt_frames) == 1
-        assert prompt_frames[0]["nvext"]["prompt_token_ids"] == [1]
+        assert prompt_frames[0]["nvext"]["prompt_token_ids"] == processed_prompt_ids
         assert prompt_frames[0]["choices"][0]["finish_reason"] == "length"
         assert all(
             "completion_token_ids" not in frame.get("nvext", {}) for frame in data

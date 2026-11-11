@@ -1556,7 +1556,7 @@ class VllmProcessor:
                     # the prompt IDs go on the first one only.
                     if include_prompt_ids and chunk_finished and not prompt_ids_sent:
                         dynamo_out.setdefault("nvext", {})["prompt_token_ids"] = list(
-                            tokens
+                            vllm_preproc.prompt_token_ids
                         )
                         prompt_ids_sent = True
                     prompt_logprobs.attach(dynamo_out)
