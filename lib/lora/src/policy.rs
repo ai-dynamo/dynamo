@@ -6,8 +6,8 @@ use std::{
     sync::Arc,
 };
 
-use dynamo_kv_router::{WorkerConfigLike, protocols::RoutingConstraints};
 use dynamo_runtime::error::{DynamoError, ErrorType};
+use dynamo_scheduler::host::{RoutingConstraints, WorkerConfigLike};
 
 use crate::{
     LoadEstimator, LoraFilter,
@@ -101,6 +101,22 @@ impl RequestPolicy {
         let name = name.ok_or_else(Self::capability_error)?;
         let eligible = Self::runtime_eligible(allowed, live, Some(configs), constraints)?;
         Self::pin_workers(filter, name, &eligible, pins.iter().copied()).map(Some)
+    }
+
+    pub fn check_worker_eligible<C: RuntimeLoraWorkerFacts + WorkerConfigLike>(
+        self,
+        worker: u64,
+        configs: Option<&HashMap<u64, C>>,
+        live: &HashSet<u64>,
+        allowed: Option<HashSet<u64>>,
+        constraints: &RoutingConstraints,
+    ) -> Result<(), DynamoError> {
+        if self.runtime
+            && !Self::runtime_eligible(allowed, live, configs, constraints)?.contains(&worker)
+        {
+            return Err(Self::capability_error());
+        }
+        Ok(())
     }
 
     fn runtime_eligible<C: RuntimeLoraWorkerFacts + WorkerConfigLike>(

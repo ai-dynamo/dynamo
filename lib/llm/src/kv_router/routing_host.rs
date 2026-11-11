@@ -8,12 +8,10 @@ use std::{
     time::Duration,
 };
 
-use dynamo_kv_router::{
-    plugins::{request_classifier::AbortCause, worker_selection::WorkerInputs},
-    protocols::{TokensWithHashes, WorkerConfigLike, WorkerWithDpRank},
-    scheduling::KvSchedulerError,
-    selector::{HostedSelectionRequest, HostedWorkerPicker},
-};
+use dynamo_admission::host::AbortCause;
+use dynamo_kv_hashing::routing::TokensWithHashes;
+use dynamo_kv_router::plugins::worker_selection::WorkerInputs;
+use dynamo_router_protocol::worker::WorkerWithDpRank;
 use dynamo_runtime::{
     error::{DynamoError, ErrorType, match_error_chain},
     metrics::frontend_perf::{STAGE_ROUTE, StageGuard},
@@ -26,6 +24,8 @@ use dynamo_runtime::{
     },
     protocols::annotated::Annotated,
 };
+use dynamo_scheduler::host::{KvSchedulerError, WorkerConfigLike};
+use dynamo_worker_selection::host::{HostedSelectionRequest, HostedWorkerPicker};
 use futures::stream::{self, StreamExt};
 use tracing::Instrument;
 
@@ -42,6 +42,7 @@ use crate::{
         preprocessor::owned_abort_error,
         timing::{RequestPhase, RoutingData, WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL},
     },
+    routing_policy::{HostedCandidatePolicy, check_candidate_policy},
     session_affinity::{
         AffinityCoordinator, AffinityTarget, Hold, SessionAffinityMode, affinity_id,
         explicit_target, from_table, invalid_argument, subagent_group_affinity_id,
@@ -56,7 +57,6 @@ mod kv_selection;
 mod occupancy;
 mod request_guard;
 
-use crate::routing_policy::HostedCandidatePolicy;
 pub(crate) use builder::hosted_picker;
 pub use builder::{LlmDispatch, MultimodalCache, RoutingHostBuilder};
 use cancellation::{CleanupBudget, DispatchCancellation, StagedKv, await_with_cleanup_policy};
