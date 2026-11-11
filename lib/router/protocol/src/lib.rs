@@ -6,7 +6,7 @@
 //! A type enters this crate only if it is serialized across a process boundary to an
 //! engine, a worker, or a sidecar, or is an identity every crate names. Nothing here
 //! runs: no tasks, no IO, no traits with behavior, no hashing. Dependencies are exactly
-//! `serde`, `serde_json`, and `thiserror`, and the layering gate checks that by equality.
+//! `serde`, `serde_json`, and `thiserror`.
 //!
 //! Deliberately elsewhere: KV event types, their engine codec, and the residency vocabulary
 //! (`dynamo-kv-events`), KV transfer hints and the worker transfer keys (`dynamo-kv-hints`),

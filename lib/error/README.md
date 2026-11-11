@@ -5,6 +5,4 @@ SPDX-License-Identifier: Apache-2.0
 
 # dynamo-error
 
-The semantic error contract Dynamo components classify failures with (DEP #14354): `DynamoError`, `ErrorClass`, `ErrorReason`, `Diagnostic`, `PublicDetails`, and the builder. The component closest to a failure classifies it once; protocol boundaries render the class.
-
-A leaf crate: it depends on serde and serde_json and nothing else, so crates below the runtime can classify with the same type. `dynamo-runtime` re-exports it as `dynamo_runtime::error`.
+`dynamo-error` is the error type Dynamo components use to classify failures. A `DynamoError` carries an `ErrorClass` (what kind of failure), an `ErrorReason` from a fixed catalog (why), and the `PublicDetails` that may reach a client; the component closest to the cause classifies it once, and protocol boundaries render the class. It depends only on `serde` and `serde_json`, and `dynamo-runtime` re-exports it as `dynamo_runtime::error`. Design: DEP #14354.
