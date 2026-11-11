@@ -869,6 +869,8 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             Err(error) => return Ok(error_stream(&ctx, error)),
         };
         let native_sglang_terminal = native_sglang.is_some();
+        // SGLang also caps output for scheduler-owned context and KV headroom.
+        let scheduler_caps_output = self.engine_args.backend == EngineType::Sglang;
 
         let dp_rank = self.resolve_dp_rank(&request);
 
@@ -1256,7 +1258,10 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                             ..Default::default()
                         };
 
-                        if signal.completed && token_count < effective_max_output_tokens {
+                        if signal.completed
+                            && token_count < effective_max_output_tokens
+                            && !scheduler_caps_output
+                        {
                             let _ = send_response(
                                 &stream_tx,
                                 LLMEngineOutput::error(
@@ -2178,7 +2183,8 @@ mod tests {
         })]);
         for (max_model_len, candidates, expected_tokens) in [
             (None, true, None),
-            (Some(4), true, Some(1)),
+            (Some(4), true, Some(0)),
+            (Some(10), true, Some(5)),
             (None, false, Some(258)),
         ] {
             let args = MockerConfig::from_value(serde_json::json!({
@@ -2201,10 +2207,24 @@ mod tests {
             let mut stream = engine.generate(SingleIn::new(request)).await.unwrap();
             if let Some(expected) = expected_tokens {
                 let mut tokens = Vec::new();
+                let mut finish = None;
                 while let Some(output) = stream.next().await {
-                    tokens.extend(output.data.unwrap().token_ids);
+                    let output = output.data.unwrap();
+                    tokens.extend(output.token_ids);
+                    if output.finish_reason.is_some() {
+                        finish = output.finish_reason;
+                    }
                 }
                 assert_eq!(tokens, vec![7; expected]);
+                if expected == 0 {
+                    assert!(matches!(
+                        finish,
+                        Some(FinishReason::Error(message))
+                            if message.contains("request exceeds worker admission limits")
+                    ));
+                } else {
+                    assert_eq!(finish, Some(FinishReason::Length));
+                }
             } else {
                 let item = stream.next().await.unwrap();
                 assert!(
