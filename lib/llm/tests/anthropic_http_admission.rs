@@ -428,6 +428,62 @@ async fn thinking_admission_observes_interleaved_beta_and_current_modes() {
 
 #[tokio::test]
 #[serial]
+async fn message_threads_are_refused_before_generation() {
+    temp_env::async_with_vars(ENV, async {
+        let script = load_agent_fixture("text.sse").await.unwrap();
+        let svc = HarnessService::start([script]).await;
+        let mut create = request();
+        create["system"] = json!("instructions");
+        create["tools"] = json!([{"name": "read", "input_schema": {"type": "object"}}]);
+        create["thread"] = json!({"type": "create"});
+        // A continue request carries only the new messages: the thread holds the rest.
+        let mut follow_up = request();
+        follow_up["stream"] = true.into();
+        follow_up["thread"] = json!({"type": "continue", "previous_message_id": "msg_01"});
+        for path in ["/v1/messages", "/v1/messages/count_tokens"] {
+            for body in [&create, &follow_up] {
+                let response = svc
+                    .client
+                    .post(format!("{}{path}", svc.base_url))
+                    .timeout(Duration::from_secs(10))
+                    .header("anthropic-beta", "message-threads-2026-08-12")
+                    .json(body)
+                    .send()
+                    .await
+                    .unwrap();
+                let error =
+                    assert_error(response, StatusCode::BAD_REQUEST, "invalid_request_error").await;
+                // The Anthropic SDKs resend the turn with the full conversation on this code.
+                assert_eq!(
+                    error["error"]["details"]["error_code"], "thread_unsupported_request",
+                    "{path}: {error}"
+                );
+            }
+        }
+        let mut unthreaded = request();
+        unthreaded["thread"] = Value::Null;
+        let response = svc
+            .client
+            .post(format!("{}/v1/messages", svc.base_url))
+            .timeout(Duration::from_secs(10))
+            .json(&unthreaded)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "{}",
+            response.text().await.unwrap()
+        );
+        assert_eq!(svc.engine.take_requests().await.len(), 1);
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
 async fn admission_retains_typed_paths_unknown_fields_and_nonempty_method_errors() {
     temp_env::async_with_vars(ENV, async {
         let script = load_agent_fixture("text.sse").await.unwrap();

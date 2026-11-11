@@ -65,7 +65,13 @@ impl<T: DeserializeOwned> ValidatedRequest<T> {
             for (name, value) in raw {
                 let value = if matches!(
                     name.as_str(),
-                    "system" | "tool_choice" | "metadata" | "thinking" | "max_tokens" | "top_k"
+                    "system"
+                        | "tool_choice"
+                        | "metadata"
+                        | "thinking"
+                        | "max_tokens"
+                        | "top_k"
+                        | "thread"
                 ) {
                     serde_json::from_str(value.get()).map_err(|error| format!("{name}: {error}"))?
                 } else {
@@ -89,6 +95,14 @@ impl<T: DeserializeOwned> ValidatedRequest<T> {
     /// Best-effort labels; validation and typed parsing run inside the handler's metrics guard.
     pub(super) fn identity(&self) -> (String, bool) {
         (self.model.clone(), self.stream)
+    }
+
+    /// Whether the request names a message thread, whose continue requests carry only the
+    /// new messages.
+    pub(super) fn has_thread(&self) -> bool {
+        self.fields
+            .as_ref()
+            .is_ok_and(|fields| fields.get("thread").is_some_and(|thread| !thread.is_null()))
     }
 
     /// Inspect native image tags without decoding or copying their source payloads.
