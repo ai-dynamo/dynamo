@@ -162,6 +162,16 @@ async fn collect(
         .await
 }
 
+fn cached_prompt_tokens(output: &dynamo_backend_common::LLMEngineOutput) -> Option<u32> {
+    output
+        .completion_usage
+        .as_ref()
+        .expect("terminal output carries usage")
+        .prompt_tokens_details
+        .as_ref()
+        .and_then(|details| details.cached_tokens)
+}
+
 fn with_image(mut request: PreprocessedRequest, source: String) -> PreprocessedRequest {
     request.multi_modal_data = Some(std::collections::HashMap::from([(
         "image_url".to_string(),
@@ -198,6 +208,24 @@ async fn large_inline_image_streams_through_sidecar() {
 }
 
 #[tokio::test]
+async fn sidecar_reports_measured_prompt_cache_hits() {
+    let server = RunningServer::start(ServerMode::Aggregated, fast_engine_args(), false).await;
+    let engine = sidecar(&server.endpoint, DisaggregationMode::Aggregated).await;
+    engine.start(0).await.unwrap();
+    let mut req = request(3);
+    // Two full 4-token blocks plus one partial block.
+    req.token_ids = (1..=9).collect::<Vec<u32>>().into();
+
+    let cold = collect(&engine, req.clone()).await;
+    assert_eq!(cached_prompt_tokens(cold.last().unwrap()), Some(0));
+    // The count arrives on the first output, not the terminal one, so a
+    // multi-token stream must carry it forward. The partial block is recomputed.
+    let warm = collect(&engine, req).await;
+    assert_eq!(cached_prompt_tokens(warm.last().unwrap()), Some(8));
+    engine.cleanup().await.unwrap();
+}
+
+#[tokio::test]
 async fn prefill_handoff_round_trips_through_a_decode_server() {
     for image in [false, true] {
         let mut args = fast_engine_args();
@@ -220,6 +248,9 @@ async fn prefill_handoff_round_trips_through_a_decode_server() {
         let prefill_outputs = collect(&prefill, prefill_request.clone()).await;
         assert_eq!(prefill_outputs.len(), 1);
         assert!(prefill_outputs[0].token_ids.is_empty());
+        // A cold prefill reports a measured zero; with prefix caching off the
+        // scheduler still measures it.
+        assert_eq!(cached_prompt_tokens(&prefill_outputs[0]), Some(0));
         let handoff = prefill_outputs[0]
             .disaggregated_params
             .clone()

@@ -284,20 +284,28 @@ impl pb::inference_server::Inference for VllmMockerService {
     ) -> Result<Response<pb::GenerateResponse>, Status> {
         let (prepared, mut live, _permit) = self.start_generation(request).await?;
         let mut output_ids = Vec::with_capacity(prepared.max_output_tokens);
+        // The scheduler reports the cache count only on the first output.
+        let mut cached_tokens = None;
         while let Some(signal) = live.recv().await {
+            cached_tokens = cached_tokens.or(signal.cached_tokens);
             let token_id = checked_token(&signal).map_err(|status| *status)?;
             output_ids.push(token_id);
             if signal.completed {
                 return Ok(Response::new(pb::GenerateResponse {
                     prompt_info: Some(prepared.prompt_info()),
-                    outputs: Some(prepared.sequence_output(&output_ids, output_ids.len(), true)),
+                    outputs: Some(prepared.sequence_output(
+                        &output_ids,
+                        output_ids.len(),
+                        true,
+                        cached_tokens,
+                    )),
                 }));
             }
         }
         if live.is_aborted() {
             return Ok(Response::new(pb::GenerateResponse {
                 prompt_info: Some(prepared.prompt_info()),
-                outputs: Some(prepared.aborted_output(&output_ids)),
+                outputs: Some(prepared.aborted_output(&output_ids, cached_tokens)),
             }));
         }
         Err(Status::internal(
@@ -318,12 +326,20 @@ impl pb::inference_server::Inference for VllmMockerService {
             };
 
             let mut generated = 0usize;
+            // The scheduler reports the cache count only on the first output.
+            let mut cached_tokens = None;
             while let Some(signal) = live.recv().await {
+                cached_tokens = cached_tokens.or(signal.cached_tokens);
                 let token_id = checked_token(&signal).map_err(|status| *status)?;
                 generated += 1;
                 yield pb::GenerateResponse {
                     prompt_info: None,
-                    outputs: Some(prepared.sequence_output(&[token_id], generated, signal.completed)),
+                    outputs: Some(prepared.sequence_output(
+                        &[token_id],
+                        generated,
+                        signal.completed,
+                        cached_tokens,
+                    )),
                 };
                 if signal.completed {
                     return;
@@ -332,7 +348,7 @@ impl pb::inference_server::Inference for VllmMockerService {
             if live.is_aborted() {
                 yield pb::GenerateResponse {
                     prompt_info: None,
-                    outputs: Some(prepared.aborted_output(&[])
+                    outputs: Some(prepared.aborted_output(&[], cached_tokens)
                         .with_total_output_tokens(generated)),
                 };
                 return;
