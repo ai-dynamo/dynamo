@@ -299,9 +299,13 @@ def test_staged_wheel_provenance_matches_reviewed_git_payload(
         ):
             helper.write_provenance(requirement_path, wheelhouse)
         assert not (wheelhouse / "aisim-source.json").exists()
+        assert not (wheelhouse / "aisim-override.txt").exists()
     else:
         helper.write_provenance(requirement_path, wheelhouse)
         proof = json.loads((wheelhouse / "aisim-source.json").read_text())
+        assert (wheelhouse / "aisim-override.txt").read_text() == (
+            f"aisim @ file:///opt/dynamo/wheelhouse/{wheel.name}\n"
+        )
         assert proof["source"] == origin
         assert proof["wheel"] == wheel.name
         assert proof["sha256"] == hashlib.sha256(wheel.read_bytes()).hexdigest()

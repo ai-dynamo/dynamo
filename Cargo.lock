@@ -35,7 +35,7 @@ dependencies = [
 [[package]]
 name = "aisim-core"
 version = "0.14.0"
-source = "git+https://github.com/ai-dynamo/aisimulate?rev=fd5b1b592b86935bf4929f3d452ca05ceff4317c#fd5b1b592b86935bf4929f3d452ca05ceff4317c"
+source = "git+https://github.com/ai-dynamo/aisimulate?rev=fc85294e633b0aa7e15968ee84cfad76aefb00a4#fc85294e633b0aa7e15968ee84cfad76aefb00a4"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",

@@ -82,6 +82,9 @@ def write_provenance(requirements: Path, wheelhouse: Path) -> None:
         "sha256": checksum,
         "version": distribution.version,
     }
+    (wheelhouse / "aisim-override.txt").write_text(
+        f"aisim @ file:///opt/dynamo/wheelhouse/{wheel.name}\n"
+    )
     (wheelhouse / "aisim-source.json").write_text(
         json.dumps(result, indent=2, sort_keys=True) + "\n"
     )

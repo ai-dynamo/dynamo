@@ -62,7 +62,7 @@ COPY --from=ghcr.io/astral-sh/uv:{{ context.dynamo.uv_version }} /uv /uvx /opt/u
 COPY --from=dynamo_base /usr/local/bin/nats-server /usr/local/bin/nats-server
 COPY --from=dynamo_base /usr/local/bin/etcd /usr/local/bin/etcd
 COPY --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
-COPY --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/aisim-source.json /opt/dynamo/wheelhouse/
+COPY --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/aisim-source.json /opt/dynamo/dist/aisim-override.txt /opt/dynamo/wheelhouse/
 
 USER dynamo
 
@@ -79,7 +79,7 @@ RUN --mount=type=bind,source=./container/deps/requirements.planner.txt,target=/t
     --mount=type=cache,id=uv-dynamo-{{ context.dynamo.uv_version }},target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     uv pip install \
-        --overrides /tmp/overrides.planner.txt \
+        --overrides /tmp/overrides.planner.txt --overrides /opt/dynamo/wheelhouse/aisim-override.txt \
         --requirement /tmp/requirements.planner.txt \
         --requirement /tmp/requirements.benchmark.txt \
         /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \

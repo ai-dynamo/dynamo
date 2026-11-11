@@ -14,6 +14,3 @@
 # once the override is in force. Drop this entry once aiperf widens its own
 # constraint.
 pillow>=13.0.0,<14
-
-# Select the explicitly staged source wheel during AISim qualification.
-aisim==0.14.0

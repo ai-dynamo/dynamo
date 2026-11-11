@@ -101,6 +101,7 @@ def test_telemetry_capture_callback_and_jsonl_share_one_sample_stream(
 
     assert set(samples[0]) == {
         "sample_ordinal",
+        "host_caches",
         "kind",
         "interval_start_ms",
         "sampled_at_ms",

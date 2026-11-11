@@ -3,4 +3,4 @@
 
 # Temporary source pin for AISim #796. Do not merge until compatible artifacts are published.
 # Keep the revision aligned with pyproject.toml and both aisim-core Cargo Git dependencies.
-aisim @ git+https://github.com/ai-dynamo/aisimulate.git@fd5b1b592b86935bf4929f3d452ca05ceff4317c#subdirectory=python/aisim
+aisim @ git+https://github.com/ai-dynamo/aisimulate.git@fc85294e633b0aa7e15968ee84cfad76aefb00a4#subdirectory=python/aisim

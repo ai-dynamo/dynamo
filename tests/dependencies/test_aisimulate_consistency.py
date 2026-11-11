@@ -5,9 +5,12 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 import sys
 import tomllib
+import zipfile
 from importlib import metadata
 from pathlib import Path
 
@@ -114,11 +117,32 @@ def test_installed_aisim_comes_from_the_reviewed_source_commit() -> None:
         pytest.skip("AISim supports Python 3.11 through 3.13")
     _, revision = _source_pin()
     distribution = metadata.distribution("aisim")
-    provenance = __import__("json").loads(
-        distribution.read_text("direct_url.json") or "{}"
-    )
-    assert provenance["vcs_info"]["commit_id"] == revision
-    assert provenance["subdirectory"] == "python/aisim"
+    provenance = json.loads(distribution.read_text("direct_url.json") or "{}")
+    if "vcs_info" in provenance:
+        assert provenance["vcs_info"]["commit_id"] == revision
+        assert provenance["subdirectory"] == "python/aisim"
+        return
+    wheelhouse = Path("/opt/dynamo/wheelhouse")
+    proof = json.loads((wheelhouse / "aisim-source.json").read_text())
+    assert proof["source"]["vcs_info"]["commit_id"] == revision
+    assert proof["source"]["subdirectory"] == "python/aisim"
+    wheel = wheelhouse / proof["wheel"]
+    assert provenance["url"] == wheel.as_uri()
+    with wheel.open("rb") as stream:
+        assert hashlib.file_digest(stream, "sha256").hexdigest() == proof["sha256"]
+    with zipfile.ZipFile(wheel) as archive:
+        payload = [
+            name
+            for name in archive.namelist()
+            if not name.endswith("/")
+            and name.split("/", 1)[0]
+            in {"aisim", "aisim_core", "aisimulate", "aisimulate_core", "collector"}
+        ]
+        assert payload
+        for name in payload:
+            assert (
+                archive.read(name) == Path(distribution.locate_file(name)).read_bytes()
+            )
 
 
 def test_ai_dynamo_registers_only_its_aisimulate_providers() -> None:

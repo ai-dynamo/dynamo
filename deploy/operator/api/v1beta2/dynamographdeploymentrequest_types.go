@@ -32,7 +32,7 @@ type ModelSpec struct {
 	Name string `json:"name"`
 }
 
-// Backend identifies an inference backend searched by AISimulate and used by generated candidates.
+// Backend identifies an inference backend searched by AISim and used by generated candidates.
 // +kubebuilder:validation:Enum=vllm;sglang;trtllm
 type Backend string
 
@@ -44,11 +44,11 @@ const (
 
 // GPUHardwareSpec describes accelerator identity and the maximum allocation per candidate.
 type GPUHardwareSpec struct {
-	// SKU identifies the accelerator using the AISimulate hardware catalog name.
-	// Known values in the bundled AISimulate release are `a100_pcie`, `a100_sxm`,
+	// SKU identifies the accelerator using the AISim hardware catalog name.
+	// Known values in the bundled AISim release are `a100_pcie`, `a100_sxm`,
 	// `a30`, `b200_sxm`, `b300_sxm`, `b60`, `gb200`, `gb300`, `h100_pcie`,
 	// `h100_sxm`, `h200_sxm`, `l4`, `l40s`, and `rtx_pro_6000_server`.
-	// The field remains open so an external AISimulate systems catalog can add identifiers.
+	// The field remains open so an external AISim systems catalog can add identifiers.
 	// Admission passes an unknown identifier through unchanged and warns when `budget` and the
 	// parent `numGpusPerNode` are also explicit. Without both, it rejects the identifier because
 	// cluster discovery cannot associate capacity or topology with it. When omitted from a
@@ -59,7 +59,7 @@ type GPUHardwareSpec struct {
 
 	// Budget is the maximum total number of GPUs one candidate may use.
 	// When omitted for a known SKU, admission derives the available GPU budget from the cluster.
-	// An SKU unknown to the bundled AISimulate catalog requires an explicit `budget` and an
+	// An SKU unknown to the bundled AISim catalog requires an explicit `budget` and an
 	// explicit `numGpusPerNode` in the parent hardware object.
 	// +optional
 	// +kubebuilder:validation:Minimum=1
@@ -75,11 +75,11 @@ type HardwareSpec struct {
 	GPU *GPUHardwareSpec `json:"gpu,omitempty"`
 
 	// NumGPUsPerNode is the number of GPUs available to one candidate on each node. It lowers
-	// to AISimulate's num_gpus_per_node input.
+	// to AISim's num_gpus_per_node input.
 	// An explicit value is authoritative. In a nonempty hardware object, admission discovers
 	// an omitted value from the selected cluster node shape. The Run controller never discovers
 	// this value. An exactly empty hardware object opts out of all operator hardware discovery
-	// and typed hardware defaults, leaving AISimulate input and defaults authoritative.
+	// and typed hardware defaults, leaving AISim input and defaults authoritative.
 	// +optional
 	// +kubebuilder:validation:Minimum=1
 	NumGPUsPerNode *int32 `json:"numGpusPerNode,omitempty"`
@@ -138,7 +138,7 @@ type StaticLoadSpec struct {
 	KVCapacityFraction *KVCapacityFractionSpec `json:"kvCapacityFraction,omitempty"`
 }
 
-// StaticWorkloadSpec defines AISimulate synthetic traffic. Admission completes a nonempty
+// StaticWorkloadSpec defines AISim synthetic traffic. Admission completes a nonempty
 // object with the omitted static defaults; an explicit empty object opts out of them.
 type StaticWorkloadSpec struct {
 	// InputTokens is the synthetic request input length in tokens.
@@ -158,20 +158,20 @@ type StaticWorkloadSpec struct {
 }
 
 // TraceFormat identifies the decoder of a recorded request trace. Lowering translates it to
-// AISimulate's native traffic.source.format.
+// AISim's native traffic.source.format.
 // +kubebuilder:validation:Enum=Dynamo
 type TraceFormat string
 
 const (
 	// TraceFormatDynamo is the Dynamo request trace (dynamo.request.trace.v1) that the frontend
-	// records, as JSON Lines or gzip-compressed JSON Lines. It lowers to AISimulate's dynamo format.
+	// records, as JSON Lines or gzip-compressed JSON Lines. It lowers to AISim's dynamo format.
 	TraceFormatDynamo TraceFormat = "Dynamo"
 )
 
 // TracePVCSource names one trace file on a PersistentVolumeClaim in the Request namespace.
 type TracePVCSource struct {
 	// ClaimName is the PersistentVolumeClaim, in the Request namespace, that holds the trace.
-	// The Run Job mounts only the trace file from it, read-only, and only into the AISimulate
+	// The Run Job mounts only the trace file from it, read-only, and only into the AISim
 	// container. Each Run protects the claim with the finalizer `nvidia.com/dgdr-run-<run-uid>`
 	// until the Run completes or, for a Run deleted before it completes, until no Job of the Run
 	// is left. Garbage collection deletes the Job of a deleted Run before the Job's pod, so the
@@ -207,7 +207,7 @@ type TraceSourceSpec struct {
 	PersistentVolumeClaim *TracePVCSource `json:"persistentVolumeClaim,omitempty"`
 }
 
-// TraceReplaySpec configures how AISimulate replays a decoded trace.
+// TraceReplaySpec configures how AISim replays a decoded trace.
 type TraceReplaySpec struct {
 	// ArrivalSpeedupRatio multiplies the recorded request-arrival rate. 1.0 preserves it.
 	// When omitted, the recorded arrival times are replayed unchanged.
@@ -237,7 +237,7 @@ type TraceWorkloadSpec struct {
 // trace are mutually exclusive.
 // +kubebuilder:validation:XValidation:rule="!(has(self.static) && has(self.trace))",message="static and trace are mutually exclusive"
 type WorkloadSpec struct {
-	// Static defines AISimulate synthetic traffic. When omitted without a trace, admission
+	// Static defines AISim synthetic traffic. When omitted without a trace, admission
 	// supplies the complete static default. An explicit empty object opts out; any nonempty
 	// object is completed with omitted inputTokens, outputTokens and load defaults.
 	// +optional
@@ -263,7 +263,7 @@ const (
 	ObjectiveModePareto ObjectiveMode = "Pareto"
 )
 
-// ObjectiveMetric is a metric optimized by AISimulate.
+// ObjectiveMetric is a metric optimized by AISim.
 // +kubebuilder:validation:Enum=Throughput;ThroughputPerGPU;ThroughputPerUser;TTFT;E2ELatency;Goodput;GoodputPerGPU
 type ObjectiveMetric string
 
@@ -317,11 +317,11 @@ type ObjectiveSpec struct {
 	SLA *ObjectiveSLASpec `json:"sla,omitempty"`
 }
 
-// AISimSpec supplies public recommendation input to the AISimulate version in the operator's configured
+// AISimSpec supplies public recommendation input to the AISim version in the operator's configured
 // planner image.
 type AISimSpec struct {
 	// InputOverrides is an RFC 7386 JSON Merge Patch over the input lowered from
-	// the typed fields. It uses the upstream AISimulate JSON contract, including
+	// the typed fields. It uses the upstream AISim JSON contract, including
 	// snake_case names. Values here take precedence, and null deletes a lowered
 	// field. The dgdr_run member must remain an object, and its operator-owned
 	// transport, identity, and runtime fields name, max_candidates, snapshot_dir,
@@ -336,9 +336,9 @@ type AISimSpec struct {
 	// parent object; the Run controller does not restore it. The typed
 	// PersistentVolumeClaim source alone decides the Run Job's trace mount and its
 	// claim dependency, so overriding a native path adds no volume mount.
-	// The operator runs the AISimulate version from its configured planner image;
+	// The operator runs the AISim version from its configured planner image;
 	// Requests and Runs cannot select a different image or version.
-	// Request and Run creation validate the merged input against the bundled AISimulate input
+	// Request and Run creation validate the merged input against the bundled AISim input
 	// schema. Request spec changes require the same validation; Run specs are immutable.
 	// Unchanged specs remain metadata-updatable after a bundled schema change.
 	// +optional
@@ -371,7 +371,7 @@ type OverridesSpec struct {
 	// the dry-run response and its defaults are discarded. The Candidate retains the
 	// unpruned payload from before the check. Invalid Candidates count toward maxCandidates.
 	// Overrides may change any deployment configuration. Evaluation metrics are not
-	// recomputed and continue to describe the original AISimulate configuration.
+	// recomputed and continue to describe the original AISim configuration.
 	// DGD labels and annotations become Candidate labels and annotations. A failed merge
 	// retains only the original generated metadata; a successful merge followed by failed
 	// dry-run validation retains the merged metadata on the invalid Candidate. Other metadata
@@ -391,7 +391,7 @@ type NativeSearchInput struct {
 	// +optional
 	Model *ModelSpec `json:"model,omitempty"`
 
-	// Backends lists one or more inference backends searched by AISimulate and used by generated candidates.
+	// Backends lists one or more inference backends searched by AISim and used by generated candidates.
 	// +optional
 	// +kubebuilder:validation:MinItems=1
 	// +listType=set
@@ -423,7 +423,7 @@ type NativeSearchInput struct {
 	// +optional
 	Objective *ObjectiveSpec `json:"objective,omitempty"`
 
-	// AISim supplies public recommendation input to the operator's AISimulate execution bundle.
+	// AISim supplies public recommendation input to the operator's AISim execution bundle.
 	// +optional
 	AISim *AISimSpec `json:"aisim,omitempty"`
 
@@ -431,7 +431,7 @@ type NativeSearchInput struct {
 	// +optional
 	Recommendation *RecommendationSpec `json:"recommendation,omitempty"`
 
-	// Overrides customizes the generated DGD without changing AISimulate execution.
+	// Overrides customizes the generated DGD without changing AISim execution.
 	// +optional
 	Overrides *OverridesSpec `json:"overrides,omitempty"`
 }

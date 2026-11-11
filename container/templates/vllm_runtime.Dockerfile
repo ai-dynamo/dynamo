@@ -187,7 +187,7 @@ RUN apt-get update && \
 COPY --chmod=664 --chown=dynamo:0 LICENSE /workspace/
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
 {% if target not in ("dev", "local-dev") %}
-COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/aisim-source.json /opt/dynamo/wheelhouse/
+COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/aisim-source.json /opt/dynamo/dist/aisim-override.txt /opt/dynamo/wheelhouse/
 {% endif %}
 
 {% set pip_target = "--system" if device == "cuda" else "--python /opt/venv/bin/python" %}

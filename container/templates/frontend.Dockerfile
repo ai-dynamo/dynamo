@@ -141,7 +141,7 @@ ENV PATH="/opt/dynamo/venv/bin:$PATH"
 COPY --chown=dynamo: --from=dynamo_base /opt/uv/bin/uv /opt/uv/bin/uvx /opt/uv/bin/
 ENV PATH=/opt/uv/bin:${PATH}
 COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
-COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/aisim-source.json /opt/dynamo/wheelhouse/
+COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/aisim-source.json /opt/dynamo/dist/aisim-override.txt /opt/dynamo/wheelhouse/
 # crick wheel pre-built in the crick_builder stage; see comment near the top.
 COPY --chown=dynamo: --from=crick_builder /wheels/ /opt/dynamo/wheelhouse/extra/
 
@@ -161,7 +161,7 @@ RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tm
     --mount=type=cache,id=uv-dynamo-{{ context.dynamo.uv_version }},target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     uv pip install \
-        --overrides /tmp/overrides.frontend.txt \
+        --overrides /tmp/overrides.frontend.txt --overrides /opt/dynamo/wheelhouse/aisim-override.txt \
         --requirement /tmp/requirements.common.txt \
         --requirement /tmp/requirements.frontend.txt
 
@@ -175,7 +175,7 @@ RUN --mount=type=bind,source=./container/deps/overrides.frontend.txt,target=/tmp
     echo "${NIXL_REF}" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$' || { echo "NIXL_REF must be a vX.Y.Z release tag; got '${NIXL_REF}'" >&2; exit 1; } && \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv UV_FIND_LINKS=/opt/dynamo/wheelhouse/extra && \
     uv pip install \
-    --overrides /tmp/overrides.frontend.txt \
+    --overrides /tmp/overrides.frontend.txt --overrides /opt/dynamo/wheelhouse/aisim-override.txt \
     /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
     /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
     /opt/dynamo/wheelhouse/aisim-*.whl && \
@@ -195,7 +195,7 @@ RUN --mount=type=bind,source=./container/deps/overrides.frontend.txt,target=/tmp
     fi && \
     cd /workspace/benchmarks && \
     export UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
-    uv pip install --overrides /tmp/overrides.frontend.txt .
+    uv pip install --overrides /tmp/overrides.frontend.txt --overrides /opt/dynamo/wheelhouse/aisim-override.txt .
 
 # Setup environment for all users
 USER root

@@ -684,7 +684,7 @@ COPY examples/router/custom-policy-example/ /opt/dynamo/examples/router/custom-p
 COPY deploy/inference-gateway/ext-proc/ /opt/dynamo/deploy/inference-gateway/ext-proc/
 COPY deploy/inference-gateway/sidecar/ /opt/dynamo/deploy/inference-gateway/sidecar/
 
-{% if target in ("planner", "frontend") or (target == "runtime" and framework in ("vllm", "sglang", "trtllm", "triton")) %}
+{% if target in ("planner", "frontend") or target == "runtime" %}
 COPY container/deps/requirements.aisim.txt /opt/dynamo/container/deps/requirements.aisim.txt
 
 # Build the exact source-pinned AISim wheel until #796 has published artifacts.
@@ -738,7 +738,7 @@ RUN set -u; injected=0; \
     done; \
     echo "wheel NOTICES bundled into $injected wheel(s)"
 
-{% if target in ("planner", "frontend") or (target == "runtime" and framework in ("vllm", "sglang", "trtllm", "triton")) %}
+{% if target in ("planner", "frontend") or target == "runtime" %}
 # Run after NOTICES bundling so the manifest hashes the final wheel bytes.
 COPY container/aisim_source_provenance.py /opt/dynamo/container/aisim_source_provenance.py
 RUN ${VIRTUAL_ENV}/bin/python /opt/dynamo/container/aisim_source_provenance.py \
