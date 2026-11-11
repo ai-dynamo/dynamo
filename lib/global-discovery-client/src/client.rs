@@ -5,7 +5,7 @@ use std::error::Error;
 use std::time::Duration;
 
 use dynamo_global_common::{
-    Lease, PoolRegistration, PoolsResponse, RouterReplica, RoutersResponse,
+    Lease, PoolRegistration, PoolsResponse, RouterRegistration, RouterReplica, RoutersResponse,
 };
 use reqwest::StatusCode;
 use serde::de::DeserializeOwned;
@@ -78,13 +78,30 @@ impl GlobalDiscoveryClient {
     /// Calls `GET /routers` and returns every Global Router replica the
     /// service lists.
     ///
-    /// Each call returns the full current set. If any entry does not parse,
+    /// Each call returns the replicas the service currently knows. If any entry does not parse,
     /// the whole call fails, so a caller never acts on a partial list.
     pub async fn routers(&self) -> Result<Vec<RouterReplica>, DiscoveryClientError> {
+        Ok(self.router_listing().await?.routers)
+    }
+
+    /// Reads the router list with its completeness marker. Caches must keep
+    /// missing replicas until a complete snapshot confirms their removal.
+    pub async fn router_listing(&self) -> Result<RoutersResponse, DiscoveryClientError> {
         let url = &self.routers_url;
         let response = self.send(self.http.get(url.clone()), url).await?;
-        let body: RoutersResponse = read_json(response, url).await?;
-        Ok(body.routers)
+        read_json(response, url).await
+    }
+
+    /// Registers one router incarnation or renews its lease.
+    pub async fn register_router(
+        &self,
+        registration: &RouterRegistration,
+    ) -> Result<Lease, DiscoveryClientError> {
+        let url = &self.routers_url;
+        let response = self
+            .send(self.http.post(url.clone()).json(registration), url)
+            .await?;
+        read_json(response, url).await
     }
 
     /// Calls `GET /pools` and returns the pools the service lists, and whether

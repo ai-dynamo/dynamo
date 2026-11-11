@@ -1,0 +1,134 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  generateName: harbor-run-
+  namespace: ate-env
+  labels:
+    app: harbor-runner
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 10800
+  template:
+    metadata:
+      labels:
+        app: harbor-runner
+    spec:
+      serviceAccountName: harbor-runner
+      restartPolicy: Never
+      nodeSelector:
+        kubernetes.io/arch: amd64
+      initContainers:
+        - name: dataset
+          # Set this digest once; the runner reuses it through the YAML alias.
+          image: &runnerImage registry.example.com/harbor-substrate/runner@sha256:REPLACE
+          command: [bash, -ec]
+          args:
+            - |
+              git init /tmp/dataset
+              git -C /tmp/dataset remote add origin https://github.com/harbor-framework/harbor-datasets
+              git -C /tmp/dataset config remote.origin.promisor true
+              git -C /tmp/dataset config remote.origin.partialclonefilter blob:none
+              git -C /tmp/dataset sparse-checkout set datasets/swebench-verified
+              git -C /tmp/dataset fetch --depth 1 --filter=blob:none origin "$DATASET_REVISION"
+              git -C /tmp/dataset checkout --detach FETCH_HEAD
+              cp -a /tmp/dataset/datasets/swebench-verified/. /work/tasks/
+              test -f /work/tasks/astropy__astropy-12907/task.toml
+          env:
+            - name: DATASET_REVISION
+              value: 86723674f04e4209ac479d0fb75d9d9f44b4377e
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: '1'
+              memory: 1Gi
+          volumeMounts:
+            - name: tasks
+              mountPath: /work/tasks
+      containers:
+        - name: runner
+          image: *runnerImage
+          command: [harbor]
+          args: [run, --config, /etc/harbor/harbor-job.yaml, '-y']
+          resources:
+            requests:
+              cpu: '1'
+              memory: 2Gi
+            limits:
+              cpu: '4'
+              memory: 8Gi
+          env:
+            - name: DYNAMO_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: harbor-model-api
+                  key: api-key
+                  optional: true
+          volumeMounts:
+            - name: config
+              mountPath: /etc/harbor
+              readOnly: true
+            - name: tasks
+              mountPath: /work/tasks
+              readOnly: true
+            - name: results
+              mountPath: /work/jobs
+            - name: ateapi-token
+              mountPath: /var/run/secrets/ateapi
+              readOnly: true
+            - name: substrate-identity
+              mountPath: /run/substrate
+              readOnly: true
+            - name: tool-trace
+              mountPath: /etc/harbor-tool-trace
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: harbor-run-config
+        - name: tasks
+          emptyDir:
+            sizeLimit: 1Gi
+        - name: results
+          persistentVolumeClaim:
+            claimName: harbor-results
+        - name: ateapi-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  audience: api.ate-system.svc
+                  expirationSeconds: 7200
+                  path: token
+        - name: substrate-identity
+          projected:
+            sources:
+              - podCertificate:
+                  signerName: podidentity.podcert.ate.dev/identity
+                  keyType: ECDSAP256
+                  credentialBundlePath: credential-bundle.pem
+              - clusterTrustBundle:
+                  signerName: servicedns.podcert.ate.dev/identity
+                  labelSelector:
+                    matchLabels:
+                      podcert.ate.dev/canarying: live
+                  path: trust-bundle.pem
+        - name: tool-trace
+          configMap:
+            name: harbor-tool-trace
+            optional: true

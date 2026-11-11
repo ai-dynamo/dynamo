@@ -11,10 +11,6 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use dynamo_kv_router::{
-    PrefillLoadEstimator, conditional_disagg::ConditionalDisaggPolicy,
-    config::RouterConfigOverride, protocols::RoutingConstraints,
-};
 use dynamo_runtime::{
     error::{DynamoError, ErrorClass, ErrorType, match_error_chain},
     pipeline::{
@@ -23,6 +19,8 @@ use dynamo_runtime::{
     },
     protocols::{EndpointId, annotated::Annotated},
 };
+use dynamo_scheduler::host::{PrefillLoadEstimator, RouterConfigOverride, RoutingConstraints};
+use dynamo_worker_selection::host::ConditionalDisaggPolicy;
 use futures::stream::{self, StreamExt};
 
 use crate::{
@@ -491,6 +489,8 @@ impl
             return next.generate(context.map(|_| req)).await;
         }
 
+        crate::routing_policy::check_stage(&req, crate::routing_policy::ExecutionStage::Prefill)?;
+
         let session_affinity = context
             .get_optional::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)
             .map_err(|message| anyhow::anyhow!("invalid session affinity context: {message}"))?;
@@ -934,8 +934,9 @@ fn merge_decode_topology_constraints(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dynamo_kv_router::config::{KvRouterConfig, RouterConfigOverride};
+    use dynamo_kv_router::config::KvRouterConfig;
     use dynamo_runtime::{engine::AsyncEngine, pipeline::Error};
+    use dynamo_scheduler::host::RouterConfigOverride;
     use futures::StreamExt;
     use std::{
         collections::{HashMap, HashSet},
@@ -1430,8 +1431,8 @@ mod tests {
     #[tokio::test]
     async fn kv_decode_host_resolves_the_decode_pool_without_conditional_disagg() {
         use crate::{kv_router::KvRouter, local_model::runtime_config::ModelRuntimeConfig};
-        use dynamo_kv_router::scheduling::PairedPoolRoom;
         use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
+        use dynamo_scheduler::host::PairedPoolRoom;
 
         let runtime = Runtime::from_current().unwrap();
         let distributed =

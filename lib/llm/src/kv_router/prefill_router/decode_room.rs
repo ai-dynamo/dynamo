@@ -10,7 +10,8 @@
 
 use std::sync::{Arc, OnceLock, Weak};
 
-use dynamo_kv_router::scheduling::{BusyThresholds, PairedPoolRoom, SchedulingRequest};
+use dynamo_scheduler::host::{PairedPoolRoom, SchedulingRequest};
+use dynamo_slot_tracker::host::BusyThresholds;
 use tokio::sync::watch;
 
 use crate::kv_router::KvRouter;

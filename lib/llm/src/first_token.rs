@@ -6,10 +6,10 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
-use dynamo_kv_router::sequences::SequencePublishQueueError;
 use dynamo_runtime::{
     component::Endpoint, metrics::MetricsHierarchy, traits::DistributedRuntimeProvider,
 };
+use dynamo_slot_tracker::host::SequencePublishQueueError;
 use tokio::sync::watch;
 
 use crate::kv_router::sequence::ActiveSequenceEventPublisher;
@@ -239,7 +239,7 @@ mod tests {
         worker_type: WorkerType,
     ) -> (
         Option<FirstTokenSource>,
-        tokio::sync::mpsc::Receiver<dynamo_kv_router::protocols::ActiveSequenceEvent>,
+        tokio::sync::mpsc::Receiver<dynamo_slot_tracker::host::ActiveSequenceEvent>,
     ) {
         let (publisher, receiver) =
             ActiveSequenceEventPublisher::channel(4, CancellationToken::new());

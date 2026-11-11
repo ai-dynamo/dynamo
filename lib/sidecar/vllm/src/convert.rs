@@ -27,7 +27,7 @@ const MM_HASHES_KEY: &str = "mm_hashes";
 const IMAGE_URL_KEY: &str = "image_url";
 const VIDEO_URL_KEY: &str = "video_url";
 const AUDIO_URL_KEY: &str = "audio_url";
-// Must match DYNAMO_CACHE_SALT_PREFIX in lib/kv-router/src/zmq_wire/extra_keys.rs.
+// Must match DYNAMO_CACHE_SALT_PREFIX in lib/kv-events/src/zmq_wire/extra_keys.rs.
 const DYNAMO_CACHE_SALT_PREFIX: &str = "dynamo-cache-salt:";
 
 const MAX_PREPROCESSED_MM_BYTES: usize = 16 * 1024 * 1024;
@@ -187,6 +187,15 @@ pub(crate) fn build_generate_request(
     let stop_conditions = request.stop_conditions;
     let encoder_result = request.encoder_result;
     let mut extra_args = request.extra_args;
+    // The Python worker uses this frontend marker; gRPC keeps its own defaults.
+    if let Some(serde_json::Value::Object(extra)) = extra_args.as_mut()
+        && extra
+            .get("request_type")
+            .and_then(serde_json::Value::as_str)
+            == Some("completions")
+    {
+        extra.remove("request_type");
+    }
     let features = consume_vllm_tito(&mut extra_args)?;
     let routing_hashes = consume_preprocessed_mm_routing_hashes(&mut extra_args)?;
     if features.is_none() && routing_hashes.is_some() {
