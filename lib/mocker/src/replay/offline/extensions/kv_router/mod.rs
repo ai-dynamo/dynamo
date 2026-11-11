@@ -10,7 +10,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use dynamo_admission::host::{
-    PolicyClassConfig, PolicyProfile, PolicyQueue, QueueMetadata, QueueSnapshot, WorkerPlacement,
+    PolicyClassConfig, PolicyProfile, PolicyQueue, QueueLane, QueueMetadata, QueueSnapshot,
+    RecheckScope, SessionLane,
 };
 use dynamo_kv_events::event::{KvCacheEventData, RouterEvent};
 use dynamo_kv_hashing::LocalBlockHash;
@@ -1146,16 +1147,6 @@ impl OfflineReplayRouter {
 
         if should_queue {
             let snapshot = self.snapshot_for(&mut pending);
-            let placement = pending
-                .affinity_hold
-                .as_ref()
-                .and_then(Hold::target)
-                .and_then(|target| {
-                    target
-                        .dp_rank
-                        .map(|rank| WorkerWithDpRank::new(target.worker_id, rank))
-                })
-                .map_or(WorkerPlacement::Any, WorkerPlacement::Exact);
             let metadata = QueueMetadata {
                 class_index,
                 snapshot,
@@ -1168,6 +1159,22 @@ impl OfflineReplayRouter {
             };
             let priority_jump = pending.priority_jump;
             let strict_priority = pending.strict_priority;
+            // As in the live router, a session's requests wait in their own lane, so a
+            // session bound to a busy rank holds only itself; a sessionless request bound to a
+            // rank by its affinity hold waits in that rank's lane.
+            let lane = match pending.session_id.as_deref() {
+                Some(session) => QueueLane::Session(SessionLane::new(session)),
+                None => pending
+                    .affinity_hold
+                    .as_ref()
+                    .and_then(Hold::target)
+                    .and_then(|target| {
+                        target
+                            .dp_rank
+                            .map(|rank| WorkerWithDpRank::new(target.worker_id, rank))
+                    })
+                    .map_or(QueueLane::Shared, QueueLane::Exact),
+            };
             self.pending
                 .enqueue_with_due_at(
                     metadata,
@@ -1176,7 +1183,7 @@ impl OfflineReplayRouter {
                         .saturating_mul(self.dp_size as usize),
                     priority_jump,
                     strict_priority,
-                    placement,
+                    lane,
                     pending,
                 )
                 .map_err(|(rejection, _)| anyhow::Error::new(rejection))?;
@@ -1654,7 +1661,8 @@ impl OfflineReplayRouter {
     fn drain_pending(&mut self, decay_now: Instant) -> Result<Vec<WorkerAdmission>> {
         self.needs_drain = false;
         let mut admissions = Vec::new();
-        self.pending.recheck_all_workers();
+        // Replay has no dispatch gate: capacity is the only reason a lane blocks.
+        self.pending.recheck_blocked_lanes(RecheckScope::Capacity);
         loop {
             // Most completions find an empty queue, which never consults the
             // predicate, so only snapshot worker loads once one is needed.

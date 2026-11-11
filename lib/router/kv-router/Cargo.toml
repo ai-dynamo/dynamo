@@ -21,7 +21,7 @@ ingest-zmq = ["dep:zmq"]
 replica-sync-zmq = ["dep:zmq"]
 peer-recovery = ["dep:reqwest"]
 metrics = ["dep:prometheus", "dynamo-kv-indexer/export"]
-bench = ["dynamo-scheduler/bench", "dynamo-router-protocol/bench", "dynamo-kv-indexer/bench", "dynamo-slot-tracker/bench", "dynamo-worker-selection/bench"]
+bench = ["dynamo-admission/bench", "dynamo-scheduler/bench", "dynamo-router-protocol/bench", "dynamo-kv-indexer/bench", "dynamo-slot-tracker/bench", "dynamo-worker-selection/bench"]
 profile = ["dynamo-kv-indexer/profile"]
 # Test-only hooks consumed by dependent crates' tests; never enable in release.
 testing = ["dynamo-scheduler/testing", "dynamo-router-protocol/testing", "dynamo-kv-indexer/testing", "dynamo-slot-tracker/testing", "dynamo-session-affinity/testing", "dynamo-worker-selection/testing", "dynamo-admission/testing"]
