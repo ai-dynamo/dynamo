@@ -25,6 +25,7 @@ from dynamo.common.http.url_validator import (
     UrlValidationError,
     UrlValidationPolicy,
     check_remote_url_allowed,
+    validate_media_url,
 )
 from dynamo.common.multimodal.image_loader import ImageLoader
 
@@ -99,7 +100,9 @@ try:
             return img
 
         # Audio, video and the image fallback download through vLLM's own
-        # client, so DYN_MM_ALLOW_REMOTE_URLS is enforced here, before it.
+        # client, so the DYN_MM_* URL rules are enforced here, before it. The
+        # async path, which the renderer uses, applies the full check, as
+        # ImageLoader does for images.
         def load_from_url(self, url: str, media_io: Any, **kwargs: Any) -> Any:
             check_remote_url_allowed(url, UrlValidationPolicy.from_env())
             return super().load_from_url(url, media_io, **kwargs)
@@ -107,7 +110,8 @@ try:
         async def load_from_url_async(
             self, url: str, media_io: Any, **kwargs: Any
         ) -> Any:
-            check_remote_url_allowed(url, UrlValidationPolicy.from_env())
+            if not url.lower().startswith("data:"):
+                await validate_media_url(url, UrlValidationPolicy.from_env())
             return await super().load_from_url_async(url, media_io, **kwargs)
 
     logger.debug("Registered 'dynamo' MediaConnector with vLLM")

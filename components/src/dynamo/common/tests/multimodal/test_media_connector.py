@@ -93,6 +93,41 @@ async def test_connector_rejects_remote_urls_when_disabled(fetch, monkeypatch):
     parent_load.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fetch", ["fetch_audio_async", "fetch_video_async"])
+@pytest.mark.parametrize(
+    "url, error",
+    [
+        ("https://127.0.0.1/latest/meta-data/", "blocked range"),
+        ("https://169.254.169.254/latest/meta-data/", "blocked range"),
+        ("http://example.com/media", "http:// URLs are not allowed"),
+    ],
+)
+async def test_connector_applies_url_policy_to_audio_and_video(
+    fetch, url, error, monkeypatch
+):
+    """Audio and video follow the same DYN_MM_* URL rules as images, so the
+    default policy refuses private addresses before vLLM downloads them."""
+    connector_class = getattr(media_connector_module, "DynamoMediaConnector", None)
+    if connector_class is None:
+        pytest.skip("vLLM is not installed")
+
+    for var in ("DYN_MM_ALLOW_INTERNAL", "DYN_MM_ALLOW_REMOTE_URLS"):
+        monkeypatch.delenv(var, raising=False)
+    parent_load = AsyncMock()
+    monkeypatch.setattr(connector_class.__mro__[1], "load_from_url_async", parent_load)
+    connector = object.__new__(connector_class)
+    connector.media_io_kwargs = {}
+
+    with pytest.raises(UrlValidationError, match=error):
+        await getattr(connector, fetch)(url)
+    parent_load.assert_not_awaited()
+
+    # data: URLs carry the media inline, so they skip the URL check.
+    await getattr(connector, fetch)("data:audio/wav;base64,AAAA")
+    parent_load.assert_awaited_once()
+
+
 def test_connector_sync_load_rejects_remote_urls_when_disabled(monkeypatch):
     connector_class = getattr(media_connector_module, "DynamoMediaConnector", None)
     if connector_class is None:
