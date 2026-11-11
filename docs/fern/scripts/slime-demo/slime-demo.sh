@@ -3,8 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # ============================================================================
-# Slime Integration Demo — cluster-free replay of the Slime tutorial: Slime
-# trains Qwen3-0.6B with GRPO on GSM8K in a KubeRay RayJob while a Dynamo
+# Slime Integration Demo — cluster-free replay of the Slime integration pages:
+# Slime trains Qwen3-0.6B with GRPO on GSM8K in a KubeRay RayJob while a Dynamo
 # DynamoGraphDeployment serves its rollouts. The waits are fast-forwarded, so
 # the run plays in about two minutes.
 # ============================================================================
@@ -12,14 +12,18 @@
 # NOTHING here touches a cluster: no kubectl, no GPUs. Every "❯ kubectl ..."
 # line is echoed as a prompt string, followed by canned output.
 #
-# The steps, resource names, and checks follow the tutorial at
-# docs/fern/pages/use-cases/reinforcement-learning/slime/tutorial.mdx, with its
+# The steps, resource names, and checks follow installation.mdx,
+# serve-inference.mdx, and train.mdx in
+# docs/fern/pages/use-cases/reinforcement-learning/slime/, with their
 # inline manifests referred to by file name. Pod names, rewards, gradient
 # norms, log-prob gaps, sync times, timestamps, and the request and reload
 # counts come from a 10-step run of that setup with Dynamo 1.6.1 and
 # slimerl/slime:nightly-dev-20261027a-cu130. The training log is condensed to
 # its integration milestones. The frames in between the recorded states of the
 # fast-forwarded waits are approximate.
+#
+# Keep every line under 100 columns: the overview plays a 100-column
+# recording, which shows larger text than a 120-column one.
 #
 # Deterministic: no randomness, fixed strings -> identical every recording.
 # Runs on the macOS system bash (3.2).
@@ -446,7 +450,7 @@ beat0_intro() {
     printf '%bSlime trains on them%b' "$NAR" "$NC"; sleep 0.5
     printf '%b' "$arrow"; sleep 0.5
     printf '%bthe new weights sync back.%b\n' "$NAR" "$NC"
-    narrate "GRPO on GSM8K, 10 steps, ${NUM}${BOLD}3 GPUs${NC}${NAR}: two SGLang engines in Dynamo, one Megatron-LM trainer on KubeRay."
+    narrate "GRPO on GSM8K, 10 steps, ${NUM}${BOLD}3 GPUs${NC}${NAR}: 2 SGLang engines in Dynamo, 1 Megatron-LM trainer on KubeRay."
     pause "$PAUSE_LONG"
 }
 
@@ -518,25 +522,7 @@ beat1_stage_data() {
 }
 
 # =============================================================================
-# Beat 2 — The custom functions that point Slime at Dynamo
-# =============================================================================
-beat2_custom_functions() {
-    step_header "🧩" "Step 2: Send Slime's Rollouts to Dynamo"
-    narrate "Slime loads custom Python functions. This one sends every rollout request to the Dynamo frontend:"
-    echo ""
-    pause "$PAUSE_SHORT"
-    type_file "dynamo_generate.py" "$DYNAMO_GENERATE_PY"
-    echo ""
-    narrate "A second one, weight_permissions.py, makes each weight update readable by the non-root engines."
-    echo ""
-    show_command_lines 'kubectl create configmap slime-functions -n $NAMESPACE \' \
-                       '    --from-file=dynamo_generate.py --from-file=weight_permissions.py'
-    echo "configmap/slime-functions created"
-    pause "$PAUSE_MED"
-}
-
-# =============================================================================
-# Beat 3 — Dynamo serves the rollouts: a DGD with two SGLang engines
+# Beat 2 — Dynamo serves the rollouts: a DGD with two SGLang engines
 # =============================================================================
 # WATCH_H must equal the number of lines pods_render() emits.
 WATCH_H=8
@@ -561,8 +547,8 @@ pods_render() {  # seconds since the DGD was applied
     el "  ${DIM}⏩ fast-forwarding · ${AGE_STR} elapsed${NC}"
 }
 
-beat3_serve_rollouts() {
-    step_header "🚀" "Step 3: Serve Rollouts with Dynamo"
+beat2_serve_rollouts() {
+    step_header "🚀" "Step 2: Serve Rollouts with Dynamo"
     narrate "A DynamoGraphDeployment (DGD) runs a Dynamo frontend and two SGLang engines, one GPU each." \
             "Each engine is stock sglang.launch_server. Dynamo's sidecar registers it with the frontend." \
             "One Service per engine exposes SGLang's own API on port 30000 for Slime's weight updates."
@@ -573,7 +559,7 @@ beat3_serve_rollouts() {
     echo "dynamographdeployment.nvidia.com/slime-sglang created"
     pause "$PAUSE_SHORT"
 
-    local title="Step 3: Serve Rollouts with Dynamo"
+    local title="Step 2: Serve Rollouts with Dynamo"
     local cmd='watch kubectl get pods -n $NAMESPACE -l dynamo.nvidia.com/slime-role'
     local n1="Fast-forwarding while both engines load the model..."
     echo ""
@@ -608,11 +594,29 @@ beat3_serve_rollouts() {
 }
 
 # =============================================================================
+# Beat 3 — The custom functions that point Slime at Dynamo
+# =============================================================================
+beat3_custom_functions() {
+    step_header "🧩" "Step 3: Send Slime's Rollouts to Dynamo"
+    narrate "Slime loads custom functions. This one sends every rollout request to the Dynamo frontend:"
+    echo ""
+    pause "$PAUSE_SHORT"
+    type_file "dynamo_generate.py" "$DYNAMO_GENERATE_PY"
+    echo ""
+    narrate "A second one, weight_permissions.py, makes each weight update readable by the non-root engines."
+    echo ""
+    show_command_lines 'kubectl create configmap slime-functions -n $NAMESPACE \' \
+                       '    --from-file=dynamo_generate.py --from-file=weight_permissions.py'
+    echo "configmap/slime-functions created"
+    pause "$PAUSE_MED"
+}
+
+# =============================================================================
 # Beat 4 — Slime trains in a KubeRay RayJob
 # =============================================================================
 beat4_rayjob() {
     step_header "🧠" "Step 4: Train with Megatron-LM on KubeRay"
-    narrate "A KubeRay RayJob runs Slime's train.py, with one GPU on the Ray head for the Megatron-LM trainer." \
+    narrate "A KubeRay RayJob runs Slime's train.py, with one GPU on the Ray head for Megatron-LM." \
             "These train.py flags swap the engines Slime would launch for the two Dynamo engines:"
     echo ""
     show_command "grep -E 'external-engine|generate-function|update-weight' slime-grpo.yaml"
@@ -688,8 +692,8 @@ loop_row() {  # step t
         s_txt="writing ${sync}..."; s_col="$DIM"
     fi
     printf -v c0 '  %-6s' "$k"
-    pad c1 28 "$r_txt"
-    pad c2 40 "$t_txt"
+    pad c1 27 "$r_txt"
+    pad c2 37 "$t_txt"
     el "${c0}${r_col}${c1}${NC}${t_col}${c2}${NC}${s_col}${s_txt}${NC}"
 }
 
@@ -707,7 +711,7 @@ loop_render() {  # t
     local t="$1" k header
     loop_milestones "$t"
     el ""
-    printf -v header '  %-6s%-28s%-40s%s' "STEP" "ROLLOUTS (Dynamo)" "TRAINING (Megatron-LM)" "WEIGHT SYNC (disk)"
+    printf -v header '  %-6s%-27s%-37s%s' "STEP" "ROLLOUTS (Dynamo)" "TRAINING (Megatron-LM)" "WEIGHT SYNC (disk)"
     el "${BOLD}${header}${NC}"
     for (( k=0; k<10; k++ )); do
         loop_row "$k" "$t"
@@ -776,17 +780,15 @@ beat5_rl_loop() {
 }
 
 # =============================================================================
-# Beat 6 — Verify: the job, Dynamo's routing, and every engine reload
+# Beat 6 — Verify: Dynamo's routing and every engine reload. The loop above
+# already ends on the job's success, so the RayJob status table is left out.
 # =============================================================================
 beat6_verify() {
     step_header "✅" "Step 6: Verify What Dynamo Did"
-    show_command 'kubectl get rayjob -n $NAMESPACE slime-grpo'
-    echo "NAME         JOB STATUS   DEPLOYMENT STATUS   RAY CLUSTER NAME   START TIME             END TIME               AGE"
-    echo "slime-grpo   SUCCEEDED    Complete            slime-grpo-6gsc7   2026-11-05T00:57:54Z   2026-11-05T01:00:30Z   2m40s"
-    echo ""
     narrate "The frontend logs one routing decision per rollout request: 10 steps × 64 samples."
     echo ""
-    show_command "kubectl logs -n \$NAMESPACE -l dynamo.nvidia.com/slime-role=frontend --tail=-1 | grep -c 'Selected worker'"
+    show_command_lines "kubectl logs -n \$NAMESPACE -l dynamo.nvidia.com/slime-role=frontend --tail=-1 \\" \
+                       "    | grep -c 'Selected worker'"
     echo "640"
     echo ""
     narrate "Round-robin sent 320 requests to each engine. Each engine also loaded every weight version:"
@@ -820,8 +822,8 @@ main() {
     trap 'cursor_show' EXIT
     beat0_intro
     beat1_stage_data
-    beat2_custom_functions
-    beat3_serve_rollouts
+    beat2_serve_rollouts
+    beat3_custom_functions
     beat4_rayjob
     beat5_rl_loop
     beat6_verify

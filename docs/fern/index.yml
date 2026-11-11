@@ -731,10 +731,13 @@ navigation:
                 contents:
                   - page: Overview
                     path: pages/use-cases/reinforcement-learning/slime/overview.mdx
-                  - page: Installation
+                  - page: Installation and Setup
                     path: pages/use-cases/reinforcement-learning/slime/installation.mdx
-                  - page: Tutorial
-                    path: pages/use-cases/reinforcement-learning/slime/tutorial.mdx
+                  - page: Serve Inference with Dynamo
+                    path: pages/use-cases/reinforcement-learning/slime/serve-inference.mdx
+                  - page: Train with Slime on KubeRay
+                    slug: train-with-slime-on-kuberay
+                    path: pages/use-cases/reinforcement-learning/slime/train.mdx
               - page: External Trainer Integration
                 path: pages/use-cases/reinforcement-learning/implementation-guide.md
               - page: RL Integration Reference
