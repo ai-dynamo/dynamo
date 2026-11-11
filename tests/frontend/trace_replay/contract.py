@@ -216,6 +216,10 @@ def read_request_seeds(payload: bytes, model_name: str) -> list[dict[str, Any]]:
             raise ReplayError("seed request.model must equal profile.model_name")
         if "reference" in seed and not isinstance(seed["reference"], dict):
             raise ReplayError("seed.reference must be an object")
+        if "preparation" in seed.get("reference", {}):
+            raise ReplayError(
+                "seed.reference.preparation is reserved for generated evidence"
+            )
         seeds.append(seed)
     if not seeds:
         raise ReplayError("request seeds must be nonempty")

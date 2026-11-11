@@ -564,3 +564,15 @@ def test_invalid_limits_fail_before_creating_output(
             requests, profile, "http://localhost", tmp_path / "capture", **kwargs
         )
     assert not (tmp_path / "capture").exists()
+
+
+def test_reserved_preparation_metadata_is_rejected_before_http(tmp_path: Path) -> None:
+    original = seed()
+    original["reference"] = {"capture": {"bfcl": "original"}, "preparation": {}}
+    requests, profile = inputs(tmp_path, [original])
+    output = tmp_path / "capture"
+    with reference_server() as (url, seen):
+        with pytest.raises(ReplayError, match="reserved"):
+            capture_requests(requests, profile, url, output)
+    assert not seen["get"] and not seen["post"]
+    assert not output.exists()
