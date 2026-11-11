@@ -3,14 +3,7 @@
 
 use std::sync::Arc;
 
-use dynamo_kv_router::WorkerType;
-use dynamo_kv_router::plugins::RouterPluginRegistry;
-use dynamo_kv_router::plugins::worker_selection::{
-    WorkerCandidates, WorkerInputView, WorkerInputs, WorkerPicker, WorkerScorer,
-    WorkerSelectionContext, WorkerSelectionPolicy, WorkerSelectionPolicyError,
-    WorkerSelectionPolicyFactory, WorkerSelectionPolicyParameters,
-    WorkerSelectionPolicyProviderError, WorkerSelectionPolicyRegistryError,
-};
+use dynamo_kv_router::plugins::prelude::*;
 
 use super::THUNDERAGENT_CLASSIFIER_TYPE;
 
@@ -104,12 +97,9 @@ pub(crate) fn register(
 mod tests {
     use std::collections::HashMap;
 
-    use dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicy;
-    use dynamo_kv_router::protocols::{RoutingConstraints, WorkerConfigLike, WorkerWithDpRank};
-    use dynamo_kv_router::scheduling::{OverlapSignals, ScheduleMode, SchedulingRequest};
-    use dynamo_kv_router::{
-        KvRouterConfig, WorkerLoadProjection, WorkerSelectionInput, WorkerSelector,
-    };
+    use dynamo_kv_router::plugins::prelude::*;
+    use dynamo_scheduler::host::WorkerSelectionInput;
+    use dynamo_scheduler::host::WorkerSelector;
 
     use super::*;
 
@@ -164,7 +154,7 @@ mod tests {
 
     fn policy() -> WorkerSelectionPolicy {
         WorkerSelectionPolicy::new(
-            KvRouterConfig::default(),
+            SelectionConfig::default(),
             "test",
             vec![Box::new(ThunderAgentScorer)],
             Box::new(ThunderAgentPicker),
