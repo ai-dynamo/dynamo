@@ -76,7 +76,7 @@ needs:
 ```bash
 python -m pytest tests/deploy/test_slime_kuberay.py \
   --namespace=slime-e2e \
-  --slime-storage-class=<rwx-storage-class> \
+  --slime-storage-class=your-rwx-storage-class \
   -v -s
 ```
 
