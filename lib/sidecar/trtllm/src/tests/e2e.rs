@@ -397,7 +397,7 @@ async fn image_routing_requests(model: &str, block_size: u32) -> Vec<Preprocesse
             .await
             .expect("preprocess the image through the production frontend");
         let reference = routing_reference(&request);
-        let pad = dynamo_kv_router::protocols::pad_value_for_mm_hash(
+        let pad = dynamo_kv_hashing::multimodal::pad_value_for_mm_hash(
             u64::from_str_radix(&reference.mm_hash, 16).unwrap(),
         );
         let last_image = reference
@@ -588,11 +588,11 @@ async fn e2e_real_openengine_image() {
 #[tokio::test]
 #[ignore = "requires the pinned model snapshot and captured native image-routing KV events"]
 async fn e2e_real_image_routing_event_conversion() {
-    use dynamo_kv_router::protocols::{
-        BlockHashOptions, ExternalSequenceBlockHash, KvCacheEventData, LocalBlockHash,
-        WorkerWithDpRank, compute_block_hash_for_seq,
-    };
-    use dynamo_kv_router::zmq_wire::{ZmqEventNormalizer, decode_event_batch};
+    use dynamo_kv_events::event::KvCacheEventData;
+    use dynamo_kv_events::zmq_wire::{ZmqEventNormalizer, decode_event_batch};
+    use dynamo_kv_hashing::routing::{BlockHashOptions, compute_block_hash_for_seq};
+    use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
+    use dynamo_router_protocol::worker::WorkerWithDpRank;
 
     let path = std::env::var("TRTLLM_E2E_ROUTING_EVENTS").expect("set TRTLLM_E2E_ROUTING_EVENTS");
     let payloads: Vec<Vec<u8>> = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();

@@ -1149,3 +1149,78 @@ async fn test_multimodal_counts_on_every_metrics_frame() {
         );
     }
 }
+
+/// The chunks a chat request with usage gets, as `(event, content, finish_reason)`.
+async fn chat_chunks_with_usage(
+    backend_stream: Pin<Box<dyn AsyncEngineStream<Annotated<BackendOutput>>>>,
+    ctx: Arc<MockContext>,
+) -> Vec<(Option<String>, Option<String>, Option<String>, bool)> {
+    let request = create_chat_request(Some(true), None);
+    let response_generator = Box::new(request.response_generator("test-pending".to_string()));
+    OpenAIPreprocessor::transform_postprocessor_stream(
+        backend_stream,
+        response_generator,
+        ctx,
+        false,
+        false,
+        None,
+        Default::default(),
+    )
+    .map(|chunk| {
+        let data = chunk.data.as_ref();
+        let choice = data.and_then(|data| data.inner.choices.first());
+        (
+            chunk.event.clone(),
+            choice.and_then(|choice| {
+                choice
+                    .delta
+                    .content
+                    .as_ref()
+                    .map(|content| format!("{content:?}"))
+            }),
+            choice.and_then(|choice| choice.finish_reason.map(|reason| format!("{reason:?}"))),
+            data.is_some_and(|data| data.inner.usage.is_some()),
+        )
+    })
+    .collect()
+    .await
+}
+
+/// A backend stream that is not ready before each chunk gives the same chunks as one that
+/// always is.
+#[tokio::test]
+async fn test_postprocessor_output_is_the_same_when_the_backend_is_pending_between_chunks() {
+    let ctx = Arc::new(MockContext::new());
+    let ready = chat_chunks_with_usage(create_mock_backend_stream(ctx.clone()), ctx.clone()).await;
+
+    let outputs = build_backend_outputs_with_cached_tokens(None);
+    let pending_polls = Arc::new(AtomicUsize::new(0));
+    let polls = pending_polls.clone();
+    let pending_first = stream::iter(outputs).then(move |output| {
+        let polls = polls.clone();
+        async move {
+            // Return `Pending` once before each chunk.
+            let mut yielded = false;
+            std::future::poll_fn(|cx| {
+                if yielded {
+                    return std::task::Poll::Ready(());
+                }
+                yielded = true;
+                polls.fetch_add(1, Ordering::Relaxed);
+                cx.waker().wake_by_ref();
+                std::task::Poll::Pending
+            })
+            .await;
+            Annotated::from_data(output)
+        }
+    });
+    let backend_stream = dynamo_runtime::engine::ResponseStream::new(
+        Box::pin(pending_first),
+        ctx.clone() as Arc<dyn AsyncEngineContext>,
+    );
+    let pending = chat_chunks_with_usage(backend_stream, ctx).await;
+
+    assert_eq!(pending_polls.load(Ordering::Relaxed), 3);
+    assert_eq!(pending, ready);
+    assert!(ready.last().is_some_and(|chunk| chunk.3), "{ready:?}");
+}

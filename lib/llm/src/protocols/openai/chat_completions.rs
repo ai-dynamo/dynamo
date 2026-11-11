@@ -24,6 +24,7 @@ pub mod aggregator;
 pub(crate) mod allowed_tools;
 pub(crate) mod custom_tools;
 mod delta;
+pub(crate) mod tool_call_merge;
 pub mod tool_parser_v2;
 pub(crate) mod unified_parser;
 
