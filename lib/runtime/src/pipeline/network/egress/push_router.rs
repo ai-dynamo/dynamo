@@ -9,7 +9,7 @@ use crate::pipeline::network::egress::route_span::{
 use crate::{
     component::{Client, DeviceType, Endpoint, Instance, RoutingInstances},
     discovery::EndpointInstanceId,
-    dynamo_nvtx_range,
+    dynamo_nvtx_request_range,
     engine::{AsyncEngine, AsyncEngineContext, Data},
     metrics::frontend_perf::{STAGE_DURATION_SECONDS, STAGE_ROUTE},
     pipeline::{
@@ -1728,7 +1728,7 @@ where
             .with_label_values(&[STAGE_ROUTE])
             .observe(route_start.elapsed().as_secs_f64());
 
-        let _nvtx_transport = dynamo_nvtx_range!(transport_kind);
+        let _nvtx_transport = dynamo_nvtx_request_range!(transport_kind, &request_id);
         let stream = self
             .addressed
             .generate(request)
@@ -2058,7 +2058,7 @@ where
             .with_label_values(&[STAGE_ROUTE])
             .observe(route_start.elapsed().as_secs_f64());
 
-        let _nvtx_transport = dynamo_nvtx_range!(transport_kind);
+        let _nvtx_transport = dynamo_nvtx_request_range!(transport_kind, &request_id);
         let stream: anyhow::Result<ManyOut<U>> = self
             .addressed
             .generate_bidirectional(instance, address, input)
