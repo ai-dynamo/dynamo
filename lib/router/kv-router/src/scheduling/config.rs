@@ -32,7 +32,7 @@ use dynamo_worker_selection::{
     default_conditional_disagg_eff_isl_threshold,
 };
 
-pub use dynamo_scheduler::config::{RouterConfigOverride, RouterPrefillLoadModel};
+pub use dynamo_scheduler::{RouterConfigOverride, RouterPrefillLoadModel};
 // Pre-split paths kept through 1.9 and removed in 1.10; the named list is the inventory in compat.rs.
 #[allow(deprecated)]
 pub use crate::compat::scheduling::config::{
@@ -1367,7 +1367,7 @@ impl From<&KvRouterConfig> for ConditionalDisaggConfig {
     }
 }
 
-impl From<&KvRouterConfig> for dynamo_scheduler::config::CacheHitWeights {
+impl From<&KvRouterConfig> for dynamo_scheduler::CacheHitWeights {
     fn from(config: &KvRouterConfig) -> Self {
         Self {
             host: config.host_cache_hit_weight,
@@ -1376,7 +1376,7 @@ impl From<&KvRouterConfig> for dynamo_scheduler::config::CacheHitWeights {
     }
 }
 
-impl From<&KvRouterConfig> for dynamo_scheduler::config::RouterConfig {
+impl From<&KvRouterConfig> for dynamo_scheduler::RouterConfig {
     /// The kernel's slice of the flat config. Profiles resolve lazily by model name through
     /// the policy file this config loaded, so a bad file surfaces when its first partition
     /// is created, exactly where `policy_profile` fails today.
@@ -1391,7 +1391,7 @@ impl From<&KvRouterConfig> for dynamo_scheduler::config::RouterConfig {
             queue_recheck_interval: config.router_queue_recheck_interval(),
             profiles: std::sync::Arc::new(move |model: Option<&str>| {
                 source.policy_profile(model).map_err(|error| {
-                    dynamo_scheduler::config::RouterConfigError::Validation(error.to_string())
+                    dynamo_scheduler::RouterConfigError::Validation(error.to_string())
                 })
             }),
         }

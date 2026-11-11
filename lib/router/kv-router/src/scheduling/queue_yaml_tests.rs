@@ -14,16 +14,15 @@ use tokio::time::Instant;
 
 use dynamo_admission::{PolicyProfile, QueueSnapshot, RouterQueuePolicy};
 use dynamo_router_protocol::worker::WorkerWithDpRank;
-use dynamo_scheduler::OverlapSignals;
-use dynamo_scheduler::protocols::WorkerConfigLike;
-use dynamo_scheduler::queue::*;
-use dynamo_scheduler::selector::{DefaultWorkerSelector, WorkerCapacityExt, WorkerInputs};
 use dynamo_scheduler::test_utils::{NoopSequencePublisher, SimpleWorkerConfig};
-use dynamo_scheduler::types::{
-    KvSchedulerError, RejectThresholdsProvider, ScheduleMode, SchedulingRequest, SchedulingResponse,
+use dynamo_scheduler::{
+    ClassQueueStats, DefaultWorkerSelector, KvSchedulerError, OverlapSignals,
+    RejectThresholdsProvider, ScheduleMode, SchedulerQueue, SchedulingRequest, SchedulingResponse,
+    WorkerCapacityExt, WorkerConfigLike,
 };
-use dynamo_slot_tracker::ActiveSequencesMultiWorker;
+use dynamo_slot_tracker::{ActiveSequencesMultiWorker, SchedulerBookingDescriptor};
 use dynamo_worker_selection::WorkerCapacity;
+use dynamo_worker_selection::WorkerInputs;
 
 use crate::scheduling::policy_config::RouterPolicyConfig;
 
@@ -149,9 +148,7 @@ fn make_request(
     isl_tokens: usize,
 ) -> (
     SchedulingRequest,
-    tokio::sync::oneshot::Receiver<
-        Result<SchedulingResponse, dynamo_scheduler::types::KvSchedulerError>,
-    >,
+    tokio::sync::oneshot::Receiver<Result<SchedulingResponse, dynamo_scheduler::KvSchedulerError>>,
 ) {
     let (tx, rx) = tokio::sync::oneshot::channel();
     let req = SchedulingRequest {
@@ -176,7 +173,7 @@ fn make_request(
         affinity_target: None,
         pinned_worker: None,
         allowed_worker_ids: None,
-        routing_constraints: dynamo_scheduler::protocols::RoutingConstraints::default(),
+        routing_constraints: dynamo_scheduler::RoutingConstraints::default(),
         shared_cache_hits: None,
         resp_tx: Some(tx),
     };

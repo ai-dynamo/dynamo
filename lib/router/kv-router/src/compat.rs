@@ -582,7 +582,7 @@ pub mod indexer {
     pub use dynamo_kv_indexer::ThreadPoolIndexer;
     #[cfg(feature = "bench")]
     pub use dynamo_kv_indexer::ThreadPoolObservationDrain;
-    pub use dynamo_scheduler::shared_cache::SharedKvCache;
+    pub use dynamo_scheduler::SharedKvCache;
     #[cfg(feature = "bench")]
     #[deprecated(
         since = "1.8.0",
@@ -796,9 +796,9 @@ pub mod protocols {
     pub use dynamo_kv_events::placement::PlacementOwner;
     #[deprecated(
         since = "1.8.0",
-        note = "moved to dynamo_scheduler::protocols::PotentialLoad; removed in 1.10.0"
+        note = "moved to dynamo_scheduler::PotentialLoad; removed in 1.10.0"
     )]
-    pub type PotentialLoad = dynamo_scheduler::protocols::PotentialLoad;
+    pub type PotentialLoad = dynamo_scheduler::PotentialLoad;
     #[deprecated(
         since = "1.8.0",
         note = "moved to dynamo_slot_tracker::PrefillEvent; removed in 1.10.0"
@@ -845,19 +845,19 @@ pub mod protocols {
         note = "moved to dynamo_kv_events::event::RouterEvent; removed in 1.10.0"
     )]
     pub type RouterEvent = dynamo_kv_events::event::RouterEvent;
-    pub use dynamo_scheduler::protocols::RouterEventSink;
+    pub use dynamo_scheduler::RouterEventSink;
     #[deprecated(
         since = "1.8.0",
         note = "moved to dynamo_kv_indexer::RouterHintSourceMetadata; removed in 1.10.0"
     )]
     pub type RouterHintSourceMetadata = dynamo_kv_indexer::RouterHintSourceMetadata;
-    pub use dynamo_scheduler::protocols::RouterRequest;
-    pub use dynamo_scheduler::protocols::RouterResponse;
+    pub use dynamo_scheduler::RouterRequest;
+    pub use dynamo_scheduler::RouterResponse;
     #[deprecated(
         since = "1.8.0",
-        note = "moved to dynamo_scheduler::protocols::RoutingConstraints; removed in 1.10.0"
+        note = "moved to dynamo_scheduler::RoutingConstraints; removed in 1.10.0"
     )]
-    pub type RoutingConstraints = dynamo_scheduler::protocols::RoutingConstraints;
+    pub type RoutingConstraints = dynamo_scheduler::RoutingConstraints;
     pub use dynamo_slot_tracker::SchedulerGroup;
     #[deprecated(
         since = "1.8.0",
@@ -866,9 +866,9 @@ pub mod protocols {
     pub type SchedulerLoad = dynamo_slot_tracker::SchedulerLoad;
     #[deprecated(
         since = "1.8.0",
-        note = "moved to dynamo_scheduler::protocols::SelectionLogFields; removed in 1.10.0"
+        note = "moved to dynamo_scheduler::SelectionLogFields; removed in 1.10.0"
     )]
-    pub type SelectionLogFields = dynamo_scheduler::protocols::SelectionLogFields;
+    pub type SelectionLogFields = dynamo_scheduler::SelectionLogFields;
     #[deprecated(
         since = "1.8.0",
         note = "moved to dynamo_worker_selection::SelectionTrace; removed in 1.10.0"
@@ -903,12 +903,12 @@ pub mod protocols {
     )]
     pub type WorkerAffinityTarget = dynamo_session_affinity::WorkerAffinityTarget;
     pub use dynamo_router_protocol::worker::WorkerId;
-    pub use dynamo_scheduler::protocols::WorkerConfigLike;
+    pub use dynamo_scheduler::WorkerConfigLike;
     #[deprecated(
         since = "1.8.0",
-        note = "moved to dynamo_scheduler::protocols::WorkerSelectionResult; removed in 1.10.0"
+        note = "moved to dynamo_scheduler::WorkerSelectionResult; removed in 1.10.0"
     )]
-    pub type WorkerSelectionResult = dynamo_scheduler::protocols::WorkerSelectionResult;
+    pub type WorkerSelectionResult = dynamo_scheduler::WorkerSelectionResult;
     #[deprecated(
         since = "1.8.0",
         note = "moved to dynamo_router_protocol::worker::WorkerWithDpRank; removed in 1.10.0"
@@ -1143,7 +1143,7 @@ pub use dynamo_worker_selection::ConditionalDisaggPolicyKind;
 )]
 pub type DefaultWorkerSelector = dynamo_scheduler::host::DefaultWorkerSelector;
 pub use dynamo_kv_events::event::KvCacheEventError;
-pub use dynamo_scheduler::policy::FcfsPolicy;
+pub use dynamo_scheduler::FcfsPolicy;
 #[deprecated(
     since = "1.8.0",
     note = "moved to dynamo_kv_router::config::KvRouterConfig; removed in 1.10.0"
@@ -1152,7 +1152,7 @@ pub type KvRouterConfig = crate::config::KvRouterConfig;
 pub use dynamo_kv_hashing::LocalBlockHash;
 pub use dynamo_kv_hints::keys::KvTransferEnforcement;
 pub use dynamo_scheduler::KvSchedulerError;
-pub use dynamo_scheduler::local::LocalScheduler;
+pub use dynamo_scheduler::LocalScheduler;
 #[deprecated(
     since = "1.8.0",
     note = "moved to dynamo_kv_indexer::LogicalNode; removed in 1.10.0"
@@ -1184,10 +1184,10 @@ pub type OverlapScores = dynamo_kv_indexer::OverlapScores;
 pub type PositionalIndexer = dynamo_kv_indexer::PositionalIndexer;
 #[deprecated(
     since = "1.8.0",
-    note = "moved to dynamo_scheduler::protocols::PotentialLoad; removed in 1.10.0"
+    note = "moved to dynamo_scheduler::PotentialLoad; removed in 1.10.0"
 )]
-pub type PotentialLoad = dynamo_scheduler::protocols::PotentialLoad;
-pub use dynamo_scheduler::prefill_load::PrefillLoadEstimator;
+pub type PotentialLoad = dynamo_scheduler::PotentialLoad;
+pub use dynamo_scheduler::PrefillLoadEstimator;
 #[deprecated(
     since = "1.8.0",
     note = "moved to dynamo_slot_tracker::PrefillTokenDeltas; removed in 1.10.0"
@@ -1202,26 +1202,26 @@ pub use dynamo_slot_tracker::ReplicaWorkerPolicy;
 pub use dynamo_slot_tracker::RequestId;
 #[deprecated(
     since = "1.8.0",
-    note = "moved to dynamo_scheduler::config::RouterConfigOverride; removed in 1.10.0"
+    note = "moved to dynamo_scheduler::RouterConfigOverride; removed in 1.10.0"
 )]
-pub type RouterConfigOverride = dynamo_scheduler::config::RouterConfigOverride;
+pub type RouterConfigOverride = dynamo_scheduler::RouterConfigOverride;
 #[deprecated(
     since = "1.8.0",
     note = "moved to dynamo_kv_events::event::RouterEvent; removed in 1.10.0"
 )]
 pub type RouterEvent = dynamo_kv_events::event::RouterEvent;
 pub use dynamo_admission::RouterQueuePolicy;
-pub use dynamo_scheduler::config::RouterPrefillLoadModel;
-pub use dynamo_scheduler::policy::RouterSchedulingPolicy;
-pub use dynamo_scheduler::protocols::RouterEventSink;
+pub use dynamo_scheduler::RouterEventSink;
+pub use dynamo_scheduler::RouterPrefillLoadModel;
+pub use dynamo_scheduler::RouterSchedulingPolicy;
 #[deprecated(
     since = "1.8.0",
     note = "moved to dynamo_router_protocol::identity::RoutingPartitionId; removed in 1.10.0"
 )]
 pub type RoutingPartitionId = dynamo_router_protocol::identity::RoutingPartitionId;
 pub use dynamo_router_protocol::identity::RoutingPartitionRef;
-pub use dynamo_scheduler::policy::SchedulingPolicy;
-pub use dynamo_scheduler::queue::SchedulerQueue;
+pub use dynamo_scheduler::SchedulerQueue;
+pub use dynamo_scheduler::SchedulingPolicy;
 #[deprecated(
     since = "1.8.0",
     note = "moved to dynamo_scheduler::SchedulingRequest; removed in 1.10.0"
@@ -1261,17 +1261,17 @@ pub use dynamo_kv_indexer::SharedCacheBackend;
 pub type SharedCacheHits = dynamo_worker_selection::SharedCacheHits;
 pub use dynamo_kv_indexer::SyncIndexer;
 pub use dynamo_kv_indexer::ThreadPoolIndexer;
-pub use dynamo_scheduler::shared_cache::SharedKvCache;
-pub use dynamo_scheduler::tracking_hash::TrackingHashAlgorithm;
+pub use dynamo_scheduler::SharedKvCache;
+pub use dynamo_scheduler::TrackingHashAlgorithm;
 pub use dynamo_worker_selection::SharedCacheType;
 #[deprecated(
     since = "1.8.0",
-    note = "moved to dynamo_scheduler::tracking_hash::TrackingHashContext; removed in 1.10.0"
+    note = "moved to dynamo_scheduler::TrackingHashContext; removed in 1.10.0"
 )]
-pub type TrackingHashContext = dynamo_scheduler::tracking_hash::TrackingHashContext;
+pub type TrackingHashContext = dynamo_scheduler::TrackingHashContext;
 pub use dynamo_router_protocol::worker::WorkerId;
-pub use dynamo_scheduler::protocols::WorkerConfigLike;
-pub use dynamo_scheduler::tracking_hash::TrackingHashScope;
+pub use dynamo_scheduler::TrackingHashScope;
+pub use dynamo_scheduler::WorkerConfigLike;
 #[deprecated(
     since = "1.8.0",
     note = "moved to dynamo_slot_tracker::WorkerLoadProjection; removed in 1.10.0"
@@ -1280,9 +1280,9 @@ pub type WorkerLoadProjection = dynamo_slot_tracker::WorkerLoadProjection;
 pub use dynamo_kv_hashing::routing::compute_block_hash_for_seq;
 pub use dynamo_router_protocol::session::WorkerSelectionInputTrigger;
 pub use dynamo_router_protocol::worker_type::WorkerType;
-pub use dynamo_scheduler::policy::WsptPolicy;
-pub use dynamo_scheduler::selector::WorkerSelectionInput;
-pub use dynamo_scheduler::selector::WorkerSelector;
+pub use dynamo_scheduler::WorkerSelectionInput;
+pub use dynamo_scheduler::WorkerSelector;
+pub use dynamo_scheduler::WsptPolicy;
 pub use dynamo_worker_selection::WorkerSelectionPolicyError;
 
 // Blocks mounted from modules that still exist in this crate (named lists in the module files).
@@ -1294,11 +1294,10 @@ pub mod scheduling {
         // Owner: dynamo_scheduler (2)
         #[deprecated(
             since = "1.8.0",
-            note = "moved to dynamo_scheduler::config::RouterConfigOverrideBuilder; removed in 1.10.0"
+            note = "moved to dynamo_scheduler::RouterConfigOverrideBuilder; removed in 1.10.0"
         )]
-        pub type RouterConfigOverrideBuilder =
-            dynamo_scheduler::config::RouterConfigOverrideBuilder;
-        pub use dynamo_scheduler::config::RouterConfigOverrideBuilderError;
+        pub type RouterConfigOverrideBuilder = dynamo_scheduler::RouterConfigOverrideBuilder;
+        pub use dynamo_scheduler::RouterConfigOverrideBuilderError;
     }
 
     /// Pre-split `dynamo_kv_router::scheduling::overlap`; its items live in `dynamo_scheduler` now.
@@ -1306,66 +1305,66 @@ pub mod scheduling {
         // Owner: dynamo_scheduler (10)
         #[deprecated(
             since = "1.8.0",
-            note = "moved to dynamo_scheduler::overlap::CacheHitEstimates; removed in 1.10.0"
+            note = "moved to dynamo_scheduler::CacheHitEstimates; removed in 1.10.0"
         )]
-        pub type CacheHitEstimates = dynamo_scheduler::overlap::CacheHitEstimates;
-        pub use dynamo_scheduler::overlap::OverlapAnalysis;
+        pub type CacheHitEstimates = dynamo_scheduler::CacheHitEstimates;
+        pub use dynamo_scheduler::OverlapAnalysis;
         #[deprecated(
             since = "1.8.0",
-            note = "moved to dynamo_scheduler::overlap::OverlapScoresResponse; removed in 1.10.0"
+            note = "moved to dynamo_scheduler::OverlapScoresResponse; removed in 1.10.0"
         )]
-        pub type OverlapScoresResponse = dynamo_scheduler::overlap::OverlapScoresResponse;
+        pub type OverlapScoresResponse = dynamo_scheduler::OverlapScoresResponse;
         #[deprecated(
             since = "1.8.0",
-            note = "moved to dynamo_scheduler::overlap::OverlapSignals; removed in 1.10.0"
+            note = "moved to dynamo_scheduler::OverlapSignals; removed in 1.10.0"
         )]
-        pub type OverlapSignals = dynamo_scheduler::overlap::OverlapSignals;
+        pub type OverlapSignals = dynamo_scheduler::OverlapSignals;
         #[deprecated(
             since = "1.8.0",
-            note = "moved to dynamo_scheduler::overlap::SelectedWorkerTierSnapshot; removed in 1.10.0"
+            note = "moved to dynamo_scheduler::SelectedWorkerTierSnapshot; removed in 1.10.0"
         )]
-        pub type SelectedWorkerTierSnapshot = dynamo_scheduler::overlap::SelectedWorkerTierSnapshot;
+        pub type SelectedWorkerTierSnapshot = dynamo_scheduler::SelectedWorkerTierSnapshot;
         #[deprecated(
             since = "1.8.0",
-            note = "moved to dynamo_scheduler::overlap::SharedCacheOverlapScore; removed in 1.10.0"
+            note = "moved to dynamo_scheduler::SharedCacheOverlapScore; removed in 1.10.0"
         )]
-        pub type SharedCacheOverlapScore = dynamo_scheduler::overlap::SharedCacheOverlapScore;
+        pub type SharedCacheOverlapScore = dynamo_scheduler::SharedCacheOverlapScore;
         #[deprecated(
             since = "1.8.0",
-            note = "moved to dynamo_scheduler::overlap::WorkerOverlapScore; removed in 1.10.0"
+            note = "moved to dynamo_scheduler::WorkerOverlapScore; removed in 1.10.0"
         )]
-        pub type WorkerOverlapScore = dynamo_scheduler::overlap::WorkerOverlapScore;
-        pub use dynamo_scheduler::overlap::build_overlap_scores_response;
-        pub use dynamo_scheduler::overlap::cache_hit_estimates_from_tiered_matches;
-        pub use dynamo_scheduler::overlap::tier_overlap_blocks_from_tiered_matches;
+        pub type WorkerOverlapScore = dynamo_scheduler::WorkerOverlapScore;
+        pub use dynamo_scheduler::build_overlap_scores_response;
+        pub use dynamo_scheduler::cache_hit_estimates_from_tiered_matches;
+        pub use dynamo_scheduler::tier_overlap_blocks_from_tiered_matches;
     }
 
     /// Pre-split `dynamo_kv_router::scheduling::overlap_refresh`; its items live in `dynamo_scheduler` now.
     pub mod overlap_refresh {
         // Owner: dynamo_scheduler (9)
-        pub use dynamo_scheduler::overlap_refresh::DEFAULT_OVERLAP_REFRESH_AFTER_SECS;
-        pub use dynamo_scheduler::overlap_refresh::NoopOverlapScoresRefresh;
-        pub use dynamo_scheduler::overlap_refresh::OVERLAP_REFRESH_TIMEOUT;
-        pub use dynamo_scheduler::overlap_refresh::OverlapScoresRefresh;
+        pub use dynamo_scheduler::DEFAULT_OVERLAP_REFRESH_AFTER_SECS;
+        pub use dynamo_scheduler::NoopOverlapScoresRefresh;
+        pub use dynamo_scheduler::OVERLAP_REFRESH_TIMEOUT;
+        pub use dynamo_scheduler::OverlapScoresRefresh;
         #[deprecated(
             since = "1.8.0",
-            note = "moved to dynamo_scheduler::overlap_refresh::RefreshedOverlap; removed in 1.10.0"
+            note = "moved to dynamo_scheduler::RefreshedOverlap; removed in 1.10.0"
         )]
-        pub type RefreshedOverlap = dynamo_scheduler::overlap_refresh::RefreshedOverlap;
-        pub use dynamo_scheduler::overlap_refresh::TieredOverlapRefresher;
-        pub use dynamo_scheduler::overlap_refresh::read_overlap_refresh_after;
-        pub use dynamo_scheduler::overlap_refresh::refresh_overlap;
-        pub use dynamo_scheduler::overlap_refresh::should_refresh_overlap;
+        pub type RefreshedOverlap = dynamo_scheduler::RefreshedOverlap;
+        pub use dynamo_scheduler::TieredOverlapRefresher;
+        pub use dynamo_scheduler::read_overlap_refresh_after;
+        pub use dynamo_scheduler::refresh_overlap;
+        pub use dynamo_scheduler::should_refresh_overlap;
     }
 
     /// Pre-split `dynamo_kv_router::scheduling::policy`; its items live in `dynamo_scheduler` now.
     pub mod policy {
         // Owner: dynamo_scheduler (5)
-        pub use dynamo_scheduler::policy::FcfsPolicy;
-        pub use dynamo_scheduler::policy::LcfsPolicy;
-        pub use dynamo_scheduler::policy::RouterSchedulingPolicy;
-        pub use dynamo_scheduler::policy::SchedulingPolicy;
-        pub use dynamo_scheduler::policy::WsptPolicy;
+        pub use dynamo_scheduler::FcfsPolicy;
+        pub use dynamo_scheduler::LcfsPolicy;
+        pub use dynamo_scheduler::RouterSchedulingPolicy;
+        pub use dynamo_scheduler::SchedulingPolicy;
+        pub use dynamo_scheduler::WsptPolicy;
     }
 
     /// Pre-split `dynamo_kv_router::scheduling::policy_queue`; its items live in `dynamo_admission` now.
@@ -1401,13 +1400,12 @@ pub mod scheduling {
         // Owner: dynamo_scheduler (4)
         #[deprecated(
             since = "1.8.0",
-            note = "moved to dynamo_scheduler::prefill_load::InvalidEffectivePrefillTokens; removed in 1.10.0"
+            note = "moved to dynamo_scheduler::InvalidEffectivePrefillTokens; removed in 1.10.0"
         )]
-        pub type InvalidEffectivePrefillTokens =
-            dynamo_scheduler::prefill_load::InvalidEffectivePrefillTokens;
-        pub use dynamo_scheduler::prefill_load::PrefillLoadEstimator;
-        pub use dynamo_scheduler::prefill_load::effective_prefill_tokens;
-        pub use dynamo_scheduler::prefill_load::prefill_load_hint_from_effective_tokens;
+        pub type InvalidEffectivePrefillTokens = dynamo_scheduler::InvalidEffectivePrefillTokens;
+        pub use dynamo_scheduler::PrefillLoadEstimator;
+        pub use dynamo_scheduler::effective_prefill_tokens;
+        pub use dynamo_scheduler::prefill_load_hint_from_effective_tokens;
     }
 
     /// Pre-split `dynamo_kv_router::scheduling::queue`; its items live in `dynamo_scheduler`, `dynamo_router_protocol` and `dynamo_slot_tracker` now.
@@ -1415,25 +1413,25 @@ pub mod scheduling {
         // Owner: dynamo_scheduler (6), dynamo_router_protocol (1), dynamo_slot_tracker (1)
         #[deprecated(
             since = "1.8.0",
-            note = "moved to dynamo_scheduler::queue::BookingHandle; removed in 1.10.0"
+            note = "moved to dynamo_scheduler::BookingHandle; removed in 1.10.0"
         )]
-        pub type BookingHandle = dynamo_scheduler::queue::BookingHandle;
+        pub type BookingHandle = dynamo_scheduler::BookingHandle;
         #[deprecated(
             since = "1.8.0",
-            note = "moved to dynamo_scheduler::queue::ClassQueueStats; removed in 1.10.0"
+            note = "moved to dynamo_scheduler::ClassQueueStats; removed in 1.10.0"
         )]
-        pub type ClassQueueStats = dynamo_scheduler::queue::ClassQueueStats;
+        pub type ClassQueueStats = dynamo_scheduler::ClassQueueStats;
         pub use dynamo_router_protocol::worker::DEFAULT_MAX_BATCHED_TOKENS;
         #[deprecated(
             since = "1.8.0",
-            note = "moved to dynamo_scheduler::queue::RuntimePolicyControl; removed in 1.10.0"
+            note = "moved to dynamo_scheduler::RuntimePolicyControl; removed in 1.10.0"
         )]
-        pub type RuntimePolicyControl = dynamo_scheduler::queue::RuntimePolicyControl;
+        pub type RuntimePolicyControl = dynamo_scheduler::RuntimePolicyControl;
         #[deprecated(
             since = "1.8.0",
-            note = "moved to dynamo_scheduler::queue::SchedulerBookingCleanup; removed in 1.10.0"
+            note = "moved to dynamo_scheduler::SchedulerBookingCleanup; removed in 1.10.0"
         )]
-        pub type SchedulerBookingCleanup = dynamo_scheduler::queue::SchedulerBookingCleanup;
+        pub type SchedulerBookingCleanup = dynamo_scheduler::SchedulerBookingCleanup;
         #[deprecated(
             since = "1.8.0",
             note = "moved to dynamo_slot_tracker::SchedulerBookingDescriptor; removed in 1.10.0"
@@ -1441,10 +1439,10 @@ pub mod scheduling {
         pub type SchedulerBookingDescriptor = dynamo_slot_tracker::SchedulerBookingDescriptor;
         #[deprecated(
             since = "1.8.0",
-            note = "moved to dynamo_scheduler::queue::SchedulerCleanupAck; removed in 1.10.0"
+            note = "moved to dynamo_scheduler::SchedulerCleanupAck; removed in 1.10.0"
         )]
-        pub type SchedulerCleanupAck = dynamo_scheduler::queue::SchedulerCleanupAck;
-        pub use dynamo_scheduler::queue::SchedulerQueue;
+        pub type SchedulerCleanupAck = dynamo_scheduler::SchedulerCleanupAck;
+        pub use dynamo_scheduler::SchedulerQueue;
     }
 
     /// Pre-split `dynamo_kv_router::scheduling::request_classifier`; its items live in `dynamo_admission` now.
@@ -1460,7 +1458,7 @@ pub mod scheduling {
     /// Pre-split `dynamo_kv_router::scheduling::selector`; its items live in `dynamo_scheduler` and `dynamo_worker_selection` now.
     pub mod selector {
         // Owner: dynamo_scheduler (4), dynamo_worker_selection (3)
-        pub use dynamo_scheduler::selector::ConfiguredSelectionInputs;
+        pub use dynamo_scheduler::ConfiguredSelectionInputs;
         #[cfg(any(test, feature = "testing", feature = "bench"))]
         #[deprecated(
             since = "1.8.0",
@@ -1477,13 +1475,13 @@ pub mod scheduling {
             note = "moved to dynamo_worker_selection::HostedWorkerPicker; removed in 1.10.0"
         )]
         pub type HostedWorkerPicker = dynamo_worker_selection::HostedWorkerPicker;
-        pub use dynamo_scheduler::selector::WorkerSelectionInput;
+        pub use dynamo_scheduler::WorkerSelectionInput;
         #[deprecated(
             since = "1.8.0",
             note = "moved to dynamo_worker_selection::WorkerSelectionPolicy; removed in 1.10.0"
         )]
         pub type WorkerSelectionPolicy = dynamo_worker_selection::WorkerSelectionPolicy;
-        pub use dynamo_scheduler::selector::WorkerSelector;
+        pub use dynamo_scheduler::WorkerSelector;
     }
 
     pub use dynamo_scheduler::AccountingAttribution;
@@ -1506,17 +1504,16 @@ pub mod scheduling {
     pub use dynamo_router_protocol::attempt::AttemptId;
     #[deprecated(
         since = "1.8.0",
-        note = "moved to dynamo_scheduler::overlap::CacheHitEstimates; removed in 1.10.0"
+        note = "moved to dynamo_scheduler::CacheHitEstimates; removed in 1.10.0"
     )]
-    pub type CacheHitEstimates = dynamo_scheduler::overlap::CacheHitEstimates;
+    pub type CacheHitEstimates = dynamo_scheduler::CacheHitEstimates;
     #[deprecated(
         since = "1.8.0",
-        note = "moved to dynamo_scheduler::prefill_load::InvalidEffectivePrefillTokens; removed in 1.10.0"
+        note = "moved to dynamo_scheduler::InvalidEffectivePrefillTokens; removed in 1.10.0"
     )]
-    pub type InvalidEffectivePrefillTokens =
-        dynamo_scheduler::prefill_load::InvalidEffectivePrefillTokens;
+    pub type InvalidEffectivePrefillTokens = dynamo_scheduler::InvalidEffectivePrefillTokens;
     pub use dynamo_scheduler::KvSchedulerError;
-    pub use dynamo_scheduler::local::LocalScheduler;
+    pub use dynamo_scheduler::LocalScheduler;
     pub use dynamo_worker_selection::LoraWorkerFilter;
     #[deprecated(
         since = "1.8.0",
@@ -1524,29 +1521,29 @@ pub mod scheduling {
     )]
     pub type NonMaxOverlapSelection = dynamo_scheduler::NonMaxOverlapSelection;
     pub use dynamo_scheduler::NonMaxOverlapSelectionObserver;
-    pub use dynamo_scheduler::overlap::OverlapAnalysis;
-    pub use dynamo_scheduler::overlap_refresh::NoopOverlapScoresRefresh;
-    pub use dynamo_scheduler::overlap_refresh::OverlapScoresRefresh;
+    pub use dynamo_scheduler::NoopOverlapScoresRefresh;
+    pub use dynamo_scheduler::OverlapAnalysis;
+    pub use dynamo_scheduler::OverlapScoresRefresh;
     #[deprecated(
         since = "1.8.0",
-        note = "moved to dynamo_scheduler::overlap::OverlapScoresResponse; removed in 1.10.0"
+        note = "moved to dynamo_scheduler::OverlapScoresResponse; removed in 1.10.0"
     )]
-    pub type OverlapScoresResponse = dynamo_scheduler::overlap::OverlapScoresResponse;
+    pub type OverlapScoresResponse = dynamo_scheduler::OverlapScoresResponse;
     #[deprecated(
         since = "1.8.0",
-        note = "moved to dynamo_scheduler::overlap::OverlapSignals; removed in 1.10.0"
+        note = "moved to dynamo_scheduler::OverlapSignals; removed in 1.10.0"
     )]
-    pub type OverlapSignals = dynamo_scheduler::overlap::OverlapSignals;
+    pub type OverlapSignals = dynamo_scheduler::OverlapSignals;
     pub use dynamo_admission::PolicyQueue;
     pub use dynamo_admission::PolicyQueueEntry;
     pub use dynamo_scheduler::OverloadedWorkerProvider;
     #[deprecated(
         since = "1.8.0",
-        note = "moved to dynamo_scheduler::protocols::PotentialLoad; removed in 1.10.0"
+        note = "moved to dynamo_scheduler::PotentialLoad; removed in 1.10.0"
     )]
-    pub type PotentialLoad = dynamo_scheduler::protocols::PotentialLoad;
+    pub type PotentialLoad = dynamo_scheduler::PotentialLoad;
     pub use dynamo_admission::QueueLimitKind;
-    pub use dynamo_scheduler::prefill_load::PrefillLoadEstimator;
+    pub use dynamo_scheduler::PrefillLoadEstimator;
     #[deprecated(
         since = "1.8.0",
         note = "moved to dynamo_admission::QueueMetadata; removed in 1.10.0"
@@ -1564,9 +1561,9 @@ pub mod scheduling {
     pub type QueueSnapshot = dynamo_admission::QueueSnapshot;
     #[deprecated(
         since = "1.8.0",
-        note = "moved to dynamo_scheduler::overlap_refresh::RefreshedOverlap; removed in 1.10.0"
+        note = "moved to dynamo_scheduler::RefreshedOverlap; removed in 1.10.0"
     )]
-    pub type RefreshedOverlap = dynamo_scheduler::overlap_refresh::RefreshedOverlap;
+    pub type RefreshedOverlap = dynamo_scheduler::RefreshedOverlap;
     #[deprecated(
         since = "1.8.0",
         note = "moved to dynamo_admission::RequestLifecycle; removed in 1.10.0"
@@ -1592,9 +1589,9 @@ pub mod scheduling {
     pub type SchedulingResponse = dynamo_scheduler::SchedulingResponse;
     #[deprecated(
         since = "1.8.0",
-        note = "moved to dynamo_scheduler::overlap::SelectedWorkerTierSnapshot; removed in 1.10.0"
+        note = "moved to dynamo_scheduler::SelectedWorkerTierSnapshot; removed in 1.10.0"
     )]
-    pub type SelectedWorkerTierSnapshot = dynamo_scheduler::overlap::SelectedWorkerTierSnapshot;
+    pub type SelectedWorkerTierSnapshot = dynamo_scheduler::SelectedWorkerTierSnapshot;
     #[deprecated(
         since = "1.8.0",
         note = "moved to dynamo_router_protocol::session::SessionContext; removed in 1.10.0"
@@ -1602,27 +1599,27 @@ pub mod scheduling {
     pub type SessionContext = dynamo_router_protocol::session::SessionContext;
     #[deprecated(
         since = "1.8.0",
-        note = "moved to dynamo_scheduler::overlap::SharedCacheOverlapScore; removed in 1.10.0"
+        note = "moved to dynamo_scheduler::SharedCacheOverlapScore; removed in 1.10.0"
     )]
-    pub type SharedCacheOverlapScore = dynamo_scheduler::overlap::SharedCacheOverlapScore;
+    pub type SharedCacheOverlapScore = dynamo_scheduler::SharedCacheOverlapScore;
     #[deprecated(
         since = "1.8.0",
         note = "moved to dynamo_scheduler::TierOverlapBlocks; removed in 1.10.0"
     )]
     pub type TierOverlapBlocks = dynamo_scheduler::TierOverlapBlocks;
+    pub use dynamo_scheduler::TieredOverlapRefresher;
     pub use dynamo_scheduler::WorkerAvailabilityProvider;
     pub use dynamo_scheduler::WorkerEligibilityError;
     pub use dynamo_scheduler::WorkerIdSet;
-    pub use dynamo_scheduler::overlap_refresh::TieredOverlapRefresher;
     #[deprecated(
         since = "1.8.0",
-        note = "moved to dynamo_scheduler::overlap::WorkerOverlapScore; removed in 1.10.0"
+        note = "moved to dynamo_scheduler::WorkerOverlapScore; removed in 1.10.0"
     )]
-    pub type WorkerOverlapScore = dynamo_scheduler::overlap::WorkerOverlapScore;
+    pub type WorkerOverlapScore = dynamo_scheduler::WorkerOverlapScore;
     pub use dynamo_admission::WorkerPlacement;
     pub use dynamo_router_protocol::session::WorkerSelectionInputTrigger;
-    pub use dynamo_scheduler::prefill_load::effective_prefill_tokens;
-    pub use dynamo_scheduler::prefill_load::prefill_load_hint_from_effective_tokens;
+    pub use dynamo_scheduler::effective_prefill_tokens;
+    pub use dynamo_scheduler::prefill_load_hint_from_effective_tokens;
     pub use dynamo_worker_selection::WorkerSelectionPolicyError;
 }
 
@@ -1684,118 +1681,117 @@ pub mod services {
             note = "moved to dynamo_session_affinity::AffinityBindingEvent; removed in 1.10.0"
         )]
         pub type AffinityBindingEvent = dynamo_session_affinity::AffinityBindingEvent;
-        pub use dynamo_scheduler::selection::membership::CatalogObserver;
+        pub use dynamo_scheduler::CatalogObserver;
         #[deprecated(
             since = "1.8.0",
-            note = "moved to dynamo_scheduler::selection::membership::CatalogReconciler; removed in 1.10.0"
+            note = "moved to dynamo_scheduler::CatalogReconciler; removed in 1.10.0"
         )]
-        pub type CatalogReconciler = dynamo_scheduler::selection::membership::CatalogReconciler;
+        pub type CatalogReconciler = dynamo_scheduler::CatalogReconciler;
         pub use crate::config::DYN_ROUTER_DECODE_POLICY;
         pub use crate::config::DYN_ROUTER_PREFILL_POLICY;
         pub use crate::config::DYN_ROUTER_WORKER_SELECTION_POLICY;
-        pub use dynamo_scheduler::selection::types::DEFAULT_MODEL_NAME;
+        pub use dynamo_scheduler::DEFAULT_MODEL_NAME;
         #[deprecated(
             since = "1.8.0",
-            note = "moved to dynamo_scheduler::selection::core::HostCache; removed in 1.10.0"
+            note = "moved to dynamo_scheduler::HostCache; removed in 1.10.0"
         )]
-        pub type HostCache = dynamo_scheduler::selection::core::HostCache;
+        pub type HostCache = dynamo_scheduler::HostCache;
         #[deprecated(
             since = "1.8.0",
-            note = "moved to dynamo_scheduler::selection::core::HostEligibility; removed in 1.10.0"
+            note = "moved to dynamo_scheduler::HostEligibility; removed in 1.10.0"
         )]
-        pub type HostEligibility = dynamo_scheduler::selection::core::HostEligibility;
+        pub type HostEligibility = dynamo_scheduler::HostEligibility;
         #[deprecated(
             since = "1.8.0",
-            note = "moved to dynamo_scheduler::selection::core::HostLoad; removed in 1.10.0"
+            note = "moved to dynamo_scheduler::HostLoad; removed in 1.10.0"
         )]
-        pub type HostLoad = dynamo_scheduler::selection::core::HostLoad;
+        pub type HostLoad = dynamo_scheduler::HostLoad;
         #[deprecated(
             since = "1.8.0",
-            note = "moved to dynamo_scheduler::replication::HostReplicaChannels; removed in 1.10.0"
+            note = "moved to dynamo_scheduler::HostReplicaChannels; removed in 1.10.0"
         )]
-        pub type HostReplicaChannels = dynamo_scheduler::replication::HostReplicaChannels;
-        pub use dynamo_scheduler::replication::HostReplicaSyncFactory;
+        pub type HostReplicaChannels = dynamo_scheduler::HostReplicaChannels;
+        pub use dynamo_scheduler::HostReplicaSyncFactory;
         #[deprecated(
             since = "1.8.0",
-            note = "moved to dynamo_scheduler::selection::core::HostReplication; removed in 1.10.0"
+            note = "moved to dynamo_scheduler::HostReplication; removed in 1.10.0"
         )]
-        pub type HostReplication = dynamo_scheduler::selection::core::HostReplication;
+        pub type HostReplication = dynamo_scheduler::HostReplication;
         #[deprecated(
             since = "1.8.0",
-            note = "moved to dynamo_scheduler::selection::core::HostTelemetry; removed in 1.10.0"
+            note = "moved to dynamo_scheduler::HostTelemetry; removed in 1.10.0"
         )]
-        pub type HostTelemetry = dynamo_scheduler::selection::core::HostTelemetry;
-        pub use dynamo_scheduler::selection::core::KvIndexSource;
-        pub use dynamo_scheduler::selection::ingress::KvEventIngress;
+        pub type HostTelemetry = dynamo_scheduler::HostTelemetry;
+        pub use dynamo_scheduler::KvEventIngress;
+        pub use dynamo_scheduler::KvIndexSource;
         #[deprecated(
             since = "1.8.0",
-            note = "moved to dynamo_scheduler::selection::types::ModelLoadResponse; removed in 1.10.0"
+            note = "moved to dynamo_scheduler::ModelLoadResponse; removed in 1.10.0"
         )]
-        pub type ModelLoadResponse = dynamo_scheduler::selection::types::ModelLoadResponse;
+        pub type ModelLoadResponse = dynamo_scheduler::ModelLoadResponse;
         #[deprecated(
             since = "1.8.0",
-            note = "moved to dynamo_scheduler::selection::types::OutputBlockRequest; removed in 1.10.0"
+            note = "moved to dynamo_scheduler::OutputBlockRequest; removed in 1.10.0"
         )]
-        pub type OutputBlockRequest = dynamo_scheduler::selection::types::OutputBlockRequest;
+        pub type OutputBlockRequest = dynamo_scheduler::OutputBlockRequest;
         #[deprecated(
             since = "1.8.0",
-            note = "moved to dynamo_scheduler::selection::types::OverlapScoresRequest; removed in 1.10.0"
+            note = "moved to dynamo_scheduler::OverlapScoresRequest; removed in 1.10.0"
         )]
-        pub type OverlapScoresRequest = dynamo_scheduler::selection::types::OverlapScoresRequest;
+        pub type OverlapScoresRequest = dynamo_scheduler::OverlapScoresRequest;
         #[deprecated(
             since = "1.8.0",
-            note = "moved to dynamo_scheduler::overlap::OverlapScoresResponse; removed in 1.10.0"
+            note = "moved to dynamo_scheduler::OverlapScoresResponse; removed in 1.10.0"
         )]
-        pub type OverlapScoresResponse = dynamo_scheduler::overlap::OverlapScoresResponse;
+        pub type OverlapScoresResponse = dynamo_scheduler::OverlapScoresResponse;
         #[deprecated(
             since = "1.8.0",
-            note = "moved to dynamo_scheduler::selection::types::PotentialLoadsRequest; removed in 1.10.0"
+            note = "moved to dynamo_scheduler::PotentialLoadsRequest; removed in 1.10.0"
         )]
-        pub type PotentialLoadsRequest = dynamo_scheduler::selection::types::PotentialLoadsRequest;
+        pub type PotentialLoadsRequest = dynamo_scheduler::PotentialLoadsRequest;
         #[deprecated(
             since = "1.8.0",
-            note = "moved to dynamo_scheduler::selection::input::PromptRequest; removed in 1.10.0"
+            note = "moved to dynamo_scheduler::PromptRequest; removed in 1.10.0"
         )]
-        pub type PromptRequest = dynamo_scheduler::selection::input::PromptRequest;
-        pub use dynamo_scheduler::selection::input::PromptView;
+        pub type PromptRequest = dynamo_scheduler::PromptRequest;
+        pub use dynamo_scheduler::PromptView;
         #[deprecated(
             since = "1.8.0",
-            note = "moved to dynamo_scheduler::selection::types::ReadyResponse; removed in 1.10.0"
+            note = "moved to dynamo_scheduler::ReadyResponse; removed in 1.10.0"
         )]
-        pub type ReadyResponse = dynamo_scheduler::selection::types::ReadyResponse;
-        pub use dynamo_scheduler::replication::ReplicaIngressObserver;
+        pub type ReadyResponse = dynamo_scheduler::ReadyResponse;
+        pub use dynamo_scheduler::ReplicaIngressObserver;
         #[deprecated(
             since = "1.8.0",
-            note = "moved to dynamo_scheduler::selection::types::ReservationRequest; removed in 1.10.0"
+            note = "moved to dynamo_scheduler::ReservationRequest; removed in 1.10.0"
         )]
-        pub type ReservationRequest = dynamo_scheduler::selection::types::ReservationRequest;
+        pub type ReservationRequest = dynamo_scheduler::ReservationRequest;
         #[deprecated(
             since = "1.8.0",
-            note = "moved to dynamo_scheduler::selection::types::ReservationResponse; removed in 1.10.0"
+            note = "moved to dynamo_scheduler::ReservationResponse; removed in 1.10.0"
         )]
-        pub type ReservationResponse = dynamo_scheduler::selection::types::ReservationResponse;
+        pub type ReservationResponse = dynamo_scheduler::ReservationResponse;
         #[deprecated(
             since = "1.8.0",
             note = "moved to dynamo_kv_router::plugins::RouterPluginRegistry; removed in 1.10.0"
         )]
         pub type RouterPluginRegistry = crate::plugins::RouterPluginRegistry;
-        pub use dynamo_scheduler::replication::SchedulerLoadSink;
+        pub use dynamo_scheduler::SchedulerLoadSink;
         #[deprecated(
             since = "1.8.0",
-            note = "moved to dynamo_scheduler::selection::types::SelectAndReserveRequest; removed in 1.10.0"
+            note = "moved to dynamo_scheduler::SelectAndReserveRequest; removed in 1.10.0"
         )]
-        pub type SelectAndReserveRequest =
-            dynamo_scheduler::selection::types::SelectAndReserveRequest;
+        pub type SelectAndReserveRequest = dynamo_scheduler::SelectAndReserveRequest;
         #[deprecated(
             since = "1.8.0",
-            note = "moved to dynamo_scheduler::selection::types::SelectRequest; removed in 1.10.0"
+            note = "moved to dynamo_scheduler::SelectRequest; removed in 1.10.0"
         )]
-        pub type SelectRequest = dynamo_scheduler::selection::types::SelectRequest;
+        pub type SelectRequest = dynamo_scheduler::SelectRequest;
         #[deprecated(
             since = "1.8.0",
-            note = "moved to dynamo_scheduler::selection::types::SelectResponse; removed in 1.10.0"
+            note = "moved to dynamo_scheduler::SelectResponse; removed in 1.10.0"
         )]
-        pub type SelectResponse = dynamo_scheduler::selection::types::SelectResponse;
+        pub type SelectResponse = dynamo_scheduler::SelectResponse;
         #[deprecated(
             since = "1.8.0",
             note = "moved to dynamo_scheduler::host::Selected; removed in 1.10.0"
@@ -1804,74 +1800,73 @@ pub mod services {
         pub use dynamo_scheduler::host::SelectionAdmission;
         #[deprecated(
             since = "1.8.0",
-            note = "moved to dynamo_scheduler::selection::pending::SelectionCacheConfig; removed in 1.10.0"
+            note = "moved to dynamo_scheduler::SelectionCacheConfig; removed in 1.10.0"
         )]
-        pub type SelectionCacheConfig = dynamo_scheduler::selection::pending::SelectionCacheConfig;
+        pub type SelectionCacheConfig = dynamo_scheduler::SelectionCacheConfig;
         #[deprecated(
             since = "1.8.0",
-            note = "moved to dynamo_scheduler::selection::core::SelectionCore; removed in 1.10.0"
+            note = "moved to dynamo_scheduler::SelectionCore; removed in 1.10.0"
         )]
-        pub type SelectionCore = dynamo_scheduler::selection::core::SelectionCore;
-        pub use dynamo_scheduler::selection::error::SelectionError;
+        pub type SelectionCore = dynamo_scheduler::SelectionCore;
+        pub use dynamo_scheduler::SelectionError;
         #[deprecated(
             since = "1.8.0",
-            note = "moved to dynamo_scheduler::selection::core::SelectionHost; removed in 1.10.0"
+            note = "moved to dynamo_scheduler::SelectionHost; removed in 1.10.0"
         )]
-        pub type SelectionHost = dynamo_scheduler::selection::core::SelectionHost;
+        pub type SelectionHost = dynamo_scheduler::SelectionHost;
+        pub use dynamo_scheduler::SelectionInputTrigger;
+        pub use dynamo_scheduler::SelectionPartition;
         pub use dynamo_scheduler::host::SelectionOperation;
         pub use dynamo_scheduler::host::SelectionOutcome;
-        pub use dynamo_scheduler::selection::core::SelectionPartition;
-        pub use dynamo_scheduler::selection::types::SelectionInputTrigger;
         #[deprecated(
             since = "1.8.0",
             note = "moved to dynamo_scheduler::host::SelectionRun; removed in 1.10.0"
         )]
         pub type SelectionRun = dynamo_scheduler::host::SelectionRun;
-        pub use dynamo_scheduler::selection::core::SelectionScheduler;
+        pub use dynamo_scheduler::SelectionScheduler;
         #[deprecated(
             since = "1.8.0",
-            note = "moved to dynamo_scheduler::selection::types::SelectionSessionContext; removed in 1.10.0"
+            note = "moved to dynamo_scheduler::SelectionSessionContext; removed in 1.10.0"
         )]
-        pub type SelectionSessionContext =
-            dynamo_scheduler::selection::types::SelectionSessionContext;
+        pub type SelectionSessionContext = dynamo_scheduler::SelectionSessionContext;
         #[deprecated(
             since = "1.8.0",
-            note = "moved to dynamo_scheduler::selection::types::SelectionWorkerConfig; removed in 1.10.0"
+            note = "moved to dynamo_scheduler::SelectionWorkerConfig; removed in 1.10.0"
         )]
-        pub type SelectionWorkerConfig = dynamo_scheduler::selection::types::SelectionWorkerConfig;
+        pub type SelectionWorkerConfig = dynamo_scheduler::SelectionWorkerConfig;
         #[deprecated(
             since = "1.8.0",
-            note = "moved to dynamo_scheduler::selection::types::SelectionWorkerLoad; removed in 1.10.0"
+            note = "moved to dynamo_scheduler::SelectionWorkerLoad; removed in 1.10.0"
         )]
-        pub type SelectionWorkerLoad = dynamo_scheduler::selection::types::SelectionWorkerLoad;
+        pub type SelectionWorkerLoad = dynamo_scheduler::SelectionWorkerLoad;
         pub use dynamo_scheduler::host::SessionBinding;
         #[deprecated(
             since = "1.8.0",
-            note = "moved to dynamo_scheduler::overlap::SharedCacheOverlapScore; removed in 1.10.0"
+            note = "moved to dynamo_scheduler::SharedCacheOverlapScore; removed in 1.10.0"
         )]
-        pub type SharedCacheOverlapScore = dynamo_scheduler::overlap::SharedCacheOverlapScore;
+        pub type SharedCacheOverlapScore = dynamo_scheduler::SharedCacheOverlapScore;
         #[deprecated(
             since = "1.8.0",
-            note = "moved to dynamo_scheduler::selection::types::WorkerCatalogRecord; removed in 1.10.0"
+            note = "moved to dynamo_scheduler::WorkerCatalogRecord; removed in 1.10.0"
         )]
-        pub type WorkerCatalogRecord = dynamo_scheduler::selection::types::WorkerCatalogRecord;
-        pub use dynamo_scheduler::selection::membership::WorkerCatalogSource;
-        pub use dynamo_scheduler::selection::types::WorkerLifecycle;
+        pub type WorkerCatalogRecord = dynamo_scheduler::WorkerCatalogRecord;
+        pub use dynamo_scheduler::WorkerCatalogSource;
+        pub use dynamo_scheduler::WorkerLifecycle;
         #[deprecated(
             since = "1.8.0",
-            note = "moved to dynamo_scheduler::overlap::WorkerOverlapScore; removed in 1.10.0"
+            note = "moved to dynamo_scheduler::WorkerOverlapScore; removed in 1.10.0"
         )]
-        pub type WorkerOverlapScore = dynamo_scheduler::overlap::WorkerOverlapScore;
+        pub type WorkerOverlapScore = dynamo_scheduler::WorkerOverlapScore;
         #[deprecated(
             since = "1.8.0",
-            note = "moved to dynamo_scheduler::selection::types::WorkerPatchRequest; removed in 1.10.0"
+            note = "moved to dynamo_scheduler::WorkerPatchRequest; removed in 1.10.0"
         )]
-        pub type WorkerPatchRequest = dynamo_scheduler::selection::types::WorkerPatchRequest;
+        pub type WorkerPatchRequest = dynamo_scheduler::WorkerPatchRequest;
         #[deprecated(
             since = "1.8.0",
-            note = "moved to dynamo_scheduler::selection::types::WorkerRequest; removed in 1.10.0"
+            note = "moved to dynamo_scheduler::WorkerRequest; removed in 1.10.0"
         )]
-        pub type WorkerRequest = dynamo_scheduler::selection::types::WorkerRequest;
+        pub type WorkerRequest = dynamo_scheduler::WorkerRequest;
         pub use crate::plugins::WorkerSelectionPolicyParameters;
         pub use crate::plugins::WorkerSelectionPolicyProvider;
         #[deprecated(
@@ -1888,9 +1883,9 @@ pub mod services {
         // Owner: dynamo_scheduler (1)
         #[deprecated(
             since = "1.8.0",
-            note = "moved to dynamo_scheduler::overlap_summary::MooncakeOverlapSummary; removed in 1.10.0"
+            note = "moved to dynamo_scheduler::MooncakeOverlapSummary; removed in 1.10.0"
         )]
-        pub type MooncakeOverlapSummary = dynamo_scheduler::overlap_summary::MooncakeOverlapSummary;
+        pub type MooncakeOverlapSummary = dynamo_scheduler::MooncakeOverlapSummary;
     }
 }
 

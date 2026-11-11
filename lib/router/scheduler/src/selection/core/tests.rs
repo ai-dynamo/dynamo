@@ -7,13 +7,12 @@ use super::reservations::{
 };
 use super::*;
 use crate::config::RouterConfig;
-use crate::kv_hints::{
-    KvCopySource, KvSourceLocationsPayload, KvTransferCandidateSource, kv_copy_locations,
-};
+use crate::kv_hints::{KvCopySource, KvTransferCandidateSource, kv_copy_locations};
 use crate::protocols::RoutingConstraints;
 use crate::replication::HostReplicaChannels;
 use crate::test_utils::{test_core_with, test_router_config};
 use dynamo_kv_events::residency::StorageTier;
+use dynamo_kv_hints::KvSourceLocationsPayload;
 use dynamo_kv_indexer::RemotePrimary;
 use dynamo_kv_indexer::ResidencyOwnerKeyExt;
 use dynamo_kv_indexer::testing::store_event;
@@ -69,7 +68,7 @@ impl crate::hint_policy::HintPolicy for TestFetch {
     fn build_hints(
         &self,
         context: &crate::hint_policy::HintContext<'_>,
-    ) -> Result<Vec<crate::kv_hints::KvHintAction>, crate::hint_policy::HintPolicyError> {
+    ) -> Result<Vec<dynamo_kv_hints::KvHintAction>, crate::hint_policy::HintPolicyError> {
         let committed = context.committed_kv_copy();
         let Some(copy) = committed.or(context.kv_copy_source()) else {
             return Ok(Vec::new());
@@ -86,7 +85,7 @@ impl crate::hint_policy::HintPolicy for TestFetch {
             source_control_endpoint: locations.source_address().to_string(),
             block_hashes: locations.chain()[..locations.source_prefix_blocks()].to_vec(),
         };
-        Ok(vec![crate::kv_hints::KvHintAction::unnumbered(
+        Ok(vec![dynamo_kv_hints::KvHintAction::unnumbered(
             "kv.fetch",
             "1.0",
             serde_json::from_value(serde_json::to_value(payload).unwrap()).unwrap(),
@@ -679,10 +678,6 @@ async fn state_agent_workers_are_not_router_hint_sources() {
 
 #[tokio::test]
 async fn fetch_continuation_books_one_source_from_each_actual_local_frontier() {
-    use crate::identity::{
-        CacheOwnerId, CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId,
-        RoutingScopeId, StableDpSlotId,
-    };
     use dynamo_kv_events::event::RouterEvent;
     use dynamo_kv_hashing::ExternalSequenceBlockHash;
     use dynamo_kv_hashing::routing::{
@@ -690,6 +685,10 @@ async fn fetch_continuation_books_one_source_from_each_actual_local_frontier() {
     };
     use dynamo_kv_indexer::{
         ResidencyProjection, ResidencyRoutingSnapshot, RouterHintSourceMetadata,
+    };
+    use dynamo_router_protocol::identity::{
+        CacheOwnerId, CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId,
+        RoutingScopeId, StableDpSlotId,
     };
 
     let owner = |id| {
@@ -932,15 +931,15 @@ struct SelectionObservation {
     shared_beyond_device_blocks: Vec<u32>,
 }
 
-impl crate::selector::WorkerPicker for CapturingPicker {
-    fn required_worker_inputs(&self) -> crate::selector::WorkerInputs {
-        crate::selector::WorkerInputs::CACHE
+impl dynamo_worker_selection::WorkerPicker for CapturingPicker {
+    fn required_worker_inputs(&self) -> dynamo_worker_selection::WorkerInputs {
+        dynamo_worker_selection::WorkerInputs::CACHE
     }
 
     fn pick(
         &self,
-        context: &crate::selector::WorkerSelectionContext<'_>,
-        input: crate::selector::WorkerInputView<'_>,
+        context: &dynamo_worker_selection::WorkerSelectionContext<'_>,
+        input: dynamo_worker_selection::WorkerInputView<'_>,
     ) -> Result<usize, crate::types::WorkerSelectionPolicyError> {
         self.observed.lock().push(SelectionObservation {
             session_context: context.session_context().cloned(),
@@ -4040,13 +4039,13 @@ fn hint_source_must_share_the_target_worker_type() {
 
 #[test]
 fn hint_resolves_a_persistent_cache_owner_over_a_state_agent_worker() {
-    use crate::identity::{
-        CacheOwnerId, CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId,
-        RoutingScopeId, StableDpSlotId,
-    };
     use dynamo_kv_events::residency::ResidencyOwner;
     use dynamo_kv_indexer::{
         ResidencyProjection, ResidencyRoutingSnapshot, RouterHintSourceMetadata,
+    };
+    use dynamo_router_protocol::identity::{
+        CacheOwnerId, CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId,
+        RoutingScopeId, StableDpSlotId,
     };
     let mut stale = hint_config("prefill", &[(0, "tcp://stale-worker:23280")]);
     stale.kv_event_source_mode = Some("state_agent_v2".to_string());
@@ -4197,7 +4196,7 @@ fn preferred_island_falls_back_to_a_cross_island_source() {
 
 #[test]
 fn continuation_island_preference_uses_only_sources_reachable_from_local_depth() {
-    use crate::kv_hints::KvTransferSourceInterval;
+    use dynamo_kv_indexer::KvTransferSourceInterval;
 
     let mut candidates = hint_candidates(&[101, 102, 103, 104], Vec::new());
     candidates.source_intervals = vec![
@@ -4243,13 +4242,13 @@ fn continuation_island_preference_uses_only_sources_reachable_from_local_depth()
 
 #[test]
 fn cache_owner_island_is_published_or_taken_from_its_attached_worker() {
-    use crate::identity::{
-        CacheOwnerId, CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId,
-        RoutingScopeId, StableDpSlotId,
-    };
     use dynamo_kv_events::residency::ResidencyOwner;
     use dynamo_kv_indexer::{
         ResidencyProjection, ResidencyRoutingSnapshot, RouterHintSourceMetadata,
+    };
+    use dynamo_router_protocol::identity::{
+        CacheOwnerId, CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId,
+        RoutingScopeId, StableDpSlotId,
     };
     let owner = |slot: u8| {
         CacheOwnerId::new(

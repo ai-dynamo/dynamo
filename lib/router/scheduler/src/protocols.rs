@@ -323,8 +323,6 @@ pub struct SelectionLogFields {
 mod tests {
     use super::*;
 
-    use serde_json;
-
     #[test]
     fn test_router_request_mark_free_backwards_compatible_deserialization() {
         let request: RouterRequest = serde_json::from_str(r#"{"method":"mark_free"}"#).unwrap();

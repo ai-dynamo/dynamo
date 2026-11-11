@@ -3262,6 +3262,7 @@ version = "1.7.0"
 dependencies = [
  "async-trait",
  "criterion",
+ "dynamo-kv-hints",
  "dynamo-kv-router",
  "dynamo-scheduler",
  "fastrand",

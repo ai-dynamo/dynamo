@@ -21,8 +21,8 @@ use dynamo_kv_indexer::KvIndexerMetrics;
 use dynamo_kv_indexer::TieredMatchDetails;
 use dynamo_router_protocol::identity::RoutingPartitionId;
 use dynamo_router_protocol::worker::WorkerId;
-use dynamo_scheduler::identity::default_routing_group;
-use dynamo_scheduler::overlap_summary::{MooncakeOverlapSummary, build_mooncake_overlap_summaries};
+use dynamo_scheduler::default_routing_group;
+use dynamo_scheduler::{MooncakeOverlapSummary, build_mooncake_overlap_summaries};
 
 use super::backend::Indexer;
 use super::registry::{IndexRegistry, ListenerControlError, WorkerRegistry};
