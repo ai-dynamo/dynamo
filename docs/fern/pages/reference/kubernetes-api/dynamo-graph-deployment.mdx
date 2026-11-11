@@ -283,7 +283,7 @@ The operator maintains observed state under `status`.
 
 <Indent>
   <ParamField path="observedID" type="string">
-    The restart ID currently being processed. Matches `spec.restart.id`.
+    The restart ID currently being processed. Matches `spec.restart.id`; this acknowledges the request, not its completion.
   </ParamField>
   <ParamField path="phase" type="RestartPhase">
     Phase of the restart.
@@ -292,6 +292,7 @@ The operator maintains observed state under `status`.
   </ParamField>
   <ParamField path="inProgress" type="[]string">
     Names of the components currently being restarted.
+    For component and Grove workloads, a component remains in progress until its rendered workload carries the requested restart ID and passes the provider's generation and readiness checks.
   </ParamField>
 </Indent>
 
