@@ -35,7 +35,7 @@ The default public run performs five cases × two modes × two schedules = 20 ex
 
 Capture and preparation run separately from replay. Capture calls an **already running** reference server with `/version`, `/v1/models`, and `/v1/chat/completions`. It requires a response that returns `prompt_token_ids` and `choices[0].token_ids` when `return_token_ids` is true. It does not deploy an engine. Preparation uses a pinned vendor reference on CPU; replay does not import that reference or require its Python dependencies.
 
-Start with prepared JSONL requests, each containing `id`, `source` and `request`, with optional diagnostic `reference`. Extract the public five without copying their expectations:
+Start with UTF-8 JSONL requests without a BOM, with each record containing `id`, `source` and `request`, with optional diagnostic `reference`. Extract the public five without copying their expectations:
 
 ```bash
 REPLAY_WORK=$(mktemp -d)
@@ -46,7 +46,9 @@ from tests.frontend.trace_replay.contract import dumps, loads
 
 source = Path("tests/frontend/trace_replay/fixtures/deepseek_v41/cases.jsonl")
 with Path(sys.argv[1]).open("w", encoding="utf-8") as destination:
-    for line in source.read_text(encoding="utf-8").splitlines():
+    for line in source.read_text(encoding="utf-8").split("\n"):
+        if not line.strip():
+            continue
         record = loads(line)
         destination.write(dumps({key: record[key] for key in ("id", "source", "request")}) + "\n")
 PYTHON
@@ -92,7 +94,9 @@ Preparation declares these worker-ingress checks. It rejects both cap aliases in
 
 Rendering inputs use explicit `chat_template_kwargs.thinking_mode` (`chat` or `thinking`), with optional consistent `thinking` and `reasoning_effort` in that same object. The supported protocol is text Chat Completions with OpenAI function tools and `tool_choice:auto`. Top-level effort, `chat_template_args`, response-format controls, parallel-tool controls, message names/prefixes, multimodal blocks and undeclared fields require a future explicit adapter. Seed sampling values remain exact JSON values.
 
-The new corpus contains deterministic `cases.jsonl` and a checksummed manifest. Identical frozen evidence and tool code produce identical exports across directories. Fresh model inference may produce different tokens. Captured parsed responses stay diagnostic, so new captures have unjudged responses by default. `--reviewed-corpus <approved-corpus>` may reuse an explicitly approved response only when its model/reference, request, prompt IDs, output IDs and terminal binding match. Supplying expectations in request seeds never approves them.
+The new corpus contains deterministic `cases.jsonl` and a checksummed manifest. Identical frozen evidence and tool code produce identical exports across directories. Fresh model inference may produce different tokens. Captured parsed responses stay diagnostic, so new captures have unjudged responses by default. `--reviewed-corpus <approved-corpus>` may reuse an explicitly approved response only when its model/reference, request, prompt IDs, output IDs and terminal binding match. Supplying expectations in request seeds never approves them. Original seed `reference` metadata is preserved; generated diagnostics are nested under `reference.preparation`. A seed that already uses that reserved preparation key is rejected.
+
+To approve a response, independently review it and commit it to a checksummed corpus with `provenance.golden_review.ids`, the encoder/version pins, and `approved_capture_identities`. That ledger has a `source` object containing `repo_id`, `revision`, `encoder_sha256` and `tokenizer_sha256`; each approved ID maps to `request_bytes_sha256`, `prompt_token_ids_sha256` and `output_token_ids_sha256`. Token-array hashes use the UTF-8 bytes of compact lossless `dumps(ids)`. Request hashes use compact lossless request JSON after removing the capture selectors and appending `return_token_ids:true` followed by `stream:false`; this is also the capture client's wire order. The captured request hash is retained at `reference.preparation.capture.request_sha256`. The reviewed corpus loader checks its own ledger before a new capture can reuse its responses; writing a ledger alone does not perform independent review.
 
 For a renderer check without inference, replace `--capture-dir` with `--requests`:
 

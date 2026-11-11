@@ -222,6 +222,72 @@ def test_capture_preserves_wire_bytes_and_archives_only_selected_seed_metadata(
         assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
+@pytest.mark.parametrize("separator", ["\u2028", "\u0085"])
+def test_unicode_separators_inside_json_strings_are_not_record_boundaries(
+    tmp_path: Path, separator: str
+) -> None:
+    original = seed()
+    original["request"]["messages"][0]["content"] = "before" + separator + "after"
+    requests, profile = inputs(tmp_path, [original])
+    assert separator.encode("utf-8") in requests.read_bytes()
+    output = tmp_path / "capture"
+    with reference_server() as (url, seen):
+        manifest = capture_requests(requests, profile, url, output)
+    assert manifest["complete"] is True
+    assert len(seen["post"]) == 1
+    record = loads((output / manifest["records"][0]["path"]).read_bytes())
+    assert record["original_request"] == original["request"]
+    assert (output / "requests.jsonl").read_bytes() == requests.read_bytes()
+
+
+@pytest.mark.parametrize("encoding", ["utf8_bom", "utf16", "invalid_utf8"])
+def test_seed_encoding_errors_are_rejected_before_http(
+    tmp_path: Path, encoding: str
+) -> None:
+    requests, profile = inputs(tmp_path, [seed()])
+    raw = requests.read_bytes()
+    if encoding == "utf8_bom":
+        raw = b"\xef\xbb\xbf" + raw
+    elif encoding == "utf16":
+        raw = raw.decode("utf-8").encode("utf-16")
+    else:
+        raw = raw.replace(b"one", b"\xff", 1)
+    requests.write_bytes(raw)
+    output = tmp_path / "capture"
+    with reference_server() as (url, seen):
+        with pytest.raises(ReplayError):
+            capture_requests(requests, profile, url, output)
+    assert not seen["get"] and not seen["post"]
+    assert not output.exists()
+
+
+@pytest.mark.parametrize(
+    "selectors", [{}, {"stream": False}, {"stream": False, "return_token_ids": True}]
+)
+def test_wire_selector_order_matches_the_reviewed_request_ledger(
+    tmp_path: Path, selectors: dict[str, Any]
+) -> None:
+    original = seed()
+    # Existing selectors can precede effective fields in a supplied seed.
+    original["request"] = {**selectors, **original["request"]}
+    requests, profile = inputs(tmp_path, [original])
+    output = tmp_path / "capture"
+    with reference_server() as (url, seen):
+        manifest = capture_requests(requests, profile, url, output)
+    effective = {
+        key: value
+        for key, value in original["request"].items()
+        if key not in {"stream", "return_token_ids"}
+    }
+    expected = dumps({**effective, "return_token_ids": True, "stream": False}).encode()
+    sent = seen["post"][0]["body"]
+    assert sent == expected
+    assert list(loads(sent))[-2:] == ["return_token_ids", "stream"]
+    record = loads((output / manifest["records"][0]["path"]).read_bytes())
+    assert record["request_sha256"] == hashlib.sha256(expected).hexdigest()
+    assert record["original_request"] == original["request"]
+
+
 @pytest.mark.parametrize(
     "change",
     [

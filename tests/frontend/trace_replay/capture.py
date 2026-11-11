@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import argparse
 import base64
-import copy
 import hashlib
 import http.client
 import ipaddress
@@ -27,8 +26,8 @@ from .contract import (
     dumps,
     file_digest,
     loads,
+    read_request_seeds,
     validate_profile,
-    validate_source,
     write_json,
 )
 
@@ -84,27 +83,9 @@ def _reference_url(value: str, authenticated: bool) -> str:
 
 def _seeds(payload: bytes, model_name: str) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
-    identifiers = set()
-    for line in payload.splitlines():
-        if not line.strip():
-            continue
-        try:
-            seed = loads(line)
-        except (ValueError, UnicodeError, RecursionError) as exc:
-            raise ReplayError("invalid JSONL seed") from exc
-        if not isinstance(seed, dict):
-            raise ReplayError("each seed must be an object")
-        identifier = seed.get("id")
-        if (
-            not isinstance(identifier, str)
-            or not identifier
-            or identifier in identifiers
-        ):
-            raise ReplayError("seed IDs must be unique nonempty strings")
-        validate_source(seed.get("source"))
-        request = seed.get("request")
-        if not isinstance(request, dict) or request.get("model") != model_name:
-            raise ReplayError("seed request.model must equal profile.model_name")
+    for seed in read_request_seeds(payload, model_name):
+        identifier = seed["id"]
+        request = seed["request"]
         if not isinstance(request.get("messages"), list) or not request["messages"]:
             raise ReplayError("capture requires nonempty Chat Completions messages")
         if "stream" in request and request["stream"] is not False:
@@ -117,14 +98,16 @@ def _seeds(payload: bytes, model_name: str) -> list[dict[str, Any]]:
             raise ReplayError("capture requires return_token_ids to be true when set")
         if {"return_prompt_token_ids", "return_meta_info"} & request.keys():
             raise ReplayError("unsupported capture-only request selector")
-        if "reference" in seed and not isinstance(seed["reference"], dict):
-            raise ReplayError("seed reference must be an object")
         original = {key: seed[key] for key in ("id", "source", "request")}
         if "reference" in seed:
             original["reference"] = seed["reference"]
-        wire = copy.deepcopy(request)
-        wire["stream"] = False
+        wire = {
+            key: value
+            for key, value in request.items()
+            if key not in {"stream", "return_token_ids"}
+        }
         wire["return_token_ids"] = True
+        wire["stream"] = False
         try:
             filename = _sha256(identifier.encode("utf-8")) + ".json"
             wire_text = dumps(wire)
@@ -132,7 +115,6 @@ def _seeds(payload: bytes, model_name: str) -> list[dict[str, Any]]:
             dumps(original).encode("utf-8")
         except (ValueError, UnicodeError, RecursionError) as exc:
             raise ReplayError("seed cannot be serialized as UTF-8 JSON") from exc
-        identifiers.add(identifier)
         result.append({"seed": original, "wire": wire_text, "filename": filename})
     if not result:
         raise ReplayError("capture requires at least one seed")

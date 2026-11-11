@@ -16,6 +16,8 @@ from typing import Any
 
 import pytest
 
+from tests.frontend import test_trace_capture as capture_test
+from tests.frontend.trace_replay import capture as capture_tool
 from tests.frontend.trace_replay import prepare
 from tests.frontend.trace_replay.contract import (
     ReplayError,
@@ -161,7 +163,12 @@ def capture(
         },
     }
     response_bytes = dumps(response).encode()
-    wire = dumps({**seed["request"], "stream": False, "return_token_ids": True})
+    effective = {
+        key: value
+        for key, value in seed["request"].items()
+        if key not in {"stream", "return_token_ids"}
+    }
+    wire = dumps({**effective, "return_token_ids": True, "stream": False})
     record = {
         "schema": prepare.RECORD_SCHEMA,
         "id": seed["id"],
@@ -223,7 +230,7 @@ def test_reference_only_is_deterministic_and_never_promotes_seed_expectations(
     assert (first / "cases.jsonl").read_bytes() == (second / "cases.jsonl").read_bytes()
     corpus = load_corpus(first)
     assert corpus.cases[0].expected_response is None
-    assert corpus.cases[0].reference["completion"]["kind"] == "synthetic"
+    assert corpus.cases[0].reference["preparation"]["completion"]["kind"] == "synthetic"
     assert corpus.cases[0].worker_events[0]["token_ids"] == [9, 1]
     assert str(tmp_path) not in (first / "manifest.json").read_text()
 
@@ -263,7 +270,9 @@ def test_captured_response_stays_diagnostic_and_controls_are_explicit(
     case = load_corpus(tmp_path / "out").cases[0]
     assert case.expected_response is None
     assert (
-        case.reference["capture"]["diagnostic_response"]["message"]["content"]
+        case.reference["preparation"]["capture"]["diagnostic_response"]["message"][
+            "content"
+        ]
         == "diagnostic"
     )
     assert case.worker_events[0]["finish_reason"] == "stop"
@@ -271,6 +280,94 @@ def test_captured_response_stays_diagnostic_and_controls_are_explicit(
     assert fields["/stop_conditions/max_tokens"] == 8
     assert fields["/eos_token_ids"] == [1]
     assert fields["/stop_conditions/stop_token_ids_hidden"] == [1]
+
+
+@pytest.mark.parametrize("captured", [False, True])
+def test_seed_reference_metadata_is_preserved_and_generated_evidence_is_namespaced(
+    setup: dict[str, Any], tmp_path: Path, captured: bool
+) -> None:
+    original = {
+        "capture": {"bfcl": {"category": "simple", "source_revision": "frozen"}},
+        "completion": {"note": "seed diagnostic"},
+        "reference_transformations": ["original metadata"],
+    }
+    setup["seed"]["reference"] = original
+    setup["seeds"].write_text(dumps(setup["seed"]) + "\n")
+    inputs = (
+        {"captures": capture(setup, tmp_path / "capture")}
+        if captured
+        else {"requests": setup["seeds"]}
+    )
+    run(setup, tmp_path / "out", **inputs)
+    reference = load_corpus(tmp_path / "out").cases[0].reference
+    assert {key: reference[key] for key in original} == original
+    assert set(reference) == set(original) | {"preparation"}
+    assert ("capture" if captured else "completion") in reference["preparation"]
+    setup["seed"]["reference"]["preparation"] = {"caller": "must not be overwritten"}
+    setup["seeds"].write_text(dumps(setup["seed"]) + "\n")
+    collision_inputs = (
+        {"captures": capture(setup, tmp_path / "collision-capture")}
+        if captured
+        else {"requests": setup["seeds"]}
+    )
+    with pytest.raises(ReplayError, match="reference.preparation is reserved"):
+        run(setup, tmp_path / "collision", **collision_inputs)
+    assert not (tmp_path / "collision" / "manifest.json").exists()
+
+
+def test_capture_to_prepare_preserves_unicode_json_line_and_canonical_wire_identity(
+    setup: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    content = "text\u2028line separator\u0085next line\u2029paragraph"
+    setup["seed"]["request"]["messages"][0]["content"] = content
+    # Selectors already in a seed must also be emitted in the canonical order.
+    setup["seed"]["request"] = {
+        "stream": False,
+        **setup["seed"]["request"],
+        "return_token_ids": True,
+    }
+    setup["seeds"].write_text(dumps(setup["seed"]) + "\n")
+    native = prepare.ReferenceEncoder(
+        setup["profile"], setup["reference"], setup["model"]
+    )
+    prompt, _ = native.prompt(setup["seed"]["request"], captured=True)
+    response = {
+        "prompt_token_ids": prompt,
+        "choices": [
+            {
+                "index": 0,
+                "token_ids": [9, 1],
+                "finish_reason": "stop",
+                "stop_reason": None,
+            }
+        ],
+        "usage": {
+            "prompt_tokens": len(prompt),
+            "completion_tokens": 2,
+            "total_tokens": len(prompt) + 2,
+        },
+    }
+    monkeypatch.setattr(capture_test, "MODEL", setup["profile"]["model_name"])
+    with capture_test.reference_server(body=dumps(response).encode()) as (url, seen):
+        result = capture_tool.capture_requests(
+            setup["seeds"], setup["path"], url, tmp_path / "http-capture"
+        )
+    assert result["complete"] is True
+    run(setup, tmp_path / "out", captures=tmp_path / "http-capture")
+    case = load_corpus(tmp_path / "out").cases[0]
+    assert case.request["messages"][0]["content"] == content
+    effective = {
+        key: value
+        for key, value in setup["seed"]["request"].items()
+        if key not in {"stream", "return_token_ids"}
+    }
+    expected_wire = dumps(
+        {**effective, "return_token_ids": True, "stream": False}
+    ).encode()
+    assert case.reference["preparation"]["capture"]["request_sha256"] == sha(
+        expected_wire
+    )
+    assert len(seen["post"]) == 1
 
 
 @pytest.mark.parametrize(
@@ -366,7 +463,7 @@ def test_segmented_reasoning_requires_captured_prompt_agreement(
     run(setup, tmp_path / "out", captures=root)
     case = load_corpus(tmp_path / "out").cases[0]
     assert case.request["messages"][0]["reasoning_content"] == ["", "first", "second"]
-    assert case.reference["reference_transformations"]
+    assert case.reference["preparation"]["reference_transformations"]
     record = loads((root / "record.json").read_bytes())
     record["response"]["prompt_token_ids"][0] += 1
     encoded = dumps(record["response"]).encode()
@@ -507,15 +604,9 @@ def test_reviewed_responses_require_explicit_ids_pins_and_exact_binding(
             },
             "records": {
                 "case": {
-                    "request_bytes_sha256": sha(
-                        dumps(
-                            {
-                                **case["request"],
-                                "return_token_ids": True,
-                                "stream": False,
-                            }
-                        ).encode()
-                    ),
+                    "request_bytes_sha256": loads(
+                        (captured / "record.json").read_bytes()
+                    )["request_sha256"],
                     "prompt_token_ids_sha256": sha(
                         dumps(case["expect"]["preprocessed"]["token_ids"]).encode()
                     ),
@@ -594,7 +685,7 @@ def test_reviewed_responses_require_explicit_ids_pins_and_exact_binding(
 
 def test_invalid_seed_and_message_shapes_fail_closed(setup: dict[str, Any]) -> None:
     encoded = (dumps(setup["seed"]) + "\n").encode()
-    with pytest.raises(ReplayError, match="duplicate seed"):
+    with pytest.raises(ReplayError, match="unique|duplicate"):
         prepare.read_seeds(encoded + encoded, setup["profile"])
     for message in (
         {"role": "user", "content": [{"type": "text", "text": "hi"}]},

@@ -39,7 +39,6 @@ from .contract import (
     parse_case,
     same_json,
     validate_profile,
-    validate_source,
     write_json,
 )
 
@@ -127,34 +126,7 @@ def load_profile(path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
 
 
 def read_seeds(data: bytes, profile: dict[str, Any]) -> list[dict[str, Any]]:
-    seeds: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for line in data.decode("utf-8").splitlines():
-        if not line.strip():
-            continue
-        seed = loads(line)
-        if (
-            not isinstance(seed, dict)
-            or not isinstance(seed.get("id"), str)
-            or not seed["id"]
-        ):
-            raise ReplayError("seed requires a nonempty id")
-        if seed["id"] in seen:
-            raise ReplayError("duplicate seed id: " + seed["id"])
-        seen.add(seed["id"])
-        validate_source(seed.get("source"))
-        request = seed.get("request")
-        if (
-            not isinstance(request, dict)
-            or request.get("model") != profile["model_name"]
-        ):
-            raise ReplayError("seed request model must equal profile.model_name")
-        if "reference" in seed and not isinstance(seed["reference"], dict):
-            raise ReplayError("seed.reference must be an object")
-        seeds.append(seed)
-    if not seeds:
-        raise ReplayError("seed input must be nonempty")
-    return seeds
+    return contract.read_request_seeds(data, profile["model_name"])
 
 
 def _closed(value: Any, keys: set[str] | frozenset[str], label: str) -> None:
@@ -726,6 +698,12 @@ def prepare_corpus(
         prompt, transformations = native.prompt(request, captured=captures is not None)
         effective = _effective(request)
         case_reference = copy.deepcopy(seed.get("reference", {}))
+        if "preparation" in case_reference:
+            raise ReplayError(
+                "seed.reference.preparation is reserved for generated evidence"
+            )
+        preparation: dict[str, Any] = {}
+        case_reference["preparation"] = preparation
         if captures is not None:
             record = records[index]
             observed_prompt, output, terminal = normalize_terminal(
@@ -735,7 +713,7 @@ def prepare_corpus(
                 raise ReplayError(
                     "vendor prompt IDs disagree with captured prompt: " + seed["id"]
                 )
-            case_reference["capture"] = {
+            preparation["capture"] = {
                 "request_sha256": record["request_sha256"],
                 "response_sha256": record["response_sha256"],
                 "diagnostic_response": {
@@ -752,7 +730,7 @@ def prepare_corpus(
             }
         else:
             output, terminal = native.synthetic(request), "stop"
-            case_reference["completion"] = {
+            preparation["completion"] = {
                 "kind": "synthetic",
                 "method": "pinned vendor render_message at assistant continuation; content OK",
             }
@@ -785,7 +763,7 @@ def prepare_corpus(
                 raise ReplayError("reviewed response binding mismatch: " + seed["id"])
             expected["response"] = golden.expected_response
         if transformations:
-            case_reference["reference_transformations"] = transformations
+            preparation["reference_transformations"] = transformations
         value = {
             "id": seed["id"],
             "source": seed["source"],

@@ -190,6 +190,38 @@ def validate_source(source: Any) -> None:
             raise ReplayError("source.context values must be strings")
 
 
+def read_request_seeds(payload: bytes, model_name: str) -> list[dict[str, Any]]:
+    """Read strict UTF-8 JSONL; Unicode separators inside strings are data."""
+    try:
+        text = payload.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise ReplayError("request seeds must be UTF-8 JSONL") from exc
+    seeds: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for line in text.split("\n"):
+        if not line.strip():
+            continue
+        seed = loads(line)
+        if not isinstance(seed, dict):
+            raise ReplayError("each seed must be an object")
+        identifier = seed.get("id")
+        if not isinstance(identifier, str) or not identifier:
+            raise ReplayError("seed requires a nonempty id")
+        if identifier in seen:
+            raise ReplayError("duplicate seed id: " + identifier)
+        seen.add(identifier)
+        validate_source(seed.get("source"))
+        request = seed.get("request")
+        if not isinstance(request, dict) or request.get("model") != model_name:
+            raise ReplayError("seed request.model must equal profile.model_name")
+        if "reference" in seed and not isinstance(seed["reference"], dict):
+            raise ReplayError("seed.reference must be an object")
+        seeds.append(seed)
+    if not seeds:
+        raise ReplayError("request seeds must be nonempty")
+    return seeds
+
+
 def _token_ids(value: Any, name: str) -> None:
     if not isinstance(value, list) or any(
         type(token) is not int or not 0 <= token <= 0xFFFFFFFF for token in value

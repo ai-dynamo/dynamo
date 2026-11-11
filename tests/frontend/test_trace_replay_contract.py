@@ -27,6 +27,7 @@ from tests.frontend.trace_replay.contract import (
     load_corpus,
     loads,
     pointer,
+    read_request_seeds,
     same_json,
     scheduled_events,
     validate_source,
@@ -642,3 +643,27 @@ def test_startup_report_pins_migration_and_preserves_parent_metadata(
         "DYN_REPLAY_HARNESS_REVISION"
         not in summary["build"]["execution"]["environment"]
     )
+
+
+@pytest.mark.parametrize("separator", ["\u0085", "\u2028", "\u2029"])
+def test_seed_unicode_line_separators_are_string_data(separator: str) -> None:
+    seed = {
+        "id": "unicode",
+        "source": {"kind": "authored", "context": {}},
+        "request": {
+            "model": "model",
+            "messages": [{"role": "user", "content": "a" + separator + "b"}],
+        },
+    }
+    assert read_request_seeds((dumps(seed) + "\n").encode("utf-8"), "model") == [seed]
+
+
+@pytest.mark.parametrize("encoding", ["utf-16", "utf-8-sig"])
+def test_seed_encoding_is_strict_utf8_without_bom(encoding: str) -> None:
+    seed = {
+        "id": "bad-encoding",
+        "source": {"kind": "authored"},
+        "request": {"model": "model"},
+    }
+    with pytest.raises(ReplayError):
+        read_request_seeds(dumps(seed).encode(encoding), "model")
