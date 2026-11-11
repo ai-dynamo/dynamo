@@ -66,8 +66,11 @@ impl SupportedMedia {
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct ModelLimits {
     /// Maximum input + output tokens; backs both the registered context window
-    /// and the default `max_tokens`. Absent when neither source supplied one,
-    /// which leaves requests that omit `max_tokens` to be rejected.
+    /// and the default `max_tokens`. Startup requires a positive value from
+    /// `--context-length` or `Control.GetModelInfo`: when neither supplies one,
+    /// startup fails before the worker registers, and request-level
+    /// `max_tokens` cannot replace the missing window. `None` only until startup
+    /// resolves it, so every serving worker has a value.
     pub(crate) context_length: Option<u32>,
     /// Engine window before any operator override; media expansion uses this window.
     pub(crate) engine_context_length: Option<u32>,
