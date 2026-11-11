@@ -201,7 +201,7 @@ SUCC cli.py:67 -- Job 'verl-grpo-nrcsf' succeeded
 
 Each step takes about 20 seconds, and the whole run about 15 minutes.
 
-Just before `logprob channel probe OK`, the log also shows `ERROR ... [DynamoHttpServer] NO TOKEN IDS in the frontend response (hit #1)`. The probe causes it: the recipe builds the probe's one-token prompt with the function that substitutes for missing token IDs, and that function logs the error. Hits after training starts mean that the engines return no token IDs.
+Just before `logprob channel probe OK`, the log also shows `ERROR ... [DynamoHttpServer] NO TOKEN IDS in the frontend response (hit #1)`. The probe causes it: the recipe builds the probe's one-token prompt with the function that substitutes for missing token IDs, and that function logs the error. Text rollouts don't use that function: with `calculate_log_probs=True`, a response without token IDs fails the job with a `RuntimeError` instead.
 
   </Step>
 </Steps>
@@ -311,7 +311,7 @@ kubectl delete rayjob verl-grpo -n "$NAMESPACE"
 | The job fails with `dynamo frontend not healthy within 600.0s (expected 4 workers; ...)` | One engine never registered with the frontend, which happens in about 1 in 50 launches. Delete the RayJob and apply it again. |
 | Loading the model fails in `accelerate/big_modeling.py` with a `TypeError` about `_is_hf_initialized` | The head has the image's accelerate 1.12.0. Check that `/data/wheelhouse/requirements.txt` lists `accelerate==1.13.0`. |
 | Hydra fails with `Key 'router_mode' is not in struct` | Prefix each key under `engine_kwargs.dynamo` with `++`. |
-| The log shows `NO TOKEN IDS in the frontend response` after training starts | The engines return no token IDs, so verl trains on one-token responses. Keep `request_engine_data=true` and `request_completion_token_ids=true`. |
+| The job fails with `RuntimeError: Dynamo frontend response carried no parseable token ids` | The engines returned no token IDs, which verl needs to pair the engines' log-probabilities with tokens. Keep `request_engine_data=true` and `request_completion_token_ids=true`. |
 | The first weight update fails with `ValueError: 'lm_head.weight' was skipped because it is tied to 'model.embed_tokens.weight'` | The model has tied embeddings, and the engines run vLLM 0.29.0 or later. Use the Dynamo 1.5.1 image. |
 | The driver log ends with `Exception ignored in atexit callback` and `RuntimeError: DataLoader worker (pid ...) is killed by signal: Killed.` | The message comes from shutdown after training. Check `JOB STATUS` on the RayJob. |
 
