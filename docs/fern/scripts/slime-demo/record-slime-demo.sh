@@ -6,9 +6,12 @@
 # the dark fern-code palette. The overview plays it with TerminalDemo's
 # fern-code theme, which follows the site's light and dark mode.
 #
+# The overview passes cols={100} rows={25} to TerminalDemo. If you record at
+# another size, change those props to match.
+#
 # Usage:
-#   ./record-slime-demo.sh                    # -> ../../assets/slime-rl-demo.cast at 120x25
-#   ./record-slime-demo.sh out.cast 25 120    # custom output, rows, cols
+#   ./record-slime-demo.sh                    # -> ../../assets/slime-rl-demo.cast at 100x25
+#   ./record-slime-demo.sh out.cast 25 100    # custom output, rows, cols
 #
 # Requires: asciinema (3.x), python3.
 set -euo pipefail
@@ -16,7 +19,7 @@ set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUT="${1:-${DIR}/../../assets/slime-rl-demo.cast}"
 ROWS="${2:-25}"
-COLS="${3:-120}"
+COLS="${3:-100}"
 
 # Without a terminal (for example, when an agent or CI records it), asciinema
 # must run headless.
