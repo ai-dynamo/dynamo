@@ -19,13 +19,17 @@ ignored = ["prost", "prost-types"]
 name = "dynamo-trtllm-sidecar"
 path = "src/main.rs"
 
+[features]
+# On for the sidecar image's SBOMs (its shared build links vLLM's mm-routing here
+# and into LPX). The Python bindings turn it off so the default wheel stays lean.
+default = ["mm-routing"]
+mm-routing = ["dynamo-llm/mm-routing"]
+
 [dependencies]
 dynamo-backend-common = { workspace = true }
 dynamo-sidecar-common = { workspace = true }
-# The sidecar image builds all sidecars in one `cargo build`, which links the
-# vLLM sidecar's `mm-routing` here (and into LPX) too. Enable it so the SBOMs
-# list what the binaries link; nothing in this sidecar calls it.
-dynamo-llm = { path = "../../llm", default-features = false, features = ["mm-routing"] }
+dynamo-kv-router = { workspace = true }
+dynamo-llm = { path = "../../llm", default-features = false }
 dynamo-runtime = { workspace = true }
 
 anyhow = { workspace = true }

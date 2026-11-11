@@ -23,6 +23,7 @@ import (
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
@@ -76,6 +77,7 @@ func TestGenerateGrovePodCliqueSet_FromDGDYaml(t *testing.T) {
 		"from_dgd_yaml/node-local-v2-specdecode",
 		"from_dgd_yaml/node-local-v3-hx-lpu-only",
 		"from_dgd_yaml/node-local-v3-hx-specdecode",
+		"from_dgd_yaml/node-local-v3-hx-agent-specdecode",
 		"from_dgd_yaml/node-local-v3-hx-hybrid",
 		"from_dgd_yaml/node-local-v3-hx-hybrid-all-local",
 		"from_dgd_yaml/lpx-v3-hx-local-partitions",
@@ -113,6 +115,12 @@ func TestGenerateGrovePodCliqueSet_FromDGDYaml(t *testing.T) {
 				require.NotNil(t, component)
 				require.True(t, component.IsLPX())
 				require.Equal(t, servingHash, clique.Labels[consts.KubeLabelDynamoWorkerHash])
+				// A runtime sidecar keeps the ordinary worker namespace and serving suffix.
+				if runtime := common.FindContainerByName(clique.Spec.PodSpec.InitContainers, consts.RuntimeContainerName); runtime != nil {
+					require.Contains(t, runtime.Env, corev1.EnvVar{Name: consts.DynamoNamespaceWorkerSuffixEnvVar, Value: servingHash})
+					require.Contains(t, runtime.Env, corev1.EnvVar{Name: consts.DynamoNamespaceEnvVar, Value: dynamoDeployment.GetDynamoNamespaceForComponent(component)})
+					continue
+				}
 				require.Contains(t, clique.Spec.PodSpec.Containers[0].Env, corev1.EnvVar{Name: consts.DynamoNamespaceWorkerSuffixEnvVar})
 				require.Contains(t, clique.Spec.PodSpec.Containers[0].Env, corev1.EnvVar{Name: consts.DynamoNamespaceEnvVar, Value: dynamoDeployment.GetDynamoNamespaceForComponent(component) + "-" + servingHash})
 			}
@@ -147,6 +155,9 @@ func TestGenerateGrovePodCliqueSet_FromDGDYaml(t *testing.T) {
 					}
 					delete(clique.Labels, consts.KubeLabelDynamoWorkerHash)
 					container := &clique.Spec.PodSpec.Containers[0]
+					if runtime := common.FindContainerByName(clique.Spec.PodSpec.InitContainers, consts.RuntimeContainerName); runtime != nil {
+						container = runtime
+					}
 					container.Env = slices.DeleteFunc(container.Env, func(env corev1.EnvVar) bool { return env.Name == consts.DynamoNamespaceWorkerSuffixEnvVar })
 					index := slices.IndexFunc(container.Env, func(env corev1.EnvVar) bool { return env.Name == consts.DynamoNamespaceEnvVar })
 					container.Env[index].Value = clique.Labels[consts.KubeLabelDynamoNamespace]
@@ -338,11 +349,6 @@ func TestLPXAgentRuntimeSidecarKeepsAuthoredSystemPort(t *testing.T) {
 func TestLPXConductorRuntimeSidecarRendering(t *testing.T) {
 	t.Log("Render a hybrid model whose conductor hosts the runtime sidecar")
 	dgd := loadLPXInput(t, "node-local-v2-hybrid")
-	dgd.GetComponentByName("lpu").ComponentRole(v1beta1.ComponentRoleLPXConductor).PodTemplate.Spec.InitContainers = []corev1.Container{{
-		Name: consts.RuntimeContainerName, Image: lpxSidecarImage, RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways),
-		Args:         []string{"lpx", "--model-path", "$(LPX_MODEL_PATH)/tokenizer"},
-		VolumeMounts: []corev1.VolumeMount{{Name: "model-storage", MountPath: "/nfs", ReadOnly: true}},
-	}}
 	_, serving := renderLPXServing(t, dgd)
 
 	t.Log("The serving conductor's first init container is the sidecar")

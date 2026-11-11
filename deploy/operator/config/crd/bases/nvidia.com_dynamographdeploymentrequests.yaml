@@ -562,18 +562,12 @@ spec:
                     for manual review and application.
                   type: boolean
                 backend:
-                  allOf:
-                    - enum:
-                        - auto
-                        - sglang
-                        - trtllm
-                        - vllm
-                    - enum:
-                        - auto
-                        - sglang
-                        - trtllm
-                        - vllm
                   description: Backend specifies the inference backend to use for profiling and deployment.
+                  enum:
+                    - auto
+                    - sglang
+                    - trtllm
+                    - vllm
                   type: string
                 features:
                   description: Features controls optional Dynamo platform features in the generated deployment.
@@ -618,51 +612,6 @@ spec:
                     Typically auto-filled by the operator from cluster discovery.
                   properties:
                     gpuSku:
-                      allOf:
-                        - enum:
-                            - vr_nvl72
-                            - gb200
-                            - gb200_sxm
-                            - gb10
-                            - b300_sxm
-                            - b200_sxm
-                            - rtx_pro_6000_server
-                            - h200_sxm
-                            - h100_sxm
-                            - h100_pcie
-                            - a100_sxm
-                            - a100_pcie
-                            - a30
-                            - l40s
-                            - l40
-                            - l4
-                            - v100_sxm
-                            - v100_pcie
-                            - t4
-                            - mi200
-                            - mi300
-                        - enum:
-                            - vr_nvl72
-                            - gb200
-                            - gb200_sxm
-                            - gb10
-                            - b300_sxm
-                            - b200_sxm
-                            - rtx_pro_6000_server
-                            - h200_sxm
-                            - h100_sxm
-                            - h100_pcie
-                            - a100_sxm
-                            - a100_pcie
-                            - a30
-                            - l40s
-                            - l40
-                            - l4
-                            - v100_sxm
-                            - v100_pcie
-                            - t4
-                            - mi200
-                            - mi300
                       description: |-
                         GPUSKU selects the GPU type to target.
                         When omitted, auto-detected as the GPU type of the node with the most GPUs
@@ -670,6 +619,28 @@ spec:
                         choose which GPU type to use. Discovery and totalGpus are then
                         restricted to nodes matching this SKU.
                         The legacy value gb200_sxm is deprecated; use gb200 instead.
+                      enum:
+                        - vr_nvl72
+                        - gb200
+                        - gb200_sxm
+                        - gb10
+                        - b300_sxm
+                        - b200_sxm
+                        - rtx_pro_6000_server
+                        - h200_sxm
+                        - h100_sxm
+                        - h100_pcie
+                        - a100_sxm
+                        - a100_pcie
+                        - a30
+                        - l40s
+                        - l40
+                        - l4
+                        - v100_sxm
+                        - v100_pcie
+                        - t4
+                        - mi200
+                        - mi300
                       type: string
                     interconnect:
                       description: |-
@@ -9330,16 +9301,12 @@ spec:
                   pattern: ^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$
                   type: string
                 searchStrategy:
-                  allOf:
-                    - enum:
-                        - rapid
-                        - thorough
-                    - enum:
-                        - rapid
-                        - thorough
                   description: |-
                     SearchStrategy controls the profiling search depth.
                     "rapid" performs a fast sweep; "thorough" explores more configurations.
+                  enum:
+                    - rapid
+                    - thorough
                   type: string
                 sla:
                   description: SLA defines service-level agreement targets that drive profiling optimization.
@@ -9606,8 +9573,8 @@ spec:
                 DynamoGraphDeploymentRequestSpec defines persistent desired search intent.
                 Native v1beta2 fields and the V1Beta1 conversion envelope are mutually exclusive.
               properties:
-                aisimulate:
-                  description: AISimulate supplies public recommendation input to the operator's AISimulate execution bundle.
+                aisim:
+                  description: AISim supplies public recommendation input to the operator's AISimulate execution bundle.
                   properties:
                     inputOverrides:
                       description: |-
@@ -9617,7 +9584,7 @@ spec:
                         field. The dgdr_run member must remain an object, and its operator-owned
                         transport, identity, and runtime fields name, max_candidates, snapshot_dir,
                         runtime_image, runtime_version_override, derive_runtime_images,
-                        num_gpus_per_node, and namespace are operator-owned. Request admission
+                        num_gpus_per_node, and namespace are operator-owned. Request and Run admission
                         rejects them, and the Run controller enforces its values while lowering the
                         immutable snapshot. A typed spec.workload.trace is an underlay like the other
                         typed fields: it supplies the default traffic.source (type trace, format
@@ -9627,10 +9594,11 @@ spec:
                         parent object; the Run controller does not restore it. The typed
                         PersistentVolumeClaim source alone decides the Run Job's trace mount and its
                         claim dependency, so overriding a native path adds no volume mount.
-                        AISimulate validates the resulting input when the Run's Job starts; admission
-                        does not validate it against the AISimulate schema yet. The operator runs
-                        the AISimulate version from its configured planner image; Requests and Runs
-                        cannot select a different image or version.
+                        The operator runs the AISimulate version from its configured planner image;
+                        Requests and Runs cannot select a different image or version.
+                        Request and Run creation validate the merged input against the bundled AISimulate input
+                        schema. Request spec changes require the same validation; Run specs are immutable.
+                        Unchanged specs remain metadata-updatable after a bundled schema change.
                       type: object
                       x-kubernetes-preserve-unknown-fields: true
                   type: object
@@ -9748,7 +9716,7 @@ spec:
                       description: |-
                         SLA defines per-request latency bounds used to calculate goodput. Admission defaults an
                         omitted SLA to TTFT 2000 ms and ITL 30 ms. An explicit empty object opts out of those
-                        defaults. spec.aisimulate.inputOverrides.evaluation.sla overrides the bounds it names.
+                        defaults. spec.aisim.inputOverrides.evaluation.sla overrides the bounds it names.
                       properties:
                         e2eMs:
                           description: E2EMs is an alternative end-to-end bound in milliseconds.
@@ -9775,6 +9743,33 @@ spec:
                       rule: '!has(self.metrics)'
                     - message: Goodput and GoodputPerGPU require at least one SLA bound
                       rule: '!(has(self.metric) && self.metric in [''Goodput'', ''GoodputPerGPU'']) || (has(self.sla) && (has(self.sla.ttftMs) || has(self.sla.itlMs) || has(self.sla.e2eMs)))'
+                overrides:
+                  description: Overrides customizes the generated DGD without changing AISimulate execution.
+                  properties:
+                    dgd:
+                      description: |-
+                        DGD is one partial nvidia.com/v1beta1 DynamoGraphDeployment applied by the publisher
+                        using the DGD schema's Server-Side Apply merge rules. Other API versions are not supported.
+                        Components must already exist; named containers may be added. Atomic lists, including
+                        container command and args, replace the generated lists. The supported customization
+                        $patch: {args: append} on a container appends to its explicit generated args list;
+                        both the container and its args must already exist. No other $patch operation is supported.
+                        Application is atomic: a merge failure retains the unchanged generated deployment
+                        with Valid=False. A successful merge is checked by strict server-side dry-run;
+                        the dry-run response and its defaults are discarded. The Candidate retains the
+                        unpruned payload from before the check. Invalid Candidates count toward maxCandidates.
+                        Overrides may change any deployment configuration. Evaluation metrics are not
+                        recomputed and continue to describe the original AISimulate configuration.
+                        DGD labels and annotations become Candidate labels and annotations. A failed merge
+                        retains only the original generated metadata; a successful merge followed by failed
+                        dry-run validation retains the merged metadata on the invalid Candidate. Other metadata
+                        and publisher-owned keys cannot be overridden; such attempts fail atomically.
+                        The complete Candidate metadata must satisfy Kubernetes limits, including generated
+                        and reserved annotations. An override that exceeds those limits fails atomically.
+                      type: object
+                      x-kubernetes-embedded-resource: true
+                      x-kubernetes-preserve-unknown-fields: true
+                  type: object
                 recommendation:
                   description: Recommendation controls bounded projection into DGDC resources.
                   properties:
@@ -9804,7 +9799,7 @@ spec:
                     an explicit empty workload receives the same shape. workload.static: {} opts out of all
                     traffic defaults. Any other static object is completed with its missing defaults, and a
                     trace workload receives no static default.
-                    spec.aisimulate.inputOverrides is applied as an RFC 7386 JSON Merge Patch and wins over
+                    spec.aisim.inputOverrides is applied as an RFC 7386 JSON Merge Patch and wins over
                     every lowered traffic field it names, including the fields a trace lowers.
                     The default evaluates a fixed concurrency, so it does not create a KV-capacity-fraction
                     search. Lowering independently defaults optimizer.max_trials to 320.
@@ -9888,7 +9883,7 @@ spec:
                         namespace. Admission supplies no static default when it is set. The Run Job mounts only the
                         trace file, read-only through a subPath of the claim, at /var/run/aisimulate/trace/trace.jsonl,
                         or trace.jsonl.gz when subPath ends in .gz. The trace lowers to the default traffic.source
-                        and traffic.load, which spec.aisimulate.inputOverrides can replace or delete.
+                        and traffic.load, which spec.aisim.inputOverrides can replace or delete.
                       properties:
                         format:
                           default: Dynamo
@@ -9964,7 +9959,7 @@ spec:
                 - message: exactly one of native v1beta2 fields or v1beta1 must be specified
                   rule: has(self.v1beta1) != has(self.model)
                 - message: v1beta1 is mutually exclusive with native v1beta2 fields
-                  rule: '!has(self.v1beta1) || !(has(self.backends) || has(self.hardware) || has(self.workload) || has(self.objective) || has(self.aisimulate) || has(self.recommendation))'
+                  rule: '!has(self.v1beta1) || !(has(self.backends) || has(self.hardware) || has(self.workload) || has(self.objective) || has(self.aisim) || has(self.recommendation) || has(self.overrides))'
                 - message: the conversion carrier is immutable
                   rule: has(self.v1beta1) == has(oldSelf.v1beta1) && (!has(self.v1beta1) || self.v1beta1 == oldSelf.v1beta1)
             status:

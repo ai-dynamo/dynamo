@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use dynamo_parsers::tool_calling::try_tool_call_parse_aggregate_finalize;
 
+use super::tool_call_merge::merge_tool_call_chunk;
 use super::{
     NvCreateChatCompletionResponse, NvCreateChatCompletionStreamResponse, ResponseOutputEvent,
 };
@@ -178,13 +179,15 @@ struct DeltaChoice {
     role: Option<dynamo_protocols::types::Role>,
     /// The reason the completion was finished (if applicable).
     finish_reason: Option<dynamo_protocols::types::FinishReason>,
+    model_eos: bool,
     /// Optional log probabilities for the chat choice.
     logprobs: Option<dynamo_protocols::types::ChatChoiceLogprobs>,
     // Tool-call chunks accumulated in the order they arrived from the stream,
     // keyed by `index` so chunks that carry only argument fragments can be
     // merged into the entry created by the initial (id + name) chunk.
     // BTreeMap preserves deterministic iteration order on the index dimension.
-    // See [`merge_tool_call_chunk`] for per-field merge semantics.
+    // See [`super::tool_call_merge::merge_tool_call_chunk`] for per-field merge
+    // semantics, shared with the streaming `tool_call_dispatch` side channel.
     // #8640: replaces the old `Option<Vec<ChatCompletionMessageToolCall>>`
     // which required id/name/arguments to all be set on the same chunk.
     tool_call_chunks: BTreeMap<u32, dynamo_protocols::types::ChatCompletionMessageToolCallChunk>,
@@ -326,66 +329,6 @@ impl Default for DeltaAggregator {
     /// Provides a default implementation for `DeltaAggregator` by calling [`DeltaAggregator::new`].
     fn default() -> Self {
         Self::new()
-    }
-}
-
-/// Merge an incoming chunk into the per-index accumulator.
-///
-/// #8640: the prior implementation required `id`, `name`, and `arguments`
-/// all on the same chunk, and thus the argument-fragment deltas were dropped
-/// and the client saw `arguments: ""`.
-///
-/// The fix here merges by `index` across deltas: `id`, `type`, `function.name`
-/// first-wins; `function.arguments` concatenated across fragments. This matches
-/// the OpenAI streaming spec and vLLM/SGLang hermes emission:
-///
-/// * delta 1: `{index, id, type, function: { name }}`
-/// * delta 2..N: `{index, function: { arguments: "<fragment>" }}`
-fn merge_tool_call_chunk(
-    existing: &mut dynamo_protocols::types::ChatCompletionMessageToolCallChunk,
-    incoming: dynamo_protocols::types::ChatCompletionMessageToolCallChunk,
-) {
-    if existing.id.is_none()
-        && let Some(id) = incoming.id
-    {
-        existing.id = Some(id);
-    }
-    if existing.r#type.is_none()
-        && let Some(ty) = incoming.r#type
-    {
-        existing.r#type = Some(ty);
-    }
-    // Custom deltas carry freeform input instead of function JSON fragments.
-    if let Some(incoming_custom) = incoming.custom {
-        let custom = existing.custom.get_or_insert_with(Default::default);
-        if custom.name.is_none() {
-            custom.name = incoming_custom.name;
-        }
-        if let Some(input) = incoming_custom.input {
-            custom
-                .input
-                .get_or_insert_with(String::new)
-                .push_str(&input);
-        }
-    }
-    let Some(incoming_fn) = incoming.function else {
-        return;
-    };
-    match &mut existing.function {
-        None => existing.function = Some(incoming_fn),
-        Some(existing_fn) => {
-            if existing_fn.name.is_none()
-                && let Some(name) = incoming_fn.name
-            {
-                existing_fn.name = Some(name);
-            }
-            if let Some(args_fragment) = incoming_fn.arguments {
-                existing_fn
-                    .arguments
-                    .get_or_insert_with(String::new)
-                    .push_str(&args_fragment);
-            }
-        }
     }
 }
 
@@ -576,6 +519,7 @@ impl DeltaAggregator {
                                     text: "".to_string(),
                                     role: choice_role,
                                     finish_reason: None,
+                                    model_eos: false,
                                     logprobs: None,
                                     tool_call_chunks: BTreeMap::new(),
                                     parser_call_completion: HashMap::new(),
@@ -631,13 +575,15 @@ impl DeltaAggregator {
                                             function: None,
                                         }
                                     });
-                                merge_tool_call_chunk(entry, chunk);
+                                // Only the streaming dispatch acts on identity conflicts.
+                                let _ = merge_tool_call_chunk(entry, chunk);
                             }
                         }
 
                         // Update finish reason if provided.
                         if let Some(finish_reason) = choice.finish_reason {
                             state_choice.finish_reason = Some(finish_reason);
+                            state_choice.model_eos = delta.model_eos.contains(&choice.index);
                         }
 
                         // Update logprobs
@@ -750,7 +696,7 @@ impl DeltaAggregator {
                 {
                     continue;
                 }
-                match super::unified_parser::parse_complete_with_policy(
+                match super::unified_parser::parse_complete_with_eos(
                     family,
                     &choice.text,
                     &parsing_options.guided_tool_constraint,
@@ -758,11 +704,11 @@ impl DeltaAggregator {
                     super::unified_parser::UnifiedRequestPolicy {
                         reasoning_disabled: parsing_options.reasoning_disabled,
                         structured_response: parsing_options.structured_response,
-                        // The complete text shows its own channels; `detect_prefill`
-                        // reads them back without a first-bytes probe.
-                        explicit_guidance: false,
                         ..Default::default()
                     },
+                    choice.model_eos
+                        && choice.finish_reason
+                            == Some(dynamo_protocols::types::FinishReason::Stop),
                 ) {
                     Ok(parsed) => {
                         if choice.index == 0
@@ -804,6 +750,12 @@ impl DeltaAggregator {
                                     Some(dynamo_protocols::types::FinishReason::ToolCalls);
                             }
                         }
+                    }
+                    Err(error) if family == super::unified_parser::BEAM_UNIFIED_FAMILY => {
+                        return Err(DynamoError::builder()
+                            .class(dynamo_runtime::error::ErrorClass::Internal)
+                            .diagnostic(format!("Invalid Beam tool output: {error}"))
+                            .build());
                     }
                     Err(error) => {
                         // Best-effort: the aggregated text is served as-is rather than
@@ -1211,6 +1163,7 @@ mod tests {
             prompt_logprobs: None,
             llm_metrics: None,
             tool_call_completion: Vec::new(),
+            model_eos: Vec::new(),
         };
 
         Annotated {
@@ -1262,6 +1215,7 @@ mod tests {
             prompt_logprobs: None,
             llm_metrics: None,
             tool_call_completion: Vec::new(),
+            model_eos: Vec::new(),
         };
         Annotated {
             data: Some(data),
@@ -1386,6 +1340,7 @@ mod tests {
             prompt_logprobs: None,
             llm_metrics: None,
             tool_call_completion: Vec::new(),
+            model_eos: Vec::new(),
         };
         let annotated = Annotated {
             data: Some(data),
@@ -1447,6 +1402,7 @@ mod tests {
             prompt_logprobs: None,
             llm_metrics: None,
             tool_call_completion: Vec::new(),
+            model_eos: Vec::new(),
         };
         Annotated {
             data: Some(data),
@@ -2106,6 +2062,7 @@ mod tests {
             prompt_logprobs: None,
             llm_metrics: None,
             tool_call_completion: Vec::new(),
+            model_eos: Vec::new(),
         };
 
         // Wrap it in Annotated and create a stream
@@ -2480,15 +2437,14 @@ mod tests {
                         ),
                     )
                     .await;
-                    let unsupported = match super::super::tool_parser_v2::selected_version()
-                        .unwrap()
-                    {
-                        super::super::tool_parser_v2::ParserVersion::V2 => tool == Some("hermes"),
-                        super::super::tool_parser_v2::ParserVersion::V1 => {
-                            tool == Some("deepseek_v41")
-                        }
-                        super::super::tool_parser_v2::ParserVersion::Auto => false,
-                    };
+                    let unsupported =
+                        match super::super::tool_parser_v2::selected_version().unwrap() {
+                            super::super::tool_parser_v2::ParserVersion::V1 => {
+                                tool == Some("deepseek_v41")
+                            }
+                            super::super::tool_parser_v2::ParserVersion::V2
+                            | super::super::tool_parser_v2::ParserVersion::Auto => false,
+                        };
                     if unsupported {
                         assert!(
                             result.is_err(),
@@ -3546,9 +3502,10 @@ mod tests {
         assert!(result.is_ok());
         let response = result.unwrap();
         let choice = &response.inner.choices[0];
+        // Unified Hermes preserves the prose newline before the tool envelope.
         assert_eq!(
             choice.message.content,
-            Some(ChatCompletionMessageContent::Text("hello".to_string()))
+            Some(ChatCompletionMessageContent::Text("hello\n".to_string()))
         );
         assert_eq!(
             choice.finish_reason,
@@ -3703,6 +3660,7 @@ mod tests {
             logprobs: None,
             tool_call_chunks: BTreeMap::new(),
             parser_call_completion: HashMap::new(),
+            model_eos: false,
             tool_calls: None,
             reasoning_content: Some("Analyzing the question.".to_string()),
             refusal: None,

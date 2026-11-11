@@ -30,7 +30,7 @@ pub use crate::scheduling::{
     SessionContext, WorkerSelectionInputTrigger, WorkerSelectionPolicyError,
 };
 pub(crate) use config::RawWorkerSelectionConfig;
-pub use config::{WorkerSelectionConfig, WorkerSelectionInstance};
+pub use config::{WorkerSelectionConfig, WorkerSelectionInstance, WorkerSelectionPolicySelection};
 
 use crate::{KvRouterConfig, RoutingPartitionRef, WorkerType};
 use std::sync::Arc;

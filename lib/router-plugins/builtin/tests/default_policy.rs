@@ -5,6 +5,7 @@ use dynamo_kv_router::plugins::worker_selection::{
     WorkerInputView, WorkerInputs, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicy,
 };
 use dynamo_kv_router::protocols::WorkerWithDpRank;
+use dynamo_kv_router::scheduling::WorkerIdSet;
 use dynamo_kv_router::{
     KvRouterConfig, RoutingPartitionRef, WorkerSelectionInput, WorkerSelectionPolicyError,
     WorkerSelector, WorkerType,
@@ -365,7 +366,7 @@ fn seeded_selection_matches_reference_across_cache_and_load_shapes() {
 #[test]
 fn sparse_eligibility_preserves_seeded_scoring_and_sampling() {
     let allowed = HashSet::from([1, 3, 5, 1000]);
-    let available = HashSet::from([1, 5, 7, 1001]);
+    let available = WorkerIdSet::from_iter([1, 5, 7, 1001]);
     for temperature in [0.0, 0.7] {
         for equal_costs in [false, true] {
             for (has_allowed, has_available) in [(true, false), (false, true), (true, true)] {
@@ -465,7 +466,8 @@ fn unseeded_sampling_matches_reference_with_the_same_random_draw() {
         for temperature in [0.1, 0.7, 1.0, 2.0] {
             for equal_costs in [false, true] {
                 let (workers, mut request) = fixture(count, 2048);
-                let available = is_sparse.then(|| HashSet::from([1, count as u64 - 1, 1000]));
+                let available =
+                    is_sparse.then(|| WorkerIdSet::from_iter([1, count as u64 - 1, 1000]));
                 if is_sparse {
                     request.allowed_worker_ids = Some(HashSet::from([1, count as u64 - 1]));
                 }
@@ -712,7 +714,7 @@ fn named_default_parameters_resolve_and_reject_invalid_values() {
         ("unknown: 1", false),
     ] {
         let mut file = tempfile::NamedTempFile::new().unwrap();
-        write!(file, "worker_selection:\n  aggregated: tuned\n  instances:\n    - name: tuned\n      type: dynamo-default-cost-fn\n      parameters:\n        {parameter}\n").unwrap();
+        write!(file, "worker_selection:\n  aggregated:\n    type: dynamo-default-cost-fn\n    parameters:\n      {parameter}\n").unwrap();
         let config = KvRouterConfig {
             router_policy_config: Some(file.path().display().to_string()),
             ..Default::default()
@@ -774,7 +776,7 @@ fn yaml_parameters_override_legacy_config_and_omissions_inherit_it() {
     ] {
         let file = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(file.path(), format!(
-            "worker_selection:\n  aggregated: tuned\n  instances:\n    - name: tuned\n      type: dynamo-default-cost-fn\n      parameters: {parameters}\n"
+            "worker_selection:\n  aggregated:\n    type: dynamo-default-cost-fn\n    parameters: {parameters}\n"
         )).unwrap();
         let config = KvRouterConfig {
             router_policy_config: Some(file.path().display().to_string()),
@@ -833,7 +835,7 @@ fn shared_cache_credit_defaults_and_legacy_precedence_apply_to_selection() {
     ] {
         let file = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(file.path(), format!(
-            "router:\n  shared_cache_type: {cache_type}\nworker_selection:\n  aggregated: tuned\n  instances:\n    - name: tuned\n      type: dynamo-default-cost-fn\n      parameters: {parameters}\n"
+            "router:\n  shared_cache_type: {cache_type}\nworker_selection:\n  aggregated:\n    type: dynamo-default-cost-fn\n    parameters: {parameters}\n"
         )).unwrap();
         let mut config = KvRouterConfig {
             router_policy_config: Some(file.path().display().to_string()),

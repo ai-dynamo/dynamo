@@ -4,8 +4,9 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
+use arc_swap::ArcSwapOption;
 use dynamo_tokens::SequenceHash;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 
 use super::config::RouterConfigOverride;
@@ -54,6 +55,42 @@ pub type OverloadedWorkerProvider =
 /// authoritative, so an empty set rejects every candidate.
 pub type WorkerAvailabilityProvider =
     Arc<dyn Fn(&SchedulingRequest) -> Option<Arc<HashSet<WorkerId>>> + Send + Sync + 'static>;
+
+/// Worker IDs hashed with Fx: eligibility probes the available set once per worker on
+/// every admission.
+pub type WorkerIdSet = FxHashSet<WorkerId>;
+
+/// A [`WorkerAvailabilityProvider`] whose sets are converted to [`WorkerIdSet`]s once per
+/// set. The frontend's provider returns the same `Arc` until membership changes; a set
+/// built per request (a LoRA filter) is converted per request.
+pub(crate) struct AvailableWorkerIds {
+    provider: WorkerAvailabilityProvider,
+    /// The last source set and its conversion. Holding the source keeps its address from
+    /// being reused, so a pointer match means the same set.
+    last: ArcSwapOption<(Arc<HashSet<WorkerId>>, Arc<WorkerIdSet>)>,
+}
+
+impl AvailableWorkerIds {
+    pub(crate) fn new(provider: WorkerAvailabilityProvider) -> Self {
+        Self {
+            provider,
+            last: ArcSwapOption::empty(),
+        }
+    }
+
+    pub(crate) fn get(&self, request: &SchedulingRequest) -> Option<Arc<WorkerIdSet>> {
+        let source = (self.provider)(request)?;
+        if let Some(last) = self.last.load().as_deref()
+            && Arc::ptr_eq(&last.0, &source)
+        {
+            return Some(Arc::clone(&last.1));
+        }
+        let converted = Arc::new(source.iter().copied().collect::<WorkerIdSet>());
+        self.last
+            .store(Some(Arc::new((source, Arc::clone(&converted)))));
+        Some(converted)
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum WorkerSelectionPolicyError {
@@ -106,6 +143,9 @@ pub enum KvSchedulerError {
 
     #[error("pinned worker {worker_id} is not in allowed worker set")]
     PinnedWorkerNotAllowed { worker_id: WorkerId },
+
+    #[error("unknown policy class {0:?}")]
+    UnknownPolicyClass(String),
 
     #[error("endpoint subscriber shutdown")]
     SubscriberShutdown,
@@ -400,6 +440,23 @@ impl SessionContext {
     }
 }
 
+/// Whether routing identity contributes to per-adapter demand accounting.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum AccountingAttribution {
+    #[default]
+    UseRoutingName,
+    Exclude,
+}
+
+impl AccountingAttribution {
+    pub(crate) fn accounting_name(self, routing_name: Option<String>) -> Option<String> {
+        match self {
+            Self::UseRoutingName => routing_name,
+            Self::Exclude => None,
+        }
+    }
+}
+
 /// Validated request accepted by [`LocalScheduler`](super::LocalScheduler).
 pub struct ScheduleRequest {
     pub mode: ScheduleMode,
@@ -407,6 +464,7 @@ pub struct ScheduleRequest {
     pub block_hashes: Option<Vec<LocalBlockHash>>,
     pub isl_tokens: usize,
     pub lora_name: Option<String>,
+    pub accounting_attribution: AccountingAttribution,
     pub expected_output_tokens: Option<u32>,
     /// A session-affinity target resolved by the request host.
     ///
@@ -438,6 +496,7 @@ pub struct SchedulingRequest {
     pub token_seq: Option<Vec<SequenceHash>>,
     pub isl_tokens: usize,
     pub lora_name: Option<String>,
+    pub accounting_attribution: AccountingAttribution,
     pub expected_output_tokens: Option<u32>,
 
     // Routing constraints and request-level config.
@@ -488,10 +547,7 @@ impl<'a, C: WorkerConfigLike> SchedulingContext<'a, C> {
         self.request
     }
 
-    pub(crate) fn with_available_workers(
-        mut self,
-        available: Option<&'a HashSet<WorkerId>>,
-    ) -> Self {
+    pub(crate) fn with_available_workers(mut self, available: Option<&'a WorkerIdSet>) -> Self {
         self.eligibility = self.eligibility.with_available_workers(available);
         self
     }
@@ -654,6 +710,7 @@ mod tests {
         );
 
         SchedulingRequest {
+            accounting_attribution: Default::default(),
             mode: ScheduleMode::QueryOnly {
                 request_id: Some("test".into()),
             },
@@ -721,5 +778,25 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn available_worker_ids_convert_each_set_once() {
+        let source = Arc::new(ArcSwapOption::from_pointee(HashSet::from([1, 2])));
+        let ids = AvailableWorkerIds::new({
+            let source = Arc::clone(&source);
+            Arc::new(move |_: &SchedulingRequest| source.load_full())
+        });
+        let request = request_with_decode_load(16, None, 0, 0, WorkerWithDpRank::from_worker_id(1));
+
+        let first = ids.get(&request).unwrap();
+        assert_eq!(*first, WorkerIdSet::from_iter([1, 2]));
+        assert!(Arc::ptr_eq(&first, &ids.get(&request).unwrap()));
+
+        source.store(Some(Arc::new(HashSet::from([3]))));
+        assert_eq!(*ids.get(&request).unwrap(), WorkerIdSet::from_iter([3]));
+
+        source.store(None);
+        assert!(ids.get(&request).is_none());
     }
 }

@@ -103,7 +103,11 @@ fn update_queue_metrics(
             );
             continue;
         };
-        handles.update_admission(stats.received_total, stats.rejected_due_time_passed_total);
+        handles.update_admission(
+            stats.received_total,
+            stats.rejected_due_time_passed_total,
+            stats.rejected_queue_size_exceeded_total,
+        );
         handles.pending_requests.set(stats.pending_count as i64);
         handles
             .pending_isl_tokens
@@ -392,10 +396,9 @@ impl EmbeddedSelection {
         ttl: Duration,
         mode: crate::session_affinity::SessionAffinityMode,
     ) -> Result<crate::session_affinity::AffinityCoordinator> {
-        let table = self.partition.session_affinity(
-            dynamo_kv_router::services::selection::affinity::SessionAffinityConfig::new(ttl)
-                .with_mode(mode),
-        )?;
+        let table = self
+            .partition
+            .session_affinity(crate::session_affinity::affinity_config(ttl, mode)?)?;
         Ok(self
             .affinity
             .get_or_init(|| crate::session_affinity::AffinityCoordinator::wrap(table))
@@ -526,6 +529,7 @@ mod tests {
             dynamo_kv_router::queue::ClassQueueStats {
                 received_total: 10,
                 rejected_due_time_passed_total: 1,
+                rejected_queue_size_exceeded_total: 4,
                 pending_count: 2,
                 pending_isl_tokens: 128,
                 pending_cached_tokens: 64,
@@ -533,6 +537,7 @@ mod tests {
             dynamo_kv_router::queue::ClassQueueStats {
                 received_total: 20,
                 rejected_due_time_passed_total: 3,
+                rejected_queue_size_exceeded_total: 0,
                 pending_count: 3,
                 pending_isl_tokens: 384,
                 pending_cached_tokens: 192,
@@ -546,6 +551,10 @@ mod tests {
             assert_eq!(
                 handles.rejected_due_time_passed_total.get(),
                 stats.rejected_due_time_passed_total
+            );
+            assert_eq!(
+                handles.rejected_queue_size_exceeded_total.get(),
+                stats.rejected_queue_size_exceeded_total
             );
             assert_eq!(handles.pending_requests.get(), stats.pending_count as i64);
             assert_eq!(
