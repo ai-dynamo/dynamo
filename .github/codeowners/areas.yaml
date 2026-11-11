@@ -6,6 +6,7 @@ areas:
   path_globs:
   - components/src/dynamo/common/http/
   - components/src/dynamo/common/protocols/
+  - components/src/dynamo/compatibility/
   - components/src/dynamo/frontend/
   - components/src/dynamo/frontend/tests/
   - examples/chat_templates/
