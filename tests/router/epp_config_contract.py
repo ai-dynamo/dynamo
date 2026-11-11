@@ -92,10 +92,11 @@ KV_ROUTER_ARGS = (
     REPO_ROOT / "components/src/dynamo/common/configuration/groups/kv_router_args.py"
 )
 FRONTEND_ARGS = REPO_ROOT / "components/src/dynamo/frontend/frontend_args.py"
-RUST_CONFIG = REPO_ROOT / "lib/kv-router/src/scheduling/config.rs"
+RUST_CONFIG = REPO_ROOT / "lib/router/kv-router/src/scheduling/config.rs"
 RUST_PYO3_ENTRYPOINT = REPO_ROOT / "lib/bindings/python/rust/llm/entrypoint.rs"
 RUST_TREES = (
-    REPO_ROOT / "lib/kv-router/src",
+    REPO_ROOT / "lib/router",
+    REPO_ROOT / "lib/kv-events/src",
     REPO_ROOT / "lib/llm/src",
 )
 FRONTEND_ROUTING_DESTS = frozenset({"serve_indexer", "kv_cache_block_size"})
@@ -178,9 +179,9 @@ OVERLAP_REFRESH_DISABLED = (
     "DYN_ROUTER_OVERLAP_REFRESH_AFTER_SECS"
 )
 OVERLAP_REFRESH_ENABLED = "Router queue overlap-score refresh enabled after"
-OVERLAP_REFRESH_TARGET = "dynamo_kv_router::scheduling::queue"
+OVERLAP_REFRESH_TARGET = "dynamo_scheduler::queue"
 OVERLAP_REFRESH_LOG_FLUSH_S = 2.0
-OVERLAP_REFRESH_RS = REPO_ROOT / "lib/kv-router/src/scheduling/overlap_refresh.rs"
+OVERLAP_REFRESH_RS = REPO_ROOT / "lib/router/scheduler/src/overlap_refresh.rs"
 TRACKING_HASH_ROW = "router_tracking_hash"
 TRACKING_KEY_FILE_ROW = "router_tracking_key_file"
 TRACKING_KEY_ID_ROW = "router_tracking_key_id"
@@ -461,22 +462,22 @@ RUST_EMBEDDED = REPO_ROOT / "lib/llm/src/kv_router/embedded.rs"
 RUST_INDEXER_INGRESS = REPO_ROOT / "lib/llm/src/kv_router/indexer/ingress.rs"
 RUST_INDEXER_REMOTE = REPO_ROOT / "lib/llm/src/kv_router/indexer/remote.rs"
 RUST_AIS_CALLBACK = REPO_ROOT / "lib/bindings/python/rust/llm/ais_callback.rs"
-RUST_POLICY_CONFIG = REPO_ROOT / "lib/kv-router/src/scheduling/policy_config.rs"
-RUST_QUEUE = REPO_ROOT / "lib/kv-router/src/scheduling/queue.rs"
+RUST_POLICY_CONFIG = REPO_ROOT / "lib/router/kv-router/src/scheduling/policy_config.rs"
+RUST_QUEUE = REPO_ROOT / "lib/router/scheduler/src/queue.rs"
 # Named support-boundary source digests: sha256 of comment-stripped
 # declaration+body for each decisive shared scope.
 SOURCE_SCOPE_DIGESTS: dict[str, str] = {
     "epp_from_discovery": "fe9ffe7d2862b80c79b4d7150ceea4efd76b45463917adbd60bc77395ff197a5",
     "epp_route_decode": "766bbc37337744174b81ed79a93880941af4a9e7c74d7ffcfeb14408d2cca99f",
     "managed_kv_router_for_with_policy": "480f353836bc5cbb248dfbfb7556a99dff7fbaa121a83d2101fc3c4793ecb8e9",
-    "kv_chooser_for_with_policy_and_client": "f099fc885a7fc79d7811caed7c37d770ad9cc885229f3e4276a275427e8a0925",
+    "kv_chooser_for_with_policy_and_client": "0723a2ec507477d5ab477981e35b4ce3ad17009d3c9da35eb1f2a91d4b5ab663",
     "prefill_router_new": "dc7b77ccc9ff50a3c0d2a097434a087f87ca04b9a44e429ef657d28768018103",
-    "embedded_selection_start": "9187ac406b6dc9a4d6a6819e657032332136c3a18a5c9c49f69daf4115a4f100",
+    "embedded_selection_start": "8894db349a9a995b0791f3d6aa20994757ef18add775036476142b6e8edb764f",
     "min_initial_workers_from_env": "73ba458edd8425a67b46dc97ef7d571f3bef9dd13641b9dee15ab7a050a4db2f",
     "ensure_served_indexer_service": "a6972ad24be7ebb2a1d7cc7ca0bc4b36cf4f073f7fbd2efe14ad3b84512aede9",
     "managed_kv_router_for_with_worker_role": "42c2a89cf5eb69d40f854fb3a21dc3cee5b8e5ce00db115a620955f21448c4cf",
-    "kv_router_new_with_worker_role_and_scheduler_load": "271eeb24f45fc969465323b5dec871bef4fd7db3d3f2c0e740dd8e5244d91fc9",
-    "prefill_router_new_with_selection_policy": "311b3097807629722f4fdb482377073f3bf4ecbc4f1bdd4d2b291a8171036868",
+    "kv_router_new_with_worker_role_and_scheduler_load": "e76b5c46fef65d532c3fc50c09ec468566ce545b1750bfe347f36956de46c82b",
+    "prefill_router_new_with_selection_policy": "0bd42a307def25c4072d4cca509d08edd30f19bb158c1ad6931c25ac02a09f67",
     "prefill_build_binding": "25365899cbf3cbf36ecddd31cc5938ee015ca6a4435c69b5c04f9f15fcb19e31",
     "kv_router_config_from_lookup": "af0fecf97c0bd382e3b9c6230410850b1a0625256c08023a382ca36a0305dd34",
     "router_settings_apply": "1e8b69e3e9ebb2c7774eda7a732ba76a1b065996d343ec793e2e78a6dd4f025e",
@@ -573,9 +574,9 @@ KV_CACHE_BLOCK_SIZE_ITEMS = (
     "tests/router/test_epp_frontend_config_parity.py::"
     "test_dynamic_block_size_consumer[worker_card16_frontend_cli64]",
 )
-QUEUE_RS = REPO_ROOT / "lib/kv-router/src/scheduling/queue.rs"
-INDEXER_BACKEND_RS = REPO_ROOT / "lib/kv-router/src/services/indexer/backend.rs"
-WORKERS_RS = REPO_ROOT / "lib/kv-router/src/services/selection/core/workers.rs"
+QUEUE_RS = REPO_ROOT / "lib/router/scheduler/src/queue.rs"
+INDEXER_BACKEND_RS = REPO_ROOT / "lib/router/kv-indexer/src/backend.rs"
+WORKERS_RS = REPO_ROOT / "lib/router/scheduler/src/selection/core/workers.rs"
 _DEFAULT_OVERLAP_REFRESH_RE = re.compile(
     r"pub const DEFAULT_OVERLAP_REFRESH_AFTER_SECS:\s*u64\s*=\s*(\d+)\s*;"
 )
@@ -591,37 +592,34 @@ _SUPPORTS_OVERLAP_REFRESH_RE = re.compile(
 NOT_FE_HONORED_ROWS = frozenset(
     {NOT_FE_HONORED_ROW, POSITIONAL_ROW, KV_CACHE_BLOCK_SIZE_ROW}
 )
-KV_INDEXER_MOD = REPO_ROOT / "lib/kv-router/src/indexer/mod.rs"
-POSITIONAL_RS = REPO_ROOT / "lib/kv-router/src/indexer/positional.rs"
-KV_INDEXER_RS = REPO_ROOT / "lib/kv-router/src/indexer/kv_indexer.rs"
-KV_ROUTER_LIB = REPO_ROOT / "lib/kv-router/src/lib.rs"
+KV_INDEXER_MOD = REPO_ROOT / "lib/router/kv-indexer/src/lib.rs"
+POSITIONAL_RS = REPO_ROOT / "lib/router/kv-indexer/src/positional.rs"
+KV_INDEXER_RS = REPO_ROOT / "lib/router/kv-indexer/src/kv_indexer.rs"
+KV_ROUTER_LIB = REPO_ROOT / "lib/router/kv-router/src/lib.rs"
+KV_ROUTER_COMPAT = REPO_ROOT / "lib/router/kv-router/src/compat.rs"
+KV_INDEXER_HOST = REPO_ROOT / "lib/router/kv-indexer/src/host.rs"
 LLM_INDEXER_MOD = REPO_ROOT / "lib/llm/src/kv_router/indexer/mod.rs"
-INDEXER_TESTS_RS = REPO_ROOT / "lib/kv-router/src/indexer/tests.rs"
-INDEXER_DELEGATE_TESTS_RS = REPO_ROOT / "lib/kv-router/src/indexer/delegate_tests.rs"
-ZMQ_WIRE_MOD = REPO_ROOT / "lib/kv-router/src/zmq_wire/mod.rs"
+INDEXER_TESTS_RS = REPO_ROOT / "lib/router/kv-indexer/src/tests.rs"
+INDEXER_DELEGATE_TESTS_RS = REPO_ROOT / "lib/router/kv-indexer/src/delegate_tests.rs"
 ZMQ_MM_EXCLUSION_TESTS_RS = (
-    REPO_ROOT / "lib/kv-router/src/zmq_wire/mm_exclusion_tests.rs"
+    REPO_ROOT / "lib/router/kv-indexer/src/mm_exclusion_tests.rs"
 )
 # Positional-bearing external test modules. Exclude a file only after its
 # parent shows exactly one `#[cfg(test)] mod <name>;`.
 _POSITIONAL_CFG_TEST_EXCLUSIONS = (
-    (KV_INDEXER_MOD, INDEXER_TESTS_RS, "tests", "indexer/mod.rs"),
+    (KV_INDEXER_MOD, INDEXER_TESTS_RS, "tests", "kv-indexer/lib.rs"),
     (
         KV_INDEXER_MOD,
         INDEXER_DELEGATE_TESTS_RS,
         "delegate_tests",
-        "indexer/mod.rs",
+        "kv-indexer/lib.rs",
     ),
     (
-        ZMQ_WIRE_MOD,
+        KV_INDEXER_MOD,
         ZMQ_MM_EXCLUSION_TESTS_RS,
         "mm_exclusion_tests",
-        "zmq_wire/mod.rs",
+        "kv-indexer/lib.rs",
     ),
-)
-POSITIONAL_LIB_EXPORTS = (
-    "pub use indexer::positional as nested_map;",
-    "pub use nested_map::PositionalIndexer;",
 )
 POSITIONAL_INDEXER_MOD = "pub mod positional;"
 _POSITIONAL_REF_RE = re.compile(
@@ -877,7 +875,7 @@ class OmittedDefaultNativeField:
     """Recorded skip_serializing_if absence from default native JSON."""
 
     field: str
-    source: str = "lib/kv-router/src/scheduling/config.rs"
+    source: str = "lib/router/kv-router/src/scheduling/config.rs"
 
 
 @dataclass(frozen=True)
@@ -4463,7 +4461,7 @@ def _assert_unique_cfg_test_module(parent: Path, module: str, label: str) -> Non
 def _positional_excluded_rust_paths() -> frozenset[Path]:
     excluded: set[Path] = set()
     for parent, path, module, label in _POSITIONAL_CFG_TEST_EXCLUSIONS:
-        if parent != path.parent / "mod.rs" or path.name != f"{module}.rs":
+        if parent != path.parent / "lib.rs" or path.name != f"{module}.rs":
             raise AssertionError(
                 f"{label} exclusion {path} is not {module}.rs under {parent}"
             )
@@ -4485,21 +4483,78 @@ def _positional_reference_hits(text: str) -> list[str]:
     return [match.group(0) for match in _POSITIONAL_REF_RE.finditer(text)]
 
 
+def _positional_export_remainder(path: Path, text: str) -> str:
+    """Allow only the split crates' explicit aliases, never an entire compat file."""
+    if path in (KV_ROUTER_LIB, KV_ROUTER_COMPAT):
+        prefix, exports = (
+            ("compat", ("PositionalIndexer", "nested_map"))
+            if path == KV_ROUTER_LIB
+            else ("indexer", ("positional as nested_map",))
+        )
+        matches = list(
+            re.finditer(rf"\bpub\s+use\s+{prefix}::\{{([^}}]+)\}}\s*;", text)
+        )
+        if len(matches) != 1:
+            raise AssertionError(f"{path} must have one {prefix} grouped export")
+        match = matches[0]
+        body = match.group(1)
+        members = tuple(item.strip() for item in body.split(",") if item.strip())
+        for export in exports:
+            if members.count(export) != 1:
+                raise AssertionError(f"{path} lost unique alias {export!r}")
+            body = _remove_unique_statement(body, export, str(path))
+        text = text[: match.start(1)] + body + text[match.end(1) :]
+    if path == KV_ROUTER_COMPAT:
+        positional = _fn_decl_and_body(
+            text, re.compile(r"pub\s+mod\s+positional\s*\{"), "compat positional"
+        )
+        expected = (
+            "pub mod positional {"
+            "pub use dynamo_kv_indexer::positional::DYN_ROUTER_POSITIONAL_SEARCH_MODE;"
+            "pub use dynamo_kv_indexer::positional::LevelIndex;"
+            '#[deprecated(since = "1.8.0",'
+            'note = "moved to dynamo_kv_indexer::positional::PositionalIndexer; removed in 1.10.0")]'
+            "pub type PositionalIndexer = dynamo_kv_indexer::positional::PositionalIndexer;"
+            "pub use dynamo_kv_indexer::positional::SearchMode;}"
+        )
+        if _collapsed_rust(positional) != _collapsed_rust(expected):
+            raise AssertionError(
+                "compat positional is no longer only four owner aliases"
+            )
+        text = _remove_unique_statement(text, positional, "compat positional")
+        alias = re.compile(
+            r'#\[deprecated\(\s*since\s*=\s*"1\.8\.0",\s*'
+            r'note\s*=\s*"moved to dynamo_kv_indexer::positional::PositionalIndexer; '
+            r'removed in 1\.10\.0"\s*\)\]\s*'
+            r"pub\s+type\s+PositionalIndexer\s*=\s*"
+            r"dynamo_kv_indexer::positional::PositionalIndexer\s*;"
+        )
+        matches = list(alias.finditer(text))
+        if len(matches) != 1:
+            raise AssertionError(
+                "compat lost its unique deprecated root positional alias"
+            )
+        text = _remove_unique_statement(text, matches[0].group(), "compat root alias")
+    elif path == KV_INDEXER_HOST:
+        text = _remove_unique_statement(
+            text,
+            "pub use crate::positional::PositionalIndexer;",
+            "kv-indexer host alias",
+        )
+    return text
+
+
 def _assert_positional_lib_exports_only() -> None:
-    if not KV_ROUTER_LIB.is_file():
-        raise AssertionError(f"missing kv-router lib.rs: {KV_ROUTER_LIB}")
-    text = _strip_rust_comments(KV_ROUTER_LIB.read_text(encoding="utf-8"))
-    remainder = text
-    for statement in POSITIONAL_LIB_EXPORTS:
-        remainder = _remove_unique_statement(
-            remainder, statement, "kv-router lib.rs export"
-        )
-    extra = _positional_reference_hits(remainder)
-    if extra:
-        raise AssertionError(
-            "kv-router lib.rs has Positional references beyond the two "
-            f"backcompat exports: {extra}"
-        )
+    for path in (KV_ROUTER_LIB, KV_ROUTER_COMPAT, KV_INDEXER_HOST):
+        text = _strip_rust_comments(path.read_text(encoding="utf-8"))
+        remainder = _positional_export_remainder(path, text)
+        extra = _positional_reference_hits(remainder)
+        if POSITIONAL_ENV in remainder:
+            extra.append(POSITIONAL_ENV)
+        if extra:
+            raise AssertionError(
+                f"{path} has positional references beyond owner aliases: {extra}"
+            )
 
 
 def _assert_positional_indexer_mod_declaration_only() -> None:
@@ -4567,11 +4622,8 @@ def _assert_positional_no_new_fe_consumer() -> None:
         if path in excluded or path == POSITIONAL_RS:
             continue
         text = _stripped_production_rust_text(path)
-        if path == KV_ROUTER_LIB:
-            for statement in POSITIONAL_LIB_EXPORTS:
-                text = _remove_unique_statement(
-                    text, statement, "kv-router lib.rs export"
-                )
+        if path in (KV_ROUTER_LIB, KV_ROUTER_COMPAT, KV_INDEXER_HOST):
+            text = _positional_export_remainder(path, text)
         elif path == KV_INDEXER_MOD:
             text = _remove_unique_statement(
                 text, POSITIONAL_INDEXER_MOD, "indexer/mod.rs module"
@@ -5645,38 +5697,38 @@ _SESSION_CAPACITY_BOUNDARIES: tuple[tuple[Path, str, str], ...] = (
         "affinity_coordinator",
     ),
     (
-        REPO_ROOT / "lib/kv-router/src/services/selection/core/mod.rs",
+        REPO_ROOT / "lib/router/scheduler/src/selection/core/mod.rs",
         r"fn\s+session_affinity\s*\([^;{]*?\)\s*->\s*"
         r"Result<&SessionAffinity,\s*SelectionError>\s*\{",
         "SelectionEntry::session_affinity",
     ),
     (
-        REPO_ROOT / "lib/kv-router/src/services/selection/affinity.rs",
+        REPO_ROOT / "lib/router/session-affinity/src/lib.rs",
         r"pub\s+fn\s+with_config\s*\(\s*config\s*:\s*SessionAffinityConfig\s*\)\s*"
         r"->\s*Result<Self,\s*AffinityError>\s*\{",
         "SessionAffinity::with_config",
     ),
     (
-        REPO_ROOT / "lib/kv-router/src/services/selection/affinity.rs",
+        REPO_ROOT / "lib/router/session-affinity/src/lib.rs",
         r"fn\s+build\s*\(\s*config\s*:\s*SessionAffinityConfig\s*,\s*"
         r"manual_now\s*:\s*Option<Instant>\s*,?\s*\)\s*"
         r"->\s*Result<Self,\s*AffinityError>\s*\{",
         "SessionAffinity::build",
     ),
     (
-        REPO_ROOT / "lib/kv-router/src/services/selection/affinity.rs",
+        REPO_ROOT / "lib/router/session-affinity/src/lib.rs",
         r"pub\s+fn\s+try_acquire\s*\([^;{]*?\)\s*"
         r"->\s*Result<AcquireStep,\s*AffinityError>\s*\{",
         "SessionAffinity::try_acquire",
     ),
     (
-        REPO_ROOT / "lib/kv-router/src/services/selection/affinity.rs",
+        REPO_ROOT / "lib/router/session-affinity/src/lib.rs",
         r"fn\s+reserve_entry\s*\(\s*&self\s*\)\s*"
         r"->\s*Result<\(\),\s*AffinityError>\s*\{",
         "SessionAffinity::reserve_entry",
     ),
     (
-        REPO_ROOT / "lib/kv-router/src/services/selection/affinity.rs",
+        REPO_ROOT / "lib/router/session-affinity/src/lib.rs",
         r"fn\s+reserve_entry\s*\(\s*&self\s*\)\s*->\s*bool\s*\{",
         "Inner::reserve_entry",
     ),

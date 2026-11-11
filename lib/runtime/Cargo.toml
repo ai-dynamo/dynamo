@@ -40,6 +40,7 @@ nvtx = ["dep:nvtx"]
 [dependencies]
 velo = { workspace = true }
 # repo
+dynamo-error = { workspace = true }
 dynamo-truthy = { workspace = true }
 
 # Use workspace dependencies where available

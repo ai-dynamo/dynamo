@@ -107,7 +107,7 @@ NAMED_POLICY_SCOPE_SPECS: tuple[NamedPolicyScopeSpec, ...] = (
     ),
     NamedPolicyScopeSpec(
         "selected_worker_selection_policy_instances_from",
-        "lib/kv-router/src/scheduling/config.rs",
+        "lib/router/kv-router/src/scheduling/config.rs",
         r"fn\s+selected_worker_selection_policy_instances_from\s*\([^;{]*?\)\s*"
         r"->\s*Result<WorkerSelectionPolicySelections,\s*"
         r"WorkerSelectionPolicyConfigError>\s*\{",
@@ -115,7 +115,7 @@ NAMED_POLICY_SCOPE_SPECS: tuple[NamedPolicyScopeSpec, ...] = (
     ),
     NamedPolicyScopeSpec(
         "registry_resolve_selected",
-        "lib/kv-router/src/plugins/registry.rs",
+        "lib/router/kv-router/src/plugins/registry.rs",
         r"fn\s+resolve_selected\s*\([^;{]*?\)\s*->\s*"
         r"Result<Option<WorkerSelectionPolicyFactory>,\s*"
         r"WorkerSelectionPolicyRegistryError>\s*\{",
@@ -123,7 +123,7 @@ NAMED_POLICY_SCOPE_SPECS: tuple[NamedPolicyScopeSpec, ...] = (
     ),
     NamedPolicyScopeSpec(
         "preferred_taint_multiplier",
-        "lib/kv-router/src/protocols.rs",
+        "lib/router/scheduler/src/protocols.rs",
         r"pub\s+fn\s+preferred_taint_multiplier\s*\([^;{]*?\)\s*"
         r"->\s*Option<f64>\s*\{",
         "RoutingConstraints::preferred_taint_multiplier",
@@ -137,14 +137,14 @@ NAMED_POLICY_SCOPE_SPECS: tuple[NamedPolicyScopeSpec, ...] = (
     ),
     NamedPolicyScopeSpec(
         "scheduler_get_potential_loads",
-        "lib/kv-router/src/scheduling/local.rs",
+        "lib/router/scheduler/src/local.rs",
         r"pub\s+fn\s+get_potential_loads\s*\([^;{]*?\)\s*"
         r"->\s*Vec<PotentialLoad>\s*\{",
         "LocalScheduler::get_potential_loads",
     ),
     NamedPolicyScopeSpec(
         "incoming_footprint_projection",
-        "lib/kv-router/src/sequences/prompt_registry.rs",
+        "lib/router/slot-tracker/src/prompt_registry.rs",
         r"fn\s+project_loads_from_membership\s*<const\s+"
         r"INCLUDE_ACTIVE_REQUESTS\s*:\s*bool>\s*\([^;{]*?\)\s*"
         r"->\s*PotentialLoadMaps\s*\{",
@@ -416,7 +416,7 @@ def assert_named_policy_source_contract() -> None:
         )
 
     selections_body = _fn_decl_and_body(
-        file_text[REPO_ROOT / "lib/kv-router/src/scheduling/config.rs"],
+        file_text[REPO_ROOT / "lib/router/kv-router/src/scheduling/config.rs"],
         re.compile(NAMED_POLICY_SCOPE_SPECS[3].declaration_regex),
         NAMED_POLICY_SCOPE_SPECS[3].label,
     )
@@ -468,7 +468,7 @@ def assert_named_policy_source_contract() -> None:
         )
 
     resolve_body = _fn_decl_and_body(
-        file_text[REPO_ROOT / "lib/kv-router/src/plugins/registry.rs"],
+        file_text[REPO_ROOT / "lib/router/kv-router/src/plugins/registry.rs"],
         re.compile(NAMED_POLICY_SCOPE_SPECS[4].declaration_regex),
         NAMED_POLICY_SCOPE_SPECS[4].label,
     )
@@ -548,7 +548,9 @@ def assert_named_policy_source_contract() -> None:
             "resolve_selected no longer shares the provider type/parameter "
             "construction flow"
         )
-    registry_text = file_text[REPO_ROOT / "lib/kv-router/src/plugins/registry.rs"]
+    registry_text = file_text[
+        REPO_ROOT / "lib/router/kv-router/src/plugins/registry.rs"
+    ]
     if (
         "unknown worker-selection policy type {name:?}; available: {available}"
         not in registry_text
@@ -586,7 +588,7 @@ def assert_named_policy_source_contract() -> None:
     _assert_stock_epp_routing_mode_catalog(file_text)
 
     taint_body = _fn_decl_and_body(
-        file_text[REPO_ROOT / "lib/kv-router/src/protocols.rs"],
+        file_text[REPO_ROOT / "lib/router/scheduler/src/protocols.rs"],
         re.compile(NAMED_POLICY_SCOPE_SPECS[5].declaration_regex),
         NAMED_POLICY_SCOPE_SPECS[5].label,
     )
@@ -683,15 +685,20 @@ def assert_named_policy_source_contract() -> None:
             "active_tokens + added_tokens"
         )
 
-    inputs_path = REPO_ROOT / "lib/kv-router/src/plugins/worker_selection/inputs.rs"
+    inputs_path = REPO_ROOT / "lib/router/scheduler/src/selector/derive.rs"
     inputs_text = _strip_rust_comments(inputs_path.read_text(encoding="utf-8"))
-    from_projection_body = _fn_decl_and_body(
+    projection_impl = _fn_decl_and_body(
         inputs_text,
+        re.compile(r"impl\s+WorkerLoadInputExt\s+for\s+WorkerLoadInput\s*\{"),
+        "WorkerLoadInputExt for WorkerLoadInput",
+    )
+    from_projection_body = _fn_decl_and_body(
+        projection_impl,
         re.compile(
-            r"pub\(crate\)\s+fn\s+from_projection\s*\(\s*load\s*:\s*"
+            r"fn\s+from_projection\s*\(\s*load\s*:\s*"
             r"WorkerLoadProjection\s*\)\s*->\s*Self\s*\{"
         ),
-        "WorkerLoadInput::from_projection",
+        "WorkerLoadInputExt::from_projection",
     )
     collapsed_from = re.sub(r"\s+", "", from_projection_body)
     if "decode_cost_blocks:load.potential_decode_blocks()asf64" not in collapsed_from:
@@ -754,7 +761,7 @@ def assert_named_policy_source_contract() -> None:
             f"default provider no longer registers type {DEFAULT_COST_FN_TYPE!r}"
         )
 
-    ws_path = REPO_ROOT / "lib/kv-router/src/plugins/worker_selection/config.rs"
+    ws_path = REPO_ROOT / "lib/router/kv-router/src/plugins/worker_selection/config.rs"
     ws_text = _strip_rust_comments(ws_path.read_text(encoding="utf-8"))
     is_default_body = _fn_decl_and_body(
         ws_text,

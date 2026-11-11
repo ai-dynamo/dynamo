@@ -85,9 +85,9 @@ PROVIDER_CONTAINER_NAME = "kv-indexer"
 PRIORITY_HOLD_DEADLINE_S = 10.0
 PRIORITY_QUEUE_LIMIT = 2
 PRIORITY_POLICY_CLASS = "default"
-PRIORITY_FE_QUEUE_LOG = "info,dynamo_kv_router::scheduling::queue=trace"
-PRIORITY_EPP_QUEUE_LOG = "debug,dynamo_kv_router::scheduling::queue=trace"
-QUEUE_ORDERING_TARGET = "dynamo_kv_router::scheduling::queue"
+QUEUE_ORDERING_TARGET = "dynamo_scheduler::queue"
+PRIORITY_FE_QUEUE_LOG = f"info,{QUEUE_ORDERING_TARGET}=trace"
+PRIORITY_EPP_QUEUE_LOG = f"debug,{QUEUE_ORDERING_TARGET}=trace"
 QUEUE_ORDERING_MESSAGE = "ordering request"
 EPP_PREFILL_FALLBACK_TARGET = "dynamo_ext_proc::epp"
 EPP_PREFILL_FALLBACK_MESSAGE = "Prefill routing failed; falling back to aggregated mode"

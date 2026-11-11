@@ -72,7 +72,9 @@ COPY --chmod=755 --chown=dynamo:0 \
 COPY --chmod=664 --chown=dynamo:0 conftest.py /workspace/conftest.py
 COPY --chmod=775 --chown=dynamo:0 benchmarks/ /workspace/benchmarks/
 COPY --chmod=775 --chown=dynamo:0 lib/gpu_memory_service/tests/ /workspace/lib/gpu_memory_service/tests/
-COPY --chmod=775 --chown=dynamo:0 lib/kv-router/src/ /workspace/lib/kv-router/src/
+# Inspection-only router crates for source-backed parity contracts.
+COPY --chmod=775 --chown=dynamo:0 lib/router/ /workspace/lib/router/
+COPY --chmod=775 --chown=dynamo:0 lib/kv-events/src/ /workspace/lib/kv-events/src/
 COPY --chmod=775 --chown=dynamo:0 lib/llm/src/ /workspace/lib/llm/src/
 # Inspection-only Rust inputs for router parity helpers (recursive field discovery).
 COPY --chmod=775 --chown=dynamo:0 lib/bindings/python/rust/ /workspace/lib/bindings/python/rust/
@@ -136,6 +138,11 @@ COPY --chmod=664 --chown=dynamo:0 components/src/dynamo/mocker/config.py /worksp
 # Give the isolated copy a unique basename so pytest cannot alias it with
 # another non-package `test_config.py` during whole-workspace collection.
 COPY --chmod=664 --chown=dynamo:0 components/src/dynamo/mocker/tests/unit/test_config.py /workspace/components/src/dynamo/mocker/tests/unit/test_mocker_config.py
+
+COPY --chmod=775 --chown=dynamo:0 \
+    components/src/dynamo/replay/tests/test_agentx_g2.py \
+    components/src/dynamo/replay/tests/test_retune_replay.py /workspace/components/src/dynamo/replay/tests/
+COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/router/tests/test_router_retune_config.py /workspace/components/src/dynamo/router/tests/test_router_retune_config.py
 
 # BuildKit applies the file mode to parent directories it creates for these
 # single-file COPY instructions. Restore directory traversal/write access for
