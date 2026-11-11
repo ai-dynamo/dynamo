@@ -1077,6 +1077,7 @@ class TestGenerateLocally:
     async def test_generation_only_output_is_capped_at_max_tokens(
         self, mode, max_tokens, engine_steps, expected_tokens, expected_finish
     ):
+        """Cap decode tokens and usage while consuming every engine result."""
         handler = self._make_handler()
         handler.disaggregation_mode = mode
         params = (
@@ -1109,6 +1110,7 @@ class TestGenerateLocally:
         consumed = []
 
         async def mock_aiter(self_mock):
+            """Record each engine result consumed before marking generation done."""
             for res in results:
                 consumed.append(res)
                 yield res
