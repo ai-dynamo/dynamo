@@ -42,6 +42,7 @@ from .sglang_prepost import (
     preprocess_chat_request,
     resolve_skip_special_tokens,
 )
+from .sglang_prompt_renderer import PromptRenderer, build_prompt_renderer
 from .structural_tag_policy import runtime_structural_tag_options
 from .thinking import runtime_default_thinking_mode
 from .usage import response_usage, update_usage_metadata
@@ -375,6 +376,7 @@ _w_default_thinking_mode: str | None = None
 _w_structural_tag_mode: str = "off"
 _w_structural_tag_scope: str = "auto"
 _w_structural_tag_schema: str = "auto"
+_w_prompt_renderer: PromptRenderer | None = None
 
 
 def _load_chat_template(chat_template: str | None) -> str | None:
@@ -434,7 +436,7 @@ def _init_worker(
     global _w_tokenizer, _w_tool_call_parser_name, _w_reasoning_parser_name
     global _w_exclude_tools_when_tool_choice_none, _w_template_force_reasoning
     global _w_default_thinking_mode, _w_structural_tag_mode
-    global _w_structural_tag_scope, _w_structural_tag_schema
+    global _w_structural_tag_scope, _w_structural_tag_schema, _w_prompt_renderer
     _w_tokenizer = _load_tokenizer(model_path, trust_remote_code)
     if chat_template is not None:
         _w_tokenizer.chat_template = chat_template
@@ -446,6 +448,13 @@ def _init_worker(
     _w_structural_tag_mode = structural_tag_mode
     _w_structural_tag_scope = structural_tag_scope
     _w_structural_tag_schema = structural_tag_schema
+    _w_prompt_renderer = build_prompt_renderer(
+        _w_tokenizer,
+        model_path=model_path,
+        chat_template=chat_template,
+        tool_call_parser_name=tool_call_parser_name,
+        reasoning_parser_name=reasoning_parser_name,
+    )
 
 
 def _preprocess_worker(
@@ -465,6 +474,7 @@ def _preprocess_worker(
         structural_tag_mode=_w_structural_tag_mode,
         structural_tag_scope=_w_structural_tag_scope,
         structural_tag_schema=_w_structural_tag_schema,
+        prompt_renderer=_w_prompt_renderer,
     )
 
     n = request.get("n", 1)
@@ -555,6 +565,13 @@ def _build_dynamo_preproc(
     else:
         routing = nvext_routing
 
+    # PreprocessedRequest.logit_bias is HashMap<u32, f32>, so JSON's str keys must
+    # become int; the HTTP layer has already validated the keys and values.
+    logit_bias = request.get("logit_bias")
+    logit_bias = (
+        {int(k): float(v) for k, v in logit_bias.items()} if logit_bias else None
+    )
+
     preproc = {
         "model": model_name,
         "token_ids": prompt_token_ids,
@@ -578,6 +595,7 @@ def _build_dynamo_preproc(
             "top_k": request.get("top_k", 0) or -1,
             "min_p": request.get("min_p", 0.0),
             "seed": request.get("seed"),
+            "logit_bias": logit_bias,
             "guided_decoding": guided_decoding,
         },
         "output_options": {
@@ -635,6 +653,7 @@ class SglangProcessor:
         structural_tag_mode: str = "off",
         structural_tag_scope: str = "auto",
         structural_tag_schema: str = "auto",
+        prompt_renderer: PromptRenderer | None = None,
         token_budget: TokenBudget | None = None,
     ):
         self.tokenizer = tokenizer
@@ -663,6 +682,7 @@ class SglangProcessor:
         self.structural_tag_mode = structural_tag_mode
         self.structural_tag_scope = structural_tag_scope
         self.structural_tag_schema = structural_tag_schema
+        self.prompt_renderer = prompt_renderer
         self.token_budget = token_budget
         self.preprocess_pool = preprocess_pool
         if preprocess_pool is not None:
@@ -768,6 +788,7 @@ class SglangProcessor:
                 structural_tag_mode=self.structural_tag_mode,
                 structural_tag_scope=self.structural_tag_scope,
                 structural_tag_schema=self.structural_tag_schema,
+                prompt_renderer=self.prompt_renderer,
             )
 
             if self.debug_perf:
@@ -1324,6 +1345,13 @@ class SglangEngineFactory:
         if default_thinking_mode:
             logger.info("SGLang default thinking mode: %s", default_thinking_mode)
 
+        prompt_renderer = build_prompt_renderer(
+            tokenizer,
+            model_path=local_dir,
+            chat_template=chat_template,
+            tool_call_parser_name=tool_call_parser_name,
+            reasoning_parser_name=reasoning_parser_name,
+        )
         preprocess_pool = None
         preprocess_workers = self.config.preprocess_workers
         assert preprocess_workers is not None  # Resolved by FrontendConfig.validate().
@@ -1387,6 +1415,7 @@ class SglangEngineFactory:
             structural_tag_mode=structural_tag_mode,
             structural_tag_scope=structural_tag_scope,
             structural_tag_schema=structural_tag_schema,
+            prompt_renderer=prompt_renderer,
             token_budget=_runtime_token_budget(mdc),
         )
         gen.exclude_tools_when_tool_choice_none = (

@@ -20,6 +20,7 @@ from packaging.version import Version
 from tests.wheels.smoke_install import AISIMULATE_FIND_LINKS
 
 pytestmark = [
+    pytest.mark.core,
     pytest.mark.gpu_0,
     pytest.mark.parallel,
     pytest.mark.planner,

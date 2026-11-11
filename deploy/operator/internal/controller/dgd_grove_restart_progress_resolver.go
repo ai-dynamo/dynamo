@@ -20,9 +20,12 @@ package controller
 import (
 	"context"
 
+	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -65,6 +68,9 @@ func (r *groveRestartProgressResolver) Resolve(
 		return inProgress
 	}
 
+	// Restart progress is only resolved while a restart ID is requested.
+	restartID := ptr.Deref(req.DGD.Spec.Restart, nvidiacomv1beta1.Restart{}).ID
+
 	updatedInProgress := make([]string, 0, len(inProgress))
 	for _, componentName := range inProgress {
 		component := req.DGD.GetComponentByName(componentName)
@@ -73,6 +79,18 @@ func (r *groveRestartProgressResolver) Resolve(
 			continue
 		}
 		resourceName := dynamo.GroveComponentResourceName(pcsName, componentName)
+
+		// A ready clique from the previous revision must not satisfy a new
+		// restart, for example when the first PodCliqueSet write failed.
+		if restartID != "" && !groveRestartApplied(pcs, componentName, restartID) {
+			logger.V(1).Info(
+				"component has not observed the requested restart",
+				"componentName", componentName,
+				"restartID", restartID,
+			)
+			updatedInProgress = append(updatedInProgress, componentName)
+			continue
+		}
 
 		var (
 			isReady bool
@@ -110,4 +128,21 @@ func (r *groveRestartProgressResolver) Resolve(
 	}
 
 	return updatedInProgress
+}
+
+// groveRestartApplied requires restartID on every clique rendered for
+// componentName in the observed PodCliqueSet spec. pcs is non-nil, never mutated.
+func groveRestartApplied(pcs *grovev1alpha1.PodCliqueSet, componentName string, restartID string) bool {
+	// Select cliques the way groveRestartAnnotations maps them to components.
+	found := false
+	for _, clique := range pcs.Spec.Template.Cliques {
+		if clique == nil || clique.Labels[consts.KubeLabelDynamoComponent] != componentName {
+			continue
+		}
+		if clique.Annotations[consts.RestartAnnotation] != restartID {
+			return false
+		}
+		found = true
+	}
+	return found
 }
