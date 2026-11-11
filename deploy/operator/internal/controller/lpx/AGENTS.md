@@ -232,8 +232,15 @@ SPDX-License-Identifier: Apache-2.0
   first, it has no gate, Kubernetes accepts no selector, and it binds without
   one. Adopt it when its Node's fabric pod has an open position, and delete it
   otherwise.
-- Fill fabric pods in name order with Pods in Grove index order, so that a
-  complete provision gives each fabric pod one contiguous index block.
+- An unbound Pod with Grove index `i` takes fabric pod number `i / replicas` in
+  name order when that fabric pod has an open position, and otherwise the first
+  fabric pod that has one. A complete provision therefore gives fabric pod `k`
+  the index block `[k * replicas, (k + 1) * replicas)`, in whatever order the
+  Pods appear. Pods keep their index after the prune, and a replacement Pod gets
+  Grove's lowest free index, so the indexes of a placed PodClique are not
+  always `0..N-1`. Cyborg pipeline-parallel mode needs exactly the indexes
+  `0..TOTAL_REPLICAS-1` in one PodClique. It works only when one fabric pod is
+  in use and that fabric pod holds the first block.
 - Keep bound Pods before unbound, ready before not ready, and older before
   newer. A fabric pod that holds LPUs therefore keeps a bound Cyborg Pod.
 - Delete surplus placed Pods before lowering the PodClique capacity. Grove

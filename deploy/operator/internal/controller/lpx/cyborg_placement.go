@@ -55,6 +55,27 @@ func (p cyborgPlacement) total() int32 {
 	return p.replicas * int32(len(p.fabricPods))
 }
 
+// openFabricPod selects the fabric pod for an unbound Pod with Grove index podIndex,
+// or returns an empty value when no position is open. open holds the open positions
+// of each fabric pod. The Pod takes the fabric pod of its index block, where block
+// k is the indexes [k*replicas, (k+1)*replicas), when that fabric pod has an open
+// position, and otherwise the first fabric pod in name order that has one. A
+// complete provision therefore gives each fabric pod one contiguous index block,
+// in whatever order the Pods appear.
+func (p cyborgPlacement) openFabricPod(open map[string]int32, podIndex int) string {
+	if podIndex >= 0 && p.replicas > 0 {
+		if block := podIndex / int(p.replicas); block < len(p.fabricPods) && open[p.fabricPods[block]] > 0 {
+			return p.fabricPods[block]
+		}
+	}
+	for _, fabricPod := range p.fabricPods {
+		if open[fabricPod] > 0 {
+			return fabricPod
+		}
+	}
+	return ""
+}
+
 // cyborgPlacementApplies reports whether this controller distributes the workload's
 // Cyborg Pods by fabric pod: the non-nil serving component's conductor role selects
 // it, and the non-nil plan has a Cyborg and at least one LPU Agent to follow.
@@ -307,7 +328,7 @@ func (r *graphReconciler) reconcileCyborgPlacement(
 		}
 	}
 
-	// Fill the open positions with the unplaced Pods, one fabric pod after the other.
+	// Fill the open positions with the unplaced Pods, each in the fabric pod of its index block.
 	var changed bool
 	for _, pod := range live {
 		if pod.Labels[cyborgFabricPodLabel] != "" {
@@ -331,8 +352,7 @@ func (r *graphReconciler) reconcileCyborgPlacement(
 			if len(pod.Spec.SchedulingGates) == 0 || (held && hasSchedulingGate(pod, grovePodGangGate)) {
 				continue
 			}
-			if index := slices.IndexFunc(placement.fabricPods, func(fabricPod string) bool { return open[fabricPod] > 0 }); index >= 0 {
-				fabricPod = placement.fabricPods[index]
+			if fabricPod = placement.openFabricPod(open, podCliquePodIndex(pod)); fabricPod != "" {
 				selector = map[string]string{fabricPodLabel: fabricPod}
 			}
 		}

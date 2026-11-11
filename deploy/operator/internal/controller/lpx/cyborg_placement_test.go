@@ -135,7 +135,7 @@ func TestLPXCyborgFabricPodPlacement(t *testing.T) {
 	pods := listTestCyborgPods(t, ctx, r.Client, clique)
 	require.Equal(t, []string{"", "", ""}, testCyborgFabricPods(pods))
 
-	t.Log("After Grove releases the Pods, pin each one to a fabric pod in Grove index order and remove the last gate in the same write")
+	t.Log("After Grove releases the Pods, pin each one to the fabric pod of its Grove index and remove the last gate in the same write")
 	for _, pod := range pods {
 		pod.Spec.SchedulingGates = []corev1.PodSchedulingGate{{Name: lpx.CyborgPlacementGate}}
 		require.NoError(t, r.Update(ctx, pod))
@@ -243,6 +243,30 @@ func TestLPXCyborgPlacementLabel(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestLPXCyborgPlacementKeepsIndexBlocks(t *testing.T) {
+	ctx := t.Context()
+
+	t.Log("Provision two Cyborg Pods in each of three fabric pods")
+	clique := &grovev1alpha1.PodClique{Name: "pcs-0-lpx-0-cond", Namespace: "default", UID: "clique-uid", ResourceVersion: "1", Labels: map[string]string{
+		lpx.CyborgPlacementLabel: lpx.CyborgPlacementPerFabricPod,
+	}}
+	clique.Spec.Replicas = 6
+	placement := cyborgPlacement{fabricPods: []string{"a", "b", "c"}, replicas: 2}
+	r := &graphReconciler{Client: newLPXTestClient(t, clique)}
+
+	t.Log("Grove creates and releases the Pods concurrently, so the controller observes them in no fixed order")
+	for _, indexes := range [][]int{{4, 1}, {3}, {0, 5, 2}} {
+		for _, index := range indexes {
+			require.NoError(t, r.Create(ctx, newTestReleasedCyborgPod(clique, index)))
+		}
+		_, err := r.reconcileCyborgPlacement(ctx, clique, placement, false)
+		require.NoError(t, err)
+	}
+
+	t.Log("Each fabric pod holds the contiguous index block of its position in name order")
+	require.Equal(t, []string{"a", "a", "b", "b", "c", "c"}, testCyborgFabricPods(listTestCyborgPods(t, ctx, r.Client, clique)))
 }
 
 func TestLPXCyborgPlacementGateOrder(t *testing.T) {
