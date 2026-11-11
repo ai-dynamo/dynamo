@@ -13,13 +13,16 @@ use std::sync::Arc;
 use anyhow::{Context, Result, anyhow};
 
 use dynamo_kv_router::config::{KvRouterConfig, try_kv_router_config_from_dynamo_env};
-use dynamo_kv_router::protocols::RoutingConstraints;
+use dynamo_kv_router::plugins::RouterPluginRegistry;
 use dynamo_kv_router::services::selection::{
-    PromptRequest, RouterPluginRegistry, SelectAndReserveRequest as CoreSelectAndReserveRequest,
-    SelectionError, SelectionService, SelectionServiceBuilder,
-    warn_for_unserved_worker_selection_policies,
+    SelectionService, SelectionServiceBuilder, warn_for_unserved_worker_selection_policies,
 };
-use dynamo_kv_router::{DEFAULT_ROUTING_GROUP, WorkerType};
+use dynamo_router_protocol::WorkerType;
+use dynamo_router_protocol::identity::DEFAULT_ROUTING_GROUP;
+use dynamo_scheduler::host::{
+    PromptRequest, RoutingConstraints, SelectAndReserveRequest as CoreSelectAndReserveRequest,
+    SelectionError,
+};
 use kube::Client;
 use tokio_util::sync::CancellationToken;
 
@@ -258,19 +261,13 @@ impl Drop for Selector {
 
 #[cfg(test)]
 mod tests {
-    use dynamo_kv_router::services::selection::affinity::MAX_SESSION_AFFINITY_ID_BYTES;
+    use dynamo_session_affinity::host::MAX_SESSION_AFFINITY_ID_BYTES;
     use std::collections::HashMap;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use dynamo_kv_router::WorkerSelectionPolicyError;
-    use dynamo_kv_router::plugins::worker_selection::{
-        WorkerInputView, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicy,
-        WorkerSelectionPolicyFactory,
-    };
-    use dynamo_kv_router::services::selection::{
-        CatalogReconciler, WorkerRequest, WorkerSelectionPolicyParameters,
-    };
+    use dynamo_kv_router::plugins::prelude::*;
+    use dynamo_scheduler::host::{CatalogReconciler, WorkerRequest};
 
     use super::*;
 
@@ -306,25 +303,14 @@ mod tests {
             r#"
 models:
   queueing-model:
-    default_policy_family: standard
-    uncached_isl_buckets:
-      - min_tokens: 0
-        bucket: all
     policy_classes:
       - name: queued
-        policy_family: standard
-        cache_bucket: all
         quantum: 1
         prefill_busy_threshold: 1
   threshold-free-model:
-    default_policy_family: standard
-    uncached_isl_buckets:
-      - min_tokens: 0
-        bucket: all
+    default_policy_class: direct
     policy_classes:
       - name: direct
-        policy_family: standard
-        cache_bucket: all
         quantum: 1
       - name: express
         quantum: 1
@@ -382,7 +368,7 @@ models:
     /// non-zero `block_size`, and a well-formed KV-event endpoint per dp_rank.
     /// The KV-event endpoint is only a `tcp://` address string — the core's ZMQ
     /// SUB listener connects lazily and never needs a live publisher (see the
-    /// `WorkerRegistry` register tests in `lib/kv-router`), so no network infra is
+    /// `WorkerRegistry` register tests in `lib/router/kv-router`), so no network infra is
     /// required. Queueing is disabled under the default router policy, so
     /// `max_num_batched_tokens` is not required here.
     fn schedulable_registration(worker_id: u64) -> WorkerRequest {
@@ -475,10 +461,6 @@ models:
             r#"
 worker_selection:
   aggregated: first-eligible
-  instances:
-    - name: first-eligible
-      type: first-eligible
-      parameters: {}
 "#,
         )
         .expect("write policy file");
@@ -770,10 +752,6 @@ worker_selection:
             r#"
 worker_selection:
   aggregated: expected-output-recorder
-  instances:
-    - name: expected-output-recorder
-      type: expected-output-recorder
-      parameters: {}
 "#,
         )
         .expect("write policy file");
@@ -828,13 +806,20 @@ worker_selection:
         );
     }
 
-    /// Fallback parity with the integrated router: `policy_class` is passed
-    /// through to the core's `PolicyProfile::resolve_class_index`, which never
-    /// rejects. Family names and explicit class names resolve normally;
-    /// physical (matrix) class names and unknown names silently fall back to
-    /// the default policy family and still schedule.
+    /// Parity with the integrated router: `policy_class` is passed through to
+    /// the core's `PolicyProfile::resolve_class_index`. Configured class names
+    /// resolve directly; any other name fails with a 400 scheduler error.
     #[tokio::test]
-    async fn policy_class_falls_back_instead_of_rejecting() {
+    async fn unknown_policy_class_is_rejected() {
+        use dynamo_scheduler::host::KvSchedulerError;
+
+        let is_unknown = |error: &SelectionError, expected: &str| {
+            matches!(
+                error,
+                SelectionError::Scheduler(KvSchedulerError::UnknownPolicyClass(name))
+                    if name == expected
+            ) && error.status_code() == 400
+        };
         let policy_file = model_policy_file();
         let mut cfg = test_config();
         cfg.model_name = "threshold-free-model".to_string();
@@ -850,58 +835,47 @@ worker_selection:
         reg.model_name = "threshold-free-model".to_string();
         register(&selector, vec![reg]).await;
 
-        // A policy-family name resolves to that family's bucketed class.
-        let mut family_req = select_request("res-family");
-        family_req.model_name = "threshold-free-model".to_string();
-        family_req.policy_class = Some("standard".to_string());
-        selector
-            .select_and_reserve(family_req)
-            .await
-            .expect("policy_family 'standard' should schedule");
+        // Every configured class name is honored, including the default's.
+        for class in ["express", "direct"] {
+            let mut class_req = select_request(&format!("res-{class}"));
+            class_req.model_name = "threshold-free-model".to_string();
+            class_req.policy_class = Some(class.to_string());
+            selector
+                .select_and_reserve(class_req)
+                .await
+                .unwrap_or_else(|error| panic!("class {class:?} should schedule: {error:?}"));
+        }
 
-        // An explicit class name is honored.
-        let mut explicit_req = select_request("res-explicit");
-        explicit_req.model_name = "threshold-free-model".to_string();
-        explicit_req.policy_class = Some("express".to_string());
-        selector
-            .select_and_reserve(explicit_req)
-            .await
-            .expect("explicit class 'express' should schedule");
-
-        // A physical FamilyBucket class name is not client-requestable; the
-        // core falls back to the default family instead of rejecting — the
-        // integrated router schedules this value normally, so standalone EPP
-        // must not 400 it either.
-        let mut physical_req = select_request("res-physical");
-        physical_req.model_name = "threshold-free-model".to_string();
-        physical_req.policy_class = Some("direct".to_string());
-        selector
-            .select_and_reserve(physical_req)
-            .await
-            .expect("physical class name 'direct' should fall back and schedule");
-
-        // A completely unknown name (e.g. a stale header after a config
-        // change) falls back the same way instead of erroring.
+        // An unknown name (e.g. a stale header after a config change, or a
+        // removed policy-family name) fails instead of using the default class.
         let mut unknown_req = select_request("res-unknown");
         unknown_req.model_name = "threshold-free-model".to_string();
         unknown_req.policy_class = Some("unknown".to_string());
-        selector
+        let error = selector
             .select_and_reserve(unknown_req)
             .await
-            .expect("unknown policy_class should fall back and schedule");
+            .expect_err("unknown policy_class must fail");
+        assert!(is_unknown(&error, "unknown"), "{error:?}");
 
-        // Under the synthetic profile (no policy file configured) any value is
-        // ignored and the request schedules, matching the integrated router.
+        // The synthetic profile (no policy file configured) knows only its own
+        // `default` class.
         let selector = Selector::new(&test_config(), RouterPluginRegistry::default())
             .await
             .expect("selector should build");
         register(&selector, vec![schedulable_registration(1)]).await;
         let mut synthetic_req = select_request("res-synthetic");
-        synthetic_req.policy_class = Some("anything".to_string());
+        synthetic_req.policy_class = Some("default".to_string());
         selector
             .select_and_reserve(synthetic_req)
             .await
-            .expect("synthetic profile must ignore any policy_class value");
+            .expect("the synthetic class name should schedule");
+        let mut synthetic_unknown = select_request("res-synthetic-unknown");
+        synthetic_unknown.policy_class = Some("anything".to_string());
+        let error = selector
+            .select_and_reserve(synthetic_unknown)
+            .await
+            .expect_err("the synthetic profile must reject any other policy_class");
+        assert!(is_unknown(&error, "anything"), "{error:?}");
     }
     #[tokio::test]
     async fn invalid_affinity_ttl_returns_configuration_error() {

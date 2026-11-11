@@ -10,13 +10,15 @@ trap 'rm -rf "$CARGO_TARGET_DIR"' EXIT
 
 CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
     cargo test --locked -p dynamo-trtllm-sidecar --lib --no-run \
-    --message-format=json > /tmp/trtllm-test-artifacts.json
+    --message-format=json-render-diagnostics > "$CARGO_TARGET_DIR/test-artifacts.json"
 python3 - <<'PY'
 import json
+import os
 import pathlib
 import shutil
 
-artifacts = [json.loads(line) for line in pathlib.Path('/tmp/trtllm-test-artifacts.json').read_text().splitlines()]
+artifact_list = pathlib.Path(os.environ['CARGO_TARGET_DIR']) / 'test-artifacts.json'
+artifacts = [json.loads(line) for line in artifact_list.read_text().splitlines()]
 executables = [item['executable'] for item in artifacts
                if item.get('reason') == 'compiler-artifact'
                and item.get('profile', {}).get('test')

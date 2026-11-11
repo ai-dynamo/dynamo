@@ -576,8 +576,8 @@ pub fn request_cache_salt<R: NvExtProvider>(request: &R) -> Option<&str> {
 
 pub fn routing_constraints_to_kv(
     constraints: RoutingConstraints,
-) -> dynamo_kv_router::protocols::RoutingConstraints {
-    dynamo_kv_router::protocols::RoutingConstraints {
+) -> dynamo_scheduler::host::RoutingConstraints {
+    dynamo_scheduler::host::RoutingConstraints {
         required_taints: constraints.required_taints,
         preferred_taints: constraints.preferred_taints,
     }

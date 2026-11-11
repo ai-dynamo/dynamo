@@ -27,8 +27,10 @@
 //! - A router that's just starting and knows no pools should still use a
 //!   partial list. Some pools beat none.
 //!
-//! With DynamoDB registration storage (planned), partial lists will be rare,
-//! but this rule is extra insurance.
+//! With DynamoDB registration storage, a replica lists every pool at once
+//! but calls the list partial for one lease after it starts, in case a
+//! PoolRelay still registers elsewhere, and while and for one lease after
+//! the table cannot be reached, since PoolRelays cannot renew meanwhile.
 
 mod pools;
 mod registrar;
@@ -36,7 +38,7 @@ mod replicas;
 mod watch;
 
 pub use pools::{Capacity, PoolDirectory, PoolEvent, PoolListing};
-pub use registrar::{Lease, PoolRegistrar, PoolRegistration};
+pub use registrar::{Lease, PoolRegistrar, PoolRegistration, RouterRegistrar};
 pub use replicas::{ReplicaDirectory, RouterReplica, RouterReplicaEvent, RouterReplicaId};
 pub use watch::{Completeness, Directory, Snapshot, WatchEvent, WatchStream};
 
@@ -48,4 +50,8 @@ use thiserror::Error;
 pub enum DiscoveryError {
     #[error("discovery backend is unavailable")]
     Unavailable(#[source] anyhow::Error),
+    /// The backend cannot keep this registration as it is, so sending it
+    /// again cannot help. The reason is for the caller.
+    #[error("the registration cannot be stored: {0}")]
+    Rejected(String),
 }
