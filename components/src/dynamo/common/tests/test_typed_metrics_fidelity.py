@@ -154,7 +154,7 @@ def test_extra_metric_prefixes_pass_expfmt_filter(monkeypatch: pytest.MonkeyPatc
     registry = CollectorRegistry()
     Counter("builtin_requests_total", "builtin", registry=registry).inc()
     Counter("myconnector_hits_total", "custom component", registry=registry).inc()
-    Counter("unrelated_total", "not whitelisted", registry=registry).inc()
+    Counter("unrelated_total", "not allowlisted", registry=registry).inc()
 
     output = get_prometheus_expfmt(
         registry,

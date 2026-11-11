@@ -87,7 +87,7 @@ _SHARED_IMAGE_CACHE_DURATION_BUCKETS = (
 
 
 # Comma-separated metric name prefixes that are appended to each backend's
-# built-in whitelist, so custom engine components can expose their metrics.
+# built-in allowlist, so custom engine components can expose their metrics.
 EXTRA_METRIC_PREFIXES_ENV_VAR = "DYN_EXTRA_METRIC_PREFIXES"
 
 
