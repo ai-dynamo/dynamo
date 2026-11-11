@@ -3,11 +3,12 @@
 
 //! NVTX timeline-annotation helpers for Nsight Systems profiling.
 //!
-//! Backed by the `nvtx` crate, which vendors NVIDIA's header-only **NVTX v3** C API
-//! and compiles it in with `cc`. There is no link-time dependency on any NVTX shared
-//! library: the v3 headers compile to inert stubs that lazily `dlopen` the profiler's
-//! injection library named by `NVTX_INJECTION64_PATH` the first time an annotation
-//! fires. With no profiler attached, nothing is loaded at all.
+//! Backed by NVIDIA's header-only **NVTX v3** C API, vendored under `third_party/nvtx3`
+//! and compiled with `cc` (from `build.rs`, only when the `nvtx` feature is on) together
+//! with a small C shim, `src/nvtx/shim.c`. There is no link-time dependency on any NVTX
+//! shared library: the v3 headers compile to inert stubs that lazily `dlopen` the
+//! profiler's injection library named by `NVTX_INJECTION64_PATH` the first time an
+//! annotation fires. With no profiler attached, nothing is loaded at all.
 //!
 //! This is why v3 matters on CUDA 13: CUDA 13 removed `libnvToolsExt.so`, which the
 //! older v2 C API (and cudarc's binding to it) resolved by `dlopen` — a hard failure
@@ -30,37 +31,29 @@
 //! repo's `profiling` profile: the disabled path is a load, a `test`, and a jump to the
 //! function tail, with no call and no `Arguments` construction.
 //!
-//! The enabled path is **not** cheap: the `nvtx` crate renders the name with
-//! `to_string()` and then copies it into a `CString`, so each annotation costs two heap
-//! allocations on top of the injection-library call. Measured at 4096 concurrent
-//! streams on mock workers, a range costs about 0.1 µs with no profiler attached and
-//! about 1.3 µs under `nsys -t nvtx`. Keep the second figure in mind when reading a
+//! The enabled path is **not** cheap: each annotation renders its name into a `String`,
+//! copies it into a `CString` and calls into the injection library. Measured at 4096
+//! concurrent streams on mock workers, a range costs about 0.1 µs with no profiler attached
+//! and about 1.3 µs under `nsys -t nvtx`. Keep the second figure in mind when reading a
 //! profile of a per-chunk path: the observer effect is real.
 //!
-//! # Caveats inherited from the `nvtx` crate
+//! # The C shim
 //!
-//! - **Range ids are narrowed to `i32`.** `nvtx-sys/export.c` declares
-//!   `int ffi_range_start(...)` / `void ffi_range_end(int)`, but NVTX's `nvtxRangeId_t`
-//!   is `uint64_t`. If an injection library ever handed back an id with bits above 31
-//!   set, the id passed to `nvtxRangeEnd` would differ from the one returned and the
-//!   range would never close — an unterminated bar on the timeline.
+//! The `nvtx` crate this module used to wrap only exposed message-only calls and had two
+//! defects, both resolved by owning the shim:
 //!
-//!   Measured against Nsight Systems 2026.4.1: ids are allocated sequentially from 1,
-//!   so a 300,000-range capture (200k raw start/end pairs plus 100k guard-managed
-//!   ranges) saw a maximum id of 200,000, zero negative ids, and all 300,000 ranges
-//!   closed. The narrowing has ~2^31 of headroom per process at that allocation rate
-//!   and does not bite in practice. Re-check if the injection library ever changes its
-//!   id scheme; widening it means a local `cc` shim over the v3 headers, since the
-//!   narrowing is in the vendored C, not in the Rust declarations [`ffi`] corrects.
-//! - **Interior NULs in names are sanitized, not fatal.** The upstream crate builds its
-//!   `CString` with `CString::new(..).expect(..)`, so an interpolated name carrying a NUL
-//!   would panic the annotated request path. [`ffi`] below owns that conversion instead
-//!   and substitutes U+FFFD, because a profiling aid must never be able to abort the
-//!   work it is measuring.
-//! - **The upstream `ffi_range_end` binding does not match its C definition.** In `nvtx`
-//!   1.3.0, `nvtx-sys/export.c` defines `void ffi_range_end(int)` while `src/bindings.rs`
-//!   declares it `-> c_int`. Every guarded range end would cross that mismatched ABI, so
-//!   [`ffi`] declares the whole surface itself, matching `export.c` exactly.
+//! - **Range ids are `u64` end to end.** NVTX's `nvtxRangeId_t` is `uint64_t`; the crate
+//!   narrowed it to `int`, which would leave a range unterminated if an injection library
+//!   ever returned an id above 2^31. The shim returns and takes `uint64_t`, and so does
+//!   [`NvtxRangeGuard`].
+//! - **The declarations match the C definitions.** [`ffi`] declares exactly what
+//!   `shim.c` defines (the crate's Rust binding disagreed with its C on `ffi_range_end`'s
+//!   return type), and a mismatch is a link error rather than silent drift.
+//!
+//! The shim also exposes the event-attribute entry points the crate lacked, which carry a
+//! `u64` payload (see "Request-scoped annotations"). Interior NULs in names are sanitized
+//! rather than fatal: [`ffi`] substitutes U+FFFD because a profiling aid must never be able
+//! to abort the work it is measuring.
 //!
 //! # Usage
 //!
@@ -88,6 +81,50 @@
 //! fails to compile; `dynamo_nvtx_range!("a{b}")` silently captures a local `b`. Use
 //! `dynamo_nvtx_range!("{}", "map{}")` for a literal brace.
 //!
+//! # Request-scoped annotations
+//!
+//! Annotations that belong to one request carry a 64-bit **request key** so a request seen
+//! misbehaving in OpenTelemetry can be found in an `nsys` report, while every range name
+//! stays static (so `nsys stats --report nvtx_sum` aggregates per stage, not per request).
+//! Everything goes to the default NVTX domain:
+//!
+//! - **Request-scoped range or mark**: ASCII message = the stage name only
+//!   (`http-request`, `kv_router.route_request:prefill`, ...), event payload = unsigned
+//!   64-bit [`rid_key`]`(rid)`. In the nsys SQLite export these are `NVTX_EVENTS.text` and
+//!   `NVTX_EVENTS.uint64Value`.
+//! - **Request identity mark** (`eventType` 34): `dynamo.request rid=<rid>[ key=value]...`
+//!   with the same payload, mapping the key back to the id (see [`format_request_message`]
+//!   for ordering and sanitizing). Several may exist per request; readers merge them.
+//!
+//! [`rid_key`] is FNV-1a-64 of the UTF-8 request id with the top bit cleared so it stays
+//! positive in SQLite's signed INTEGER. The Python layer pins the same test vectors.
+//!
+//! **Explicit markers** — [`dynamo_nvtx_request_mark!`] / [`dynamo_nvtx_request_range!`]
+//! (and the `dynamo._core.nvtx_request_*` Python bindings) produce them. They test
+//! [`enabled()`] first, so nothing is formatted or allocated while annotations are off. A
+//! non-empty `attrs` also emits an identity mark carrying those attributes. Where one
+//! request opens several ranges (the worker's ingress and per-chunk egress ranges, the
+//! router's selection ranges), [`request_key`] hashes the id once and
+//! [`dynamo_nvtx_keyed_range!`] reuses it.
+//!
+//! Raw-trace recipes against the nsys SQLite export:
+//!
+//! ```sql
+//! -- per-stage aggregation over closed ranges (`nsys stats --report nvtx_sum` does this
+//! -- natively for whole-request captures; it overflows on windowed ones with open ranges)
+//! SELECT text AS stage, count(*) AS n, avg("end" - start) / 1e6 AS avg_ms
+//! FROM NVTX_EVENTS WHERE eventType = 60 AND uint64Value IS NOT NULL
+//!   AND "end" <= (SELECT duration FROM ANALYSIS_DETAILS) GROUP BY text;
+//! -- request id -> key
+//! SELECT DISTINCT uint64Value FROM NVTX_EVENTS
+//! WHERE eventType = 34 AND (text = 'dynamo.request rid=<rid>' OR instr(text, 'dynamo.request rid=<rid> ') = 1);
+//! -- every event of that request
+//! SELECT text, start, "end", globalTid FROM NVTX_EVENTS WHERE uint64Value = :key ORDER BY start;
+//! ```
+//!
+//! Cost: with the feature off, none of this is compiled. With the feature on and
+//! `DYN_NVTX` off, explicit sites cost the usual relaxed load plus branch.
+//!
 //! # Build
 //!
 //! ```bash
@@ -110,39 +147,35 @@ static NVTX_ENABLED: AtomicBool = AtomicBool::new(false);
 /// (`dynamo.common.utils.nvtx_utils`), which parses it with the same vocabulary.
 pub const ENV_VAR: &str = "DYN_NVTX";
 
-/// Corrected declarations for the C shim that `nvtx` 1.3.0 compiles and links.
+/// Declarations for `src/nvtx/shim.c`, compiled into the `dynamo_nvtx_shim` static library by
+/// `build.rs` (which also puts it on the link line).
 ///
-/// The upstream `src/bindings.rs` is not usable as-is: it declares
-/// `ffi_range_end` as returning `c_int` where `nvtx-sys/export.c` defines it
-/// `void`, and it builds every name with `CString::new(..).expect(..)`, which
-/// turns an interior NUL in an interpolated marker name into a panic on the
-/// path being profiled. These declarations match `export.c` exactly and the
-/// conversion below cannot fail.
-///
-/// The symbols come from the static `libnvtx.a` that the `nvtx` crate's build
-/// script compiles with `cc`; depending on that crate is what puts them on the
-/// link line. A rename upstream surfaces as a link error, not as silent drift.
+/// They match the C definitions exactly, with range ids as `uint64_t` end to end. A rename
+/// or signature drift on either side surfaces as a link error, not as silent corruption.
+/// Name conversion below cannot fail: an interior NUL would otherwise turn an interpolated
+/// name into a panic on the path being profiled.
 #[cfg(feature = "nvtx")]
 mod ffi {
-    use std::ffi::{CString, c_char, c_int};
+    use std::ffi::{CString, c_char};
 
-    #[link(name = "nvtx")]
+    #[link(name = "dynamo_nvtx_shim", kind = "static")]
     unsafe extern "C" {
-        fn ffi_range_push(message: *const c_char) -> c_int;
-        fn ffi_range_pop() -> c_int;
-        fn ffi_range_start(message: *const c_char) -> c_int;
-        fn ffi_range_end(id: c_int);
-        fn ffi_mark(message: *const c_char);
-        fn ffi_name_thread(name: *const c_char);
+        fn dynamo_nvtx_range_start(message: *const c_char) -> u64;
+        fn dynamo_nvtx_range_start_payload(message: *const c_char, payload: u64) -> u64;
+        fn dynamo_nvtx_range_end(id: u64);
+        fn dynamo_nvtx_mark(message: *const c_char);
+        fn dynamo_nvtx_mark_payload(message: *const c_char, payload: u64);
+        fn dynamo_nvtx_range_push(message: *const c_char);
+        fn dynamo_nvtx_range_pop();
+        fn dynamo_nvtx_name_thread(name: *const c_char);
     }
 
     /// Render a marker name into a NUL-terminated C string, infallibly.
     ///
     /// An interior NUL is replaced with U+FFFD rather than rejected: the name
     /// is a human-readable label on a timeline, so a mangled label is a far
-    /// better outcome than either a lost range or a panic. The allocation
-    /// count is unchanged from the upstream path (one `String`, one
-    /// `CString`); the `replace` only runs on the rare bad name.
+    /// better outcome than either a lost range or a panic. The `replace` only
+    /// runs on the rare bad name.
     fn c_name<M: std::fmt::Display>(name: M) -> CString {
         let rendered = name.to_string();
         let cleaned = if rendered.as_bytes().contains(&0) {
@@ -157,38 +190,51 @@ mod ffi {
 
     pub fn range_push<M: std::fmt::Display>(name: M) {
         let name = c_name(name);
-        // SAFETY: signature matches `int ffi_range_push(const char *)` in
-        // nvtx-sys/export.c; the pointer is valid for the call's duration.
-        unsafe { ffi_range_push(name.as_ptr()) };
+        // SAFETY: signature matches `void dynamo_nvtx_range_push(const char *)` in
+        // shim.c; the pointer is valid for the call's duration.
+        unsafe { dynamo_nvtx_range_push(name.as_ptr()) };
     }
 
     pub fn range_pop() {
-        // SAFETY: signature matches `int ffi_range_pop(void)`.
-        unsafe { ffi_range_pop() };
+        // SAFETY: signature matches `void dynamo_nvtx_range_pop(void)`.
+        unsafe { dynamo_nvtx_range_pop() };
     }
 
-    pub fn range_start<M: std::fmt::Display>(name: M) -> c_int {
+    pub fn range_start<M: std::fmt::Display>(name: M) -> u64 {
         let name = c_name(name);
-        // SAFETY: signature matches `int ffi_range_start(const char *)`.
-        unsafe { ffi_range_start(name.as_ptr()) }
+        // SAFETY: signature matches `uint64_t dynamo_nvtx_range_start(const char *)`.
+        unsafe { dynamo_nvtx_range_start(name.as_ptr()) }
     }
 
-    pub fn range_end(id: c_int) {
-        // SAFETY: signature matches `void ffi_range_end(int)`. `id` is one
-        // previously returned by `range_start`.
-        unsafe { ffi_range_end(id) };
+    pub fn range_start_payload<M: std::fmt::Display>(name: M, payload: u64) -> u64 {
+        let name = c_name(name);
+        // SAFETY: signature matches
+        // `uint64_t dynamo_nvtx_range_start_payload(const char *, uint64_t)`.
+        unsafe { dynamo_nvtx_range_start_payload(name.as_ptr(), payload) }
+    }
+
+    pub fn range_end(id: u64) {
+        // SAFETY: signature matches `void dynamo_nvtx_range_end(uint64_t)`. `id` is one
+        // previously returned by `range_start*`.
+        unsafe { dynamo_nvtx_range_end(id) };
     }
 
     pub fn mark<M: std::fmt::Display>(name: M) {
         let name = c_name(name);
-        // SAFETY: signature matches `void ffi_mark(const char *)`.
-        unsafe { ffi_mark(name.as_ptr()) };
+        // SAFETY: signature matches `void dynamo_nvtx_mark(const char *)`.
+        unsafe { dynamo_nvtx_mark(name.as_ptr()) };
+    }
+
+    pub fn mark_payload<M: std::fmt::Display>(name: M, payload: u64) {
+        let name = c_name(name);
+        // SAFETY: signature matches `void dynamo_nvtx_mark_payload(const char *, uint64_t)`.
+        unsafe { dynamo_nvtx_mark_payload(name.as_ptr(), payload) };
     }
 
     pub fn name_thread<M: std::fmt::Display>(name: M) {
         let name = c_name(name);
-        // SAFETY: signature matches `void ffi_name_thread(const char *)`.
-        unsafe { ffi_name_thread(name.as_ptr()) };
+        // SAFETY: signature matches `void dynamo_nvtx_name_thread(const char *)`.
+        unsafe { dynamo_nvtx_name_thread(name.as_ptr()) };
     }
 }
 
@@ -290,6 +336,24 @@ pub fn mark_impl<M: std::fmt::Display>(name: M) {
     let _ = name;
 }
 
+/// Record a marker with an optional precomputed request key. Prefer
+/// [`dynamo_nvtx_keyed_mark!`].
+#[doc(hidden)]
+#[inline(always)]
+pub fn keyed_mark_impl<M: std::fmt::Display>(stage: M, key: Option<u64>) {
+    #[cfg(feature = "nvtx")]
+    {
+        if NVTX_ENABLED.load(Ordering::Relaxed) {
+            match key {
+                Some(key) => ffi::mark_payload(stage, key),
+                None => ffi::mark(stage),
+            }
+        }
+    }
+    #[cfg(not(feature = "nvtx"))]
+    let _ = (stage, key);
+}
+
 /// Name the current OS thread in the Nsight Systems timeline.
 /// No-op (compiled out) when the `nvtx` feature is off.
 #[inline(always)]
@@ -314,7 +378,7 @@ pub fn name_current_thread_impl<M: std::fmt::Display>(name: M) {
 #[cfg(feature = "nvtx")]
 pub struct NvtxRangeGuard {
     /// NVTX range id; `None` when annotations are disabled at runtime.
-    id: Option<i32>,
+    id: Option<u64>,
 }
 
 /// Zero-sized no-op guard used when the `nvtx` feature is off.
@@ -339,6 +403,36 @@ impl NvtxRangeGuard {
         {
             let _ = name;
             NvtxRangeGuard
+        }
+    }
+
+    /// Open a request-scoped range (static `stage`, `key` as the NVTX payload) if
+    /// annotations are on. Prefer [`dynamo_nvtx_request_range!`].
+    #[doc(hidden)]
+    pub fn new_with_payload<M: std::fmt::Display>(stage: M, key: u64) -> Self {
+        #[cfg(feature = "nvtx")]
+        {
+            let id = NVTX_ENABLED
+                .load(Ordering::Relaxed)
+                .then(|| ffi::range_start_payload(stage, key));
+            NvtxRangeGuard { id }
+        }
+        #[cfg(not(feature = "nvtx"))]
+        {
+            let _ = (stage, key);
+            NvtxRangeGuard
+        }
+    }
+
+    /// Open a range named `stage`, with `key` as the NVTX payload when it is `Some` and
+    /// without a payload when it is `None`, if annotations are on. Prefer
+    /// [`dynamo_nvtx_keyed_range!`].
+    #[doc(hidden)]
+    #[inline(always)]
+    pub fn new_keyed<M: std::fmt::Display>(stage: M, key: Option<u64>) -> Self {
+        match key {
+            Some(key) => Self::new_with_payload(stage, key),
+            None => Self::new(stage),
         }
     }
 
@@ -456,6 +550,227 @@ macro_rules! dynamo_nvtx_range {
             $crate::nvtx::NvtxRangeGuard::new($name)
         } else {
             $crate::nvtx::NvtxRangeGuard::inactive()
+        }
+    };
+}
+
+// ── Request-scoped messages ──────────────────────────────────────────────────
+
+/// Longest value (in bytes) emitted for any `rid=`/`key=` token.
+pub const MAX_VALUE_BYTES: usize = 128;
+
+/// Keys that always come first after `rid=`, in this order.
+const LEADING_KEYS: [&str; 3] = ["trace", "xrid", "engine_rid"];
+
+/// Append `value` sanitized for a space-separated token: whitespace becomes `_`,
+/// control characters are dropped, and the result is cut to [`MAX_VALUE_BYTES`] on a
+/// char boundary. Returns whether anything was written.
+fn push_sanitized(out: &mut String, value: &str) -> bool {
+    let start = out.len();
+    for ch in value.chars() {
+        let ch = if ch.is_whitespace() {
+            '_'
+        } else if ch.is_control() {
+            continue;
+        } else {
+            ch
+        };
+        if out.len() - start + ch.len_utf8() > MAX_VALUE_BYTES {
+            break;
+        }
+        out.push(ch);
+    }
+    out.len() > start
+}
+
+fn push_attr(out: &mut String, key: &str, value: &str) {
+    let rollback = out.len();
+    out.push(' ');
+    let key_start = out.len();
+    out.extend(key.chars().map(|c| {
+        if c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-') {
+            c
+        } else {
+            '_'
+        }
+    }));
+    if out.len() == key_start {
+        out.truncate(rollback);
+        return;
+    }
+    out.push('=');
+    if !push_sanitized(out, value) {
+        out.truncate(rollback);
+    }
+}
+
+/// Stage name of the request identity mark.
+pub const IDENTITY_STAGE: &str = "dynamo.request";
+
+/// The 64-bit NVTX payload that identifies a request: FNV-1a-64 of the UTF-8 request id
+/// with the top bit cleared, so the value stays positive in SQLite's signed INTEGER.
+///
+/// Stable across processes and languages (the Python tests pin the same vectors), which is
+/// what lets the frontend's and the workers' events for one request be joined.
+#[must_use]
+pub const fn rid_key(rid: &str) -> u64 {
+    const OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    let bytes = rid.as_bytes();
+    let mut hash = OFFSET_BASIS;
+    let mut i = 0;
+    while i < bytes.len() {
+        hash ^= bytes[i] as u64;
+        hash = hash.wrapping_mul(PRIME);
+        i += 1;
+    }
+    hash & 0x7FFF_FFFF_FFFF_FFFF
+}
+
+/// [`rid_key`]`(rid)` while annotations are on, `None` while they are off, so nothing is
+/// hashed on the off path.
+///
+/// Compute it once where one request opens several ranges, or one range per response
+/// chunk, and pass it to [`dynamo_nvtx_keyed_range!`].
+#[inline(always)]
+#[must_use]
+pub fn request_key(rid: &str) -> Option<u64> {
+    if enabled() { Some(rid_key(rid)) } else { None }
+}
+
+/// Render `<stage> rid=<rid>[ key=value]...`.
+///
+/// Used with [`IDENTITY_STAGE`] for the request identity mark. `trace`, `xrid` and
+/// `engine_rid` come first (in that order), then the remaining `attrs` sorted by key.
+/// Values are sanitized and bounded (see [`MAX_VALUE_BYTES`]) and attributes whose value
+/// ends up empty are omitted. This allocates; callers must test [`enabled()`] first (the
+/// `dynamo_nvtx_request_*` macros do).
+pub fn format_request_message(stage: &str, rid: &str, attrs: &[(&str, &str)]) -> String {
+    let mut out = String::with_capacity(stage.len() + rid.len() + 32 + attrs.len() * 24);
+    push_sanitized(&mut out, stage);
+    out.push_str(" rid=");
+    push_sanitized(&mut out, rid);
+
+    for key in LEADING_KEYS {
+        if let Some((_, value)) = attrs.iter().find(|(k, _)| *k == key) {
+            push_attr(&mut out, key, value);
+        }
+    }
+    let mut rest: Vec<&(&str, &str)> = attrs
+        .iter()
+        .filter(|(k, _)| !LEADING_KEYS.contains(k))
+        .collect();
+    rest.sort_by_key(|(k, _)| *k);
+    for (key, value) in rest {
+        push_attr(&mut out, key, value);
+    }
+    out
+}
+
+/// Message of the identity mark for `rid` with `attrs`.
+#[cfg(feature = "nvtx")]
+pub(crate) fn identity_message(rid: &str, attrs: &[(&str, &str)]) -> String {
+    format_request_message(IDENTITY_STAGE, rid, attrs)
+}
+
+/// Record a request-scoped marker. Prefer [`dynamo_nvtx_request_mark!`].
+#[doc(hidden)]
+#[inline(never)]
+pub fn request_mark_impl(stage: &str, rid: &str, attrs: &[(&str, &str)]) {
+    #[cfg(feature = "nvtx")]
+    {
+        if !enabled() {
+            return;
+        }
+        let key = rid_key(rid);
+        if !attrs.is_empty() {
+            ffi::mark_payload(identity_message(rid, attrs), key);
+        }
+        ffi::mark_payload(stage, key);
+    }
+    #[cfg(not(feature = "nvtx"))]
+    let _ = (stage, rid, attrs);
+}
+
+/// Open a request-scoped range. Prefer [`dynamo_nvtx_request_range!`].
+#[doc(hidden)]
+#[inline(never)]
+pub fn request_range_impl(stage: &str, rid: &str, attrs: &[(&str, &str)]) -> NvtxRangeGuard {
+    let key = rid_key(rid);
+    #[cfg(feature = "nvtx")]
+    if enabled() && !attrs.is_empty() {
+        ffi::mark_payload(identity_message(rid, attrs), key);
+    }
+    #[cfg(not(feature = "nvtx"))]
+    let _ = attrs;
+    NvtxRangeGuard::new_with_payload(stage, key)
+}
+
+/// Record a request-scoped NVTX marker: message `<stage>`, payload [`rid_key`]`(rid)`.
+///
+/// `$attrs` is an optional `&[(&str, &str)]`; when non-empty an identity mark
+/// (`dynamo.request rid=<rid> k=v...`, same payload) is emitted first. Nothing is formatted or allocated unless
+/// annotations are enabled. Zero-cost when the `nvtx` Cargo feature is off.
+#[macro_export]
+macro_rules! dynamo_nvtx_request_mark {
+    ($stage:expr, $rid:expr) => {
+        $crate::dynamo_nvtx_request_mark!($stage, $rid, &[])
+    };
+    ($stage:expr, $rid:expr, $attrs:expr) => {
+        if $crate::nvtx::enabled() {
+            $crate::nvtx::request_mark_impl($stage, $rid, $attrs);
+        }
+    };
+}
+
+/// Open a request-scoped NVTX range (message `<stage>`, payload [`rid_key`]`(rid)`) that
+/// closes when the returned guard drops. Safe to hold across `.await`.
+///
+/// `$attrs` is an optional `&[(&str, &str)]`; when non-empty an identity mark
+/// (`dynamo.request rid=<rid> k=v...`, same payload) is emitted first. Nothing is formatted or allocated unless
+/// annotations are enabled. Zero-cost when the `nvtx` Cargo feature is off.
+#[macro_export]
+macro_rules! dynamo_nvtx_request_range {
+    ($stage:expr, $rid:expr) => {
+        $crate::dynamo_nvtx_request_range!($stage, $rid, &[])
+    };
+    ($stage:expr, $rid:expr, $attrs:expr) => {
+        if $crate::nvtx::enabled() {
+            $crate::nvtx::request_range_impl($stage, $rid, $attrs)
+        } else {
+            $crate::nvtx::NvtxRangeGuard::inactive()
+        }
+    };
+}
+
+/// Open an NVTX range named `$stage` that closes when the returned guard drops, with the
+/// precomputed request key `$key: Option<u64>` (from [`nvtx::request_key`](crate::nvtx::request_key))
+/// as its payload. A `None` key opens the same range without a payload.
+///
+/// Unlike [`dynamo_nvtx_request_range!`], which hashes the request id at every call,
+/// this reuses one key, so per-chunk ranges cost no more than unkeyed ones. It never emits
+/// an identity mark. Safe to hold across `.await`. Zero-cost when the `nvtx` Cargo feature
+/// is off.
+#[macro_export]
+macro_rules! dynamo_nvtx_keyed_range {
+    ($stage:expr, $key:expr) => {
+        if $crate::nvtx::enabled() {
+            $crate::nvtx::NvtxRangeGuard::new_keyed($stage, $key)
+        } else {
+            $crate::nvtx::NvtxRangeGuard::inactive()
+        }
+    };
+}
+
+/// Record an NVTX marker named `$stage` with the precomputed request key `$key:
+/// Option<u64>` as its payload; a `None` key records it without one. The marker
+/// counterpart of [`dynamo_nvtx_keyed_range!`]. Zero-cost when the `nvtx` Cargo feature
+/// is off.
+#[macro_export]
+macro_rules! dynamo_nvtx_keyed_mark {
+    ($stage:expr, $key:expr) => {
+        if $crate::nvtx::enabled() {
+            $crate::nvtx::keyed_mark_impl($stage, $key);
         }
     };
 }
@@ -713,5 +1028,165 @@ mod tests {
 
         drop(disabled);
         drop(enabled);
+    }
+
+    const PIN_A: u64 = 3_414_815_163_700_866_188;
+    const PIN_UUID: u64 = 1_346_822_055_457_142_067;
+
+    // ── Request message formatter ────────────────────────────────────────────
+
+    #[test]
+    fn format_minimal_message() {
+        assert_eq!(
+            super::format_request_message("http-request", "abc", &[]),
+            "http-request rid=abc"
+        );
+    }
+
+    #[test]
+    fn format_orders_leading_keys_then_sorted_rest() {
+        let msg = super::format_request_message(
+            "stage",
+            "r1",
+            &[
+                ("zeta", "z"),
+                ("engine_rid", "e"),
+                ("alpha", "a"),
+                ("xrid", "x"),
+                ("trace", "t"),
+            ],
+        );
+        assert_eq!(
+            msg,
+            "stage rid=r1 trace=t xrid=x engine_rid=e alpha=a zeta=z"
+        );
+    }
+
+    #[test]
+    fn format_omits_empty_and_fully_dropped_values() {
+        let msg = super::format_request_message(
+            "s",
+            "r",
+            &[("xrid", ""), ("a", "\u{1}\u{7f}"), ("b", "ok"), ("", "v")],
+        );
+        assert_eq!(msg, "s rid=r b=ok");
+    }
+
+    #[test]
+    fn format_sanitizes_whitespace_and_control_chars() {
+        let msg = super::format_request_message(
+            "s",
+            "a b\tc\nd",
+            &[("xrid", "x y\u{0}z\r\n"), ("k=ey v", "v")],
+        );
+        assert_eq!(msg, "s rid=a_b_c_d xrid=x_yz__ k_ey_v=v");
+        assert_eq!(msg.matches(' ').count(), 3);
+    }
+
+    #[test]
+    fn format_truncates_on_char_boundary() {
+        let long = "a".repeat(500);
+        let msg = super::format_request_message("s", &long, &[]);
+        assert_eq!(msg, format!("s rid={}", "a".repeat(super::MAX_VALUE_BYTES)));
+
+        // 3-byte chars: 128 / 3 = 42 whole chars (126 bytes); never split one.
+        let wide = "\u{20ac}".repeat(100);
+        let msg = super::format_request_message("s", "r", &[("xrid", &wide)]);
+        let value = msg.strip_prefix("s rid=r xrid=").expect("prefix");
+        assert_eq!(value.chars().count(), 42);
+        assert_eq!(value.len(), 126);
+
+        // Exactly at the limit is kept whole.
+        let exact = "b".repeat(super::MAX_VALUE_BYTES);
+        assert!(super::format_request_message("s", &exact, &[]).ends_with(&exact));
+    }
+
+    #[test]
+    fn format_matches_the_parser_regex_shape() {
+        let msg = super::format_request_message(
+            "kv_router.route_request:prefill",
+            "123e4567-e89b-12d3-a456-426614174000",
+            &[
+                ("trace", "0af7651916cd43dd8448eb211c80319c"),
+                ("xrid", "my id"),
+            ],
+        );
+        let mut tokens = msg.split(' ');
+        assert_eq!(tokens.next(), Some("kv_router.route_request:prefill"));
+        assert!(tokens.next().expect("rid").starts_with("rid="));
+        for rest in tokens {
+            assert!(rest.contains('='), "{rest}");
+        }
+    }
+
+    #[test]
+    fn rid_key_is_fnv1a_with_top_bit_cleared() {
+        // Pinned; the Python tests assert the same vectors.
+        assert_eq!(super::rid_key(""), 5_472_609_002_491_880_229);
+        assert_eq!(super::rid_key("a"), PIN_A);
+        assert_eq!(
+            super::rid_key("6f1c2b0e-4a57-4c0c-9b3f-0d5e8a1b7c42"),
+            PIN_UUID
+        );
+        for rid in ["", "a", "zz", "6f1c2b0e-4a57-4c0c-9b3f-0d5e8a1b7c42"] {
+            assert!(super::rid_key(rid) < 1 << 63, "{rid:?}");
+        }
+    }
+
+    #[test]
+    fn request_macros_run_in_every_arm() {
+        #[cfg(feature = "nvtx")]
+        let flag = EnabledFlag::set(false);
+        dynamo_nvtx_request_mark!("test.mark", "rid-1");
+        dynamo_nvtx_request_mark!("test.mark", "rid-1", &[("k", "v")]);
+        let _r = dynamo_nvtx_request_range!("test.range", "rid-1");
+        #[cfg(feature = "nvtx")]
+        {
+            flag.store(true);
+            dynamo_nvtx_request_mark!("test.mark", "rid-1", &[("k", "v")]);
+            let _r = dynamo_nvtx_request_range!("test.range", "rid-1", &[("k", "v")]);
+        }
+    }
+
+    /// `request_key` hashes only while enabled, and the keyed range opens with or
+    /// without a key.
+    #[test]
+    fn keyed_range_runs_in_every_arm() {
+        #[cfg(feature = "nvtx")]
+        let flag = EnabledFlag::set(false);
+        assert_eq!(super::request_key("a"), None);
+        let _keyed = dynamo_nvtx_keyed_range!("test.keyed", super::request_key("a"));
+        let _unkeyed = dynamo_nvtx_keyed_range!("test.keyed", None);
+        dynamo_nvtx_keyed_mark!("test.keyed_mark", super::request_key("a"));
+        #[cfg(feature = "nvtx")]
+        {
+            flag.store(true);
+            let key = super::request_key("a");
+            dynamo_nvtx_keyed_mark!("test.keyed_mark", key);
+            dynamo_nvtx_keyed_mark!("test.keyed_mark", None);
+            assert_eq!(key, Some(PIN_A));
+            let keyed = dynamo_nvtx_keyed_range!("test.keyed", key);
+            let unkeyed = dynamo_nvtx_keyed_range!("test.keyed", None);
+            assert!(keyed.id.is_some(), "a keyed range opened while enabled");
+            assert!(
+                unkeyed.id.is_some(),
+                "an unkeyed range opened while enabled"
+            );
+        }
+    }
+
+    /// Nothing is evaluated or formatted while disabled.
+    #[cfg(feature = "nvtx")]
+    #[test]
+    fn request_macros_skip_formatting_when_disabled() {
+        let _flag = EnabledFlag::set(false);
+        let evaluated = std::cell::Cell::new(false);
+        let probe = || {
+            evaluated.set(true);
+            "x"
+        };
+        dynamo_nvtx_request_mark!("s", probe());
+        let _guard = dynamo_nvtx_request_range!("s", probe());
+        assert!(!evaluated.get());
     }
 }
