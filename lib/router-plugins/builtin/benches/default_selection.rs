@@ -434,8 +434,8 @@ fn kv_capacity_aware(c: &mut Criterion) {
         std::fs::write(
             file.path(),
             format!(
-                "worker_selection:\n  decode: kvca\n  instances:\n    - name: kvca\n      \
-                 type: dynamo-kv-capacity-aware\n      parameters: {parameters}\n"
+                "worker_selection:\n  decode:\n    type: dynamo-kv-capacity-aware\n    \
+                 parameters: {parameters}\n"
             ),
         )
         .unwrap();
