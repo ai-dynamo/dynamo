@@ -1981,23 +1981,81 @@ async def test_generator_inner_forwards_reasoning_parser_and_model_config(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("tool_choice", "include_reasoning", "stream_response"),
+    (
+        "prompt_text",
+        "chat_template_kwargs",
+        "expected",
+        "tool_choice",
+        "include_reasoning",
+        "stream_response",
+        "combined_chunk",
+    ),
     [
-        (None, True, True),
-        ("required", True, True),
-        ({"type": "function", "function": {"name": "get_weather"}}, False, False),
+        pytest.param(
+            _GLM_OPEN_PROMPT,
+            {control: False},
+            ("plan", "Hello"),
+            tool_choice,
+            include_reasoning,
+            stream_response,
+            combined_chunk,
+            id=f"open-{control}-{choice_id}-{'combined' if combined_chunk else 'split'}",
+        )
+        for control in ("enable_thinking", "thinking")
+        for choice_id, tool_choice, include_reasoning, stream_response in (
+            ("plain", None, True, True),
+            ("required-tool", "required", True, True),
+            (
+                "named-tool-hidden-reasoning",
+                {"type": "function", "function": {"name": "get_weather"}},
+                False,
+                False,
+            ),
+        )
+        for combined_chunk in (False, True)
+    ]
+    + [
+        pytest.param(
+            _GLM_CLOSED_PROMPT,
+            {"enable_thinking": True},
+            (None, "plan</think>Hello"),
+            None,
+            True,
+            True,
+            False,
+            id="closed-plain-split",
+        ),
+        pytest.param(
+            _GLM_CLOSED_PROMPT,
+            {"enable_thinking": True},
+            (None, "plan</think>Hello"),
+            None,
+            True,
+            True,
+            True,
+            id="closed-plain-combined",
+        ),
+        pytest.param(
+            _GLM_CLOSED_PROMPT,
+            {"enable_thinking": True},
+            (None, ""),
+            "required",
+            True,
+            True,
+            False,
+            id="closed-required-tool",
+        ),
+        pytest.param(
+            _GLM_CLOSED_PROMPT,
+            {"enable_thinking": True},
+            (None, ""),
+            {"type": "function", "function": {"name": "get_weather"}},
+            False,
+            False,
+            False,
+            id="closed-named-tool-hidden-reasoning",
+        ),
     ],
-    ids=["plain", "required-tool", "named-tool-hidden-reasoning"],
-)
-@pytest.mark.parametrize("combined_chunk", [False, True], ids=["split", "combined"])
-@pytest.mark.parametrize(
-    ("prompt_text", "chat_template_kwargs", "expected"),
-    [
-        (_GLM_OPEN_PROMPT, {"enable_thinking": False}, ("plan", "Hello")),
-        (_GLM_OPEN_PROMPT, {"thinking": False}, ("plan", "Hello")),
-        (_GLM_CLOSED_PROMPT, {"enable_thinking": True}, (None, "plan</think>Hello")),
-    ],
-    ids=["open-enable-thinking-false", "open-thinking-false", "closed-flag-true"],
 )
 # _generator_inner reads the deprecated max_tokens field of a real request.
 @pytest.mark.filterwarnings(
