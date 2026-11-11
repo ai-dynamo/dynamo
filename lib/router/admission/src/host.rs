@@ -7,9 +7,9 @@
 //! host contract (hosts inventory v2, section 3).
 
 pub use crate::classifier::{AbortCause, RequestLifecycle, RequestProgress, WorkerView};
-pub use crate::placement::WorkerPlacement;
+pub use crate::placement::SessionLane;
 pub use crate::profile::{PolicyClassConfig, PolicyProfile, RouterQueuePolicy};
-pub use crate::queue::{PolicyQueue, QueueMetadata, QueueRejection, QueueSnapshot};
+pub use crate::queue::{PolicyQueue, QueueMetadata, QueueRejection, QueueSnapshot, RecheckScope};
 
 // What the frontend host (lib/llm) names beyond the lists above.
 pub use crate::queue::QueueLimitKind;

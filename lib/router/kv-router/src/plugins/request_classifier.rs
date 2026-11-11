@@ -13,9 +13,9 @@ mod registry;
 
 pub use dynamo_admission::classifier::{
     AbortCause, ClassificationError, ClassificationOverrides, ClassifierError, ClassifyEvent,
-    ClassifyFuture, ClassifyRequest, NoWorkers, RequestClassifier, RequestClassifierContext,
-    RequestClassifierRuntime, RequestLifecycle, RequestProgress, RequestProgressUpdater,
-    WorkerCacheView, WorkerLoadView, WorkerView,
+    ClassifyRequest, DispatchDecision, DispatchGate, DispatchHead, DispatchRecheck, NoWorkers,
+    RequestClassifier, RequestClassifierContext, RequestClassifierRuntime, RequestLifecycle,
+    RequestProgress, RequestProgressUpdater, WorkerCacheView, WorkerLoadView, WorkerView,
 };
 
 pub(crate) use config::RawRequestClassifierConfig;

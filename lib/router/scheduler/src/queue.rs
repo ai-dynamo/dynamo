@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::cell::Cell;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
@@ -15,7 +16,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
 
 use self::capacity::CapacityUpdates;
-use super::filter::{RoutingEligibility, worker_config_for_rank};
+use super::filter::RoutingEligibility;
 use super::overlap::SelectedWorkerTierSnapshot;
 use super::overlap_refresh::{
     NoopOverlapScoresRefresh, OVERLAP_REFRESH_TIMEOUT, OverlapScoresRefresh, RefreshedOverlap,
@@ -35,9 +36,14 @@ use super::types::{
 use crate::protocols::{WorkerConfigLike, WorkerSelectionResult};
 use crate::selector::WorkerCapacityExt;
 use crate::types::RejectThresholdsProvider;
-use dynamo_admission::classifier::{ClassificationOverrides, ClassifyRequest};
-use dynamo_admission::placement::WorkerPlacement;
-use dynamo_admission::queue::{PolicyQueue, QueueMetadata, QueueSnapshot};
+use dynamo_admission::classifier::{
+    ClassificationOverrides, ClassifyRequest, DispatchDecision, DispatchGate, DispatchHead,
+    DispatchRecheck,
+};
+use dynamo_admission::placement::SessionLane;
+use dynamo_admission::queue::{
+    BlockReason, LaneCheck, PolicyQueue, QueueMetadata, QueueSnapshot, RecheckScope,
+};
 use dynamo_admission::{PolicyClassConfig, PolicyProfile};
 use dynamo_kv_hashing::LocalBlockHash;
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
@@ -96,6 +102,60 @@ struct QueuedRequest {
     block_hashes: Option<Vec<LocalBlockHash>>,
     /// Actor turn that received the request. Its prepared rows last only that turn.
     enqueue_turn: u64,
+    /// The dispatch gate's last `Go` target for this head, written by the dispatch predicate
+    /// and taken when the head leaves the queue. Only the actor touches it.
+    gate_target: Cell<Option<WorkerWithDpRank>>,
+}
+
+impl QueuedRequest {
+    fn dispatch_head<'a>(&'a self, policy_class: &'a str) -> DispatchHead<'a> {
+        DispatchHead::new(
+            self.request.mode.request_id(),
+            self.request.session_context.as_ref(),
+            self.request.isl_tokens,
+            self.request.pinned_worker,
+            policy_class,
+            self.enqueue_at,
+        )
+    }
+}
+
+/// Asks the dispatch gate about one head inside a dispatch predicate: `false` holds the head
+/// and records the earliest requested recheck still in the future; `true` stores the gate's
+/// target on the head.
+fn gate_allows(
+    gate: &dyn DispatchGate,
+    policy_class: &str,
+    queued: &QueuedRequest,
+    recheck_at: &Cell<Option<Instant>>,
+) -> bool {
+    match gate.check(&queued.dispatch_head(policy_class)) {
+        DispatchDecision::Go { target } => {
+            queued.gate_target.set(target);
+            true
+        }
+        DispatchDecision::Hold { until } => {
+            // A deadline that already passed arms nothing: re-arming it would wake the actor
+            // again at once while the gate still holds.
+            if let Some(until) = until.filter(|until| *until > Instant::now()) {
+                recheck_at.set(Some(recheck_at.get().map_or(until, |at| at.min(until))));
+            }
+            false
+        }
+    }
+}
+
+/// The channel a capacity change wakes the actor on: the capacity channel when a class queues
+/// on capacity, else the actor's wake channel once a dispatch gate is installed, since a held
+/// gate head may be waiting for room. `None` when nothing waits on capacity.
+fn capacity_wake<'a>(
+    capacity_updates: &'a Option<Arc<CapacityUpdates>>,
+    actor_wake: &'a Arc<CapacityUpdates>,
+    dispatch_gate: &OnceLock<Arc<dyn DispatchGate>>,
+) -> Option<&'a Arc<CapacityUpdates>> {
+    capacity_updates
+        .as_ref()
+        .or_else(|| dispatch_gate.get().map(|_| actor_wake))
 }
 
 /// Candidate rows built on the caller task, before the request reaches the actor.
@@ -333,9 +393,9 @@ enum Admission {
 enum Drain {
     /// Nothing made work ready.
     None,
-    /// An arrival entered the queue or was booked. Only lanes of workers with recorded
-    /// capacity changes are rechecked, so an older blocked pinned lane competes with later
-    /// shared arrivals.
+    /// An arrival entered the queue or was booked. Blocked lanes are rechecked only when a
+    /// capacity change was recorded, so an older held session competes with later shared
+    /// arrivals once anything changed.
     Enqueued,
     /// Every blocked lane is rechecked.
     Full,
@@ -784,7 +844,7 @@ struct SchedulerQueueActor<
     pending: PolicyQueue<QueuedRequest>,
     class_timers: ClassTimers,
     cleanup: Arc<AdmissionCleanup>,
-    capacity_updates: Option<Arc<CapacityUpdates>>,
+    capacity_updates: Arc<CapacityUpdates>,
     capacity_workers: FxHashSet<WorkerWithDpRank>,
     profile: Arc<PolicyProfile>,
     pending_count: Arc<AtomicUsize>,
@@ -815,6 +875,10 @@ struct SchedulerQueueActor<
     /// Per-candidate cost capture for admitted selections, installed once by the host.
     selection_trace: Arc<OnceLock<SelectionTraceSpec>>,
     reject_thresholds: Option<RejectThresholdsProvider>,
+    /// The request classifier's dispatch gate, installed once by the host.
+    dispatch_gate: Arc<OnceLock<Arc<dyn DispatchGate>>>,
+    /// Earliest recheck a held head asked for; cleared when its timer fires.
+    gate_recheck_at: Option<Instant>,
 }
 
 /// Queue that gates scheduling requests behind a capacity check.
@@ -853,6 +917,9 @@ pub struct SchedulerQueue<
     /// Per-candidate cost capture for admitted selections, installed once by the host.
     selection_trace: Arc<OnceLock<SelectionTraceSpec>>,
     reject_thresholds: Option<RejectThresholdsProvider>,
+    dispatch_gate: Arc<OnceLock<Arc<dyn DispatchGate>>>,
+    /// Wakes the actor for a full lane recheck, whether or not any class queues.
+    actor_wake: Arc<CapacityUpdates>,
     #[allow(clippy::type_complexity)]
     // Covariant type markers, without ownership or auto-trait bounds.
     _marker: PhantomData<fn() -> (P, C, Sel, RF)>,
@@ -977,11 +1044,18 @@ impl<
         let cleanup = Arc::new(AdmissionCleanup::default());
         let non_max_overlap_selection_observer = Arc::new(OnceLock::new());
         let selection_trace = Arc::new(OnceLock::new());
+        let dispatch_gate = Arc::new(OnceLock::new());
         let start_time = Instant::now();
-        let capacity_updates = queueing_enabled.then(|| Arc::new(CapacityUpdates::new()));
+        // The actor always listens for wakes: a dispatch gate installed later holds heads even
+        // when no class queues on capacity, and its rechecks arrive here. Capacity changes
+        // wake it when a class queues on them or a gate is installed.
+        let actor_wake = Arc::new(CapacityUpdates::new());
+        let capacity_updates = queueing_enabled.then(|| Arc::clone(&actor_wake));
         let direct_release: DirectBookingRelease = {
             let slots = Arc::clone(&slots);
             let capacity_updates = capacity_updates.clone();
+            let actor_wake = Arc::clone(&actor_wake);
+            let dispatch_gate = Arc::clone(&dispatch_gate);
             Arc::new(move |booking| {
                 let outcome = slots.free_if_booking(
                     &booking.request_id,
@@ -990,7 +1064,8 @@ impl<
                     Instant::now(),
                 )?;
                 if outcome.is_applied()
-                    && let Some(updates) = &capacity_updates
+                    && let Some(updates) =
+                        capacity_wake(&capacity_updates, &actor_wake, &dispatch_gate)
                 {
                     updates.record(Some(booking.worker));
                 }
@@ -1009,7 +1084,7 @@ impl<
             pending,
             class_timers: ClassTimers::new(profile.classes().len()),
             cleanup: Arc::clone(&cleanup),
-            capacity_updates: capacity_updates.clone(),
+            capacity_updates: Arc::clone(&actor_wake),
             capacity_workers: FxHashSet::default(),
             profile: Arc::clone(&profile),
             pending_count: Arc::clone(&pending_count),
@@ -1033,6 +1108,8 @@ impl<
             non_max_overlap_selection_observer: Arc::clone(&non_max_overlap_selection_observer),
             selection_trace: Arc::clone(&selection_trace),
             reject_thresholds: reject_thresholds.clone(),
+            dispatch_gate: Arc::clone(&dispatch_gate),
+            gate_recheck_at: None,
         };
         tokio::spawn(actor.run());
         Self {
@@ -1057,6 +1134,8 @@ impl<
             non_max_overlap_selection_observer,
             selection_trace,
             reject_thresholds,
+            dispatch_gate,
+            actor_wake,
             _marker: PhantomData,
         }
     }
@@ -1079,6 +1158,20 @@ impl<
         self.non_max_overlap_selection_observer
             .set(observer)
             .is_ok()
+    }
+
+    /// Install the request classifier's dispatch gate. Returns `false` when one is already
+    /// installed. The gate is asked about every queued head and receives a recheck handle that
+    /// wakes the actor to re-ask every blocked lane, the ones it holds included. A class with a
+    /// zero queue limit never queues, so its requests are admitted without asking the gate; the
+    /// classifier sees them at `Sent`.
+    pub(crate) fn install_dispatch_gate(&self, gate: Arc<dyn DispatchGate>) -> bool {
+        if self.dispatch_gate.set(Arc::clone(&gate)).is_err() {
+            return false;
+        }
+        let wake = Arc::clone(&self.actor_wake);
+        gate.attach(DispatchRecheck::new(Arc::new(move || wake.record_gate())));
+        true
     }
 
     /// Install per-candidate cost capture for admitted selections.
@@ -1421,10 +1514,11 @@ impl<
             .map_err(|_| KvSchedulerError::SubscriberShutdown)?
     }
 
-    /// Wait for a full admission recheck when queueing is enabled and the actor is running.
-    /// With queueing disabled, return immediately without an admission barrier.
+    /// Wait for a full admission recheck when a class queues on capacity or a dispatch gate is
+    /// installed, and the actor is running. Otherwise nothing can be held: return immediately
+    /// without an admission barrier.
     pub async fn update(&self) {
-        if self.capacity_updates.is_none() {
+        if self.capacity_updates.is_none() && self.dispatch_gate.get().is_none() {
             return;
         }
 
@@ -1455,7 +1549,11 @@ impl<
 
     /// Notify pending admission after the authoritative mutation is complete.
     pub fn capacity_changed(&self, worker: Option<WorkerWithDpRank>) {
-        if let Some(updates) = &self.capacity_updates {
+        if let Some(updates) = capacity_wake(
+            &self.capacity_updates,
+            &self.actor_wake,
+            &self.dispatch_gate,
+        ) {
             updates.record(worker);
         }
     }
@@ -1556,36 +1654,37 @@ impl<
 {
     async fn run(mut self) {
         let mut commands_since_cleanup = 0usize;
-        let capacity_updates = self.capacity_updates.clone();
+        let capacity_updates = Arc::clone(&self.capacity_updates);
         loop {
             self.begin_turn();
-            let due_at = self.class_timers.next_deadline();
-            let command = if capacity_updates.is_none() && due_at.is_none() {
-                self.commands.recv().await
-            } else {
-                tokio::select! {
-                    command = self.commands.recv() => command,
-                    _ = async {
-                        if let Some(updates) = &capacity_updates {
-                            updates.notified().await;
-                        }
-                    }, if capacity_updates.is_some() => {
-                        let drain_cleanup =
-                            self.commands.is_empty() || commands_since_cleanup == 256;
-                        if drain_cleanup {
-                            commands_since_cleanup = 0;
-                        }
-                        self.handle_capacity_updates(drain_cleanup).await;
-                        continue;
+            let due_at = match (self.class_timers.next_deadline(), self.gate_recheck_at) {
+                (Some(class_due), Some(gate_due)) => Some(class_due.min(gate_due)),
+                (class_due, gate_due) => class_due.or(gate_due),
+            };
+            let command = tokio::select! {
+                command = self.commands.recv() => command,
+                _ = capacity_updates.notified() => {
+                    let drain_cleanup =
+                        self.commands.is_empty() || commands_since_cleanup == 256;
+                    if drain_cleanup {
+                        commands_since_cleanup = 0;
                     }
-                    _ = async {
-                        if let Some(due_at) = due_at {
-                            tokio::time::sleep_until(due_at).await;
-                        }
-                    }, if due_at.is_some() => {
-                        self.handle_update(None).await;
-                        continue;
+                    self.handle_capacity_updates(drain_cleanup).await;
+                    continue;
+                }
+                _ = async {
+                    if let Some(due_at) = due_at {
+                        tokio::time::sleep_until(due_at).await;
                     }
+                }, if due_at.is_some() => {
+                    // A class deadline expires its roots, which unblocks their lanes on its own;
+                    // only the gate's hold timer re-asks the lanes it holds.
+                    let gate_due = self.gate_recheck_at.is_some_and(|at| at <= Instant::now());
+                    if gate_due {
+                        self.gate_recheck_at = None;
+                    }
+                    self.handle_update(None, gate_due.then_some(RecheckScope::All)).await;
+                    continue;
                 }
             };
             let Some(command) = command else { break };
@@ -1636,7 +1735,7 @@ impl<
                 }
             }
             Drain::Enqueued => self.handle_enqueued(reply).await,
-            Drain::Full => self.handle_update(reply).await,
+            Drain::Full => self.handle_update(reply, Some(RecheckScope::All)).await,
         }
     }
 
@@ -1799,6 +1898,7 @@ impl<
             due_at,
             block_hashes,
             enqueue_turn: self.turn,
+            gate_target: Cell::new(None),
         };
         self.turn_prepared = prepared;
         if let Insertion::Refused { exposed } =
@@ -1839,10 +1939,14 @@ impl<
         let mut exposed = self.expire_due_classes(now);
         let priority_jump = queued.request.priority_jump;
         let strict_priority = queued.request.strict_priority;
-        let placement = queued
+        // A session's requests wait in their own lane, so a head that cannot dispatch, because
+        // a gate holds it or its bound worker is full, blocks only that session. Requests
+        // without a session share the class lane.
+        let lane = queued
             .request
-            .pinned_worker
-            .map_or(WorkerPlacement::Any, WorkerPlacement::Exact);
+            .session_context
+            .as_ref()
+            .map(|session| SessionLane::new(session.session_id()));
         let worker_count = self.workers_with_configs.borrow().len();
         loop {
             if due_at.is_some_and(|due_at| due_at <= Instant::now()) {
@@ -1854,7 +1958,7 @@ impl<
                 worker_count,
                 priority_jump,
                 strict_priority,
-                placement,
+                lane,
                 queued,
             ) {
                 Ok(()) => return Insertion::Queued,
@@ -2042,18 +2146,27 @@ impl<
         made_ready || (removed_ready_head && self.has_dispatchable_ready_head())
     }
 
-    fn has_dispatchable_ready_head(&self) -> bool {
+    /// Whether a lane head can dispatch now. A hold this asks about still arms the gate's
+    /// recheck, so a newly exposed root is woken at its own deadline.
+    fn has_dispatchable_ready_head(&mut self) -> bool {
         let decay_now = Instant::now();
         let slots = &self.slots;
         let available_ids = self.available_worker_ids.as_ref();
         let workers = &self.workers_with_configs;
-        self.pending.any_ready_head(|_, class, queued| {
+        let gate = self.dispatch_gate.get();
+        let gate_recheck_at = Cell::new(self.gate_recheck_at);
+        let dispatchable = self.pending.any_ready_head(|_, class, queued| {
+            if let Some(gate) = gate
+                && !gate_allows(gate.as_ref(), &class.name, queued, &gate_recheck_at)
+            {
+                return LaneCheck::Blocked(BlockReason::Gate);
+            }
             if !class.queueing_enabled() {
-                return true;
+                return LaneCheck::Dispatch;
             }
             let available = available_ids.and_then(|ids| ids.get(&queued.request));
             let configs = workers.borrow();
-            !Self::all_eligible_workers_full(
+            LaneCheck::from(!Self::all_eligible_workers_full(
                 &slots.worker_load_reader(decay_now),
                 &configs,
                 class.busy_thresholds,
@@ -2061,8 +2174,10 @@ impl<
                     .request
                     .eligibility()
                     .with_available_workers(available.as_deref()),
-            )
-        })
+            ))
+        });
+        self.gate_recheck_at = gate_recheck_at.get();
+        dispatchable
     }
 
     fn subtract_pending_counters(&self, class_index: usize, snapshot: QueueSnapshot) {
@@ -2072,36 +2187,35 @@ impl<
         self.subtract_class_counters(class_index, snapshot);
     }
 
-    /// Consume recorded capacity changes before choosing among shared and pinned lanes.
-    fn recheck_capacity_updates(&mut self, mut recheck_all: bool) {
-        if let Some(updates) = &self.capacity_updates {
-            recheck_all |= updates.drain_into(&mut self.capacity_workers);
+    /// Consume recorded capacity changes before draining. A capacity change re-asks the lanes
+    /// blocked on capacity: a blocked session head may be waiting on any of its eligible
+    /// workers, and the shared lane's head is asked again on every dispatch anyway. Lanes the
+    /// gate holds are re-asked only when the gate wakes the actor or its hold timer fires, since
+    /// capacity alone cannot free them. `recheck` widens the scope for the caller's own reason.
+    fn recheck_capacity_updates(&mut self, recheck: Option<RecheckScope>) {
+        let drained = self.capacity_updates.drain_into(&mut self.capacity_workers);
+        let mut scope = recheck;
+        if drained.gate_recheck {
+            scope = Some(RecheckScope::All);
         }
-        // Consume hints even when there is no pending work. Blocked pinned lanes
-        // count as ready here and still need their capacity rechecked.
-        if !self.pending.has_ready() {
-            return;
+        if drained.full_recheck || !self.capacity_workers.is_empty() {
+            scope = Some(scope.map_or(RecheckScope::Capacity, |scope| {
+                scope.max(RecheckScope::Capacity)
+            }));
         }
-        if !recheck_all {
-            let configs = self.workers_with_configs.borrow();
-            recheck_all = self
-                .capacity_workers
-                .iter()
-                .any(|&worker| worker_config_for_rank(&configs, worker).is_err());
-        }
-        if recheck_all {
-            self.pending.recheck_all_workers();
-        } else {
-            for &worker in &self.capacity_workers {
-                self.pending.recheck_worker(worker);
-            }
+        // Consume hints even when there is no pending work. Blocked lanes count as ready here
+        // and still need their recheck.
+        if let Some(scope) = scope
+            && self.pending.has_ready()
+        {
+            self.pending.recheck_blocked_lanes(scope);
         }
     }
 
     async fn handle_capacity_updates(&mut self, drain_cleanup: bool) {
         self.expire_due_classes(Instant::now());
         let cleanup_ready = drain_cleanup && self.drain_cleanup();
-        self.recheck_capacity_updates(cleanup_ready);
+        self.recheck_capacity_updates(cleanup_ready.then_some(RecheckScope::All));
         if !self.pending.has_ready() {
             return;
         }
@@ -2109,17 +2223,19 @@ impl<
     }
 
     /// Rechecks every blocked lane, then drains as [`Self::drain_ready`] does.
-    async fn handle_update(&mut self, reply: Option<CommandReply>) {
+    /// Drains after a change that may free blocked lanes: `recheck` names the lanes to ask
+    /// again beyond what the recorded capacity changes call for.
+    async fn handle_update(&mut self, reply: Option<CommandReply>, recheck: Option<RecheckScope>) {
         self.expire_due_classes(Instant::now());
-        self.recheck_capacity_updates(true);
+        self.recheck_capacity_updates(recheck);
         self.drain_ready(reply).await;
     }
 
     /// Recheck recorded capacity changes before an enqueue drains the queue, so
-    /// an older blocked pinned lane competes with later shared arrivals.
+    /// an older blocked session lane competes with later shared arrivals.
     async fn handle_enqueued(&mut self, reply: Option<CommandReply>) {
         self.expire_due_classes(Instant::now());
-        self.recheck_capacity_updates(false);
+        self.recheck_capacity_updates(None);
         self.drain_ready(reply).await;
     }
 
@@ -2127,6 +2243,8 @@ impl<
     /// the drain, is sent before the first refresh await or when the drain ends, never held across
     /// that await.
     async fn drain_ready(&mut self, mut reply: Option<CommandReply>) {
+        // The gate is installed once, before the actor starts.
+        let gate = self.dispatch_gate.get().cloned();
         // Continuation draining stays actor-local; never self-send through the
         // bounded command channel while processing an update.
         loop {
@@ -2139,20 +2257,26 @@ impl<
             // Load is read after the previous admission booked, so this one sees that
             // reservation. Frees and peer bookings from other tasks can land between
             // two reads, as they can right after the gate.
+            let gate_recheck_at = Cell::new(self.gate_recheck_at);
             let extracted = {
                 let slots = &self.slots;
                 let available_ids = self.available_worker_ids.as_ref();
                 let workers = &self.workers_with_configs;
+                let gate = gate.as_deref();
                 self.pending.extract_next(|_, class, queued| {
+                    if let Some(gate) = gate
+                        && !gate_allows(gate, &class.name, queued, &gate_recheck_at)
+                    {
+                        return LaneCheck::Blocked(BlockReason::Gate);
+                    }
                     if !class.queueing_enabled() {
-                        return true;
+                        return LaneCheck::Dispatch;
                     }
                     let available = available_ids.and_then(|ids| ids.get(&queued.request));
                     let configs = workers.borrow();
-                    // TODO: This preserves head-of-line blocking within each policy
-                    // class. A blocked constrained head can stall later entries in
-                    // that class until a bounded non-HOL policy is introduced.
-                    !Self::all_eligible_workers_full(
+                    // A sessionless head waits in the class's shared lane, so one whose
+                    // eligible workers are full stalls the shared lane until they free.
+                    LaneCheck::from(!Self::all_eligible_workers_full(
                         &slots.worker_load_reader(decay_now),
                         &configs,
                         class.busy_thresholds,
@@ -2160,9 +2284,10 @@ impl<
                             .request
                             .eligibility()
                             .with_available_workers(available.as_deref()),
-                    )
+                    ))
                 })
             };
+            self.gate_recheck_at = gate_recheck_at.get();
             let Some((mut candidate, charge)) = extracted else {
                 break;
             };
@@ -2232,7 +2357,24 @@ impl<
                     }
                 }
             }
-            let queued = candidate.into_payload();
+            let mut queued = candidate.into_payload();
+            // The gate's `Go` target replaces the soft affinity target unless the caller
+            // pinned a worker; the gate learns the head left the queue once, here.
+            if let Some(gate) = &gate
+                && !released
+            {
+                let target = queued.gate_target.take();
+                if queued.request.pinned_worker.is_none()
+                    && let Some(target) = target
+                {
+                    queued.request.affinity_target = Some(target.into());
+                }
+                let policy_class = &self.profile.class(class_index).name;
+                gate.dispatched(
+                    &queued.dispatch_head(policy_class),
+                    queued.request.pinned_worker.or(target),
+                );
+            }
             // Only this turn's request has rows, and a refresh replaces the overlap
             // they were built from.
             let prepared = if queued.enqueue_turn == self.turn && !refreshed {
@@ -2298,7 +2440,7 @@ impl<
             ),
         );
         tokio::pin!(refresh);
-        let capacity_updates = self.capacity_updates.clone();
+        let capacity_updates = Arc::clone(&self.capacity_updates);
         let due_at = queued.due_at;
         loop {
             let timer = self.class_timers.next_deadline();
@@ -2323,11 +2465,7 @@ impl<
                         tokio::time::sleep_until(timer).await;
                     }
                 }, if timer.is_some() => RefreshEvent::ClassTimer,
-                _ = async {
-                    if let Some(updates) = &capacity_updates {
-                        updates.notified().await;
-                    }
-                }, if capacity_updates.is_some() => RefreshEvent::Capacity,
+                _ = capacity_updates.notified() => RefreshEvent::Capacity,
                 command = self.commands.recv() => match command {
                     Some(command) => RefreshEvent::Command(command),
                     None => return RefreshEnd::Shutdown,
@@ -2340,14 +2478,14 @@ impl<
                 }
                 RefreshEvent::Capacity => {
                     let cleanup_ready = self.drain_cleanup();
-                    self.recheck_capacity_updates(cleanup_ready);
+                    self.recheck_capacity_updates(cleanup_ready.then_some(RecheckScope::All));
                 }
                 RefreshEvent::Command(command) => {
                     let (drain, reply) = self.apply_command(command, true);
                     match drain {
                         Drain::None => {}
-                        Drain::Enqueued => self.recheck_capacity_updates(false),
-                        Drain::Full => self.recheck_capacity_updates(true),
+                        Drain::Enqueued => self.recheck_capacity_updates(None),
+                        Drain::Full => self.recheck_capacity_updates(Some(RecheckScope::All)),
                     }
                     if let Some(reply) = reply {
                         reply.send();
@@ -2871,6 +3009,7 @@ mod tests {
 
     use tokio::sync::{Barrier, watch};
 
+    use super::capacity::Drained;
     use super::*;
 
     use crate::OverlapSignals;
@@ -3953,7 +4092,7 @@ mod tests {
 
     #[tokio::test]
     async fn classifier_sequence_hashes_preserve_absence_empty_and_order() {
-        use dynamo_admission::classifier::{ClassifyFuture, RequestClassifier};
+        use dynamo_admission::classifier::{ClassifierError, RequestClassifier};
 
         struct InspectHashes(Option<Vec<u64>>, WorkerWithDpRank);
         impl RequestClassifier for InspectHashes {
@@ -3961,15 +4100,10 @@ mod tests {
                 &mut self,
                 request: ClassifyRequest,
                 _workers: &dyn WorkerView,
-            ) -> ClassifyFuture {
-                let expected = self.0.clone();
-                let pin = self.1;
-                Box::pin(async move {
-                    tokio::task::yield_now().await;
-                    assert_eq!(request.sequence_hashes(), expected.as_deref());
-                    assert_eq!(request.pinned_worker(), Some(pin));
-                    Ok(request)
-                })
+            ) -> Result<ClassifyRequest, Box<ClassifierError>> {
+                assert_eq!(request.sequence_hashes(), self.0.as_deref());
+                assert_eq!(request.pinned_worker(), Some(self.1));
+                Ok(request)
             }
         }
 
@@ -3984,103 +4118,14 @@ mod tests {
                 queue.build_classify_request(&request, Instant::now(), WorkerInputs::NONE);
             assert_eq!(request.token_seq, hashes);
             let mut classifier = InspectHashes(hashes, pin);
-            let pending = classifier.classify(classified, &ClassifierRows(workers));
-            // The independently pollable future must not borrow actor-owned data.
+            // The classification input owns its copy of the hashes and the pin.
             request.token_seq = Some(vec![99]);
             request.pinned_worker = None;
+            classifier
+                .classify(classified, &ClassifierRows(workers))
+                .unwrap();
             drop(request);
-            pending.await.unwrap();
         }
-    }
-
-    /// Measures real queue projection with snapshots held in pending classifier futures.
-    /// Run in release mode with CLASSIFIER_BENCH_HASHES ("none" or a count) and
-    /// CLASSIFIER_BENCH_PENDING set; source setup and cancellation are not timed.
-    #[tokio::test]
-    #[ignore = "CPU microbenchmark; run explicitly with --release --ignored --nocapture"]
-    async fn classifier_input_projection_benchmark() {
-        use dynamo_admission::classifier::{ClassifyFuture, RequestClassifier};
-        use std::hint::black_box;
-        use std::task::Context;
-        use std::time::Instant as WallClock;
-
-        struct Park;
-        impl RequestClassifier for Park {
-            fn classify(
-                &mut self,
-                request: ClassifyRequest,
-                _workers: &dyn WorkerView,
-            ) -> ClassifyFuture {
-                Box::pin(async move {
-                    std::future::pending::<()>().await;
-                    Ok(black_box(request))
-                })
-            }
-        }
-
-        let hash_count = std::env::var("CLASSIFIER_BENCH_HASHES").unwrap();
-        let hashes = if hash_count == "none" {
-            None
-        } else {
-            Some(hash_count.parse::<usize>().unwrap())
-        };
-        let retained: usize = std::env::var("CLASSIFIER_BENCH_PENDING")
-            .unwrap()
-            .parse()
-            .unwrap();
-        assert!(retained > 0 && retained <= 1024);
-        assert!(hashes.unwrap_or(0) <= 62_500);
-        let profile = PolicyProfile::synthetic(None, dynamo_admission::RouterQueuePolicy::Fcfs);
-        let (queue, _slots) = make_queue_with_profile(1, 16, 1_000_000, profile);
-        let sources: Vec<_> = (0..retained)
-            .map(|i| {
-                let (mut request, rx) = make_request(
-                    &format!("copy-bench-{i}"),
-                    hashes.unwrap_or(0).saturating_mul(16).max(1),
-                );
-                request.token_seq = hashes.map(|n| (0..n as u64).collect());
-                (request, rx)
-            })
-            .collect();
-        let mut classifier = Park;
-        let mut futures = Vec::with_capacity(retained);
-        let mut cx = Context::from_waker(futures_util::task::noop_waker_ref());
-        let ingress_at = Instant::now();
-        let repeats = (1024 / retained).max(1);
-        let mut samples = Vec::with_capacity(40);
-        for sample in 0..45 {
-            let mut elapsed = std::time::Duration::ZERO;
-            for _ in 0..repeats {
-                let start = WallClock::now();
-                for (request, _) in &sources {
-                    let (input, workers) = queue.build_classify_request(
-                        black_box(request),
-                        ingress_at,
-                        WorkerInputs::NONE,
-                    );
-                    let mut future = classifier.classify(input, &ClassifierRows(workers));
-                    assert!(future.as_mut().poll(&mut cx).is_pending());
-                    futures.push(future);
-                }
-                elapsed += start.elapsed();
-                // Keep every snapshot live until the batch ends; cancellation is excluded.
-                black_box(&futures);
-                futures.clear();
-            }
-            if sample >= 5 {
-                samples.push(elapsed.as_secs_f64() * 1e9 / (retained * repeats) as f64);
-            }
-        }
-        println!(
-            "CLASSIFIER_BENCH {}",
-            serde_json::json!({
-                "hashes": hashes,
-                "pending": retained,
-                "repeats_per_sample": repeats,
-                "classify_request_bytes": std::mem::size_of::<ClassifyRequest>(),
-                "ns_per_request_samples": samples,
-            })
-        );
     }
 
     #[tokio::test]
@@ -4311,6 +4356,121 @@ mod tests {
         slots.assert_completely_drained(decay_now());
     }
 
+    fn in_session(request: &mut SchedulingRequest, session_id: &str) {
+        request.session_context = Some(dynamo_router_protocol::session::SessionContext::new(
+            session_id.into(),
+            None,
+            None,
+            None,
+        ));
+    }
+
+    /// A gate that holds every head without a deadline and counts how often it is asked.
+    struct CountingHoldGate {
+        checks: AtomicUsize,
+        recheck: OnceLock<DispatchRecheck>,
+    }
+
+    impl DispatchGate for CountingHoldGate {
+        fn check(&self, _head: &DispatchHead<'_>) -> DispatchDecision {
+            self.checks.fetch_add(1, Ordering::SeqCst);
+            DispatchDecision::Hold { until: None }
+        }
+
+        fn attach(&self, recheck: DispatchRecheck) {
+            let _ = self.recheck.set(recheck);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn capacity_change_does_not_re_ask_gate_held_lanes() {
+        let (queue, _slots) = make_queue(1, 16, 256, Some(0.0));
+        let gate = Arc::new(CountingHoldGate {
+            checks: AtomicUsize::new(0),
+            recheck: OnceLock::new(),
+        });
+        assert!(queue.install_dispatch_gate(Arc::clone(&gate) as Arc<dyn DispatchGate>));
+        for (request_id, session) in [("a1", "a"), ("b1", "b")] {
+            let (mut request, _rx) = make_request(request_id, 256);
+            in_session(&mut request, session);
+            queue.enqueue(request).await;
+        }
+        assert_eq!(queue.pending_count(), 2);
+        let held = gate.checks.load(Ordering::SeqCst);
+        assert!(held >= 2, "each head was asked once on arrival");
+
+        // A freed worker cannot release a head the gate holds: the gate is not asked again.
+        queue.capacity_changed(Some(WorkerWithDpRank::new(0, 0)));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(gate.checks.load(Ordering::SeqCst), held);
+
+        // The gate's own wake re-asks both held lanes.
+        gate.recheck.get().expect("gate attached").notify();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while gate.checks.load(Ordering::SeqCst) < held + 2 {
+            assert!(
+                Instant::now() < deadline,
+                "gate wake should re-ask held lanes"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(gate.checks.load(Ordering::SeqCst), held + 2);
+        assert_eq!(queue.pending_count(), 2);
+    }
+
+    /// A gate that holds every head until a test-set instant; `None` holds with no deadline.
+    struct DeadlineGate(parking_lot::Mutex<Option<Instant>>);
+
+    impl DispatchGate for DeadlineGate {
+        fn check(&self, _head: &DispatchHead<'_>) -> DispatchDecision {
+            DispatchDecision::Hold {
+                until: *self.0.lock(),
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cleanup_that_exposes_a_held_root_arms_its_gate_deadline() {
+        let (queue, slots) = make_queue(1, 16, 256, Some(0.5));
+        let gate = Arc::new(DeadlineGate(parking_lot::Mutex::new(None)));
+        assert!(queue.install_dispatch_gate(Arc::clone(&gate) as Arc<dyn DispatchGate>));
+        let mut actor = actor_for_test(&queue, &slots);
+        let metadata = |request: &SchedulingRequest| {
+            queue
+                .default_queue_metadata(request, Instant::now())
+                .unwrap()
+        };
+
+        // Session a's lane is held with no deadline: nothing is armed.
+        let head_transfer = Arc::new(AdmissionLifecycleTransfer::new("head".to_string()));
+        let (mut head, _head_rx) = make_request("head", 64);
+        in_session(&mut head, "a");
+        let head_metadata = metadata(&head);
+        actor.handle_enqueue(
+            head,
+            None,
+            Some(Arc::clone(&head_transfer)),
+            None,
+            None,
+            head_metadata,
+        );
+        let (mut next, _next_rx) = make_request("next", 64);
+        in_session(&mut next, "a");
+        let next_metadata = metadata(&next);
+        actor.handle_enqueue(next, None, None, None, None, next_metadata);
+        actor.handle_update(None, Some(RecheckScope::All)).await;
+        assert_eq!(actor.gate_recheck_at, None);
+
+        // Cancelling the head exposes `next`, which the gate now holds until a deadline.
+        let until = Instant::now() + Duration::from_secs(5);
+        *gate.0.lock() = Some(until);
+        actor.cleanup.enqueue(AdmissionCleanupEntry {
+            target: SchedulerCleanupTarget::AdmissionLifecycle(head_transfer),
+        });
+        assert!(!actor.drain_cleanup());
+        assert_eq!(actor.gate_recheck_at, Some(until));
+    }
+
     // The caller drives this actor directly. Its hints are separate from the
     // idle actor spawned by make_queue, so tests control notification ordering.
     fn actor_for_test(
@@ -4340,7 +4500,7 @@ mod tests {
             pending: PolicyQueue::with_class_budget_expiry(&queue.profile),
             class_timers: ClassTimers::new(queue.profile.classes().len()),
             cleanup: Arc::clone(&queue.cleanup),
-            capacity_updates: None,
+            capacity_updates: Arc::new(CapacityUpdates::new()),
             capacity_workers: FxHashSet::default(),
             profile: Arc::clone(&queue.profile),
             pending_count: Arc::clone(&queue.pending_count),
@@ -4366,6 +4526,8 @@ mod tests {
             ),
             selection_trace: Arc::clone(&queue.selection_trace),
             reject_thresholds: queue.reject_thresholds.clone(),
+            dispatch_gate: Arc::clone(&queue.dispatch_gate),
+            gate_recheck_at: None,
         }
     }
 
@@ -4594,7 +4756,7 @@ mod tests {
             let (queue, slots) = make_queue(1, 16, 64, Some(0.0));
             let mut actor = actor_for_test(&queue, &slots);
             let updates = Arc::new(CapacityUpdates::new());
-            actor.capacity_updates = Some(Arc::clone(&updates));
+            actor.capacity_updates = Arc::clone(&updates);
             let worker = WorkerWithDpRank::new(0, 0);
 
             let (active, mut active_rx) = make_request("active", 64);
@@ -6070,7 +6232,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn edf_blocked_pinned_lane_does_not_block_other_worker() {
+    async fn edf_blocked_session_lane_does_not_block_other_worker() {
         let profile = policy_profile(
             None,
             vec![PolicyClassConfig {
@@ -6087,13 +6249,15 @@ mod tests {
 
         let (mut first, first_rx) = make_request("pinned-1", 256);
         first.pinned_worker = Some(WorkerWithDpRank::new(1, 0));
+        in_session(&mut first, "a");
         queue.enqueue(first).await;
         let first_resp = first_rx.await.unwrap().unwrap();
         assert_eq!(first_resp.best_worker, WorkerWithDpRank::new(1, 0));
 
-        // The earliest-due request waits for its full pinned worker.
+        // The earliest-due request waits in its session's lane for its full pinned worker.
         let (mut second, mut second_rx) = make_request("pinned-2", 256);
         second.pinned_worker = Some(WorkerWithDpRank::new(1, 0));
+        in_session(&mut second, "b");
         queue.enqueue(second).await;
         assert_eq!(queue.pending_count(), 1);
         assert!(
@@ -6101,9 +6265,10 @@ mod tests {
             "request should remain queued"
         );
 
-        // A later request pinned to the idle worker does not wait behind it.
+        // A later session pinned to the idle worker does not wait behind it.
         let (mut other_worker, mut other_worker_rx) = make_request("pinned-0", 256);
         other_worker.pinned_worker = Some(WorkerWithDpRank::new(0, 0));
+        in_session(&mut other_worker, "c");
         queue.enqueue(other_worker).await;
         assert_eq!(queue.pending_count(), 1);
         let other_worker_resp = other_worker_rx
@@ -6477,17 +6642,19 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_blocked_pinned_lane_does_not_block_other_worker() {
+    async fn blocked_session_lane_does_not_block_other_worker() {
         let (queue, slots) = make_queue(2, 16, 256, Some(0.0));
 
         let (mut first, first_rx) = make_request("pinned-1", 256);
         first.pinned_worker = Some(WorkerWithDpRank::new(1, 0));
+        in_session(&mut first, "a");
         queue.enqueue(first).await;
         let first_resp = first_rx.await.unwrap().unwrap();
         assert_eq!(first_resp.best_worker, WorkerWithDpRank::new(1, 0));
 
         let (mut second, mut second_rx) = make_request("pinned-2", 256);
         second.pinned_worker = Some(WorkerWithDpRank::new(1, 0));
+        in_session(&mut second, "b");
         queue.enqueue(second).await;
         assert_eq!(queue.pending_count(), 1);
         assert!(
@@ -6497,6 +6664,7 @@ mod tests {
 
         let (mut other_worker, mut other_worker_rx) = make_request("pinned-0", 256);
         other_worker.pinned_worker = Some(WorkerWithDpRank::new(0, 0));
+        in_session(&mut other_worker, "c");
         queue.enqueue(other_worker).await;
         assert_eq!(queue.pending_count(), 1);
         let other_worker_resp = other_worker_rx
@@ -7122,7 +7290,7 @@ mod tests {
         assert!(enqueue_request_into_actor(
             &queue, &mut actor, active, None, None
         ));
-        actor.handle_update(None).await;
+        actor.handle_update(None, Some(RecheckScope::All)).await;
         active_rx.try_recv().unwrap().unwrap();
 
         let (mut head, mut head_rx) = make_request("head", 16);
@@ -7156,7 +7324,7 @@ mod tests {
             advance_clock_on_response(&mut response_rx, Duration::from_millis(2));
             overdue_rx = Some(response_rx);
         }
-        actor.handle_update(None).await;
+        actor.handle_update(None, Some(RecheckScope::All)).await;
         assert!(matches!(
             successor_rx.try_recv(),
             Err(oneshot::error::TryRecvError::Empty)
@@ -7300,7 +7468,7 @@ mod tests {
         let (active, mut active_rx) = make_request("active", 64);
         let active_metadata = metadata(&active);
         assert!(actor.handle_enqueue(active, None, None, None, None, active_metadata));
-        actor.handle_update(None).await;
+        actor.handle_update(None, Some(RecheckScope::All)).await;
         active_rx.try_recv().unwrap().unwrap();
         assert_eq!(actor.class_timers.armed[0], None);
 
@@ -7334,13 +7502,13 @@ mod tests {
         assert_eq!(actor.class_timers.armed[0], at(150));
         // The head's old due time passes without a rejection.
         tokio::time::advance(Duration::from_millis(50)).await;
-        actor.handle_update(None).await;
+        actor.handle_update(None, Some(RecheckScope::All)).await;
         assert!(matches!(
             later_rx.try_recv(),
             Err(oneshot::error::TryRecvError::Empty)
         ));
         tokio::time::advance(Duration::from_millis(50)).await;
-        actor.handle_update(None).await;
+        actor.handle_update(None, Some(RecheckScope::All)).await;
         assert!(matches!(
             later_rx.try_recv(),
             Ok(Err(KvSchedulerError::DeadlineExceeded))
@@ -7858,12 +8026,13 @@ mod tests {
         queue.capacity_changed(Some(worker));
         queue.update().await;
         let mut workers = FxHashSet::default();
-        assert!(
-            !queue
+        assert_eq!(
+            queue
                 .capacity_updates
                 .as_ref()
                 .unwrap()
-                .drain_into(&mut workers)
+                .drain_into(&mut workers),
+            Drained::default()
         );
         assert!(workers.is_empty());
         assert!(matches!(
@@ -7971,7 +8140,7 @@ mod tests {
         let mut actor = actor_for_test(&queue, &slots);
         let start = Instant::now();
         let (_, mut active_rx) = enqueue_into_actor(&queue, &mut actor, "active", None);
-        actor.handle_update(None).await;
+        actor.handle_update(None, Some(RecheckScope::All)).await;
         active_rx.try_recv().unwrap().unwrap();
         let (queued, _expires_rx) = enqueue_into_actor(&queue, &mut actor, "expires", None);
         assert!(queued);
@@ -8192,7 +8361,7 @@ mod tests {
             (request, response_rx)
         };
         let (_, mut active_rx) = enqueue_into_actor(&queue, &mut actor, "active", None);
-        actor.handle_update(None).await;
+        actor.handle_update(None, Some(RecheckScope::All)).await;
         active_rx.try_recv().unwrap().unwrap();
 
         // Each class queues a head with only a class due time. A later explicit deadline
@@ -8238,7 +8407,7 @@ mod tests {
 
         // At the class budget, only the opted-in class rejects its waiting head.
         tokio::time::advance(Duration::from_millis(100)).await;
-        actor.handle_update(None).await;
+        actor.handle_update(None, Some(RecheckScope::All)).await;
         assert!(matches!(
             heads[0].try_recv(),
             Ok(Err(KvSchedulerError::DeadlineExceeded))
@@ -8251,7 +8420,7 @@ mod tests {
         }
         // The explicit deadline still expires behind the disabled class's ordering-only head.
         tokio::time::advance(Duration::from_millis(100)).await;
-        actor.handle_update(None).await;
+        actor.handle_update(None, Some(RecheckScope::All)).await;
         assert!(matches!(
             hidden_rx.try_recv(),
             Ok(Err(KvSchedulerError::DeadlineExceeded))
@@ -8266,7 +8435,7 @@ mod tests {
         // Freed capacity admits both heads whose class budgets only ordered them.
         free_requests(&slots, &["active"]);
         for _ in 0..2 {
-            actor.handle_update(None).await;
+            actor.handle_update(None, Some(RecheckScope::All)).await;
             let admitted = match heads[1].try_recv() {
                 Ok(response) => {
                     response.unwrap();
@@ -8401,7 +8570,7 @@ mod tests {
                     (request, response_rx)
                 };
                 let (_, mut active_rx) = enqueue_into_actor(&queue, &mut actor, "active", None);
-                actor.handle_update(None).await;
+                actor.handle_update(None, Some(RecheckScope::All)).await;
                 active_rx.try_recv().unwrap().unwrap();
 
                 // The limited class is full with an entry due at 100 ms. The other class's entry is
@@ -8492,7 +8661,7 @@ mod tests {
                 if case != "takes-the-freed-slot" {
                     // Its class timer still rejects the held entry.
                     assert_eq!(actor.class_timers.armed, [at(100), None]);
-                    actor.handle_update(None).await;
+                    actor.handle_update(None, Some(RecheckScope::All)).await;
                     assert!(matches!(
                         held_rx.try_recv(),
                         Ok(Err(KvSchedulerError::DeadlineExceeded))
@@ -8537,7 +8706,7 @@ mod tests {
                 (request, response_rx)
             };
             let (_, mut active_rx) = enqueue_into_actor(&queue, &mut actor, "active", None);
-            actor.handle_update(None).await;
+            actor.handle_update(None, Some(RecheckScope::All)).await;
             active_rx.try_recv().unwrap().unwrap();
 
             // 16 + 112 tokens fill the 100-token limit. Rejecting the other class's entry at
@@ -8725,12 +8894,12 @@ mod tests {
         }
     }
 
-    /// An arrival whose enqueue expires the root of a blocked exact lane drains that lane's next
-    /// head, though no capacity change was recorded for the lane's worker and the expiry left no
-    /// class timer armed. Otherwise the successor would wait for a capacity change on its worker
-    /// or for a full recheck, which the scheduler's periodic queue update runs.
+    /// An arrival whose enqueue expires the root of a blocked session lane drains that lane's
+    /// next head, though no capacity change was recorded and the expiry left no class timer
+    /// armed. Otherwise the successor would wait for a capacity change or for a full recheck,
+    /// which the scheduler's periodic queue update runs.
     #[tokio::test(start_paused = true)]
-    async fn an_arrival_drains_the_exact_lane_its_expiry_unblocked() {
+    async fn an_arrival_drains_the_session_lane_its_expiry_unblocked() {
         // One worker: a 64-token limit refuses the arrival once the successor alone fills it, and
         // a 128-token limit admits it to the lane behind the successor.
         for (case, queue_limit) in [("refused", 64), ("accepted", 128)] {
@@ -8751,20 +8920,22 @@ mod tests {
             let mut actor = actor_for_test(&queue, &slots);
             let start = Instant::now();
             let worker = WorkerWithDpRank::new(0, 0);
+            // One session: its turns share a lane, pinned to the only worker.
             let pinned = |id: &str, isl_tokens| {
                 let (mut request, response_rx) = make_request(id, isl_tokens);
                 request.pinned_worker = Some(worker);
+                in_session(&mut request, "s");
                 (request, response_rx)
             };
             let (active, mut active_rx) = pinned("active", 16);
             assert!(enqueue_request_into_actor(
                 &queue, &mut actor, active, None, None
             ));
-            actor.handle_update(None).await;
+            actor.handle_update(None, Some(RecheckScope::All)).await;
             active_rx.try_recv().unwrap().unwrap();
 
-            // The busy worker blocks its exact lane at the head, due at 100 ms. The successor,
-            // with no due time, waits behind it.
+            // The busy worker blocks the session's lane at the head, due at 100 ms. The
+            // successor, with no due time, waits behind it.
             let (head, mut head_rx) = pinned("head", 16);
             let head_due = start + Duration::from_millis(100);
             assert!(enqueue_request_into_actor(
@@ -8778,7 +8949,7 @@ mod tests {
             assert!(enqueue_request_into_actor(
                 &queue, &mut actor, successor, None, None
             ));
-            actor.handle_update(None).await;
+            actor.handle_update(None, Some(RecheckScope::All)).await;
             assert!(matches!(
                 successor_rx.try_recv(),
                 Err(oneshot::error::TryRecvError::Empty)
@@ -8823,7 +8994,7 @@ mod tests {
                 ));
                 assert_eq!(queue.pending_count(), 1);
                 free_requests(&slots, &["successor"]);
-                actor.handle_update(None).await;
+                actor.handle_update(None, Some(RecheckScope::All)).await;
                 assert_eq!(arrival_rx.try_recv().unwrap().unwrap().best_worker, worker);
                 free_requests(&slots, &["arrival"]);
             } else {
@@ -9228,7 +9399,7 @@ mod tests {
             request
         };
         let (_, mut active_rx) = enqueue_into_actor(&queue, &mut actor, "active", None);
-        actor.handle_update(None).await;
+        actor.handle_update(None, Some(RecheckScope::All)).await;
         active_rx.try_recv().unwrap().unwrap();
 
         // Two queued requests fill the limit. One receiver is closed, and its lease cleanup is
@@ -9282,7 +9453,7 @@ mod tests {
         // At the due time the sweep removes both queued requests and counts only the one whose
         // receiver is open. The waiting cleanup then finds nothing left to remove.
         tokio::time::advance(Duration::from_millis(100)).await;
-        actor.handle_update(None).await;
+        actor.handle_update(None, Some(RecheckScope::All)).await;
         assert!(matches!(
             live_queued_rx.try_recv(),
             Ok(Err(KvSchedulerError::DeadlineExceeded))

@@ -135,6 +135,22 @@ pub struct WorkerCandidates<'a> {
     info: WorkerInfoLookup<'a>,
 }
 
+impl WorkerCandidates<'static> {
+    /// A view with no rows, for plugin tests and benchmarks that call `classify` directly.
+    #[cfg(any(test, feature = "bench"))]
+    pub fn empty() -> Self {
+        static NO_CACHE: CacheSnapshot<'static> = CacheSnapshot {
+            shared_hits: None,
+            has_tier_matches: false,
+        };
+        fn no_rows(_: usize) -> WorkerInfo {
+            unreachable!("an empty candidate view has no rows")
+        }
+        static NO_INFO: &(dyn Fn(usize) -> WorkerInfo + Sync) = &no_rows;
+        Self::new(&[], WorkerInputs::NONE, &NO_CACHE, NO_INFO)
+    }
+}
+
 impl<'a> WorkerCandidates<'a> {
     #[inline]
     pub(crate) fn new(

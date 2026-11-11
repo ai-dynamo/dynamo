@@ -1648,7 +1648,7 @@ pub mod scheduling {
         note = "moved to dynamo_scheduler::overlap::WorkerOverlapScore; removed in 1.10.0"
     )]
     pub type WorkerOverlapScore = dynamo_scheduler::overlap::WorkerOverlapScore;
-    pub use dynamo_admission::placement::WorkerPlacement;
+    pub use dynamo_admission::placement::SessionLane;
     pub use dynamo_router_protocol::session::WorkerSelectionInputTrigger;
     pub use dynamo_scheduler::prefill_load::effective_prefill_tokens;
     pub use dynamo_scheduler::prefill_load::prefill_load_hint_from_effective_tokens;

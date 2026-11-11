@@ -22,10 +22,10 @@ pub use crate::plugins::worker_selection::{
 
 // Request-classifier contracts and the request they classify.
 pub use crate::plugins::request_classifier::{
-    AbortCause, ClassifierError, ClassifyEvent, ClassifyFuture, ClassifyRequest, RequestClassifier,
-    RequestClassifierContext, RequestClassifierFactory, RequestClassifierParameters,
-    RequestClassifierProvider, RequestClassifierProviderError, RequestClassifierRegistryError,
-    RequestProgress, WorkerView,
+    AbortCause, ClassifierError, ClassifyEvent, ClassifyRequest, DispatchDecision, DispatchGate,
+    DispatchHead, DispatchRecheck, NoWorkers, RequestClassifier, RequestClassifierContext,
+    RequestClassifierFactory, RequestClassifierParameters, RequestClassifierProvider,
+    RequestClassifierProviderError, RequestClassifierRegistryError, RequestProgress, WorkerView,
 };
 
 // Registration and the configuration the registry resolves plugins from.
