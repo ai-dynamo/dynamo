@@ -308,14 +308,8 @@ def _relative(root: Path, name: Any) -> Path:
     return result
 
 
-def load_corpus(path: Path, limit: int | None = None) -> Corpus:
-    if limit is not None and limit <= 0:
-        raise ReplayError("limit must be positive; omit it to run every case")
-    path = manifest_path(path)
-    manifest = loads(path.read_bytes())
-    if not isinstance(manifest, dict) or manifest.get("schema") != SCHEMA:
-        raise ReplayError(f"manifest schema must be {SCHEMA}")
-    profile = manifest.get("profile")
+def validate_profile(profile: Any) -> dict[str, Any]:
+    """Validate the shared model/assets/runtime contract without loading traces."""
     if (
         not isinstance(profile, dict)
         or not isinstance(profile.get("name"), str)
@@ -357,6 +351,17 @@ def load_corpus(path: Path, limit: int | None = None) -> Corpus:
         )
     if type(config.get("context_length")) is not int or config["context_length"] <= 0:
         raise ReplayError("runtime_config.context_length must be positive")
+    return profile
+
+
+def load_corpus(path: Path, limit: int | None = None) -> Corpus:
+    if limit is not None and limit <= 0:
+        raise ReplayError("limit must be positive; omit it to run every case")
+    path = manifest_path(path)
+    manifest = loads(path.read_bytes())
+    if not isinstance(manifest, dict) or manifest.get("schema") != SCHEMA:
+        raise ReplayError(f"manifest schema must be {SCHEMA}")
+    validate_profile(manifest.get("profile"))
     entries = manifest.get("traces")
     if not isinstance(entries, list) or not entries:
         raise ReplayError("manifest.traces must be nonempty")

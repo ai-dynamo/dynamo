@@ -31,6 +31,95 @@ The subprocess environment drops inherited `DYN_*` controls and supplies only th
 
 The default public run performs five cases × two modes × two schedules = 20 executions. `--limit N` selects the first N corpus records, while still validating all shard hashes, records and declared counts. Omit the limit for the complete corpus. Supported schedules are `whole`, `one_token`, `fixed32` and `recorded`; `recorded` preserves the supplied worker frames. A corpus argument can be a manifest or a directory containing `manifest.json`; `.jsonl.gz` shards are read transparently and their compressed bytes are hashed.
 
+## Capture and prepare fixtures
+
+Capture and preparation run separately from replay. Capture calls an **already running** reference server with `/version`, `/v1/models`, and `/v1/chat/completions`. It requires a response that returns `prompt_token_ids` and `choices[0].token_ids` when `return_token_ids` is true. It does not deploy an engine. Preparation uses a pinned vendor reference on CPU; replay does not import that reference or require its Python dependencies.
+
+Start with prepared JSONL requests, each containing `id`, `source` and `request`, with optional diagnostic `reference`. Extract the public five without copying their expectations:
+
+```bash
+REPLAY_WORK=$(mktemp -d)
+python - "$REPLAY_WORK/requests.jsonl" <<'PYTHON'
+import sys
+from pathlib import Path
+from tests.frontend.trace_replay.contract import dumps, loads
+
+source = Path("tests/frontend/trace_replay/fixtures/deepseek_v41/cases.jsonl")
+with Path(sys.argv[1]).open("w", encoding="utf-8") as destination:
+    for line in source.read_text(encoding="utf-8").splitlines():
+        record = loads(line)
+        destination.write(dumps({key: record[key] for key in ("id", "source", "request")}) + "\n")
+PYTHON
+
+python -m tests.frontend.trace_replay.capture \
+  --requests "$REPLAY_WORK/requests.jsonl" \
+  --profile tests/frontend/trace_replay/fixtures/deepseek_v41/manifest.json \
+  --url http://127.0.0.1:8000 --output "$REPLAY_WORK/capture"
+```
+
+Each request must explicitly name the profile's model alias. The tool preflights the complete seed set before sending requests, uses unary transport and requests token IDs, and refuses conflicting capture selectors. Choose a fresh output directory: this MVP does not resume captures. Optional authentication uses `--api-key-env ENVIRONMENT_VARIABLE_NAME`; the token is excluded from artifacts and requires HTTPS outside loopback. Environment proxies and implicit credentials are disabled, and redirects fail.
+
+`capture/requests.jsonl` preserves exact seed bytes. Hash-named records preserve the original request, exact sent bytes, exact received bytes, lossless parsed JSON and their hashes. `capture.json` is written last and identifies complete coverage or per-case failures. A partial capture exits nonzero and cannot be prepared as a smaller passing corpus. Reported server metadata is diagnostic; a declared model pin does not prove what weights the server loaded. Captured API replies and API finish reasons are not native Dynamo worker observations.
+
+Prepare the native model assets as described above. Download the official encoder separately at the manifest's pinned revision; preparation checks its hash before executing its exact verified bytes:
+
+```bash
+curl --fail --location \
+  https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash/resolve/2cba9e42aa026125f3ed06c6d98c1db82f7ca027/encoding/encoding.py \
+  --output "$REPLAY_WORK/encoding.py"
+
+uv run --no-project --python 3.12 --with tokenizers==0.21.4 \
+  python -m tests.frontend.trace_replay.prepare \
+  --profile tests/frontend/trace_replay/fixtures/deepseek_v41/manifest.json \
+  --model-dir /absolute/verified/native/assets --encoder "$REPLAY_WORK/encoding.py" \
+  --capture-dir "$REPLAY_WORK/capture" --output "$REPLAY_WORK/corpus"
+```
+
+The optional preparation dependency is `tokenizers==0.21.4`. The profile may be an existing corpus manifest, using `provenance.golden_review.encoder` and its sibling `tokenizers_version`, or a small document with `schema:dynamo-frontend-replay/v1`, `profile` and `reference`. The reference descriptor carries `repo_id`, `revision`, `path`, `sha256` and `tokenizers_version`; it must bind to the profile's immutable model revision. All native assets are checked before reference execution. Unsupported rendering inputs fail explicitly rather than acquiring guessed expectations.
+
+Preparation independently renders and tokenizes each prompt with `add_special_tokens=False`, then requires exact equality with captured prompt IDs. It verifies request/response hashes and usage, retains EOS in output IDs, and derives worker termination from verified model assets and capture evidence. It refuses ambiguous terminal evidence and unsupported stop controls. The exported request retains its actual input shape. Array-valued reasoning is supported only with captured prompt evidence that verifies the documented reference adaptation; reference-only mode refuses that extension and array content.
+
+Preparation declares these worker-ingress checks. It rejects both cap aliases in one request and requires `n` to be one when supplied.
+
+| Input | Expected IR pointer |
+| --- | --- |
+| `temperature` | `/sampling_options/temperature` |
+| `top_p` | `/sampling_options/top_p` |
+| `seed` | `/sampling_options/seed` |
+| `n` | `/sampling_options/n` |
+| `max_tokens` or `max_completion_tokens` | `/stop_conditions/max_tokens` |
+| EOS from verified config/tokenizer assets | `/eos_token_ids` and `/stop_conditions/stop_token_ids_hidden` |
+
+Rendering inputs use explicit `chat_template_kwargs.thinking_mode` (`chat` or `thinking`), with optional consistent `thinking` and `reasoning_effort` in that same object. The supported protocol is text Chat Completions with OpenAI function tools and `tool_choice:auto`. Top-level effort, `chat_template_args`, response-format controls, parallel-tool controls, message names/prefixes, multimodal blocks and undeclared fields require a future explicit adapter. Seed sampling values remain exact JSON values.
+
+The new corpus contains deterministic `cases.jsonl` and a checksummed manifest. Identical frozen evidence and tool code produce identical exports across directories. Fresh model inference may produce different tokens. Captured parsed responses stay diagnostic, so new captures have unjudged responses by default. `--reviewed-corpus <approved-corpus>` may reuse an explicitly approved response only when its model/reference, request, prompt IDs, output IDs and terminal binding match. Supplying expectations in request seeds never approves them.
+
+For a renderer check without inference, replace `--capture-dir` with `--requests`:
+
+```bash
+uv run --no-project --python 3.12 --with tokenizers==0.21.4 \
+  python -m tests.frontend.trace_replay.prepare \
+  --profile tests/frontend/trace_replay/fixtures/deepseek_v41/manifest.json \
+  --model-dir /absolute/verified/native/assets --encoder "$REPLAY_WORK/encoding.py" \
+  --requests "$REPLAY_WORK/requests.jsonl" --output "$REPLAY_WORK/renderer-corpus"
+
+python - "$REPLAY_WORK/renderer-corpus" <<'PYTHON'
+import sys
+from pathlib import Path
+from tests.frontend.trace_replay.contract import load_corpus
+
+approved = load_corpus(Path("tests/frontend/trace_replay/fixtures/deepseek_v41"))
+prepared = load_corpus(Path(sys.argv[1]))
+expected = {case.identifier: case.expected_preprocessed["token_ids"] for case in approved.cases}
+actual = {case.identifier: case.expected_preprocessed["token_ids"] for case in prepared.cases}
+if actual != expected:
+    raise SystemExit("prepared prompts differ from the five independently verified fixtures")
+print("All five prepared prompt ID arrays match")
+PYTHON
+```
+
+This independently reproduces the five prompts and emits a vendor-rendered synthetic completion that fits the request cap, marked synthetic in each record and the manifest. It does not capture model inference or approve response semantics. Run either exported corpus with the installed target frontend using the existing `run` command. Unary/SSE and rechunking are execution choices, not corpus preparation choices.
+
 ## Corpus contract
 
 Manifest schema is `dynamo-frontend-replay/v1`:
@@ -66,9 +155,10 @@ The separate GitHub workflow verifies the originating nightly run and binds its 
 ## Tests
 
 ```bash
-python -m pytest tests/frontend/test_trace_replay_contract.py -q
+python -m pytest tests/frontend/test_trace_replay_contract.py \
+  tests/frontend/test_trace_capture.py tests/frontend/test_trace_prepare.py -q
 DYN_RUN_FRONTEND_REPLAY=1 DYN_REPLAY_MODEL_DIR=/absolute/model/bundle \
   python -m pytest tests/frontend/test_trace_replay.py -q
 ```
 
-The contract tests cover provenance validation, lossless typed comparisons, missing-versus-null JSON Pointers, gzip/count/limit handling, planted prompt/argument failures, EOS-preserving schedules, malformed SSE and baseline classification. The live test is skipped unless explicitly enabled and is excluded from the existing nightly selector. Once enabled, it requires the verified native bundle; unavailable assets are a failure. Its initial timeout is 300 seconds and should be tuned from measured execution times.
+Capture/preparation tests exercise local HTTP evidence, completeness, independent source and asset pins, reviewed bindings, synthetic outputs, and deterministic exports without requiring the optional tokenizer package. The contract tests cover provenance validation, lossless typed comparisons, missing-versus-null JSON Pointers, gzip/count/limit handling, planted prompt/argument failures, EOS-preserving schedules, malformed SSE and baseline classification. The live test is skipped unless explicitly enabled and is excluded from the existing nightly selector. Once enabled, it requires the verified native bundle; unavailable assets are a failure. Its initial timeout is 300 seconds and should be tuned from measured execution times.
