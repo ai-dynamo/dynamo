@@ -120,7 +120,7 @@ pub mod identity {
 
 /// Pre-split `dynamo_kv_router::indexer`; its items live in `dynamo_kv_indexer` and `dynamo_scheduler` now.
 pub mod indexer {
-    // Owner: dynamo_kv_indexer (97), dynamo_scheduler (1)
+    // Owner: dynamo_kv_indexer (37), dynamo_scheduler (1)
     /// Pre-split `dynamo_kv_router::indexer::concurrent_radix_tree_compressed`; its items live in `dynamo_kv_indexer` now.
     pub mod concurrent_radix_tree_compressed {
         // Owner: dynamo_kv_indexer (1)
@@ -134,7 +134,7 @@ pub mod indexer {
 
     /// Pre-split `dynamo_kv_router::indexer::cuckoo`; its items live in `dynamo_kv_indexer` now.
     pub mod cuckoo {
-        // Owner: dynamo_kv_indexer (60)
+        // Owner: dynamo_kv_indexer (50)
         pub use dynamo_kv_indexer::cuckoo::CKF_LANE_COUNT;
         pub use dynamo_kv_indexer::cuckoo::CanonicalSequenceBlockHash;
         pub use dynamo_kv_indexer::cuckoo::CkfBuildError;
@@ -158,9 +158,6 @@ pub mod indexer {
         )]
         pub type ConsumerDrainMarker = dynamo_kv_indexer::cuckoo::ConsumerDrainMarker;
         pub use dynamo_kv_indexer::cuckoo::ConsumerInstanceId;
-        pub use dynamo_kv_indexer::cuckoo::DEFAULT_GLOBAL_INGESTION_CONTROL_TIMEOUT;
-        pub use dynamo_kv_indexer::cuckoo::DEFAULT_GLOBAL_INGESTION_QUEUE_CAPACITY;
-        pub use dynamo_kv_indexer::cuckoo::DEFAULT_GLOBAL_INGESTION_WORKERS;
         #[deprecated(
             since = "1.8.0",
             note = "moved to dynamo_kv_indexer::cuckoo::DcCkfAggregationStats; removed in 1.10.0"
@@ -276,29 +273,6 @@ pub mod indexer {
             note = "moved to dynamo_kv_indexer::cuckoo::LaneLease; removed in 1.10.0"
         )]
         pub type LaneLease = dynamo_kv_indexer::cuckoo::LaneLease;
-        #[deprecated(
-            since = "1.8.0",
-            note = "moved to dynamo_kv_indexer::cuckoo::LocalCkfAdapter; removed in 1.10.0"
-        )]
-        pub type LocalCkfAdapter = dynamo_kv_indexer::cuckoo::LocalCkfAdapter;
-        pub use dynamo_kv_indexer::cuckoo::LocalCkfAdapterBuildError;
-        pub use dynamo_kv_indexer::cuckoo::LocalCkfAdapterError;
-        pub use dynamo_kv_indexer::cuckoo::LocalCkfDeltaSinkError;
-        #[deprecated(
-            since = "1.8.0",
-            note = "moved to dynamo_kv_indexer::cuckoo::LocalCkfDrainReport; removed in 1.10.0"
-        )]
-        pub type LocalCkfDrainReport = dynamo_kv_indexer::cuckoo::LocalCkfDrainReport;
-        #[deprecated(
-            since = "1.8.0",
-            note = "moved to dynamo_kv_indexer::cuckoo::LocalCkfEventResult; removed in 1.10.0"
-        )]
-        pub type LocalCkfEventResult = dynamo_kv_indexer::cuckoo::LocalCkfEventResult;
-        #[deprecated(
-            since = "1.8.0",
-            note = "moved to dynamo_kv_indexer::cuckoo::LocalCkfRecoveryReport; removed in 1.10.0"
-        )]
-        pub type LocalCkfRecoveryReport = dynamo_kv_indexer::cuckoo::LocalCkfRecoveryReport;
         #[deprecated(
             since = "1.8.0",
             note = "moved to dynamo_kv_indexer::cuckoo::PrefixSearchConfig; removed in 1.10.0"

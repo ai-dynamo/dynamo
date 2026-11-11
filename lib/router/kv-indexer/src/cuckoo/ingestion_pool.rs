@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use parking_lot::Mutex;
 
 use super::failure::{CkfFailureAction, CkfFailureDisposition, CkfFailurePoint};
-use super::{
+use super::global::{
     ConsumerDrainMarker, GlobalCkfAssignmentError, GlobalCkfBuildError, GlobalCkfDelta,
     GlobalCkfIndexer, GlobalCkfIngestOutcome, GlobalCkfLaneFault, GlobalCkfLaneIngestor,
     GlobalCkfSnapshot, LaneLease, ProducerIdentity,
@@ -1364,10 +1364,11 @@ fn report_fault(fault_tx: &flume::Sender<GlobalCkfIngestionFault>, fault: Global
 
 #[cfg(test)]
 mod tests {
+    use super::super::global::GlobalCkfBucketImage;
     use super::*;
     use crate::cuckoo::{
         CkfCommitState, CkfConfig, CkfFailureAction, CkfFailureDomain, ConsumerInstanceId,
-        DcCkfState, GlobalCkfBucketImage, GlobalCkfManifest, PrefixSearchConfig,
+        DcCkfState, GlobalCkfManifest, PrefixSearchConfig,
     };
     use dynamo_router_protocol::identity::{
         CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,

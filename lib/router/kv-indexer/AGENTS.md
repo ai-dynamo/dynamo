@@ -4,7 +4,7 @@
 
 - Depends on (Dynamo crates): `dynamo-kv-events`, `dynamo-kv-hashing`, `dynamo-router-protocol`, `dynamo-tokens`.
 - Must not depend on: other stages, the kernel, kv-router, `dynamo-kv-hints`, the runtime, any socket transport (tokio for channels and the indexer actors, never for sockets).
-- Hosts import this crate through its `host` module.
+- Hosts import this crate through its `host` module. The DC relay (`lib/llm` pool relay, the relay benches) imports the `cuckoo` module, whose root re-export list is the relay contract; its submodules are private and nothing else in this crate uses it.
 - The crate root exports an explicit list in `src/lib.rs` and no glob; an item not on that list is reached through its module path or the `host` module.
 - Check: `bash scripts/router_layering_check.sh` (and `--host`).
 - Design: `lib/router/README.md`.

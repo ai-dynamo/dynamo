@@ -60,7 +60,7 @@ let indexer = KvIndexer::builder(
 
 `BranchShardedIndexer::new_with_delegate` constructs local compressed shards with one shared ownership tracker. Router prefixes and shard suffixes participate in the same lifecycle. Synthetic anchors do not count as owners. Remote shard handles cannot transport an in-process delegate. Install delegates at the process that owns the index.
 
-`DcCkfState::new_with_delegate` and `LocalCkfAdapter::new_with_delegate` accept `KvIndexerDelegate<CanonicalSequenceBlockHash>`. These callbacks describe exact canonical ownership, including hashes omitted from the physical filter for capacity. Transactional rank replacement reports only the committed difference. Failed replacement emits nothing. The global fingerprint replica cannot recover exact hash identities and does not expose delegate registration.
+`DcCkfState::new_with_delegate` accepts `KvIndexerDelegate<CanonicalSequenceBlockHash>`. These callbacks describe exact canonical ownership, including hashes omitted from the physical filter for capacity. Transactional rank replacement reports only the committed difference. Failed replacement emits nothing. The global fingerprint replica cannot recover exact hash identities and does not expose delegate registration.
 
 Notifications follow committed ownership updates, including clears, rank resets, explicit removals, and approximate eviction. They do not describe tree-node allocation or an atomic snapshot of concurrent query results. Destroying an indexer does not emit removals.
 
