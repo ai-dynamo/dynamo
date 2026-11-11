@@ -5,5 +5,6 @@
 - Depends on (Dynamo crates): `dynamo-kv-events`, `dynamo-kv-hashing`, `dynamo-router-protocol`, `dynamo-tokens`.
 - Must not depend on: other stages, the kernel, kv-router, `dynamo-kv-hints`, the runtime, any socket transport (tokio for channels and the indexer actors, never for sockets).
 - Hosts import this crate through its `host` module.
+- The crate root exports an explicit list in `src/lib.rs` and no glob; an item not on that list is reached through its module path or the `host` module.
 - Check: `bash scripts/router_layering_check.sh` (and `--host`).
 - Design: `lib/router/README.md`.
