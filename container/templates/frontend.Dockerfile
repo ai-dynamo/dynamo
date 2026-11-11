@@ -58,7 +58,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         ca-certificates \
         libstdc++6 \
         # required by EPP's embedded ZMQ KV-event/replica-sync subscriber
-        # (dynamo-kv-router's standalone-selection feature); matches the
+        # (dynamo-kv-router's ingest-zmq and replica-sync-zmq features); matches the
         # runtime dep installed in deploy/inference-gateway/ext-proc/Dockerfile
         libzmq5 \
         # required for verification of GPG keys
@@ -97,6 +97,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         gpgsm \
         gpgv \
         keyboxd \
+        libbrotli1 \
+        libgnutls30t64 \
         libssl3t64 \
         openssl \
     && apt-get clean \

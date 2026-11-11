@@ -486,7 +486,6 @@ class TestBuildEngineInputs:
             ({"output_format": "gif"}, "Unsupported output_format"),
             ({"quality": "high"}, "quality is not supported"),
             ({"background": "transparent"}, "background is not supported"),
-            ({"response_format": "file"}, "Unsupported response_format"),
         ],
     )
     @pytest.mark.asyncio
@@ -555,19 +554,6 @@ class TestBuildEngineInputs:
             req, RequestType.VIDEO_GENERATION, image=img
         )
         assert i2v.response_format == response_format
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("fps", [0, -1])
-    async def test_video_generation_rejects_non_positive_fps(self, fps):
-        handler = _make_handler()
-        req = NvCreateVideoRequest(
-            prompt="a drone",
-            model="test-model",
-            nvext=VideoNvExt(num_frames=24, fps=fps),
-        )
-
-        with pytest.raises(ValueError, match="fps must be greater than zero"):
-            await handler.build_engine_inputs(req, RequestType.VIDEO_GENERATION)
 
     @pytest.mark.asyncio
     async def test_video_generation_normalizes_mp4_output_format(self):
@@ -1125,36 +1111,12 @@ class TestI2VEngineInputs:
         assert isinstance(sp.num_frames, int)
         assert result.fps == 24
 
-    @pytest.mark.parametrize(
-        ("field", "value", "message"),
-        [
-            ("num_frames", 0, "nvext.num_frames must be greater than zero"),
-            ("num_frames", -1, "nvext.num_frames must be greater than zero"),
-            ("fps", 0, "nvext.fps must be greater than zero"),
-            ("fps", -1, "nvext.fps must be greater than zero"),
-        ],
-    )
     @pytest.mark.asyncio
-    async def test_video_rejects_non_positive_overrides(self, field, value, message):
-        handler = _make_handler()
-        req = NvCreateVideoRequest(
-            prompt="cat", model="video-model", nvext=VideoNvExt(**{field: value})
-        )
-
-        with pytest.raises(ValueError, match=message):
-            await handler.build_engine_inputs(req, RequestType.VIDEO_GENERATION)
-
-    @pytest.mark.parametrize("seconds", [0, -1])
-    @pytest.mark.asyncio
-    async def test_video_rejects_non_positive_duration(self, seconds):
-        handler = _make_handler()
-        req = NvCreateVideoRequest(prompt="cat", model="video-model", seconds=seconds)
-
-        with pytest.raises(ValueError, match="seconds must be greater than zero"):
-            await handler.build_engine_inputs(req, RequestType.VIDEO_GENERATION)
-
-    @pytest.mark.asyncio
-    async def test_video_rejection_propagates_as_invalid_argument(self):
+    async def test_video_rejection_by_the_model_propagates(self):
+        """The shared request model rejects a non-positive fps, as the frontend
+        does. The client gets InvalidArgument (a 400) that names the field and
+        the rule, and not the rejected value, which str(ValidationError) would
+        carry as input_value."""
         handler = _make_handler()
         handler.config.output_modalities = ["video"]
         request = {
@@ -1166,8 +1128,10 @@ class TestI2VEngineInputs:
         with pytest.raises(InvalidArgument) as excinfo:
             async for _ in handler._generate_openai_mode(request, None, "req-1"):
                 pass
-
-        assert str(excinfo.value) == "nvext.fps must be greater than zero"
+        assert (
+            str(excinfo.value)
+            == "nvext.fps: Input should be greater than or equal to 1"
+        )
 
     async def test_media_passthrough_reaches_sampling_params(self):
         """A top-level SDK extra_body field, nested by the frontend under
@@ -1344,7 +1308,7 @@ class TestLoraEnablement:
             "dynamo.vllm.omni.omni_handler.get_lora_manager",
             return_value=MagicMock(),
         ):
-            with pytest.raises(ValueError, match="unknown model or LoRA adapter"):
+            with pytest.raises(InvalidArgument, match="unknown model or LoRA adapter"):
                 handler._resolve_lora_request("ghost-adapter")
 
     def test_resolve_lora_request_unknown_adapter_is_none_when_manager_missing(self):
@@ -1365,6 +1329,69 @@ class TestLoraEnablement:
             return_value=MagicMock(),
         ):
             assert handler._resolve_lora_request("test-model-alias") is None
+
+    @pytest.mark.asyncio
+    async def test_unknown_adapter_chat_rejected_before_generation(self):
+        handler = _make_handler()
+        handler.config.engine_args.enable_lora = True
+        handler._abort_monitor = MagicMock(return_value=nullcontext())
+        handler.engine_client.generate = MagicMock(
+            side_effect=AssertionError("engine must not run for a rejected request")
+        )
+        request = {
+            "model": "ghost-adapter",
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+
+        with patch(
+            "dynamo.vllm.omni.omni_handler.get_lora_manager",
+            return_value=MagicMock(),
+        ):
+            with pytest.raises(InvalidArgument, match="unknown model or LoRA adapter"):
+                async for _ in handler._generate_openai_mode(request, None, "req-1"):
+                    pass
+
+        handler.engine_client.generate.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_admission_recheck_failure_propagates_as_invalid_argument(self):
+        """An adapter unloaded between input build and lock admission must
+        surface as a public InvalidArgument (HTTP 400), not an in-band error
+        chunk inside a 200 stream."""
+        handler = _make_handler()
+        handler.config.engine_args.enable_lora = True
+        handler._abort_monitor = MagicMock(return_value=nullcontext())
+        handler.engine_client.generate = MagicMock(
+            side_effect=AssertionError("engine must not run for a rejected request")
+        )
+        handler._lora_state.loaded_loras["adapterA"] = LoRAInfo(
+            id=123, path="/cache/adapterA"
+        )
+
+        original_build = handler.build_engine_inputs
+
+        async def _build_then_unload(*args, **kwargs):
+            inputs = await original_build(*args, **kwargs)
+            # A concurrent unload_lora lands between input build and
+            # admission-lock acquisition.
+            handler._lora_state.loaded_loras.pop("adapterA")
+            return inputs
+
+        handler.build_engine_inputs = _build_then_unload
+
+        request = {
+            "model": "adapterA",
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+        with patch(
+            "dynamo.vllm.omni.omni_handler.get_lora_manager",
+            return_value=MagicMock(),
+        ):
+            with pytest.raises(InvalidArgument, match="unknown model or LoRA adapter"):
+                async for _ in handler._generate_openai_mode(request, None, "req-1"):
+                    pass
+
+        handler.engine_client.generate.assert_not_called()
 
 
 class TestLoraCapacity:
@@ -1947,7 +1974,10 @@ class TestImageReferenceInputs:
             async for _ in handler._generate_openai_mode(request, None, "req-1"):
                 pass
 
-        assert str(exc_info.value) == "Failed to load input_reference"
+        # parse_media_request names the field and the rule, never the value.
+        message = str(exc_info.value)
+        assert message.startswith("input_reference: ")
+        assert "signature=private" not in message
         handler._image_edit_loader.load_image.assert_not_awaited()
         handler.engine_client.generate.assert_not_called()
 

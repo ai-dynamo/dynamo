@@ -8,20 +8,22 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::{Context, Result, anyhow};
+use dynamo_kv_events::event::RouterEvent;
+use dynamo_kv_events::residency::StorageTier;
+use dynamo_kv_hashing::routing::{BlockHashOptions, compute_block_hash_for_seq};
+use dynamo_kv_indexer::host::{
+    ConcurrentRadixTreeCompressed, KvIndexer, KvIndexerInterface, KvIndexerMetrics,
+    LowerTierIndexers, LowerTierQueryOptions, MatchDetails, ThreadPoolIndexer, TieredMatchDetails,
+    query_lower_tiers_with_options,
+};
 use dynamo_kv_router::config::KvRouterConfig;
-use dynamo_kv_router::indexer::{
-    KvIndexer, KvIndexerInterface, KvIndexerMetrics, LowerTierIndexers, LowerTierQueryOptions,
-    MatchDetails, ThreadPoolIndexer, TieredMatchDetails, query_lower_tiers_with_options,
-};
-use dynamo_kv_router::protocols::{
-    BlockHashOptions, RouterEvent, RoutingConstraints, StorageTier, WorkerId,
-    compute_block_hash_for_seq,
-};
-use dynamo_kv_router::scheduling::{
-    OverlapAnalysis, ScheduleMode, ScheduleRequest, SessionContext,
-};
-use dynamo_kv_router::{
-    ConcurrentRadixTreeCompressed, RoutingPartitionRef, TrackingHashContext, TrackingHashScope,
+use dynamo_kv_router::tracking_hash::tracking_hash_context;
+use dynamo_router_protocol::identity::RoutingPartitionRef;
+use dynamo_router_protocol::session::SessionContext;
+use dynamo_router_protocol::worker::WorkerId;
+use dynamo_scheduler::host::{
+    CacheHitWeights, OverlapAnalysis, RoutingConstraints, ScheduleMode, ScheduleRequest,
+    TrackingHashContext, TrackingHashScope,
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -167,7 +169,7 @@ impl KvCacheEventSink for ReplayKvEventSink {
         Ok(())
     }
 
-    fn publish(&self, event: dynamo_kv_router::protocols::KvCacheEvent) -> anyhow::Result<()> {
+    fn publish(&self, event: dynamo_kv_events::event::KvCacheEvent) -> anyhow::Result<()> {
         self.event_tx
             .send(RouterEvent::new(self.worker_id, event))
             .map_err(|_| anyhow!("replay router event channel closed"))
@@ -175,7 +177,7 @@ impl KvCacheEventSink for ReplayKvEventSink {
 
     fn publish_with_storage_tier(
         &self,
-        event: dynamo_kv_router::protocols::KvCacheEvent,
+        event: dynamo_kv_events::event::KvCacheEvent,
         storage_tier: StorageTier,
     ) -> anyhow::Result<()> {
         self.event_tx
@@ -261,7 +263,7 @@ impl KvReplayRouter {
         num_workers: usize,
     ) -> Result<Self> {
         let config = replay_router_config(args, router_config);
-        let tracking_hash = TrackingHashContext::from_config(&config)?;
+        let tracking_hash = tracking_hash_context(&config)?;
         let indexer =
             create_replay_indexer(args.block_size as u32, config.router_event_threads as usize);
         let workers_with_configs = replay_workers_with_configs(args, num_workers);
@@ -273,13 +275,14 @@ impl KvReplayRouter {
             .configured_policy_profile()
             .map_err(anyhow::Error::from)?;
         let scheduler_cancel = CancellationToken::new();
-        let scheduler = Arc::new(dynamo_kv_router::LocalScheduler::new(
+        let scheduler = Arc::new(dynamo_scheduler::host::LocalScheduler::new(
             slots,
             worker_config_rx,
             profile,
             args.block_size as u32,
             selector,
             prefill_load_estimator,
+            None,
             None,
             None,
             None,
@@ -336,7 +339,12 @@ impl KvReplayRouter {
             .indexer
             .find_matches_for_request(&request.tokens, None)
             .await?;
-        let overlap = OverlapAnalysis::new(&self.config, self.block_size, &tiered).signals();
+        let overlap = OverlapAnalysis::new(
+            &CacheHitWeights::from(&self.config),
+            self.block_size,
+            &tiered,
+        )
+        .signals();
         let token_seq = self.config.compute_seq_hashes_for_tracking_with_context(
             &self.tracking_hash,
             TrackingHashScope {
@@ -352,6 +360,7 @@ impl KvReplayRouter {
         let response = self
             .scheduler
             .schedule_request(ScheduleRequest {
+                accounting_attribution: Default::default(),
                 mode: ScheduleMode::Tracked {
                     request_id: uuid.to_string(),
                 },
@@ -429,7 +438,7 @@ impl KvReplayRouter {
         &self,
         isl_tokens: usize,
         track_prefill_tokens: bool,
-    ) -> Vec<dynamo_kv_router::PotentialLoad> {
+    ) -> Vec<dynamo_scheduler::host::PotentialLoad> {
         self.scheduler.get_potential_loads(
             None,
             isl_tokens,
@@ -543,7 +552,7 @@ impl ReplayRouter {
         &self,
         isl_tokens: usize,
         track_prefill_tokens: bool,
-    ) -> Vec<dynamo_kv_router::PotentialLoad> {
+    ) -> Vec<dynamo_scheduler::host::PotentialLoad> {
         match self {
             Self::RoundRobin(_) => Vec::new(),
             Self::Kv(router) => router.debug_potential_loads(isl_tokens, track_prefill_tokens),
@@ -570,12 +579,14 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use dynamo_kv_router::config::RouterQueuePolicy;
-    use dynamo_kv_router::protocols::{
-        ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
-        KvCacheStoredBlockData, LocalBlockHash, StorageTier, WorkerWithDpRank,
-        compute_block_hash_for_seq,
+    use dynamo_admission::host::RouterQueuePolicy;
+    use dynamo_kv_events::event::{
+        KvCacheEvent, KvCacheEventData, KvCacheStoreData, KvCacheStoredBlockData,
     };
+    use dynamo_kv_events::residency::StorageTier;
+    use dynamo_kv_hashing::routing::compute_block_hash_for_seq;
+    use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
+    use dynamo_router_protocol::worker::WorkerWithDpRank;
 
     use super::*;
 
@@ -863,19 +874,12 @@ mod tests {
         std::fs::write(
             &path,
             r#"
-default_policy_family: latency
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: all
+default_policy_class: latency
 policy_classes:
   - name: latency
-    policy_family: latency
-    cache_bucket: all
     quantum: 1
     prefill_busy_threshold: 0
   - name: batch
-    policy_family: batch
-    cache_bucket: all
     quantum: 4
     prefill_busy_threshold: 1024
 "#,

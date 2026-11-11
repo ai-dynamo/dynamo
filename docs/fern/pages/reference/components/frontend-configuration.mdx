@@ -13,6 +13,26 @@ Every CLI argument has a corresponding environment variable. The CLI argument ta
   These are the frontend-specific flags. The frontend also parses the shared Dynamo runtime flags (namespace, discovery, planes, parsing) — see [Runtime Configuration](runtime-configuration.mdx). For the router cost model and tuning guidance behind the router flags below, see [Configuration and Tuning](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md).
 </Note>
 
+## Decision APIs
+
+**Experimental.** `--enable-systemone-api` (environment variable `DYN_ENABLE_SYSTEMONE_API`, default `false`) enables both OpenAI `POST /v1/decisions` and Jev `POST /v1/systemone`. The qualified backend is an aggregated, single-rank SGLang CUDA worker using the serialized scoring profile. See [Start a Decision Worker](../../cli/model-deployment/introduction.mdx#decision-api-workers) for launch commands and smoke requests.
+
+| Environment variable | Default | Maximum | Meaning |
+| --- | --- | --- | --- |
+| `DYN_SYSTEMONE_MAX_INFLIGHT_BRANCHES` | 256 | 4,096 | Concurrent admitted question branches across requests |
+| `DYN_SYSTEMONE_MAX_INPUT_TOKENS` | 65,536 | 1,048,576 | Cumulative rendered input tokens across all questions in one request |
+| `DYN_SYSTEMONE_REQUEST_TIMEOUT_SECS` | 300 | 3,600 | End-to-end request deadline in seconds |
+
+Positive values above a default log a warning. Values above the maximum are clamped with a warning; invalid values fall back to the default. Admission rejects excess work immediately rather than placing it in a frontend queue. Capacity responses use `DYN_HTTP_OVERLOAD_STATUS_CODE`.
+
+Decision capacity rejections carry `Retry-After: 1` and the `rate_limit_exceeded` error code regardless of the configured HTTP status. OpenAI responses expose this code at `error.code`; Jev responses expose it at `code`. An unavailable worker returns `server_error`, not a capacity rejection. A native worker-abort HTTP 503 can also carry `Retry-After`, so the status and header alone do not identify capacity exhaustion.
+
+Raising the input-token limit does not raise every execution limit. Model context capacity, input bytes, tokenization work, and the fixed **16 MiB cumulative encoded-text budget** remain independent. Each question charges its rendered prompt bytes once for initial encoding, once for round-trip validation, and once per candidate label. For 26 labels, this budget permits approximately `16 MiB / 28` rendered bytes summed across questions, regardless of the configured token limit. Higher-byte-per-token text reaches this budget sooner. Rejections identify the encoded-text budget; they use HTTP 422 for Jev and HTTP 400 for OpenAI.
+
+The protocol ceiling of 255 candidates is not a guarantee that every tokenizer supports that many choices. Scoring requires distinct single-token labels at the answer position; the effective limit depends on the tokenizer and rendered prompt. Reduce the candidate count or select another model if label validation fails. Request shape and context checks run before scoring inference.
+
+Question branches in one request share a cache namespace and are pinned to the first branch's worker. Separate API calls receive different random cache namespaces, so repeated inputs do not reuse another request's cached prefixes. Trusted tenant-scoped cross-request reuse is not supported by this profile.
+
 ## HTTP and networking
 
 <ParamField path="--http-host" type="string" default="0.0.0.0">
@@ -104,11 +124,10 @@ router. See [Router Guide](../../developer-guide/knowledge-base/modular-componen
 ### Routing and readiness
 
 <ParamField path="--router-mode" type="string" default="round-robin">
-  Routing strategy. `power-of-two` samples two workers and selects the worker with fewer in-flight
-  requests. In disaggregated prefill mode, `power-of-two` and `least-loaded` use the synchronous
-  prefill fallback path.
+  Routing strategy. In disaggregated prefill mode, `least-loaded` uses the synchronous prefill
+  fallback path.
 
-  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>round-robin</Badge> <Badge intent="note" minimal>random</Badge> <Badge intent="note" minimal>power-of-two</Badge> <Badge intent="note" minimal>kv</Badge> <Badge intent="note" minimal>direct</Badge> <Badge intent="note" minimal>least-loaded</Badge> <Badge intent="note" minimal>device-aware-weighted</Badge></span>
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>round-robin</Badge> <Badge intent="note" minimal>random</Badge> <Badge intent="note" minimal>kv</Badge> <Badge intent="note" minimal>direct</Badge> <Badge intent="note" minimal>least-loaded</Badge> <Badge intent="note" minimal>device-aware-weighted</Badge></span>
 
   Environment variable: `DYN_ROUTER_MODE`
 </ParamField>
@@ -125,6 +144,17 @@ router. See [Router Guide](../../developer-guide/knowledge-base/modular-componen
   to disable session affinity. See [Session affinity](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#session-affinity).
 
   Environment variable: `DYN_ROUTER_SESSION_AFFINITY_TTL_SECS`
+</ParamField>
+
+<ParamField path="--router-session-affinity-max-entries" type="integer" default="65536">
+  Maximum number of sessions each affinity table holds at once; must be at least `1`. A frontend
+  keeps one table per worker set it routes to. A request that would start a new session past the
+  limit fails as resource exhausted (HTTP 529 by default) until an idle session expires. Replica
+  sync copies bindings to every frontend, so size the limit for the sessions live across all
+  frontends; sync is best effort, so it is not a hard fleet-wide cap. Has no effect unless
+  `--router-session-affinity-ttl-secs` is set.
+
+  Environment variable: `DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES`
 </ParamField>
 
 <ParamField path="--decode-fallback / --no-decode-fallback" type="boolean" default="false">
@@ -348,7 +378,7 @@ Configure scoring through [default policy parameters](../../developer-guide/know
 </ParamField>
 
 <ParamField path="--router-policy-config" type="string" default="null">
-  Startup-only YAML for shared `router` settings, policy-class queues, and worker-selection instances. When omitted,
+  Startup-only YAML for shared `router` settings, policy-class queues, and per-role worker-selection policies. When omitted,
   `--router-queue-threshold` and `--router-queue-policy` define one synthetic policy class.
   Queueing remains disabled until a threshold is configured. See [Shared Router Settings](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#shared-router-settings), [Policy-class queues](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#policy-class-queues) and [Write Custom Routing Strategies](../../developer-guide/knowledge-base/modular-components/router/custom-worker-selection.mdx).
 
@@ -358,9 +388,10 @@ Configure scoring through [default policy parameters](../../developer-guide/know
 <ParamField path="--router-prefill-policy" type="string" default="null">
   **Deprecated; removal in v1.7.** Set `worker_selection.prefill` in `--router-policy-config`.
 
-  Worker-selection instance for disaggregated prefill workers in the current router process. This
-  option overrides `worker_selection.prefill` from `--router-policy-config`. It is not included in
-  worker model cards. Set it to `default` to use Dynamo's built-in worker selector.
+  Worker-selection policy type for disaggregated prefill workers in the current router process,
+  run with its default parameters. This option overrides `worker_selection.prefill` from
+  `--router-policy-config`. It is not included in worker model cards. Set it to `default` to use
+  Dynamo's built-in worker selector.
 
   Environment variable: `DYN_ROUTER_PREFILL_POLICY`
 </ParamField>
@@ -368,10 +399,11 @@ Configure scoring through [default policy parameters](../../developer-guide/know
 <ParamField path="--router-decode-policy" type="string" default="null">
   **Deprecated; removal in v1.7.** Set `worker_selection.decode` in `--router-policy-config`.
 
-  Worker-selection instance for decode workers in the current router process. This option
-  overrides `worker_selection.decode` from `--router-policy-config`. It is not included in worker
-  model cards. Set it to `default` to use Dynamo's built-in worker selector. Configure an aggregated
-  pool with `worker_selection.aggregated` or `DYN_ROUTER_WORKER_SELECTION_POLICY`.
+  Worker-selection policy type for decode workers in the current router process, run with its
+  default parameters. This option overrides `worker_selection.decode` from `--router-policy-config`.
+  It is not included in worker model cards. Set it to `default` to use Dynamo's built-in worker
+  selector. Configure an aggregated pool with `worker_selection.aggregated` or
+  `DYN_ROUTER_WORKER_SELECTION_POLICY`.
 
   Environment variable: `DYN_ROUTER_DECODE_POLICY`
 </ParamField>
@@ -445,7 +477,24 @@ For MoE models, AIS requires `ais_tp_size * ais_attention_dp_size == ais_moe_tp_
 ## Fault tolerance
 
 <ParamField path="--migration-limit" type="integer" default="0">
-  Maximum request migrations per worker disconnect. `0` disables migration.
+  Maximum replacement worker attempts per request. `0` disables migration.
+
+  For `/v1/realtime`, this is a lifetime budget for one client WebSocket. Recovery is
+  experimental and supports acknowledged transcription sessions with PCM input,
+  `audio.input.turn_detection: null`, and explicit client commits. The frontend replays
+  unfinished audio to a compatible warm replica in the original worker group while keeping
+  the client connection open. Completed turns are not replayed. Other realtime modes,
+  server-side voice activity detection, and frontend failure are outside this scope.
+
+  Each recovery has a five-second deadline covering connection, session acknowledgement,
+  and replay submission. Normal transcription completion has no recovery deadline.
+  A subsequent session update, unsupported event, application error, or retention limit
+  disables further recovery for that socket. Retention is bounded to 16 MiB of accounted
+  session, event, and transcript data and 4,096 events per eligible socket. Exceeding a
+  limit leaves a healthy stream working. Replayed deltas that differ from text already
+  delivered terminate the session with an error; final transcripts may still revise
+  interim text. Recovery requires another warm worker and adds inference work and an
+  output gap.
 
   Environment variable: `DYN_MIGRATION_LIMIT`
 </ParamField>
@@ -454,6 +503,8 @@ For MoE models, AIS requires `ais_tp_size * ais_attention_dp_size == ais_moe_tp_
   Maximum prompt-plus-output sequence length that remains eligible for migration. When a request
   strictly exceeds the limit, migration and token tracking stop for that request. Must be from `1`
   through `4294967295`. Unset means no sequence-length limit.
+
+  This token limit does not control realtime audio retention.
 
   Environment variable: `DYN_MIGRATION_MAX_SEQ_LEN`
 </ParamField>
@@ -467,6 +518,8 @@ For MoE models, AIS requires `ais_tp_size * ais_attention_dp_size == ais_moe_tp_
 </ParamField>
 
 <ParamField path="--active-prefill-tokens-threshold" type="integer" default="null">
+  Deprecated; will be removed in v1.7. Use `--active-prefill-tokens-threshold-frac`.
+
   Absolute active-prefill-token threshold. A numeric value greater than or equal to `0` independently
   enables this check. Uses OR logic with the fractional prefill threshold.
 
@@ -703,8 +756,17 @@ curl -s localhost:8000/metrics | grep dynamo_frontend_inter_token_latency_second
 <ParamField path="--enable-anthropic-api" type="boolean" default="false">
   Enable `/v1/messages` (the Anthropic Messages API).
 
+  With a V2 unified parser that provides per-call completion evidence, streaming responses release
+  completed tool blocks in call order once the identity is available and the arguments form a valid
+  JSON object. This lets clients receive a completed call while later calls are still generating.
+  V1 parsers, including those selected with `DYN_PARSER_VERSION=1`, retain the finish-reason or
+  end-of-stream fallback. Calls whose argument string remains empty wait until end of stream,
+  even if the parser reports completion.
+
   Environment variable: `DYN_ENABLE_ANTHROPIC_API`
 </ParamField>
+
+The `dynamo` chat processor runs Rust parsing in the frontend; workers publish parser choices through `--dyn-tool-call-parser` and `--dyn-reasoning-parser`. See [Parser Generation Routing](../../use-cases/tool-calling-and-reasoning/troubleshooting-tool-calls.md#parser-generation-routing) for `DYN_PARSER_VERSION`, aliases, fallback, and migration settings.
 
 <ParamField path="--dyn-chat-processor" type="string" default="dynamo">
   Chat processor. See [Chat Processors](../../use-cases/tool-calling-and-reasoning/chat-processors.mdx) for how this combines with the parser flags.
@@ -843,7 +905,9 @@ Use `/v1/images/edits` for prompt-guided variations.
   array of those strings.
 
 See the [Image Edits API](../api/image-edits.mdx) for build requirements,
-accepted fields, limits, errors, and rolling upgrades.
+accepted fields, limits, errors, and rolling upgrades, and
+[Create a Variation with Image Edits](../../use-cases/diffusion/workflows/text-to-image.md#create-a-variation-with-image-edits)
+for a reference-image-plus-prompt example.
 
 ### Anthropic (Experimental)
 
@@ -851,6 +915,29 @@ accepted fields, limits, errors, and rolling upgrades.
 |--------|------|-------------|
 | `POST` | `/v1/messages` | Anthropic Messages API (requires `--enable-anthropic-api`) |
 | `POST` | `/v1/messages/count_tokens` | Token counting for the Anthropic API |
+
+Responses from the Messages handlers, including request parsing and validation errors, return
+the assigned request ID in the `request-id` response header. HTTP errors from these handlers
+use the [Anthropic error envelope](https://platform.claude.com/docs/en/api/errors), including
+the same ID in `request_id`. Malformed JSON, invalid request shapes, and missing or incorrect
+JSON content types return HTTP 400. Requests exceeding `DYN_HTTP_BODY_LIMIT_MB` return HTTP
+413 with `request_too_large`; the default is 45 MiB.
+
+Before conversion, the frontend validates these
+[Messages request fields](https://platform.claude.com/docs/en/api/http/messages/create):
+
+- `tool_choice.type` selects `auto`, `any`, `none`, or `tool`. Only `tool` accepts and requires
+  a nonempty `name`. `disable_parallel_tool_use` must be a boolean and is unavailable with `none`.
+- `system` accepts a string or text blocks, each with `type: "text"` and nonempty string `text`.
+- `metadata` accepts an object; `user_id`, when supplied, accepts a string of at most 512
+  characters or `null`.
+- `thinking.type: "enabled"` requires an integer `budget_tokens` of at least 1,024 and less
+  than `max_tokens`, except when `anthropic-beta` includes
+  `interleaved-thinking-2025-05-14`. Budgets are invalid with `disabled`, `adaptive`,
+  or `between_tools`. `between_tools` is accepted without enabling thinking before the first tool.
+- `top_k` must fit the backend's signed 32-bit field (at most 2,147,483,647).
+
+For `system`, `metadata`, `tool_choice`, and `thinking`, `null` is treated as omission.
 
 ### Infrastructure
 
@@ -861,14 +948,44 @@ accepted fields, limits, errors, and rolling upgrades.
 | `GET` | `/metrics` | Prometheus metrics |
 | `GET` | `/openapi.json` | OpenAPI specification |
 | `GET` | `/docs` | Swagger UI |
-| `POST` | `/busy_threshold` | Set independently enabled busy thresholds for a discovered model (disabled when `DYN_DISABLE_FRONTEND_ADMIN_API` is truthy) |
-| `GET` | `/busy_threshold` | Get stored busy thresholds (disabled when `DYN_DISABLE_FRONTEND_ADMIN_API` is truthy) |
+
+### Admin
+
+Admin routes are off by default and are served on a separate listener (`127.0.0.1:8002` by
+default), never on the inference port. They have no authentication; see
+[Secure Deployment Guidelines](../../developer-guide/security/secure-deployment-guidelines.md#frontend-extensions-and-admin-api).
+When frontend TLS is configured, the admin listener uses the same certificate and client CA
+settings, so call it with `https://`. The inference port's `/openapi.json` does not list these
+routes; `generate-frontend-openapi` does.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET`, `PATCH` | `/router_policy` | Get or update worker-selection parameters of a router instance |
+| `GET`, `POST` | `/router_policy/busy_threshold` | Get or set busy thresholds for a discovered model |
+| `POST` | `/busy_threshold` | Set independently enabled busy thresholds for a discovered model |
+| `GET` | `/busy_threshold` | Get stored busy thresholds |
+
+<ParamField path="DYN_ENABLE_FRONTEND_ADMIN_API" type="boolean" default="false">
+  When truthy (`1`, `true`, `yes`, or `on`), the frontend starts the admin listener and serves the
+  routes above.
+</ParamField>
+
+<ParamField path="DYN_FRONTEND_ADMIN_HOST" type="string" default="127.0.0.1">
+  Address the admin listener binds to. If you widen it, restrict the admin port at the network
+  boundary.
+</ParamField>
+
+<ParamField path="DYN_FRONTEND_ADMIN_PORT" type="integer" default="8002">
+  Port of the admin listener. When the admin API is enabled and the port cannot be bound, the
+  frontend fails to start. A value that is not a valid port number falls back to `8002`.
+</ParamField>
 
 `POST /busy_threshold` accepts `model` plus any of `active_decode_blocks_threshold`,
 `active_prefill_tokens_threshold`, and `active_prefill_tokens_threshold_frac`. A numeric field enables
 only that check. The router reevaluates workers on the next worker-load or runtime-configuration
-update; the call does not synchronously recompute the busy set and does not change startup-only router
-options such as `--router-mode kv` or `--router-track-output-blocks`.
+update, or with `--router-mode kv` at the next worker selection; the call does not synchronously
+recompute the busy set and does not change startup-only router options such as `--router-mode kv` or
+`--router-track-output-blocks`.
 
 ### Frontend feature switches
 
@@ -908,9 +1025,26 @@ are disabled by default. Truthy values are `1`, `true`, `yes`, or `on`, case-ins
   these endpoints do not use `x-tenant-id` or `x-dynamo-*` routing headers in either mode.
 </ParamField>
 
-<ParamField path="DYN_DISABLE_FRONTEND_ADMIN_API" type="boolean" default="false">
-  When truthy, `GET /busy_threshold` and `POST /busy_threshold` are not registered and return 404.
-  Inference, metrics, models, health, and liveness routes are unaffected.
+### Media refusal for text-only models
+
+A frontend that serves text-only models can refuse media before routing. A refused request never reaches a worker, and a streaming client receives the HTTP status instead of a `200` followed by an error event. Readiness checks on the OpenAI endpoints still take precedence.
+
+<ParamField path="--reject-media" type="boolean" default="false">
+  Refuse media in any message, including earlier turns, before conversion or routing:
+
+  - `/v1/chat/completions`: image, video, and audio URL parts, plus inline `input_audio`.
+  - `/v1/responses`: `input_image` parts, including `file_id` references, system/developer messages, assistant history, and function-call outputs. Audio and video input parts are not accepted by the Responses request schema.
+  - `/v1/messages`: image blocks with base64 or URL sources, including images inside `tool_result` content.
+
+  Refusals are counted with `error_type="unsupported_modality"` on `dynamo_frontend_requests_total`, apart from validation and overload errors.
+
+  Environment variable: `DYN_REJECT_MEDIA`
+</ParamField>
+
+<ParamField path="--reject-media-status-code" type="integer" default="415">
+  HTTP status for a request refused by `--reject-media`. Only 4xx and 5xx values are accepted. Set it to a status an upstream gateway fails over on, for example `429`, to have that gateway send media requests to a multimodal model.
+
+  Environment variable: `DYN_REJECT_MEDIA_STATUS_CODE`
 </ParamField>
 
 ### Endpoint path customization

@@ -12,7 +12,6 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -103,10 +102,10 @@ func TestDGDResourceSyncerDeleteIfControlledBy(t *testing.T) {
 				ctx := context.Background()
 				scheme := newDynamoGraphDeploymentControllerTestScheme(t)
 				dgd := &v1beta1.DynamoGraphDeployment{
-					ObjectMeta: metav1.ObjectMeta{Name: "my-dgd", Namespace: "default", UID: types.UID("dgd-uid")},
+					Name: "my-dgd", Namespace: "default", UID: types.UID("dgd-uid"),
 				}
 				other := &v1beta1.DynamoGraphDeployment{
-					ObjectMeta: metav1.ObjectMeta{Name: "other-dgd", Namespace: "default", UID: types.UID("other-uid")},
+					Name: "other-dgd", Namespace: "default", UID: types.UID("other-uid"),
 				}
 				objects := []client.Object{dgd}
 				if tc.seedController != "" {

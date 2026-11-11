@@ -343,12 +343,12 @@ docker push "${CUSTOM_SPEECH_ADAPTER_IMAGE}"
 
 The adapter build uses `DYNAMO_FRONTEND_IMAGE` as its base. Use published images
 only after both capabilities are released. In `deploy/agg.yaml`, add
-`--realtime` and `--enable-prefix-caching` to the `main` container's `args` in
+`--endpoint-types realtime` and `--enable-prefix-caching` to the `main` container's `args` in
 the component named `worker`, leaving its other arguments unchanged. For private
 runtime images, also add `custom-adapter-image-pull-secret` to
 `podTemplate.spec.imagePullSecrets` for the `Frontend` and `worker` components.
 Repeat the deployment command in step 4 with these image variables. The worker
-now serves realtime text instead of chat completions; remove `--realtime` and
+now serves realtime text instead of chat completions; remove `--endpoint-types realtime` and
 redeploy to return to the chat baseline. After the rollout, run:
 
 ```bash

@@ -16,19 +16,21 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
-use dynamo_kv_router::ConcurrentRadixTreeCompressed;
-use dynamo_kv_router::identity::{
-    CacheOwnerId, CacheSemanticsId, DcId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
-    StableDpSlotId,
+use dynamo_kv_events::event::{
+    KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData,
 };
-use dynamo_kv_router::indexer::{
-    KvIndexerInterface, KvIndexerMetrics, LowerTierIndexers, LowerTierQueryOptions, MatchDetails,
+use dynamo_kv_events::residency::StorageTier;
+use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
+use dynamo_kv_indexer::host::{
+    ConcurrentRadixTreeCompressed, KvIndexerInterface, KvIndexerMetrics, LowerTierIndexers,
+    LowerTierQueryOptions, MatchDetails, ResidencyProjection, ResidencyRoutingSnapshot,
+    RouterHintSourceMetadata,
 };
-use dynamo_kv_router::protocols::{
-    ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData,
-    LocalBlockHash, ResidencyProjection, ResidencyRoutingSnapshot, RouterHintSourceMetadata,
-    StorageTier, WorkerWithDpRank,
+use dynamo_router_protocol::identity::{
+    CacheOwnerId, CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId,
+    RoutingScopeId, StableDpSlotId,
 };
+use dynamo_router_protocol::worker::WorkerWithDpRank;
 use serde::Serialize;
 
 use super::mooncake_shared::{WorkerTrace, WorkerTraceEntry};
@@ -43,7 +45,7 @@ pub(crate) fn cache_owner(worker_id: u64) -> CacheOwnerId {
                 CacheSemanticsId::new([1; 16], IdentitySource::Explicit),
                 RoutingScopeId::new([2; 16], IdentitySource::Explicit),
             ),
-            DcId::new(1),
+            ClusterId::new(1),
         ),
         StableDpSlotId::new(slot, IdentitySource::Explicit),
     )

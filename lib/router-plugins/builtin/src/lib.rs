@@ -9,19 +9,30 @@
 //! Sequence tracking, eligibility, and admission remain in dynamo-kv-router.
 
 mod default;
+pub mod router_modes;
+mod sticky_min_load;
 mod thunderagent;
 mod two_tier_cost_fn;
 pub use default::{
-    DefaultWorkerSelector, DefaultWorkerSelectorControl, default_factory, default_policy,
-    startup_policy_parameters,
+    default_factory, default_policy, default_policy_with_rng, startup_policy_parameters,
 };
 
-/// Registry containing the required default only, without an optional policy catalog.
+/// Registry every host links: the required default plus the routing modes
+/// ([`router_modes`]), without an optional policy catalog.
 pub fn default_registry() -> RouterPluginRegistry {
-    RouterPluginRegistry::default().with_default_factory(default_factory())
+    with_defaults(RouterPluginRegistry::default())
 }
 
-use dynamo_kv_router::plugins::{RouterPluginRegistry, RouterPluginRegistryError};
+/// `registry` plus what [`default_registry`] holds: the required default and each routing mode
+/// it doesn't already provide. A host applies this to the catalog it installs, so
+/// `--router-mode` resolves however that catalog was built.
+pub fn with_defaults(registry: RouterPluginRegistry) -> RouterPluginRegistry {
+    let mut registry = registry.with_default_factory(default_factory());
+    router_modes::register_missing(&mut registry);
+    registry
+}
+
+use dynamo_kv_router::plugins::prelude::*;
 
 /// Register the named providers Dynamo ships, without changing the host's default factory.
 ///
@@ -30,6 +41,7 @@ use dynamo_kv_router::plugins::{RouterPluginRegistry, RouterPluginRegistryError}
 /// than overriding it.
 pub fn register(registry: &mut RouterPluginRegistry) -> Result<(), RouterPluginRegistryError> {
     default::register(registry)?;
+    sticky_min_load::register(registry)?;
     two_tier_cost_fn::register(registry)?;
     thunderagent::register(registry)?;
     Ok(())
@@ -37,9 +49,7 @@ pub fn register(registry: &mut RouterPluginRegistry) -> Result<(), RouterPluginR
 
 #[cfg(test)]
 mod tests {
-    use dynamo_kv_router::plugins::WorkerSelectionPolicyRegistryError;
-    use dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicyFactory;
-    use dynamo_kv_router::{KvRouterConfig, RoutingPartitionRef, WorkerType};
+    use dynamo_kv_router::plugins::prelude::*;
 
     use super::*;
 
@@ -74,9 +84,6 @@ worker_selection:
   aggregated: dynamo-two-tier-cost-fn
   prefill: dynamo-two-tier-cost-fn
   decode: dynamo-two-tier-cost-fn
-  instances:
-    - name: dynamo-two-tier-cost-fn
-      type: dynamo-two-tier-cost-fn
 "#,
         );
         let factory = resolved
@@ -89,7 +96,39 @@ worker_selection:
             WorkerType::Prefill,
             WorkerType::Decode,
         ] {
-            factory(&config, worker_type, partition);
+            factory(&SelectionConfig::from(&config), worker_type, partition);
+        }
+    }
+
+    #[test]
+    fn resolves_sticky_min_load_yaml() {
+        let (config, resolved) = resolve(
+            r#"
+worker_selection:
+  aggregated:
+    type: dynamo-sticky-min-load
+    parameters:
+      max_idle_secs: 600
+  prefill:
+    type: dynamo-sticky-min-load
+    parameters:
+      max_idle_secs: 600
+  decode:
+    type: dynamo-sticky-min-load
+    parameters:
+      max_idle_secs: 600
+"#,
+        );
+        let factory = resolved
+            .unwrap()
+            .expect("a configured instance resolves to a factory");
+        let partition = RoutingPartitionRef::new("model", "default");
+        for worker_type in [
+            WorkerType::Aggregated,
+            WorkerType::Prefill,
+            WorkerType::Decode,
+        ] {
+            factory(&SelectionConfig::from(&config), worker_type, partition);
         }
     }
 
@@ -100,12 +139,10 @@ worker_selection:
         let (_config, resolved) = resolve(
             r#"
 worker_selection:
-  aggregated: dynamo-two-tier-cost-fn
-  instances:
-    - name: dynamo-two-tier-cost-fn
-      type: dynamo-two-tier-cost-fn
-      parameters:
-        cache_affinity_threshold: 0.8
+  aggregated:
+    type: dynamo-two-tier-cost-fn
+    parameters:
+      cache_affinity_threshold: 0.8
 "#,
         );
 
@@ -121,5 +158,33 @@ worker_selection:
             error.to_string().contains("cache_affinity_threshold"),
             "the error should name the offending key: {error}"
         );
+    }
+
+    /// The routing modes take no parameters, so a `parameters` block under one is a mistake.
+    #[test]
+    fn routing_modes_reject_parameters() {
+        for policy_type in [
+            router_modes::RANDOM,
+            router_modes::ROUND_ROBIN,
+            router_modes::LEAST_LOADED,
+        ] {
+            let (_config, resolved) = resolve(&format!(
+                r#"
+worker_selection:
+  aggregated:
+    type: {policy_type}
+    parameters:
+      temperature: 0.5
+"#
+            ));
+            let Err(error) = resolved else {
+                panic!("{policy_type} must reject parameters");
+            };
+            assert!(
+                matches!(&error, WorkerSelectionPolicyRegistryError::Provider { policy_type: rejected, .. }
+                    if rejected == policy_type),
+                "unexpected error: {error}"
+            );
+        }
     }
 }

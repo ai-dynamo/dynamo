@@ -4,10 +4,7 @@
 //! Cache and load cost calculation. The host owns snapshots and validates finite scores.
 
 use super::parameters::PolicyParameters;
-use dynamo_kv_router::plugins::worker_selection::{
-    WorkerCandidate, WorkerCandidates, WorkerInputs, WorkerScorer, WorkerSelectionContext,
-    WorkerSelectionPolicyError,
-};
+use dynamo_kv_router::plugins::prelude::*;
 
 /// Resolve optional terms once so disabled weights add neither branches nor conversions to
 /// each worker score. The remote-hit specialization (shared-cache ranges and fetchable KV
@@ -37,12 +34,10 @@ struct DefaultScorer<const REQUEST_COST: bool, const SHARED_CREDIT: bool> {
     prefill_load_scale: f64,
     prefix_affinity_weight: f64,
     is_decode: bool,
-    prepared: PreparedRequest,
 }
 
 /// Values shared by every worker score in one selection. Preparation keeps their conversions
 /// and role checks outside the per-worker calculation without changing floating-point arithmetic.
-#[derive(Default)]
 struct PreparedRequest {
     min_prefill: usize,
     block_size: IntegerDivisor,
@@ -82,12 +77,6 @@ impl IntegerDivisor {
     }
 }
 
-impl Default for IntegerDivisor {
-    fn default() -> Self {
-        Self::new(1)
-    }
-}
-
 impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
     DefaultScorer<REQUEST_COST, SHARED_CREDIT>
 {
@@ -102,7 +91,6 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
             prefill_load_scale: config.prefill_load_scale,
             prefix_affinity_weight: config.prefix_affinity_weight,
             is_decode: worker_label == "decode",
-            prepared: PreparedRequest::default(),
         }
     }
 }
@@ -111,11 +99,11 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
     DefaultScorer<REQUEST_COST, SHARED_CREDIT>
 {
     fn prepare(
-        &mut self,
+        &self,
         context: &WorkerSelectionContext<'_>,
         candidates: WorkerCandidates<'_>,
-    ) -> Result<(), WorkerSelectionPolicyError> {
-        self.prepared = PreparedRequest {
+    ) -> Result<PreparedRequest, WorkerSelectionPolicyError> {
+        let mut prepared = PreparedRequest {
             min_prefill: 0,
             block_size: IntegerDivisor::new(u64::from(context.block_size())),
             // An empty prompt (e.g. embeddings-only input) has no overlap to decay;
@@ -130,7 +118,7 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
                     .get(0)
                     .is_some_and(|candidate| candidate.kv_transfer().is_some()),
         };
-        if self.prepared.needs_decay {
+        if prepared.needs_decay {
             let mut minimum = usize::MAX;
             for candidate in candidates.iter() {
                 let load = candidate
@@ -138,13 +126,14 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
                     .ok_or_else(|| WorkerSelectionPolicyError::failed("load input unavailable"))?;
                 minimum = minimum.min(load.active_prefill_tokens());
             }
-            self.prepared.min_prefill = minimum;
+            prepared.min_prefill = minimum;
         }
-        Ok(())
+        Ok(prepared)
     }
 
     fn score_worker(
-        &mut self,
+        &self,
+        prepared: &PreparedRequest,
         context: &WorkerSelectionContext<'_>,
         candidate: WorkerCandidate<'_>,
     ) -> Result<f64, WorkerSelectionPolicyError> {
@@ -163,7 +152,7 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
                     .shared_hits()
                     .map_or(0, |hits| hits.hits_beyond(device.round().max(0.0) as u32));
                 // Blocks a KV fetch would add beyond everything this worker holds.
-                let fetchable = if self.prepared.has_kv_transfer {
+                let fetchable = if prepared.has_kv_transfer {
                     candidate
                         .kv_transfer()
                         .and_then(|transfer| transfer.source_prefix_blocks())
@@ -181,17 +170,17 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
                 // Preserve signed zero when the configured weight is -0.0.
                 self.shared_cache_multiplier
             };
-            let decay = if self.prepared.needs_decay {
-                let excess = self.prepared.block_size.divide(
+            let decay = if prepared.needs_decay {
+                let excess = prepared.block_size.divide(
                     load.active_prefill_tokens()
-                        .saturating_sub(self.prepared.min_prefill) as f64,
+                        .saturating_sub(prepared.min_prefill) as f64,
                 );
                 1.0 / (1.0
-                    + self.overlap_score_credit_decay * self.prepared.request_blocks.divide(excess))
+                    + self.overlap_score_credit_decay * prepared.request_blocks.divide(excess))
             } else {
                 1.0
             };
-            let credit = self.prepared.overlap_credit * decay * device
+            let credit = prepared.overlap_credit * decay * device
                 + self.host_cache_hit_weight * cache.host_overlap_blocks()
                 + self.disk_cache_hit_weight * cache.disk_overlap_blocks()
                 + shared_credit;
@@ -204,14 +193,14 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
         } else {
             self.decode_active_request_weight
         };
-        let logit = if self.prepared.needs_decode_subtraction {
+        let logit = if prepared.needs_decode_subtraction {
             let logit = (load.decode_cost_blocks() - credit).max(0.0) + request_cost;
             // Load-only decode routing (no overlap credit) ignores the prompt, so it never
             // charges missing prefix blocks. Cache-aware decode routing (conditional
             // disaggregation, or aggregated serving without prefill tracking) does: the
             // credit here only offsets decode load, so it has the same cap as below.
-            if self.prefix_affinity_weight != 0.0 && self.prepared.overlap_credit > 0.0 {
-                let missing = (self.prepared.prompt_blocks - device_blocks).max(0.0);
+            if self.prefix_affinity_weight != 0.0 && prepared.overlap_credit > 0.0 {
+                let missing = (prepared.prompt_blocks - device_blocks).max(0.0);
                 logit + self.prefix_affinity_weight * missing
             } else {
                 logit
@@ -220,19 +209,19 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
             let raw_tokens = if !context.tracks_prefill_tokens() {
                 0
             } else if load.is_available() {
-                let uncached = context.prompt_tokens().saturating_sub(cached_tokens);
+                let uncached = context.isl_tokens().saturating_sub(cached_tokens);
                 (load.active_prefill_tokens() + uncached).saturating_add(cached_tokens)
             } else {
-                context.prompt_tokens()
+                context.isl_tokens()
             };
-            let prefill = (self.prepared.block_size.divide(raw_tokens as f64) - credit).max(0.0);
+            let prefill = (prepared.block_size.divide(raw_tokens as f64) - credit).max(0.0);
             let logit =
                 self.prefill_load_scale * prefill + load.decode_cost_blocks() + request_cost;
             if self.prefix_affinity_weight != 0.0 {
                 // Charge each prompt block this worker lacks. The overlap credit above is
                 // capped at the request's own prefill, so it cannot outweigh transient
                 // decode load on the worker that already holds a resumed prefix.
-                let missing = (self.prepared.prompt_blocks - device_blocks).max(0.0);
+                let missing = (prepared.prompt_blocks - device_blocks).max(0.0);
                 logit + self.prefix_affinity_weight * missing
             } else {
                 logit
@@ -263,14 +252,14 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool> WorkerScorer
     }
 
     fn score(
-        &mut self,
+        &self,
         context: &WorkerSelectionContext<'_>,
         candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
     ) -> Result<(), WorkerSelectionPolicyError> {
-        self.prepare(context, candidates)?;
+        let prepared = self.prepare(context, candidates)?;
         for (candidate, cost) in candidates.iter().zip(costs) {
-            *cost = self.score_worker(context, candidate)?;
+            *cost = self.score_worker(&prepared, context, candidate)?;
         }
         Ok(())
     }

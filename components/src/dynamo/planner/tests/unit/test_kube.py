@@ -1767,3 +1767,93 @@ async def test_wait_settlement_uses_operator_projected_integer(k8s_api, mock_cor
             delay_seconds=0.01,
         )
     assert got is dgd
+
+
+def _frontend_short_dgd() -> Dict[str, Any]:
+    """Workers settled; one Frontend replica short, so DGD Ready is False."""
+    return {
+        "metadata": {"name": "graph", "generation": 3},
+        "spec": {
+            "components": [
+                {"name": "Frontend", "type": "frontend", "replicas": 3},
+                {"name": "VllmDecodeWorker", "replicas": 2},
+            ]
+        },
+        "status": {
+            "observedGeneration": 3,
+            "state": "pending",
+            "conditions": [{"type": "Ready", "status": "False"}],
+            "components": {
+                "Frontend": {
+                    "replicas": 3,
+                    "updatedReplicas": 3,
+                    "readyReplicas": 2,
+                    "availableReplicas": 2,
+                },
+                "VllmDecodeWorker": {
+                    "replicas": 2,
+                    "updatedReplicas": 2,
+                    "readyReplicas": 2,
+                    "availableReplicas": 2,
+                },
+            },
+        },
+    }
+
+
+def test_non_planner_components_stable_ignores_unready_frontend(k8s_api):
+    assert k8s_api.non_planner_components_stable(_frontend_short_dgd()) == (True, [])
+
+
+def test_non_planner_components_stable_reports_untyped_worker(k8s_api):
+    deployment = _frontend_short_dgd()
+    deployment["status"]["components"]["VllmDecodeWorker"]["availableReplicas"] = 1
+
+    assert k8s_api.non_planner_components_stable(deployment) == (
+        False,
+        ["VllmDecodeWorker"],
+    )
+
+
+def test_only_frontend_unready_when_frontend_short(k8s_api):
+    assert k8s_api.only_frontend_unready(_frontend_short_dgd()) is True
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        pytest.param(lambda d: d["status"].update(state="failed"), id="failed"),
+        pytest.param(
+            lambda d: d["status"].update(rollingUpdate={"phase": "InProgress"}),
+            id="rolling-update",
+        ),
+        pytest.param(
+            lambda d: d["status"].update(observedGeneration=2), id="generation-lag"
+        ),
+        pytest.param(
+            lambda d: d["status"]["components"]["VllmDecodeWorker"].update(
+                availableReplicas=1
+            ),
+            id="worker-unstable",
+        ),
+    ],
+)
+def test_only_frontend_unready_rejects_unsettled_graph(k8s_api, mutate):
+    deployment = _frontend_short_dgd()
+    mutate(deployment)
+
+    assert k8s_api.only_frontend_unready(deployment) is False
+
+
+@pytest.mark.asyncio
+async def test_wait_exclude_planner_ignores_unready_frontend(k8s_api):
+    deployment = _frontend_short_dgd()
+    with patch.object(k8s_api, "get_graph_deployment", return_value=deployment):
+        got = await k8s_api.wait_for_graph_deployment_ready(
+            "graph",
+            include_planner=False,
+            max_attempts=1,
+            delay_seconds=0,
+        )
+
+    assert got is deployment
