@@ -5769,7 +5769,6 @@ class TestResponseFormatReasoningStart:
                 False,
                 False,
             ),
-            # No reasoning parser at all.
             ("<|im_start|>assistant\n<think>", None, False, False),
         ],
         ids=[
@@ -5847,6 +5846,22 @@ class TestResponseFormatReasoningStart:
         reasoning = guided["structural_tag"]["format"]["elements"][0]
         assert reasoning["content"]["exclude_tokens"] == sorted({end, tool_call})
         assert reasoning["end"] == {"type": "token", "token": end}
+
+    @pytest.mark.asyncio
+    async def test_nonprogressing_ref_cycle_is_rejected(self, tokenizer):
+        # Wrapped, the schema is no longer in guided_decoding.json, where the
+        # worker rejects it.
+        with pytest.raises(HttpError) as exc_info:
+            await self._guided(
+                tokenizer,
+                prompt_text="<|im_start|>assistant\n<think>",
+                reasoning_parser_class=_prompt_reasoning_parser_with_end(),
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {"name": "loop", "schema": {"$ref": "#"}},
+                },
+            )
+        assert exc_info.value.code == 400
 
     @pytest.mark.asyncio
     async def test_thinking_disabled_by_request_is_not_wrapped(self, tokenizer):

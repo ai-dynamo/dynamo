@@ -35,7 +35,10 @@ from vllm.tool_parsers import ToolParser
 from vllm.tool_parsers.utils import get_json_schema_from_tools
 from vllm.utils.async_utils import make_async
 
-from dynamo.common.utils.guided_json import admits_only_empty_object
+from dynamo.common.utils.guided_json import (
+    admits_only_empty_object,
+    reject_nonprogressing_guided_json_ref_cycles,
+)
 from dynamo.llm.exceptions import InvalidArgument
 
 from .responses_history import responses_history_template, responses_tools_request
@@ -652,6 +655,8 @@ def _response_format_after_reasoning(
             reasoning_parser_class.__name__,
         )
         return None
+    # The worker rejects these schemas only in ``guided_decoding.json``.
+    reject_nonprogressing_guided_json_ref_cycles(schema)
     return {
         "structural_tag": {
             "type": "structural_tag",
