@@ -60,7 +60,7 @@ spec:
       advisory: true
 ```
 
-advisory 模式仅提供建议。Planner 会计算建议副本数、记录日志、将其导出为诊断信息，并显示在 HTML 报告中。这些建议不会作为扩缩容决策应用：Planner 不会执行扩缩容操作，也不会更改部署。planner-in-the-loop replay 也遵循此设置：模拟部署保持不变，只报告建议，retune 决策（retune 目前仅在离线仿真中运行）也只记录、不应用。
+advisory 模式仅提供建议。Planner 会计算建议副本数、记录日志、将其导出为诊断信息，并显示在 HTML 报告中。这些建议不会作为扩缩容决策应用：Planner 不会执行扩缩容操作，也不会更改部署。planner-in-the-loop replay 也遵循此设置：模拟部署保持不变，只报告建议，retune 决策（`executor: local` 的 retune 仅在离线仿真中运行；线上部署使用 `executor: dgdr`，目前为实验功能）也只记录、不应用。
 
 ### 优化目标
 
@@ -150,7 +150,7 @@ spec:
 | `load_adjustment_interval_seconds` | int | `5` | FPM 调优更新和基于负载的扩缩容决策之间的秒数。即使只启用了吞吐量扩缩容，实时 FPM 观测也会按此间隔输入到性能模型中。必须短于 `throughput_adjustment_interval_seconds`。 |
 | `max_num_fpm_samples` | int | `64` | 为在线调优或回归保留的 FPM 观测最大数量。 |
 | `fpm_sample_bucket_size` | int | `16` | 用于观测淘汰的 bucket 数量（必须是完全平方数）。 |
-| `load_scaling_down_sensitivity` | int | `80` | 缩容敏感度 0-100（0=永不，100=激进）。 |
+| `load_scaling_down_sensitivity` | int | `80` | SLA 模式下的缩容敏感度 0-100（100=激进）。0 会阻止基于性能模型的缩容，但完全空闲的池仍会每次减少一个副本，直到端点下限（至少 1）。仅在 `optimization_target` 为 `sla` 时生效。 |
 | `load_min_observations` | int | `5` | 做出扩缩容决策前所需的最少观测数。 |
 
 ### 通用设置

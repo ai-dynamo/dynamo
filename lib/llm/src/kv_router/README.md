@@ -1,6 +1,6 @@
 # Router Host Layer
 
-This module is the router's host layer. It embeds the selection core from `lib/kv-router`
+This module is the router's host layer. It embeds the selection core from `lib/router/kv-router`
 (scoring, queues, load tracking) and adds what a running request needs around it: session
 affinity, booking ownership, dispatch, cancellation, and the optional encode and prefill hops.
 For which processes embed it and where their boundaries are, see
@@ -38,16 +38,18 @@ RoutingHost
  │   ├─ Kv(KvRouter)                 KV candidate state; selects and books, never dispatches
  │   │   ├─ Indexer                  which blocks each worker holds
  │   │   ├─ RequestLeaseManager      booking leases, reaper
- │   │   └─ EmbeddedSelection → SelectionService / SelectionCore (lib/kv-router)
+ │   │   └─ EmbeddedSelection → SelectionService / SelectionCore (lib/router/kv-router)
  │   │                               classify, queue, score, admit, account load
- │   ├─ Builtin                      round-robin, random, power-of-two, least-loaded
+ │   ├─ Builtin                      round-robin, random, least-loaded
  │   ├─ Direct                       the worker the request names
  │   └─ DeviceAwareWeighted
  ├─ affinity: AffinityCoordinator    session affinity (optional; crate::session_affinity)
  ├─ hosted_occupancy                 in-flight tracking for load-based builtin modes (optional)
- ├─ lora: LoraRouting                LoRA filter (optional)
+ ├─ candidate_policy                 hosted worker selection hook (optional)
  └─ request_metrics
 ```
+
+An optional hosted candidate policy selects a worker before dispatch. The legacy LoRA policy intersects eligible workers with currently available capacity and keeps its attempt lease in the request guard; transport fallback stays within those candidates. Hosted requests without a policy selection continue through the usual affinity and occupancy paths. KV routing uses a separate admission policy in its availability callback; the KV routing host holds no hosted candidate policy.
 
 What a KV request does in `RoutingHost::generate` (call order):
 
