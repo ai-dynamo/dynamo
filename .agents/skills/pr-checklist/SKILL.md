@@ -28,7 +28,7 @@ Use this skill when making a pull request to Dynamo or reviewing one. Work throu
 
 - Distributed runtime: `lib/runtime/`
 - LLM pipeline: `lib/llm/`
-- KV router: `lib/kv-router/`
+- KV router: `lib/router/kv-router/`
 - Python bindings: `lib/bindings/python/`
 - Sidecars: `lib/sidecar/`
 - Shared Python components: `components/src/dynamo/common/`, `components/src/dynamo/frontend/`

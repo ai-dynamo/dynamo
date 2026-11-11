@@ -58,13 +58,20 @@ areas:
   - components/src/dynamo/global_router/tests/
   - components/src/dynamo/router/
   - components/src/dynamo/thunderagent_router/
-  - lib/kv-router/
-  - lib/kv-router/src/indexer/
-  - lib/kv-router/src/recovery/
-  - lib/kv-router/src/scheduling/
-  - lib/kv-router/src/sequences/
-  - lib/kv-router/src/zmq_wire/
-  - lib/kv-router/tests/
+  - lib/kv-events/
+  - lib/kv-events/src/zmq_wire/
+  - lib/router/
+  - lib/router/admission/
+  - lib/router/kv-hints/
+  - lib/router/kv-indexer/
+  - lib/router/kv-router/
+  - lib/router/kv-router/src/scheduling/
+  - lib/router/kv-router/tests/
+  - lib/router/protocol/
+  - lib/router/scheduler/
+  - lib/router/session-affinity/
+  - lib/router/slot-tracker/
+  - lib/router/worker-selection/
   - lib/llm/src/kv_router.rs
   - lib/llm/src/kv_router/
   - lib/llm/src/routing_policy.rs
@@ -282,6 +289,7 @@ areas:
   - lib/bindings/
   - lib/bindings/c/
   - lib/bindings/python/
+  - lib/error/
   - lib/llm/
   - lib/llm/benches/
   - lib/llm/bin/
@@ -1077,27 +1085,44 @@ shared:
   - performance
   - router
   - global-router
-- glob: lib/kv-router/src/plugins/registry.rs
+- glob: lib/router/kv-router/src/plugins/registry.rs
   owners:
   - router
   - epp
-- glob: lib/kv-router/src/scheduling/config.rs
+# The pre-split scheduling/config.rs: the flat config half stays in kv-router, the
+# kernel-facing slice (RouterConfigOverride) lives in the scheduler crate.
+- glob: lib/router/kv-router/src/scheduling/config.rs
   owners:
   - router
   - epp
-# Top-level files only: the selection core in core/ stays router-only.
-- glob: lib/kv-router/src/services/selection/*
+- glob: lib/router/scheduler/src/config.rs
   owners:
   - router
   - epp
-- glob: lib/kv-router/src/services/shared_cache/
+# Top-level files only: the selection core in core/ stays router-only. The pre-split
+# services/selection top level is now the kernel's selection/ (types, catalog, ingress,
+# errors), the kv-router service adapters, and the session-affinity table.
+- glob: lib/router/scheduler/src/selection/*
   owners:
   - router
-  - kv-memory
-- glob: lib/kv-router/src/zmq_wire/extra_keys.rs
+  - epp
+- glob: lib/router/kv-router/src/services/selection/*
+  owners:
+  - router
+  - epp
+- glob: lib/router/session-affinity/src/lib.rs
+  owners:
+  - router
+  - epp
+- glob: lib/kv-events/src/zmq_wire/extra_keys.rs
   owners:
   - router
   - multimodal
+- glob: lib/kv-hashing/src/multimodal/
+  owners:
+  - router
+  - multimodal
+  - kv-memory
 - glob: lib/kvbm-config/src/messenger.rs
   owners:
   - kv-memory

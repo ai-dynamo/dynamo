@@ -502,13 +502,13 @@ jobs:
     - name: Set up Rust CI
       uses: ./.github/actions/setup-rust-ci
     - name: Check isolated kv-router feature builds
-      # Workspace feature unification hides these; check each on its own.
+      # Workspace feature unification hides these; check each feature on its own.
       run: |
-        cargo check --locked -p dynamo-kv-router --no-default-features --features standalone-slot-tracker
-        cargo check --locked -p dynamo-kv-router --no-default-features --features standalone-indexer
-    - name: Run standalone slot-tracker feature tests
-      # No workspace member requests standalone-slot-tracker, so it needs an explicit run here.
-      run: cargo test --locked -p dynamo-kv-router --features standalone-slot-tracker --lib 'services::'
+        cargo-hack --version || cargo install cargo-hack@0.6.45 --locked
+        cargo hack check --locked -p dynamo-kv-router --each-feature --all-targets
+    - name: Run kv-router adapter feature tests
+      # No workspace member enables the http adapter, so these tests run only here.
+      run: cargo test --locked -p dynamo-kv-router --features http,ingest-zmq,replica-sync-zmq,peer-recovery,metrics --lib --tests
     - name: Run canonical replay feature tests
       run: |
         cargo test --locked -p dynamo-bench --features replay-bench \
@@ -571,6 +571,9 @@ jobs:
     - name: Run Clippy Checks
       working-directory: ${{ matrix.dir }}
       run: cargo clippy --no-deps --all-targets -- -D warnings
+    - name: Check router crate layering
+      if: matrix.dir == '.'
+      run: bash scripts/router_layering_check.sh --host
     - name: Run Python bindings AIS feature clippy
       if: matrix.dir == 'lib/bindings/python'
       working-directory: ${{ matrix.dir }}

@@ -255,6 +255,9 @@ fn project_routing(hints: &RoutingHints, keep_worker_pins: bool) -> RoutingHints
         prefill_dp_rank,
         expected_output_tokens,
         lora_name,
+        base_model_name,
+        lora_source_uri,
+        lora_resolution_version,
         cache_namespace,
         priority_jump,
         strict_priority,
@@ -274,6 +277,9 @@ fn project_routing(hints: &RoutingHints, keep_worker_pins: bool) -> RoutingHints
             .flatten(),
         expected_output_tokens: *expected_output_tokens,
         lora_name: lora_name.clone(),
+        base_model_name: base_model_name.clone(),
+        lora_source_uri: lora_source_uri.clone(),
+        lora_resolution_version: *lora_resolution_version,
         cache_namespace: cache_namespace.clone(),
         priority_jump: *priority_jump,
         strict_priority: *strict_priority,
@@ -316,6 +322,8 @@ mod tests {
             dp_rank: Some(1),
             allowed_worker_ids: Some([7u64].into_iter().collect()),
             lora_name: Some("lora".to_string()),
+            base_model_name: Some("base".to_string()),
+            lora_resolution_version: Some(1),
             priority: Some(3),
             ..Default::default()
         });
@@ -339,6 +347,8 @@ mod tests {
         assert_eq!(routing.dp_rank, None);
         assert_eq!(routing.allowed_worker_ids, None);
         assert_eq!(routing.lora_name.as_deref(), Some("lora"));
+        assert_eq!(routing.base_model_name.as_deref(), Some("base"));
+        assert_eq!(routing.lora_resolution_version, Some(1));
         assert_eq!(routing.priority, Some(3));
         assert_eq!(copy.prompt_embeds.as_deref(), Some("embeds"));
         assert_eq!(copy.extra_args, source.extra_args);

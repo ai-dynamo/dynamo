@@ -1,11 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-use dynamo_kv_router::protocols::RoutingConstraints;
-use dynamo_kv_router::services::selection::{
-    PromptRequest, SelectAndReserveRequest, SelectionCacheConfig, SelectionCore, WorkerRequest,
-};
-use dynamo_kv_router::{KvRouterConfig, RoutingPartitionId};
+use dynamo_kv_router::plugins::prelude::*;
+use dynamo_kv_router::services::selection::local_selection_core;
 use dynamo_router_policies::default_factory;
+use dynamo_scheduler::host::{
+    PromptRequest, SelectAndReserveRequest, SelectionCacheConfig, WorkerRequest,
+};
 
 fn worker(worker_id: u64) -> WorkerRequest {
     WorkerRequest {
@@ -43,7 +43,7 @@ fn reserve_request(selection_id: &str) -> SelectAndReserveRequest {
 
 #[tokio::test]
 async fn shared_core_books_and_releases_with_the_builtin_default() {
-    let core = SelectionCore::try_new_local(
+    let core = local_selection_core(
         KvRouterConfig {
             use_kv_events: false,
             router_queue_threshold: None,
@@ -65,7 +65,7 @@ async fn shared_core_books_and_releases_with_the_builtin_default() {
         .unwrap();
     assert!(partition.scheduler().has_request("request"));
     // Replacing scorer/picker state must leave active reservations intact.
-    use dynamo_kv_router::plugins::worker_selection::RuntimePolicyUpdate;
+    use dynamo_kv_router::plugins::prelude::*;
     let control = partition.scheduler().policy_control();
     let initial = control.get().await.unwrap();
     control
@@ -88,8 +88,8 @@ async fn shared_core_books_and_releases_with_the_builtin_default() {
 
 #[tokio::test]
 async fn runtime_updates_are_conditional_and_cancelled_writes_do_not_apply() {
-    use dynamo_kv_router::plugins::worker_selection::{RuntimePolicyError, RuntimePolicyUpdate};
-    let core = SelectionCore::try_new_local(
+    use dynamo_kv_router::plugins::prelude::*;
+    let core = local_selection_core(
         KvRouterConfig {
             use_kv_events: false,
             ..Default::default()
@@ -138,11 +138,7 @@ async fn runtime_updates_are_conditional_and_cancelled_writes_do_not_apply() {
 
 #[tokio::test]
 async fn scoring_error_does_not_book_and_allows_retry() {
-    use dynamo_kv_router::WorkerSelectionPolicyError;
-    use dynamo_kv_router::plugins::worker_selection::{
-        WorkerCandidates, WorkerInputView, WorkerPicker, WorkerScorer, WorkerSelectionContext,
-        WorkerSelectionPolicy,
-    };
+    use dynamo_kv_router::plugins::prelude::*;
     use std::sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -173,7 +169,7 @@ async fn scoring_error_does_not_book_and_allows_retry() {
             Ok(0)
         }
     }
-    let core = SelectionCore::try_new_local(
+    let core = local_selection_core(
         KvRouterConfig {
             use_kv_events: false,
             router_queue_threshold: None,
