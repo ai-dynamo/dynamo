@@ -522,7 +522,7 @@ func TestGroveFrontendIngressUsesPreservedVirtualServiceSettings(t *testing.T) {
 			require.NoError(t, networkingv1.AddToScheme(scheme))
 			require.NoError(t, networkingv1beta1.AddToScheme(scheme))
 			name := dynamo.GetDCDResourceName(dgd, "frontend", "")
-			virtualService := &networkingv1beta1.VirtualService{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: dgd.Namespace}}
+			virtualService := &networkingv1beta1.VirtualService{Name: name, Namespace: dgd.Namespace}
 			require.NoError(t, controllerutil.SetControllerReference(dgd, virtualService, scheme))
 			service := &corev1.Service{Name: name, Namespace: dgd.Namespace}
 			require.NoError(t, controllerutil.SetControllerReference(dgd, service, scheme))
