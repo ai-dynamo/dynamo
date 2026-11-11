@@ -24,7 +24,8 @@ use crate::protocols::TokenIdType;
 use crate::protocols::common::FinishReason;
 use crate::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
 use anyhow::{Context, Result, bail};
-use dynamo_kv_router::protocols::{KvCacheEvent, StorageTier};
+use dynamo_kv_events::event::KvCacheEvent;
+use dynamo_kv_events::residency::StorageTier;
 use dynamo_mocker::common::handoff::HandoffId;
 use dynamo_mocker::common::protocols::{
     DirectRequest, EngineType, KvCacheEventSink, KvEventPublishers, MockerConfig, RawKvEvent,
@@ -1110,6 +1111,13 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                     "aggregated mocker request cannot carry handoff metadata",
                 ));
             }
+        } else if self.engine_args.is_decode() && request.prefill_result.is_some() {
+            // Sequential handoff (vLLM, TRT-LLM): the prompt KV arrives from prefill, and the
+            // prefill worker already waited out the modeled transfer.
+            live_request = engine
+                .submit_decode(direct_request)
+                .await
+                .map_err(|error| Error::msg(error.to_string()))?;
         } else {
             live_request = engine
                 .submit(direct_request)
@@ -1638,6 +1646,55 @@ mod tests {
         assert!(finish.token_ids.is_empty());
         assert!(finish.finish_reason.is_some());
         assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn sequential_decode_starts_from_transferred_prompt_kv() {
+        use crate::protocols::common::preprocessor::PrefillResult;
+        use dynamo_mocker::common::protocols::{ForwardPassSnapshot, FpmPublisher, FpmSink};
+        use dynamo_mocker::live::LiveEngineConfig;
+
+        #[derive(Default)]
+        struct Passes(std::sync::Mutex<usize>);
+        impl FpmSink for Passes {
+            fn publish(&self, _: ForwardPassSnapshot) -> anyhow::Result<()> {
+                *self.0.lock().unwrap() += 1;
+                Ok(())
+            }
+        }
+
+        let args = MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "worker_type": WorkerType::Decode,
+                "block_size": 4,
+                "num_gpu_blocks": 256,
+                "max_num_batched_tokens": 64,
+                "speedup_ratio": 1000.0
+            }
+        }))
+        .unwrap();
+        let passes = Arc::new(Passes::default());
+        let live = LiveEngine::start_with_config(
+            args.clone(),
+            0,
+            LiveEngineConfig {
+                fpm_publisher: FpmPublisher::new(Some(passes.clone())),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let engine = MockerExecutionContext::new(args);
+        assert!(engine.engines.set(vec![live]).is_ok());
+        let mut request = decode_request(640, 1);
+        request.prefill_result = Some(PrefillResult {
+            disaggregated_params: serde_json::json!({}),
+            prompt_tokens_details: None,
+        });
+
+        let mut stream = engine.generate(SingleIn::new(request)).await.unwrap();
+        while stream.next().await.is_some() {}
+        // Recomputing the prompt would take 640 / 64 = 10 passes before the token.
+        assert_eq!(*passes.0.lock().unwrap(), 1);
     }
 
     #[tokio::test]
