@@ -46,17 +46,33 @@ CMD_PAUSE="${CMD_PAUSE:-0.8}"        # linger after a command finishes "typing"
 PROMPT_PAUSE="${PROMPT_PAUSE:-0.8}"  # linger on an empty prompt before typing
 
 # =============================================================================
-# Palette (same roles as hero-demo.sh, so apply-hero-theme.py maps them the same)
+# Palette: each escape picks a syntax role, not a hue
 # =============================================================================
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-PURPLE='\033[0;35m'
-WHITE='\033[0;37m'
+# The Slime Integration overview plays this recording with TerminalDemo's
+# "fern-code" theme, which colors each ANSI slot the way Fern's code blocks
+# color that role, in the site's light and dark mode. The two modes give some
+# roles different hues: command names are purple in light mode and yellow in
+# dark mode. apply-fern-code-theme.py embeds the dark colors for other players.
+RULE='\033[0;30m'     # 0  step header rules
+PROP='\033[0;31m'     # 1  Python attribute names
+STR='\033[0;32m'      # 2  quoted strings; success
+CMD='\033[0;33m'      # 3  command names
+FUNC='\033[0;34m'     # 4  shell builtins and Python function names
+DECL='\033[0;35m'     # 5  declaration keywords: export, async, def
+OP='\033[0;36m'       # 6  operators and control keywords: | = for do import return
+NAR='\033[0;37m'      # 7  narration and comments
+DIM='\033[0;90m'      # 8  progress and fast-forward notes
+NUM='\033[0;91m'      # 9  numbers called out in narration; in-progress status
+ARG='\033[0;92m'      # 10 unquoted arguments and flags
+PARAM='\033[0;93m'    # 11 Python parameters
+CALLARG='\033[0;94m'  # 12 Python call arguments
+QUOTE='\033[0;95m'    # 13 quote marks
+PUNCT='\033[0;96m'    # 14 punctuation
+PROMPT='\033[0;97m'   # 15 the prompt
 BOLD='\033[1m'
-DIM='\033[0;35m'   # "dim" text repurposed as purple
 NC='\033[0m'
-NAR='\033[0;34m'   # narration = blue
+OK="$STR"             # success marks share the string green
+STATUS="$NUM"         # in-progress status shares the number color
 
 # Table column formats, padded the way kubectl pads them (widest value + 3).
 CRD_FMT='%-36s%s'
@@ -93,35 +109,208 @@ narrate() {
 cursor_show() { printf '\033[?25h'; }
 cursor_hide() { printf '\033[?25l'; }
 
-# Type a string without a newline. $2 = optional color (default WHITE),
-# $3 = optional chars per chunk (default 1).
-type_chars() {
+# -----------------------------------------------------------------------------
+# Syntax highlighting. hl_bash and hl_python split one line into segments the
+# way Fern's code blocks color bash and Python, appending each segment's text
+# to SEG_TXT and its role's escape to SEG_COL.
+# -----------------------------------------------------------------------------
+SEG_TXT=()
+SEG_COL=()
+seg_reset() { SEG_TXT=(); SEG_COL=(); }
+seg() { SEG_COL+=("$1"); SEG_TXT+=("$2"); }
+
+# Bash state that carries across the lines of one command: inside "...",
+# inside $( ) within it, whether the next word is a command name, and a role
+# that the next word takes after for or export.
+HB_DQ=0
+HB_SUB=0
+HB_CMD=1
+HB_NEXT=""
+hl_bash_reset() { HB_DQ=0; HB_SUB=0; HB_CMD=1; HB_NEXT=""; }
+
+# Color one word of a command.
+hl_bash_word() {
+    local w="$1"
+    if [[ "$HB_NEXT" == "var" ]]; then
+        HB_NEXT=""
+        seg "$NC" "$w"
+        return 0
+    fi
+    if [[ "$HB_NEXT" == "assign" && "$w" == *=* ]]; then
+        HB_NEXT=""
+        seg "$NC" "${w%%=*}"; seg "$OP" "="; seg "$NC" "${w#*=}"
+        return 0
+    fi
+    case "$w" in
+        for) seg "$OP" "$w"; HB_CMD=0; HB_NEXT=var; return 0 ;;
+        in|done) seg "$OP" "$w"; return 0 ;;
+        do) seg "$OP" "$w"; HB_CMD=1; return 0 ;;
+        export) seg "$DECL" "$w"; HB_CMD=0; HB_NEXT=assign; return 0 ;;
+    esac
+    if (( HB_CMD )); then
+        HB_CMD=0
+        case "$w" in
+            echo|cd|test) seg "$FUNC" "$w" ;;
+            *) seg "$CMD" "$w" ;;
+        esac
+    else
+        seg "$ARG" "$w"
+    fi
+}
+
+hl_bash() {
+    local s="$1" n=${#1} i=0 j c
+    while (( i < n )); do
+        c=${s:i:1}
+        if [[ "$c" == " " ]]; then
+            j=$i
+            while [[ "${s:j:1}" == " " ]]; do j=$((j + 1)); done
+            seg "$NC" "${s:i:j-i}"; i=$j
+            continue
+        fi
+        if (( HB_DQ && !HB_SUB )); then
+            # Inside "...": variables, $( to open a command, or string text.
+            if [[ "$c" == '"' ]]; then
+                seg "$QUOTE" '"'; HB_DQ=0; i=$((i + 1))
+            elif [[ "$c" == '$' && "${s:i+1:1}" == "(" ]]; then
+                seg "$QUOTE" '$('; HB_SUB=1; HB_CMD=1; i=$((i + 2))
+            elif [[ "$c" == '$' ]]; then
+                j=$((i + 1))
+                while [[ "${s:j:1}" =~ [A-Za-z0-9_] ]]; do j=$((j + 1)); done
+                seg "$NC" "${s:i:j-i}"; i=$j
+            else
+                j=$i
+                while (( j < n )) && [[ "${s:j:1}" != '"' && "${s:j:1}" != '$' ]]; do j=$((j + 1)); done
+                seg "$STR" "${s:i:j-i}"; i=$j
+            fi
+            continue
+        fi
+        case "$c" in
+            '"') seg "$QUOTE" '"'; HB_DQ=1; HB_CMD=0; i=$((i + 1)); continue ;;
+            "'")
+                j=$((i + 1))
+                while (( j < n )) && [[ "${s:j:1}" != "'" ]]; do j=$((j + 1)); done
+                seg "$QUOTE" "'"; seg "$STR" "${s:i+1:j-i-1}"; seg "$QUOTE" "'"
+                HB_CMD=0; i=$((j + 1))
+                continue ;;
+            '|') seg "$OP" '|'; HB_CMD=1; i=$((i + 1)); continue ;;
+            ';') seg "$PUNCT" ';'; HB_CMD=1; i=$((i + 1)); continue ;;
+            ')') seg "$QUOTE" ')'; HB_SUB=0; i=$((i + 1)); continue ;;
+            '\') seg "$NC" '\'; i=$((i + 1)); continue ;;
+            '$')
+                j=$((i + 1))
+                while [[ "${s:j:1}" =~ [A-Za-z0-9_] ]]; do j=$((j + 1)); done
+                seg "$NC" "${s:i:j-i}"; HB_CMD=0; i=$j
+                continue ;;
+        esac
+        # A word runs to the next space, quote, operator, or variable.
+        j=$i
+        while (( j < n )); do
+            case "${s:j:1}" in ' '|'"'|"'"|'|'|';'|')'|'$') break ;; esac
+            j=$((j + 1))
+        done
+        hl_bash_word "${s:i:j-i}"
+        i=$j
+    done
+}
+
+# Color one line of Python. Each line of the demo's file is self-contained.
+hl_python() {
+    local s="$1" n=${#1} i=0 j c w prev next role
+    local import_line=0 after_def=0 params=0 depth=0
+    case "$s" in "import "*|"from "*) import_line=1 ;; esac
+    while (( i < n )); do
+        c=${s:i:1}
+        if [[ "$c" == " " ]]; then
+            j=$i
+            while [[ "${s:j:1}" == " " ]]; do j=$((j + 1)); done
+            seg "$NC" "${s:i:j-i}"; i=$j
+            continue
+        fi
+        if [[ "$c" == '"' || "$c" == "'" ]]; then
+            j=$((i + 1))
+            while (( j < n )) && [[ "${s:j:1}" != "$c" ]]; do j=$((j + 1)); done
+            seg "$QUOTE" "$c"; seg "$STR" "${s:i+1:j-i-1}"; seg "$QUOTE" "$c"
+            i=$((j + 1))
+            continue
+        fi
+        if [[ "$c" =~ [A-Za-z_] ]]; then
+            j=$i
+            while [[ "${s:j:1}" =~ [A-Za-z0-9_] ]]; do j=$((j + 1)); done
+            w=${s:i:j-i}
+            next=${s:j:1}
+            prev=""
+            (( i > 0 )) && prev=${s:i-1:1}
+            case "$w" in
+                import|from|as|return|await|if|else|for|in|with) role=$OP ;;
+                async|def|class) role=$DECL; [[ "$w" == def ]] && after_def=1 ;;
+                *)
+                    if (( after_def )); then
+                        role=$FUNC; after_def=0; params=1
+                    elif (( params == 2 )); then
+                        role=$PARAM
+                    elif [[ "$prev" == "." ]] && (( !import_line )); then
+                        if [[ "$next" == "(" ]]; then role=$FUNC; else role=$PROP; fi
+                    elif [[ "$next" == "(" ]]; then
+                        role=$FUNC
+                    elif (( depth > 0 )); then
+                        role=$CALLARG
+                    else
+                        role=$NC
+                    fi ;;
+            esac
+            seg "$role" "$w"; i=$j
+            continue
+        fi
+        case "$c" in
+            '(')
+                if (( params == 1 )); then params=2; else depth=$((depth + 1)); fi
+                seg "$PUNCT" "$c" ;;
+            ')')
+                if (( params == 2 )); then params=0; else depth=$((depth - 1)); fi
+                seg "$PUNCT" "$c" ;;
+            '=') seg "$OP" "$c" ;;
+            *) seg "$PUNCT" "$c" ;;
+        esac
+        i=$((i + 1))
+    done
+}
+
+# Type the segments, sleeping after every $1 characters (default 1).
+type_segments() {
+    local chunk="${1:-1}" k i t count=0
     cursor_show
-    local s="$1" color="${2:-$WHITE}" chunk="${3:-1}" i
-    printf '%b' "$color"
-    for (( i=0; i<${#s}; i+=chunk )); do
-        printf '%s' "${s:i:chunk}"
-        sleep "$CHAR_SPEED"
+    for (( k=0; k<${#SEG_TXT[@]}; k++ )); do
+        t=${SEG_TXT[$k]}
+        printf '%b' "${SEG_COL[$k]}"
+        for (( i=0; i<${#t}; i++ )); do
+            printf '%s' "${t:i:1}"
+            count=$((count + 1))
+            if (( count % chunk == 0 )); then sleep "$CHAR_SPEED"; fi
+        done
     done
     printf '%b' "$NC"
 }
 
-# Type a string, then end the line.
-type_out() {
-    type_chars "$@"
-    printf '\n'
-    cursor_hide
+# Print the segments at once.
+print_segments() {
+    local k
+    for (( k=0; k<${#SEG_TXT[@]}; k++ )); do
+        printf '%b%s' "${SEG_COL[$k]}" "${SEG_TXT[$k]}"
+    done
+    printf '%b' "$NC"
 }
 
 # A shell command: draw the prompt, linger, type the command, linger.
-# $2 = optional note printed in DIM after the command, as if it were a comment.
+# $2 = optional comment printed after the command.
 show_command() {
     cursor_show
-    printf '%b ' "${GREEN}❯${NC}"
+    printf '%b ' "${PROMPT}❯${NC}"
     pause "$PROMPT_PAUSE"
-    type_chars "$1"
+    seg_reset; hl_bash_reset; hl_bash "$1"
+    type_segments
     if [[ -n "${2:-}" ]]; then
-        printf '%b' "${DIM}${2}${NC}"
+        printf '%b' "${NAR}${2}${NC}"
     fi
     printf '\n'
     cursor_hide
@@ -132,18 +321,25 @@ show_command() {
 # each continuation line is typed below it.
 show_command_lines() {
     cursor_show
-    printf '%b ' "${GREEN}❯${NC}"
+    printf '%b ' "${PROMPT}❯${NC}"
     pause "$PROMPT_PAUSE"
+    hl_bash_reset
     local line
     for line in "$@"; do
-        type_out "$line"
+        seg_reset; hl_bash "$line"
+        type_segments
+        printf '\n'
+        cursor_hide
     done
     pause "$CMD_PAUSE"
 }
 
 # The same prompt line, printed at once. Used to re-pin a command after a hard cut.
 print_command() {
-    echo -e "${GREEN}❯${NC} ${WHITE}${1}${NC}${2:+${DIM}${2}${NC}}"
+    printf '%b ' "${PROMPT}❯${NC}"
+    seg_reset; hl_bash_reset; hl_bash "$1"
+    print_segments
+    printf '%b\n' "${2:+${NAR}${2}${NC}}"
 }
 
 # Step header with two leading blank lines to separate it from the prior beat.
@@ -156,9 +352,9 @@ step_header() {
 # Header with no leading blank lines, for watch beats that pin it to the top row.
 step_header_bars() {
     local emoji="$1" title="$2"
-    echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "  ${GREEN}${BOLD}${emoji} ${title}${NC}"
-    echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${RULE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "  ${BOLD}${emoji} ${title}${NC}"
+    echo -e "${RULE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
 }
 
@@ -166,12 +362,18 @@ step_header_bars() {
 type_file() {
     local file="$1" body="$2" line
     cursor_show
-    printf '%b ' "${GREEN}❯${NC}"
+    printf '%b ' "${PROMPT}❯${NC}"
     pause "$PROMPT_PAUSE"
-    type_out "vim ${file}"
+    seg_reset; hl_bash_reset; hl_bash "vim ${file}"
+    type_segments
+    printf '\n'
+    cursor_hide
     pause "$CMD_PAUSE"
     while IFS= read -r line; do
-        type_out "$line" "$NC" "$FILE_CHUNK"
+        seg_reset; hl_python "$line"
+        type_segments "$FILE_CHUNK"
+        printf '\n'
+        cursor_hide
     done <<< "$body"
     pause "$CMD_PAUSE"
 }
@@ -237,14 +439,14 @@ beat0_intro() {
     clear_screen
     step_header "🚀" "Let's train Qwen3-0.6B with Slime and Dynamo!"
     # Reveal the loop segment by segment, with the arrows in bold white.
-    local arrow="${WHITE}${BOLD} → ${NC}"
+    local arrow="${NC}${BOLD} → ${NC}"
     pause "$NAR_PAUSE"
     printf '%b# Each step: Dynamo serves the rollouts%b' "$NAR" "$NC"; sleep 0.5
     printf '%b' "$arrow"; sleep 0.5
     printf '%bSlime trains on them%b' "$NAR" "$NC"; sleep 0.5
     printf '%b' "$arrow"; sleep 0.5
     printf '%bthe new weights sync back.%b\n' "$NAR" "$NC"
-    narrate "GRPO on GSM8K, 10 steps, ${YELLOW}${BOLD}3 GPUs${NC}${NAR}: two SGLang engines in Dynamo, one Megatron-LM trainer on KubeRay."
+    narrate "GRPO on GSM8K, 10 steps, ${NUM}${BOLD}3 GPUs${NC}${NAR}: two SGLang engines in Dynamo, one Megatron-LM trainer on KubeRay."
     pause "$PAUSE_LONG"
 }
 
@@ -262,7 +464,7 @@ setup_render() {  # seconds since the Job started
     else
         status="Creating /data/weight-updates for the weight syncs..."
     fi
-    el "   ${BLUE}▸ ${status}${NC}"
+    el "   ${STATUS}▸ ${status}${NC}"
     el "  ${DIM}⏩ fast-forwarding · ${AGE_STR} elapsed${NC}"
 }
 
@@ -351,9 +553,9 @@ pods_render() {  # seconds since the DGD was applied
     done
     el ""
     if (( t >= ${POD_READY_T[2]} )); then
-        el "   ${GREEN}✅ All 3 Pods ready: both engines can generate${NC}"
+        el "   ${OK}✅ All 3 Pods ready: both engines can generate${NC}"
     else
-        el "   ${BLUE}▸ Engines loading Qwen3-0.6B from /data${NC} — ready once /health_generate succeeds"
+        el "   ${STATUS}▸ Engines loading Qwen3-0.6B from /data${NC} — ready once /health_generate succeeds"
     fi
     el ""
     el "  ${DIM}⏩ fast-forwarding · ${AGE_STR} elapsed${NC}"
@@ -448,12 +650,12 @@ pad() { printf -v "$1" "%-${2}s" "$3"; }
 loop_milestones() {  # t
     local t="$1"
     if (( t >= ENGINES_T )); then
-        el "  ${GREEN}✓${NC} Slime attached to the Dynamo engines: slime-sglang-engine-0:30000, slime-sglang-engine-1:30000"
+        el "  ${OK}✓${NC} Slime attached to the Dynamo engines: slime-sglang-engine-0:30000, slime-sglang-engine-1:30000"
     else
         el "  ${DIM}▸ Ray starts Slime's driver and the Megatron-LM trainer on the head Pod...${NC}"
     fi
     if (( t >= FIRST_SYNC_T )); then
-        el "  ${GREEN}✓${NC} Initial weight sync: v1 → both engines in 2.9s, so rollouts start from the trainer's weights"
+        el "  ${OK}✓${NC} Initial weight sync: v1 → both engines in 2.9s, so rollouts start from the trainer's weights"
     elif (( t >= ENGINES_T )); then
         el "  ${DIM}▸ Loading the torch_dist checkpoint, then syncing it to both engines...${NC}"
     else
@@ -481,7 +683,7 @@ loop_row() {  # step t
     fi
     sync="v$((k + 2))"
     if (( t >= ${SYNC_T[$k]} )); then
-        s_txt="${sync} → both engines in ${SYNC_SECS[$k]}s"; s_col="$GREEN"
+        s_txt="${sync} → both engines in ${SYNC_SECS[$k]}s"; s_col="$OK"
     elif (( t >= ${TRAIN_T[$k]} )); then
         s_txt="writing ${sync}..."; s_col="$DIM"
     fi
@@ -495,7 +697,7 @@ loop_status() {  # t
     local t="$1"
     fmt_age "$t"
     if (( t >= DONE_T )); then
-        el "  ${GREEN}✅ Job 'slime-grpo-d5tcx' succeeded · ${AGE_STR} after the RayJob started${NC}"
+        el "  ${OK}✅ Job 'slime-grpo-d5tcx' succeeded · ${AGE_STR} after the RayJob started${NC}"
     else
         el "  ${DIM}⏩ fast-forwarding · ${AGE_STR} elapsed${NC}"
     fi
@@ -568,7 +770,7 @@ beat5_rl_loop() {
     cursor_show
     pause "$PAUSE_MED"
     echo ""
-    narrate "Logprob gap ${YELLOW}${BOLD}≈ 0.01${NC}${NAR} at every step: the engines generated with the weights Slime had just synced." \
+    narrate "Logprob gap ${NUM}${BOLD}≈ 0.01${NC}${NAR} at every step: the engines generated with the weights Slime had just synced." \
             "The reward moves with the 8 prompts in each step. Ten steps test the pipeline, not learning."
     pause "$PAUSE_MED"
 }
@@ -605,7 +807,7 @@ beat6_verify() {
 # =============================================================================
 beat7_closing() {
     step_header "🎉" "Done: 10 GRPO Steps, Every Rollout Served by Dynamo"
-    echo -e "   ${PURPLE}${BOLD}Slime trains. Dynamo serves. New weights every step. 🔁${NC}"
+    echo -e "   ${PROMPT}${BOLD}Slime trains. Dynamo serves. New weights every step. 🔁${NC}"
     echo ""
     hold "$CLOSING_HOLD"
 }
