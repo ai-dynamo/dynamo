@@ -19,6 +19,7 @@
 //! The [`service_v2::HttpService`] can be further extended to host any [`axum::Router`] using the [`service_v2::HttpServiceConfigBuilder`].
 
 mod anthropic;
+mod backend_routes;
 mod batch_proxy;
 mod decision_lifecycle;
 mod image_edits;
@@ -32,7 +33,6 @@ pub mod busy_threshold;
 pub mod disconnect;
 pub mod error;
 pub mod format_generate;
-mod forward;
 pub mod frontend_extension;
 
 pub mod health;

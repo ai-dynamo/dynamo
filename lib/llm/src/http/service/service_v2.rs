@@ -17,7 +17,7 @@ use axum::response::IntoResponse;
 
 use super::Metrics;
 use super::RouteDoc;
-use super::forward::{ForwardRoutes, WorkerDiscovery};
+use super::backend_routes::{BackendRoutes, WorkerDiscovery};
 use super::frontend_extension::{
     FrontendExtensionContext, FrontendRouteExtension, FrontendRouteSet,
 };
@@ -77,13 +77,13 @@ struct UnmatchedRouteState {
     /// Base path of the Anthropic Messages API, or `None` when those endpoints
     /// are disabled and every miss belongs to the OpenAI surface.
     anthropic_path: Option<Arc<str>>,
-    forward_routes: Option<Arc<ForwardRoutes>>,
-    /// Counts forwarded responses as inflight, and ends forwarded streams and
-    /// tunnels once shutdown has drained.
+    backend_routes: Option<Arc<BackendRoutes>>,
+    /// Counts forwarded responses as inflight, and ends forwarded WebSocket
+    /// tunnels on shutdown.
     service: Arc<State>,
 }
 
-/// Forwards the request when a configured prefix covers it; otherwise
+/// Forwards the request when a worker declares a route covering it; otherwise
 /// returns a protocol-compatible JSON `404` error response.
 ///
 /// Requests under the configured Anthropic Messages path receive an Anthropic
@@ -92,14 +92,14 @@ async fn unmatched_route_fallback(
     axum::extract::State(state): axum::extract::State<UnmatchedRouteState>,
     request: axum::extract::Request,
 ) -> axum::response::Response {
-    if let Some(routes) = &state.forward_routes
+    if let Some(routes) = &state.backend_routes
         && let Some(target) = routes.resolve(request.uri())
     {
         // Forwarded work is admitted like inference.
         let Some(permit) = admit_inflight(&state.service) else {
             return draining_inference_response(request.version());
         };
-        let cancel = state.service.stopping_token().clone();
+        let cancel = state.service.cancel_token().clone();
         return routes.forward(request, target, cancel, permit).await;
     }
     let (method, uri) = (request.method(), request.uri());
@@ -475,9 +475,6 @@ pub struct ServiceObserver {
     stage: AtomicU8,
     inflight_inference: AtomicU64,
     inflight_zero: Notify,
-    /// Cancelled on entering `Stopping`, after inflight bodies drained or the
-    /// graceful shutdown timeout expired.
-    stopping: CancellationToken,
 }
 
 impl Default for ServiceObserver {
@@ -486,7 +483,6 @@ impl Default for ServiceObserver {
             stage: AtomicU8::new(ServiceStage::Ready.as_u8()),
             inflight_inference: AtomicU64::new(0),
             inflight_zero: Notify::new(),
-            stopping: CancellationToken::new(),
         }
     }
 }
@@ -528,7 +524,6 @@ impl ServiceObserver {
         );
         self.stage
             .store(ServiceStage::Stopping.as_u8(), Ordering::Release);
-        self.stopping.cancel();
     }
 
     /// Track one admitted inference response body.
@@ -858,12 +853,6 @@ impl State {
         self.service_observer.acquire_inflight()
     }
 
-    /// Cancelled once shutdown has drained (or timed out); unlike
-    /// [`Self::cancel_token`], it does not fire when shutdown begins.
-    pub fn stopping_token(&self) -> &CancellationToken {
-        &self.service_observer.stopping
-    }
-
     pub fn inflight_count(&self) -> u64 {
         self.service_observer.inflight_count()
     }
@@ -1035,14 +1024,8 @@ pub struct HttpServiceConfig {
     #[builder(default)]
     frontend_route_extensions: Vec<FrontendRouteExtension>,
 
-    /// Path prefixes reverse-proxied to upstream servers, as `PREFIX=URL` or
-    /// `PREFIX=owner` entries. `None` falls back to
-    /// `DYN_HTTP_FORWARD_ROUTES`.
-    #[builder(default)]
-    forward_routes: Option<Vec<String>>,
-
-    /// Namespaces whose workers this frontend serves; owner forward
-    /// routes reach only those. `None` means every namespace.
+    /// Namespaces whose workers this frontend serves; backend routes reach
+    /// only those. `None` means every namespace.
     #[builder(default)]
     namespace_filter: Option<NamespaceFilter>,
 
@@ -1659,8 +1642,8 @@ impl HttpServiceConfigBuilder {
 
         let model_manager = Arc::new(ModelManager::new());
         let cancel_token = config.cancel_token.unwrap_or_default().child_token();
-        // Owner forward routes find workers through real discovery only.
-        let forward_workers = config.discovery.clone().map(|discovery| WorkerDiscovery {
+        // Backend routes find workers through real discovery only.
+        let backend_workers = config.discovery.clone().map(|discovery| WorkerDiscovery {
             discovery,
             namespaces: config
                 .namespace_filter
@@ -1907,7 +1890,7 @@ impl HttpServiceConfigBuilder {
         // Return protocol-compatible JSON errors for unmatched routes. Register this router
         // outside `track_inflight_inference` so unmatched requests do not acquire an
         // inference permit or return `503` while the service is draining; requests a
-        // forward route covers do their own admission in `unmatched_route_fallback`.
+        // backend route covers do their own admission in `unmatched_route_fallback`.
         let unmatched_router = axum::Router::new()
             .fallback(unmatched_route_fallback)
             .with_state(UnmatchedRouteState {
@@ -1916,11 +1899,10 @@ impl HttpServiceConfigBuilder {
                         .unwrap_or_else(|_| super::anthropic::DEFAULT_MESSAGES_PATH.to_string())
                         .into()
                 }),
-                forward_routes: ForwardRoutes::from_config(
-                    config.forward_routes.as_deref(),
-                    forward_workers,
-                )?
-                .map(Arc::new),
+                backend_routes: backend_workers
+                    .map(BackendRoutes::new)
+                    .transpose()?
+                    .map(Arc::new),
                 service: state.clone(),
             })
             .layer(
@@ -3222,14 +3204,69 @@ mod tests {
         (port, state, handle)
     }
 
+    /// The discovery through which a frontend finds a worker serving
+    /// `/v1/custom` at `upstream`.
+    async fn custom_route_worker(upstream: std::net::SocketAddr) -> Arc<dyn Discovery> {
+        use dynamo_runtime::discovery::{DiscoverySpec, MockDiscovery, SharedMockRegistry};
+
+        let registry = SharedMockRegistry::new();
+        let card = serde_json::json!({
+            "display_name": "model",
+            "runtime_config": {"runtime_data": {"http_routes": {
+                "url": format!("http://{upstream}"),
+                "prefixes": ["/v1/custom"],
+            }}},
+        });
+        let spec = DiscoverySpec::from_model(
+            "ns".to_string(),
+            "backend".to_string(),
+            "generate".to_string(),
+            &card,
+        )
+        .unwrap();
+        MockDiscovery::new(Some(1), registry.clone())
+            .register(spec)
+            .await
+            .unwrap();
+        Arc::new(MockDiscovery::new(None, registry))
+    }
+
+    /// Serves `router`, plus `GET /v1/custom/s1`, the resource the forwarded
+    /// requests name.
+    async fn custom_route_upstream(router: axum::Router) -> std::net::SocketAddr {
+        let router = router.route("/v1/custom/s1", axum::routing::get(|| async { "s1" }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        addr
+    }
+
+    /// Waits until the frontend on `port` forwards `/v1/custom/s1`, and no
+    /// request is inflight.
+    async fn wait_for_custom_route(port: u16, state: &State) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let url = format!("http://localhost:{port}/v1/custom/s1");
+            while reqwest::get(&url).await.unwrap().status() != reqwest::StatusCode::OK {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the frontend sees the worker's route");
+        assert!(
+            state
+                .wait_inflight_zero_or_timeout(Duration::from_secs(5))
+                .await
+        );
+    }
+
     #[tokio::test]
     async fn test_forwarded_stream_is_tracked_inflight() {
         use futures::StreamExt;
 
         let release = Arc::new(Notify::new());
         let released = release.clone();
-        let upstream = axum::Router::new().route(
-            "/v1/custom/stream",
+        let upstream = custom_route_upstream(axum::Router::new().route(
+            "/v1/custom/s1/stream",
             axum::routing::get(move || async move {
                 let first = futures::stream::once(async { Ok::<_, std::io::Error>("first") });
                 let last = futures::stream::once(async move {
@@ -3238,16 +3275,14 @@ mod tests {
                 });
                 Body::from_stream(first.chain(last))
             }),
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let upstream_addr = listener.local_addr().unwrap();
-        tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
-
-        let (port, state, handle) = spawn_service(|builder| {
-            builder.forward_routes(Some(vec![format!("/v1/custom=http://{upstream_addr}")]))
-        })
+        ))
         .await;
-        let mut resp = reqwest::get(format!("http://localhost:{port}/v1/custom/stream"))
+        let discovery = custom_route_worker(upstream).await;
+        let (port, state, handle) =
+            spawn_service(|builder| builder.discovery(Some(discovery))).await;
+        wait_for_custom_route(port, &state).await;
+
+        let mut resp = reqwest::get(format!("http://localhost:{port}/v1/custom/s1/stream"))
             .await
             .expect("request failed");
         assert_eq!(resp.status(), reqwest::StatusCode::OK);
@@ -3282,17 +3317,16 @@ mod tests {
             [(env_llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS, Some("2"))],
             async move {
                 // An event stream that never ends on its own.
-                let upstream = axum::Router::new().route(
-                    "/v1/custom/events",
+                let upstream = custom_route_upstream(axum::Router::new().route(
+                    "/v1/custom/s1/events",
                     axum::routing::get(|| async {
                         let first =
                             futures::stream::once(async { Ok::<_, std::io::Error>("connected") });
                         Body::from_stream(first.chain(futures::stream::pending()))
                     }),
-                );
-                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-                let upstream_addr = listener.local_addr().unwrap();
-                tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+                ))
+                .await;
+                let discovery = custom_route_worker(upstream).await;
 
                 let runtime = CancellationToken::new();
                 let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -3300,15 +3334,17 @@ mod tests {
                 let service = HttpService::builder()
                     .port(port)
                     .cancel_token(Some(runtime.clone()))
-                    .forward_routes(Some(vec![format!("/v1/custom=http://{upstream_addr}")]))
+                    .discovery(Some(discovery))
                     .build()
                     .unwrap();
+                let state = service.state_clone();
                 let handle = tokio::spawn({
                     let runtime = runtime.clone();
                     async move { service.run_with_listener(runtime, listener).await }
                 });
+                wait_for_custom_route(port, &state).await;
 
-                let mut resp = reqwest::get(format!("http://localhost:{port}/v1/custom/events"))
+                let mut resp = reqwest::get(format!("http://localhost:{port}/v1/custom/s1/events"))
                     .await
                     .expect("request failed");
                 assert_eq!(&resp.chunk().await.unwrap().unwrap()[..], b"connected");
@@ -3328,129 +3364,18 @@ mod tests {
         .await;
     }
 
-    /// A client that stops reading fills every buffer back to the upstream,
-    /// so Hyper stops polling the forwarded body and the body never sees the
-    /// stopping token. The connection must still close at the shutdown
-    /// deadline, dropping the upstream response and the inflight permit.
-    #[tokio::test]
-    #[serial_test::serial]
-    async fn test_shutdown_closes_connection_whose_client_stopped_reading() {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        use tokio::io::AsyncWriteExt;
-
-        temp_env::async_with_vars(
-            [(env_llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS, Some("1"))],
-            async move {
-                // Streams as fast as it is read, and fires `dropped` once its
-                // stream is dropped: when the frontend drops its upstream
-                // response.
-                struct OnDrop(CancellationToken);
-                impl Drop for OnDrop {
-                    fn drop(&mut self) {
-                        self.0.cancel();
-                    }
-                }
-                let produced = Arc::new(AtomicU64::new(0));
-                let dropped = CancellationToken::new();
-                let upstream = axum::Router::new().route(
-                    "/v1/custom/flood",
-                    axum::routing::get({
-                        let (produced, dropped) = (produced.clone(), dropped.clone());
-                        move || async move {
-                            let chunk = bytes::Bytes::from(vec![b'x'; 64 * 1024]);
-                            Body::from_stream(futures::stream::unfold(
-                                OnDrop(dropped),
-                                move |on_drop| {
-                                    produced.fetch_add(chunk.len() as u64, Ordering::Relaxed);
-                                    let chunk = chunk.clone();
-                                    async move { Some((Ok::<_, std::io::Error>(chunk), on_drop)) }
-                                },
-                            ))
-                        }
-                    }),
-                );
-                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-                let upstream_addr = listener.local_addr().unwrap();
-                tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
-
-                let runtime = CancellationToken::new();
-                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-                let addr = listener.local_addr().unwrap();
-                let service = HttpService::builder()
-                    .port(addr.port())
-                    .cancel_token(Some(runtime.clone()))
-                    .forward_routes(Some(vec![format!("/v1/custom=http://{upstream_addr}")]))
-                    .build()
-                    .unwrap();
-                let state = service.state_clone();
-                let server = tokio::spawn({
-                    let runtime = runtime.clone();
-                    async move { service.run_with_listener(runtime, listener).await }
-                });
-
-                // Ask for the stream, then never read it.
-                let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
-                client
-                    .write_all(b"GET /v1/custom/flood HTTP/1.1\r\nhost: localhost\r\n\r\n")
-                    .await
-                    .unwrap();
-                // Once every buffer on the way is full, the upstream stalls.
-                tokio::time::timeout(Duration::from_secs(10), async {
-                    let (mut seen, mut unchanged) = (0, 0);
-                    while unchanged < 3 {
-                        tokio::time::sleep(Duration::from_millis(100)).await;
-                        let now = produced.load(Ordering::Relaxed);
-                        unchanged = if now > 0 && now == seen {
-                            unchanged + 1
-                        } else {
-                            0
-                        };
-                        seen = now;
-                    }
-                })
-                .await
-                .expect("the upstream stalls once the client stops reading");
-                assert_eq!(state.inflight_count(), 1);
-
-                let started = std::time::Instant::now();
-                runtime.cancel();
-                tokio::time::timeout(Duration::from_secs(5), server)
-                    .await
-                    .expect("the server stops at the shutdown deadline")
-                    .unwrap()
-                    .unwrap();
-                let held = started.elapsed();
-                assert!(
-                    held >= Duration::from_millis(900),
-                    "the connection must be held through the drain window, closed after {held:?}"
-                );
-                assert!(
-                    state
-                        .wait_inflight_zero_or_timeout(Duration::from_secs(5))
-                        .await,
-                    "closing releases the permit"
-                );
-                tokio::time::timeout(Duration::from_secs(5), dropped.cancelled())
-                    .await
-                    .expect("closing drops the upstream response");
-                drop(client);
-            },
-        )
-        .await;
-    }
-
     #[tokio::test]
     async fn test_draining_refuses_new_forwarded_requests() {
-        // Never contacted: admission is refused before forwarding.
-        let (port, state, handle) = spawn_service(|builder| {
-            builder.forward_routes(Some(vec!["/v1/custom=http://127.0.0.1:1".to_string()]))
-        })
-        .await;
+        let upstream = custom_route_upstream(axum::Router::new()).await;
+        let discovery = custom_route_worker(upstream).await;
+        let (port, state, handle) =
+            spawn_service(|builder| builder.discovery(Some(discovery))).await;
+        wait_for_custom_route(port, &state).await;
         state.start_draining();
 
         let client = reqwest::Client::new();
         let forwarded = client
-            .get(format!("http://localhost:{port}/v1/custom/events"))
+            .get(format!("http://localhost:{port}/v1/custom/s1"))
             .send()
             .await
             .expect("request failed");
