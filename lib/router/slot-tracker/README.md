@@ -9,4 +9,4 @@ Bookings per rank in, load and fullness per request out. The router's slot track
 
 Dependencies: `dynamo-router-protocol` and nothing router-side beyond it; no axum, reqwest, zmq, Prometheus, or `dynamo-runtime` under any feature. Tokio stays for channels and timers; the stage rule forbids sockets and HTTP, not async.
 
-Part of the router split (see `lib/router/README.md`).
+See `lib/router/README.md` for how the crates fit together.

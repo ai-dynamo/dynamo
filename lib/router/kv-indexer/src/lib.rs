@@ -20,8 +20,7 @@
 //! (`kv_hints::KvTransferCandidateSource`, `label_key`, `topology_keys`) and the residency
 //! owner key (`residency::ResidencyOwnerKey`); `dynamo-kv-hints` imports them from here, never
 //! the reverse.
-//! The `export` feature (Prometheus counter vectors) is transitional: the design replaces it
-//! with atomics and a `stats()` snapshot in the metrics behavior change.
+//! The `export` feature enables the Prometheus counter vectors.
 //!
 //! # KV RadixTree
 //!

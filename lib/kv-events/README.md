@@ -9,4 +9,4 @@ Everything about KV cache events, for both ends of the wire: the event types and
 
 Dependencies: `dynamo-router-protocol` (identities), `dynamo-kv-hashing` (the block hash identities and the contract the codec recomputes, and its `multimodal` module: the per-block multimodal metadata and the extra-key marker the codec parses), serde, serde_json, rmp-serde, rustc-hash, thiserror, tracing. No sockets, tasks, or servers: the ZMQ socket helper and the listener that drives it are `dynamo-kv-router` adapters behind its ZMQ features. The layering gate (`scripts/router_layering_check.sh`) checks the dependency set.
 
-Part of the router split (see `lib/router/README.md`).
+See `lib/router/README.md` for how the crates fit together.

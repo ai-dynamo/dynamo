@@ -300,7 +300,7 @@ pub enum ReplicaWorkerPolicy {
 }
 
 #[derive(Debug, Clone, Copy)]
-/// Stage operation the router drives; documented with the kernel contract in step 6.
+/// Stage operation the router drives.
 pub struct SequenceTrackerOptions {
     /// How this tracker treats replicated bookings.
     pub replica_worker_policy: ReplicaWorkerPolicy,
@@ -802,7 +802,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         self.add_request_admitted(req, decay_now).map(|_| ())
     }
 
-    /// Stage operation the router drives; documented with the kernel contract in step 6.
+    /// Stage operation the router drives.
     pub fn add_request_admitted(
         &self,
         req: SequenceRequest,
@@ -857,7 +857,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         Ok(attempt_id)
     }
 
-    /// Stage operation the router drives; documented with the kernel contract in step 6.
+    /// Stage operation the router drives.
     pub fn request_worker(&self, request_id: &str) -> Option<WorkerWithDpRank> {
         self.request_index.worker_for(request_id)
     }
@@ -873,7 +873,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         })
     }
 
-    /// Stage operation the router drives; documented with the kernel contract in step 6.
+    /// Stage operation the router drives.
     pub fn has_booking(&self, booking: &SchedulerBookingDescriptor) -> bool {
         self.request_index.booking_for(&booking.request_id)
             == Some(RequestBooking {
@@ -1236,7 +1236,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         Ok(())
     }
 
-    /// Stage operation the router drives; documented with the kernel contract in step 6.
+    /// Stage operation the router drives.
     pub fn add_output_blocks_if_booking(
         &self,
         request_id: &RequestId,

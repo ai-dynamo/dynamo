@@ -4,7 +4,7 @@
 //! The router-local request vocabulary: what a host hands the scheduler kernel
 //! (`RouterRequest`, `RoutingConstraints`, the worker-config view `WorkerConfigLike`) and
 //! what comes back (`RouterResponse`, `PotentialLoad`, `WorkerSelectionResult`), plus the
-//! event sink hosts implement. Kernel-owned per SPLIT_V2 section 4 rows 40-41.
+//! event sink hosts implement. Owned by the kernel.
 
 use crate::kv_hints::{KvTransferSourceChoice, WorkerKvTransferKeys, WorkerKvTransferKeysExt};
 use dynamo_kv_events::event::RouterEvent;
