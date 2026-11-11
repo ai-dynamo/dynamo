@@ -134,6 +134,8 @@ impl EndpointConfigBuilder {
     pub async fn start_with_registration(self) -> Result<StartedEndpoint> {
         let (endpoint, handler, metrics_labels, graceful_shutdown, health_check_payload) =
             self.build_internal()?.dissolve();
+        let runtime = endpoint.drt().runtime().clone();
+        let _registration = runtime.endpoint_registration_guard().await?;
         let connection_id = endpoint.drt().connection_id();
         let endpoint_id = endpoint.id();
 
@@ -252,8 +254,11 @@ impl EndpointConfigBuilder {
                     error = %e,
                     "Unable to register service for discovery"
                 );
+                // No shutdown in progress on this path, so this resolves to the
+                // runtime default.
+                let drain_timeout = endpoint.drt().endpoint_drain_timeout();
                 let _ = server
-                    .unregister_endpoint_instance(&endpoint_id, connection_id)
+                    .unregister_endpoint_instance(&endpoint_id, connection_id, drain_timeout)
                     .await;
                 if let Some(tracker) = tracker_clone {
                     tracker.unregister_endpoint();
@@ -274,8 +279,15 @@ impl EndpointConfigBuilder {
         let cancel_token_for_cleanup = endpoint_shutdown_token.clone();
         let discovery_for_cleanup = discovery;
 
+        let drt_for_cleanup = endpoint.drt().clone();
         let task: tokio::task::JoinHandle<anyhow::Result<()>> = tokio::spawn(async move {
             cancel_token_for_cleanup.cancelled().await;
+
+            // Read *after* cancellation: the bound is published when the
+            // shutdown sequence starts, so reading it at registration time
+            // would always see the default and put this drain on a different
+            // clock than the Phase 2 wait for it.
+            let drain_timeout = drt_for_cleanup.endpoint_drain_timeout();
 
             if let Err(error) = discovery_for_cleanup.unregister(discovery_instance).await {
                 tracing::warn!(%error, "Failed to unregister endpoint from discovery");
@@ -287,7 +299,7 @@ impl EndpointConfigBuilder {
             );
 
             if let Err(e) = server_for_cleanup
-                .unregister_endpoint_instance(&endpoint_id, connection_id)
+                .unregister_endpoint_instance(&endpoint_id, connection_id, drain_timeout)
                 .await
             {
                 tracing::warn!(
@@ -422,6 +434,7 @@ impl Endpoint {
     /// and should start receiving requests.
     pub async fn register_endpoint_instance(&self) -> anyhow::Result<()> {
         let drt = self.drt();
+        let _registration = drt.runtime().endpoint_registration_guard().await?;
         let instance_id = drt.connection_id();
         let endpoint_id = self.id();
 

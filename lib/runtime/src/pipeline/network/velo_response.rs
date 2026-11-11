@@ -1068,6 +1068,63 @@ mod tests {
         }
     }
 
+    // Idle workers have no HTTP admission left to protect. The frontend's
+    // configured grace must not consume their entire cleanup allowance.
+    #[tokio::test]
+    async fn drained_runtime_skips_velo_http_admission_window() {
+        temp_env::async_with_vars(
+            [
+                ("DYN_TCP_RESPONSE_STREAM_HOST", Some("127.0.0.1")),
+                ("DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS", Some("60")),
+            ],
+            async {
+                let runtime = crate::Runtime::from_current().unwrap();
+                let service = runtime.velo_response_service().service().await.unwrap();
+                runtime
+                    .shutdown_with_budget(Duration::from_secs(2))
+                    .await
+                    .expect("an idle worker must not wait for frontend HTTP admission");
+                assert!(service.closed.initialized());
+            },
+        )
+        .await;
+    }
+
+    // A timed-out HTTP owner can still be tokenizing its first request. With
+    // an empty response map, retain the window for its late registration.
+    #[tokio::test]
+    async fn pending_http_owner_retains_velo_response_admission_window() {
+        temp_env::async_with_vars(
+            [
+                ("DYN_TCP_RESPONSE_STREAM_HOST", Some("127.0.0.1")),
+                ("DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS", Some("1")),
+            ],
+            async {
+                let runtime = crate::Runtime::from_current().unwrap();
+                let service = runtime.velo_response_service().service().await.unwrap();
+                let http_owner = runtime.graceful_shutdown_tracker().register_task();
+                let shutdown = tokio::spawn({
+                    let runtime = runtime.clone();
+                    async move { runtime.shutdown_and_wait(Some(Duration::ZERO)).await }
+                });
+                runtime.primary_token().cancelled().await;
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                let response = service
+                    .register_response(EngineContext::new(()).context(), false)
+                    .expect("an admitted HTTP request may register during its grace period");
+                drop(response);
+                drop(http_owner);
+                tokio::time::timeout(Duration::from_secs(5), shutdown)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap();
+                assert!(service.closed.initialized());
+            },
+        )
+        .await;
+    }
+
     #[tokio::test]
     async fn runtime_shutdown_closes_only_the_last_owner_after_its_streams_drain() {
         temp_env::async_with_vars(
