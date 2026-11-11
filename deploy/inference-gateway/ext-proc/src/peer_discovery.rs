@@ -266,9 +266,9 @@ mod tests {
         use axum::response::IntoResponse;
         use axum::routing::get;
         use axum::{Json, Router};
-        use dynamo_kv_router::WorkerType;
         use dynamo_kv_router::config::kv_router_config_from_dynamo_env;
         use dynamo_kv_router::services::selection::SelectionServiceBuilder;
+        use dynamo_router_protocol::WorkerType;
         use kube::Config;
         use tokio::net::TcpListener;
         use tokio::sync::Notify;
