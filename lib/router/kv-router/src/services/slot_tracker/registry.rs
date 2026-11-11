@@ -12,7 +12,7 @@ use tokio_util::sync::CancellationToken;
 
 use dynamo_router_protocol::identity::RoutingPartitionId;
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
-use dynamo_scheduler::protocols::PotentialLoad;
+use dynamo_scheduler::PotentialLoad;
 use dynamo_slot_tracker::PrefillCompletion;
 use dynamo_slot_tracker::PrefillLoadHint;
 use dynamo_slot_tracker::{
@@ -20,7 +20,7 @@ use dynamo_slot_tracker::{
 };
 use dynamo_slot_tracker::{MAX_DATA_PARALLEL_RANKS_PER_WORKER, WorkerDpRange, WorkerTopologyError};
 
-use dynamo_scheduler::replication::{
+use dynamo_scheduler::{
     ReplicaInbox, ReplicaSyncConfig, ScopedReplicaEvent, ScopedSequencePublisher,
     setup_scoped_replica_sync,
 };

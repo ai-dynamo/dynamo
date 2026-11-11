@@ -23,12 +23,12 @@ use dynamo_kv_router::services::indexer::backend::Indexer;
 use dynamo_kv_router::services::selection::{local_selection_core, local_selection_core_with_host};
 use dynamo_router_protocol::identity::RoutingPartitionId;
 use dynamo_router_protocol::worker::WorkerWithDpRank;
+use dynamo_scheduler::RoutingConstraints;
 use dynamo_scheduler::host::{
     HostLoad, PromptRequest, SelectAndReserveRequest, SelectionCacheConfig, SelectionCore,
     SelectionHost, WorkerRequest,
 };
-use dynamo_scheduler::protocols::RoutingConstraints;
-use dynamo_scheduler::types::{RejectThresholdsProvider, WorkerSelectionPolicyFactory};
+use dynamo_scheduler::{RejectThresholdsProvider, WorkerSelectionPolicyFactory};
 use dynamo_slot_tracker::BusyThresholds;
 use tokio_util::sync::CancellationToken;
 

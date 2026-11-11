@@ -5,7 +5,7 @@
 - Depends on (Dynamo crates): `dynamo-admission`, `dynamo-kv-events`, `dynamo-kv-hashing`, `dynamo-kv-hints`, `dynamo-kv-indexer`, `dynamo-router-protocol`, `dynamo-session-affinity`, `dynamo-slot-tracker`, `dynamo-tokens`, `dynamo-worker-selection`.
 - Must not depend on: kv-router, the runtime, any transport (axum, hyper, reqwest, zmq, prometheus); `dynamo-kv-router` composes it with those adapters.
 - Hosts import this crate through its `host` module.
-- The crate root exports an explicit list in `src/lib.rs` and no glob; an item not on that list is reached through its module path or the `host` module.
+- Modules are private except `host` and `test_utils`. The root list in `src/lib.rs` is the in-router contract (composition); `host` is the subset promised to hosts outside `lib/router`. A new cross-crate name goes on the root list, and on `host` only when a host needs it. A type another crate owns is imported from that crate, not re-exported here.
 - Check: `bash scripts/router_layering_check.sh` (and `--host`).
 - Design: `lib/router/README.md`; the kernel's invariants, lock order, and actor rules are in `README.md` under "Working rules".
 

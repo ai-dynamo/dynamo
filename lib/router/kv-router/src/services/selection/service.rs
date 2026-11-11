@@ -16,10 +16,10 @@ use crate::services::common::replica_sync::{
 use crate::tracking_hash::tracking_hash_context;
 use dynamo_kv_indexer::IndexerPolicy;
 use dynamo_router_protocol::worker::WorkerId;
-use dynamo_scheduler::config::RouterConfig;
-use dynamo_scheduler::protocols::PotentialLoad;
-use dynamo_scheduler::replication::AffinityBindingEvent;
-use dynamo_scheduler::types::WorkerSelectionPolicyFactory;
+use dynamo_scheduler::PotentialLoad;
+use dynamo_scheduler::RouterConfig;
+use dynamo_scheduler::WorkerSelectionPolicyFactory;
+use dynamo_session_affinity::AffinityBindingEvent;
 
 #[cfg(feature = "ingest-zmq")]
 use super::zmq_ingress::ZmqDirectIngress;
