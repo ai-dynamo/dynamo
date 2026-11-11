@@ -4574,9 +4574,7 @@ func TestBuildRollingUpdateContext(t *testing.T) {
 		pods                           func(newHash string) []runtime.Object
 		expectedOld                    map[string]int32
 		expectedNew                    map[string]int32
-		// expectedOldDCDSpec, when set, applies the context with scaleOldWorkerDCDs
-		// and checks spec.replicas of each component's old DCD.
-		expectedOldDCDSpec map[string]int32
+		expectedOldDCDSpec             map[string]int32
 	}{
 		{
 			name: "normal rollout start - all old healthy, no new pods yet",
@@ -4988,6 +4986,36 @@ func TestBuildRollingUpdateContext(t *testing.T) {
 			expectedOld:        map[string]int32{"prefill": 1, "decode": 1},
 			expectedNew:        map[string]int32{"prefill": 1, "decode": 1},
 			expectedOldDCDSpec: map[string]int32{"prefill": 1, "decode": 1},
+		},
+		{
+			name: "disagg - recreate prefill drained, new prefill pending - retire old decode",
+			// prefill: Recreate, old drained to 0 | decode: desired=1, maxSurge=1, maxUnavailable=0
+			// new prefill: spec=1, available=0 (Pending) | decode: old and new available=1
+			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"prefill": {
+					ComponentType: consts.ComponentTypePrefill,
+					Replicas:      new(int32(1)),
+					Annotations: map[string]string{
+						KubeAnnotationDeploymentStrategy: string(common.DeploymentStrategyRecreate),
+					},
+				},
+				"decode": {ComponentType: consts.ComponentTypeDecode, Replicas: new(int32(1))},
+			},
+			oldDCDs: func(dgd *nvidiacomv1beta1.DynamoGraphDeployment, _ string) []runtime.Object {
+				return []runtime.Object{
+					makeOldDCD(dgd, "test-dgd", "prefill", consts.ComponentTypePrefill, "", 0, 0, 0),
+					makeOldDCD(dgd, "test-dgd", "decode", consts.ComponentTypeDecode, "", 1, 1, 1),
+				}
+			},
+			newDCDs: func(dgd *nvidiacomv1beta1.DynamoGraphDeployment, newHash string) []runtime.Object {
+				return []runtime.Object{
+					makeNewDCD(dgd, "test-dgd", "prefill", consts.ComponentTypePrefill, newHash, 1, 1, 0),
+					makeNewDCD(dgd, "test-dgd", "decode", consts.ComponentTypeDecode, newHash, 1, 1, 1),
+				}
+			},
+			expectedOld:        map[string]int32{"prefill": 0, "decode": 0},
+			expectedNew:        map[string]int32{"prefill": 1, "decode": 1},
+			expectedOldDCDSpec: map[string]int32{"prefill": 0, "decode": 0},
 		},
 	}
 

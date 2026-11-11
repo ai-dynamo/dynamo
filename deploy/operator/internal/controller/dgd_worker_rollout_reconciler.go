@@ -1455,10 +1455,13 @@ func (r *dgdWorkerRolloutReconciler) buildRollingUpdateContext(
 	oldWorkerDCDReplicas := make(map[string]int32)
 	newWorkerReplicas := make(map[string]int32)
 
-	// Workers pair only within one generation's runtime namespace: new replicas count as
-	// available once every desired worker component has one, so old decode keeps its prefill.
+	// Workers pair only within one generation's runtime namespace: while the old generation
+	// still serves and the new one cannot, new replicas do not count as available, so old
+	// decode keeps its prefill. An old component with no available replica (such as a
+	// drained Recreate prefill) ends the hold, since the old generation cannot serve either.
 	newStates := make(map[string]dcdComponentState)
 	newGenerationServes := true
+	oldGenerationServes := true
 	for i := range dgd.Spec.Components {
 		spec := &dgd.Spec.Components[i]
 		if !dynamo.IsWorkerComponent(string(spec.ComponentType)) {
@@ -1478,10 +1481,17 @@ func (r *dgdWorkerRolloutReconciler) buildRollingUpdateContext(
 		}
 		newStates[componentName] = newState
 
-		if (spec.Replicas == nil || *spec.Replicas > 0) && newState.Available == 0 {
+		if spec.Replicas != nil && *spec.Replicas == 0 {
+			continue
+		}
+		if newState.Available == 0 {
 			newGenerationServes = false
 		}
+		if len(oldDCDsByComponent[componentName]) > 0 && oldStates[componentName].Available == 0 {
+			oldGenerationServes = false
+		}
 	}
+	holdOldGeneration := oldGenerationServes && !newGenerationServes
 
 	for i := range dgd.Spec.Components {
 		spec := &dgd.Spec.Components[i]
@@ -1525,7 +1535,7 @@ func (r *dgdWorkerRolloutReconciler) buildRollingUpdateContext(
 			minAvailable = desired - maxUnavailable
 
 			newAvailable := newState.Available
-			if !newGenerationServes {
+			if holdOldGeneration {
 				newAvailable = 0
 			}
 			newUnavailable := max(int32(0), newState.Spec-newAvailable)
@@ -1555,7 +1565,7 @@ func (r *dgdWorkerRolloutReconciler) buildRollingUpdateContext(
 			"minAvailable", minAvailable,
 			"old", oldState,
 			"new", newState,
-			"newGenerationServes", newGenerationServes,
+			"holdOldGeneration", holdOldGeneration,
 			"oldTarget", oldTarget,
 			"newTarget", newTarget)
 	}
