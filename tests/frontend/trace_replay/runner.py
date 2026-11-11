@@ -8,7 +8,6 @@ from __future__ import annotations
 import copy
 import os
 import sys
-import tempfile
 import time
 import uuid
 import xml.etree.ElementTree as ET
@@ -25,6 +24,7 @@ from tests.utils.http_checks import model_registered
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.port_utils import allocate_port, deallocate_port
 
+from .assets import ensure_assets
 from .contract import (
     Case,
     Corpus,
@@ -57,38 +57,7 @@ REPLAY_ENVIRONMENT = (
 
 def prepare_assets(corpus_path: Path, model_dir: Path) -> dict[str, str]:
     corpus = load_corpus(corpus_path)
-    model = corpus.profile["model"]
-    model_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-    for name, expected in model["assets"].items():
-        destination = model_dir / name
-        if destination.exists():
-            if not destination.is_file() or file_digest(destination) != expected:
-                raise ReplayError(f"existing model asset has the wrong hash: {name}")
-            continue
-        url = f"https://huggingface.co/{model['repo_id']}/resolve/{model['revision']}/{name}"
-        headers = (
-            {"Authorization": "Bearer " + os.environ["HF_TOKEN"]}
-            if os.environ.get("HF_TOKEN")
-            else {}
-        )
-        fd, temporary = tempfile.mkstemp(prefix=".asset-", dir=model_dir)
-        try:
-            with os.fdopen(fd, "wb") as output:
-                try:
-                    with requests.get(
-                        url, headers=headers, stream=True, timeout=(10, 120)
-                    ) as response:
-                        response.raise_for_status()
-                        for block in response.iter_content(1024 * 1024):
-                            output.write(block)
-                except requests.RequestException as exc:
-                    raise ReplayError(f"asset download failed: {name}: {exc}") from exc
-            if file_digest(Path(temporary)) != expected:
-                raise ReplayError(f"downloaded model asset has the wrong hash: {name}")
-            os.replace(temporary, destination)
-        finally:
-            Path(temporary).unlink(missing_ok=True)
-    return verify_assets(corpus, model_dir)
+    return ensure_assets(corpus.profile, model_dir)
 
 
 def _sse_payloads(lines: Iterable[str]) -> list[dict[str, Any]]:
@@ -716,6 +685,7 @@ def run(options: RunOptions) -> tuple[int, dict[str, Any]]:
     base_url = f"http://127.0.0.1:{port}"
     worker_command = [
         sys.executable,
+        "-P",
         "-m",
         "tests.frontend.trace_replay.worker",
         "--corpus",
@@ -731,6 +701,7 @@ def run(options: RunOptions) -> tuple[int, dict[str, Any]]:
         worker_command += ["--limit", str(options.limit)]
     frontend_command = [
         sys.executable,
+        "-P",
         "-m",
         "dynamo.frontend",
         "--http-host",

@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import copy
 import gzip
+import subprocess
+import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
@@ -622,6 +624,7 @@ def test_replay_environment_drops_inherited_routes_and_does_not_report_secrets(
     assert "test-credential-must-not-be-reported" not in dumps(report)
 
 
+@pytest.mark.timeout(20)
 def test_startup_report_pins_migration_and_preserves_parent_metadata(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -643,6 +646,40 @@ def test_startup_report_pins_migration_and_preserves_parent_metadata(
         "DYN_REPLAY_HARNESS_REVISION"
         not in summary["build"]["execution"]["environment"]
     )
+    foreign = tmp_path / "foreign-cwd"
+    package = foreign
+    for name in ("tests", "frontend", "trace_replay"):
+        package /= name
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_text("")
+    decoy = package / "worker.py"
+    decoy.write_text("raise RuntimeError('foreign worker must not execute')\n")
+    probe = "import importlib.util; print(importlib.util.find_spec('tests.frontend.trace_replay.worker').origin)"
+    expected = Path(runner.__file__).parent / "worker.py"
+    for key in ("worker_command", "frontend_command"):
+        child = summary["build"]["execution"][key]
+        assert child[:3] == [sys.executable, "-P", "-m"]
+        prefix = child[: child.index("-m")]
+        resolved = subprocess.run(
+            [*prefix, "-c", probe],
+            cwd=foreign,
+            env=_environment(tmp_path),
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=5,
+        )
+        assert Path(resolved.stdout.strip()) == expected
+        unhardened = subprocess.run(
+            [prefix[0], "-c", probe],
+            cwd=foreign,
+            env=_environment(tmp_path),
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=5,
+        )
+        assert Path(unhardened.stdout.strip()) == decoy
 
 
 @pytest.mark.parametrize("separator", ["\u0085", "\u2028", "\u2029"])

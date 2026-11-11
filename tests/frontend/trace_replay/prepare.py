@@ -129,6 +129,28 @@ def read_seeds(data: bytes, profile: dict[str, Any]) -> list[dict[str, Any]]:
     return contract.read_request_seeds(data, profile["model_name"])
 
 
+def validate_seeds(seeds: list[dict[str, Any]], *, captured: bool) -> None:
+    """Check the complete supported request surface without loading assets."""
+    for seed in seeds:
+        if "preparation" in seed.get("reference", {}):
+            raise ReplayError(
+                "seed.reference.preparation is reserved for generated evidence"
+            )
+        rendering_input(seed["request"], captured=captured)
+
+
+def validate_tokenizers_version(version: str) -> None:
+    """Check the optional preparation dependency before acquiring assets."""
+    try:
+        actual = importlib.metadata.version("tokenizers")
+    except importlib.metadata.PackageNotFoundError as exc:
+        raise ReplayError(
+            f"preparation requires optional tokenizers=={version}"
+        ) from exc
+    if actual != version:
+        raise ReplayError(f"preparation requires tokenizers=={version}; found {actual}")
+
+
 def _closed(value: Any, keys: set[str] | frozenset[str], label: str) -> None:
     if not isinstance(value, dict) or set(value) - keys:
         raise ReplayError(f"unsupported {label} fields")
@@ -338,12 +360,8 @@ class ReferenceEncoder:
 
     @staticmethod
     def _tokenizer(data: bytes, version: str) -> Any:
+        validate_tokenizers_version(version)
         try:
-            actual = importlib.metadata.version("tokenizers")
-            if actual != version:
-                raise ReplayError(
-                    f"preparation requires tokenizers=={version}; found {actual}"
-                )
             module = importlib.import_module("tokenizers")
         except (ImportError, importlib.metadata.PackageNotFoundError) as exc:
             raise ReplayError(
@@ -651,6 +669,23 @@ def _reviewed(
     }
 
 
+def preflight_requests(
+    profile_path: Path,
+    model_dir: Path,
+    requests_path: Path,
+    *,
+    encoder: Path | None = None,
+) -> int:
+    """Verify all captured-mode prompts before spending reference inference."""
+    profile, reference = load_profile(profile_path)
+    seeds = read_seeds(requests_path.read_bytes(), profile)
+    validate_seeds(seeds, captured=True)
+    native = ReferenceEncoder(profile, reference, model_dir, encoder)
+    for seed in seeds:
+        native.prompt(seed["request"], captured=True)
+    return len(seeds)
+
+
 def prepare_corpus(
     profile_path: Path,
     model_dir: Path,
@@ -688,6 +723,7 @@ def prepare_corpus(
         data = requests.read_bytes()
         seeds, records = read_seeds(data, profile), []
         evidence = {"kind": "synthetic", "requests_sha256": _sha(data)}
+    validate_seeds(seeds, captured=captures is not None)
     reviewed: dict[str, Any] = {}
     review_evidence: dict[str, Any] | None = None
     if reviewed_corpus is not None:
@@ -698,10 +734,6 @@ def prepare_corpus(
         prompt, transformations = native.prompt(request, captured=captures is not None)
         effective = _effective(request)
         case_reference = copy.deepcopy(seed.get("reference", {}))
-        if "preparation" in case_reference:
-            raise ReplayError(
-                "seed.reference.preparation is reserved for generated evidence"
-            )
         preparation: dict[str, Any] = {}
         case_reference["preparation"] = preparation
         if captures is not None:

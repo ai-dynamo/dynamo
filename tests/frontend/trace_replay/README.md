@@ -31,6 +31,45 @@ The subprocess environment drops inherited `DYN_*` controls and supplies only th
 
 The default public run performs five cases × two modes × two schedules = 20 executions. `--limit N` selects the first N corpus records, while still validating all shard hashes, records and declared counts. Omit the limit for the complete corpus. Supported schedules are `whole`, `one_token`, `fixed32` and `recorded`; `recorded` preserves the supplied worker frames. A corpus argument can be a manifest or a directory containing `manifest.json`; `.jsonl.gz` shards are read transparently and their compressed bytes are hashed.
 
+## Build a corpus with one command
+
+The repository launcher combines capture and independent preparation. It requires `uv`, which provides Python 3.12 and the pinned preparation dependencies in an isolated environment. Use it directly from the checkout, or add its directory to `PATH`:
+
+```bash
+export PATH="/absolute/path/to/dynamo/tests/frontend/trace_replay:$PATH"
+
+frontend-replay build-corpus \
+  --requests requests.jsonl \
+  --reference-url http://127.0.0.1:8000 \
+  --profile deepseek-v41 \
+  --output corpus/
+```
+
+It connects to an already-running reference server. Prepared requests have the `id`, `source` and `request` fields described below. The exact bare alias `deepseek-v41` resolves to the committed V4.1 fixture manifest's model and encoder pins. A profile file or corpus directory can also be supplied; use an explicit path such as `./deepseek-v41` when a local filename matches the alias. Relative paths are resolved from the caller's working directory.
+
+Before contacting the reference server, the command freezes the input bytes, checks every request against the supported capture/preparation subset, verifies dependencies and any reviewed-corpus pins, fetches the declared assets, and independently computes all prompts. Unsupported inputs fail before inference. Only tokenizer/config files and the pinned official encoder are downloaded.
+
+Assets live under `${XDG_CACHE_HOME:-~/.cache}/dynamo/frontend-replay/<identity-digest>/`. `--cache-dir` overrides the cache root. Every reused file is hash-verified; corrupted entries fail instead of being silently replaced. Asset downloads honor proxy and CA-bundle environment settings and explicit `HF_TOKEN`, while ignoring implicit netrc credentials. Reference-server authentication uses `--api-key-env ENVIRONMENT_VARIABLE_NAME`.
+
+A successful fresh output contains:
+
+```text
+corpus/
+  manifest.json
+  cases.jsonl
+  evidence/
+    inputs/
+    capture/
+```
+
+The root manifest is published only after capture is complete and preparation succeeds. Raw captures and frozen inputs remain available for inspection and offline preparation. An incomplete capture skips preparation; failures retain any available evidence. The command requires a fresh output and does not resume or overwrite another run.
+
+New responses remain unjudged by default. Optional `--reviewed-corpus <approved-corpus>` delegates the existing exact approval bindings; it does not approve fresh responses. `--timeout` and `--concurrency` retain capture defaults of 600 seconds and two requests. Whole-output/single-token schedules and unary/SSE modes are selected later during replay.
+
+On success the command prints a complete replay command using the cached assets and a fresh `corpus/replay-results` directory. Run that command with the target image's installed Python and the printed checkout/corpus/cache paths available there. The isolated build environment provides preparation tools; the target environment provides `dynamo.frontend`.
+
+After `uv` starts the tool, exit codes are **0** for a prepared corpus, **1** for incomplete capture, and **2** for input, dependency, download, startup or preparation errors. The standalone capture and preparation commands below remain available for debugging and renderer-only fixtures.
+
 ## Capture and prepare fixtures
 
 Capture and preparation run separately from replay. Capture calls an **already running** reference server with `/version`, `/v1/models`, and `/v1/chat/completions`. It requires a response that returns `prompt_token_ids` and `choices[0].token_ids` when `return_token_ids` is true. It does not deploy an engine. Preparation uses a pinned vendor reference on CPU; replay does not import that reference or require its Python dependencies.
@@ -160,9 +199,11 @@ The separate GitHub workflow verifies the originating nightly run and binds its 
 
 ```bash
 python -m pytest tests/frontend/test_trace_replay_contract.py \
-  tests/frontend/test_trace_capture.py tests/frontend/test_trace_prepare.py -q
+  tests/frontend/test_trace_capture.py tests/frontend/test_trace_prepare.py \
+  tests/frontend/test_trace_assets.py tests/frontend/test_trace_build_corpus.py \
+  tests/frontend/test_trace_launcher.py -q
 DYN_RUN_FRONTEND_REPLAY=1 DYN_REPLAY_MODEL_DIR=/absolute/model/bundle \
   python -m pytest tests/frontend/test_trace_replay.py -q
 ```
 
-Capture/preparation tests exercise local HTTP evidence, completeness, independent source and asset pins, reviewed bindings, synthetic outputs, and deterministic exports without requiring the optional tokenizer package. The contract tests cover provenance validation, lossless typed comparisons, missing-versus-null JSON Pointers, gzip/count/limit handling, planted prompt/argument failures, EOS-preserving schedules, malformed SSE and baseline classification. The live test is skipped unless explicitly enabled and is excluded from the existing nightly selector. Once enabled, it requires the verified native bundle; unavailable assets are a failure. Its initial timeout is 300 seconds and should be tuned from measured execution times.
+Launcher, asset and builder tests cover checkout selection, verified caching, preflight before reference HTTP, frozen inputs, partial captures and manifest publication. The launcher bounds dependency resolution with a reviewed November 11, 2026 cutoff; update it together with dependency pins. Capture/preparation tests exercise local HTTP evidence, completeness, independent source and asset pins, reviewed bindings, synthetic outputs, and deterministic exports without requiring the optional tokenizer package. The contract tests cover provenance validation, lossless typed comparisons, missing-versus-null JSON Pointers, gzip/count/limit handling, planted prompt/argument failures, EOS-preserving schedules, malformed SSE and baseline classification. The live test is skipped unless explicitly enabled and is excluded from the existing nightly selector. Once enabled, it requires the verified native bundle; unavailable assets are a failure. Its initial timeout is 300 seconds and should be tuned from measured execution times.

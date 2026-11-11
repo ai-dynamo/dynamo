@@ -212,6 +212,29 @@ def _token_evidence(response: Any) -> None:
         raise ReplayError("reference response requires a terminal API finish reason")
 
 
+def validate_target(
+    url: str,
+    timeout: float,
+    concurrency: int,
+    api_key_env: str | None,
+) -> tuple[str, str]:
+    """Validate capture transport settings before downloads or HTTP requests."""
+    if (
+        type(timeout) not in {int, float}
+        or not math.isfinite(timeout)
+        or timeout <= 0
+        or type(concurrency) is not int
+        or concurrency <= 0
+    ):
+        raise ReplayError("capture timeout and concurrency must be positive")
+    token = os.environ.get(api_key_env, "") if api_key_env else ""
+    if api_key_env and not token:
+        raise ReplayError("the requested API-key environment variable is empty")
+    if token and any(not 0x21 <= ord(character) <= 0x7E for character in token):
+        raise ReplayError("the API key must be a visible ASCII header value")
+    return _reference_url(url, bool(token)), token
+
+
 def capture_requests(
     requests_path: Path,
     profile_path: Path,
@@ -223,14 +246,7 @@ def capture_requests(
     api_key_env: str | None = None,
 ) -> dict[str, Any]:
     """Capture prepared seeds; no inference engine or model is started here."""
-    if (
-        type(timeout) not in {int, float}
-        or not math.isfinite(timeout)
-        or timeout <= 0
-        or type(concurrency) is not int
-        or concurrency <= 0
-    ):
-        raise ReplayError("capture timeout and concurrency must be positive")
+    url, token = validate_target(url, timeout, concurrency, api_key_env)
     profile_bytes = profile_path.read_bytes()
     document = loads(profile_bytes)
     if not isinstance(document, dict) or document.get("schema") != SCHEMA:
@@ -240,12 +256,6 @@ def capture_requests(
         raise ReplayError("capture requires a nonempty profile.model_name")
     payload = requests_path.read_bytes()
     seeds = _seeds(payload, profile["model_name"])
-    token = os.environ.get(api_key_env, "") if api_key_env else ""
-    if api_key_env and not token:
-        raise ReplayError("the requested API-key environment variable is empty")
-    if token and any(not 0x21 <= ord(character) <= 0x7E for character in token):
-        raise ReplayError("the API key must be a visible ASCII header value")
-    url = _reference_url(url, bool(token))
     if output_dir.exists() and (not output_dir.is_dir() or any(output_dir.iterdir())):
         raise ReplayError("capture output directory must be empty")
     output_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
