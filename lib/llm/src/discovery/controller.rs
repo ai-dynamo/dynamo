@@ -51,6 +51,7 @@ pub(crate) struct DesiredInstance {
     pub(crate) projection_fingerprint: String,
     /// Digest of this worker's Qwen video prompt-expansion contract.
     pub(crate) video_contract: Option<String>,
+    pub(crate) guided_output_contract: Option<String>,
 }
 
 impl DesiredInstance {
@@ -71,19 +72,41 @@ fn cohort_video_contract(members: &[DesiredInstance]) -> Option<String> {
         .then_some(agreed)
 }
 
-/// Identifies a cohort's active video contract without changing its MDC checksum.
-fn cohort_fingerprint(mdc_checksum: &str, video_contract: Option<&str>) -> String {
-    match video_contract {
+fn cohort_guided_output_contract(members: &[DesiredInstance]) -> Option<String> {
+    let mut members = members.iter();
+    let agreed = members.next()?.guided_output_contract.clone()?;
+    members
+        .all(|member| member.guided_output_contract.as_deref() == Some(agreed.as_str()))
+        .then_some(agreed)
+}
+
+/// Identifies a cohort's active contracts without changing its MDC checksum.
+fn cohort_fingerprint(
+    mdc_checksum: &str,
+    video_contract: Option<&str>,
+    guided_output_contract: Option<&str>,
+) -> String {
+    let mut fingerprint = match video_contract {
         Some(contract) => format!("{mdc_checksum}\0video_contract\0{contract}"),
         None => mdc_checksum.to_string(),
+    };
+    if let Some(contract) = guided_output_contract {
+        fingerprint.push_str("\0guided_output_contract\0");
+        fingerprint.push_str(contract);
     }
+    fingerprint
 }
 
 /// Splits a fingerprint back into the MDC checksum and video contract it carries.
-fn fingerprint_parts(fingerprint: &str) -> (&str, Option<&str>) {
+fn fingerprint_parts(fingerprint: &str) -> (&str, Option<&str>, Option<&str>) {
+    let (fingerprint, guided) = fingerprint
+        .split_once("\0guided_output_contract\0")
+        .map_or((fingerprint, None), |(fingerprint, contract)| {
+            (fingerprint, Some(contract))
+        });
     match fingerprint.split_once("\0video_contract\0") {
-        Some((mdc_checksum, contract)) => (mdc_checksum, Some(contract)),
-        None => (fingerprint, None),
+        Some((mdc_checksum, contract)) => (mdc_checksum, Some(contract), guided),
+        None => (fingerprint, None, guided),
     }
 }
 
@@ -96,6 +119,7 @@ pub(crate) struct GroupSpec {
     pub(crate) representative: DesiredInstance,
     /// Contract shared by the cohort, if any.
     pub(crate) video_contract: Option<String>,
+    pub(crate) guided_output_contract: Option<String>,
 }
 
 #[async_trait]
@@ -198,6 +222,7 @@ struct RetainedPipeline {
     /// pending, so it is the only record of what the retained workers must publish.
     /// `None` means it was built without exact video routing.
     contract: Option<String>,
+    guided_output_contract: Option<String>,
 }
 
 struct DesiredGroup {
@@ -432,6 +457,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
             if existing.mdc_checksum == instance.mdc_checksum
                 && existing.projection_fingerprint == instance.projection_fingerprint
                 && existing.video_contract == instance.video_contract
+                && existing.guided_output_contract == instance.guided_output_contract
                 && super::image_edits::advertised_limit(&existing.card)
                     == super::image_edits::advertised_limit(&instance.card)
             {
@@ -607,8 +633,11 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
             .to_string();
         let member_keys = group.cohorts[&mdc_checksum].clone();
         let members = self.members(&member_keys);
-        let fingerprint =
-            cohort_fingerprint(&mdc_checksum, cohort_video_contract(&members).as_deref());
+        let fingerprint = cohort_fingerprint(
+            &mdc_checksum,
+            cohort_video_contract(&members).as_deref(),
+            cohort_guided_output_contract(&members).as_deref(),
+        );
         let fingerprint_changed =
             status_checksum(&old_status).is_some_and(|previous| previous != fingerprint);
         let mut retained_commit = status_committed_members(&old_status).cloned();
@@ -621,13 +650,24 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                 .1
                 .map(str::to_string),
         };
+        let committed_guided_contract = match &group.retained {
+            Some(retained) => retained.guided_output_contract.clone(),
+            None => fingerprint_parts(status_checksum(&old_status).unwrap_or_default())
+                .2
+                .map(str::to_string),
+        };
         if fingerprint_changed {
             retained_commit = retained_commit.and_then(|committed_members| {
-                let (previous_checksum, _) = fingerprint_parts(status_checksum(&old_status)?);
+                let (previous_checksum, _, _) = fingerprint_parts(status_checksum(&old_status)?);
                 if previous_checksum != mdc_checksum {
                     return None;
                 }
-                surviving_commit(&members, &committed_members, committed_contract.as_deref())
+                surviving_commit(
+                    &members,
+                    &committed_members,
+                    committed_contract.as_deref(),
+                    committed_guided_contract.as_deref(),
+                )
             });
             cancel_build(&old_status);
             if retained_commit.is_some() {
@@ -639,7 +679,8 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                 let previous_tx = std::mem::replace(&mut group.admission_tx, successor_tx);
                 group.retained.get_or_insert_with(|| RetainedPipeline {
                     admission_tx: previous_tx,
-                    contract: committed_contract,
+                    contract: committed_contract.clone(),
+                    guided_output_contract: committed_guided_contract.clone(),
                 });
             } else {
                 group.admission_tx.send_replace(Vec::new());
@@ -662,7 +703,12 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
             // one keeps receiving requests expanded with the contract it dropped.
             let had_commit = retained_commit.is_some();
             retained_commit = retained_commit.and_then(|committed_members| {
-                surviving_commit(&members, &committed_members, committed_contract.as_deref())
+                surviving_commit(
+                    &members,
+                    &committed_members,
+                    committed_contract.as_deref(),
+                    committed_guided_contract.as_deref(),
+                )
             });
             if had_commit && retained_commit.is_none() {
                 self.host.remove_group(key);
@@ -906,7 +952,12 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                 continue;
             };
             let video_contract = cohort_video_contract(&members);
-            let fingerprint = cohort_fingerprint(&mdc_checksum, video_contract.as_deref());
+            let guided_output_contract = cohort_guided_output_contract(&members);
+            let fingerprint = cohort_fingerprint(
+                &mdc_checksum,
+                video_contract.as_deref(),
+                guided_output_contract.as_deref(),
+            );
 
             let cancellation = CancellationToken::new();
             let generation = self.next_build_generation;
@@ -918,6 +969,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                 generation,
                 representative,
                 video_contract,
+                guided_output_contract,
             };
             group.status = GroupStatus::Building {
                 mdc_checksum: fingerprint,
@@ -991,6 +1043,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                     cohort_fingerprint(
                         &result.spec.mdc_checksum,
                         cohort_video_contract(&self.members(member_keys)).as_deref(),
+                        cohort_guided_output_contract(&self.members(member_keys)).as_deref(),
                     ) == result.spec.fingerprint
                 });
         let committed_members = match &group.status {
@@ -1254,6 +1307,7 @@ fn surviving_commit(
     members: &[DesiredInstance],
     committed_members: &BTreeSet<String>,
     contract: Option<&str>,
+    guided_output_contract: Option<&str>,
 ) -> Option<BTreeSet<String>> {
     // Keep serving the committed workers that are still here rather than demanding
     // the whole membership, so dropping the last worker of a rolling upgrade does
@@ -1273,6 +1327,13 @@ fn surviving_commit(
         && !surviving
             .iter()
             .all(|member| member.video_contract.as_deref() == Some(contract))
+    {
+        return None;
+    }
+    if let Some(contract) = guided_output_contract
+        && !surviving
+            .iter()
+            .all(|member| member.guided_output_contract.as_deref() == Some(contract))
     {
         return None;
     }
@@ -1482,6 +1543,9 @@ mod tests {
                 mdc_checksum: card.mdcsum().to_string(),
                 projection_fingerprint: card.source_path.clone().unwrap(),
                 video_contract: crate::discovery::watcher::qwen_video_contract_digest(&card),
+                guided_output_contract: crate::discovery::watcher::guided_output_contract_digest(
+                    &card,
+                ),
                 card,
             }))
         }
@@ -1651,6 +1715,7 @@ mod tests {
             mdc_checksum: card.mdcsum().to_string(),
             projection_fingerprint: mdc_checksum.to_string(),
             video_contract: crate::discovery::watcher::qwen_video_contract_digest(&card),
+            guided_output_contract: crate::discovery::watcher::guided_output_contract_digest(&card),
             card,
         }
     }
@@ -1697,6 +1762,51 @@ mod tests {
         let result = controller.builds.join_next().await.unwrap().unwrap();
         controller.active_builds -= 1;
         controller.apply_build_result(result);
+    }
+
+    fn guided_worker(id: u64, end_id: u32) -> DesiredInstance {
+        let mut worker = instance(id, "same");
+        worker.card.runtime_config.runtime_data.insert(
+            crate::protocols::common::guided_output::GUIDED_OUTPUT_REASONING_RUNTIME_KEY.into(),
+            serde_json::json!({"version":1,"engine":"vllm","mode":"explicit_gate","end_token_ids":[end_id]}),
+        );
+        worker.guided_output_contract =
+            crate::discovery::watcher::guided_output_contract_digest(&worker.card);
+        worker
+    }
+
+    #[tokio::test]
+    async fn guided_output_cohort_agreement_and_republication_withdraw_stale_gates() {
+        let (host, mut starts) = FakeHost::new();
+        let mut controller = ModelDiscoveryController::new(host.clone());
+        let first = guided_worker(1, 5);
+        let second = guided_worker(2, 5);
+        assert_eq!(first.mdc_checksum, instance(1, "same").mdc_checksum);
+        controller.apply_added(first.clone());
+        controller.apply_added(second.clone());
+        controller.start_queued_builds();
+        let agreed = starts.recv().await.unwrap();
+        assert_eq!(agreed.guided_output_contract, first.guided_output_contract);
+        assert_ne!(agreed.fingerprint, agreed.mdc_checksum);
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
+
+        // Adding an older worker disables the gate for the replacement pipeline.
+        controller.apply_added(instance(3, "same"));
+        controller.start_queued_builds();
+        let mixed = starts.recv().await.unwrap();
+        assert!(mixed.guided_output_contract.is_none());
+        // A retained worker changes its gate while that replacement is pending.
+        // The old pipeline must immediately stop serving its obsolete boundary.
+        assert!(controller.apply_added(guided_worker(1, 6)));
+        assert!(host.members(&group_key()).is_empty());
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
+        // The queued snapshot must not revive the obsolete gated pipeline.
+        assert_ne!(
+            host.members(&group_key()),
+            BTreeSet::from([first.key, second.key])
+        );
     }
 
     #[tokio::test]
@@ -1753,7 +1863,8 @@ mod tests {
             upgraded_spec.fingerprint,
             cohort_fingerprint(
                 &upgraded_spec.mdc_checksum,
-                Some(&contract_digest("round_ties_even"))
+                Some(&contract_digest("round_ties_even")),
+                None,
             )
         );
         host.release.add_permits(1);

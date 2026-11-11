@@ -9,6 +9,16 @@ Some models emit reasoning separately from their final response. Dynamo can spli
 
 See [Parser Generation Routing](troubleshooting-tool-calls.md#parser-generation-routing) for version selection and compatible names.
 
+## Guided Answers and Reasoning
+
+`guided_json`, `guided_choice`, `guided_regex`, and `guided_grammar` constrain the final answer in `content`. Enabled reasoning remains in `reasoning_content`. If generation stops before the reasoning boundary, the partial output remains reasoning.
+
+`guided_json` accepts a JSON schema object or a JSON-encoded schema object. It follows the same rendering, reasoning, tool-composition, and usage rules as `response_format` with `type: "json_schema"`. Schemas can describe objects, arrays, or scalar values. Supply only one answer constraint. `force_nonempty_content=true` is incompatible with a guided answer and enabled reasoning.
+
+For reasoning followed by a guided answer, use vLLM or SGLang workers that publish a verified explicit reasoning gate and honor request-local reasoning controls. Configure both the engine's native `--reasoning-parser` and Dynamo's compatible parser. Merely configuring `--dyn-reasoning-parser` does not enable engine grammar gating. Unsupported combinations return a configuration error before generation. Existing native JSON channel grammars retain their framing and parser; they do not add support for choice, regex, or grammar answers.
+
+Upgrade workers before the frontend. All workers in a routing group must publish the same gate capability. Older workers or mixed capabilities cannot serve guided answers with enabled reasoning through the new path. Disable thinking only when the model supports that mode, or upgrade and configure the workers indicated by the error.
+
 ## Configure Reasoning Parsing
 
 Set `DYN_PARSER_VERSION` in the frontend and backend worker environments before startup: `1` selects legacy V1 parsing, `2` requires a compatible unified V2 parser, and unset or `auto` prefers compatible V2 with V1 fallback. See [Parser Generation Routing](troubleshooting-tool-calls.md#parser-generation-routing) for supported configurations and family exceptions.

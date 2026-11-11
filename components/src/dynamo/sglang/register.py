@@ -67,6 +67,7 @@ from dynamo.sglang.gateway import (
     effective_gateway_workers,
     gateway_engine_id,
 )
+from dynamo.sglang.guided_output import publish_guided_output_capability
 from dynamo.sglang.kv_hints import publish_kvcr_hint_capabilities
 from dynamo.sglang.state_agent import inventory_sources
 from dynamo.sglang.video_routing import publish_sglang_qwen_video_processor_contract
@@ -663,6 +664,7 @@ async def get_runtime_config(
         publish_sglang_structural_tag_reasoning_policy(
             runtime_config, engine, server_args
         )
+        publish_guided_output_capability(runtime_config, engine, server_args)
     if dynamo_args.dyn_default_thinking_mode is not None:
         runtime_config.set_engine_specific(
             "default_thinking_mode",

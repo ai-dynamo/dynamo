@@ -463,6 +463,11 @@ impl ModelWatcher {
                  exact video routing disabled for this group"
             );
         }
+        if spec.guided_output_contract.is_none() {
+            card.runtime_config.runtime_data.remove(
+                crate::protocols::common::guided_output::GUIDED_OUTPUT_REASONING_RUNTIME_KEY,
+            );
+        }
         // Use per-worker-set router config if the worker provided one in its MDC,
         // otherwise fall back to the frontend-level global config. Policy selections
         // are process-local, so preserve them when the MDC supplies the base config.
@@ -1181,6 +1186,7 @@ impl ControllerHost for ModelWatcher {
         let mdc_checksum = card.mdcsum().to_string();
         let projection_fingerprint = lora_projection_fingerprint(&card)?;
         let video_contract = qwen_video_contract_digest(&card);
+        let guided_output_contract = guided_output_contract_digest(&card);
         Ok(Some(DesiredInstance {
             key: mcid.to_path(),
             mcid,
@@ -1190,6 +1196,7 @@ impl ControllerHost for ModelWatcher {
             mdc_checksum,
             projection_fingerprint,
             video_contract,
+            guided_output_contract,
         }))
     }
 
@@ -1604,6 +1611,16 @@ pub(super) fn qwen_video_contract_digest(card: &ModelDeploymentCard) -> Option<S
     let mut contracts = serde_json::Value::Object(contracts);
     canonicalize_json_object_keys(&mut contracts);
     Some(blake3::hash(contracts.to_string().as_bytes()).to_string())
+}
+
+pub(super) fn guided_output_contract_digest(card: &ModelDeploymentCard) -> Option<String> {
+    let mut value = card
+        .runtime_config
+        .runtime_data
+        .get(crate::protocols::common::guided_output::GUIDED_OUTPUT_REASONING_RUNTIME_KEY)?
+        .clone();
+    canonicalize_json_object_keys(&mut value);
+    Some(blake3::hash(value.to_string().as_bytes()).to_string())
 }
 
 fn worker_set_chat_preprocessor(
@@ -2525,6 +2542,7 @@ request_classifier:
                 fingerprint: desired.mdc_checksum.clone(),
                 generation: instance as u64 + 1,
                 video_contract: desired.video_contract.clone(),
+                guided_output_contract: desired.guided_output_contract.clone(),
                 representative: desired,
             };
             let (_admission_tx, admission_rx) = tokio::sync::watch::channel(vec![worker_id]);
@@ -2671,6 +2689,7 @@ request_classifier:
             mdc_checksum: card.mdcsum().to_string(),
             projection_fingerprint: lora_projection_fingerprint(&card).unwrap(),
             video_contract: qwen_video_contract_digest(&card),
+            guided_output_contract: guided_output_contract_digest(&card),
             card,
             group_key: key.clone(),
         };
@@ -2681,6 +2700,7 @@ request_classifier:
             generation: 1,
             representative: desired.clone(),
             video_contract: desired.video_contract.clone(),
+            guided_output_contract: desired.guided_output_contract.clone(),
         };
         let (_admission_tx, admission_rx) = tokio::sync::watch::channel(vec![1]);
         let prepared = watcher
@@ -2766,6 +2786,7 @@ request_classifier:
                 mdc_checksum: card.mdcsum().to_string(),
                 projection_fingerprint: lora_projection_fingerprint(&card).unwrap(),
                 video_contract: qwen_video_contract_digest(&card),
+                guided_output_contract: guided_output_contract_digest(&card),
                 card,
                 group_key: key.clone(),
             };
@@ -2776,6 +2797,7 @@ request_classifier:
                 generation: 1,
                 representative: desired.clone(),
                 video_contract: desired.video_contract.clone(),
+                guided_output_contract: desired.guided_output_contract.clone(),
             };
             let (_admission_tx, admission_rx) = tokio::sync::watch::channel(vec![1]);
             let prepared = watcher
@@ -2991,6 +3013,7 @@ request_classifier:
             mdc_checksum: card.mdcsum().to_string(),
             projection_fingerprint: lora_projection_fingerprint(&card).unwrap(),
             video_contract: qwen_video_contract_digest(&card),
+            guided_output_contract: guided_output_contract_digest(&card),
             card,
             group_key: key.clone(),
         };
@@ -3001,6 +3024,7 @@ request_classifier:
             generation: 1,
             representative: desired,
             video_contract: None,
+            guided_output_contract: None,
         };
         let (_admission_tx, admission_rx) = tokio::sync::watch::channel(vec![1]);
 
@@ -3678,6 +3702,7 @@ request_classifier:
                 fingerprint: desired.mdc_checksum.clone(),
                 generation: index + 1,
                 video_contract: desired.video_contract.clone(),
+                guided_output_contract: desired.guided_output_contract.clone(),
                 representative: desired.clone(),
             };
             let (_tx, rx) = tokio::sync::watch::channel(vec![worker_id]);

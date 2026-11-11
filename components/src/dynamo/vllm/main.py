@@ -57,6 +57,7 @@ from dynamo.llm import (
 )
 from dynamo.runtime import Endpoint
 from dynamo.runtime.logging import configure_dynamo_logging
+from dynamo.vllm.guided_output import publish_guided_output_capability
 from dynamo.vllm.kv_hints import publish_kv_hint_capabilities
 from dynamo.vllm.nixl_telemetry import allow_nixl_telemetry_capture
 from dynamo.vllm.worker_factory import WorkerFactory
@@ -951,6 +952,12 @@ async def register_vllm_model(
     """
     runtime_config = ModelRuntimeConfig()
     publish_vllm_structural_tag_reasoning_policy(runtime_config, vllm_config)
+    if model_input == ModelInput.Tokens and (
+        model_type.supports_chat()
+        or model_type == ModelType.Completions
+        or worker_type == WorkerType.Prefill
+    ):
+        publish_guided_output_capability(runtime_config, engine_client, vllm_config)
     publish_vllm_qwen_video_processor_contract(runtime_config, vllm_config)
     publish_vllm_nemotron_video_processor_contract(runtime_config, vllm_config)
     dp_range = get_dp_range_for_worker(vllm_config)

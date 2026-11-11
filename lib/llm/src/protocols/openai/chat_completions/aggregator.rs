@@ -722,11 +722,12 @@ impl DeltaAggregator {
 
         // One configured unified family owns raw batch output before legacy parsing.
         // Worker-parsed choices already carry tool calls and skip this safety net.
+        let projected_guided_answer = parsing_options.projects_guided_answer();
         let selected_unified_family = super::unified_parser::selected_batch_family(
             parsing_options.tool_call_parser.as_deref(),
             parsing_options.reasoning_parser.as_deref(),
         );
-        if selected_unified_family.is_none() {
+        if selected_unified_family.is_none() && !projected_guided_answer {
             let version = super::tool_parser_v2::selected_version().map_err(|error| {
                 DynamoError::builder()
                     .class(dynamo_runtime::error::ErrorClass::InvalidRequest)
@@ -749,7 +750,7 @@ impl DeltaAggregator {
                     .build()
             })?;
         }
-        if let Some(family) = selected_unified_family {
+        if let Some(family) = selected_unified_family.filter(|_| !projected_guided_answer) {
             for choice in aggregator.choices.values_mut() {
                 if choice.text.is_empty()
                     || choice
@@ -838,7 +839,10 @@ impl DeltaAggregator {
             }
         }
 
-        if selected_unified_family.is_none() && parsing_options.tool_call_parser.is_some() {
+        if !projected_guided_answer
+            && selected_unified_family.is_none()
+            && parsing_options.tool_call_parser.is_some()
+        {
             for choice in aggregator.choices.values_mut() {
                 if choice
                     .tool_calls
@@ -936,7 +940,7 @@ impl DeltaAggregator {
         // non-empty content, so surface the reasoning as content. Only when no
         // content and no tool calls were produced; when content exists,
         // reasoning stays in `reasoning_content`.
-        if parsing_options.move_reasoning_to_content_when_empty {
+        if parsing_options.move_reasoning_to_content_when_empty && !projected_guided_answer {
             for choice in aggregator.choices.values_mut() {
                 let has_tool_calls = choice
                     .tool_calls
@@ -1297,6 +1301,71 @@ mod tests {
                 ResponseOutputEvent::Scores(2),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn guided_output_projection_survives_unary_and_trace_aggregation() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+
+        for (tool, reasoning) in [("hermes", "step3"), ("qwen3", "qwen3")] {
+            let projected = Arc::new(AtomicBool::new(false));
+            let mut options = ParsingOptions::new(Some(tool.into()), Some(reasoning.into()));
+            options.guided_answer_projected = Some(projected.clone());
+            options.move_reasoning_to_content_when_empty = true;
+            let trace_options = options.clone();
+            let answer = "<think>literal</think><tool_call>{\"name\":\"literal\",\"arguments\":{}}</tool_call> é";
+            // The frontend resolves the plan after HTTP and trace options are cloned.
+            projected.store(true, Ordering::Release);
+            for options in [options, trace_options] {
+                let deltas = vec![
+                    create_reasoning_delta(0, "", "actual reasoning"),
+                    create_test_delta(
+                        0,
+                        answer,
+                        None,
+                        Some(dynamo_protocols::types::FinishReason::Stop),
+                        None,
+                        None,
+                    ),
+                    create_reasoning_delta(1, "", "truncated reasoning"),
+                    create_test_delta(
+                        1,
+                        "",
+                        None,
+                        Some(dynamo_protocols::types::FinishReason::Length),
+                        None,
+                        None,
+                    ),
+                ];
+                let response = NvCreateChatCompletionResponse::from_annotated_stream(
+                    Box::pin(stream::iter(deltas)),
+                    options,
+                )
+                .await
+                .unwrap();
+                let first = &response.inner.choices[0];
+                assert_eq!(
+                    first.message.content,
+                    Some(ChatCompletionMessageContent::Text(answer.into()))
+                );
+                assert_eq!(
+                    first.message.reasoning_content.as_deref(),
+                    Some("actual reasoning")
+                );
+                assert!(first.message.tool_calls.is_none());
+                let second = &response.inner.choices[1];
+                assert!(second.message.content.as_ref().is_none_or(
+                    |value| value == &ChatCompletionMessageContent::Text(String::new())
+                ));
+                assert_eq!(
+                    second.message.reasoning_content.as_deref(),
+                    Some("truncated reasoning")
+                );
+            }
+        }
     }
 
     #[tokio::test]

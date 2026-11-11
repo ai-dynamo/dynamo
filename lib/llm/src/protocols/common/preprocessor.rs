@@ -422,6 +422,11 @@ pub struct PreprocessedRequest {
     #[serde(skip)]
     pub(crate) migration_state: Option<MigrationState>,
 
+    /// Resolved final-answer handling, consumed before worker serialization.
+    #[builder(default)]
+    #[serde(skip)]
+    pub(crate) guided_output_plan: Option<super::guided_output::GuidedOutputPlan>,
+
     /// Set when remote prefill has staged KV blocks that only this request's
     /// decode worker can release, so the decode leg must reach that worker even
     /// after the client disconnects.
