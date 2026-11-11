@@ -171,7 +171,6 @@ consumer.
 | `publication.rs` | Lease and sequence ownership for snapshots, deltas, and drains |
 | `global.rs` | Manifest validation, lane state machine, transposed query storage |
 | `ingestion_pool.rs` | Bounded lane-sticky Flume transport and readiness fencing |
-| `adapter.rs` | In-process producer-to-consumer composition and snapshot recovery |
 | `search.rs` | Multi-lane prefix search over the transposed table |
 | `failure.rs` | Pre-/post-commit failure dispositions by affected domain |
 
