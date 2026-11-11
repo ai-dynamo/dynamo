@@ -67,6 +67,10 @@ SPDX-License-Identifier: Apache-2.0
   Do not add ResourceClaim, ResourceClaimTemplate, or DeviceClass watches for it:
   the resolved count does not affect the rendered workload. Lookup failures use
   ordinary error retries, and DGD edits use the existing watch.
+- Per-fabric-pod Cyborg placement is the only reader of Pods and Nodes through
+  watches. Its Pod watch selects only Cyborg Pods that carry the placement
+  annotation, and its Node watch is metadata-only. Do not widen either watch or
+  add a complete Node cache.
 - Observations are not an atomic snapshot. Publishing previously observed
   intent during a concurrent edit is accepted; watches drive convergence.
   UID/resource-version preconditions and write conflicts protect mutations.
@@ -121,6 +125,9 @@ SPDX-License-Identifier: Apache-2.0
   reapply the desired count. Explicit DGD replicas are reapplied by this controller.
 - Index PCSGs by controlling PCS, validating the owner's API version and kind
   in the index. Do not add a namespace-wide request scan.
+- Per-fabric-pod placement owns the capacity of its Cyborg PodCliques, also when
+  the conductor role omits replicas. The other Cyborg capacity rules, including
+  external scaling, apply only to workloads without that placement.
 - Initial PCS creation needs no PCSG. Once the PCS exists, `Reconcile` waits
   until every configured group has an owned, non-deleting PCSG before proceeding.
   The PCSG watch resumes reconciliation. Downstream capacity, request, deadline,
@@ -153,6 +160,8 @@ SPDX-License-Identifier: Apache-2.0
   checks and UID/resource-version delete preconditions. Retry missing observations
   without blocking cleanup of the remaining journaled Pods. Preserve Grove capacity
   and LPUPipelineRequest status, finalizers, and annotations.
+- The only other direct Pod deletion is the removal of surplus Cyborg Pods by
+  per-fabric-pod placement; see Cyborg Fabric-Pod Placement.
 - Attempt release cleanup after DGD identity and input-handoff checks and owned
   Grove-resource observations, including every configured PCSG. It bypasses model
   downloads and desired workload resolution, not these earlier gates. Use observed
@@ -166,6 +175,58 @@ SPDX-License-Identifier: Apache-2.0
 - A terminating LPR is pending cleanup, not a reason to delete its PCS or Pods.
   Wait for scheduler finalization through watches, including when external
   capacity is unchanged.
+
+# Cyborg Fabric-Pod Placement
+
+- The annotation `lpx.nvidia.com/cyborg-placement: per-fabric-pod` on a hybrid
+  conductor role's Pod template selects it. It applies only to a workload with a
+  Cyborg and at least one LPU Agent. An unknown value is an error. Without the
+  annotation nothing changes, so an operator upgrade does not roll a workload.
+- The role's replica count applies to each fabric pod, the value of Node label
+  `network.topology.nvidia.com/lpu-fabric-pod`. It must form complete client
+  groups, as a count without placement must.
+- Provision, then prune, for each PCSG replica independently. Until every LPR of
+  the replica is `Bound` or `Degraded` on a committed NodeLocal plan, the targets
+  are all fabric pods that the Cyborg template can select. Afterwards they are
+  the `fabricId` values of the committed rows. A replica without a settled plan
+  provisions again; a `samePlacement` repair keeps its fabric pods and does not.
+- A fabric pod is selectable when one of its Nodes matches the Cyborg template's
+  node selector and required node affinity. Taints and free capacity are not
+  evaluated: a Pod pinned to a fabric pod without capacity stays Pending and
+  gives the LPX scheduler no evidence. No selectable Node is an error.
+- Do not change the Cyborg template for placement. Grove replaces template
+  scheduling gates, rejects `topologySpreadConstraints`, and rolls every Pod on a
+  template change, and the LPX scheduler fences the Cyborg template hash.
+- Pin each Pod with a `nodeSelector` merge patch that carries the observed
+  resource version, and record the fabric pod in Pod label
+  `lpx.nvidia.com/fabric-pod`: the operator Pod cache holds no node selector.
+  The patch succeeds only while Grove's own scheduling gate is present. A
+  conflict or a refusal is not an error; a later Pod version wakes the
+  controller. A Pod that binds without a selector is adopted when its Node's
+  fabric pod has an open position, and is deleted otherwise.
+- Fill fabric pods in name order with Pods in Grove index order, so that a
+  complete provision gives each fabric pod one contiguous index block.
+- Keep bound Pods before unbound, ready before not ready, and older before
+  newer. A fabric pod that holds LPUs therefore keeps a bound Cyborg Pod.
+- Delete surplus placed Pods before lowering the PodClique capacity. Grove
+  excludes terminating Pods from its scale-in selection; with the lower capacity
+  first, Grove selects its own victims and can remove the last Cyborg Pod of a
+  selected fabric pod.
+- While a lower capacity is not yet written, never delete an unplaced Pod. Grove
+  replaces each removed Pod until the capacity is lower, and its scale-in then
+  removes unbound and newer Pods first. Deleting the replacements starts a
+  create and delete loop.
+- Write the placement capacity without a resource-version precondition. The
+  placement is its only owner, and a conflict only delays the write that stops
+  the replacements.
+- Capacity writes, and the removals that a lower capacity needs, follow the
+  shared scaling predicate. Pinning does not.
+- Placement runs after PCS synchronization and does not delay request
+  publication: the LPX scheduler waits for bound Cyborg Pods by itself.
+- Placement needs a scheduler that places each pinned Pod independently, such as
+  the default scheduler. KAI schedules the PodClique as one gang and does not
+  continue past a member that cannot run.
+- Namespace-restricted mode cannot read Nodes; reject the annotation there.
 
 # Scheduling Cycles
 

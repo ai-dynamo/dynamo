@@ -57,6 +57,7 @@ func (p cyborgPlacement) total() int32 {
 // it, and the non-nil plan has a Cyborg and at least one LPU Agent to follow.
 // An unknown mode is an error, never ignored.
 func cyborgPlacementApplies(component *v1beta1.DynamoComponentDeploymentSharedSpec, plan *lpx.MaterializationPlan) (bool, error) {
+	// The conductor role's Pod template carries the selection.
 	role := component.ComponentRole(v1beta1.ComponentRoleLPXConductor)
 	if role == nil || role.PodTemplate == nil {
 		return false, nil
@@ -103,12 +104,17 @@ func (r *graphReconciler) resolveCyborgPlacements(
 		plan, workload := plans[groupName], workloads[groupName]
 		component := dgd.GetComponentByName(groupName)
 
+		// Only workloads that select the placement take part; they need Node labels.
 		placed, err := cyborgPlacementApplies(component, plan)
 		if err != nil {
 			return nil, err
 		}
 		if !placed {
 			continue
+		}
+		if r.config.Namespace.Restricted != "" {
+			return nil, fmt.Errorf("component %q: annotation %s needs cluster-wide Node access, which namespace-restricted mode does not have",
+				component.ComponentName, cyborgPlacementAnnotation)
 		}
 
 		// The role's count applies to each fabric pod and must form complete client groups.
@@ -189,12 +195,10 @@ func committedFabricPods(requests map[string]*lpxv1alpha1.LPUPipelineRequest, sc
 // template's node selector and required node affinity can select. Taints and free
 // capacity are not evaluated: a Cyborg Pod pinned to a fabric pod without capacity
 // stays Pending and gives the LPX scheduler no evidence for that fabric pod.
-// pcs is the non-nil observed PodCliqueSet that contains cyborgTemplate.
+// pcs is the non-nil observed PodCliqueSet that contains cyborgTemplate. The
+// caller establishes cluster-wide Node access.
 func (r *graphReconciler) eligibleFabricPods(ctx context.Context, pcs *grovev1alpha1.PodCliqueSet, cyborgTemplate string) ([]string, error) {
-	if r.config.Namespace.Restricted != "" {
-		return nil, fmt.Errorf("annotation %s needs cluster-wide Node access, which namespace-restricted mode does not have", cyborgPlacementAnnotation)
-	}
-
+	// Evaluate the hard node constraints of the observed Cyborg template.
 	index := slices.IndexFunc(pcs.Spec.Template.Cliques, func(clique *grovev1alpha1.PodCliqueTemplateSpec) bool {
 		return clique.Name == cyborgTemplate
 	})
@@ -207,6 +211,7 @@ func (r *graphReconciler) eligibleFabricPods(ctx context.Context, pcs *grovev1al
 		return nil, fmt.Errorf("list Nodes with label %s: %w", fabricPodLabel, err)
 	}
 
+	// Collect the fabric pod of every Node that the template can select.
 	eligible := make(map[string]struct{})
 	for i := range nodes.Items {
 		node := &corev1.Node{ObjectMeta: nodes.Items[i].ObjectMeta}
@@ -351,7 +356,7 @@ func (r *graphReconciler) reconcileCyborgPlacement(
 			return changed, fmt.Errorf("delete Cyborg Pod %q outside its placement: %w", pod.Name, err)
 		}
 		changed = true
-		logger.Info("Deleted Cyborg Pod outside its placement", "pod", pod.Name, "fabricPod", pod.Labels[cyborgFabricPodLabel], "node", pod.Spec.NodeName, "fabricPods", placement.fabricPods)
+		logger.Info("Deleted surplus Cyborg Pod", "pod", pod.Name, "fabricPod", pod.Labels[cyborgFabricPodLabel], "node", pod.Spec.NodeName, "fabricPods", placement.fabricPods)
 	}
 
 	if clique.Spec.Replicas == total || scalingBlocked {
@@ -361,8 +366,8 @@ func (r *graphReconciler) reconcileCyborgPlacement(
 	// The placement is the only owner of this capacity. A version precondition would
 	// only delay the write that stops Grove from replacing the removed Pods.
 	scale := &autoscalingv1.Scale{
-		ObjectMeta: metav1.ObjectMeta{Name: clique.Name, Namespace: clique.Namespace},
-		Spec:       autoscalingv1.ScaleSpec{Replicas: total},
+		Name: clique.Name, Namespace: clique.Namespace,
+		Spec: autoscalingv1.ScaleSpec{Replicas: total},
 	}
 	if err := r.SubResource("scale").Update(ctx, clique, client.WithSubResourceBody(scale)); err != nil {
 		return changed, fmt.Errorf("scale Cyborg PodClique %q: %w", clique.Name, err)
@@ -389,6 +394,8 @@ func (r *graphReconciler) placeCyborgPod(ctx context.Context, pod *corev1.Pod, f
 	if err == nil {
 		return true, nil
 	}
+
+	// A later Pod version resolves these refusals and wakes the controller.
 	if apierrors.IsConflict(err) || apierrors.IsNotFound(err) || apierrors.IsInvalid(err) {
 		log.FromContext(ctx).V(1).Info("Cyborg Pod placement waits for a newer observation", "pod", pod.Name, "fabricPod", fabricPod, "reason", err.Error())
 		return false, nil

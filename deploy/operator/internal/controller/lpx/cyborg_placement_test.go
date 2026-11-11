@@ -6,6 +6,7 @@ package lpx
 import (
 	"context"
 	"fmt"
+	"maps"
 	"slices"
 	"strconv"
 	"testing"
@@ -106,7 +107,7 @@ func TestLPXCyborgFabricPodPlacement(t *testing.T) {
 	conductor.PodTemplate.Annotations = map[string]string{cyborgPlacementAnnotation: cyborgPlacementPerFabricPod}
 	r := newLPXTestReconciler(t, registry, child, dgd,
 		newTestFabricPodNode("gpu-a", "a"), newTestFabricPodNode("gpu-b", "b"), newTestFabricPodNode("gpu-c", "c"),
-		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "unlabeled"}},
+		&corev1.Node{Name: "unlabeled"},
 	)
 	workloads, plans, err := r.resolveWorkloads(ctx, child, dgd)
 	require.NoError(t, err)
@@ -196,7 +197,7 @@ func TestLPXCyborgPlacementOfReleasedPods(t *testing.T) {
 	ctx := t.Context()
 
 	t.Log("Keep one Cyborg Pod in each of two fabric pods")
-	clique := &grovev1alpha1.PodClique{ObjectMeta: metav1.ObjectMeta{Name: "pcs-0-lpx-0-cond", Namespace: "default", UID: "clique-uid", ResourceVersion: "1"}}
+	clique := &grovev1alpha1.PodClique{Name: "pcs-0-lpx-0-cond", Namespace: "default", UID: "clique-uid", ResourceVersion: "1"}
 	clique.Spec.Replicas = 2
 	placement := cyborgPlacement{fabricPods: []string{"a", "b"}, replicas: 1}
 
@@ -242,7 +243,7 @@ func TestLPXCyborgPlacementWaitsForScaling(t *testing.T) {
 	ctx := t.Context()
 
 	t.Log("Grove defers replica writes while the placement shrinks from two fabric pods to one")
-	clique := &grovev1alpha1.PodClique{ObjectMeta: metav1.ObjectMeta{Name: "pcs-0-lpx-0-cond", Namespace: "default", UID: "clique-uid", ResourceVersion: "1"}}
+	clique := &grovev1alpha1.PodClique{Name: "pcs-0-lpx-0-cond", Namespace: "default", UID: "clique-uid", ResourceVersion: "1"}
 	clique.Spec.Replicas = 2
 	kept, pruned := newTestCyborgPod(clique, 0), newTestCyborgPod(clique, 1)
 	kept.Labels[cyborgFabricPodLabel], pruned.Labels[cyborgFabricPodLabel] = "a", "b"
@@ -268,7 +269,7 @@ func TestLPXCyborgPruneDoesNotLoopOnFailedScale(t *testing.T) {
 	ctx := t.Context()
 
 	t.Log("The scheduler selected fabric pod a of three, and the API server refuses the lower capacity")
-	clique := &grovev1alpha1.PodClique{ObjectMeta: metav1.ObjectMeta{Name: "pcs-0-lpx-0-cond", Namespace: "default", UID: "clique-uid", ResourceVersion: "1"}}
+	clique := &grovev1alpha1.PodClique{Name: "pcs-0-lpx-0-cond", Namespace: "default", UID: "clique-uid", ResourceVersion: "1"}
 	clique.Spec.Replicas = 3
 	kept, prunedB, prunedC := newTestCyborgPod(clique, 0), newTestCyborgPod(clique, 1), newTestCyborgPod(clique, 2)
 	kept.Labels[cyborgFabricPodLabel], prunedB.Labels[cyborgFabricPodLabel], prunedC.Labels[cyborgFabricPodLabel] = "a", "b", "c"
@@ -318,7 +319,7 @@ func TestEligibleFabricPods(t *testing.T) {
 		newTestFabricPodNode("gpu-a", "a", "pool", "gpu"),
 		newTestFabricPodNode("gpu-b", "b", "pool", "gpu"),
 		newTestFabricPodNode("lpu-c", "c", "pool", "lpu"),
-		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "unlabeled", Labels: map[string]string{"pool": "gpu"}}},
+		&corev1.Node{Name: "unlabeled", Labels: map[string]string{"pool": "gpu"}},
 	}
 
 	for _, tc := range []struct {
@@ -354,14 +355,29 @@ func TestEligibleFabricPods(t *testing.T) {
 			require.Equal(t, tc.want, fabricPods)
 		})
 	}
+}
 
-	t.Log("Namespace-restricted mode cannot read Nodes")
-	r := &graphReconciler{Client: newLPXTestClient(t, nodes...), config: newLPXTestReconciler(t, nil, &v1alpha1.LPXGraphDeployment{}, loadTestDGD(t, lpx.PipelineHybrid, "build")).config}
-	r.config.Namespace.Restricted = "tenant"
-	pcs := &grovev1alpha1.PodCliqueSet{}
-	pcs.Spec.Template.Cliques = []*grovev1alpha1.PodCliqueTemplateSpec{{Name: "cond"}}
-	_, err := r.eligibleFabricPods(t.Context(), pcs, "cond")
+func TestLPXCyborgPlacementRejectsNamespaceRestrictedMode(t *testing.T) {
+	ctx := t.Context()
+
+	t.Log("Select per-fabric-pod placement while the operator can read only one namespace")
+	child, dgd, registry := newLPXTestDGD(t, lpx.PipelineHybrid)
+	conductor := dgd.Spec.Components[0].ComponentRole(v1beta1.ComponentRoleLPXConductor)
+	conductor.PodTemplate.Annotations = map[string]string{cyborgPlacementAnnotation: cyborgPlacementPerFabricPod}
+	r := newLPXTestReconciler(t, registry, child, dgd, newTestFabricPodNode("gpu-a", "a"))
+	r.config.Namespace.Restricted = child.Namespace
+	workloads, plans, err := r.resolveWorkloads(ctx, child, dgd)
+	require.NoError(t, err)
+	pcs, _, err := r.renderPodCliqueSet(ctx, child, dgd, workloads, plans, nil)
+	require.NoError(t, err)
+	createLPXTestObjects(t, ctx, r.Client, materializeLPXTestPCS(t, child, pcs, plans["lpx"])...)
+
+	t.Log("Report the missing Node access and leave the Cyborg capacity unchanged")
+	_, err = r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(child)})
 	require.ErrorContains(t, err, "namespace-restricted")
+	clique := &grovev1alpha1.PodClique{}
+	require.NoError(t, r.Get(ctx, client.ObjectKey{Namespace: pcs.Namespace, Name: plans["lpx"].ForReplica(0).CyborgClique}, clique))
+	require.Equal(t, int32(1), clique.Spec.Replicas)
 }
 
 func TestCyborgPlacementApplies(t *testing.T) {
@@ -395,9 +411,9 @@ func TestCyborgPlacementApplies(t *testing.T) {
 }
 
 func TestPlacedCyborgPodPredicate(t *testing.T) {
-	clique := &grovev1alpha1.PodClique{ObjectMeta: metav1.ObjectMeta{Name: "pcs-0-lpx-0-cond", Namespace: "default", UID: "clique-uid", Annotations: map[string]string{
+	clique := &grovev1alpha1.PodClique{Name: "pcs-0-lpx-0-cond", Namespace: "default", UID: "clique-uid", Annotations: map[string]string{
 		lpxv1alpha1.PodRoleAnnotation: lpxv1alpha1.PodRoleCyborgWorker, cyborgPlacementAnnotation: cyborgPlacementPerFabricPod,
-	}}}
+	}}
 	unplaced := newTestCyborgPod(clique, 0)
 	placed := unplaced.DeepCopy()
 	placed.Labels[cyborgFabricPodLabel] = "a"
@@ -427,7 +443,7 @@ func newTestPlacedPipelineRequest(name, scalingGroup string, replica int64, phas
 	}
 	generation := int64(1)
 	return &lpxv1alpha1.LPUPipelineRequest{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default", Generation: generation},
+		Name: name, Namespace: "default", Generation: generation,
 		Spec: lpxv1alpha1.LPUPipelineRequestSpec{
 			ExecutionBackend: lpxv1alpha1.ExecutionBackendNodeLocal,
 			MaterializationTarget: lpxv1alpha1.MaterializationTarget{
@@ -452,7 +468,7 @@ func newTestPlacedPipelineRequest(name, scalingGroup string, replica int64, phas
 
 // newTestFabricPodNode returns a Node in fabricPod with the additional label pairs.
 func newTestFabricPodNode(name, fabricPod string, labels ...string) *corev1.Node {
-	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: name, Labels: map[string]string{fabricPodLabel: fabricPod}}}
+	node := &corev1.Node{Name: name, Labels: map[string]string{fabricPodLabel: fabricPod}}
 	for index := 0; index+1 < len(labels); index += 2 {
 		node.Labels[labels[index]] = labels[index+1]
 	}
@@ -463,7 +479,7 @@ func newTestFabricPodNode(name, fabricPod string, labels ...string) *corev1.Node
 // unbound, without a placement, and younger at a higher index.
 func newTestCyborgPod(clique *grovev1alpha1.PodClique, index int) *corev1.Pod {
 	created := time.Date(2026, time.November, 11, 0, 0, index, 0, time.UTC)
-	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+	pod := &corev1.Pod{
 		Name: fmt.Sprintf("%s-%d-%d", clique.Name, index, created.Unix()), Namespace: clique.Namespace,
 		UID:               types.UID(fmt.Sprintf("%s-pod-%d-%d", clique.Name, index, created.Unix())),
 		CreationTimestamp: metav1.NewTime(created),
@@ -471,11 +487,11 @@ func newTestCyborgPod(clique *grovev1alpha1.PodClique, index int) *corev1.Pod {
 			grovecommon.LabelPodClique:         clique.Name,
 			grovecommon.LabelPodCliquePodIndex: strconv.Itoa(index),
 		},
-		Annotations:     map[string]string{},
+		Annotations:     maps.Clone(clique.Annotations),
 		OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(clique, grovev1alpha1.SchemeGroupVersion.WithKind("PodClique"))},
-	}}
-	for key, value := range clique.Annotations {
-		pod.Annotations[key] = value
+	}
+	if pod.Annotations == nil {
+		pod.Annotations = map[string]string{}
 	}
 	return pod
 }
