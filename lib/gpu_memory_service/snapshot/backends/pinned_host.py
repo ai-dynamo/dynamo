@@ -10,7 +10,7 @@ import logging
 import os
 from typing import Any, List, Sequence, Tuple
 
-from gpu_memory_service.common.vmm import VMMDevice
+from gpu_memory_service.common.vmm import VMMDevice, VMMDeviceType, get_vmm_device_type
 
 PINNED_COPY_CHUNK_SIZE = 64 * 1024 * 1024
 
@@ -41,6 +41,21 @@ def _free_aligned_buffer(view: memoryview, ptr: int) -> None:
     _LIBC.free(ctypes.c_void_p(ptr))
 
 
+# Raised by _sycl_vmm/sycl_vmm.cpp host_register(); a unit test keeps them in sync.
+_UNSUPPORTED_HOST_REGISTER_MESSAGES = (
+    "register_host_memory not available",
+    "device does not support host memory registration",
+)
+
+
+def _is_unsupported_host_register_error(exc: RuntimeError) -> bool:
+    # Only _sycl_vmm raises these; any other backend or error must fail.
+    message = str(exc).lower()
+    return get_vmm_device_type() == VMMDeviceType.XPU and any(
+        text in message for text in _UNSUPPORTED_HOST_REGISTER_MESSAGES
+    )
+
+
 class PinnedCopySlot:
     """One reusable pinned host buffer and copy stream.
 
@@ -59,8 +74,17 @@ class PinnedCopySlot:
         self._closed = False
         try:
             self.stream = self._vmm.stream_create_nonblocking()
-            self._vmm.host_register(self.ptr, size)
-            self._registered = True
+            try:
+                self._vmm.host_register(self.ptr, size)
+            except RuntimeError as exc:
+                if not _is_unsupported_host_register_error(exc):
+                    raise
+                _LOGGER.warning(
+                    "GPU backend does not support host memory registration; "
+                    "continuing with unregistered host staging buffer"
+                )
+            else:
+                self._registered = True
         except Exception:
             try:
                 if self.stream is not None:

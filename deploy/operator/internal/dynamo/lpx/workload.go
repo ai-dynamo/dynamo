@@ -25,11 +25,6 @@ func (w *Workload) Digest() WorkloadDigest {
 	return w.digest
 }
 
-// BuildFamily returns the workload's build family.
-func (w *Workload) BuildFamily() BuildFamily {
-	return w.modelProjections[0].configuredBuild.Family
-}
-
 // Pipeline returns the workload's runtime pipeline.
 func (w *Workload) Pipeline() Pipeline {
 	return w.modelProjections[0].pipeline

@@ -7,7 +7,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dynamo_backend_common::{DisaggregationMode, LLMEngineOutput, PreprocessedRequest};
+use dynamo_llm::discovery::ModelWatcher;
+use dynamo_llm::entrypoint::RouterConfig;
+use dynamo_llm::http::service::service_v2::HttpService;
 use dynamo_llm::model_card::ModelDeploymentCard;
+use dynamo_llm::namespace::NamespaceFilter;
 use dynamo_runtime::component::Endpoint;
 use dynamo_runtime::discovery::{DiscoveryInstance, DiscoveryQuery};
 use dynamo_runtime::distributed::{DiscoveryBackend, DistributedConfig};
@@ -24,6 +28,10 @@ use tokio::task::{JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
 
 pub type Router = PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>;
+
+/// How long routers from [`Environment::ready`] keep a faulted worker out. Fault-recovery
+/// tests wait it out, so the production window would dominate their runtime.
+pub const INHIBITED_DURATION: Duration = Duration::from_millis(500);
 
 use crate::support::ProcessFixture;
 
@@ -95,14 +103,22 @@ impl Environment {
     }
 
     pub async fn ready(&self, component: &str) -> Arc<Router> {
-        let client = self.endpoint(component).client().await.unwrap();
+        let client = self
+            .endpoint(component)
+            .client_with_inhibited_duration(INHIBITED_DURATION)
+            .await
+            .unwrap();
         bounded("sidecar endpoint registration", client.wait_for_instances())
             .await
             .unwrap();
         Arc::new(
-            Router::from_client(client, RouterMode::RoundRobin)
-                .await
-                .unwrap(),
+            Router::from_client_with_options(
+                client,
+                RouterMode::RoundRobin,
+                dynamo_llm::kv_router::plugins::push_router_options(),
+            )
+            .await
+            .unwrap(),
         )
     }
 
@@ -158,8 +174,9 @@ impl Environment {
         &self,
         endpoint: &str,
         mode: DisaggregationMode,
+        grace_secs: u64,
     ) -> Process {
-        Process::spawn::<F>(self, endpoint, mode, 5, false, 1)
+        Process::spawn::<F>(self, endpoint, mode, 5, false, grace_secs)
     }
 
     pub fn spawn_env<F: ProcessFixture>(
@@ -175,6 +192,102 @@ impl Environment {
 impl Drop for Environment {
     fn drop(&mut self) {
         self.runtime.shutdown();
+    }
+}
+
+pub struct Frontend {
+    url: String,
+    client: reqwest::Client,
+    cancel: CancellationToken,
+    service: JoinHandle<anyhow::Result<()>>,
+    watcher: JoinHandle<()>,
+}
+
+impl Frontend {
+    pub async fn start(env: &Environment) -> Self {
+        Self::start_with_migration(env, 0).await
+    }
+
+    pub async fn start_with_migration(env: &Environment, migration_limit: u32) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let service = HttpService::builder()
+            .host("127.0.0.1")
+            .port(address.port())
+            .enable_cmpl_endpoints(true)
+            .build()
+            .unwrap();
+        let watcher = Arc::new(ModelWatcher::new(
+            env.runtime.clone(),
+            service.state().manager_clone(),
+            RouterConfig {
+                router_mode: RouterMode::RoundRobin,
+                ..Default::default()
+            },
+            migration_limit,
+            None,
+            None,
+            None,
+            service.state().metrics_clone(),
+        ));
+        let discovery = env
+            .runtime
+            .discovery()
+            .list_and_watch(DiscoveryQuery::AllModels, Some(env.runtime.primary_token()))
+            .await
+            .unwrap();
+        let watched = watcher.clone();
+        let namespace = NamespaceFilter::Exact(env.namespace.clone());
+        let watcher_task = tokio::spawn(async move { watched.watch(discovery, namespace).await });
+        let cancel = CancellationToken::new();
+        let service = service.spawn_with_listener(cancel.clone(), listener).await;
+        bounded(
+            "HTTP frontend model discovery",
+            watcher.wait_for_chat_model(),
+        )
+        .await;
+        Self {
+            url: format!("http://{address}/v1/completions"),
+            client: reqwest::Client::builder().no_proxy().build().unwrap(),
+            cancel,
+            service,
+            watcher: watcher_task,
+        }
+    }
+
+    pub fn generate(&self, model: &str, is_streaming: bool) -> reqwest::RequestBuilder {
+        self.generate_tokens(model, is_streaming, 3)
+    }
+
+    pub fn generate_tokens(
+        &self,
+        model: &str,
+        is_streaming: bool,
+        max_tokens: u32,
+    ) -> reqwest::RequestBuilder {
+        self.client.post(&self.url).json(&serde_json::json!({
+            "model": model, "prompt": "hello", "max_tokens": max_tokens,
+            "stream": is_streaming, "temperature": 0, "ignore_eos": true,
+            "nvext": {"extra_fields": ["completion_token_ids"]},
+        }))
+    }
+
+    pub async fn shutdown(mut self) {
+        self.cancel.cancel();
+        bounded("HTTP frontend shutdown", &mut self.service)
+            .await
+            .unwrap()
+            .unwrap();
+        self.watcher.abort();
+        let _ = (&mut self.watcher).await;
+    }
+}
+
+impl Drop for Frontend {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+        self.service.abort();
+        self.watcher.abort();
     }
 }
 
@@ -202,7 +315,7 @@ impl Process {
         };
         let stdout = env.root.path().join(format!("{role}.stdout"));
         let stderr = env.root.path().join(format!("{role}.stderr"));
-        let mut command = F::command();
+        let mut command = F::command(&env.model);
         for (key, _) in std::env::vars_os() {
             let key_text = key.to_string_lossy();
             if key_text.starts_with("DYN_")

@@ -7,11 +7,12 @@
 set -e
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
-export DYNAMO_HOME="${DYNAMO_HOME:-$(readlink -f "$SCRIPT_DIR/../../../..")}"
+# Resolved relative to this script, not via $DYNAMO_HOME: vllm_runtime.Dockerfile
+# bakes DYNAMO_HOME=/opt/dynamo, which has no examples/ directory.
 # shellcheck disable=SC1091 # Resolved relative to this script at runtime.
-source "$DYNAMO_HOME/examples/common/gpu_utils.sh" # build_vllm_gpu_mem_args
+source "$SCRIPT_DIR/../../../../examples/common/gpu_utils.sh" # build_vllm_gpu_mem_args
 # shellcheck disable=SC1091 # Resolved relative to this script at runtime.
-source "$DYNAMO_HOME/examples/common/launch_utils.sh" # print_launch_banner, wait_any_exit
+source "$SCRIPT_DIR/../../../../examples/common/launch_utils.sh" # print_launch_banner, wait_any_exit
 
 MODEL="${MODEL:-Qwen/Qwen2.5-VL-3B-Instruct}"
 
@@ -36,9 +37,9 @@ while [[ $# -gt 0 ]]; do
             echo "  DYN_SYSTEM_PORT1        Encoder sidecar system port (default: 8081)"
             echo "  DYN_SYSTEM_PORT2        PD sidecar system port (default: 8082)"
             echo "  VLLM_ENCODER_HTTP_PORT  Encoder vLLM HTTP port (default: 8100)"
-            echo "  VLLM_ENCODER_GRPC_PORT  Encoder vLLM gRPC port (default: 50051)"
+            echo "  VLLM_ENCODER_GRPC_PORT  Encoder vLLM gRPC port (default: 30001)"
             echo "  VLLM_PD_HTTP_PORT       PD vLLM HTTP port (default: 8110)"
-            echo "  VLLM_PD_GRPC_PORT       PD vLLM gRPC port (default: 50052)"
+            echo "  VLLM_PD_GRPC_PORT       PD vLLM gRPC port (default: 30011)"
             echo "  VLLM_ENCODER_GPU        Encoder GPU index (default: 0)"
             echo "  VLLM_PD_GPU             PD GPU index (default: 1)"
             exit 0
@@ -72,9 +73,9 @@ trap epd_exit_trap EXIT
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
 MAX_CONCURRENT_SEQS="${MAX_CONCURRENT_SEQS:-2}"
 VLLM_ENCODER_HTTP_PORT="${VLLM_ENCODER_HTTP_PORT:-8100}"
-VLLM_ENCODER_GRPC_PORT="${VLLM_ENCODER_GRPC_PORT:-50051}"
+VLLM_ENCODER_GRPC_PORT="${VLLM_ENCODER_GRPC_PORT:-30001}"
 VLLM_PD_HTTP_PORT="${VLLM_PD_HTTP_PORT:-8110}"
-VLLM_PD_GRPC_PORT="${VLLM_PD_GRPC_PORT:-50052}"
+VLLM_PD_GRPC_PORT="${VLLM_PD_GRPC_PORT:-30011}"
 VLLM_ENCODER_GPU="${VLLM_ENCODER_GPU:-0}"
 VLLM_PD_GPU="${VLLM_PD_GPU:-1}"
 ENCODER_GPU_MEMORY_UTILIZATION="${ENCODER_GPU_MEMORY_UTILIZATION:-0.1}"

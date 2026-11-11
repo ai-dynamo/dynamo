@@ -123,9 +123,7 @@ func gmsWeightServerPodSpec(basePodSpec *corev1.PodSpec, rank int32, gpuCount in
 	c.Args = []string{gmsWrapperScript()}
 
 	c.StartupProbe = &corev1.Probe{
-		ProbeHandler: corev1.ProbeHandler{
-			Exec: &corev1.ExecAction{Command: gmsStartupProbeCommand(gpuCount)},
-		},
+		Exec:             &corev1.ExecAction{Command: gmsStartupProbeCommand(gpuCount)},
 		PeriodSeconds:    2,
 		TimeoutSeconds:   2,
 		FailureThreshold: 150, // 2s * 150 = 5 min
@@ -214,11 +212,9 @@ func gmsSharedVolume(rank int32) (corev1.Volume, corev1.VolumeMount) {
 	hostPathType := corev1.HostPathDirectoryOrCreate
 	vol := corev1.Volume{
 		Name: gmsSharedVolumeName,
-		VolumeSource: corev1.VolumeSource{
-			HostPath: &corev1.HostPathVolumeSource{
-				Path: gmsHostPathBase,
-				Type: &hostPathType,
-			},
+		HostPath: &corev1.HostPathVolumeSource{
+			Path: gmsHostPathBase,
+			Type: &hostPathType,
 		},
 	}
 	mount := corev1.VolumeMount{
@@ -246,7 +242,7 @@ func gmsPermFixInitContainer(rank int32, image string) corev1.Container {
 			// pod-level SecurityContext defaults do not silently reject this
 			// init container on admission.
 			RunAsUser:    ptr.To[int64](0),
-			RunAsNonRoot: ptr.To(false),
+			RunAsNonRoot: new(false),
 		},
 		VolumeMounts: []corev1.VolumeMount{mount},
 	}
@@ -395,10 +391,8 @@ func gmsResourceSharingEntries(serviceName string, roles []ServiceRole) []grovev
 	for _, rank := range rankOrder {
 		g := groups[rank]
 		refs = append(refs, grovev1alpha1.PCSGResourceSharingSpec{
-			ResourceSharingSpec: grovev1alpha1.ResourceSharingSpec{
-				Name:  gmsRCTName(serviceName, rank),
-				Scope: grovev1alpha1.ResourceSharingScopePerReplica,
-			},
+			Name:  gmsRCTName(serviceName, rank),
+			Scope: grovev1alpha1.ResourceSharingScopePerReplica,
 			Filter: &grovev1alpha1.PCSGResourceSharingFilter{
 				ChildCliqueNames: g.cliqueNames,
 			},
@@ -481,7 +475,7 @@ func IsIntraPodFailoverEnabled(component *v1beta1.DynamoComponentDeploymentShare
 
 func IntraPodFailoverEngineContainerNames() []string {
 	names := make([]string, 0, failoverEngineCount)
-	for i := 0; i < failoverEngineCount; i++ {
+	for i := range failoverEngineCount {
 		names = append(names, fmt.Sprintf("engine-%d", i))
 	}
 	return names
@@ -531,7 +525,7 @@ func buildFailoverEnginePair(podSpec *corev1.PodSpec) error {
 	// Clone main before applying any path-specific overrides.
 	mainContainer := podSpec.Containers[0]
 	sidecars := podSpec.Containers[1:]
-	engines := make([]corev1.Container, failoverEngineCount)
+	engines := make([]corev1.Container, failoverEngineCount, failoverEngineCount+len(sidecars))
 	for i := range failoverEngineCount {
 		engines[i] = buildEngineContainer(mainContainer, i, commonconsts.DynamoSystemPort+i)
 	}
