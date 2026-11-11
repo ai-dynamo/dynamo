@@ -270,16 +270,39 @@ SPDX-License-Identifier: Apache-2.0
   name order when that fabric pod has an open position, and otherwise the first
   fabric pod that has one. A provision into an empty PodClique therefore gives
   fabric pod `k` the index block `[k * replicas, (k + 1) * replicas)`, in
-  whatever order the Pods appear. The block is not durable: Pods keep their
-  index after the prune, and a later Pod gets Grove's lowest free index and the
-  open position. After a replacement in a kept block that is not the first one,
-  two Pods of a fabric pod can have the same `index % ioFpgaCount`.
-- The indexes of a placed PodClique are thus not always `0..N-1`. Cyborg
-  pipeline-parallel mode needs exactly the indexes `0..TOTAL_REPLICAS-1` in one
-  PodClique. It works only when one fabric pod is in use and that fabric pod
-  holds the first block.
-- Keep bound Pods before unbound, ready before not ready, and older before
-  newer. A fabric pod that holds LPUs therefore keeps a bound Cyborg Pod.
+  whatever order the Pods appear. A Pod keeps its index for its life, so the
+  Pods that stay after a prune can have indexes at or above the new total.
+- Renumber when the capacity is correct: remove a placed Pod whose index is at
+  or above the placement total. Grove gives the replacement the lowest free
+  index of the PodClique, the placement gate holds it, and the pin puts it in
+  the position that the removal opened. Cyborg pipeline-parallel mode needs
+  exactly the indexes `0..TOTAL_REPLICAS-1` in one PodClique. With one fabric
+  pod in use, this step gives it those indexes. With two or more, that mode
+  needs a Cyborg change.
+- Renumber only while every LPR of the PCSG replica is `Bound`. Only for a
+  `Bound` plan does the LPX scheduler wait, for the PCS `terminationDelay`, for
+  the replacement of the last bound Cyborg Pod of a fabric pod. For a
+  `Degraded` or `Planned` plan it releases the plan at once.
+- Remove one Pod at a time, and only when the PodClique has exactly the
+  placement total of live Pods and each of them is placed and bound. Grove then
+  owes exactly one replacement, and a fabric pod with two or more positions
+  always keeps a bound Cyborg Pod. With one position, the fabric pod has no
+  bound Cyborg Pod until the replacement binds.
+- Never remove a Ready Pod to renumber it: it serves with the index that it
+  has. The Pods that stay after a prune are not Ready, because a Cyborg starts
+  after its Agents, and a pipeline-parallel Cyborg with an index out of range
+  does not become Ready. A Ready Pod can keep an index at or above the total,
+  for example after a scale-in with two or more fabric pods. A later
+  replacement in its fabric pod then gets a lower index, and two Pods of that
+  fabric pod can have the same `index % ioFpgaCount`.
+- Take the first fabric pod in name order that has such a Pod, lowest index
+  first. One fabric pod is then complete before the next one starts and gets
+  consecutive free indexes: one index block again when the provision gave
+  blocks. The blocks of two or more fabric pods are then not in name order.
+- Keep bound Pods before unbound, ready before not ready, and then the lower
+  Grove index. A fabric pod that holds LPUs therefore keeps a bound Cyborg Pod,
+  and with one fabric pod in use, the Pods that stay after a scale-in need no
+  replacement.
 - Delete surplus placed Pods before lowering the PodClique capacity. Grove
   excludes terminating Pods from its scale-in selection; with the lower capacity
   first, Grove selects its own victims and can remove the last Cyborg Pod of a
