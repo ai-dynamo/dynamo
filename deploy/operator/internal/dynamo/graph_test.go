@@ -9500,9 +9500,8 @@ func TestGenerateGrovePodCliqueSet_IntraPodFailoverCheckpointTargets(t *testing.
 	assert.True(t, sawDecode, "test setup should produce the decode engine clique")
 }
 
-// Grove v0.2.0-beta1 rejects scaling-group replicas <= 0 and minAvailable >
-// replicas. A pending WaitForCheckpoint renders the smallest valid seed; the
-// Grove scaler holds the live children at zero instead.
+// Grove v0.2.0-beta1 rejects scaling-group replicas <= 0 and minAvailable > replicas,
+// so a pending WaitForCheckpoint renders the smallest valid template seed.
 func TestGenerateGrovePodCliqueSet_WaitForCheckpointKeepsPositiveTemplateSeed(t *testing.T) {
 	tests := []struct {
 		name              string
