@@ -4,27 +4,28 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::hint::black_box;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use dynamo_bench::kv_router_common::clock::BenchmarkClock;
+use dynamo_bench::kv_router_common::fixed_lane::{EMPTY_OPERATION_ID, FixedLane, LaneOverflow};
 use dynamo_bench::kv_router_common::issuer::pin_current_thread;
 use dynamo_bench::kv_router_common::replay::NoopSequencePublisher;
 use dynamo_bench::kv_router_common::trace_gen::WorkerTimelines;
-use dynamo_kv_router::protocols::{PrefillLoadHint, WorkerWithDpRank};
-use dynamo_kv_router::{
-    ActiveSequencesMultiWorker, SequenceError, SequenceRequest, WorkerLoadProjection,
+use dynamo_router_protocol::worker::WorkerWithDpRank;
+use dynamo_slot_tracker::host::{
+    ActiveSequencesMultiWorker, PrefillLoadHint, SequenceError, SequenceRequest,
+    WorkerLoadProjection,
 };
 use dynamo_tokens::SequenceHash;
 use rustc_hash::FxHashMap;
 use serde::Serialize;
-use tokio::sync::{Notify, oneshot};
+use tokio::sync::oneshot;
 
 use super::active_sequences_shared::{SequenceTrace, SequenceTraceEntry};
 
 const RESULT_SCHEMA_VERSION: u32 = 2;
-const EMPTY_OPERATION_ID: u32 = u32::MAX;
 const START_LEAD_NS: u64 = 20_000_000;
 
 #[derive(Clone, Debug)]
@@ -563,53 +564,6 @@ pub(crate) fn prepare_active_sequences_trial(
     })
 }
 
-struct OperationLane {
-    slots: Box<[AtomicU32]>,
-    published: AtomicUsize,
-    consumed: AtomicUsize,
-    closed: AtomicBool,
-    notify: Notify,
-}
-
-impl OperationLane {
-    fn new(capacity: usize) -> Self {
-        Self {
-            slots: (0..capacity)
-                .map(|_| AtomicU32::new(EMPTY_OPERATION_ID))
-                .collect::<Vec<_>>()
-                .into_boxed_slice(),
-            published: AtomicUsize::new(0),
-            consumed: AtomicUsize::new(0),
-            closed: AtomicBool::new(false),
-            notify: Notify::new(),
-        }
-    }
-
-    fn write(&self, cursor: usize, id: u32) -> Result<(), IssuerFailure> {
-        let Some(slot) = self.slots.get(cursor) else {
-            return Err(IssuerFailure::LaneOverflow);
-        };
-        slot.store(id, Ordering::Relaxed);
-        Ok(())
-    }
-
-    fn publish(&self, count: usize) {
-        self.published.store(count, Ordering::Release);
-        self.notify.notify_one();
-    }
-
-    fn close(&self) {
-        self.closed.store(true, Ordering::Release);
-        self.notify.notify_one();
-    }
-
-    fn depth(&self) -> usize {
-        self.published
-            .load(Ordering::Acquire)
-            .saturating_sub(self.consumed.load(Ordering::Acquire))
-    }
-}
-
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum CompletionFailure {
     #[default]
@@ -810,7 +764,7 @@ fn execute_payload(
 
 async fn operation_lane_worker(
     sequences: Arc<ActiveSequencesMultiWorker<NoopSequencePublisher>>,
-    lane: Arc<OperationLane>,
+    lane: Arc<FixedLane>,
     mut payloads: Box<[LanePayloadSlot]>,
     request_ids: Box<[String]>,
     clock: Arc<BenchmarkClock>,
@@ -822,9 +776,9 @@ async fn operation_lane_worker(
     let _ = ready.send(());
 
     loop {
-        let published = lane.published.load(Ordering::Acquire);
+        let published = lane.published();
         while consumed < published {
-            let id = lane.slots[consumed].load(Ordering::Relaxed);
+            let id = lane.id(consumed);
             if id == EMPTY_OPERATION_ID {
                 failure = LaneFailure::MissingPublishedId;
                 break;
@@ -849,22 +803,14 @@ async fn operation_lane_worker(
                 payload_slot.payload.take(),
             );
             consumed += 1;
-            lane.consumed.store(consumed, Ordering::Release);
+            lane.record_consumed(consumed);
         }
 
         if failure != LaneFailure::None {
             break;
         }
-        if lane.closed.load(Ordering::Acquire) && consumed == lane.published.load(Ordering::Acquire)
-        {
+        if !lane.wait_for_more(consumed).await {
             break;
-        }
-
-        let notified = lane.notify.notified();
-        if consumed == lane.published.load(Ordering::Acquire)
-            && !lane.closed.load(Ordering::Acquire)
-        {
-            notified.await;
         }
     }
 
@@ -893,6 +839,12 @@ enum IssuerFailure {
     DispatchMismatch,
 }
 
+impl From<LaneOverflow> for IssuerFailure {
+    fn from(_: LaneOverflow) -> Self {
+        IssuerFailure::LaneOverflow
+    }
+}
+
 struct IssuerOutput {
     records: Box<[IssueRecord]>,
     producer_stop_ns: u64,
@@ -902,7 +854,7 @@ struct IssuerOutput {
 
 fn issue_operations(
     dispatch: Vec<ScheduledOperation>,
-    lanes: Vec<Arc<OperationLane>>,
+    lanes: Vec<Arc<FixedLane>>,
     operation_count: usize,
     clock: Arc<BenchmarkClock>,
     start_signal: Arc<AtomicU64>,
@@ -955,7 +907,7 @@ fn issue_operations(
                 break;
             };
             if let Err(error) = lane.write(lane_cursors[operation.lane], operation.id) {
-                failure = Some(error);
+                failure = Some(error.into());
                 break;
             }
             lane_cursors[operation.lane] += 1;
@@ -1105,7 +1057,7 @@ pub(crate) async fn run_active_sequences_trial(
     let lanes = trial
         .lane_capacities
         .iter()
-        .map(|&capacity| Arc::new(OperationLane::new(capacity)))
+        .map(|&capacity| Arc::new(FixedLane::new(capacity)))
         .collect::<Vec<_>>();
 
     let mut ready_receivers = Vec::with_capacity(lanes.len());
@@ -1653,13 +1605,13 @@ mod tests {
 
     use super::{
         ActiveOperationKind, ActiveSequencesRunConfig, BenchmarkClock, CompletionFailure,
-        IssuerFailure, LanePayload, LanePayloadSlot, OperationLane,
-        prepare_active_sequences_corpus, run_active_sequences_benchmark,
+        FixedLane, LanePayload, LanePayloadSlot, prepare_active_sequences_corpus,
+        run_active_sequences_benchmark,
     };
     use crate::active_sequences_shared::{SequenceTrace, SequenceTraceEntry};
     use dynamo_bench::kv_router_common::replay::NoopSequencePublisher;
-    use dynamo_kv_router::protocols::{PrefillLoadHint, WorkerWithDpRank};
-    use dynamo_kv_router::{ActiveSequencesMultiWorker, SequenceRequest};
+    use dynamo_router_protocol::worker::WorkerWithDpRank;
+    use dynamo_slot_tracker::host::{ActiveSequencesMultiWorker, PrefillLoadHint, SequenceRequest};
 
     fn add(request_id: &str, hashes: &[u64], timestamp_us: u64) -> SequenceTrace {
         SequenceTrace {
@@ -1806,16 +1758,9 @@ mod tests {
         assert!(error.contains("replay window must be positive"));
     }
 
-    #[test]
-    fn fixed_lane_reports_overflow() {
-        let lane = OperationLane::new(1);
-        assert!(lane.write(0, 1).is_ok());
-        assert_eq!(lane.write(1, 2), Err(IssuerFailure::LaneOverflow));
-    }
-
     #[tokio::test(flavor = "current_thread")]
     async fn fixed_lane_does_not_lose_publish_before_wait() {
-        let lane = Arc::new(OperationLane::new(1));
+        let lane = Arc::new(FixedLane::new(1));
         lane.write(0, 7).unwrap();
         lane.publish(1);
         lane.close();

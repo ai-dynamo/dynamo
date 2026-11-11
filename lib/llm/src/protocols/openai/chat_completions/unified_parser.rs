@@ -40,9 +40,10 @@ use std::sync::LazyLock;
 use async_stream::stream;
 use dynamo_parsers::tool_calling::ToolDefinition;
 use dynamo_parsers_v2::{
-    ArgumentFraming, InvalidGuidedPayloadPolicy, Tool, ToolCallPolicy, UnifiedEvent, UnifiedParser,
-    UnifiedParserContinuation, UnifiedParserEvent, UnifiedParserInit, UnifiedParserOutput,
-    UnifiedParserStartingState, UnifiedToolOutputMode, create_unified_parser_for_family,
+    ArgumentFraming, InvalidGuidedPayloadPolicy, MalformedToolCallPolicy, Tool, ToolCallPolicy,
+    UnifiedEvent, UnifiedParser, UnifiedParserContinuation, UnifiedParserEvent, UnifiedParserInit,
+    UnifiedParserOutput, UnifiedParserStartingState, UnifiedToolOutputMode,
+    create_unified_parser_for_family,
 };
 use dynamo_protocols::types::{
     ChatChoiceLogprobs, ChatChoiceStream, ChatCompletionMessageContent,
@@ -119,6 +120,28 @@ pub(crate) fn canonical_family(parser: &str) -> Option<&'static str> {
         .find_map(|(alias, family)| (*alias == parser).then_some(*family))
         .unwrap_or(parser);
     dynamo_parsers_v2::canonical_unified_family(parser)
+}
+
+/// Aliases that still route but are scheduled for removal, paired with the family
+/// to configure instead. `muse` predates Muse Spark Open and now reads as "any Muse
+/// model" while it selects only Muse Glimmer; a Spark deployment configured with it
+/// starts without complaint and runs the wrong parser.
+/// TODO(next minor): remove these from `DYNAMO_FAMILY_ALIASES` and `FAMILY_NAMES` so
+/// the alias becomes a startup error.
+pub(crate) const DEPRECATED_FAMILY_ALIASES: &[(&str, &str)] = &[("muse", MUSE_UNIFIED_FAMILY)];
+
+/// The startup warning for a deprecated alias, or `None` for any other selector.
+pub(crate) fn deprecated_alias_warning(parser: &str) -> Option<String> {
+    DEPRECATED_FAMILY_ALIASES
+        .iter()
+        .find(|(alias, _)| *alias == parser)
+        .map(|(alias, family)| {
+            format!(
+                "parser `{alias}` is a deprecated alias of `{family}` and will be removed in a \
+                 future release; configure `{family}` instead. Muse Spark Open is a different \
+                 parser: `muse_spark_open`"
+            )
+        })
 }
 
 pub(crate) static FAMILY_NAMES: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
@@ -861,7 +884,7 @@ fn bare_json_starting_state(family: &str) -> UnifiedParserStartingState {
 fn detect_prefill(family: &str, content: &str) -> anyhow::Result<UnifiedParserStartingState> {
     match family {
         "qwen3" | "deepseek_v4" | "deepseek_v41" | "glm47" | "kimi_k2" | "minimax_m3"
-        | "nemotron_v3" => {
+        | "nemotron_v3" | "hermes" => {
             let (opener_marker, closer_marker) = reasoning_marker_pair(family)
                 .expect("think-marker families have a configured reasoning pair");
             // Compare FIRST-occurrence positions, not mere presence: a prompt that
@@ -958,9 +981,8 @@ fn beam_prefill(content: &str) -> UnifiedParserStartingState {
 fn reasoning_marker_pair(family: &str) -> Option<(&'static str, &'static str)> {
     match family {
         "minimax_m3" => Some(("<mm:think>", "</mm:think>")),
-        "qwen3" | "deepseek_v4" | "deepseek_v41" | "glm47" | "kimi_k2" | "nemotron_v3" => {
-            Some(("<think>", "</think>"))
-        }
+        "qwen3" | "deepseek_v4" | "deepseek_v41" | "glm47" | "kimi_k2" | "nemotron_v3"
+        | "hermes" => Some(("<think>", "</think>")),
         "gemma4" => Some(("<|channel>", "<channel|>")),
         _ => None,
     }
@@ -1250,12 +1272,19 @@ fn argument_framing(constraint: &GuidedToolConstraint) -> ArgumentFraming {
 }
 
 fn apply_argument_framing(
+    family: &str,
     parser: &mut dyn UnifiedParser,
     argument_framing: ArgumentFraming,
 ) -> anyhow::Result<()> {
-    if argument_framing != ArgumentFraming::default() {
+    if family == BEAM_UNIFIED_FAMILY || argument_framing != ArgumentFraming::default() {
         parser.set_tool_call_policy(ToolCallPolicy {
-            malformed: Default::default(),
+            malformed: if family == BEAM_UNIFIED_FAMILY
+                && argument_framing == ArgumentFraming::SchemaConstrained
+            {
+                MalformedToolCallPolicy::Reject
+            } else {
+                Default::default()
+            },
             argument_framing,
         })?;
     }
@@ -1880,6 +1909,7 @@ pub(crate) struct ChoiceState {
     /// The parser errored. Later chunks pass through as plain text instead of failing
     /// the request — a parser bug must not turn a served answer into a 500.
     failed: bool,
+    parse_error: Option<anyhow::Error>,
 }
 
 impl ChoiceState {
@@ -1929,7 +1959,7 @@ impl ChoiceState {
             .and_then(|cache| cache.continuation.as_ref());
         let mut parser = if let Some(continuation) = continuation {
             let mut parser = continuation.fork()?;
-            apply_argument_framing(parser.as_mut(), argument_framing)?;
+            apply_argument_framing(family, parser.as_mut(), argument_framing)?;
             parser
         } else {
             let mut parser = create_unified_parser_for_family(family, tools)?;
@@ -1986,7 +2016,7 @@ impl ChoiceState {
                 tool_output_mode: tool_output_mode.clone(),
                 invalid_guided_payload: invalid_guided_payload_policy(guided_streaming),
             })?;
-            apply_argument_framing(parser.as_mut(), argument_framing)?;
+            apply_argument_framing(family, parser.as_mut(), argument_framing)?;
             if let Some(tokens) = harmony_prefix_tokens {
                 // Consumed prompt deltas stay private; token replay preserves literal
                 // delimiter fragments without joining them to generated text.
@@ -2046,6 +2076,7 @@ impl ChoiceState {
             pending_parsed_tool_calls: HashMap::new(),
             tool_emitted: false,
             failed: false,
+            parse_error: None,
         })
     }
 
@@ -2151,6 +2182,11 @@ impl ChoiceState {
         let mut output = UnifiedParserOutput::default();
         match self.parser.parse_into(text, &mut output) {
             Ok(()) => output.events,
+            Err(error) if self.family == BEAM_UNIFIED_FAMILY => {
+                self.failed = true;
+                self.parse_error = Some(error);
+                Vec::new()
+            }
             Err(error) => {
                 tracing::warn!(
                     error = %error,
@@ -2252,6 +2288,10 @@ impl ChoiceState {
 
     /// Flush buffered partial state at end of stream.
     pub(crate) fn finish(&mut self) -> Vec<UnifiedParserEvent> {
+        self.finish_with_eos(false)
+    }
+
+    fn finish_with_eos(&mut self, confirmed_eos: bool) -> Vec<UnifiedParserEvent> {
         if self.failed {
             return Vec::new();
         }
@@ -2284,10 +2324,20 @@ impl ChoiceState {
         } else {
             self.parse_segment(&pending_qwen_opener)
         };
-        events.extend(match self.parser.finish() {
+        let finished = if confirmed_eos {
+            self.parser.finish_at_eos()
+        } else {
+            self.parser.finish()
+        };
+        events.extend(match finished {
             // `finish` now hands back the whole `UnifiedParserOutput`; this path only ever
             // wants the ordered events out of it.
             Ok(output) => output.events,
+            Err(error) if self.family == BEAM_UNIFIED_FAMILY => {
+                self.failed = true;
+                self.parse_error = Some(error);
+                Vec::new()
+            }
             Err(error) => {
                 tracing::warn!(
                     error = %error,
@@ -2774,6 +2824,7 @@ pub(crate) fn parse_complete(
     )
 }
 
+#[cfg(test)]
 pub(crate) fn parse_complete_with_policy(
     family: &str,
     content: &str,
@@ -2781,6 +2832,30 @@ pub(crate) fn parse_complete_with_policy(
     tool_definitions: &[ToolDefinition],
     policy: UnifiedRequestPolicy,
 ) -> anyhow::Result<CompleteOutput> {
+    parse_complete_with_eos(
+        family,
+        content,
+        guided_tool_constraint,
+        tool_definitions,
+        policy,
+        false,
+    )
+}
+
+pub(crate) fn parse_complete_with_eos(
+    family: &str,
+    content: &str,
+    guided_tool_constraint: &GuidedToolConstraint,
+    tool_definitions: &[ToolDefinition],
+    policy: UnifiedRequestPolicy,
+    model_eos: bool,
+) -> anyhow::Result<CompleteOutput> {
+    let confirmed_eos = model_eos
+        && family == BEAM_UNIFIED_FAMILY
+        && matches!(
+            guided_tool_constraint,
+            GuidedToolConstraint::BeamTurnGrammar { .. }
+        );
     let policy = policy.under(guided_tool_constraint);
     // A remote frontend may reconstruct guided JSON even when the backend returned
     // native reasoning/content without a tool call. Keep that recovery under the
@@ -2793,6 +2868,7 @@ pub(crate) fn parse_complete_with_policy(
         tool_definitions,
         mode.clone(),
         policy,
+        confirmed_eos,
     ) {
         Err(guided_error) if !matches!(mode, UnifiedToolOutputMode::Native) => {
             match parse_complete_in_mode(
@@ -2802,6 +2878,7 @@ pub(crate) fn parse_complete_with_policy(
                 tool_definitions,
                 UnifiedToolOutputMode::Native,
                 policy,
+                confirmed_eos,
             ) {
                 Ok(parsed)
                     if !parsed.tool_calls.is_empty()
@@ -2832,6 +2909,7 @@ fn parse_complete_in_mode(
     tool_definitions: &[ToolDefinition],
     effective_mode: UnifiedToolOutputMode,
     policy: UnifiedRequestPolicy,
+    confirmed_eos: bool,
 ) -> anyhow::Result<CompleteOutput> {
     let tools = to_v2_tools(Some(tool_definitions));
     let mut parser = create_unified_parser_for_family(family, &tools)?;
@@ -2867,14 +2945,25 @@ fn parse_complete_in_mode(
         tool_output_mode: effective_mode,
         ..UnifiedParserInit::default()
     })?;
-    apply_argument_framing(parser.as_mut(), argument_framing(guided_tool_constraint))?;
+    apply_argument_framing(
+        family,
+        parser.as_mut(),
+        argument_framing(guided_tool_constraint),
+    )?;
 
     let mut text = String::new();
     let mut reasoning = String::new();
     let mut tool_calls = Vec::new();
     let mut output = UnifiedParserOutput::default();
     parser.parse_into(content, &mut output)?;
-    output.events.extend(parser.finish()?.events);
+    output.events.extend(
+        if confirmed_eos {
+            parser.finish_at_eos()?
+        } else {
+            parser.finish()?
+        }
+        .events,
+    );
     let completed_indices: HashSet<_> = output
         .events
         .iter()
@@ -3006,6 +3095,7 @@ struct DeferredQwenXmlReasoningResponse {
 }
 
 enum FinishedStreamChunk {
+    Error(anyhow::Error),
     Choice(ChatChoiceStream),
     Boundary(ChatChoiceStream, super::MessageBoundary),
     Source(Annotated<Box<NvCreateChatCompletionStreamResponse>>),
@@ -3293,6 +3383,10 @@ fn finish_unterminated_choices(
         match states.get_mut(&index) {
             Some(state) => {
                 let deltas = state.finish();
+                if let Some(error) = state.parse_error.take() {
+                    chunks.push(FinishedStreamChunk::Error(error));
+                    continue;
+                }
                 // Native completion evidence remains authoritative; backend-only calls
                 // use the family policy so default-on parsers retain their EOF contract.
                 let mut flushed = state.choices_for(&base, deltas, true, None);
@@ -3701,6 +3795,7 @@ where
                     }
                     for output in finish_unterminated_choices(&mut states, &mut records, family) {
                         match output {
+                            FinishedStreamChunk::Error(error) => { yield Annotated::from_error(error.to_string()); return; }
                             FinishedStreamChunk::Choice(choice) => {
                                 yield response_with_choice(template, choice, &states, &records);
                             }
@@ -3941,6 +4036,10 @@ where
                             .pending_parsed_tool_calls
                             .clone_from(&record.pending_parsed_tool_calls);
                         let deltas = state.finish();
+                        if let Some(error) = state.parse_error.take() {
+                            yield Annotated::from_error(error.to_string());
+                            return;
+                        }
                         let flushed = state.choices_for(
                             &empty_choice(original.index),
                             deltas,
@@ -3949,6 +4048,7 @@ where
                         );
                         for output in stream_chunks_for_choices(&state, record, flushed) {
                             match output {
+                            FinishedStreamChunk::Error(error) => { yield Annotated::from_error(error.to_string()); return; }
                                 FinishedStreamChunk::Source(response) => {
                                     deferred_qwen_responses.push((emitted.len(), response));
                                 }
@@ -4003,12 +4103,17 @@ where
                     && let Some(mut state) = states.remove(&original.index)
                 {
                         let deltas = state.finish();
+                        if let Some(error) = state.parse_error.take() {
+                            yield Annotated::from_error(error.to_string());
+                            return;
+                        }
                         let flushed = state.choices_for(
                             &empty_choice(original.index), deltas, true, None,
                         );
                         let record = records.entry(original.index).or_default();
                         for output in stream_chunks_for_choices(&state, record, flushed) {
                             match output {
+                            FinishedStreamChunk::Error(error) => { yield Annotated::from_error(error.to_string()); return; }
                                 FinishedStreamChunk::Source(response) => {
                                     deferred_qwen_responses.push((emitted.len(), response));
                                 }
@@ -4227,11 +4332,19 @@ where
                     .is_some_and(|record| record.finished);
                 if terminal.is_some() {
                     if !already_finished {
-                        deltas.extend(state.finish());
+                        let confirmed_eos = family == BEAM_UNIFIED_FAMILY
+                            && matches!(guided_tool_constraint, GuidedToolConstraint::BeamTurnGrammar { .. })
+                            && terminal == Some(FinishReason::Stop)
+                            && chat.model_eos.contains(&original.index);
+                        deltas.extend(state.finish_with_eos(confirmed_eos));
                     }
                     records.entry(original.index).or_default().finished = true;
                 }
 
+                if let Some(error) = state.parse_error.take() {
+                    yield Annotated::from_error(error.to_string());
+                    return;
+                }
                 let mut choices = state.choices_for(&original, deltas, true, terminal);
                 merge_passthrough_completion(
                     &mut state.parser_call_completion,
@@ -4248,6 +4361,7 @@ where
                 let record = records.entry(original.index).or_default();
                 for output in stream_chunks_for_choices(state, record, choices) {
                     match output {
+                            FinishedStreamChunk::Error(error) => { yield Annotated::from_error(error.to_string()); return; }
                         FinishedStreamChunk::Source(response) => {
                             deferred_qwen_responses.push((emitted.len() + parsed.len(), response));
                         }
@@ -4336,6 +4450,7 @@ where
                     }
                     for output in finish_unterminated_choices(&mut states, &mut records, family) {
                 match output {
+                            FinishedStreamChunk::Error(error) => { yield Annotated::from_error(error.to_string()); return; }
                     FinishedStreamChunk::Choice(choice) => {
                         yield response_with_choice(template, choice, &states, &records);
                     }
@@ -4421,6 +4536,7 @@ pub(crate) mod tests {
             llm_metrics: None,
             prompt_logprobs: None,
             tool_call_completion: Vec::new(),
+            model_eos: Vec::new(),
         };
         Annotated::from_data(response)
     }
@@ -6391,6 +6507,128 @@ pub(crate) mod tests {
         assert_eq!(ids[0].0, 0);
         assert_eq!(ids[1].0, 1);
         assert_ne!(ids[0].1, ids[1].1, "each call gets its own id");
+    }
+
+    #[tokio::test]
+    async fn every_family_api_tool_ids_follow_protocol_across_turns() {
+        use dynamo_parsers_v2::{REGISTERED_UNIFIED_FAMILIES, canonical_unified_family};
+        use std::collections::{BTreeMap, BTreeSet};
+
+        let inputs: BTreeMap<String, String> = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/data/unified_tool_call_ids.json"
+        )))
+        .unwrap();
+        let registered: BTreeSet<_> = REGISTERED_UNIFIED_FAMILIES
+            .iter()
+            .map(|family| canonical_unified_family(family).unwrap())
+            .collect();
+        assert_eq!(
+            inputs.keys().map(String::as_str).collect::<BTreeSet<_>>(),
+            registered
+        );
+        for (family, input) in inputs {
+            let family = canonical_unified_family(&family).unwrap();
+            let mut conversation_ids = BTreeSet::new();
+            for character_chunks in [false, true] {
+                for turn in 0..2 {
+                    let pieces = if character_chunks {
+                        input.chars().map(|ch| ch.to_string()).collect::<Vec<_>>()
+                    } else {
+                        vec![input.clone()]
+                    };
+                    let chunks = pieces
+                        .iter()
+                        .map(|text| chunk(text, false))
+                        .chain([chunk("", true)])
+                        .collect::<Vec<_>>();
+                    let responses = apply_stream_with_constraint(
+                        stream::iter(chunks),
+                        Some(weather_tools()),
+                        GuidedToolConstraint::None,
+                        UnifiedParserStartingState::None,
+                        family,
+                        true,
+                    )
+                    .collect::<Vec<_>>()
+                    .await;
+                    assert!(
+                        responses.iter().all(|response| !response.is_error()),
+                        "{family}"
+                    );
+                    let mut calls = BTreeMap::<u32, (String, String, String)>::new();
+                    for choice in collect_choices(&responses) {
+                        let Some(deltas) = &choice.delta.tool_calls else {
+                            continue;
+                        };
+                        assert_eq!(deltas.len(), 1, "each API event carries one call: {family}");
+                        for delta in deltas {
+                            let function = delta.function.as_ref().unwrap();
+                            if let Some((_, _, arguments)) = calls.get_mut(&delta.index) {
+                                assert!(
+                                    delta.id.is_none(),
+                                    "ID repeated after first chunk: {family}"
+                                );
+                                assert!(function.name.is_none());
+                                arguments
+                                    .push_str(function.arguments.as_deref().unwrap_or_default());
+                            } else {
+                                calls.insert(
+                                    delta.index,
+                                    (
+                                        delta.id.clone().expect("first API chunk must carry an ID"),
+                                        function
+                                            .name
+                                            .clone()
+                                            .expect("first API chunk must carry a name"),
+                                        function.arguments.clone().unwrap_or_default(),
+                                    ),
+                                );
+                            }
+                        }
+                    }
+                    assert_eq!(
+                        calls.keys().copied().collect::<Vec<_>>(),
+                        [0, 1],
+                        "{family}"
+                    );
+                    for (index, (id, name, arguments)) in calls {
+                        assert_eq!(name, "get_weather");
+                        assert_eq!(
+                            serde_json::from_str::<serde_json::Value>(&arguments).unwrap(),
+                            serde_json::json!({"city":"Paris"})
+                        );
+                        if family == "kimi_k2" {
+                            assert_eq!(id, format!("functions.get_weather:{index}"));
+                        } else {
+                            assert!(
+                                conversation_ids.insert(id),
+                                "API ID reused: {family}, turn={turn}, char_chunks={character_chunks}"
+                            );
+                        }
+                    }
+                    let batch = parse_complete(
+                        family,
+                        &input,
+                        &GuidedToolConstraint::None,
+                        &weather_tools(),
+                    )
+                    .unwrap();
+                    assert_eq!(batch.tool_calls.len(), 2, "{family}");
+                    for (index, call) in batch.tool_calls.into_iter().enumerate() {
+                        assert_eq!(call.function.name, "get_weather");
+                        if family == "kimi_k2" {
+                            assert_eq!(call.id, format!("functions.get_weather:{index}"));
+                        } else {
+                            assert!(
+                                conversation_ids.insert(call.id),
+                                "batch reused an API ID: {family}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -8580,6 +8818,7 @@ pub(crate) mod tests {
                 llm_metrics: None,
                 prompt_logprobs: None,
                 tool_call_completion: Vec::new(),
+                model_eos: Vec::new(),
             };
             Annotated::from_data(response)
         }
@@ -10176,6 +10415,7 @@ pub(crate) mod tests {
                 llm_metrics: None,
                 prompt_logprobs: None,
                 tool_call_completion: Vec::new(),
+                model_eos: Vec::new(),
             };
             Annotated::from_data(response)
         }
@@ -10518,6 +10758,7 @@ pub(crate) mod tests {
             pending_parsed_tool_calls: HashMap::new(),
             tool_emitted: false,
             failed: false,
+            parse_error: None,
         };
 
         assert_eq!(
@@ -11747,7 +11988,22 @@ pub(crate) mod tests {
         )
         .unwrap();
         assert_eq!(parsed.tool_calls.len(), 1);
-        assert_eq!(parsed.tool_calls[0].id, "good:1");
+        let call = &parsed.tool_calls[0];
+        assert_eq!(call.function.name, "good");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&call.function.arguments).unwrap(),
+            serde_json::json!({"x": 7})
+        );
+        let id = uuid::Uuid::parse_str(call.id.strip_prefix("call-").unwrap()).unwrap();
+        assert_eq!(id.get_version_num(), 4);
+        let repeated = parse_complete(
+            KIMI_K3_UNIFIED_FAMILY,
+            input,
+            &GuidedToolConstraint::None,
+            &[],
+        )
+        .unwrap();
+        assert_ne!(call.id, repeated.tool_calls[0].id);
     }
     #[tokio::test]
     async fn kimi3_short_close_before_guided_json_survives_every_split() {
@@ -12550,6 +12806,24 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn muse_alias_is_deprecated_but_still_routes() {
+        let warning = deprecated_alias_warning("muse").expect("muse is a deprecated alias");
+        assert!(warning.contains("`muse_glimmer`"), "{warning}");
+        assert!(warning.contains("`muse_spark_open`"), "{warning}");
+        for parser in [
+            "muse_glimmer",
+            "muse_spark",
+            "muse_spark_open",
+            "qwen3_coder",
+            "gemma-4",
+        ] {
+            assert_eq!(deprecated_alias_warning(parser), None, "{parser}");
+        }
+        assert_eq!(canonical_family("muse"), Some(MUSE_UNIFIED_FAMILY));
+        assert!(FAMILY_NAMES.contains(&"muse"));
+    }
+
+    #[test]
     fn eight_family_routing_all_modes() {
         for (tool, reason, family) in [
             ("qwen3_coder", "qwen3", QWEN3_UNIFIED_FAMILY),
@@ -13151,7 +13425,7 @@ pub(crate) mod tests {
         }
     }
 
-    fn all_family_native_calls() -> [(&'static str, &'static str); 9] {
+    fn all_family_native_calls() -> [(&'static str, &'static str); 10] {
         [
             (
                 "minimax_m3",
@@ -13172,6 +13446,10 @@ pub(crate) mod tests {
             (
                 "glm47",
                 "<tool_call>get_weather<arg_key>city</arg_key><arg_value>Tokyo</arg_value></tool_call>",
+            ),
+            (
+                "hermes",
+                r#"<tool_call>{"name":"get_weather","arguments":{"city":"Tokyo"}}</tool_call>"#,
             ),
             (
                 "kimi_k2",
@@ -13813,7 +14091,7 @@ pub(crate) mod tests {
         for (tool, reasoning) in [
             (Some("qwen3_coder"), Some("glm47")),
             (Some("qwen3_coder"), Some("deepseek_r1")),
-            (Some("hermes"), None),
+            (Some("unknown_parser"), None),
             (None, Some("deepseek_r1")),
             (None, None),
         ] {
@@ -14888,6 +15166,102 @@ pub(crate) mod tests {
 mod beam_routing_tests {
     use super::*;
     use dynamo_runtime::config::ParserVersion;
+
+    #[tokio::test]
+    async fn beam_finalization_respects_grammar_and_confirmed_eos() {
+        let tools = vec![ToolDefinition {
+            name: "weather".into(),
+            parameters: Some(
+                serde_json::json!({"type": "object", "properties": {"city": {"type": "string"}}}),
+            ),
+            strict: None,
+        }];
+        let body = "<|start|>assistant to=weather<|channel|>analysis <|constrain|>xml<|message|><rfl:parameter name=\"city\">Paris</rfl:parameter>";
+        for (suffix, finish, eos, held, succeeds) in [
+            ("", Some(FinishReason::Stop), true, true, true),
+            ("<|return|>", Some(FinishReason::Stop), true, true, true),
+            ("", Some(FinishReason::Stop), false, true, false),
+            ("", Some(FinishReason::Stop), true, false, true),
+            ("", Some(FinishReason::Stop), false, false, true),
+            ("", Some(FinishReason::Length), true, true, false),
+            ("", None, false, true, false),
+            ("<|call|>", Some(FinishReason::Stop), false, false, true),
+            ("<|call|>", Some(FinishReason::Length), false, true, true),
+            (
+                "<rfl:parameter name=\"city\">",
+                Some(FinishReason::Stop),
+                true,
+                true,
+                false,
+            ),
+        ] {
+            let constraint = if held {
+                GuidedToolConstraint::BeamTurnGrammar {
+                    frames_answer: false,
+                }
+            } else {
+                GuidedToolConstraint::None
+            };
+            let input = format!("{body}{suffix}");
+            let raw: NvCreateChatCompletionStreamResponse =
+                serde_json::from_value(serde_json::json!({
+                    "id": "test", "object": "chat.completion.chunk", "model": "beam", "created": 0,
+                    "choices": [{"index": 0, "delta": {"content": input}, "finish_reason": finish}],
+                    "model_eos": if eos { vec![0] } else { vec![] },
+                }))
+                .unwrap();
+            let output: Vec<_> = apply_stream_with_constraint(
+                futures::stream::iter([Annotated::from_data(raw)]),
+                Some(tools.clone()),
+                constraint.clone(),
+                UnifiedParserStartingState::None,
+                BEAM_UNIFIED_FAMILY,
+                true,
+            )
+            .collect()
+            .await;
+            assert_eq!(
+                !output.iter().any(|item| item.is_error()),
+                succeeds,
+                "{suffix:?}, {finish:?}, eos={eos}, held={held}"
+            );
+            if succeeds {
+                let choices: Vec<_> = output
+                    .iter()
+                    .flat_map(|item| item.data.iter().flat_map(|data| &data.inner.choices))
+                    .collect();
+                let arguments: String = choices
+                    .iter()
+                    .flat_map(|choice| choice.delta.tool_calls.iter().flatten())
+                    .filter_map(|call| call.function.as_ref()?.arguments.as_deref())
+                    .collect();
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(&arguments).unwrap(),
+                    serde_json::json!({"city": "Paris"})
+                );
+                assert_eq!(
+                    choices.last().unwrap().finish_reason,
+                    Some(if finish == Some(FinishReason::Length) {
+                        FinishReason::Length
+                    } else {
+                        FinishReason::ToolCalls
+                    })
+                );
+            }
+            // Length and EOF without a suffix duplicate Stop without EOS in unary parsing.
+            if finish == Some(FinishReason::Stop) || !suffix.is_empty() {
+                let batch = parse_complete_with_eos(
+                    BEAM_UNIFIED_FAMILY,
+                    &input,
+                    &constraint,
+                    &tools,
+                    UnifiedRequestPolicy::default(),
+                    eos && finish == Some(FinishReason::Stop),
+                );
+                assert_eq!(batch.is_ok(), succeeds);
+            }
+        }
+    }
 
     /// The turn grammar writes a held tool's non-string parameters as JSON, so a closing
     /// tag inside one of their strings is data; and it holds a `response_format` answer

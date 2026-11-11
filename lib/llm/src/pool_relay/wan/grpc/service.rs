@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_stream::{stream, try_stream};
-use dynamo_kv_router::identity::PoolId;
+use dynamo_router_protocol::identity::PoolId;
 use futures::{Stream, StreamExt};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, broadcast};
 use tokio_util::sync::CancellationToken;
@@ -544,7 +544,7 @@ fn filter_update(frame: &PublicationFrame, relay: PoolRelayIdentity) -> proto::F
 }
 
 fn heartbeat_update(
-    identity: dynamo_kv_router::indexer::cuckoo::ProducerIdentity,
+    identity: dynamo_kv_indexer::cuckoo::ProducerIdentity,
     sequence: u64,
     relay: PoolRelayIdentity,
 ) -> proto::FilterUpdate {

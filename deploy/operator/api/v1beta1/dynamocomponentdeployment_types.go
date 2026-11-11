@@ -55,6 +55,7 @@ const (
 type DynamoComponentDeploymentSpec struct {
 	// backendFramework specifies the backend framework.
 	// +kubebuilder:validation:Enum=sglang;vllm;trtllm
+	// +optional
 	BackendFramework string `json:"backendFramework,omitempty"`
 
 	// DynamoComponentDeploymentSharedSpec embeds common deployment and runtime
@@ -107,7 +108,7 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// a hash during rolling updates) without losing the stable identity that
 	// downstream consumers (labels, status maps, DGDSA references, planner
 	// RBAC, EPP filters) depend on.
-	// +kubebuilder:validation:Required
+	// +required
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?$`
@@ -223,9 +224,9 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// preserves the implicit multinode role layout.
 	//
 	// LPX components each require an agent role. A DGD may contain independent
-	// LPX components, each with its own conductor role, or a shared draft and
-	// target pair with a conductor role only on the target. Every LPX role
-	// requires its own podTemplate.
+	// LPX components, each serving through its own conductor role or agent
+	// runtime init container, or a draft and target pair in which only the
+	// target serves. Every LPX role requires its own podTemplate.
 	// +optional
 	// +kubebuilder:validation:MaxItems=2
 	// +listType=map
@@ -347,12 +348,15 @@ type DynamoComponentDeploymentStatus struct {
 // to and from the served v1alpha1 version through
 // operator's conversion webhook; see api/v1alpha1/*_conversion.go.
 type DynamoComponentDeployment struct {
-	metav1.TypeMeta   `json:",inline"`
+	metav1.TypeMeta `json:",inline"`
+	// +optional
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
 	// spec defines the desired state for this Dynamo component deployment.
+	// +optional
 	Spec DynamoComponentDeploymentSpec `json:"spec,omitempty"`
 	// status reflects the current observed state of the component deployment.
+	// +optional
 	Status DynamoComponentDeploymentStatus `json:"status,omitempty"`
 }
 

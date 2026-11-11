@@ -218,7 +218,7 @@ impl Serialize for NvResponse {
         if let Some(tools) = &self.template_tools {
             obj.insert(
                 "tools".into(),
-                serde_json::to_value(tools).map_err(serde::ser::Error::custom)?,
+                echoed_tools_json(tools).map_err(serde::ser::Error::custom)?,
             );
         }
         if let Some(choice) = &self.requested_tool_choice {
