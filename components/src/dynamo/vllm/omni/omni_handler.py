@@ -387,6 +387,7 @@ class OmniHandler(BaseOmniHandler):
         )
 
         async def preload_inputs() -> EngineInputs:
+            """Load request media and build the inputs before generation starts."""
             # Pre-load input image for I2V requests (async I/O before sync build)
             image = None
             if (
@@ -534,11 +535,8 @@ class OmniHandler(BaseOmniHandler):
     ) -> _T:
         """Await ``work``, cancelling it if the request context stops first.
 
-        Preloading (reference image and audio downloads) runs before
-        ``_abort_monitor`` starts. The Rust response stream polls this generator
-        once more after a client disconnect but does not cancel a pending await,
-        so without this race a stalled download keeps running until its own
-        timeout.
+        Reference downloads need their own stop watcher because preloading
+        runs before ``_abort_monitor`` starts.
         """
         if context is None:
             return await work

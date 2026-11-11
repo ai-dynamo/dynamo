@@ -355,6 +355,7 @@ class TestHealthCanaries:
     @pytest.mark.parametrize("error_type", [RuntimeError, ValueError])
     @pytest.mark.asyncio
     async def test_normal_generation_propagates_engine_failure(self, error_type):
+        """A live request must still raise an engine failure after preloading."""
         handler = _make_handler()
         handler.config.output_modalities = ["image"]
         context = _live_context()
@@ -2174,6 +2175,7 @@ class TestChatAudioValidation:
     async def test_client_validation_raises_invalid_argument(
         self, modality, payload, reason
     ):
+        """Invalid chat and audio inputs must fail before engine generation."""
         handler = _make_handler()
         handler.config.output_modalities = [modality]
         handler.audio = _make_audio_handler()
@@ -2198,6 +2200,7 @@ class TestVideoEndpointValidation:
     async def test_i2v_invalid_reference_is_a_client_error(
         self, monkeypatch, reference
     ):
+        """Blocked URLs and malformed image data must raise a client error."""
         monkeypatch.delenv("DYN_MM_ALLOW_INTERNAL", raising=False)
         handler = _make_handler()
         handler.config.output_modalities = ["video"]
@@ -2219,6 +2222,7 @@ class TestVideoEndpointValidation:
 
     @pytest.mark.asyncio
     async def test_i2v_unsupported_reference_preserves_status(self):
+        """An unsupported reference image must keep its HTTP 415 status."""
         handler = _make_handler()
         handler.config.output_modalities = ["video"]
         handler._image_loader = ImageLoader()
@@ -2240,6 +2244,7 @@ class TestVideoEndpointValidation:
 
     @pytest.mark.asyncio
     async def test_i2v_pixel_limit_is_a_bounded_client_error(self):
+        """An oversized image must fail without exposing loader details."""
         handler = _make_handler()
         handler.config.output_modalities = ["video"]
         error = Image.DecompressionBombError("unbounded loader details")
@@ -2271,6 +2276,7 @@ class TestVideoEndpointValidation:
         ids=["origin-unavailable", "unexpected-failure"],
     )
     async def test_i2v_loader_server_errors_are_preserved(self, error):
+        """Origin and unexpected loader failures must reach the caller intact."""
         handler = _make_handler()
         handler.config.output_modalities = ["video"]
         handler._image_loader = SimpleNamespace(load_image=AsyncMock(side_effect=error))
@@ -2397,6 +2403,7 @@ class TestRefAudioRejection:
 
     @pytest.mark.asyncio
     async def test_a_blocked_ref_audio_url_fails_the_request(self, monkeypatch):
+        """A blocked audio reference must fail before engine generation."""
         monkeypatch.delenv("DYN_MM_ALLOW_INTERNAL", raising=False)
         monkeypatch.setattr(dynamo_http, "_default", AiohttpClient())
         handler = _make_handler()
@@ -2487,6 +2494,7 @@ async def test_context_stop_cancels_stalled_reference_download(
     started, released = asyncio.Event(), asyncio.Event()
 
     async def stalled_fetch(*args, **kwargs):
+        """Hold the download open and record when cancellation releases it."""
         started.set()
         try:
             await asyncio.Event().wait()
@@ -2502,6 +2510,7 @@ async def test_context_stop_cancels_stalled_reference_download(
     )
 
     async def run():
+        """Consume the edit request so its download can be cancelled."""
         async for _ in handler._generate_openai_mode(
             {
                 "prompt": "edit",
