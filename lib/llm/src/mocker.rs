@@ -24,7 +24,8 @@ use crate::protocols::TokenIdType;
 use crate::protocols::common::FinishReason;
 use crate::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
 use anyhow::{Context, Result, bail};
-use dynamo_kv_router::protocols::{KvCacheEvent, StorageTier};
+use dynamo_kv_events::event::KvCacheEvent;
+use dynamo_kv_events::residency::StorageTier;
 use dynamo_mocker::common::handoff::HandoffId;
 use dynamo_mocker::common::protocols::{
     DirectRequest, EngineType, KvCacheEventSink, KvEventPublishers, MockerConfig, RawKvEvent,

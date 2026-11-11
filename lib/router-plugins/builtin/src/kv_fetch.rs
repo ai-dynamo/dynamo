@@ -12,14 +12,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use dynamo_kv_router::plugins::RouterPluginRegistry;
-use dynamo_kv_router::plugins::hint_policy::{
-    HintContext, HintHost, HintPolicy, HintPolicyConstructor, HintPolicyError,
-    HintPolicyProviderError, HintPolicyRegistryError, KvHintAction,
-};
-use dynamo_kv_router::plugins::worker_selection::{Commitments, KvCopySource, WorkerInputs};
-use dynamo_kv_router::protocols::ExternalSequenceBlockHash;
-use serde::{Deserialize, Serialize};
+use dynamo_kv_router::plugins::prelude::*;
 
 use crate::KVCR_POLICY_TYPE;
 
@@ -31,38 +24,24 @@ pub const KV_FETCH_ACTION_TYPE: &str = "kv.fetch";
 /// The `kv.fetch` payload version this policy sends.
 pub const KV_FETCH_ACTION_VERSION: &str = "1.0";
 
-/// Typed payload for the `kv.fetch@1.0` point-to-point action.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct KvSourceLocationsPayload {
-    pub source_control_endpoint: String,
-    /// Root-aligned request hashes through the fetchable end. `block_hashes[i]`
-    /// corresponds to request block `i`; the target fetches its missing suffix.
-    /// With fetch continuation, the source need not hold the target's local prefix.
-    /// If that prefix has been evicted, the receiver must use actual fetch
-    /// results and recompute from any remaining gap; the hint is not a pin.
-    pub block_hashes: Vec<ExternalSequenceBlockHash>,
-}
-
-impl KvSourceLocationsPayload {
-    /// The `kv.fetch@1.0` action that carries this payload. The router numbers it when it
-    /// composes the hint.
-    pub fn into_action(self) -> KvHintAction {
-        let Self {
-            source_control_endpoint,
-            block_hashes,
-        } = self;
-        KvHintAction::unnumbered(
-            KV_FETCH_ACTION_TYPE,
-            KV_FETCH_ACTION_VERSION,
-            BTreeMap::from([
-                (
-                    "source_control_endpoint".to_string(),
-                    serde_json::json!(source_control_endpoint),
-                ),
-                ("block_hashes".to_string(), serde_json::json!(block_hashes)),
-            ]),
-        )
-    }
+/// The `kv.fetch@1.0` action that carries `payload`. The router numbers it when it composes the
+/// hint.
+fn fetch_action(payload: KvSourceLocationsPayload) -> KvHintAction {
+    let KvSourceLocationsPayload {
+        source_control_endpoint,
+        block_hashes,
+    } = payload;
+    KvHintAction::unnumbered(
+        KV_FETCH_ACTION_TYPE,
+        KV_FETCH_ACTION_VERSION,
+        BTreeMap::from([
+            (
+                "source_control_endpoint".to_string(),
+                serde_json::json!(source_control_endpoint),
+            ),
+            ("block_hashes".to_string(), serde_json::json!(block_hashes)),
+        ]),
+    )
 }
 
 #[derive(Clone, Copy, serde::Deserialize)]
@@ -119,13 +98,12 @@ fn kvcr_fetch(
     let locations = context
         .kv_copy_locations(copy)
         .ok_or_else(|| HintPolicyError::new("the copy source is no longer reachable"))?;
-    Ok(KvSourceLocationsPayload {
+    Ok(fetch_action(KvSourceLocationsPayload {
         source_control_endpoint: locations.source_address().to_string(),
         // kv.fetch@1.0 wants every hash from block 0 through the source's prefix; the target
         // fetches what it lacks.
         block_hashes: locations.chain()[..locations.source_prefix_blocks()].to_vec(),
-    }
-    .into_action())
+    }))
 }
 
 /// Register `kv_fetch` on by default under the `kvcr` worker-selection policy, so a `kvcr` role
@@ -155,16 +133,15 @@ pub(crate) fn register(registry: &mut RouterPluginRegistry) -> Result<(), HintPo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dynamo_kv_router::kv_hints::KvHint;
+    use dynamo_scheduler::kv_hints::KvHint;
 
     /// The wire shape engines and KVCR read: field names and values are N-2 compatible.
     #[test]
     fn serializes_versioned_fetch_action() {
-        let mut action = KvSourceLocationsPayload {
+        let mut action = fetch_action(KvSourceLocationsPayload {
             source_control_endpoint: "tcp://127.0.0.1:23280".to_string(),
             block_hashes: vec![ExternalSequenceBlockHash(11), ExternalSequenceBlockHash(22)],
-        }
-        .into_action();
+        });
         action.action_id = "a1".to_string();
         let hint = KvHint::new("msg-123", vec![action]);
 

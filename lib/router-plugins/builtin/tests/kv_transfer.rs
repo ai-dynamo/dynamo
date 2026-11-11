@@ -5,14 +5,9 @@
 //! commits the selected worker to that copy. The default policy credits no copy.
 
 mod support;
-use dynamo_kv_router::kv_hints::{KvTransferCandidateSource, KvTransferCandidates};
-use dynamo_kv_router::protocols::{
-    ExternalSequenceBlockHash, KvHintTransferWorkerMetadata, KvTransferEnforcement,
-    WorkerConfigLike, WorkerWithDpRank,
-};
-use dynamo_kv_router::scheduling::SchedulingRequest;
-use dynamo_kv_router::{KvRouterConfig, WorkerLoadProjection, WorkerSelector};
-use dynamo_router_policies::DefaultWorkerSelector;
+use dynamo_kv_router::plugins::prelude::*;
+use dynamo_router_policies::{default_policy, default_policy_with_rng, kvcr_policy};
+use dynamo_scheduler::host::WorkerSelector;
 use std::collections::HashMap;
 
 const BLOCK_SIZE: u32 = 16;
@@ -134,18 +129,18 @@ fn select(
     multiplier: f64,
 ) -> (u64, Option<(KvTransferCandidateSource, usize)>) {
     select_with(
-        DefaultWorkerSelector::kvcr_seeded(Some(config(multiplier)), "test", 0),
+        kvcr_policy(SelectionConfig::from(&config(multiplier)), "test"),
         workers,
         request,
     )
 }
 
 fn select_with(
-    selector: DefaultWorkerSelector,
+    policy: WorkerSelectionPolicy,
     workers: &HashMap<u64, HintWorker>,
     request: &SchedulingRequest,
 ) -> (u64, Option<(KvTransferCandidateSource, usize)>) {
-    let selected = selector
+    let selected = policy
         .select_worker(support::selection_input(workers, request, BLOCK_SIZE))
         .unwrap();
     (
@@ -177,14 +172,14 @@ fn idle_worker_that_can_fetch_beats_a_busy_cached_one() {
     // The default credits no fetch, so A still wins; the router still names C for it.
     assert_eq!(
         select_with(
-            DefaultWorkerSelector::new_seeded(Some(config(0.5)), "test", 0),
+            default_policy(SelectionConfig::from(&config(0.5)), "test"),
             &workers,
             &request,
         ),
         (0, from_c)
     );
     // Fetch credit only scores; it does not count as cached for prefill booking.
-    let selected = DefaultWorkerSelector::kvcr_seeded(Some(config(0.5)), "test", 0)
+    let selected = kvcr_policy(SelectionConfig::from(&config(0.5)), "test")
         .select_worker(support::selection_input(&workers, &request, BLOCK_SIZE))
         .unwrap();
     assert_eq!(selected.cached_tokens, 0);
@@ -240,12 +235,18 @@ fn seeded_selection_matches_reference_with_fetchable_prefixes() {
                 router_temperature: temperature,
                 ..config(multiplier)
             };
-            let reference = dynamo_kv_router::DefaultWorkerSelector::new_seeded(
-                Some(config.clone()),
+            let reference = dynamo_scheduler::host::DefaultWorkerSelector::new_seeded(
+                Some(SelectionConfig::from(&config)),
                 "test",
                 42,
             );
-            let plugin = DefaultWorkerSelector::new_seeded(Some(config), "test", 42);
+            let plugin = default_policy_with_rng(
+                SelectionConfig::from(&config),
+                "test",
+                Some(std::sync::Arc::new(parking_lot::Mutex::new(
+                    fastrand::Rng::with_seed(42),
+                ))),
+            );
             for _ in 0..32 {
                 let expected = reference
                     .select_worker(support::selection_input(&workers, &request, BLOCK_SIZE))
@@ -274,16 +275,16 @@ fn kvcr_reads_copy_offers_only_with_a_positive_multiplier() {
             WorkerSelector::<HintWorker>::required_worker_inputs(&policy)
                 .contains(WorkerInputs::KV_COPY)
         };
-    assert!(!reads_offers(dynamo_router_policies::kvcr_policy(
-        config(0.0),
+    assert!(!reads_offers(kvcr_policy(
+        SelectionConfig::from(&config(0.0)),
         "test"
     )));
-    assert!(reads_offers(dynamo_router_policies::kvcr_policy(
-        config(0.5),
+    assert!(reads_offers(kvcr_policy(
+        SelectionConfig::from(&config(0.5)),
         "test"
     )));
-    assert!(!reads_offers(dynamo_router_policies::default_policy(
-        config(0.5),
+    assert!(!reads_offers(default_policy(
+        SelectionConfig::from(&config(0.5)),
         "test"
     )));
 }

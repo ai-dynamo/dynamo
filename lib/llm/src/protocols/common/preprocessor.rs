@@ -5,16 +5,14 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use derive_builder::Builder;
-pub use dynamo_kv_router::kv_hints::{KV_HINT_TRANSFER_CAPABILITY_KEY, KvHint, KvHintAction};
-// KVCR's `kv.fetch` payload belongs to the `kv_fetch` hint policy; engines keep this path.
-use dynamo_kv_router::{
-    config::RouterConfigOverride,
-    plugins::request_classifier::AbortCause,
-    protocols::{BlockExtraInfo, RoutingConstraints, WorkerId},
-    scheduling::RequestLifecycle,
+use dynamo_admission::host::AbortCause;
+use dynamo_kv_hashing::multimodal::BlockExtraInfo;
+pub use dynamo_kv_hints::{
+    KV_HINT_TRANSFER_CAPABILITY_KEY, KvHint, KvHintAction, KvSourceLocationsPayload,
 };
-pub use dynamo_router_policies::KvSourceLocationsPayload;
+use dynamo_router_protocol::worker::WorkerId;
 use dynamo_runtime::error::{DynamoError, ErrorType, match_error_chain};
+use dynamo_scheduler::host::{RequestLifecycle, RouterConfigOverride, RoutingConstraints};
 use serde::{Deserialize, Serialize};
 
 use uuid::Uuid;

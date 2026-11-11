@@ -2,19 +2,18 @@
 // SPDX-License-Identifier: Apache-2.0
 use std::collections::HashMap;
 
-use dynamo_kv_router::indexer::KvIndexerInterface;
-use dynamo_kv_router::protocols::{
-    BlockHashOptions, ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
-    KvCacheStoredBlockData, RouterEvent, RoutingConstraints, StorageTier, WorkerWithDpRank,
-    compute_block_hash_for_seq, compute_seq_hash_for_block,
-};
-use dynamo_kv_router::services::indexer::backend::Indexer;
+use dynamo_kv_router::plugins::prelude::*;
+use dynamo_kv_router::services::indexer::backend::test_util::flush;
 use dynamo_kv_router::services::selection::{
-    PromptRequest, SelectAndReserveRequest, SelectionCacheConfig, SelectionCore, SelectionService,
-    SelectionServiceBuilder, WorkerRequest,
+    SelectionService, SelectionServiceBuilder, local_selection_core,
 };
-use dynamo_kv_router::{KvRouterConfig, RoutingPartitionId, WorkerType};
 use dynamo_router_policies::{default_factory, default_registry, register};
+use dynamo_scheduler::host::{
+    PromptRequest, SelectAndReserveRequest, SelectionCacheConfig, WorkerRequest,
+};
+use dynamo_scheduler::test_utils::{
+    BlockHashOptions, compute_block_hash_for_seq, compute_seq_hash_for_block, make_store_event_full,
+};
 
 fn worker(worker_id: u64) -> WorkerRequest {
     WorkerRequest {
@@ -52,7 +51,7 @@ fn reserve_request(selection_id: &str) -> SelectAndReserveRequest {
 
 #[tokio::test]
 async fn shared_core_books_and_releases_with_the_builtin_default() {
-    let core = SelectionCore::try_new_local(
+    let core = local_selection_core(
         KvRouterConfig {
             use_kv_events: false,
             router_queue_threshold: None,
@@ -74,7 +73,7 @@ async fn shared_core_books_and_releases_with_the_builtin_default() {
         .unwrap();
     assert!(partition.scheduler().has_request("request"));
     // Replacing scorer/picker state must leave active reservations intact.
-    use dynamo_kv_router::plugins::worker_selection::RuntimePolicyUpdate;
+    use dynamo_kv_router::plugins::prelude::*;
     let control = partition.scheduler().policy_control();
     let initial = control.get().await.unwrap();
     control
@@ -97,8 +96,8 @@ async fn shared_core_books_and_releases_with_the_builtin_default() {
 
 #[tokio::test]
 async fn runtime_updates_are_conditional_and_cancelled_writes_do_not_apply() {
-    use dynamo_kv_router::plugins::worker_selection::{RuntimePolicyError, RuntimePolicyUpdate};
-    let core = SelectionCore::try_new_local(
+    use dynamo_kv_router::plugins::prelude::*;
+    let core = local_selection_core(
         KvRouterConfig {
             use_kv_events: false,
             ..Default::default()
@@ -147,11 +146,7 @@ async fn runtime_updates_are_conditional_and_cancelled_writes_do_not_apply() {
 
 #[tokio::test]
 async fn scoring_error_does_not_book_and_allows_retry() {
-    use dynamo_kv_router::WorkerSelectionPolicyError;
-    use dynamo_kv_router::plugins::worker_selection::{
-        WorkerCandidates, WorkerInputView, WorkerPicker, WorkerScorer, WorkerSelectionContext,
-        WorkerSelectionPolicy,
-    };
+    use dynamo_kv_router::plugins::prelude::*;
     use std::sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -182,7 +177,7 @@ async fn scoring_error_does_not_book_and_allows_retry() {
             Ok(0)
         }
     }
-    let core = SelectionCore::try_new_local(
+    let core = local_selection_core(
         KvRouterConfig {
             use_kv_events: false,
             router_queue_threshold: None,
@@ -240,41 +235,22 @@ fn prompt_hashes() -> Vec<u64> {
 
 /// Index `worker_id` as holding the prompt's first `blocks` blocks, as its KV events would.
 async fn store_prefix(service: &SelectionService, worker_id: u64, blocks: usize) {
-    let local = compute_block_hash_for_seq(&prompt_tokens(), 4, BlockHashOptions::default());
-    let blocks = local
-        .iter()
-        .zip(prompt_hashes())
-        .take(blocks)
-        .map(|(&tokens_hash, sequence_hash)| KvCacheStoredBlockData {
-            block_hash: ExternalSequenceBlockHash(sequence_hash),
-            tokens_hash,
-            mm_extra_info: None,
-        })
-        .collect();
+    let local: Vec<u64> =
+        compute_block_hash_for_seq(&prompt_tokens(), 4, BlockHashOptions::default())
+            .into_iter()
+            .take(blocks)
+            .map(|hash| hash.0)
+            .collect();
     let partition = service
         .core()
         .partition(&RoutingPartitionId::new("model", "default"))
         .unwrap();
     partition
         .indexer()
-        .apply_event_routed(RouterEvent::with_storage_tier(
-            worker_id,
-            KvCacheEvent {
-                event_id: 1,
-                data: KvCacheEventData::Stored(KvCacheStoreData {
-                    parent_hash: None,
-                    start_position: None,
-                    blocks,
-                }),
-                dp_rank: 0,
-            },
-            StorageTier::Device,
-        ))
+        .apply_event_routed(make_store_event_full(worker_id, &local, 0, None, None))
         .await
         .unwrap();
-    if let Indexer::Single { primary, .. } = partition.indexer() {
-        primary.flush().await;
-    }
+    flush(partition.indexer()).await;
 }
 
 /// A selection service built from the shipped registry with the router policy `policy_yaml`, as
