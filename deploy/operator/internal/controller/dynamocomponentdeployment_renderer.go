@@ -785,6 +785,14 @@ func (r *dcdWorkloadRenderer) hasExistingLegacyWorkerSelector(
 	}
 	service := &corev1.Service{}
 	if err := r.reader.Get(ctx, types.NamespacedName{Name: serviceName, Namespace: namespace}, service); err == nil {
+		// A colliding Service must not change this workload's component type.
+		owned, err := dynamo.IsComponentServiceControlledBy(ctx, r.reader, owner, service)
+		if err != nil {
+			return false, err
+		}
+		if !owned {
+			return false, nil
+		}
 		return hasLegacyWorkerSelector(service.Spec.Selector, componentType), nil
 	} else if !k8serrors.IsNotFound(err) {
 		return false, fmt.Errorf("failed to get service %s/%s: %w", namespace, serviceName, err)

@@ -131,11 +131,16 @@ class KubernetesAPI:
         ).items
         matches = []
         for service in services:
-            # Grove identifies the component in the Pod selector; its Service
-            # metadata need not carry either the component or graph label.
-            if (service.spec.selector or {}).get(
-                DYNAMO_COMPONENT_LABEL
-            ) != component_name:
+            # Stable worker Services identify the component in metadata;
+            # Grove Services identify it only in the Pod selector.
+            service_component = (service.metadata.labels or {}).get(
+                DYNAMO_COMPONENT_LABEL,
+                (service.spec.selector or {}).get(DYNAMO_COMPONENT_LABEL),
+            )
+            if service_component != component_name:
+                continue
+            # The headless Ray Service is an auxiliary endpoint, not discovery.
+            if service.spec.cluster_ip == "None":
                 continue
             if service.metadata.deletion_timestamp is not None:
                 continue
@@ -168,7 +173,7 @@ class KubernetesAPI:
                         continue
                     raise
                 metadata = dcd["metadata"]
-                if metadata["uid"] != owner.uid:
+                if metadata.get("deletionTimestamp") or metadata["uid"] != owner.uid:
                     continue
                 if any(
                     ref.get("controller") is True

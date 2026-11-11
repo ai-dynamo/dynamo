@@ -3331,11 +3331,17 @@ def test_model_refresh_reads_registrations_and_pods_once(
     "service_name", ["svc-123-graph-frontend", "123-graph-frontend", "graph-frontend"]
 )
 @pytest.mark.parametrize("child_dcd", [False, True])
+@pytest.mark.parametrize("metadata_component", [False, True])
 @pytest.mark.parametrize(
     "owner_api_version", ["nvidia.com/v1alpha1", "nvidia.com/v1beta1"]
 )
 def test_frontend_metrics_uses_existing_owned_service(
-    kubernetes_connector, mock_kube_api, service_name, child_dcd, owner_api_version
+    kubernetes_connector,
+    mock_kube_api,
+    service_name,
+    child_dcd,
+    metadata_component,
+    owner_api_version,
 ):
     graph_name = "123-graph" if "123" in service_name else "graph"
     deployment = {
@@ -3381,8 +3387,15 @@ def test_frontend_metrics_uses_existing_owned_service(
         metadata=client.V1ObjectMeta(
             name=service_name,
             owner_references=[service_owner],
+            labels={"nvidia.com/dynamo-component": "Frontend"}
+            if metadata_component
+            else None,
         ),
-        spec=client.V1ServiceSpec(selector={"nvidia.com/dynamo-component": "Frontend"}),
+        spec=client.V1ServiceSpec(
+            selector={"nvidia.com/disaggregated-set-role": "frontend"}
+            if metadata_component
+            else {"nvidia.com/dynamo-component": "Frontend"}
+        ),
     )
     unrelated = client.V1Service(
         metadata=client.V1ObjectMeta(
@@ -3397,9 +3410,19 @@ def test_frontend_metrics_uses_existing_owned_service(
         ),
         spec=client.V1ServiceSpec(selector={"nvidia.com/dynamo-component": "Worker"}),
     )
+    ray_service = client.V1Service(
+        metadata=client.V1ObjectMeta(
+            name=service_name + "-ray", owner_references=[service_owner]
+        ),
+        spec=client.V1ServiceSpec(
+            cluster_ip="None",
+            selector={"nvidia.com/dynamo-component": "Frontend"},
+        ),
+    )
     api.core_api.list_namespaced_service.return_value.items = [
         unrelated,
         other_component,
+        ray_service,
         service,
     ]
     mock_kube_api.get_graph_deployment.return_value = deployment

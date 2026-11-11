@@ -348,6 +348,8 @@ class DynamoDeploymentClient:
         )
         frontend_names = []
         for service in services.items:
+            if service.metadata.deletion_timestamp is not None:
+                continue
             if (service.spec.selector or {}).get(
                 "nvidia.com/dynamo-component-type"
             ) != "frontend":
@@ -378,6 +380,8 @@ class DynamoDeploymentClient:
                         continue
                     raise
                 metadata = component["metadata"]
+                if metadata.get("deletionTimestamp"):
+                    continue
                 if metadata["uid"] == owner.uid and any(
                     reference.get("controller")
                     and reference["kind"] == "DynamoGraphDeployment"
@@ -800,7 +804,7 @@ async def main():
     parser.add_argument(
         "--service-name",
         "-s",
-        help="Service name for connecting to the service (default: {deployment_name}-frontend)",
+        help="Service name to connect to (default: discover the owned frontend Service; required when multiple frontends exist)",
     )
 
     args = parser.parse_args()

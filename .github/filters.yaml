@@ -242,6 +242,8 @@ dev_images:
 
 operator:
   - *ci
+  # The operator check also runs the deployment client's endpoint tests.
+  - 'deploy/utils/**'
   - 'deploy/operator/**'
   - 'deploy/operator/.*'
   # An AISimulate pin bump must refresh the schema used by operator admission.

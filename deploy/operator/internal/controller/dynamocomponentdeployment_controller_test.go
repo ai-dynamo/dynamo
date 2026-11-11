@@ -825,6 +825,66 @@ func TestDCDService_PrefixedNameCollisionIsAnOwnershipConflict(t *testing.T) {
 	require.Equal(t, first.UID, owner.UID)
 }
 
+func TestLegacyWorkerServiceSelectorRequiresOwnership(t *testing.T) {
+	for _, tt := range []struct {
+		name         string
+		graphOwner   bool
+		serviceOwner string
+		wantType     string
+	}{
+		{name: "foreign prefixed Service", serviceOwner: "foreign", wantType: commonconsts.ComponentTypeDecode},
+		{name: "unowned prefixed Service", serviceOwner: "none", wantType: commonconsts.ComponentTypeDecode},
+		{name: "direct DCD owner", serviceOwner: "component", wantType: commonconsts.ComponentTypeWorker},
+		{name: "child reads parent DGD Service", serviceOwner: "graph", wantType: commonconsts.ComponentTypeWorker},
+		{name: "graph reads verified child Service", graphOwner: true, serviceOwner: "component", wantType: commonconsts.ComponentTypeWorker},
+		{name: "graph rejects stale child UID", graphOwner: true, serviceOwner: "stale-component", wantType: commonconsts.ComponentTypeDecode},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Seed a prefixed Service with a legacy worker selector and the requested owner")
+			graph := &v1beta1.DynamoGraphDeployment{Name: "7foo", Namespace: "default", UID: "graph-uid"}
+			graphReference := metav1.OwnerReference{
+				APIVersion: v1beta1.GroupVersion.String(), Kind: "DynamoGraphDeployment",
+				Name: graph.Name, UID: graph.UID, Controller: new(true),
+			}
+			component := &v1beta1.DynamoComponentDeployment{
+				Name: "7foo-decode", Namespace: graph.Namespace, UID: "component-uid",
+				OwnerReferences: []metav1.OwnerReference{graphReference},
+			}
+			service := &corev1.Service{
+				Name: dynamo.ComponentServiceName(component.Name), Namespace: graph.Namespace,
+				Spec: corev1.ServiceSpec{Selector: map[string]string{
+					commonconsts.KubeLabelDynamoComponentType: commonconsts.ComponentTypeWorker,
+				}},
+			}
+			if tt.serviceOwner == "graph" {
+				service.OwnerReferences = []metav1.OwnerReference{graphReference}
+			} else if tt.serviceOwner != "none" {
+				ownerUID := component.UID
+				if tt.serviceOwner == "foreign" || tt.serviceOwner == "stale-component" {
+					ownerUID = "other-component-uid"
+				}
+				service.OwnerReferences = []metav1.OwnerReference{{
+					APIVersion: v1beta1.GroupVersion.String(), Kind: "DynamoComponentDeployment",
+					Name: component.Name, UID: ownerUID, Controller: new(true),
+				}}
+			}
+			reader := fake.NewClientBuilder().WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).WithObjects(graph, component, service).Build()
+			renderer := newDCDWorkloadRenderer(reader, &configv1alpha1.OperatorConfiguration{},
+				&controller_common.RuntimeConfig{}, &mockDockerSecretRetriever{})
+			var owner metav1.Object = component
+			if tt.graphOwner {
+				owner = graph
+			}
+
+			t.Log("Keep decode unless the Service belongs to this workload or its verified graph family")
+			componentType, err := renderer.getWorkloadComponentType(t.Context(), component.Namespace,
+				component.Name, commonconsts.ComponentTypeDecode, nil, owner)
+			require.NoError(t, err)
+			require.Equal(t, tt.wantType, componentType)
+		})
+	}
+}
+
 func TestDynamoComponentDeploymentReconciler_LWSNameDoesNotCollideWithComponentService(t *testing.T) {
 	t.Log("Build a multinode DCD and the dependencies shared by reconciliation and rendering")
 	s := scheme.Scheme

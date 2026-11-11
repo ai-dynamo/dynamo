@@ -1573,21 +1573,21 @@ class ManagedDeployment:
             )
 
         matches = []
-        # Grove identifies the component in the Pod selector, and need not
-        # carry the component or graph-name label on the Service itself.
-        for service in kr8s.get(
-            "services",
-            namespace=self.namespace,
-        ):
+        # Stable workers use a metadata label; Grove uses the Pod selector.
+        for service in kr8s.get("services", namespace=self.namespace):
+            metadata = service.raw["metadata"]
+            spec = service.raw.get("spec", {})
+            service_component = (metadata.get("labels") or {}).get(
+                "nvidia.com/dynamo-component",
+                (spec.get("selector") or {}).get("nvidia.com/dynamo-component"),
+            )
             if (
-                service.raw.get("spec", {})
-                .get("selector", {})
-                .get("nvidia.com/dynamo-component")
-                != component_name
+                service_component is None
+                or service_component.lower() != component_name.lower()
             ):
                 continue
-            metadata = service.raw["metadata"]
-            if metadata.get("deletionTimestamp"):
+            # Exclude the auxiliary headless Ray endpoint before counting matches.
+            if spec.get("clusterIP") == "None" or metadata.get("deletionTimestamp"):
                 continue
             if owned_by_graph(metadata):
                 matches.append(service)
@@ -1608,6 +1608,7 @@ class ManagedDeployment:
                 )
                 if (
                     len(dcds) == 1
+                    and not dcds[0].raw["metadata"].get("deletionTimestamp")
                     and dcds[0].raw["metadata"]["uid"] == owner.get("uid")
                     and owned_by_graph(dcds[0].raw["metadata"])
                 ):

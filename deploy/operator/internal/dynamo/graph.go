@@ -843,8 +843,22 @@ func ResolveComponentServiceName(ctx context.Context, reader ctrlclient.Reader, 
 	if err != nil {
 		return "", fmt.Errorf("resolve legacy Service %s/%s: %w", owner.GetNamespace(), legacyName, err)
 	}
-	if owner.GetUID() != "" && metav1.IsControlledBy(service, owner) {
+	owned, err := IsComponentServiceControlledBy(ctx, reader, owner, service)
+	if err != nil {
+		return "", err
+	}
+	if owned {
 		return legacyName, nil
+	}
+	return desiredName, nil
+}
+
+// IsComponentServiceControlledBy verifies direct ownership, a child DCD's parent
+// DGD, or a graph's live child DCD. reader, owner, and service must be non-nil.
+func IsComponentServiceControlledBy(ctx context.Context, reader ctrlclient.Reader, owner metav1.Object, service *corev1.Service) (bool, error) {
+	// Direct ownership requires a non-empty controller UID.
+	if owner.GetUID() != "" && metav1.IsControlledBy(service, owner) {
+		return true, nil
 	}
 
 	// DGD stable Services can be referenced by their child DCD renderer.
@@ -855,7 +869,7 @@ func ResolveComponentServiceName(ctx context.Context, reader ctrlclient.Reader, 
 		strings.HasPrefix(parent.APIVersion, v1beta1.GroupVersion.Group+"/") &&
 		strings.HasPrefix(controller.APIVersion, v1beta1.GroupVersion.Group+"/") &&
 		parent.Kind == controller.Kind && parent.UID == controller.UID {
-		return legacyName, nil
+		return true, nil
 	}
 	// EPP references are graph-owned even when the Service belongs to a child DCD.
 	if _, graphOwner := owner.(*v1beta1.DynamoGraphDeployment); graphOwner && controller != nil &&
@@ -863,17 +877,17 @@ func ResolveComponentServiceName(ctx context.Context, reader ctrlclient.Reader, 
 		component := &v1beta1.DynamoComponentDeployment{}
 		err := reader.Get(ctx, types.NamespacedName{Name: controller.Name, Namespace: owner.GetNamespace()}, component)
 		if k8serrors.IsNotFound(err) {
-			return desiredName, nil
+			return false, nil
 		}
 		if err != nil {
-			return "", fmt.Errorf("resolve legacy Service owner %s: %w", controller.Name, err)
+			return false, fmt.Errorf("verify component Service owner %s: %w", controller.Name, err)
 		}
 		if component.UID == controller.UID && owner.GetUID() != "" && metav1.IsControlledBy(component, owner) {
-			return legacyName, nil
+			return true, nil
 		}
 	}
 
-	return desiredName, nil
+	return false, nil
 }
 
 type SecretsRetriever interface {

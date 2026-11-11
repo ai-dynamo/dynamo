@@ -418,11 +418,17 @@ async def test_discovery_capture_and_cleanup(
     "service_name", ["svc-123-graph-frontend", "123-graph-frontend", "graph-frontend"]
 )
 @pytest.mark.parametrize("child_dcd", [False, True])
+@pytest.mark.parametrize("metadata_component", [False, True])
 @pytest.mark.parametrize(
     "owner_api_version", ["nvidia.com/v1alpha1", "nvidia.com/v1beta1"]
 )
 def test_get_service_discovers_current_owned_name(
-    monkeypatch, tmp_path, service_name, child_dcd, owner_api_version
+    monkeypatch,
+    tmp_path,
+    service_name,
+    child_dcd,
+    metadata_component,
+    owner_api_version,
 ):
     deployment = managed_deployment(tmp_path)
     deployment._deployment_name = "123-graph" if "123" in service_name else "graph"
@@ -455,8 +461,18 @@ def test_get_service_discovers_current_owned_name(
         }
     service = SimpleNamespace(
         raw={
-            "metadata": {"name": service_name, "ownerReferences": [service_owner]},
-            "spec": {"selector": {"nvidia.com/dynamo-component": "Frontend"}},
+            "metadata": {
+                "name": service_name,
+                "ownerReferences": [service_owner],
+                "labels": {"nvidia.com/dynamo-component": "Frontend"}
+                if metadata_component
+                else {},
+            },
+            "spec": {
+                "selector": {"nvidia.com/disaggregated-set-role": "frontend"}
+                if metadata_component
+                else {"nvidia.com/dynamo-component": "Frontend"},
+            },
         }
     )
     unrelated = SimpleNamespace(
@@ -471,9 +487,21 @@ def test_get_service_discovers_current_owned_name(
             "spec": {"selector": {"nvidia.com/dynamo-component": "Worker"}},
         }
     )
+    ray_service = SimpleNamespace(
+        raw={
+            "metadata": {
+                "name": service_name + "-ray",
+                "ownerReferences": [service_owner],
+            },
+            "spec": {
+                "clusterIP": "None",
+                "selector": {"nvidia.com/dynamo-component": "Frontend"},
+            },
+        }
+    )
     objects = {
         "dynamographdeployments": [graph],
-        "services": [unrelated, other_component, service],
+        "services": [unrelated, other_component, ray_service, service],
         "dynamocomponentdeployments": [dcd],
     }
     get_objects = MagicMock(
@@ -481,15 +509,22 @@ def test_get_service_discovers_current_owned_name(
     )
     monkeypatch.setattr(dgd_utils.kr8s, "get", get_objects)
 
-    assert deployment.get_service("Frontend") is service
+    assert deployment.get_service("frontend") is service
     assert get_objects.call_args_list[1].kwargs == {
         "namespace": "default",
     }
 
 
-@pytest.mark.parametrize("child_uid", ["other-component-uid", "component-uid", None])
+@pytest.mark.parametrize(
+    ("child_uid", "graph_uid"),
+    [
+        ("other-component-uid", "graph-uid"),
+        ("component-uid", "other-graph-uid"),
+        (None, "graph-uid"),
+    ],
+)
 def test_get_service_rejects_unverified_component_owner(
-    monkeypatch, tmp_path, child_uid
+    monkeypatch, tmp_path, child_uid, graph_uid
 ):
     deployment = managed_deployment(tmp_path)
     graph = SimpleNamespace(
@@ -523,7 +558,7 @@ def test_get_service_rejects_unverified_component_owner(
                         "apiVersion": "nvidia.com/v1beta1",
                         "kind": "DynamoGraphDeployment",
                         "name": deployment._deployment_name,
-                        "uid": "other-graph-uid",
+                        "uid": graph_uid,
                         "controller": True,
                     }
                 ],

@@ -10,6 +10,7 @@ When a candidate deployment's worker pods enter ``CrashLoopBackOff``,
 of wall-clock per failing candidate.
 """
 
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -440,3 +441,44 @@ async def test_frontend_discovery_skips_deleted_component_owner(monkeypatch):
     assert await client.wait_for_deployment_ready(timeout=1) is True
     assert client.service_name == "live-frontend"
     assert client.custom_api.get_namespaced_custom_object.await_count == 2
+
+
+@pytest.mark.unit
+@pytest.mark.gpu_0
+@pytest.mark.parametrize("terminating_resource", ["service", "component"])
+async def test_frontend_discovery_skips_terminating_resources(
+    monkeypatch, terminating_resource
+):
+    """Deleting endpoints must not make the live frontend look ambiguous."""
+    stale = _owned_frontend_service(
+        "stale-frontend", "DynamoComponentDeployment", "component-uid"
+    )
+    if terminating_resource == "service":
+        stale.metadata.deletion_timestamp = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    client = _ready_client(
+        monkeypatch, [stale, _owned_frontend_service("live-frontend")]
+    )
+    ready_graph = client.custom_api.get_namespaced_custom_object.return_value
+    client.custom_api.get_namespaced_custom_object.side_effect = [
+        ready_graph,
+        {
+            "metadata": {
+                "uid": "component-uid",
+                "deletionTimestamp": "2026-01-01T00:00:00Z",
+                "ownerReferences": [
+                    {
+                        "apiVersion": "nvidia.com/v1beta1",
+                        "kind": "DynamoGraphDeployment",
+                        "uid": "graph-uid",
+                        "controller": True,
+                    }
+                ],
+            }
+        },
+    ]
+
+    assert await client.wait_for_deployment_ready(timeout=1) is True
+    assert client.service_name == "live-frontend"
+    assert client.custom_api.get_namespaced_custom_object.await_count == (
+        1 if terminating_resource == "service" else 2
+    )
