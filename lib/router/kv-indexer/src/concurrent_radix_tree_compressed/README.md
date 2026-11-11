@@ -42,10 +42,11 @@ Its main differences are:
   stale entry is observed. Cross-thread splits do not need to synchronously patch
   every other thread's lookup table.
 - **Shared-lock structural reads**: child storage keeps up to four children
-  inline behind a per-node read-write lock and uses a `DashMap` for higher
-  fanout, while the edge state is protected separately. Hot read paths take
-  both locks shared and do not take the shape gate, and shape-sensitive writes
-  use version validation to retry when a plan becomes stale.
+  in a small sorted list behind a per-node read-write lock and uses a `DashMap`
+  for higher fanout, while the edge state is protected separately. Hot read
+  paths take both locks shared and do not take the shape gate, and
+  shape-sensitive writes use version validation to retry when a plan becomes
+  stale.
 - **Versioned shape gates**: the node's `shape_gate` and `shape_version` combine
   a small critical section with explicit stale-plan detection. Shared operations,
   such as adding a child under a stable internal node, can proceed with a shared
@@ -277,17 +278,15 @@ Node internals use separate protection for edge state and child maps:
 
 - `CrtcNodeState` is protected by a `parking_lot::RwLock`.
 - `children` sits behind its own `parking_lot::RwLock`. Up to four children
-  are stored inline and change in place under the exclusive lock; past four the
-  node promotes to a `DashMap`, which changes under the shared lock, so writers
-  to a high-fanout node never block its readers. A leaf allocates no child
-  storage, and a compact list frees its storage when it empties; a `DashMap`
-  stays once created. Lock order: a node's child lock is taken after its own
-  `state` lock, and a walk over a node's children holds that node's child lock
-  shared while it reads each child's `state` and child lock. So no path may
-  take a parent's child lock while it holds a child's `state` or child lock.
-  Compact children used to be immutable `ArcSwap` snapshots; each swap or drop
-  of one walks every thread's `arc_swap` debt list, which with over a hundred
-  reader threads was half of the event threads' time.
+  are kept in a small sorted list that changes in place under the exclusive
+  lock; past four the node promotes to a `DashMap`, which changes under the
+  shared lock, so writers to a high-fanout node never block its readers. A leaf
+  allocates no child storage, and a compact list frees its storage when it
+  empties; a `DashMap` stays once created.
+- Lock order: a node's child lock is taken after its own `state` lock, and a
+  walk over a node's children holds that node's child lock shared while it
+  reads each child's `state` and child lock. So no path may take a parent's
+  child lock while it holds a child's `state` or child lock.
 - `shape_gate` and `shape_version` coordinate plans that depend on the relation
   between the edge and child map.
 

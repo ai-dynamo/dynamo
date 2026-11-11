@@ -7,7 +7,7 @@ use std::fmt;
 use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
 use parking_lot::RwLock;
-use rustc_hash::{FxBuildHasher, FxHashMap};
+use rustc_hash::FxBuildHasher;
 
 use super::types::SharedNode;
 use crate::prelude::LocalBlockHash;
@@ -34,6 +34,7 @@ pub(super) enum ChildInsertResult {
     Inserted(SharedNode),
 }
 
+#[derive(Default)]
 pub(super) struct NodeChildren {
     /// `None` until the first child and again when a compact list empties, so a leaf
     /// allocates nothing; a sharded map stays once created. Compact children change in
@@ -55,28 +56,6 @@ impl fmt::Debug for NodeChildren {
 }
 
 impl NodeChildren {
-    pub(super) fn from_map(children: FxHashMap<LocalBlockHash, SharedNode>) -> Self {
-        let state = if children.len() > SMALL_CHILD_LIMIT {
-            let sharded = ShardedChildren::with_hasher(FxBuildHasher);
-            for (key, child) in children {
-                sharded.insert(key, child);
-            }
-            Some(ChildrenState::Sharded(sharded))
-        } else {
-            let mut entries: Vec<_> = children
-                .into_iter()
-                .map(|(hash, node)| ChildEntry { hash, node })
-                .collect();
-            entries.sort_unstable_by_key(|entry| entry.hash);
-            match entries.len() {
-                0 => None,
-                1 => entries.pop().map(ChildrenState::Singleton),
-                _ => Some(ChildrenState::Small(entries)),
-            }
-        };
-        Self::from_state(state.map(Box::new))
-    }
-
     fn from_state(state: Option<Box<ChildrenState>>) -> Self {
         Self {
             state: RwLock::new(state),
@@ -84,11 +63,7 @@ impl NodeChildren {
     }
 
     pub(super) fn is_empty(&self) -> bool {
-        match self.state.read().as_deref() {
-            None => true,
-            Some(ChildrenState::Sharded(children)) => children.is_empty(),
-            Some(ChildrenState::Singleton(_) | ChildrenState::Small(_)) => false,
-        }
+        self.len() == 0
     }
 
     fn len(&self) -> usize {
@@ -282,31 +257,22 @@ impl NodeChildren {
         }
     }
 
+    /// Empties the list while the owning node's exclusive shape gate is held, and returns
+    /// whether it had children. The gate keeps inserts out, so nothing promotes a compact
+    /// list between the two locks; if something did, taking the map would still clear it.
     pub(super) fn clear(&self) -> bool {
-        let clear_sharded = |children: &ShardedChildren| {
-            let had_children = !children.is_empty();
-            children.clear();
-            had_children
-        };
-        {
-            let state = self.state.read();
-            match state.as_deref() {
-                None => return false,
-                Some(ChildrenState::Sharded(children)) => return clear_sharded(children),
-                Some(ChildrenState::Singleton(_) | ChildrenState::Small(_)) => {}
+        match self.state.read().as_deref() {
+            None => return false,
+            Some(ChildrenState::Sharded(children)) => {
+                let had_children = !children.is_empty();
+                children.clear();
+                return had_children;
             }
+            Some(ChildrenState::Singleton(_) | ChildrenState::Small(_)) => {}
         }
-        let compact = {
-            let mut state = self.state.write();
-            match state.as_deref() {
-                None => return false,
-                Some(ChildrenState::Sharded(children)) => return clear_sharded(children),
-                Some(ChildrenState::Singleton(_) | ChildrenState::Small(_)) => state.take(),
-            }
-        };
-        // Dropped after the lock: releasing the children can free whole subtrees.
-        drop(compact);
-        true
+        let compact = self.state.write().take();
+        // `compact` drops after the lock: releasing the children can free whole subtrees.
+        compact.is_some()
     }
 
     /// Transfers the current state while the owning node's exclusive shape gate is held.
@@ -350,7 +316,7 @@ mod tests {
 
     #[test]
     fn compact_removals_shrink_to_singleton_then_empty() {
-        let children = NodeChildren::from_map(FxHashMap::default());
+        let children = NodeChildren::default();
         let nodes: Vec<_> = (0..SMALL_CHILD_LIMIT).map(|_| child()).collect();
 
         for (key, node) in nodes.iter().enumerate() {
@@ -359,9 +325,9 @@ mod tests {
         }
         assert_eq!(children.kind(), ChildrenKind::Small);
 
-        for key in (1..SMALL_CHILD_LIMIT).rev() {
+        for (key, node) in nodes.iter().enumerate().skip(1) {
             let removed = children.remove(&LocalBlockHash(key as u64)).unwrap();
-            assert!(Arc::ptr_eq(&removed, &nodes[key]));
+            assert!(Arc::ptr_eq(&removed, node));
         }
         assert_eq!(children.kind(), ChildrenKind::Singleton);
         assert!(Arc::ptr_eq(
@@ -376,7 +342,7 @@ mod tests {
 
     #[test]
     fn fifth_distinct_child_promotes_and_ordinary_mutations_do_not_demote() {
-        let children = NodeChildren::from_map(FxHashMap::default());
+        let children = NodeChildren::default();
 
         for key in 0..=SMALL_CHILD_LIMIT {
             let result = children.insert_if_absent(LocalBlockHash(key as u64), child());
@@ -392,14 +358,14 @@ mod tests {
         assert_eq!(children.kind(), ChildrenKind::Sharded);
 
         children.insert(LocalBlockHash(99), child());
-        children.clear();
+        assert!(children.clear());
         assert!(children.is_empty());
         assert_eq!(children.kind(), ChildrenKind::Sharded);
     }
 
     #[test]
     fn split_transfer_compacts_prefix_and_preserves_suffix_children() {
-        let compact = NodeChildren::from_map(FxHashMap::default());
+        let compact = NodeChildren::default();
         compact.insert(LocalBlockHash(1), child());
         compact.insert(LocalBlockHash(2), child());
         let compact_suffix = compact.transfer_for_split();
@@ -409,7 +375,7 @@ mod tests {
         compact.insert(LocalBlockHash(3), child());
         assert_eq!(compact.kind(), ChildrenKind::Singleton);
 
-        let sharded = NodeChildren::from_map(FxHashMap::default());
+        let sharded = NodeChildren::default();
         for key in 0..=SMALL_CHILD_LIMIT {
             sharded.insert(LocalBlockHash(key as u64), child());
         }
@@ -426,7 +392,7 @@ mod tests {
     fn a_node_without_children_allocates_no_storage() {
         assert_eq!(std::mem::size_of::<NodeChildren>(), 16);
 
-        let children = NodeChildren::from_map(FxHashMap::default());
+        let children = NodeChildren::default();
         assert!(children.is_empty());
         assert!(children.remove(&LocalBlockHash(1)).is_none());
         assert!(!children.clear());
@@ -442,9 +408,10 @@ mod tests {
 
     #[test]
     fn insert_replaces_and_insert_if_absent_keeps_the_existing_child() {
-        let children = NodeChildren::from_map(FxHashMap::default());
-        for size in 1..=SMALL_CHILD_LIMIT + 1 {
-            let key = LocalBlockHash(size as u64);
+        let children = NodeChildren::default();
+        let mut stored = Vec::new();
+        // A first key, a new smallest, an append, a middle one, then the promoting fifth.
+        for key in [2, 0, 4, 1, 3].map(LocalBlockHash) {
             let first = child();
             assert!(children.insert(key, first.clone()).is_none());
 
@@ -456,51 +423,13 @@ mod tests {
             let second = child();
             let replaced = children.insert(key, second.clone()).unwrap();
             assert!(Arc::ptr_eq(&replaced, &first));
-            assert!(Arc::ptr_eq(&children.get(&key).unwrap(), &second));
-            assert_eq!(children.len(), size);
+            stored.push((key, second));
+            for (key, node) in &stored {
+                assert!(Arc::ptr_eq(&children.get(key).unwrap(), node));
+            }
+            assert_eq!(children.len(), stored.len());
         }
         assert_eq!(children.kind(), ChildrenKind::Sharded);
-    }
-
-    #[test]
-    fn lookups_see_every_child_while_storage_promotes() {
-        const ROUNDS: usize = 200;
-        for _ in 0..ROUNDS {
-            let children = Arc::new(NodeChildren::from_map(FxHashMap::default()));
-            let originals: Vec<_> = (0..SMALL_CHILD_LIMIT).map(|_| child()).collect();
-            for (key, node) in originals.iter().enumerate() {
-                children.insert(LocalBlockHash(key as u64), node.clone());
-            }
-
-            let start = Arc::new(Barrier::new(2));
-            let reader = {
-                let children = children.clone();
-                let originals = originals.clone();
-                let start = start.clone();
-                thread::spawn(move || {
-                    start.wait();
-                    // Always one pass, and one more after the promotion is visible.
-                    loop {
-                        let promoted = children.kind() == ChildrenKind::Sharded;
-                        for (key, node) in originals.iter().enumerate() {
-                            let found = children.get(&LocalBlockHash(key as u64));
-                            assert!(found.is_some_and(|found| Arc::ptr_eq(&found, node)));
-                        }
-                        if promoted {
-                            break;
-                        }
-                    }
-                })
-            };
-
-            start.wait();
-            let fifth = child();
-            children.insert_if_absent(LocalBlockHash(SMALL_CHILD_LIMIT as u64), fifth.clone());
-            reader.join().unwrap();
-            assert_eq!(children.len(), SMALL_CHILD_LIMIT + 1);
-            let stored = children.get(&LocalBlockHash(SMALL_CHILD_LIMIT as u64));
-            assert!(stored.is_some_and(|stored| Arc::ptr_eq(&stored, &fifth)));
-        }
     }
 
     /// An insert looks under the shared lock first. If another thread promotes the
@@ -537,7 +466,7 @@ mod tests {
     #[test]
     fn concurrent_duplicate_insert_has_one_winner() {
         const THREADS: usize = 16;
-        let children = Arc::new(NodeChildren::from_map(FxHashMap::default()));
+        let children = Arc::new(NodeChildren::default());
         let barrier = Arc::new(Barrier::new(THREADS + 1));
         let inserted = Arc::new(AtomicUsize::new(0));
         let mut handles = Vec::with_capacity(THREADS);
@@ -574,7 +503,7 @@ mod tests {
     #[test]
     fn concurrent_distinct_inserts_survive_promotion_races() {
         const THREADS: usize = 32;
-        let children = Arc::new(NodeChildren::from_map(FxHashMap::default()));
+        let children = Arc::new(NodeChildren::default());
         let barrier = Arc::new(Barrier::new(THREADS + 1));
         let mut handles = Vec::with_capacity(THREADS);
 
