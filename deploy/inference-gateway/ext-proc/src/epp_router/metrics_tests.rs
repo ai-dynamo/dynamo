@@ -4,8 +4,8 @@
 use std::collections::HashMap;
 
 use axum::{Json, Router, routing::post};
-use dynamo_kv_router::services::selection::{CatalogReconciler, WorkerRequest};
 use dynamo_runtime::metrics::prometheus_names::router as router_names;
+use dynamo_scheduler::host::{CatalogReconciler, WorkerRequest};
 use prometheus::{Encoder, Registry, TextEncoder};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
