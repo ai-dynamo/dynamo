@@ -117,6 +117,29 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         default="",
         help="Secret containing the profiler's HF_TOKEN value.",
     )
+    parser.addoption(
+        "--slime-storage-class",
+        default="",
+        help="ReadWriteMany StorageClass for the Slime tutorial test's volume.",
+    )
+    parser.addoption(
+        "--slime-pvc",
+        default="",
+        help="Existing ReadWriteMany PVC for the Slime tutorial test to mount "
+        "instead of creating one. The test does not delete it.",
+    )
+    parser.addoption(
+        "--slime-image",
+        default="",
+        help="Slime image override for the Slime tutorial test's setup Job "
+        "and Ray head.",
+    )
+    parser.addoption(
+        "--slime-gpu-toleration",
+        default="",
+        help="Taint key, such as nvidia.com/gpu, for the Slime tutorial test's "
+        "GPU Pods to tolerate (operator Exists, effect NoSchedule).",
+    )
 
 
 @dataclass(frozen=True)

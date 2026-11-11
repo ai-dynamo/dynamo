@@ -1,0 +1,141 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# The Slime tutorial's DynamoGraphDeployment ("Create the
+# DynamoGraphDeployment"): a Dynamo frontend and two SGLang engines that serve
+# Slime's rollouts. Kept out of examples/backends/*/deploy/ so the
+# auto-discovered deploy-test matrix in tests/deploy/conftest.py never picks it
+# up; the engines need the volume that the tutorial's setup Job prepares.
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: slime-sglang
+spec:
+  backendFramework: sglang
+  components:
+    - name: frontend
+      type: frontend
+      replicas: 1
+      podTemplate:
+        metadata:
+          labels:
+            dynamo.nvidia.com/slime-role: frontend
+        spec:
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.6.1
+              env:
+                - name: DYN_SGLANG_ENABLE_GENERATE
+                  value: "1"
+    - name: worker-0
+      type: worker
+      replicas: 1
+      podTemplate:
+        metadata:
+          labels:
+            dynamo.nvidia.com/slime-role: worker-0
+        spec:
+          volumes:
+            - name: slime-data
+              persistentVolumeClaim:
+                claimName: slime-data
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.6.1
+              command:
+                - python3
+                - -m
+                - sglang.launch_server
+              args:
+                - --model-path
+                - /data/models/Qwen3-0.6B
+                - --served-model-name
+                - Qwen/Qwen3-0.6B
+                - --host
+                - 0.0.0.0
+                - --port
+                - "30000"
+                - --grpc-port
+                - "30001"
+                - --incremental-streaming-output
+                - --sidecar
+                - dynamo.sglang.sidecar
+                - --sidecar-args
+                - '["--grpc-endpoint","http://127.0.0.1:30001"]'
+              resources:
+                requests:
+                  nvidia.com/gpu: "1"
+                limits:
+                  nvidia.com/gpu: "1"
+              volumeMounts:
+                - name: slime-data
+                  mountPath: /data
+              startupProbe:
+                httpGet:
+                  path: /health_generate
+                  port: 30000
+                periodSeconds: 5
+                timeoutSeconds: 5
+                failureThreshold: 60
+              readinessProbe:
+                httpGet:
+                  path: /health_generate
+                  port: 30000
+                periodSeconds: 10
+                timeoutSeconds: 5
+    - name: worker-1
+      type: worker
+      replicas: 1
+      podTemplate:
+        metadata:
+          labels:
+            dynamo.nvidia.com/slime-role: worker-1
+        spec:
+          volumes:
+            - name: slime-data
+              persistentVolumeClaim:
+                claimName: slime-data
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.6.1
+              command:
+                - python3
+                - -m
+                - sglang.launch_server
+              args:
+                - --model-path
+                - /data/models/Qwen3-0.6B
+                - --served-model-name
+                - Qwen/Qwen3-0.6B
+                - --host
+                - 0.0.0.0
+                - --port
+                - "30000"
+                - --grpc-port
+                - "30001"
+                - --incremental-streaming-output
+                - --sidecar
+                - dynamo.sglang.sidecar
+                - --sidecar-args
+                - '["--grpc-endpoint","http://127.0.0.1:30001"]'
+              resources:
+                requests:
+                  nvidia.com/gpu: "1"
+                limits:
+                  nvidia.com/gpu: "1"
+              volumeMounts:
+                - name: slime-data
+                  mountPath: /data
+              startupProbe:
+                httpGet:
+                  path: /health_generate
+                  port: 30000
+                periodSeconds: 5
+                timeoutSeconds: 5
+                failureThreshold: 60
+              readinessProbe:
+                httpGet:
+                  path: /health_generate
+                  port: 30000
+                periodSeconds: 10
+                timeoutSeconds: 5
