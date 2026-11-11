@@ -883,7 +883,7 @@ mod tests {
     /// invalid-argument errors or a classifier failure that carries the refusal as a cause.
     #[tokio::test]
     async fn other_invalid_argument_decode_errors_preserve_prefill_transfer() {
-        use dynamo_kv_router::scheduling::KvSchedulerError;
+        use dynamo_scheduler::host::KvSchedulerError;
 
         let refusal = || {
             crate::kv_router::map_scheduler_error(KvSchedulerError::UnknownPolicyClass(

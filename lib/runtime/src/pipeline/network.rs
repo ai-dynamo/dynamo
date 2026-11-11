@@ -845,6 +845,19 @@ mod tests {
     }
 
     #[test]
+    fn decode_rejection_roundtrips_through_request_plane_codecs() {
+        let error = DynamoError::reject_before_kv_receiver("invalid sampling options".into());
+        for codec in [
+            RequestPlanePayloadCodec::Json,
+            RequestPlanePayloadCodec::Msgpack,
+        ] {
+            let decoded: DynamoError = codec.decode(&codec.encode(&error).unwrap()).unwrap();
+            assert_eq!(decoded, error);
+            assert!(decoded.rejected_before_kv_receiver());
+        }
+    }
+
+    #[test]
     fn prologue_without_typed_error_field_still_decodes() {
         let legacy = br#"{"error":"Generate Error: something went wrong"}"#;
         let prologue: ResponseStreamPrologue =
