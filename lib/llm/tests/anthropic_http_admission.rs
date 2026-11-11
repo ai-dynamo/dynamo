@@ -460,6 +460,32 @@ async fn message_threads_are_refused_before_generation() {
                 );
             }
         }
+        // A repeated key must not hide the thread: the typed request ignores both.
+        let named = serde_json::to_string(&follow_up).unwrap();
+        let named = named.strip_suffix('}').unwrap();
+        let unnamed = serde_json::to_string(&request()).unwrap();
+        let unnamed = unnamed.strip_suffix('}').unwrap();
+        let thread = r#""thread":{"type":"continue","previous_message_id":"msg_01"}"#;
+        for body in [
+            format!(r#"{named},"thread":null}}"#),
+            format!(r#"{unnamed},"thread":null,{thread}}}"#),
+        ] {
+            let response = svc
+                .client
+                .post(format!("{}/v1/messages", svc.base_url))
+                .timeout(Duration::from_secs(10))
+                .header("content-type", "application/json")
+                .body(body.clone())
+                .send()
+                .await
+                .unwrap();
+            let error =
+                assert_error(response, StatusCode::BAD_REQUEST, "invalid_request_error").await;
+            assert_eq!(
+                error["error"]["details"]["error_code"], "thread_unsupported_request",
+                "{body}: {error}"
+            );
+        }
         let mut unthreaded = request();
         unthreaded["thread"] = Value::Null;
         let response = svc

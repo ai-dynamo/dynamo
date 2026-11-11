@@ -10,7 +10,10 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use bytes::Bytes;
-use serde::{Deserialize, de::DeserializeOwned};
+use serde::{
+    Deserialize, Deserializer,
+    de::{DeserializeOwned, MapAccess, Visitor},
+};
 use serde_json::{Value, value::RawValue};
 
 /// Retain the ingress buffer and small admission fields. Borrowed raw fields
@@ -21,6 +24,41 @@ pub(super) struct ValidatedRequest<T> {
     stream: bool,
     fields: Result<Value, String>,
     marker: PhantomData<T>,
+}
+
+/// The body's top-level fields, borrowed. A repeated key keeps its last value, as the typed
+/// parser reads it, except `thread`: a thread named once stays named, so a later `null`
+/// cannot pass a threaded request through admission as an unthreaded one.
+struct RawFields<'a>(HashMap<String, &'a RawValue>);
+
+impl<'de: 'a, 'a> Deserialize<'de> for RawFields<'a> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Fields<'a>(PhantomData<&'a ()>);
+
+        impl<'de: 'a, 'a> Visitor<'de> for Fields<'a> {
+            type Value = RawFields<'a>;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a JSON object")
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                let mut fields: HashMap<String, &'a RawValue> = HashMap::new();
+                while let Some((name, value)) = map.next_entry::<String, &'de RawValue>()? {
+                    let named = name == "thread"
+                        && fields
+                            .get("thread")
+                            .is_some_and(|kept| kept.get() != "null");
+                    if !named {
+                        fields.insert(name, value);
+                    }
+                }
+                Ok(RawFields(fields))
+            }
+        }
+
+        deserializer.deserialize_map(Fields(PhantomData))
+    }
 }
 
 impl<S: Send + Sync, T: DeserializeOwned + Send> FromRequest<S> for ValidatedRequest<T> {
@@ -51,7 +89,7 @@ impl<T: DeserializeOwned> ValidatedRequest<T> {
         let mut model = String::new();
         let mut stream = false;
         let fields = (|| {
-            let raw: HashMap<String, &RawValue> =
+            let RawFields(raw) =
                 serde_json::from_slice(&body).map_err(|error| error.to_string())?;
             model = raw
                 .get("model")
