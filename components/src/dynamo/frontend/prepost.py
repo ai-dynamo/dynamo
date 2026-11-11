@@ -34,6 +34,9 @@ from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser
 from vllm.tool_parsers.utils import get_json_schema_from_tools
 from vllm.utils.async_utils import make_async
+from vllm.v1.structured_output.backend_xgrammar import (
+    has_xgrammar_unsupported_json_features,
+)
 
 from dynamo.common.utils.guided_json import (
     admits_only_empty_object,
@@ -625,6 +628,11 @@ def _response_format_after_reasoning(
     """
     schema = guided_decoding.get("json")
     if schema is None or set(guided_decoding) != {"json"}:
+        return None
+    # vLLM checks these features only in a plain JSON constraint, and falls back
+    # to another backend or rejects the request. In a structural tag, xgrammar
+    # would drop them silently.
+    if has_xgrammar_unsupported_json_features(schema):
         return None
     # Same gate as the parser that will read the output: without it, the
     # reasoning block would be returned as content.

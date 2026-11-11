@@ -5863,6 +5863,24 @@ class TestResponseFormatReasoningStart:
         assert exc_info.value.code == 400
 
     @pytest.mark.asyncio
+    async def test_schema_xgrammar_cannot_enforce_is_not_wrapped(self, tokenizer):
+        # Unwrapped, vLLM falls back to a backend that enforces multipleOf.
+        schema = {
+            "type": "object",
+            "properties": {"count": {"type": "integer", "multipleOf": 5}},
+        }
+        guided = await self._guided(
+            tokenizer,
+            prompt_text="<|im_start|>assistant\n<think>",
+            reasoning_parser_class=_prompt_reasoning_parser_with_end(),
+            response_format={
+                "type": "json_schema",
+                "json_schema": {"name": "count", "schema": schema},
+            },
+        )
+        assert guided == {"json": schema}
+
+    @pytest.mark.asyncio
     async def test_thinking_disabled_by_request_is_not_wrapped(self, tokenizer):
         guided = await self._guided(
             tokenizer,
