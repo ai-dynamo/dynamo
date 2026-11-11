@@ -9506,18 +9506,34 @@ func TestGenerateGrovePodCliqueSet_WaitForCheckpointKeepsPositiveTemplateSeed(t 
 	tests := []struct {
 		name              string
 		multinode         *v1alpha1.MultinodeSpec
+		minAvailable      *int32
 		wantScalingGroup  bool
+		wantGroupSeed     int32
 		wantCliqueReplica int32
 	}{
 		{
 			name:              "multinode scaling group",
 			multinode:         &v1alpha1.MultinodeSpec{NodeCount: 2},
 			wantScalingGroup:  true,
+			wantGroupSeed:     1,
+			wantCliqueReplica: 1,
+		},
+		{
+			name:              "multinode scaling group seeds at minAvailable",
+			multinode:         &v1alpha1.MultinodeSpec{NodeCount: 2},
+			minAvailable:      new(int32(2)),
+			wantScalingGroup:  true,
+			wantGroupSeed:     2,
 			wantCliqueReplica: 1,
 		},
 		{
 			name:              "standalone clique",
 			wantCliqueReplica: 1,
+		},
+		{
+			name:              "standalone clique seeds at minAvailable",
+			minAvailable:      new(int32(2)),
+			wantCliqueReplica: 2,
 		},
 	}
 
@@ -9535,7 +9551,8 @@ func TestGenerateGrovePodCliqueSet_WaitForCheckpointKeepsPositiveTemplateSeed(t 
 							Resources: &v1alpha1.Resources{
 								Limits: &v1alpha1.ResourceItem{GPU: "1"},
 							},
-							Multinode: tt.multinode,
+							Multinode:    tt.multinode,
+							MinAvailable: tt.minAvailable,
 							Checkpoint: &v1alpha1.ServiceCheckpointConfig{
 								Enabled:       true,
 								StartupPolicy: v1alpha1.CheckpointStartupPolicyWaitForCheckpoint,
@@ -9570,9 +9587,9 @@ func TestGenerateGrovePodCliqueSet_WaitForCheckpointKeepsPositiveTemplateSeed(t 
 				require.Len(t, got.Spec.Template.PodCliqueScalingGroupConfigs, 1)
 				pcsg := got.Spec.Template.PodCliqueScalingGroupConfigs[0]
 				require.NotNil(t, pcsg.Replicas)
-				assert.EqualValues(t, 1, *pcsg.Replicas)
+				assert.EqualValues(t, tt.wantGroupSeed, *pcsg.Replicas)
 				require.NotNil(t, pcsg.MinAvailable)
-				assert.EqualValues(t, 1, *pcsg.MinAvailable)
+				assert.EqualValues(t, tt.wantGroupSeed, *pcsg.MinAvailable)
 				assert.LessOrEqual(t, *pcsg.MinAvailable, *pcsg.Replicas)
 			} else {
 				assert.Empty(t, got.Spec.Template.PodCliqueScalingGroupConfigs)
@@ -9586,6 +9603,9 @@ func TestGenerateGrovePodCliqueSet_WaitForCheckpointKeepsPositiveTemplateSeed(t 
 				assert.EqualValues(t, tt.wantCliqueReplica, clique.Spec.Replicas, "clique %q template replicas", clique.Name)
 				require.NotNil(t, clique.Spec.MinAvailable)
 				assert.Positive(t, *clique.Spec.MinAvailable, "clique %q minAvailable", clique.Name)
+				if !tt.wantScalingGroup {
+					assert.EqualValues(t, tt.wantCliqueReplica, *clique.Spec.MinAvailable, "clique %q minAvailable", clique.Name)
+				}
 				assert.LessOrEqual(t, *clique.Spec.MinAvailable, clique.Spec.Replicas, "clique %q minAvailable must not exceed replicas", clique.Name)
 			}
 		})
