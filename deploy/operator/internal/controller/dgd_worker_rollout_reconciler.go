@@ -1433,7 +1433,8 @@ func resolveRollingUpdateParams(annotations map[string]string, desiredReplicas i
 	return int32(surge), int32(unavail)
 }
 
-// buildRollingUpdateContext creates a RollingUpdateContext.
+// buildRollingUpdateContext calculates replica targets, retaining old workers while
+// a complete old worker hash can serve and the new generation cannot. dgd must be non-nil.
 func (r *dgdWorkerRolloutReconciler) buildRollingUpdateContext(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
@@ -1455,13 +1456,11 @@ func (r *dgdWorkerRolloutReconciler) buildRollingUpdateContext(
 	oldWorkerDCDReplicas := make(map[string]int32)
 	newWorkerReplicas := make(map[string]int32)
 
-	// Workers pair only within one generation's runtime namespace: while the old generation
-	// still serves and the new one cannot, new replicas do not count as available, so old
-	// decode keeps its prefill. An old component with no available replica (such as a
-	// drained Recreate prefill) ends the hold, since the old generation cannot serve either.
+	// Workers pair within one hash, so unmatched old roles must not hold up the rollout.
 	newStates := make(map[string]dcdComponentState)
 	newGenerationServes := true
-	oldGenerationServes := true
+	oldAvailableComponentsByHash := make(map[string]map[string]bool)
+	requiredWorkerComponents := 0
 	for i := range dgd.Spec.Components {
 		spec := &dgd.Spec.Components[i]
 		if !dynamo.IsWorkerComponent(string(spec.ComponentType)) {
@@ -1484,11 +1483,30 @@ func (r *dgdWorkerRolloutReconciler) buildRollingUpdateContext(
 		if spec.Replicas != nil && *spec.Replicas == 0 {
 			continue
 		}
+		requiredWorkerComponents++
 		if newState.Available == 0 {
 			newGenerationServes = false
 		}
-		if len(oldDCDsByComponent[componentName]) > 0 && oldStates[componentName].Available == 0 {
-			oldGenerationServes = false
+
+		// Keep each old hash's available roles together when checking whether it serves.
+		for _, oldDCD := range oldDCDsByComponent[componentName] {
+			if dcdComponentStateFromDCD(oldDCD).Available == 0 {
+				continue
+			}
+			hash := dynamo.GetDCDEffectiveWorkerHash(oldDCD)
+			if oldAvailableComponentsByHash[hash] == nil {
+				oldAvailableComponentsByHash[hash] = make(map[string]bool)
+			}
+			oldAvailableComponentsByHash[hash][componentName] = true
+		}
+	}
+
+	// Hold old replicas only while at least one old hash has every required role.
+	oldGenerationServes := false
+	for _, components := range oldAvailableComponentsByHash {
+		if len(components) == requiredWorkerComponents {
+			oldGenerationServes = true
+			break
 		}
 	}
 	holdOldGeneration := oldGenerationServes && !newGenerationServes
