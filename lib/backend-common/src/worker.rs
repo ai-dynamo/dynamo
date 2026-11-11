@@ -1599,6 +1599,12 @@ impl Worker {
                 Err(error) => {
                     self.begin_engine_route_shutdown().await;
                     self.orchestrator_steps(&endpoint, Some(&request_tracker)).await;
+                    // A signal can fence registration while the endpoint handoff
+                    // is still finishing. That is the same clean pre-serve stop
+                    // as the cancellation arm below, not a serving failure.
+                    if shutdown.is_cancelled() {
+                        return Ok(());
+                    }
                     return Err(err(
                         ErrorType::Backend(BackendError::Unknown),
                         format!("serve: {error}"),
@@ -3939,6 +3945,7 @@ mod handoff_and_lifecycle_tests {
     struct HandoffMockEngine {
         log: Arc<StdMutex<Vec<&'static str>>>,
         endpoint_ready_should_fail: bool,
+        shutdown_on_handoff: Option<CancellationToken>,
         controls: Vec<String>,
         updates: Vec<String>,
     }
@@ -3953,6 +3960,7 @@ mod handoff_and_lifecycle_tests {
             let eng = Arc::new(Self {
                 log: log.clone(),
                 endpoint_ready_should_fail,
+                shutdown_on_handoff: None,
                 controls,
                 updates,
             });
@@ -3981,6 +3989,7 @@ mod handoff_and_lifecycle_tests {
         }
 
         async fn cleanup(&self) -> Result<(), DynamoError> {
+            self.log.lock().unwrap().push("cleanup");
             Ok(())
         }
 
@@ -4046,9 +4055,13 @@ mod handoff_and_lifecycle_tests {
 
         async fn on_endpoint_ready(
             &self,
-            _endpoint: dynamo_runtime::component::Endpoint,
+            endpoint: dynamo_runtime::component::Endpoint,
         ) -> Result<(), DynamoError> {
             self.log.lock().unwrap().push("on_endpoint_ready");
+            if let Some(shutdown) = &self.shutdown_on_handoff {
+                shutdown.cancel();
+                endpoint.drt().runtime().mark_shutting_down();
+            }
             if self.endpoint_ready_should_fail {
                 Err(err(
                     ErrorType::Backend(BackendError::Unknown),
@@ -4058,6 +4071,54 @@ mod handoff_and_lifecycle_tests {
                 Ok(())
             }
         }
+    }
+
+    // A signal during handoff must fence registration without turning a normal
+    // stop into an error; a real engine handoff failure must still be reported.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn shutdown_during_endpoint_handoff_preserves_only_real_startup_errors() {
+        temp_env::async_with_vars(
+            [
+                ("DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS", Some("0")),
+                ("DYN_WORKER_SHUTDOWN_TOTAL_TIMEOUT_SECS", Some("5")),
+            ],
+            async {
+                for handoff_fails in [false, true] {
+                    let endpoint = test_local_endpoint().await;
+                    let shutdown = CancellationToken::new();
+                    let (mut engine, log) = HandoffMockEngine::new(handoff_fails, vec![], vec![]);
+                    Arc::get_mut(&mut engine).unwrap().shutdown_on_handoff = Some(shutdown.clone());
+                    let result = Worker::new(engine, WorkerConfig::default())
+                        .run_with_drt(endpoint.drt().clone(), shutdown)
+                        .await;
+                    if handoff_fails {
+                        assert!(
+                            result
+                                .unwrap_err()
+                                .to_string()
+                                .contains("synthetic on_endpoint_ready failure")
+                        );
+                    } else {
+                        result.expect("shutdown fencing is a clean pre-serve stop");
+                    }
+                    assert_eq!(
+                        log.lock()
+                            .unwrap()
+                            .iter()
+                            .filter(|event| **event == "cleanup")
+                            .count(),
+                        1
+                    );
+                    endpoint
+                        .drt()
+                        .shutdown_and_wait(Some(Duration::ZERO))
+                        .await
+                        .unwrap();
+                }
+            },
+        )
+        .await;
     }
 
     /// Engine that overrides only the required methods, so it inherits the

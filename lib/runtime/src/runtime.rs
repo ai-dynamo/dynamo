@@ -623,12 +623,19 @@ impl Runtime {
                 }
                 Ok::<(), anyhow::Error>(())
             };
-            // HTTP draining starts with the main token. Preserve its response
-            // service until streams finish, alongside discovery cleanup, even
-            // when joining another teardown task fails.
+            // HTTP serving holds a graceful-task guard through its drain, which
+            // starts in Phase 1. Once every guard is gone, no admitted HTTP work
+            // can register a response later, so workers need no admission delay.
+            // Preserve that window if Phase 2 timed out with an owner still live,
+            // and always drain responses that are already registered.
             let close_responses = async {
+                let admission_window = if tracker.get_count() == 0 {
+                    Duration::ZERO
+                } else {
+                    velo_response_drain_window()
+                };
                 velo_response_service
-                    .drain(velo_response_drain_window(), VELO_RESPONSE_DRAIN_HEADROOM)
+                    .drain(admission_window, VELO_RESPONSE_DRAIN_HEADROOM)
                     .await;
                 velo_response_service.shutdown().await;
             };
