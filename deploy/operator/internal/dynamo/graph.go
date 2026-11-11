@@ -2737,8 +2737,8 @@ func buildCliqueFromTemplate(p cliqueParams, template corev1.PodTemplateSpec) (*
 	}
 	replicas := p.r.Replicas
 	// Pending WaitForCheckpoint: seed at minAvailable (Grove needs minAvailable <= replicas);
-	// the scaler holds the live PodClique at zero. Grouped cliques keep their role count.
-	if !p.usesPCSG && p.r.Role != RoleGMS && isWaitingForCheckpoint(p.checkpointInfo) {
+	// the scaler holds the live PodClique at zero. Grouped cliques, GMS included, keep their role count.
+	if !p.usesPCSG && isWaitingForCheckpoint(p.checkpointInfo) {
 		replicas = minAvailable
 	}
 	clique := &grovev1alpha1.PodCliqueTemplateSpec{
