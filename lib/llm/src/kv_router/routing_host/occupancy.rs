@@ -4,9 +4,10 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use dynamo_kv_router::selector::{HostedSelectionRequest, HostedWorkerPicker};
 use dynamo_runtime::pipeline::{OccupancyReservation, PushRouter, RoutingOccupancyState};
 use dynamo_runtime::protocols::annotated::Annotated;
+use dynamo_scheduler::host::KvSchedulerError;
+use dynamo_worker_selection::host::{HostedSelectionRequest, HostedWorkerPicker};
 
 use crate::{preprocessor::PreprocessedRequest, protocols::common::llm_backend::LLMEngineOutput};
 
@@ -47,7 +48,9 @@ impl HostedOccupancy {
         let selection = self
             .state
             .select_and_reserve_with(&candidates, |occupancy| {
-                picker.select(&candidates, Some(occupancy), &request)
+                picker
+                    .select(&candidates, Some(occupancy), &request)
+                    .map_err(KvSchedulerError::from)
             })?;
         let result = HostedOccupancySelection {
             worker_id: selection.worker_id(),
