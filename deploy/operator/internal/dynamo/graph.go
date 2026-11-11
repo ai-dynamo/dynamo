@@ -1469,7 +1469,10 @@ func PCSNameForDGD(
 	hash := fnv.New32a()
 	hash.Write([]byte(dgd.Name))
 	suffix := fmt.Sprintf("%04x", hash.Sum32()&0xFFFF)
-	return dgd.Name[:pcsBudget-5] + "-" + suffix
+	// Trim only dots, since ".-" is not a valid DNS-1123 subdomain. Trimming "-"
+	// too would rename the PodCliqueSet of a running DGD.
+	prefix := strings.TrimRight(dgd.Name[:pcsBudget-5], ".")
+	return prefix + "-" + suffix
 }
 
 func isDelegatedComponent(

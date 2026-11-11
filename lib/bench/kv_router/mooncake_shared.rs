@@ -4,12 +4,12 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use dynamo_kv_router::LocalBlockHash;
-use dynamo_kv_router::indexer::pruning::PruneConfig;
-use dynamo_kv_router::indexer::{KvIndexer, KvIndexerInterface, KvIndexerMetrics};
-use dynamo_kv_router::protocols::{KvCacheEvent, KvCacheEventData, StorageTier};
-use dynamo_kv_router::{
-    BranchShardedIndexer, ConcurrentRadixTreeCompressed, PositionalIndexer, ThreadPoolIndexer,
+use dynamo_kv_events::event::{KvCacheEvent, KvCacheEventData};
+use dynamo_kv_events::residency::StorageTier;
+use dynamo_kv_hashing::LocalBlockHash;
+use dynamo_kv_indexer::host::{
+    BranchShardedIndexer, ConcurrentRadixTreeCompressed, KvIndexer, KvIndexerInterface,
+    KvIndexerMetrics, PositionalIndexer, PruneConfig, ThreadPoolIndexer,
 };
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;

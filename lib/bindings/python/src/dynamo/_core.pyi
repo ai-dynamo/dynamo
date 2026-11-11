@@ -2096,11 +2096,7 @@ def _normalize_mocker_config(config: Mapping[str, Any] | str) -> Dict[str, Any]:
 def _convert_preprocessed_request(
     preprocessed: Dict[str, Any], fast_path: bool
 ) -> Optional[Dict[str, Any]]:
-    """Test hook: the request RoutedEngine.generate builds, pythonized back.
-
-    With fast_path, only the direct read of token_ids and extra_args (None when it
-    declines the input); without, full pythonize.
-    """
+    """Test hook: the fast path's request (None if it declines) or pythonize's, pythonized back."""
     ...
 
 

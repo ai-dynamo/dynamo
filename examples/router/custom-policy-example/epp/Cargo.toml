@@ -15,5 +15,5 @@ description = "Standalone EPP binary for Dynamo custom worker-selection policy e
 anyhow.workspace = true
 dynamo-custom-policy-example-catalog = { path = "../catalog" }
 dynamo-ext-proc = { path = "../../../../deploy/inference-gateway/ext-proc" }
-dynamo-kv-router = { workspace = true, features = ["standalone-selection"] }
+dynamo-kv-router = { workspace = true }
 tokio.workspace = true
