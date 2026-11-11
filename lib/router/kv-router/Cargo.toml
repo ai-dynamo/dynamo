@@ -1,0 +1,115 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "dynamo-kv-router"
+description = "KV Router - Radix tree for LLM KV cache routing"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+readme = "README.md"
+
+[features]
+default = []
+# Adapters. The composition (flat config, plugin registry, SelectionServiceBuilder) never
+# needs a transport crate; each adapter brings its own.
+http = ["dep:axum", "dep:chrono", "dep:tracing-appender"]
+ingest-zmq = ["dep:zmq"]
+replica-sync-zmq = ["dep:zmq"]
+peer-recovery = ["dep:reqwest"]
+metrics = ["dep:prometheus", "dynamo-kv-indexer/export"]
+bench = ["dynamo-scheduler/bench", "dynamo-router-protocol/bench", "dynamo-kv-indexer/bench", "dynamo-slot-tracker/bench", "dynamo-worker-selection/bench"]
+profile = ["dynamo-kv-indexer/profile"]
+# Test-only hooks consumed by dependent crates' tests; never enable in release.
+testing = ["dynamo-scheduler/testing", "dynamo-router-protocol/testing", "dynamo-kv-indexer/testing", "dynamo-slot-tracker/testing", "dynamo-session-affinity/testing", "dynamo-worker-selection/testing", "dynamo-admission/testing"]
+
+[dependencies]
+# repo
+dynamo-admission = { workspace = true }
+dynamo-scheduler = { workspace = true }
+dynamo-kv-events = { workspace = true }
+dynamo-kv-hashing = { workspace = true }
+dynamo-kv-hints = { workspace = true }
+dynamo-kv-indexer = { workspace = true }
+dynamo-slot-tracker = { workspace = true }
+dynamo-session-affinity = { workspace = true }
+dynamo-worker-selection = { workspace = true }
+dynamo-router-protocol = { workspace = true }
+dynamo-tokens = { workspace = true }
+dynamo-truthy = { workspace = true }
+
+# workspace
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+blake3 = { workspace = true }
+dashmap = { workspace = true }
+fastrand = "2"
+prometheus = { workspace = true, optional = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = "0.9.34"
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+zmq = { workspace = true, optional = true }
+uuid = { workspace = true }
+zeroize = { workspace = true }
+
+# dependencies
+parking_lot = { workspace = true }
+rmp-serde = { workspace = true }
+
+rustc-hash = "2.1.1"
+
+# adapters (optional)
+http = { workspace = true }
+axum = { version = "=0.8.4", default-features = false, features = [
+  "http1",
+  "json",
+  "matched-path",
+  "query",
+  "tokio",
+  "tracing",
+], optional = true }
+chrono = { workspace = true, optional = true }
+reqwest = { version = "0.12.24", default-features = false, features = ["json", "rustls-tls"], optional = true }
+tracing-appender = { version = "0.2", optional = true }
+
+[dev-dependencies]
+dynamo-kv-indexer = { workspace = true, features = ["testing"] }
+dynamo-slot-tracker = { workspace = true, features = ["testing"] }
+dynamo-session-affinity = { workspace = true, features = ["testing"] }
+dynamo-worker-selection = { workspace = true, features = ["testing"] }
+dynamo-admission = { workspace = true, features = ["testing"] }
+dynamo-scheduler = { workspace = true, features = ["testing"] }
+dynamo-router-protocol = { workspace = true, features = ["testing"] }
+criterion = "0.5"
+rstest = "0.18.2"
+rstest_reuse = "0.7.0"
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros", "time", "test-util"] }
+dynamo-tokens = { workspace = true }
+tower = { version = "0.5", features = ["util"] }
+reqwest = { version = "0.12.24", default-features = false, features = ["json", "rustls-tls"] }
+
+[[bench]]
+name = "policy_queue"
+harness = false
+
+[[bench]]
+name = "tracking_hash"
+harness = false
+
+[[bench]]
+name = "worker_selection"
+harness = false
+required-features = ["bench"]
+
+[[bench]]
+name = "selection_core"
+harness = false
+required-features = ["ingest-zmq", "replica-sync-zmq", "peer-recovery", "bench"]
