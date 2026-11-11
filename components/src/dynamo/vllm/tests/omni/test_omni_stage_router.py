@@ -331,6 +331,51 @@ async def test_generate_delegates_formatting_to_output_formatter():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "nvext,expected_steps",
+    [
+        pytest.param({"num_inference_steps": 4}, 4, id="explicit"),
+        pytest.param(None, None, id="default"),
+    ],
+)
+async def test_generate_passes_requested_num_inference_steps_to_formatter(
+    nvext, expected_steps
+):
+    """The requested step count reaches the formatter; a default leaves it out."""
+    fake_result = SimpleNamespace(final_output_type="image")
+    mock_formatter = AsyncMock()
+    mock_formatter.format.return_value = {"data": [{"b64_json": "abc"}]}
+
+    async def stage0_handler(request):
+        return {"shm_meta": {"some": "meta"}, "finished": True}
+
+    router = _make_router(
+        stage_configs=[_make_stage_cfg(0)],
+        stage_clients={"stage0": _StageClient(stage0_handler)},
+        formatter=mock_formatter,
+    )
+
+    request = {"prompt": "x"}
+    if nvext is not None:
+        request["nvext"] = nvext
+    with patch.object(stage_router, "shm_deserialize", return_value=fake_result):
+        with patch(
+            "dynamo.vllm.omni.stage_router.parse_request_type",
+            return_value=(
+                NvCreateImageRequest(**request),
+                RequestType.IMAGE_GENERATION,
+            ),
+        ):
+            [c async for c in router.generate(request, context=None)]
+
+    kwargs = mock_formatter.format.await_args.kwargs
+    if expected_steps is None:
+        assert "num_inference_steps" not in kwargs
+    else:
+        assert kwargs["num_inference_steps"] == expected_steps
+
+
+@pytest.mark.asyncio
 async def test_invalid_image_output_format_is_rejected_before_stage_call():
     stage_called = False
 
