@@ -5,32 +5,21 @@ SPDX-License-Identifier: Apache-2.0
 
 # lib/router
 
-The Dynamo router as a set of small crates. Every arrow into a stage starts at the scheduler kernel: stages never message each other, the kernel carries one stage's output to the next as that stage's own input type, and `dynamo-kv-router` composes the result behind features.
+The Dynamo router, split into small crates. Each stage (indexer, slot tracker, session affinity, worker selection, admission) is its own crate and knows nothing about the others. The scheduler kernel runs them in order for one request and hands each stage's output to the next. `dynamo-kv-router` composes the kernel and the stages into a running router, with every transport adapter behind a feature, and is the crate plugins and most hosts link.
 
-## The thirteen crates
-
-| Crate | One sentence | Depends on |
+| Crate | What it does | Depends on |
 |---|---|---|
-| `dynamo-error` | The error contract: `DynamoError`, `ErrorClass::http_status`, reason catalog, `PublicDetails` | serde, serde_json |
-| `dynamo-kv-hashing` | The hash contract engines and router share: the block hash identities, block hashes, sequence hashes, tracking-hash context; its `multimodal` module is the multimodal identity both ends of the wire compute (per-block and per-request metadata, the pad and identifier rules, the extra-key marker) | dynamo-tokens, xxhash-rust |
-| `dynamo-router-protocol` | The identities and worker-facing vocabulary every crate names | serde, serde_json, thiserror |
-| `dynamo-kv-events` | Everything about KV events: types, engine codec, replay cursor, the residency vocabulary (tiers, domains, owners) | protocol, kv-hashing, serde, rmp-serde |
-| `dynamo-kv-hints` | KV transfer hints the router hands engines: the wire, the source choice, the worker transfer keys | protocol, kv-hashing, kv-indexer, serde, rustc-hash |
-| `dynamo-kv-indexer` | KV events in, prefix knowledge out; owns its service DTOs, identity config, the transfer candidate vocabulary, and the residency owner key | protocol, kv-events, kv-hashing |
-| `dynamo-slot-tracker` | Bookings per rank in, load and fullness out; owns its replication wire | protocol, kv-hashing |
-| `dynamo-session-affinity` | Session bindings in, constraints out; owns the affinity target and its replication wire | protocol |
-| `dynamo-worker-selection` | Pick one rank from a candidate table under a policy; owns the rows and the plugin API | protocol, slot-tracker, session-affinity |
-| `dynamo-admission` | Admit, hold, or reject now; owns the queue, the classifier API, `QueueRejection` | protocol, slot-tracker, session-affinity |
-| `dynamo-scheduler` | Run the stages atomically for one request; owns the request, eligibility, the hook traits, the conversions, validated config, the one error conversion | protocol, kv-hashing, kv-hints, the five stages, dynamo-error |
-| `dynamo-metrics` | Names, factory, collector helper with monotonic baselines | prometheus |
-| `dynamo-kv-router` | Compose a router and be the one crate plugins name; flat config; every adapter behind a feature | scheduler, metrics; optional axum, reqwest, zmq, dynamo-kv-events |
+| `dynamo-error` | `DynamoError`, `ErrorClass`, the reason catalog, `PublicDetails` | none |
+| `dynamo-kv-hashing` | Block, sequence, and tracking hashes shared by engines and the router, plus the multimodal identity both sides compute | dynamo-tokens |
+| `dynamo-router-protocol` | Worker and attempt identities and the wire types every router crate uses | none |
+| `dynamo-kv-events` | KV event types, the engine ZMQ codec, the replay cursor, residency tiers and owners | protocol, kv-hashing |
+| `dynamo-kv-hints` | KV transfer hints the router hands engines: wire format, source choice, worker transfer keys | protocol, kv-hashing, kv-indexer |
+| `dynamo-kv-indexer` | KV events in, prefix matches out. Radix trees, the indexer wrappers, LRU retention and pruning, lower-tier indexes, the cuckoo-filter relay index, the service DTOs | protocol, kv-events, kv-hashing, dynamo-tokens |
+| `dynamo-slot-tracker` | Bookings per rank in, load and fullness out. Includes its replication wire | protocol, dynamo-tokens |
+| `dynamo-session-affinity` | Session binding table, leases, and the replication wire | protocol |
+| `dynamo-worker-selection` | Picks one rank from the candidate rows under a policy. Owns the rows and the plugin API | protocol, slot-tracker, session-affinity |
+| `dynamo-admission` | Admit, hold, or reject a request now. The per-class queue, the classifier API, `QueueRejection` | protocol, slot-tracker, session-affinity, dynamo-tokens |
+| `dynamo-scheduler` | The kernel. Runs the stages for one request, owns the request and response types, eligibility, the queue actor, the selection core, the validated config, the tracking hash | protocol, kv-hashing, kv-events, kv-hints, the five stages, dynamo-tokens |
+| `dynamo-kv-router` | Composes a router. Flat config, the YAML policy file, the plugin registry, and the HTTP, ZMQ, replica-mesh, peer-recovery, and Prometheus adapters behind features | scheduler, the five stages, protocol, kv-events, kv-hashing, kv-hints, dynamo-tokens, dynamo-truthy |
 
-On the request path but not router crates: `dynamo-llm` (the frontend host) and `dynamo-runtime` (transport and route pickers; depends on no router crate).
-
-## Status
-
-So far `protocol` exists here, `dynamo-kv-hashing` (`lib/kv-hashing`) holds the router's hash contract in its `routing` module and the multimodal identity in its `multimodal` module, `dynamo-kv-events` (`lib/kv-events`) holds the event types, the engine ZMQ codec, the replay cursor, and the residency vocabulary, `dynamo-kv-hints` (`lib/router/kv-hints`) holds the KV transfer hint wire, the transfer source choice, and the worker transfer keys, and `dynamo-kv-indexer` (`lib/router/kv-indexer`) is complete: every index structure, the ingest backend, lookup, recording, session updates, the session prefix index, identity material, and its configuration slice; the HTTP server, the ZMQ socket helper, the ZMQ listener and worker registry, and Prometheus exposition stay in `lib/router/kv-router` as adapters. `dynamo-slot-tracker` (`lib/router/slot-tracker`) holds the active-sequence trackers, prompt registry, load projection, fullness, the booking descriptor, and the replication wire; the replica mesh, registry, and HTTP server stay in `lib/router/kv-router`. `dynamo-session-affinity` (`lib/router/session-affinity`) holds the session binding table, leases, versions, the replica sink port, the affinity target, and its wire; the mesh stays in `lib/router/kv-router`. `dynamo-worker-selection` (`lib/router/worker-selection`) holds the plugin API, the composed policy over a `CandidateRowSource`, the rows and views, the preparer, runtime updates, the selection config slice, the trace, the conditional-disaggregation policies, and the LoRA filter; the kernel's `WorkerSelector`, the request-to-row source, the derived columns, the factory and registry, and the reference selector stay in `lib/router/kv-router`. `dynamo-admission` (`lib/router/admission`) holds the policy queue, the placement, the resolved profiles, the classifier plugin API with its `WorkerView`, the classifier runtime, and the request lifecycle; the YAML policy file and resolver, the registry, the gate over the slot projection, and the `WorkerView` over worker selection's rows stay in `lib/router/kv-router`. The rest arrive in the order of the split plan: `dynamo-scheduler`, then `dynamo-kv-router` thinned to composition and the host import rewrite; `dynamo-error` and `dynamo-metrics` land on their own tracks.
-
-## Gate
-
-`scripts/router_layering_check.sh` checks every crate in this directory against the table above: the direct Dynamo dependencies by exact set (the set each crate's `AGENTS.md` states), a forbidden list anywhere in the `--all-features` closure, for `protocol` a behavior grep, for the composition crate the router set of its no-features tree, for the plugin crates (`lib/router-plugins/*`, the custom-policy examples) that `dynamo-kv-router` is the one Dynamo crate they name, on the workspace graph that no normal dependency enables a `testing`, `bench`, or `profile` feature of a router crate, and two source rules (no `#[doc(hidden)]`, no cross-crate glob re-export). The gate runs in CI's `rust-clippy` job with `--host`, which also resolves `dynamo-llm`, `dynamo-ext-proc`, `dynamo-mocker`, and the Python bindings and fails if any router crate reaches `axum`, `hyper`, `reqwest`, or `zmq` through a host's feature unification; run it locally on demand with `bash scripts/router_layering_check.sh` (about ten seconds without `--host`). The per-feature build check for `dynamo-kv-router` is one `cargo hack check --each-feature` line in the `rust-feature-builds` job. `scripts/router_move_diff.py` proves a move PR moved text without changing it.
+`scripts/router_layering_check.sh` enforces the dependency rules and runs in CI. Each crate's `AGENTS.md` states its boundary.
