@@ -408,7 +408,17 @@ def test_sparse_usage_survives_flushes(
     ("metadata", "expected"),
     [
         ({"combined_limit": 10, "reject_prompt_overflow": True}, (10, True, False)),
+        ({"combined_limit": 0}, (0, False, False)),
+        ({"combined_limit": 2**32 - 1}, (2**32 - 1, False, False)),
         ({"combined_limit": True}, None),
+        ({"combined_limit": -1}, None),
+        ({"combined_limit": 2**32}, None),
+        ({"combined_limit": 10.0}, None),
+        ({"combined_limit": "10"}, None),
+        ({"combined_limit": 10, "reject_prompt_overflow": 1}, None),
+        ({"combined_limit": 10, "reject_total_overflow": "true"}, None),
+        ({}, None),
+        ([], None),
         (None, None),
     ],
 )
@@ -421,6 +431,47 @@ def test_reads_worker_token_budget(module_stubs, metadata, expected):
     budget = module._runtime_token_budget(mdc)
 
     assert budget == (module.TokenBudget(*expected) if expected else None)
+
+
+@pytest.mark.parametrize(
+    "runtime_config", [None, [], {}, {"runtime_data": None}, {"runtime_data": []}]
+)
+def test_missing_runtime_token_budget(module_stubs, runtime_config):
+    module = _load_processor_module(module_stubs)
+    mdc = types.SimpleNamespace(runtime_config=lambda: runtime_config)
+
+    assert module._runtime_token_budget(mdc) is None
+
+
+@pytest.mark.parametrize("configured_budget", [False, True])
+@pytest.mark.parametrize("stop_conditions", [_MISSING, None, {}])
+def test_token_budget_without_stop_conditions(
+    module_stubs, configured_budget, stop_conditions
+):
+    module = _load_processor_module(module_stubs)
+    engine = FakeRoutedEngine(items=[{"token_ids": [42], "finish_reason": "stop"}])
+    processor = module.SglangProcessor(
+        tokenizer=None,
+        routed_engine=engine,
+        tool_call_parser_name=None,
+        reasoning_parser_name=None,
+        eos_token_ids=None,
+        token_budget=module.TokenBudget(10, True, True) if configured_budget else None,
+    )
+    preprocessed = {}
+    if stop_conditions is not _MISSING:
+        preprocessed["stop_conditions"] = stop_conditions
+
+    async def collect():
+        return [
+            item
+            async for item in processor._generate_and_stream(
+                "req", {"model": "test"}, preprocessed, [1, 2, 3], _PostProcessor()
+            )
+        ]
+
+    assert asyncio.run(collect())
+    assert engine.requests == [preprocessed]
 
 
 @pytest.mark.parametrize(
