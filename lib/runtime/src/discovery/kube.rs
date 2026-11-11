@@ -1206,7 +1206,6 @@ mod tests {
         for (i, result) in results.iter().enumerate() {
             assert_eq!(result.is_ok(), i != 3, "update {i}: {result:?}");
         }
-        // The six accepted updates shared one persist; the rejected one left nothing behind.
         assert_eq!(persisted, vec![6]);
         assert_eq!(committed, 6);
     }
