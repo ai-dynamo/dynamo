@@ -229,7 +229,7 @@ In single-GPU mode (`--single-gpu` or `SINGLE_GPU=true`), set `CUDA_VISIBLE_DEVI
 | `ETCD_ENDPOINTS` | `http://127.0.0.1:2379` | etcd endpoint used for Dynamo discovery state. |
 | `VLLM_SYSTEM_PORT_BASE` | `18081` | Starting system and metrics port for vLLM workers. |
 | `KV_EVENTS_PORT_BASE` | `5557` | Starting port for per-worker KV event publishers. |
-| `DYN_LOG` | `info,mm_routing=debug,dynamo_kv_router::scheduling=debug,dynamo_llm::kv_router=debug` | Dynamo log filter used by the launched processes. |
+| `DYN_LOG` | `info,mm_routing=debug,dynamo_scheduler=debug,dynamo_admission=debug,dynamo_worker_selection=debug,dynamo_llm::kv_router=debug` | Dynamo log filter used by the launched processes. |
 | `VLLM_EXTRA_ARGS` | `Empty` | Additional arguments appended to each `dynamo.vllm` worker command. |
 
 **Command-line flags:** `--model` sets the model identifier or path; `--num-workers` sets the worker
@@ -1386,7 +1386,7 @@ The default model is `Qwen/Qwen3-VL-2B-Instruct`.
 | `ETCD_ENDPOINTS` | `http://127.0.0.1:2379` | etcd endpoint used for Dynamo discovery state. |
 | `VLLM_SYSTEM_PORT_BASE` | `18081` | Starting system and metrics port for vLLM workers. |
 | `KV_EVENTS_PORT_BASE` | `5557` | Starting port for per-worker KV event publishers. |
-| `DYN_LOG` | `info,lightseek_mm=debug,dynamo_kv_router::scheduling=debug` | Dynamo log filter used by the launched processes. |
+| `DYN_LOG` | `info,lightseek_mm=debug,dynamo_scheduler=debug,dynamo_admission=debug,dynamo_worker_selection=debug` | Dynamo log filter used by the launched processes. |
 | `VLLM_EXTRA_ARGS` | `Empty` | Additional arguments appended to each `dynamo.vllm` worker command. |
 | `ZE_AFFINITY_MASK` | None | Comma-separated XPU assignments; required when `NUM_WORKERS` is greater than `1`. |
 | `DYN_SYSTEM_PORT1` | `18081` | System and metrics port for the first worker. |

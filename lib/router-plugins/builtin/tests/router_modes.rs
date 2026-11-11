@@ -5,11 +5,10 @@ mod support;
 
 use std::collections::HashSet;
 
-use dynamo_kv_router::plugins::RouterPluginRegistry;
-use dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicy;
-use dynamo_kv_router::{KvRouterConfig, RoutingPartitionRef, WorkerSelector, WorkerType};
+use dynamo_kv_router::plugins::prelude::*;
 use dynamo_router_policies::router_modes::{LEAST_LOADED, RANDOM, ROUND_ROBIN};
 use dynamo_router_policies::{default_registry, register, with_defaults};
+use dynamo_scheduler::host::WorkerSelector;
 use support::*;
 
 const MODES: [&str; 3] = [RANDOM, ROUND_ROBIN, LEAST_LOADED];
@@ -17,7 +16,7 @@ const MODES: [&str; 3] = [RANDOM, ROUND_ROBIN, LEAST_LOADED];
 fn policy(policy_type: &str) -> WorkerSelectionPolicy {
     let factory = default_registry().resolve_type(policy_type).unwrap();
     factory(
-        &KvRouterConfig::default(),
+        &SelectionConfig::default(),
         WorkerType::Decode,
         RoutingPartitionRef::new("model", "group"),
     )

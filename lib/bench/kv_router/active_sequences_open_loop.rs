@@ -13,9 +13,10 @@ use dynamo_bench::kv_router_common::fixed_lane::{EMPTY_OPERATION_ID, FixedLane, 
 use dynamo_bench::kv_router_common::issuer::pin_current_thread;
 use dynamo_bench::kv_router_common::replay::NoopSequencePublisher;
 use dynamo_bench::kv_router_common::trace_gen::WorkerTimelines;
-use dynamo_kv_router::protocols::{PrefillLoadHint, WorkerWithDpRank};
-use dynamo_kv_router::{
-    ActiveSequencesMultiWorker, SequenceError, SequenceRequest, WorkerLoadProjection,
+use dynamo_router_protocol::worker::WorkerWithDpRank;
+use dynamo_slot_tracker::host::{
+    ActiveSequencesMultiWorker, PrefillLoadHint, SequenceError, SequenceRequest,
+    WorkerLoadProjection,
 };
 use dynamo_tokens::SequenceHash;
 use rustc_hash::FxHashMap;
@@ -1609,8 +1610,8 @@ mod tests {
     };
     use crate::active_sequences_shared::{SequenceTrace, SequenceTraceEntry};
     use dynamo_bench::kv_router_common::replay::NoopSequencePublisher;
-    use dynamo_kv_router::protocols::{PrefillLoadHint, WorkerWithDpRank};
-    use dynamo_kv_router::{ActiveSequencesMultiWorker, SequenceRequest};
+    use dynamo_router_protocol::worker::WorkerWithDpRank;
+    use dynamo_slot_tracker::host::{ActiveSequencesMultiWorker, PrefillLoadHint, SequenceRequest};
 
     fn add(request_id: &str, hashes: &[u64], timestamp_us: u64) -> SequenceTrace {
         SequenceTrace {
