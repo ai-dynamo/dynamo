@@ -157,6 +157,9 @@ ignore:
   # Developer tooling for the router crate split (proves a move is a move);
   # no CI job consumes it.
   - 'scripts/router_move_diff.py'
+  # Removed with the router layering gate; claimed here so changed-files
+  # validation passes on the deletion diff.
+  - 'scripts/router_layering_check.sh'
   # Pre-commit generator for the Python media protocol models. Its outputs are
   # covered by `core` and `frontend`; the generate-media-protocols hook
   # validates the script itself.
