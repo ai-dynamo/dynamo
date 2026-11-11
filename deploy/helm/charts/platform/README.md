@@ -154,6 +154,32 @@ upgrades. Explicitly authored complete probes remain effective.
 `startupProbe` on its frontend container. This is an intentional Pod-template update;
 plan for frontend replacement, including a possible single-replica Grove Service outage.
 
+#### CRD and admission breaking changes
+
+##### Complete health probes
+
+**Change:** Each supplied `startupProbe`, `livenessProbe`, or `readinessProbe` must include
+exactly one handler: `exec`, `httpGet`, `tcpSocket`, or `grpc`. Admission rejects timing-only
+probes and probes with multiple handlers. An authored probe replaces the applicable operator
+default as a complete value. For `main` and the `runtime` sidecar this was already the
+rendering behavior. For the container selected by `frontendSidecar`, operator 1.6.x
+field-merged an authored probe with its frontend defaults; complete-value replacement applies
+to workloads whose operator origin is 1.7.0 or later.
+
+**Affected:** DGD and DCD manifests in both `v1alpha1` and `v1beta1`, including main
+containers, sidecars, and role templates.
+
+**Action:** Before upgrading, supply a complete handler with any custom timing settings, or
+omit the probe to use the applicable operator default. A frontend-sidecar probe that relied on
+merged defaults keeps rendering as before on an existing workload. To adopt complete-value
+semantics there, author the full probe; this is an intentional Pod-template update.
+
+**Existing deployments:** An operator-only upgrade does not change rendered probes. Workloads
+created by operator 1.6.x or earlier keep the field-merged frontend-sidecar probes they run
+today, including timing-only probes that the 1.6.x operator completed from its defaults.
+Installing the CRDs does not rewrite stored probes. The next specification update must satisfy
+the validation rules, so complete any timing-only probe in that update.
+
 #### Operator behavior breaking changes
 
 ##### Legacy LWS migration cleanup removed
@@ -177,26 +203,28 @@ upgrading, and excess LWS objects can continue consuming cluster resources.
 ##### Native sidecar backend inference
 
 **Change:** Backend inference recognizes a direct `vllm-rs` engine command in `main`,
-including a literal absolute path. It continues to inspect the engine for backend
-validation and compilation-cache defaults, independently of the runtime sidecar launch.
-The inferred framework participates in the graph-wide worker-generation hash.
+including a literal absolute path, for workloads whose operator origin is 1.7.0 or later.
+It continues to inspect the engine for backend validation and compilation-cache defaults,
+independently of the runtime sidecar launch. The inferred framework participates in the
+graph-wide worker-generation hash, so inference is pinned to the workload origin instead of
+being applied to existing workloads. vLLM prefill LoRA fallback classification inspects the
+running engine command and is not origin-gated.
 
-**Affected:** Deployments with this engine command and no explicit `backendFramework`
-previously resolved to an undetected backend. The vLLM reference manifests already set
+**Affected:** Workloads created by operator 1.7.0 or later with this engine command and no
+explicit `backendFramework`. The vLLM reference manifests already set
 `backendFramework: vllm` and are unaffected by this inference change.
 
-**Action:** Plan for a one-time worker rollout when upgrading to v1.7.0. To perform the
-migration before the operator upgrade, set `spec.backendFramework: vllm` on affected
-DGDs and complete that manifest-driven rollout first. This moves the migration earlier;
-it does not eliminate it. Explicit frameworks must match the engine launch. Opaque
-engine commands, including shell wrappers and image entrypoints, still require an
-explicit framework.
+**Action:** None for existing workloads. To give an existing native-sidecar workload the vLLM
+backend defaults, set `spec.backendFramework: vllm`; this is a manifest-driven worker rollout.
+Explicit frameworks must match the engine launch. Opaque engine commands, including shell
+wrappers and image entrypoints, still require an explicit framework.
 
-**Existing deployments:** Reconciliation can roll all workers in an affected DGD without
-an authored manifest change. With `compilationCache.mountPath` set, the engine also gains
-`VLLM_CACHE_ROOT` pointing to that path. Standalone DCDs can roll when newly inferred cache
-defaults change their pod template. Runtime registration used by Planner does not affect
-the desired worker hash or engine configuration.
+**Existing deployments:** Workloads created by operator 1.6.x or earlier keep the undetected
+backend they were created with, their worker hash, and their rendered pod template during an
+operator-only upgrade. Without an explicit `backendFramework`, they do not receive
+`VLLM_CACHE_ROOT` or vLLM provider startup ordering. Standalone DCDs read their own immutable
+origin. Runtime registration used by Planner does not affect the desired worker hash or engine
+configuration.
 
 **Planner permissions:** Registration-based native identity requires `list` on `pods`
 in addition to worker metadata access. If an older Planner service account receives
@@ -248,6 +276,16 @@ not update its templates or replica count, and it does not retire or republish p
 so a faulted pipeline does not recover.
 
 #### New behavior
+
+##### Per-component Grove rollout budgets
+
+**Change:** Component-level `providerOverride.value` now accepts `rollingUpdate.maxUnavailable`, alone or alongside native `minAvailable` and `topologyConstraint`. Admission infers an omitted target, and Dynamo applies the budget to the generated standalone clique or owning scaling group. Graph-root and multinode role overrides remain topology-only. Requires Grove `v0.1.0-alpha.15` or later, which fixes [corrective Coherent update recovery (#873)](https://github.com/ai-dynamo/grove/issues/873) and [budgets constrained by stale template replicas (#876)](https://github.com/ai-dynamo/grove/issues/876); the bundled Grove `v0.2.0-beta1` satisfies this.
+
+**Warning:** Admission warns when an explicit RollingRecreate or Coherent budget could take a complete component offline. Coherent also warns about this risk with its default budget, including single-replica frontends. RollingRecreate keeps its established warning behavior when no budget is configured. Warnings appear on creation and relevant rollout edits; unchanged metadata edits do not repeat them. No warning is emitted for externally scaled LPX capacity that is unknown to admission.
+
+**Affected:** Grove-backed DGDs that explicitly opt into a rollout budget. Existing workloads keep Grove's defaults when the override is absent: `minAvailable` for Coherent and `1` for RollingRecreate. Removing a budget restores the selected strategy's default. Budget-only edits preserve worker hashes and pod templates and do not initiate a workload rollout. LPX reconciles the changed policy while retaining PCS identity and existing pipeline requests.
+
+**Action:** Upgrade Grove and its matching CRDs to `v0.1.0-alpha.15` or later before configuring rollout budgets, including separately managed installations. Set a positive integer, and at least the effective `minAvailable` under Coherent. The budget may exceed the component's desired replicas or its PCS template seed, including for LPX. Keep the budget when scaling below it or to zero; Grove limits disruption to the replicas that remain. Remove the rollout fragment before selecting OnDelete. See the [DGD reference](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/reference/kubernetes-api/dynamo-graph-deployment.mdx#grove-rollout-budget-overrides) for a complete P/D example and scope rules.
 
 ##### LWS no longer requires Volcano
 
@@ -365,16 +403,6 @@ defaults to `minAvailable` rather than `replicas`; existing explicit minima are 
 
 #### CRD and admission breaking changes
 
-##### Complete health probes
-
-**Change:** Each supplied `startupProbe`, `livenessProbe`, or `readinessProbe` must include exactly one handler: `exec`, `httpGet`, `tcpSocket`, or `grpc`. Admission rejects timing-only probes and probes with multiple handlers. An authored probe replaces the applicable operator default as a complete value.
-
-**Affected:** DGD and DCD manifests in both `v1alpha1` and `v1beta1`, including main containers, sidecars, and role templates.
-
-**Action:** Before upgrading, supply a complete handler with any custom timing settings, or omit the probe to use the applicable operator default.
-
-**Existing deployments:** Installing the CRDs does not rewrite stored probes. Correct invalid probes before the next specification update; new and updated manifests must satisfy the validation rules.
-
 ##### Reserved runtime init container name
 
 **Change:** Declaring `spec.components[*].podTemplate.spec.initContainers[name=runtime]` activates Dynamo
@@ -427,31 +455,20 @@ Components without a frontend sidecar or using pod discovery are unaffected by t
 
 **Affected:** Existing Grove-backed DGDs retain their legacy defaults and rollout strategy after an operator upgrade. The upgrade does not automatically migrate availability fields or roll unchanged workloads.
 
-**Action:** Upgrade externally managed Grove controllers and matching CRDs to `v0.1.0-alpha.15` or later. When migrating availability fields, migrate all components together while preserving their existing effective minima. Review disruption requirements before opting into Coherent. See the [DGD reference for strategy configuration and minimum-availability migration](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/reference/kubernetes-api/dynamo-graph-deployment.mdx#grove-update-strategy). Operational rollout guidance is being restored in [the Rolling Updates guide PR](https://github.com/ai-dynamo/dynamo/pull/15730).
-
-##### Per-component Grove rollout budgets
-
-**Change:** Component-level `providerOverride.value` now accepts `rollingUpdate.maxUnavailable`, alone or alongside native `minAvailable` and `topologyConstraint`. Admission infers an omitted target, and Dynamo applies the budget to the generated standalone clique or owning scaling group. Graph-root and multinode role overrides remain topology-only. Requires Grove `v0.1.0-alpha.15` or later, which fixes [corrective Coherent update recovery (#873)](https://github.com/ai-dynamo/grove/issues/873) and [budgets constrained by stale template replicas (#876)](https://github.com/ai-dynamo/grove/issues/876).
-
-**Warning:** Admission warns when an explicit RollingRecreate or Coherent budget could take a complete component offline. Coherent also warns about this risk with its default budget, including single-replica frontends. RollingRecreate keeps its established warning behavior when no budget is configured. Warnings appear on creation and relevant rollout edits; unchanged metadata edits do not repeat them. No warning is emitted for externally scaled LPX capacity that is unknown to admission.
-
-**Affected:** Grove-backed DGDs that explicitly opt into a rollout budget. Existing workloads keep Grove's defaults when the override is absent: `minAvailable` for Coherent and `1` for RollingRecreate. Removing a budget restores the selected strategy's default. Budget-only edits preserve worker hashes and pod templates and do not initiate a workload rollout. LPX reconciles the changed policy while retaining PCS identity and existing pipeline requests.
-
-**Action:** Upgrade Grove and its matching CRDs to `v0.1.0-alpha.15` or later before configuring rollout budgets, including separately managed installations. Set a positive integer, and at least the effective `minAvailable` under Coherent. The budget may exceed the component's desired replicas or its PCS template seed, including for LPX. Keep the budget when scaling below it or to zero; Grove limits disruption to the replicas that remain. Remove the rollout fragment before selecting OnDelete. See the [DGD reference](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/reference/kubernetes-api/dynamo-graph-deployment.mdx#grove-rollout-budget-overrides) for a complete P/D example and scope rules.
+**Action:** Upgrade externally managed Grove controllers and matching CRDs to `v0.1.0-alpha.14` or later. When migrating availability fields, migrate all components together while preserving their existing effective minima. Review disruption requirements before opting into Coherent. See the [DGD reference for strategy configuration and minimum-availability migration](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/reference/kubernetes-api/dynamo-graph-deployment.mdx#grove-update-strategy). Operational rollout guidance is being restored in [the Rolling Updates guide PR](https://github.com/ai-dynamo/dynamo/pull/15730).
 
 #### Dependency compatibility
 
-**Change:** The bundled Grove version is now `v0.1.0-alpha.15`. It fixes corrective Coherent
-update recovery and permits rollout budgets above the creation-time replica seed. It also provides
-the group-wide pod index and environment-variable ordering used by Dynamo's backend-independent
-`DYNAMO_RANK` and `DYNAMO_LEADER_ADDRESS` aliases.
+**Change:** The bundled Grove version is now `v0.1.0-alpha.14`. It provides the group-wide pod
+index and environment-variable ordering used by Dynamo's backend-independent `DYNAMO_RANK` and
+`DYNAMO_LEADER_ADDRESS` aliases.
 
-**Affected:** Grove-backed DGDs using rollout budgets or Coherent updates, and new multinode DGDs
-created by Dynamo 1.6.0 when Grove is managed outside the platform chart.
+**Affected:** New multinode DGDs created by Dynamo 1.6.0 when Grove is managed outside the platform
+chart.
 
-**Action:** Upgrade externally managed Grove and its CRDs to `v0.1.0-alpha.15` or later before
-using rollout budgets or Coherent updates, or creating new multinode DGDs. Updating Dynamo's
-dependency or platform chart does not upgrade separately managed Grove installations.
+**Action:** Upgrade externally managed Grove and its CRDs to `v0.1.0-alpha.14` or later before
+creating new multinode DGDs. Updating Dynamo's dependency or platform chart does not upgrade
+separately managed Grove installations.
 
 **Existing deployments:** `DYNAMO_RANK` and `DYNAMO_LEADER_ADDRESS` are injected only into DGDs
 created by operator 1.6.0 or later. An operator upgrade does not add them to an older DGD, and

@@ -55,12 +55,13 @@ func TestNativeSidecarBackendFramework(t *testing.T) {
 				}},
 			}
 			original := component.DeepCopy()
-			dgd := &v1beta1.DynamoGraphDeployment{Spec: v1beta1.DynamoGraphDeploymentSpec{BackendFramework: tc.explicit}}
-			dcd := &v1beta1.DynamoComponentDeployment{Spec: v1beta1.DynamoComponentDeploymentSpec{
+			currentOrigin := map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.7.0"}
+			dgd := &v1beta1.DynamoGraphDeployment{Annotations: currentOrigin, Spec: v1beta1.DynamoGraphDeploymentSpec{BackendFramework: tc.explicit}}
+			dcd := &v1beta1.DynamoComponentDeployment{Annotations: currentOrigin, Spec: v1beta1.DynamoComponentDeploymentSpec{
 				DynamoComponentDeploymentSharedSpec: component, BackendFramework: tc.explicit,
 			}}
 
-			t.Log("Resolve both graph and standalone component backends without changing authored containers")
+			t.Log("Resolve both graph and standalone component backends for workloads created by operator 1.7.0 without changing authored containers")
 			graphBackend, graphErr := getBackendFrameworkFromComponent(&component, dgd)
 			componentBackend, componentErr := GetBackendFrameworkFromDynamoComponent(dcd)
 			if tc.wantErr != "" {
@@ -101,8 +102,9 @@ func TestNativeSidecarCompilationCacheBackendDetection(t *testing.T) {
 					InitContainers: []corev1.Container{{Name: "runtime", Image: "runtime:1.6.0", RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways), Command: tc.command, Args: []string{"--grpc-endpoint", "127.0.0.1:50051"}}},
 				}},
 			}
+			currentOrigin := map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.7.0"}
 			dgd := &v1beta1.DynamoGraphDeployment{
-				Name: "test", Namespace: "test",
+				Name: "test", Namespace: "test", Annotations: currentOrigin,
 				Spec: v1beta1.DynamoGraphDeploymentSpec{Components: []v1beta1.DynamoComponentDeploymentSharedSpec{component}},
 			}
 			original := dgd.DeepCopy()
@@ -126,7 +128,7 @@ func TestNativeSidecarCompilationCacheBackendDetection(t *testing.T) {
 
 			t.Log("Render an independent standalone DCD so graph inference cannot mask controller detection")
 			dcd := &v1beta1.DynamoComponentDeployment{
-				Name: "worker", Namespace: "test",
+				Name: "worker", Namespace: "test", Annotations: currentOrigin,
 				Spec: v1beta1.DynamoComponentDeploymentSpec{DynamoComponentDeploymentSharedSpec: component},
 			}
 			originalDCD := dcd.DeepCopy()

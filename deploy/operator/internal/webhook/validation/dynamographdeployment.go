@@ -71,6 +71,8 @@ type dynamoGraphDeploymentSpecValidationOptions struct {
 	oldComponents           map[string]*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec
 	groveUpdateStrategy     grovev1alpha1.UpdateStrategyType
 	oldGroveUpdateStrategy  grovev1alpha1.UpdateStrategyType
+	// originAnnotations carry the DGD's immutable operator origin for origin-gated resolution.
+	originAnnotations map[string]string
 }
 
 // Validate performs stateless validation on the v1beta1 DynamoGraphDeployment.
@@ -229,6 +231,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeployment(
 		oldComponents:           oldComponents,
 		groveUpdateStrategy:     k8sptr.Deref(updateStrategy, grovev1alpha1.RollingRecreateStrategy),
 		oldGroveUpdateStrategy:  oldStrategy,
+		originAnnotations:       dgd.Annotations,
 	}
 	if grovePathway {
 		specOpts.pcsName = dynamo.PCSNameForDGD(
@@ -443,7 +446,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 		allErrs = append(allErrs, v.validateDGDComponentPowerAnnotation(component, componentPath)...)
 
 		allErrs = append(allErrs, validateElasticEPRequiresCommand(spec.BackendFramework, component, componentPath)...)
-		allErrs = append(allErrs, dynamo.ValidateSnapshotFailover(component, componentPath, spec.BackendFramework)...)
+		allErrs = append(allErrs, dynamo.ValidateSnapshotFailover(component, componentPath, spec.BackendFramework, opts.originAnnotations)...)
 
 		// Allow existing LPX components to survive disablement without accepting new or changed specs.
 		allErrs = append(allErrs, lpxComponentGateErrors(

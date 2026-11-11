@@ -418,8 +418,9 @@ const (
 )
 
 // ValidateSnapshotFailover checks the requirements for snapshot-backed intra-pod
-// failover. component and fldPath must not be nil.
-func ValidateSnapshotFailover(component *v1beta1.DynamoComponentDeploymentSharedSpec, fldPath *field.Path, explicitBackendFramework string) field.ErrorList {
+// failover. component and fldPath must not be nil. originAnnotations carry the
+// owning workload's operator origin, as read by the backend resolver.
+func ValidateSnapshotFailover(component *v1beta1.DynamoComponentDeploymentSharedSpec, fldPath *field.Path, explicitBackendFramework string, originAnnotations map[string]string) field.ErrorList {
 	config := GetCheckpoint(component)
 
 	// Apply these checks only to snapshot-backed intra-pod failover.
@@ -431,7 +432,7 @@ func ValidateSnapshotFailover(component *v1beta1.DynamoComponentDeploymentShared
 
 	// Resolve the backend exactly as rendering does, including command inference.
 	// TRT-LLM snapshot failover is not supported yet; reject it at admission.
-	backendFramework, err := determineBackendFrameworkForComponent(component, explicitBackendFramework)
+	backendFramework, err := determineBackendFrameworkForComponent(component, explicitBackendFramework, originAnnotations)
 	if err != nil {
 		allErrs = append(allErrs, field.Forbidden(fldPath.Child("experimental", "failover"), "Snapshot-backed intra-pod failover requires a consistent vLLM or SGLang backend"))
 	} else if !snapshotFailoverBackendSupported(backendFramework) {

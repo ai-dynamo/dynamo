@@ -64,18 +64,20 @@ func TestFrontendSidecarProbeOverride(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Log("Provide complete frontend sidecar probes on runtime 1.6.0")
+			t.Log("Provide complete frontend sidecar probes on runtime 1.6.0 in a graph created by operator 1.7.0")
 			override := &corev1.Probe{ProbeHandler: tt.handler, PeriodSeconds: 5, FailureThreshold: 90}
 			component := &v1beta1.DynamoComponentDeploymentSharedSpec{
 				ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker,
 				RuntimeVersionOverride: "1.6.0", FrontendSidecar: new("frontend"),
-				PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{
-					{Name: commonconsts.MainContainerName, Image: "worker:1.6.0"},
-					{
-						Name: "frontend", Image: "frontend:1.6.0",
-						StartupProbe: override.DeepCopy(), LivenessProbe: override.DeepCopy(), ReadinessProbe: override.DeepCopy(),
-					},
-				}}},
+				PodTemplate: &corev1.PodTemplateSpec{
+					Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.7.0"},
+					Spec: corev1.PodSpec{Containers: []corev1.Container{
+						{Name: commonconsts.MainContainerName, Image: "worker:1.6.0"},
+						{
+							Name: "frontend", Image: "frontend:1.6.0",
+							StartupProbe: override.DeepCopy(), LivenessProbe: override.DeepCopy(), ReadinessProbe: override.DeepCopy(),
+						},
+					}}},
 			}
 
 			t.Log("Render the complete pod specification through the production entry point")
