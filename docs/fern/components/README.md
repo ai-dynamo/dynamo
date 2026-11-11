@@ -89,6 +89,20 @@ import { BlogStyles } from "@/components/BlogStyles";
 <BlogStyles />
 ```
 
+### HideTocStyles
+
+Once on any other page that sets `hide-toc: true`, such as a section overview,
+immediately after the imports. Without it, the content column sits to the right
+of where the neighboring pages put it on screens wide enough to show a table of
+contents. Home, Community, Blog, and Recipe pages handle `hide-toc` in their own
+style components.
+
+```mdx
+import { HideTocStyles } from "@/components/HideTocStyles";
+
+<HideTocStyles />
+```
+
 ### TerminalDemo
 
 Props are documented in the component's own header.
