@@ -14,10 +14,11 @@ use tokio_util::sync::CancellationToken;
 use crate::services::common::zmq::{
     create_bound_pub_socket, create_sub_socket_topics, validate_endpoint,
 };
-use dynamo_scheduler::replication::{
-    AFFINITY_EVENT_CHANNEL_CAPACITY, AffinityBindingEvent, REPLICA_EVENT_CHANNEL_CAPACITY,
-    ReplicaEventSender, ReplicaSyncConfig, ScopedReplicaEvent,
+use dynamo_scheduler::{
+    AFFINITY_EVENT_CHANNEL_CAPACITY, REPLICA_EVENT_CHANNEL_CAPACITY, ReplicaEventSender,
+    ReplicaSyncConfig, ScopedReplicaEvent,
 };
+use dynamo_session_affinity::AffinityBindingEvent;
 
 const PEER_COMMAND_CHANNEL_CAPACITY: usize = 64;
 

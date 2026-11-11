@@ -27,16 +27,14 @@ use dynamo_kv_indexer::OverlapScores;
 use dynamo_kv_indexer::{LowerTierMatchDetails, MatchDetails, TieredMatchDetails};
 use dynamo_router_protocol::identity::RoutingPartitionRef;
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
+use dynamo_scheduler::build_overlap_scores_response;
 use dynamo_scheduler::host::{
     DEFAULT_MODEL_NAME, OverlapScoresRequest, PotentialLoadsRequest, PromptRequest,
     ReservationRequest, SelectAndReserveRequest, SelectRequest, SelectionCacheConfig,
     SelectionError, WorkerRequest,
 };
-use dynamo_scheduler::overlap::build_overlap_scores_response;
-use dynamo_scheduler::selection::input::{
-    MmRoutingInfoRequest, NormalizedPrompt, TrackingHashInput,
-};
-use dynamo_scheduler::tracking_hash::{TrackingHashContext, TrackingHashScope};
+use dynamo_scheduler::{MmRoutingInfoRequest, NormalizedPrompt, TrackingHashInput};
+use dynamo_scheduler::{TrackingHashContext, TrackingHashScope};
 use dynamo_worker_selection::{
     WorkerCandidate, WorkerCandidates, WorkerFilter, WorkerInputView, WorkerPicker, WorkerScorer,
     WorkerSelectionContext, WorkerSelectionPolicy, WorkerSelectionPolicyError,
@@ -322,7 +320,7 @@ where
         router_policy_config: Some(policy_file.path().display().to_string()),
         ..test_config()
     };
-    let factory: dynamo_scheduler::types::WorkerSelectionPolicyFactory = Arc::new(factory);
+    let factory: dynamo_scheduler::WorkerSelectionPolicyFactory = Arc::new(factory);
     let mut registry = RouterPluginRegistry::default();
     registry
         .register_worker_selection(
@@ -667,7 +665,7 @@ fn keyed_prompt_tracking_leaves_indexer_hashes_public() {
     let mut key_file = NamedTempFile::new().unwrap();
     key_file.write_all(&[0x35; 32]).unwrap();
     let config = crate::config::KvRouterConfig {
-        router_tracking_hash: dynamo_scheduler::tracking_hash::TrackingHashAlgorithm::KeyedXxh3V1,
+        router_tracking_hash: dynamo_scheduler::TrackingHashAlgorithm::KeyedXxh3V1,
         router_tracking_key_file: Some(key_file.path().to_path_buf()),
         router_tracking_key_id: Some("2026-01".to_string()),
         ..test_config()
@@ -721,7 +719,7 @@ fn keyed_reservation_hashes_directly_from_tokens() {
     let mut key_file = NamedTempFile::new().unwrap();
     key_file.write_all(&[0x47; 32]).unwrap();
     let config = crate::config::KvRouterConfig {
-        router_tracking_hash: dynamo_scheduler::tracking_hash::TrackingHashAlgorithm::KeyedXxh3V1,
+        router_tracking_hash: dynamo_scheduler::TrackingHashAlgorithm::KeyedXxh3V1,
         router_tracking_key_file: Some(key_file.path().to_path_buf()),
         router_tracking_key_id: Some("2026-01".to_string()),
         ..test_config()
@@ -768,7 +766,7 @@ fn keyed_hash_only_inputs_remain_trusted_for_selection_and_reservation() {
     let mut key_file = NamedTempFile::new().unwrap();
     key_file.write_all(&[0x59; 32]).unwrap();
     let config = crate::config::KvRouterConfig {
-        router_tracking_hash: dynamo_scheduler::tracking_hash::TrackingHashAlgorithm::KeyedXxh3V1,
+        router_tracking_hash: dynamo_scheduler::TrackingHashAlgorithm::KeyedXxh3V1,
         router_tracking_key_file: Some(key_file.path().to_path_buf()),
         router_tracking_key_id: Some("2026-01".to_string()),
         ..test_config()

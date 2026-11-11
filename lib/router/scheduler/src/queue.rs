@@ -23,7 +23,7 @@ use super::overlap_refresh::{
 };
 use super::prefill_load::{PrefillLoadEstimator, effective_prefill_tokens};
 use super::selector::{
-    CandidatePreparer, CandidatePreparerExt, PreparedCandidates, WorkerInputs, WorkerLoadInputExt,
+    CandidatePreparer, CandidatePreparerExt, PreparedCandidates, WorkerLoadInputExt,
     WorkerSelectionInput, WorkerSelector, worker_input_rows,
 };
 use super::types::{
@@ -47,12 +47,10 @@ use dynamo_slot_tracker::{
     WorkerLoadProjection, WorkerLoadReader,
 };
 use dynamo_slot_tracker::{BusyThresholds, FullRankCounts};
+use dynamo_worker_selection::WorkerInputs;
 use dynamo_worker_selection::{RuntimePolicyConfig, RuntimePolicyError, RuntimePolicyUpdate};
 use dynamo_worker_selection::{SelectionTrace, SelectionTraceSpec};
 use dynamo_worker_selection::{WorkerCapacity, WorkerInputRows, WorkerLoadInput};
-
-// The fallback lives beside `WorkerCapacity`; this path stays for existing importers.
-pub use dynamo_router_protocol::worker::DEFAULT_MAX_BATCHED_TOKENS;
 
 mod capacity;
 
@@ -2884,7 +2882,8 @@ mod tests {
     use dynamo_router_protocol::worker::WorkerWithDpRank;
     use dynamo_slot_tracker::ActiveSequenceEvent;
 
-    use crate::selector::{DefaultWorkerSelector, WorkerInputs, WorkerSelector};
+    use crate::selector::{DefaultWorkerSelector, WorkerSelector};
+    use dynamo_worker_selection::WorkerInputs;
 
     use crate::test_utils::{NoopSequencePublisher, SimpleWorkerConfig};
 
