@@ -23,6 +23,7 @@ use crate::protocols::common::extensions::{
 pub mod aggregator;
 pub(crate) mod custom_tools;
 mod delta;
+pub(crate) mod tool_call_merge;
 pub mod tool_parser_v2;
 pub(crate) mod unified_parser;
 
@@ -159,6 +160,18 @@ pub struct NvCreateChatCompletionRequest {
 }
 
 impl NvCreateChatCompletionRequest {
+    /// The named passthrough fields (`validate::PASSTHROUGH_EXTRA_FIELDS`) this
+    /// request carries. They are not serialized with the request, so a Python
+    /// chat processor receives them through this accessor.
+    /// Unknown fields kept by `DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS` are skipped.
+    pub fn passthrough_extra_fields(
+        &self,
+    ) -> impl Iterator<Item = (&'static str, &serde_json::Value)> {
+        validate::PASSTHROUGH_EXTRA_FIELDS
+            .iter()
+            .filter_map(|key| self.unsupported_fields.get(*key).map(|value| (*key, value)))
+    }
+
     /// Resolve the request's reasoning controls into `chat_template_args`.
     /// Runs once at the HTTP boundary, so every render path reads one answer.
     /// Model-specific overrides still apply later in the default preprocessor.
@@ -1165,6 +1178,30 @@ mod tests {
             serde_json::from_value(invalid_stop_token_ids).expect("Failed to deserialize request");
         let err = ValidateRequest::validate(&request).expect_err("invalid stop_token_ids");
         assert!(err.to_string().contains("stop_token_ids"));
+    }
+
+    #[test]
+    fn passthrough_extra_fields_skips_ignored_unknown_fields() {
+        let mut request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stop_token_ids": [7],
+            "allowed_token_ids": [10, 11],
+        }))
+        .expect("Failed to deserialize request");
+        // DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS keeps unknown fields in the map.
+        request
+            .unsupported_fields
+            .insert("experimental_field".to_string(), json!("value"));
+
+        let fields: Vec<_> = request.passthrough_extra_fields().collect();
+        assert_eq!(
+            fields,
+            vec![
+                ("stop_token_ids", &json!([7])),
+                ("allowed_token_ids", &json!([10, 11])),
+            ]
+        );
     }
 
     #[test]

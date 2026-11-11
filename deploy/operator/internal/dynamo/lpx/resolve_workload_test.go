@@ -13,6 +13,7 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	deploymentcapnpv1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/deployment/v1"
 	manifestcapnp "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/v2"
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 	"github.com/stretchr/testify/require"
@@ -631,4 +632,41 @@ func acquireHybridTestSnapshot(t *testing.T) *Build {
 	fixture.selectedPropSyncChains = nil
 	fixture.partitions = append(fixture.partitions, testV3CapnpPartition{id: 11, deviceType: manifestcapnp.DeviceType_cuda})
 	return acquireTestSnapshot(t, writeCompilerFixture(t, fixture))
+}
+
+func TestResolveUnitsFormatPerWorkload(t *testing.T) {
+	t.Parallel()
+	bundle := testUnitBundle{architecture: deploymentcapnpv1.LpuArchitecture_lp20, devicesPerNode: 8,
+		partitions: testUnitPartitions(8, nil, 0), units: testSingleUnits(testNodesReservation(1, 0))}
+	units, err := acquireTestUnitBundle(t, bundle)
+	require.NoError(t, err)
+	bundle.units = nil
+	legacy, err := acquireTestUnitBundle(t, bundle)
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		name          string
+		draft, target *Build
+		wantErr       bool
+	}{
+		{"legacy pair", legacy, legacy, false}, {"units pair", units, units, false},
+		{"units draft and legacy target", units, legacy, true}, {"legacy draft and units target", legacy, units, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Log("Resolve the complete pair before rendering any live resource")
+			dgd := newSelectedTestDGD(t, "pair",
+				testLPXComponent("target", "target-build", v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXConductor, PodTemplate: testLPXPodTemplate("runtime")}, v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: testLPXPodTemplate("runtime")}),
+				testLPXComponent("draft", "draft-build", v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: testLPXPodTemplate("runtime")}),
+			)
+			before := dgd.DeepCopy()
+			got, err := ResolveWorkload(t.Context(), fake.NewClientBuilder().Build(), dgd, singleGroupComponents(t, dgd), staticModelRegistry{"draft-build": tc.draft, "target-build": tc.target})
+			require.Equal(t, before, dgd)
+			if tc.wantErr {
+				require.ErrorContains(t, err, "mixes builds with and without lpuUnits")
+				require.Nil(t, got)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tc.target == units, got.placesLPUUnits())
+		})
+	}
 }
