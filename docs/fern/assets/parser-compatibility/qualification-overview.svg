@@ -1,0 +1,118 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1130" viewBox="0 0 1800 1130" role="img">
+<!-- SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION &amp; AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0 -->
+<title>DEP #18601 — Parser compatibility qualification</title>
+<desc>One Python entry point • Fixed versions and explicit scope • Deterministic evidence for each required feature</desc>
+<defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 1 L7 4 L0 7" fill="none" stroke="#56616a" stroke-width="1.5"/></marker></defs>
+<rect width="1800" height="100%" fill="#fafafa"/>
+<g font-family="Arial, Helvetica, sans-serif" fill="#252b30">
+<text x="34" y="56" font-size="37" font-weight="700" text-anchor="start">DEP #18601 — Parser compatibility qualification</text>
+<text x="36" y="91" font-size="20" font-weight="400" text-anchor="start" fill="#53606a">One Python entry point • Fixed versions and explicit scope • Deterministic evidence for each required feature</text>
+<rect x="1480" y="25" width="284" height="34" rx="9" fill="#fff1d7" stroke="#cda052" stroke-width="1.5"/>
+<text x="1622.0" y="47.78" font-size="17" font-weight="700" text-anchor="middle">PROPOSED DESIGN</text>
+<rect x="34" y="120" width="1732" height="185" rx="13" fill="#ffffff" stroke="#6d7680" stroke-width="1.5"/>
+<path d="M48 121 H1752 Q1765 121 1765 134 V166 H35 V134 Q35 121 48 121" fill="#f0e7f8"/>
+<rect x="50" y="129" width="29" height="29" rx="7" fill="#252b30" stroke="#252b30" stroke-width="1.5"/>
+<text x="64.5" y="151" font-size="20" font-weight="700" text-anchor="middle" fill="#fff">A</text>
+<text x="92" y="152" font-size="25" font-weight="700" text-anchor="start">Freeze the contract before running tests</text>
+<text x="1745" y="151" font-size="17" font-weight="700" text-anchor="end" fill="#53606a">Required coverage cannot disappear during a run</text>
+<rect x="50" y="187" width="153" height="54" rx="9" fill="#f0e7f8" stroke="#aa83c5" stroke-width="1.5"/>
+<text x="126.5" y="219.78" font-size="17" font-weight="700" text-anchor="middle">Profile / cases</text>
+<rect x="225" y="183" width="350" height="94" rx="9" fill="#f0e7f8" stroke="#aa83c5" stroke-width="1.5"/>
+<text x="400.0" y="212.12" font-size="18" font-weight="700" text-anchor="middle">Pin the qualification tuple</text>
+<text x="400.0" y="236.12" font-size="18" font-weight="400" text-anchor="middle">Model, revision, tokenizer / template</text>
+<text x="400.0" y="260.12" font-size="18" font-weight="400" text-anchor="middle">Builds, processor and parser config</text>
+<rect x="600" y="183" width="350" height="94" rx="9" fill="#e2f0fb" stroke="#78afd1" stroke-width="1.5"/>
+<text x="775.0" y="212.12" font-size="18" font-weight="700" text-anchor="middle">Declare required features</text>
+<text x="775.0" y="236.12" font-size="18" font-weight="400" text-anchor="middle">API × feature × variant</text>
+<text x="775.0" y="260.12" font-size="18" font-weight="400" text-anchor="middle">Authored + captured + generated cases</text>
+<rect x="975" y="183" width="350" height="94" rx="9" fill="#fff1d7" stroke="#cda052" stroke-width="1.5"/>
+<text x="1150.0" y="212.12" font-size="18" font-weight="700" text-anchor="middle">Validate and freeze scope</text>
+<text x="1150.0" y="236.12" font-size="18" font-weight="400" text-anchor="middle">Reject missing or invalid cases</text>
+<text x="1150.0" y="260.12" font-size="18" font-weight="400" text-anchor="middle">Record the denominator and scope hash</text>
+<rect x="1350" y="183" width="395" height="94" rx="9" fill="#e9f3df" stroke="#8cae79" stroke-width="1.5"/>
+<text x="1547.5" y="212.12" font-size="18" font-weight="700" text-anchor="middle">Run the same Python module</text>
+<text x="1547.5" y="236.12" font-size="18" font-weight="400" text-anchor="middle">python3 -m dynamo.compatibility</text>
+<text x="1547.5" y="260.12" font-size="18" font-weight="400" text-anchor="middle">CI and local runs share one executor</text>
+<path d="M577 230 H596" stroke="#56616a" stroke-width="1.6" marker-end="url(#arrow)"/>
+<path d="M952 230 H971" stroke="#56616a" stroke-width="1.6" marker-end="url(#arrow)"/>
+<path d="M1327 230 H1346" stroke="#56616a" stroke-width="1.6" marker-end="url(#arrow)"/>
+<rect x="34" y="321" width="1732" height="224" rx="13" fill="#ffffff" stroke="#6d7680" stroke-width="1.5"/>
+<path d="M48 322 H1752 Q1765 322 1765 335 V367 H35 V335 Q35 322 48 322" fill="#e2f0fb"/>
+<rect x="50" y="330" width="29" height="29" rx="7" fill="#252b30" stroke="#252b30" stroke-width="1.5"/>
+<text x="64.5" y="352" font-size="20" font-weight="700" text-anchor="middle" fill="#fff">B</text>
+<text x="92" y="353" font-size="25" font-weight="700" text-anchor="start">Input qualification — compare the engine’s effective request</text>
+<text x="1745" y="352" font-size="17" font-weight="700" text-anchor="end" fill="#53606a">Text tokens + controls + media are separate assertions</text>
+<rect x="50" y="391" width="153" height="54" rx="9" fill="#e2f0fb" stroke="#78afd1" stroke-width="1.5"/>
+<text x="126.5" y="423.78" font-size="17" font-weight="700" text-anchor="middle">Input adapters</text>
+<rect x="225" y="383" width="350" height="108" rx="9" fill="#e2f0fb" stroke="#78afd1" stroke-width="1.5"/>
+<text x="400.0" y="419.12" font-size="18" font-weight="700" text-anchor="middle">Native SGLang</text>
+<text x="400.0" y="443.12" font-size="18" font-weight="400" text-anchor="middle">Use its own preprocessing path</text>
+<text x="400.0" y="467.12" font-size="18" font-weight="400" text-anchor="middle">Independent reference adapter</text>
+<rect x="600" y="383" width="350" height="108" rx="9" fill="#f0e7f8" stroke="#aa83c5" stroke-width="1.5"/>
+<text x="775.0" y="419.12" font-size="18" font-weight="700" text-anchor="middle">Dynamo Rust processor</text>
+<text x="775.0" y="443.12" font-size="18" font-weight="400" text-anchor="middle">Use the real production boundary</text>
+<text x="775.0" y="467.12" font-size="18" font-weight="400" text-anchor="middle">Record final input evidence</text>
+<rect x="975" y="383" width="350" height="108" rx="9" fill="#f0e7f8" stroke="#aa83c5" stroke-width="1.5"/>
+<text x="1150.0" y="419.12" font-size="18" font-weight="700" text-anchor="middle">Dynamo Python processor</text>
+<text x="1150.0" y="443.12" font-size="18" font-weight="400" text-anchor="middle">SGLang Chat Processor path</text>
+<text x="1150.0" y="467.12" font-size="18" font-weight="400" text-anchor="middle">Record final input evidence</text>
+<rect x="1350" y="383" width="395" height="108" rx="9" fill="#e9f3df" stroke="#8cae79" stroke-width="1.5"/>
+<text x="1547.5" y="419.12" font-size="18" font-weight="700" text-anchor="middle">Compare + check invariants</text>
+<text x="1547.5" y="443.12" font-size="18" font-weight="400" text-anchor="middle">Exact text token IDs and order</text>
+<text x="1547.5" y="467.12" font-size="18" font-weight="400" text-anchor="middle">Controls, grammar and media identity</text>
+<text x="225" y="523" font-size="17" font-weight="400" text-anchor="start" fill="#53606a">Run the same semantic request through each declared path. A shared rejection of a supported request cannot pass.</text>
+<rect x="34" y="561" width="1732" height="222" rx="13" fill="#ffffff" stroke="#6d7680" stroke-width="1.5"/>
+<path d="M48 562 H1752 Q1765 562 1765 575 V607 H35 V575 Q35 562 48 562" fill="#fbe7e0"/>
+<rect x="50" y="570" width="29" height="29" rx="7" fill="#252b30" stroke="#252b30" stroke-width="1.5"/>
+<text x="64.5" y="592" font-size="20" font-weight="700" text-anchor="middle" fill="#fff">C</text>
+<text x="92" y="593" font-size="25" font-weight="700" text-anchor="start">Output qualification — replay fixed evidence through real code</text>
+<text x="1745" y="592" font-size="17" font-weight="700" text-anchor="end" fill="#53606a">Most deterministic checks need no model weights or GPU</text>
+<rect x="50" y="630" width="153" height="54" rx="9" fill="#fbe7e0" stroke="#d68d79" stroke-width="1.5"/>
+<text x="126.5" y="662.78" font-size="17" font-weight="700" text-anchor="middle">Output replay</text>
+<rect x="225" y="623" width="350" height="108" rx="9" fill="#fbe7e0" stroke="#d68d79" stroke-width="1.5"/>
+<text x="400.0" y="659.12" font-size="18" font-weight="700" text-anchor="middle">Fixed model-format output</text>
+<text x="400.0" y="683.12" font-size="18" font-weight="400" text-anchor="middle">Token IDs + scripted backend events</text>
+<text x="400.0" y="707.12" font-size="18" font-weight="400" text-anchor="middle">Valid and malformed fixtures</text>
+<rect x="600" y="623" width="350" height="108" rx="9" fill="#e2f0fb" stroke="#78afd1" stroke-width="1.5"/>
+<text x="775.0" y="659.12" font-size="18" font-weight="700" text-anchor="middle">Real parsing boundaries</text>
+<text x="775.0" y="683.12" font-size="18" font-weight="400" text-anchor="middle">Detokenizer, reasoning and tool parser</text>
+<text x="775.0" y="707.12" font-size="18" font-weight="400" text-anchor="middle">Aggregator and HTTP / SSE projection</text>
+<rect x="975" y="623" width="350" height="108" rx="9" fill="#fff1d7" stroke="#cda052" stroke-width="1.5"/>
+<text x="1150.0" y="659.12" font-size="18" font-weight="700" text-anchor="middle">Vary stream boundaries</text>
+<text x="1150.0" y="683.12" font-size="18" font-weight="400" text-anchor="middle">Single-token and marker / UTF-8 splits</text>
+<text x="1150.0" y="707.12" font-size="18" font-weight="400" text-anchor="middle">Targeted + bounded random partitions</text>
+<rect x="1350" y="623" width="395" height="108" rx="9" fill="#e9f3df" stroke="#8cae79" stroke-width="1.5"/>
+<text x="1547.5" y="659.12" font-size="18" font-weight="700" text-anchor="middle">Compare + check invariants</text>
+<text x="1547.5" y="683.12" font-size="18" font-weight="400" text-anchor="middle">Content, arguments, IDs and finish reason</text>
+<text x="1547.5" y="707.12" font-size="18" font-weight="400" text-anchor="middle">Event lifecycle and incremental dispatch</text>
+<path d="M577 677 H596" stroke="#56616a" stroke-width="1.6" marker-end="url(#arrow)"/>
+<path d="M952 677 H971" stroke="#56616a" stroke-width="1.6" marker-end="url(#arrow)"/>
+<path d="M1327 677 H1346" stroke="#56616a" stroke-width="1.6" marker-end="url(#arrow)"/>
+<text x="225" y="761" font-size="17" font-weight="400" text-anchor="start" fill="#53606a">Record each injection boundary and bypassed stage. Model answer randomness is never the compatibility oracle.</text>
+<rect x="34" y="799" width="1732" height="179" rx="13" fill="#ffffff" stroke="#6d7680" stroke-width="1.5"/>
+<path d="M48 800 H1752 Q1765 800 1765 813 V845 H35 V813 Q35 800 48 800" fill="#e9f3df"/>
+<rect x="50" y="808" width="29" height="29" rx="7" fill="#252b30" stroke="#252b30" stroke-width="1.5"/>
+<text x="64.5" y="830" font-size="20" font-weight="700" text-anchor="middle" fill="#fff">D</text>
+<text x="92" y="831" font-size="25" font-weight="700" text-anchor="start">One evidence set drives both CI and documentation</text>
+<text x="1745" y="830" font-size="17" font-weight="700" text-anchor="end" fill="#53606a">No unexecuted feature may appear as a tested pass</text>
+<rect x="50" y="866" width="153" height="54" rx="9" fill="#e9f3df" stroke="#8cae79" stroke-width="1.5"/>
+<text x="126.5" y="898.78" font-size="17" font-weight="700" text-anchor="middle">Results</text>
+<rect x="225" y="860" width="500" height="88" rx="9" fill="#f0f2f4" stroke="#a7b0b8" stroke-width="1.5"/>
+<text x="475.0" y="898.12" font-size="18" font-weight="700" text-anchor="middle">Immutable evidence and reproductions</text>
+<text x="475.0" y="922.12" font-size="18" font-weight="400" text-anchor="middle">Per-cell status, versions, scope hash and first mismatch</text>
+<rect x="760" y="860" width="460" height="88" rx="9" fill="#fff1d7" stroke="#cda052" stroke-width="1.5"/>
+<text x="990.0" y="898.12" font-size="18" font-weight="700" text-anchor="middle">Strict CI verdict</text>
+<text x="990.0" y="922.12" font-size="18" font-weight="400" text-anchor="middle">Exit 0 only for complete passing required coverage</text>
+<rect x="1255" y="860" width="490" height="88" rx="9" fill="#e9f3df" stroke="#8cae79" stroke-width="1.5"/>
+<text x="1500.0" y="898.12" font-size="18" font-weight="700" text-anchor="middle">Documentation-ready matrix</text>
+<text x="1500.0" y="922.12" font-size="18" font-weight="400" text-anchor="middle">JSON + Markdown + HTML from the same results</text>
+<path d="M728 904 H755" stroke="#56616a" stroke-width="1.6" marker-end="url(#arrow)"/>
+<path d="M1223 904 H1250" stroke="#56616a" stroke-width="1.6" marker-end="url(#arrow)"/>
+<rect x="34" y="994" width="1732" height="110" rx="12" fill="#f3f4f5" stroke="#a7b0b8" stroke-width="1.5"/>
+<text x="51" y="1023" font-size="21" font-weight="700" text-anchor="start">Implementation boundary</text>
+<rect x="51" y="1037" width="690" height="50" rx="9" fill="#f0e7f8" stroke="#aa83c5" stroke-width="1.5"/>
+<text x="396.0" y="1068.12" font-size="18" font-weight="700" text-anchor="middle">PR1: HTTP text Chat input token parity + strict reports</text>
+<rect x="759" y="1037" width="989" height="50" rx="9" fill="#e2f0fb" stroke="#78afd1" stroke-width="1.5"/>
+<text x="1253.5" y="1068.12" font-size="18" font-weight="700" text-anchor="middle">Follow-up PRs: more APIs / models, output / SSE, controls / media, trusted publication</text>
+</g></svg>
