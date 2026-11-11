@@ -1488,7 +1488,6 @@ func (r *dgdWorkerRolloutReconciler) buildRollingUpdateContext(
 			newGenerationServes = false
 		}
 
-		// Keep each old hash's available roles together when checking whether it serves.
 		for _, oldDCD := range oldDCDsByComponent[componentName] {
 			if dcdComponentStateFromDCD(oldDCD).Available == 0 {
 				continue
