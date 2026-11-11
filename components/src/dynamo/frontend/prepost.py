@@ -823,6 +823,7 @@ async def preprocess_chat_request(
     structural_tag_schema: str = "auto",
     structural_tag_excludes_reasoning: bool = False,
 ) -> PreprocessResult:
+    """Render a validated chat request and select its engine guidance and parsers."""
     validated_request = _validate_chat_completion_request(request)
     assistant_guided_decoding = _build_assistant_guided_decoding(validated_request)
     client_structured_guidance = deepcopy(
@@ -1210,6 +1211,7 @@ class StreamingPostProcessor:
     def _process_dynamo_json_fallback_tool_calls(
         self, output: Any, *, content: str | None, reasoning: str | None = None
     ) -> dict[str, Any] | None:
+        """Buffer answer text for tool JSON while forwarding requested reasoning."""
         chunks = self._dynamo_json_fallback_chunks.setdefault(output.index, [])
         if content:
             chunks.append(content)
@@ -1530,6 +1532,7 @@ class StreamingPostProcessor:
     def process_output(self, output: Any) -> dict[str, Any] | None:
         # BEFORE any branch below: every path must feed the ledger, including
         # the ones that emit nothing for this chunk.
+        """Parse one engine chunk into a response choice, or wait for buffered output."""
         if self.reasoning_parser is not None:
             self._reasoning_token_ids.extend(output.token_ids or [])
         if self._uses_dynamo_json_tool_call_fallback and (

@@ -955,6 +955,7 @@ class TestReasoningParserMetadata:
         chat_template_kwargs,
         **request_fields,
     ):
+        """Read reasoning controls for a real GLM parser and a chosen prompt tail."""
         from vllm.reasoning import ReasoningParserManager
 
         from dynamo.frontend.vllm_processor import _build_reasoning_parser_metadata
@@ -983,6 +984,7 @@ class TestReasoningParserMetadata:
     def test_glm_reasoning_follows_rendered_prompt(
         self, tokenizer, parser_name, prompt_open, control, requested
     ):
+        """GLM worker controls must follow the template when request flags disagree."""
         chat_template_kwargs = {control: requested, "reasoning_effort": "low"}
         metadata = self._glm_metadata(
             tokenizer,
@@ -1003,6 +1005,7 @@ class TestReasoningParserMetadata:
         assert chat_template_kwargs == {control: requested, "reasoning_effort": "low"}
 
     def test_glm_open_prompt_keeps_include_reasoning_false_engine_hint(self, tokenizer):
+        """Hiding reasoning must preserve the worker hint while the prompt stays open."""
         metadata = self._glm_metadata(
             tokenizer,
             "glm45",
@@ -5670,6 +5673,7 @@ class TestToolCallGrammarReasoningStart:
         structural_tag_excludes_reasoning=False,
         chat_template_kwargs=None,
     ):
+        """Capture whether tool guidance starts inside the rendered reasoning block."""
         parsers = []
 
         def make_parser(tokenizer, tools):
@@ -5758,6 +5762,7 @@ class TestToolCallGrammarReasoningStart:
     async def test_glm_prompt_state_overrides_false_thinking_flag(
         self, tokenizer, monkeypatch, prompt_text, parser_name, expected
     ):
+        """Only GLM prompt markers override a false flag when tool guidance starts."""
         from vllm.reasoning import ReasoningParserManager
 
         reasoning = await self._reasoning_requested(

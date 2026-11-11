@@ -597,6 +597,7 @@ def _build_reasoning_parser_metadata(
     prompt_token_ids: list[int],
     model_config: Any = None,
 ) -> _ReasoningParserMetadata:
+    """Choose worker and response reasoning controls from request and prompt state."""
     if reasoning_parser_class is None:
         return _ReasoningParserMetadata(None, None, None)
 
@@ -990,6 +991,7 @@ class VllmProcessor:
     async def _generator_inner(
         self, request: dict[str, Any], context: Any | None = None
     ) -> AsyncGenerator[dict[str, Any], None]:
+        """Render a chat request, route generation, and parse each response choice."""
         request_id = random_uuid()
 
         _reject_unsupported_chat_logprobs(
@@ -1213,6 +1215,7 @@ class VllmProcessor:
                 # vLLM tool parsers keep mutable streaming state. Give every
                 # n>1 choice its own parser instead of reusing the parser that
                 # adjusted the shared request during preprocessing.
+                """Create independent parser state for one response choice."""
                 choice_tool_parser = (
                     self.tool_parser_class(self.tokenizer, request_for_sampling.tools)
                     if tool_parser is not None and self.tool_parser_class is not None

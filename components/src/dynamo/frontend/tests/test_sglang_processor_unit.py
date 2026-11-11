@@ -1581,12 +1581,14 @@ _GLM_CLOSED_GENERATION = "<think>\n\n</think>\n\n"
 
 
 def _glm_tokenizer(tokenizer, generation):
+    """Use a template that ignores flags so the prompt decides reasoning state."""
     glm = copy.copy(tokenizer)
     glm.chat_template = _GLM_PROMPT_TEMPLATE.replace("{{ GENERATION }}", generation)
     return glm
 
 
 def _glm_request(request_fields, chat_template_kwargs):
+    """Build a guided request whose thinking flags may disagree with its prompt."""
     return {
         **_mistral_guided_request("auto"),
         "reasoning_effort": None,
@@ -1608,6 +1610,7 @@ _GLM_GUIDED_REQUESTS = [
 def test_glm_reasoning_gate_follows_rendered_prompt(
     tokenizer, request_fields, prompt_open, requested
 ):
+    """A template that ignores thinking flags must still set the reasoning gate."""
     glm_tokenizer = _glm_tokenizer(
         tokenizer, _GLM_OPEN_GENERATION if prompt_open else _GLM_CLOSED_GENERATION
     )
@@ -1641,6 +1644,7 @@ def test_glm_reasoning_gate_follows_rendered_prompt(
 def test_glm_rendered_prompt_sets_reasoning_gate_inline(
     tokenizer, request_fields, generation, requested
 ):
+    """The inline processor must send the rendered reasoning state to the worker."""
     routed_engine = FakeRoutedEngine(items=[{"token_ids": [], "finish_reason": "stop"}])
     processor = SglangProcessor(
         tokenizer=_glm_tokenizer(tokenizer, generation),
@@ -1667,6 +1671,7 @@ def test_glm_rendered_prompt_sets_reasoning_gate_inline(
 def test_glm_rendered_prompt_sets_reasoning_gate_pool(
     tokenizer, request_fields, generation, requested, monkeypatch
 ):
+    """Pool preprocessing must use the same rendered reasoning state as inline."""
     monkeypatch.setattr(
         sglang_processor_module, "_w_tokenizer", _glm_tokenizer(tokenizer, generation)
     )
