@@ -1455,12 +1455,8 @@ func (r *dgdWorkerRolloutReconciler) buildRollingUpdateContext(
 	oldWorkerDCDReplicas := make(map[string]int32)
 	newWorkerReplicas := make(map[string]int32)
 
-	// Prefill and decode workers pair only within one worker generation's
-	// runtime namespace, so a new replica can serve only once every desired
-	// worker component has an available replica in the new generation. Until
-	// then, new availability must not be spent to retire old replicas, or an
-	// old decode can lose its only prefill peer while the new decode is still
-	// unschedulable.
+	// Workers pair only within one generation's runtime namespace: new replicas count as
+	// available once every desired worker component has one, so old decode keeps its prefill.
 	newStates := make(map[string]dcdComponentState)
 	newGenerationServes := true
 	for i := range dgd.Spec.Components {

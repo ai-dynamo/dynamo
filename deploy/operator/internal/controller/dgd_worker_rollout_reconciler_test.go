@@ -4967,10 +4967,8 @@ func TestBuildRollingUpdateContext(t *testing.T) {
 		},
 		{
 			name: "disagg - new prefill available, new decode unschedulable - keep old prefill",
-			// prefill and decode: desired=1, maxSurge=1, maxUnavailable=0
-			//   old: spec=1, available=1
+			// prefill and decode: desired=1, maxSurge=1, maxUnavailable=0; old: spec=1, available=1
 			// new prefill: spec=1, available=1 | new decode: spec=1, available=0 (Pending)
-			// The new prefill cannot serve without a new decode, so the old pair stays.
 			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				"prefill": {ComponentType: consts.ComponentTypePrefill, Replicas: new(int32(1))},
 				"decode":  {ComponentType: consts.ComponentTypeDecode, Replicas: new(int32(1))},
