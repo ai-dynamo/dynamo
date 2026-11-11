@@ -9500,63 +9500,96 @@ func TestGenerateGrovePodCliqueSet_IntraPodFailoverCheckpointTargets(t *testing.
 	assert.True(t, sawDecode, "test setup should produce the decode engine clique")
 }
 
-func TestGenerateGrovePodCliqueSet_WaitForCheckpointGatesPodCliqueScalingGroup(t *testing.T) {
-	dgd := &v1alpha1.DynamoGraphDeployment{
-		Name:      "test-dgd",
-		Namespace: "test-ns",
-		Spec: v1alpha1.DynamoGraphDeploymentSpec{
-			BackendFramework: "vllm",
-			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
-				"decode": {
-					ComponentType: commonconsts.ComponentTypeDecode,
-					Replicas:      new(int32(3)),
-					Resources: &v1alpha1.Resources{
-						Limits: &v1alpha1.ResourceItem{GPU: "1"},
-					},
-					Multinode: &v1alpha1.MultinodeSpec{NodeCount: 2},
-					Checkpoint: &v1alpha1.ServiceCheckpointConfig{
-						Enabled:       true,
-						StartupPolicy: v1alpha1.CheckpointStartupPolicyWaitForCheckpoint,
-					},
-				},
-			},
+// Grove v0.2.0-beta1 rejects PCS templates with replicas <= 0, minAvailable <= 0,
+// or minAvailable > replicas. A pending WaitForCheckpoint must keep a valid
+// template; the Grove scaler holds the live children at zero instead.
+func TestGenerateGrovePodCliqueSet_WaitForCheckpointKeepsPositiveTemplateSeed(t *testing.T) {
+	tests := []struct {
+		name              string
+		multinode         *v1alpha1.MultinodeSpec
+		wantScalingGroup  bool
+		wantCliqueReplica int32
+	}{
+		{
+			name:              "multinode scaling group",
+			multinode:         &v1alpha1.MultinodeSpec{NodeCount: 2},
+			wantScalingGroup:  true,
+			wantCliqueReplica: 1,
+		},
+		{
+			name:              "standalone clique",
+			wantCliqueReplica: 3,
 		},
 	}
 
-	converted := betaDGD(t, dgd)
-	got, err := GenerateGrovePodCliqueSet(
-		context.Background(),
-		converted, nil,
-		&configv1alpha1.OperatorConfiguration{Checkpoint: configv1alpha1.CheckpointConfiguration{Enabled: true}},
-		&controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true, DRA: true}},
-		nil,
-		nil,
-		nil,
-		nil,
-		false,
-		map[string]*checkpoint.CheckpointInfo{
-			"decode": {
-				Enabled:          true,
-				AutomaticCapture: true,
-				StartupPolicy:    v1alpha1.CheckpointStartupPolicyWaitForCheckpoint,
-			},
-		},
-	)
-	require.NoError(t, err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dgd := &v1alpha1.DynamoGraphDeployment{
+				Name:      "test-dgd",
+				Namespace: "test-ns",
+				Spec: v1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "vllm",
+					Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+						"decode": {
+							ComponentType: commonconsts.ComponentTypeDecode,
+							Replicas:      new(int32(3)),
+							Resources: &v1alpha1.Resources{
+								Limits: &v1alpha1.ResourceItem{GPU: "1"},
+							},
+							Multinode: tt.multinode,
+							Checkpoint: &v1alpha1.ServiceCheckpointConfig{
+								Enabled:       true,
+								StartupPolicy: v1alpha1.CheckpointStartupPolicyWaitForCheckpoint,
+							},
+						},
+					},
+				},
+			}
 
-	require.Len(t, got.Spec.Template.PodCliqueScalingGroupConfigs, 1)
-	pcsg := got.Spec.Template.PodCliqueScalingGroupConfigs[0]
-	require.NotNil(t, pcsg.Replicas)
-	assert.EqualValues(t, 0, *pcsg.Replicas)
-	require.NotNil(t, pcsg.MinAvailable)
-	assert.EqualValues(t, 1, *pcsg.MinAvailable)
-	for _, clique := range got.Spec.Template.Cliques {
-		if strings.Contains(clique.Name, "gms") {
-			continue
-		}
-		assert.EqualValues(t, 0, clique.Spec.Replicas, "clique %q should be gated", clique.Name)
-		require.NotNil(t, clique.Spec.MinAvailable)
-		assert.EqualValues(t, 1, *clique.Spec.MinAvailable, "clique %q should keep its configured minAvailable", clique.Name)
+			converted := betaDGD(t, dgd)
+			got, err := GenerateGrovePodCliqueSet(
+				context.Background(),
+				converted, nil,
+				&configv1alpha1.OperatorConfiguration{Checkpoint: configv1alpha1.CheckpointConfiguration{Enabled: true}},
+				&controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true, DRA: true}},
+				nil,
+				nil,
+				nil,
+				nil,
+				false,
+				map[string]*checkpoint.CheckpointInfo{
+					"decode": {
+						Enabled:          true,
+						AutomaticCapture: true,
+						StartupPolicy:    v1alpha1.CheckpointStartupPolicyWaitForCheckpoint,
+					},
+				},
+			)
+			require.NoError(t, err)
+
+			if tt.wantScalingGroup {
+				require.Len(t, got.Spec.Template.PodCliqueScalingGroupConfigs, 1)
+				pcsg := got.Spec.Template.PodCliqueScalingGroupConfigs[0]
+				require.NotNil(t, pcsg.Replicas)
+				assert.EqualValues(t, 3, *pcsg.Replicas)
+				require.NotNil(t, pcsg.MinAvailable)
+				assert.EqualValues(t, 1, *pcsg.MinAvailable)
+				assert.LessOrEqual(t, *pcsg.MinAvailable, *pcsg.Replicas)
+			} else {
+				assert.Empty(t, got.Spec.Template.PodCliqueScalingGroupConfigs)
+			}
+
+			require.NotEmpty(t, got.Spec.Template.Cliques)
+			for _, clique := range got.Spec.Template.Cliques {
+				if strings.Contains(clique.Name, "gms") {
+					continue
+				}
+				assert.EqualValues(t, tt.wantCliqueReplica, clique.Spec.Replicas, "clique %q template replicas", clique.Name)
+				require.NotNil(t, clique.Spec.MinAvailable)
+				assert.Positive(t, *clique.Spec.MinAvailable, "clique %q minAvailable", clique.Name)
+				assert.LessOrEqual(t, *clique.Spec.MinAvailable, clique.Spec.Replicas, "clique %q minAvailable must not exceed replicas", clique.Name)
+			}
+		})
 	}
 }
 

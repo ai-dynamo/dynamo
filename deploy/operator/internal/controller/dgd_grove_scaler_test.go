@@ -93,6 +93,61 @@ func TestGroveScaler_ReconcileTargetsExpectedGroveChildren(t *testing.T) {
 	assert.Equal(t, int32(0), gated.Spec.Replicas)
 }
 
+func TestGroveScaler_WaitForCheckpointHoldsAndReleasesGroveChildren(t *testing.T) {
+	dgd := betaDGD(t, &nvidiacomv1alpha1.DynamoGraphDeployment{
+		Name: "graph", Namespace: "default",
+		Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+			Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ComponentType: consts.ComponentTypeWorker,
+					Replicas:      new(int32(3)),
+					Multinode:     &nvidiacomv1alpha1.MultinodeSpec{NodeCount: 2},
+				},
+				"gated": {
+					ComponentType: consts.ComponentTypeWorker,
+					Replicas:      new(int32(2)),
+				},
+			},
+		},
+	})
+	// Grove creates the children from the positive PCS template seed.
+	worker := &grovev1alpha1.PodCliqueScalingGroup{Name: "graph-0-worker", Namespace: "default", Spec: grovev1alpha1.PodCliqueScalingGroupSpec{Replicas: 3}}
+	gated := &grovev1alpha1.PodClique{Name: "graph-0-gated", Namespace: "default", Spec: grovev1alpha1.PodCliqueSpec{Replicas: 2}}
+	kubeClient := fake.NewClientBuilder().
+		WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
+		WithRESTMapper(groveScaleRESTMapper()).
+		WithObjects(worker, gated).
+		WithInterceptorFuncs(groveScaleInterceptor(interceptor.Funcs{}, nil)).
+		Build()
+	checkpointInfos := func(ready bool) map[string]*checkpoint.CheckpointInfo {
+		infos := map[string]*checkpoint.CheckpointInfo{}
+		for _, name := range []string{"worker", "gated"} {
+			infos[name] = &checkpoint.CheckpointInfo{
+				Enabled:       true,
+				Ready:         ready,
+				StartupPolicy: nvidiacomv1alpha1.CheckpointStartupPolicyWaitForCheckpoint,
+			}
+		}
+		return infos
+	}
+
+	t.Log("Hold the live children at zero while the checkpoint is pending")
+	_, err := newGroveScaler(kubeClient).Reconcile(t.Context(), groveReconcileRequest{DGD: dgd}, checkpointInfos(false), false)
+	require.NoError(t, err)
+	require.NoError(t, kubeClient.Get(t.Context(), client.ObjectKeyFromObject(worker), worker))
+	require.NoError(t, kubeClient.Get(t.Context(), client.ObjectKeyFromObject(gated), gated))
+	assert.Equal(t, int32(0), worker.Spec.Replicas)
+	assert.Equal(t, int32(0), gated.Spec.Replicas)
+
+	t.Log("Release the live children to their desired replicas once the checkpoint is ready")
+	_, err = newGroveScaler(kubeClient).Reconcile(t.Context(), groveReconcileRequest{DGD: dgd}, checkpointInfos(true), false)
+	require.NoError(t, err)
+	require.NoError(t, kubeClient.Get(t.Context(), client.ObjectKeyFromObject(worker), worker))
+	require.NoError(t, kubeClient.Get(t.Context(), client.ObjectKeyFromObject(gated), gated))
+	assert.Equal(t, int32(3), worker.Spec.Replicas)
+	assert.Equal(t, int32(2), gated.Spec.Replicas)
+}
+
 func groveScaleInterceptor(funcs interceptor.Funcs, onUpdate func()) interceptor.Funcs {
 	funcs.SubResourceGet = func(
 		ctx context.Context,
