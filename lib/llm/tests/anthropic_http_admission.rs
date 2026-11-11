@@ -453,7 +453,7 @@ async fn message_threads_are_refused_before_generation() {
                     .unwrap();
                 let error =
                     assert_error(response, StatusCode::BAD_REQUEST, "invalid_request_error").await;
-                // The Anthropic SDKs resend the turn with the full conversation on this code.
+                // The Anthropic SDK tool runner resends the turn without `thread` on this code.
                 assert_eq!(
                     error["error"]["details"]["error_code"], "thread_unsupported_request",
                     "{path}: {error}"

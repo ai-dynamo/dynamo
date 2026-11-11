@@ -361,7 +361,7 @@ impl AnthropicHandlerError {
 
 /// A message thread keeps the conversation on the server, so a continue request carries only
 /// the new messages. No thread is kept here, so refuse one rather than answer from those alone,
-/// with the code on which the Anthropic SDKs resend the turn with the full conversation.
+/// with the code on which the Anthropic SDK tool runner resends the turn without `thread`.
 fn thread_unsupported_response() -> Response {
     super::openai::record_local_failure(ErrorClass::InvalidRequest);
     let mut body = serde_json::to_value(AnthropicErrorResponse::invalid_request(

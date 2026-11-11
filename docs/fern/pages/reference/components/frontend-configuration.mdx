@@ -936,8 +936,13 @@ Before conversion, the frontend validates these
   `interleaved-thinking-2025-05-14`. Budgets are invalid with `disabled`, `adaptive`,
   or `between_tools`. `between_tools` is accepted without enabling thinking before the first tool.
 - `top_k` must fit the backend's signed 32-bit field (at most 2,147,483,647).
+- `thread` ([message threads](https://platform.claude.com/docs/en/build-with-claude/message-threads))
+  is refused with `error.details.error_code: "thread_unsupported_request"`: the frontend keeps no
+  conversation between requests, so send the full conversation without `thread`. The Anthropic
+  SDK tool runner does so on that code, as does the thread helper with
+  `unsupported_request_behavior: "continue_unthreaded"`.
 
-For `system`, `metadata`, `tool_choice`, and `thinking`, `null` is treated as omission.
+For `system`, `metadata`, `tool_choice`, `thinking`, and `thread`, `null` is treated as omission.
 
 ### Infrastructure
 
