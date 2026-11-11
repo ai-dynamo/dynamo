@@ -1,0 +1,256 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Serve Slime Rollouts with Dynamo and SGLang
+subtitle: Run the SGLang engines that generate Slime's rollouts in a DynamoGraphDeployment
+---
+
+Slime normally launches its own SGLang engines. Here, a DynamoGraphDeployment (DGD) runs them, and Slime attaches to them as external engines. Slime reaches the engines on two paths:
+
+- **Generation** goes through the Dynamo frontend, which picks an engine for each request.
+- **Control** goes straight to each engine's native SGLang API on port 30000. Slime reads `/server_info` at startup. At each weight sync, it pauses generation, calls `/update_weights_from_disk`, and resumes generation.
+
+## Prerequisites
+
+- Complete [Installation and Setup](installation.mdx), which stages the model on the `slime-data` volume and sets `NAMESPACE`.
+- Have two free GPUs, one for each engine.
+
+## Deploy the Engines
+
+<Steps toc={true}>
+  <Step title="Create the engine Services" id="create-the-engine-services">
+
+Slime needs a fixed address for each engine. Create one Service per engine. Each Service selects the Pod of one DGD worker through the `dynamo.nvidia.com/slime-role` label, which the DGD in the next step sets:
+
+```bash
+kubectl apply -n "$NAMESPACE" -f - <<'EOF'
+apiVersion: v1
+kind: Service
+metadata:
+  name: slime-sglang-engine-0
+spec:
+  selector:
+    dynamo.nvidia.com/slime-role: worker-0
+  ports:
+    - name: sglang-http
+      port: 30000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: slime-sglang-engine-1
+spec:
+  selector:
+    dynamo.nvidia.com/slime-role: worker-1
+  ports:
+    - name: sglang-http
+      port: 30000
+EOF
+```
+
+The Dynamo operator also creates `slime-sglang-worker-0` and `slime-sglang-worker-1` Services, but those expose Dynamo's system port, 9090, not the SGLang API.
+
+<Warning>
+The engine Services expose SGLang administrative and weight-update APIs. Restrict access to them, for example with a NetworkPolicy that admits only the trainer Pods.
+</Warning>
+
+  </Step>
+  <Step title="Create the DynamoGraphDeployment" id="create-the-dynamographdeployment">
+
+Apply a DGD with one frontend and two SGLang workers:
+
+```bash
+kubectl apply -n "$NAMESPACE" -f - <<'EOF'
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: slime-sglang
+spec:
+  backendFramework: sglang
+  components:
+    - name: frontend
+      type: frontend
+      replicas: 1
+      podTemplate:
+        metadata:
+          labels:
+            dynamo.nvidia.com/slime-role: frontend
+        spec:
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.6.1
+              env:
+                - name: DYN_SGLANG_ENABLE_GENERATE
+                  value: "1"
+    - name: worker-0
+      type: worker
+      replicas: 1
+      podTemplate:
+        metadata:
+          labels:
+            dynamo.nvidia.com/slime-role: worker-0
+        spec:
+          volumes:
+            - name: slime-data
+              persistentVolumeClaim:
+                claimName: slime-data
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.6.1
+              command:
+                - python3
+                - -m
+                - sglang.launch_server
+              args:
+                - --model-path
+                - /data/models/Qwen3-0.6B
+                - --served-model-name
+                - Qwen/Qwen3-0.6B
+                - --host
+                - 0.0.0.0
+                - --port
+                - "30000"
+                - --grpc-port
+                - "30001"
+                - --incremental-streaming-output
+                - --sidecar
+                - dynamo.sglang.sidecar
+                - --sidecar-args
+                - '["--grpc-endpoint","http://127.0.0.1:30001"]'
+              resources:
+                requests:
+                  nvidia.com/gpu: "1"
+                limits:
+                  nvidia.com/gpu: "1"
+              volumeMounts:
+                - name: slime-data
+                  mountPath: /data
+              startupProbe:
+                httpGet:
+                  path: /health_generate
+                  port: 30000
+                periodSeconds: 5
+                timeoutSeconds: 5
+                failureThreshold: 60
+              readinessProbe:
+                httpGet:
+                  path: /health_generate
+                  port: 30000
+                periodSeconds: 10
+                timeoutSeconds: 5
+    - name: worker-1
+      type: worker
+      replicas: 1
+      podTemplate:
+        metadata:
+          labels:
+            dynamo.nvidia.com/slime-role: worker-1
+        spec:
+          volumes:
+            - name: slime-data
+              persistentVolumeClaim:
+                claimName: slime-data
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.6.1
+              command:
+                - python3
+                - -m
+                - sglang.launch_server
+              args:
+                - --model-path
+                - /data/models/Qwen3-0.6B
+                - --served-model-name
+                - Qwen/Qwen3-0.6B
+                - --host
+                - 0.0.0.0
+                - --port
+                - "30000"
+                - --grpc-port
+                - "30001"
+                - --incremental-streaming-output
+                - --sidecar
+                - dynamo.sglang.sidecar
+                - --sidecar-args
+                - '["--grpc-endpoint","http://127.0.0.1:30001"]'
+              resources:
+                requests:
+                  nvidia.com/gpu: "1"
+                limits:
+                  nvidia.com/gpu: "1"
+              volumeMounts:
+                - name: slime-data
+                  mountPath: /data
+              startupProbe:
+                httpGet:
+                  path: /health_generate
+                  port: 30000
+                periodSeconds: 5
+                timeoutSeconds: 5
+                failureThreshold: 60
+              readinessProbe:
+                httpGet:
+                  path: /health_generate
+                  port: 30000
+                periodSeconds: 10
+                timeoutSeconds: 5
+EOF
+```
+
+The two workers are identical except for their names and labels. The manifest sets up these parts of the integration:
+
+- **Frontend.** `DYN_SGLANG_ENABLE_GENERATE=1` adds SGLang's native streaming `/generate` route to the Dynamo frontend. Slime's streaming generator calls this route with token IDs. The operator exposes the frontend through the `slime-sglang-frontend` Service on port 8000.
+- **Engines.** Each worker runs unmodified `sglang.launch_server` on one GPU. `--sidecar dynamo.sglang.sidecar` makes SGLang start Dynamo's sidecar, which connects to the engine's gRPC port, 30001, and registers the engine with the frontend. Port 30000 stays SGLang's own HTTP API, which the engine Services expose.
+- **Weights.** Each engine loads `/data/models/Qwen3-0.6B`, the checkpoint that the trainer starts from, and reads later weight updates from the same `/data` mount. `--served-model-name` keeps the Hugging Face model name.
+- **Streaming.** `--incremental-streaming-output` makes each streamed chunk carry only the new tokens. It must match the `--sglang-incremental-streaming-output` flag that Slime gets.
+- **Probes.** `/health_generate` runs a short generation, so a worker becomes ready only when its engine can generate. The startup probe allows 5 minutes for the model to load.
+
+Keep every worker component at one replica. Slime treats each address as one engine, so each engine Service must reach exactly one Pod. To add engines, add components.
+
+  </Step>
+  <Step title="Wait for the engines" id="wait-for-the-engines">
+
+```bash
+kubectl wait -n "$NAMESPACE" --for=condition=Ready dgd/slime-sglang --timeout=15m
+```
+
+```text
+dynamographdeployment.nvidia.com/slime-sglang condition met
+```
+
+The first start pulls the SGLang runtime image, which is about 14 GB. With the image cached, the DGD is ready in about a minute. Startup probe failures are normal while the engines load the model.
+
+If the worker Pods stay in `ContainerCreating`, check the volume. The operator runs DGD Pods with `fsGroup: 1000`. With some CSI drivers, kubelet then changes the group of every file on the volume before the Pod starts, which takes a long time on a volume with many files. Use a new volume for these pages.
+
+Then check the three addresses that the trainer uses, from inside the namespace. The SGLang runtime image includes `curl`:
+
+```bash
+ENGINE_POD=$(kubectl get pod -n "$NAMESPACE" -l dynamo.nvidia.com/slime-role=worker-0 -o name)
+for url in slime-sglang-engine-0:30000/health_generate \
+           slime-sglang-engine-1:30000/health_generate \
+           slime-sglang-frontend:8000/health; do
+  echo "$url -> $(kubectl exec -n "$NAMESPACE" "$ENGINE_POD" -- curl -s -o /dev/null -w '%{http_code}' "http://$url")"
+done
+```
+
+```text
+slime-sglang-engine-0:30000/health_generate -> 200
+slime-sglang-engine-1:30000/health_generate -> 200
+slime-sglang-frontend:8000/health -> 200
+```
+
+  </Step>
+</Steps>
+
+## Routing
+
+The frontend uses its default round-robin routing, the only routing mode tested with Slime. Slime samples each prompt several times, so many requests in a batch share a prefix. To decide whether KV-aware routing suits your rollouts, see [KV-Aware Load Balancing for RL Rollouts](../routing.md). KV-aware routing needs KV events from the engines, which this DGD doesn't turn on. The SGLang sidecar's [KV router manifest](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/sglang/deploy/agg_kv_router.yaml) shows the frontend and engine settings.
+
+## Current Limitations
+
+- The engine set is fixed. Each engine needs its own worker component with one replica and its own Service, and Slime reads the engine addresses only at startup. To add engines, add components and restart Slime.
+- Slime doesn't recover an external engine. If Kubernetes restarts or replaces an engine Pod, restart the training job.
+
+## Next Steps
+
+[Train with Slime on KubeRay](train.mdx) to run the GRPO job that sends its rollouts to these engines.
