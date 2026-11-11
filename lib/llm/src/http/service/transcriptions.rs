@@ -365,6 +365,7 @@ mod tests {
         http::{Request, header::CONTENT_TYPE},
     };
     use bytes::Bytes;
+    use dynamo_runtime::config::environment_names::llm as env_llm;
     use tower::ServiceExt;
 
     fn multipart_body(audio: &[u8], closed: bool) -> Vec<u8> {
@@ -378,21 +379,15 @@ mod tests {
         body
     }
 
-    /// Parse the form behind `body_limit`, streamed without a Content-Length.
-    async fn parse_status(body: Vec<u8>, body_limit: usize) -> (StatusCode, serde_json::Value) {
-        let app = Router::new()
-            .route(
-                "/",
-                post(|multipart: Multipart| async move {
-                    match TranscriptionForm::parse(multipart).await {
-                        Ok(_) => StatusCode::OK.into_response(),
-                        Err(error) => error.into_response(),
-                    }
-                }),
-            )
-            .layer(DefaultBodyLimit::max(body_limit));
+    /// Post `body` to `app` in `chunk_size` pieces, streamed without a Content-Length.
+    async fn post_form(
+        app: Router,
+        uri: &str,
+        body: Vec<u8>,
+        chunk_size: usize,
+    ) -> (StatusCode, serde_json::Value) {
         let chunks = body
-            .chunks(17)
+            .chunks(chunk_size)
             .map(Bytes::copy_from_slice)
             .map(Ok::<_, std::io::Error>)
             .collect::<Vec<_>>();
@@ -400,7 +395,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/")
+                    .uri(uri)
                     .header(CONTENT_TYPE, "multipart/form-data; boundary=audio-boundary")
                     .body(Body::from_stream(futures::stream::iter(chunks)))
                     .unwrap(),
@@ -415,6 +410,48 @@ mod tests {
             status,
             serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
         )
+    }
+
+    /// Parse the form behind `body_limit`.
+    async fn parse_status(body: Vec<u8>, body_limit: usize) -> (StatusCode, serde_json::Value) {
+        let app = Router::new()
+            .route(
+                "/",
+                post(|multipart: Multipart| async move {
+                    match TranscriptionForm::parse(multipart).await {
+                        Ok(_) => StatusCode::OK.into_response(),
+                        Err(error) => error.into_response(),
+                    }
+                }),
+            )
+            .layer(DefaultBodyLimit::max(body_limit));
+        post_form(app, "/", body, 17).await
+    }
+
+    /// Drives the real route in memory. Over TCP the server resets the connection while the
+    /// client is still uploading, and the reset can drop the 413 body before the client reads it.
+    #[tokio::test]
+    async fn upload_too_large_for_the_request_plane_returns_payload_too_large() {
+        // Clear any lowered HTTP body limit; tests that set it hold the same temp_env lock.
+        temp_env::async_with_vars([(env_llm::DYN_HTTP_BODY_LIMIT_MB, None::<&str>)], async {
+            let state = service_v2::HttpService::builder()
+                .build()
+                .unwrap()
+                .state_clone();
+            let (_, app) = transcriptions_router(state, None);
+            // Under the default HTTP body limit, but too large once base64-encoded for the
+            // request plane's default 32 MiB frame.
+            let body = multipart_body(&vec![1; 24 * 1024 * 1024], true);
+            let (status, error) = post_form(app, "/v1/audio/transcriptions", body, 64 * 1024).await;
+            assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+            assert!(
+                error["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("transcription limit")),
+                "unexpected 413 body: {error}"
+            );
+        })
+        .await;
     }
 
     #[tokio::test]
