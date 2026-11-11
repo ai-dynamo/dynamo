@@ -730,7 +730,7 @@ navigation:
               - section: Slime Integration
                 contents:
                   - page: Overview
-                    path: pages/use-cases/reinforcement-learning/slime/overview.md
+                    path: pages/use-cases/reinforcement-learning/slime/overview.mdx
                   - page: Installation
                     path: pages/use-cases/reinforcement-learning/slime/installation.mdx
                   - page: Tutorial
