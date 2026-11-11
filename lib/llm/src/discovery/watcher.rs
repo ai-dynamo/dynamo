@@ -2292,7 +2292,7 @@ mod tests {
         let manager = Arc::new(ModelManager::new());
         let (events, task) =
             watch_test_cards(drt.clone(), manager.clone(), RouterConfig::default());
-        for namespace in ["dgd-v1", "dgd-v2"] {
+        for (namespace, kv_cache_block_size) in [("dgd-v1", 16), ("dgd-v2", 32)] {
             let endpoint = drt
                 .namespace(namespace)
                 .unwrap()
@@ -2305,6 +2305,7 @@ mod tests {
             card.model_type = ModelType::Chat;
             card.worker_type = Some(WorkerType::Aggregated);
             card.source_path = Some(format!("/models/{namespace}"));
+            card.kv_cache_block_size = kv_cache_block_size;
             apply_discovery_event(
                 &events,
                 discovered_card(namespace, drt.discovery().instance_id(), &card),
@@ -2318,7 +2319,9 @@ mod tests {
         assert_eq!(model.worker_set_count(), 2);
         assert!(model.is_workers_ready("dgd-v1"));
         assert!(model.is_workers_ready("dgd-v2"));
-        assert_eq!(manager.get_model_cards().len(), 2);
+        let cards = manager.get_model_cards();
+        assert_eq!(cards.len(), 2);
+        assert_ne!(cards[0].mdcsum(), cards[1].mdcsum());
         drop(events);
         task.await.unwrap();
         runtime.shutdown();
