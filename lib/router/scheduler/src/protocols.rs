@@ -243,7 +243,7 @@ pub enum RouterResponse {
         overlap_blocks: u32,
     },
     QueueRejected {
-        rejection: dynamo_admission::queue::QueueRejection,
+        rejection: dynamo_admission::QueueRejection,
     },
     PrefillMarked {
         success: bool,

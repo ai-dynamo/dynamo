@@ -102,7 +102,7 @@ fn extension_blocks(extension: Option<&LowerTierMatchDetails>, worker: WorkerWit
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dynamo_kv_indexer::overlap::OverlapScores;
+    use dynamo_kv_indexer::OverlapScores;
     use dynamo_kv_indexer::{LowerTierMatchDetails, MatchDetails};
 
     #[test]

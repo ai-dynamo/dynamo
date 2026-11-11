@@ -17,11 +17,17 @@ pub use crate::backend::{Indexer, IndexerPolicy, RemotePrimary, SideIndexer};
 pub use crate::branch_sharded::BranchShardedIndexer;
 pub use crate::concurrent_radix_tree_compressed::ConcurrentRadixTreeCompressed;
 pub use crate::config::ApproximateCachePolicyKind;
+pub use crate::kv_hints::{KvTransferCandidateSource, KvTransferCandidates};
 pub use crate::kv_indexer::KvIndexer;
 pub use crate::local::LocalKvIndexer;
 pub use crate::lower_tier::LowerTierMatchDetails;
 pub use crate::lower_tier_indexers::{
     LowerTierIndexers, LowerTierQueryOptions, TieredMatchDetails, query_lower_tiers_with_options,
+};
+#[cfg(feature = "export")]
+pub use crate::metrics::{
+    CKF_MUTATION_HELP, CKF_MUTATION_LABELS, KV_CACHE_EVENT_WARNINGS_HELP,
+    KV_CACHE_EVENT_WARNINGS_LABELS, KV_CACHE_EVENTS_APPLIED_HELP, KV_CACHE_EVENTS_APPLIED_LABELS,
 };
 pub use crate::metrics::{
     KvIndexerMetrics, METRIC_EVENT_STORED, METRIC_STATUS_PARENT_NOT_FOUND,

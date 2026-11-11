@@ -45,7 +45,25 @@ pub mod server;
 #[cfg(all(feature = "http", feature = "peer-recovery"))]
 pub use run::{IndexerConfig, parse_workers, run_server};
 
-pub use dynamo_kv_indexer::{backend, lookup, recording, session_updates};
+/// The indexer stage's ingest backend at the path this service has always exposed it under.
+pub mod backend {
+    pub use dynamo_kv_indexer::{
+        Indexer, IndexerPolicy, PrimaryRetention, RemotePrimary, SideIndexer, create_indexer,
+        create_indexer_with_metrics, create_indexer_with_policy,
+    };
+}
+/// The indexer stage's lookup input at the path this service has always exposed it under.
+pub mod lookup {
+    pub use dynamo_kv_indexer::HashInput;
+}
+/// The indexer stage's routing-decision recording at the path this service has always exposed it under.
+pub mod recording {
+    pub use dynamo_kv_indexer::ApproximateRequestLease;
+}
+/// The indexer stage's session update sender at the path this service has always exposed it under.
+pub mod session_updates {
+    pub use dynamo_kv_indexer::SessionUpdateSender;
+}
 
 use crate::services::common::zmq::validate_endpoint as validate_zmq_endpoint;
 

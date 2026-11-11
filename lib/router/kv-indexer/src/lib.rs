@@ -53,38 +53,38 @@
 //! This module provides a scalable and efficient way to manage and retrieve data blocks for LLM inference, leveraging a global KV cache to optimize performance.
 
 mod active_set;
-pub mod api;
+mod api;
 mod approximate_lru;
-pub mod backend;
+mod backend;
 mod branch_sharded;
 mod compressed_radix;
-pub mod concurrent_radix_tree_compressed;
-pub mod config;
+mod concurrent_radix_tree_compressed;
+mod config;
 pub mod cuckoo;
-pub mod delegate;
+mod delegate;
 pub mod host;
-pub mod identity;
-pub mod kv_hints;
+mod identity;
+mod kv_hints;
 mod kv_indexer;
 mod local;
-pub mod lookup;
+mod lookup;
 mod lower_tier;
 mod lower_tier_indexers;
-pub mod metrics;
+mod metrics;
 #[cfg(test)]
 mod mm_exclusion_tests;
 #[cfg(feature = "bench")]
 mod observation;
-pub mod overlap;
-pub mod positional;
+mod overlap;
+mod positional;
 mod prelude;
-pub mod pruning;
-pub mod radix_tree;
-pub mod recording;
-pub mod registry;
-pub mod residency;
-pub mod session_prefix_index;
-pub mod session_updates;
+mod pruning;
+mod radix_tree;
+mod recording;
+mod registry;
+mod residency;
+mod session_prefix_index;
+mod session_updates;
 mod shard_handle;
 #[cfg(any(test, feature = "testing", feature = "bench"))]
 pub mod testing;
@@ -135,14 +135,29 @@ pub use approximate_lru::{
     ApproximateLruLease, ApproximateLruReleaseAck, ApproximateLruReply, ApproximateLruStats,
     ApproximateLruTask, ApproximateRetentionConfig,
 };
+pub use backend::{
+    Indexer, IndexerPolicy, PrimaryRetention, RemotePrimary, SideIndexer, create_indexer,
+    create_indexer_with_metrics, create_indexer_with_policy,
+};
 // The deprecated alias stays exported for the pre-split paths in `dynamo-kv-router`'s compat list.
 #[allow(deprecated)]
 pub use branch_sharded::AnchorAwareBranchShardedIndexer;
 pub use branch_sharded::BranchShardedIndexer;
 pub use concurrent_radix_tree_compressed::ConcurrentRadixTreeCompressed;
+pub use config::{ApproximateCachePolicyKind, IndexerConfig};
 pub use delegate::{HashLifecycle, KvIndexerDelegate};
+pub use identity::{
+    CanonicalIdentityMaterial, ExplicitIdentityMap, IdentitySpecError, IndexerIdentitySpec,
+    MAX_EXPLICIT_IDENTITY_ENTRIES, MAX_EXPLICIT_IDENTITY_KEY_BYTES,
+    MAX_EXPLICIT_IDENTITY_VALUE_BYTES,
+};
+pub use kv_hints::{
+    CacheOwnerKvTransferKeys, KvTransferCandidateSource, KvTransferCandidates,
+    KvTransferSourceInterval, label_key, topology_keys,
+};
 pub use kv_indexer::{KvEventSender, KvIndexer, KvIndexerBuilder};
 pub use local::LocalKvIndexer;
+pub use lookup::HashInput;
 pub use lower_tier::{
     KvTransferExtensions, LowerTierContinuation, LowerTierIndexer, LowerTierMatchDetails,
 };
@@ -167,9 +182,23 @@ pub use observation::{
     ObservationSeal, ObservedEnqueueReceipt, ThreadPoolObservationPlan,
     ThreadPoolObservationSnapshot, WorkerObservationState,
 };
+pub use overlap::OverlapScores;
+pub use positional::{
+    DYN_ROUTER_POSITIONAL_SEARCH_MODE, LevelIndex, PositionalIndexer, SearchMode,
+};
+pub use pruning::{BlockEntry, PruneConfig, PruneManager, WorkerPruneManager};
 pub use radix_tree::RadixTree;
-pub use residency::RouterHintSourceMetadata;
-pub use session_prefix_index::{SessionPrefixIndexer, SessionResidencyOwner, SharedCacheBackend};
+pub use recording::ApproximateRequestLease;
+pub use registry::{IndexClaimError, IndexRegistry, IndexerEntry, LifecycleGuard};
+pub use residency::{
+    ResidencyOwnerKey, ResidencyOwnerKeyExt, ResidencyProjection, ResidencyProjectionError,
+    ResidencyRoutingSnapshot, ResolvedRouterHintSource, RouterHintSourceMetadata,
+};
+pub use session_prefix_index::{
+    LogicalNode, NodeId, SessionId, SessionPrefixIndexError, SessionPrefixIndexer,
+    SessionResidencyOwner, SharedCacheBackend,
+};
+pub use session_updates::SessionUpdateSender;
 pub use thread_pool::ThreadPoolIndexer;
 #[cfg(feature = "bench")]
 pub use thread_pool::{

@@ -8,6 +8,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+use dynamo_router_protocol::identity::IdentitySource;
 use serde::de::{Error as _, MapAccess, Visitor};
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -15,13 +16,6 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 pub const MAX_EXPLICIT_IDENTITY_ENTRIES: usize = 32;
 pub const MAX_EXPLICIT_IDENTITY_KEY_BYTES: usize = 128;
 pub const MAX_EXPLICIT_IDENTITY_VALUE_BYTES: usize = 1024;
-
-/// Routing group used when a request does not specify one.
-pub use dynamo_router_protocol::identity::{
-    CacheOwnerId, CacheSemanticsId, ClusterId, DEFAULT_ROUTING_GROUP, IdentityParseError,
-    IdentitySource, IndexerDomainId, PoolId, RoutingPartitionId, RoutingPartitionRef,
-    RoutingScopeId, StableDpSlotId,
-};
 
 const CACHE_SEMANTICS_DEFAULT_V1: &[u8] = b"dynamo/indexer-cache-semantics/default/v1";
 const CACHE_SEMANTICS_EXPLICIT_V1: &[u8] = b"dynamo/indexer-cache-semantics/explicit/v1";
@@ -264,6 +258,10 @@ mod tests {
     use std::collections::HashSet;
 
     use super::*;
+    use dynamo_router_protocol::identity::{
+        CacheOwnerId, CacheSemanticsId, ClusterId, IndexerDomainId, PoolId, RoutingPartitionId,
+        RoutingPartitionRef, RoutingScopeId, StableDpSlotId,
+    };
 
     #[test]
     fn routing_partition_identity_matches_registry_key_semantics() {

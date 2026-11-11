@@ -5,6 +5,8 @@
 //! [`KvIndexerInterface`]. Enabled by `cfg(test)`, `testing`, or `bench`.
 
 use crate::KvIndexerInterface;
+#[cfg(any(test, feature = "testing"))]
+pub use crate::backend::test_util::store_event;
 use crate::prelude::{
     ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData,
     KvCacheStoredBlockData, LocalBlockHash, OverlapScores, RouterEvent, WorkerId, WorkerWithDpRank,

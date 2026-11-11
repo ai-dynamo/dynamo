@@ -33,11 +33,11 @@ use crate::types::RejectThresholdsProvider;
 use dynamo_admission::PolicyProfile;
 #[cfg(test)]
 use dynamo_admission::RouterQueuePolicy;
-use dynamo_admission::classifier::{ClassifyRequest, RequestClassifier};
-use dynamo_admission::classifier::{RequestClassifierRuntime, RequestLifecycle};
+use dynamo_admission::{ClassifyRequest, RequestClassifier};
+use dynamo_admission::{RequestClassifierRuntime, RequestLifecycle};
 use dynamo_kv_hashing::LocalBlockHash;
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
-use dynamo_slot_tracker::topology::WorkerDpRange;
+use dynamo_slot_tracker::WorkerDpRange;
 use dynamo_slot_tracker::{
     ActiveSequencesMultiWorker, LifecycleMutationOutcome, PrefillCompletion, PrefillTokenDeltas,
     SequenceError, SequencePublisher, SequenceRequest,
@@ -981,11 +981,11 @@ mod tests {
     use crate::PrefillLoadEstimator;
     use crate::selector::DefaultWorkerSelector;
     use crate::test_utils::{NoopSequencePublisher, SimpleWorkerConfig};
-    use dynamo_admission::classifier::ClassifyFuture;
-    use dynamo_admission::classifier::WorkerView;
+    use dynamo_admission::ClassifyFuture;
+    use dynamo_admission::WorkerView;
+    use dynamo_slot_tracker::BusyThresholds;
     use dynamo_slot_tracker::SequenceSubscriber;
-    use dynamo_slot_tracker::busy::BusyThresholds;
-    use dynamo_slot_tracker::wire::{ActiveSequenceEvent, ActiveSequenceEventData};
+    use dynamo_slot_tracker::{ActiveSequenceEvent, ActiveSequenceEventData};
 
     struct TestSequenceSubscriber {
         rx: mpsc::UnboundedReceiver<ActiveSequenceEvent>,
@@ -1021,7 +1021,7 @@ mod tests {
                     token_sequence: None,
                     track_prefill_tokens: true,
                     expected_output_tokens: None,
-                    prefill_load_hint: Some(dynamo_slot_tracker::wire::PrefillLoadHint {
+                    prefill_load_hint: Some(dynamo_slot_tracker::PrefillLoadHint {
                         initial_effective_prefill_tokens: 64,
                         expected_prefill_duration: None,
                     }),
@@ -1581,7 +1581,7 @@ mod tests {
                 token_sequence: None,
                 track_prefill_tokens: true,
                 expected_output_tokens: None,
-                prefill_load_hint: Some(dynamo_slot_tracker::wire::PrefillLoadHint {
+                prefill_load_hint: Some(dynamo_slot_tracker::PrefillLoadHint {
                     initial_effective_prefill_tokens: 64,
                     expected_prefill_duration: None,
                 }),

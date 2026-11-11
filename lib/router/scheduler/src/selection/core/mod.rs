@@ -40,19 +40,19 @@ use crate::{
     WorkerAvailabilityProvider, effective_prefill_tokens, prefill_load_hint_from_effective_tokens,
 };
 use dynamo_kv_hashing::LocalBlockHash;
-use dynamo_kv_indexer::backend::{Indexer, IndexerPolicy};
-use dynamo_kv_indexer::registry::IndexRegistry;
+use dynamo_kv_indexer::IndexRegistry;
+use dynamo_kv_indexer::{Indexer, IndexerPolicy};
 use dynamo_kv_indexer::{LowerTierQueryOptions, RoutingDecisionHashes, TieredMatchDetails};
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 use dynamo_session_affinity::WorkerAffinityTarget;
-use dynamo_slot_tracker::wire::PrefillLoadHint;
+use dynamo_slot_tracker::PrefillLoadHint;
 use dynamo_slot_tracker::{
     ActiveSequencesMultiWorker, LifecycleMutationOutcome, ReplicaRequestLeaseObserver,
     ReplicaWorkerPolicy, SequenceRequest, SequenceTrackerOptions, active_request_expiry_duration,
 };
 use dynamo_worker_selection::SharedCacheHits;
 use dynamo_worker_selection::WorkerInputs;
-use dynamo_worker_selection::lora_filter::{LoraWorkerFilter, narrow_allowed_worker_ids_by_lora};
+use dynamo_worker_selection::{LoraWorkerFilter, narrow_allowed_worker_ids_by_lora};
 
 mod hint;
 mod operation;

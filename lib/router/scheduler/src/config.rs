@@ -15,10 +15,10 @@ use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 
 use dynamo_admission::{PolicyClassConfig, PolicyProfile};
+use dynamo_worker_selection::ConditionalDisaggConfig;
 use dynamo_worker_selection::SelectionConfig;
-use dynamo_worker_selection::conditional_disagg::ConditionalDisaggConfig;
 
-use dynamo_worker_selection::selection_config::{
+use dynamo_worker_selection::{
     default_disk_cache_hit_weight, default_host_cache_hit_weight, validate_finite_non_negative,
     validate_overlap_score_credit, validate_range,
 };

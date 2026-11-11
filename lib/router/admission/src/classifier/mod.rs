@@ -25,7 +25,7 @@ use dynamo_router_protocol::columns::WorkerInputs;
 use dynamo_router_protocol::session::SessionContext;
 use dynamo_router_protocol::worker::WorkerWithDpRank;
 use dynamo_session_affinity::WorkerAffinityTarget;
-use dynamo_slot_tracker::busy::BusyThresholds;
+use dynamo_slot_tracker::BusyThresholds;
 
 use crate::profile::PolicyProfile;
 use crate::queue::QueueSnapshot;

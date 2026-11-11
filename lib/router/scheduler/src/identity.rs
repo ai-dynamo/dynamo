@@ -13,7 +13,7 @@ pub use dynamo_router_protocol::identity::{
     RoutingScopeId, StableDpSlotId,
 };
 
-pub use dynamo_kv_indexer::identity::{
+pub use dynamo_kv_indexer::{
     CanonicalIdentityMaterial, ExplicitIdentityMap, IdentitySpecError, IndexerIdentitySpec,
     MAX_EXPLICIT_IDENTITY_ENTRIES, MAX_EXPLICIT_IDENTITY_KEY_BYTES,
     MAX_EXPLICIT_IDENTITY_VALUE_BYTES,

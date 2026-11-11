@@ -19,8 +19,8 @@ use parking_lot::Mutex;
 use tokio::sync::watch;
 
 use crate::backend::{Indexer, IndexerPolicy, create_indexer_with_policy};
-use crate::identity::RoutingPartitionId;
 use crate::metrics::KvIndexerMetrics;
+use dynamo_router_protocol::identity::RoutingPartitionId;
 
 /// A partition's indexer and the block size it was created for.
 pub struct IndexerEntry {

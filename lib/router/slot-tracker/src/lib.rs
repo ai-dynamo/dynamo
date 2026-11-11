@@ -13,12 +13,12 @@
 //! adapters. Depends only on `dynamo-router-protocol` among router crates.
 
 mod block_tracker;
-pub mod booking;
-pub mod busy;
+mod booking;
+mod busy;
 mod cleanup;
 mod compressed_path_arena;
 pub mod host;
-pub mod multi_worker;
+mod multi_worker;
 mod prefill_tracker;
 mod prelude;
 mod prompt_membership_trie;
@@ -26,19 +26,27 @@ mod prompt_registry;
 mod replica_sync;
 mod request_maps;
 mod sharded_lock;
-pub mod single;
-pub mod topology;
-pub mod wire;
+mod single;
+mod topology;
+mod wire;
 
+pub use booking::SchedulerBookingDescriptor;
+pub use busy::{BusyRanksExt, BusyThresholds, FullRankCounts, RankLoad};
 pub use multi_worker::{
     ActiveSequencesMultiWorker, LifecycleMutationOutcome, LocalWorkerLoad, NoopSequencePublisher,
-    ReplicaRequestLeaseObserver, ReplicaWorkerPolicy, SchedulerLoadSnapshot, SequenceError,
-    SequencePublishQueueError, SequencePublisher, SequenceRequest, SequenceSubscriber,
-    SequenceTrackerOptions, active_request_expiry_duration,
+    RateLimitedFailureLog, ReplicaRequestLeaseObserver, ReplicaWorkerPolicy, SchedulerLoadSnapshot,
+    SequenceError, SequencePublishQueueError, SequencePublisher, SequenceRequest,
+    SequenceSubscriber, SequenceTrackerOptions, active_request_expiry_duration,
 };
 pub use prefill_tracker::PrefillTokenDeltas;
 pub use prompt_registry::WorkerLoadReader;
 pub use prompt_registry::{PotentialLoadMaps, WorkerLoadProjection};
 pub use single::{
     ActiveSequences, DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION, PrefillCompletion, RequestId,
+};
+pub use topology::{MAX_DATA_PARALLEL_RANKS_PER_WORKER, WorkerDpRange, WorkerTopologyError};
+pub use wire::{
+    ActiveBlockEvent, ActiveBlockEventData, ActiveSequenceEvent, ActiveSequenceEventBatch,
+    ActiveSequenceEventData, MAX_REPLICA_BATCH_DURATION, MAX_REPLICA_BATCH_EVENTS, PrefillEvent,
+    PrefillEventData, PrefillLoadHint, SchedulerGroup, SchedulerLoad,
 };

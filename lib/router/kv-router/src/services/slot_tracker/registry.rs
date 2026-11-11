@@ -13,14 +13,12 @@ use tokio_util::sync::CancellationToken;
 use dynamo_router_protocol::identity::RoutingPartitionId;
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 use dynamo_scheduler::protocols::PotentialLoad;
-use dynamo_slot_tracker::single::PrefillCompletion;
-use dynamo_slot_tracker::topology::{
-    MAX_DATA_PARALLEL_RANKS_PER_WORKER, WorkerDpRange, WorkerTopologyError,
-};
-use dynamo_slot_tracker::wire::PrefillLoadHint;
+use dynamo_slot_tracker::PrefillCompletion;
+use dynamo_slot_tracker::PrefillLoadHint;
 use dynamo_slot_tracker::{
     ActiveSequencesMultiWorker, ReplicaWorkerPolicy, SequenceError, SequenceRequest,
 };
+use dynamo_slot_tracker::{MAX_DATA_PARALLEL_RANKS_PER_WORKER, WorkerDpRange, WorkerTopologyError};
 
 use dynamo_scheduler::replication::{
     ReplicaInbox, ReplicaSyncConfig, ScopedReplicaEvent, ScopedSequencePublisher,
@@ -496,7 +494,7 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::*;
-    use dynamo_slot_tracker::wire::{ActiveSequenceEvent, ActiveSequenceEventData};
+    use dynamo_slot_tracker::{ActiveSequenceEvent, ActiveSequenceEventData};
 
     fn registry() -> SlotTrackerRegistry {
         SlotTrackerRegistry::new(CancellationToken::new())
