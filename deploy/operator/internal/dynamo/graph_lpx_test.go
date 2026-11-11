@@ -29,7 +29,7 @@ func TestBackendDetectionSkipsNonWorkers(t *testing.T) {
 		t.Run(componentType, func(t *testing.T) {
 			t.Log("Ignore ambiguous GPU commands and explicit backends for non-workers")
 			backend, err := determineBackendFramework(componentType, nil,
-				[]string{"python -m dynamo.vllm; python -m dynamo.sglang"}, "trtllm")
+				[]string{"python -m dynamo.vllm; python -m dynamo.sglang"}, "trtllm", true)
 			require.NoError(t, err)
 			require.Equal(t, BackendFrameworkNoop, backend)
 		})
