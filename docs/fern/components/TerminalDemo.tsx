@@ -31,6 +31,8 @@
  *     startAt / endAt     play only a slice; endAt loops back to startAt
  *     idleTimeLimit       cap any idle gap in seconds; kills dead air
  *     speed               above 1 plays faster
+ *     chrome              "dynamo" (landing-page product bar) or "macos"
+ *     theme               "fern-code" matches the site's code blocks
  *
  * GETTING THE CAST (deferred — not wired to a page yet):
  *   The recording lives on asciinema.org, not in the repo. Pull it local:
@@ -62,6 +64,23 @@ const CSS_ELEMENT_ID = "asciinema-player-css";
 const JS_ELEMENT_ID = "asciinema-player-js";
 
 type FitMode = "width" | "height" | "both" | false;
+type ChromeStyle = "dynamo" | "macos";
+type ColorScheme = "light" | "dark";
+
+/** Track the site's light or dark mode, which Fern sets as a class on <html>. */
+function useSiteColorScheme(enabled: boolean): ColorScheme | null {
+  const [scheme, setScheme] = useState<ColorScheme | null>(null);
+  useEffect(() => {
+    if (!enabled || typeof document === "undefined") return;
+    const root = document.documentElement;
+    const read = () => setScheme(root.classList.contains("dark") ? "dark" : "light");
+    read();
+    const observer = new MutationObserver(read);
+    observer.observe(root, { attributes: true, attributeFilter: ["class"] });
+    return () => observer.disconnect();
+  }, [enabled]);
+  return scheme;
+}
 
 export interface TerminalDemoProps {
   /**
@@ -87,7 +106,12 @@ export interface TerminalDemoProps {
   autoPlay?: boolean;
   /** Show the control bar. Default false for a clean hero. */
   controls?: boolean;
-  /** Force a named player theme (asciinema | dracula | monokai | nord | solarized-dark | solarized-light | tango). Omit to use the cast's embedded term.theme palette. */
+  /**
+   * Force a named player theme: one of the player's own (asciinema | dracula |
+   * monokai | nord | solarized-dark | solarized-light | tango), or "fern-code",
+   * defined below, which follows the site's light and dark mode. Omit to use
+   * the cast's embedded term.theme palette.
+   */
   theme?: string;
   /** Poster frame, e.g. "npt:0:04" or a data URL. */
   poster?: string;
@@ -96,8 +120,14 @@ export interface TerminalDemoProps {
   rows?: number;
   /** How the player scales to its container. Default "width". */
   fit?: FitMode;
-  /** Render the Dynamo product title bar. Default true. */
+  /** Render the window title bar. Default true. */
   titleBar?: boolean;
+  /**
+   * Window style. "dynamo" is the landing page's product bar. "macos" is a
+   * plain macOS window in the style of the community calendar, light or dark
+   * with the site. Default "dynamo".
+   */
+  chrome?: ChromeStyle;
   /** Optional centered caption in the title bar (e.g. a command or hostname). */
   title?: string;
   /** Escape hatch: extra asciinema-player options merged last. */
@@ -165,6 +195,7 @@ export function TerminalDemo({
   rows,
   fit = "width",
   titleBar = true,
+  chrome = "dynamo",
   title,
   extraOptions,
   className,
@@ -172,8 +203,18 @@ export function TerminalDemo({
   const containerRef = useRef<HTMLDivElement>(null);
   const [showControls, setShowControls] = useState(controls);
   const [loaded, setLoaded] = useState(false);
+  const isMacos = chrome === "macos";
+  // The player reads a CSS theme's colors once, when it mounts. A named theme
+  // can change with the site's light and dark mode, so the player is rebuilt
+  // on each switch and resumes where the old one was.
+  const scheme = useSiteColorScheme(Boolean(theme));
+  const resumeRef = useRef<{ src: string; time: number } | null>(null);
 
   useEffect(() => {
+    // Mount a themed player only once the site's mode is known, so it never
+    // starts with the other mode's palette.
+    if (theme && scheme === null) return;
+
     let player: {
       dispose?: () => void;
       getCurrentTime?: () => number;
@@ -191,6 +232,11 @@ export function TerminalDemo({
       window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
     const shouldAutoPlay = autoPlay && !prefersReducedMotion;
+
+    // Resume at the old player's position when only the site's mode changed.
+    const resume = resumeRef.current;
+    resumeRef.current = null;
+    const resumeAt = resume && resume.src === src ? resume.time : undefined;
 
     ensureStylesheet();
     ensureScript()
@@ -213,7 +259,7 @@ export function TerminalDemo({
           // toggle so switching never re-creates the player (no jump/reset).
           controls: true,
           fit,
-          startAt,
+          startAt: resumeAt ?? startAt,
           // Only force a named theme when explicitly asked. Otherwise omit it so
           // the player uses the cast's embedded Dynamo Glass term.theme header.
           // Passing theme="asciinema" would override that palette.
@@ -285,17 +331,24 @@ export function TerminalDemo({
       if (trimTimer) clearInterval(trimTimer);
       if (releaseTimer) clearTimeout(releaseTimer);
       try {
+        const time = player?.getCurrentTime?.();
+        if (typeof time === "number" && time > 0) resumeRef.current = { src, time };
+      } catch {
+        /* no position to keep */
+      }
+      try {
         player?.dispose?.();
       } catch {
         /* already torn down */
       }
     };
-  }, [src, startAt, endAt, idleTimeLimit, speed, loop, autoPlay, theme, poster, cols, rows, fit, extraOptions]);
+  }, [src, startAt, endAt, idleTimeLimit, speed, loop, autoPlay, theme, scheme, poster, cols, rows, fit, extraOptions]);
 
   return (
     <div
       className={
         (className ? `dynamo-terminal-demo ${className}` : "dynamo-terminal-demo") +
+        (isMacos ? " dynamo-terminal-demo--macos" : "") +
         (loaded ? " dynamo-terminal-demo--loaded" : "") +
         (showControls ? " dynamo-terminal-demo--controls" : "")
       }
@@ -308,12 +361,14 @@ export function TerminalDemo({
             <span className="dynamo-terminal-demo__dot dynamo-terminal-demo__dot--yellow" />
             <span className="dynamo-terminal-demo__dot dynamo-terminal-demo__dot--green" />
           </span>
-          <span className="dynamo-terminal-demo__product">Dynamo</span>
+          {!isMacos && <span className="dynamo-terminal-demo__product">Dynamo</span>}
           {title && <span className="dynamo-terminal-demo__title">{title}</span>}
-          <span className="dynamo-terminal-demo__activity">
-            <span aria-hidden="true" />
-            Demo running
-          </span>
+          {!isMacos && (
+            <span className="dynamo-terminal-demo__activity">
+              <span aria-hidden="true" />
+              Demo running
+            </span>
+          )}
           <span className="dynamo-terminal-demo__toggle-wrap">
             <button
               type="button"
@@ -589,5 +644,145 @@ const TERMINAL_DEMO_CSS = `
   .dynamo-terminal-demo {
     margin: 16px auto;
   }
+}
+/*
+ * chrome="macos": a plain macOS window that matches the community calendar
+ * windows on the home and community pages. The title bar follows the site's
+ * light or dark mode, and the terminal body takes the player theme's colors.
+ */
+.dynamo-terminal-demo.dynamo-terminal-demo--macos {
+  --dynamo-terminal-titlebar: #f3f4f3;
+  --dynamo-terminal-titlebar-text: #555755;
+  --dynamo-terminal-titlebar-rule: #d7d8d7;
+  --dynamo-terminal-surface: #ffffff;
+  border: 1px solid rgb(127 127 127 / 20%);
+  border-radius: 14px;
+  background: var(--dynamo-terminal-surface);
+  box-shadow: 0 12px 32px rgb(0 0 0 / 8%);
+}
+.dark .dynamo-terminal-demo.dynamo-terminal-demo--macos {
+  --dynamo-terminal-titlebar: #2b2c2b;
+  --dynamo-terminal-titlebar-text: #d4d5d4;
+  --dynamo-terminal-titlebar-rule: #171817;
+  --dynamo-terminal-surface: #0c0d0b;
+  border-color: rgb(255 255 255 / 12%);
+  box-shadow: 0 14px 36px rgb(0 0 0 / 40%);
+}
+.dynamo-terminal-demo--macos .dynamo-terminal-demo__bar {
+  grid-template-columns: minmax(4rem, 1fr) minmax(0, auto) minmax(4rem, 1fr);
+  gap: 0.75rem;
+  min-height: 3rem;
+  padding: 0 0.75rem 0 1rem;
+  border-bottom: 1px solid var(--dynamo-terminal-titlebar-rule);
+  background: var(--dynamo-terminal-titlebar);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 90%);
+}
+.dark .dynamo-terminal-demo--macos .dynamo-terminal-demo__bar {
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 8%);
+}
+.dynamo-terminal-demo--macos .dynamo-terminal-demo__window-controls {
+  gap: 0.5rem;
+  padding-right: 0;
+}
+.dynamo-terminal-demo--macos .dynamo-terminal-demo__dot {
+  width: 0.76rem;
+  height: 0.76rem;
+  border: 1px solid rgb(0 0 0 / 12%);
+  box-shadow: inset 0 0 0 0.5px rgb(0 0 0 / 8%);
+}
+.dynamo-terminal-demo--macos .dynamo-terminal-demo__title {
+  grid-column: 2;
+  color: var(--dynamo-terminal-titlebar-text);
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+.dynamo-terminal-demo--macos .dynamo-terminal-demo__toggle-wrap {
+  grid-column: 3;
+  justify-self: end;
+}
+.dynamo-terminal-demo--macos .dynamo-terminal-demo__toggle {
+  color: #8a8c8a;
+}
+.dynamo-terminal-demo--macos .dynamo-terminal-demo__toggle:hover {
+  background: rgb(0 0 0 / 6%);
+  color: #3f413f;
+}
+.dark .dynamo-terminal-demo--macos .dynamo-terminal-demo__toggle:hover {
+  background: rgb(255 255 255 / 8%);
+  color: #e4e5e4;
+}
+.dynamo-terminal-demo--macos .dynamo-terminal-demo__toggle--on,
+.dynamo-terminal-demo--macos .dynamo-terminal-demo__toggle--on:hover {
+  background: rgb(118 185 0 / 16%);
+  color: #4d8100;
+}
+.dark .dynamo-terminal-demo--macos .dynamo-terminal-demo__toggle--on,
+.dark .dynamo-terminal-demo--macos .dynamo-terminal-demo__toggle--on:hover {
+  background: rgb(118 185 0 / 18%);
+  color: #8cce37;
+}
+.dynamo-terminal-demo--macos .dynamo-terminal-demo__player {
+  background: var(--dynamo-terminal-surface);
+}
+.dynamo-terminal-demo--macos .ap-player,
+.dynamo-terminal-demo--macos .ap-term {
+  border-color: var(--term-color-background);
+  background: var(--term-color-background);
+}
+/*
+ * theme="fern-code": the token colors of Fern's code blocks on this site,
+ * min-light in light mode and Material Theme Darker in dark mode, so the
+ * recording matches the code blocks around it. Comments are darker in light
+ * mode and lighter in dark mode than Fern's, because the recording narrates
+ * in comments, and the backgrounds match the macOS window body.
+ *
+ * Each slot is a syntax role rather than an ANSI hue: the two Fern themes give
+ * one role different hues, such as purple command names in light mode and
+ * yellow ones in dark mode. scripts/slime-demo/slime-demo.sh lists the role of
+ * every slot. The !important beats the forced background above and the
+ * inline colors the player sets from a cast's embedded theme.
+ */
+.dynamo-terminal-demo .ap-player.asciinema-player-theme-fern-code {
+  --term-color-foreground: #24292e !important;
+  --term-color-background: #ffffff !important;
+  --term-color-0: #dddddd !important;  /* header rules */
+  --term-color-1: #24292e !important;  /* attribute names */
+  --term-color-2: #22863a !important;  /* strings, success */
+  --term-color-3: #6f42c1 !important;  /* command names */
+  --term-color-4: #6f42c1 !important;  /* builtins, function names */
+  --term-color-5: #d32f2f !important;  /* declarations: export, def */
+  --term-color-6: #d32f2f !important;  /* operators, control keywords */
+  --term-color-7: #6a737d !important;  /* narration, comments */
+  --term-color-8: #8c959f !important;  /* progress notes */
+  --term-color-9: #1976d2 !important;  /* numbers, status */
+  --term-color-10: #2b5581 !important; /* arguments, flags */
+  --term-color-11: #ff9800 !important; /* parameters */
+  --term-color-12: #212121 !important; /* call arguments */
+  --term-color-13: #22863a !important; /* quote marks */
+  --term-color-14: #212121 !important; /* punctuation */
+  --term-color-15: #4d8100 !important; /* prompt: Fern accent text */
+}
+.dark .dynamo-terminal-demo .ap-player.asciinema-player-theme-fern-code {
+  --term-color-foreground: #eeffff !important;
+  --term-color-background: #0c0d0b !important;
+  --term-color-0: #333333 !important;
+  --term-color-1: #f07178 !important;
+  --term-color-2: #c3e88d !important;
+  --term-color-3: #ffcb6b !important;
+  --term-color-4: #82aaff !important;
+  --term-color-5: #c792ea !important;
+  --term-color-6: #89ddff !important;
+  --term-color-7: #8b949e !important;
+  --term-color-8: #6e7681 !important;
+  --term-color-9: #f78c6c !important;
+  --term-color-10: #c3e88d !important;
+  --term-color-11: #eeffff !important;
+  --term-color-12: #82aaff !important;
+  --term-color-13: #89ddff !important;
+  --term-color-14: #89ddff !important;
+  --term-color-15: #8cce37 !important;
 }
 `;
