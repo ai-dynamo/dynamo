@@ -1,0 +1,152 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+
+diff --git a/pi-plugin/src/light/provider.ts b/pi-plugin/src/light/provider.ts
+index 9db0396..e38953a 100644
+--- a/pi-plugin/src/light/provider.ts
++++ b/pi-plugin/src/light/provider.ts
+@@ -24,14 +24,22 @@ export const DYNAMO_API = "dynamo-openai-completions" satisfies Api;
+ export const DEFAULT_DYNAMO_BASE_URL = "http://127.0.0.1:8000/v1";
+ export const DEFAULT_DYNAMO_API_KEY = "dynamo-local";
+ export const DEFAULT_DYNAMO_MODEL_ID = "default";
++export const DEFAULT_DYNAMO_CONTEXT_WINDOW = 128000;
++export const DEFAULT_DYNAMO_MAX_TOKENS = 8192;
+ 
+ export interface DynamoEnvironment extends DynamoSessionEnvironment {
+ 	DYNAMO_BASE_URL?: string;
+ 	OPENAI_BASE_URL?: string;
+ 	DYNAMO_API_KEY?: string;
+ 	DYN_AGENT_SESSION_FINAL?: string;
++	/** Context window in tokens. Overrides what the endpoint advertises. */
++	DYNAMO_CONTEXT_WINDOW?: string;
++	/** Output cap in tokens, sent as max_tokens on every request. */
++	DYNAMO_MAX_TOKENS?: string;
+ }
+ 
++export type DynamoLimitsEnvironment = Pick<DynamoEnvironment, "DYNAMO_CONTEXT_WINDOW" | "DYNAMO_MAX_TOKENS">;
++
+ export interface DynamoConfig {
+ 	baseUrl: string;
+ 	apiKey: string;
+@@ -42,7 +50,7 @@ export interface DynamoConfig {
+ }
+ 
+ interface OpenAIModelsResponse {
+-	data?: Array<{ id?: unknown }>;
++	data?: Array<{ id?: unknown; context_window?: unknown }>;
+ }
+ 
+ type OpenAICompletionsStreamSimple = (
+@@ -113,41 +121,81 @@ const dynamoOpenAICompat = {
+ 	supportsLongCacheRetention: false,
+ } satisfies OpenAICompletionsCompat;
+ 
+-export function createDynamoModels(modelIds: string[], baseUrl: string): ProviderModelConfig[] {
++/** Parse a token limit from the environment. Unset or blank means "not configured"; anything else must be a positive integer. */
++function limitFromEnv(name: keyof DynamoLimitsEnvironment, value: string | undefined): number | undefined {
++	const trimmed = value?.trim();
++	if (!trimmed) return undefined;
++	const parsed = Number(trimmed);
++	if (!Number.isSafeInteger(parsed) || parsed <= 0) {
++		throw new Error(`${name} must be a positive integer, got ${JSON.stringify(value)}`);
++	}
++	return parsed;
++}
++
++/**
++ * Build the provider's model entries. The context window comes from
++ * DYNAMO_CONTEXT_WINDOW when set, else from what the endpoint advertised for
++ * that model in GET /models, else the default. The output cap comes from
++ * DYNAMO_MAX_TOKENS when set, else the default.
++ */
++export function createDynamoModels(
++	modelIds: string[],
++	baseUrl: string,
++	servedContextWindows: ReadonlyMap<string, number> = new Map(),
++	env: DynamoLimitsEnvironment = process.env,
++): ProviderModelConfig[] {
+ 	const ids = modelIds.length > 0 ? modelIds : [DEFAULT_DYNAMO_MODEL_ID];
+-	return ids.map((id) => ({
+-		id,
+-		name: id,
+-		api: DYNAMO_API,
+-		baseUrl,
+-		reasoning: false,
+-		input: ["text"],
+-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+-		contextWindow: 128000,
+-		maxTokens: 8192,
+-		compat: dynamoOpenAICompat,
+-	}));
++	const envContextWindow = limitFromEnv("DYNAMO_CONTEXT_WINDOW", env.DYNAMO_CONTEXT_WINDOW);
++	const maxTokens = limitFromEnv("DYNAMO_MAX_TOKENS", env.DYNAMO_MAX_TOKENS) ?? DEFAULT_DYNAMO_MAX_TOKENS;
++	return ids.map((id) => {
++		const contextWindow = envContextWindow ?? servedContextWindows.get(id) ?? DEFAULT_DYNAMO_CONTEXT_WINDOW;
++		if (maxTokens >= contextWindow) {
++			throw new Error(
++				`Dynamo model ${id}: max tokens ${maxTokens} must be below the context window ${contextWindow}`,
++			);
++		}
++		return {
++			id,
++			name: id,
++			api: DYNAMO_API,
++			baseUrl,
++			reasoning: false,
++			input: ["text"],
++			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
++			contextWindow,
++			maxTokens,
++			compat: dynamoOpenAICompat,
++		};
++	});
+ }
+ 
+ export async function discoverDynamoModels(config: DynamoConfig, timeoutMs = 2000): Promise<ProviderModelConfig[]> {
+ 	const controller = new AbortController();
+ 	const timeout = setTimeout(() => controller.abort(), timeoutMs);
++	let body: OpenAIModelsResponse;
+ 	try {
+ 		const response = await fetch(`${config.baseUrl}/models`, {
+ 			headers: { Authorization: `Bearer ${config.apiKey}` },
+ 			signal: controller.signal,
+ 		});
+ 		if (!response.ok) return [];
+-		const body = (await response.json()) as OpenAIModelsResponse;
+-		const ids =
+-			body.data?.map((model) => model.id).filter((id): id is string => typeof id === "string" && id.length > 0) ??
+-			[];
+-		return createDynamoModels([...new Set(ids)], config.baseUrl);
++		body = (await response.json()) as OpenAIModelsResponse;
+ 	} catch {
+ 		return [];
+ 	} finally {
+ 		clearTimeout(timeout);
+ 	}
++	const ids: string[] = [];
++	const servedContextWindows = new Map<string, number>();
++	for (const entry of body.data ?? []) {
++		if (typeof entry.id !== "string" || entry.id.length === 0) continue;
++		ids.push(entry.id);
++		// Dynamo lists the engine's serving limit as context_window. The OpenAI schema has no such field.
++		if (typeof entry.context_window === "number" && Number.isSafeInteger(entry.context_window) && entry.context_window > 1) {
++			servedContextWindows.set(entry.id, entry.context_window);
++		}
++	}
++	return createDynamoModels([...new Set(ids)], config.baseUrl, servedContextWindows);
+ }
+ 
+ function toOpenAICompletionsModel(model: Model<Api>): Model<"openai-completions"> {
