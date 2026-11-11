@@ -493,11 +493,22 @@ class ManagedDGDR:
         deadline = time.monotonic() + timeout
         last_phase: str | None = None
         while time.monotonic() < deadline:
-            result = await self._retry_vcluster_api(
-                f"reading DGDR {self.config.namespace}/{name} while waiting for {target}",
-                self.get,
-                name,
-            )
+            # Connection retries can outlast the phase timeout, so stop them at
+            # the deadline and report the phase timeout instead.
+            try:
+                result = await asyncio.wait_for(
+                    self._retry_vcluster_api(
+                        f"reading DGDR {self.config.namespace}/{name} "
+                        f"while waiting for {target}",
+                        self.get,
+                        name,
+                    ),
+                    timeout=deadline - time.monotonic(),
+                )
+            except TimeoutError:
+                if time.monotonic() < deadline:
+                    raise
+                break
             phase = result.get("status", {}).get("phase") if result else None
             if phase != last_phase:
                 logger.info("DGDR %s/%s phase: %s", self.config.namespace, name, phase)

@@ -11,6 +11,7 @@
 //!
 //! The Preprocessor will accept any IngressRequest and transform it to a BackendRequest.
 
+mod edit;
 pub mod media;
 #[cfg(feature = "mm-routing")]
 pub mod mm_routing;
@@ -51,6 +52,7 @@ use std::{
     collections::{HashMap, HashSet},
     pin::Pin,
     sync::{Arc, Mutex, OnceLock},
+    task::{Poll, ready},
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{self, Instrument};
@@ -383,6 +385,9 @@ fn tool_content_part_as_user(
         }
         ChatCompletionRequestToolMessageContentPart::AudioUrl(part) => {
             ChatCompletionRequestUserMessageContentPart::AudioUrl(part.clone())
+        }
+        ChatCompletionRequestToolMessageContentPart::Custom(part) => {
+            ChatCompletionRequestUserMessageContentPart::Custom(part.clone())
         }
     })
 }
@@ -1215,7 +1220,7 @@ fn append_mm_routing_replacement(
     image: MmImageEntry,
     num_image_tokens: usize,
 ) -> Result<()> {
-    let fill_token = dynamo_kv_router::protocols::pad_value_for_mm_hash(image.mm_hash);
+    let fill_token = dynamo_kv_hashing::multimodal::pad_value_for_mm_hash(image.mm_hash);
 
     append_mm_routing_replacement_with_fill(
         expanded,
@@ -1283,10 +1288,10 @@ fn apply_tracked_mm_replacements(
 ) -> Result<(
     Vec<TokenIdType>,
     usize,
-    Vec<Option<dynamo_kv_router::protocols::BlockExtraInfo>>,
+    Vec<Option<dynamo_kv_hashing::multimodal::BlockExtraInfo>>,
 )> {
-    use dynamo_kv_router::protocols::{BlockExtraInfo, BlockMmObjectInfo};
-    use dynamo_kv_router::zmq_wire::{normalize_mm_placeholder_runs, normalize_mm_token_runs};
+    use dynamo_kv_events::zmq_wire::{normalize_mm_placeholder_runs, normalize_mm_token_runs};
+    use dynamo_kv_hashing::multimodal::{BlockExtraInfo, BlockMmObjectInfo};
 
     anyhow::ensure!(block_size > 0, "MM routing block size must be positive");
     anyhow::ensure!(
@@ -3808,6 +3813,9 @@ impl OpenAIPreprocessor {
                 strict_priority,
                 priority,
                 lora_name,
+                base_model_name: None,
+                lora_source_uri: None,
+                lora_resolution_version: None,
                 cache_namespace: cache_namespace.clone(),
                 allowed_worker_ids: None,
                 routing_constraints: nvext
@@ -5056,7 +5064,7 @@ impl OpenAIPreprocessor {
                         replacement_tokens,
                     } => {
                         let fill_token =
-                            dynamo_kv_router::protocols::pad_value_for_mm_hash(*mm_hash);
+                            dynamo_kv_hashing::multimodal::pad_value_for_mm_hash(*mm_hash);
                         TrackedMmRoutingReplacement {
                             mm_hash: *mm_hash,
                             target_tokens: target_tokens.clone(),
@@ -5718,7 +5726,7 @@ impl OpenAIPreprocessor {
         reasoning_disabled: bool,
     ) -> Pin<Box<dyn Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>>
     where
-        S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
+        S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + Unpin + 'static,
     {
         let stream: Pin<Box<dyn Stream<Item = _> + Send>> = Box::pin(
             Self::apply_tool_call_response_policy(stream, emit_tool_calls),
@@ -6076,7 +6084,7 @@ impl OpenAIPreprocessor {
                 start_token,
             ))
         } else {
-            Box::pin(stream)
+            stream
         };
         // A MiniMax M3 parser can also release held text in an end-of-stream
         // chunk (see `finalize_parser_at_finish`), so its usage is held too.
@@ -6118,7 +6126,7 @@ impl OpenAIPreprocessor {
                     stream,
                 ))
             }
-            ToolProcessingRoute::PassThrough => Box::pin(stream),
+            ToolProcessingRoute::PassThrough => stream,
             ToolProcessingRoute::Unified(_) => {
                 unreachable!("unified routes return before legacy response processing")
             }
@@ -6147,13 +6155,13 @@ impl OpenAIPreprocessor {
         tool_call_parsing_enabled: bool,
     ) -> Pin<Box<dyn Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static>>
     where
-        S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
+        S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + Unpin + 'static,
     {
         if tool_call_parsing_enabled {
             return Box::pin(stream);
         }
 
-        Box::pin(stream.map(|mut response| {
+        Box::pin(edit::edit_items(stream, |response| {
             if let Some(data) = response.data.as_mut() {
                 for choice in &mut data.inner.choices {
                     choice.delta.tool_calls = None;
@@ -6164,7 +6172,6 @@ impl OpenAIPreprocessor {
                     }
                 }
             }
-            response
         }))
     }
 
@@ -6176,11 +6183,11 @@ impl OpenAIPreprocessor {
         stream: S,
     ) -> impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static
     where
-        S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
+        S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + Unpin + 'static,
     {
         let mut role_emitted_choices = HashSet::new();
 
-        stream.map(move |mut response| {
+        edit::edit_items(stream, move |response| {
             if let Some(data) = response.data.as_mut() {
                 for choice in &mut data.inner.choices {
                     choice.delta.role = role_emitted_choices
@@ -6188,7 +6195,6 @@ impl OpenAIPreprocessor {
                         .then_some(dynamo_protocols::types::Role::Assistant);
                 }
             }
-            response
         })
     }
 
@@ -6206,7 +6212,7 @@ impl OpenAIPreprocessor {
         Resp: Send + Sync + Clone + 'static + std::fmt::Debug,
     {
         Self::transform_postprocessor_stream_with_image_tokens(
-            stream,
+            Box::pin(stream),
             generator,
             context,
             emit_payload_usage_chunk,
@@ -6217,6 +6223,7 @@ impl OpenAIPreprocessor {
         )
     }
 
+    /// The response transform over `stream`, Backend's items.
     #[allow(clippy::too_many_arguments)]
     fn transform_postprocessor_stream_with_image_tokens<S, Resp>(
         stream: S,
@@ -6229,7 +6236,7 @@ impl OpenAIPreprocessor {
         image_tokens: Option<usize>,
     ) -> impl Stream<Item = Annotated<Resp>> + Send
     where
-        S: Stream<Item = Annotated<BackendOutput>> + Send + 'static,
+        S: Stream<Item = Annotated<BackendOutput>> + Send + Unpin + 'static,
         Resp: Send + Sync + Clone + 'static + std::fmt::Debug,
     {
         struct DetokenizeMetricsGuard {
@@ -6255,11 +6262,11 @@ impl OpenAIPreprocessor {
             }
         }
 
-        struct State<Resp>
+        struct State<S, Resp>
         where
             Resp: Send + Sync + Clone + 'static + std::fmt::Debug,
         {
-            response_stream: Pin<Box<dyn Stream<Item = Annotated<BackendOutput>> + Send>>,
+            response_stream: S,
             response_generator: Box<dyn DeltaGeneratorExt<Resp>>,
             detokenize_metrics: DetokenizeMetricsGuard,
             context: Arc<dyn AsyncEngineContext>,
@@ -6280,7 +6287,7 @@ impl OpenAIPreprocessor {
 
         let tracker = generator.tracker();
         let state = State {
-            response_stream: Box::pin(stream),
+            response_stream: stream,
             response_generator: generator,
             detokenize_metrics: DetokenizeMetricsGuard { tracker },
             context: context.clone(),
@@ -6297,48 +6304,92 @@ impl OpenAIPreprocessor {
             image_tokens,
         };
 
-        // transform the common response stream into a chat response stream
+        /// The response stream. `state` is `None` once the stream has ended, so the state,
+        /// and with it the detokenize metrics guard, drops when the stream ends.
+        struct Postprocessed<S, Resp>
+        where
+            Resp: Send + Sync + Clone + 'static + std::fmt::Debug,
+        {
+            state: Option<State<S, Resp>>,
+        }
 
-        stream::unfold(state, |mut inner| {
-            async move {
+        // Nothing in the state is pinned: the stream below is `Unpin`, and the rest is moved
+        // and edited freely.
+        impl<S: Unpin, Resp> Unpin for Postprocessed<S, Resp> where
+            Resp: Send + Sync + Clone + 'static + std::fmt::Debug
+        {
+        }
+
+        impl<S, Resp> Stream for Postprocessed<S, Resp>
+        where
+            S: Stream<Item = Annotated<BackendOutput>> + Unpin,
+            Resp: Send + Sync + Clone + 'static + std::fmt::Debug,
+        {
+            type Item = Annotated<Resp>;
+
+            fn poll_next(
+                mut self: Pin<&mut Self>,
+                cx: &mut std::task::Context<'_>,
+            ) -> Poll<Option<Annotated<Resp>>> {
+                let Some(state) = self.state.as_mut() else {
+                    return Poll::Ready(None);
+                };
+                // Returned as it is: taking the item out of the `Poll` would move it again.
+                let poll = state.poll_step(cx);
+                if let Poll::Ready(None) = poll {
+                    self.state = None;
+                }
+                poll
+            }
+        }
+
+        impl<S, Resp> State<S, Resp>
+        where
+            S: Stream<Item = Annotated<BackendOutput>> + Unpin,
+            Resp: Send + Sync + Clone + 'static + std::fmt::Debug,
+        {
+            /// The next chunk of the response, or `None` when it has ended.
+            fn poll_step(
+                &mut self,
+                cx: &mut std::task::Context<'_>,
+            ) -> Poll<Option<Annotated<Resp>>> {
                 // Drain the buffered client-facing plain usage chunk first.
                 // This MUST come before the `finished` guard: the stream-end
-                // handler sets inner.finished = true before returning the payload
+                // handler sets self.finished = true before returning the payload
                 // chunk, so on the very next iteration the finished guard would
                 // terminate before we ever emit the client chunk.
-                if let Some(client_chunk) = inner.pending_client_usage.take() {
-                    inner.finished = true;
+                if let Some(client_chunk) = self.pending_client_usage.take() {
+                    self.finished = true;
                     // Emit unconditionally to match the non-payload path below; the
                     // chunk is only buffered after a finish_reason, so payload capture must
                     // not alter the client SSE tail.
-                    return Some((client_chunk, inner));
+                    return Poll::Ready(Some(client_chunk));
                 }
 
                 // If already finished (and no pending client chunk), stop.
-                if inner.finished {
-                    return None;
+                if self.finished {
+                    return Poll::Ready(None);
                 }
 
-                if let Some(mut response) = inner.response_stream.next().await {
+                if let Some(mut response) = ready!(self.response_stream.poll_next_unpin(cx)) {
                     // Split topology: overlay a standalone router's forwarded routing_data
                     // (timing, query-only token_ids) onto this request's tracker so the
                     // frontend's nvext/timing surfaces populate.
                     drain_router_routing_data(
                         &mut response.data,
-                        inner.detokenize_metrics.tracker(),
+                        self.detokenize_metrics.tracker(),
                     );
 
-                    if inner.cancelled {
+                    if self.cancelled {
                         tracing::debug!(
-                            request_id = inner.context.id(),
+                            request_id = self.context.id(),
                             "Cancellation issued last message; closing stream"
                         );
-                        // inner.finished = true; // Mark as finished
-                        return None;
+                        return Poll::Ready(None);
                     }
 
                     tracing::trace!(
-                        request_id = inner.context.id(),
+                        request_id = self.context.id(),
                         "Processing common response: {:?}",
                         response
                     );
@@ -6352,12 +6403,12 @@ impl OpenAIPreprocessor {
 
                     let (chunk_tokens, isl) = if let Some(ref backend_output) = response.data {
                         let chunk_tokens = backend_output.token_ids.len();
-                        inner.cumulative_output_tokens += chunk_tokens;
+                        self.cumulative_output_tokens += chunk_tokens;
 
-                        let isl = inner.response_generator.get_isl().map(|isl| isl as usize);
+                        let isl = self.response_generator.get_isl().map(|isl| isl as usize);
 
                         crate::request_trace::record_backend_finish_reason_metadata(
-                            inner.trace_finish_reason_metadata.as_ref(),
+                            self.trace_finish_reason_metadata.as_ref(),
                             backend_output.index,
                             backend_output.finish_reason.as_ref(),
                             backend_output.stop_reason.as_ref(),
@@ -6368,37 +6419,36 @@ impl OpenAIPreprocessor {
                         (0, None)
                     };
 
-                    let current_osl = inner.cumulative_output_tokens;
+                    let current_osl = self.cumulative_output_tokens;
 
                     let mut response = response.map_data(|data| {
-                        inner
-                            .response_generator
+                        self.response_generator
                             .choice_from_postprocessor(data)
                             .inspect_err(|e| {
                                 tracing::error!(
-                                    request_id = inner.context.id(),
+                                    request_id = self.context.id(),
                                     "Error processing common response: {:?}",
                                     e
                                 );
-                                inner.cancelled = true;
-                                inner.context.stop_generating();
+                                self.cancelled = true;
+                                self.context.stop_generating();
                             })
                             .map_err(|e| e.to_string())
                     });
 
                     // Create LLM metrics annotation with prefill/decode worker info from tracker.
                     // Worker types are stored at routing time to avoid expensive MDC lookup.
-                    let tracker = inner.detokenize_metrics.tracker();
+                    let tracker = self.detokenize_metrics.tracker();
                     let llm_metrics = build_llm_metric_annotation(
                         tracker,
                         isl.unwrap_or(0),
                         current_osl,
                         chunk_tokens,
                         None,
-                        inner.mm_counts,
-                        inner.image_tokens,
+                        self.mm_counts,
+                        self.image_tokens,
                     );
-                    if inner.trace_tokens_enabled {
+                    if self.trace_tokens_enabled {
                         crate::request_trace::record_llm_metric_tokens(
                             tracker,
                             isl,
@@ -6411,27 +6461,27 @@ impl OpenAIPreprocessor {
 
                     // Mark if we've seen a finish_reason
                     if has_finish_reason {
-                        inner.finish_reason_sent = true;
+                        self.finish_reason_sent = true;
                     }
 
                     tracing::trace!(
-                        request_id = inner.context.id(),
+                        request_id = self.context.id(),
                         "OpenAI NvCreateChatCompletionStreamResponse: {:?}",
                         response
                     );
 
-                    Some((response, inner))
+                    Poll::Ready(Some(response))
                 } else {
-                    // Stream has ended - must set finished to true to prevent unfold from polling
-                    // again. The stream is exhausted and will panic if polled after None.
-                    inner.finished = true;
+                    // The stream has ended. Set `finished` so the exhausted `response_stream`
+                    // is not polled again.
+                    self.finished = true;
 
-                    if inner.finish_reason_sent && !inner.usage_chunk_sent {
-                        inner.usage_chunk_sent = true;
+                    if self.finish_reason_sent && !self.usage_chunk_sent {
+                        self.usage_chunk_sent = true;
 
-                        let usage_chunk = inner.response_generator.create_usage_chunk();
-                        let usage = inner.response_generator.get_usage();
-                        let tracker = inner.detokenize_metrics.tracker();
+                        let usage_chunk = self.response_generator.create_usage_chunk();
+                        let usage = self.response_generator.get_usage();
+                        let tracker = self.detokenize_metrics.tracker();
                         let cached_tokens = usage
                             .prompt_tokens_details
                             .as_ref()
@@ -6442,10 +6492,10 @@ impl OpenAIPreprocessor {
                             usage.completion_tokens as usize,
                             0,
                             cached_tokens,
-                            inner.mm_counts,
-                            inner.image_tokens,
+                            self.mm_counts,
+                            self.image_tokens,
                         );
-                        if inner.trace_tokens_enabled {
+                        if self.trace_tokens_enabled {
                             crate::request_trace::record_llm_metric_tokens(
                                 tracker,
                                 Some(usage.prompt_tokens as usize),
@@ -6454,16 +6504,16 @@ impl OpenAIPreprocessor {
                             );
                         }
 
-                        let usage_requested = inner.response_generator.is_usage_enabled();
+                        let usage_requested = self.response_generator.is_usage_enabled();
 
-                        if inner.emit_payload_usage_chunk {
+                        if self.emit_payload_usage_chunk {
                             // Payload capture on: emit a dedicated payload-usage chunk that
                             // always carries usage for the payload DeltaAggregator
                             // (the EventConverter strips it entirely from the
                             // client), and buffer the plain client usage chunk only
                             // when include_usage was requested.
                             if usage_requested {
-                                inner.pending_client_usage = Some(Annotated::<Resp> {
+                                self.pending_client_usage = Some(Annotated::<Resp> {
                                     id: None,
                                     data: Some(usage_chunk.clone()),
                                     event: None,
@@ -6484,7 +6534,7 @@ impl OpenAIPreprocessor {
                                 comment: annotation.comment,
                                 error: None,
                             };
-                            Some((payload_usage, inner))
+                            Poll::Ready(Some(payload_usage))
                         } else {
                             // Payload capture off: a single usage chunk; data is present only
                             // when include_usage was requested. Metrics ride via the
@@ -6503,16 +6553,18 @@ impl OpenAIPreprocessor {
                                 error: None,
                             };
                             attach_llm_metrics(&mut annotated_usage, llm_metrics);
-                            Some((annotated_usage, inner))
+                            Poll::Ready(Some(annotated_usage))
                         }
                     } else {
                         // stream closed
-                        None
+                        Poll::Ready(None)
                     }
                 }
             }
-        })
-        .fuse()
+        }
+
+        // transform the common response stream into a chat response stream
+        Postprocessed { state: Some(state) }
     }
 
     /// Transform engine embedding output stream to OpenAI embedding response stream
@@ -8937,7 +8989,7 @@ impl
 
         // transform the postprocessor stream. Legacy `/v1/completions` is
         // text-only, so multimodal counts are always zero here.
-        let stream = Self::transform_postprocessor_stream(
+        let stream = Self::transform_postprocessor_stream_with_image_tokens(
             response_stream,
             response_generator,
             context.clone(),
@@ -8945,6 +8997,7 @@ impl
             trace_tokens_enabled,
             trace_finish_reason_metadata,
             MultimodalCounts::default(),
+            None,
         );
 
         let stream =
@@ -12211,7 +12264,11 @@ responses_tools: None,
         ) {
             return;
         }
-        for (tool, reasoning) in [("hermes", None), ("qwen3_coder", Some("hermes"))] {
+        for (tool, reasoning) in [
+            ("llama3_json", None),
+            ("qwen3_coder", Some("deepseek_r1")),
+            ("qwen3_coder", Some("hermes")),
+        ] {
             let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
             let mut card = ModelDeploymentCard::load_from_disk(model_path, None).unwrap();
@@ -12525,10 +12582,14 @@ responses_tools: None,
                     family,
                     true,
                 );
-                let output =
-                    OpenAIPreprocessor::apply_unified_response_policies(raw, true, false, true)
-                        .collect::<Vec<_>>()
-                        .await;
+                let output = OpenAIPreprocessor::apply_unified_response_policies(
+                    Box::pin(raw),
+                    true,
+                    false,
+                    true,
+                )
+                .collect::<Vec<_>>()
+                .await;
                 let mut text = String::new();
                 for choice in output
                     .iter()
@@ -13064,15 +13125,17 @@ responses_tools: None,
     }
 
     const HARMONY_CALL_TOKEN_ID: TokenIdType = 42;
+    const HARMONY_RETURN_TOKEN_ID: TokenIdType = 43;
 
     struct HiddenStopTokenizer;
 
     impl crate::tokenizers::traits::Encoder for HiddenStopTokenizer {
         fn encode(&self, input: &str) -> anyhow::Result<Encoding> {
-            if input != "<|call|>" {
-                anyhow::bail!("unexpected Harmony tool-call end token {input:?}");
+            match input {
+                "<|call|>" => Ok(Encoding::Sp(vec![HARMONY_CALL_TOKEN_ID])),
+                "<|return|>" => Ok(Encoding::Sp(vec![HARMONY_RETURN_TOKEN_ID])),
+                _ => anyhow::bail!("unexpected Harmony tool-call end token {input:?}"),
             }
-            Ok(Encoding::Sp(vec![HARMONY_CALL_TOKEN_ID]))
         }
 
         fn encode_batch(&self, inputs: &[&str]) -> anyhow::Result<Vec<Encoding>> {
@@ -13132,19 +13195,25 @@ responses_tools: None,
         assert!(none.inner.tools.is_none());
 
         let preprocessor = hidden_stop_preprocessor();
-        let mut dynamic_hidden = vec![HARMONY_CALL_TOKEN_ID, 7];
+        let mut dynamic_hidden = vec![HARMONY_CALL_TOKEN_ID, HARMONY_RETURN_TOKEN_ID, 7];
         let dynamic_visible = preprocessor
             .remove_tool_parser_end_tokens_from_hidden_stops(&dynamic, &mut dynamic_hidden)
             .unwrap();
-        assert_eq!(dynamic_visible, [HARMONY_CALL_TOKEN_ID]);
+        assert_eq!(
+            dynamic_visible,
+            [HARMONY_CALL_TOKEN_ID, HARMONY_RETURN_TOKEN_ID]
+        );
         assert_eq!(dynamic_hidden, [7]);
 
-        let mut none_hidden = vec![HARMONY_CALL_TOKEN_ID, 7];
+        let mut none_hidden = vec![HARMONY_CALL_TOKEN_ID, HARMONY_RETURN_TOKEN_ID, 7];
         let none_visible = preprocessor
             .remove_tool_parser_end_tokens_from_hidden_stops(&none, &mut none_hidden)
             .unwrap();
         assert!(none_visible.is_empty());
-        assert_eq!(none_hidden, [HARMONY_CALL_TOKEN_ID, 7]);
+        assert_eq!(
+            none_hidden,
+            [HARMONY_CALL_TOKEN_ID, HARMONY_RETURN_TOKEN_ID, 7]
+        );
     }
 
     async fn apply_kimi_k3_no_tools(
@@ -13171,9 +13240,12 @@ responses_tools: None,
             ]),
         );
 
-        OpenAIPreprocessor::apply_tool_call_response_policy(jailed, tool_call_parsing_enabled)
-            .collect()
-            .await
+        OpenAIPreprocessor::apply_tool_call_response_policy(
+            Box::pin(jailed),
+            tool_call_parsing_enabled,
+        )
+        .collect()
+        .await
     }
 
     async fn apply_kimi_k3_dynamic_tools(
@@ -13218,9 +13290,12 @@ responses_tools: None,
             ]),
         );
 
-        OpenAIPreprocessor::apply_tool_call_response_policy(jailed, tool_call_parsing_enabled)
-            .collect()
-            .await
+        OpenAIPreprocessor::apply_tool_call_response_policy(
+            Box::pin(jailed),
+            tool_call_parsing_enabled,
+        )
+        .collect()
+        .await
     }
 
     #[tokio::test]
@@ -13665,7 +13740,7 @@ responses_tools: None,
             width: 320,
             height: 240,
         };
-        let fill = dynamo_kv_router::protocols::pad_value_for_mm_hash(image.mm_hash);
+        let fill = dynamo_kv_hashing::multimodal::pad_value_for_mm_hash(image.mm_hash);
         let dimension_ids: Vec<TokenIdType> = "image 320x240"
             .bytes()
             .map(|byte| 1000 + u32::from(byte))
@@ -13694,7 +13769,7 @@ responses_tools: None,
             width: 320,
             height: 240,
         };
-        let fill = dynamo_kv_router::protocols::pad_value_for_mm_hash(image.mm_hash);
+        let fill = dynamo_kv_hashing::multimodal::pad_value_for_mm_hash(image.mm_hash);
         let mut expanded = vec![7];
 
         append_mm_routing_replacement(
@@ -13729,7 +13804,7 @@ responses_tools: None,
             width: 224,
             height: 224,
         };
-        let fill = dynamo_kv_router::protocols::pad_value_for_mm_hash(image.mm_hash);
+        let fill = dynamo_kv_hashing::multimodal::pad_value_for_mm_hash(image.mm_hash);
         let mut expanded = vec![7];
 
         append_mm_routing_replacement(&mut expanded, &tokenizer, layout, image, 3).unwrap();
@@ -13923,8 +13998,8 @@ responses_tools: None,
                 height: 480,
             },
         ];
-        let first_fill = dynamo_kv_router::protocols::pad_value_for_mm_hash(images[0].mm_hash);
-        let second_fill = dynamo_kv_router::protocols::pad_value_for_mm_hash(images[1].mm_hash);
+        let first_fill = dynamo_kv_hashing::multimodal::pad_value_for_mm_hash(images[0].mm_hash);
+        let second_fill = dynamo_kv_hashing::multimodal::pad_value_for_mm_hash(images[1].mm_hash);
 
         let (expanded, prompt_len) = expand_mm_routing_tokens(
             &tokenizer,
@@ -14446,6 +14521,21 @@ responses_tools: None,
     /// PRE.1 — `skip_special_tokens` default. See `lib/llm/PREPROCESSOR_CASES.md`.
     #[test]
     fn test_parser_requires_special_tokens() {
+        for version in ["auto", "1", "2"] {
+            if !crate::test_utils::run_isolated(
+                concat!(module_path!(), "::test_parser_requires_special_tokens"),
+                &[(env_llm::DYN_PARSER_VERSION, version)],
+            ) {
+                let version = std::env::var(env_llm::DYN_PARSER_VERSION).unwrap();
+                assert_eq!(
+                    OpenAIPreprocessor::parser_requires_special_tokens(Some("hermes"), None)
+                        .unwrap(),
+                    version != "1",
+                    "Hermes special-token requirement for DYN_PARSER_VERSION={version}"
+                );
+                return;
+            }
+        }
         let cases: &[(Option<&str>, Option<&str>, bool, &str)] = &[
             (
                 Some("gemma4"),
@@ -14477,7 +14567,12 @@ responses_tools: None,
                 true,
                 "gemma4 paired → required",
             ),
-            (Some("hermes"), None, false, "hermes → not required"),
+            (
+                Some("llama3_json"),
+                None,
+                false,
+                "llama3_json (legacy JSON parser) → not required",
+            ),
             (
                 Some("harmony"),
                 None,
@@ -16213,7 +16308,8 @@ responses_tools: None,
             None,
         )
         .unwrap();
-        mdc.runtime_config.tool_call_parser = Some("hermes".to_string());
+        // llama3_json has no unified family, so it still takes the legacy jail.
+        mdc.runtime_config.tool_call_parser = Some("llama3_json".to_string());
         let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
         let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
             "model": "test-model",
@@ -20241,7 +20337,7 @@ responses_tools: None,
     #[cfg(feature = "mm-routing")]
     #[test]
     fn tracked_video_boundary_uses_native_metadata_only_when_needed() {
-        use dynamo_kv_router::protocols::pad_value_for_mm_hash;
+        use dynamo_kv_hashing::multimodal::pad_value_for_mm_hash;
 
         let video_token_id = 100;
         let mm_hash = 41;
@@ -20274,7 +20370,7 @@ responses_tools: None,
     #[cfg(feature = "mm-routing")]
     #[test]
     fn tracked_video_boundary_matches_token_only_worker_contract() {
-        use dynamo_kv_router::protocols::pad_value_for_mm_hash;
+        use dynamo_kv_hashing::multimodal::pad_value_for_mm_hash;
 
         let video_token_id = 100;
         let mm_hash = 41;
@@ -20335,7 +20431,7 @@ responses_tools: None,
     #[cfg(feature = "mm-routing")]
     #[test]
     fn tracked_mixed_boundary_preserves_worker_hash_fallback() {
-        use dynamo_kv_router::protocols::pad_value_for_mm_hash;
+        use dynamo_kv_hashing::multimodal::pad_value_for_mm_hash;
 
         let image_token_id = 99;
         let video_token_id = 100;
@@ -20403,7 +20499,7 @@ responses_tools: None,
     #[cfg(feature = "mm-routing")]
     #[test]
     fn tracked_mixed_token_only_boundary_preserves_canonical_pads() {
-        use dynamo_kv_router::protocols::pad_value_for_mm_hash;
+        use dynamo_kv_hashing::multimodal::pad_value_for_mm_hash;
 
         let image_token_id = 99;
         let video_token_id = 100;
@@ -20447,7 +20543,7 @@ responses_tools: None,
     #[cfg(feature = "mm-routing")]
     #[test]
     fn tracked_replacements_preserve_image_video_image_order() {
-        use dynamo_kv_router::protocols::pad_value_for_mm_hash;
+        use dynamo_kv_hashing::multimodal::pad_value_for_mm_hash;
 
         let image_token_id = 99;
         let video_token_id = 100;
@@ -20527,7 +20623,7 @@ responses_tools: None,
     #[cfg(feature = "mm-routing")]
     #[test]
     fn shared_placeholder_video_matches_legacy_worker_normalization() {
-        use dynamo_kv_router::protocols::pad_value_for_mm_hash;
+        use dynamo_kv_hashing::multimodal::pad_value_for_mm_hash;
 
         let mm_hash = 41;
         let pad = pad_value_for_mm_hash(mm_hash);
