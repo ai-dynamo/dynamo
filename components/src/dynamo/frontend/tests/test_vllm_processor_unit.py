@@ -5815,7 +5815,6 @@ class TestResponseFormatReasoningStart:
 
     @pytest.mark.asyncio
     async def test_multi_token_end_marker_is_matched_as_text(self, tokenizer):
-        # No single token to match, so the end marker's text bounds reasoning.
         assert len(tokenizer.encode("<|end_of_thought|>", add_special_tokens=False)) > 1
         guided = await self._guided(
             tokenizer,
@@ -5875,12 +5874,12 @@ class TestResponseFormatReasoningStart:
 
     @pytest.mark.asyncio
     async def test_explicit_guided_json_is_not_wrapped(self, tokenizer):
-        # guided_json / structured_outputs constrain the whole token stream.
+        # Legacy guided_json takes precedence over response_format and
+        # constrains the whole token stream.
         guided = await self._guided(
             tokenizer,
             prompt_text="<|im_start|>assistant\n<think>",
             reasoning_parser_class=_prompt_reasoning_parser_with_end(),
-            response_format={"type": "text"},
-            extra={"structured_outputs": {"json": _JSON_SCHEMA}},
+            extra={"guided_json": _JSON_SCHEMA},
         )
         assert guided == {"json": _JSON_SCHEMA}
