@@ -180,7 +180,8 @@ func scalePodCliqueScalingGroup(ctx context.Context, cl client.Client, pcsg *gro
 }
 
 // scalePodCliques scales the named template's clique in every replica of the
-// non-nil pcsg. Call only for explicitly managed capacity.
+// non-nil pcsg. Call only for explicitly managed capacity. A clique with a Cyborg
+// fabric-pod placement keeps the capacity of that placement.
 // The provided PCLQs remain unchanged; the returned bool reports whether they were updated.
 func scalePodCliques(ctx context.Context, cl client.Client, pcsg *grovev1alpha1.PodCliqueScalingGroup, pclqs map[string]*grovev1alpha1.PodClique, templateName string, replicas int32) (bool, error) {
 	var changed bool
@@ -188,7 +189,7 @@ func scalePodCliques(ctx context.Context, cl client.Client, pcsg *grovev1alpha1.
 	for index := range pcsg.Spec.Replicas {
 		name := grovecommon.GeneratePodCliqueName(grovecommon.ResourceNameReplica{Name: pcsg.Name, Replica: int(index)}, templateName)
 		pclq := pclqs[name]
-		if pclq == nil || pclq.Spec.Replicas == replicas {
+		if pclq == nil || hasCyborgPlacement(pclq) || pclq.Spec.Replicas == replicas {
 			continue
 		}
 

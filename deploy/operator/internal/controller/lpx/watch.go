@@ -73,7 +73,7 @@ func (r *graphReconciler) setupWithManager(mgr ctrl.Manager) error {
 		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(mapChildToLPXGraphDeployment), builder.WithPredicates(placedCyborgPodPredicate()))
 
 	// Node labels define the fabric pods. Namespace-restricted mode cannot read Nodes,
-	// and resolveCyborgPlacements then rejects the placement annotation.
+	// and renderPodCliqueSet then rejects the placement annotation.
 	if r.config.Namespace.Restricted == "" {
 		ctrlBuilder = ctrlBuilder.WatchesMetadata(&corev1.Node{}, handler.EnqueueRequestsFromMapFunc(r.mapNodeToLPXGraphDeployments), builder.WithPredicates(fabricPodNodePredicate()))
 	}
@@ -233,10 +233,10 @@ func podCliqueScalingGroupPredicate() predicate.Funcs {
 	}
 }
 
-// isPlacedCyborgPod selects the Cyborg Pods that this controller places by fabric
-// pod. renderPodCliqueSet marks their PodClique template, and Grove copies the
-// template labels to every Pod.
-func isPlacedCyborgPod(obj client.Object) bool {
+// hasCyborgPlacement selects the Cyborg PodCliques, and their Pods, that this
+// controller places by fabric pod. renderPodCliqueSet marks the PodClique
+// template, and Grove copies the template labels to the PodClique and its Pods.
+func hasCyborgPlacement(obj client.Object) bool {
 	return obj.GetLabels()[lpx.CyborgPlacementLabel] != ""
 }
 
@@ -244,10 +244,10 @@ func isPlacedCyborgPod(obj client.Object) bool {
 // Its registered informer supplies non-nil Pods.
 func placedCyborgPodPredicate() predicate.Funcs {
 	return predicate.Funcs{
-		CreateFunc: func(e event.CreateEvent) bool { return isPlacedCyborgPod(e.Object) },
-		DeleteFunc: func(e event.DeleteEvent) bool { return isPlacedCyborgPod(e.Object) },
+		CreateFunc: func(e event.CreateEvent) bool { return hasCyborgPlacement(e.Object) },
+		DeleteFunc: func(e event.DeleteEvent) bool { return hasCyborgPlacement(e.Object) },
 		UpdateFunc: func(e event.UpdateEvent) bool {
-			if !isPlacedCyborgPod(e.ObjectNew) {
+			if !hasCyborgPlacement(e.ObjectNew) {
 				return false
 			}
 			oldPod, newPod := e.ObjectOld.(*corev1.Pod), e.ObjectNew.(*corev1.Pod)

@@ -45,6 +45,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/yaml"
@@ -1683,4 +1684,69 @@ func writeUnitsGraphBuild(t *testing.T, root, buildID, shape string) {
 	data, err = writable.Marshal()
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(path, data, 0o600))
+}
+
+func TestLPXCyborgPlacementLabel(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		annotations map[string]string
+		labels      map[string]string
+		want        string
+	}{
+		{name: "a workload that does not select the placement has no label"},
+		{
+			name:        "the annotation on the conductor role marks the Cyborg Pods",
+			annotations: map[string]string{cyborgPlacementAnnotation: lpx.CyborgPlacementPerFabricPod},
+			want:        lpx.CyborgPlacementPerFabricPod,
+		},
+		{
+			name:   "an authored label does not mark Pods that this controller does not place",
+			labels: map[string]string{lpx.CyborgPlacementLabel: lpx.CyborgPlacementPerFabricPod, cyborgFabricPodLabel: "a", "authored": "kept"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+
+			t.Log("Given a hybrid workload with the authored conductor annotations and labels")
+			child, dgd, registry := newLPXTestDGD(t, lpx.PipelineHybrid)
+			conductor := dgd.Spec.Components[0].ComponentRole(v1beta1.ComponentRoleLPXConductor)
+			conductor.PodTemplate.Annotations, conductor.PodTemplate.Labels = tc.annotations, tc.labels
+			r := newLPXTestReconciler(t, registry, child, dgd)
+			workloads, plans, err := r.resolveWorkloads(ctx, child, dgd)
+			require.NoError(t, err)
+
+			t.Log("When the controller renders the PodCliqueSet")
+			pcs, _, err := r.renderPodCliqueSet(ctx, child, dgd, workloads, plans, nil)
+			require.NoError(t, err)
+
+			t.Log("Then only the Cyborg template of a placed workload has the placement label")
+			for _, clique := range pcs.Spec.Template.Cliques {
+				want := ""
+				if clique.Name == plans["lpx"].CyborgTemplate {
+					want = tc.want
+					require.Equal(t, tc.labels["authored"], clique.Labels["authored"], "authored labels reach the Cyborg template")
+				}
+				require.Equal(t, want, clique.Labels[lpx.CyborgPlacementLabel], clique.Name)
+				require.NotContains(t, clique.Labels, cyborgFabricPodLabel, "an authored fabric pod would make a new Pod look placed")
+			}
+		})
+	}
+}
+
+func TestLPXCyborgPlacementRejectsNamespaceRestrictedMode(t *testing.T) {
+	ctx := t.Context()
+
+	t.Log("Select per-fabric-pod placement while the operator can read only one namespace")
+	child, dgd, registry := newLPXTestDGD(t, lpx.PipelineHybrid)
+	conductor := dgd.Spec.Components[0].ComponentRole(v1beta1.ComponentRoleLPXConductor)
+	conductor.PodTemplate.Annotations = map[string]string{cyborgPlacementAnnotation: lpx.CyborgPlacementPerFabricPod}
+	r := newLPXTestReconciler(t, registry, child, dgd, newTestFabricPodNode("gpu-a", "a"))
+	r.config.Namespace.Restricted = child.Namespace
+
+	t.Log("Report the missing Node access before a PodCliqueSet can create a Pod with the placement label")
+	_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(child)})
+	require.ErrorContains(t, err, "namespace-restricted")
+	sets := &grovev1alpha1.PodCliqueSetList{}
+	require.NoError(t, r.List(ctx, sets))
+	require.Empty(t, sets.Items)
 }

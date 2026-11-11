@@ -10,12 +10,14 @@ import (
 
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx"
+	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/testing/operatorenv"
 	webhooksetup "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/setup"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -39,9 +41,11 @@ func TestLPXCyborgPlacementGateOnAPIServer(t *testing.T) {
 		},
 	}).RunT(t)
 	r := &graphReconciler{Client: env.Client()}
-	clique := &grovev1alpha1.PodClique{Name: "pcs-0-lpx-0-cond", Namespace: env.Namespace(), UID: "clique-uid", Labels: map[string]string{
-		lpx.CyborgPlacementLabel: lpx.CyborgPlacementPerFabricPod,
-	}}
+	clique := &grovev1alpha1.PodClique{
+		Name: "pcs-0-lpx-0-cond", Namespace: env.Namespace(), UID: "clique-uid",
+		Labels:      map[string]string{lpx.CyborgPlacementLabel: lpx.CyborgPlacementPerFabricPod},
+		Annotations: map[string]string{lpxv1alpha1.PodRoleAnnotation: lpxv1alpha1.PodRoleCyborgWorker, lpx.DeploymentNameAnnotation: "llama"},
+	}
 	groveGate, placementGate := corev1.PodSchedulingGate{Name: grovePodGangGate}, corev1.PodSchedulingGate{Name: lpx.CyborgPlacementGate}
 	quotaGate := corev1.PodSchedulingGate{Name: "example.com/quota"}
 	selector := map[string]string{fabricPodLabel: "a"}
@@ -102,14 +106,14 @@ func TestLPXCyborgPlacementGateOnAPIServer(t *testing.T) {
 	require.Equal(t, selector, ungated.Spec.NodeSelector)
 	require.Equal(t, []corev1.PodSchedulingGate{groveGate}, ungated.Spec.SchedulingGates)
 
-	t.Log("After Grove releases such a Pod, Kubernetes refuses the pin and records no placement")
+	t.Log("After Grove releases such a Pod, Kubernetes accepts no selector, so the controller does not pin a Pod without a gate")
 	floating := newTestAPIServerCyborgPod(clique, 4)
 	require.NoError(t, r.Create(ctx, floating))
 	observed = floating.DeepCopy()
 	floating.Spec.SchedulingGates = nil
 	require.NoError(t, r.Patch(ctx, floating, client.MergeFrom(observed)))
 	placed, err = r.placeCyborgPod(ctx, floating, "a", selector)
-	require.NoError(t, err)
+	require.True(t, apierrors.IsInvalid(err), "%v", err)
 	require.False(t, placed)
 	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(floating), floating))
 	require.Empty(t, floating.Spec.NodeSelector)

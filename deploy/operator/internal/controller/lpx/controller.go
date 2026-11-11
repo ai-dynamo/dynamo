@@ -103,13 +103,13 @@ func (r *graphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 		return ctrl.Result{}, nil
 	}
 
-	var cleanupErr error
+	var cleanupErr, placementErr error
 
 	// Persist the combined outcome before converting errors into bounded retries.
 	defer func(previous *v1alpha1.LPXGraphDeploymentStatus) {
-		if cleanupErr != nil {
-			err = errors.Join(err, cleanupErr)
-			// A later workload wakeup must not postpone failed release cleanup.
+		if cleanupErr != nil || placementErr != nil {
+			err = errors.Join(err, cleanupErr, placementErr)
+			// A later workload wakeup must not postpone failed release cleanup or placement.
 			if result.RequeueAfter > 0 {
 				result.RequeueAfter = min(result.RequeueAfter, pipelineRequestDeadlineRetryInterval)
 			}
@@ -204,16 +204,25 @@ func (r *graphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 	// Agents from the old template, requiring another release cycle.
 	cleanupErr = r.removeReleasedAgentPods(ctx, pcsgs, requests)
 
+	// Pin Cyborg Pods from the observed hierarchy, also before downloads and desired
+	// workload resolution: Pod admission holds each new Cyborg Pod until its pin, and
+	// a replacement Pod of a serving replica must not wait for a new revision. A
+	// PodClique without a placement must not stop the write that corrects it.
+	var cyborgPlacements map[string]cyborgPlacement
+	cyborgPlacements, placementErr = r.resolveCyborgPlacements(ctx, pcs, pcsgs, pclqs, requests)
+	placementErr = errors.Join(placementErr, r.pinCyborgPods(ctx, pclqs, cyborgPlacements))
+
 	if result, err := r.reconcileModelDownloads(ctx, deployment, dgd); err != nil || result.RequeueAfter > 0 {
 		return result, err
 	}
 
-	return r.reconcileWorkloads(ctx, deployment, dgd, pcs, pcsgs, pclqs, requests)
+	return r.reconcileWorkloads(ctx, deployment, dgd, pcs, pcsgs, pclqs, requests, cyborgPlacements)
 }
 
 // reconcileWorkloads consumes owned observations; DGD and deployment are non-nil.
 // A nil pcs means initial creation, with no pcsgs, pclqs or requests. Otherwise
 // pcsgs contains every configured group; pclqs contains owned, non-deleting cliques.
+// cyborgPlacements holds the placement of each observed Cyborg PodClique that has one.
 // On error, Reconcile persists status before applying deadline retries.
 //
 //nolint:gocyclo // Keep lifecycle ordering explicit in one reconciliation path.
@@ -225,6 +234,7 @@ func (r *graphReconciler) reconcileWorkloads(
 	pcsgs map[string]*grovev1alpha1.PodCliqueScalingGroup,
 	pclqs map[string]*grovev1alpha1.PodClique,
 	requests map[string]*lpxv1alpha1.LPUPipelineRequest,
+	cyborgPlacements map[string]cyborgPlacement,
 ) (result ctrl.Result, err error) {
 	// Resolve and render every workload before deleting the running PCS.
 	workloads, plans, err := r.resolveWorkloads(ctx, deployment, dgd)
@@ -261,7 +271,6 @@ func (r *graphReconciler) reconcileWorkloads(
 		missingRequests  []*lpxv1alpha1.LPUPipelineRequest
 		expiredRequests  []*lpxv1alpha1.LPUPipelineRequest
 		deadlineAt       time.Time
-		cyborgPlacements map[string]cyborgPlacement
 	)
 
 	// Prepare requests only after observing the PCS, in publication order.
@@ -294,11 +303,7 @@ func (r *graphReconciler) reconcileWorkloads(
 			deadlineAt = next
 		}
 
-		// Cyborg placement follows the committed plans of the complete graph's requests.
-		cyborgPlacements, err = r.resolveCyborgPlacements(ctx, dgd, pcs, pcsgs, pclqs, desiredRequests, workloads, plans)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
+		// A fabric-pod placement reports its own Cyborg capacity changes.
 		for name, placement := range cyborgPlacements {
 			scalingRequired = scalingRequired || pclqs[name].Spec.Replicas != placement.total()
 		}
@@ -340,8 +345,9 @@ func (r *graphReconciler) reconcileWorkloads(
 		return ctrl.Result{}, nil
 	}
 
-	// Pin Cyborg Pods while Grove still gates them; the Pod and PodClique watches
-	// deliver each write, and no later step of this pass depends on Cyborg Pods.
+	// Remove Cyborg Pods outside their placement and write its capacity only after
+	// the PCS is synchronized, as for every replica write. The Pod and PodClique
+	// watches deliver each write, and no later step of this pass depends on Cyborg Pods.
 	if _, err := r.reconcileCyborgPlacements(ctx, pclqs, cyborgPlacements, scalingBlocked); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -432,16 +438,17 @@ func resolveWorkloadCapacity(
 ) (int32, *int32, bool, error) {
 	replicas, explicit := plan.Replicas, component.Replicas
 	required := explicit != nil && *explicit != pcsg.Spec.Replicas
-	placed, err := cyborgPlacementApplies(component, plan)
-	if err != nil {
-		return 0, nil, false, err
-	}
-	// A fabric-pod placement reports its own Cyborg capacity changes.
-	if plan.CyborgTemplate != "" && !placed {
+	if plan.CyborgTemplate != "" {
 		if role := component.ComponentRole(v1beta1.ComponentRoleLPXConductor); role != nil && role.Replicas != nil {
 			for index := range pcsg.Spec.Replicas {
 				name := grovecommon.GeneratePodCliqueName(grovecommon.ResourceNameReplica{Name: pcsg.Name, Replica: int(index)}, plan.CyborgTemplate)
-				if clique := pclqs[name]; clique == nil || clique.Spec.Replicas != *role.Replicas {
+				clique := pclqs[name]
+
+				// A fabric-pod placement reports its own Cyborg capacity changes.
+				if clique != nil && hasCyborgPlacement(clique) {
+					continue
+				}
+				if clique == nil || clique.Spec.Replicas != *role.Replicas {
 					required = true
 				}
 			}
@@ -541,11 +548,6 @@ func (r *graphReconciler) reconcileWorkloadCapacity(
 		return false, nil
 	}
 
-	// A fabric-pod placement owns the Cyborg capacity of its workload.
-	if placed, err := cyborgPlacementApplies(component, plan); placed || err != nil {
-		return false, err
-	}
-
 	if replicas := component.ComponentRole(v1beta1.ComponentRoleLPXConductor).Replicas; replicas != nil {
 		return scalePodCliques(ctx, r, pcsg, pclqs, plan.CyborgTemplate, *replicas)
 	}
@@ -553,7 +555,9 @@ func (r *graphReconciler) reconcileWorkloadCapacity(
 	for index := range pcsg.Spec.Replicas {
 		name := grovecommon.GeneratePodCliqueName(grovecommon.ResourceNameReplica{Name: pcsg.Name, Replica: int(index)}, plan.CyborgTemplate)
 		pclq := pclqs[name]
-		if pclq == nil {
+
+		// A fabric-pod placement owns the capacity of its PodClique.
+		if pclq == nil || hasCyborgPlacement(pclq) {
 			continue
 		}
 

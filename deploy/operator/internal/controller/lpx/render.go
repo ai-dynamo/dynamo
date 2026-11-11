@@ -142,8 +142,9 @@ func (r *graphReconciler) renderPodCliqueSet(
 			serving = plan.Agents[len(plan.Agents)-1].TemplateName
 		}
 
-		// Only this controller marks the Cyborg Pods that it places by fabric pod. Pod
-		// admission gates each marked Pod, so the mark must imply that a pin follows.
+		// Only this controller marks the Cyborg Pods that it places by fabric pod, and
+		// only it records their fabric pod. Pod admission gates each marked Pod, so the
+		// mark must imply that a pin follows.
 		placed, err := cyborgPlacementApplies(dgd.GetComponentByName(groupName), plan)
 		if err != nil {
 			return nil, nil, err
@@ -158,6 +159,7 @@ func (r *graphReconciler) renderPodCliqueSet(
 				clique.Annotations[consts.RestartAnnotation] = token
 			}
 			delete(clique.Labels, lpx.CyborgPlacementLabel)
+			delete(clique.Labels, cyborgFabricPodLabel)
 			if placed && clique.Name == plan.CyborgTemplate {
 				clique.Labels[lpx.CyborgPlacementLabel] = lpx.CyborgPlacementPerFabricPod
 			}

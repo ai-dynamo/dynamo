@@ -7,6 +7,7 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -23,7 +24,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/component-helpers/scheduling/corev1/nodeaffinity"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -60,8 +60,10 @@ func (p cyborgPlacement) total() int32 {
 // of each fabric pod. The Pod takes the fabric pod of its index block, where block
 // k is the indexes [k*replicas, (k+1)*replicas), when that fabric pod has an open
 // position, and otherwise the first fabric pod in name order that has one. A
-// complete provision therefore gives each fabric pod one contiguous index block,
-// in whatever order the Pods appear.
+// provision into an empty PodClique therefore gives each fabric pod one contiguous
+// index block, in whatever order the Pods appear. Later Pods get Grove's lowest
+// free index and the position that is open, so a block does not survive a
+// replacement after a prune.
 func (p cyborgPlacement) openFabricPod(open map[string]int32, podIndex int) string {
 	if podIndex >= 0 && p.replicas > 0 {
 		if block := podIndex / int(p.replicas); block < len(p.fabricPods) && open[p.fabricPods[block]] > 0 {
@@ -76,10 +78,10 @@ func (p cyborgPlacement) openFabricPod(open map[string]int32, podIndex int) stri
 	return ""
 }
 
-// cyborgPlacementApplies reports whether this controller distributes the workload's
-// Cyborg Pods by fabric pod: the non-nil serving component's conductor role selects
-// it, and the non-nil plan has a Cyborg and at least one LPU Agent to follow.
-// An unknown mode is an error, never ignored.
+// cyborgPlacementApplies reports whether renderPodCliqueSet marks the workload's
+// Cyborg template for fabric-pod placement: the non-nil serving component's
+// conductor role selects it, and the non-nil plan has a Cyborg and at least one
+// LPU Agent to follow. An unknown mode is an error, never ignored.
 func cyborgPlacementApplies(component *v1beta1.DynamoComponentDeploymentSharedSpec, plan *lpx.MaterializationPlan) (bool, error) {
 	// The conductor role's Pod template carries the selection.
 	role := component.ComponentRole(v1beta1.ComponentRoleLPXConductor)
@@ -101,78 +103,65 @@ func cyborgPlacementApplies(component *v1beta1.DynamoComponentDeploymentSharedSp
 }
 
 // resolveCyborgPlacements derives the desired distribution of every observed Cyborg
-// PodClique whose workload selects per-fabric-pod placement, keyed by PodClique name.
+// PodClique that carries the placement label, keyed by PodClique name.
 //
 // A workload replica whose requests are all Bound or Degraded keeps Cyborg Pods only
 // in the fabric pods of its committed LPU plans. Until then it keeps them in every
-// fabric pod that the Cyborg template can select, so the LPX scheduler finds a
-// Cyborg in each fabric pod that it can use.
+// fabric pod that its PodClique can select, so the LPX scheduler finds a Cyborg in
+// each fabric pod that it can use. The count for each fabric pod is the replica
+// count of the PodClique's template in the observed PodCliqueSet.
 //
-// Pointer inputs are non-nil and owned observations; requests holds the desired
-// requests of the complete graph and plans carry their resolved replica counts.
-// Workloads without placement, without Agents, or without an observed Cyborg
-// PodClique have no entry. Inputs are not mutated.
+// Every input is an owned observation, so the result needs no desired state. A
+// PodClique keeps its placement while a new revision waits, and until Grove
+// replaces it after the DGD stops selecting the placement. pcs is nil before the
+// PodCliqueSet exists; otherwise pcsgs holds every configured group. requests may
+// be nil. A PodClique whose placement cannot be derived has no entry and is named
+// in the returned error; the other entries stay valid. Inputs are not mutated.
 func (r *graphReconciler) resolveCyborgPlacements(
 	ctx context.Context,
-	dgd *v1beta1.DynamoGraphDeployment,
 	pcs *grovev1alpha1.PodCliqueSet,
 	pcsgs map[string]*grovev1alpha1.PodCliqueScalingGroup,
 	pclqs map[string]*grovev1alpha1.PodClique,
 	requests map[string]*lpxv1alpha1.LPUPipelineRequest,
-	workloads map[string]*lpx.Workload,
-	plans map[string]*lpx.MaterializationPlan,
 ) (map[string]cyborgPlacement, error) {
 	placements := make(map[string]cyborgPlacement)
 
-	for _, groupName := range slices.Sorted(maps.Keys(plans)) {
-		plan, workload := plans[groupName], workloads[groupName]
-		component := dgd.GetComponentByName(groupName)
+	// Namespace-restricted mode has no Node cache; renderPodCliqueSet rejects the placement there.
+	if pcs == nil || r.config.Namespace.Restricted != "" {
+		return placements, nil
+	}
 
-		// Only workloads that select the placement take part. renderPodCliqueSet has
-		// rejected them where this controller cannot read Node labels.
-		placed, err := cyborgPlacementApplies(component, plan)
-		if err != nil {
-			return nil, err
-		}
-		if !placed {
-			continue
-		}
-
-		// The role's count applies to each fabric pod and must form complete client groups.
-		minimum, err := workload.MinimumCyborgReplicas()
-		if err != nil {
-			return nil, err
-		}
-		replicas := ptr.Deref(component.ComponentRole(v1beta1.ComponentRoleLPXConductor).Replicas, minimum)
-		if err := workload.ValidateCyborgReplicas(replicas); err != nil {
-			return nil, err
-		}
-
-		// Replicas above the desired count are retiring and keep their Cyborg Pods.
-		var eligible []string
-		pcsg := pcsgs[plan.LPXScalingGroup]
-		for index := range min(pcsg.Spec.Replicas, plan.Replicas) {
-			name := grovecommon.GeneratePodCliqueName(grovecommon.ResourceNameReplica{Name: pcsg.Name, Replica: int(index)}, plan.CyborgTemplate)
-			if pclqs[name] == nil {
+	// Visit the PodCliques by scaling group, template and replica, as Grove names them.
+	var errs []error
+	for _, group := range pcs.Spec.Template.PodCliqueScalingGroupConfigs {
+		pcsg := pcsgs[grovecommon.GeneratePodCliqueScalingGroupName(grovecommon.ResourceNameReplica{Name: pcs.Name, Replica: 0}, group.Name)]
+		for _, template := range pcs.Spec.Template.Cliques {
+			if !slices.Contains(group.CliqueNames, template.Name) {
 				continue
 			}
 
-			fabricPods, settled := committedFabricPods(requests, plan.LPXScalingGroup, index)
-			if !settled {
-				// Resolve the Node inventory one time for the replicas that still need it.
-				if eligible == nil {
-					eligible, err = r.eligibleFabricPods(ctx, pcs, plan.CyborgTemplate)
-					if err != nil {
-						return nil, err
+			for index := range pcsg.Spec.Replicas {
+				name := grovecommon.GeneratePodCliqueName(grovecommon.ResourceNameReplica{Name: pcsg.Name, Replica: int(index)}, template.Name)
+				clique := pclqs[name]
+				if clique == nil || !hasCyborgPlacement(clique) {
+					continue
+				}
+
+				// One PodClique without a selectable Node must not stop the other placements.
+				fabricPods, settled := committedFabricPods(requests, pcsg.Name, index)
+				if !settled {
+					var err error
+					if fabricPods, err = r.eligibleFabricPods(ctx, clique); err != nil {
+						errs = append(errs, err)
+						continue
 					}
 				}
-				fabricPods = eligible
+				placements[name] = cyborgPlacement{fabricPods: fabricPods, replicas: template.Spec.Replicas}
 			}
-			placements[name] = cyborgPlacement{fabricPods: fabricPods, replicas: replicas}
 		}
 	}
 
-	return placements, nil
+	return placements, errors.Join(errs...)
 }
 
 // committedFabricPods returns the sorted fabric pods that hold the LPUs of one
@@ -212,18 +201,13 @@ func committedFabricPods(requests map[string]*lpxv1alpha1.LPUPipelineRequest, sc
 	return slices.Sorted(maps.Keys(selected)), true
 }
 
-// eligibleFabricPods lists the fabric pods that contain a Node which the Cyborg
-// template's node selector and required node affinity can select. Taints and free
-// capacity are not evaluated: a Cyborg Pod pinned to a fabric pod without capacity
-// stays Pending and gives the LPX scheduler no evidence for that fabric pod.
-// pcs is the non-nil observed PodCliqueSet that contains cyborgTemplate. The
-// caller establishes cluster-wide Node access.
-func (r *graphReconciler) eligibleFabricPods(ctx context.Context, pcs *grovev1alpha1.PodCliqueSet, cyborgTemplate string) ([]string, error) {
-	// Evaluate the hard node constraints of the observed Cyborg template.
-	index := slices.IndexFunc(pcs.Spec.Template.Cliques, func(clique *grovev1alpha1.PodCliqueTemplateSpec) bool {
-		return clique.Name == cyborgTemplate
-	})
-	required := nodeaffinity.GetRequiredNodeAffinity(&corev1.Pod{Spec: pcs.Spec.Template.Cliques[index].Spec.PodSpec})
+// eligibleFabricPods lists the fabric pods that contain a Node which the node
+// selector and required node affinity of the non-nil Cyborg PodClique can select.
+// Taints and free capacity are not evaluated: a Cyborg Pod pinned to a fabric pod
+// without capacity stays Pending and gives the LPX scheduler no evidence for that
+// fabric pod. The caller establishes cluster-wide Node access.
+func (r *graphReconciler) eligibleFabricPods(ctx context.Context, clique *grovev1alpha1.PodClique) ([]string, error) {
+	required := nodeaffinity.GetRequiredNodeAffinity(&corev1.Pod{Spec: clique.Spec.PodSpec})
 
 	// Read only Node metadata; the cache holds no complete Node objects.
 	nodes := &metav1.PartialObjectMetadataList{}
@@ -232,7 +216,7 @@ func (r *graphReconciler) eligibleFabricPods(ctx context.Context, pcs *grovev1al
 		return nil, fmt.Errorf("list Nodes with label %s: %w", fabricPodLabel, err)
 	}
 
-	// Collect the fabric pod of every Node that the template can select.
+	// Collect the fabric pod of every Node that the PodClique can select.
 	eligible := make(map[string]struct{})
 	for i := range nodes.Items {
 		node := &corev1.Node{ObjectMeta: nodes.Items[i].ObjectMeta}
@@ -241,7 +225,7 @@ func (r *graphReconciler) eligibleFabricPods(ctx context.Context, pcs *grovev1al
 		}
 		selectable, err := required.Match(node)
 		if err != nil {
-			return nil, fmt.Errorf("evaluate the node affinity of Cyborg template %q: %w", cyborgTemplate, err)
+			return nil, fmt.Errorf("evaluate the node affinity of Cyborg PodClique %q: %w", clique.Name, err)
 		}
 		if selectable {
 			eligible[node.Labels[fabricPodLabel]] = struct{}{}
@@ -249,29 +233,47 @@ func (r *graphReconciler) eligibleFabricPods(ctx context.Context, pcs *grovev1al
 	}
 
 	if len(eligible) == 0 {
-		return nil, fmt.Errorf("no Node with label %s matches the node selector and affinity of Cyborg template %q", fabricPodLabel, cyborgTemplate)
+		return nil, fmt.Errorf("no Node with label %s matches the node selector and affinity of Cyborg PodClique %q", fabricPodLabel, clique.Name)
 	}
 	return slices.Sorted(maps.Keys(eligible)), nil
+}
+
+// pinCyborgPods pins the unplaced Pods of every placed Cyborg PodClique. It writes
+// no capacity and removes no Pod, so it can run before the desired state is known.
+// pclqs contains the observation of every placement key. One PodClique that fails
+// does not stop the others.
+func (r *graphReconciler) pinCyborgPods(ctx context.Context, pclqs map[string]*grovev1alpha1.PodClique, placements map[string]cyborgPlacement) error {
+	var errs []error
+	for _, name := range slices.Sorted(maps.Keys(placements)) {
+		if _, _, err := r.fillCyborgPlacement(ctx, pclqs[name], placements[name]); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // reconcileCyborgPlacements converges every placed Cyborg PodClique in name order.
 // pclqs contains the observation of every placement key. The returned bool reports
 // a write, after which the Pod and PodClique watches deliver the next observation.
+// One PodClique that fails does not stop the others.
 func (r *graphReconciler) reconcileCyborgPlacements(
 	ctx context.Context,
 	pclqs map[string]*grovev1alpha1.PodClique,
 	placements map[string]cyborgPlacement,
 	scalingBlocked bool,
 ) (bool, error) {
-	var changed bool
+	var (
+		changed bool
+		errs    []error
+	)
 	for _, name := range slices.Sorted(maps.Keys(placements)) {
 		cliqueChanged, err := r.reconcileCyborgPlacement(ctx, pclqs[name], placements[name], scalingBlocked)
 		changed = changed || cliqueChanged
 		if err != nil {
-			return changed, err
+			errs = append(errs, err)
 		}
 	}
-	return changed, nil
+	return changed, errors.Join(errs...)
 }
 
 // reconcileCyborgPlacement converges one non-nil, owned Cyborg PodClique on its
@@ -293,92 +295,14 @@ func (r *graphReconciler) reconcileCyborgPlacement(
 ) (bool, error) {
 	logger := log.FromContext(ctx).WithValues("podClique", clique.Name)
 
-	// Observe the live Pods of this PodClique incarnation in Grove index order.
-	pods := &corev1.PodList{}
-	if err := r.List(ctx, pods, client.InNamespace(clique.Namespace), client.MatchingLabels{grovecommon.LabelPodClique: clique.Name}); err != nil {
-		return false, fmt.Errorf("list the Cyborg Pods of PodClique %q: %w", clique.Name, err)
-	}
-	var live []*corev1.Pod
-	for i := range pods.Items {
-		if pod := &pods.Items[i]; metav1.IsControlledBy(pod, clique) && pod.DeletionTimestamp.IsZero() {
-			live = append(live, pod)
-		}
-	}
-	slices.SortFunc(live, func(a, b *corev1.Pod) int {
-		return cmp.Or(cmp.Compare(podCliquePodIndex(a), podCliquePodIndex(b)), cmp.Compare(a.Name, b.Name))
-	})
-
-	// Each target fabric pod has replicas open positions.
-	total := placement.total()
-	shrinking := clique.Spec.Replicas > total
-	open := make(map[string]int32, len(placement.fabricPods))
-	for _, fabricPod := range placement.fabricPods {
-		open[fabricPod] = placement.replicas
-	}
-
-	// Placed Pods keep their positions; bound, ready and older Pods go first.
-	var surplus []*corev1.Pod
-	placed := slices.DeleteFunc(slices.Clone(live), func(pod *corev1.Pod) bool { return pod.Labels[cyborgFabricPodLabel] == "" })
-	slices.SortStableFunc(placed, compareCyborgRetention)
-	for _, pod := range placed {
-		if fabricPod := pod.Labels[cyborgFabricPodLabel]; open[fabricPod] > 0 {
-			open[fabricPod]--
-		} else {
-			surplus = append(surplus, pod)
-		}
-	}
-
-	// Fill the open positions with the unplaced Pods, each in the fabric pod of its index block.
-	var changed bool
-	for _, pod := range live {
-		if pod.Labels[cyborgFabricPodLabel] != "" {
-			continue
-		}
-
-		// Where Pod admission did not add this controller's scheduling gate, Grove can
-		// release a Pod before the pin. Such a Pod binds without a selector: keep it
-		// where its Node has an open position.
-		fabricPod, selector := "", map[string]string(nil)
-		if pod.Spec.NodeName != "" {
-			var err error
-			if fabricPod, err = r.nodeFabricPod(ctx, pod.Spec.NodeName); err != nil {
-				return changed, err
-			}
-		} else {
-			// Kubernetes accepts a selector only on a gated Pod. Grove removes its gate with
-			// a patch that lists the gates it keeps, and Kubernetes refuses that patch when
-			// a listed gate is gone. So this controller's gate leaves last, with the pin.
-			held := hasSchedulingGate(pod, lpx.CyborgPlacementGate)
-			if len(pod.Spec.SchedulingGates) == 0 || (held && hasSchedulingGate(pod, grovePodGangGate)) {
-				continue
-			}
-			if fabricPod = placement.openFabricPod(open, podCliquePodIndex(pod)); fabricPod != "" {
-				selector = map[string]string{fabricPodLabel: fabricPod}
-			}
-		}
-
-		// Without an open position, a bound Pod holds a GPU that no placement uses.
-		// Grove's scale-in removes every other unplaced Pod.
-		if open[fabricPod] == 0 {
-			if pod.Spec.NodeName != "" && !shrinking {
-				surplus = append(surplus, pod)
-			}
-			continue
-		}
-
-		placedPod, err := r.placeCyborgPod(ctx, pod, fabricPod, selector)
-		if err != nil {
-			return changed, err
-		}
-		if placedPod {
-			open[fabricPod]--
-			changed = true
-			logger.Info("Placed Cyborg Pod in fabric pod", "pod", pod.Name, "fabricPod", fabricPod, "bound", pod.Spec.NodeName != "")
-		}
+	surplus, changed, err := r.fillCyborgPlacement(ctx, clique, placement)
+	if err != nil {
+		return changed, err
 	}
 
 	// A lower capacity needs its removals first, and both wait while Grove defers replica writes.
-	if shrinking && scalingBlocked {
+	total := placement.total()
+	if clique.Spec.Replicas > total && scalingBlocked {
 		return changed, nil
 	}
 	for _, pod := range surplus {
@@ -406,13 +330,108 @@ func (r *graphReconciler) reconcileCyborgPlacement(
 	return true, nil
 }
 
+// fillCyborgPlacement observes the live Pods of one non-nil, owned Cyborg PodClique
+// and pins each unplaced Pod to a fabric pod of the placement that has an open
+// position. It returns the Pods that hold a GPU outside the placement, which the
+// caller can remove, and whether it wrote a pin. It writes no capacity and removes
+// no Pod.
+func (r *graphReconciler) fillCyborgPlacement(
+	ctx context.Context,
+	clique *grovev1alpha1.PodClique,
+	placement cyborgPlacement,
+) (surplus []*corev1.Pod, changed bool, err error) {
+	logger := log.FromContext(ctx).WithValues("podClique", clique.Name)
+
+	// Observe the live Pods of this PodClique incarnation in Grove index order.
+	pods := &corev1.PodList{}
+	if err := r.List(ctx, pods, client.InNamespace(clique.Namespace), client.MatchingLabels{grovecommon.LabelPodClique: clique.Name}); err != nil {
+		return nil, false, fmt.Errorf("list the Cyborg Pods of PodClique %q: %w", clique.Name, err)
+	}
+	var live []*corev1.Pod
+	for i := range pods.Items {
+		if pod := &pods.Items[i]; metav1.IsControlledBy(pod, clique) && pod.DeletionTimestamp.IsZero() {
+			live = append(live, pod)
+		}
+	}
+	slices.SortFunc(live, func(a, b *corev1.Pod) int {
+		return cmp.Or(cmp.Compare(podCliquePodIndex(a), podCliquePodIndex(b)), cmp.Compare(a.Name, b.Name))
+	})
+
+	// Each target fabric pod has replicas open positions.
+	shrinking := clique.Spec.Replicas > placement.total()
+	open := make(map[string]int32, len(placement.fabricPods))
+	for _, fabricPod := range placement.fabricPods {
+		open[fabricPod] = placement.replicas
+	}
+
+	// Placed Pods keep their positions; bound, ready and older Pods go first.
+	placed := slices.DeleteFunc(slices.Clone(live), func(pod *corev1.Pod) bool { return pod.Labels[cyborgFabricPodLabel] == "" })
+	slices.SortStableFunc(placed, compareCyborgRetention)
+	for _, pod := range placed {
+		if fabricPod := pod.Labels[cyborgFabricPodLabel]; open[fabricPod] > 0 {
+			open[fabricPod]--
+		} else {
+			surplus = append(surplus, pod)
+		}
+	}
+
+	// Fill the open positions with the unplaced Pods, each in the fabric pod of its index block.
+	for _, pod := range live {
+		if pod.Labels[cyborgFabricPodLabel] != "" {
+			continue
+		}
+
+		// Where Pod admission did not add this controller's scheduling gate, Grove can
+		// release a Pod before the pin. Such a Pod binds without a selector: keep it
+		// where its Node has an open position.
+		fabricPod, selector := "", map[string]string(nil)
+		if pod.Spec.NodeName != "" {
+			if fabricPod, err = r.nodeFabricPod(ctx, pod.Spec.NodeName); err != nil {
+				return surplus, changed, err
+			}
+		} else {
+			// Kubernetes accepts a selector only on a gated Pod. Grove removes its gate with
+			// a patch that lists the gates it keeps, and Kubernetes refuses that patch when
+			// a listed gate is gone. So this controller's gate leaves last, with the pin.
+			held := hasSchedulingGate(pod, lpx.CyborgPlacementGate)
+			if len(pod.Spec.SchedulingGates) == 0 || (held && hasSchedulingGate(pod, grovePodGangGate)) {
+				continue
+			}
+			if fabricPod = placement.openFabricPod(open, podCliquePodIndex(pod)); fabricPod != "" {
+				selector = map[string]string{fabricPodLabel: fabricPod}
+			}
+		}
+
+		// Without an open position, a bound Pod holds a GPU that no placement uses.
+		// Grove's scale-in removes every other unplaced Pod.
+		if open[fabricPod] == 0 {
+			if pod.Spec.NodeName != "" && !shrinking {
+				surplus = append(surplus, pod)
+			}
+			continue
+		}
+
+		placedPod, err := r.placeCyborgPod(ctx, pod, fabricPod, selector)
+		if err != nil {
+			return surplus, changed, err
+		}
+		if placedPod {
+			open[fabricPod]--
+			changed = true
+			logger.Info("Placed Cyborg Pod in fabric pod", "pod", pod.Name, "fabricPod", fabricPod, "bound", pod.Spec.NodeName != "")
+		}
+	}
+
+	return surplus, changed, nil
+}
+
 // placeCyborgPod records fabricPod on the non-nil cached Pod. With a non-nil
 // selector it also pins the Pod to that fabric pod and, in the same write, removes
 // this controller's scheduling gate, so the Pod is never schedulable without its
 // pin. The write carries the observed resource version.
 // It returns false without an error when the API server refuses the write for a
-// reason that a later observation resolves: a newer Pod version, a deleted Pod,
-// or a selector change on a Pod that lost its last scheduling gate.
+// reason that a later observation resolves: a newer Pod version or a deleted Pod.
+// Every other refusal is an error: no later Pod version removes it.
 func (r *graphReconciler) placeCyborgPod(ctx context.Context, pod *corev1.Pod, fabricPod string, selector map[string]string) (bool, error) {
 	// The cached Pod is a projection, so name the changes. A strategic merge patch
 	// removes one gate by name and keeps every other gate; the removal does nothing
@@ -438,7 +457,7 @@ func (r *graphReconciler) placeCyborgPod(ctx context.Context, pod *corev1.Pod, f
 	}
 
 	// A later Pod version resolves these refusals and wakes the controller.
-	if apierrors.IsConflict(err) || apierrors.IsNotFound(err) || apierrors.IsInvalid(err) {
+	if apierrors.IsConflict(err) || apierrors.IsNotFound(err) {
 		log.FromContext(ctx).V(1).Info("Cyborg Pod placement waits for a newer observation", "pod", pod.Name, "fabricPod", fabricPod, "reason", err.Error())
 		return false, nil
 	}

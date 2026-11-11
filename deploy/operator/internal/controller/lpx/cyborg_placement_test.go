@@ -7,12 +7,12 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"net/url"
 	"slices"
 	"strconv"
 	"testing"
 	"time"
 
-	v1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx"
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
@@ -203,46 +203,140 @@ func TestLPXCyborgFabricPodPlacement(t *testing.T) {
 	require.Equal(t, []string{"b", "b", "a", "a", "c", "c"}, testCyborgFabricPods(listTestCyborgPods(t, ctx, r.Client, clique)))
 }
 
-func TestLPXCyborgPlacementLabel(t *testing.T) {
-	for _, tc := range []struct {
-		name        string
-		annotations map[string]string
-		labels      map[string]string
-		want        string
-	}{
-		{name: "a workload that does not select the placement has no label"},
-		{
-			name:        "the annotation on the conductor role marks the Cyborg Pods",
-			annotations: map[string]string{cyborgPlacementAnnotation: lpx.CyborgPlacementPerFabricPod},
-			want:        lpx.CyborgPlacementPerFabricPod,
-		},
-		{
-			name:   "an authored label does not mark Pods that this controller does not place",
-			labels: map[string]string{lpx.CyborgPlacementLabel: lpx.CyborgPlacementPerFabricPod, "authored": "kept"},
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			ctx := t.Context()
-			child, dgd, registry := newLPXTestDGD(t, lpx.PipelineHybrid)
-			conductor := dgd.Spec.Components[0].ComponentRole(v1beta1.ComponentRoleLPXConductor)
-			conductor.PodTemplate.Annotations, conductor.PodTemplate.Labels = tc.annotations, tc.labels
-			r := newLPXTestReconciler(t, registry, child, dgd)
-			workloads, plans, err := r.resolveWorkloads(ctx, child, dgd)
-			require.NoError(t, err)
+func TestLPXCyborgPinDoesNotWaitForDesiredState(t *testing.T) {
+	ctx := t.Context()
 
-			pcs, _, err := r.renderPodCliqueSet(ctx, child, dgd, workloads, plans, nil)
-			require.NoError(t, err)
-
-			for _, clique := range pcs.Spec.Template.Cliques {
-				want := ""
-				if clique.Name == plans["lpx"].CyborgTemplate {
-					want = tc.want
-					require.Equal(t, tc.labels["authored"], clique.Labels["authored"], "authored labels reach the Cyborg template")
-				}
-				require.Equal(t, want, clique.Labels[lpx.CyborgPlacementLabel], clique.Name)
-			}
-		})
+	t.Log("Run one hybrid workload with per-fabric-pod placement in a cluster with one fabric pod")
+	child, dgd, registry := newLPXTestDGD(t, lpx.PipelineHybrid)
+	conductor := dgd.Spec.Components[0].ComponentRole(v1beta1.ComponentRoleLPXConductor)
+	conductor.PodTemplate.Annotations = map[string]string{cyborgPlacementAnnotation: lpx.CyborgPlacementPerFabricPod}
+	r := newLPXTestReconciler(t, registry, child, dgd, newTestFabricPodNode("gpu-a", "a"))
+	workloads, plans, err := r.resolveWorkloads(ctx, child, dgd)
+	require.NoError(t, err)
+	pcs, _, err := r.renderPodCliqueSet(ctx, child, dgd, workloads, plans, nil)
+	require.NoError(t, err)
+	createLPXTestObjects(t, ctx, r.Client, materializeLPXTestPCS(t, child, pcs, plans["lpx"])...)
+	key := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(child)}
+	for range 3 {
+		_, err = r.Reconcile(ctx, key)
+		require.NoError(t, err)
 	}
+	clique := &grovev1alpha1.PodClique{}
+	require.NoError(t, r.Get(ctx, client.ObjectKey{Namespace: pcs.Namespace, Name: plans["lpx"].ForReplica(0).CyborgClique}, clique))
+
+	t.Log("A build download for a new revision holds every pass before the desired workload is resolved")
+	r.modelRegistry = &downloadOrderedLPXRegistry{ModelRegistry: registry, buildURL: url.URL{Scheme: lpx.BuildSchemeGCS, Host: "bucket", Path: "/build"}}
+
+	t.Log("Grove replaces a Cyborg Pod of the running workload, and admission gates the new Pod")
+	createLPXTestObjects(t, ctx, r.Client, newTestReleasedCyborgPod(clique, 0))
+	result, err := r.Reconcile(ctx, key)
+	require.NoError(t, err)
+	require.Positive(t, result.RequeueAfter, "the pass waits for the download")
+
+	t.Log("The pin does not wait: the placement of the running workload is known from observed objects")
+	pods := listTestCyborgPods(t, ctx, r.Client, clique)
+	require.Equal(t, []string{"a"}, testCyborgFabricPods(pods))
+	require.Empty(t, pods[0].Spec.SchedulingGates)
+}
+
+func TestLPXCyborgPlacementErrorDoesNotStopItsCorrection(t *testing.T) {
+	ctx := t.Context()
+
+	t.Log("Select per-fabric-pod placement with a Cyborg node selector that matches no Node")
+	child, dgd, registry := newLPXTestDGD(t, lpx.PipelineHybrid)
+	conductor := dgd.Spec.Components[0].ComponentRole(v1beta1.ComponentRoleLPXConductor)
+	conductor.PodTemplate.Annotations = map[string]string{cyborgPlacementAnnotation: lpx.CyborgPlacementPerFabricPod}
+	conductor.PodTemplate.Spec.NodeSelector = map[string]string{"pool": "wrong"}
+	r := newLPXTestReconciler(t, registry, child, dgd, newTestFabricPodNode("gpu-a", "a", "pool", "gpu"))
+	workloads, plans, err := r.resolveWorkloads(ctx, child, dgd)
+	require.NoError(t, err)
+	pcs, _, err := r.renderPodCliqueSet(ctx, child, dgd, workloads, plans, nil)
+	require.NoError(t, err)
+	createLPXTestObjects(t, ctx, r.Client, materializeLPXTestPCS(t, child, pcs, plans["lpx"])...)
+	key := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(child)}
+	cliqueKey := client.ObjectKey{Namespace: pcs.Namespace, Name: plans["lpx"].ForReplica(0).CyborgClique}
+
+	t.Log("Report the PodClique that has no selectable Node")
+	_, err = r.Reconcile(ctx, key)
+	require.ErrorContains(t, err, "no Node with label")
+	require.ErrorContains(t, err, cliqueKey.Name)
+
+	t.Log("The user corrects the selector: the error must not stop the PodCliqueSet write")
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(dgd), dgd))
+	dgd.Spec.Components[0].ComponentRole(v1beta1.ComponentRoleLPXConductor).PodTemplate.Spec.NodeSelector = map[string]string{"pool": "gpu"}
+	updateTestDGD(t, r, child, dgd)
+	_, err = r.Reconcile(ctx, key)
+	require.ErrorContains(t, err, "no Node with label", "Grove has not replaced the PodClique yet")
+	live := &grovev1alpha1.PodCliqueSet{}
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(pcs), live))
+	index := slices.IndexFunc(live.Spec.Template.Cliques, func(template *grovev1alpha1.PodCliqueTemplateSpec) bool {
+		return template.Name == plans["lpx"].CyborgTemplate
+	})
+	require.Equal(t, map[string]string{"pool": "gpu"}, live.Spec.Template.Cliques[index].Spec.PodSpec.NodeSelector)
+
+	t.Log("After Grove gives the PodClique the corrected template, the placement provisions")
+	clique := &grovev1alpha1.PodClique{}
+	require.NoError(t, r.Get(ctx, cliqueKey, clique))
+	clique.Spec.PodSpec.NodeSelector = map[string]string{"pool": "gpu"}
+	require.NoError(t, r.Update(ctx, clique))
+	_, err = r.Reconcile(ctx, key)
+	require.NoError(t, err)
+}
+
+func TestLPXCyborgPlacementOutlivesItsAnnotation(t *testing.T) {
+	ctx := t.Context()
+
+	t.Log("Run one hybrid workload with one explicit Cyborg replica for each of three fabric pods")
+	child, dgd, registry := newLPXTestDGD(t, lpx.PipelineHybrid)
+	conductor := dgd.Spec.Components[0].ComponentRole(v1beta1.ComponentRoleLPXConductor)
+	conductor.PodTemplate.Annotations = map[string]string{cyborgPlacementAnnotation: lpx.CyborgPlacementPerFabricPod}
+	conductor.Replicas = new(int32(1))
+	r := newLPXTestReconciler(t, registry, child, dgd,
+		newTestFabricPodNode("gpu-a", "a"), newTestFabricPodNode("gpu-b", "b"), newTestFabricPodNode("gpu-c", "c"))
+	workloads, plans, err := r.resolveWorkloads(ctx, child, dgd)
+	require.NoError(t, err)
+	pcs, _, err := r.renderPodCliqueSet(ctx, child, dgd, workloads, plans, nil)
+	require.NoError(t, err)
+	createLPXTestObjects(t, ctx, r.Client, materializeLPXTestPCS(t, child, pcs, plans["lpx"])...)
+	key := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(child)}
+	cliqueKey := client.ObjectKey{Namespace: pcs.Namespace, Name: plans["lpx"].ForReplica(0).CyborgClique}
+	for range 3 {
+		_, err = r.Reconcile(ctx, key)
+		require.NoError(t, err)
+	}
+	clique := &grovev1alpha1.PodClique{}
+	require.NoError(t, r.Get(ctx, cliqueKey, clique))
+	require.Equal(t, int32(3), clique.Spec.Replicas)
+
+	t.Log("The user removes the annotation; Grove has not replaced this PodClique yet, so it keeps the placement label")
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(dgd), dgd))
+	dgd.Spec.Components[0].ComponentRole(v1beta1.ComponentRoleLPXConductor).PodTemplate.Annotations = nil
+	updateTestDGD(t, r, child, dgd)
+	for range 3 {
+		_, err = r.Reconcile(ctx, key)
+		require.NoError(t, err)
+	}
+	require.NoError(t, r.Get(ctx, cliqueKey, clique))
+	require.Equal(t, lpx.CyborgPlacementPerFabricPod, clique.Labels[lpx.CyborgPlacementLabel])
+
+	t.Log("Admission still gates the Pods of that PodClique, so the placement keeps its capacity and pins them")
+	require.Equal(t, int32(3), clique.Spec.Replicas, "the explicit replica count does not replace the placement capacity")
+	createLPXTestObjects(t, ctx, r.Client, newTestReleasedCyborgPod(clique, 0))
+	_, err = r.Reconcile(ctx, key)
+	require.NoError(t, err)
+	pods := listTestCyborgPods(t, ctx, r.Client, clique)
+	require.Equal(t, []string{"a"}, testCyborgFabricPods(pods))
+	require.Empty(t, pods[0].Spec.SchedulingGates)
+
+	t.Log("After Grove replaces the PodClique without the label, the explicit replica count applies")
+	delete(clique.Labels, lpx.CyborgPlacementLabel)
+	require.NoError(t, r.Update(ctx, clique))
+	for range 2 {
+		_, err = r.Reconcile(ctx, key)
+		require.NoError(t, err)
+	}
+	require.NoError(t, r.Get(ctx, cliqueKey, clique))
+	require.Equal(t, int32(1), clique.Spec.Replicas)
 }
 
 func TestLPXCyborgPlacementKeepsIndexBlocks(t *testing.T) {
@@ -266,7 +360,22 @@ func TestLPXCyborgPlacementKeepsIndexBlocks(t *testing.T) {
 	}
 
 	t.Log("Each fabric pod holds the contiguous index block of its position in name order")
-	require.Equal(t, []string{"a", "a", "b", "b", "c", "c"}, testCyborgFabricPods(listTestCyborgPods(t, ctx, r.Client, clique)))
+	pods := listTestCyborgPods(t, ctx, r.Client, clique)
+	require.Equal(t, []string{"a", "a", "b", "b", "c", "c"}, testCyborgFabricPods(pods))
+
+	t.Log("The limit: after a prune to fabric pod b, Grove gives a replacement Pod its lowest free index, which is outside the block of b")
+	placement = cyborgPlacement{fabricPods: []string{"b"}, replicas: 2}
+	_, err := r.reconcileCyborgPlacement(ctx, clique, placement, false)
+	require.NoError(t, err)
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(clique), clique))
+	require.Equal(t, int32(2), clique.Spec.Replicas)
+	require.NoError(t, r.Delete(ctx, pods[3]))
+	require.NoError(t, r.Create(ctx, newTestReleasedCyborgPod(clique, 0)))
+	_, err = r.reconcileCyborgPlacement(ctx, clique, placement, false)
+	require.NoError(t, err)
+	pods = listTestCyborgPods(t, ctx, r.Client, clique)
+	require.Equal(t, []string{"b", "b"}, testCyborgFabricPods(pods))
+	require.Equal(t, []int{0, 2}, []int{podCliquePodIndex(pods[0]), podCliquePodIndex(pods[1])})
 }
 
 func TestLPXCyborgPlacementGateOrder(t *testing.T) {
@@ -287,16 +396,20 @@ func TestLPXCyborgPlacementGateOrder(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := t.Context()
+
+			t.Log("Given one unbound Cyborg Pod with these scheduling gates and one open position")
 			clique := &grovev1alpha1.PodClique{Name: "pcs-0-lpx-0-cond", Namespace: "default", UID: "clique-uid", ResourceVersion: "1"}
 			clique.Spec.Replicas = 1
 			pod := newTestCyborgPod(clique, 0)
 			pod.Spec.SchedulingGates = tc.gates
 			r := &graphReconciler{Client: newLPXTestClient(t, clique, pod)}
 
+			t.Log("When the controller reconciles the placement")
 			changed, err := r.reconcileCyborgPlacement(ctx, clique, cyborgPlacement{fabricPods: []string{"a"}, replicas: 1}, false)
 			require.NoError(t, err)
 			require.Equal(t, tc.pinned, changed)
 
+			t.Log("Then the Pod has its pin and no placement gate, or is unchanged")
 			pods := listTestCyborgPods(t, ctx, r.Client, clique)
 			require.Len(t, pods, 1)
 			require.Equal(t, tc.want, pods[0].Spec.SchedulingGates)
@@ -451,10 +564,9 @@ func TestEligibleFabricPods(t *testing.T) {
 		{name: "no selectable Node is an error", podSpec: corev1.PodSpec{NodeSelector: map[string]string{"pool": "none"}}, wantErr: "no Node with label"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			r := &graphReconciler{Client: newLPXTestClient(t, nodes...), config: newLPXTestReconciler(t, nil, &v1alpha1.LPXGraphDeployment{}, loadTestDGD(t, lpx.PipelineHybrid, "build")).config}
-			pcs := &grovev1alpha1.PodCliqueSet{}
-			pcs.Spec.Template.Cliques = []*grovev1alpha1.PodCliqueTemplateSpec{{Name: "cond", Spec: grovev1alpha1.PodCliqueSpec{PodSpec: tc.podSpec}}}
-			fabricPods, err := r.eligibleFabricPods(t.Context(), pcs, "cond")
+			r := &graphReconciler{Client: newLPXTestClient(t, nodes...)}
+			clique := &grovev1alpha1.PodClique{Name: "pcs-0-lpx-0-cond", Spec: grovev1alpha1.PodCliqueSpec{PodSpec: tc.podSpec}}
+			fabricPods, err := r.eligibleFabricPods(t.Context(), clique)
 			if tc.wantErr != "" {
 				require.ErrorContains(t, err, tc.wantErr)
 				return
@@ -463,24 +575,6 @@ func TestEligibleFabricPods(t *testing.T) {
 			require.Equal(t, tc.want, fabricPods)
 		})
 	}
-}
-
-func TestLPXCyborgPlacementRejectsNamespaceRestrictedMode(t *testing.T) {
-	ctx := t.Context()
-
-	t.Log("Select per-fabric-pod placement while the operator can read only one namespace")
-	child, dgd, registry := newLPXTestDGD(t, lpx.PipelineHybrid)
-	conductor := dgd.Spec.Components[0].ComponentRole(v1beta1.ComponentRoleLPXConductor)
-	conductor.PodTemplate.Annotations = map[string]string{cyborgPlacementAnnotation: lpx.CyborgPlacementPerFabricPod}
-	r := newLPXTestReconciler(t, registry, child, dgd, newTestFabricPodNode("gpu-a", "a"))
-	r.config.Namespace.Restricted = child.Namespace
-
-	t.Log("Report the missing Node access before a PodCliqueSet can create a Pod with the placement label")
-	_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(child)})
-	require.ErrorContains(t, err, "namespace-restricted")
-	sets := &grovev1alpha1.PodCliqueSetList{}
-	require.NoError(t, r.List(ctx, sets))
-	require.Empty(t, sets.Items)
 }
 
 func TestCyborgPlacementApplies(t *testing.T) {
