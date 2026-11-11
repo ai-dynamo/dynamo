@@ -329,7 +329,7 @@ else
   sed 's/^/        /' "$tmp/globs.txt"
 fi
 
-# Stage crates expose two surfaces: the explicit root list (in-router callers)
+# Stage crates and the kernel expose two surfaces: the explicit root list (in-router callers)
 # and the `host` module (hosts outside lib/router). Every other module is
 # private; a stage crate's root declares no `pub mod` beyond STAGE_PUB_MODS.
 STAGE_PUB_MODS=(
@@ -338,6 +338,7 @@ STAGE_PUB_MODS=(
   "lib/router/session-affinity | host"
   "lib/router/worker-selection | host"
   "lib/router/admission | host"
+  "lib/router/scheduler | host test_utils"
 )
 for row in "${STAGE_PUB_MODS[@]}"; do
   IFS='|' read -r dir allowed <<<"$row"

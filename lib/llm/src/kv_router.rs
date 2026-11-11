@@ -54,7 +54,9 @@ use futures::stream;
 // Re-export from dynamo-kv-router crate
 pub use dynamo_kv_router::scheduling;
 pub use dynamo_scheduler::host::OverlapScoresResponse;
-pub use dynamo_scheduler::protocols;
+// The 1.7 path `dynamo_llm::kv_router::protocols`, through the composition crate's pre-split list
+// (removed with it in 1.10).
+pub use dynamo_kv_router::protocols;
 
 pub mod active_load;
 pub(crate) mod embedded;

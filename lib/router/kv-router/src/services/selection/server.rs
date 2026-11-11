@@ -20,12 +20,12 @@ use dynamo_router_protocol::worker::WorkerId;
 use dynamo_scheduler::KvSchedulerError;
 
 use super::service::SelectionService;
+use dynamo_scheduler::REQUEST_BODY_LIMIT_BYTES;
 use dynamo_scheduler::host::SelectionError;
 use dynamo_scheduler::host::{
     OutputBlockRequest, OverlapScoresRequest, PotentialLoadsRequest, ReservationRequest,
     SelectAndReserveRequest, SelectRequest, WorkerPatchRequest, WorkerRequest,
 };
-use dynamo_scheduler::selection::types::REQUEST_BODY_LIMIT_BYTES;
 
 #[derive(Debug, Deserialize)]
 struct FilterQuery {

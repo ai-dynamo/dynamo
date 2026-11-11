@@ -7,19 +7,11 @@
 //! candidates with worker keys under a selection scope.
 
 pub use dynamo_kv_hints::{
-    KvTransferScope, KvTransferSourceChoice, KvTransferSourceSummary, KvTransferTarget,
-    ResolvedTransferSource, WorkerKvTransferKeys, WorkerKvTransferKeysCache,
+    KvHint, KvHintAction, KvSourceLocationsPayload, KvTransferScope, KvTransferSourceChoice,
+    KvTransferSourceSummary, ResolvedTransferSource, WorkerKvTransferKeys,
+    WorkerKvTransferKeysCache,
 };
-pub use dynamo_kv_indexer::CacheOwnerKvTransferKeys;
-
-pub use dynamo_kv_hints::{
-    KV_HINT_TRANSFER_CAPABILITY_KEY, KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
-    KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY, KvHint, KvHintAction, KvSourceLocationsPayload,
-};
-
-pub use dynamo_kv_indexer::{
-    KvTransferCandidateSource, KvTransferCandidates, KvTransferSourceInterval,
-};
+pub use dynamo_kv_indexer::{KvTransferCandidateSource, KvTransferCandidates};
 
 use std::collections::HashMap;
 
@@ -211,6 +203,7 @@ mod tests {
 
 #[cfg(test)]
 mod summary_tests {
+    use dynamo_kv_indexer::KvTransferSourceInterval;
     use std::collections::HashMap;
 
     use dynamo_router_protocol::worker::WorkerWithDpRank;
@@ -222,15 +215,15 @@ mod summary_tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::identity::{
-        CacheOwnerId, CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId,
-        RoutingScopeId, StableDpSlotId,
-    };
     use dynamo_kv_events::residency::ResidencyOwner;
     use dynamo_kv_hashing::ExternalSequenceBlockHash;
     use dynamo_kv_hints::KvHintTransferWorkerMetadata;
     use dynamo_kv_indexer::{
         ResidencyProjection, ResidencyRoutingSnapshot, RouterHintSourceMetadata,
+    };
+    use dynamo_router_protocol::identity::{
+        CacheOwnerId, CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId,
+        RoutingScopeId, StableDpSlotId,
     };
 
     struct Worker;

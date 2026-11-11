@@ -16,7 +16,7 @@ use crate::plugins::worker_selection::{
     RawWorkerSelectionConfig, WorkerCapacity, WorkerCapacityExt, WorkerSelectionConfig,
 };
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
-use dynamo_scheduler::protocols::WorkerConfigLike;
+use dynamo_scheduler::WorkerConfigLike;
 use dynamo_slot_tracker::WorkerLoadProjection;
 
 #[derive(Debug, Error)]
@@ -39,7 +39,7 @@ pub enum RouterPolicyConfigError {
 
 /// Supplies the host's live reject thresholds. Selection skips a worker whose every rank is
 /// past them, and rejects the request when no eligible worker remains.
-pub use dynamo_scheduler::types::RejectThresholdsProvider;
+pub use dynamo_scheduler::RejectThresholdsProvider;
 
 pub use dynamo_slot_tracker::BusyRanksExt;
 pub use dynamo_slot_tracker::{BusyThresholds, FullRankCounts};
@@ -431,7 +431,7 @@ mod tests {
     use crate::plugins::worker_selection::WorkerSelectionPolicySelection;
     use crate::plugins::worker_selection::{WorkerLoadInput, WorkerLoadInputExt};
     use dynamo_admission::UnknownPolicyClassError;
-    use dynamo_scheduler::types::KvSchedulerError;
+    use dynamo_scheduler::KvSchedulerError;
     use dynamo_slot_tracker::WorkerLoadProjection;
 
     fn prefill_load(active_prefill_tokens: usize) -> WorkerLoadInput {
