@@ -6,7 +6,10 @@
 use super::PublisherInput;
 use super::zmq_listener::{is_mismatched_rank, normalize_batch, split_zmq_kv_batch};
 use crate::utils::zmq::multipart_message;
-use dynamo_kv_router::{protocols::*, zmq_wire::*};
+#[cfg(test)]
+use dynamo_kv_events::placement::PlacementEvent;
+use dynamo_kv_events::zmq_wire::{ZmqEventNormalizer, decode_event_batch};
+use dynamo_router_protocol::worker::WorkerWithDpRank;
 use dynamo_runtime::transports::zmq::ipv6_option_for;
 use futures::{FutureExt, SinkExt, StreamExt};
 use std::sync::atomic::AtomicU64;

@@ -14,7 +14,7 @@ processor publishes normalized events through the configured event plane.
   lost in that window is repaired at the next live gap (see `ZmqRecoveryConfig`).
 - `event_processor.rs`: owns the async receive loop and preserves event ordering.
 - `batching.rs`: coalesces adjacent store/remove events before publish.
-- `EventDedupFilter` (`dynamo_kv_router::zmq_wire`): gates duplicate removes with
+- `EventDedupFilter` (`dynamo_kv_events::zmq_wire`): gates duplicate removes with
   per-rank, per-tier refcounts.
 - `sinks.rs`: applies events to the local worker indexer and publishes them
   externally.
