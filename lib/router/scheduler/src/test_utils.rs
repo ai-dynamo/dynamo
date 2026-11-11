@@ -71,8 +71,7 @@ pub fn test_router_config(
 ) -> crate::config::RouterConfig {
     crate::config::RouterConfig {
         selection: dynamo_worker_selection::SelectionConfig::default(),
-        conditional_disagg:
-            dynamo_worker_selection::conditional_disagg::ConditionalDisaggConfig::default(),
+        conditional_disagg: dynamo_worker_selection::ConditionalDisaggConfig::default(),
         use_kv_events,
         track_prefill_tokens: true,
         assume_kv_reuse: true,
@@ -108,13 +107,12 @@ pub fn test_core_with(
     worker_type: dynamo_router_protocol::worker_type::WorkerType,
     affinity: Option<dynamo_session_affinity::SessionAffinityConfig>,
 ) -> crate::selection::SelectionCore {
-    let indexer_policy = dynamo_kv_indexer::backend::IndexerPolicy::from_config(
-        &dynamo_kv_indexer::config::IndexerConfig {
+    let indexer_policy =
+        dynamo_kv_indexer::IndexerPolicy::from_config(&dynamo_kv_indexer::IndexerConfig {
             use_kv_events: config.use_kv_events,
             ..Default::default()
-        },
-    )
-    .expect("indexer policy");
+        })
+        .expect("indexer policy");
     crate::selection::SelectionCore::new(
         config.validate().expect("valid router config"),
         indexer_threads,

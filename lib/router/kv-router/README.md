@@ -29,7 +29,7 @@ The data structures live in their owning crates: hashing in `dynamo_kv_hashing::
 use dynamo_kv_hashing::routing::{
     BlockHashOptions, compute_block_hash_for_seq, compute_seq_hash_for_block,
 };
-use dynamo_kv_indexer::radix_tree::RadixTree;
+use dynamo_kv_indexer::RadixTree;
 use dynamo_kv_router::config::KvRouterConfig;
 
 let prompt_tokens = vec![1_u32, 2, 3, 4, 5, 6, 7, 8];
@@ -109,13 +109,13 @@ see the deprecations page. In-tree hosts import the owner's `host` module; plugi
 | root re-exports of stage and kernel items (`WorkerSelectionPolicy`, `LocalScheduler`, `KvSchedulerError`, `SelectionConfig`, ...) | the owner's `host` module, `plugins::prelude`, or `config::` |
 | `protocols::*` | `dynamo_router_protocol`, `dynamo_kv_events` (`event`, `placement`, `residency`), `dynamo_kv_hashing::routing`, `dynamo_kv_hints`, `dynamo_scheduler::protocols` |
 | `protocols::ActiveLoad` | `dynamo_llm::kv_router::ActiveLoad` (this crate cannot see `lib/llm`, which publishes and reads the message) |
-| `identity::*` | `dynamo_router_protocol::identity` (indexer identity specs: `dynamo_kv_indexer::identity`) |
+| `identity::*` | `dynamo_router_protocol::identity` (indexer identity specs: `dynamo_kv_indexer`) |
 | `indexer::*`, `concurrent_radix_tree_compressed`, `nested_map`, `approx`, `radix_tree`, `session_prefix_index` | `dynamo_kv_indexer` (`host`, `cuckoo`, `api`) |
 | `sequences`, `multi_worker_sequence`, `sequence` | `dynamo_slot_tracker` (`host`) |
 | `scheduling::{queue, selector, overlap, overlap_refresh, prefill_load, protocols, router_config, shared_cache, tracking_hash, classifier_rows}` and its kernel re-exports | `dynamo_scheduler` (`host`) |
 | `scheduling::{policy_queue, request_classifier, admission_config, queue_admission}` | `dynamo_admission` (`host`) |
 | `scheduling::lora_filter`, `conditional_disagg` | `dynamo_worker_selection` (`host`) |
-| `kv_hints` | `dynamo_kv_hints`, `dynamo_kv_indexer::kv_hints`, `dynamo_scheduler::kv_hints` |
+| `kv_hints` | `dynamo_kv_hints`, `dynamo_kv_indexer`, `dynamo_scheduler::kv_hints` |
 | `recovery` | `dynamo_kv_events::cursor` |
 | `zmq_wire` | `dynamo_kv_events::zmq_wire` |
 | `worker_type` | `dynamo_router_protocol::WorkerType` |

@@ -10,7 +10,16 @@
 
 mod config;
 
-pub use dynamo_worker_selection::selection_config;
+/// The selection slice of the router config, with its defaults and validators.
+pub mod selection_config {
+    pub use dynamo_worker_selection::{
+        OVERLAP_SCORE_CREDIT_RANGE_ERROR, SelectionConfig, SharedCacheType,
+        default_decode_active_request_weight, default_disk_cache_hit_weight,
+        default_host_cache_hit_weight, default_overlap_score_credit_decay,
+        default_prefill_load_scale, overlap_score_credit_error_message,
+        validate_finite_non_negative, validate_overlap_score_credit, validate_range,
+    };
+}
 pub use dynamo_worker_selection::{
     CacheSnapshot, CandidateData, CandidatePreparer, CandidateRank, CandidateRowSource,
     HostedSelectionRequest, HostedWorkerPicker, PreparedRows, RankVisitor, RowPick,

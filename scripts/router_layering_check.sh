@@ -15,7 +15,8 @@
 #              protocol behavior grep, the composition crate's no-features
 #              tree, the plugin table, the workspace test-feature check, and
 #              the source rules (no #[doc(hidden)], no cross-crate glob
-#              re-export); run it locally on demand, about ten seconds.
+#              re-export, stage crates keep their modules private); run it
+#              locally on demand, about ten seconds.
 #   --host     additionally resolve the host packages in HOSTS and
 #              HOSTS_EXTERNAL and fail if any table crate reaches a heavy
 #              external crate in the host's own graph (feature unification
@@ -327,6 +328,29 @@ else
   bad "router crates: cross-crate glob re-exports ($(wc -l <"$tmp/globs.txt") lines):"
   sed 's/^/        /' "$tmp/globs.txt"
 fi
+
+# Stage crates expose two surfaces: the explicit root list (in-router callers)
+# and the `host` module (hosts outside lib/router). Every other module is
+# private; a stage crate's root declares no `pub mod` beyond STAGE_PUB_MODS.
+STAGE_PUB_MODS=(
+  "lib/router/kv-indexer | host testing cuckoo"
+  "lib/router/slot-tracker | host"
+  "lib/router/session-affinity | host"
+  "lib/router/worker-selection | host"
+  "lib/router/admission | host"
+)
+for row in "${STAGE_PUB_MODS[@]}"; do
+  IFS='|' read -r dir allowed <<<"$row"
+  dir="$(trim "$dir")"
+  [ -f "$dir/src/lib.rs" ] || die "$dir/src/lib.rs does not exist"
+  got="$(sed -nE 's/^[[:space:]]*pub mod ([a-z_0-9]+);.*/\1/p' "$dir/src/lib.rs" | sort -u)"
+  extra="$(comm -23 <(printf '%s\n' "$got" | sed '/^$/d') <(words "$allowed"))"
+  if [ -z "$extra" ]; then
+    ok "$dir: public modules within $(words "$allowed" | show)"
+  else
+    bad "$dir: public modules beyond $(words "$allowed" | show): $(show <<<"$extra")"
+  fi
+done
 
 # ---------------------------------------------------------------------------
 # --host: no table crate reaches a heavy external crate in a host's own graph

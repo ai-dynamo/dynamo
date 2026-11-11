@@ -18,11 +18,11 @@
 //! `RequestClassifierRuntime` are public for the kernel in another crate; hosts and plugins do
 //! not call them. `QueueMetadata` is also what offline replay enqueues with.
 
-pub mod classifier;
+mod classifier;
 pub mod host;
-pub mod placement;
-pub mod profile;
-pub mod queue;
+mod placement;
+mod profile;
+mod queue;
 
 pub use classifier::{
     AbortCause, ClassificationError, ClassificationOverrides, ClassifierError, ClassifyEvent,

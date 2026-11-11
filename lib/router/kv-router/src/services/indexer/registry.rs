@@ -14,16 +14,14 @@ use serde::Serialize;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-use dynamo_kv_indexer::metrics::KvIndexerMetrics;
+use dynamo_kv_indexer::KvIndexerMetrics;
 use dynamo_router_protocol::identity::RoutingPartitionId;
 use dynamo_router_protocol::worker::WorkerId;
 
 use super::backend::{Indexer, IndexerPolicy};
 use super::listener::spawn_zmq_listener;
 
-pub use dynamo_kv_indexer::registry::{
-    IndexClaimError, IndexRegistry, IndexerEntry, LifecycleGuard,
-};
+pub use dynamo_kv_indexer::{IndexClaimError, IndexRegistry, IndexerEntry, LifecycleGuard};
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
@@ -821,9 +819,9 @@ impl WorkerRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::services::indexer::backend::test_util::store_event;
     use dynamo_kv_events::residency::StorageTier;
     use dynamo_kv_hashing::LocalBlockHash;
+    use dynamo_kv_indexer::testing::store_event;
     use dynamo_router_protocol::worker::WorkerWithDpRank;
     use std::future::Future;
     use std::sync::atomic::Ordering;

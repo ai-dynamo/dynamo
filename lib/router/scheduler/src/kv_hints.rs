@@ -10,14 +10,14 @@ pub use dynamo_kv_hints::{
     KvTransferScope, KvTransferSourceChoice, KvTransferSourceSummary, KvTransferTarget,
     ResolvedTransferSource, WorkerKvTransferKeys, WorkerKvTransferKeysCache,
 };
-pub use dynamo_kv_indexer::kv_hints::CacheOwnerKvTransferKeys;
+pub use dynamo_kv_indexer::CacheOwnerKvTransferKeys;
 
 pub use dynamo_kv_hints::{
     KV_HINT_TRANSFER_CAPABILITY_KEY, KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
     KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY, KvHint, KvHintAction, KvSourceLocationsPayload,
 };
 
-pub use dynamo_kv_indexer::kv_hints::{
+pub use dynamo_kv_indexer::{
     KvTransferCandidateSource, KvTransferCandidates, KvTransferSourceInterval,
 };
 
@@ -217,7 +217,7 @@ mod summary_tests {
 
     use super::KvTransferCandidates;
     use crate::protocols::WorkerConfigLike;
-    use dynamo_kv_indexer::residency::ResidencyOwnerKeyExt;
+    use dynamo_kv_indexer::ResidencyOwnerKeyExt;
     use dynamo_router_protocol::worker::WorkerId;
     use std::sync::Arc;
 
@@ -229,7 +229,7 @@ mod summary_tests {
     use dynamo_kv_events::residency::ResidencyOwner;
     use dynamo_kv_hashing::ExternalSequenceBlockHash;
     use dynamo_kv_hints::KvHintTransferWorkerMetadata;
-    use dynamo_kv_indexer::residency::{
+    use dynamo_kv_indexer::{
         ResidencyProjection, ResidencyRoutingSnapshot, RouterHintSourceMetadata,
     };
 
