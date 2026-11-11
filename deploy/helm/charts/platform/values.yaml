@@ -311,7 +311,7 @@ dynamo-operator:
     # -- Failure policy for the Pod CREATE checkpoint-restore mutating webhook. Defaults to Ignore so a webhook outage falls back to cold-start instead of blocking workload Pods.
     podCheckpointRestoreFailurePolicy: Ignore
 
-    # -- Failure policy for the Pod CREATE mutating webhook that holds each Cyborg Pod with fabric-pod placement out of scheduling until the LPX controller pins it. The webhook matches only Pods with the label lpx.nvidia.com/cyborg-placement. Defaults to Fail so that no such Pod is scheduled without its pin. With Ignore, a Pod that is created during a webhook outage is scheduled without a pin.
+    # -- Failure policy for the Pod CREATE mutating webhook that holds each Cyborg Pod with fabric-pod placement out of scheduling until the LPX controller pins it. The webhook matches only Pods with the label lpx.nvidia.com/cyborg-placement. Defaults to Fail so that no such Pod is scheduled without its pin. With Fail, Grove cannot create such a Pod while the operator webhook is unavailable, and the LPX scheduler can then release a bound plan that loses its Cyborg Pod; run more than one operator replica where this matters. With Ignore, a Pod that is created during a webhook outage is scheduled without a pin.
     podCyborgPlacementFailurePolicy: Fail
 
     # -- Timeout in seconds for webhook validation calls. If the webhook doesn't respond within this time, the request will be handled according to the failurePolicy.

@@ -414,8 +414,9 @@ webhooks:
       path: /mutate-core-v1-pod-cyborg-placement
   failurePolicy: {{ .Values.webhook.podCyborgPlacementFailurePolicy | default "Fail" }}
   name: mpodcyborgplacement.kb.io
-  # Only the LPX controller sets this label, on the Cyborg Pods that it pins to an
-  # LPU fabric pod. No other Pod reaches this webhook, so Fail blocks no other Pod.
+  # The LPX controller sets this label on the Cyborg Pods that it pins to an LPU
+  # fabric pod. A Pod without the label does not reach this webhook, so Fail does
+  # not block it.
   objectSelector:
     matchExpressions:
     - key: lpx.nvidia.com/cyborg-placement

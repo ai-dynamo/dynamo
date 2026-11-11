@@ -7,13 +7,12 @@ package mutation
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
 	"net/http"
 	"slices"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	"gomodules.xyz/jsonpatch/v2"
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -24,6 +23,7 @@ import (
 
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	dynamolpx "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx"
+	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
 )
@@ -78,10 +78,13 @@ func (h *PodCyborgPlacementMutator) Handle(ctx context.Context, req admission.Re
 		return admission.Allowed("the LPX controller does not reconcile this namespace")
 	}
 
-	// The LPX controller marks the Pods that it places, and observes them through
-	// their PodClique. A copy of such a Pod without that owner gets no gate.
-	if pod.Labels[dynamolpx.CyborgPlacementLabel] != dynamolpx.CyborgPlacementPerFabricPod {
-		return admission.Allowed("pod has no fabric-pod placement")
+	// The LPX controller marks the Cyborg Pods that it places. It finds them through
+	// their LPX deployment and their PodClique. A Pod without these, such as a copy
+	// or a Pod of another component with the same label, gets no gate.
+	if pod.Labels[dynamolpx.CyborgPlacementLabel] != dynamolpx.CyborgPlacementPerFabricPod ||
+		pod.Annotations[lpxv1alpha1.PodRoleAnnotation] != lpxv1alpha1.PodRoleCyborgWorker ||
+		pod.Annotations[dynamolpx.DeploymentNameAnnotation] == "" {
+		return admission.Allowed("pod is not a Cyborg Pod with fabric-pod placement")
 	}
 	owner := metav1.GetControllerOf(pod)
 	if owner == nil || owner.Kind != "PodClique" || schema.FromAPIVersionAndKind(owner.APIVersion, owner.Kind).Group != grovev1alpha1.SchemeGroupVersion.Group {
@@ -93,21 +96,12 @@ func (h *PodCyborgPlacementMutator) Handle(ctx context.Context, req admission.Re
 		return admission.Allowed("pod already has the placement gate")
 	}
 
-	// Change only the gates of the object as sent, so that Pod fields which this
-	// operator's API version does not know are not part of the patch.
-	var object map[string]any
-	if err := json.Unmarshal(req.Object.Raw, &object); err != nil {
-		return admission.Errored(http.StatusBadRequest, err)
+	// Send one operation that adds the gate, so that the patch cannot change another Pod field.
+	gate := corev1.PodSchedulingGate{Name: dynamolpx.CyborgPlacementGate}
+	if len(pod.Spec.SchedulingGates) == 0 {
+		return admission.Patched("held until the LPX controller selects a fabric pod",
+			jsonpatch.NewOperation("add", "/spec/schedulingGates", []corev1.PodSchedulingGate{gate}))
 	}
-	spec, ok := object["spec"].(map[string]any)
-	if !ok {
-		return admission.Errored(http.StatusBadRequest, fmt.Errorf("pod has no spec object"))
-	}
-	gates, _ := spec["schedulingGates"].([]any)
-	spec["schedulingGates"] = append(gates, map[string]any{"name": dynamolpx.CyborgPlacementGate})
-	mutated, err := json.Marshal(object)
-	if err != nil {
-		return admission.Errored(http.StatusInternalServerError, err)
-	}
-	return admission.PatchResponseFromRaw(req.Object.Raw, mutated)
+	return admission.Patched("held until the LPX controller selects a fabric pod",
+		jsonpatch.NewOperation("add", "/spec/schedulingGates/-", gate))
 }
