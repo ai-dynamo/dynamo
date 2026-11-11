@@ -946,10 +946,10 @@ jobs:
       # TODO: remove after the DD_BB8KCN retries finish on this PR.
       # Both KV-transfer cases repeat 20 times and exceed the default 30 minutes.
       gpu_test_timeout_minutes: 180
-      # Profiled tests run in the VRAM-aware GPU stage; unprofiled fall through to sequential.
-      # Current single-GPU runners are 24 GiB, so this cap admits the profiled TRT-LLM pool
-      # while yielding one auto slot today. Larger runners will get more slots from the same markers.
-      run_gpu_parallel_tests: true
+      # TODO: restore GPU parallel tests after the DD_BB8KCN retries are verified.
+      # Run the same tests sequentially so CI logs and artifacts include every
+      # retry; the GPU orchestrator only uploads its parent process's reports.
+      run_gpu_parallel_tests: false
       gpu_parallel_max_vram_gib: '24'
     secrets: inherit
 
