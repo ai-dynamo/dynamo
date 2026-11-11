@@ -1,0 +1,1299 @@
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+use std::collections::HashMap;
+use std::fmt;
+use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
+
+use anyhow::{Result, bail};
+use dashmap::DashMap;
+use dashmap::mapref::one::Ref;
+use parking_lot::Mutex;
+use serde::Serialize;
+use tokio::sync::watch;
+use tokio_util::sync::CancellationToken;
+
+use dynamo_kv_indexer::metrics::KvIndexerMetrics;
+use dynamo_router_protocol::identity::RoutingPartitionId;
+use dynamo_router_protocol::worker::WorkerId;
+
+use super::backend::{Indexer, IndexerPolicy};
+use super::listener::spawn_zmq_listener;
+
+pub use dynamo_kv_indexer::registry::{
+    IndexClaimError, IndexRegistry, IndexerEntry, LifecycleGuard,
+};
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum ListenerStatus {
+    Pending,
+    Active,
+    Paused,
+    Failed,
+}
+
+impl ListenerStatus {
+    pub const ALL: [Self; 4] = [Self::Pending, Self::Active, Self::Paused, Self::Failed];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Active => "active",
+            Self::Paused => "paused",
+            Self::Failed => "failed",
+        }
+    }
+
+    pub fn metric_index(self) -> usize {
+        match self {
+            Self::Pending => 0,
+            Self::Active => 1,
+            Self::Paused => 2,
+            Self::Failed => 3,
+        }
+    }
+
+    pub fn aggregate(statuses: impl IntoIterator<Item = Self>) -> Self {
+        let mut saw_pending = false;
+        let mut saw_active = false;
+
+        for status in statuses {
+            match status {
+                Self::Failed => return Self::Failed,
+                Self::Pending => saw_pending = true,
+                Self::Active => saw_active = true,
+                Self::Paused => {}
+            }
+        }
+
+        if saw_pending {
+            Self::Pending
+        } else if saw_active {
+            Self::Active
+        } else {
+            Self::Paused
+        }
+    }
+}
+
+impl fmt::Display for ListenerStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerSource {
+    Zmq,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ListenerInfo {
+    endpoint: String,
+    engine_owned_mm_identity: bool,
+    status: ListenerStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkerInfo {
+    instance_id: WorkerId,
+    source: WorkerSource,
+    status: ListenerStatus,
+    model_name: String,
+    routing_group: String,
+    block_size: u32,
+    endpoints: HashMap<u32, String>,
+    listeners: HashMap<u32, ListenerInfo>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ListenerControlError {
+    #[error("instance {instance_id} not found")]
+    WorkerNotFound { instance_id: WorkerId },
+
+    #[error("instance {instance_id} dp_rank {dp_rank} not found")]
+    ListenerNotFound { instance_id: WorkerId, dp_rank: u32 },
+
+    #[error("instance {instance_id} dp_rank {dp_rank} cannot be paused from status {status}")]
+    InvalidPauseState {
+        instance_id: WorkerId,
+        dp_rank: u32,
+        status: ListenerStatus,
+    },
+
+    #[error("instance {instance_id} dp_rank {dp_rank} cannot be resumed from status {status}")]
+    InvalidResumeState {
+        instance_id: WorkerId,
+        dp_rank: u32,
+        status: ListenerStatus,
+    },
+}
+
+struct ListenerRuntime {
+    status: ListenerStatus,
+    last_error: Option<String>,
+    cancel_token: Option<CancellationToken>,
+    generation: u64,
+}
+
+pub struct ListenerRecord {
+    endpoint: String,
+    replay_endpoint: Option<String>,
+    engine_owned_mm_identity: bool,
+    block_size: u32,
+    indexer: Indexer,
+    watermark: Arc<AtomicU64>,
+    runtime: Mutex<ListenerRuntime>,
+}
+
+impl ListenerRecord {
+    fn new(
+        endpoint: String,
+        replay_endpoint: Option<String>,
+        engine_owned_mm_identity: bool,
+        block_size: u32,
+        indexer: Indexer,
+        watermark: Arc<AtomicU64>,
+    ) -> Self {
+        Self {
+            endpoint,
+            replay_endpoint,
+            engine_owned_mm_identity,
+            block_size,
+            indexer,
+            watermark,
+            runtime: Mutex::new(ListenerRuntime {
+                status: ListenerStatus::Pending,
+                last_error: None,
+                cancel_token: None,
+                generation: 0,
+            }),
+        }
+    }
+
+    pub(super) fn endpoint(&self) -> &str {
+        &self.endpoint
+    }
+
+    pub(super) fn replay_endpoint(&self) -> Option<&str> {
+        self.replay_endpoint.as_deref()
+    }
+
+    pub(super) fn engine_owned_mm_identity(&self) -> bool {
+        self.engine_owned_mm_identity
+    }
+
+    pub(super) fn block_size(&self) -> u32 {
+        self.block_size
+    }
+
+    pub(super) fn indexer(&self) -> Indexer {
+        self.indexer.clone()
+    }
+
+    pub(super) fn watermark(&self) -> Arc<AtomicU64> {
+        self.watermark.clone()
+    }
+
+    pub(super) fn start_pending(
+        &self,
+        root_cancel_token: &CancellationToken,
+    ) -> (u64, CancellationToken) {
+        let mut runtime = self.runtime.lock();
+        runtime.generation += 1;
+        let cancel_token = root_cancel_token.child_token();
+        runtime.status = ListenerStatus::Pending;
+        runtime.last_error = None;
+        runtime.cancel_token = Some(cancel_token.clone());
+        (runtime.generation, cancel_token)
+    }
+
+    pub(super) fn pause(
+        &self,
+        instance_id: WorkerId,
+        dp_rank: u32,
+    ) -> std::result::Result<CancellationToken, ListenerControlError> {
+        let mut runtime = self.runtime.lock();
+        match runtime.status {
+            ListenerStatus::Pending | ListenerStatus::Active => {
+                let cancel_token =
+                    runtime
+                        .cancel_token
+                        .take()
+                        .ok_or(ListenerControlError::InvalidPauseState {
+                            instance_id,
+                            dp_rank,
+                            status: runtime.status,
+                        })?;
+                runtime.status = ListenerStatus::Paused;
+                runtime.last_error = None;
+                Ok(cancel_token)
+            }
+            status => Err(ListenerControlError::InvalidPauseState {
+                instance_id,
+                dp_rank,
+                status,
+            }),
+        }
+    }
+
+    pub(super) fn resume(
+        &self,
+        instance_id: WorkerId,
+        dp_rank: u32,
+        root_cancel_token: &CancellationToken,
+    ) -> std::result::Result<(u64, CancellationToken), ListenerControlError> {
+        let mut runtime = self.runtime.lock();
+        match runtime.status {
+            ListenerStatus::Paused | ListenerStatus::Failed => {
+                runtime.generation += 1;
+                let cancel_token = root_cancel_token.child_token();
+                runtime.status = ListenerStatus::Pending;
+                runtime.last_error = None;
+                runtime.cancel_token = Some(cancel_token.clone());
+                Ok((runtime.generation, cancel_token))
+            }
+            status => Err(ListenerControlError::InvalidResumeState {
+                instance_id,
+                dp_rank,
+                status,
+            }),
+        }
+    }
+
+    pub(super) fn is_current_attempt(&self, generation: u64) -> bool {
+        let runtime = self.runtime.lock();
+        runtime.generation == generation && runtime.cancel_token.is_some()
+    }
+
+    pub(super) fn try_mark_active(&self, generation: u64) -> bool {
+        let mut runtime = self.runtime.lock();
+        if runtime.generation != generation || runtime.cancel_token.is_none() {
+            return false;
+        }
+        runtime.status = ListenerStatus::Active;
+        runtime.last_error = None;
+        true
+    }
+
+    pub(super) fn try_mark_failed(&self, generation: u64, error: impl Into<String>) {
+        let mut runtime = self.runtime.lock();
+        if runtime.generation != generation || runtime.cancel_token.is_none() {
+            return;
+        }
+        runtime.status = ListenerStatus::Failed;
+        runtime.last_error = Some(error.into());
+        runtime.cancel_token = None;
+    }
+
+    fn take_cancel(&self) -> Option<CancellationToken> {
+        self.runtime.lock().cancel_token.take()
+    }
+
+    fn snapshot(&self) -> ListenerInfo {
+        let runtime = self.runtime.lock();
+        ListenerInfo {
+            endpoint: self.endpoint.clone(),
+            engine_owned_mm_identity: self.engine_owned_mm_identity,
+            status: runtime.status,
+            last_error: runtime.last_error.clone(),
+        }
+    }
+
+    #[allow(dead_code)]
+    fn status(&self) -> ListenerStatus {
+        self.runtime.lock().status
+    }
+}
+
+pub struct WorkerEntry {
+    key: RoutingPartitionId,
+    listeners: HashMap<u32, Arc<ListenerRecord>>,
+}
+
+pub struct WorkerRegistry {
+    workers: DashMap<WorkerId, WorkerEntry>,
+    watermarks: DashMap<(WorkerId, u32), Arc<AtomicU64>>,
+    peers: DashMap<String, ()>,
+    root_cancel_token: CancellationToken,
+    /// The per-partition indexers these listeners feed; shared with whoever reads them.
+    index: Arc<IndexRegistry>,
+}
+
+impl WorkerRegistry {
+    pub fn new(num_threads: usize) -> Self {
+        Self::new_with_cancel_token(num_threads, CancellationToken::new())
+    }
+
+    pub fn new_with_cancel_token(num_threads: usize, root_cancel_token: CancellationToken) -> Self {
+        Self::new_inner(
+            num_threads,
+            Arc::new(KvIndexerMetrics::new_unregistered()),
+            root_cancel_token,
+        )
+    }
+
+    pub fn new_with_indexer_metrics(
+        num_threads: usize,
+        indexer_metrics: Arc<KvIndexerMetrics>,
+    ) -> Self {
+        Self::new_inner(num_threads, indexer_metrics, CancellationToken::new())
+    }
+
+    #[cfg(all(feature = "metrics", feature = "http"))]
+    pub(super) fn new_with_indexer_metrics_and_cancel_token(
+        num_threads: usize,
+        indexer_metrics: Arc<KvIndexerMetrics>,
+        root_cancel_token: CancellationToken,
+    ) -> Self {
+        Self::new_inner(num_threads, indexer_metrics, root_cancel_token)
+    }
+
+    fn new_inner(
+        num_threads: usize,
+        indexer_metrics: Arc<KvIndexerMetrics>,
+        root_cancel_token: CancellationToken,
+    ) -> Self {
+        Self::with_index(
+            Arc::new(IndexRegistry::new(num_threads, indexer_metrics)),
+            root_cancel_token,
+        )
+    }
+
+    /// Listeners over an index registry someone else owns too (the selection core's).
+    pub fn with_index(index: Arc<IndexRegistry>, root_cancel_token: CancellationToken) -> Self {
+        Self {
+            workers: DashMap::new(),
+            watermarks: DashMap::new(),
+            peers: DashMap::new(),
+            root_cancel_token,
+            index,
+        }
+    }
+
+    pub fn index(&self) -> &Arc<IndexRegistry> {
+        &self.index
+    }
+
+    /// Set the shape used for indexers created from now on.
+    pub fn set_indexer_policy(&self, policy: IndexerPolicy) {
+        self.index.set_indexer_policy(policy);
+    }
+
+    pub fn signal_ready(&self) {
+        self.index.signal_ready();
+    }
+
+    pub fn ready_rx(&self) -> watch::Receiver<bool> {
+        self.index.ready_rx()
+    }
+
+    pub fn register_peer(&self, url: String) {
+        self.peers.entry(url).or_insert(());
+    }
+
+    pub fn deregister_peer(&self, url: &str) -> bool {
+        self.peers.remove(url).is_some()
+    }
+
+    pub fn list_peers(&self) -> Vec<String> {
+        self.peers.iter().map(|entry| entry.key().clone()).collect()
+    }
+
+    #[cfg(all(feature = "metrics", feature = "http"))]
+    pub fn refresh_metrics(&self) {
+        let models = self.index.len();
+        let workers = self.workers.len();
+
+        let mut listener_counts = [0_i64; 4];
+        for entry in self.workers.iter() {
+            for record in entry.value().listeners.values() {
+                listener_counts[record.status().metric_index()] += 1;
+            }
+        }
+
+        super::metrics::set_worker_state(models, workers, listener_counts);
+    }
+
+    #[expect(clippy::too_many_arguments)]
+    pub async fn register(
+        &self,
+        instance_id: WorkerId,
+        endpoint: String,
+        dp_rank: u32,
+        model_name: String,
+        routing_group: String,
+        block_size: u32,
+        replay_endpoint: Option<String>,
+        engine_owned_mm_identity: bool,
+    ) -> Result<()> {
+        let key = RoutingPartitionId::new(model_name, routing_group);
+        let registration = self.index.lock_lifecycle().await;
+
+        if let Some(entry) = self.workers.get(&instance_id) {
+            if entry.key != key {
+                bail!(
+                    "instance {instance_id} is already registered for model={} routing_group={}",
+                    entry.key.model_name,
+                    entry.key.routing_group
+                );
+            }
+
+            if entry.listeners.contains_key(&dp_rank) {
+                bail!("instance {instance_id} dp_rank {dp_rank} already registered");
+            }
+        }
+
+        let indexer = self.index.claim(&registration, &key, block_size)?;
+        let bs = block_size;
+
+        let watermark = self
+            .watermarks
+            .entry((instance_id, dp_rank))
+            .or_insert_with(|| Arc::new(AtomicU64::new(u64::MAX)))
+            .clone();
+
+        let record = Arc::new(ListenerRecord::new(
+            endpoint,
+            replay_endpoint,
+            engine_owned_mm_identity,
+            bs,
+            indexer,
+            watermark,
+        ));
+        let attempt = record.start_pending(&self.root_cancel_token);
+
+        {
+            let mut entry = self
+                .workers
+                .entry(instance_id)
+                .or_insert_with(|| WorkerEntry {
+                    key: key.clone(),
+                    listeners: HashMap::new(),
+                });
+            entry.listeners.insert(dp_rank, record.clone());
+        }
+
+        drop(registration);
+        self.spawn_listener(instance_id, dp_rank, attempt, record);
+        Ok(())
+    }
+
+    pub async fn deregister(
+        &self,
+        instance_id: WorkerId,
+        model_name: &str,
+        routing_group: &str,
+    ) -> Result<()> {
+        let key = RoutingPartitionId::new(model_name, routing_group);
+
+        if let Some(entry) = self.workers.get(&instance_id) {
+            if entry.key != key {
+                bail!(
+                    "instance {instance_id} is registered for model={} routing_group={}",
+                    entry.key.model_name,
+                    entry.key.routing_group
+                );
+            }
+        } else {
+            bail!("instance {instance_id} not found");
+        }
+
+        if let Some((_, entry)) = self.workers.remove(&instance_id) {
+            for record in entry.listeners.values() {
+                if let Some(cancel_token) = record.take_cancel() {
+                    cancel_token.cancel();
+                }
+            }
+            for &dp_rank in entry.listeners.keys() {
+                self.watermarks.remove(&(instance_id, dp_rank));
+            }
+        }
+
+        // Registration needs this map's write lock while removal can wait on indexer queues.
+        let indexer = self.index.indexer(&key);
+        if let Some(indexer) = indexer {
+            indexer.remove_worker(instance_id).await;
+        }
+        self.release_indexer_if_unused(&key).await;
+        Ok(())
+    }
+
+    pub async fn deregister_dp_rank(
+        &self,
+        instance_id: WorkerId,
+        dp_rank: u32,
+        model_name: &str,
+        routing_group: &str,
+    ) -> Result<()> {
+        let key = RoutingPartitionId::new(model_name, routing_group);
+
+        let (record, remove_worker) = {
+            let mut entry = self
+                .workers
+                .get_mut(&instance_id)
+                .ok_or_else(|| anyhow::anyhow!("instance {instance_id} not found"))?;
+
+            if entry.key != key {
+                bail!(
+                    "instance {instance_id} is registered for model={} routing_group={}",
+                    entry.key.model_name,
+                    entry.key.routing_group
+                );
+            }
+
+            let record = entry.listeners.remove(&dp_rank).ok_or_else(|| {
+                anyhow::anyhow!("instance {instance_id} dp_rank {dp_rank} not found")
+            })?;
+            let remove_worker = entry.listeners.is_empty();
+            (record, remove_worker)
+        };
+
+        if let Some(cancel_token) = record.take_cancel() {
+            cancel_token.cancel();
+        }
+        self.watermarks.remove(&(instance_id, dp_rank));
+
+        if remove_worker {
+            let actually_removed = self
+                .workers
+                .remove_if(&instance_id, |_, entry| entry.listeners.is_empty())
+                .is_some();
+            if actually_removed {
+                let indexer = self.index.indexer(&key);
+                if let Some(indexer) = indexer {
+                    indexer.remove_worker(instance_id).await;
+                }
+                self.release_indexer_if_unused(&key).await;
+            }
+        } else {
+            let indexer = self.index.indexer(&key);
+            if let Some(indexer) = indexer {
+                indexer.remove_worker_dp_rank(instance_id, dp_rank).await;
+            }
+        }
+
+        Ok(())
+    }
+
+    pub async fn deregister_all_routing_groups(
+        &self,
+        instance_id: WorkerId,
+        model_name: &str,
+    ) -> Result<()> {
+        let key = if let Some(entry) = self.workers.get(&instance_id) {
+            if entry.key.model_name != model_name {
+                bail!(
+                    "instance {instance_id} is registered for model={} routing_group={}",
+                    entry.key.model_name,
+                    entry.key.routing_group
+                );
+            }
+            entry.key.clone()
+        } else {
+            bail!("instance {instance_id} not found");
+        };
+
+        if let Some((_, entry)) = self.workers.remove(&instance_id) {
+            for record in entry.listeners.values() {
+                if let Some(cancel_token) = record.take_cancel() {
+                    cancel_token.cancel();
+                }
+            }
+            for &dp_rank in entry.listeners.keys() {
+                self.watermarks.remove(&(instance_id, dp_rank));
+            }
+        }
+
+        let indexer = self.index.indexer(&key);
+        if let Some(indexer) = indexer {
+            indexer.remove_worker(instance_id).await;
+        }
+        self.release_indexer_if_unused(&key).await;
+        Ok(())
+    }
+
+    pub fn pause_listener(
+        &self,
+        instance_id: WorkerId,
+        dp_rank: u32,
+    ) -> std::result::Result<(), ListenerControlError> {
+        let record = if let Some(entry) = self.workers.get(&instance_id) {
+            entry.listeners.get(&dp_rank).cloned().ok_or(
+                ListenerControlError::ListenerNotFound {
+                    instance_id,
+                    dp_rank,
+                },
+            )?
+        } else {
+            return Err(ListenerControlError::WorkerNotFound { instance_id });
+        };
+
+        let cancel_token = record.pause(instance_id, dp_rank)?;
+        cancel_token.cancel();
+        tracing::info!(instance_id, dp_rank, "Paused ZMQ listener");
+        Ok(())
+    }
+
+    pub async fn resume_listener(
+        &self,
+        instance_id: WorkerId,
+        dp_rank: u32,
+    ) -> std::result::Result<(), ListenerControlError> {
+        let record = if let Some(entry) = self.workers.get(&instance_id) {
+            entry.listeners.get(&dp_rank).cloned().ok_or(
+                ListenerControlError::ListenerNotFound {
+                    instance_id,
+                    dp_rank,
+                },
+            )?
+        } else {
+            return Err(ListenerControlError::WorkerNotFound { instance_id });
+        };
+
+        let attempt = record.resume(instance_id, dp_rank, &self.root_cancel_token)?;
+        self.spawn_listener(instance_id, dp_rank, attempt, record);
+        tracing::info!(instance_id, dp_rank, "Resumed ZMQ listener");
+        Ok(())
+    }
+
+    /// Whether `worker_id` has listeners registered here.
+    pub fn has_worker(&self, worker_id: WorkerId) -> bool {
+        self.workers.contains_key(&worker_id)
+    }
+
+    pub fn has_listener(&self, worker_id: WorkerId, dp_rank: u32) -> bool {
+        self.workers
+            .get(&worker_id)
+            .is_some_and(|entry| entry.listeners.contains_key(&dp_rank))
+    }
+
+    /// Drop what a rank's listener fed into the index after the listener itself
+    /// is gone (its deregistration was cancelled before reaching this step).
+    pub async fn remove_dp_rank_blocks(
+        &self,
+        worker_id: WorkerId,
+        dp_rank: u32,
+        key: &RoutingPartitionId,
+    ) {
+        // Clone the handle so the shard guard drops before the await.
+        let indexer = self.index.indexer(key);
+        if let Some(indexer) = indexer {
+            indexer.remove_worker_dp_rank(worker_id, dp_rank).await;
+        }
+    }
+
+    pub fn list(&self) -> Vec<WorkerInfo> {
+        self.list_filtered(None, None)
+    }
+
+    /// Return registered workers, optionally filtered by `model_name` and/or
+    /// `routing_group`.  Pass `None` for a field to skip that filter.
+    ///
+    /// Workers that are mid-deregistration (listener map temporarily empty
+    /// before the worker entry is removed) are silently omitted to avoid
+    /// exposing `block_size = 0` in the response.
+    pub fn list_filtered(
+        &self,
+        model_name: Option<&str>,
+        routing_group: Option<&str>,
+    ) -> Vec<WorkerInfo> {
+        self.workers
+            .iter()
+            .filter_map(|entry| {
+                let worker = entry.value();
+                let key = &worker.key;
+
+                // Apply caller-supplied filters.
+                if model_name.is_some_and(|m| key.model_name != m)
+                    || routing_group.is_some_and(|t| key.routing_group != t)
+                {
+                    return None;
+                }
+
+                // Skip workers that are mid-deregistration.  deregister_dp_rank
+                // removes the last listener from the HashMap *before* calling
+                // workers.remove(), so a concurrent list() can observe an empty
+                // listener set.  Omit these entries rather than serializing
+                // block_size = 0.
+                if worker.listeners.is_empty() {
+                    return None;
+                }
+
+                // block_size is authoritative on IndexerEntry (validated on
+                // every register() call), not on individual listener records.
+                // Read it from there to avoid the same TOCTOU.
+                let block_size = self.index.block_size(key).unwrap_or(0);
+
+                let listeners: HashMap<u32, ListenerInfo> = worker
+                    .listeners
+                    .iter()
+                    .map(|(dp_rank, record)| (*dp_rank, record.snapshot()))
+                    .collect();
+                let endpoints: HashMap<u32, String> = listeners
+                    .iter()
+                    .map(|(dp_rank, info)| (*dp_rank, info.endpoint.clone()))
+                    .collect();
+                let status = ListenerStatus::aggregate(listeners.values().map(|info| info.status));
+                Some(WorkerInfo {
+                    instance_id: *entry.key(),
+                    source: WorkerSource::Zmq,
+                    status,
+                    model_name: key.model_name.clone(),
+                    routing_group: key.routing_group.clone(),
+                    block_size,
+                    endpoints,
+                    listeners,
+                })
+            })
+            .collect()
+    }
+
+    pub fn get_indexer(
+        &self,
+        key: &RoutingPartitionId,
+    ) -> Option<Ref<'_, RoutingPartitionId, IndexerEntry>> {
+        self.index.get_indexer(key)
+    }
+
+    pub fn get_or_create_indexer(&self, key: RoutingPartitionId, block_size: u32) -> Indexer {
+        self.index.get_or_create_indexer(key, block_size)
+    }
+
+    pub fn all_indexers_with_block_size(&self) -> Vec<(RoutingPartitionId, Indexer, u32)> {
+        self.index.all_indexers_with_block_size()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn forget_listener(&self, instance_id: WorkerId, dp_rank: u32) {
+        if let Some(mut entry) = self.workers.get_mut(&instance_id) {
+            entry.listeners.remove(&dp_rank);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn listener_cancelled(&self, instance_id: WorkerId, dp_rank: u32) -> Option<bool> {
+        self.workers.get(&instance_id).and_then(|entry| {
+            entry.listeners.get(&dp_rank).and_then(|record| {
+                record
+                    .runtime
+                    .lock()
+                    .cancel_token
+                    .as_ref()
+                    .map(|t| t.is_cancelled())
+            })
+        })
+    }
+
+    fn spawn_listener(
+        &self,
+        instance_id: WorkerId,
+        dp_rank: u32,
+        (generation, cancel_token): (u64, CancellationToken),
+        record: Arc<ListenerRecord>,
+    ) {
+        spawn_zmq_listener(
+            instance_id,
+            dp_rank,
+            record,
+            self.ready_rx(),
+            generation,
+            cancel_token.child_token(),
+        );
+    }
+
+    /// Drop the partition's indexer once no registered worker names it (unless the
+    /// index retains empty indexers); the check runs under the index lifecycle lock.
+    async fn release_indexer_if_unused(&self, key: &RoutingPartitionId) {
+        self.index
+            .release_if_unused(key, || {
+                self.workers.iter().any(|entry| entry.value().key == *key)
+            })
+            .await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::indexer::backend::test_util::store_event;
+    use dynamo_kv_events::residency::StorageTier;
+    use dynamo_kv_hashing::LocalBlockHash;
+    use dynamo_router_protocol::worker::WorkerWithDpRank;
+    use std::future::Future;
+    use std::sync::atomic::Ordering;
+    use std::task::{Context, Poll, Waker};
+    use std::time::Duration;
+
+    fn test_registry() -> WorkerRegistry {
+        WorkerRegistry::new(1)
+    }
+
+    #[rstest::rstest]
+    #[case("worker")]
+    #[case("all_groups")]
+    #[case("last_rank")]
+    #[tokio::test]
+    async fn registration_progresses_while_removal_is_backpressured(#[case] removal: &str) {
+        let registry = test_registry();
+        let key = RoutingPartitionId::new("test-model", "default");
+        registry
+            .register(
+                1,
+                "tcp://127.0.0.1:15557".into(),
+                0,
+                "test-model".into(),
+                "default".into(),
+                1,
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+        let indexer = registry.index().indexer(&key).unwrap();
+        let Indexer::Single { primary, .. } = indexer else {
+            unreachable!();
+        };
+        let sender = primary.remove_worker_sender();
+        // Reserve the entire queue so removal must yield without blocking the executor.
+        let permits = sender.reserve_many(sender.max_capacity()).await.unwrap();
+        let removal = async {
+            match removal {
+                "worker" => registry.deregister(1, "test-model", "default").await,
+                "all_groups" => {
+                    registry
+                        .deregister_all_routing_groups(1, "test-model")
+                        .await
+                }
+                "last_rank" => {
+                    registry
+                        .deregister_dp_rank(1, 0, "test-model", "default")
+                        .await
+                }
+                _ => unreachable!(),
+            }
+        };
+        tokio::pin!(removal);
+        assert!(matches!(
+            removal
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop())),
+            Poll::Pending
+        ));
+        // A nonblocking probe makes the regression fail instead of deadlocking the test.
+        assert!(registry.index().contains(&key));
+        assert!(registry.index().shard_is_writable(&key));
+        registry
+            .register(
+                2,
+                "tcp://127.0.0.1:15558".into(),
+                0,
+                "test-model".into(),
+                "default".into(),
+                1,
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+        drop(permits);
+        tokio::time::timeout(Duration::from_secs(5), removal)
+            .await
+            .expect("removal should finish after queue capacity is released")
+            .unwrap();
+        assert!(registry.workers.contains_key(&2));
+        assert!(registry.index().contains(&key));
+        registry.root_cancel_token.cancel();
+    }
+
+    #[rstest::rstest]
+    #[case("worker")]
+    #[case("all_groups")]
+    #[case("last_rank")]
+    #[tokio::test]
+    async fn empty_indexer_removal_waits_for_registration(#[case] removal: &str) {
+        let registry = test_registry();
+        let key = RoutingPartitionId::new("test-model", "default");
+        registry
+            .register(
+                1,
+                "tcp://127.0.0.1:15557".into(),
+                0,
+                "test-model".into(),
+                "default".into(),
+                1,
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+
+        // Queue registration ahead of pruning, without timing or thread scheduling assumptions.
+        let lifecycle = registry.index().lock_lifecycle().await;
+        let registration = registry.register(
+            2,
+            "tcp://127.0.0.1:15558".into(),
+            0,
+            "test-model".into(),
+            "default".into(),
+            1,
+            None,
+            false,
+        );
+        tokio::pin!(registration);
+        assert!(matches!(
+            registration
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop())),
+            Poll::Pending
+        ));
+
+        let removal = async {
+            match removal {
+                "worker" => registry.deregister(1, "test-model", "default").await,
+                "all_groups" => {
+                    registry
+                        .deregister_all_routing_groups(1, "test-model")
+                        .await
+                }
+                "last_rank" => {
+                    registry
+                        .deregister_dp_rank(1, 0, "test-model", "default")
+                        .await
+                }
+                _ => unreachable!(),
+            }
+        };
+        tokio::pin!(removal);
+        assert!(matches!(
+            removal
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop())),
+            Poll::Pending
+        ));
+        assert!(registry.workers.is_empty());
+        assert!(!registry.watermarks.contains_key(&(1, 0)));
+        assert!(registry.get_indexer(&key).is_some());
+        drop(lifecycle);
+        registration.await.unwrap();
+        removal.await.unwrap();
+
+        // Events written by the new listener must remain visible through the query registry.
+        let listener_indexer = registry.workers.get(&2).unwrap().listeners[&0]
+            .indexer
+            .clone();
+        listener_indexer
+            .apply_event_routed(store_event(2, 0, 0, &[], &[11], StorageTier::Device))
+            .await
+            .unwrap();
+        listener_indexer.dump_events().await.unwrap();
+        let query_indexer = registry
+            .get_indexer(&key)
+            .expect("registered indexer")
+            .indexer
+            .clone();
+        let scores = query_indexer
+            .find_matches(vec![LocalBlockHash(11)])
+            .await
+            .unwrap();
+        assert_eq!(scores.scores.get(&WorkerWithDpRank::new(2, 0)), Some(&1));
+        registry.root_cancel_token.cancel();
+    }
+
+    #[tokio::test]
+    async fn register_records_engine_owned_mm_identity_per_listener() {
+        let registry = test_registry();
+        for (dp_rank, engine_owned) in [(0, false), (1, true)] {
+            registry
+                .register(
+                    1,
+                    format!("tcp://127.0.0.1:{}", 15570 + dp_rank),
+                    dp_rank,
+                    "test-model".to_string(),
+                    "default".to_string(),
+                    1,
+                    None,
+                    engine_owned,
+                )
+                .await
+                .unwrap();
+        }
+
+        let entry = registry.workers.get(&1).unwrap();
+        assert!(!entry.listeners[&0].engine_owned_mm_identity());
+        assert!(entry.listeners[&1].engine_owned_mm_identity());
+        drop(entry);
+        let listed = serde_json::to_value(registry.list()).unwrap();
+        assert_eq!(
+            listed[0]["listeners"]["1"]["engine_owned_mm_identity"],
+            true
+        );
+        registry.root_cancel_token.cancel();
+    }
+
+    #[tokio::test]
+    async fn deregister_dp_rank_removes_watermark() {
+        let registry = test_registry();
+        registry.signal_ready();
+
+        registry
+            .register(
+                1,
+                "tcp://127.0.0.1:15558".to_string(),
+                0,
+                "test-model".to_string(),
+                "default".to_string(),
+                1,
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+
+        registry
+            .register(
+                1,
+                "tcp://127.0.0.1:15559".to_string(),
+                1,
+                "test-model".to_string(),
+                "default".to_string(),
+                1,
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+
+        assert!(registry.watermarks.contains_key(&(1, 0)));
+        assert!(registry.watermarks.contains_key(&(1, 1)));
+
+        registry
+            .deregister_dp_rank(1, 1, "test-model", "default")
+            .await
+            .unwrap();
+
+        assert!(
+            registry.watermarks.contains_key(&(1, 0)),
+            "watermark for dp_rank 0 should remain"
+        );
+        assert!(
+            !registry.watermarks.contains_key(&(1, 1)),
+            "watermark for dp_rank 1 should be removed"
+        );
+    }
+
+    #[tokio::test]
+    async fn listener_cancelled_by_root() {
+        let root = CancellationToken::new();
+        let registry = WorkerRegistry::new_with_cancel_token(1, root.clone());
+
+        registry
+            .register(
+                1,
+                "tcp://127.0.0.1:15560".to_string(),
+                0,
+                "test-model".to_string(),
+                "default".to_string(),
+                1,
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+        assert_eq!(registry.listener_cancelled(1, 0), Some(false));
+
+        root.cancel();
+        assert_eq!(registry.listener_cancelled(1, 0), Some(true));
+    }
+
+    #[tokio::test]
+    async fn listener_inherits_cancelled_root() {
+        let root = CancellationToken::new();
+        root.cancel();
+        let registry = WorkerRegistry::new_with_cancel_token(1, root);
+
+        registry
+            .register(
+                1,
+                "tcp://127.0.0.1:15561".to_string(),
+                0,
+                "test-model".to_string(),
+                "default".to_string(),
+                1,
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(registry.listener_cancelled(1, 0), Some(true));
+    }
+
+    #[tokio::test]
+    async fn re_register_gets_fresh_watermark() {
+        let registry = test_registry();
+        registry.signal_ready();
+
+        registry
+            .register(
+                1,
+                "tcp://127.0.0.1:15560".to_string(),
+                0,
+                "test-model".to_string(),
+                "default".to_string(),
+                1,
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+
+        // Simulate that the listener advanced the watermark.
+        registry
+            .watermarks
+            .get(&(1, 0))
+            .unwrap()
+            .store(42, Ordering::Release);
+
+        registry
+            .deregister(1, "test-model", "default")
+            .await
+            .unwrap();
+
+        assert!(
+            registry
+                .get_indexer(&RoutingPartitionId::new("test-model", "default"))
+                .is_none()
+        );
+
+        registry
+            .register(
+                1,
+                "tcp://127.0.0.1:15561".to_string(),
+                0,
+                "test-model".to_string(),
+                "default".to_string(),
+                1,
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+
+        let wm = registry
+            .watermarks
+            .get(&(1, 0))
+            .expect("watermark should exist after re-register");
+        assert_eq!(
+            wm.load(Ordering::Acquire),
+            u64::MAX,
+            "re-registered watermark should be fresh (u64::MAX)"
+        );
+    }
+
+    // ── list_filtered tests ───────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn list_filtered_returns_metadata_and_applies_filters() {
+        let registry = test_registry();
+        registry.signal_ready();
+
+        registry
+            .register(
+                10,
+                "tcp://127.0.0.1:15570".to_string(),
+                0,
+                "llama3".to_string(),
+                "acme".to_string(),
+                4,
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+
+        registry
+            .register(
+                11,
+                "tcp://127.0.0.1:15571".to_string(),
+                0,
+                "mistral".to_string(),
+                "other-group".to_string(),
+                8,
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+
+        let workers = registry.list();
+        assert_eq!(workers.len(), 2);
+
+        let llama = workers.iter().find(|w| w.model_name == "llama3").unwrap();
+        assert_eq!(llama.block_size, 4);
+        assert_eq!(llama.routing_group, "acme");
+
+        let mistral = workers.iter().find(|w| w.model_name == "mistral").unwrap();
+        assert_eq!(mistral.block_size, 8);
+        assert_eq!(mistral.routing_group, "other-group");
+
+        let filtered = registry.list_filtered(Some("llama3"), None);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].model_name, "llama3");
+
+        let acme = registry.list_filtered(None, Some("acme"));
+        assert_eq!(acme.len(), 1);
+        assert_eq!(acme[0].routing_group, "acme");
+
+        let other = registry.list_filtered(None, Some("other-group"));
+        assert_eq!(other.len(), 1);
+        assert_eq!(other[0].routing_group, "other-group");
+
+        assert!(
+            registry
+                .list_filtered(Some("llama3"), Some("other-group"))
+                .is_empty()
+        );
+        assert!(registry.list_filtered(Some("nonexistent"), None).is_empty());
+    }
+
+    #[test]
+    fn list_filtered_skips_empty_listener_workers() {
+        // Directly inject a WorkerEntry with an empty listener map into the
+        // registry's workers DashMap.  This is the exact state that exists in
+        // the TOCTOU window inside deregister_dp_rank: the last listener has
+        // been removed from the HashMap (inside the shard lock at line ~525)
+        // but workers.remove() has not yet been called (line ~538, outside the
+        // lock).  Calling list() on this state must not return the entry.
+        //
+        // The previous approach (register + deregister both dp_ranks) was
+        // vacuous: after the second deregister_dp_rank returns, the worker is
+        // already gone, so workers.iter() is empty and the assertion held
+        // trivially without exercising the filter.
+        let registry = test_registry();
+
+        let key = RoutingPartitionId::new("llama3", "acme");
+
+        // Inject the empty-listener WorkerEntry directly.
+        registry.workers.insert(
+            99u64,
+            WorkerEntry {
+                key,
+                listeners: HashMap::new(),
+            },
+        );
+
+        let workers = registry.list();
+        assert!(
+            workers.is_empty(),
+            "worker with empty listener map must be omitted from list(); \
+             got {} entries",
+            workers.len()
+        );
+    }
+}
