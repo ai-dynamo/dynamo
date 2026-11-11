@@ -154,6 +154,13 @@ func (r *graphReconciler) renderPodCliqueSet(
 				groupName, cyborgPlacementAnnotation)
 		}
 
+		// Grove refuses replica changes during a Coherent update, but each replaced
+		// replica starts with the template count and needs a Cyborg Pod in every fabric pod.
+		if placed && dynamo.GroveCoherentUpdateSelected(pcs) {
+			return nil, nil, fmt.Errorf("component %q: annotation %s is not supported with the Coherent update strategy, which defers the Cyborg capacity that a replaced replica needs",
+				groupName, cyborgPlacementAnnotation)
+		}
+
 		for _, clique := range rendered.Cliques {
 			if token := deployment.Annotations[dynamo.LPXRestartAnnotation]; token != "" {
 				clique.Annotations[consts.RestartAnnotation] = token

@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
+	v1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx"
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
@@ -21,7 +23,9 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -237,6 +241,39 @@ func TestLPXCyborgPinDoesNotWaitForDesiredState(t *testing.T) {
 	pods := listTestCyborgPods(t, ctx, r.Client, clique)
 	require.Equal(t, []string{"a"}, testCyborgFabricPods(pods))
 	require.Empty(t, pods[0].Spec.SchedulingGates)
+
+	t.Log("A pass that waits only pins: a second Pod in the same fabric pod stays, and the capacity is not written")
+	extra := newTestReleasedCyborgPod(clique, 1)
+	extra.Labels[cyborgFabricPodLabel], extra.Spec.NodeName = "a", "gpu-a"
+	createLPXTestObjects(t, ctx, r.Client, extra)
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(clique), clique))
+	clique.Spec.Replicas = 2
+	require.NoError(t, r.Update(ctx, clique))
+	r.modelRegistry = &downloadOrderedLPXRegistry{ModelRegistry: registry, buildURL: url.URL{Scheme: lpx.BuildSchemeGCS, Host: "bucket", Path: "/other-build"}}
+	result, err = r.Reconcile(ctx, key)
+	require.NoError(t, err)
+	require.Positive(t, result.RequeueAfter)
+	require.Len(t, listTestCyborgPods(t, ctx, r.Client, clique), 2)
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(clique), clique))
+	require.Equal(t, int32(2), clique.Spec.Replicas)
+	require.NoError(t, r.Delete(ctx, extra))
+
+	t.Log("The DGD changes, and its controller does not deliver the new input revision to the LPX deployment")
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(dgd), dgd))
+	dgd.Spec.Env = append(dgd.Spec.Env, corev1.EnvVar{Name: "CHANGED", Value: "after-the-handoff"})
+	require.NoError(t, r.Update(ctx, dgd))
+
+	t.Log("Grove replaces the Cyborg Pod again, and the pin does not wait for the handoff")
+	require.NoError(t, r.Delete(ctx, pods[0]))
+	createLPXTestObjects(t, ctx, r.Client, newTestReleasedCyborgPod(clique, 0))
+	_, err = r.Reconcile(ctx, key)
+	require.NoError(t, err)
+	require.NoError(t, r.Get(ctx, key.NamespacedName, child))
+	ready := meta.FindStatusCondition(child.Status.Conditions, v1alpha1.LPXReadyCondition)
+	require.Contains(t, ready.Message, "Waiting for the matching DynamoGraphDeployment")
+	pods = listTestCyborgPods(t, ctx, r.Client, clique)
+	require.Equal(t, []string{"a"}, testCyborgFabricPods(pods))
+	require.Empty(t, pods[0].Spec.SchedulingGates)
 }
 
 func TestLPXCyborgPlacementErrorDoesNotStopItsCorrection(t *testing.T) {
@@ -274,6 +311,10 @@ func TestLPXCyborgPlacementErrorDoesNotStopItsCorrection(t *testing.T) {
 	})
 	require.Equal(t, map[string]string{"pool": "gpu"}, live.Spec.Template.Cliques[index].Spec.PodSpec.NodeSelector)
 
+	t.Log("The PodClique still has the old selector, so the placement still has no Node: it reads the PodClique, not the template")
+	_, err = r.Reconcile(ctx, key)
+	require.ErrorContains(t, err, "no Node with label")
+
 	t.Log("After Grove gives the PodClique the corrected template, the placement provisions")
 	clique := &grovev1alpha1.PodClique{}
 	require.NoError(t, r.Get(ctx, cliqueKey, clique))
@@ -281,6 +322,66 @@ func TestLPXCyborgPlacementErrorDoesNotStopItsCorrection(t *testing.T) {
 	require.NoError(t, r.Update(ctx, clique))
 	_, err = r.Reconcile(ctx, key)
 	require.NoError(t, err)
+}
+
+func TestLPXCyborgPlacementContinuesPastOnePodClique(t *testing.T) {
+	ctx := t.Context()
+
+	t.Log("Two PodCliques have the placement label: the first one selects no Node, the second one selects fabric pod a")
+	pcs := &grovev1alpha1.PodCliqueSet{Name: "pcs", Namespace: "default"}
+	pcs.Spec.Template.Cliques = []*grovev1alpha1.PodCliqueTemplateSpec{{Name: "cond", Spec: grovev1alpha1.PodCliqueSpec{Replicas: 1}}}
+	pcs.Spec.Template.PodCliqueScalingGroupConfigs = []grovev1alpha1.PodCliqueScalingGroupConfig{{Name: "lpx", CliqueNames: []string{"cond"}}}
+	pcsg := &grovev1alpha1.PodCliqueScalingGroup{Name: "pcs-0-lpx", Namespace: "default"}
+	pcsg.Spec.Replicas = 2
+	placed := map[string]string{lpx.CyborgPlacementLabel: lpx.CyborgPlacementPerFabricPod}
+	unselectable := &grovev1alpha1.PodClique{Name: "pcs-0-lpx-0-cond", Namespace: "default", UID: "clique-0", ResourceVersion: "1", Labels: placed}
+	unselectable.Spec.Replicas, unselectable.Spec.PodSpec.NodeSelector = 1, map[string]string{"pool": "wrong"}
+	selectable := &grovev1alpha1.PodClique{Name: "pcs-0-lpx-1-cond", Namespace: "default", UID: "clique-1", ResourceVersion: "1", Labels: placed}
+	selectable.Spec.Replicas = 1
+	pod := newTestReleasedCyborgPod(selectable, 0)
+	r := &graphReconciler{
+		Client: newLPXTestClient(t, unselectable, selectable, pod, newTestFabricPodNode("gpu-a", "a", "pool", "gpu")),
+		config: &configv1alpha1.OperatorConfiguration{},
+	}
+	pcsgs := map[string]*grovev1alpha1.PodCliqueScalingGroup{pcsg.Name: pcsg}
+	pclqs := map[string]*grovev1alpha1.PodClique{unselectable.Name: unselectable, selectable.Name: selectable}
+
+	t.Log("Name the PodClique without a Node, and still give the other PodClique its placement")
+	placements, err := r.resolveCyborgPlacements(ctx, pcs, pcsgs, pclqs, nil)
+	require.ErrorContains(t, err, unselectable.Name)
+	require.Equal(t, map[string]cyborgPlacement{selectable.Name: {fabricPods: []string{"a"}, replicas: 1}}, placements)
+
+	t.Log("Pin the Pod of the PodClique that has a placement")
+	require.NoError(t, r.pinCyborgPods(ctx, pclqs, placements))
+	require.Equal(t, []string{"a"}, testCyborgFabricPods(listTestCyborgPods(t, ctx, r.Client, selectable)))
+}
+
+func TestLPXCyborgRefusedPinKeepsItsPosition(t *testing.T) {
+	ctx := t.Context()
+
+	t.Log("One position is open in fabric pod a, and Grove released two Pods")
+	clique := &grovev1alpha1.PodClique{Name: "pcs-0-lpx-0-cond", Namespace: "default", UID: "clique-uid", ResourceVersion: "1"}
+	clique.Spec.Replicas = 2
+	first, second := newTestReleasedCyborgPod(clique, 0), newTestReleasedCyborgPod(clique, 1)
+	first.Spec.SchedulingGates = []corev1.PodSchedulingGate{{Name: lpx.CyborgPlacementGate}}
+	second.Spec.SchedulingGates = []corev1.PodSchedulingGate{{Name: lpx.CyborgPlacementGate}}
+	base := newLPXTestClient(t, clique, first, second)
+	r := &graphReconciler{Client: interceptor.NewClient(base, interceptor.Funcs{
+		// An earlier step of the same pass pinned the first Pod; the cache does not show it yet.
+		Patch: func(ctx context.Context, delegated client.WithWatch, object client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			if object.GetName() == first.Name {
+				return apierrors.NewConflict(schema.GroupResource{Resource: "pods"}, object.GetName(), fmt.Errorf("the object has been modified"))
+			}
+			return delegated.Patch(ctx, object, patch, opts...)
+		},
+	})}
+
+	t.Log("The refused pin keeps the position: the second Pod does not take it")
+	surplus, changed, err := r.fillCyborgPlacement(ctx, clique, cyborgPlacement{fabricPods: []string{"a"}, replicas: 1})
+	require.NoError(t, err)
+	require.False(t, changed)
+	require.Empty(t, surplus)
+	require.Equal(t, []string{"", ""}, testCyborgFabricPods(listTestCyborgPods(t, ctx, r.Client, clique)))
 }
 
 func TestLPXCyborgPlacementOutlivesItsAnnotation(t *testing.T) {
@@ -312,7 +413,11 @@ func TestLPXCyborgPlacementOutlivesItsAnnotation(t *testing.T) {
 	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(dgd), dgd))
 	dgd.Spec.Components[0].ComponentRole(v1beta1.ComponentRoleLPXConductor).PodTemplate.Annotations = nil
 	updateTestDGD(t, r, child, dgd)
-	for range 3 {
+	_, err = r.Reconcile(ctx, key)
+	require.NoError(t, err)
+	require.NoError(t, r.Get(ctx, key.NamespacedName, child))
+	require.False(t, meta.IsStatusConditionTrue(child.Status.Conditions, "ScalingDeferred"), "the explicit replica count is not a pending capacity change for a placed PodClique")
+	for range 2 {
 		_, err = r.Reconcile(ctx, key)
 		require.NoError(t, err)
 	}
@@ -536,11 +641,11 @@ func TestLPXCyborgPruneDoesNotLoopOnFailedScale(t *testing.T) {
 }
 
 func TestEligibleFabricPods(t *testing.T) {
-	nodes := []client.Object{
-		newTestFabricPodNode("gpu-a", "a", "pool", "gpu"),
-		newTestFabricPodNode("gpu-b", "b", "pool", "gpu"),
-		newTestFabricPodNode("lpu-c", "c", "pool", "lpu"),
-		&corev1.Node{Name: "unlabeled", Labels: map[string]string{"pool": "gpu"}},
+	nodes := []metav1.PartialObjectMetadata{
+		{Name: "gpu-a", Labels: map[string]string{fabricPodLabel: "a", "pool": "gpu"}},
+		{Name: "gpu-b", Labels: map[string]string{fabricPodLabel: "b", "pool": "gpu"}},
+		{Name: "lpu-c", Labels: map[string]string{fabricPodLabel: "c", "pool": "lpu"}},
+		{Name: "unlabeled", Labels: map[string]string{"pool": "gpu"}},
 	}
 
 	for _, tc := range []struct {
@@ -564,9 +669,8 @@ func TestEligibleFabricPods(t *testing.T) {
 		{name: "no selectable Node is an error", podSpec: corev1.PodSpec{NodeSelector: map[string]string{"pool": "none"}}, wantErr: "no Node with label"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			r := &graphReconciler{Client: newLPXTestClient(t, nodes...)}
 			clique := &grovev1alpha1.PodClique{Name: "pcs-0-lpx-0-cond", Spec: grovev1alpha1.PodCliqueSpec{PodSpec: tc.podSpec}}
-			fabricPods, err := r.eligibleFabricPods(t.Context(), clique)
+			fabricPods, err := eligibleFabricPods(nodes, clique)
 			if tc.wantErr != "" {
 				require.ErrorContains(t, err, tc.wantErr)
 				return

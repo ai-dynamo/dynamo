@@ -195,11 +195,21 @@ SPDX-License-Identifier: Apache-2.0
   PodClique keeps its placement, and its capacity, until Grove replaces it
   without the label. Do not derive a placement from the DGD: admission gates by
   the observed label, so the two must not disagree.
-- Pin from these placements directly after release cleanup, before downloads
-  and desired workload resolution. Remove Pods and write capacity only after
-  PCS synchronization, as for every replica write. Join placement errors into
-  the final error, as for release cleanup: a PodClique that selects no Node must
+- Pin from these placements directly after the DGD identity check and the Grove
+  observations: before the input handoff check, release cleanup, downloads and
+  desired workload resolution. The pin is the only workload write that does not
+  wait for the handoff. Remove Pods and write capacity only after PCS
+  synchronization, as for every replica write. Join placement errors into the
+  final error, as for release cleanup: a PodClique that selects no Node must
   not stop the PCS write that corrects it, or the placement of other PodCliques.
+- The count for each fabric pod follows the template of the observed
+  PodCliqueSet at once, also for a PodClique that Grove has not replaced yet.
+  With omitted conductor replicas, a build with a different minimum count thus
+  changes the capacity of an old PodClique before Grove replaces it.
+- Reject the annotation with the Coherent update strategy when rendering. Grove
+  refuses replica changes during a Coherent update, each replaced replica
+  starts with the template count, and the capacity difference would also defer
+  request publication, so the update could not end.
 - The role's replica count applies to each fabric pod, the value of Node label
   `network.topology.nvidia.com/lpu-fabric-pod`. It must form complete client
   groups, as a count without placement must.
@@ -242,8 +252,8 @@ SPDX-License-Identifier: Apache-2.0
   Kubernetes refuses that patch when a listed gate is gone, and Grove then
   records an error on the PodClique. The placement gate therefore leaves last.
 - The gate leaves a Pod only with its pin. A gated Pod waits while a pass
-  stops before the pin: the LPXGD or its PCS is in deletion, the DGD handoff is
-  missing, or a configured scaling group is not observed. It also waits while
+  stops before the pin: the LPXGD or its PCS is in deletion, the DGD identity
+  check fails, or a configured scaling group is not observed. It also waits while
   its PodClique has no placement, for example with no selectable Node. The LPX
   scheduler tolerates a pending replacement Pod of a bound plan only for the
   PCS `terminationDelay`.

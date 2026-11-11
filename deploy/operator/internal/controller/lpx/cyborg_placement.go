@@ -132,7 +132,10 @@ func (r *graphReconciler) resolveCyborgPlacements(
 	}
 
 	// Visit the PodCliques by scaling group, template and replica, as Grove names them.
-	var errs []error
+	var (
+		errs  []error
+		nodes *metav1.PartialObjectMetadataList
+	)
 	for _, group := range pcs.Spec.Template.PodCliqueScalingGroupConfigs {
 		pcsg := pcsgs[grovecommon.GeneratePodCliqueScalingGroupName(grovecommon.ResourceNameReplica{Name: pcs.Name, Replica: 0}, group.Name)]
 		for _, template := range pcs.Spec.Template.Cliques {
@@ -147,11 +150,21 @@ func (r *graphReconciler) resolveCyborgPlacements(
 					continue
 				}
 
-				// One PodClique without a selectable Node must not stop the other placements.
 				fabricPods, settled := committedFabricPods(requests, pcsg.Name, index)
 				if !settled {
+					// Read only Node metadata, one time for the PodCliques that still need it;
+					// the cache holds no complete Node objects.
+					if nodes == nil {
+						nodes = &metav1.PartialObjectMetadataList{}
+						nodes.SetGroupVersionKind(corev1.SchemeGroupVersion.WithKind("NodeList"))
+						if err := r.List(ctx, nodes, client.HasLabels{fabricPodLabel}); err != nil {
+							return placements, errors.Join(append(errs, fmt.Errorf("list Nodes with label %s: %w", fabricPodLabel, err))...)
+						}
+					}
+
+					// One PodClique without a selectable Node must not stop the other placements.
 					var err error
-					if fabricPods, err = r.eligibleFabricPods(ctx, clique); err != nil {
+					if fabricPods, err = eligibleFabricPods(nodes.Items, clique); err != nil {
 						errs = append(errs, err)
 						continue
 					}
@@ -201,25 +214,18 @@ func committedFabricPods(requests map[string]*lpxv1alpha1.LPUPipelineRequest, sc
 	return slices.Sorted(maps.Keys(selected)), true
 }
 
-// eligibleFabricPods lists the fabric pods that contain a Node which the node
+// eligibleFabricPods lists the fabric pods that contain one of nodes which the node
 // selector and required node affinity of the non-nil Cyborg PodClique can select.
-// Taints and free capacity are not evaluated: a Cyborg Pod pinned to a fabric pod
-// without capacity stays Pending and gives the LPX scheduler no evidence for that
-// fabric pod. The caller establishes cluster-wide Node access.
-func (r *graphReconciler) eligibleFabricPods(ctx context.Context, clique *grovev1alpha1.PodClique) ([]string, error) {
+// nodes holds the metadata of the Nodes that have the fabric pod label. Taints and
+// free capacity are not evaluated: a Cyborg Pod pinned to a fabric pod without
+// capacity stays Pending and gives the LPX scheduler no evidence for that fabric pod.
+func eligibleFabricPods(nodes []metav1.PartialObjectMetadata, clique *grovev1alpha1.PodClique) ([]string, error) {
 	required := nodeaffinity.GetRequiredNodeAffinity(&corev1.Pod{Spec: clique.Spec.PodSpec})
-
-	// Read only Node metadata; the cache holds no complete Node objects.
-	nodes := &metav1.PartialObjectMetadataList{}
-	nodes.SetGroupVersionKind(corev1.SchemeGroupVersion.WithKind("NodeList"))
-	if err := r.List(ctx, nodes, client.HasLabels{fabricPodLabel}); err != nil {
-		return nil, fmt.Errorf("list Nodes with label %s: %w", fabricPodLabel, err)
-	}
 
 	// Collect the fabric pod of every Node that the PodClique can select.
 	eligible := make(map[string]struct{})
-	for i := range nodes.Items {
-		node := &corev1.Node{ObjectMeta: nodes.Items[i].ObjectMeta}
+	for i := range nodes {
+		node := &corev1.Node{ObjectMeta: nodes[i].ObjectMeta}
 		if node.Labels[fabricPodLabel] == "" {
 			continue
 		}
@@ -415,8 +421,11 @@ func (r *graphReconciler) fillCyborgPlacement(
 		if err != nil {
 			return surplus, changed, err
 		}
+
+		// A refused pin keeps its position in this pass: the Pod has a version that
+		// this pass did not observe, and that version can already hold the position.
+		open[fabricPod]--
 		if placedPod {
-			open[fabricPod]--
 			changed = true
 			logger.Info("Placed Cyborg Pod in fabric pod", "pod", pod.Name, "fabricPod", fabricPod, "bound", pod.Spec.NodeName != "")
 		}

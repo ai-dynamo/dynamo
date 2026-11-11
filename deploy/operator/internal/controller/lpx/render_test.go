@@ -1733,6 +1733,28 @@ func TestLPXCyborgPlacementLabel(t *testing.T) {
 	}
 }
 
+func TestLPXCyborgPlacementRejectsCoherentUpdates(t *testing.T) {
+	ctx := t.Context()
+
+	t.Log("Select per-fabric-pod placement together with the Coherent update strategy")
+	child, dgd, registry := newLPXTestDGD(t, lpx.PipelineHybrid)
+	conductor := dgd.Spec.Components[0].ComponentRole(v1beta1.ComponentRoleLPXConductor)
+	conductor.PodTemplate.Annotations = map[string]string{cyborgPlacementAnnotation: lpx.CyborgPlacementPerFabricPod}
+	dgd.Annotations = map[string]string{consts.KubeAnnotationGroveUpdateStrategy: string(grovev1alpha1.CoherentStrategy)}
+	r := newLPXTestReconciler(t, registry, child, dgd, newTestFabricPodNode("gpu-a", "a"))
+	workloads, plans, err := r.resolveWorkloads(ctx, child, dgd)
+	require.NoError(t, err)
+
+	t.Log("Report that Grove defers the Cyborg capacity that a replaced replica needs")
+	_, _, err = r.renderPodCliqueSet(ctx, child, dgd, workloads, plans, nil)
+	require.ErrorContains(t, err, "Coherent update strategy")
+
+	t.Log("The other update strategies keep the placement")
+	dgd.Annotations[consts.KubeAnnotationGroveUpdateStrategy] = string(grovev1alpha1.RollingRecreateStrategy)
+	_, _, err = r.renderPodCliqueSet(ctx, child, dgd, workloads, plans, nil)
+	require.NoError(t, err)
+}
+
 func TestLPXCyborgPlacementRejectsNamespaceRestrictedMode(t *testing.T) {
 	ctx := t.Context()
 

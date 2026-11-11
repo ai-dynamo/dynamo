@@ -147,16 +147,11 @@ func (r *graphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 		return ctrl.Result{}, nil
 	}
 
-	// DGD identity and input revision are checked before any workload writes.
+	// DGD identity is checked before any workload write. Only the pin of Cyborg Pods
+	// precedes the input revision check, because it needs no DGD.
 	dgd, err := getDynamoGraphDeployment(ctx, r.Client, deployment)
 	if err != nil {
 		return ctrl.Result{}, err
-	}
-
-	// A cache miss or delayed handoff is not cleanup authority; owner GC handles deletion.
-	if dgd == nil {
-		setReadyCondition(deployment, v1beta1.DGDStatePending, "Waiting for the matching DynamoGraphDeployment")
-		return ctrl.Result{}, nil
 	}
 
 	// Resolve the owned Grove hierarchy from one cache observation.
@@ -199,18 +194,24 @@ func (r *graphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 		}
 	}
 
+	// Pin Cyborg Pods from the observed hierarchy, before the DGD handoff, downloads
+	// and desired workload resolution: Pod admission holds each new Cyborg Pod until
+	// its pin, and a replacement Pod of a serving replica must not wait for a new
+	// revision. A PodClique without a placement must not stop the write that corrects it.
+	var cyborgPlacements map[string]cyborgPlacement
+	cyborgPlacements, placementErr = r.resolveCyborgPlacements(ctx, pcs, pcsgs, pclqs, requests)
+	placementErr = errors.Join(placementErr, r.pinCyborgPods(ctx, pclqs, cyborgPlacements))
+
+	// A cache miss or delayed handoff is not cleanup authority; owner GC handles deletion.
+	if dgd == nil {
+		setReadyCondition(deployment, v1beta1.DGDStatePending, "Waiting for the matching DynamoGraphDeployment")
+		return ctrl.Result{}, nil
+	}
+
 	// Cleanup follows DGD handoff and owned Grove observations, but precedes downloads
 	// and desired workload resolution. Before PCS synchronization, Grove may recreate
 	// Agents from the old template, requiring another release cycle.
 	cleanupErr = r.removeReleasedAgentPods(ctx, pcsgs, requests)
-
-	// Pin Cyborg Pods from the observed hierarchy, also before downloads and desired
-	// workload resolution: Pod admission holds each new Cyborg Pod until its pin, and
-	// a replacement Pod of a serving replica must not wait for a new revision. A
-	// PodClique without a placement must not stop the write that corrects it.
-	var cyborgPlacements map[string]cyborgPlacement
-	cyborgPlacements, placementErr = r.resolveCyborgPlacements(ctx, pcs, pcsgs, pclqs, requests)
-	placementErr = errors.Join(placementErr, r.pinCyborgPods(ctx, pclqs, cyborgPlacements))
 
 	if result, err := r.reconcileModelDownloads(ctx, deployment, dgd); err != nil || result.RequeueAfter > 0 {
 		return result, err
