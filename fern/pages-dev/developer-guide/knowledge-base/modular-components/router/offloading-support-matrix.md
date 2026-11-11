@@ -111,7 +111,7 @@ See the [TensorRT-LLM backend docs](../backends/tensorrt-llm/overview.md) for wo
 
 ### How the router actually computes
 
-The Rust worker selector (`lib/kv-router/src/scheduling/selector.rs`) scores each candidate worker with:
+The Rust worker selector (`lib/router/scheduler/src/selector/reference.rs`) scores each candidate worker with:
 
 ```
 overlap_credit_blocks = device_overlap_blocks       * effective_device_credit
