@@ -13,7 +13,7 @@
 //!     parameters:
 //!       router_temperature: 0.5
 //!     hints:                                   # optional: the role's hints, in run order
-//!       - type: kv_fetch
+//!       - type: my_hint                        # any linked hint policy
 //! ```
 //!
 //! A role whose entry lists no `hints` runs its default hints; `hints: []` runs none.
