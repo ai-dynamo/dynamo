@@ -861,7 +861,11 @@ func ResolveComponentServiceName(ctx context.Context, reader ctrlclient.Reader, 
 	if _, graphOwner := owner.(*v1beta1.DynamoGraphDeployment); graphOwner && controller != nil &&
 		controller.Kind == "DynamoComponentDeployment" && strings.HasPrefix(controller.APIVersion, v1beta1.GroupVersion.Group+"/") {
 		component := &v1beta1.DynamoComponentDeployment{}
-		if err := reader.Get(ctx, types.NamespacedName{Name: controller.Name, Namespace: owner.GetNamespace()}, component); err != nil {
+		err := reader.Get(ctx, types.NamespacedName{Name: controller.Name, Namespace: owner.GetNamespace()}, component)
+		if k8serrors.IsNotFound(err) {
+			return desiredName, nil
+		}
+		if err != nil {
 			return "", fmt.Errorf("resolve legacy Service owner %s: %w", controller.Name, err)
 		}
 		if component.UID == controller.UID && owner.GetUID() != "" && metav1.IsControlledBy(component, owner) {
@@ -1007,7 +1011,7 @@ func getCliqueStartupDependencies(
 // Service for a Dynamo component, independent of whether the caller is the DGD
 // (Grove) or DCD controller.
 type ComponentServiceParams struct {
-	ServiceName     string
+	ServiceName     string // resolved Service name, including an owned legacy name
 	Namespace       string
 	ComponentType   string
 	DynamoNamespace string
@@ -1017,6 +1021,9 @@ type ComponentServiceParams struct {
 	IsK8sDiscovery  bool
 }
 
+// GenerateComponentService renders a component Service using params.ServiceName
+// as its final name. Callers must resolve that name with ResolveComponentServiceName
+// or use ComponentServiceName when rendering without a Kubernetes reader.
 func GenerateComponentService(params ComponentServiceParams) (*corev1.Service, error) {
 	var servicePort corev1.ServicePort
 	switch params.ComponentType {
@@ -1061,8 +1068,8 @@ func GenerateComponentService(params ComponentServiceParams) (*corev1.Service, e
 	maps.Copy(annotations, params.Annotations)
 
 	service := &corev1.Service{
-		// Service names must be DNS-1035 labels: no dots, and a leading letter.
-		Name:        ComponentServiceName(params.ServiceName),
+		// The caller resolves the Service identity before rendering.
+		Name:        params.ServiceName,
 		Namespace:   params.Namespace,
 		Labels:      labels,
 		Annotations: annotations,
@@ -1102,7 +1109,9 @@ func shortenServiceName(name string) string {
 	return name[:maxServiceNameLength-len(suffix)-1] + "-" + suffix
 }
 
-// GenerateElasticEPHeadlessService returns a headless Service that gives a single-pod
+// GenerateElasticEPHeadlessService uses params.ServiceName as the final Service name.
+// Callers must resolve an owned legacy Ray Service or use ElasticEPLeaderServiceName
+// for a new Service. It returns a headless Service that gives a single-pod
 // elastic-EP leader a stable address its followers join with
 // `ray start --address=<service>:6379` (see injectElasticEPRayLaunchFlags).
 //
@@ -1134,7 +1143,7 @@ func GenerateElasticEPHeadlessService(params ComponentServiceParams) *corev1.Ser
 	}
 
 	return &corev1.Service{
-		Name:        ElasticEPLeaderServiceName(params.ServiceName),
+		Name:        params.ServiceName,
 		Namespace:   params.Namespace,
 		Labels:      labels,
 		Annotations: annotations,
@@ -1163,7 +1172,9 @@ func GenerateElasticEPHeadlessService(params ComponentServiceParams) *corev1.Ser
 	}
 }
 
-func GenerateComponentIngress(ctx context.Context, componentName, componentNamespace string, ingressSpec IngressSpec) *networkingv1.Ingress {
+// GenerateComponentIngress renders an Ingress whose backend uses the resolved
+// serviceName verbatim. The componentName determines only the Ingress resource name.
+func GenerateComponentIngress(ctx context.Context, componentName, componentNamespace, serviceName string, ingressSpec IngressSpec) *networkingv1.Ingress {
 	resourceName := NormalizeKubeResourceName(componentName)
 	ingress := &networkingv1.Ingress{
 		Name:      resourceName,
@@ -1182,7 +1193,7 @@ func GenerateComponentIngress(ctx context.Context, componentName, componentNames
 							PathType: &[]networkingv1.PathType{networkingv1.PathTypePrefix}[0],
 							Backend: networkingv1.IngressBackend{
 								Service: &networkingv1.IngressServiceBackend{
-									Name: ComponentServiceName(componentName),
+									Name: serviceName,
 									Port: networkingv1.ServiceBackendPort{
 										Number: commonconsts.DynamoServicePort,
 									},
@@ -1217,7 +1228,10 @@ func getIngressHost(ingressSpec IngressSpec) string {
 	return fmt.Sprintf("%s.%s", host, ingressSuffix)
 }
 
-func GenerateComponentVirtualService(ctx context.Context, componentName, componentNamespace string, ingressSpec IngressSpec) *networkingv1beta1.VirtualService {
+// GenerateComponentVirtualService renders routing to the resolved serviceName
+// verbatim, or a metadata-only deletion stub when ingressSpec disables routing.
+// The componentName determines only the VirtualService resource name.
+func GenerateComponentVirtualService(ctx context.Context, componentName, componentNamespace, serviceName string, ingressSpec IngressSpec) *networkingv1beta1.VirtualService {
 	resourceName := NormalizeKubeResourceName(componentName)
 	vs := &networkingv1beta1.VirtualService{
 		Name:      resourceName,
@@ -1241,7 +1255,7 @@ func GenerateComponentVirtualService(ctx context.Context, componentName, compone
 					Route: []*istioNetworking.HTTPRouteDestination{
 						{
 							Destination: &istioNetworking.Destination{
-								Host: ComponentServiceName(componentName),
+								Host: serviceName,
 								Port: &istioNetworking.PortSelector{
 									Number: commonconsts.DynamoServicePort,
 								},
@@ -1258,8 +1272,10 @@ func GenerateComponentVirtualService(ctx context.Context, componentName, compone
 // GenerateEPPDestinationRule builds an Istio DestinationRule for an EPP service.
 // This tells the mesh sidecar how to connect to the EPP's gRPC endpoint,
 // avoiding double-TLS issues when the EPP serves TLS (SecureServing=true).
-func GenerateEPPDestinationRule(serviceName, namespace string, meshConfig configv1alpha1.ServiceMeshConfiguration) *networkingv1beta1.DestinationRule {
-	normalizedName := NormalizeKubeResourceName(serviceName)
+// serviceName is the resolved Service name and is used verbatim in its host;
+// componentName determines only the DestinationRule resource name.
+func GenerateEPPDestinationRule(componentName, namespace, serviceName string, meshConfig configv1alpha1.ServiceMeshConfiguration) *networkingv1beta1.DestinationRule {
+	normalizedName := NormalizeKubeResourceName(componentName)
 
 	dr := &networkingv1beta1.DestinationRule{
 		Name:      normalizedName,
@@ -1300,9 +1316,8 @@ func GenerateEPPDestinationRule(serviceName, namespace string, meshConfig config
 	}
 
 	dr.Spec = istioNetworking.DestinationRule{
-		// Name the Service the same way GenerateComponentService does so the
-		// host matches the actual Service DNS name.
-		Host: fmt.Sprintf("%s.%s.svc.cluster.local", ComponentServiceName(serviceName), namespace),
+		// Route to the Service identity resolved by the caller.
+		Host: fmt.Sprintf("%s.%s.svc.cluster.local", serviceName, namespace),
 		TrafficPolicy: &istioNetworking.TrafficPolicy{
 			Tls: tls,
 		},

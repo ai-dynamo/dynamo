@@ -28,7 +28,7 @@ from deploy.utils.dynamo_deployment import (  # noqa: E402
     DynamoDeploymentClient,
 )
 
-pytestmark = pytest.mark.pre_merge
+pytestmark = [pytest.mark.pre_merge, pytest.mark.timeout(5)]
 
 
 async def test_wait_for_deployment_ready_raises_deployment_failed_on_crashloop(
@@ -49,11 +49,11 @@ async def test_wait_for_deployment_ready_raises_deployment_failed_on_crashloop(
         return_value="pod p0 container worker in CrashLoopBackOff"
     )
 
-    # Avoid sleeping in the test.
-    async def _no_sleep(_seconds):
-        return None
-
-    monkeypatch.setattr("deploy.utils.dynamo_deployment.asyncio.sleep", _no_sleep)
+    # Any retry is a regression; never enter the real polling delay.
+    monkeypatch.setattr(
+        "deploy.utils.dynamo_deployment.asyncio.sleep",
+        AsyncMock(side_effect=AssertionError("unexpected readiness retry")),
+    )
 
     with pytest.raises(DeploymentFailedError) as excinfo:
         # Pass a generous timeout so a regression (timeout instead of
@@ -166,12 +166,20 @@ async def test_ready_deployment_uses_actual_owned_frontend_service(
     """Both connection methods must use the rendered or retained Service name."""
     monkeypatch.setattr("deploy.utils.dynamo_deployment.uuid.uuid4", lambda: "abcd")
     client = DynamoDeploymentClient(namespace="ns", deployment_name=deployment_name)
+    monkeypatch.setattr(
+        "deploy.utils.dynamo_deployment.asyncio.sleep",
+        AsyncMock(side_effect=AssertionError("unexpected readiness retry")),
+    )
     graph_uid = "graph-uid"
     component_uid = "component-uid"
     component_name = f"{client.deployment_name}-frontend"
     service = k8s_client.V1Service(
         metadata=k8s_client.V1ObjectMeta(
             name=service_name,
+            # Grove Services need not carry the DCD pathway's graph label.
+            labels={"nvidia.com/dynamo-graph-deployment-name": client.deployment_name}
+            if owner_kind == "DynamoComponentDeployment"
+            else None,
             owner_references=[
                 k8s_client.V1OwnerReference(
                     api_version="nvidia.com/v1beta1",
@@ -205,11 +213,30 @@ async def test_ready_deployment_uses_actual_owned_frontend_service(
             selector={"nvidia.com/dynamo-component-type": "worker"}
         ),
     )
-    client.core_api.list_namespaced_service = AsyncMock(
-        return_value=k8s_client.V1ServiceList(
-            items=[unowned_service, worker_service, service]
-        )
-    )
+
+    async def list_services(namespace, label_selector=None):
+        """Apply Kubernetes equality selectors to the rendered Service labels."""
+        items = [
+            unowned_service,
+            worker_service,
+            _owned_frontend_service(
+                "other-graph-frontend", owner_uid="other-graph-uid"
+            ),
+            service,
+        ]
+        if label_selector:
+            labels = dict(term.split("=", 1) for term in label_selector.split(","))
+            items = [
+                item
+                for item in items
+                if all(
+                    (item.metadata.labels or {}).get(key) == value
+                    for key, value in labels.items()
+                )
+            ]
+        return k8s_client.V1ServiceList(items=items)
+
+    client.core_api.list_namespaced_service = AsyncMock(side_effect=list_services)
     client.custom_api = MagicMock()
 
     async def read_resource(**kwargs):
@@ -241,14 +268,13 @@ async def test_ready_deployment_uses_actual_owned_frontend_service(
     client.custom_api.get_namespaced_custom_object = AsyncMock(
         side_effect=read_resource
     )
-    assert await client.wait_for_deployment_ready() is True
+    assert await client.wait_for_deployment_ready(timeout=1) is True
     assert (
         client.get_service_url()
         == f"http://{service_name}.ns.svc.cluster.local:{client.frontend_port}"
     )
     client.core_api.list_namespaced_service.assert_awaited_once_with(
         namespace="ns",
-        label_selector=f"nvidia.com/dynamo-graph-deployment-name={client.deployment_name}",
     )
 
     popen = MagicMock()
@@ -260,8 +286,12 @@ async def test_ready_deployment_uses_actual_owned_frontend_service(
 
 @pytest.mark.unit
 @pytest.mark.gpu_0
-async def test_ready_deployment_preserves_explicit_service_name():
+async def test_ready_deployment_preserves_explicit_service_name(monkeypatch):
     """An explicit endpoint must not require Service discovery permissions."""
+    monkeypatch.setattr(
+        "deploy.utils.dynamo_deployment.asyncio.sleep",
+        AsyncMock(side_effect=AssertionError("unexpected readiness retry")),
+    )
     client = DynamoDeploymentClient(namespace="ns", service_name="custom-endpoint")
     client.custom_api = MagicMock()
     client.custom_api.get_namespaced_custom_object = AsyncMock(
@@ -274,6 +304,139 @@ async def test_ready_deployment_preserves_explicit_service_name():
     )
     client._resolve_frontend_service = AsyncMock()  # type: ignore[method-assign]
 
-    assert await client.wait_for_deployment_ready() is True
+    assert await client.wait_for_deployment_ready(timeout=1) is True
     client._resolve_frontend_service.assert_not_awaited()
     assert client.service_name == "custom-endpoint"
+
+
+def _owned_frontend_service(
+    name, owner_kind="DynamoGraphDeployment", owner_uid="graph-uid"
+):
+    """Build a frontend Service with the operator's controlling owner reference."""
+    return k8s_client.V1Service(
+        metadata=k8s_client.V1ObjectMeta(
+            name=name,
+            owner_references=[
+                k8s_client.V1OwnerReference(
+                    api_version="nvidia.com/v1beta1",
+                    kind=owner_kind,
+                    name="component"
+                    if owner_kind == "DynamoComponentDeployment"
+                    else "graph",
+                    uid=owner_uid,
+                    controller=True,
+                )
+            ],
+        ),
+        spec=k8s_client.V1ServiceSpec(
+            selector={"nvidia.com/dynamo-component-type": "frontend"}
+        ),
+    )
+
+
+def _ready_client(monkeypatch, services):
+    """Return a ready graph client whose tests fail immediately on any retry."""
+    monkeypatch.setattr(
+        "deploy.utils.dynamo_deployment.asyncio.sleep",
+        AsyncMock(side_effect=AssertionError("unexpected readiness retry")),
+    )
+    client = DynamoDeploymentClient(namespace="ns")
+    client.core_api = MagicMock()
+    client.core_api.list_namespaced_service = AsyncMock(
+        return_value=k8s_client.V1ServiceList(items=services)
+    )
+    client.custom_api = MagicMock()
+    client.custom_api.get_namespaced_custom_object = AsyncMock(
+        return_value={
+            "metadata": {"uid": "graph-uid"},
+            "status": {
+                "state": "successful",
+                "conditions": [{"type": "Ready", "status": "True"}],
+            },
+        }
+    )
+    return client
+
+
+@pytest.mark.unit
+@pytest.mark.gpu_0
+@pytest.mark.parametrize("service_count", [0, 2])
+async def test_ready_graph_without_unique_frontend_reports_connection_error(
+    monkeypatch, service_count
+):
+    """Endpoint choice must not prevent a worker-only or multi-frontend graph being ready."""
+    client = _ready_client(
+        monkeypatch,
+        [
+            _owned_frontend_service(f"frontend-{index}")
+            for index in range(service_count)
+        ],
+    )
+
+    assert await client.wait_for_deployment_ready(timeout=1) is True
+    error = (
+        "no owned frontend Service"
+        if service_count == 0
+        else "multiple owned frontend Services"
+    )
+    with pytest.raises(RuntimeError, match=error):
+        client.get_service_url()
+    with pytest.raises(RuntimeError, match=error):
+        client.port_forward_frontend()
+    assert client.service_name is None
+
+
+@pytest.mark.unit
+@pytest.mark.gpu_0
+@pytest.mark.parametrize("status_code", [401, 403])
+@pytest.mark.parametrize("failed_resource", ["service-list", "component-get"])
+async def test_ready_deployment_surfaces_discovery_permission_errors(
+    monkeypatch, status_code, failed_resource
+):
+    """Service list and DCD reads must expose denied access without retrying."""
+    client = _ready_client(
+        monkeypatch,
+        [
+            _owned_frontend_service(
+                "frontend", "DynamoComponentDeployment", "component-uid"
+            )
+        ],
+    )
+    failure = k8s_client.rest.ApiException(status=status_code, reason="access denied")
+    if failed_resource == "service-list":
+        client.core_api.list_namespaced_service.side_effect = failure
+    else:
+        ready_graph = client.custom_api.get_namespaced_custom_object.return_value
+        client.custom_api.get_namespaced_custom_object.side_effect = [
+            ready_graph,
+            failure,
+        ]
+
+    with pytest.raises(k8s_client.rest.ApiException) as excinfo:
+        await client.wait_for_deployment_ready(timeout=1)
+    assert excinfo.value.status == status_code
+    client.core_api.list_namespaced_service.assert_awaited_once()
+
+
+@pytest.mark.unit
+@pytest.mark.gpu_0
+async def test_frontend_discovery_skips_deleted_component_owner(monkeypatch):
+    """A stale Service must not hide a live frontend later in the namespace list."""
+    client = _ready_client(
+        monkeypatch,
+        [
+            _owned_frontend_service(
+                "stale-frontend", "DynamoComponentDeployment", "deleted-uid"
+            ),
+            _owned_frontend_service("live-frontend"),
+        ],
+    )
+    ready_graph = client.custom_api.get_namespaced_custom_object.return_value
+    client.custom_api.get_namespaced_custom_object.side_effect = [
+        ready_graph,
+        k8s_client.rest.ApiException(status=404, reason="component no longer exists"),
+    ]
+
+    assert await client.wait_for_deployment_ready(timeout=1) is True
+    assert client.service_name == "live-frontend"
+    assert client.custom_api.get_namespaced_custom_object.await_count == 2

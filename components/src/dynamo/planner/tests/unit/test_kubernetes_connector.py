@@ -3325,3 +3325,181 @@ def test_model_refresh_reads_registrations_and_pods_once(
     assert kubernetes_connector.get_model_name() == "registered-model"
     kubernetes_connector._list_worker_metadata_crs.assert_called_once()
     mock_kube_api.list_pods_for_graph.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    "service_name", ["svc-123-graph-frontend", "123-graph-frontend", "graph-frontend"]
+)
+@pytest.mark.parametrize("child_dcd", [False, True])
+@pytest.mark.parametrize(
+    "owner_api_version", ["nvidia.com/v1alpha1", "nvidia.com/v1beta1"]
+)
+def test_frontend_metrics_uses_existing_owned_service(
+    kubernetes_connector, mock_kube_api, service_name, child_dcd, owner_api_version
+):
+    graph_name = "123-graph" if "123" in service_name else "graph"
+    deployment = {
+        "apiVersion": "nvidia.com/v1beta1",
+        "metadata": {"name": graph_name, "uid": "graph-uid"},
+        "spec": {"components": [{"name": "Frontend", "type": "frontend"}]},
+    }
+    graph_owner = client.V1OwnerReference(
+        api_version=owner_api_version,
+        kind="DynamoGraphDeployment",
+        name=graph_name,
+        uid="graph-uid",
+        controller=True,
+    )
+    service_owner = graph_owner
+    api = KubernetesAPI.__new__(KubernetesAPI)
+    api.current_namespace = "other-namespace"
+    api.core_api = Mock()
+    api.custom_api = Mock()
+    if child_dcd:
+        service_owner = client.V1OwnerReference(
+            api_version=owner_api_version,
+            kind="DynamoComponentDeployment",
+            name=f"{graph_name}-frontend",
+            uid="component-uid",
+            controller=True,
+        )
+        api.custom_api.get_namespaced_custom_object.return_value = {
+            "metadata": {
+                "uid": "component-uid",
+                "ownerReferences": [
+                    {
+                        "apiVersion": owner_api_version,
+                        "kind": "DynamoGraphDeployment",
+                        "name": graph_name,
+                        "uid": "graph-uid",
+                        "controller": True,
+                    }
+                ],
+            },
+        }
+    service = client.V1Service(
+        metadata=client.V1ObjectMeta(
+            name=service_name,
+            owner_references=[service_owner],
+        ),
+        spec=client.V1ServiceSpec(selector={"nvidia.com/dynamo-component": "Frontend"}),
+    )
+    unrelated = client.V1Service(
+        metadata=client.V1ObjectMeta(
+            name="unrelated-frontend",
+            owner_references=[],
+        ),
+        spec=client.V1ServiceSpec(selector={"nvidia.com/dynamo-component": "Frontend"}),
+    )
+    other_component = client.V1Service(
+        metadata=client.V1ObjectMeta(
+            name="graph-worker", owner_references=[graph_owner]
+        ),
+        spec=client.V1ServiceSpec(selector={"nvidia.com/dynamo-component": "Worker"}),
+    )
+    api.core_api.list_namespaced_service.return_value.items = [
+        unrelated,
+        other_component,
+        service,
+    ]
+    mock_kube_api.get_graph_deployment.return_value = deployment
+    mock_kube_api.get_component_service.side_effect = api.get_component_service
+    mock_kube_api.current_namespace = api.current_namespace
+
+    assert kubernetes_connector.get_frontend_metrics_url() == (
+        f"http://{service_name}.other-namespace.svc:8000/metrics"
+    )
+    api.core_api.list_namespaced_service.assert_called_once_with(
+        namespace="other-namespace"
+    )
+    if child_dcd:
+        api.custom_api.get_namespaced_custom_object.assert_called_once_with(
+            group="nvidia.com",
+            version=owner_api_version.split("/", 1)[1],
+            namespace="other-namespace",
+            plural="dynamocomponentdeployments",
+            name=f"{graph_name}-frontend",
+        )
+
+
+@pytest.mark.parametrize("foreign_uid", ["other-graph-uid", ""])
+def test_component_service_rejects_foreign_graph_owner(foreign_uid):
+    deployment = {
+        "apiVersion": "nvidia.com/v1beta1",
+        "metadata": {"name": "123-graph", "uid": "graph-uid"},
+    }
+    api = KubernetesAPI.__new__(KubernetesAPI)
+    api.current_namespace = "default"
+    api.core_api = Mock()
+    api.core_api.list_namespaced_service.return_value.items = [
+        client.V1Service(
+            metadata=client.V1ObjectMeta(
+                name="123-graph-frontend",
+                owner_references=[
+                    client.V1OwnerReference(
+                        api_version="nvidia.com/v1beta1",
+                        kind="DynamoGraphDeployment",
+                        name="123-graph",
+                        uid=foreign_uid,
+                        controller=True,
+                    )
+                ],
+            ),
+            spec=client.V1ServiceSpec(
+                selector={"nvidia.com/dynamo-component": "Frontend"}
+            ),
+        )
+    ]
+    assert api.get_component_service(deployment, "Frontend") is None
+
+
+@pytest.mark.parametrize(
+    "rejection", ["child_uid", "graph_uid", "not_controller", "missing_dcd"]
+)
+def test_component_service_rejects_unverified_child(rejection):
+    api = KubernetesAPI.__new__(KubernetesAPI)
+    api.current_namespace = "default"
+    api.core_api = Mock()
+    api.custom_api = Mock()
+    deployment = {
+        "apiVersion": "nvidia.com/v1beta1",
+        "metadata": {"name": "123-graph", "uid": "graph-uid"},
+    }
+    api.core_api.list_namespaced_service.return_value.items = [
+        client.V1Service(
+            metadata=client.V1ObjectMeta(
+                name="123-graph-frontend",
+                owner_references=[
+                    client.V1OwnerReference(
+                        api_version="nvidia.com/v1beta1",
+                        kind="DynamoComponentDeployment",
+                        name="123-graph-frontend",
+                        uid="component-uid",
+                        controller=True,
+                    )
+                ],
+            ),
+            spec=client.V1ServiceSpec(
+                selector={"nvidia.com/dynamo-component": "Frontend"}
+            ),
+        )
+    ]
+    api.custom_api.get_namespaced_custom_object.return_value = {
+        "metadata": {
+            "uid": "wrong-uid" if rejection == "child_uid" else "component-uid",
+            "ownerReferences": [
+                {
+                    "apiVersion": "nvidia.com/v1beta1",
+                    "kind": "DynamoGraphDeployment",
+                    "name": "123-graph",
+                    "uid": "wrong-uid" if rejection == "graph_uid" else "graph-uid",
+                    "controller": rejection != "not_controller",
+                }
+            ],
+        }
+    }
+    if rejection == "missing_dcd":
+        api.custom_api.get_namespaced_custom_object.side_effect = client.ApiException(
+            status=404
+        )
+    assert api.get_component_service(deployment, "Frontend") is None

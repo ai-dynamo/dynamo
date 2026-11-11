@@ -162,19 +162,19 @@ func (r *graphReconciler) renderPodCliqueSet(
 
 		// Kubernetes discovery exposes only this workload's serving role within its PCS.
 		if commoncontroller.IsK8sDiscoveryEnabled(r.config.Discovery.Backend, dgd.Annotations) {
+			// Keep an owned discovery Service at its pre-upgrade address.
+			serviceName, err := dynamo.ResolveComponentServiceName(ctx, r.Client, deployment, plan.ResourcePrefix+"-serve")
+			if err != nil {
+				return nil, nil, err
+			}
 			component := dgd.GetComponentByName(workload.ServingComponentName())
 			service, err := dynamo.GenerateComponentService(dynamo.ComponentServiceParams{
-				ServiceName: plan.ResourcePrefix + "-serve", Namespace: deployment.Namespace,
+				ServiceName: serviceName, Namespace: deployment.Namespace,
 				ComponentType: string(component.ComponentType), ComponentName: component.ComponentName,
 				DynamoNamespace: dgd.GetDynamoNamespaceForComponent(component), IsK8sDiscovery: true,
 				Labels:      dynamo.GetDGDComponentResourceLabels(dgd, component.ComponentName, component),
 				Annotations: dynamo.GetDGDComponentResourceAnnotations(dgd, component.ComponentName, component),
 			})
-			if err != nil {
-				return nil, nil, err
-			}
-			// Keep an owned discovery Service at its pre-upgrade address.
-			service.Name, err = dynamo.ResolveComponentServiceName(ctx, r.Client, deployment, plan.ResourcePrefix+"-serve")
 			if err != nil {
 				return nil, nil, err
 			}

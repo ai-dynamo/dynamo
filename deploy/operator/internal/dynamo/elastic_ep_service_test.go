@@ -86,7 +86,7 @@ func TestElasticEPLeaderServiceNameIsStable(t *testing.T) {
 func TestGenerateElasticEPHeadlessService(t *testing.T) {
 	t.Log("Generate the leader Service for a single-pod elastic-EP component")
 	svc := GenerateElasticEPHeadlessService(ComponentServiceParams{
-		ServiceName:     "my-dgd-worker",
+		ServiceName:     "my-dgd-worker-ray",
 		Namespace:       "ns",
 		ComponentType:   "worker",
 		DynamoNamespace: "ns-my-dgd",

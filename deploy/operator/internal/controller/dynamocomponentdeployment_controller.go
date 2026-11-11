@@ -818,8 +818,7 @@ func (r *DynamoComponentDeploymentReconciler) generateIngress(ctx context.Contex
 	if err != nil {
 		return nil, false, err
 	}
-	ingress = dynamo.GenerateComponentIngress(ctx, opt.dynamoComponentDeployment.Name, opt.dynamoComponentDeployment.Namespace, ingressSpec)
-	ingress.Spec.Rules[0].HTTP.Paths[0].Backend.Service.Name = serviceName
+	ingress = dynamo.GenerateComponentIngress(ctx, opt.dynamoComponentDeployment.Name, opt.dynamoComponentDeployment.Namespace, serviceName, ingressSpec)
 	return ingress, false, nil
 }
 
@@ -845,8 +844,7 @@ func (r *DynamoComponentDeploymentReconciler) generateVirtualService(ctx context
 	if err != nil {
 		return nil, false, err
 	}
-	vs = dynamo.GenerateComponentVirtualService(ctx, opt.dynamoComponentDeployment.Name, opt.dynamoComponentDeployment.Namespace, ingressSpec)
-	vs.Spec.Http[0].Route[0].Destination.Host = serviceName
+	vs = dynamo.GenerateComponentVirtualService(ctx, opt.dynamoComponentDeployment.Name, opt.dynamoComponentDeployment.Namespace, serviceName, ingressSpec)
 	return vs, false, nil
 }
 

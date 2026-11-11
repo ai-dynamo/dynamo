@@ -544,21 +544,26 @@ class KubernetesConnector(PlannerConnector):
     def get_frontend_metrics_url(self, port: int = 8000) -> Optional[str]:
         """Auto-discover the frontend component's metrics URL from the DGD.
 
-        Iterates DGD components to find the component with type "frontend",
-        then constructs the in-cluster URL using the operator's naming convention:
-        http://{dgd_name}-{component_name_lowercase}:{port}/metrics
+        Uses the existing Service owned by the graph or its component DCD,
+        including Services retained from an older operator's naming rules.
 
         Returns:
-            The metrics URL string, or None if no frontend component is found.
+            The metrics URL string, or None if no frontend Service is found.
         """
         deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
         components = get_components_by_name(deployment)
 
         for component_name, component_spec in components.items():
             if get_component_type(component_spec) == "frontend":
-                service_name = f"{self.graph_deployment_name}-{component_name.lower()}"
-                url = f"http://{service_name}:{port}/metrics"
-                logger.info(f"Auto-discovered frontend metrics URL: {url}")
+                service = self.kube_api.get_component_service(
+                    deployment, component_name
+                )
+                if service is None:
+                    return None
+                service_name = service.metadata.name
+                namespace = self.kube_api.current_namespace
+                url = f"http://{service_name}.{namespace}.svc:{port}/metrics"
+                logger.info("Auto-discovered frontend metrics URL: %s", url)
                 return url
 
         return None

@@ -1548,12 +1548,77 @@ class ManagedDeployment:
         processes = [PodProcess(pod, line) for line in lines[1:]]
         return processes
 
-    def get_service(self, service_name=None):
-        if not service_name:
-            service_name = ""
-        full_service_name = f"{self._deployment_name}-{service_name.lower()}"
+    def get_service(self, service_name: str | None = None) -> Service:
+        """Find the current component Service, including a retained legacy name."""
+        component_name = service_name or self.frontend_service_name
+        graphs = list(
+            kr8s.get(
+                "dynamographdeployments",
+                self._deployment_name,
+                namespace=self.namespace,
+            )
+        )
+        if len(graphs) != 1:
+            raise ValueError(f"Deployment {self._deployment_name!r} was not found")
+        graph = graphs[0].raw
 
-        return Service.get(full_service_name, namespace=self.namespace)
+        def owned_by_graph(metadata):
+            return any(
+                owner.get("controller") is True
+                and (owner.get("apiVersion") or "").startswith("nvidia.com/")
+                and owner.get("kind") == "DynamoGraphDeployment"
+                and owner.get("name") == self._deployment_name
+                and owner.get("uid") == graph["metadata"]["uid"]
+                for owner in metadata.get("ownerReferences", [])
+            )
+
+        matches = []
+        # Grove identifies the component in the Pod selector, and need not
+        # carry the component or graph-name label on the Service itself.
+        for service in kr8s.get(
+            "services",
+            namespace=self.namespace,
+        ):
+            if (
+                service.raw.get("spec", {})
+                .get("selector", {})
+                .get("nvidia.com/dynamo-component")
+                != component_name
+            ):
+                continue
+            metadata = service.raw["metadata"]
+            if metadata.get("deletionTimestamp"):
+                continue
+            if owned_by_graph(metadata):
+                matches.append(service)
+                continue
+            for owner in metadata.get("ownerReferences", []):
+                if (
+                    owner.get("controller") is not True
+                    or not (owner.get("apiVersion") or "").startswith("nvidia.com/")
+                    or owner.get("kind") != "DynamoComponentDeployment"
+                ):
+                    continue
+                dcds = list(
+                    kr8s.get(
+                        "dynamocomponentdeployments",
+                        owner["name"],
+                        namespace=self.namespace,
+                    )
+                )
+                if (
+                    len(dcds) == 1
+                    and dcds[0].raw["metadata"]["uid"] == owner.get("uid")
+                    and owned_by_graph(dcds[0].raw["metadata"])
+                ):
+                    matches.append(service)
+                    break
+        if len(matches) != 1:
+            raise ValueError(
+                f"Expected one Service for component {component_name!r} of "
+                f"{self._deployment_name!r}, found {len(matches)}"
+            )
+        return matches[0]
 
     def get_pods(self, service_names: list[str] | None = None) -> dict[str, list[Pod]]:
         if not service_names:

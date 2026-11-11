@@ -22,13 +22,16 @@ import (
 	"testing"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/stretchr/testify/require"
+	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -38,6 +41,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
 // elasticEPArgs is the command line that marks a component as an elastic-EP Ray launch:
@@ -477,4 +481,68 @@ func newElasticEPTestStableResourcesReconciler(
 		&configv1alpha1.OperatorConfiguration{},
 	)
 	return reconciler, kubeClient
+}
+
+func TestGroveFrontendIngressUsesPreservedVirtualServiceSettings(t *testing.T) {
+	for _, tt := range []struct {
+		name              string
+		enabled           bool
+		useVirtualService bool
+		gateway           *string
+		wantDeleted       bool
+	}{
+		{name: "disabled ingress", useVirtualService: true, gateway: new("mesh/gateway"), wantDeleted: true},
+		{name: "disabled VirtualService", enabled: true, gateway: new("mesh/gateway"), wantDeleted: true},
+		{name: "missing gateway", enabled: true, useVirtualService: true, wantDeleted: true},
+		{name: "enabled uses retained Service", enabled: true, useVirtualService: true, gateway: new("mesh/gateway")},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Convert a legacy graph that preserves its component's ingress settings")
+			alpha := &v1alpha1.DynamoGraphDeployment{
+				Name: "7model", Namespace: "default",
+				Spec: v1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "vllm",
+					Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+						"frontend": {
+							ComponentType: commonconsts.ComponentTypeFrontend,
+							Ingress: &v1alpha1.IngressSpec{
+								Enabled: tt.enabled, UseVirtualService: tt.useVirtualService,
+								VirtualServiceGateway: tt.gateway,
+							},
+						},
+					},
+				},
+			}
+			dgd := &v1beta1.DynamoGraphDeployment{}
+			require.NoError(t, alpha.ConvertTo(dgd))
+			dgd.UID = "graph-uid"
+
+			t.Log("Seed a graph-owned VirtualService and legacy numeric frontend Service")
+			scheme := newDynamoGraphDeploymentControllerTestScheme(t)
+			require.NoError(t, networkingv1.AddToScheme(scheme))
+			require.NoError(t, networkingv1beta1.AddToScheme(scheme))
+			name := dynamo.GetDCDResourceName(dgd, "frontend", "")
+			virtualService := &networkingv1beta1.VirtualService{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: dgd.Namespace}}
+			require.NoError(t, controllerutil.SetControllerReference(dgd, virtualService, scheme))
+			service := &corev1.Service{Name: name, Namespace: dgd.Namespace}
+			require.NoError(t, controllerutil.SetControllerReference(dgd, service, scheme))
+			kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(dgd, virtualService, service).Build()
+			reconciler := newGroveStableResourcesReconciler(kubeClient, events.NewFakeRecorder(100),
+				&configv1alpha1.OperatorConfiguration{Ingress: configv1alpha1.IngressConfiguration{VirtualServiceGateway: "mesh/gateway"}})
+
+			t.Log("Reconcile safely and delete disabled routing or keep the resolved Service address")
+			_, err := reconciler.reconcileFrontendIngress(t.Context(), dgd, dgd.GetComponentByName("frontend"))
+			require.NoError(t, err)
+			current := &networkingv1beta1.VirtualService{}
+			err = kubeClient.Get(t.Context(), types.NamespacedName{Name: name, Namespace: dgd.Namespace}, current)
+			if tt.wantDeleted {
+				require.True(t, apierrors.IsNotFound(err), "expected deletion, got %v", err)
+			} else {
+				require.NoError(t, err)
+				require.Len(t, current.Spec.Http, 1)
+				require.Len(t, current.Spec.Http[0].Route, 1)
+				require.Equal(t, name, current.Spec.Http[0].Route[0].Destination.Host)
+			}
+		})
+	}
 }

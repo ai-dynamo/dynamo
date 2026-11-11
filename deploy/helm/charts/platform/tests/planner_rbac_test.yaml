@@ -116,14 +116,14 @@ tests:
         documentIndex: 1
 
   # ── EXPERIMENTAL live retune (dgdrV1Beta2.plannerLiveRetune) ────────────────
-  # The base role has 6 rules; live retune adds exactly 4. Counting the rules
+  # The base role has 8 rules; live retune adds exactly 4. Counting the rules
   # also catches an extra verb or a split rule.
 
   - it: omits live retune rules from the ClusterRole by default
     asserts:
       - lengthEqual:
           path: rules
-          count: 6
+          count: 8
         documentIndex: 0
 
   - it: omits live retune rules from the ClusterRole with dgdrV1Beta2 alone
@@ -132,7 +132,7 @@ tests:
     asserts:
       - lengthEqual:
           path: rules
-          count: 6
+          count: 8
         documentIndex: 0
 
   - it: omits live retune rules from the ClusterRole with plannerLiveRetune alone
@@ -141,7 +141,7 @@ tests:
     asserts:
       - lengthEqual:
           path: rules
-          count: 6
+          count: 8
         documentIndex: 0
 
   - it: grants DGDR v1beta2 and Lease access in the ClusterRole with plannerLiveRetune
@@ -151,7 +151,7 @@ tests:
     asserts:
       - lengthEqual:
           path: rules
-          count: 10
+          count: 12
         documentIndex: 0
       - contains:
           path: rules
@@ -208,7 +208,7 @@ tests:
     asserts:
       - lengthEqual:
           path: rules
-          count: 6
+          count: 8
         documentIndex: 1
 
   - it: grants DGDR v1beta2 and Lease access in the Role with plannerLiveRetune in namespace-restricted mode
@@ -220,7 +220,7 @@ tests:
     asserts:
       - lengthEqual:
           path: rules
-          count: 10
+          count: 12
         documentIndex: 1
       - contains:
           path: rules
@@ -267,4 +267,41 @@ tests:
               - create
               - update
               - delete
+        documentIndex: 1
+
+  - it: grants frontend Service discovery in the ClusterRole
+    asserts:
+      - contains:
+          path: rules
+          content:
+            apiGroups: [""]
+            resources: ["services"]
+            verbs: ["list"]
+        documentIndex: 0
+      - contains:
+          path: rules
+          content:
+            apiGroups: ["nvidia.com"]
+            resources: ["dynamocomponentdeployments"]
+            verbs: ["get"]
+        documentIndex: 0
+
+  - it: grants frontend Service discovery in the namespace Role
+    set:
+      dynamo-operator.namespaceRestriction.enabled: true
+      dynamo-operator.upgradeCRD: false
+    asserts:
+      - contains:
+          path: rules
+          content:
+            apiGroups: [""]
+            resources: ["services"]
+            verbs: ["list"]
+        documentIndex: 1
+      - contains:
+          path: rules
+          content:
+            apiGroups: ["nvidia.com"]
+            resources: ["dynamocomponentdeployments"]
+            verbs: ["get"]
         documentIndex: 1

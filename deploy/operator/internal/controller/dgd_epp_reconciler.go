@@ -134,8 +134,7 @@ func (r *dgdEPPReconciler) Reconcile(
 		}
 	}
 	if istioAvailable {
-		destinationRule := dynamo.GenerateEPPDestinationRule(eppServiceName, dgd.Namespace, r.config.ServiceMesh)
-		destinationRule.Spec.Host = fmt.Sprintf("%s.%s.svc.cluster.local", resolvedName, dgd.Namespace)
+		destinationRule := dynamo.GenerateEPPDestinationRule(eppServiceName, dgd.Namespace, resolvedName, r.config.ServiceMesh)
 		if _, _, err := commoncontroller.SyncResource(ctx, r, dgd, func(context.Context) (*networkingv1beta1.DestinationRule, bool, error) {
 			return destinationRule, !meshEnabled, nil
 		}); err != nil {

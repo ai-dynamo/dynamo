@@ -119,6 +119,73 @@ class KubernetesAPI:
                 )
             raise
 
+    def get_component_service(
+        self, deployment: dict, component_name: str
+    ) -> client.V1Service | None:
+        """Find the existing Service owned by this graph or its component DCD."""
+        graph_metadata = deployment["metadata"]
+        graph_name = graph_metadata["name"]
+        graph_uid = graph_metadata["uid"]
+        services = self.core_api.list_namespaced_service(
+            namespace=self.current_namespace,
+        ).items
+        matches = []
+        for service in services:
+            # Grove identifies the component in the Pod selector; its Service
+            # metadata need not carry either the component or graph label.
+            if (service.spec.selector or {}).get(
+                DYNAMO_COMPONENT_LABEL
+            ) != component_name:
+                continue
+            if service.metadata.deletion_timestamp is not None:
+                continue
+            for owner in service.metadata.owner_references or []:
+                if owner.controller is not True:
+                    continue
+                if (
+                    owner.api_version.startswith(f"{NVIDIA_API_GROUP}/")
+                    and owner.kind == "DynamoGraphDeployment"
+                    and owner.name == graph_name
+                    and owner.uid == graph_uid
+                ):
+                    matches.append(service)
+                    break
+                if (
+                    not owner.api_version.startswith(f"{NVIDIA_API_GROUP}/")
+                    or owner.kind != "DynamoComponentDeployment"
+                ):
+                    continue
+                try:
+                    dcd = self.custom_api.get_namespaced_custom_object(
+                        group=NVIDIA_API_GROUP,
+                        version=owner.api_version.split("/", 1)[1],
+                        namespace=self.current_namespace,
+                        plural="dynamocomponentdeployments",
+                        name=owner.name,
+                    )
+                except client.ApiException as exc:
+                    if exc.status == 404:
+                        continue
+                    raise
+                metadata = dcd["metadata"]
+                if metadata["uid"] != owner.uid:
+                    continue
+                if any(
+                    ref.get("controller") is True
+                    and (ref.get("apiVersion") or "").startswith(f"{NVIDIA_API_GROUP}/")
+                    and ref.get("kind") == "DynamoGraphDeployment"
+                    and ref.get("name") == graph_name
+                    and ref.get("uid") == graph_uid
+                    for ref in metadata.get("ownerReferences", [])
+                ):
+                    matches.append(service)
+                    break
+        if len(matches) > 1:
+            raise ValueError(
+                f"Multiple Services belong to component {component_name!r} of {graph_name!r}"
+            )
+        return matches[0] if matches else None
+
     def update_service_replicas(
         self, graph_deployment_name: str, service_name: str, replicas: int
     ) -> None:

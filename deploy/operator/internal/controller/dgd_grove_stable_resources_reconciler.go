@@ -182,12 +182,12 @@ func (r *groveStableResourcesReconciler) reconcileComponentService(
 	if err != nil {
 		return nil, err
 	}
+	params.ServiceName = resolvedName
 	service, err := dynamo.GenerateComponentService(params)
 	if err != nil {
 		logger.Error(err, "failed to generate the main component service")
 		return nil, fmt.Errorf("failed to generate the main component service: %w", err)
 	}
-	service.Name = resolvedName
 	_, syncedService, err := commoncontroller.SyncResource(
 		ctx,
 		r,
@@ -297,16 +297,17 @@ func (r *groveStableResourcesReconciler) reconcileElasticEPLeaderService(
 	// Use the same rendered identity as discovery Services so followers find the leader.
 	componentName := component.ComponentName
 	params := groveComponentServiceParams(dgd, component, podCliqueSet)
-	service := dynamo.GenerateElasticEPHeadlessService(params)
 
 	// Preserve a legacy Ray Service independently of the discovery Service.
 	resolvedName, err := dynamo.ResolveComponentServiceName(ctx, r, dgd, params.ServiceName+"-ray")
 	if err != nil {
 		return nil, err
 	}
-	if resolvedName != dynamo.ComponentServiceName(params.ServiceName+"-ray") {
-		service.Name = resolvedName
+	if resolvedName == dynamo.ComponentServiceName(params.ServiceName+"-ray") {
+		resolvedName = dynamo.ElasticEPLeaderServiceName(params.ServiceName)
 	}
+	params.ServiceName = resolvedName
+	service := dynamo.GenerateElasticEPHeadlessService(params)
 
 	// Handle removal here rather than through SyncResource, which resolves the live object
 	// by name alone and would delete a Service this DGD never created.
@@ -372,9 +373,9 @@ func (r *groveStableResourcesReconciler) reconcileFrontendIngress(
 		ctx,
 		dynamo.GetDCDResourceName(dgd, componentName, ""),
 		dgd.Namespace,
+		resolvedName,
 		ingressSpec,
 	)
-	ingress.Spec.Rules[0].HTTP.Paths[0].Backend.Service.Name = resolvedName
 	_, syncedIngress, err := commoncontroller.SyncResource(
 		ctx,
 		r,
@@ -410,9 +411,9 @@ func (r *groveStableResourcesReconciler) reconcileFrontendIngress(
 		ctx,
 		dynamo.GetDCDResourceName(dgd, componentName, ""),
 		dgd.Namespace,
+		resolvedName,
 		ingressSpec,
 	)
-	virtualService.Spec.Http[0].Route[0].Destination.Host = resolvedName
 	_, syncedVirtualService, err := commoncontroller.SyncResource(
 		ctx,
 		r,

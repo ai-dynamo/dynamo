@@ -9829,7 +9829,7 @@ func TestGenerateComponentIngressResources_NormalizeBackendServiceName(t *testin
 		VirtualServiceGateway: new("mesh/gateway"),
 	}
 
-	ingress := GenerateComponentIngress(context.Background(), "model.Qwen3-0.6B", "default", ingressSpec)
+	ingress := GenerateComponentIngress(context.Background(), "model.Qwen3-0.6B", "default", ComponentServiceName("model.Qwen3-0.6B"), ingressSpec)
 	require.Len(t, ingress.Spec.Rules, 1)
 	require.NotNil(t, ingress.Spec.Rules[0].HTTP)
 	require.Len(t, ingress.Spec.Rules[0].HTTP.Paths, 1)
@@ -9837,7 +9837,7 @@ func TestGenerateComponentIngressResources_NormalizeBackendServiceName(t *testin
 	assert.Equal(t, "model-qwen3-0-6b", ingress.Name)
 	assert.Equal(t, "model-qwen3-0-6b", ingress.Spec.Rules[0].HTTP.Paths[0].Backend.Service.Name)
 
-	virtualService := GenerateComponentVirtualService(context.Background(), "model.Qwen3-0.6B", "default", ingressSpec)
+	virtualService := GenerateComponentVirtualService(context.Background(), "model.Qwen3-0.6B", "default", ComponentServiceName("model.Qwen3-0.6B"), ingressSpec)
 	require.Len(t, virtualService.Spec.Http, 1)
 	require.Len(t, virtualService.Spec.Http[0].Route, 1)
 	require.NotNil(t, virtualService.Spec.Http[0].Route[0].Destination)
@@ -9867,7 +9867,7 @@ func TestGenerateComponentService_DNS1035Name(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Log("Generate the component Service")
 			svc, err := GenerateComponentService(ComponentServiceParams{
-				ServiceName:     tt.input,
+				ServiceName:     ComponentServiceName(tt.input),
 				Namespace:       "default",
 				ComponentType:   commonconsts.ComponentTypeFrontend,
 				DynamoNamespace: "dynamo",
@@ -9901,7 +9901,7 @@ func TestComponentServiceReferences_DigitLeadingName(t *testing.T) {
 	const name = "70b-llama-production"
 	t.Log("Generate the component Service for a digit-leading name")
 	svc, err := GenerateComponentService(ComponentServiceParams{
-		ServiceName:     name,
+		ServiceName:     ComponentServiceName(name),
 		Namespace:       "default",
 		ComponentType:   commonconsts.ComponentTypeFrontend,
 		DynamoNamespace: "dynamo",
@@ -9917,7 +9917,7 @@ func TestComponentServiceReferences_DigitLeadingName(t *testing.T) {
 		UseVirtualService:     true,
 		VirtualServiceGateway: new("mesh/gateway"),
 	}
-	ingress := GenerateComponentIngress(context.Background(), name, "default", ingressSpec)
+	ingress := GenerateComponentIngress(context.Background(), name, "default", svc.Name, ingressSpec)
 	require.Len(t, ingress.Spec.Rules, 1)
 	require.NotNil(t, ingress.Spec.Rules[0].HTTP)
 	require.Len(t, ingress.Spec.Rules[0].HTTP.Paths, 1)
@@ -9925,7 +9925,7 @@ func TestComponentServiceReferences_DigitLeadingName(t *testing.T) {
 	assert.Equal(t, name, ingress.Name)
 	assert.Equal(t, svc.Name, ingress.Spec.Rules[0].HTTP.Paths[0].Backend.Service.Name)
 
-	virtualService := GenerateComponentVirtualService(context.Background(), name, "default", ingressSpec)
+	virtualService := GenerateComponentVirtualService(context.Background(), name, "default", svc.Name, ingressSpec)
 	require.Len(t, virtualService.Spec.Http, 1)
 	require.Len(t, virtualService.Spec.Http[0].Route, 1)
 	require.NotNil(t, virtualService.Spec.Http[0].Route[0].Destination)
@@ -9937,7 +9937,7 @@ func TestComponentServiceReferences_DigitLeadingName(t *testing.T) {
 		Provider: string(configv1alpha1.ServiceMeshProviderIstio),
 		Istio:    &configv1alpha1.IstioMeshConfiguration{},
 	}
-	dr := GenerateEPPDestinationRule(name, "default", mesh)
+	dr := GenerateEPPDestinationRule(name, "default", svc.Name, mesh)
 	assert.Equal(t, name, dr.Name)
 	assert.Equal(t, svc.Name+".default.svc.cluster.local", dr.Spec.Host)
 
@@ -12264,7 +12264,7 @@ func TestGenerateEPPDestinationRule_MUTUALPropagatesCerts(t *testing.T) {
 		},
 	}
 
-	dr := GenerateEPPDestinationRule("qwen-epp", "dynamo-cloud", mesh)
+	dr := GenerateEPPDestinationRule("qwen-epp", "dynamo-cloud", "qwen-epp", mesh)
 
 	require.NotNil(t, dr.Spec.TrafficPolicy)
 	require.NotNil(t, dr.Spec.TrafficPolicy.Tls)

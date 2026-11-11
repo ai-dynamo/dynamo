@@ -605,7 +605,7 @@ func (r *dcdWorkloadRenderer) generateService(
 	}
 
 	svc, err := dynamo.GenerateComponentService(dynamo.ComponentServiceParams{
-		ServiceName:     dcd.Name,
+		ServiceName:     resolvedName,
 		Namespace:       dcd.Namespace,
 		ComponentType:   componentType,
 		DynamoNamespace: dynamoNamespace,
@@ -617,7 +617,6 @@ func (r *dcdWorkloadRenderer) generateService(
 	if err != nil {
 		return nil, false, err
 	}
-	svc.Name = resolvedName
 	if dcd.IsMultinode() {
 		svc.Spec.Selector[dcdWorkloadRoleLabel] = string(dynamo.RoleLeader)
 	}
@@ -657,7 +656,7 @@ func (r *dcdWorkloadRenderer) generateServiceForDGDComponent(
 		return nil, false, err
 	}
 	service, err := dynamo.GenerateComponentService(dynamo.ComponentServiceParams{
-		ServiceName:     serviceName,
+		ServiceName:     resolvedName,
 		Namespace:       dgd.Namespace,
 		ComponentType:   workloadComponentType,
 		DynamoNamespace: dynamoNamespace,
@@ -669,7 +668,6 @@ func (r *dcdWorkloadRenderer) generateServiceForDGDComponent(
 	if err != nil {
 		return nil, false, err
 	}
-	service.Name = resolvedName
 	if component.IsMultinode() {
 		service.Spec.Selector[dcdWorkloadRoleLabel] = string(dynamo.RoleLeader)
 	}

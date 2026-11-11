@@ -143,4 +143,12 @@ func TestDGDEPPReconcilerRetainsLegacyChildServiceReference(t *testing.T) {
 	destinationRule := &networkingv1beta1.DestinationRule{}
 	require.NoError(t, kubeClient.Get(t.Context(), types.NamespacedName{Name: name, Namespace: dgd.Namespace}, destinationRule))
 	require.Equal(t, name+".default.svc.cluster.local", destinationRule.Spec.Host)
+
+	t.Log("Ignore a stale Service whose controlling DCD is no longer present")
+	require.NoError(t, kubeClient.Delete(t.Context(), dcd))
+	require.NoError(t, reconciler.Reconcile(t.Context(), dgd))
+	require.NoError(t, kubeClient.Get(t.Context(), types.NamespacedName{Name: epp.GetPoolName(dgd.Name), Namespace: dgd.Namespace}, pool))
+	require.Equal(t, dynamo.ComponentServiceName(name), string(pool.Spec.EndpointPickerRef.Name))
+	require.NoError(t, kubeClient.Get(t.Context(), types.NamespacedName{Name: name, Namespace: dgd.Namespace}, destinationRule))
+	require.Equal(t, dynamo.ComponentServiceName(name)+".default.svc.cluster.local", destinationRule.Spec.Host)
 }

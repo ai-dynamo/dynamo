@@ -141,6 +141,7 @@ class DynamoDeploymentClient:
         self.model_name = model_name
         self.service_name = service_name or None
         self._explicit_service_name = bool(service_name)
+        self._frontend_service_error: Optional[str] = None
         self.components: List[str] = []  # Will store component names from CR
         self._original_components: List[str] = []
         # Version segment of the DynamoGraphDeployment apiVersion, reset from the
@@ -178,7 +179,8 @@ class DynamoDeploymentClient:
         """
         if self.service_name is None:
             raise RuntimeError(
-                "Wait for deployment readiness before connecting to its frontend"
+                self._frontend_service_error
+                or "Wait for deployment readiness before connecting to its frontend"
             )
 
         if local_port is None:
@@ -247,7 +249,8 @@ class DynamoDeploymentClient:
         """
         if self.service_name is None:
             raise RuntimeError(
-                "Wait for deployment readiness before connecting to its frontend"
+                self._frontend_service_error
+                or "Wait for deployment readiness before connecting to its frontend"
             )
         service_url = f"http://{self.service_name}.{self.namespace}.svc.cluster.local:{self.frontend_port}"
         print(f"Using service URL: {service_url}")
@@ -335,11 +338,13 @@ class DynamoDeploymentClient:
 
         Read the actual name instead of repeating the operator's naming rules.
         This also supports an existing numeric Service retained during an upgrade.
+        Grove Services may lack the graph label, so ownership is checked after
+        listing the namespace. No unique frontend leaves the graph ready and
+        records an error for callers that try to connect without service_name.
         """
         graph_uid = deployment["metadata"]["uid"]
         services = await self.core_api.list_namespaced_service(
             namespace=self.namespace,
-            label_selector=f"nvidia.com/dynamo-graph-deployment-name={self.deployment_name}",
         )
         frontend_names = []
         for service in services.items:
@@ -359,13 +364,19 @@ class DynamoDeploymentClient:
                     break
                 if owner.kind != "DynamoComponentDeployment":
                     continue
-                component = await self.custom_api.get_namespaced_custom_object(
-                    group="nvidia.com",
-                    version=owner.api_version.split("/")[-1],
-                    namespace=self.namespace,
-                    plural="dynamocomponentdeployments",
-                    name=owner.name,
-                )
+                try:
+                    component = await self.custom_api.get_namespaced_custom_object(
+                        group="nvidia.com",
+                        version=owner.api_version.split("/")[-1],
+                        namespace=self.namespace,
+                        plural="dynamocomponentdeployments",
+                        name=owner.name,
+                    )
+                except kubernetes.client.rest.ApiException as e:
+                    if e.status == 404:
+                        # A stale Service may await its deleted DCD's cleanup.
+                        continue
+                    raise
                 metadata = component["metadata"]
                 if metadata["uid"] == owner.uid and any(
                     reference.get("controller")
@@ -377,12 +388,20 @@ class DynamoDeploymentClient:
                     frontend_names.append(service.metadata.name)
                     break
 
+        self.service_name = None
         if not frontend_names:
+            self._frontend_service_error = (
+                f"Deployment '{self.deployment_name}' has no owned frontend Service; "
+                "provide service_name to connect to its endpoint"
+            )
             return False
         if len(frontend_names) != 1:
-            raise DeploymentFailedError(
-                f"Deployment '{self.deployment_name}' has multiple owned frontend Services: {frontend_names}"
+            self._frontend_service_error = (
+                f"Deployment '{self.deployment_name}' has multiple owned frontend "
+                f"Services: {frontend_names}; provide service_name to choose an endpoint"
             )
+            return False
+        self._frontend_service_error = None
         self.service_name = frontend_names[0]
         return True
 
@@ -461,6 +480,8 @@ class DynamoDeploymentClient:
                 deployment becomes ready. Allows callers (e.g. the
                 thorough-mode profiler) to skip a failing candidate
                 immediately instead of waiting for the full timeout.
+            kubernetes.client.rest.ApiException: If access to the deployment
+                or frontend discovery resources is unauthorized or forbidden.
             TimeoutError: If the deployment fails to become ready within
                 ``timeout`` seconds without any detectable terminal pod
                 failure.
@@ -554,14 +575,11 @@ class DynamoDeploymentClient:
                         last_conditions_str = conditions_str
 
                 # Check if deployment is ready
-                if (
-                    ready_condition
-                    and state_successful
-                    and (
-                        self._explicit_service_name
-                        or await self._resolve_frontend_service(status)
-                    )
-                ):
+                if ready_condition and state_successful:
+                    if not self._explicit_service_name:
+                        # Graph readiness also applies to worker-only and EPP graphs.
+                        # Endpoint ambiguity is reported when a caller connects.
+                        await self._resolve_frontend_service(status)
                     progress.finish(
                         f"✅ Deployment '{self.deployment_name}' ready after {elapsed:.1f}s"
                     )
@@ -587,6 +605,9 @@ class DynamoDeploymentClient:
                 # this deployment instead of waiting for the timeout.
                 raise
             except kubernetes.client.rest.ApiException as e:
+                if e.status in (401, 403):
+                    # Retrying cannot repair missing credentials or permissions.
+                    raise
                 if verbose:
                     progress.update(
                         f"API Exception while checking deployment status: {e}",
