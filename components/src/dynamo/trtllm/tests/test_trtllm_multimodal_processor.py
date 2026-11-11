@@ -354,8 +354,9 @@ async def test_video_next_to_an_image_is_handed_over_as_uint8(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("image", [True, False], ids=["with_image", "video_only"])
 async def test_video_conversion_runs_off_the_event_loop(
-    image_video_processor, monkeypatch
+    image, image_video_processor, monkeypatch
 ) -> None:
     """Converting a clip takes CPU time that grows with its frame count, so it
     must not hold up other requests on the worker's event loop."""
@@ -370,7 +371,7 @@ async def test_video_conversion_runs_off_the_event_loop(
     monkeypatch.setattr(mmp, "_video_frames_to_uint8", spy)
 
     await processor.process_openai_request(
-        _request(), embeddings=None, ep_disaggregated_params=None
+        _request(image=image), embeddings=None, ep_disaggregated_params=None
     )
 
     assert threads and threading.get_ident() not in threads
@@ -392,10 +393,36 @@ async def test_image_only_request_keeps_pil_images(
 
 
 @pytest.mark.asyncio
-async def test_video_only_request_keeps_float_frames(
+@pytest.mark.parametrize("path", ["nvdec", "vendor"])
+async def test_video_only_request_is_handed_over_as_uint8(
+    path, image_video_processor, monkeypatch
+) -> None:
+    """Without an image, too, videos go over in the format the model asks for,
+    as trtllm-serve sends them, so a clip reaches the model in the same form
+    with or without an image."""
+    processor, _ = image_video_processor("np")
+    frames_u8 = _decoded_frames()
+    source = _pt_video(frames_u8)
+    _route_video(monkeypatch, path, source)
+
+    processed = await processor.process_openai_request(
+        _request(image=False), embeddings=None, ep_disaggregated_params=None
+    )
+
+    assert list(processed["multi_modal_data"]) == ["video"]
+    (video,) = processed["multi_modal_data"]["video"]
+    assert isinstance(video.frames, np.ndarray)
+    assert video.frames.dtype == np.uint8
+    assert np.array_equal(video.frames, frames_u8)
+    assert video.metadata == source.metadata
+    assert "mm_item_order" not in processed
+
+
+@pytest.mark.asyncio
+async def test_video_only_request_keeps_float_frames_without_a_preference(
     image_video_processor, monkeypatch
 ) -> None:
-    processor, _ = image_video_processor("np")
+    processor, _ = image_video_processor(None)
     source = _pt_video(_decoded_frames())
     _route_video(monkeypatch, "nvdec", source)
 
@@ -403,9 +430,8 @@ async def test_video_only_request_keeps_float_frames(
         _request(image=False), embeddings=None, ep_disaggregated_params=None
     )
 
-    assert processed["multi_modal_data"]["video"] == [source]
+    assert processed["multi_modal_data"]["video"][0] is source
     assert "mm_item_order" not in processed
-    processor.input_processor.get_preferred_media_io_kwargs.assert_not_called()
 
 
 @pytest.mark.asyncio
