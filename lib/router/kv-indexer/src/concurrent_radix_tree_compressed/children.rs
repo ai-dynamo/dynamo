@@ -3,12 +3,10 @@
 
 use std::collections::VecDeque;
 use std::fmt;
-use std::ops::Deref;
-use std::sync::{Arc, OnceLock};
 
-use arc_swap::{ArcSwap, Guard};
 use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
+use parking_lot::RwLock;
 use rustc_hash::{FxBuildHasher, FxHashMap};
 
 use super::types::SharedNode;
@@ -25,9 +23,9 @@ struct ChildEntry {
 }
 
 enum ChildrenState {
-    Empty,
     Singleton(ChildEntry),
-    Small(Box<[ChildEntry]>),
+    /// Two to `SMALL_CHILD_LIMIT` children, sorted by hash.
+    Small(Vec<ChildEntry>),
     Sharded(ShardedChildren),
 }
 
@@ -36,24 +34,16 @@ pub(super) enum ChildInsertResult {
     Inserted(SharedNode),
 }
 
-/// The state of a node that has never had a child.
-static NO_CHILDREN: ChildrenState = ChildrenState::Empty;
-
 pub(super) struct NodeChildren {
-    /// Unset until the first child seeds it, so a leaf never drops an `ArcSwap`: each
-    /// drop or swap walks every thread's arc_swap debt list.
-    state: OnceLock<ArcSwap<ChildrenState>>,
-}
-
-/// The children as loaded: the cell's current state, or `NO_CHILDREN` if it is unset.
-struct Loaded(Option<Guard<Arc<ChildrenState>>>);
-
-impl Deref for Loaded {
-    type Target = ChildrenState;
-
-    fn deref(&self) -> &ChildrenState {
-        self.0.as_deref().map_or(&NO_CHILDREN, |state| state)
-    }
+    /// `None` until the first child and again when a compact list empties, so a leaf
+    /// allocates nothing; a sharded map stays once created. Compact children change in
+    /// place under the exclusive lock. A sharded map changes under the shared lock, so
+    /// writers to a high-fanout node never block its readers.
+    ///
+    /// NOTE(perf): This was an `ArcSwap` of immutable snapshots. Each swap or drop of
+    /// one walks every thread's `arc_swap` debt list, and with over a hundred reader
+    /// threads those walks were half of the event threads' time.
+    state: RwLock<Option<Box<ChildrenState>>>,
 }
 
 impl fmt::Debug for NodeChildren {
@@ -66,80 +56,53 @@ impl fmt::Debug for NodeChildren {
 
 impl NodeChildren {
     pub(super) fn from_map(children: FxHashMap<LocalBlockHash, SharedNode>) -> Self {
-        if children.is_empty() {
-            return Self::unset();
-        }
         let state = if children.len() > SMALL_CHILD_LIMIT {
             let sharded = ShardedChildren::with_hasher(FxBuildHasher);
             for (key, child) in children {
                 sharded.insert(key, child);
             }
-            ChildrenState::Sharded(sharded)
+            Some(ChildrenState::Sharded(sharded))
         } else {
             let mut entries: Vec<_> = children
                 .into_iter()
                 .map(|(hash, node)| ChildEntry { hash, node })
                 .collect();
             entries.sort_unstable_by_key(|entry| entry.hash);
-            Self::compact_state(entries)
+            match entries.len() {
+                0 => None,
+                1 => entries.pop().map(ChildrenState::Singleton),
+                _ => Some(ChildrenState::Small(entries)),
+            }
         };
-        Self::from_state(Arc::new(state))
+        Self::from_state(state.map(Box::new))
     }
 
-    fn from_state(state: Arc<ChildrenState>) -> Self {
+    fn from_state(state: Option<Box<ChildrenState>>) -> Self {
         Self {
-            state: OnceLock::from(ArcSwap::new(state)),
+            state: RwLock::new(state),
         }
-    }
-
-    fn unset() -> Self {
-        Self {
-            state: OnceLock::new(),
-        }
-    }
-
-    fn load(&self) -> Loaded {
-        Loaded(self.state.get().map(ArcSwap::load))
-    }
-
-    /// The state cell, or `None` if this call created it holding just `key -> child`.
-    fn cell_or_seed(
-        &self,
-        key: LocalBlockHash,
-        child: &SharedNode,
-    ) -> Option<&ArcSwap<ChildrenState>> {
-        let mut seeded = false;
-        let cell = self.state.get_or_init(|| {
-            seeded = true;
-            ArcSwap::from_pointee(ChildrenState::Singleton(ChildEntry {
-                hash: key,
-                node: child.clone(),
-            }))
-        });
-        (!seeded).then_some(cell)
     }
 
     pub(super) fn is_empty(&self) -> bool {
-        match &*self.load() {
-            ChildrenState::Empty => true,
-            ChildrenState::Singleton(_) => false,
-            ChildrenState::Small(children) => children.is_empty(),
-            ChildrenState::Sharded(children) => children.is_empty(),
+        match self.state.read().as_deref() {
+            None => true,
+            Some(ChildrenState::Sharded(children)) => children.is_empty(),
+            Some(ChildrenState::Singleton(_) | ChildrenState::Small(_)) => false,
         }
     }
 
     fn len(&self) -> usize {
-        match &*self.load() {
-            ChildrenState::Empty => 0,
-            ChildrenState::Singleton(_) => 1,
-            ChildrenState::Small(children) => children.len(),
-            ChildrenState::Sharded(children) => children.len(),
+        match self.state.read().as_deref() {
+            None => 0,
+            Some(ChildrenState::Singleton(_)) => 1,
+            Some(ChildrenState::Small(children)) => children.len(),
+            Some(ChildrenState::Sharded(children)) => children.len(),
         }
     }
 
     pub(super) fn get(&self, key: &LocalBlockHash) -> Option<SharedNode> {
-        match &*self.load() {
-            ChildrenState::Empty => None,
+        let state = self.state.read();
+        match state.as_deref()? {
             ChildrenState::Singleton(entry) => (entry.hash == *key).then(|| entry.node.clone()),
             ChildrenState::Small(children) => children
                 .binary_search_by_key(key, |entry| entry.hash)
@@ -151,17 +114,19 @@ impl NodeChildren {
         }
     }
 
-    /// Visits each child by reference, without cloning its `Arc`.
+    /// Visits each child by reference, without cloning its `Arc`. The shared lock is held
+    /// for the whole walk, so `visit` must not use this node's children, and no path may
+    /// take this lock while holding a child's `state` or child lock.
     pub(super) fn for_each_child(&self, mut visit: impl FnMut(LocalBlockHash, &SharedNode)) {
-        match &*self.load() {
-            ChildrenState::Empty => {}
-            ChildrenState::Singleton(entry) => visit(entry.hash, &entry.node),
-            ChildrenState::Small(children) => {
-                for entry in children.iter() {
+        match self.state.read().as_deref() {
+            None => {}
+            Some(ChildrenState::Singleton(entry)) => visit(entry.hash, &entry.node),
+            Some(ChildrenState::Small(children)) => {
+                for entry in children {
                     visit(entry.hash, &entry.node);
                 }
             }
-            ChildrenState::Sharded(children) => {
+            Some(ChildrenState::Sharded(children)) => {
                 for entry in children.iter() {
                     visit(*entry.key(), entry.value());
                 }
@@ -187,30 +152,13 @@ impl NodeChildren {
     }
 
     pub(super) fn insert(&self, key: LocalBlockHash, child: SharedNode) -> Option<SharedNode> {
-        // A freshly seeded cell had no previous child.
-        let cell = self.cell_or_seed(key, &child)?;
-        let current = cell.load_full();
-        if let ChildrenState::Sharded(children) = current.as_ref() {
-            return children.insert(key, child);
-        }
-
-        let mut entries = Self::clone_compact_entries(current.as_ref(), 1);
-        let previous = match entries.binary_search_by_key(&key, |entry| entry.hash) {
-            Ok(index) => Some(std::mem::replace(&mut entries[index].node, child.clone())),
-            Err(index) => {
-                entries.insert(
-                    index,
-                    ChildEntry {
-                        hash: key,
-                        node: child,
-                    },
-                );
-                None
+        {
+            let state = self.state.read();
+            if let Some(ChildrenState::Sharded(children)) = state.as_deref() {
+                return children.insert(key, child);
             }
-        };
-
-        cell.store(Arc::new(Self::state_from_entries(entries)));
-        previous
+        }
+        Self::upsert(&mut self.state.write(), key, &child, true)
     }
 
     pub(super) fn insert_if_absent(
@@ -218,160 +166,162 @@ impl NodeChildren {
         key: LocalBlockHash,
         child: SharedNode,
     ) -> ChildInsertResult {
-        let Some(cell) = self.cell_or_seed(key, &child) else {
-            return ChildInsertResult::Inserted(child);
-        };
-        loop {
-            let current = cell.load_full();
-            let insert_index = match current.as_ref() {
-                ChildrenState::Empty => 0,
-                ChildrenState::Singleton(entry) if entry.hash == key => {
-                    return ChildInsertResult::Existing(entry.node.clone());
-                }
-                ChildrenState::Singleton(entry) => usize::from(entry.hash < key),
-                ChildrenState::Small(entries) => {
-                    match entries.binary_search_by_key(&key, |entry| entry.hash) {
-                        Ok(index) => {
-                            return ChildInsertResult::Existing(entries[index].node.clone());
-                        }
-                        Err(index) => index,
+        {
+            let state = self.state.read();
+            if let Some(ChildrenState::Sharded(children)) = state.as_deref() {
+                return match children.entry(key) {
+                    Entry::Occupied(entry) => ChildInsertResult::Existing(entry.get().clone()),
+                    Entry::Vacant(entry) => {
+                        entry.insert(child.clone());
+                        ChildInsertResult::Inserted(child)
                     }
-                }
-                ChildrenState::Sharded(children) => {
-                    return match children.entry(key) {
-                        Entry::Occupied(entry) => ChildInsertResult::Existing(entry.get().clone()),
-                        Entry::Vacant(entry) => {
-                            entry.insert(child.clone());
-                            ChildInsertResult::Inserted(child)
-                        }
-                    };
-                }
-            };
-
-            let mut entries = Self::clone_compact_entries(current.as_ref(), 1);
-            entries.insert(
-                insert_index,
-                ChildEntry {
-                    hash: key,
-                    node: child.clone(),
-                },
-            );
-            if Self::compare_and_swap(cell, &current, Self::state_from_entries(entries)) {
-                return ChildInsertResult::Inserted(child);
+                };
             }
         }
+        match Self::upsert(&mut self.state.write(), key, &child, false) {
+            Some(existing) => ChildInsertResult::Existing(existing),
+            None => ChildInsertResult::Inserted(child),
+        }
+    }
+
+    /// Stores `key -> child` under the exclusive lock, promoting to a sharded map past
+    /// `SMALL_CHILD_LIMIT`. If `key` already has a child, returns it: replaced by
+    /// `child` when `replace` is set, left in place otherwise.
+    fn upsert(
+        state: &mut Option<Box<ChildrenState>>,
+        key: LocalBlockHash,
+        child: &SharedNode,
+        replace: bool,
+    ) -> Option<SharedNode> {
+        let new_entry = || ChildEntry {
+            hash: key,
+            node: child.clone(),
+        };
+        let Some(current) = state.as_deref_mut() else {
+            *state = Some(Box::new(ChildrenState::Singleton(new_entry())));
+            return None;
+        };
+        let existing = match current {
+            ChildrenState::Singleton(only) if only.hash == key => &mut only.node,
+            ChildrenState::Singleton(only) => {
+                let mut entries = vec![only.clone(), new_entry()];
+                if key < only.hash {
+                    entries.swap(0, 1);
+                }
+                *current = ChildrenState::Small(entries);
+                return None;
+            }
+            ChildrenState::Small(entries) => {
+                match entries.binary_search_by_key(&key, |entry| entry.hash) {
+                    Ok(index) => &mut entries[index].node,
+                    Err(index) if entries.len() < SMALL_CHILD_LIMIT => {
+                        entries.reserve_exact(1);
+                        entries.insert(index, new_entry());
+                        return None;
+                    }
+                    Err(_) => {
+                        let sharded = ShardedChildren::with_hasher(FxBuildHasher);
+                        for entry in entries.drain(..) {
+                            sharded.insert(entry.hash, entry.node);
+                        }
+                        sharded.insert(key, child.clone());
+                        *current = ChildrenState::Sharded(sharded);
+                        return None;
+                    }
+                }
+            }
+            // Promoted between the caller's shared look and this exclusive lock.
+            ChildrenState::Sharded(children) => {
+                return match children.entry(key) {
+                    Entry::Occupied(mut entry) if replace => Some(entry.insert(child.clone())),
+                    Entry::Occupied(entry) => Some(entry.get().clone()),
+                    Entry::Vacant(entry) => {
+                        entry.insert(child.clone());
+                        None
+                    }
+                };
+            }
+        };
+        Some(if replace {
+            std::mem::replace(existing, child.clone())
+        } else {
+            existing.clone()
+        })
     }
 
     pub(super) fn remove(&self, key: &LocalBlockHash) -> Option<SharedNode> {
-        let cell = self.state.get()?;
-        let current = cell.load_full();
-        let remove_index = match current.as_ref() {
-            ChildrenState::Empty => return None,
-            ChildrenState::Singleton(entry) => {
-                if entry.hash != *key {
-                    return None;
-                }
-                0
-            }
-            ChildrenState::Small(entries) => {
-                let Ok(index) = entries.binary_search_by_key(key, |entry| entry.hash) else {
-                    return None;
-                };
-                index
-            }
-            ChildrenState::Sharded(children) => {
+        {
+            let state = self.state.read();
+            if let ChildrenState::Sharded(children) = state.as_deref()? {
                 return children.remove(key).map(|(_, child)| child);
             }
-        };
-
-        let mut entries = Self::clone_compact_entries(current.as_ref(), 0);
-        let removed = entries.remove(remove_index);
-        cell.store(Arc::new(Self::compact_state(entries)));
-        Some(removed.node)
+        }
+        let mut state = self.state.write();
+        let current = state.as_deref_mut()?;
+        match current {
+            ChildrenState::Singleton(only) => {
+                if only.hash != *key {
+                    return None;
+                }
+                match state.take().map(|only| *only) {
+                    Some(ChildrenState::Singleton(only)) => Some(only.node),
+                    _ => unreachable!("matched a singleton under this lock"),
+                }
+            }
+            ChildrenState::Small(entries) => {
+                let index = entries.binary_search_by_key(key, |entry| entry.hash).ok()?;
+                let removed = entries.remove(index);
+                if entries.len() == 1
+                    && let Some(only) = entries.pop()
+                {
+                    *current = ChildrenState::Singleton(only);
+                }
+                Some(removed.node)
+            }
+            ChildrenState::Sharded(children) => children.remove(key).map(|(_, child)| child),
+        }
     }
 
     pub(super) fn clear(&self) -> bool {
-        let Some(cell) = self.state.get() else {
-            return false;
+        let clear_sharded = |children: &ShardedChildren| {
+            let had_children = !children.is_empty();
+            children.clear();
+            had_children
         };
-        let current = cell.load_full();
-        match current.as_ref() {
-            ChildrenState::Empty => false,
-            ChildrenState::Sharded(children) => {
-                let had_children = !children.is_empty();
-                children.clear();
-                had_children
-            }
-            ChildrenState::Singleton(_) | ChildrenState::Small(_) => {
-                cell.store(Arc::new(ChildrenState::Empty));
-                true
+        {
+            let state = self.state.read();
+            match state.as_deref() {
+                None => return false,
+                Some(ChildrenState::Sharded(children)) => return clear_sharded(children),
+                Some(ChildrenState::Singleton(_) | ChildrenState::Small(_)) => {}
             }
         }
+        let compact = {
+            let mut state = self.state.write();
+            match state.as_deref() {
+                None => return false,
+                Some(ChildrenState::Sharded(children)) => return clear_sharded(children),
+                Some(ChildrenState::Singleton(_) | ChildrenState::Small(_)) => state.take(),
+            }
+        };
+        // Dropped after the lock: releasing the children can free whole subtrees.
+        drop(compact);
+        true
     }
 
     /// Transfers the current state while the owning node's exclusive shape gate is held.
     /// The suffix keeps its representation; the prefix restarts with compact children.
     pub(super) fn transfer_for_split(&self) -> Self {
-        let Some(cell) = self.state.get() else {
-            return Self::unset();
-        };
-        let current = cell.load_full();
-        cell.store(Arc::new(ChildrenState::Empty));
-        Self::from_state(current)
-    }
-
-    /// Copies compact entries with room for `spare` more, so inserting a new key neither
-    /// grows the copy nor shrinks it again when it becomes a boxed slice.
-    fn clone_compact_entries(state: &ChildrenState, spare: usize) -> Vec<ChildEntry> {
-        let current: &[ChildEntry] = match state {
-            ChildrenState::Empty => &[],
-            ChildrenState::Singleton(entry) => std::slice::from_ref(entry),
-            ChildrenState::Small(children) => children,
-            ChildrenState::Sharded(_) => unreachable!("sharded children are mutated in place"),
-        };
-        let mut entries = Vec::with_capacity(current.len() + spare);
-        entries.extend_from_slice(current);
-        entries
-    }
-
-    fn state_from_entries(entries: Vec<ChildEntry>) -> ChildrenState {
-        if entries.len() <= SMALL_CHILD_LIMIT {
-            return Self::compact_state(entries);
-        }
-
-        let sharded = ShardedChildren::with_hasher(FxBuildHasher);
-        for entry in entries {
-            sharded.insert(entry.hash, entry.node);
-        }
-        ChildrenState::Sharded(sharded)
-    }
-
-    fn compact_state(mut entries: Vec<ChildEntry>) -> ChildrenState {
-        debug_assert!(entries.windows(2).all(|pair| pair[0].hash < pair[1].hash));
-        debug_assert!(entries.len() <= SMALL_CHILD_LIMIT);
-        match entries.len() {
-            0 => ChildrenState::Empty,
-            1 => ChildrenState::Singleton(entries.remove(0)),
-            _ => ChildrenState::Small(entries.into_boxed_slice()),
-        }
-    }
-
-    fn compare_and_swap(
-        cell: &ArcSwap<ChildrenState>,
-        current: &Arc<ChildrenState>,
-        next: ChildrenState,
-    ) -> bool {
-        let previous = cell.compare_and_swap(current, Arc::new(next));
-        Arc::ptr_eq(current, &*previous)
+        Self::from_state(self.state.write().take())
     }
 
     #[cfg(test)]
     fn kind(&self) -> ChildrenKind {
-        match &*self.load() {
-            ChildrenState::Empty => ChildrenKind::Empty,
-            ChildrenState::Singleton(_) => ChildrenKind::Singleton,
-            ChildrenState::Small(_) => ChildrenKind::Small,
-            ChildrenState::Sharded(_) => ChildrenKind::Sharded,
+        match self.state.read().as_deref() {
+            None => ChildrenKind::Empty,
+            Some(ChildrenState::Singleton(_)) => ChildrenKind::Singleton,
+            Some(ChildrenState::Small(_)) => ChildrenKind::Small,
+            Some(ChildrenState::Sharded(_)) => ChildrenKind::Sharded,
         }
     }
 }
@@ -473,83 +423,114 @@ mod tests {
     }
 
     #[test]
-    fn a_node_without_children_holds_no_state_cell() {
+    fn a_node_without_children_allocates_no_storage() {
+        assert_eq!(std::mem::size_of::<NodeChildren>(), 16);
+
         let children = NodeChildren::from_map(FxHashMap::default());
         assert!(children.is_empty());
         assert!(children.remove(&LocalBlockHash(1)).is_none());
         assert!(!children.clear());
         let suffix = children.transfer_for_split();
-        assert!(children.state.get().is_none());
-        assert!(suffix.state.get().is_none());
+        assert!(children.state.read().is_none());
+        assert!(suffix.state.read().is_none());
 
         children.insert(LocalBlockHash(1), child());
-        assert!(children.state.get().is_some());
         assert_eq!(children.kind(), ChildrenKind::Singleton);
+        assert!(children.clear());
+        assert!(children.state.read().is_none());
     }
 
     #[test]
-    fn stale_compact_remove_replace_cannot_overwrite_promotion() {
-        let children = Arc::new(NodeChildren::from_map(FxHashMap::default()));
-        let originals: Vec<_> = (0..SMALL_CHILD_LIMIT).map(|_| child()).collect();
-        for (key, node) in originals.iter().enumerate() {
-            children.insert(LocalBlockHash(key as u64), node.clone());
+    fn insert_replaces_and_insert_if_absent_keeps_the_existing_child() {
+        let children = NodeChildren::from_map(FxHashMap::default());
+        for size in 1..=SMALL_CHILD_LIMIT + 1 {
+            let key = LocalBlockHash(size as u64);
+            let first = child();
+            assert!(children.insert(key, first.clone()).is_none());
+
+            let ChildInsertResult::Existing(kept) = children.insert_if_absent(key, child()) else {
+                panic!("{key:?} already has a child");
+            };
+            assert!(Arc::ptr_eq(&kept, &first));
+
+            let second = child();
+            let replaced = children.insert(key, second.clone()).unwrap();
+            assert!(Arc::ptr_eq(&replaced, &first));
+            assert!(Arc::ptr_eq(&children.get(&key).unwrap(), &second));
+            assert_eq!(children.len(), size);
         }
-
-        let cell = children.state.get().unwrap();
-        let stale = cell.load_full();
-        let mut stale_entries = NodeChildren::clone_compact_entries(stale.as_ref(), 0);
-        stale_entries.remove(0);
-        let replacement = child();
-        let replacement_index = stale_entries
-            .binary_search_by_key(&LocalBlockHash(1), |entry| entry.hash)
-            .unwrap();
-        stale_entries[replacement_index].node = replacement.clone();
-
-        let start = Arc::new(Barrier::new(2));
-        let promoted = Arc::new(Barrier::new(2));
-        let promote_children = children.clone();
-        let promote_start = start.clone();
-        let promote_done = promoted.clone();
-        let fifth = child();
-        let fifth_for_thread = fifth.clone();
-        let handle = thread::spawn(move || {
-            promote_start.wait();
-            let result = promote_children
-                .insert_if_absent(LocalBlockHash(SMALL_CHILD_LIMIT as u64), fifth_for_thread);
-            promote_done.wait();
-            result
-        });
-
-        start.wait();
-        promoted.wait();
         assert_eq!(children.kind(), ChildrenKind::Sharded);
-        assert!(!NodeChildren::compare_and_swap(
-            cell,
-            &stale,
-            NodeChildren::compact_state(stale_entries)
-        ));
-        assert!(matches!(
-            handle.join().unwrap(),
-            ChildInsertResult::Inserted(_)
-        ));
+    }
 
-        assert!(Arc::ptr_eq(
-            &children.get(&LocalBlockHash(0)).unwrap(),
-            &originals[0]
-        ));
+    #[test]
+    fn lookups_see_every_child_while_storage_promotes() {
+        const ROUNDS: usize = 200;
+        for _ in 0..ROUNDS {
+            let children = Arc::new(NodeChildren::from_map(FxHashMap::default()));
+            let originals: Vec<_> = (0..SMALL_CHILD_LIMIT).map(|_| child()).collect();
+            for (key, node) in originals.iter().enumerate() {
+                children.insert(LocalBlockHash(key as u64), node.clone());
+            }
+
+            let start = Arc::new(Barrier::new(2));
+            let reader = {
+                let children = children.clone();
+                let originals = originals.clone();
+                let start = start.clone();
+                thread::spawn(move || {
+                    start.wait();
+                    // Always one pass, and one more after the promotion is visible.
+                    loop {
+                        let promoted = children.kind() == ChildrenKind::Sharded;
+                        for (key, node) in originals.iter().enumerate() {
+                            let found = children.get(&LocalBlockHash(key as u64));
+                            assert!(found.is_some_and(|found| Arc::ptr_eq(&found, node)));
+                        }
+                        if promoted {
+                            break;
+                        }
+                    }
+                })
+            };
+
+            start.wait();
+            let fifth = child();
+            children.insert_if_absent(LocalBlockHash(SMALL_CHILD_LIMIT as u64), fifth.clone());
+            reader.join().unwrap();
+            assert_eq!(children.len(), SMALL_CHILD_LIMIT + 1);
+            let stored = children.get(&LocalBlockHash(SMALL_CHILD_LIMIT as u64));
+            assert!(stored.is_some_and(|stored| Arc::ptr_eq(&stored, &fifth)));
+        }
+    }
+
+    /// An insert looks under the shared lock first. If another thread promotes the
+    /// storage before it takes the exclusive lock, `upsert` meets a sharded map.
+    #[test]
+    fn upsert_handles_storage_promoted_before_the_exclusive_lock() {
+        let sharded = ShardedChildren::with_hasher(FxBuildHasher);
+        let first = child();
+        sharded.insert(LocalBlockHash(1), first.clone());
+        let mut state = Some(Box::new(ChildrenState::Sharded(sharded)));
+
+        let kept = NodeChildren::upsert(&mut state, LocalBlockHash(1), &child(), false).unwrap();
+        assert!(Arc::ptr_eq(&kept, &first));
+
+        let second = child();
+        let replaced = NodeChildren::upsert(&mut state, LocalBlockHash(1), &second, true).unwrap();
+        assert!(Arc::ptr_eq(&replaced, &first));
+
+        let third = child();
+        assert!(NodeChildren::upsert(&mut state, LocalBlockHash(2), &third, false).is_none());
+
+        let children = NodeChildren::from_state(state);
+        assert_eq!(children.kind(), ChildrenKind::Sharded);
         assert!(Arc::ptr_eq(
             &children.get(&LocalBlockHash(1)).unwrap(),
-            &originals[1]
-        ));
-        assert!(!Arc::ptr_eq(
-            &children.get(&LocalBlockHash(1)).unwrap(),
-            &replacement
+            &second
         ));
         assert!(Arc::ptr_eq(
-            &children
-                .get(&LocalBlockHash(SMALL_CHILD_LIMIT as u64))
-                .unwrap(),
-            &fifth
+            &children.get(&LocalBlockHash(2)).unwrap(),
+            &third
         ));
     }
 
