@@ -930,6 +930,12 @@ pub fn chat_completion_to_anthropic_response(
             }
             None => None,
         };
+        // Anthropic Messages has no refusal block, so dedicated refusal text
+        // is appended to the text block, after any content text, as sent.
+        let text = match (text, choice.message.refusal.filter(|r| !r.is_empty())) {
+            (Some(text), Some(refusal)) => Some(text + &refusal),
+            (text, refusal) => text.or(refusal),
+        };
         if let Some(text) = text {
             // Text goes after thinking block (if any)
             content.push(AnthropicResponseContentBlock::Text {

@@ -2759,9 +2759,15 @@ mod tests {
                 .await
         }
 
+        // The bare-EOF flush walks the per-choice decoder map, whose order is random, so
+        // compare its chunks by choice index. The four streamed chunks keep their order.
+        let sorted_flush = |mut outputs: Vec<_>| {
+            outputs[4..].sort_by_key(|(index, _, _)| *index);
+            outputs
+        };
         let ready = outputs(false).await;
         assert_eq!(ready.len(), 6, "{ready:?}");
-        assert_eq!(outputs(true).await, ready);
+        assert_eq!(sorted_flush(outputs(true).await), sorted_flush(ready));
     }
 
     struct ErrorThenBareEofEngine;

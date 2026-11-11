@@ -26,7 +26,7 @@ use crate::{
     session_affinity::explicit_target,
 };
 
-use dynamo_kv_router::plugins::request_classifier::AbortCause;
+use dynamo_admission::host::AbortCause;
 use dynamo_protocols::types::CompletionUsage;
 use dynamo_runtime::engine::Data;
 use dynamo_runtime::error::{self, DynamoError, ErrorReason, ErrorType};
