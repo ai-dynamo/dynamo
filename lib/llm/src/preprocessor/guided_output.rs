@@ -125,10 +125,18 @@ impl OpenAIPreprocessor {
                     prompt.legacy
                         || prompt.unified
                         || Self::reasoning_is_mandatory(family)
-                        || Self::sglang_effective_reasoning_enabled(
+                        || Self::known_reasoning_enabled(
                             parser.or(family),
                             request.chat_template_args.as_ref(),
                         )
+                        .unwrap_or_else(|| {
+                            parser.or(family).is_some()
+                                && Self::normalize_thinking_aliases(
+                                    request.chat_template_args.as_ref(),
+                                    parser.or(family),
+                                )
+                                .unwrap_or(true)
+                        })
                 }
             };
         if reasoning
@@ -145,11 +153,21 @@ impl OpenAIPreprocessor {
         }
         let capability = self
             .runtime_config
-            .get_engine_specific::<GuidedOutputCapability>(GUIDED_OUTPUT_REASONING_RUNTIME_KEY)
-            .map_err(|error| {
-                invalid_argument_error(format!("invalid guided-output worker capability: {error}"))
-            })?;
-        let capability = capability.filter(|capability| capability.version == 1);
+            .runtime_data
+            .get(GUIDED_OUTPUT_REASONING_RUNTIME_KEY)
+            .and_then(|value| {
+                if value.get("version").and_then(Value::as_u64) != Some(1) {
+                    tracing::warn!("Unavailable guided-output worker capability version");
+                    return None;
+                }
+                match serde_json::from_value::<GuidedOutputCapability>(value.clone()) {
+                    Ok(capability) => Some(capability),
+                    Err(error) => {
+                        tracing::warn!(%error, "Unavailable guided-output worker capability");
+                        None
+                    }
+                }
+            });
         let unsupported = || {
             invalid_argument_error(concat!(
                 "The selected workers cannot preserve this guided-answer reasoning policy. ",
@@ -198,17 +216,43 @@ impl OpenAIPreprocessor {
             .as_object_mut()
             .ok_or_else(|| invalid_argument_error("extra_args must be an object"))?;
         extra.insert("reasoning_ended".into(), json!(!reasoning));
-        extra.insert(
-            "reasoning_parser_kwargs".into(),
-            json!({
-                "chat_template_kwargs": request.chat_template_args.clone().unwrap_or_default()
-            }),
-        );
+        if parser.is_some()
+            || capability
+                .as_ref()
+                .is_some_and(|value| value.reasoner.is_some())
+        {
+            let kwargs = extra
+                .entry("reasoning_parser_kwargs")
+                .or_insert_with(|| json!({}));
+            let kwargs = kwargs.as_object_mut().ok_or_else(|| {
+                invalid_argument_error("reasoning_parser_kwargs must be an object")
+            })?;
+            let chat = kwargs
+                .entry("chat_template_kwargs")
+                .or_insert_with(|| json!({}));
+            let chat = chat.as_object_mut().ok_or_else(|| {
+                invalid_argument_error(
+                    "reasoning_parser_kwargs.chat_template_kwargs must be an object",
+                )
+            })?;
+            if let Some(args) = &request.chat_template_args {
+                chat.extend(args.iter().map(|(key, value)| (key.clone(), value.clone())));
+            }
+            if matches!(parser, Some("glm45" | "glm47"))
+                && prompt.reasoning_closed_by_prompt.is_some()
+            {
+                chat.insert("thinking".into(), json!(reasoning));
+                chat.insert("enable_thinking".into(), json!(reasoning));
+            }
+        }
         let plan = if reasoning {
             GuidedOutputPlan::EngineGated(capability.expect("validated above"))
         } else {
             GuidedOutputPlan::Direct
         };
+        // Projected answers bypass the parser that consumes model EOS markup.
+        // Explicit no_stop_trim retains its normal behavior in the decoder.
+        common.output_options.retain_model_stop_token_text = None;
         common.guided_output_plan = Some(plan.clone());
         Ok(Some(plan))
     }
@@ -308,6 +352,49 @@ mod tests {
                 assert_eq!(snapshots[0], snapshots[1], "{root} encoded alias");
                 assert_eq!(snapshots[0], snapshots[2], "{root} response_format alias");
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn guided_output_json_aliases_keep_the_same_tool_loop_contract() {
+        let processor = processor(Some(gate()));
+        let tools = json!([{"type":"function","function":{"name":"get_weather","parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}}}]);
+        let user =
+            json!({"role":"user","content":"Get Paris weather, then return the result as JSON."});
+        let schema = json!({"type":"object","properties":{"weather":{"type":"string"}},"required":["weather"]});
+        for tool_turn in [true, false] {
+            let mut messages = vec![user.clone()];
+            if !tool_turn {
+                messages.extend([
+                    json!({"role":"assistant","tool_calls":[{"id":"weather_1","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"Paris\"}"}}]}),
+                    json!({"role":"tool","tool_call_id":"weather_1","content":"sunny"}),
+                ]);
+            }
+            let mut snapshots = Vec::new();
+            for format in [
+                json!({"guided_json":schema}),
+                json!({"response_format":{"type":"json_schema","json_schema":{"name":"guided_json","schema":schema}}}),
+            ] {
+                let mut fields = json!({"tools":tools,"messages":messages,"tool_choice":if tool_turn {"required"} else {"auto"}});
+                fields
+                    .as_object_mut()
+                    .unwrap()
+                    .extend(format.as_object().unwrap().clone());
+                let mut request = request(fields);
+                normalize_guided_json(&mut request).unwrap();
+                let (mut common, _, prefill) =
+                    processor.preprocess_request(&request, None).await.unwrap();
+                let installed = processor
+                    .apply_tool_choice_guided_decoding(&request, &mut common, prefill.clone())
+                    .unwrap();
+                let plan = processor
+                    .resolve_guided_output_plan(&request, &mut common, &prefill, &installed)
+                    .unwrap();
+                assert_eq!(plan.is_none(), tool_turn);
+                assert_eq!(installed.installs_guided_json(), tool_turn);
+                snapshots.push((serde_json::to_value(common).unwrap(), installed, plan));
+            }
+            assert_eq!(snapshots[0], snapshots[1], "tool turn: {tool_turn}");
         }
     }
 
@@ -505,5 +592,301 @@ mod tests {
             )
             .unwrap_err();
         assert!(error.to_string().contains("force_nonempty_content"));
+    }
+
+    #[test]
+    fn guided_output_unknown_metadata_and_reasoner_defaults_are_conservative() {
+        let mut processor = processor(Some(gate()));
+        let mut additive = serde_json::to_value(gate()).unwrap();
+        additive["future_field"] = json!(true);
+        for (metadata, available) in [
+            (additive, true),
+            (json!({"version":2,"mode":"future"}), false),
+            (json!({"version":1,"mode":"future","engine":"vllm"}), false),
+            (
+                json!({"version":1,"mode":"explicit_gate","engine":7}),
+                false,
+            ),
+            (json!("malformed capability"), false),
+        ] {
+            std::sync::Arc::get_mut(&mut processor)
+                .unwrap()
+                .runtime_config
+                .runtime_data
+                .insert(GUIDED_OUTPUT_REASONING_RUNTIME_KEY.into(), metadata);
+            for thinking in [false, true] {
+                let mut request = request(json!({"guided_choice":["yes"]}));
+                request.chat_template_args = Some(std::collections::HashMap::from([(
+                    "enable_thinking".into(),
+                    json!(thinking),
+                )]));
+                let mut common = processor
+                    .builder_with_lora(&request, None)
+                    .unwrap()
+                    .token_ids(vec![])
+                    .build()
+                    .unwrap();
+                let plan = processor.resolve_guided_output_plan(
+                    &request,
+                    &mut common,
+                    &false.into(),
+                    &GuidedToolConstraint::None,
+                );
+                assert_eq!(plan.is_ok(), !thinking || available);
+            }
+        }
+        let inner = std::sync::Arc::get_mut(&mut processor).unwrap();
+        inner
+            .runtime_config
+            .runtime_data
+            .remove(GUIDED_OUTPUT_REASONING_RUNTIME_KEY);
+        inner.runtime_config.reasoning_parser = Some("glm47".into());
+        let request = request(json!({"guided_choice":["yes"]}));
+        let mut common = processor
+            .builder_with_lora(&request, None)
+            .unwrap()
+            .token_ids(vec![])
+            .build()
+            .unwrap();
+        assert!(
+            processor
+                .resolve_guided_output_plan(
+                    &request,
+                    &mut common,
+                    &false.into(),
+                    &GuidedToolConstraint::None
+                )
+                .is_err(),
+            "an unknown default must not silently suppress reasoning"
+        );
+    }
+
+    #[test]
+    fn guided_output_merges_effective_glm_kwargs_and_omits_unconfigured_kwargs() {
+        let mut processor = processor(Some(gate()));
+        std::sync::Arc::get_mut(&mut processor)
+            .unwrap()
+            .runtime_config
+            .reasoning_parser = Some("glm47".into());
+        let mut request = request(json!({"guided_regex":"yes"}));
+        request.chat_template_args = Some(std::collections::HashMap::from([
+            ("thinking".into(), json!(true)),
+            ("other".into(), json!("kept")),
+        ]));
+        let mut common = processor
+            .builder_with_lora(&request, None)
+            .unwrap()
+            .token_ids(vec![])
+            .build()
+            .unwrap();
+        common.extra_args = Some(
+            json!({"reasoning_parser_kwargs":{"extension":42,"chat_template_kwargs":{"thinking":false,"enable_thinking":false,"existing":"kept"}}}),
+        );
+        let mut prefill: PromptReasoningPrefill = false.into();
+        prefill.reasoning_closed_by_prompt = Some(true);
+        assert_eq!(
+            processor
+                .resolve_guided_output_plan(
+                    &request,
+                    &mut common,
+                    &prefill,
+                    &GuidedToolConstraint::None
+                )
+                .unwrap(),
+            Some(GuidedOutputPlan::Direct)
+        );
+        let kwargs = &common.extra_args.as_ref().unwrap()["reasoning_parser_kwargs"];
+        assert_eq!(kwargs["extension"], 42);
+        assert_eq!(kwargs["chat_template_kwargs"]["thinking"], false);
+        assert_eq!(kwargs["chat_template_kwargs"]["enable_thinking"], false);
+        assert_eq!(kwargs["chat_template_kwargs"]["existing"], "kept");
+        assert_eq!(kwargs["chat_template_kwargs"]["other"], "kept");
+
+        let inner = std::sync::Arc::get_mut(&mut processor).unwrap();
+        inner.runtime_config.reasoning_parser = None;
+        inner
+            .runtime_config
+            .runtime_data
+            .remove(GUIDED_OUTPUT_REASONING_RUNTIME_KEY);
+        let mut common = processor
+            .builder_with_lora(&request, None)
+            .unwrap()
+            .token_ids(vec![])
+            .build()
+            .unwrap();
+        processor
+            .resolve_guided_output_plan(
+                &request,
+                &mut common,
+                &false.into(),
+                &GuidedToolConstraint::None,
+            )
+            .unwrap();
+        assert!(
+            common
+                .extra_args
+                .as_ref()
+                .unwrap()
+                .get("reasoning_parser_kwargs")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn guided_output_beam_final_prefill_consumes_model_eos_without_a_parser() {
+        use crate::protocols::{
+            Annotated,
+            common::llm_backend::LLMEngineOutput,
+            openai::{DeltaGeneratorExt, ParsingOptions, chat_completions::DeltaAggregator},
+        };
+        use dynamo_runtime::pipeline::{
+            AsyncEngine, AsyncEngineContextProvider, ManyOut, Operator, ResponseStream, SingleIn,
+            async_trait,
+        };
+        use futures::StreamExt;
+        use std::sync::{Arc, atomic::AtomicBool};
+
+        struct Tokens(Vec<u32>);
+        #[async_trait]
+        impl
+            AsyncEngine<
+                SingleIn<PreprocessedRequest>,
+                ManyOut<Annotated<LLMEngineOutput>>,
+                anyhow::Error,
+            > for Tokens
+        {
+            async fn generate(
+                &self,
+                request: SingleIn<PreprocessedRequest>,
+            ) -> anyhow::Result<ManyOut<Annotated<LLMEngineOutput>>> {
+                let output = LLMEngineOutput {
+                    token_ids: self.0.clone(),
+                    finish_reason: Some(crate::protocols::common::FinishReason::EoS),
+                    ..Default::default()
+                };
+                Ok(ResponseStream::new(
+                    Box::pin(futures::stream::iter([Annotated::from_data(output)])),
+                    request.context(),
+                ))
+            }
+        }
+
+        for no_stop_trim in [false, true] {
+            let mut immediate = gate();
+            immediate.mode = GuidedReasoningMode::Immediate;
+            immediate.reasoner = None;
+            let mut processor = processor(Some(immediate));
+            let inner = Arc::get_mut(&mut processor).unwrap();
+            inner.beam_route = true;
+            inner.tool_call_parser = Some("beam".into());
+            inner.runtime_config.tool_call_parser = Some("beam".into());
+            inner.runtime_config.reasoning_parser = Some("beam".into());
+            // The sample card's reduced tokenizer has no supplier EOS IDs.
+            // Install a tiny real decoder with an explicit Beam model EOS.
+            let hf: tokenizers::Tokenizer = serde_json::from_value(json!({
+                "version":"1.0","truncation":null,"padding":null,
+                "added_tokens":[{"id":1,"content":"<|return|>","special":true,"single_word":false,"lstrip":false,"rstrip":false,"normalized":false}],
+                "normalizer":null,"pre_tokenizer":null,"post_processor":null,
+                "decoder":{"type":"Sequence","decoders":[{"type":"ByteFallback"},{"type":"Fuse"}]},
+                "model":{"type":"BPE","vocab":{"yes":0,"<|return|>":1},"merges":[],"byte_fallback":true}
+            })).unwrap();
+            inner.tokenizer = Arc::new(crate::tokenizers::HuggingFaceTokenizer::from_tokenizer(hf));
+            let request = request(json!({
+                "messages":[{"role":"user","content":"answer yes"},{"role":"assistant","reasoning_content":"already thought","content":""}],
+                "continue_final_message":true,"add_generation_prompt":false,
+                "guided_choice":["yes"],"skip_special_tokens":false,
+            }));
+            let mut common = processor
+                .builder_with_lora(&request, None)
+                .unwrap()
+                .token_ids(vec![])
+                .build()
+                .unwrap();
+            common.eos_token_ids = vec![1];
+            common.stop_conditions.stop_token_ids_hidden = Some(vec![1]);
+            common.output_options.no_stop_trim = Some(no_stop_trim);
+            assert_eq!(
+                common.output_options.retain_model_stop_token_text,
+                Some(true)
+            );
+            let mut prefill = OpenAIPreprocessor::prompt_reasoning_prefill_for_parsers(
+                Some("beam"),
+                Some("beam"),
+                Some("<|start|>assistant<|channel|>final<|message|>"),
+            );
+            let plan = processor
+                .resolve_guided_output_plan(
+                    &request,
+                    &mut common,
+                    &prefill,
+                    &GuidedToolConstraint::None,
+                )
+                .unwrap();
+            assert_eq!(plan, Some(GuidedOutputPlan::Direct));
+            prefill.guided_output_plan = plan;
+            let eos = 1;
+            let eos_text: String = processor.tokenizer.decode(&[eos], false).unwrap().into();
+            assert!(!eos_text.is_empty());
+            let mut ids = vec![0];
+            ids.push(eos);
+            let backend = crate::backend::Backend::from_tokenizer(
+                crate::tokenizers::Tokenizer::from(processor.tokenizer.clone()),
+            );
+            let mut stream = Operator::generate(
+                backend.as_ref(),
+                SingleIn::new(common),
+                Arc::new(Tokens(ids)),
+            )
+            .await
+            .unwrap();
+            let mut generator = request.response_generator("beam-guided".into());
+            let mut chunks = Vec::new();
+            while let Some(chunk) = stream.next().await {
+                chunks.push(Annotated::from_data(
+                    generator
+                        .choice_from_postprocessor(chunk.data.unwrap())
+                        .unwrap(),
+                ));
+            }
+            chunks.push(Annotated::from_data(generator.create_usage_chunk()));
+            let parsed = processor
+                .postprocessor_parsing_stream(
+                    futures::stream::iter(chunks),
+                    &request,
+                    prefill,
+                    false,
+                )
+                .unwrap();
+            let mut options = ParsingOptions::new(Some("beam".into()), Some("beam".into()));
+            options.guided_answer_projected = Some(Arc::new(AtomicBool::new(true)));
+            let response = DeltaAggregator::apply(parsed, options).await.unwrap();
+            let expected = if no_stop_trim {
+                format!("yes{eos_text}")
+            } else {
+                "yes".into()
+            };
+            assert_eq!(
+                response.inner.choices[0].message.content,
+                Some(dynamo_protocols::types::ChatCompletionMessageContent::Text(
+                    expected
+                ))
+            );
+            assert!(
+                response.inner.choices[0]
+                    .message
+                    .reasoning_content
+                    .is_none()
+            );
+            assert_eq!(
+                response
+                    .inner
+                    .usage
+                    .unwrap()
+                    .completion_tokens_details
+                    .unwrap()
+                    .reasoning_tokens,
+                Some(0)
+            );
+        }
     }
 }

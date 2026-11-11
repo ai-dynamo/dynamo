@@ -403,9 +403,14 @@ where
                 {
                     self.stream.context().stop_generating();
                     self.finished = true;
+                    let message = if self.guided_output_plan.is_some() {
+                        "Guided final-answer output requires raw backend token IDs to preserve reasoning boundaries; the selected worker omitted them"
+                    } else {
+                        "no_stop_trim requires backend token IDs through the matched stop; the backend omitted them (also required when a parser retains the model's stop token text)"
+                    };
                     let error = DynamoError::builder()
                         .class(ErrorClass::BackendProtocol)
-                        .message("no_stop_trim requires backend token IDs through the matched stop; the backend omitted them (also required when a parser retains the model's stop token text)")
+                        .message(message)
                         .build();
                     return Poll::Ready(Some(Annotated::from_err(error)));
                 }
@@ -1110,7 +1115,12 @@ impl Decoder {
             self.pending_token_ids.clear();
             if let Some(text) = tail {
                 self.guided_output.as_mut().unwrap().observe_text(&text);
-                let flushed = self.process_decoded_text(Some(text))?;
+                let flushed = if self.generated_tokens <= self.min_tokens {
+                    self.guided_output.as_mut().unwrap().release(&text);
+                    StepResult::ok(Some(text))
+                } else {
+                    self.process_decoded_text(Some(text))?
+                };
                 if flushed.stop_trigger.is_some() {
                     self.generated_tokens += 1;
                     let state = self.guided_output.as_mut().unwrap();
@@ -1854,6 +1864,21 @@ mod tests {
             let delta = decoder.guided_output.as_mut().unwrap().take_delta();
             assert_eq!(delta.reasoning, expected_reasoning, "{stop}");
             assert_eq!(delta.content, "");
+        }
+    }
+
+    #[test]
+    fn guided_output_byte_flush_respects_min_tokens() {
+        for min_tokens in [2, 4] {
+            let mut decoder = guided_test_decoder(false, true, Some("�"));
+            decoder.min_tokens = min_tokens;
+            let result = decoder.process_token_ids(&[4, 0, 3, 5]).unwrap();
+            assert!(result.stop_trigger.is_none());
+            decoder.finish().unwrap();
+            let delta = decoder.guided_output.as_mut().unwrap().take_delta();
+            assert_eq!(delta.reasoning, "�");
+            assert_eq!(delta.content, "<tool_call>yes</tool_call>");
+            assert_eq!(delta.reasoning_tokens, 3);
         }
     }
 

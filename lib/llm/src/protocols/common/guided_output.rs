@@ -11,7 +11,6 @@ pub(crate) const GUIDED_OUTPUT_REASONING_RUNTIME_KEY: &str = "guided_output_reas
 
 /// Published only after the engine and its tokenizer have initialized.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub(crate) struct GuidedOutputCapability {
     pub version: u32,
     pub engine: String,

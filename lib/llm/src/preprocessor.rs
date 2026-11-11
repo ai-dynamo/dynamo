@@ -2551,9 +2551,17 @@ impl OpenAIPreprocessor {
         reasoning_parser: Option<&str>,
         chat_template_args: Option<&std::collections::HashMap<String, serde_json::Value>>,
     ) -> bool {
+        Self::known_reasoning_enabled(reasoning_parser, chat_template_args).unwrap_or(false)
+    }
+
+    /// Known model policies; an absent entry does not establish a non-thinking default.
+    fn known_reasoning_enabled(
+        reasoning_parser: Option<&str>,
+        chat_template_args: Option<&std::collections::HashMap<String, serde_json::Value>>,
+    ) -> Option<bool> {
         let thinking_enabled = dynamo_renderer::thinking_bool_from_args(chat_template_args);
 
-        match reasoning_parser {
+        Some(match reasoning_parser {
             // These SGLang reasoners are enabled unless the request opts out.
             Some("qwen3" | "glm45" | "nemotron_nano" | "nemotron3" | "nemotron_v3") => {
                 thinking_enabled != Some(false)
@@ -2589,8 +2597,8 @@ impl OpenAIPreprocessor {
 
             // These SGLang reasoners do not expose a per-request off mode.
             Some("deepseek_r1" | "step3" | "gpt_oss" | "kimi") => true,
-            _ => false,
-        }
+            _ => return None,
+        })
     }
 
     /// Mirror dynamo-renderer's DeepSeek reasoning-toggle precedence.

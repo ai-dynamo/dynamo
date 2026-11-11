@@ -189,3 +189,93 @@ def test_sglang_old_reasoner_api_does_not_break_worker_startup() -> None:
         SimpleNamespace(reasoning_parser="qwen3", skip_tokenizer_init=False),
     )
     assert runtime.value["mode"] == "unsupported"
+
+
+@pytest.mark.parametrize("error_type", [AttributeError, TypeError, RuntimeError])
+def test_vllm_optional_capability_probe_failure_does_not_break_startup(
+    error_type, caplog
+):
+    def unavailable(self: Any, tokenizer: Any, **kwargs: Any) -> None:
+        raise error_type("changed engine API")
+
+    parser_class = type(
+        "Step3ReasoningParser",
+        (Step3ReasoningParser,),
+        {
+            "__module__": "vllm.reasoning.step3_reasoning_parser",
+            "__init__": unavailable,
+        },
+    )
+    publish = publisher(
+        "vllm",
+        "vllm.reasoning",
+        ReasoningParserManager=SimpleNamespace(
+            get_reasoning_parser=lambda name: parser_class
+        ),
+    )
+    runtime = RuntimeConfig()
+    config = SimpleNamespace(
+        structured_outputs_config=SimpleNamespace(
+            reasoning_parser="step3", enable_in_reasoning=False
+        ),
+        model_config=SimpleNamespace(skip_tokenizer_init=False),
+    )
+    publish(runtime, Engine(), config)
+    assert runtime.value["mode"] == "unsupported"
+    assert "capability unavailable" in caplog.text
+
+
+def test_vllm_optional_reasoning_opener_is_not_required() -> None:
+    parser_class = type(
+        "Step3ReasoningParser",
+        (Step3ReasoningParser,),
+        {
+            "__module__": "vllm.reasoning.step3_reasoning_parser",
+            "reasoning_start_str": None,
+        },
+    )
+    publish = publisher(
+        "vllm",
+        "vllm.reasoning",
+        ReasoningParserManager=SimpleNamespace(
+            get_reasoning_parser=lambda name: parser_class
+        ),
+    )
+    runtime = RuntimeConfig()
+    config = SimpleNamespace(
+        structured_outputs_config=SimpleNamespace(
+            reasoning_parser="step3", enable_in_reasoning=False
+        ),
+        model_config=SimpleNamespace(skip_tokenizer_init=False),
+    )
+    publish(runtime, Engine(), config)
+    assert runtime.value["mode"] == "explicit_gate"
+    assert runtime.value["start_token_ids"] == []
+
+
+def test_sglang_missing_detector_gate_api_is_unavailable(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    detector = type(
+        "Qwen3Detector",
+        (SimpleNamespace,),
+        {"__module__": "sglang.srt.parser.reasoning_parser"},
+    )(
+        think_start_token="<think>",
+        think_end_token="</think>",
+    )
+
+    def reasoner(*, model_type: str, stream_reasoning: bool, tokenizer: Any) -> Any:
+        return SimpleNamespace(detector=detector)
+
+    publish = publisher(
+        "sglang", "sglang.srt.parser.reasoning_parser", ReasoningParser=reasoner
+    )
+    runtime = RuntimeConfig()
+    publish(
+        runtime,
+        Engine(),
+        SimpleNamespace(reasoning_parser="qwen3", skip_tokenizer_init=False),
+    )
+    assert runtime.value["mode"] == "unsupported"
+    assert "capability unavailable" in caplog.text
