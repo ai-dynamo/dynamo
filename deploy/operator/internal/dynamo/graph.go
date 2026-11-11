@@ -3151,8 +3151,6 @@ func buildGroveScalingGroupConfig(
 	return pcsg
 }
 
-// isWaitingForCheckpoint reports whether a component's WaitForCheckpoint startup
-// is still pending. A nil checkpointInfo means the component has no checkpoint.
 func isWaitingForCheckpoint(checkpointInfo *checkpoint.CheckpointInfo) bool {
 	return checkpointInfo != nil &&
 		checkpointInfo.Enabled &&
