@@ -6,7 +6,7 @@ import gc
 import logging
 import os
 import time
-from typing import Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 import sglang as sgl
 from sglang.srt.entrypoints.http_server import _get_vlm_warmup_image_base64
@@ -23,6 +23,7 @@ from dynamo.runtime import DistributedRuntime
 from dynamo.sglang.args import Config
 from dynamo.sglang.gateway import (
     attached_engine_load_time,
+    gateway_child_index,
     gateway_worker_count,
     serve_via_gateway_children,
 )
@@ -169,6 +170,21 @@ def _freeze_gc_after_init(enabled: bool) -> None:
         logging.info("Froze SGLang worker GC objects after collecting %d", collected)
 
 
+async def _freeze_worker_gc_after_init(
+    enabled: bool, engine: Any, *, is_gateway_child: bool
+) -> None:
+    if not enabled:
+        return
+
+    # Child 0 freezes its tokenizer and the shared scheduler/detokenizer.
+    # The remaining gateway children only need to freeze their local heaps.
+    if is_gateway_child and gateway_child_index() != 0:
+        _freeze_gc_after_init(True)
+        return
+
+    await engine.tokenizer_manager.freeze_gc()
+
+
 async def init_decode(
     runtime: DistributedRuntime,
     config: Config,
@@ -298,7 +314,11 @@ async def init_decode(
             engine, use_text_input=dynamo_args.use_sglang_tokenizer
         ).to_dict()
 
-    _freeze_gc_after_init(dynamo_args.freeze_gc_after_init)
+    await _freeze_worker_gc_after_init(
+        dynamo_args.freeze_gc_after_init,
+        engine,
+        is_gateway_child=attached_engine is not None,
+    )
 
     logging.info(f"Registering model with endpoint types: {dynamo_args.endpoint_types}")
     if dynamo_args.custom_jinja_template and "chat" not in dynamo_args.endpoint_types:

@@ -34,6 +34,7 @@ import (
 	grovecommon "github.com/ai-dynamo/grove/operator/api/common"
 	groveconstants "github.com/ai-dynamo/grove/operator/api/common/constants"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	grovev1beta1 "github.com/ai-dynamo/grove/operator/api/core/v1beta1"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 	"github.com/onsi/gomega"
 	"github.com/stretchr/testify/assert"
@@ -1698,6 +1699,8 @@ func TestGroveWorkloadRendererRenderKeepsNativeWorkerSelectors(t *testing.T) {
 	g.Expect(prefill.Labels[commonconsts.KubeLabelDynamoComponentType]).To(gomega.Equal(commonconsts.ComponentTypePrefill))
 }
 
+// TestDGDRestartReconciler_ComputeStatus checks restart transitions across
+// component and Grove workloads, including readiness and generation delays.
 func TestDGDRestartReconciler_ComputeStatus(t *testing.T) {
 	ctx := context.Background()
 	newID := "restart-1"
@@ -1805,6 +1808,11 @@ func TestDGDRestartReconciler_ComputeStatus(t *testing.T) {
 					Name:       "test-dgd-frontend",
 					Namespace:  "default",
 					Generation: 1,
+					Spec: v1alpha1.DynamoComponentDeploymentSpec{
+						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+							Annotations: map[string]string{commonconsts.RestartAnnotation: newID},
+						},
+					},
 					Status: v1alpha1.DynamoComponentDeploymentStatus{
 						ObservedGeneration: 1,
 						Conditions: []metav1.Condition{
@@ -1856,6 +1864,11 @@ func TestDGDRestartReconciler_ComputeStatus(t *testing.T) {
 					Name:       "test-dgd-frontend",
 					Namespace:  "default",
 					Generation: 1,
+					Spec: v1alpha1.DynamoComponentDeploymentSpec{
+						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+							Annotations: map[string]string{commonconsts.RestartAnnotation: newID},
+						},
+					},
 					Status: v1alpha1.DynamoComponentDeploymentStatus{
 						ObservedGeneration: 1,
 						Conditions: []metav1.Condition{
@@ -1870,6 +1883,11 @@ func TestDGDRestartReconciler_ComputeStatus(t *testing.T) {
 					Name:       "test-dgd-decode",
 					Namespace:  "default",
 					Generation: 2,
+					Spec: v1alpha1.DynamoComponentDeploymentSpec{
+						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+							Annotations: map[string]string{commonconsts.RestartAnnotation: newID},
+						},
+					},
 					Status: v1alpha1.DynamoComponentDeploymentStatus{
 						ObservedGeneration: 1, // Not yet caught up
 						Conditions: []metav1.Condition{
@@ -1943,6 +1961,11 @@ func TestDGDRestartReconciler_ComputeStatus(t *testing.T) {
 					Name:       "test-dgd-frontend",
 					Namespace:  "default",
 					Generation: 1,
+					Spec: v1alpha1.DynamoComponentDeploymentSpec{
+						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+							Annotations: map[string]string{commonconsts.RestartAnnotation: newID},
+						},
+					},
 					Status: v1alpha1.DynamoComponentDeploymentStatus{
 						ObservedGeneration: 1,
 						Conditions: []metav1.Condition{
@@ -1987,6 +2010,11 @@ func TestDGDRestartReconciler_ComputeStatus(t *testing.T) {
 					Name:       "test-dgd-frontend",
 					Namespace:  "default",
 					Generation: 1,
+					Spec: v1alpha1.DynamoComponentDeploymentSpec{
+						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+							Annotations: map[string]string{commonconsts.RestartAnnotation: newID},
+						},
+					},
 					Status: v1alpha1.DynamoComponentDeploymentStatus{
 						ObservedGeneration: 1,
 						Conditions: []metav1.Condition{
@@ -2034,6 +2062,11 @@ func TestDGDRestartReconciler_ComputeStatus(t *testing.T) {
 					Name:       "test-dgd-removed",
 					Namespace:  "default",
 					Generation: 1,
+					Spec: v1alpha1.DynamoComponentDeploymentSpec{
+						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+							Annotations: map[string]string{commonconsts.RestartAnnotation: newID},
+						},
+					},
 					Status: v1alpha1.DynamoComponentDeploymentStatus{
 						ObservedGeneration: 1,
 						Conditions: []metav1.Condition{
@@ -2169,6 +2202,15 @@ func TestDGDRestartReconciler_ComputeStatus(t *testing.T) {
 					Name:       "test-dgd",
 					Namespace:  "default",
 					Generation: 1,
+					Spec: grovev1alpha1.PodCliqueSetSpec{
+						Template: grovev1alpha1.PodCliqueSetTemplateSpec{
+							Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{{
+								Name:        "frontend",
+								Labels:      map[string]string{commonconsts.KubeLabelDynamoComponent: "frontend"},
+								Annotations: map[string]string{commonconsts.RestartAnnotation: newID},
+							}},
+						},
+					},
 					Status: grovev1alpha1.PodCliqueSetStatus{
 						ObservedGeneration: new(int64(1)),
 					},
@@ -2221,6 +2263,15 @@ func TestDGDRestartReconciler_ComputeStatus(t *testing.T) {
 					Name:       "test-dgd",
 					Namespace:  "default",
 					Generation: 2,
+					Spec: grovev1alpha1.PodCliqueSetSpec{
+						Template: grovev1alpha1.PodCliqueSetTemplateSpec{
+							Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{{
+								Name:        "frontend",
+								Labels:      map[string]string{commonconsts.KubeLabelDynamoComponent: "frontend"},
+								Annotations: map[string]string{commonconsts.RestartAnnotation: newID},
+							}},
+						},
+					},
 					Status: grovev1alpha1.PodCliqueSetStatus{
 						ObservedGeneration: new(int64(1)),
 					},
@@ -2324,6 +2375,15 @@ func TestDGDRestartReconciler_ComputeStatus(t *testing.T) {
 					Name:       "test-dgd",
 					Namespace:  "default",
 					Generation: 1,
+					Spec: grovev1alpha1.PodCliqueSetSpec{
+						Template: grovev1alpha1.PodCliqueSetTemplateSpec{
+							Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{{
+								Name:        "frontend",
+								Labels:      map[string]string{commonconsts.KubeLabelDynamoComponent: "frontend"},
+								Annotations: map[string]string{commonconsts.RestartAnnotation: newID},
+							}},
+						},
+					},
 					Status: grovev1alpha1.PodCliqueSetStatus{
 						ObservedGeneration: new(int64(1)),
 					},
@@ -2370,6 +2430,11 @@ func TestDGDRestartReconciler_ComputeStatus(t *testing.T) {
 					Name:       "test-dgd-frontend",
 					Namespace:  "default",
 					Generation: 2,
+					Spec: v1alpha1.DynamoComponentDeploymentSpec{
+						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+							Annotations: map[string]string{commonconsts.RestartAnnotation: newID},
+						},
+					},
 					Status: v1alpha1.DynamoComponentDeploymentStatus{
 						ObservedGeneration: 2,
 						Conditions: []metav1.Condition{
@@ -2381,6 +2446,11 @@ func TestDGDRestartReconciler_ComputeStatus(t *testing.T) {
 					Name:       "test-dgd-decode",
 					Namespace:  "default",
 					Generation: 2,
+					Spec: v1alpha1.DynamoComponentDeploymentSpec{
+						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+							Annotations: map[string]string{commonconsts.RestartAnnotation: newID},
+						},
+					},
 					Status: v1alpha1.DynamoComponentDeploymentStatus{
 						ObservedGeneration: 2,
 						Conditions: []metav1.Condition{
@@ -2392,6 +2462,11 @@ func TestDGDRestartReconciler_ComputeStatus(t *testing.T) {
 					Name:       "test-dgd-completed",
 					Namespace:  "default",
 					Generation: 2,
+					Spec: v1alpha1.DynamoComponentDeploymentSpec{
+						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+							Annotations: map[string]string{commonconsts.RestartAnnotation: newID},
+						},
+					},
 					Status: v1alpha1.DynamoComponentDeploymentStatus{
 						ObservedGeneration: 2,
 						Conditions: []metav1.Condition{
@@ -2440,6 +2515,11 @@ func TestDGDRestartReconciler_ComputeStatus(t *testing.T) {
 					Name:       "test-dgd-frontend",
 					Namespace:  "default",
 					Generation: 2,
+					Spec: v1alpha1.DynamoComponentDeploymentSpec{
+						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+							Annotations: map[string]string{commonconsts.RestartAnnotation: newID},
+						},
+					},
 					Status: v1alpha1.DynamoComponentDeploymentStatus{
 						ObservedGeneration: 2,
 						Conditions: []metav1.Condition{
@@ -2451,6 +2531,11 @@ func TestDGDRestartReconciler_ComputeStatus(t *testing.T) {
 					Name:       "test-dgd-decode",
 					Namespace:  "default",
 					Generation: 2,
+					Spec: v1alpha1.DynamoComponentDeploymentSpec{
+						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+							Annotations: map[string]string{commonconsts.RestartAnnotation: newID},
+						},
+					},
 					Status: v1alpha1.DynamoComponentDeploymentStatus{
 						ObservedGeneration: 2,
 						Conditions: []metav1.Condition{
@@ -2462,6 +2547,11 @@ func TestDGDRestartReconciler_ComputeStatus(t *testing.T) {
 					Name:       "test-dgd-worker",
 					Namespace:  "default",
 					Generation: 2,
+					Spec: v1alpha1.DynamoComponentDeploymentSpec{
+						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+							Annotations: map[string]string{commonconsts.RestartAnnotation: newID},
+						},
+					},
 					Status: v1alpha1.DynamoComponentDeploymentStatus{
 						ObservedGeneration: 2,
 						Conditions: []metav1.Condition{
@@ -3667,13 +3757,24 @@ func TestGroveWatchSetup_MapPodCliqueScalingGroupToRequests(t *testing.T) {
 				Config:        &configv1alpha1.OperatorConfiguration{},
 				RuntimeConfig: &controller_common.RuntimeConfig{},
 			}
-			reqs := newGroveWatchSetup(r.Client).
-				mapPodCliqueScalingGroupToRequests(context.Background(), tt.obj)
+			for _, apiVersion := range []string{grovev1alpha1.SchemeGroupVersion.String(), grovev1beta1.SchemeGroupVersion.String()} {
+				t.Logf("Map scaling-group readiness with %s owner references", apiVersion)
+				obj := tt.obj.DeepCopyObject().(client.Object)
+				owners := obj.GetOwnerReferences()
+				for i := range owners {
+					if owners[i].APIVersion == grovev1alpha1.SchemeGroupVersion.String() {
+						owners[i].APIVersion = apiVersion
+					}
+				}
+				obj.SetOwnerReferences(owners)
+				reqs := newGroveWatchSetup(r.Client).
+					mapPodCliqueScalingGroupToRequests(context.Background(), obj)
 
-			g.Expect(reqs).To(gomega.HaveLen(tt.wantRequests))
-			if tt.wantRequests == 1 {
-				g.Expect(reqs[0].Name).To(gomega.Equal(tt.wantName))
-				g.Expect(reqs[0].Namespace).To(gomega.Equal(tt.wantNs))
+				g.Expect(reqs).To(gomega.HaveLen(tt.wantRequests))
+				if tt.wantRequests == 1 {
+					g.Expect(reqs[0].Name).To(gomega.Equal(tt.wantName))
+					g.Expect(reqs[0].Namespace).To(gomega.Equal(tt.wantNs))
+				}
 			}
 		})
 	}

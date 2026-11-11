@@ -3,19 +3,18 @@
 
 use std::collections::HashSet;
 
-use dynamo_kv_router::{
-    RouterConfigOverride,
-    indexer::RoutingDecisionHashes,
-    kv_hints::KvHint,
-    protocols::{
-        BlockExtraInfo, RoutingConstraints, WorkerAffinityTarget, WorkerId, WorkerWithDpRank,
-    },
-    scheduling::{
-        AdvisoryWorkerLoad, QueueRejection, RequestLifecycle, RoutingEligibility,
-        queue::BookingHandle,
-    },
-};
+use super::check_candidate_policy;
+use dynamo_admission::host::QueueRejection;
+use dynamo_kv_hashing::multimodal::BlockExtraInfo;
+use dynamo_kv_hints::KvHint;
+use dynamo_kv_indexer::host::RoutingDecisionHashes;
+use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 use dynamo_runtime::{dynamo_nvtx_range, pipeline::Error};
+use dynamo_scheduler::host::{
+    AdvisoryWorkerLoad, BookingHandle, RequestLifecycle, RouterConfigOverride, RoutingConstraints,
+    RoutingEligibility,
+};
+use dynamo_session_affinity::host::WorkerAffinityTarget;
 
 use crate::{
     kv_router::{FindBestMatchAdmission, FindBestMatchOutcome, routing_host::RoutingHost},
@@ -26,6 +25,11 @@ use crate::{
     },
     session_affinity::AffinityTarget,
 };
+
+#[cfg(test)]
+use crate::lora::LoraFilter;
+#[cfg(test)]
+use dynamo_lora::runtime::constrain_runtime_lora_workers;
 
 pub(super) struct WorkerSelection {
     pub(super) worker: WorkerWithDpRank,
@@ -81,11 +85,12 @@ pub(super) struct SelectionOptions {
     pub(super) affinity_target: Option<AffinityTarget>,
     pub(super) planned_worker: Option<WorkerWithDpRank>,
     pub(super) policy_class: Option<String>,
-    pub(super) session_context: Option<dynamo_kv_router::SessionContext>,
+    pub(super) session_context: Option<dynamo_router_protocol::session::SessionContext>,
     pub(super) admission: FindBestMatchAdmission,
 }
 
 struct BestMatchArgs<'a> {
+    accounting_attribution: dynamo_scheduler::host::AccountingAttribution,
     context_id: &'a str,
     routing_parts: RoutingRequestParts<'a>,
     router_config_override: Option<&'a RouterConfigOverride>,
@@ -96,7 +101,7 @@ struct BestMatchArgs<'a> {
     priority_jump: f64,
     strict_priority: u32,
     policy_class: Option<String>,
-    session_context: Option<dynamo_kv_router::SessionContext>,
+    session_context: Option<dynamo_router_protocol::session::SessionContext>,
     expected_output_tokens: Option<u32>,
     affinity_target: Option<WorkerAffinityTarget>,
     pinned_worker: Option<WorkerWithDpRank>,
@@ -106,6 +111,40 @@ struct BestMatchArgs<'a> {
 }
 
 impl RoutingHost {
+    pub(super) fn check_current_kv_candidate(
+        &self,
+        request: &PreprocessedRequest,
+        worker: u64,
+    ) -> Result<(), Error> {
+        if !crate::routing_policy::execution_requirements(request).policy_required {
+            return Ok(());
+        }
+        let policy = self
+            .kv_router()
+            .admission_policy
+            .as_ref()
+            .ok_or_else(dynamo_lora::policy::RequestPolicy::capability_error)?;
+        let routing = request
+            .routing
+            .as_ref()
+            .ok_or_else(dynamo_lora::policy::RequestPolicy::capability_error)?;
+        let live = self.inner.client.instance_ids_avail().into_iter().collect();
+        let workers = self.kv_router().workers_with_configs.borrow();
+        let default_constraints = RoutingConstraints::default();
+        policy.check_current(
+            request,
+            worker,
+            &workers,
+            &live,
+            routing.allowed_worker_ids.clone(),
+            routing
+                .routing_constraints
+                .as_ref()
+                .unwrap_or(&default_constraints),
+        )?;
+        Ok(())
+    }
+
     async fn select_best_match(&self, args: BestMatchArgs<'_>) -> Result<SelectionOutcome, Error> {
         let admitted = self
             .kv_router()
@@ -128,6 +167,7 @@ impl RoutingHost {
                 args.allowed_worker_ids,
                 args.routing_constraints,
                 args.admission,
+                args.accounting_attribution,
             )
             .await?;
         match admitted.outcome {
@@ -187,6 +227,26 @@ impl RoutingHost {
             .and_then(|routing| routing.routing_constraints.clone())
             .unwrap_or_default();
         let mut allowed_worker_ids = routing.and_then(|routing| routing.allowed_worker_ids.clone());
+        check_candidate_policy(request, self.kv_router().admission_policy.is_some())?;
+        if crate::routing_policy::execution_requirements(request).policy_required
+            && let Some(policy) = self.kv_router().admission_policy.as_ref()
+        {
+            let workers = self.kv_router().workers_with_configs.borrow();
+            let live = self.inner.client.instance_ids_avail().into_iter().collect();
+            let pins = explicit_pin
+                .map(|(worker, _)| worker)
+                .into_iter()
+                .chain(options.pinned_target.map(|target| target.worker_id))
+                .collect::<Vec<_>>();
+            allowed_worker_ids = policy.restrict(
+                request,
+                &workers,
+                &live,
+                allowed_worker_ids,
+                &routing_constraints,
+                &pins,
+            )?;
+        }
         let migration_excluded_worker_ids = request
             .migration_state
             .as_ref()
@@ -247,6 +307,9 @@ impl RoutingHost {
                 .dp_rank
                 .map(|dp_rank| (target.worker_id, Some(dp_rank)))
         });
+        // A pin from the session binding alone is an affinity decision: forward it as the
+        // affinity target so the scheduler logs and measures it as one.
+        let pin_is_affinity_only = explicit_pin.is_none() && affinity_pin.is_some();
         let requested_pin = merge_affinity_pin(explicit_pin, affinity_pin);
         let pinned_worker = match planned_worker {
             Some(planned_worker) => {
@@ -277,6 +340,8 @@ impl RoutingHost {
             let _nvtx_kv = dynamo_nvtx_range!("route.kv_match");
             let selection = self
                 .select_best_match(BestMatchArgs {
+                    accounting_attribution: crate::routing_policy::execution_requirements(request)
+                        .accounting_attribution,
                     context_id,
                     routing_parts,
                     router_config_override: request.router_config_override.as_ref(),
@@ -345,6 +410,8 @@ impl RoutingHost {
         );
 
         self.select_best_match(BestMatchArgs {
+            accounting_attribution: crate::routing_policy::execution_requirements(request)
+                .accounting_attribution,
             context_id,
             routing_parts,
             router_config_override: request.router_config_override.as_ref(),
@@ -357,7 +424,7 @@ impl RoutingHost {
             policy_class,
             session_context,
             expected_output_tokens,
-            affinity_target: None,
+            affinity_target: pin_is_affinity_only.then(|| pinned_worker.into()),
             pinned_worker: Some(pinned_worker),
             allowed_worker_ids,
             routing_constraints,
@@ -365,6 +432,21 @@ impl RoutingHost {
         })
         .await
     }
+}
+
+#[cfg(test)]
+fn pin_runtime_lora_workers(
+    filter: &LoraFilter,
+    lora_name: &str,
+    eligible: &HashSet<u64>,
+    requested_workers: impl IntoIterator<Item = u64>,
+) -> Result<HashSet<u64>, Error> {
+    Ok(dynamo_lora::policy::RequestPolicy::pin_workers(
+        filter,
+        lora_name,
+        eligible,
+        requested_workers,
+    )?)
 }
 
 fn merge_affinity_pin(
@@ -420,24 +502,180 @@ fn pinned_worker_hint(
 
 #[cfg(test)]
 mod tests {
+    use crate::lora::runtime::{
+        RUNTIME_LORA_PROTOCOL_VERSION, RUNTIME_LORA_SCHEMES_RUNTIME_KEY,
+        RUNTIME_LORA_SUPPORT_RUNTIME_KEY, RUNTIME_LORA_VERSIONS_RUNTIME_KEY,
+    };
+    use dynamo_runtime::error::{DynamoError, ErrorType};
     use std::collections::{HashMap, HashSet};
 
-    use dynamo_kv_router::{
-        protocols::{RoutingConstraints, WorkerWithDpRank},
-        scheduling::{RoutingEligibility, WorkerEligibilityError},
-    };
+    use dynamo_router_protocol::worker::WorkerWithDpRank;
+    use dynamo_scheduler::host::{RoutingConstraints, RoutingEligibility, WorkerEligibilityError};
 
-    use super::{merge_affinity_pin, pinned_worker_hint, resolve_pinned_worker_rank};
+    use super::*;
     use crate::{
         local_model::runtime_config::ModelRuntimeConfig,
+        lora::{
+            filter::LoraFilter, routing::table::LoraRoutingTable, state_tracker::LoraStateTracker,
+        },
         protocols::common::{preprocessor::RoutingHints, timing::RequestPhase},
     };
+
+    fn runtime_config(capability: &str, scheme: &str) -> ModelRuntimeConfig {
+        let mut config = ModelRuntimeConfig::default();
+        config.taints.insert(capability.to_string());
+        config
+            .set_engine_specific(RUNTIME_LORA_SUPPORT_RUNTIME_KEY, true)
+            .unwrap();
+        config
+            .set_engine_specific(
+                RUNTIME_LORA_VERSIONS_RUNTIME_KEY,
+                vec![RUNTIME_LORA_PROTOCOL_VERSION],
+            )
+            .unwrap();
+        config
+            .set_engine_specific(RUNTIME_LORA_SCHEMES_RUNTIME_KEY, vec![scheme])
+            .unwrap();
+        config
+    }
 
     #[test]
     fn resolve_pinned_worker_rank_uses_explicit_rank_including_zero() {
         let worker = resolve_pinned_worker_rank(7, Some(0), Some(3)).unwrap();
         assert_eq!(worker.worker_id, 7);
         assert_eq!(worker.dp_rank, 0);
+    }
+
+    #[test]
+    fn runtime_lora_capability_is_applied_before_lora_affinity() {
+        let capability = "dynamo.runtime-lora/v2".to_string();
+        let capable = runtime_config(&capability, "wandb-artifact");
+        let workers = HashMap::from([(1, ModelRuntimeConfig::default()), (2, capable)]);
+        let constraints = RoutingConstraints {
+            required_taints: HashSet::from([capability]),
+            ..Default::default()
+        };
+        let live = HashSet::from([1, 2]);
+
+        let eligible = constrain_runtime_lora_workers(true, None, &live, &workers, &constraints);
+
+        assert_eq!(eligible, Some(HashSet::from([2])));
+    }
+
+    #[test]
+    fn runtime_lora_rejects_heterogeneous_resolver_sets() {
+        let capability = "dynamo.runtime-lora/v2".to_string();
+        let wandb = runtime_config(&capability, "wandb-artifact");
+        let custom = runtime_config(&capability, "custom");
+        let workers = HashMap::from([(1, wandb), (2, custom)]);
+        let constraints = RoutingConstraints {
+            required_taints: HashSet::from([capability]),
+            ..Default::default()
+        };
+        let live = HashSet::from([1, 2]);
+
+        let eligible = constrain_runtime_lora_workers(true, None, &live, &workers, &constraints);
+
+        assert_eq!(eligible, Some(HashSet::new()));
+    }
+
+    #[test]
+    fn runtime_lora_excludes_configured_workers_that_are_not_live() {
+        let capability = "dynamo.runtime-lora/v2".to_string();
+        let stale = runtime_config(&capability, "custom");
+        let capable = runtime_config(&capability, "wandb-artifact");
+        let workers = HashMap::from([(1, stale), (2, capable)]);
+        let live = HashSet::from([2]);
+        let constraints = RoutingConstraints {
+            required_taints: HashSet::from([capability]),
+            ..Default::default()
+        };
+
+        let eligible = constrain_runtime_lora_workers(true, None, &live, &workers, &constraints);
+
+        assert_eq!(eligible, Some(HashSet::from([2])));
+    }
+
+    #[test]
+    fn runtime_lora_rejects_incomplete_advertised_capability() {
+        let capability = "dynamo.runtime-lora/v2".to_string();
+        let constraints = RoutingConstraints {
+            required_taints: HashSet::from([capability.clone()]),
+            ..Default::default()
+        };
+        let mut missing_support = runtime_config(&capability, "wandb-artifact");
+        missing_support
+            .runtime_data
+            .remove(RUNTIME_LORA_SUPPORT_RUNTIME_KEY);
+        let mut false_support = runtime_config(&capability, "wandb-artifact");
+        false_support
+            .set_engine_specific(RUNTIME_LORA_SUPPORT_RUNTIME_KEY, false)
+            .unwrap();
+        let mut wrong_version = runtime_config(&capability, "wandb-artifact");
+        wrong_version
+            .set_engine_specific(RUNTIME_LORA_VERSIONS_RUNTIME_KEY, vec![1_u32])
+            .unwrap();
+
+        for config in [missing_support, false_support, wrong_version] {
+            let workers = HashMap::from([
+                (1, config),
+                (2, runtime_config(&capability, "wandb-artifact")),
+            ]);
+            assert_eq!(
+                constrain_runtime_lora_workers(
+                    true,
+                    None,
+                    &HashSet::from([1, 2]),
+                    &workers,
+                    &constraints,
+                ),
+                Some(HashSet::from([2]))
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_lora_excludes_sglang_like_workers_without_capability() {
+        let capability = "dynamo.runtime-lora/v2".to_string();
+        let workers = HashMap::from([(1, ModelRuntimeConfig::default())]);
+        let live = HashSet::from([1]);
+        let constraints = RoutingConstraints {
+            required_taints: HashSet::from([capability]),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            constrain_runtime_lora_workers(true, None, &live, &workers, &constraints),
+            Some(HashSet::new())
+        );
+    }
+
+    #[test]
+    fn runtime_lora_affinity_pins_unknown_adapter_to_one_worker() {
+        let filter = LoraFilter::new(LoraRoutingTable::new(), LoraStateTracker::new());
+        let eligible = HashSet::from([1, 2, 3]);
+
+        let first = pin_runtime_lora_workers(&filter, "dyn-lora-test", &eligible, []).unwrap();
+        let second = pin_runtime_lora_workers(&filter, "dyn-lora-test", &eligible, []).unwrap();
+
+        assert_eq!(first.len(), 1);
+        assert_eq!(first, second);
+        assert!(first.is_subset(&eligible));
+        let pinned = *first.iter().next().unwrap();
+        assert_eq!(
+            pin_runtime_lora_workers(&filter, "dyn-lora-test", &eligible, [pinned]).unwrap(),
+            first
+        );
+        let alternate = *eligible.difference(&first).next().unwrap();
+        assert_eq!(
+            pin_runtime_lora_workers(&filter, "dyn-lora-test", &eligible, [alternate]).unwrap(),
+            HashSet::from([alternate])
+        );
+        let error = pin_runtime_lora_workers(&filter, "dyn-lora-test", &eligible, [4]).unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<DynamoError>().unwrap().error_type(),
+            ErrorType::InvalidArgument
+        );
     }
 
     #[test]

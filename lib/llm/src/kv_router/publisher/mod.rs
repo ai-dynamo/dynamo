@@ -8,11 +8,27 @@ use anyhow::Result;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-use dynamo_kv_router::indexer::{KvIndexerMetrics, LocalKvIndexer};
-use dynamo_kv_router::protocols::*;
-pub use dynamo_kv_router::zmq_wire::create_stored_blocks;
+use dynamo_kv_events::event::KvCacheEvent;
 #[cfg(test)]
-use dynamo_kv_router::zmq_wire::*;
+use dynamo_kv_events::event::{
+    KvCacheEventData, KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData, RouterEvent,
+};
+use dynamo_kv_events::placement::{Placement, PlacementEvent};
+use dynamo_kv_events::residency::StorageTier;
+#[cfg(test)]
+use dynamo_kv_events::residency::{ResetScope, ResidencyDomain};
+pub use dynamo_kv_events::zmq_wire::create_stored_blocks;
+#[cfg(test)]
+use dynamo_kv_events::zmq_wire::{
+    BlockHashValue, ExtraKeyItem, KvEventBatch, RawKvEvent, convert_event,
+    create_stored_block_from_parts, extra_keys_to_block_mm_infos,
+};
+#[cfg(test)]
+use dynamo_kv_hashing::multimodal::parse_mm_hash_from_extra_key;
+#[cfg(test)]
+use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
+use dynamo_kv_indexer::host::{KvIndexerMetrics, LocalKvIndexer};
+use dynamo_router_protocol::worker::{DpRank, WorkerId, WorkerWithDpRank};
 use dynamo_runtime::component::{Component, Endpoint};
 use dynamo_runtime::discovery::{DiscoverySpec, EventScope};
 use dynamo_runtime::protocols::EndpointId;
@@ -85,6 +101,11 @@ pub enum KvEventSourceConfig {
         /// Expected source rank and negotiated heartbeat timeout.
         /// Cannot be combined with `recovery`.
         liveness: Option<(u32, std::time::Duration)>,
+        /// The source derives multimodal pad values from engine identities
+        /// (SGLang after sgl-project/sglang#43043), so every event token at or
+        /// above `MM_PAD_SHIFT_VALUE` is excluded from the index. Otherwise only
+        /// values that do not fit in `u32` are excluded.
+        engine_owned_mm_identity: bool,
         /// Opt-in replay recovery that gates readiness on verified continuity.
         /// Cannot be combined with `liveness`.
         recovery: Option<ZmqRecoveryConfig>,
@@ -148,6 +169,7 @@ impl KvEventSource {
                 video_token_id,
                 expected_rank,
                 liveness,
+                engine_owned_mm_identity,
                 recovery,
             } => {
                 anyhow::ensure!(
@@ -171,6 +193,7 @@ impl KvEventSource {
                             video_token_id,
                             expected_rank,
                             liveness,
+                            engine_owned_mm_identity,
                             recovery,
                         ));
                 let listener_abort_handle = listener_handle.abort_handle();

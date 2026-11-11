@@ -5,4 +5,4 @@
 //!
 //! These are msgpack-over-ZMQ structures emitted by vLLM's Python `msgspec` codec.
 
-pub use dynamo_kv_router::zmq_wire::{BlockHashValue, KvEventBatch, RawKvEvent};
+pub use dynamo_kv_events::zmq_wire::{BlockHashValue, KvEventBatch, RawKvEvent};
