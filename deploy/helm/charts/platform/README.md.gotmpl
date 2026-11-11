@@ -249,31 +249,6 @@ so a faulted pipeline does not recover.
 
 #### New behavior
 
-##### LPX Workload Priority
-
-**Change:** `lpx.scheduling.priorityClassName` selects a non-preempting Kubernetes
-PriorityClass for future LPU pipeline requests. The serving target owns the policy
-for a shared workload; its draft must omit the class or repeat the target's value.
-
-**Affected:** LPX DGDs that opt into the field in either served API version.
-Omission retains priority zero and does not select the cluster's default class.
-
-**Action:** Before enabling the field, install the LPX CRD that retains
-`LpuPipelineRequest.spec.priorityClassName`, grant the scheduler read access to
-PriorityClasses, and upgrade every scheduler replica to a reader that supports
-the field. Keep producers field-absent during mixed-version scheduler rollout.
-Then create user classes with `preemptionPolicy: Never` and configure the DGD.
-An older strict reader can reject an entire Request LIST containing the new
-field. After enabling it, roll back only to compatible scheduler binaries;
-removing the DGD setting does not strip existing immutable request references.
-
-**Existing deployments:** Priority edits preserve published requests, their
-scheduling clocks, PCS identity, and workload templates. New requests use the
-current policy. An edit after a scheduling deadline failure permits retry only
-after ordinary cleanup and finalization; healthy survivors retain their class
-and external capacity stays externally managed. See the
-[shared component reference](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/reference/kubernetes-api/dynamo-component-deployment.mdx#shared-component-spec).
-
 ##### LWS no longer requires Volcano
 
 **Change:** LWS auto-detection and explicit enablement require only the
