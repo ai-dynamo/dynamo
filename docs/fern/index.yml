@@ -96,6 +96,9 @@ navigation:
           path: pages/kubernetes/installation/install-with-aicr.md
         - page: Multinode Orchestration
           path: pages/kubernetes/installation/multinode-orchestration.md
+        - page: Install KubeRay
+          slug: install-kuberay
+          path: pages/kubernetes/installation/install-kuberay.mdx
         - page: Gateway API Inference Extension
           path: pages/kubernetes/installation/gateway-api-routing.mdx
         - page: Operator TLS
