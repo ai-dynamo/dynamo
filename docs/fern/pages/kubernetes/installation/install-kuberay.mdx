@@ -6,7 +6,7 @@ subtitle: Install the KubeRay operator to run reinforcement learning trainers on
 ---
 
 <Note>
-Install KubeRay only to run trainers on Ray, such as the one in the [Slime](../../use-cases/reinforcement-learning/slime/overview.mdx) reinforcement learning (RL) tutorial. Dynamo doesn't need KubeRay to serve models.
+Install KubeRay only to run trainers on Ray, such as the ones in the [Slime](../../use-cases/reinforcement-learning/slime/overview.mdx) and [verl](../../use-cases/reinforcement-learning/verl/overview.mdx) reinforcement learning (RL) tutorials. Dynamo doesn't need KubeRay to serve models.
 </Note>
 
 [KubeRay](https://docs.ray.io/en/latest/cluster/kubernetes/index.html) runs Ray clusters and Ray jobs on Kubernetes. The RL tutorials submit their trainers as KubeRay `RayJob` resources. For each `RayJob`, KubeRay creates a Ray cluster, runs the job on it, and deletes the cluster when the job ends.
@@ -77,4 +77,5 @@ rayclusters.ray.io   2026-07-09T18:47:32Z
 
 ## Next Steps
 
-[Install and set up Slime with Dynamo](../../use-cases/reinforcement-learning/slime/installation.mdx) to train Qwen3-0.6B with Slime on KubeRay while Dynamo serves its rollouts.
+- [Install and set up Slime with Dynamo](../../use-cases/reinforcement-learning/slime/installation.mdx) to train Qwen3-0.6B with Slime on KubeRay while Dynamo serves its rollouts.
+- [Install and set up verl with Dynamo](../../use-cases/reinforcement-learning/verl/installation.mdx) to train Qwen2.5-7B-Instruct with verl on KubeRay while Dynamo serves its rollouts.

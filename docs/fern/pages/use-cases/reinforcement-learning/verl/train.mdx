@@ -27,7 +27,7 @@ kind: RayJob
 metadata:
   name: verl-grpo
 spec:
-  entrypoint: >-
+  entrypoint: >-  # KubeRay pastes this into a shell script unquoted, so it can't hold comments
     python3 -m verl.trainer.main_ppo
     --config-path /data/verl/recipe/dynamo/config
     --config-name dynamo_trainer_v1_colocate
@@ -81,16 +81,16 @@ spec:
     trainer.default_local_dir=/data/runs/verl-grpo/checkpoints
     trainer.rollout_data_dir=/data/runs/verl-grpo/rollouts
     trainer.validation_data_dir=/data/runs/verl-grpo/validation
-  shutdownAfterJobFinishes: true
-  ttlSecondsAfterFinished: 30
-  activeDeadlineSeconds: 3600
-  backoffLimit: 0
+  shutdownAfterJobFinishes: true  # Delete the Ray cluster when the job ends
+  ttlSecondsAfterFinished: 30     # Wait 30 seconds first
+  activeDeadlineSeconds: 3600     # Stop a run that lasts more than an hour
+  backoffLimit: 0                 # Don't retry a failed run
   submitterPodTemplate:
     spec:
       restartPolicy: Never
       containers:
         - name: ray-job-submitter
-          image: rayproject/ray:2.60.0-py312
+          image: rayproject/ray:2.60.0-py312  # Ray's image: the Dynamo image has no Ray CLI
           resources:
             requests:
               cpu: 200m
@@ -99,41 +99,42 @@ spec:
               cpu: "1"
               memory: 1Gi
   rayClusterSpec:
-    rayVersion: "2.60.0"
+    rayVersion: "2.60.0"  # The Ray version that the setup Job installed
     headGroupSpec:
       rayStartParams: {}
       template:
         spec:
-          enableServiceLinks: false
+          enableServiceLinks: false  # Keep Service variables out of etcd, NATS, and Dynamo
           containers:
             - name: ray-head
-              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.1
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.1  # Dynamo 1.5.1 with vLLM 0.28.0
+              # KubeRay runs this command before its own ray start: install the setup Job's wheels.
               command: ["python3", "-m", "pip", "install", "--quiet", "--no-index", "--no-deps",
                         "--find-links", "/data/wheelhouse", "-r", "/data/wheelhouse/requirements.txt"]
               securityContext:
-                runAsUser: 0
+                runAsUser: 0  # Root, to install the wheels into the image's Python environment
               env:
-                - name: PYTHONPATH
+                - name: PYTHONPATH                 # Import verl and the recipe from the volume
                   value: /data/verl
-                - name: VERL_USE_EXTERNAL_MODULES
+                - name: VERL_USE_EXTERNAL_MODULES  # Register the recipe's dynamo rollout backend
                   value: recipe.dynamo.register
-                - name: VERL_DYNAMO_REFIT_STRICT
+                - name: VERL_DYNAMO_REFIT_STRICT   # Stop if the weight-update self-test fails
                   value: "1"
-                - name: PYTHONUNBUFFERED
+                - name: PYTHONUNBUFFERED           # Print each training step when it finishes
                   value: "1"
-                - name: HF_HOME
+                - name: HF_HOME                    # Keep the Hugging Face cache on the volume
                   value: /data/hf-home
-                - name: POD_IP
+                - name: POD_IP                     # The Pod's IP address, for DYN_TCP_RPC_HOST
                   valueFrom:
                     fieldRef:
                       fieldPath: status.podIP
-                - name: DYN_TCP_RPC_HOST
+                - name: DYN_TCP_RPC_HOST           # Bind Dynamo's request plane to the Pod IP
                   value: $(POD_IP)
               resources:
                 requests:
                   cpu: "64"
                   memory: 800Gi
-                  nvidia.com/gpu: "8"
+                  nvidia.com/gpu: "8"  # The trainer and the four vLLM engines share the 8 GPUs
                 limits:
                   cpu: "64"
                   memory: 800Gi
@@ -142,7 +143,7 @@ spec:
                 - name: verl-data
                   mountPath: /data
                 - name: dshm
-                  mountPath: /dev/shm
+                  mountPath: /dev/shm  # Shared memory for NCCL, vLLM, and the Ray object store
           volumes:
             - name: verl-data
               persistentVolumeClaim:
@@ -154,50 +155,7 @@ spec:
 EOF
 ```
 
-The RayJob has three parts:
-
-- **The job.** `entrypoint` is the training command: verl's `main_ppo` module with the recipe's preset and Hydra overrides. KubeRay pastes it unquoted into a shell script, so keep `#` out of it.
-- **The Ray cluster.** One head Pod holds all 8 GPUs and runs the verl driver, the FSDP workers, and the Dynamo processes. KubeRay runs the container's `command` in a shell before its own `ray start`, so the head installs the setup Job's wheels first. The Dynamo image has no Ray until then. The head runs as root to install them into the image's Python environment. `rayVersion` matches the Ray version that the setup Job installed, and KubeRay uses it to pick version-specific behavior such as the head's health checks. `enableServiceLinks: false` keeps Kubernetes service variables out of the etcd, NATS, and Dynamo processes, and `/dev/shm` is memory-backed for NCCL, vLLM, and the Ray object store.
-- **The submitter and cleanup.** The submitter Pod runs `ray job submit` from Ray's own image at the same Ray version, because the Dynamo image has no Ray command-line tool. `shutdownAfterJobFinishes` and `ttlSecondsAfterFinished` delete the Ray cluster 30 seconds after the job ends, and `activeDeadlineSeconds` stops a run that lasts more than an hour. The RayJob keeps the job status, and its submitter keeps the driver log.
-
-The head sets these environment variables:
-
-| Variable | Purpose |
-|---|---|
-| `PYTHONPATH` | Imports verl and the recipe from the checkout on the volume. |
-| `VERL_USE_EXTERNAL_MODULES` | Registers the recipe's `dynamo` rollout backend when verl starts. The preset passes it on to the Ray workers. |
-| `VERL_DYNAMO_REFIT_STRICT` | Stops the run if the recipe's weight-update self-test fails, instead of logging a warning. |
-| `PYTHONUNBUFFERED` | Prints each training step when it finishes. Ray workers otherwise buffer verl's output. |
-| `HF_HOME` | Keeps the Hugging Face cache on the volume. |
-| `DYN_TCP_RPC_HOST` | Binds Dynamo's request plane to the Pod IP, which `POD_IP` reads from the Pod's status. |
-
-These overrides configure the Dynamo rollout backend. In the table, `rollout.` stands for `actor_rollout_ref.rollout.`, and `dynamo.` for `actor_rollout_ref.rollout.engine_kwargs.dynamo.`:
-
-| Override | Purpose |
-|---|---|
-| `--config-path`, `--config-name` | Loads the recipe's `dynamo_trainer_v1_colocate` preset: verl's V1 trainer in `colocate_async` mode, with the engines and the trainer on the same GPUs. |
-| `rollout.name`, `rollout.mode` | Generates rollouts with the recipe's asynchronous Dynamo backend. |
-| `rollout.tensor_model_parallel_size` | Runs one vLLM engine per two GPUs: four engines on the node's 8 GPUs. |
-| `rollout.gpu_memory_utilization` | Caps each engine at 60% of its GPUs' memory while it's awake. |
-| `rollout.calculate_log_probs` | Returns the engines' token log-probabilities, which verl compares with the trainer's. |
-| `dynamo.router_mode`, `dynamo.thunderagent.enabled` | Routes requests with Dynamo's KV router instead of ThunderAgent. |
-| `dynamo.request_engine_data`, `dynamo.request_completion_token_ids` | Returns the token IDs that the engines generated, so verl trains on the exact tokens. |
-| `dynamo.request_timeout_s` | Allows each rollout request up to 30 minutes. |
-| `dynamo.free_engine_on_train` | Puts the engines to sleep while FSDP trains. It must match `rollout.free_cache_engine`, which the preset sets to `true`. |
-| `VERL_DYNAMO_LOG_DIR` | Writes the frontend and engine logs to `/data/runs/verl-grpo/dynamo-logs`. |
-
-The keys under `engine_kwargs.dynamo` need the `++` prefix, which adds a key that the preset doesn't declare. Without it, Hydra fails with `Key 'router_mode' is not in struct`.
-
-The other overrides are standard verl settings. See the [verl configuration guide](https://verl.readthedocs.io/en/latest/examples/config.html) for each one.
-
-| Overrides | Setting |
-|---|---|
-| `algorithm.*` | Use GRPO advantages, without a KL penalty in the reward. |
-| `data.*` | Train on 64 GSM8K prompts per step, with up to 512 prompt tokens and 1,024 response tokens. Drop longer prompts. |
-| `actor_rollout_ref.model.*` | Train Qwen2.5-7B-Instruct with padding removal and gradient checkpointing. |
-| `actor_rollout_ref.actor.*`, `actor_rollout_ref.ref.*` | Update the policy 4 times per step, 16 prompts at a time, with a learning rate of 1e-6, a `low_var_kl` loss against the reference model with a coefficient of 0.001, and no entropy bonus. Keep the reference model's parameters in CPU memory. |
-| `rollout.n`, `*.log_prob_micro_batch_size_per_gpu` | Sample 8 answers per prompt, and compute log-probabilities 8 sequences at a time per GPU. |
-| `trainer.*`, `hydra.run.dir` | Log to the console only, because verl's default also logs to Weights & Biases, which asks for a login. Train on one node with 8 GPUs for 15 steps, score the GSM8K test split before training and every 5 steps, and save no checkpoints. Write Hydra's run directory, the rollouts, and the validation answers under `/data/runs/verl-grpo`. |
+The entrypoint loads the recipe's `dynamo_trainer_v1_colocate` preset, which runs verl's V1 trainer with the engines and the trainer on the same GPUs. `actor_rollout_ref.rollout.name=dynamo` sends the rollouts through the recipe's Dynamo backend, and the `engine_kwargs.dynamo` keys configure it: KV-aware routing, the generated token IDs in every response, and engines that sleep while FSDP trains. These keys need the `++` prefix, which adds a key that the preset doesn't declare. The other overrides set up GRPO on GSM8K: 64 prompts per step with 8 answers each, 15 steps, and the test accuracy before training and every 5 steps. Because the entrypoint can't hold comments, [verl Configuration](../../../reference/reinforcement-learning/verl-configuration.mdx) describes each override.
 
   </Step>
   <Step title="Follow the training log" id="follow-the-training-log">
@@ -363,7 +321,6 @@ kubectl delete rayjob verl-grpo -n "$NAMESPACE"
 - Dynamo runs inside the Ray job, so no operator restarts a failed engine or frontend. The job fails instead.
 - The Ray head's dashboard and Jobs API on port 8265 accept requests without authentication, and the recipe runs etcd and NATS without authentication in the same Pod. Anyone who can reach the Pod can run code in it. Restrict access to the Ray head, for example with a NetworkPolicy.
 - Each Ray Pod installs the setup Job's wheels when it starts, because the Dynamo image doesn't include Ray or verl.
-- The recipe is tested on one node.
 
 ## Next Steps
 

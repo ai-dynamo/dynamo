@@ -1389,6 +1389,14 @@ navigation:
           - page: TensorRT-LLM Configuration
             path: pages/reference/backends/tensorrt-llm-configuration.mdx
 
+      - section: Reinforcement Learning
+        icon: brain
+        slug: reinforcement-learning
+        collapsed: true
+        contents:
+          - page: verl Configuration
+            path: pages/reference/reinforcement-learning/verl-configuration.mdx
+
       - section: Observability
         icon: gauge
         slug: observability

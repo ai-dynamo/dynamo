@@ -15,46 +15,7 @@ You don't need the Dynamo Kubernetes platform. The verl recipe starts Dynamo fro
 
 ## Install KubeRay
 
-<Steps toc={true}>
-  <Step title="Install the KubeRay operator" id="install-the-kuberay-operator">
-
-KubeRay runs the verl trainer as a `RayJob`. Install the operator with Helm:
-
-```bash
-helm repo add kuberay https://ray-project.github.io/kuberay-helm/
-helm repo update
-helm install kuberay-operator kuberay/kuberay-operator \
-  --version 1.7.1 \
-  --namespace kuberay \
-  --create-namespace
-```
-
-Confirm that the operator is running:
-
-```bash
-kubectl get pods -n kuberay
-```
-
-```text
-NAME                                READY   STATUS    RESTARTS   AGE
-kuberay-operator-6b9c8d7f5d-x2q7z   1/1     Running   0          1m
-```
-
-  </Step>
-  <Step title="Verify the installation" id="verify-the-installation">
-
-```bash
-kubectl get crd rayjobs.ray.io rayclusters.ray.io
-```
-
-```text
-NAME                 CREATED AT
-rayjobs.ray.io       2026-07-09T18:47:36Z
-rayclusters.ray.io   2026-07-09T18:47:32Z
-```
-
-  </Step>
-</Steps>
+KubeRay runs the verl trainer as a `RayJob`. Follow [Install KubeRay](../../../kubernetes/installation/install-kuberay.mdx). These pages were validated with KubeRay 1.7.1.
 
 ## Build verl and Stage the Model
 

@@ -21,7 +21,9 @@
 # dark colors serves players without that theme, such as agg and asciinema.org.
 # Keep it in step with the dark block of the fern-code theme in
 # docs/fern/components/TerminalDemo.tsx. Each slot is the syntax role that
-# slime-demo.sh names in its palette section.
+# slime-demo.sh names in its palette section. The verl Integration overview's
+# cast uses the same slots, so ../verl-demo/record-verl-demo.sh runs this
+# script too.
 #
 # Usage: apply-fern-code-theme.py <file.cast>
 import json

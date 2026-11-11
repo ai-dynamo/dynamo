@@ -2,17 +2,45 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: verl Integration
-subtitle: Run verl rollouts through Dynamo on Kubernetes
 hide-toc: true
 ---
 
-<Tooltip tip="Validated with Dynamo 1.5.1, verl 6cbca9ce, verl-recipe 242c73fc, and KubeRay 1.7.1 on H100 GPUs. Manifests and flags can change between releases."><Badge intent="warning" minimal>Experimental</Badge></Tooltip> [verl](https://github.com/verl-project/verl) trains on KubeRay while the [Dynamo rollout backend](https://github.com/verl-project/verl-recipe/tree/main/dynamo) from verl-recipe starts a Dynamo frontend and vLLM engines inside the training job to generate its rollouts.
+import { HideTocStyles } from "@/components/HideTocStyles";
+import { TerminalDemo } from "@/components/TerminalDemo";
+
+<HideTocStyles />
+
+<Warning title="Experimental">
+Validated with Dynamo 1.5.1, verl 6cbca9ce, verl-recipe 242c73fc, and KubeRay 1.7.1 on H100 GPUs. Manifests and flags can change between releases.
+</Warning>
+
+[verl](https://github.com/verl-project/verl) trains on KubeRay while the [Dynamo rollout backend](https://github.com/verl-project/verl-recipe/tree/main/dynamo) from verl-recipe starts a Dynamo frontend and vLLM engines inside the training job to generate its rollouts.
+
+## Tutorial: Train Qwen2.5-7B-Instruct with verl + Dynamo
+
+This tutorial covers how to train Qwen2.5-7B-Instruct to solve elementary math problems through reinforcement learning on the GSM8K (Grade School Math 8K) dataset using the GRPO algorithm. The RL loop runs on verl through KubeRay, and Fully Sharded Data Parallel (FSDP) trains the model. verl usually generates rollouts with vLLM engines that it manages itself. Here, the recipe's Dynamo backend starts a Dynamo frontend and four vLLM engines inside the same job instead, so every rollout request goes through Dynamo's KV-aware router. The engines and the trainer share one node's 8 GPUs, and no DynamoGraphDeployment is involved.
+
+<Note>
+Although verl doesn't require Kubernetes, this tutorial covers running it on Kubernetes with KubeRay. The recipe's [README](https://github.com/verl-project/verl-recipe/tree/main/dynamo) covers running it without Kubernetes.
+</Note>
 
 <CardGroup cols={2}>
-  <Card title="Installation and Setup" icon="regular download" href="installation.mdx">
+  <Card title="1. Install + Setup" icon="regular download" href="installation.mdx">
     Install KubeRay, then build verl onto a shared volume and download the model and dataset.
   </Card>
-  <Card title="Train with verl on KubeRay" icon="regular brain" href="train.mdx">
-    Run GRPO on Qwen2.5-7B-Instruct with GSM8K for 15 steps in a RayJob that starts its own Dynamo frontend and vLLM engines.
+  <Card title="2. Train with verl + KubeRay" icon="regular brain" href="train.mdx">
+    Run GRPO for 15 steps in a RayJob that starts its own Dynamo frontend and vLLM engines.
   </Card>
 </CardGroup>
+
+## Seeing it in action
+
+<TerminalDemo
+  src="../../../../assets/verl-rl-demo.cast"
+  title="Qwen2.5-7B-Instruct · GRPO on GSM8K · 15 steps on 8 GPUs"
+  chrome="macos"
+  theme="fern-code"
+  cols={100}
+  rows={25}
+  idleTimeLimit={1.5}
+/>
