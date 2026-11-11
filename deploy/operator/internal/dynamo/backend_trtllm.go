@@ -7,6 +7,7 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features/compatibility"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -75,7 +76,8 @@ func (b *TRTLLMBackend) UpdateContainer(container *corev1.Container, numberOfNod
 		if err != nil {
 			return fmt.Errorf("failed to resolve container GPUs: %w", err)
 		}
-		b.setupLeaderContainer(container, numberOfNodes, serviceName, multinodeDeployer, containerGPUs)
+		mapByNode := compatibility.TRTLLMMpirunMapByNode.Enabled(GetPodTemplateAnnotations(component))
+		b.setupLeaderContainer(container, numberOfNodes, serviceName, multinodeDeployer, containerGPUs, mapByNode)
 	case RoleWorker:
 		b.setupWorkerContainer(container)
 	}
@@ -110,7 +112,7 @@ func (b *TRTLLMBackend) addSSHVolumeMount(container *corev1.Container) {
 }
 
 // setupLeaderContainer configures the leader node with SSH setup and mpirun command
-func (b *TRTLLMBackend) setupLeaderContainer(container *corev1.Container, numberOfNodes int32, serviceName string, multinodeDeployer MultinodeDeployer, containerGPUs int64) {
+func (b *TRTLLMBackend) setupLeaderContainer(container *corev1.Container, numberOfNodes int32, serviceName string, multinodeDeployer MultinodeDeployer, containerGPUs int64, mapByNode bool) {
 	// Generate the list of all hostnames
 	hostNamesList := b.hostNamesList(numberOfNodes, serviceName, multinodeDeployer)
 	allHostnames := strings.Join(hostNamesList, ",")
@@ -165,9 +167,19 @@ func (b *TRTLLMBackend) setupLeaderContainer(container *corev1.Container, number
 	// Use --allow-run-as-root only when the container is running as root (UID 0).
 	// When running as a non-root user, mpirun works without this flag and omitting
 	// it avoids masking accidental root execution.
-	mpirunCmd := fmt.Sprintf("mpirun $([ \"$(id -u)\" = \"0\" ] && echo --allow-run-as-root) --oversubscribe -n %d -H %s --mca pml ob1 --mca plm_rsh_args \"-p %d -o StrictHostKeyChecking=no -i $HOME/.ssh/id_rsa\" %s %s",
+	//
+	// -H lists each host without a slot count. Open MPI 4 then spreads the
+	// oversubscribed ranks evenly over the hosts, but Open MPI 5 (the arm64
+	// runtime image) maps by core and puts every rank on the first host.
+	// --map-by ppr:<GPUs>:node pins GPUs-per-pod ranks to each host on both.
+	mapByFlag := ""
+	if mapByNode {
+		mapByFlag = fmt.Sprintf(" --map-by ppr:%d:node", containerGPUs)
+	}
+	mpirunCmd := fmt.Sprintf("mpirun $([ \"$(id -u)\" = \"0\" ] && echo --allow-run-as-root) --oversubscribe -n %d -H %s%s --mca pml ob1 --mca plm_rsh_args \"-p %d -o StrictHostKeyChecking=no -i $HOME/.ssh/id_rsa\" %s %s",
 		totalGPUs,
 		allHostnames,
+		mapByFlag,
 		commonconsts.MpiRunSshPort,
 		envVarsStr,
 		wrappedCommand)

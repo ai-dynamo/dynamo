@@ -127,7 +127,7 @@ func TestShellQuoteForBashC_InLeaderCommand(t *testing.T) {
 		},
 	}
 
-	backend.setupLeaderContainer(container, 2, "dec", &GroveMultinodeDeployer{}, resolveTestContainerGPUs(t, betaComponent(t, component)))
+	backend.setupLeaderContainer(container, 2, "dec", &GroveMultinodeDeployer{}, resolveTestContainerGPUs(t, betaComponent(t, component)), false)
 
 	if len(container.Args) != 1 {
 		t.Fatalf("expected 1 arg, got %d", len(container.Args))
@@ -258,6 +258,56 @@ func TestTRTLLMBackend_UpdateContainer(t *testing.T) {
 			expectLivenessRemoved:  false,
 			expectReadinessRemoved: false,
 			expectStartupRemoved:   false,
+			expectedReadinessProbe: nil,
+		},
+		{
+			name:              "Multinode leader created by operator 1.7.0 places GPUs-per-pod ranks on each node",
+			numberOfNodes:     2,
+			role:              RoleLeader,
+			multinodeDeployer: &LWSMultinodeDeployer{},
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				Annotations: map[string]string{
+					commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.7.0",
+				},
+				Resources: &v1alpha1.Resources{
+					Limits: &v1alpha1.ResourceItem{
+						GPU: "4",
+					},
+				},
+			},
+			expectedVolumeMounts: []corev1.VolumeMount{
+				{Name: mpiRunSecretName, MountPath: "/ssh-pk", ReadOnly: true},
+			},
+			expectedCommand: []string{"/bin/sh", "-c"},
+			expectedArgs:    []string{"mkdir -p $HOME/.ssh && ls -la /ssh-pk/ && cp /ssh-pk/private.key $HOME/.ssh/id_rsa && cp /ssh-pk/private.key.pub $HOME/.ssh/id_rsa.pub && cp /ssh-pk/private.key.pub $HOME/.ssh/authorized_keys && chmod 600 $HOME/.ssh/id_rsa $HOME/.ssh/authorized_keys && chmod 644 $HOME/.ssh/id_rsa.pub && printf 'Host *\\nIdentityFile '$HOME'/.ssh/id_rsa\\nStrictHostKeyChecking no\\nPort 2222\\n' > $HOME/.ssh/config && TIMEOUT=300; START_TIME=$(date +%s); for worker in $(echo \"$LWS_LEADER_ADDRESS\" | sed 's/\\./-1\\./'); do echo \"Waiting for DNS: $worker\"; until getent hosts $worker >/dev/null 2>&1; do CURRENT_TIME=$(date +%s); if [ $((CURRENT_TIME - START_TIME)) -gt $TIMEOUT ]; then echo \"ERROR: Timeout waiting for DNS: $worker\"; exit 1; fi; echo \"DNS not ready for $worker, retrying...\"; sleep 2; done; echo \"✓ DNS resolved: $worker\"; done; echo \"All workers DNS ready\" && mpirun $([ \"$(id -u)\" = \"0\" ] && echo --allow-run-as-root) --oversubscribe -n 8 -H $(LWS_LEADER_ADDRESS),$(echo \"$LWS_LEADER_ADDRESS\" | sed 's/\\./-1\\./') --map-by ppr:4:node --mca pml ob1 --mca plm_rsh_args \"-p 2222 -o StrictHostKeyChecking=no -i $HOME/.ssh/id_rsa\" -x CPATH -x CUDA_VISIBLE_DEVICES -x HF_DATASETS_CACHE -x HF_ENDPOINT -x HF_HOME -x HF_TOKEN -x HOME -x HUGGING_FACE_HUB_TOKEN -x LD_LIBRARY_PATH -x MODEL_PATH -x NCCL_DEBUG -x NCCL_IB_DISABLE -x NCCL_P2P_DISABLE -x OMPI_MCA_orte_keep_fqdn_hostnames -x PATH -x PYTHONPATH -x TENSORRT_LLM_CACHE_DIR -x TOKENIZERS_PARALLELISM -x TRANSFORMERS_CACHE -x TRITON_PTXAS_PATH -x TRTLLM_USE_UCX_KVCACHE -x USER bash -c 'trtllm-llmapi-launch python3 --model test'"},
+			expectedEnv: []corev1.EnvVar{
+				{Name: "OMPI_MCA_orte_keep_fqdn_hostnames", Value: "1"},
+			},
+			expectedReadinessProbe: nil,
+		},
+		{
+			name:              "Multinode leader created by operator 1.6.0 keeps the original mpirun placement",
+			numberOfNodes:     2,
+			role:              RoleLeader,
+			multinodeDeployer: &LWSMultinodeDeployer{},
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				Annotations: map[string]string{
+					commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.6.0",
+				},
+				Resources: &v1alpha1.Resources{
+					Limits: &v1alpha1.ResourceItem{
+						GPU: "4",
+					},
+				},
+			},
+			expectedVolumeMounts: []corev1.VolumeMount{
+				{Name: mpiRunSecretName, MountPath: "/ssh-pk", ReadOnly: true},
+			},
+			expectedCommand: []string{"/bin/sh", "-c"},
+			expectedArgs:    []string{"mkdir -p $HOME/.ssh && ls -la /ssh-pk/ && cp /ssh-pk/private.key $HOME/.ssh/id_rsa && cp /ssh-pk/private.key.pub $HOME/.ssh/id_rsa.pub && cp /ssh-pk/private.key.pub $HOME/.ssh/authorized_keys && chmod 600 $HOME/.ssh/id_rsa $HOME/.ssh/authorized_keys && chmod 644 $HOME/.ssh/id_rsa.pub && printf 'Host *\\nIdentityFile '$HOME'/.ssh/id_rsa\\nStrictHostKeyChecking no\\nPort 2222\\n' > $HOME/.ssh/config && TIMEOUT=300; START_TIME=$(date +%s); for worker in $(echo \"$LWS_LEADER_ADDRESS\" | sed 's/\\./-1\\./'); do echo \"Waiting for DNS: $worker\"; until getent hosts $worker >/dev/null 2>&1; do CURRENT_TIME=$(date +%s); if [ $((CURRENT_TIME - START_TIME)) -gt $TIMEOUT ]; then echo \"ERROR: Timeout waiting for DNS: $worker\"; exit 1; fi; echo \"DNS not ready for $worker, retrying...\"; sleep 2; done; echo \"✓ DNS resolved: $worker\"; done; echo \"All workers DNS ready\" && mpirun $([ \"$(id -u)\" = \"0\" ] && echo --allow-run-as-root) --oversubscribe -n 8 -H $(LWS_LEADER_ADDRESS),$(echo \"$LWS_LEADER_ADDRESS\" | sed 's/\\./-1\\./') --mca pml ob1 --mca plm_rsh_args \"-p 2222 -o StrictHostKeyChecking=no -i $HOME/.ssh/id_rsa\" -x CPATH -x CUDA_VISIBLE_DEVICES -x HF_DATASETS_CACHE -x HF_ENDPOINT -x HF_HOME -x HF_TOKEN -x HOME -x HUGGING_FACE_HUB_TOKEN -x LD_LIBRARY_PATH -x MODEL_PATH -x NCCL_DEBUG -x NCCL_IB_DISABLE -x NCCL_P2P_DISABLE -x OMPI_MCA_orte_keep_fqdn_hostnames -x PATH -x PYTHONPATH -x TENSORRT_LLM_CACHE_DIR -x TOKENIZERS_PARALLELISM -x TRANSFORMERS_CACHE -x TRITON_PTXAS_PATH -x TRTLLM_USE_UCX_KVCACHE -x USER bash -c 'trtllm-llmapi-launch python3 --model test'"},
+			expectedEnv: []corev1.EnvVar{
+				{Name: "OMPI_MCA_orte_keep_fqdn_hostnames", Value: "1"},
+			},
 			expectedReadinessProbe: nil,
 		},
 	}
@@ -671,6 +721,7 @@ func TestTRTLLMBackend_setupLeaderContainer(t *testing.T) {
 		component         *v1alpha1.DynamoComponentDeploymentSharedSpec
 		initialArgs       []string
 		initialCommand    []string
+		mapByNode         bool
 		expected          string
 	}{
 		{
@@ -795,6 +846,23 @@ func TestTRTLLMBackend_setupLeaderContainer(t *testing.T) {
 			initialCommand: []string{},
 			expected:       "mkdir -p $HOME/.ssh && ls -la /ssh-pk/ && cp /ssh-pk/private.key $HOME/.ssh/id_rsa && cp /ssh-pk/private.key.pub $HOME/.ssh/id_rsa.pub && cp /ssh-pk/private.key.pub $HOME/.ssh/authorized_keys && chmod 600 $HOME/.ssh/id_rsa $HOME/.ssh/authorized_keys && chmod 644 $HOME/.ssh/id_rsa.pub && printf 'Host *\\nIdentityFile '$HOME'/.ssh/id_rsa\\nStrictHostKeyChecking no\\nPort 2222\\n' > $HOME/.ssh/config && mpirun $([ \"$(id -u)\" = \"0\" ] && echo --allow-run-as-root) --oversubscribe -n 2 -H $(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-ldr-0.$(GROVE_HEADLESS_SERVICE),$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-wkr-0.$(GROVE_HEADLESS_SERVICE) --mca pml ob1 --mca plm_rsh_args \"-p 2222 -o StrictHostKeyChecking=no -i $HOME/.ssh/id_rsa\" -x CPATH -x CUDA_VISIBLE_DEVICES -x CUSTOM_VAR -x HF_DATASETS_CACHE -x HF_ENDPOINT -x HF_HOME -x HF_TOKEN -x HOME -x HUGGING_FACE_HUB_TOKEN -x LD_LIBRARY_PATH -x MODEL_PATH -x NCCL_DEBUG -x NCCL_IB_DISABLE -x NCCL_P2P_DISABLE -x PATH -x PYTHONPATH -x TENSORRT_LLM_CACHE_DIR -x TOKENIZERS_PARALLELISM -x TRANSFORMERS_CACHE -x TRITON_PTXAS_PATH -x TRTLLM_USE_UCX_KVCACHE -x USER bash -c 'trtllm-llmapi-launch serve --model test'",
 		},
+		{
+			name:              "Leader with map-by-node places GPUs-per-pod ranks on each node",
+			numberOfNodes:     3,
+			multinodeDeployer: &GroveMultinodeDeployer{},
+			serviceName:       "test-service",
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				Resources: &v1alpha1.Resources{
+					Requests: &v1alpha1.ResourceItem{
+						GPU: "2",
+					},
+				},
+			},
+			initialArgs:    []string{"python3", "--model", "test"},
+			initialCommand: []string{},
+			mapByNode:      true,
+			expected:       "mkdir -p $HOME/.ssh && ls -la /ssh-pk/ && cp /ssh-pk/private.key $HOME/.ssh/id_rsa && cp /ssh-pk/private.key.pub $HOME/.ssh/id_rsa.pub && cp /ssh-pk/private.key.pub $HOME/.ssh/authorized_keys && chmod 600 $HOME/.ssh/id_rsa $HOME/.ssh/authorized_keys && chmod 644 $HOME/.ssh/id_rsa.pub && printf 'Host *\\nIdentityFile '$HOME'/.ssh/id_rsa\\nStrictHostKeyChecking no\\nPort 2222\\n' > $HOME/.ssh/config && mpirun $([ \"$(id -u)\" = \"0\" ] && echo --allow-run-as-root) --oversubscribe -n 6 -H $(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE),$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-wkr-0.$(GROVE_HEADLESS_SERVICE),$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-wkr-1.$(GROVE_HEADLESS_SERVICE) --map-by ppr:2:node --mca pml ob1 --mca plm_rsh_args \"-p 2222 -o StrictHostKeyChecking=no -i $HOME/.ssh/id_rsa\" -x CPATH -x CUDA_VISIBLE_DEVICES -x HF_DATASETS_CACHE -x HF_ENDPOINT -x HF_HOME -x HF_TOKEN -x HOME -x HUGGING_FACE_HUB_TOKEN -x LD_LIBRARY_PATH -x MODEL_PATH -x NCCL_DEBUG -x NCCL_IB_DISABLE -x NCCL_P2P_DISABLE -x PATH -x PYTHONPATH -x TENSORRT_LLM_CACHE_DIR -x TOKENIZERS_PARALLELISM -x TRANSFORMERS_CACHE -x TRITON_PTXAS_PATH -x TRTLLM_USE_UCX_KVCACHE -x USER bash -c 'trtllm-llmapi-launch python3 --model test'",
+		},
 	}
 
 	for _, tt := range tests {
@@ -821,6 +889,7 @@ func TestTRTLLMBackend_setupLeaderContainer(t *testing.T) {
 				tt.serviceName,
 				tt.multinodeDeployer,
 				resolveTestContainerGPUs(t, component),
+				tt.mapByNode,
 			)
 
 			// Check that command is set correctly
