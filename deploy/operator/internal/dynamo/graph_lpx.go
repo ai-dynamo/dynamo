@@ -64,7 +64,7 @@ func RenderLPXPodCliqueSet(
 	return pcs, nil
 }
 
-// RenderLPXWorkloadTemplates renders one workload's roles, scaling group and resources.
+// RenderLPXWorkloadTemplates renders one workload's roles and scaling group.
 // Pointer inputs must be non-nil, except secretsRetriever when no secrets are used.
 // Inputs are not mutated.
 func RenderLPXWorkloadTemplates(
@@ -99,10 +99,6 @@ func RenderLPXWorkloadTemplates(
 		}
 	}
 
-	// Scope the rendered resources to the graph's Kubernetes namespace.
-	for _, resource := range rendered.Resources {
-		resource.SetNamespace(source.Namespace)
-	}
 	return rendered, nil
 }
 
@@ -442,12 +438,6 @@ func renderSelectedLPXRole(
 		}
 	}
 
-	// LPX supplies the generated config volume after merging; discard only inferred PVCs.
-	explicitVolumes := component.PodTemplate.Spec.Volumes
-	basePodSpec.Volumes = slices.DeleteFunc(basePodSpec.Volumes, func(volume corev1.Volume) bool {
-		return volume.Name == "config" && !slices.ContainsFunc(explicitVolumes,
-			func(explicit corev1.Volume) bool { return explicit.Name == volume.Name })
-	})
 	for _, annotationKey := range commonconsts.KubeTopologySourceAnnotationKeys() {
 		delete(metadata.Annotations, annotationKey)
 	}

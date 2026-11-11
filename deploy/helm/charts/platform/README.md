@@ -104,6 +104,36 @@ up to your target version. Each entry describes changes introduced in that relea
 categories without migration notes recorded here are omitted. For supported Grove and KAI Scheduler
 versions, see the [compatibility matrix](#kai-scheduler-and-grove-configuration).
 
+### Unreleased
+
+#### Operator behavior breaking changes
+
+##### LPX units-only deployment contract
+
+**Change:** LPX reconciliation reads `deployment.v1.capnp.bin` with explicit `lpuUnits`.
+Deployment contract revision 1 remains. The operator no longer reads `manifest.v2.capnp.bin`
+or legacy placement fields, and it no longer generates placement ConfigMaps under `/configs`.
+An invalid checkpoint record in a bundle now fails build acquisition for every workload that
+uses the bundle; before, only a hybrid workload that adopted the checkpoint reported it.
+Checkpoint records that the compiler writes are valid.
+
+**Affected:** All existing LPX deployments need the migration under "Existing deployments".
+Bundles that have no `deployment.v1.capnp.bin` or no `lpuUnits` also need recompilation.
+Existing revision-1 bundles that contain `lpuUnits` do not require recompilation for this change.
+
+**Action:** Recompile affected models with a units-capable producer and update their build IDs.
+Use units-capable runtimes and the scheduler API without `allocationMetadata` or
+`compilerPartitionId`. Remove obsolete `/configs` mounts and their volumes; the operator no
+longer rejects the old path as a migration guard. A main-container mount named `config` that
+has no volume now gets a PersistentVolumeClaim volume with the claim name `config`, as any
+other mount without a volume does. Unless that claim exists, its Pods stay Pending.
+
+**Existing deployments:** Finish existing LPX workloads and clean them up with the old
+operator and scheduler before upgrading. Then create the workloads again with compatible
+models and runtimes. Rolling overlap across the scheduler Request-field cutover is not supported.
+The operator forwards compiler-authored per-host resource counts; it does not impose a
+fixed device count for the hardware family.
+
 ### v1.7.0
 
 #### Deployment Tool Compatibility
