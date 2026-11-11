@@ -57,7 +57,7 @@ sequenceDiagram
     participant L as zmq_listener
     participant P as event_processor
     participant B as batching
-    participant D as dedup
+    participant D as EventDedupFilter
     participant S as sinks
 
     L->>P: Vec<PlacementEvent> (one native batch)

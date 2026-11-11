@@ -153,6 +153,9 @@ fn apply_block_refcounts(
     dedup: &mut EventDedupFilter,
     mut placement_event: PlacementEvent,
 ) -> Option<PlacementEvent> {
+    // The ZMQ normalizer builds only `Placement::local_worker` placements (the `Worker`
+    // domain), so every event here is refcounted. If it ever emits `CacheOwner` events,
+    // pick the policy per domain, as the dynamo-llm publisher's state agent does.
     let policy = EventDedupPolicy::RefCounted;
     let tier = placement_event.placement.tier;
     let domain = placement_event.placement.residency_domain;
