@@ -11,7 +11,7 @@ subtitle: Run a Slime GRPO job on KubeRay with rollouts served by Dynamo
 - Have three free GPUs: one for each engine and one for the trainer. The trainer's node also needs 16 CPUs and 200 GiB of memory free.
 - If your GPU nodes have taints, add matching tolerations to every Pod template that requests a GPU: the setup Job, both DynamoGraphDeployment (DGD) workers, and the Ray head.
 
-## Set Up Training
+## 1. Set Up Training
 
 <Steps toc={true}>
   <Step title="Set the namespace and storage class" id="set-the-namespace-and-storage-class">
@@ -177,7 +177,7 @@ EOF
   </Step>
 </Steps>
 
-## Deploy Inference with Dynamo
+## 2. Deploy Inference with Dynamo
 
 Slime normally launches its own SGLang engines. Here a DGD runs them, and Slime attaches to them as external engines. Slime reaches the engines on two paths:
 
@@ -407,7 +407,7 @@ slime-sglang-frontend:8000/health -> 200
   </Step>
 </Steps>
 
-## Start Training
+## 3. Start Training
 
 A KubeRay RayJob describes a Ray cluster and the job to run on it. KubeRay creates the cluster, here a single head Pod in the Slime image. It then starts a submitter Pod that runs `ray job submit` with the RayJob's `entrypoint` and streams the driver log. The submitter uses the Slime image too, which includes the Ray CLI, so you don't need Ray on your workstation. When the job ends, KubeRay deletes the Ray cluster and frees its GPU.
 
@@ -661,4 +661,4 @@ kubectl delete namespace "$NAMESPACE"
 - **Train on more GPUs.** Add a `workerGroupSpecs` group to the RayJob with the same image and volumes, and raise `--actor-num-nodes` or `--actor-num-gpus-per-node` to match. Keep the GPU on the head.
 - **Keep the trained model.** Add `--save` with a directory on `/data` and `--save-interval`. Slime also saves after the last rollout.
 - **Compare routing.** This tutorial uses the frontend's default round-robin routing, although the 8 samples for each prompt share a prefix. See [KV-Aware Load Balancing for RL Rollouts](../routing.md) to decide whether KV-aware routing suits your rollouts.
-- Review the integration's limits in the [Slime Integration overview](overview.md).
+- Review the integration's limits in the [Slime Integration overview](overview.mdx#current-limitations).
