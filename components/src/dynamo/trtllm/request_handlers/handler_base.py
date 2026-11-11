@@ -1219,12 +1219,8 @@ class HandlerBase(BaseGenerativeHandler):
                 no_stop_trim=(output_options or {}).get("no_stop_trim", False),
             )
 
-        # TensorRT-LLM 1.4.0rc2 appends the prefill worker's first token to a
-        # generation-only request (PyExecutor._prepare_disagg_gen_transmission_complete)
-        # without checking max_tokens, then samples one more, so max_tokens=1
-        # returns two tokens. Cap each decode choice at max_tokens and drain the
-        # rest so the native request still finishes and frees its KV normally.
-        # Remove once TensorRT-LLM checks the budget at that import.
+        # TensorRT-LLM 1.4.0rc2 imports the prefill token without checking max_tokens.
+        # Cap decode output and drain the rest so KV frees normally; drop once fixed.
         output_token_cap = (
             sampling_params.max_tokens
             if getattr(disaggregated_params, "request_type", None) == "generation_only"
