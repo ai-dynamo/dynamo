@@ -133,7 +133,7 @@ Every Dynamo process reads its own environment at startup, so set these on each 
 ## OpenTelemetry (traces and logs)
 
 <ParamField path="OTEL_EXPORT_ENABLED" type="boolean" default="false">
-  Master switch for OTLP export. Gates both traces and runtime logs. Request trace records require the separate `otel` request-trace sink.
+  Default switch for OTLP export of traces and runtime logs. `OTEL_TRACES_EXPORTER` and `OTEL_LOGS_EXPORTER` override it for their own signal, so either signal can be exported or suppressed regardless of this value; when they are unset or blank, this value decides. Request trace records are not covered by either switch and require the separate `otel` request-trace sink.
 </ParamField>
 
 <ParamField path="OTEL_TRACES_EXPORTER" type="string">

@@ -159,6 +159,8 @@ fn resolve_telemetry_signal_export(signal_exporter: Option<&str>, legacy_enabled
     }
 }
 
+/// Read one signal's exporter variable and the legacy switch from the environment and
+/// resolve them with [`resolve_telemetry_signal_export`].
 fn telemetry_signal_export_enabled(signal_exporter_env: &str) -> bool {
     resolve_telemetry_signal_export(
         std::env::var(signal_exporter_env).ok().as_deref(),
@@ -404,6 +406,7 @@ fn span_events_for_logging() -> FmtSpan {
     }
 }
 
+/// Log which OTLP signals are exported and where, or that export is disabled.
 fn log_otel_init_status(
     service_name: &str,
     traces_endpoint: Option<(OtlpProtocol, String)>,
@@ -2323,6 +2326,8 @@ pub mod tests {
         );
     }
 
+    /// A non-blank per-signal exporter overrides `OTEL_EXPORT_ENABLED`; unset or blank
+    /// defers to it.
     #[test]
     fn signal_exporter_overrides_legacy_switch() {
         // Unset or blank defers to OTEL_EXPORT_ENABLED.
@@ -2986,6 +2991,9 @@ pub mod tests {
         tracing::info!("readable log with OTLP export");
     }
 
+    /// Each combination of `OTEL_EXPORT_ENABLED`, `OTEL_TRACES_EXPORTER`, and
+    /// `OTEL_LOGS_EXPORTER` selects the expected signals, checked through the startup
+    /// status line of a fresh subprocess (logging init is process-global).
     #[test]
     fn otlp_signal_exporters_select_traces_and_logs_independently() {
         use std::process::Command;
@@ -3021,7 +3029,15 @@ pub mod tests {
                 // JSONL keeps trace context on when every exporter is off, so the
                 // status line is still logged.
                 .env("DYN_LOGGING_CONSOLE_FORMAT", "jsonl")
-                .env_remove("DYN_LOGGING_JSONL");
+                .env_remove("DYN_LOGGING_JSONL")
+                // Don't let host-inherited endpoint or protocol settings change how the
+                // child builds its exporters; only the signal switches vary per case.
+                .env_remove("OTEL_EXPORTER_OTLP_PROTOCOL")
+                .env_remove("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL")
+                .env_remove("OTEL_EXPORTER_OTLP_LOGS_PROTOCOL")
+                .env_remove("OTEL_EXPORTER_OTLP_ENDPOINT")
+                .env_remove("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
+                .env_remove("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT");
             for (name, value) in [
                 ("OTEL_EXPORT_ENABLED", legacy),
                 ("OTEL_TRACES_EXPORTER", traces),
@@ -3046,6 +3062,8 @@ pub mod tests {
         }
     }
 
+    /// Child half of `otlp_signal_exporters_select_traces_and_logs_independently`;
+    /// a no-op unless launched by that test.
     #[test]
     fn otlp_signal_exporters_subprocess() {
         if std::env::var("DYN_TEST_OTLP_SIGNAL_CHILD").is_err() {
