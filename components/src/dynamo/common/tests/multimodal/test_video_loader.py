@@ -435,7 +435,7 @@ async def test_undetected_codec_is_client_unsupported_media(monkeypatch, media_i
         await loader._decode_video_bytes(b"not-a-video", media_io)
 
     assert exc_info.value.status == 415
-    assert exc_info.value.message == "Unsupported Media Type"
+    assert exc_info.value.message == "Unsupported video media"
 
 
 # ISO-BMFF with an MPEG-4 Part 2 brand. No H.264/HEVC/AV1/VP8/VP9 marker.
@@ -457,7 +457,7 @@ async def test_failed_open_non_video_is_unsupported_with_backend(monkeypatch):
 
     assert exc_info.value.status == 415
     assert exc_info.value.url == "https://example.com/x.mp4"
-    assert exc_info.value.message == "Unsupported Media Type"
+    assert exc_info.value.message == "Unsupported video media"
 
 
 @pytest.mark.asyncio

@@ -88,10 +88,10 @@ def _is_failed_open(exc: BaseException) -> bool:
 
 def _unsupported_video_input(url: str, cause: BaseException) -> HttpStatusError:
     """Client input that is not a video."""
-    # Operators still need the decoder's own text. The client body is the
-    # catalog string, so this stays in the log.
+    # Operators still need the decoder's own text. Clients see this exact
+    # sentence: errors.rs allowlists it as the public message.
     logger.warning("Rejecting non-video input supplied as video: %s", cause)
-    return HttpStatusError(415, "Unsupported Media Type", url)
+    return HttpStatusError(415, "Unsupported video media", url)
 
 
 def _attributable_to_cv2(exc: BaseException, media_io: Any | None = None) -> bool:

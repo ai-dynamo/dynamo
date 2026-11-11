@@ -8629,6 +8629,33 @@ mod tests {
     }
 
     #[test]
+    fn unsupported_video_public_message_reaches_the_http_body() {
+        let error = dynamo_runtime::error::DynamoError::builder()
+            .class(dynamo_runtime::error::ErrorClass::UnsupportedMedia)
+            .diagnostic(r#"{"message":"Unsupported video media","code":415}"#)
+            .public_message("Unsupported video media")
+            .build();
+        let response = ErrorMessage::from_anyhow(error.into(), BACKUP_ERROR_MESSAGE);
+
+        assert_eq!(response.0, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(response.1.code, 415);
+        assert_eq!(response.1.message, "Unsupported video media");
+    }
+
+    #[test]
+    fn unsupported_media_without_public_message_uses_catalog_text() {
+        let error = dynamo_runtime::error::DynamoError::builder()
+            .class(dynamo_runtime::error::ErrorClass::UnsupportedMedia)
+            .diagnostic("private fetch https://example.com/?sig=secret")
+            .build();
+        let response = ErrorMessage::from_anyhow(error.into(), BACKUP_ERROR_MESSAGE);
+
+        assert_eq!(response.0, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(response.1.message, "Unsupported media type");
+        assert!(!response.1.message.contains("secret"));
+    }
+
+    #[test]
     fn backend_http_status_derives_the_recorded_semantic_class() {
         assert_eq!(
             backend_http_error_class(StatusCode::BAD_REQUEST),
