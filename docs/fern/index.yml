@@ -739,8 +739,15 @@ navigation:
             skip-slug: true
             collapsed: open-by-default
             contents:
-              - page: verl Integration
-                path: pages/use-cases/reinforcement-learning/verl.md
+              - section: verl Integration
+                contents:
+                  - page: Overview
+                    path: pages/use-cases/reinforcement-learning/verl/overview.mdx
+                  - page: Installation and Setup
+                    path: pages/use-cases/reinforcement-learning/verl/installation.mdx
+                  - page: Train with verl on KubeRay
+                    slug: train-with-verl-on-kuberay
+                    path: pages/use-cases/reinforcement-learning/verl/train.mdx
               - page: NeMo RL Integration
                 path: pages/use-cases/reinforcement-learning/nemo-rl.md
               - section: Slime Integration

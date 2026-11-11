@@ -1,0 +1,373 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Train with verl and Dynamo on KubeRay
+subtitle: Run a verl GRPO job in a KubeRay RayJob that starts its own Dynamo rollout stack
+---
+
+A KubeRay `RayJob` describes a Ray cluster and the job to run on it. KubeRay creates the cluster, here a single head Pod with 8 GPUs in Dynamo's vLLM runtime image, then starts a submitter Pod that runs `ray job submit` with the job's entrypoint and streams the driver log. When the job ends, KubeRay deletes the Ray cluster and every process in it.
+
+The entrypoint runs verl's trainer. verl-recipe's Dynamo backend starts etcd, NATS, a Dynamo frontend, and four vLLM engines inside the job, so applying the RayJob starts both Dynamo and training, with no DynamoGraphDeployment. The engines share the GPUs with the trainer. Each training step generates a batch of rollouts through the Dynamo frontend, puts the engines to sleep while Fully Sharded Data Parallel (FSDP) trains the policy, and sends the new weights to the engines over CUDA IPC.
+
+## Prerequisites
+
+- Complete [Installation and Setup](installation.mdx). The commands use its `NAMESPACE` variable.
+- Have one node with 8 free GPUs, 64 CPUs, and 800 GiB of memory.
+- If your GPU nodes have taints, add matching tolerations to the Ray head's Pod template.
+
+## Start Training
+
+<Steps toc={true}>
+  <Step title="Submit the RayJob" id="submit-the-rayjob">
+
+```bash
+kubectl apply -n "$NAMESPACE" -f - <<'EOF'
+apiVersion: ray.io/v1
+kind: RayJob
+metadata:
+  name: verl-grpo
+spec:
+  entrypoint: >-
+    python3 -m verl.trainer.main_ppo
+    --config-path /data/verl/recipe/dynamo/config
+    --config-name dynamo_trainer_v1_colocate
+    hydra.run.dir=/data/runs/verl-grpo/hydra
+    algorithm.adv_estimator=grpo
+    algorithm.use_kl_in_reward=False
+    data.train_files=/data/gsm8k/train.parquet
+    data.val_files=/data/gsm8k/test.parquet
+    data.train_batch_size=64
+    data.max_prompt_length=512
+    data.max_response_length=1024
+    data.filter_overlong_prompts=True
+    data.truncation=error
+    actor_rollout_ref.model.path=/data/models/Qwen2.5-7B-Instruct
+    actor_rollout_ref.model.use_remove_padding=True
+    actor_rollout_ref.model.enable_gradient_checkpointing=True
+    actor_rollout_ref.actor.optim.lr=1e-6
+    actor_rollout_ref.actor.ppo_mini_batch_size=16
+    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=4
+    actor_rollout_ref.actor.use_kl_loss=True
+    actor_rollout_ref.actor.kl_loss_coef=0.001
+    actor_rollout_ref.actor.kl_loss_type=low_var_kl
+    actor_rollout_ref.actor.entropy_coeff=0
+    actor_rollout_ref.actor.fsdp_config.param_offload=False
+    actor_rollout_ref.actor.fsdp_config.optimizer_offload=False
+    actor_rollout_ref.ref.fsdp_config.param_offload=True
+    actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=8
+    actor_rollout_ref.rollout.name=dynamo
+    actor_rollout_ref.rollout.mode=async
+    actor_rollout_ref.rollout.tensor_model_parallel_size=2
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.6
+    actor_rollout_ref.rollout.n=8
+    actor_rollout_ref.rollout.calculate_log_probs=True
+    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=8
+    ++actor_rollout_ref.rollout.engine_kwargs.dynamo.router_mode=kv
+    ++actor_rollout_ref.rollout.engine_kwargs.dynamo.thunderagent.enabled=false
+    ++actor_rollout_ref.rollout.engine_kwargs.dynamo.request_engine_data=true
+    ++actor_rollout_ref.rollout.engine_kwargs.dynamo.request_completion_token_ids=true
+    ++actor_rollout_ref.rollout.engine_kwargs.dynamo.request_timeout_s=1800
+    ++actor_rollout_ref.rollout.engine_kwargs.dynamo.free_engine_on_train=true
+    ++ray_kwargs.ray_init.runtime_env.env_vars.VERL_DYNAMO_LOG_DIR=/data/runs/verl-grpo/dynamo-logs
+    "trainer.logger=[console]"
+    trainer.project_name=verl-dynamo
+    trainer.experiment_name=gsm8k-grpo
+    trainer.n_gpus_per_node=8
+    trainer.nnodes=1
+    trainer.val_before_train=True
+    trainer.test_freq=5
+    trainer.save_freq=-1
+    trainer.total_training_steps=15
+    trainer.default_local_dir=/data/runs/verl-grpo/checkpoints
+    trainer.rollout_data_dir=/data/runs/verl-grpo/rollouts
+    trainer.validation_data_dir=/data/runs/verl-grpo/validation
+  shutdownAfterJobFinishes: true
+  ttlSecondsAfterFinished: 30
+  activeDeadlineSeconds: 3600
+  backoffLimit: 0
+  submitterPodTemplate:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: ray-job-submitter
+          image: rayproject/ray:2.60.0-py312
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+  rayClusterSpec:
+    rayVersion: "2.60.0"
+    headGroupSpec:
+      rayStartParams: {}
+      template:
+        spec:
+          enableServiceLinks: false
+          containers:
+            - name: ray-head
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.1
+              command: ["python3", "-m", "pip", "install", "--quiet", "--no-index", "--no-deps",
+                        "--find-links", "/data/wheelhouse", "-r", "/data/wheelhouse/requirements.txt"]
+              securityContext:
+                runAsUser: 0
+              env:
+                - name: PYTHONPATH
+                  value: /data/verl
+                - name: VERL_USE_EXTERNAL_MODULES
+                  value: recipe.dynamo.register
+                - name: VERL_DYNAMO_REFIT_STRICT
+                  value: "1"
+                - name: PYTHONUNBUFFERED
+                  value: "1"
+                - name: HF_HOME
+                  value: /data/hf-home
+                - name: POD_IP
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: status.podIP
+                - name: DYN_TCP_RPC_HOST
+                  value: $(POD_IP)
+              resources:
+                requests:
+                  cpu: "64"
+                  memory: 800Gi
+                  nvidia.com/gpu: "8"
+                limits:
+                  cpu: "64"
+                  memory: 800Gi
+                  nvidia.com/gpu: "8"
+              volumeMounts:
+                - name: verl-data
+                  mountPath: /data
+                - name: dshm
+                  mountPath: /dev/shm
+          volumes:
+            - name: verl-data
+              persistentVolumeClaim:
+                claimName: verl-data
+            - name: dshm
+              emptyDir:
+                medium: Memory
+                sizeLimit: 256Gi
+EOF
+```
+
+The RayJob has three parts:
+
+- **The job.** `entrypoint` is the training command: verl's `main_ppo` module with the recipe's preset and Hydra overrides. KubeRay pastes it unquoted into a shell script, so keep `#` out of it.
+- **The Ray cluster.** One head Pod holds all 8 GPUs and runs the verl driver, the FSDP workers, and the Dynamo processes. KubeRay runs the container's `command` in a shell before its own `ray start`, so the head installs the setup Job's wheels first. The Dynamo image has no Ray until then. The head runs as root to install them into the image's Python environment. `rayVersion` matches the Ray version that the setup Job installed, and KubeRay uses it to pick version-specific behavior such as the head's health checks. `enableServiceLinks: false` keeps Kubernetes service variables out of the etcd, NATS, and Dynamo processes, and `/dev/shm` is memory-backed for NCCL, vLLM, and the Ray object store.
+- **The submitter and cleanup.** The submitter Pod runs `ray job submit` from Ray's own image at the same Ray version, because the Dynamo image has no Ray command-line tool. `shutdownAfterJobFinishes` and `ttlSecondsAfterFinished` delete the Ray cluster 30 seconds after the job ends, and `activeDeadlineSeconds` stops a run that lasts more than an hour. The RayJob keeps the job status, and its submitter keeps the driver log.
+
+The head sets these environment variables:
+
+| Variable | Purpose |
+|---|---|
+| `PYTHONPATH` | Imports verl and the recipe from the checkout on the volume. |
+| `VERL_USE_EXTERNAL_MODULES` | Registers the recipe's `dynamo` rollout backend when verl starts. The preset passes it on to the Ray workers. |
+| `VERL_DYNAMO_REFIT_STRICT` | Stops the run if the recipe's weight-update self-test fails, instead of logging a warning. |
+| `PYTHONUNBUFFERED` | Prints each training step when it finishes. Ray workers otherwise buffer verl's output. |
+| `HF_HOME` | Keeps the Hugging Face cache on the volume. |
+| `DYN_TCP_RPC_HOST` | Binds Dynamo's request plane to the Pod IP, which `POD_IP` reads from the Pod's status. |
+
+These overrides configure the Dynamo rollout backend. In the table, `rollout.` stands for `actor_rollout_ref.rollout.`, and `dynamo.` for `actor_rollout_ref.rollout.engine_kwargs.dynamo.`:
+
+| Override | Purpose |
+|---|---|
+| `--config-path`, `--config-name` | Loads the recipe's `dynamo_trainer_v1_colocate` preset: verl's V1 trainer in `colocate_async` mode, with the engines and the trainer on the same GPUs. |
+| `rollout.name`, `rollout.mode` | Generates rollouts with the recipe's asynchronous Dynamo backend. |
+| `rollout.tensor_model_parallel_size` | Runs one vLLM engine per two GPUs: four engines on the node's 8 GPUs. |
+| `rollout.gpu_memory_utilization` | Caps each engine at 60% of its GPUs' memory while it's awake. |
+| `rollout.calculate_log_probs` | Returns the engines' token log-probabilities, which verl compares with the trainer's. |
+| `dynamo.router_mode`, `dynamo.thunderagent.enabled` | Routes requests with Dynamo's KV router instead of ThunderAgent. |
+| `dynamo.request_engine_data`, `dynamo.request_completion_token_ids` | Returns the token IDs that the engines generated, so verl trains on the exact tokens. |
+| `dynamo.request_timeout_s` | Allows each rollout request up to 30 minutes. |
+| `dynamo.free_engine_on_train` | Puts the engines to sleep while FSDP trains. It must match `rollout.free_cache_engine`, which the preset sets to `true`. |
+| `VERL_DYNAMO_LOG_DIR` | Writes the frontend and engine logs to `/data/runs/verl-grpo/dynamo-logs`. |
+
+The keys under `engine_kwargs.dynamo` need the `++` prefix, which adds a key that the preset doesn't declare. Without it, Hydra fails with `Key 'router_mode' is not in struct`.
+
+The other overrides are standard verl settings. See the [verl configuration guide](https://verl.readthedocs.io/en/latest/examples/config.html) for each one.
+
+| Overrides | Setting |
+|---|---|
+| `algorithm.*` | Use GRPO advantages, without a KL penalty in the reward. |
+| `data.*` | Train on 64 GSM8K prompts per step, with up to 512 prompt tokens and 1,024 response tokens. Drop longer prompts. |
+| `actor_rollout_ref.model.*` | Train Qwen2.5-7B-Instruct with padding removal and gradient checkpointing. |
+| `actor_rollout_ref.actor.*`, `actor_rollout_ref.ref.*` | Update the policy 4 times per step, 16 prompts at a time, with a learning rate of 1e-6, a `low_var_kl` loss against the reference model with a coefficient of 0.001, and no entropy bonus. Keep the reference model's parameters in CPU memory. |
+| `rollout.n`, `*.log_prob_micro_batch_size_per_gpu` | Sample 8 answers per prompt, and compute log-probabilities 8 sequences at a time per GPU. |
+| `trainer.*`, `hydra.run.dir` | Log to the console only, because verl's default also logs to Weights & Biases, which asks for a login. Train on one node with 8 GPUs for 15 steps, score the GSM8K test split before training and every 5 steps, and save no checkpoints. Write Hydra's run directory, the rollouts, and the validation answers under `/data/runs/verl-grpo`. |
+
+  </Step>
+  <Step title="Follow the training log" id="follow-the-training-log">
+
+Wait for Ray to start the job, then stream the driver log. The submitter is a Kubernetes Job with the same name as the RayJob:
+
+```bash
+kubectl wait -n "$NAMESPACE" --for=jsonpath='{.status.jobStatus}'=RUNNING rayjob/verl-grpo --timeout=30m
+kubectl logs -n "$NAMESPACE" -f job/verl-grpo
+```
+
+The head installs the wheels in about a minute before Ray starts. If `kubectl logs` returns before the job ends, run it again. While the job runs, `kubectl port-forward -n "$NAMESPACE" svc/verl-grpo-head-svc 8265:8265` opens the Ray dashboard at `http://localhost:8265`.
+
+The log is long. These lines trace the integration, in order:
+
+```text
+INFO worker.py:1841 -- Connecting to existing Ray cluster at address: 10.244.6.131:6379...
+(DynamoThunderAgentHttpServer pid=8073) INFO:2026-11-11 02:28:18,077:[DynamoHttpServer] etcd healthy on :48153
+(DynamoThunderAgentHttpServer pid=8073) INFO:2026-11-11 02:28:18,579:[DynamoHttpServer] NATS port :51183 open
+(DynamoThunderAgentHttpServer pid=8073) INFO:2026-11-11 02:28:18,580:[DynamoHttpServer] starting dynamo.vllm shard 0/4 (replica=0, rank_offset=0, GPUs=0,1, ...
+...
+(DynamoThunderAgentHttpServer pid=8073) INFO:2026-11-11 02:28:18,583:[DynamoHttpServer] starting dynamo.frontend on :45207 (...): /usr/bin/python3 -m dynamo.frontend --http-port 45207 --http-host 0.0.0.0 --router-mode kv ...
+(DynamoThunderAgentHttpServer pid=8073) INFO:2026-11-11 02:30:21,144:[DynamoHttpServer] frontend healthy: 4/4 workers registered
+(DynamoThunderAgentHttpServer pid=8073) INFO:2026-11-11 02:30:21,148:[DynamoHttpServer] refit self-test PASSED @ tcp://10.244.6.131:33583 ...
+(DynamoThunderAgentHttpServer pid=8073) INFO:2026-11-11 02:30:21,404:[DynamoHttpServer] logprob channel probe OK
+(TaskRunnerV1 pid=5007) INFO:2026-11-11 02:30:21,406:[DynamoReplica pool] ready: server_address=10.244.6.131:45207 logical_replicas=4 workers=4 nodes=1
+(TaskRunnerV1 pid=5007) step:0 - ... - val-core/openai/gsm8k/acc/mean@1:np.float64(0.78013646702047) - ...
+(DynamoThunderAgentHttpServer pid=8073) INFO:2026-11-11 02:31:03,465:[DynamoHttpServer] abort_all_requests: engines paused (node=0)
+(DynamoThunderAgentHttpServer pid=8073) INFO:2026-11-11 02:31:31,828:[DynamoHttpServer] resume_generation: gate open (node=0)
+(TaskRunnerV1 pid=5007) step:1 - ... - rollout_corr/k3_kl:0.0003299138625152409 - ... - critic/score/mean:0.83984375 - ... - timing_s/update_weights:5.504038840008434 - ...
+...
+(TaskRunnerV1 pid=5007) step:15 - ... - val-core/openai/gsm8k/acc/mean@1:np.float64(0.913570887035633) - ...
+SUCC cli.py:67 -- Job 'verl-grpo-nrcsf' succeeded
+```
+
+1. verl joins the Ray cluster that KubeRay created, instead of starting its own. It then loads the model into 8 FSDP workers, which takes about 3 minutes.
+2. The recipe starts etcd and NATS, one `dynamo.vllm` engine on each pair of GPUs, and the frontend with the KV router.
+3. All four engines register with the frontend, about 2 minutes later. The recipe tests the weight-update channel to the engines (`refit self-test PASSED`) and sends one request through the frontend to check that the engines return token IDs and log-probabilities (`logprob channel probe OK`).
+4. `step:0` reports the accuracy before training. `val-core/openai/gsm8k/acc/mean@1` is the fraction of the 1,319 GSM8K test questions that the model answers correctly.
+5. In each step, the recipe pauses the engines (`abort_all_requests`) while FSDP trains, and resumes them after the new weights arrive (`resume_generation`).
+6. Each `step:N` line reports one training step. `critic/score/mean` is the mean reward of the step's 512 answers. `rollout_corr/k3_kl` compares the engines' token probabilities with the trainer's. `timing_s/update_weights` is the time to send the new weights to the engines, about 5 seconds.
+7. Steps 5, 10, and 15 also report the test accuracy. After step 15, the job succeeds.
+
+Each step takes about 20 seconds, and the whole run about 15 minutes.
+
+Just before `logprob channel probe OK`, the log also shows `ERROR ... [DynamoHttpServer] NO TOKEN IDS in the frontend response (hit #1)`. The probe causes it: the recipe builds the probe's one-token prompt with the function that substitutes for missing token IDs, and that function logs the error. Hits after training starts mean that the engines return no token IDs.
+
+  </Step>
+</Steps>
+
+## Verify the Run
+
+<Steps toc={true}>
+  <Step title="Check the job status" id="check-the-job-status">
+
+```bash
+kubectl get rayjob verl-grpo -n "$NAMESPACE"
+```
+
+```text
+NAME        JOB STATUS   DEPLOYMENT STATUS   RAY CLUSTER NAME   START TIME             END TIME               AGE
+verl-grpo   SUCCEEDED    Complete            verl-grpo-wd8mc    2026-11-11T02:23:56Z   2026-11-11T02:37:08Z   15m
+```
+
+  </Step>
+  <Step title="Check the test accuracy" id="check-the-test-accuracy">
+
+Print the GSM8K test accuracy before training and after steps 5, 10, and 15:
+
+```bash
+kubectl logs -n "$NAMESPACE" job/verl-grpo \
+  | sed -n -E 's/^.*step:([0-9]+) - .*val-core\/openai\/gsm8k\/acc\/mean@1:np\.float64\(([0-9.]+)\).*$/\1 \2/p' \
+  | awk '{ printf "step %2d: %.3f\n", $1, $2 }'
+```
+
+```text
+step  0: 0.780
+step  5: 0.897
+step 10: 0.904
+step 15: 0.914
+```
+
+verl's GSM8K reward accepts only a plain number after `####`, such as `#### 71` and not `#### $71`, so much of the gain comes from the model learning that format.
+
+  </Step>
+  <Step title="Check that the engines served the new weights" id="check-that-the-engines-served-the-new-weights">
+
+Count the times that generation resumed after a weight update:
+
+```bash
+kubectl logs -n "$NAMESPACE" job/verl-grpo | grep -c 'resume_generation: gate open'
+```
+
+```text
+15
+```
+
+The engines received new weights after each of the 15 steps. Then print, for each step, the divergence between the engines' token probabilities and the trainer's, and the time spent generating rollouts:
+
+```bash
+kubectl logs -n "$NAMESPACE" job/verl-grpo \
+  | sed -n -E 's/^.*step:([0-9]+) - .*rollout_corr\/k3_kl:([0-9.e-]+) .*timing_s\/gen:([0-9.]+) .*$/\1 \2 \3/p' \
+  | awk '{ printf "step %2d: k3_kl %.4f, gen %4.1f s\n", $1, $2, $3 }'
+```
+
+```text
+step  1: k3_kl 0.0003, gen  6.7 s
+step  2: k3_kl 0.0010, gen  0.7 s
+step  3: k3_kl 0.0003, gen  6.7 s
+step  4: k3_kl 0.0018, gen  0.7 s
+step  5: k3_kl 0.0003, gen  6.7 s
+step  6: k3_kl 0.0005, gen  0.7 s
+step  7: k3_kl 0.0003, gen  6.7 s
+step  8: k3_kl 0.0035, gen  0.7 s
+step  9: k3_kl 0.0003, gen  6.7 s
+step 10: k3_kl 0.0008, gen  0.8 s
+step 11: k3_kl 0.0024, gen  0.7 s
+step 12: k3_kl 0.0003, gen  6.7 s
+step 13: k3_kl 0.0008, gen  0.7 s
+step 14: k3_kl 0.0003, gen  6.7 s
+step 15: k3_kl 0.0007, gen  0.7 s
+```
+
+When the engines generate a step's batch with the current weights, `rollout_corr/k3_kl` stays near 0.0003. On the steps that take under a second to generate, verl had already generated most of the batch, one step ahead, with the weights from before the last update, so the divergence reads higher by design. Engines that kept old weights would make it grow from step to step.
+
+  </Step>
+</Steps>
+
+## Routing
+
+The frontend routes with Dynamo's KV router (`router_mode=kv`). The engines publish their KV-cache events through NATS, and GRPO samples each prompt 8 times, so the router can send a prompt's samples to the engine that already holds the prompt's prefix in its KV cache. The recipe also accepts `round-robin`, `random`, and `least-loaded`, and it can route with ThunderAgent, a separate scheduling path, instead. To decide whether KV-aware routing suits your rollouts, see [KV-Aware Load Balancing for RL Rollouts](../routing.md).
+
+## Clean Up
+
+Delete the namespace. This removes the RayJob, the setup Job, and the PersistentVolumeClaim. If the StorageClass uses the `Delete` reclaim policy, the storage provider also deletes the volume with verl, the wheels, and the model:
+
+```bash
+kubectl delete namespace "$NAMESPACE"
+```
+
+To train again instead, delete only the RayJob, then apply it again. The next run writes to the same directories under `/data/runs/verl-grpo`:
+
+```bash
+kubectl delete rayjob verl-grpo -n "$NAMESPACE"
+```
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| The setup Job's Pod is `OOMKilled` while it compiles flash-attn | Each compile job can use about 9 GB of memory. Lower `MAX_JOBS` or raise the Job's memory, then delete the Job and apply it again. |
+| The Ray head Pod stays `Pending`, and its events show `volume node affinity conflict` | The volume is zonal, and no GPU node with free GPUs is in its zone. Free GPUs on a node in the volume's zone, or delete the namespace and run the setup again. |
+| The job fails with `dynamo frontend not healthy within 600.0s (expected 4 workers; ...)` | One engine never registered with the frontend, which happens in about 1 in 50 launches. Delete the RayJob and apply it again. |
+| Loading the model fails in `accelerate/big_modeling.py` with a `TypeError` about `_is_hf_initialized` | The head has the image's accelerate 1.12.0. Check that `/data/wheelhouse/requirements.txt` lists `accelerate==1.13.0`. |
+| Hydra fails with `Key 'router_mode' is not in struct` | Prefix each key under `engine_kwargs.dynamo` with `++`. |
+| The log shows `NO TOKEN IDS in the frontend response` after training starts | The engines return no token IDs, so verl trains on one-token responses. Keep `request_engine_data=true` and `request_completion_token_ids=true`. |
+| The first weight update fails with `ValueError: 'lm_head.weight' was skipped because it is tied to 'model.embed_tokens.weight'` | The model has tied embeddings, and the engines run vLLM 0.29.0 or later. Use the Dynamo 1.5.1 image. |
+| The driver log ends with `Exception ignored in atexit callback` and `RuntimeError: DataLoader worker (pid ...) is killed by signal: Killed.` | The message comes from shutdown after training. Check `JOB STATUS` on the RayJob. |
+
+## Current Limitations
+
+- The pages use Dynamo 1.5.1 images, whose vLLM 0.28.0 is the version that the recipe tests. Dynamo 1.6 images ship vLLM 0.31.0. From vLLM 0.29.0 on, the first weight update fails for models with tied embeddings, such as Qwen2.5-0.5B, with the verl commit that the recipe pins. verl fixes this in [verl-project/verl#7973](https://github.com/verl-project/verl/pull/7973), which the pinned commit predates.
+- Dynamo runs inside the Ray job, so no operator restarts a failed engine or frontend. The job fails instead.
+- The Ray head's dashboard and Jobs API on port 8265 accept requests without authentication, and the recipe runs etcd and NATS without authentication in the same Pod. Anyone who can reach the Pod can run code in it. Restrict access to the Ray head, for example with a NetworkPolicy.
+- Each Ray Pod installs the setup Job's wheels when it starts, because the Dynamo image doesn't include Ray or verl.
+- The recipe is tested on one node.
+
+## Next Steps
+
+- **Keep the trained model.** Set `trainer.save_freq` to a number of steps. verl saves checkpoints to `trainer.default_local_dir` and resumes from the latest one there. Checkpoints of the 7B policy with its optimizer state need a larger volume.
+- **Compare routing.** Set `router_mode=round-robin` and compare the runs. See [Routing](#routing).
+- **Train on more nodes.** Add a `workerGroupSpecs` group to the RayJob with the same Pod template, use a `ReadWriteMany` volume, and raise `trainer.nnodes`.
+- **Try other presets.** The recipe's [README](https://github.com/verl-project/verl-recipe/tree/main/dynamo) covers running without Kubernetes and its other presets: SGLang engines, a separate GPU pool for rollouts, and ThunderAgent routing.

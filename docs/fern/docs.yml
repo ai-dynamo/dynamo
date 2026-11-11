@@ -3130,6 +3130,8 @@ redirects:
     destination: "/dynamo/dev/diffusion/:slug*"
   - source: "/dynamo/dev/agents/overview/:slug"
     destination: "/dynamo/dev/agents/:slug"
+  - source: "/dynamo/dev/reinforcement-learning/verl-integration"
+    destination: "/dynamo/dev/reinforcement-learning/verl-integration/overview"
   - source: "/dynamo/dev/reinforcement-learning/overview/:slug"
     destination: "/dynamo/dev/reinforcement-learning/:slug"
   - source: "/dynamo/dev/reinforcement-learning/slime-integration"
