@@ -50,7 +50,7 @@
  */
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { type CSSProperties, useEffect, useRef, useState } from "react";
 
 // Pin the player version for reproducible builds; bump deliberately.
 const PLAYER_VERSION = "3.17.0";
@@ -62,6 +62,11 @@ const PLAYER_CSS_SRI = "sha384-05cmIVRzN7mR7nmqajPpGPUPqJ5VyTAGHL1xJuiGWfhpWDp5h
 
 const CSS_ELEMENT_ID = "asciinema-player-css";
 const JS_ELEMENT_ID = "asciinema-player-js";
+
+// A terminal cell is about 0.6em wide in the player's monospace fonts, and the
+// player sets each line 1.333em tall. Their ratio sizes the pre-load reserve.
+const CELL_WIDTH_EM = 0.6;
+const LINE_HEIGHT_EM = 4 / 3;
 
 type FitMode = "width" | "height" | "both" | false;
 type ChromeStyle = "dynamo" | "macos";
@@ -115,7 +120,11 @@ export interface TerminalDemoProps {
   theme?: string;
   /** Poster frame, e.g. "npt:0:04" or a data URL. */
   poster?: string;
-  /** Force terminal width/height in cells (otherwise taken from the cast). */
+  /**
+   * Force terminal width/height in cells (otherwise taken from the cast).
+   * With both set, the frame also reserves the terminal's height before the
+   * cast loads, so pass the cast's own size for a cast that isn't 120x25.
+   */
   cols?: number;
   rows?: number;
   /** How the player scales to its container. Default "width". */
@@ -209,6 +218,13 @@ export function TerminalDemo({
   // on each switch and resumes where the old one was.
   const scheme = useSiteColorScheme(Boolean(theme));
   const resumeRef = useRef<{ src: string; time: number } | null>(null);
+  // Reserve the terminal's height from its size in cells when the page gives it.
+  const reserveStyle =
+    cols && rows
+      ? ({
+          "--dynamo-term-aspect": ((Number(cols) * CELL_WIDTH_EM) / (Number(rows) * LINE_HEIGHT_EM)).toFixed(3),
+        } as CSSProperties)
+      : undefined;
 
   useEffect(() => {
     // Mount a themed player only once the site's mode is known, so it never
@@ -396,7 +412,7 @@ export function TerminalDemo({
           </span>
         </div>
       )}
-      <div ref={containerRef} className="dynamo-terminal-demo__player" />
+      <div ref={containerRef} className="dynamo-terminal-demo__player" style={reserveStyle} />
     </div>
   );
 }
@@ -544,7 +560,8 @@ const TERMINAL_DEMO_CSS = `
  * full size instead of flashing a 0-height body under the title bar. The
  * asciinema player only sets the real terminal height in JS after the cast
  * fetches; until then this aspect-ratio holds the space (defaults to the
- * 120x25 hero cast; overridable via --dynamo-term-aspect). Once the player
+ * 120x25 hero cast; the cols and rows props override it through
+ * --dynamo-term-aspect). Once the player
  * mounts we drop the fixed ratio (via --loaded) so the box is free to grow
  * when the controls slide out.
  */
@@ -649,12 +666,15 @@ const TERMINAL_DEMO_CSS = `
  * chrome="macos": a plain macOS window that matches the community calendar
  * windows on the home and community pages. The title bar follows the site's
  * light or dark mode, and the terminal body takes the player theme's colors.
+ * It sits in a page's content column, so it fills that column instead of
+ * stopping at the hero's 860px; the wider window means larger text.
  */
 .dynamo-terminal-demo.dynamo-terminal-demo--macos {
   --dynamo-terminal-titlebar: #f3f4f3;
   --dynamo-terminal-titlebar-text: #555755;
   --dynamo-terminal-titlebar-rule: #d7d8d7;
   --dynamo-terminal-surface: #ffffff;
+  max-width: none;
   border: 1px solid rgb(127 127 127 / 20%);
   border-radius: 14px;
   background: var(--dynamo-terminal-surface);

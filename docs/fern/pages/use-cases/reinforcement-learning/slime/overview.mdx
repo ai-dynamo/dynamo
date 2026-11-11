@@ -3,60 +3,31 @@
 # SPDX-License-Identifier: Apache-2.0
 title: Slime Integration
 subtitle: Run Slime external rollouts through Dynamo on Kubernetes
+hide-toc: true
 ---
 
 import { TerminalDemo } from "@/components/TerminalDemo";
 
-**Experimental.** [Slime](https://github.com/THUDM/slime) is a reinforcement learning (RL) post-training framework that trains with Megatron-LM and generates rollouts with SGLang. Slime runs on Ray. On Kubernetes, the [KubeRay](https://github.com/ray-project/kuberay) operator runs it as a `RayJob`. Outside Kubernetes, you submit it to a Ray cluster with the Ray CLI.
-
-These pages cover Kubernetes. The Dynamo operator runs a DynamoGraphDeployment (DGD) of SGLang engines that serves Slime's rollouts, and Slime sends each rollout request through the Dynamo frontend, which routes it to an engine. Dynamo's [Slime example](https://github.com/ai-dynamo/dynamo/tree/main/examples/rl/slime) packages the engine deployment and the Slime launch command as scripts. The [tutorial](tutorial.mdx) writes out each manifest instead and trains Qwen3-0.6B on the GSM8K dataset with Group Relative Policy Optimization (GRPO) for 10 steps.
-
-The recording replays a run of the tutorial, with the waits fast-forwarded:
+<Tooltip tip="Validated with Dynamo 1.6.1, Slime 0.4.0, and KubeRay 1.7.1 on H100 GPUs. Manifests and flags can change between releases."><Badge intent="warning" minimal>Experimental</Badge></Tooltip> [Slime](https://github.com/THUDM/slime) trains with Megatron-LM on KubeRay while Dynamo serves the SGLang engines that generate its rollouts.
 
 <TerminalDemo
   src="../../../../assets/slime-rl-demo.cast"
-  title="Slime GRPO training with Dynamo rollouts"
+  title="Qwen3-0.6B · GRPO on GSM8K · 10 steps on 3 GPUs"
   chrome="macos"
   theme="fern-code"
+  cols={100}
+  rows={25}
   idleTimeLimit={1.5}
 />
 
-## Serve Inference with Dynamo and SGLang
-
-Slime normally launches its own SGLang engines. Here, a DGD runs them and Slime attaches to them as external engines. The DGD has a frontend and one worker component per engine. Each worker runs unmodified `sglang.launch_server` on one GPU, and SGLang starts Dynamo's sidecar, which registers the engine with the frontend.
-
-Slime reaches the engines on two paths:
-
-- **Generation** goes through the Dynamo frontend. A custom generate function, `dynamo_generate.py`, points Slime's streaming generator at the frontend instead of the SGLang router that Slime starts. That router only tracks the engines.
-- **Control** goes to each engine's own SGLang API through one Kubernetes Service per engine. Slime reads `/server_info` at startup. At each weight sync, it pauses generation, calls `/update_weights_from_disk`, and resumes generation.
-
-The tutorial uses the frontend's default round-robin routing, the only routing mode tested with Slime. Slime samples each prompt several times, so many requests in a batch share a prefix. To decide whether KV-aware routing suits your rollouts, see [KV-Aware Load Balancing for RL Rollouts](../routing.md). KV-aware routing needs KV events from the engines, which the tutorial's DGD doesn't turn on. The SGLang sidecar's [KV router manifest](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/sglang/deploy/agg_kv_router.yaml) shows the frontend and engine settings.
-
-## Train with Megatron-LM on KubeRay
-
-Megatron-LM loads its own checkpoint formats, not Hugging Face checkpoints. Before training, a one-time Job downloads the model and the dataset to a shared volume and converts the checkpoint to the `torch_dist` format with Slime's `tools/convert_hf_to_torch_dist.py`. The trainer starts from the converted checkpoint, and the engines load the Hugging Face checkpoint. Before the first rollout, Slime syncs the trainer's weights to the engines, so both sides start from the same weights.
-
-The trainer runs as a KubeRay `RayJob`. KubeRay creates a Ray cluster in the Slime image, then starts a submitter Pod that runs `ray job submit` with the job's entrypoint and streams the driver log. The entrypoint runs Slime's `train.py`. In the tutorial, the Ray cluster is one head Pod with one GPU, which runs the Slime driver and the Megatron-LM trainer. When the job ends, KubeRay deletes the Ray cluster.
-
-Training repeats this loop once per step:
-
-1. Slime sends a batch of rollout requests through the Dynamo frontend and scores the responses. In the tutorial, a batch is 8 prompts with 8 samples each.
-2. Megatron-LM trains the policy on the scored batch.
-3. Slime writes the new weights to the shared volume, and every engine reloads them.
-
-For each weight sync, Slime writes a full Hugging Face checkpoint, about 1.2 GB for Qwen3-0.6B, to a directory that the trainer and every engine mount. The shared volume therefore needs the `ReadWriteMany` access mode. A second custom function, `weight_permissions.py`, makes the files readable by the engines, which run as a non-root user.
-
-## Current Limitations
-
-- The engine set is fixed. Each engine needs its own worker component with one replica and its own Service, and Slime reads the engine addresses only at startup. To add engines, add components and restart Slime.
-- Slime doesn't recover an external engine. If Kubernetes restarts or replaces an engine Pod, restart the RayJob.
-- Weight syncs write full checkpoints to disk. Slime's default NCCL transport fails with the SGLang 0.5.21 engines in Dynamo 1.6 images; see [Known Issues](../../../reference/general/releases/known-issues.mdx#v160). Delta disk updates need the `/pull_weights` route from Slime's SGLang patch, which the Dynamo images don't include.
-- The engines and the trainer use separate GPUs, so Slime's `--colocate` mode doesn't apply.
-- The engine Services expose SGLang's administrative and weight-update APIs. Restrict access to them, for example with a NetworkPolicy that admits only the trainer Pods.
-- Slime's streaming generator, which `dynamo_generate.py` calls, doesn't support score centering (`--use-score-centering`).
-
-## Get Started
-
-- [Installation](installation.mdx) prepares the cluster: the Dynamo platform, the KubeRay operator, and a `ReadWriteMany` StorageClass.
-- The [tutorial](tutorial.mdx) runs the training job from the recording on three GPUs.
-- Slime's [external rollout engine guide](https://github.com/THUDM/slime/blob/main/docs/en/advanced/external-rollout-engines.md) compares its weight-update transports.
+<CardGroup cols={3}>
+  <Card title="Installation and Setup" icon="regular download" href="installation.mdx">
+    Install the Dynamo platform and KubeRay, then stage the model and dataset on a shared volume.
+  </Card>
+  <Card title="Serve Inference with Dynamo" icon="regular server" href="serve-inference.mdx">
+    Run two SGLang engines behind the Dynamo frontend in a DynamoGraphDeployment.
+  </Card>
+  <Card title="Train with Slime on KubeRay" icon="regular brain" href="train.mdx">
+    Run Slime's GRPO loop with Megatron-LM in a RayJob that sends its rollouts through Dynamo.
+  </Card>
+</CardGroup>
