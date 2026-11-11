@@ -563,6 +563,7 @@ impl AnthropicStreamConverter {
                         &choice.delta.content,
                         Some(ChatCompletionMessageContent::Text(t)) if !t.is_empty()
                     )
+                    || choice.delta.refusal.as_ref().is_some_and(|r| !r.is_empty())
                     || choice
                         .delta
                         .tool_calls
@@ -633,8 +634,12 @@ impl AnthropicStreamConverter {
                 _ => None,
             };
 
-            if let Some(text) = content_text
-                && !text.is_empty()
+            // Anthropic Messages has no refusal block, so dedicated refusal
+            // text streams as text_delta after this chunk's content text.
+            for text in [content_text, delta.refusal.as_deref()]
+                .into_iter()
+                .flatten()
+                .filter(|text| !text.is_empty())
             {
                 // Close thinking block before text starts (Anthropic spec: thinking → text → tool_use)
                 if self.thinking_block_started && !self.thinking_block_closed {
@@ -1035,8 +1040,12 @@ impl AnthropicStreamConverter {
                 _ => None,
             };
 
-            if let Some(text) = content_text
-                && !text.is_empty()
+            // Anthropic Messages has no refusal block, so dedicated refusal
+            // text streams as text_delta after this chunk's content text.
+            for text in [content_text, delta.refusal.as_deref()]
+                .into_iter()
+                .flatten()
+                .filter(|text| !text.is_empty())
             {
                 // Close thinking block before text starts
                 if self.thinking_block_started && !self.thinking_block_closed {
@@ -2995,6 +3004,54 @@ mod tests {
             AnthropicStreamEvent::ContentBlockStop { index } => assert_eq!(*index, 0),
             other => panic!("expected text stop at index 0, got {other:?}"),
         }
+    }
+
+    /// Dedicated `refusal` fragments stream as `text_delta` events on the text
+    /// block, after the same chunk's content; empty refusals emit nothing.
+    #[tokio::test]
+    async fn test_refusal_streams_as_text_deltas() {
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
+
+        let mut mixed = text_chunk("Pong.");
+        mixed.inner.choices[0].delta.refusal = Some("I cannot ".into());
+        let mut refusal_only = text_chunk("");
+        refusal_only.inner.choices[0].delta.content = None;
+        refusal_only.inner.choices[0].delta.refusal = Some("help with that.".into());
+        let mut empty_refusal = text_chunk("");
+        empty_refusal.inner.choices[0].delta.content = None;
+        empty_refusal.inner.choices[0].delta.refusal = Some(String::new());
+
+        let mut events = conv.process_chunk(&mixed);
+        events.extend(conv.process_chunk(&refusal_only));
+        let before_empty = events.len();
+        events.extend(conv.process_chunk(&empty_refusal));
+        assert_eq!(
+            events.len(),
+            before_empty,
+            "empty refusal must emit nothing"
+        );
+        assert_eq!(conv.usage.output_tokens, 2);
+
+        let values = sse_values(events).await;
+        assert_eq!(values[0]["type"], "content_block_start");
+        assert_eq!(values[0]["index"], 0);
+        assert_eq!(values[0]["content_block"]["type"], "text");
+        let deltas: Vec<(&serde_json::Value, &str)> = values[1..]
+            .iter()
+            .map(|value| {
+                assert_eq!(value["type"], "content_block_delta");
+                assert_eq!(value["delta"]["type"], "text_delta");
+                (&value["index"], value["delta"]["text"].as_str().unwrap())
+            })
+            .collect();
+        assert_eq!(
+            deltas,
+            vec![
+                (&serde_json::json!(0), "Pong."),
+                (&serde_json::json!(0), "I cannot "),
+                (&serde_json::json!(0), "help with that."),
+            ]
+        );
     }
 
     fn reasoning_chunk(text: &str) -> NvCreateChatCompletionStreamResponse {
