@@ -86,7 +86,7 @@ maturin develop --uv
 maturin develop --uv --features kv-indexer,slot-tracker,select-service,mm-routing,ais-forward-pass,request-trace-s3
 ```
 
-最小构建不包含[发布版 wheel](https://github.com/ai-dynamo/dynamo/blob/main/container/templates/wheel_builder.Dockerfile) 的以下 features：独立的 KV indexer、slot tracker 和 select service（部分 router 测试会启动它们）、多模态 KV 路由、AISimulate 性能模型以及 S3 请求追踪。
+最小构建不包含[发布版 wheel](https://github.com/ai-dynamo/dynamo/blob/main/container/templates/wheel_builder.Dockerfile) 的以下 features：独立的 KV indexer、slot tracker 和 select service（部分 router 测试会启动它们）、多模态 KV 路由、AISim 性能模型以及 S3 请求追踪。
 
 如需在 Nsight Systems profile 中添加标注，请在 feature 列表中加上 `nvtx`。
 

@@ -154,8 +154,8 @@ targets. The perf model is bootstrapped from the first available source:
 4. live FPM regression warmup when no pre-deployment data is available
 
 The Planner constructs all estimators through
-`aisimulate_core.sdk.RustForwardPassPerfModel.best_available(config)` using the
-role-indexed canonical configurations in `ais_perf_model.roles`. AISimulate owns
+`aisim_core.sdk.RustForwardPassPerfModel.best_available(config)` using the
+role-indexed canonical configurations in `ais_perf_model.roles`. AISim owns
 schema validation, selection, tuning, and prediction. Dynamo binds immutable
 worker identity and runtime limits, and derives queue drain, TTFT, ITL, and capacity.
 New configurations default to `auto` selection with `deny` fallback. Auto still
@@ -373,7 +373,7 @@ was recorded or a role had no ready worker then, the decision is `failed`.
 
 ### Candidates and the Sweep
 
-`retune.router` and `retune.planner` use the AISimulate recommendation syntax of the Dynamo router
+`retune.router` and `retune.planner` use the AISim recommendation syntax of the Dynamo router
 and Planner adapters. `planner/retune/domains.py` expands them into a grid keyed by live names:
 PATCH `/router_policy` parameters and `PlannerConfig` fields. The router grid is a Cartesian product;
 the Planner grid is a list of points, because a scaling policy is one correlated choice of its four
@@ -451,7 +451,7 @@ decision records the result in `predictor_presweep`: one summary with `interval_
 ### Scoring and Outcomes
 
 Each candidate is scored on `retune.objective`, by default SLA-good output tokens per second of the
-window per GPU. The score is AISimulate's `objective_value` for the target that the
+window per GPU. The score is AISim's `objective_value` for the target that the
 [objective](../../../../reference/components/planner-configuration.mdx#objectives) maps to, in the
 metric's own units, rescaled for the Goodput objectives only:
 
@@ -565,7 +565,7 @@ trace that ends at or before the first replayed request; without throughput scal
   `effects` have the same keys with or without retune; the desired router map is in
   `runtime_decision.router_parameters`.
 
-The AISimulate Planner adapter (`planner/simulation/provider.py`) passes `planner.retune` through to
+The AISim Planner adapter (`planner/simulation/provider.py`) passes `planner.retune` through to
 `PlannerConfig` and fills the scoring SLA from `evaluation.sla`. For live retune with scaling, it
 also reads `planner.retune_sweep` in `aisimulate recommend`: the live Planner's scaling fields
 (`base`), the Planner points to search (`points`) and the history warm-up by throughput interval
@@ -573,7 +573,7 @@ also reads `planner.retune_sweep` in `aisimulate recommend`: the live Planner's 
 interval, which `DynamoReplayRunner` hands to `run_trace_replay`; its concrete config is the
 section narrowed to that point, which `aisimulate predict` replays again. `dynamo.replay` (`run_trace_replay`,
 and `prepare_planner_replay` for synthetic traffic) rejects traffic that is not an open-loop Dynamo
-request trace, and its error names the AISimulate setting.
+request trace, and its error names the AISim setting.
 
 ## Known Limitations
 
@@ -610,6 +610,6 @@ request trace, and its error names the AISimulate setting.
 | `components/src/dynamo/planner/retune/domains.py` | Expansion of `retune.router` and `retune.planner` into the candidate grid. |
 | `components/src/dynamo/planner/retune/live/` | Live retune (`executor: dgdr`): deployment rules, window cuts, DGDR v1beta2 sweeps, leadership and state Leases, router actuation, and clean-up. |
 | `components/src/dynamo/planner/offline/replay_adapter.py` | Replay host: tick records, scaling events, router parameter updates, and retune actuation. |
-| `components/src/dynamo/planner/simulation/` | AISimulate Planner adapter: the `planner` section of `aisimulate predict` and `recommend`. |
-| `components/src/dynamo/router/simulation/config.py` | AISimulate router section schemas, including `retune.router`. |
-| `components/src/dynamo/aisimulate/domains.py` | Shared search-domain helpers for AISimulate sections and retune. |
+| `components/src/dynamo/planner/simulation/` | AISim Planner adapter: the `planner` section of `aisimulate predict` and `recommend`. |
+| `components/src/dynamo/router/simulation/config.py` | AISim router section schemas, including `retune.router`. |
+| `components/src/dynamo/aisimulate/domains.py` | Shared search-domain helpers for AISim sections and retune. |

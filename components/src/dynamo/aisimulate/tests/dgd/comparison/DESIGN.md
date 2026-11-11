@@ -10,8 +10,8 @@ SPDX-License-Identifier: Apache-2.0
 The comparison suite generates DynamoGraphDeployments for the same deployment intent through:
 
 - the existing DGDR v1beta1 profiler;
-- AI Simulate Sweeper followed by the AI Configurator renderer; and
-- AI Simulate Sweeper followed by the standalone direct renderer.
+- AISim Sweeper followed by the AI Configurator renderer; and
+- AISim Sweeper followed by the standalone direct renderer.
 
 The runner generates manifests for inspection; it does not deploy them or require the generators to
 choose identical topologies. The issue #8469 suite retains the recipe-matrix rows. Every row has

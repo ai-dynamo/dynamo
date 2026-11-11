@@ -177,6 +177,7 @@ ci: &ci
 
 core:
   - *ci
+  - 'container/aisim_source_provenance.py'
   - 'container/render.py'
   - 'container/Dockerfile.template'
   - 'container/context.yaml'
@@ -243,7 +244,7 @@ operator:
   - 'deploy/operator/.*'
   # An AISimulate pin bump must refresh the schema used by operator admission.
   - 'pyproject.toml'
-  - 'container/deps/requirements.aisimulate.txt'
+  - 'container/deps/requirements.aisim.txt'
   - 'docs/fern/pages/reference/kubernetes-api/additional-resources/api-reference-k8s.md'
   - 'deploy/helm/charts/platform/**'
   # The operator check owns the real Go/Python DGD override contract test.
@@ -493,6 +494,7 @@ frontend:
   # Both live in `core:`, which frontend-build is not gated on, so without
   # these a PR bumping only epp_image would build and test no frontend image.
   - 'container/context.yaml'
+  - 'container/aisim_source_provenance.py'
   - 'container/render.py'
   # Sidecars are standalone Rust binaries and are not part of the frontend
   # image or its E2E test pipeline.

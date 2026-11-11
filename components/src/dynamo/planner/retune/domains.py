@@ -3,7 +3,7 @@
 
 """Search-domain expansion for planner retune.
 
-``retune.router`` and ``retune.planner`` use the AISimulate recommendation
+``retune.router`` and ``retune.planner`` use the AISim recommendation
 syntax of the Dynamo router and planner adapters: public knob names, each a
 scalar, ``{choices: [...]}`` or ``{range: {min, max, step?}}``, and the
 planner preset groups. ``RouterRetuneConfig`` and ``PlannerRetuneConfig``
@@ -12,11 +12,11 @@ keyed by live names (PATCH ``/router_policy`` parameters and ``PlannerConfig``
 fields) plus the load-predictor candidates of the forecast-loss pre-sweep, so
 config validation and the retune controller size and enumerate the same grid.
 
-- An omitted AISimulate knob searches its AISimulate default domain; a scalar
+- An omitted AISim knob searches its AISim default domain; a scalar
   pins it. ``default`` omits every knob.
 - Knobs fixed at startup keep their running value; worker minimums and GPU
   budgets are user constraints and are never searched.
-- Retune extension knobs (no AISimulate default domain) and the
+- Retune extension knobs (no AISim default domain) and the
   ``scaling_policy`` group keep their current value when omitted.
 - The load predictor is never a grid dimension: its candidates go to the
   pre-sweep, and every non-baseline candidate uses the winner of its
@@ -29,7 +29,7 @@ config validation and the retune controller size and enumerate the same grid.
 
 The adapter schemas and providers are imported on use: they import
 ``PlannerConfig``, whose validation imports this module, and the providers
-pull in the AISimulate sweeper.
+pull in the AISim sweeper.
 """
 
 from __future__ import annotations
@@ -96,7 +96,7 @@ THROUGHPUT_ONLY_KEYS: tuple[str, ...] = (
     *PREDICTOR_KEYS,
 )
 # Combinations a ``preset: false`` group may expand to before deduplication,
-# which bounds the expansion's memory. The AISimulate default load-predictor
+# which bounds the expansion's memory. The AISim default load-predictor
 # domain is 256 combinations.
 MAX_PRESET_COMBINATIONS = 65_536
 
@@ -315,8 +315,8 @@ def expand_router_domain(
 ) -> dict[str, list[float]]:
     """Return the router search domain keyed by PATCH ``/router_policy`` names.
 
-    An omitted AISimulate knob (``overlap_score_credit``,
-    ``prefill_load_scale``, ``temperature``) takes its AISimulate default
+    An omitted AISim knob (``overlap_score_credit``,
+    ``prefill_load_scale``, ``temperature``) takes its AISim default
     domain; ``router: default`` is all three (3 x 9 x 4 = 108 points). An
     extension knob is a dimension only when written. Each dimension may hold
     at most ``retune.max_candidates`` values.
@@ -363,7 +363,7 @@ def expand_router_domain(
 
 
 def _check_startup_load_model(public: RouterRetuneConfig, startup: str) -> None:
-    from aisimulate.config.common import Choices
+    from aisim.config.common import Choices
 
     model = public.prefill_load_model
     if (
@@ -389,7 +389,7 @@ def expand_planner_domain(config: PlannerConfig) -> PlannerDomain:
     searched:
 
     - ``scaling_policy``, when written: its preset entries (``default`` is
-      every AISimulate preset that scales; ``preset: false`` every
+      every AISim preset that scales; ``preset: false`` every
       combination of its four knobs). With ``optimization_target`` other
       than ``sla`` the planner always scales on load only, so only the load
       interval can vary. Points that turn both modes off, order the
@@ -398,10 +398,10 @@ def expand_planner_domain(config: PlannerConfig) -> PlannerDomain:
     - ``load_sensitivity``, with load scaling in some point: the
       ``load_scaling_down_sensitivity`` of its entries
       (``load_min_observations`` is fixed at startup). Omitted, the three
-      AISimulate presets give {70, 80, 90}.
+      AISim presets give {70, 80, 90}.
     - ``load_predictor``, with ``optimization_target='sla'`` and throughput
       scaling in some point: the distinct predictor candidates of the
-      pre-sweep. Omitted, the 11 AISimulate presets.
+      pre-sweep. Omitted, the 11 AISim presets.
     - Any written ``PLANNER_RETUNE_KNOBS`` knob, under its ``PlannerConfig``
       name.
 
@@ -550,7 +550,7 @@ def _scaling_policies(
     written: list[str | dict[str, Any]] | None = None
     entries: list[str | dict[str, Any]]
     if control.preset == "default":
-        # Every AISimulate preset that scales: retune never turns scaling off.
+        # Every AISim preset that scales: retune never turns scaling off.
         entries = [
             name
             for name, policy in SCALING_POLICIES.items()
@@ -753,8 +753,8 @@ def _preset_off_entries(
 ) -> list[dict[str, Any]]:
     """Every combination ``preset: false`` of ``group`` stands for.
 
-    Like AISimulate recommend: a written group knob uses its domain, an
-    omitted one its AISimulate default domain. The written domains and the
+    Like AISim recommend: a written group knob uses its domain, an
+    omitted one its AISim default domain. The written domains and the
     number of combinations are bounded before anything is built.
     """
 

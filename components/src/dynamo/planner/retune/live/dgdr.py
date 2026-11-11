@@ -134,7 +134,7 @@ PLANNER_ADAPTER = "dynamo.planner"
 RETUNE_SWEEP = "retune_sweep"
 _ROLES = ("aggregated", "prefill", "decode")
 _TEMPERATURE = DGDR_ROUTER_KNOBS["temperature"]
-# spec.objective.metric -> AISimulate optimization.target (operator lowering).
+# spec.objective.metric -> AISim optimization.target (operator lowering).
 _METRIC_TARGETS = {
     "Throughput": "throughput",
     "ThroughputPerGPU": "throughput_per_gpu",
@@ -452,7 +452,7 @@ def build_request(
     ``parallelism.preset[0].replicas`` set from ``spec_replicas``
     (unused roles are deleted with ``null``); the GPU budget is the sum of
     replicas times GPUs per worker (tensor x pipeline x attention_data).
-    Router knobs use their AISimulate public names: ``{choices: [...]}``
+    Router knobs use their AISim public names: ``{choices: [...]}``
     for a grid shard, a scalar for a point or probe shard. ``cfg.engine``
     is the one the configuration check (P5) accepted. Raises
     ``ValueError`` for ``spec_replicas`` or a shard the Request cannot

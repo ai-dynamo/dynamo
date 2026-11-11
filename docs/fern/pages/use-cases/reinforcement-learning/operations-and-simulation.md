@@ -142,7 +142,7 @@ router:
 Run DynoSim on the captured trace:
 
 ```bash
-aisimulate predict \
+aisim predict \
   --stack dynamo \
   --config /tmp/rl-run/dynosim.yaml \
   --output-dir /tmp/rl-run/dynosim-output

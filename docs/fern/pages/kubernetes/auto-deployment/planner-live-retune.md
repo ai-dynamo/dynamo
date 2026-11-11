@@ -33,7 +33,7 @@ Live retune searches the three router knobs a DGDR Request can express,
   the replica counts that were ready at the window start, as
   [replay retune](../../developer-guide/knowledge-base/modular-components/planner/planner-design.md#candidates-and-the-sweep)
   does. This needs an operator whose configured planner image includes this release: the Runs'
-  AISimulate Planner adapter must read the Requests' `planner.retune_sweep` section.
+  AISim Planner adapter must read the Requests' `planner.retune_sweep` section.
 
 ## How it works
 
@@ -95,7 +95,7 @@ This applies to all DGDR trace Runs, not only those the Planner creates.
   must discover GPUs, through DCGM or GPU discovery with labeled nodes. See
   [Auto Deploy with DGDR](auto-deploy-with-dgdr.md#prerequisites).
 - **A public model.** The Run Job has no Hugging Face credentials and no model mount, so
-  `retune.dgdr.model` must be a public Hugging Face repository id that AISimulate can resolve.
+  `retune.dgdr.model` must be a public Hugging Face repository id that AISim can resolve.
 - **A ReadWriteMany claim** in the DGD namespace, dedicated to traces. Create `segments/` and
   `windows/` at its root, writable by the user the frontend and Planner containers run as. The
   Planner writes each window file with mode `0644`, so the Run Job, which reads it as UID 1000
@@ -230,11 +230,11 @@ retune:
 | `phase_seconds` | `0` | Window phase in epoch seconds |
 | `model` | required | Hugging Face repository id the workers serve; the Requests' `spec.model.name` |
 | `sku` | required | The Requests' `spec.hardware.gpu.sku` |
-| `engine` | required | The pinned AISimulate engine section; see [Engine section](#engine-section) |
+| `engine` | required | The pinned AISim engine section; see [Engine section](#engine-section) |
 | `cut_budget_seconds` | `900` | Deadline of the window cut subprocess |
 | `job_startup_seconds` | `300` | Run Job start-up time reserved when deciding whether a shard can still finish |
-| `run.parallelism` | `8` | AISimulate `optimizer.parallelism` of each Run; Job resources may lower it |
-| `run.candidate_timeout_seconds` | `1800` | AISimulate `optimizer.candidate_timeout_seconds` of each Run |
+| `run.parallelism` | `8` | AISim `optimizer.parallelism` of each Run; Job resources may lower it |
+| `run.candidate_timeout_seconds` | `1800` | AISim `optimizer.candidate_timeout_seconds` of each Run |
 | `run.max_shards` | `3` | Most grid shards (Requests) per window; the probe and off-grid points do not count |
 | `keep_requests` | `5` | Windows whose finished Requests are kept for audit |
 | `max_window_rows` | `5000000` | A larger window fails with `window_too_large` |
@@ -278,7 +278,7 @@ new values; to keep `ttft_ms` and `itl_ms` changeable at runtime, set both `retu
 
 `retune.dgdr.engine` becomes `spec.aisim.inputOverrides.engine` of every Request, so every
 value in it must be a scalar. A `{choices: ...}` or `{range: ...}` domain, or an omitted knob that
-AISimulate searches by default, would make the Run search engine settings as well.
+AISim searches by default, would make the Run search engine settings as well.
 
 - `mode` is `aggregated` for `mode: agg` and `disaggregated` for `mode: disagg`.
 - Each worker role of the mode (`aggregated`, or `prefill` and `decode`) sets
@@ -286,14 +286,14 @@ AISimulate searches by default, would make the Run search engine settings as wel
   `moe_tensor` and `moe_expert`, and sets `scheduler.max_batched_tokens` and
   `scheduler.max_sequences`.
 - The preset entry may also set `prefill_context`, but only to `1`, and must not set
-  `decode_context`: the pinned AISimulate recommendation does not run context parallelism.
+  `decode_context`: the pinned AISim recommendation does not run context parallelism.
 - Do not set `replicas` anywhere: the Planner fills them in at each launch, from the DGD spec with
   fixed replicas or from the ready counts at the window start with scaling, and sets
   `spec.hardware.gpu.budget` to their GPU total.
 - Write roles the mode does not use as `null`, or leave them out.
 - Set the model and GPU with `retune.dgdr.model` and `retune.dgdr.sku`, not in the engine.
-- Leave `backend_version` out to let the pinned AISimulate pick its version for
-  `retune.dgdr.sku`. If you set it, it must be a version AISimulate accepts for that GPU;
+- Leave `backend_version` out to let the pinned AISim pick its version for
+  `retune.dgdr.sku`. If you set it, it must be a version AISim accepts for that GPU;
   otherwise every Run fails with `UnlistedQueryVersionError`.
 
 ### Time budget
@@ -306,7 +306,7 @@ need(n) = cut_budget_seconds + job_startup_seconds
           + (1 + ceil((n - 1) / run.parallelism)) x run.candidate_timeout_seconds
 ```
 
-AISimulate evaluates the first candidate alone, hence the `1 +`. With scaling, a shard also needs
+AISim evaluates the first candidate alone, hence the `1 +`. With scaling, a shard also needs
 another `cut_budget_seconds` for the history read and the pre-sweep. The Planner rejects a
 configuration whose largest grid shard needs more than `timeout_seconds`, because the baseline
 can fall in any shard and a window without a baseline score fails. With the defaults, the 108-point
@@ -348,7 +348,7 @@ retries:
 | P11 | The API server accepts a dry-run Request with `spec.workload.trace` |
 | P12 | At least `max(1, replicas)` frontends are Ready, each with a router per worker type, and `/router_policy` answers on each one's admin listener |
 
-The Planner only warns when AISimulate does not list the model among its default models (P6).
+The Planner only warns when AISim does not list the model among its default models (P6).
 
 ## Roll out
 
@@ -507,7 +507,7 @@ The Planner exports these on `metric_reporting_prometheus_port`:
 
 | Not supported | Reason |
 |---|---|
-| Retune with scaling on an operator whose planner image predates this release | The Run's AISimulate Planner adapter rejects `planner.retune_sweep`, so every Run fails |
+| Retune with scaling on an operator whose planner image predates this release | The Run's AISim Planner adapter rejects `planner.retune_sweep`, so every Run fails |
 | Restoring applied Planner parameters after a Planner restart | They live in the Planner process, and a load predictor needs a history warm-up; the next window starts from the configured values |
 | Load-predictor history beyond 1024 buckets of the shortest throughput interval | The warm-up travels inside every Request and Candidate |
 | Frontends with non-default routing fields beyond the three knobs, or `kv_event_lag_ms` other than 0 | The DGDR router section expresses only the three knobs, and the Run does not pass a lag |
@@ -516,7 +516,7 @@ The Planner exports these on `metric_reporting_prometheus_port`:
 | Router flags that a worker produces through shell command substitution, backticks, script variables, positional parameters, literal text that `eval` or a nested shell parses again, or a script file, and ConfigMap, Secret, annotation or `envFrom` values in text that a shell or `xargs` reads from a heredoc, a here-string or a pipe, or that `su -c` runs (P4 does not see them) | The Planner reads the worker's spec and does not run its script |
 | Raising `overlap_score_credit` on a frontend that starts it at 0: an omitted credit then searches only 0, and a written positive value fails P4 | A live router rejects a positive credit after starting at 0 |
 | Private, fine-tuned or local-path models | The Run Job has no Hugging Face credentials or model mount |
-| Several frontends without router replica sync | AISimulate simulates one router |
+| Several frontends without router replica sync | AISim simulates one router |
 | EPP or Gateway API Inference Extension frontends, `frontendSidecar`, TLS frontends | No `/router_policy` there, different addressing, or certificates |
 | Run Job resources, deadline and tolerations | Fixed by the DGDR Run Job |
 | Time-based segment rotation and a segment count limit | The frontend trace writer rotates by size only |

@@ -29,7 +29,7 @@ POLICY_PARAMETER_KEYS: tuple[str, ...] = (
     "shared_cache_multiplier",
 )
 
-# Router knobs a DGDR v1beta2 Request can search, AISimulate public name ->
+# Router knobs a DGDR v1beta2 Request can search, AISim public name ->
 # live name. ``dynamo.router.simulation.config.ROUTER_PUBLIC_TO_LIVE`` is the
 # source of truth; this mirrors it for modules that must not import the
 # router simulation stack.

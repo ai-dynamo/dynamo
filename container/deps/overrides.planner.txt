@@ -14,3 +14,5 @@
 # once the override is in force. Drop this entry once aiperf widens its own
 # constraint.
 pillow>=13.0.0,<14
+
+# The explicit source-built wheel is the dependency for this draft; avoid a second Git solve.

@@ -272,7 +272,7 @@ def collect_dpkg_sources(
 # First-party Rust crate prefixes. Crates whose name starts with any of these
 # are NVIDIA-authored in this repository or another ai-dynamo release, so we
 # don't ship them in the third-party OSRB sources archive.
-_FIRST_PARTY_RUST_PREFIXES = ("aisimulate-", "dynamo-", "kvbm-", "nixl-")
+_FIRST_PARTY_RUST_PREFIXES = ("aisim-", "aisimulate-", "dynamo-", "kvbm-", "nixl-")
 
 
 def _shipped_rust_crates(

@@ -144,7 +144,7 @@ class AISDatasetProfileSpec(BaseModel):
 
 
 class AISPerfModelSpec(BaseModel):
-    """Role-indexed AISimulate canonical configurations.
+    """Role-indexed AISim canonical configurations.
 
     The SDK owns the estimator schema. Dynamo binds each configuration to
     its deployment role.
@@ -174,8 +174,8 @@ class AISPerfModelSpec(BaseModel):
         # estimator runtime. Require AIS only when validating an AIS config.
         # The package root loads native APIs lazily and types them as object;
         # import the typed native module directly.
-        from aisimulate_core._native import RustForwardPassPerfModel
-        from aisimulate_core.sdk import ForwardPassPerfModelConfig
+        from aisim_core._native import RustForwardPassPerfModel
+        from aisim_core.sdk import ForwardPassPerfModelConfig
 
         result = {}
         for role, config in roles.items():
@@ -187,7 +187,7 @@ class AISPerfModelSpec(BaseModel):
                 # Use the installed SDK's fields/defaults; never duplicate its
                 # expanding schema or discard an unrecognized input field.
                 request = ForwardPassPerfModelConfig(**config)
-                # AISimulate exposes native APIs lazily through module __getattr__.
+                # AISim exposes native APIs lazily through module __getattr__.
                 cast(Any, RustForwardPassPerfModel).normalize_config(
                     json.dumps(request.to_dict())
                 )
@@ -856,7 +856,7 @@ class DgdrRunConfig(BaseModel):
         default=8,
         ge=1,
         description=(
-            "AISimulate optimizer.parallelism of each Run. The Run Job's CPU "
+            "AISim optimizer.parallelism of each Run. The Run Job's CPU "
             "and memory may lower the effective value."
         ),
     )
@@ -864,7 +864,7 @@ class DgdrRunConfig(BaseModel):
         default=1800.0,
         gt=0,
         allow_inf_nan=False,
-        description="AISimulate optimizer.candidate_timeout_seconds of each Run.",
+        description="AISim optimizer.candidate_timeout_seconds of each Run.",
     )
     max_shards: int = Field(
         default=3,
@@ -957,12 +957,12 @@ class DgdrExecutorConfig(BaseModel):
     )
     model: str = Field(
         min_length=1,
-        description="HF repo id the workers serve (worker --model); AISimulate resolves it.",
+        description="HF repo id the workers serve (worker --model); AISim resolves it.",
     )
     sku: str = Field(min_length=1, description="spec.hardware.gpu.sku of each Request.")
     engine: dict[str, Any] = Field(
         description=(
-            "AISimulate public engine section with every leaf a scalar "
+            "AISim public engine section with every leaf a scalar "
             "(mode, backend, backend_version, context_length, "
             "workers.<role>.parallelism.preset, scheduler, kv_cache). Replicas "
             "come from the DGD spec at each launch and must not be set here."
@@ -1061,24 +1061,24 @@ _DGDR_ROUTER_SECTION_KEYS = frozenset(
 )
 _DGDR_ENGINE_MODES = {"agg": "aggregated", "disagg": "disaggregated"}
 _DGDR_ENGINE_ROLES = {"agg": ("aggregated",), "disagg": ("prefill", "decode")}
-# ``parallelism.preset`` entry keys: AISimulate requires all of these plus
+# ``parallelism.preset`` entry keys: AISim requires all of these plus
 # ``replicas``, which the executor sets from the DGD spec at each launch.
 _DGDR_PRESET_KEYS = ("tensor", "pipeline", "attention_data", "moe_tensor", "moe_expert")
-# The pinned AISimulate recommend runs prefill_context only at 1, and its
+# The pinned AISim recommend runs prefill_context only at 1, and its
 # preset entry schema has no decode_context. When the pin moves, update this
 # tuple together with _validate_dgdr_parallelism (its decode_context branch,
 # the "optionally prefill_context: 1" message and the prefill_context == 1
 # check), test_pinned_aisimulate_rejects_decode_context and the preset rules
 # in docs/fern/pages/kubernetes/auto-deployment/planner-live-retune.md.
 _DGDR_PRESET_OPTIONAL_KEYS = ("prefill_context",)
-# Scheduler knobs AISimulate searches over a default domain when omitted.
+# Scheduler knobs AISim searches over a default domain when omitted.
 _DGDR_SCHEDULER_KNOBS = ("max_batched_tokens", "max_sequences")
 
 
 def dgdr_rounds(points: int, parallelism: int) -> int:
     """Evaluation rounds of a DGDR Run that scores ``points`` candidates.
 
-    The AISimulate optimizer evaluates the first candidate alone, then
+    The AISim optimizer evaluates the first candidate alone, then
     ``parallelism`` candidates at a time.
     """
 
@@ -1179,7 +1179,7 @@ def _validate_dgdr_engine(
     """P5: ``retune.dgdr.engine`` pins one engine with scalars only.
 
     The section is the Request's ``inputOverrides.engine`` merge patch, so
-    any AISimulate search domain left in it (a ``choices`` or ``range``
+    any AISim search domain left in it (a ``choices`` or ``range``
     mapping, a parallelism preset list or a default domain) would make the
     Run search engine settings next to the router knobs. A written
     ``backend`` must be the deployed one (``PlannerConfig.backend``), which
@@ -1234,7 +1234,7 @@ def _validate_dgdr_engine(
             if not _is_positive_int(scheduler.get(knob)):
                 raise ValueError(
                     f"{path}.scheduler.{knob} must be a positive integer (P5); "
-                    "omitted, AISimulate searches its default domain"
+                    "omitted, AISim searches its default domain"
                 )
 
 
@@ -1257,7 +1257,7 @@ def _validate_dgdr_parallelism(parallelism: Any, path: str) -> None:
     if "decode_context" in entry:
         raise ValueError(
             f"{path}.preset[0].decode_context is not accepted (P5); the pinned "
-            "AISimulate preset schema has no decode_context"
+            "AISim preset schema has no decode_context"
         )
     missing = [key for key in _DGDR_PRESET_KEYS if key not in entry]
     unknown = sorted(
@@ -1277,7 +1277,7 @@ def _validate_dgdr_parallelism(parallelism: Any, path: str) -> None:
     if entry.get("prefill_context", 1) != 1:
         raise ValueError(
             f"{path}.preset[0].prefill_context must be 1 or omitted (P5); "
-            "AISimulate recommend rejects context parallelism above 1, "
+            "AISim recommend rejects context parallelism above 1, "
             f"got {entry['prefill_context']!r}"
         )
 
@@ -1327,7 +1327,7 @@ class RetuneConfig(BaseModel):
     recorded traffic against a grid of candidate parameters and applies the
     best point by ``objective`` (SLA goodput per GPU by default; see
     ``retune.sweep.score_summary``). ``router`` and ``planner`` are search
-    domains in the AISimulate recommendation syntax of the Dynamo router and
+    domains in the AISim recommendation syntax of the Dynamo router and
     planner adapters (``RouterRetuneConfig``, ``PlannerRetuneConfig``), stored
     as written; ``retune.domains`` expands them into a grid keyed by live
     names. Either may be the literal ``"default"``; ``None`` searches nothing.
@@ -1446,12 +1446,12 @@ class RetuneConfig(BaseModel):
     router: Literal["default"] | dict[str, Any] | None = Field(
         default=None,
         description=(
-            "Router search domain in the AISimulate recommend syntax: public "
+            "Router search domain in the AISim recommend syntax: public "
             "knobs overlap_score_credit, prefill_load_scale and temperature, "
             "plus the retune extension knobs, each a scalar, {choices: [...]} "
-            "or {range: {min, max, step}}. An omitted AISimulate knob searches "
-            "its AISimulate default domain; a scalar pins it. 'default' is the "
-            "AISimulate default domain; null does not search the router."
+            "or {range: {min, max, step}}. An omitted AISim knob searches "
+            "its AISim default domain; a scalar pins it. 'default' is the "
+            "AISim default domain; null does not search the router."
         ),
     )
     executor: Literal["local", "dgdr"] = Field(
@@ -1468,10 +1468,10 @@ class RetuneConfig(BaseModel):
     planner: Literal["default"] | dict[str, Any] | None = Field(
         default=None,
         description=(
-            "Planner search domain in the AISimulate recommend syntax, limited "
+            "Planner search domain in the AISim recommend syntax, limited "
             "to what a running planner can change: the load_sensitivity and "
             "load_predictor groups and the runtime knobs. 'default' searches "
-            "the applicable AISimulate default domain; null does not search "
+            "the applicable AISim default domain; null does not search "
             "the planner. ttft_ms and itl_ms are never searched."
         ),
     )
@@ -1496,7 +1496,7 @@ class RetuneConfig(BaseModel):
                 f"default domain, or remove it to keep every {section} "
                 "parameter unchanged"
             )
-        # Imported on use: the adapter schemas import AISimulate and this
+        # Imported on use: the adapter schemas import AISim and this
         # module.
         from dynamo.planner.retune.domains import parse_retune_section
 
@@ -1607,7 +1607,7 @@ class PlannerConfig(BaseModel):
             "depth and KV cache utilization — no SLA targets or profiling needed. "
             "'load' uses user-defined prefill queue token and decode KV "
             "utilization thresholds. "
-            "'sla' uses the AISimulate performance model to target specific "
+            "'sla' uses the AISim performance model to target specific "
             "ttft_ms/itl_ms values."
         ),
     )
@@ -1715,7 +1715,7 @@ class PlannerConfig(BaseModel):
     ais_perf_model: Optional[AISPerfModelSpec] = Field(
         default=None,
         description=(
-            "Role-indexed AISimulate ForwardPassPerfModelConfig mappings. "
+            "Role-indexed AISim ForwardPassPerfModelConfig mappings. "
             "The SDK owns estimator selection, tuning, and validation; "
             "new configs default to auto selection with fallback denied."
         ),
@@ -1727,7 +1727,7 @@ class PlannerConfig(BaseModel):
         if isinstance(values, dict) and "aic_perf_model" in values:
             raise ValueError(
                 "aic_perf_model is no longer supported; use ais_perf_model.roles "
-                "with canonical AISimulate configurations"
+                "with canonical AISim configurations"
             )
         return values
 
@@ -2372,8 +2372,8 @@ class PlannerConfig(BaseModel):
             ):
                 logger.warning(
                     "pre_deployment_sweeping_mode is 'none' or unset while "
-                    "throughput scaling is enabled; the AISimulate performance model "
-                    "will start from native AISimulate estimates when available or "
+                    "throughput scaling is enabled; the AISim performance model "
+                    "will start from native AISim estimates when available or "
                     "from live FPM regression after enough observations."
                 )
             if (
@@ -2505,7 +2505,7 @@ class PlannerConfig(BaseModel):
             raise ValueError(
                 f"retune grid has {size} candidates, exceeding "
                 f"retune.max_candidates={retune.max_candidates} "
-                f"({description}); an omitted AISimulate knob searches its "
+                f"({description}); an omitted AISim knob searches its "
                 "default domain, so pin knobs with a scalar to shrink the grid"
             )
         if retune.executor == "dgdr":
@@ -2613,7 +2613,7 @@ class PlannerConfig(BaseModel):
         if "prefill_load_model" not in spec:
             return
         # Imported on use: the adapter schema imports this module.
-        from aisimulate.config.common import Choices
+        from aisim.config.common import Choices
 
         from dynamo.planner.retune.domains import parse_retune_section
 

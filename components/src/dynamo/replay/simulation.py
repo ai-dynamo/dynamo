@@ -18,12 +18,9 @@ from enum import Enum
 from numbers import Real
 from typing import Any
 
-from aisimulate.runner import (
-    EngineReplayRunnerFactory,
-    materialize_engine_launch_config,
-)
-from aisimulate.sweeper.provider import JSONValue, RuntimeHookSpec
-from aisimulate.sweeper.replay import (
+from aisim.runner import EngineReplayRunnerFactory, materialize_engine_launch_config
+from aisim.sweeper.provider import JSONValue, RuntimeHookSpec
+from aisim.sweeper.replay import (
     HookCapability,
     ReplayOutputRequirements,
     ReplayReport,
@@ -434,7 +431,7 @@ class DynamoReplayRunner:
         }
         trace_block_size = spec.workload.get("trace_block_size")
         # Weka and Dynamo traces carry their source block size in the trace
-        # metadata. Leave it unset so AISimulate can validate and use that
+        # metadata. Leave it unset so AISim can validate and use that
         # embedded value instead of imposing the synthetic-workload default.
         if trace_format not in {"weka", "dynamo"} and trace_block_size is None:
             trace_block_size = self.trace_block_size
@@ -568,7 +565,7 @@ class DynamoReplayRunner:
                 workload.get("inter_turn_delay_ms", 0.0), "inter_turn_delay_ms"
             ),
             # Session sources author each turn's new input; replay prefixes it
-            # with the earlier turns, as AISimulate's engine stack does.
+            # with the earlier turns, as AISim's engine stack does.
             "accumulate_session_deltas": (
                 workload.get("source_type") == "synthetic-session"
             ),

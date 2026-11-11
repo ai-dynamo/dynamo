@@ -6,7 +6,7 @@ subtitle: Extend Sweeper without adding application dependencies to its core
 ---
 
 > [!WARNING]
-> **Experimental.** The provider ABI is versioned but may change before AISimulate stabilizes.
+> **Experimental.** The provider ABI is versioned but may change before AISim stabilizes.
 
 A `SweepConfigProvider` lets an optional feature package contribute search dimensions without
 making `aisimulate` depend on that package.
@@ -41,10 +41,10 @@ objects needed by replay.
 
 ## Registration
 
-Expose a zero-argument factory from the `aisimulate.sweep_config_providers` entry-point group:
+Expose a zero-argument factory from the `aisim.sweep_config_providers` entry-point group:
 
 ```toml
-[project.entry-points."aisimulate.sweep_config_providers"]
+[project.entry-points."aisim.sweep_config_providers"]
 "example.policy" = "example_package.simulation:create_provider"
 ```
 

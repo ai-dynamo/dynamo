@@ -153,7 +153,7 @@ def _retune_inputs(
     target model of agentic rows, and ``DynamoReplayRunner`` sets it for every
     performance-model engine, agentic or not. ``aisimulate predict --stack
     dynamo`` replays through this function too, so each error also names the
-    AISimulate setting.
+    AISim setting.
     """
 
     retune = config.retune
@@ -439,7 +439,7 @@ def run_trace_replay(
     ``wall_time_ms`` and derived throughput measure Rust runtime construction
     and execution. Planner creation and bootstrap happen before that boundary.
     ``weka_nested_timestamp_basis`` overrides Weka nested timestamp interpretation;
-    omitting it retains AISimulate's automatic selection.
+    omitting it retains AISim's automatic selection.
 
     ``kv_event_lag_ms`` delays the KV cache events (blocks stored and removed)
     the router's indexer observes by that much simulated time. Prefill and
@@ -447,7 +447,7 @@ def run_trace_replay(
     on the response path. ``None`` or ``0`` keeps synchronous updates. Offline
     KV-router replay only.
 
-    ``agentic_snapshot``, ``agentic_warmup`` and ``agentic_profile`` use AISimulate
+    ``agentic_snapshot``, ``agentic_warmup`` and ``agentic_profile`` use AISim
     workload controls on the existing offline trace path. Native validation owns
     their schemas and lifecycle constraints.
 

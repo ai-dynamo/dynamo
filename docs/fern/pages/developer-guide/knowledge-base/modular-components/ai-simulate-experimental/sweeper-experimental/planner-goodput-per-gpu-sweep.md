@@ -53,7 +53,7 @@ scales the fleet to an average of ~13.5 GPUs instead of pinning 32.
 The experiment used `Sweeper.run` with `goal.target = goodput_per_gpu`. It fixed the deployment,
 router, workload, and SLA, and swept only the planner settings using the full open-loop trace. The
 configuration below documents the retired `aisimulate==0.1.0.dev1` API and is not accepted by
-AISimulate 0.12.0:
+AISim 0.12.0:
 
 ```yaml
 search_space:

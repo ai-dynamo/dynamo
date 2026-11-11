@@ -68,7 +68,7 @@ type RoundProgress struct {
 	Total int32 `json:"total"`
 }
 
-// BranchProgress reports progress for one independently optimized AISimulate branch.
+// BranchProgress reports progress for one independently optimized AISim branch.
 type BranchProgress struct {
 	// Name is the executor-defined stable branch identifier.
 	// +required
@@ -123,7 +123,7 @@ type CandidateProgress struct {
 
 // DGDRRunProgress contains branch-aware optimizer and evaluation outcome counters.
 type DGDRRunProgress struct {
-	// Branches reports independently optimized AISimulate branches.
+	// Branches reports independently optimized AISim branches.
 	// +optional
 	// +listType=map
 	// +listMapKey=name
@@ -140,9 +140,9 @@ type DGDRRunProgress struct {
 
 // AISimRunStatus reports the exact public recommendation input used for this execution.
 type AISimRunStatus struct {
-	// Input is the fully lowered AISimulate input after typed fields, derived defaults and
+	// Input is the fully lowered AISim input after typed fields, derived defaults and
 	// spec.aisim.inputOverrides have been merged. Field names and nesting use the
-	// upstream AISimulate JSON contract.
+	// upstream AISim JSON contract.
 	// +optional
 	// +kubebuilder:pruning:PreserveUnknownFields
 	// +kubebuilder:validation:Type=object
@@ -163,7 +163,7 @@ type DynamoGraphDeploymentRunStatus struct {
 	// +optional
 	Progress *DGDRRunProgress `json:"progress,omitempty"`
 
-	// AISim reports the effective input executed by AISimulate.
+	// AISim reports the effective input executed by AISim.
 	// +optional
 	AISim *AISimRunStatus `json:"aisim,omitempty"`
 

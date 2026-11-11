@@ -684,23 +684,19 @@ COPY examples/router/custom-policy-example/ /opt/dynamo/examples/router/custom-p
 COPY deploy/inference-gateway/ext-proc/ /opt/dynamo/deploy/inference-gateway/ext-proc/
 COPY deploy/inference-gateway/sidecar/ /opt/dynamo/deploy/inference-gateway/sidecar/
 
-{% if target == "planner" or (target == "runtime" and framework in ("vllm", "sglang", "trtllm")) %}
-COPY container/deps/requirements.aisimulate.txt /opt/dynamo/container/deps/requirements.aisimulate.txt
+{% if target in ("planner", "frontend") or target == "runtime" %}
+COPY container/deps/requirements.aisim.txt /opt/dynamo/container/deps/requirements.aisim.txt
 
-# AISimulate is released separately as an abi3 wheel. Stage the pinned wheel
-# directly from NVIDIA's package index. Download only this
-# distribution; runtime images own dependency installation through their
-# requirements files and local wheels.
+# Build the exact source-pinned AISim wheel until #796 has published artifacts.
+# No dependencies are downloaded into the wheelhouse; runtime images own them.
 RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=shared \
     export UV_CACHE_DIR=/root/.cache/uv && \
     source ${VIRTUAL_ENV}/bin/activate && \
-    python -m pip download \
-        --only-binary=:all: \
+    python -m pip install --no-deps --requirement /opt/dynamo/container/deps/requirements.aisim.txt && \
+    python -m pip wheel \
         --no-deps \
-        --no-index \
-        --find-links https://pypi.nvidia.com/aisimulate/ \
-        --dest /opt/dynamo/dist \
-        --requirement /opt/dynamo/container/deps/requirements.aisimulate.txt
+        --wheel-dir /opt/dynamo/dist \
+        --requirement /opt/dynamo/container/deps/requirements.aisim.txt
 {% endif %}
 
 # Compliance: harvest each crate's real LICENSE files from the cargo registry
@@ -734,13 +730,20 @@ RUN --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
 # the bare system python3 lacks it and the step would no-op with a warning.
 COPY container/compliance /opt/compliance
 RUN set -u; injected=0; \
-    for whl in /opt/dynamo/dist/ai_dynamo_runtime*.whl /opt/dynamo/dist/aisimulate*.whl; do \
+    for whl in /opt/dynamo/dist/ai_dynamo_runtime*.whl /opt/dynamo/dist/aisim-*.whl; do \
         [ -e "$whl" ] || continue; \
         PYTHONPATH=/opt ${VIRTUAL_ENV}/bin/python3 -m compliance.bundle_wheel_notices \
             --wheel "$whl" --licenses-dir /opt/dynamo/rust-licenses -v \
             && injected=$((injected+1)) || echo "::warning::wheel NOTICES bundling failed for $whl (SBOM retained)"; \
     done; \
     echo "wheel NOTICES bundled into $injected wheel(s)"
+
+{% if target in ("planner", "frontend") or target == "runtime" %}
+# Run after NOTICES bundling so the manifest hashes the final wheel bytes.
+COPY container/aisim_source_provenance.py /opt/dynamo/container/aisim_source_provenance.py
+RUN ${VIRTUAL_ENV}/bin/python /opt/dynamo/container/aisim_source_provenance.py \
+    /opt/dynamo/container/deps/requirements.aisim.txt /opt/dynamo/dist
+{% endif %}
 
 # Compliance source archival: vendor the workspace lockfile for the OSRB
 # bundle. Gated on ENABLE_SOURCE_ARCHIVAL so PR builds skip the ~200-400 MB

@@ -9,8 +9,8 @@ and predictor candidates that match the running predictor."""
 import pytest
 
 pytest.importorskip(
-    "aisimulate.sweeper",
-    reason="AI Simulate is an optional Dynamo simulation dependency",
+    "aisim.sweeper",
+    reason="AISim is an optional Dynamo simulation dependency",
 )
 
 from dynamo.planner.config.planner_config import PlannerConfig
@@ -79,7 +79,7 @@ def test_default_domains_follow_the_scaling_mode(overrides, grid, presets, size)
     router = expand_router_domain(config.retune)
     planner = expand_planner_domain(config)
 
-    # router: default is the AISimulate domain, 3 x 9 x 4 = 108 points.
+    # router: default is the AISim domain, 3 x 9 x 4 = 108 points.
     assert list(router) == [
         "overlap_score_credit",
         "prefill_load_scale",
@@ -149,7 +149,7 @@ def test_scaling_policy_is_searched_only_when_written():
 
 
 def test_default_scaling_policies_fold_inactive_fields_and_deduplicate():
-    # The six AISimulate presets that scale; "disabled" is never a candidate.
+    # The six AISim presets that scale; "disabled" is never a candidate.
     domain = expand_planner_domain(
         _config(
             router=PINNED_ROUTER,

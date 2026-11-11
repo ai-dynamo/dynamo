@@ -39,7 +39,7 @@ classifiers = [
 ]
 
 dependencies = [
-    "aisimulate==0.13.0.dev202610290000000087 ; python_version >= '3.11' and python_version < '3.14'",
+    "aisim @ git+https://github.com/ai-dynamo/aisimulate.git@fc85294e633b0aa7e15968ee84cfad76aefb00a4#subdirectory=python/aisim ; python_version >= '3.11' and python_version < '3.14'",
     "aiperf==0.13.0",
     "matplotlib",
     "networkx",

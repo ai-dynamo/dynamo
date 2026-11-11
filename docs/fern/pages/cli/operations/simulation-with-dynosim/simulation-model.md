@@ -10,7 +10,7 @@ engine-specific scheduler and KV-cache state. Offline prediction and live Mocker
 same core through virtual-time and wall-clock execution, respectively.
 
 Run `python3 -m dynamo.mocker` to launch live workers. This worker launcher is separate from the
-former public Replay online CLI, which remains unavailable in the unified AISimulate CLI. The
+former public Replay online CLI, which remains unavailable in the unified AISim CLI. The
 Python replay SDK retains online mode for programmatic callers.
 
 ## Engine Behavior
@@ -43,18 +43,18 @@ Scheduler state determines the batch and cache-hit inputs to the timing source. 
 source for each worker role with `engine.workers.<role>.timing.type`.
 
 The live Mocker CLI options for profile-derived interpolation and direct `--ais-*` configuration
-are separate from the unified CLI. In AISimulate configurations, use only the timing types accepted
-by the AISimulate YAML schema.
+are separate from the unified CLI. In AISim configurations, use only the timing types accepted
+by the AISim YAML schema.
 
-### AISimulate Performance Model
+### AISim Performance Model
 
-`timing.type: default` uses the AISimulate performance model. AISimulate selects model data from
+`timing.type: default` uses the AISim performance model. AISim selects model data from
 `engine.model`, `engine.hardware`, `engine.backend`, the optional `engine.backend_version`, and the
 role's parallelism mapping. Unsupported combinations fail instead of silently using an
 uncalibrated timing model.
 
 KV-capacity selection is independent of the timing source. With `kv_cache.capacity.type: default`,
-AISimulate estimates capacity from the model, backend, hardware, parallelism, block size, and memory
+AISim estimates capacity from the model, backend, hardware, parallelism, block size, and memory
 fraction. With `type: fixed`, set the concrete block count in `blocks`.
 
 ### Fixed Timing
@@ -66,7 +66,7 @@ timing: {type: fixed, prefill_ms: 2, decode_ms: 0.5}
 ```
 
 Use fixed timing for functional tests or controlled comparisons. These values replace the
-AISimulate timing lookup but do not disable default KV-capacity estimation.
+AISim timing lookup but do not disable default KV-capacity estimation.
 
 ### Polynomial Baseline
 

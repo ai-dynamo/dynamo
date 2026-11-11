@@ -11,7 +11,7 @@ cache behavior without running a real inference engine.
 
 ## What This Crate Provides
 
-- `MockerConfig` combining the AISimulate launch configuration with Dynamo runtime options
+- `MockerConfig` combining the AISim launch configuration with Dynamo runtime options
 - `engine::create_engine` for building a vLLM-style or SGLang-style mock scheduler
 - `KvEventPublishers` hooks for emitting router-visible KV cache events
 - `loadgen` and `replay` modules for synthetic and trace-driven experiments
@@ -33,7 +33,7 @@ let config = MockerConfig::from_value(serde_json::json!({
 }))?;
 ```
 
-AISimulate supplies the engine configuration, defaults, validation, and scheduling implementation.
+AISim supplies the engine configuration, defaults, validation, and scheduling implementation.
 Dynamo supplies transport, event publishing, and Router/Planner adapters. Python replay entry points
 accept the same canonical mapping; no Dynamo engine-argument constructor classes are required.
 
@@ -48,7 +48,7 @@ change placement or eviction policy.
 
 Session IDs come from replay request metadata and `RouterEvent.session_id`.
 Unattributed stores and lower-tier events do not create session lineage. Replay
-forwards AISimulate stored-block attribution into router events. The adapter never
+forwards AISim stored-block attribution into router events. The adapter never
 infers a store's session from whichever requests happen to be running.
 Disaggregated decode placement remains load-only; prefill observes the cache events.
 

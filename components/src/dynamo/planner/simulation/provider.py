@@ -15,12 +15,9 @@ from dataclasses import replace
 from enum import Enum
 from typing import Any, cast
 
-from aisimulate.config.common import Choices, IntegerRange, NumericRange
-from aisimulate.config_adapter import (
-    PredictionAdapterContext,
-    RecommendationAdapterContext,
-)
-from aisimulate.sweeper.provider import (
+from aisim.config.common import Choices, IntegerRange, NumericRange
+from aisim.config_adapter import PredictionAdapterContext, RecommendationAdapterContext
+from aisim.sweeper.provider import (
     AdapterReplaySpec,
     AdapterSearchPlan,
     CandidateContext,
@@ -1346,7 +1343,7 @@ def _retune_with_evaluation_sla(
 
     The Planner's own ``ttft_ms``/``itl_ms`` follow ``evaluation.sla`` only for
     ``target: sla``; without this default, other targets would score retune
-    against Planner defaults while AISimulate reports goodput against
+    against Planner defaults while AISim reports goodput against
     ``evaluation.sla``.
     """
 

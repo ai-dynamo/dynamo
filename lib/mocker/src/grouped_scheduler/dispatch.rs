@@ -4,7 +4,7 @@
 //! Publication of neutral generalized-engine effects through Dynamo sinks.
 
 use super::*;
-use aisimulate_core::engine::PassStartEffects;
+use aisim_core::engine::PassStartEffects;
 use dynamo_kv_router::protocols::StorageTier;
 
 #[derive(Clone)]
@@ -494,7 +494,7 @@ impl RankDispatch {
                 session_id: event.session_id.clone(),
             })
             .collect();
-        // The vLLM wire format needs each block's token IDs, which AISimulate
+        // The vLLM wire format needs each block's token IDs, which AISim
         // does not carry for G2 residency; those events use only the event sink.
         raw_events.retain(|event| {
             event.storage_tier == StorageTier::Device || event.block_token_ids.is_some()

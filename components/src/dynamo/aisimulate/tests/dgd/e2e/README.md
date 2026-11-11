@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # Recommend-to-DGD CLI tests
 
-`test_dgd_cli.py` runs every YAML in `configs/` through the installed AISimulate
+`test_dgd_cli.py` runs every YAML in `configs/` through the installed AISim
 CLI with `recommend --stack dynamo --output dgd`. The real Dynamo replay stack,
 search, AIC renderer, and DGD output adapter run together. The local tiny-model
 fixture contains metadata only; fixed timings keep these CPU tests independent

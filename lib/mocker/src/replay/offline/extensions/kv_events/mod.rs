@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use aisimulate_core::engine::KvEvent;
+use aisim_core::engine::KvEvent;
 use anyhow::Context;
 use dynamo_kv_router::protocols::{RouterEvent, StorageTier};
 
@@ -12,7 +12,7 @@ use crate::replay::{
     ReplayTimedKvEvent, ReplayTimedOutputSignal, ReplayTimedRequest, ReplayWorkerArtifacts,
 };
 use crate::scheduler::RouterEventVisibility;
-use aisimulate_core::replay::{
+use aisim_core::replay::{
     CURRENT_REPLAY_SPEC_VERSION, EngineEventBatch, KvIngestEventEncoder, ProviderSpec,
     ReplayAdapters, ReplayArtifactKvEventVisibility, ReplayEngineObservation, ReplayRuntimeInput,
     ReplaySpec, ReplayTopology, Replayer, WorkerPoolSpec, WorkerStage,
@@ -260,7 +260,7 @@ pub(in crate::replay) fn generate_trace_worker_artifacts_with_visibility(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aisimulate_core::engine::{KvBlock, KvEventData, KvEventTier, StoredBlocks};
+    use aisim_core::engine::{KvBlock, KvEventData, KvEventTier, StoredBlocks};
 
     fn stored(tier: KvEventTier, event_id: u64) -> KvEvent {
         KvEvent {
@@ -276,6 +276,7 @@ mod tests {
                     token_ids: None,
                 }],
                 session_id: Some("session-1".to_owned()),
+                cache_salt: None,
             }),
         }
     }

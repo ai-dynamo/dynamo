@@ -41,7 +41,7 @@ provenance are saved in `runs/quickstart/results.json`; replay diagnostics and
 telemetry are under `runs/quickstart/artifacts/`.
 
 > [!NOTE]
-> The simulation setup requires Linux because Dynamo's pinned AISimulate wheel
+> The simulation setup requires Linux because Dynamo's pinned AISim wheel
 > is Linux-only. Trace generation, config validation, scoring, saved reports,
 > and endpoint benchmarking also work on macOS. Python 3.11–3.12 is supported
 > for the standalone package; use 3.11 or 3.12 for simulation.

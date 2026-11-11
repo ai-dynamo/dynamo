@@ -101,7 +101,7 @@ def test_parses_without_notices_or_local_files(
     assert namespace.router_temperature == 0.5
     assert namespace.model_path == "/not/a/local/dir"
     assert not hasattr(namespace, "admission_control")
-    # The AISimulate perf-model flags name local files and are not registered.
+    # The AISim perf-model flags name local files and are not registered.
     assert unknown == ["--ais-perf-config", "/not/a/local/file.yaml"]
     assert not caplog.records
     assert not recwarn

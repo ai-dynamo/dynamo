@@ -15,7 +15,7 @@ configure, see [Mocker Engine Architecture](../../developer-guide/knowledge-base
 Run `python3 -m dynamo.mocker --help` for the complete option list supported by the installed
 version.
 
-AISimulate reuses the same engine core for offline virtual-clock prediction and recommendation, but
+AISim reuses the same engine core for offline virtual-clock prediction and recommendation, but
 its public YAML is separate from these live-worker flags. See the
 [DynoSim Replay CLI Reference](dynosim-replay-cli-reference.mdx) for the offline contract. The
 former public Replay online CLI remains unavailable, although the Python replay SDK retains online
@@ -47,7 +47,7 @@ mode.
 </ParamField>
 
 <ParamField path="--extra-engine-args" type="path" default="null">
-  Path to a JSON file with canonical AISimulate launch configuration and optional `dynamo` runtime options.
+  Path to a JSON file with canonical AISim launch configuration and optional `dynamo` runtime options.
   Engine fields belong under `engine`. This file overrides individual CLI arguments; see
   [Canonical Python Engine Configuration](dynosim-replay-cli-reference.mdx#canonical-python-engine-configuration).
 </ParamField>
@@ -96,11 +96,11 @@ token IDs that the simulated G2 does not carry; a router consuming that stream s
   Enable native G2 host offload with this host cache capacity per data-parallel rank, in blocks.
 </ParamField>
 
-<ParamField path="--host-offload-d2h-bandwidth-gbps" type="float" default="AISimulate default">
+<ParamField path="--host-offload-d2h-bandwidth-gbps" type="float" default="AISim default">
   Per-rank device-to-host bandwidth in decimal GB/s. `0` is unlimited. Requires `--num-host-blocks`.
 </ParamField>
 
-<ParamField path="--host-offload-h2d-bandwidth-gbps" type="float" default="AISimulate default">
+<ParamField path="--host-offload-h2d-bandwidth-gbps" type="float" default="AISim default">
   Per-rank host-to-device bandwidth in decimal GB/s. `0` is unlimited. Requires `--num-host-blocks`.
 </ParamField>
 
@@ -202,7 +202,7 @@ MTP (`--ais-nextn`).
 ## AIS performance model
 
 <ParamField path="--ais-perf-config" type="JSON object or JSON/YAML file" default="null">
-  Complete AISimulate `ForwardPassPerfModelConfig`, including immutable worker role,
+  Complete AISim `ForwardPassPerfModelConfig`, including immutable worker role,
   data roots, selection policy and nested estimator controls. Defaults to
   `estimation_mode: auto` and `fallback_policy: deny`. Do not combine this input
   with flat AIS identity flags. Cold regression is rejected by Router and Mocker.
@@ -212,12 +212,12 @@ MTP (`--ais-nextn`).
 Legacy `--aic-*` spellings remain input aliases. Use `--ais-*` in new configurations.
 
 
-Opt-in flags for the AISimulate (AIS) latency model. Live Mocker workers do not use AIS by
+Opt-in flags for the AISim (AIS) latency model. Live Mocker workers do not use AIS by
 default.
 For the timing-model design, see [Mocker Engine Architecture](../../developer-guide/knowledge-base/modular-components/backends/mocker/mocker-engine-architecture.md#performance-model).
 
 <ParamField path="--ais-perf-model" type="boolean" default="false">
-  Use the canonical AISimulate performance-model API for latency prediction instead of the
+  Use the canonical AISim performance-model API for latency prediction instead of the
   interpolated or polynomial models. Install `aisimulate` and use a supported
   `system/backend/version` tuple.
 </ParamField>

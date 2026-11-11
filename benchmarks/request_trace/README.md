@@ -78,7 +78,7 @@ planner: {policy: disabled}
 Add every shard to `traffic.source.paths`, then run the offline prediction:
 
 ```bash
-aisimulate predict \
+aisim predict \
   --stack dynamo \
   --config /tmp/request-trace-prediction.yaml \
   --output-dir /tmp/request-trace-prediction
@@ -86,7 +86,7 @@ aisimulate predict \
 
 No format conversion or intermediate Mooncake file is required.
 
-AISimulate derives the trace block size from the request records and rejects mixed
+AISim derives the trace block size from the request records and rejects mixed
 block sizes across shards. Context-free traces use standard replay. Traces in
 which every request has `agent_context` use agentic replay. Mixed traces are
 rejected.

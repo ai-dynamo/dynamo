@@ -22,8 +22,8 @@ from typing import get_args
 import pytest
 
 pytest.importorskip(
-    "aisimulate.sweeper",
-    reason="AI Simulate is an optional Dynamo simulation dependency",
+    "aisim.sweeper",
+    reason="AISim is an optional Dynamo simulation dependency",
 )
 
 from dynamo.planner.config.planner_config import RetuneObjective

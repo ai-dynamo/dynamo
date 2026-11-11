@@ -86,7 +86,7 @@ maturin develop --uv
 maturin develop --uv --features kv-indexer,slot-tracker,select-service,mm-routing,ais-forward-pass,request-trace-s3
 ```
 
-The minimal build leaves out the [release wheel](https://github.com/ai-dynamo/dynamo/blob/main/container/templates/wheel_builder.Dockerfile) features: the standalone KV indexer, slot tracker and select service (some router tests start these), multimodal KV routing, the AISimulate perf model and S3 request traces.
+The minimal build leaves out the [release wheel](https://github.com/ai-dynamo/dynamo/blob/main/container/templates/wheel_builder.Dockerfile) features: the standalone KV indexer, slot tracker and select service (some router tests start these), multimodal KV routing, the AISim perf model and S3 request traces.
 
 To annotate Nsight Systems profiles, add `nvtx` to the feature list.
 

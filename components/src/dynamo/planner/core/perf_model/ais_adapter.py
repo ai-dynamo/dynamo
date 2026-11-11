@@ -3,7 +3,7 @@
 
 """Planner AIS adapter for forward-pass performance modeling.
 
-The AISimulate core wheel owns forward-pass estimates, tuning, and correction. The
+The AISim core wheel owns forward-pass estimates, tuning, and correction. The
 Planner-owned engine-query layer derives queue drain, TTFT/ITL, and sustainable
 engine capacity while this adapter keeps Planner policy local: next-request
 synthesis, prefix-cache discounts, and attention-DP grouping.
@@ -20,8 +20,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, Optional
 
-from aisimulate_core.datasets import prepare_execution_profile
-from aisimulate_core.sdk import ForwardPassPerfModelConfig
+from aisim_core.datasets import prepare_execution_profile
+from aisim_core.sdk import ForwardPassPerfModelConfig
 
 from dynamo.common.forward_pass_metrics import (
     FPM_VERSION,
@@ -88,7 +88,7 @@ class _MovingAverage:
 
 
 class PlannerEnginePerfModel:
-    """Planner-facing wrapper around the AISimulate core engine-query layer.
+    """Planner-facing wrapper around the AISim core engine-query layer.
 
     ``worker_type`` is one of ``prefill``, ``decode``, or ``aggregated``.
     """

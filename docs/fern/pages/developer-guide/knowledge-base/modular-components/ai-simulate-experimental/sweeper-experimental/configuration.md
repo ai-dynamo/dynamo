@@ -82,7 +82,7 @@ KV-feasible, and supported by at least one selected backend.
 ## Provider Selection
 
 Adapter names are provider entry-point names. A provider can be installed through the
-`aisimulate.sweep_config_providers` entry-point group or injected into the `Sweeper` constructor:
+`aisim.sweep_config_providers` entry-point group or injected into the `Sweeper` constructor:
 
 ```python
 sweeper = Sweeper(
@@ -99,10 +99,10 @@ Providers](sweep-config-provider.md) for the complete ABI.
 The experimental `AISIMULATE_SWEEPER_VIZIER_ALGO` environment variable overrides the Vizier
 algorithm. For example, set it to `RANDOM_SEARCH` to bypass the default GP-bandit designer.
 `SPICA_VIZIER_ALGO` remains a deprecated fallback during migration; when both are set, the
-AISimulate variable takes precedence.
+AISim variable takes precedence.
 
 ## Removed KVBM Fields
 
 Sweeper rejects the old KVBM block-count, transfer-bandwidth, offload-batch-size, and cache-hit
-fields. The AISimulate engine and replay path do not support them, and they have no adapter
+fields. The AISim engine and replay path do not support them, and they have no adapter
 migration.

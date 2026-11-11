@@ -3,10 +3,10 @@ SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All 
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# AISimulate input schemas
+# AISim input schemas
 
 Each JSON file is generated from the exact pinned wheel's
-`aisimulate.config.CoreRecommendationConfig.model_json_schema(mode="validation")`.
+`aisim.config.CoreRecommendationConfig.model_json_schema(mode="validation")`.
 The operator embeds only `latest.json`, which the generator refreshes together with
 the versioned snapshot and the `SchemaVersion` constant. Webhook setup compiles it
 before registering handlers, so an invalid schema fails startup rather than admission.
@@ -20,12 +20,12 @@ section extraction before core validation. These adapters own their detailed rul
 Python `model_validator` and `field_validator` rules absent from the JSON Schema
 remain runtime checks; do not recreate them in Go.
 
-After updating both AISimulate Python pins, install the generator dependencies and
+After updating both AISim Python pins, install the generator dependencies and
 regenerate from the repository root:
 
 ```bash
 python3 -m pip install pydantic==2.13.5 PyYAML
-python3 -m pip install --no-deps -r container/deps/requirements.aisimulate.txt
+python3 -m pip install --no-deps -r container/deps/requirements.aisim.txt
 make -C deploy/operator generate-aisimulate-schema
 make -C deploy/operator check-aisimulate-schema
 ```

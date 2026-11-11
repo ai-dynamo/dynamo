@@ -1,13 +1,13 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Dynamo integration options around AISimulate's canonical engine configuration.
+//! Dynamo integration options around AISim's canonical engine configuration.
 
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use aisimulate_core::engine::{EngineLaunchConfig, TimingModelConfig};
+use aisim_core::engine::{EngineLaunchConfig, TimingModelConfig};
 use anyhow::{Result, ensure};
 use dynamo_kv_router::config::RouterQueuePolicy;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};

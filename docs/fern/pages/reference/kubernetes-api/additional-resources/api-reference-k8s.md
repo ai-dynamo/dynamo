@@ -3295,14 +3295,14 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `input` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | Input is the fully lowered AISimulate input after typed fields, derived defaults and<br />spec.aisim.inputOverrides have been merged. Field names and nesting use the<br />upstream AISimulate JSON contract. |  | Type: object <br />Optional: \{\} <br /> |
+| `input` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | Input is the fully lowered AISim input after typed fields, derived defaults and<br />spec.aisim.inputOverrides have been merged. Field names and nesting use the<br />upstream AISim JSON contract. |  | Type: object <br />Optional: \{\} <br /> |
 
 
 #### AISimSpec
 
 
 
-AISimSpec supplies public recommendation input to the AISimulate version in the operator's configured
+AISimSpec supplies public recommendation input to the AISim version in the operator's configured
 planner image.
 
 
@@ -3315,14 +3315,14 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `inputOverrides` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | InputOverrides is an RFC 7386 JSON Merge Patch over the input lowered from<br />the typed fields. It uses the upstream AISimulate JSON contract, including<br />snake_case names. Values here take precedence, and null deletes a lowered<br />field. The dgdr_run member must remain an object, and its operator-owned<br />transport, identity, and runtime fields name, max_candidates, snapshot_dir,<br />runtime_image, runtime_version_override, derive_runtime_images,<br />num_gpus_per_node, and namespace are operator-owned. Request and Run admission<br />rejects them, and the Run controller enforces its values while lowering the<br />immutable snapshot. A typed spec.workload.trace is an underlay like the other<br />typed fields: it supplies the default traffic.source (type trace, format<br />dynamo and the mounted trace file in paths) and the recorded-arrival<br />traffic.load. Overrides can replace those values, including<br />traffic.source.type, format, and paths, and null deletes the named field or<br />parent object; the Run controller does not restore it. The typed<br />PersistentVolumeClaim source alone decides the Run Job's trace mount and its<br />claim dependency, so overriding a native path adds no volume mount.<br />The operator runs the AISimulate version from its configured planner image;<br />Requests and Runs cannot select a different image or version.<br />Request and Run creation validate the merged input against the bundled AISimulate input<br />schema. Request spec changes require the same validation; Run specs are immutable.<br />Unchanged specs remain metadata-updatable after a bundled schema change. |  | Type: object <br />Optional: \{\} <br /> |
+| `inputOverrides` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | InputOverrides is an RFC 7386 JSON Merge Patch over the input lowered from<br />the typed fields. It uses the upstream AISim JSON contract, including<br />snake_case names. Values here take precedence, and null deletes a lowered<br />field. The dgdr_run member must remain an object, and its operator-owned<br />transport, identity, and runtime fields name, max_candidates, snapshot_dir,<br />runtime_image, runtime_version_override, derive_runtime_images,<br />num_gpus_per_node, and namespace are operator-owned. Request and Run admission<br />rejects them, and the Run controller enforces its values while lowering the<br />immutable snapshot. A typed spec.workload.trace is an underlay like the other<br />typed fields: it supplies the default traffic.source (type trace, format<br />dynamo and the mounted trace file in paths) and the recorded-arrival<br />traffic.load. Overrides can replace those values, including<br />traffic.source.type, format, and paths, and null deletes the named field or<br />parent object; the Run controller does not restore it. The typed<br />PersistentVolumeClaim source alone decides the Run Job's trace mount and its<br />claim dependency, so overriding a native path adds no volume mount.<br />The operator runs the AISim version from its configured planner image;<br />Requests and Runs cannot select a different image or version.<br />Request and Run creation validate the merged input against the bundled AISim input<br />schema. Request spec changes require the same validation; Run specs are immutable.<br />Unchanged specs remain metadata-updatable after a bundled schema change. |  | Type: object <br />Optional: \{\} <br /> |
 
 
 #### Backend
 
 _Underlying type:_ _string_
 
-Backend identifies an inference backend searched by AISimulate and used by generated candidates.
+Backend identifies an inference backend searched by AISim and used by generated candidates.
 
 _Validation:_
 - Enum: [vllm sglang trtllm]
@@ -3344,7 +3344,7 @@ _Appears in:_
 
 
 
-BranchProgress reports progress for one independently optimized AISimulate branch.
+BranchProgress reports progress for one independently optimized AISim branch.
 
 
 
@@ -3407,7 +3407,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `branches` _[BranchProgress](#branchprogress) array_ | Branches reports independently optimized AISimulate branches. |  | Optional: \{\} <br /> |
+| `branches` _[BranchProgress](#branchprogress) array_ | Branches reports independently optimized AISim branches. |  | Optional: \{\} <br /> |
 | `evaluations` _[EvaluationProgress](#evaluationprogress)_ | Evaluations reports unique candidate outcomes. |  | Optional: \{\} <br /> |
 | `candidates` _[CandidateProgress](#candidateprogress)_ | Candidates reports bounded Kubernetes publication. |  | Optional: \{\} <br /> |
 
@@ -3482,13 +3482,13 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `model` _[ModelSpec](#modelspec)_ | Model identifies the model whose deployment configurations are evaluated. |  | Optional: \{\} <br /> |
-| `backends` _[Backend](#backend) array_ | Backends lists one or more inference backends searched by AISimulate and used by generated candidates. |  | Enum: [vllm sglang trtllm] <br />MinItems: 1 <br />Optional: \{\} <br /> |
+| `backends` _[Backend](#backend) array_ | Backends lists one or more inference backends searched by AISim and used by generated candidates. |  | Enum: [vllm sglang trtllm] <br />MinItems: 1 <br />Optional: \{\} <br /> |
 | `hardware` _[HardwareSpec](#v1beta2-hardwarespec)_ | Hardware bounds the accelerator configurations evaluated by the search.<br />When omitted, admission discovers SKU, budget and node width. An exactly empty object opts<br />out of operator hardware discovery and typed defaults. Admission completes every nonempty<br />object with any missing hardware values; explicit values remain authoritative. |  | Optional: \{\} <br /> |
 | `workload` _[WorkloadSpec](#v1beta2-workloadspec)_ | Workload defines the traffic model used for every candidate evaluation: synthetic static<br />traffic or a recorded trace.<br />When omitted, admission supplies 1024 input tokens, 128 output tokens and concurrency 10;<br />an explicit empty workload receives the same shape. workload.static: \{\} opts out of all<br />traffic defaults. Any other static object is completed with its missing defaults, and a<br />trace workload receives no static default.<br />spec.aisim.inputOverrides is applied as an RFC 7386 JSON Merge Patch and wins over<br />every lowered traffic field it names, including the fields a trace lowers.<br />The default evaluates a fixed concurrency, so it does not create a KV-capacity-fraction<br />search. Lowering independently defaults optimizer.max_trials to 320. |  | Optional: \{\} <br /> |
 | `objective` _[ObjectiveSpec](#objectivespec)_ | Objective defines scalar optimization. When omitted,<br />admission supplies the object. Its mode defaults to Optimize, its scalar metric defaults<br />to ThroughputPerGPU, and its absent SLA defaults to TTFT 2000 ms and ITL 30 ms. |  | Optional: \{\} <br /> |
-| `aisim` _[AISimSpec](#aisimspec)_ | AISim supplies public recommendation input to the operator's AISimulate execution bundle. |  | Optional: \{\} <br /> |
+| `aisim` _[AISimSpec](#aisimspec)_ | AISim supplies public recommendation input to the operator's AISim execution bundle. |  | Optional: \{\} <br /> |
 | `recommendation` _[RecommendationSpec](#recommendationspec)_ | Recommendation controls bounded projection into DGDC resources. |  | Optional: \{\} <br /> |
-| `overrides` _[OverridesSpec](#v1beta2-overridesspec)_ | Overrides customizes the generated DGD without changing AISimulate execution. |  | Optional: \{\} <br /> |
+| `overrides` _[OverridesSpec](#v1beta2-overridesspec)_ | Overrides customizes the generated DGD without changing AISim execution. |  | Optional: \{\} <br /> |
 
 
 #### v1beta2 DynamoGraphDeploymentRequestNativeStatus
@@ -3525,13 +3525,13 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `model` _[ModelSpec](#modelspec)_ | Model identifies the model whose deployment configurations are evaluated. |  | Optional: \{\} <br /> |
-| `backends` _[Backend](#backend) array_ | Backends lists one or more inference backends searched by AISimulate and used by generated candidates. |  | Enum: [vllm sglang trtllm] <br />MinItems: 1 <br />Optional: \{\} <br /> |
+| `backends` _[Backend](#backend) array_ | Backends lists one or more inference backends searched by AISim and used by generated candidates. |  | Enum: [vllm sglang trtllm] <br />MinItems: 1 <br />Optional: \{\} <br /> |
 | `hardware` _[HardwareSpec](#v1beta2-hardwarespec)_ | Hardware bounds the accelerator configurations evaluated by the search.<br />When omitted, admission discovers SKU, budget and node width. An exactly empty object opts<br />out of operator hardware discovery and typed defaults. Admission completes every nonempty<br />object with any missing hardware values; explicit values remain authoritative. |  | Optional: \{\} <br /> |
 | `workload` _[WorkloadSpec](#v1beta2-workloadspec)_ | Workload defines the traffic model used for every candidate evaluation: synthetic static<br />traffic or a recorded trace.<br />When omitted, admission supplies 1024 input tokens, 128 output tokens and concurrency 10;<br />an explicit empty workload receives the same shape. workload.static: \{\} opts out of all<br />traffic defaults. Any other static object is completed with its missing defaults, and a<br />trace workload receives no static default.<br />spec.aisim.inputOverrides is applied as an RFC 7386 JSON Merge Patch and wins over<br />every lowered traffic field it names, including the fields a trace lowers.<br />The default evaluates a fixed concurrency, so it does not create a KV-capacity-fraction<br />search. Lowering independently defaults optimizer.max_trials to 320. |  | Optional: \{\} <br /> |
 | `objective` _[ObjectiveSpec](#objectivespec)_ | Objective defines scalar optimization. When omitted,<br />admission supplies the object. Its mode defaults to Optimize, its scalar metric defaults<br />to ThroughputPerGPU, and its absent SLA defaults to TTFT 2000 ms and ITL 30 ms. |  | Optional: \{\} <br /> |
-| `aisim` _[AISimSpec](#aisimspec)_ | AISim supplies public recommendation input to the operator's AISimulate execution bundle. |  | Optional: \{\} <br /> |
+| `aisim` _[AISimSpec](#aisimspec)_ | AISim supplies public recommendation input to the operator's AISim execution bundle. |  | Optional: \{\} <br /> |
 | `recommendation` _[RecommendationSpec](#recommendationspec)_ | Recommendation controls bounded projection into DGDC resources. |  | Optional: \{\} <br /> |
-| `overrides` _[OverridesSpec](#v1beta2-overridesspec)_ | Overrides customizes the generated DGD without changing AISimulate execution. |  | Optional: \{\} <br /> |
+| `overrides` _[OverridesSpec](#v1beta2-overridesspec)_ | Overrides customizes the generated DGD without changing AISim execution. |  | Optional: \{\} <br /> |
 | `v1beta1` _[JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#json-v1-apiextensions-k8s-io)_ | V1Beta1 losslessly preserves a native v1beta1 spec while this object is<br />represented through v1beta2. It is mutually exclusive with native fields.<br />This field is a read-only conversion view; modify the request through the<br />native v1beta1 API. |  | Type: object <br />Optional: \{\} <br /> |
 
 
@@ -3593,13 +3593,13 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `model` _[ModelSpec](#modelspec)_ | Model identifies the model whose deployment configurations are evaluated. |  | Optional: \{\} <br /> |
-| `backends` _[Backend](#backend) array_ | Backends lists one or more inference backends searched by AISimulate and used by generated candidates. |  | Enum: [vllm sglang trtllm] <br />MinItems: 1 <br />Optional: \{\} <br /> |
+| `backends` _[Backend](#backend) array_ | Backends lists one or more inference backends searched by AISim and used by generated candidates. |  | Enum: [vllm sglang trtllm] <br />MinItems: 1 <br />Optional: \{\} <br /> |
 | `hardware` _[HardwareSpec](#v1beta2-hardwarespec)_ | Hardware bounds the accelerator configurations evaluated by the search.<br />When omitted, admission discovers SKU, budget and node width. An exactly empty object opts<br />out of operator hardware discovery and typed defaults. Admission completes every nonempty<br />object with any missing hardware values; explicit values remain authoritative. |  | Optional: \{\} <br /> |
 | `workload` _[WorkloadSpec](#v1beta2-workloadspec)_ | Workload defines the traffic model used for every candidate evaluation: synthetic static<br />traffic or a recorded trace.<br />When omitted, admission supplies 1024 input tokens, 128 output tokens and concurrency 10;<br />an explicit empty workload receives the same shape. workload.static: \{\} opts out of all<br />traffic defaults. Any other static object is completed with its missing defaults, and a<br />trace workload receives no static default.<br />spec.aisim.inputOverrides is applied as an RFC 7386 JSON Merge Patch and wins over<br />every lowered traffic field it names, including the fields a trace lowers.<br />The default evaluates a fixed concurrency, so it does not create a KV-capacity-fraction<br />search. Lowering independently defaults optimizer.max_trials to 320. |  | Optional: \{\} <br /> |
 | `objective` _[ObjectiveSpec](#objectivespec)_ | Objective defines scalar optimization. When omitted,<br />admission supplies the object. Its mode defaults to Optimize, its scalar metric defaults<br />to ThroughputPerGPU, and its absent SLA defaults to TTFT 2000 ms and ITL 30 ms. |  | Optional: \{\} <br /> |
-| `aisim` _[AISimSpec](#aisimspec)_ | AISim supplies public recommendation input to the operator's AISimulate execution bundle. |  | Optional: \{\} <br /> |
+| `aisim` _[AISimSpec](#aisimspec)_ | AISim supplies public recommendation input to the operator's AISim execution bundle. |  | Optional: \{\} <br /> |
 | `recommendation` _[RecommendationSpec](#recommendationspec)_ | Recommendation controls bounded projection into DGDC resources. |  | Optional: \{\} <br /> |
-| `overrides` _[OverridesSpec](#v1beta2-overridesspec)_ | Overrides customizes the generated DGD without changing AISimulate execution. |  | Optional: \{\} <br /> |
+| `overrides` _[OverridesSpec](#v1beta2-overridesspec)_ | Overrides customizes the generated DGD without changing AISim execution. |  | Optional: \{\} <br /> |
 
 
 #### DynamoGraphDeploymentRunStatus
@@ -3618,7 +3618,7 @@ _Appears in:_
 | `phase` _[DGDRRunPhase](#dgdrrunphase)_ | Phase is a concise presentation state. Conditions remain authoritative. |  | Enum: [Pending Running Succeeded Failed] <br />Optional: \{\} <br /> |
 | `jobRef` _[ResourceReference](#resourcereference)_ | JobRef identifies the controller-owned Job for this run. |  | Optional: \{\} <br /> |
 | `progress` _[DGDRRunProgress](#dgdrrunprogress)_ | Progress contains branch-aware optimizer and evaluation outcome counters. |  | Optional: \{\} <br /> |
-| `aisim` _[AISimRunStatus](#aisimrunstatus)_ | AISim reports the effective input executed by AISimulate. |  | Optional: \{\} <br /> |
+| `aisim` _[AISimRunStatus](#aisimrunstatus)_ | AISim reports the effective input executed by AISim. |  | Optional: \{\} <br /> |
 | `candidateRefs` _[LocalObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#localobjectreference-v1-core) array_ | CandidateRefs identifies the current bounded DGDC projection. List order<br />represents rank, best first, for scalar searches. |  | Optional: \{\} <br /> |
 | `startTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ | StartTime is when execution started. |  | Optional: \{\} <br /> |
 | `completionTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ | CompletionTime is present only after a terminal outcome. |  | Optional: \{\} <br /> |
@@ -3661,8 +3661,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `sku` _string_ | SKU identifies the accelerator using the AISimulate hardware catalog name.<br />Known values in the bundled AISimulate release are `a100_pcie`, `a100_sxm`,<br />`a30`, `b200_sxm`, `b300_sxm`, `b60`, `gb200`, `gb300`, `h100_pcie`,<br />`h100_sxm`, `h200_sxm`, `l4`, `l40s`, and `rtx_pro_6000_server`.<br />The field remains open so an external AISimulate systems catalog can add identifiers.<br />Admission passes an unknown identifier through unchanged and warns when `budget` and the<br />parent `numGpusPerNode` are also explicit. Without both, it rejects the identifier because<br />cluster discovery cannot associate capacity or topology with it. When omitted from a<br />nonempty hardware object, admission discovers the accelerator. |  | MinLength: 1 <br />Optional: \{\} <br /> |
-| `budget` _integer_ | Budget is the maximum total number of GPUs one candidate may use.<br />When omitted for a known SKU, admission derives the available GPU budget from the cluster.<br />An SKU unknown to the bundled AISimulate catalog requires an explicit `budget` and an<br />explicit `numGpusPerNode` in the parent hardware object. |  | Minimum: 1 <br />Optional: \{\} <br /> |
+| `sku` _string_ | SKU identifies the accelerator using the AISim hardware catalog name.<br />Known values in the bundled AISim release are `a100_pcie`, `a100_sxm`,<br />`a30`, `b200_sxm`, `b300_sxm`, `b60`, `gb200`, `gb300`, `h100_pcie`,<br />`h100_sxm`, `h200_sxm`, `l4`, `l40s`, and `rtx_pro_6000_server`.<br />The field remains open so an external AISim systems catalog can add identifiers.<br />Admission passes an unknown identifier through unchanged and warns when `budget` and the<br />parent `numGpusPerNode` are also explicit. Without both, it rejects the identifier because<br />cluster discovery cannot associate capacity or topology with it. When omitted from a<br />nonempty hardware object, admission discovers the accelerator. |  | MinLength: 1 <br />Optional: \{\} <br /> |
+| `budget` _integer_ | Budget is the maximum total number of GPUs one candidate may use.<br />When omitted for a known SKU, admission derives the available GPU budget from the cluster.<br />An SKU unknown to the bundled AISim catalog requires an explicit `budget` and an<br />explicit `numGpusPerNode` in the parent hardware object. |  | Minimum: 1 <br />Optional: \{\} <br /> |
 
 
 #### v1beta2 HardwareSpec
@@ -3683,7 +3683,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `gpu` _[GPUHardwareSpec](#gpuhardwarespec)_ | GPU describes accelerator identity and the maximum allocation per candidate.<br />In a nonempty hardware object, admission resolves an omitted SKU or budget from the cluster. |  | Optional: \{\} <br /> |
-| `numGpusPerNode` _integer_ | NumGPUsPerNode is the number of GPUs available to one candidate on each node. It lowers<br />to AISimulate's num_gpus_per_node input.<br />An explicit value is authoritative. In a nonempty hardware object, admission discovers<br />an omitted value from the selected cluster node shape. The Run controller never discovers<br />this value. An exactly empty hardware object opts out of all operator hardware discovery<br />and typed hardware defaults, leaving AISimulate input and defaults authoritative. |  | Minimum: 1 <br />Optional: \{\} <br /> |
+| `numGpusPerNode` _integer_ | NumGPUsPerNode is the number of GPUs available to one candidate on each node. It lowers<br />to AISim's num_gpus_per_node input.<br />An explicit value is authoritative. In a nonempty hardware object, admission discovers<br />an omitted value from the selected cluster node shape. The Run controller never discovers<br />this value. An exactly empty hardware object opts out of all operator hardware discovery<br />and typed hardware defaults, leaving AISim input and defaults authoritative. |  | Minimum: 1 <br />Optional: \{\} <br /> |
 
 
 #### KVCapacityFractionRange
@@ -3756,20 +3756,20 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `model` _[ModelSpec](#modelspec)_ | Model identifies the model whose deployment configurations are evaluated. |  | Optional: \{\} <br /> |
-| `backends` _[Backend](#backend) array_ | Backends lists one or more inference backends searched by AISimulate and used by generated candidates. |  | Enum: [vllm sglang trtllm] <br />MinItems: 1 <br />Optional: \{\} <br /> |
+| `backends` _[Backend](#backend) array_ | Backends lists one or more inference backends searched by AISim and used by generated candidates. |  | Enum: [vllm sglang trtllm] <br />MinItems: 1 <br />Optional: \{\} <br /> |
 | `hardware` _[HardwareSpec](#v1beta2-hardwarespec)_ | Hardware bounds the accelerator configurations evaluated by the search.<br />When omitted, admission discovers SKU, budget and node width. An exactly empty object opts<br />out of operator hardware discovery and typed defaults. Admission completes every nonempty<br />object with any missing hardware values; explicit values remain authoritative. |  | Optional: \{\} <br /> |
 | `workload` _[WorkloadSpec](#v1beta2-workloadspec)_ | Workload defines the traffic model used for every candidate evaluation: synthetic static<br />traffic or a recorded trace.<br />When omitted, admission supplies 1024 input tokens, 128 output tokens and concurrency 10;<br />an explicit empty workload receives the same shape. workload.static: \{\} opts out of all<br />traffic defaults. Any other static object is completed with its missing defaults, and a<br />trace workload receives no static default.<br />spec.aisim.inputOverrides is applied as an RFC 7386 JSON Merge Patch and wins over<br />every lowered traffic field it names, including the fields a trace lowers.<br />The default evaluates a fixed concurrency, so it does not create a KV-capacity-fraction<br />search. Lowering independently defaults optimizer.max_trials to 320. |  | Optional: \{\} <br /> |
 | `objective` _[ObjectiveSpec](#objectivespec)_ | Objective defines scalar optimization. When omitted,<br />admission supplies the object. Its mode defaults to Optimize, its scalar metric defaults<br />to ThroughputPerGPU, and its absent SLA defaults to TTFT 2000 ms and ITL 30 ms. |  | Optional: \{\} <br /> |
-| `aisim` _[AISimSpec](#aisimspec)_ | AISim supplies public recommendation input to the operator's AISimulate execution bundle. |  | Optional: \{\} <br /> |
+| `aisim` _[AISimSpec](#aisimspec)_ | AISim supplies public recommendation input to the operator's AISim execution bundle. |  | Optional: \{\} <br /> |
 | `recommendation` _[RecommendationSpec](#recommendationspec)_ | Recommendation controls bounded projection into DGDC resources. |  | Optional: \{\} <br /> |
-| `overrides` _[OverridesSpec](#v1beta2-overridesspec)_ | Overrides customizes the generated DGD without changing AISimulate execution. |  | Optional: \{\} <br /> |
+| `overrides` _[OverridesSpec](#v1beta2-overridesspec)_ | Overrides customizes the generated DGD without changing AISim execution. |  | Optional: \{\} <br /> |
 
 
 #### ObjectiveMetric
 
 _Underlying type:_ _string_
 
-ObjectiveMetric is a metric optimized by AISimulate.
+ObjectiveMetric is a metric optimized by AISim.
 
 _Validation:_
 - Enum: [Throughput ThroughputPerGPU ThroughputPerUser TTFT E2ELatency Goodput GoodputPerGPU]
@@ -3855,7 +3855,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `dgd` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | DGD is one partial nvidia.com/v1beta1 DynamoGraphDeployment applied by the publisher<br />using the DGD schema's Server-Side Apply merge rules. Other API versions are not supported.<br />Components must already exist; named containers may be added. Atomic lists, including<br />container command and args, replace the generated lists. The supported customization<br />$patch: \{args: append\} on a container appends to its explicit generated args list;<br />both the container and its args must already exist. No other $patch operation is supported.<br />Application is atomic: a merge failure retains the unchanged generated deployment<br />with Valid=False. A successful merge is checked by strict server-side dry-run;<br />the dry-run response and its defaults are discarded. The Candidate retains the<br />unpruned payload from before the check. Invalid Candidates count toward maxCandidates.<br />Overrides may change any deployment configuration. Evaluation metrics are not<br />recomputed and continue to describe the original AISimulate configuration.<br />DGD labels and annotations become Candidate labels and annotations. A failed merge<br />retains only the original generated metadata; a successful merge followed by failed<br />dry-run validation retains the merged metadata on the invalid Candidate. Other metadata<br />and publisher-owned keys cannot be overridden; such attempts fail atomically.<br />The complete Candidate metadata must satisfy Kubernetes limits, including generated<br />and reserved annotations. An override that exceeds those limits fails atomically. |  | EmbeddedResource: \{\} <br />Optional: \{\} <br /> |
+| `dgd` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | DGD is one partial nvidia.com/v1beta1 DynamoGraphDeployment applied by the publisher<br />using the DGD schema's Server-Side Apply merge rules. Other API versions are not supported.<br />Components must already exist; named containers may be added. Atomic lists, including<br />container command and args, replace the generated lists. The supported customization<br />$patch: \{args: append\} on a container appends to its explicit generated args list;<br />both the container and its args must already exist. No other $patch operation is supported.<br />Application is atomic: a merge failure retains the unchanged generated deployment<br />with Valid=False. A successful merge is checked by strict server-side dry-run;<br />the dry-run response and its defaults are discarded. The Candidate retains the<br />unpruned payload from before the check. Invalid Candidates count toward maxCandidates.<br />Overrides may change any deployment configuration. Evaluation metrics are not<br />recomputed and continue to describe the original AISim configuration.<br />DGD labels and annotations become Candidate labels and annotations. A failed merge<br />retains only the original generated metadata; a successful merge followed by failed<br />dry-run validation retains the merged metadata on the invalid Candidate. Other metadata<br />and publisher-owned keys cannot be overridden; such attempts fail atomically.<br />The complete Candidate metadata must satisfy Kubernetes limits, including generated<br />and reserved annotations. An override that exceeds those limits fails atomically. |  | EmbeddedResource: \{\} <br />Optional: \{\} <br /> |
 
 
 #### RecommendationSpec
@@ -3933,7 +3933,7 @@ _Appears in:_
 
 
 
-StaticWorkloadSpec defines AISimulate synthetic traffic. Admission completes a nonempty
+StaticWorkloadSpec defines AISim synthetic traffic. Admission completes a nonempty
 object with the omitted static defaults; an explicit empty object opts out of them.
 
 
@@ -3953,7 +3953,7 @@ _Appears in:_
 _Underlying type:_ _string_
 
 TraceFormat identifies the decoder of a recorded request trace. Lowering translates it to
-AISimulate's native traffic.source.format.
+AISim's native traffic.source.format.
 
 _Validation:_
 - Enum: [Dynamo]
@@ -3963,7 +3963,7 @@ _Appears in:_
 
 | Field | Description |
 | --- | --- |
-| `Dynamo` | TraceFormatDynamo is the Dynamo request trace (dynamo.request.trace.v1) that the frontend<br />records, as JSON Lines or gzip-compressed JSON Lines. It lowers to AISimulate's dynamo format.<br /> |
+| `Dynamo` | TraceFormatDynamo is the Dynamo request trace (dynamo.request.trace.v1) that the frontend<br />records, as JSON Lines or gzip-compressed JSON Lines. It lowers to AISim's dynamo format.<br /> |
 
 
 #### TracePVCSource
@@ -3979,7 +3979,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `claimName` _string_ | ClaimName is the PersistentVolumeClaim, in the Request namespace, that holds the trace.<br />The Run Job mounts only the trace file from it, read-only, and only into the AISimulate<br />container. Each Run protects the claim with the finalizer `nvidia.com/dgdr-run-<run-uid>`<br />until the Run completes or, for a Run deleted before it completes, until no Job of the Run<br />is left. Garbage collection deletes the Job of a deleted Run before the Job's pod, so the<br />finalizer of a deleted Run can be released while that pod still stops; Kubernetes<br />PersistentVolumeClaim protection keeps the claim until no pod uses it. Deleting the claim<br />cancels the Runs that read it. |  | MaxLength: 253 <br />MinLength: 1 <br />Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$` <br />Required: \{\} <br /> |
+| `claimName` _string_ | ClaimName is the PersistentVolumeClaim, in the Request namespace, that holds the trace.<br />The Run Job mounts only the trace file from it, read-only, and only into the AISim<br />container. Each Run protects the claim with the finalizer `nvidia.com/dgdr-run-<run-uid>`<br />until the Run completes or, for a Run deleted before it completes, until no Job of the Run<br />is left. Garbage collection deletes the Job of a deleted Run before the Job's pod, so the<br />finalizer of a deleted Run can be released while that pod still stops; Kubernetes<br />PersistentVolumeClaim protection keeps the claim until no pod uses it. Deleting the claim<br />cancels the Runs that read it. |  | MaxLength: 253 <br />MinLength: 1 <br />Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$` <br />Required: \{\} <br /> |
 | `subPath` _string_ | SubPath names one trace file relative to the root of the claim; the Run Job mounts it as<br />the subPath of the claim volume. It is neither a directory nor a glob. It must not start or<br />end with '/' and must not contain empty, '.' or '..' segments or a NUL character, which no<br />file name can hold. The file must be complete before the Request is created and must never<br />be rewritten: every Run of the Request reads it when its Job starts. |  | MaxLength: 1024 <br />MinLength: 1 <br />Required: \{\} <br /> |
 
 
@@ -3987,7 +3987,7 @@ _Appears in:_
 
 
 
-TraceReplaySpec configures how AISimulate replays a decoded trace.
+TraceReplaySpec configures how AISim replays a decoded trace.
 
 
 
@@ -4051,7 +4051,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `static` _[StaticWorkloadSpec](#staticworkloadspec)_ | Static defines AISimulate synthetic traffic. When omitted without a trace, admission<br />supplies the complete static default. An explicit empty object opts out; any nonempty<br />object is completed with omitted inputTokens, outputTokens and load defaults. |  | Optional: \{\} <br /> |
+| `static` _[StaticWorkloadSpec](#staticworkloadspec)_ | Static defines AISim synthetic traffic. When omitted without a trace, admission<br />supplies the complete static default. An explicit empty object opts out; any nonempty<br />object is completed with omitted inputTokens, outputTokens and load defaults. |  | Optional: \{\} <br /> |
 | `trace` _[TraceWorkloadSpec](#traceworkloadspec)_ | Trace replays a recorded request trace from a PersistentVolumeClaim in the Request<br />namespace. Admission supplies no static default when it is set. The Run Job mounts only the<br />trace file, read-only through a subPath of the claim, at /var/run/aisimulate/trace/trace.jsonl,<br />or trace.jsonl.gz when subPath ends in .gz. The trace lowers to the default traffic.source<br />and traffic.load, which spec.aisim.inputOverrides can replace or delete. |  | Optional: \{\} <br /> |
 
 

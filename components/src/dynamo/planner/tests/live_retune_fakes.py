@@ -56,7 +56,7 @@ DEFAULT_RUNTIME_IMAGE = "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.8.0"
 DEFAULT_DYNAMO_VERSION = "1.8.0"
 ROUTER_ADAPTER = "dynamo.router"
 # spec.workload.trace.format: the CRD default, and each API value's
-# AISimulate traffic.source.format spelling.
+# AISim traffic.source.format spelling.
 DEFAULT_TRACE_FORMAT = "Dynamo"
 _TRACE_FORMATS = {"Dynamo": "dynamo"}
 
@@ -180,7 +180,7 @@ def lower_request_input(
 ) -> dict[str, Any]:
     """``Run.status.aisim.input`` for a Request, as the operator lowers it.
 
-    Mirrors ``aisimulate.LowerWithUnderlay`` and ``dgdrRunInput`` at #17483:
+    Mirrors ``aisim.LowerWithUnderlay`` and ``dgdrRunInput`` at #17483:
     the public role underlay, the ``dgdr_run`` static underlay, the typed
     underlay, the derived defaults, ``inputOverrides`` as the final merge
     patch, then the operator-owned ``dgdr_run`` fields. ``inputOverrides``
@@ -934,7 +934,7 @@ class FakeRetuneKube:
             status["jobRef"] = {"name": f"{run_name}-job", "uid": str(uuid.uuid4())}
             status["phase"] = "Pending"
             self._set_completed(
-                run, "False", "JobPending", "AISimulate Job is waiting to start"
+                run, "False", "JobPending", "AISim Job is waiting to start"
             )
 
     def start_run(self, run_name: str, *, record_input: bool = True) -> None:
@@ -947,7 +947,7 @@ class FakeRetuneKube:
             status = run["status"]
             status["startTime"] = rfc3339(self.now())
             status["phase"] = "Running"
-            self._set_completed(run, "False", "JobRunning", "AISimulate Job is running")
+            self._set_completed(run, "False", "JobRunning", "AISim Job is running")
 
     def set_run_completed(
         self, run_name: str, *, status: str, reason: str, message: str = ""
@@ -1101,7 +1101,7 @@ class FakeDgdrOperator:
     (the lowered input, jobRef and startTime; the operator records the
     input together with jobRef), complete (one Candidate per router point
     the input spans, metrics from ``evaluate(request, point_public)``;
-    ``None`` leaves the point unpublished, as AISimulate drops an
+    ``None`` leaves the point unpublished, as AISim drops an
     infeasible point). ``hold`` keeps
     named Requests in their current phase; ``fail_runs`` maps a Request
     name to the ``Completed`` reason its Run ends with. ``mutate_input``

@@ -13,7 +13,7 @@ workers without replay orchestration.
 
 For task-oriented instructions, see [Run a DynoSim Simulation](../../../../cli/operations/simulation-with-dynosim/dynosim-replay.mdx),
 [Sweep DynoSim Configurations](../../../../cli/operations/simulation-with-dynosim/dynosim-sweeps.mdx), and
-[Simulate Planner Decisions with AISimulate](../../modular-components/planner/aisimulate-planner-replay.mdx). For engine-core details, see
+[Simulate Planner Decisions with AISim](../../modular-components/planner/aisimulate-planner-replay.mdx). For engine-core details, see
 [Mocker Engine Architecture](../../modular-components/backends/mocker/mocker-engine-architecture.md).
 
 ## Replay harness

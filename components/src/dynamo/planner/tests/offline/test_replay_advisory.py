@@ -20,8 +20,8 @@ from dataclasses import dataclass, field
 import pytest
 
 pytest.importorskip(
-    "aisimulate.replay",
-    reason="AI Simulate is an optional Dynamo simulation dependency",
+    "aisim.replay",
+    reason="AISim is an optional Dynamo simulation dependency",
 )
 
 from dynamo.planner.config.planner_config import PlannerConfig

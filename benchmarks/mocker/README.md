@@ -11,7 +11,7 @@ and FPM serialization costs; it does not measure Dynamo's pure Rust Router/Mocke
 callback directly.
 
 Build Dynamo bindings with `--features ais-forward-pass` and install a matching
-AISimulate wheel, then run:
+AISim wheel, then run:
 
 ```bash
 python benchmarks/mocker/bench_ais_concurrency.py --osl 256 --calls 20000

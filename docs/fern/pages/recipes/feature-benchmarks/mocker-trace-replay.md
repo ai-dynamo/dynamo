@@ -8,7 +8,7 @@ subtitle: Replay Mooncake-style traces through the mocker in offline mode
 This page has moved to [Run a DynoSim Simulation](../../cli/operations/simulation-with-dynosim/dynosim-replay.mdx).
 
 > [!NOTE]
-> The former `online` replay mode has no replacement in the unified AISimulate CLI yet. It will
+> The former `online` replay mode has no replacement in the unified AISim CLI yet. It will
 > return in a future release. The separate `python3 -m dynamo.mocker` command remains available for
 > launching live Mocker workers; it does not replay a trace by itself.
 

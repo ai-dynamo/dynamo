@@ -61,9 +61,9 @@ logger = logging.getLogger(__name__)
 
 def _load_latest_database_version() -> Optional[Callable[..., Optional[str]]]:
     try:
-        perf_database = importlib.import_module("aisimulate_core.sdk.perf_database")
+        perf_database = importlib.import_module("aisim_core.sdk.perf_database")
     except ModuleNotFoundError as e:
-        if e.name != "aisimulate_core":
+        if e.name != "aisim_core":
             raise
         return None
     return perf_database.get_latest_database_version
@@ -113,7 +113,7 @@ def assemble_final_config(
        ``features.kvRouter.enabled`` is true.
     5. **Planner** — inject the Planner service + planner-config ConfigMap.
        When ``ais_perf_model`` is given, it is embedded so the planner can
-       initialize its direct AISimulate model with native identity. When
+       initialize its direct AISim model with native identity. When
        ``aic_spec`` is given (rapid mode), it is embedded so the planner can
        run AIC interpolation at bootstrap if the endpoint is unavailable.
     6. **Profile data** — attach interpolation-data ConfigMap when mocker
@@ -735,7 +735,7 @@ def build_ais_perf_model_spec(
     resolved_backend: str,
     system: str,
 ) -> Optional[AISPerfModelSpec]:
-    """Build native AIS identity for the Planner's AISimulate integration.
+    """Build native AIS identity for the Planner's AISim integration.
 
     This is intentionally independent from AIC interpolation. It does not
     request a sweep; it only gives the Planner enough identity and parallelism
@@ -797,7 +797,7 @@ def build_ais_perf_model_spec(
 
     if get_latest_database_version is None:
         logger.warning(
-            "AISimulate perf model is unavailable; Planner will use FPM regression "
+            "AISim perf model is unavailable; Planner will use FPM regression "
             "instead of native AIS estimates."
         )
         return None

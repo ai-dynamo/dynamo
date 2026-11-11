@@ -7,7 +7,7 @@ Pytest collection puts components/src/dynamo on sys.path, which makes
 `import vllm` resolve to dynamo.vllm. Spawned subprocesses (EngineCore,
 sglang scheduler) inherit that and crash on `from vllm.v1 ...`. The same
 applies to dynamo.triton vs. the triton compiler package torch imports.
-Likewise, dynamo.aisimulate must not shadow the installed AISimulate SDK.
+Likewise, dynamo.aisimulate must not shadow the installed AISim SDK.
 """
 
 from __future__ import annotations
@@ -47,7 +47,15 @@ _REPO_ROOT = Path(__file__).resolve().parent
 # Seed sys.modules with the venv copies before pytest collection runs.
 # Best-effort: an engine that is present but not importable (an editable install
 # with an unreadable source tree raises PermissionError) must not abort collection.
-for _name in ("vllm", "sglang", "triton", "aisimulate"):
+for _name in (
+    "vllm",
+    "sglang",
+    "triton",
+    "aisim",
+    "aisim_core",
+    "aisimulate",
+    "aisimulate_core",
+):
     try:
         importlib.import_module(_name)
     # ImportError is a missing engine; OSError is one whose sources are present

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Dynamo CLI/runtime adapters for AISimulate's canonical engine configuration."""
+"""Dynamo CLI/runtime adapters for AISim's canonical engine configuration."""
 
 import argparse
 import copy

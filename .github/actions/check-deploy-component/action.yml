@@ -61,7 +61,7 @@ runs:
           "pytest==9.0.3" \
           "pytest-timeout==2.4.0"
         # Schema extraction only imports the lightweight core models, not the simulator.
-        python -m pip install --no-deps -r ../../container/deps/requirements.aisimulate.txt
+        python -m pip install --no-deps -r ../../container/deps/requirements.aisim.txt
 
     - name: Check operator generated files
       if: ${{ inputs.component == 'operator' }}

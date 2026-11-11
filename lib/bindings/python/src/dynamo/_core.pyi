@@ -21,7 +21,7 @@ from typing import (
     overload,
 )
 
-from aisimulate_core.sdk import ForwardPassPerfModelConfig
+from aisim_core.sdk import ForwardPassPerfModelConfig
 from typing_extensions import NotRequired
 
 # Import from specialized modules

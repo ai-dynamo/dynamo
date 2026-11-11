@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for AISimulate and AIConfigurator interpolation in profiler DGD generation."""
+"""Unit tests for AISim and AIConfigurator interpolation in profiler DGD generation."""
 
 from pathlib import Path
 
@@ -39,7 +39,7 @@ pytestmark = [
 
 def test_aic_import_treats_missing_root_package_as_optional(monkeypatch):
     def raise_missing_root(_):
-        raise ModuleNotFoundError(name="aisimulate_core")
+        raise ModuleNotFoundError(name="aisim_core")
 
     monkeypatch.setattr(
         "dynamo.profiler.utils.dgd_generation.importlib.import_module",
@@ -51,7 +51,7 @@ def test_aic_import_treats_missing_root_package_as_optional(monkeypatch):
 
 @pytest.mark.parametrize(
     "missing_module",
-    ["aisimulate_core.sdk.operations.attention", "unrelated_dependency"],
+    ["aisim_core.sdk.operations.attention", "unrelated_dependency"],
 )
 def test_aic_import_propagates_internal_or_unrelated_missing_module(
     monkeypatch, missing_module
@@ -336,7 +336,7 @@ class TestInjectMockerAicArgs:
     @pytest.mark.parametrize("explicit_capacity", [False, True])
     def test_dense_tp_pick_starts_with_canonical_estimator(self, explicit_capacity):
         # Only packaged model metadata/performance tables are used; no weights.
-        from aisimulate_core.sdk import RustForwardPassPerfModel
+        from aisim_core.sdk import RustForwardPassPerfModel
 
         from dynamo.mocker.args import parse_args
         from dynamo.mocker.config import build_mocker_engine_args
@@ -503,7 +503,7 @@ class TestBuildPlannerConfigEmbedsAicSpec:
         )
 
         assert spec is None
-        assert "AISimulate perf model is unavailable" in caplog.text
+        assert "AISim perf model is unavailable" in caplog.text
 
     @pytest.mark.parametrize(
         ("mode", "prefill_pick", "decode_pick"),

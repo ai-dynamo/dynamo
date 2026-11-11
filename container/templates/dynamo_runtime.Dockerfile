@@ -64,6 +64,9 @@ ENV PROTOC=/usr/local/bin/protoc
 RUN protoc --version && test -f /usr/local/include/google/protobuf/struct.proto
 
 COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
+{% if target == "runtime" %}
+COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/aisim-source.json /opt/dynamo/dist/aisim-override.txt /opt/dynamo/wheelhouse/
+{% endif %}
 
 # Install Python for framework=none runtime (cuda-dl-base doesn't include Python)
 # This is needed to create venv and install dynamo packages
@@ -116,6 +119,8 @@ ENV VIRTUAL_ENV=/opt/dynamo/venv \
 RUN --mount=type=cache,id=uv-dynamo-{{ context.dynamo.uv_version }},target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
     uv pip install \
+    --overrides /opt/dynamo/wheelhouse/aisim-override.txt \
+    /opt/dynamo/wheelhouse/aisim-*.whl \
     /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
     /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
     /opt/dynamo/wheelhouse/nixl/nixl*.whl

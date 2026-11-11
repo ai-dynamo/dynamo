@@ -379,6 +379,7 @@ areas:
   - container/deps/
   - container/dev/
   - container/launch_message/
+  - container/aisim_source_provenance.py
   - container/render.py
   - container/run.sh
   - container/templates/

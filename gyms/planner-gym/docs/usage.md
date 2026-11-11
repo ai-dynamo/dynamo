@@ -376,7 +376,7 @@ For an aggregated topology, use `engines.aggregate` instead of
 `tp_size * attention_dp_size`; MoE TP and EP, when supplied, must describe the
 same world size. GPU-budget validation weights prefill and decode replica
 counts by their independently resolved engine costs. An engine's `backend`
-selects DynoSim's scheduler semantics. AISimulate performance lookup defaults to that
+selects DynoSim's scheduler semantics. AISim performance lookup defaults to that
 backend/version but can be decoupled explicitly with `ais_backend` and
 `ais_backend_version`; identity and accounting fields cannot be overridden
 through `extra_args`. `cold_start_delay_s` models worker startup and defaults to
@@ -883,10 +883,10 @@ binding.
 `$DYNAMO_DIR/lib/bench/testdata/mooncake_trace_1000.jsonl`. Set `DYNAMO_DIR` to
 the correct absolute path and use `gen_traces.py --include-recorded`.
 
-### AISimulate cannot resolve the default model/system/backend
+### AISim cannot resolve the default model/system/backend
 
-Verify that the installed AISimulate performance data supports the selected
-model, system, and backend version. Use the AISimulate version pinned by the
+Verify that the installed AISim performance data supports the selected
+model, system, and backend version. Use the AISim version pinned by the
 same Dynamo checkout. For legacy simulation commands, select a bundled
 combination with `--substrate`. For Match Config runs, set the first-class
 `backend.model` and `backend.engines` fields.

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Keep replay benchmark imports usable without the optional AISimulate runtime."""
+"""Keep replay benchmark imports usable without the optional AISim runtime."""
 
 import builtins
 import importlib.util
@@ -22,21 +22,21 @@ pytestmark = [
 
 @pytest.fixture
 def bench_without_aisimulate(monkeypatch):
-    """Load the real benchmark with AISimulate blocked and replay siblings stubbed."""
+    """Load the real benchmark with AISim blocked and replay siblings stubbed."""
     original_import = builtins.__import__
     attempts = []
 
     def without_aisimulate(name, *args, **kwargs):
-        if name.split(".")[0] in {"aisimulate", "aisimulate_core"}:
+        if name.split(".")[0] in {"aisim", "aisim_core"}:
             attempts.append(name)
-            raise ModuleNotFoundError("AISimulate is unavailable", name=name)
+            raise ModuleNotFoundError("AISim is unavailable", name=name)
         return original_import(name, *args, **kwargs)
 
-    # Block imports even when another test has already loaded AISimulate.
+    # Block imports even when another test has already loaded AISim.
     monkeypatch.setattr(builtins, "__import__", without_aisimulate)
 
     # Isolate bench.py from sibling modules that require Dynamo's native runtime.
-    # Its source and AISimulate import remain real; no package initializer runs.
+    # Its source and AISim import remain real; no package initializer runs.
     package = "_replay_bench_import_test"
     dependencies = {
         "scoring": ("_pick_best_record",),
@@ -67,9 +67,9 @@ def test_aic_comparison_requires_aisimulate_at_call_time(bench_without_aisimulat
         workload=SimpleNamespace(isTraceBased=False, requestCount=1, concurrency=1)
     )
 
-    with pytest.raises(ModuleNotFoundError, match="AISimulate is unavailable") as exc:
+    with pytest.raises(ModuleNotFoundError, match="AISim is unavailable") as exc:
         bench.compare_aic_and_replay_disagg(spec)
 
     assert exc.value.name is not None
-    assert exc.value.name.split(".")[0] == "aisimulate"
+    assert exc.value.name.split(".")[0] == "aisim"
     assert attempts == [exc.value.name]

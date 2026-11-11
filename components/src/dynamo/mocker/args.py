@@ -184,7 +184,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Model name for API responses (default: derived from model-path)",
     )
 
-    # Engine CLI options (lowered to the AISimulate configuration)
+    # Engine CLI options (lowered to the AISim configuration)
     parser.add_argument(
         "--num-gpu-blocks-override",
         type=int,
@@ -296,7 +296,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         dest="ais_perf_model",
         action="store_true",
         default=False,
-        help="Use AISimulate's perf model directly for latency prediction. "
+        help="Use AISim's perf model directly for latency prediction. "
         "Requires aisimulate installed.",
     )
     parser.add_argument(
@@ -582,7 +582,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=float,
         default=engine_defaults["kv_transfer_bandwidth"],
         help="KV cache transfer bandwidth in GB/s for disaggregated serving latency simulation. "
-        "When unset, uses the AISimulate engine default. Set to 0 to disable KV transfer delay. "
+        "When unset, uses the AISim engine default. Set to 0 to disable KV transfer delay. "
         "For intra-node NVLink, typical value is ~450.",
     )
     parser.add_argument(
@@ -627,7 +627,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             type=float,
             default=None,
             help=f"Per-DP-rank native G2 {direction.upper()} bandwidth in decimal GB/s "
-            "(AISimulate default when unset; 0 is unlimited). Requires --num-host-blocks.",
+            "(AISim default when unset; 0 is unlimited). Requires --num-host-blocks.",
         )
     parser.add_argument(
         "--stagger-delay",

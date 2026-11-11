@@ -52,7 +52,7 @@ fn validate_aggregated_worker(args: &MockerConfig, mode: &str) -> Result<()> {
     Ok(())
 }
 
-// Engine and topology validation belong to AISimulate's ReplaySpec/engine factory.
+// Engine and topology validation belong to AISim's ReplaySpec/engine factory.
 // Keep only the argument roles that Dynamo lowers into those contracts here.
 pub(super) fn validate_offline_replay_args(args: &MockerConfig) -> Result<()> {
     validate_aggregated_worker(args, "offline replay")

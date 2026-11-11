@@ -1511,7 +1511,7 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) buildJob(
 }
 
 func dgdrRunSweeperCommand() []string {
-	return []string{"aisimulate"}
+	return []string{"aisim"}
 }
 
 func dgdrRunSweeperArgs(snapshotPath string) []string {

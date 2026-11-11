@@ -5,7 +5,7 @@ title: Run a DynoSim Simulation
 subtitle: Predict a synthetic workload or saved trace against one simulated configuration
 ---
 
-A DynoSim prediction evaluates one workload against one simulated Dynamo configuration. AISimulate
+A DynoSim prediction evaluates one workload against one simulated Dynamo configuration. AISim
 drives the simulated engine cores directly without starting a frontend, registering workers, or
 sending HTTP requests. It runs on CPUs and writes an AIPerf-style summary and JSON report.
 
@@ -60,7 +60,7 @@ planner: {policy: disabled}
 Run the prediction through the Dynamo stack:
 
 ```bash
-aisimulate predict \
+aisim predict \
   --stack dynamo \
   --config /tmp/dynosim-synthetic.yaml \
   --output-dir /tmp/dynosim-synthetic
@@ -75,7 +75,7 @@ Override the synthetic source with three-turn sessions. `--set` parses its right
 and applies it after loading the file:
 
 ```bash
-aisimulate predict \
+aisim predict \
   --stack dynamo \
   --config /tmp/dynosim-synthetic.yaml \
   --set 'traffic.source={type: synthetic-session, new_input_tokens_per_turn: 1024, output_tokens_per_turn: 128, session: {turns: 3, shared_prefix_ratio: 0.5, prefix_groups: 8, inter_turn_delay_ms: 250}}' \
@@ -100,7 +100,7 @@ curl -sL \
 Override the workload mappings while keeping the engine configuration fixed:
 
 ```bash
-aisimulate predict \
+aisim predict \
   --stack dynamo \
   --config /tmp/dynosim-synthetic.yaml \
   --set 'traffic.source={type: trace, format: mooncake, paths: [/tmp/toolagent_trace.jsonl], block_size: 512}' \
@@ -118,7 +118,7 @@ remains `engine.workers.aggregated.kv_cache.block_size: 64`.
 Run the same trace through four workers and the KV router:
 
 ```bash
-aisimulate predict \
+aisim predict \
   --stack dynamo \
   --config /tmp/dynosim-synthetic.yaml \
   --set 'traffic.source={type: trace, format: mooncake, paths: [/tmp/toolagent_trace.jsonl], block_size: 512}' \
@@ -170,7 +170,7 @@ planner: {policy: disabled}
 Run the disaggregated prediction:
 
 ```bash
-aisimulate predict \
+aisim predict \
   --stack dynamo \
   --config /tmp/dynosim-disaggregated.yaml \
   --output-dir /tmp/dynosim-disaggregated

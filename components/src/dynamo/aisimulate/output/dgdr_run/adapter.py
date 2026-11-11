@@ -54,13 +54,13 @@ from pathlib import Path
 from typing import Any, Literal, NoReturn, Protocol
 
 import yaml
-from aisimulate.output_adapter import (
+from aisim.output_adapter import (
     OUTPUT_ADAPTER_API_VERSION,
     RecommendationOutputCallbacks,
 )
-from aisimulate.sweeper.config import SmartSearchConfig
-from aisimulate.sweeper.result import SweepResult
-from aisimulate_core.sdk.perf_database import load_system_spec
+from aisim.sweeper.config import SmartSearchConfig
+from aisim.sweeper.result import SweepResult
+from aisim_core.sdk.perf_database import load_system_spec
 from pydantic import BaseModel, ConfigDict, Field
 
 from dynamo.aisimulate.output.dgd.renderers import (
@@ -88,7 +88,7 @@ _ID_HEX_LENGTH = 12
 # AIC appends component-specific suffixes to the prefix. Keep the same bound as
 # the AIC comparison harness so every generated Kubernetes name remains valid.
 _MAX_DGD_NAME_LENGTH = 28
-# Metric names the adapter derives itself. They are reserved: a measurement AISimulate resolves under
+# Metric names the adapter derives itself. They are reserved: a measurement AISim resolves under
 # one of these names is replaced by the adapter's value (and logged), never merged with it.
 _RESERVED_METRICS = ("score", "usedGpus", "objectives")
 
@@ -102,7 +102,7 @@ class CandidateRecordLike(Protocol):
 
     @property
     def status(self) -> Any:
-        ...  # aisimulate.sweeper.result.CandidateStatus
+        ...  # aisim.sweeper.result.CandidateStatus
 
     @property
     def score(self) -> float | None:
@@ -265,14 +265,14 @@ class DGDRRunOutputConfig(BaseModel):
         except Exception as exc:
             raise CandidateMaterializationError(
                 _bounded(
-                    "could not load AISimulate system spec for hardware_sku "
+                    "could not load AISim system spec for hardware_sku "
                     f"{hardware_sku!r}"
                 )
             ) from exc
         if not isinstance(system_spec, Mapping):
             raise CandidateMaterializationError(
                 _bounded(
-                    f"AISimulate system spec for hardware_sku {hardware_sku!r} "
+                    f"AISim system spec for hardware_sku {hardware_sku!r} "
                     "must be an object"
                 )
             )
@@ -280,7 +280,7 @@ class DGDRRunOutputConfig(BaseModel):
         if not isinstance(node_spec, Mapping):
             raise CandidateMaterializationError(
                 _bounded(
-                    f"AISimulate system spec for hardware_sku {hardware_sku!r} "
+                    f"AISim system spec for hardware_sku {hardware_sku!r} "
                     "must contain an object at node"
                 )
             )
@@ -288,7 +288,7 @@ class DGDRRunOutputConfig(BaseModel):
         if type(num_gpus_per_node) is not int or num_gpus_per_node < 1:
             raise CandidateMaterializationError(
                 _bounded(
-                    f"AISimulate system spec for hardware_sku {hardware_sku!r} must "
+                    f"AISim system spec for hardware_sku {hardware_sku!r} must "
                     "contain a positive integer at node.num_gpus_per_node"
                 )
             )
@@ -450,7 +450,7 @@ class DGDRRunOutputAdapter:
             return None
         parameters = _plain(dict(record.config))
         score = float(record.score)
-        # Every measurement AISimulate resolved for the point (throughput, TTFT, ITL, E2E latency,
+        # Every measurement AISim resolved for the point (throughput, TTFT, ITL, E2E latency,
         # goodput, power, ...) is kept under its own name, with non-finite values as null. The
         # adapter's rank metadata is added under the reserved names.
         metrics: dict[str, Any] = _finite(
@@ -736,9 +736,9 @@ class _RenderInput:
 
 
 class DGDRRunOutputPlugin:
-    """The object AISimulate discovers for ``--output dgdr_run``.
+    """The object AISim discovers for ``--output dgdr_run``.
 
-    AISimulate calls ``subscribe(config, context=...)`` once, in the process that
+    AISim calls ``subscribe(config, context=...)`` once, in the process that
     runs the search, and wires the returned callbacks into the Sweeper: that is
     the live path (initial snapshot immediately, then coalesced snapshots).
     ``write()`` runs afterwards in the CLI process, only when the search
@@ -814,7 +814,7 @@ class DGDRRunOutputPlugin:
             round_no=_last_published_round(directory),
         )
         adapter.close_selection()
-        # AISimulate requires reported artifacts to live under output_dir; a snapshot
+        # AISim requires reported artifacts to live under output_dir; a snapshot
         # on the shared volume does not, and is consumed by the publisher instead.
         if directory.resolve() == Path(output_dir).resolve():
             return [Path(SNAPSHOT_FILE_NAME)]
@@ -860,7 +860,7 @@ def _as_feasible(candidate: Any) -> _FinalCandidate:
 
 
 def create_adapter() -> DGDRRunOutputPlugin:
-    """Create the Dynamo plugin discovered by AISimulate."""
+    """Create the Dynamo plugin discovered by AISim."""
     return DGDRRunOutputPlugin()
 
 

@@ -28,13 +28,13 @@ Known issues summarize each release's GitHub release notes. The current release 
 
 <span className="dynref-badge dynref-badge--blue">vLLM</span> **GMS Persisted KV Standby Wake Failure:** With GPU Memory Service persisted KV failover (`DYN_GMS_PERSIST_KV`), tensor parallelism, and an explicit `--kv-cache-memory-bytes`, the vLLM standby engine fails to adopt the retained KV cache with `StaleMemoryLayoutError`. The issue also affects v1.5.0. **Workaround:** leave `DYN_GMS_PERSIST_KV` unset.
 
-<span className="dynref-badge dynref-badge--blue">CLI</span> **Replay Module Entrypoint Removal:** `python -m dynamo.replay` fails because the replay CLI moved into the AISimulate wheel in v1.5.0. **Workaround:** use `aisimulate predict --stack dynamo --config <file>`. See [the replay guide](../../../cli/operations/simulation-with-dynosim/dynosim-replay.mdx).
+<span className="dynref-badge dynref-badge--blue">CLI</span> **Replay Module Entrypoint Removal:** `python -m dynamo.replay` fails because the replay CLI moved into the AISim wheel in v1.5.0. **Workaround:** use `aisimulate predict --stack dynamo --config <file>`. See [the replay guide](../../../cli/operations/simulation-with-dynosim/dynosim-replay.mdx).
 
 <span className="dynref-badge dynref-badge--blue">Frontend</span> **Logit Bias Ignored:** The Frontend accepts `logit_bias` on `/v1/chat/completions` and `/v1/completions` but drops it before the engine, so no bias is applied. No workaround is available yet.
 
 <span className="dynref-badge dynref-badge--blue">Frontend</span> **Request Error Details Dropped:** When a worker rejects a request, the Frontend returns a generic error without the worker's message. The issue also affects v1.5.0. No workaround is available yet.
 
-<span className="dynref-badge dynref-badge--blue">Planner</span> **Inflated Capacity Estimate Suppresses Scaling:** For aggregated vLLM deployments, a Dynamo Planner regression model seeded from worker self-benchmark data can overestimate per-engine capacity and refuse to scale up under load. **Workaround:** use a pre-published AISimulate performance model.
+<span className="dynref-badge dynref-badge--blue">Planner</span> **Inflated Capacity Estimate Suppresses Scaling:** For aggregated vLLM deployments, a Dynamo Planner regression model seeded from worker self-benchmark data can overestimate per-engine capacity and refuse to scale up under load. **Workaround:** use a pre-published AISim performance model.
 
 <span className="dynref-badge dynref-badge--blue">Router</span> **GlobalRouter Pool Requests Find No Endpoints:** On Kubernetes with Grove, requests that the GlobalRouter sends to a pool can fail with no available endpoints even when the pool's worker is healthy. The issue also affects v1.5.0. No workaround is available yet.
 
@@ -70,7 +70,7 @@ The other [v1.5.0 known issues](#v150) still apply.
 
 <span className="dynref-badge dynref-badge--blue">vLLM</span> **RL Weight Version Tracking Drift:** In reinforcement learning workflows on the vLLM backend, the reported weight version can disagree with the weights actually loaded in the engine, so downstream consumers may treat stale weights as current.
 
-<span className="dynref-badge dynref-badge--blue">CLI</span> **Replay Module Entrypoint Removal:** Scripts and test suites that invoke `python -m dynamo.replay` now fail because the module no longer provides a CLI entry point. The replay CLI moved into the AISimulate wheel with no compatibility shim. **Workaround:** migrate to `aisimulate predict --stack dynamo --config <file>`. It takes a YAML config instead of the previous command-line arguments and does not support online mode. See [the replay guide](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/cli/operations/simulation-with-dynosim/dynosim-replay.mdx) for usage.
+<span className="dynref-badge dynref-badge--blue">CLI</span> **Replay Module Entrypoint Removal:** Scripts and test suites that invoke `python -m dynamo.replay` now fail because the module no longer provides a CLI entry point. The replay CLI moved into the AISim wheel with no compatibility shim. **Workaround:** migrate to `aisimulate predict --stack dynamo --config <file>`. It takes a YAML config instead of the previous command-line arguments and does not support online mode. See [the replay guide](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/cli/operations/simulation-with-dynosim/dynosim-replay.mdx) for usage.
 
 <span className="dynref-badge dynref-badge--blue">Frontend</span> **Bare 500 on Request Errors:** When a request-level error is returned by the backend, clients receive a bare HTTP 500 with no explanatory message, so the actual failure reason is not visible in the response.
 

@@ -595,7 +595,7 @@ Required when `--router-prefill-load-model=ais` is enabled:
 - `--ais-model-path`
 
 For full estimator settings, use `--ais-perf-config` with a JSON object or a JSON/YAML
-file. It accepts the AISimulate `ForwardPassPerfModelConfig` unchanged, including
+file. It accepts the AISim `ForwardPassPerfModelConfig` unchanged, including
 `worker_type`, ordered `systems_paths`, `estimation_mode`, `fallback_policy`, and
 nested `estimator_config`. The default selection is `auto` with `deny`; auto tries
 op-level data, FPM interpolation, then FPM regression. Router requires a ready

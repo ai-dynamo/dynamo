@@ -240,8 +240,8 @@ async def test_rebuilt_real_controllers_never_sweep_at_once():
     """
 
     pytest.importorskip(
-        "aisimulate.sweeper",
-        reason="AI Simulate is an optional Dynamo simulation dependency",
+        "aisim.sweeper",
+        reason="AISim is an optional Dynamo simulation dependency",
     )
     from dynamo.planner.retune.sweep import SweepResult
 

@@ -1690,6 +1690,7 @@ fn parse_weka_import_options(
     );
     Ok(WekaImportOptions {
         nested_timestamp_basis,
+        ..Default::default()
     })
 }
 
@@ -2010,7 +2011,7 @@ impl ReplayTelemetryJsonl {
 }
 
 // Samples are emitted serially. Shared ownership only lets the binding flush
-// after AISimulate has consumed the observer; this is not a concurrent writer.
+// after AISim has consumed the observer; this is not a concurrent writer.
 type ReplayTelemetryWriter = Arc<Mutex<ReplayTelemetryJsonl>>;
 
 struct PyReplayTelemetryObserver {

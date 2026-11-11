@@ -1,19 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Keep DGDR's hardware hints synchronized with the pinned AISimulate wheel."""
+"""Keep DGDR's hardware hints synchronized with the pinned AISim wheel."""
 
 from __future__ import annotations
 
 import re
-import tomllib
 from importlib import metadata
 from pathlib import Path
 
 import pytest
 import yaml
-from packaging.requirements import Requirement
-from packaging.utils import canonicalize_name
 from packaging.version import Version
 
 pytestmark = [
@@ -33,29 +30,21 @@ PYPROJECT_PATH = REPO_ROOT / "pyproject.toml"
 
 
 def _pinned_version() -> Version:
-    with PYPROJECT_PATH.open("rb") as stream:
-        dependencies = tomllib.load(stream)["project"]["dependencies"]
-    requirements = [
-        Requirement(dependency)
-        for dependency in dependencies
-        if canonicalize_name(Requirement(dependency).name) == "aisimulate"
-    ]
-    assert len(requirements) == 1, "pyproject.toml must contain one AISimulate pin"
+    import importlib.util
 
-    requirement = requirements[0]
-    specifiers = list(requirement.specifier)
-    assert requirement.url is None
-    assert len(specifiers) == 1 and specifiers[0].operator == "=="
-    return Version(specifiers[0].version)
+    path = REPO_ROOT / "deploy/operator/hack/generate_aisimulate_schema.py"
+    spec = importlib.util.spec_from_file_location("aisim_schema_generator", path)
+    generator = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(generator)
+    return Version(generator.pinned_version(REPO_ROOT))
 
 
 def _packaged_hardware_skus() -> list[str]:
-    distribution = metadata.distribution("aisimulate")
+    distribution = metadata.distribution("aisim")
     system_files = [
         path
         for path in distribution.files or []
-        if path.parent.as_posix() == "aisimulate_core/systems"
-        and path.suffix == ".yaml"
+        if path.parent.as_posix() == "aisim_core/systems" and path.suffix == ".yaml"
     ]
     result = []
     for packaged_path in system_files:
@@ -86,7 +75,7 @@ def _operator_hardware_skus() -> list[str]:
 
 
 def test_dgdr_hardware_catalog_matches_pinned_aisimulate() -> None:
-    assert Version(metadata.version("aisimulate")) == _pinned_version()
+    assert Version(metadata.version("aisim")) == _pinned_version()
 
     expected = _packaged_hardware_skus()
     assert _operator_hardware_skus() == expected

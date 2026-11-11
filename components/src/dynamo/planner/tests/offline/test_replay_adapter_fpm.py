@@ -12,8 +12,8 @@ import json
 import pytest
 
 pytest.importorskip(
-    "aisimulate.replay",
-    reason="AI Simulate is an optional Dynamo simulation dependency",
+    "aisim.replay",
+    reason="AISim is an optional Dynamo simulation dependency",
 )
 
 from dynamo.mocker.config import normalize_mocker_config

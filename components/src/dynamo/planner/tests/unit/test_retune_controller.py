@@ -12,8 +12,8 @@ from collections import deque
 import pytest
 
 pytest.importorskip(
-    "aisimulate.sweeper",
-    reason="AI Simulate is an optional Dynamo simulation dependency",
+    "aisim.sweeper",
+    reason="AISim is an optional Dynamo simulation dependency",
 )
 
 import dynamo.planner.retune.controller as controller_module
@@ -47,7 +47,7 @@ ORIGIN_MS = 1_000_000.0
 INTERVAL = 60.0
 GRACE = 5.0
 STEP = 5.0
-# AISimulate recommend syntax; prefill_load_scale is pinned (an omitted knob
+# AISim recommend syntax; prefill_load_scale is pinned (an omitted knob
 # searches its default domain), so it is a one-value dimension.
 ROUTER = {
     "overlap_score_credit": {"choices": [0.0, 1.0]},

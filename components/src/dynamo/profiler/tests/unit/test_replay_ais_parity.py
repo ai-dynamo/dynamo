@@ -8,12 +8,12 @@ from dynamo.mocker.config import normalize_mocker_config
 from dynamo.replay import run_synthetic_trace_replay
 
 # run_synthetic_trace_replay constructs the Rust AIS callback, which imports
-# the AISimulate engine API. Skip when the core wheel is absent.
-pytest.importorskip("aisimulate_core.sdk.engine")
-aic_backend_factory = pytest.importorskip("aisimulate_core.sdk.backends.factory")
-aic_config = pytest.importorskip("aisimulate_core.sdk.config")
-aic_models = pytest.importorskip("aisimulate_core.sdk.models")
-aic_perf_database = pytest.importorskip("aisimulate_core.sdk.perf_database")
+# the AISim engine API. Skip when the core wheel is absent.
+pytest.importorskip("aisim_core.sdk.engine")
+aic_backend_factory = pytest.importorskip("aisim_core.sdk.backends.factory")
+aic_config = pytest.importorskip("aisim_core.sdk.config")
+aic_models = pytest.importorskip("aisim_core.sdk.models")
+aic_perf_database = pytest.importorskip("aisim_core.sdk.perf_database")
 
 AIC_PARITY_MODEL = "Qwen/Qwen3-32B"
 AIC_PARITY_SYSTEM = "h200_sxm"

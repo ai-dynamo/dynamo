@@ -10,7 +10,7 @@ from collections.abc import Mapping
 from copy import deepcopy
 from typing import Annotated, Any, Literal, TypeAlias
 
-from aisimulate.config.common import Choices, IntegerRange, NumericRange
+from aisim.config.common import Choices, IntegerRange, NumericRange
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from dynamo.aisimulate.domains import CHOICE_FORM, CHOICES, KNOB_FORM, RANGE, SCALAR
@@ -355,7 +355,7 @@ _PLANNER_USER_CONSTRAINT_FIELDS = {
     "max_gpu_budget": "max_num_gpus",
     "min_gpu_budget": "min_num_gpus",
 }
-# Runtime ``PlannerConfig`` fields without an AISimulate public name. Retune
+# Runtime ``PlannerConfig`` fields without an AISim public name. Retune
 # accepts them under their own names.
 PLANNER_RETUNE_EXTENSIONS: tuple[str, ...] = (
     "prefill_scale_up_queue_tokens",
@@ -471,7 +471,7 @@ def inner_planner_config(
 ) -> dict[str, Any]:
     """A retune candidate's inner planner: ``base`` with ``point`` applied and
     ``INNER_PLANNER_OVERRIDES`` over both. Every retune executor (the replay
-    sweep, the DGDR executor and the AISimulate adapter) builds it here."""
+    sweep, the DGDR executor and the AISim adapter) builds it here."""
 
     return {
         **deepcopy(dict(base)),

@@ -1,20 +1,20 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 # ruff: noqa: E402
-# Optional-dependency preflight must run before the AISimulate imports.
+# Optional-dependency preflight must run before the AISim imports.
 
-"""Finite expansion of AISimulate value domains (``dynamo.aisimulate.domains``)."""
+"""Finite expansion of AISim value domains (``dynamo.aisimulate.domains``)."""
 
 from __future__ import annotations
 
 import pytest
 
 pytest.importorskip(
-    "aisimulate.config.common",
-    reason="AI Simulate is an optional Dynamo simulation dependency",
+    "aisim.config.common",
+    reason="AISim is an optional Dynamo simulation dependency",
 )
 
-from aisimulate.config.common import Choices, IntegerRange, NumericRange
+from aisim.config.common import Choices, IntegerRange, NumericRange
 
 from dynamo.aisimulate.domains import (
     ContinuousDomain,

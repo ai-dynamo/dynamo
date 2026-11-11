@@ -1,15 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Value-domain expansion shared by the Dynamo AISimulate adapters and retune.
+"""Value-domain expansion shared by the Dynamo AISim adapters and retune.
 
 An adapter knob is written as a scalar, ``{choices: [...]}`` or
 ``{range: {min, max, step?, scale?}}``; after schema validation these are a
-plain value or an AISimulate ``Choices``, ``NumericRange`` or
+plain value or an AISim ``Choices``, ``NumericRange`` or
 ``IntegerRange``. ``expand_domain`` turns one validated knob into its values,
-or into a ``ContinuousDomain`` for a range AISimulate samples continuously (a
+or into a ``ContinuousDomain`` for a range AISim samples continuously (a
 linear range without ``step``, or a log range). A recommendation sweep hands
-continuous domains to the AISimulate sampler; an exhaustive grid such as the
+continuous domains to the AISim sampler; an exhaustive grid such as the
 planner retune sweep uses ``finite_values`` and ``require_enumerable``, which
 reject them.
 
@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from aisimulate.config.common import Choices, IntegerRange, NumericRange
+from aisim.config.common import Choices, IntegerRange, NumericRange
 from pydantic import BaseModel, Discriminator, Tag
 
 SCALAR = Tag("scalar")
@@ -166,7 +166,7 @@ def expand_domain(
         if spec.min == spec.max:
             return [spec.min]
         if spec.step is None:
-            # AISimulate rejects a step on log ranges, so every log range
+            # AISim rejects a step on log ranges, so every log range
             # with distinct bounds lands here.
             return ContinuousDomain(spec.min, spec.max, spec.scale == "log")
         if isinstance(value, IntegerRange):

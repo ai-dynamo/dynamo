@@ -40,8 +40,8 @@ from typing import Any, Optional
 import pytest
 
 pytest.importorskip(
-    "aisimulate.sweeper",
-    reason="AI Simulate is an optional Dynamo simulation dependency",
+    "aisim.sweeper",
+    reason="AISim is an optional Dynamo simulation dependency",
 )
 
 from dynamo.llm import KvRouterConfig
@@ -735,7 +735,7 @@ class World:
         self.preferences[end_ms(n)] = dict(point)
 
     def _evaluate(self, request: dict, point: Mapping[str, float]) -> dict:
-        """Replay summary of a router point (AISimulate public names): the
+        """Replay summary of a router point (AISim public names): the
         window's preferred point scores best; deterministic, so the CRN
         probe always matches its grid twin."""
 

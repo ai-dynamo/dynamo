@@ -79,7 +79,7 @@ impl AgenticReplayOptions {
                 .into_trace_driver_with_options(block_size, include_replay_hashes, lanes);
         };
         // Sample recorded source time first; speedup applies only to the saved
-        // frontier's remaining timers, just as it does in AISimulate's runner.
+        // frontier's remaining timers, just as it does in AISim's runner.
         let prepared = trace.prepare_snapshots(
             lanes.context("agentic_snapshot requires positive agentic_lanes")?,
             snapshot,

@@ -565,7 +565,7 @@ class KvRouterArgGroup(ArgGroup):
             help=(
                 "[EXPERIMENTAL] KV Router: Prompt-side prefill load model. "
                 "'none' keeps static prompt load accounting. "
-                "'ais' decays the oldest active prefill request using AISimulate-predicted duration."
+                "'ais' decays the oldest active prefill request using AISim-predicted duration."
             ),
             env=self.env,
         )

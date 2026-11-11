@@ -1,8 +1,8 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Simulate Planner Decisions with AISimulate
-sidebar-title: Simulate Planner Decisions (AISimulate)
+title: Simulate Planner Decisions with AISim
+sidebar-title: Simulate Planner Decisions (AISim)
 subtitle: Replay a trace through the Planner offline to compare topologies, scaling settings, startup delays, and experimental retune
 ---
 
@@ -27,11 +27,11 @@ replay feeds the Planner its observations, see the
 
 ## Prerequisites
 
-- Install Dynamo, AISimulate, and the Planner dependencies from one checkout, as described in
+- Install Dynamo, AISim, and the Planner dependencies from one checkout, as described in
   [Install](../ai-simulate-experimental/sweeper-experimental/dynamo-integration.md#install).
-  AISimulate supports Python 3.11 through 3.13. That procedure builds the bindings in release mode,
+  AISim supports Python 3.11 through 3.13. That procedure builds the bindings in release mode,
   which matters because simulation runs are CPU-bound.
-- AISimulate reads each model's Hugging Face configuration on first use, for
+- AISim reads each model's Hugging Face configuration on first use, for
   `engine.context_length: max` and the default timing model. The host needs Hugging Face Hub
   access or the configuration in its local Hugging Face cache.
 
@@ -49,7 +49,7 @@ planner: {policy: enabled}
 from the section and validates it as a live Planner would. Omitted keys take the defaults listed in
 the [Planner Configuration reference](../../../../reference/components/planner-configuration.mdx).
 
-The section uses AISimulate key names. These differ from the `PlannerConfig` field names:
+The section uses AISim key names. These differ from the `PlannerConfig` field names:
 
 | `planner` key | `PlannerConfig` field |
 |---|---|
@@ -104,12 +104,12 @@ section. `aisimulate predict --stack dynamo` runs offline only, so `--online` is
 ### Planner Performance Model
 
 Throughput scaling with `target: sla` needs a performance model of the engines. Predict
-bootstraps it from AISimulate forward-pass estimates for `engine.model`, `engine.hardware`, and
+bootstraps it from AISim forward-pass estimates for `engine.model`, `engine.hardware`, and
 `engine.backend`, and records the result in `planner.metadata.bootstrap`: `status: installed`, the
 number of prefill and decode samples (`prefill_fpm_count`, `decode_fpm_count`), and an
 `fpm_sha256` digest. Other targets do not need the model and record `status: not_required`.
 
-The bootstrap uses AISimulate estimates even when `engine.workers.<role>.timing.type` is
+The bootstrap uses AISim estimates even when `engine.workers.<role>.timing.type` is
 `polynomial` or `fixed`. With those timing models, the Planner's model and the simulated engines
 disagree until the Planner has tuned its model on the forward passes it observes. Keep
 `timing.type: default` when the Planner's throughput decisions matter.
@@ -175,7 +175,7 @@ evaluation:
 Run the prediction:
 
 ```bash
-aisimulate predict \
+aisim predict \
   --stack dynamo \
   --config planner-aggregated.yaml \
   --output-dir planner-reports/aggregated
@@ -231,7 +231,7 @@ planner:
 Save the result as `planner-disaggregated.yaml`, then run it:
 
 ```bash
-aisimulate predict \
+aisim predict \
   --stack dynamo \
   --config planner-disaggregated.yaml \
   --output-dir planner-reports/disaggregated
@@ -258,7 +258,7 @@ zero. Run the aggregated prediction with a sequence of overrides. Each run takes
 ```bash
 for startup_seconds in 0 60 120 180 240 300; do
   output_dir=$(printf "planner-reports/startup-%03d" "$startup_seconds")
-  aisimulate predict \
+  aisim predict \
     --stack dynamo \
     --config planner-aggregated.yaml \
     --set "engine.workers.aggregated.startup_seconds=$startup_seconds" \
@@ -336,7 +336,7 @@ CLI reference.
 
 `dynamo.replay.run_trace_replay` runs the same Planner-in-the-loop replay from a script and returns
 a `ReplayReport` with `summary`, `per_request`, `coverage`, `planner`, and `to_dict()`. The Planner
-input is a `PlannerConfig`, not the AISimulate `planner` section: use `PlannerConfig` field names
+input is a `PlannerConfig`, not the AISim `planner` section: use `PlannerConfig` field names
 (`optimization_target`, `max_gpu_budget`, `min_endpoint`, `ttft_ms`, `itl_ms`), and set `mode` to
 `agg` with `extra_engine_args` or `disagg` with `prefill_engine_args` and `decode_engine_args`.
 This script mirrors the aggregated baseline:
@@ -398,7 +398,7 @@ print(report.planner.html_report_path)
   Planner's own targets are `ttft_ms` and `itl_ms` in `planner_config`.
 - Engine arguments use the
   [canonical engine mapping](../../../../reference/components/dynosim-replay-cli-reference.mdx#canonical-python-engine-configuration).
-  An AISimulate `timing_model` with `worker_type` gives the same performance-model bootstrap as
+  An AISim `timing_model` with `worker_type` gives the same performance-model bootstrap as
   predict. Engine arguments without one, such as the default `polynomial` timing, leave the
   bootstrap at `not_configured_load_only`, and the log warns that throughput-based scaling falls back
   to load-based scaling. The engine argument `startup_time`, in seconds, delays added workers like
@@ -498,7 +498,7 @@ With `aisimulate predict --stack dynamo`:
 
 Recommended: set `evaluation.sla` with `ttft_ms` and `itl_ms`. Predict fills `retune.sla_ttft_ms`
 and `retune.sla_itl_ms` from it when they are unset, so retune scores candidates against the SLA
-that AISimulate reports goodput for. Without it, scoring uses the Planner's `ttft_ms` and `itl_ms`,
+that AISim reports goodput for. Without it, scoring uses the Planner's `ttft_ms` and `itl_ms`,
 which then keep their `PlannerConfig` defaults. The SLA applies only to the default
 `retune.objective`, `GoodputPerGPU`, and to `Goodput`.
 
@@ -616,7 +616,7 @@ evaluation:
 Run the prediction:
 
 ```bash
-aisimulate predict --stack dynamo --config retune-router.yaml --output-dir retune-reports/router
+aisim predict --stack dynamo --config retune-router.yaml --output-dir retune-reports/router
 ```
 
 The 39-minute replay makes three decisions. Each sweep replays about 4,100 requests once per
@@ -658,7 +658,7 @@ planner:
 Run it:
 
 ```bash
-aisimulate predict --stack dynamo --config retune-joint.yaml --output-dir retune-reports/joint
+aisim predict --stack dynamo --config retune-joint.yaml --output-dir retune-reports/joint
 ```
 
 ### Read Retune Decisions
@@ -725,7 +725,7 @@ For example, on a host where Scenario 1's sweeps take about 11 seconds, `measure
 decision from one tick after launch (665 seconds for window 0) to the third (675 seconds):
 
 ```bash
-aisimulate predict --stack dynamo --config retune-router.yaml \
+aisim predict --stack dynamo --config retune-router.yaml \
   --set planner.retune.decision_latency_seconds=measured \
   --output-dir retune-reports/router-measured
 ```
@@ -743,7 +743,7 @@ Run the same config without retune and compare `summary.goodput_output_throughpu
 - For Scenario 2, remove retune with `--set planner.retune=null`.
 
 ```bash
-aisimulate predict --stack dynamo --config retune-router.yaml \
+aisim predict --stack dynamo --config retune-router.yaml \
   --set 'planner={policy: disabled}' --output-dir retune-reports/static
 for run in static router; do
   jq -c --arg run "$run" '{run: $run,
@@ -862,7 +862,7 @@ PLANNER = {
 }
 ```
 
-Keep the AISimulate `timing_model` with `worker_type` in `ENGINE`. Without it, the
+Keep the AISim `timing_model` with `worker_type` in `ENGINE`. Without it, the
 performance-model bootstrap is `not_configured_load_only`, and throughput scaling falls back to
 load scaling, as described in [Run from Python](#run-from-python).
 
@@ -899,7 +899,7 @@ against its limits under `execution.resources`:
   otherwise the run stops as `resource_limited` with exit code 3. Size the limit as the outer
   replay plus `max_parallel` times the peak of one window replay, measured on a short run:
   `resource-runtime.json` reports the tree's `peak_observed_rss_bytes`.
-- **CPUs.** The execution process and its sweep workers are pinned to `cpu_limit` CPUs. AISimulate
+- **CPUs.** The execution process and its sweep workers are pinned to `cpu_limit` CPUs. AISim
   also limits math libraries to one thread (`OMP_NUM_THREADS=1` and similar), which sweep workers
   inherit.
 - **Timeouts.** The initialization timeout covers start-up until the replay begins, including a

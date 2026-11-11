@@ -3,7 +3,7 @@
 
 """Dynamo replay API and adapter surface.
 
-The shared offline implementation is owned by AISimulate. Dynamo retains these
+The shared offline implementation is owned by AISim. Dynamo retains these
 entry points for single-run replay and for Router, Planner, and online adapters.
 """
 

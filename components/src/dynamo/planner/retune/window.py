@@ -4,11 +4,11 @@
 """Request-trace window reader for retune sweeps.
 
 It reads ``dynamo.request.trace.v1`` files (in replay, the replay's own trace)
-and hands AISimulate a clean, bare-row file:
+and hands AISim a clean, bare-row file:
 
 * only ``request_end`` rows; every other event type is dropped and
   ``agent_context`` is stripped (open-loop replay);
-* request times follow the AISimulate rule: arrival is
+* request times follow the AISim rule: arrival is
   ``request_received_ms``, else ``event_time_unix_ms - round(total_time_ms)``;
   completion is ``request_received_ms + round(total_time_ms)`` when both are
   present, else ``event_time_unix_ms``;
@@ -150,10 +150,10 @@ def trace_origin_ms(
     *,
     row_counts: dict[str, int] | None = None,
 ) -> float:
-    """Earliest AISimulate arrival over the ``request_end`` rows of ``paths``.
+    """Earliest AISim arrival over the ``request_end`` rows of ``paths``.
 
     This is trace time at planner-clock zero for a replay of ``paths``:
-    AISimulate rebases a Dynamo trace to its first arrival. ``row_counts``,
+    AISim rebases a Dynamo trace to its first arrival. ``row_counts``,
     when given, receives the read's row counts with every parsed request
     counted as kept, so ``agent_context_stripped`` counts the requests that
     carry ``agent_context`` (an agentic Dynamo trace).
@@ -194,7 +194,7 @@ def read_trace_window(
     Rows whose completion is after ``as_of_ms`` are censored. The output is a
     bare-row ``dynamo.request.trace.v1`` file sorted by (arrival, completion,
     request_id) with ``request_received_ms`` set to the normalized arrival, so
-    AISimulate replays it as is. ``buckets``, when given, receives every kept
+    AISim replays it as is. ``buckets``, when given, receives every kept
     row; a sequence of bucket sets receives it in each.
     """
 

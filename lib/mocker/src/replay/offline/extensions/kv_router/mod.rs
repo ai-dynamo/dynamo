@@ -55,8 +55,8 @@ use crate::replay::router_shared::{
 use crate::replay::{
     ConversationAffinityConfig, ConversationAffinityMode, ReplayPrefillLoadEstimator,
 };
-use aisimulate_core::replay::loadgen::{ReplayRequestHashes, ReplayRequestPayload};
-use aisimulate_core::replay::{
+use aisim_core::replay::loadgen::{ReplayRequestHashes, ReplayRequestPayload};
+use aisim_core::replay::{
     KvFetchAction, KvHints, Placement, PlacementCacheSample, PlacementDecision, PlacementEffects,
     PlacementPolicy, ProviderSpec, ReplayAdmissionMetadata, WorkerTopology,
 };
@@ -162,7 +162,7 @@ pub(in crate::replay) fn provider_spec() -> ProviderSpec {
     }
 }
 
-/// Dynamo-owned metadata used by KV-aware placement. AISimulate only defines
+/// Dynamo-owned metadata used by KV-aware placement. AISim only defines
 /// the neutral admission-metadata contract and never imports Router types.
 #[derive(Debug, Default)]
 pub(in crate::replay) struct KvReplayMetadata {
@@ -911,8 +911,7 @@ impl OfflineReplayRouter {
                     .and_then(|identity| identity.lineage.as_ref())
                     .context("sibling affinity requires unambiguous conversation lineage")?;
                 anyhow::ensure!(
-                    lineage.schema
-                        == aisimulate_core::replay::AGENTIC_CONVERSATION_LINEAGE_SCHEMA_V1
+                    lineage.schema == aisim_core::replay::AGENTIC_CONVERSATION_LINEAGE_SCHEMA_V1
                         && !lineage.root_conversation_id.is_empty(),
                     "unsupported conversation lineage"
                 );
@@ -961,11 +960,14 @@ impl OfflineReplayRouter {
     /// Apply, in arrival order, every lagged KV event batch visible at `now_ms`. KV events change
     /// no load, so this never admits queued requests on its own.
     fn apply_due_kv_events(&mut self, now_ms: f64) -> Result<()> {
-        while let Some((_, events)) = self
+        while self
             .lagged_kv_events
-            .pop_front_if(|(visible_ms, _)| *visible_ms <= now_ms)
+            .front()
+            .is_some_and(|(visible_ms, _)| *visible_ms <= now_ms)
         {
-            self.on_kv_events(events)?;
+            if let Some((_, events)) = self.lagged_kv_events.pop_front() {
+                self.on_kv_events(events)?;
+            }
         }
         Ok(())
     }
@@ -1652,7 +1654,7 @@ mod tests {
     };
     use crate::common::protocols::{DirectRequest, MockerConfig};
     use crate::replay::ReplayPrefillLoadEstimator;
-    use aisimulate_core::replay::{
+    use aisim_core::replay::{
         KvFetchAction, KvHints, Placement, PlacementDecision, PlacementPolicy,
         ReplayPromptTokenSource, ReplayRequestContext, WorkerTopology,
     };
@@ -1666,7 +1668,7 @@ mod tests {
         #[case] dp_size: u32,
     ) {
         use super::KvRouterPlacement as Policy;
-        use aisimulate_core::replay::PlacementPolicy;
+        use aisim_core::replay::PlacementPolicy;
         let mut args = queueing_args();
         args.dp_size = dp_size;
         let mut policy = Policy::new_with_selector_seed(
@@ -1765,7 +1767,7 @@ mod tests {
     #[test]
     fn unknown_policy_class_fails_at_class_entry_and_releases_session_affinity() {
         use super::KvRouterPlacement as Policy;
-        use aisimulate_core::replay::PlacementPolicy;
+        use aisim_core::replay::PlacementPolicy;
         use dynamo_kv_router::scheduling::KvSchedulerError;
         let mut policy = Policy::new_with_selector_seed(
             &queueing_args(),
@@ -1823,7 +1825,7 @@ mod tests {
 
     #[test]
     fn affinity_queue_cost_uses_only_the_bound_rank_cache() {
-        use aisimulate_core::replay::PlacementPolicy;
+        use aisim_core::replay::PlacementPolicy;
         let mut args = queueing_args();
         args.dp_size = 2;
         let mut policy = super::KvRouterPlacement::new_with_selector_seed(
@@ -1900,7 +1902,7 @@ mod tests {
         #[case] evict: bool,
         #[case] authored_hashes: bool,
     ) {
-        use aisimulate_core::replay::PlacementPolicy;
+        use aisim_core::replay::PlacementPolicy;
         let mut policy = super::KvRouterPlacement::new_with_selector_seed(
             &queueing_args(),
             Some(queueing_router_config()),
@@ -1985,7 +1987,7 @@ mod tests {
     #[case(false)]
     #[case(true)]
     fn affinity_clock_does_not_drain_on_decay_and_abort_releases_capacity(#[case] affinity: bool) {
-        use aisimulate_core::replay::PlacementPolicy;
+        use aisim_core::replay::PlacementPolicy;
         let mut config = queueing_router_config();
         config.router_prefill_load_model = RouterPrefillLoadModel::Ais;
         let mut policy = super::KvRouterPlacement::new_with_selector_seed(
@@ -2053,7 +2055,7 @@ mod tests {
     #[test]
     fn affinity_table_full_routes_without_affinity() {
         use super::{KvRouterPlacement as Policy, SessionAffinity, SessionAffinityConfig};
-        use aisimulate_core::replay::PlacementPolicy;
+        use aisim_core::replay::PlacementPolicy;
         let mut policy = Policy::new_with_selector_seed(
             &replay_args(),
             None,
@@ -2187,6 +2189,7 @@ mod tests {
             policy_class: None,
             replay_context: None,
             images: Vec::new(),
+            cache_salt: None,
         }
     }
 
@@ -2194,7 +2197,7 @@ mod tests {
     fn unhandled_request_fields_are_rejected_instead_of_dropped() {
         let mut router = OfflineReplayRouter::new(&replay_args(), None, None, 1).unwrap();
         let mut request = request(1, 7);
-        request.kv_hints = Some(aisimulate_core::replay::AuthoredKvHints {
+        request.kv_hints = Some(aisim_core::replay::AuthoredKvHints {
             source_worker: 0,
             source_dp_rank: 0,
         });
@@ -2202,11 +2205,11 @@ mod tests {
         assert!(error.to_string().contains("authored KV fetch hints"));
         assert_eq!(router.pending_count(), 0);
         request.kv_hints = None;
-        request.images.push(aisimulate_core::engine::ImageSpec {
+        request.images.push(aisim_core::engine::ImageSpec {
             identity: 1,
             token_start: 0,
             token_end: 1,
-            encoder: aisimulate_core::engine::EncoderShape {
+            encoder: aisim_core::engine::EncoderShape {
                 sequences: 1,
                 patch_tokens: 1,
                 transformer_tokens: 1,
@@ -2381,7 +2384,7 @@ mod tests {
         );
     }
 
-    /// One store event covering a whole prompt, as AISimulate relays a
+    /// One store event covering a whole prompt, as AISim relays a
     /// cluster-shared G2 pool's residency (`HostPinned`) to each subscribed rank.
     fn prompt_store_event(
         worker_id: WorkerId,

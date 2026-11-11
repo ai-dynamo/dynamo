@@ -1,17 +1,21 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Verify Dynamo consumes the canonical AISimulate wheel and namespaces."""
+"""Verify Dynamo consumes the canonical AISim wheel and namespaces."""
 
 from __future__ import annotations
 
+import hashlib
+import importlib.util
 import json
 import subprocess
 import sys
 import textwrap
 import tomllib
+import zipfile
 from importlib import metadata, resources
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from packaging.requirements import Requirement
@@ -44,7 +48,7 @@ def test_operator_schemas_do_not_load_aisimulate_runtime() -> None:
 
         class WithoutAIS(importlib.abc.MetaPathFinder):
             def find_spec(self, fullname, path=None, target=None):
-                if fullname.split('.')[0] in {'aisimulate', 'aisimulate_core'}:
+                if fullname.split('.')[0] in {'aisim', 'aisim_core'}:
                     raise ModuleNotFoundError('AIS runtime is unavailable', name=fullname)
 
         sys.meta_path.insert(0, WithoutAIS())
@@ -57,7 +61,7 @@ def test_operator_schemas_do_not_load_aisimulate_runtime() -> None:
                 }}},
             )
         except ModuleNotFoundError as error:
-            assert error.name == 'aisimulate_core'
+            assert error.name == 'aisim_core'
         else:
             raise AssertionError('Explicit AIS configuration requires its runtime')
         """
@@ -133,13 +137,11 @@ def test_no_manifest_installs_retired_aic_distributions() -> None:
         with lockfile.open("rb") as handle:
             packages = tomllib.load(handle)["package"]
         assert all(package["name"] != "aiconfigurator-core" for package in packages)
-    assert features["ais-forward-pass"] == ["dep:aisimulate-core"]
+    assert features["ais-forward-pass"] == ["dep:aisim-core"]
     assert "aic-forward-pass" not in features
     with (ROOT / "Cargo.toml").open("rb") as handle:
-        canonical_core = tomllib.load(handle)["workspace"]["dependencies"][
-            "aisimulate-core"
-        ]
-    assert dependencies["aisimulate-core"] == {
+        canonical_core = tomllib.load(handle)["workspace"]["dependencies"]["aisim-core"]
+    assert dependencies["aisim-core"] == {
         **canonical_core,
         "optional": True,
         "features": ["python"],
@@ -147,12 +149,12 @@ def test_no_manifest_installs_retired_aic_distributions() -> None:
     requirement = next(
         Requirement(item)
         for item in root_project["dependencies"]
-        if canonicalize_name(Requirement(item).name) == "aisimulate"
+        if canonicalize_name(Requirement(item).name) == "aisim"
     )
     if "git" in canonical_core:
         assert requirement.url == (
-            f"git+{canonical_core['git']}@{canonical_core['rev']}"
-            "#subdirectory=python/aisimulate"
+            f"git+{canonical_core['git']}.git@{canonical_core['rev']}"
+            "#subdirectory=python/aisim"
         )
     else:
         assert (
@@ -163,41 +165,41 @@ def test_no_manifest_installs_retired_aic_distributions() -> None:
 
 def test_aisimulate_wheel_uses_canonical_import_namespaces() -> None:
     if sys.version_info < (3, 11) or sys.version_info >= (3, 14):
-        pytest.skip("AISimulate supports Python 3.11 through 3.13")
+        pytest.skip("AISim supports Python 3.11 through 3.13")
 
-    release = metadata.distribution("aisimulate")
+    release = metadata.distribution("aisim")
     release_requirements = _requirement_names(release.requires or [])
     release_files = {str(path) for path in release.files or []}
 
     assert not (release_requirements & LEGACY_DISTRIBUTIONS)
-    assert "aisimulate/__init__.py" in release_files
-    assert "aisimulate_core/__init__.py" in release_files
+    assert "aisim/__init__.py" in release_files
+    assert "aisim_core/__init__.py" in release_files
     assert not any(
         path.split("/", 1)[0] in {"aiconfigurator", "aiconfigurator_core"}
         for path in release_files
     )
 
-    from aisimulate.sdk.task_v2 import Task
-    from aisimulate_core.sdk import RustForwardPassPerfModel
+    from aisim.sdk.task_v2 import Task
+    from aisim_core.sdk import RustForwardPassPerfModel
 
     assert Task is not None
     assert callable(RustForwardPassPerfModel.best_available)
-    core_root = resources.files("aisimulate_core")
+    core_root = resources.files("aisim_core")
     assert core_root.joinpath("model_configs/Qwen--Qwen3-32B_config.json").is_file()
     assert core_root.joinpath("systems/h200_sxm.yaml").is_file()
     legacy_cli = next(
         entry for entry in release.entry_points if entry.name == "aiconfigurator"
     )
-    assert legacy_cli.value == "aisimulate.legacy_cli.entrypoint:main"
+    assert legacy_cli.value == "aisim.legacy_cli.entrypoint:main"
 
 
 def test_pinned_aisimulate_materializes_shared_host_offload() -> None:
     if sys.version_info < (3, 11) or sys.version_info >= (3, 14):
-        pytest.skip("AISimulate supports Python 3.11 through 3.13")
+        pytest.skip("AISim supports Python 3.11 through 3.13")
 
     # Adapters consume the public launch contract; layout identity remains
-    # owned by AISimulate rather than a private helper imported by Dynamo.
-    from aisimulate.runner import materialize_engine_launch_config
+    # owned by AISim rather than a private helper imported by Dynamo.
+    from aisim.runner import materialize_engine_launch_config
 
     config = materialize_engine_launch_config(
         "vllm",
@@ -233,3 +235,77 @@ def test_pinned_aisimulate_materializes_shared_host_offload() -> None:
         "block_size": engine["block_size"],
         "bytes_per_token": 1024,
     }
+
+
+@pytest.mark.parametrize("failure", [None, "source", "payload", "version"])
+def test_staged_wheel_provenance_matches_reviewed_git_payload(
+    tmp_path, monkeypatch, failure
+):
+    helper_path = ROOT / "container/aisim_source_provenance.py"
+    helper_spec = importlib.util.spec_from_file_location(
+        "aisim_source_provenance", helper_path
+    )
+    helper = importlib.util.module_from_spec(helper_spec)
+    helper_spec.loader.exec_module(helper)
+    requirement_path = ROOT / "container/deps/requirements.aisim.txt"
+    pin = Requirement(
+        next(
+            line
+            for line in requirement_path.read_text().splitlines()
+            if line.startswith("aisim @")
+        )
+    )
+    commit = pin.url.split("@", 1)[1].split("#", 1)[0]
+    origin = {
+        "url": "https://github.com/ai-dynamo/aisimulate.git",
+        "vcs_info": {"vcs": "git", "commit_id": commit},
+        "subdirectory": "python/aisim",
+    }
+    if failure == "source":
+        origin["vcs_info"]["commit_id"] = "0" * 40
+    installed = tmp_path / "installed/aisim/__init__.py"
+    installed.parent.mkdir(parents=True)
+    installed.write_bytes(b"canonical source")
+    distribution = SimpleNamespace(
+        version="0.14.0",
+        read_text=lambda _: json.dumps(origin),
+        locate_file=lambda name: tmp_path / "installed" / name,
+    )
+    monkeypatch.setattr(
+        helper.importlib.metadata, "distribution", lambda _: distribution
+    )
+    wheelhouse = tmp_path / "wheels"
+    wheelhouse.mkdir()
+    wheel = wheelhouse / "aisim-0.14.0-py3-none-any.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr(
+            "aisim/__init__.py",
+            b"tampered" if failure == "payload" else installed.read_bytes(),
+        )
+        archive.writestr(
+            "aisim-0.14.0.dist-info/METADATA",
+            "Name: aisim\nVersion: "
+            + ("0.13.0" if failure == "version" else "0.14.0")
+            + "\n",
+        )
+    if failure is not None:
+        with pytest.raises(
+            ValueError,
+            match={
+                "source": "source differs",
+                "payload": "payload differs",
+                "version": "metadata differs",
+            }[failure],
+        ):
+            helper.write_provenance(requirement_path, wheelhouse)
+        assert not (wheelhouse / "aisim-source.json").exists()
+        assert not (wheelhouse / "aisim-override.txt").exists()
+    else:
+        helper.write_provenance(requirement_path, wheelhouse)
+        proof = json.loads((wheelhouse / "aisim-source.json").read_text())
+        assert (wheelhouse / "aisim-override.txt").read_text() == (
+            f"aisim @ file:///opt/dynamo/wheelhouse/{wheel.name}\n"
+        )
+        assert proof["source"] == origin
+        assert proof["wheel"] == wheel.name
+        assert proof["sha256"] == hashlib.sha256(wheel.read_bytes()).hexdigest()

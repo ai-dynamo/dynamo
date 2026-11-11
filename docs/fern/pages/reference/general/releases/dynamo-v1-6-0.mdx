@@ -68,7 +68,7 @@ Pull, deploy, and install with every artifact pinned to the v1.6.0 release set.
     {
       area: "Planner",
       title: "Dynamo Planner & Performance Modeling",
-      body: "Dynamo Planner reconfigures endpoint floors and GPU budget bounds at runtime through `/v1/min-endpoints` ([#14218](https://github.com/ai-dynamo/dynamo/pull/14218), [#14231](https://github.com/ai-dynamo/dynamo/pull/14231)), caps how many replicas one throughput decision changes ([#14296](https://github.com/ai-dynamo/dynamo/pull/14296)), and keeps pending capacity when demand falls while a worker is still starting ([#14671](https://github.com/ai-dynamo/dynamo/pull/14671)). An experimental Planner Gym compares Planner, KEDA-style, reactive, and static autoscaling policies against replayed or live traffic ([#15576](https://github.com/ai-dynamo/dynamo/pull/15576)). Performance-model consumers across the Planner, Profiler, Router, Frontend, Mocker, and replay move to AISimulate's canonical configuration ([#15063](https://github.com/ai-dynamo/dynamo/pull/15063)). Replay gains typed agentic traces ([#13586](https://github.com/ai-dynamo/dynamo/pull/13586)), Codex and Claude trace export ([#15601](https://github.com/ai-dynamo/dynamo/pull/15601)), and host-memory KV offload in the Mocker ([#15647](https://github.com/ai-dynamo/dynamo/pull/15647)).",
+      body: "Dynamo Planner reconfigures endpoint floors and GPU budget bounds at runtime through `/v1/min-endpoints` ([#14218](https://github.com/ai-dynamo/dynamo/pull/14218), [#14231](https://github.com/ai-dynamo/dynamo/pull/14231)), caps how many replicas one throughput decision changes ([#14296](https://github.com/ai-dynamo/dynamo/pull/14296)), and keeps pending capacity when demand falls while a worker is still starting ([#14671](https://github.com/ai-dynamo/dynamo/pull/14671)). An experimental Planner Gym compares Planner, KEDA-style, reactive, and static autoscaling policies against replayed or live traffic ([#15576](https://github.com/ai-dynamo/dynamo/pull/15576)). Performance-model consumers across the Planner, Profiler, Router, Frontend, Mocker, and replay move to AISim's canonical configuration ([#15063](https://github.com/ai-dynamo/dynamo/pull/15063)). Replay gains typed agentic traces ([#13586](https://github.com/ai-dynamo/dynamo/pull/13586)), Codex and Claude trace export ([#15601](https://github.com/ai-dynamo/dynamo/pull/15601)), and host-memory KV offload in the Mocker ([#15647](https://github.com/ai-dynamo/dynamo/pull/15647)).",
       anchor: "scheduling",
     },
     {
@@ -191,8 +191,8 @@ Dynamo Sidecar remains experimental in Dynamo v1.6.0.
 
 - **Typed Agentic Replay Adapters:** Added a streaming Weka importer in `dynamo-data-gen`, lowered Weka and Claude/Codex/Dynamo request traces into versioned Agentic Mooncake v2 rows, and added Dynamo replay entrypoints for typed agentic lanes ([#13586](https://github.com/ai-dynamo/dynamo/pull/13586)).
 - **Codex and Claude Trace Export:** Added an offline Codex trace exporter for agentic replay alongside the Claude exporter and fixed Claude export so a full local corpus replays. Claude export on a 216 MB project dropped from 49 s to 2.6 s and peak RSS from 2.3 GB to 1.3 GB ([#15601](https://github.com/ai-dynamo/dynamo/pull/15601)).
-- **Mocker Host-Memory KV Offload:** Wired AISimulate's vLLM host-memory KV offload into the Mocker with tier-aware KV routing, so the Router tracks host-resident blocks and `--num-host-blocks` alone enables host offload ([#15647](https://github.com/ai-dynamo/dynamo/pull/15647)).
-- **AISimulate Canonical Configuration:** Moved performance-model consumers across the Planner, Profiler, Router, Frontend, Mocker, and replay to AISimulate's canonical configuration interface, carrying complete configurations through Planner roles and the related CLI consumers ([#15063](https://github.com/ai-dynamo/dynamo/pull/15063)).
+- **Mocker Host-Memory KV Offload:** Wired AISim's vLLM host-memory KV offload into the Mocker with tier-aware KV routing, so the Router tracks host-resident blocks and `--num-host-blocks` alone enables host offload ([#15647](https://github.com/ai-dynamo/dynamo/pull/15647)).
+- **AISim Canonical Configuration:** Moved performance-model consumers across the Planner, Profiler, Router, Frontend, Mocker, and replay to AISim's canonical configuration interface, carrying complete configurations through Planner roles and the related CLI consumers ([#15063](https://github.com/ai-dynamo/dynamo/pull/15063)).
 
 ### Fault Tolerance & Observability
 
@@ -404,7 +404,7 @@ Engine and NIXL pins are on [Compatibility](../compatibility.mdx). The other dep
 - **SGLang on XPU:** Upgraded from v0.5.11 to v0.5.19, built against oneAPI 2026.0 ([#15186](https://github.com/ai-dynamo/dynamo/pull/15186)).
 - **libfabric:** Upgraded from v2.4.0 to v2.6.0 ([#15908](https://github.com/ai-dynamo/dynamo/pull/15908)).
 - **etcd:** Upgraded from v3.5.33 to v3.5.34 ([#15697](https://github.com/ai-dynamo/dynamo/pull/15697)).
-- **AIPerf and AISimulate:** Upgraded both from v0.12.0 to v0.13.0 ([#15495](https://github.com/ai-dynamo/dynamo/pull/15495), [#16949](https://github.com/ai-dynamo/dynamo/pull/16949)).
+- **AIPerf and AISim:** Upgraded both from v0.12.0 to v0.13.0 ([#15495](https://github.com/ai-dynamo/dynamo/pull/15495), [#16949](https://github.com/ai-dynamo/dynamo/pull/16949)).
 - **Grove:** Upgraded from v0.1.0-alpha.13 to v0.1.0-alpha.14 ([#15704](https://github.com/ai-dynamo/dynamo/pull/15704)).
 - **ModelExpress:** Upgraded from v0.6.0 to v0.7.0 ([#15656](https://github.com/ai-dynamo/dynamo/pull/15656)).
 - **Triton Runtime Image:** Moved from `26.07-py3` (CUDA 13.2) to `26.09-py3` (CUDA 13.4) ([#15499](https://github.com/ai-dynamo/dynamo/pull/15499)).

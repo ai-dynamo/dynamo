@@ -48,7 +48,7 @@ from multiprocessing.process import BaseProcess
 from pathlib import Path
 from typing import Any, Literal, NamedTuple
 
-from aisimulate.sweeper import OptimizationTarget, objective_value
+from aisim.sweeper import OptimizationTarget, objective_value
 
 from dynamo.planner.config.planner_config import (
     PlannerConfig,
@@ -105,7 +105,7 @@ _WORKER_TEMP_DIR = "tmp"
 class _Objective:
     """How ``score_summary`` scores one ``retune.objective``.
 
-    ``target`` is the AISimulate target the DGDR operator lowers the metric
+    ``target`` is the AISim target the DGDR operator lowers the metric
     to. ``inputs`` are the summary values ``objective_value`` reads, which
     must be finite numbers; ``positive`` of them must also be above 0.
     ``per_window`` rescales the value from the replay's duration to the
@@ -421,7 +421,7 @@ def score_summary(
 ) -> tuple[float, dict[str, Any]]:
     """Score a replay summary on ``objective``, in the objective's own units.
 
-    The score is ``objective_value`` of the AISimulate target the DGDR
+    The score is ``objective_value`` of the AISim target the DGDR
     operator lowers the objective to, unsigned: ``objective_maximized`` says
     which way is better. A replay drains every request of the window, so its
     ``duration_ms`` is the window plus a drain that differs by candidate, and

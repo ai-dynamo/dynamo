@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""One CPU-only Request → Run → AISimulate/publisher → Candidate smoke test.
+"""One CPU-only Request → Run → AISim/publisher → Candidate smoke test.
 
 Run against a Helm installation with dynamo-operator.dgdrV1Beta2.enabled=true
 and controllerManager.manager.dgdrDefaultImage set to the matching planner image.

@@ -13,8 +13,8 @@ from typing import Any
 
 import pytest
 import yaml
-from aisimulate.config.cli import CorePredictionConfig
-from aisimulate.config.common import split_config_sections
+from aisim.config.cli import CorePredictionConfig
+from aisim.config.common import split_config_sections
 
 pytestmark = [
     # Release-gating CPU smoke for plugin discovery, replay composition, and
@@ -39,7 +39,7 @@ _RECOMMEND_CASES = tuple(
 
 def _run_cli(*args: str, timeout: float = 180.0) -> subprocess.CompletedProcess[str]:
     result = subprocess.run(
-        [sys.executable, "-m", "aisimulate", *args],
+        [sys.executable, "-m", "aisim", *args],
         cwd=_REPO_ROOT,
         text=True,
         capture_output=True,

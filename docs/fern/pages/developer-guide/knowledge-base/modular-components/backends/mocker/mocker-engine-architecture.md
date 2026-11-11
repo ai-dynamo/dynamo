@@ -18,12 +18,12 @@ For live workers, see the
 
 ## Generalized Engine
 
-The `aisimulate_core::engine` module owns the scheduler, native GPU KV accounting, preemption, timing, and
+The `aisim_core::engine` module owns the scheduler, native GPU KV accounting, preemption, timing, and
 attention data-parallel (DP) barrier. A logical engine contains either one rank or a fixed group of
 sibling ranks. Grouped execution starts a pass only when every sibling rank is ready and completes
 at the latest rank completion time.
 
-Offline prediction and live Mocker workers construct this same generalized engine. The AISimulate
+Offline prediction and live Mocker workers construct this same generalized engine. The AISim
 Replayer advances it with a virtual clock and deterministic event queue. Live workers advance it
 with Tokio and wall-clock timers and register with the Dynamo runtime.
 
@@ -81,10 +81,10 @@ remain request-local until they cross a block boundary.
 
 ## Performance Model
 
-The unified AISimulate configuration exposes three timing modes under
+The unified AISim configuration exposes three timing modes under
 `engine.workers.<role>.timing`:
 
-- **`default`** constructs the canonical AISimulate performance model through
+- **`default`** constructs the canonical AISim performance model through
   `ForwardPassPerfModel.best_available(config)`. It derives model, backend, hardware, and parallelism
   inputs from the `engine` configuration and requires a ready estimator for that tuple.
 - **`fixed`** uses the configured `prefill_ms` and `decode_ms` for deterministic tests.
@@ -107,7 +107,7 @@ The mocker simulates KV cache transfer time between prefill and decode workers. 
   positive integer to override it.
 - `bandwidth_gb_per_second` sets a positive transfer bandwidth. Omitting it disables modeled
   transfer delay.
-- The public AISimulate `engine.kv_transfer.timing_mode` field defaults to `destination_missing`
+- The public AISim `engine.kv_transfer.timing_mode` field defaults to `destination_missing`
   and can be set to `full_prompt`.
 
 The delay is injected after simulated prefill compute completes, modeling the sequential flow:

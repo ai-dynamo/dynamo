@@ -9,7 +9,7 @@ import math
 from collections.abc import Mapping
 from typing import Annotated, Any, Literal, TypeAlias
 
-from aisimulate.config.common import Choices, NumericRange
+from aisim.config.common import Choices, NumericRange
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from dynamo.aisimulate.domains import (
@@ -46,7 +46,7 @@ LoadModelTypeDomain: TypeAlias = Annotated[
     Annotated[LoadModelType, SCALAR] | Annotated[Choices[LoadModelType], CHOICES],
     CHOICE_FORM,
 ]
-# Public numeric knob -> AISimulate default domain, in plan dimension order.
+# Public numeric knob -> AISim default domain, in plan dimension order.
 ROUTER_KNOB_DEFAULTS: dict[str, tuple[float, ...]] = {
     "overlap_score_credit": OVERLAP_SCORE_CREDIT_DEFAULTS,
     "prefill_load_scale": PREFILL_LOAD_SCALE_DEFAULTS,
@@ -59,7 +59,7 @@ ROUTER_PUBLIC_TO_LIVE: dict[str, str] = {
     "prefill_load_scale": "prefill_load_scale",
     "temperature": "router_temperature",
 }
-# ``PolicyParameters`` without an AISimulate public name. Retune accepts them
+# ``PolicyParameters`` without an AISim public name. Retune accepts them
 # under their live names; recommend and predict do not search them.
 ROUTER_RETUNE_EXTENSIONS: tuple[str, ...] = (
     "overlap_score_credit_decay",
@@ -262,7 +262,7 @@ class RouterRetuneConfig(RouterRecommendationConfig):
       defaults to ``kv_router`` and rejects any other domain.
       ``prefill_load_model.type`` is fixed at startup too; the caller checks
       an explicit value against the startup one.
-    - The ``ROUTER_RETUNE_EXTENSIONS`` knobs have no AISimulate default
+    - The ``ROUTER_RETUNE_EXTENSIONS`` knobs have no AISim default
       domain: omitted, they keep their current value.
     """
 

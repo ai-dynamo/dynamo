@@ -148,7 +148,7 @@ class ComparisonCase:
 
 @dataclass(frozen=True)
 class SweepSelection:
-    """Native AISimulate config and its selected comparison candidates."""
+    """Native AISim config and its selected comparison candidates."""
 
     config: Any
     candidates: list[Any]
@@ -156,14 +156,14 @@ class SweepSelection:
 
 def load_sweep_config(config_path: str | Path) -> Any:
     """Load one native SmartSearchConfig for the comparison harness."""
-    from aisimulate.sweeper import SmartSearchConfig
+    from aisim.sweeper import SmartSearchConfig
 
     return SmartSearchConfig.from_yaml(str(config_path))
 
 
 def run_sweep(config: Any) -> SweepSelection:
-    """Run one comparison search through AISimulate's public Sweeper API."""
-    from aisimulate.sweeper import Sweeper
+    """Run one comparison search through AISim's public Sweeper API."""
+    from aisim.sweeper import Sweeper
 
     from dynamo.replay.simulation import DynamoReplayRunnerFactory
 
