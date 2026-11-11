@@ -13,6 +13,7 @@ import (
 // DynamoPoolRelaySpec configures Relay Pods for the DGD with the same name and namespace.
 type DynamoPoolRelaySpec struct {
 	// ClusterID is the Relay's stable logical cluster ID across restarts.
+	// +required
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=128
 	// +kubebuilder:validation:Pattern=`^[^[:space:]\p{Z}\x85\x1c-\x1f](.*[^[:space:]\p{Z}\x85\x1c-\x1f])?$`
@@ -28,7 +29,7 @@ type DynamoPoolRelaySpec struct {
 	// DYN_RELAY_CONNECTION_REVISION, DYN_RELAY_NAMESPACES, DYN_RELAY_WATCH_ALL,
 	// DYN_RELAY_ENDPOINT_PREFIXES, POD_NAME, POD_NAMESPACE, and POD_UID.
 	// The main container cannot use envFrom because it could override those values.
-	// +kubebuilder:validation:Required
+	// +required
 	PodTemplate *corev1.PodTemplateSpec `json:"podTemplate"`
 
 	// Replicas sets the number of active Relay Pods. Each watches the DGD.
@@ -72,9 +73,11 @@ type DynamoPoolRelayStatus struct {
 // +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
 // +kubebuilder:printcolumn:name="Endpoint",type=string,JSONPath=`.status.endpoint`
 type DynamoPoolRelay struct {
-	metav1.TypeMeta   `json:",inline"`
+	metav1.TypeMeta `json:",inline"`
+	// +optional
 	metav1.ObjectMeta `json:"metadata,omitempty"`
-	Spec              DynamoPoolRelaySpec `json:"spec"`
+	// +required
+	Spec DynamoPoolRelaySpec `json:"spec"`
 	// +optional
 	Status DynamoPoolRelayStatus `json:"status,omitempty"`
 }

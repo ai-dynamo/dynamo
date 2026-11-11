@@ -10,12 +10,10 @@ use std::{
     time::Duration,
 };
 
-use dynamo_kv_router::{
-    multi_worker_sequence::{ReplicaRequestLeaseObserver, active_request_expiry_duration},
-    scheduling::{
-        AttemptId,
-        queue::{SchedulerBookingCleanup, SchedulerBookingDescriptor},
-    },
+use dynamo_router_protocol::attempt::AttemptId;
+use dynamo_scheduler::host::SchedulerBookingCleanup;
+use dynamo_slot_tracker::host::{
+    ReplicaRequestLeaseObserver, SchedulerBookingDescriptor, active_request_expiry_duration,
 };
 use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;
@@ -551,7 +549,7 @@ mod tests {
 
     #[tokio::test]
     async fn replica_observer_forwards_live_callbacks_without_retaining_manager() {
-        use dynamo_kv_router::protocols::WorkerWithDpRank;
+        use dynamo_router_protocol::worker::WorkerWithDpRank;
 
         use crate::kv_router::{sequence::SequenceRequest, tests::tracked_router};
 
@@ -622,7 +620,7 @@ mod tests {
 
     #[tokio::test]
     async fn attempt_release_frees_booking_when_another_path_owns_cleanup() {
-        use dynamo_kv_router::protocols::WorkerWithDpRank;
+        use dynamo_router_protocol::worker::WorkerWithDpRank;
 
         use crate::kv_router::{sequence::SequenceRequest, tests::tracked_router};
 

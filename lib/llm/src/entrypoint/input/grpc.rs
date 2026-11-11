@@ -107,7 +107,8 @@ pub async fn run(
 
     // Run both HTTP (for metrics) and gRPC servers concurrently
     let http_service = grpc_service.http_service().clone();
-    let shutdown_token = distributed_runtime.primary_token();
+    let _graceful_task = distributed_runtime.register_graceful_task();
+    let shutdown_token = distributed_runtime.child_token();
 
     // Wait for both servers to complete, propagating the first error if any occurs
     // Both tasks should run indefinitely until cancelled by the shutdown token
@@ -134,7 +135,7 @@ async fn run_watcher(
     migration_limit: u32,
     migration_max_seq_len: Option<u32>,
     namespace_filter: NamespaceFilter,
-    prefill_load_estimator: Option<Arc<dyn dynamo_kv_router::PrefillLoadEstimator>>,
+    prefill_load_estimator: Option<Arc<dyn dynamo_scheduler::host::PrefillLoadEstimator>>,
     local_model_path: Option<PathBuf>,
     metrics_prefix: Option<String>,
     tokenizer_backend: Option<TokenizerBackend>,

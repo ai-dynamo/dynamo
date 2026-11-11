@@ -124,11 +124,10 @@ router. See [Router Guide](../../developer-guide/knowledge-base/modular-componen
 ### Routing and readiness
 
 <ParamField path="--router-mode" type="string" default="round-robin">
-  Routing strategy. `power-of-two` samples two workers and selects the worker with fewer in-flight
-  requests. In disaggregated prefill mode, `power-of-two` and `least-loaded` use the synchronous
-  prefill fallback path.
+  Routing strategy. In disaggregated prefill mode, `least-loaded` uses the synchronous prefill
+  fallback path.
 
-  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>round-robin</Badge> <Badge intent="note" minimal>random</Badge> <Badge intent="note" minimal>power-of-two</Badge> <Badge intent="note" minimal>kv</Badge> <Badge intent="note" minimal>direct</Badge> <Badge intent="note" minimal>least-loaded</Badge> <Badge intent="note" minimal>device-aware-weighted</Badge></span>
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>round-robin</Badge> <Badge intent="note" minimal>random</Badge> <Badge intent="note" minimal>kv</Badge> <Badge intent="note" minimal>direct</Badge> <Badge intent="note" minimal>least-loaded</Badge> <Badge intent="note" minimal>device-aware-weighted</Badge></span>
 
   Environment variable: `DYN_ROUTER_MODE`
 </ParamField>
@@ -145,6 +144,17 @@ router. See [Router Guide](../../developer-guide/knowledge-base/modular-componen
   to disable session affinity. See [Session affinity](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#session-affinity).
 
   Environment variable: `DYN_ROUTER_SESSION_AFFINITY_TTL_SECS`
+</ParamField>
+
+<ParamField path="--router-session-affinity-max-entries" type="integer" default="65536">
+  Maximum number of sessions each affinity table holds at once; must be at least `1`. A frontend
+  keeps one table per worker set it routes to. A request that would start a new session past the
+  limit fails as resource exhausted (HTTP 529 by default) until an idle session expires. Replica
+  sync copies bindings to every frontend, so size the limit for the sessions live across all
+  frontends; sync is best effort, so it is not a hard fleet-wide cap. Has no effect unless
+  `--router-session-affinity-ttl-secs` is set.
+
+  Environment variable: `DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES`
 </ParamField>
 
 <ParamField path="--decode-fallback / --no-decode-fallback" type="boolean" default="false">
@@ -368,7 +378,7 @@ Configure scoring through [default policy parameters](../../developer-guide/know
 </ParamField>
 
 <ParamField path="--router-policy-config" type="string" default="null">
-  Startup-only YAML for shared `router` settings, policy-class queues, and worker-selection instances. When omitted,
+  Startup-only YAML for shared `router` settings, policy-class queues, and per-role worker-selection policies. When omitted,
   `--router-queue-threshold` and `--router-queue-policy` define one synthetic policy class.
   Queueing remains disabled until a threshold is configured. See [Shared Router Settings](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#shared-router-settings), [Policy-class queues](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#policy-class-queues) and [Write Custom Routing Strategies](../../developer-guide/knowledge-base/modular-components/router/custom-worker-selection.mdx).
 
@@ -378,9 +388,10 @@ Configure scoring through [default policy parameters](../../developer-guide/know
 <ParamField path="--router-prefill-policy" type="string" default="null">
   **Deprecated; removal in v1.7.** Set `worker_selection.prefill` in `--router-policy-config`.
 
-  Worker-selection instance for disaggregated prefill workers in the current router process. This
-  option overrides `worker_selection.prefill` from `--router-policy-config`. It is not included in
-  worker model cards. Set it to `default` to use Dynamo's built-in worker selector.
+  Worker-selection policy type for disaggregated prefill workers in the current router process,
+  run with its default parameters. This option overrides `worker_selection.prefill` from
+  `--router-policy-config`. It is not included in worker model cards. Set it to `default` to use
+  Dynamo's built-in worker selector.
 
   Environment variable: `DYN_ROUTER_PREFILL_POLICY`
 </ParamField>
@@ -388,10 +399,11 @@ Configure scoring through [default policy parameters](../../developer-guide/know
 <ParamField path="--router-decode-policy" type="string" default="null">
   **Deprecated; removal in v1.7.** Set `worker_selection.decode` in `--router-policy-config`.
 
-  Worker-selection instance for decode workers in the current router process. This option
-  overrides `worker_selection.decode` from `--router-policy-config`. It is not included in worker
-  model cards. Set it to `default` to use Dynamo's built-in worker selector. Configure an aggregated
-  pool with `worker_selection.aggregated` or `DYN_ROUTER_WORKER_SELECTION_POLICY`.
+  Worker-selection policy type for decode workers in the current router process, run with its
+  default parameters. This option overrides `worker_selection.decode` from `--router-policy-config`.
+  It is not included in worker model cards. Set it to `default` to use Dynamo's built-in worker
+  selector. Configure an aggregated pool with `worker_selection.aggregated` or
+  `DYN_ROUTER_WORKER_SELECTION_POLICY`.
 
   Environment variable: `DYN_ROUTER_DECODE_POLICY`
 </ParamField>
@@ -893,7 +905,9 @@ Use `/v1/images/edits` for prompt-guided variations.
   array of those strings.
 
 See the [Image Edits API](../api/image-edits.mdx) for build requirements,
-accepted fields, limits, errors, and rolling upgrades.
+accepted fields, limits, errors, and rolling upgrades, and
+[Create a Variation with Image Edits](../../use-cases/diffusion/workflows/text-to-image.md#create-a-variation-with-image-edits)
+for a reference-image-plus-prompt example.
 
 ### Anthropic (Experimental)
 
@@ -1009,6 +1023,28 @@ are disabled by default. Truthy values are `1`, `true`, `yes`, or `on`, case-ins
   groups. Top-level cache salts remain active on chat completions, completions, classify, and
   pooling. On embeddings, classify, and pooling, the switch only drops legacy NvExt annotations;
   these endpoints do not use `x-tenant-id` or `x-dynamo-*` routing headers in either mode.
+</ParamField>
+
+### Media refusal for text-only models
+
+A frontend that serves text-only models can refuse media before routing. A refused request never reaches a worker, and a streaming client receives the HTTP status instead of a `200` followed by an error event. Readiness checks on the OpenAI endpoints still take precedence.
+
+<ParamField path="--reject-media" type="boolean" default="false">
+  Refuse media in any message, including earlier turns, before conversion or routing:
+
+  - `/v1/chat/completions`: image, video, and audio URL parts, plus inline `input_audio`.
+  - `/v1/responses`: `input_image` parts, including `file_id` references, system/developer messages, assistant history, and function-call outputs. Audio and video input parts are not accepted by the Responses request schema.
+  - `/v1/messages`: image blocks with base64 or URL sources, including images inside `tool_result` content.
+
+  Refusals are counted with `error_type="unsupported_modality"` on `dynamo_frontend_requests_total`, apart from validation and overload errors.
+
+  Environment variable: `DYN_REJECT_MEDIA`
+</ParamField>
+
+<ParamField path="--reject-media-status-code" type="integer" default="415">
+  HTTP status for a request refused by `--reject-media`. Only 4xx and 5xx values are accepted. Set it to a status an upstream gateway fails over on, for example `429`, to have that gateway send media requests to a multimodal model.
+
+  Environment variable: `DYN_REJECT_MEDIA_STATUS_CODE`
 </ParamField>
 
 ### Endpoint path customization

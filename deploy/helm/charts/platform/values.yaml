@@ -131,6 +131,11 @@ dynamo-operator:
     # reconciles v1beta2 Requests into Runs and executes each Run as an AISimulate
     # planner Job with a publisher sidecar that persists deployment Candidates.
     enabled: false
+    # -- EXPERIMENTAL, DEVELOPMENT CLUSTERS ONLY: With dgdrV1Beta2.enabled, grant every
+    # Planner ServiceAccount what Planner live retune (retune.executor: dgdr) needs:
+    # create, read and delete DGDR v1beta2 Requests, read their Runs and Candidates,
+    # and read, create, update and delete any Lease in the namespace.
+    plannerLiveRetune: false
 
   # Environment variables to pass to operator Deployment.
   env: []
@@ -366,6 +371,21 @@ kai-scheduler:
     tolerations: []
     # -- Affinity for kai-scheduler pods
     affinity: {}
+
+# Hook Job that holds the Dynamo Queues until bundled KAI's queue-controller webhook admits Queues.
+kaiQueueWait:
+  # -- Wait for the bundled KAI queue-controller before creating the Dynamo Queues. Disable only when the webhook is known to be serving, or when Queue validation is disabled in kai-config.
+  enabled: true
+  # -- Image providing kubectl 1.31 or later, which can wait for a resource to be created. Override for an internal registry.
+  image: registry.k8s.io/kubectl:v1.34.12
+  # -- Existing pull secrets for the wait image.
+  imagePullSecrets: []
+  # -- Maximum Job duration in seconds, including retries. The Helm timeout still bounds the hook.
+  activeDeadlineSeconds: 600
+  # -- Affinity for the wait Job. Tolerations are inherited from kai-scheduler.global.tolerations.
+  affinity: {}
+  # -- (object) Full replacement of the wait pod security context. Null defaults to runAsNonRoot=true, runAsUser=65532 and seccompProfile.type=RuntimeDefault. On OpenShift, supply a context without runAsUser for admission to assign it.
+  podSecurityContext: null
 
 # etcd configuration - distributed key-value store
 # Installation is controlled by global.etcd.install above.

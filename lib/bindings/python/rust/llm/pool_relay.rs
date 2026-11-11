@@ -40,6 +40,9 @@ impl PoolRelay {
         sources_file=None,
         connection_revision=None,
         global_discovery_url=None,
+        routing_pool=None,
+        routing_pool_region=None,
+        routing_pool_frontends=None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -59,6 +62,9 @@ impl PoolRelay {
         sources_file: Option<String>,
         connection_revision: Option<String>,
         global_discovery_url: Option<String>,
+        routing_pool: Option<String>,
+        routing_pool_region: Option<String>,
+        routing_pool_frontends: Option<Vec<String>>,
     ) -> PyResult<Self> {
         if namespace_filter.is_some() && namespaces.is_some() {
             return Err(PyValueError::new_err(
@@ -217,6 +223,29 @@ impl PoolRelay {
             }
         }
 
+        let routing_pool = routing_pool
+            .map(|value| {
+                let fields = value.split('/').collect::<Vec<_>>();
+                let [cluster, namespace, dgd] = fields.as_slice() else {
+                    return Err(PyValueError::new_err(
+                        "routing_pool must be <cluster>/<namespace>/<DGD>",
+                    ));
+                };
+                llm_rs::pool_relay::RoutingPoolKey::new(*cluster, *namespace, *dgd)
+                    .map_err(|error| PyValueError::new_err(error.to_string()))
+            })
+            .transpose()?;
+        let routing_pool_frontends = routing_pool_frontends
+            .unwrap_or_default()
+            .iter()
+            .map(|frontend| {
+                frontend.parse().map_err(|error| {
+                    PyValueError::new_err(format!(
+                        "invalid routing_pool_frontends entry {frontend:?}: {error}"
+                    ))
+                })
+            })
+            .collect::<PyResult<Vec<_>>>()?;
         Ok(Self {
             endpoint: endpoint.inner,
             cluster_id,
@@ -239,6 +268,9 @@ impl PoolRelay {
                     .map_err(|error| {
                         PyValueError::new_err(format!("invalid global_discovery_url: {error}"))
                     })?,
+                routing_pool,
+                routing_pool_region,
+                routing_pool_frontends,
             },
             inner: Arc::new(OnceCell::new()),
         })

@@ -14,50 +14,29 @@ use crate::{
         prefill_router::BYPASS_REMOTE_PREFILL_ANNOTATION,
         request_lease::{RequestAttemptLease, RequestAttemptRelease},
     },
-    lora::LoadEstimator,
     preprocessor::PreprocessedRequest,
     protocols::common::{
         llm_backend::LLMEngineOutput,
         preprocessor::MigrationState,
         timing::{RequestPhase, RequestTracker},
     },
+    routing_policy::AttemptLease,
 };
-use dynamo_kv_router::{
-    indexer::{ApproximateAcquireMode, ApproximateLruBlock, RoutingDecisionHashes},
-    protocols::{
-        BlockExtraInfo, BlockHashOptions, WorkerWithDpRank, compute_block_hash_for_seq,
-        compute_next_seq_hash,
-    },
-    scheduling::{AbortCause, RequestLifecycle, queue::BookingHandle},
-    services::selection::affinity::AffinityLease,
+use dynamo_admission::host::AbortCause;
+use dynamo_kv_hashing::multimodal::BlockExtraInfo;
+use dynamo_kv_hashing::routing::{
+    BlockHashOptions, compute_block_hash_for_seq, compute_next_seq_hash,
 };
+use dynamo_kv_indexer::host::{ApproximateAcquireMode, ApproximateLruBlock, RoutingDecisionHashes};
+use dynamo_router_protocol::worker::WorkerWithDpRank;
 use dynamo_runtime::{
     error::DynamoError,
     metrics::frontend_perf::{STAGE_DISPATCH, StageGuard},
     pipeline::OccupancyReservation,
     protocols::annotated::Annotated,
 };
-
-pub(super) struct LoraLoadGuard {
-    estimator: Arc<LoadEstimator>,
-    lora_name: String,
-}
-
-impl LoraLoadGuard {
-    pub(super) fn new(estimator: Arc<LoadEstimator>, lora_name: String) -> Self {
-        estimator.increment_load(&lora_name);
-        Self {
-            estimator,
-            lora_name,
-        }
-    }
-}
-
-impl Drop for LoraLoadGuard {
-    fn drop(&mut self) {
-        self.estimator.decrement_load(&self.lora_name);
-    }
-}
+use dynamo_scheduler::host::{BookingHandle, RequestLifecycle};
+use dynamo_session_affinity::host::AffinityLease;
 
 #[derive(Clone)]
 struct OutputHashBranch {
@@ -631,7 +610,7 @@ pub(super) struct RequestGuard {
     migration_state: Option<MigrationState>,
     kv_hit: Option<KvHitTracking>,
     affinity_lease: Option<AffinityLease>,
-    _lora_load: Option<LoraLoadGuard>,
+    _attempt_lease: Option<AttemptLease>,
 }
 
 impl RequestGuard {
@@ -693,10 +672,13 @@ impl RequestGuard {
             output_hashes,
             record_itl_at_completion: false,
             prefill_marked: false,
-            migration_state: request.migration_state.clone(),
+            migration_state: request
+                .migration_state
+                .clone()
+                .filter(|_| crate::routing_policy::execution_requirements(request).allows_replay),
             kv_hit,
             affinity_lease: None,
-            _lora_load: None,
+            _attempt_lease: None,
         }
     }
 
@@ -704,7 +686,7 @@ impl RequestGuard {
         request_metrics: Arc<RouterRequestMetrics>,
         worker_id: u64,
         occupancy_reservation: Option<OccupancyReservation>,
-        lora_load: Option<LoraLoadGuard>,
+        attempt_lease: Option<AttemptLease>,
         request: &PreprocessedRequest,
         phase: RequestPhase,
     ) -> Self {
@@ -725,10 +707,13 @@ impl RequestGuard {
             output_hashes: None,
             record_itl_at_completion: true,
             prefill_marked: false,
-            migration_state: request.migration_state.clone(),
+            migration_state: request
+                .migration_state
+                .clone()
+                .filter(|_| crate::routing_policy::execution_requirements(request).allows_replay),
             kv_hit: None,
             affinity_lease: None,
-            _lora_load: lora_load,
+            _attempt_lease: attempt_lease,
         }
     }
 
@@ -778,7 +763,7 @@ impl RequestGuard {
     pub(super) async fn acquire_approximate_lru(
         &mut self,
         hashes: RoutingDecisionHashes,
-    ) -> Result<(), dynamo_kv_router::indexer::KvRouterError> {
+    ) -> Result<(), dynamo_kv_indexer::host::KvRouterError> {
         let parent_hash = hashes.sequence_hashes.last().copied();
         let private_blocks = self
             .output_hashes
@@ -1083,7 +1068,8 @@ mod output_block_tests {
 #[cfg(test)]
 mod output_hash_tests {
     use super::*;
-    use dynamo_kv_router::protocols::{BlockMmObjectInfo, compute_seq_hash_for_block};
+    use dynamo_kv_hashing::multimodal::BlockMmObjectInfo;
+    use dynamo_kv_hashing::routing::compute_seq_hash_for_block;
 
     fn direct_blocks(
         tokens: &[u32],
