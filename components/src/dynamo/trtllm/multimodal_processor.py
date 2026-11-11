@@ -100,13 +100,18 @@ def _video_frames_to_uint8(video: VideoData) -> VideoData:
     uint8 ``(N, H, W, 3)`` array, TRT-LLM's ``format="np"`` video form.
 
     Both decode paths scale uint8 frames by 1/255, so rounding back recovers
-    the decoded pixels exactly. Other fields are kept.
+    the decoded pixels exactly. Frames go into the output one at a time, so
+    the conversion needs one float frame of scratch space, not float copies
+    of the whole clip. Other fields are kept.
     """
-    stacked = torch.stack(list(video.frames))
-    frames_u8 = stacked.mul(255.0).round_().clamp_(0, 255).to(torch.uint8)
-    return dataclasses.replace(
-        video, frames=frames_u8.permute(0, 2, 3, 1).contiguous().numpy()
-    )
+    frames = list(video.frames)
+    channels, height, width = frames[0].shape
+    frames_u8 = torch.empty((len(frames), height, width, channels), dtype=torch.uint8)
+    scaled = torch.empty_like(frames[0])
+    for out, frame in zip(frames_u8, frames):
+        torch.mul(frame, 255.0, out=scaled).round_().clamp_(0, 255)
+        out.copy_(scaled.permute(1, 2, 0))
+    return dataclasses.replace(video, frames=frames_u8.numpy())
 
 
 def _mm_item_order(

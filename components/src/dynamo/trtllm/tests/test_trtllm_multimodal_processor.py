@@ -518,15 +518,15 @@ async def test_image_and_video_request_keeps_float_frames_for_other_models(
 
 
 def test_video_frames_to_uint8_round_trips_every_value() -> None:
-    """Every uint8 value survives the 1/255 scaling both decode paths apply."""
-    levels = np.arange(256, dtype=np.uint8).reshape(1, 16, 16, 1)
-    frames_u8 = np.repeat(levels, 3, axis=3)
+    """Every uint8 value survives the 1/255 scaling both decode paths apply,
+    and each frame lands in its own place in the output."""
+    frames_u8 = _decoded_frames(n=4, h=8, w=16)  # every value, in each channel
     source = _pt_video(frames_u8)
     before = [f.clone() for f in source.frames]
 
     video = mmp._video_frames_to_uint8(source)
 
-    assert video.frames.shape == (1, 16, 16, 3)
+    assert video.frames.shape == (4, 8, 16, 3)
     assert np.array_equal(video.frames, frames_u8)
     assert video.metadata == source.metadata and video.audio is source.audio
     assert all(torch.equal(a, b) for a, b in zip(before, source.frames))
