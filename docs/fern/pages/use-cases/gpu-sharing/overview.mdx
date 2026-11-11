@@ -128,6 +128,16 @@ Read across a row to confirm that latency meets your requirements, then use **Fr
   </Accordion>
 </AccordionGroup>
 
+## Understanding MPS and Choosing an Approach
+
+These pages explain the technology behind the GPU fractions configuration and help you decide whether it fits your models:
+
+- [How GPU Sharing Works](how-gpu-sharing-works.md): what CUDA MPS is, and how it compares with MIG, time-slicing, and KAI + HAMi.
+- [MPS v2 and v3](mps-v2-and-v3.md): why per-model GPU fractions need the MPS v3 interface.
+- [Which Models to Share a GPU](which-models-to-share.md): why sharing suits distinct models rather than replicas.
+- [Example MPS Architecture](example-mps-architecture.md): a two-node Kubernetes cluster with MPS, and the same models with MIG.
+- [Choosing a GPU Sharing Approach](choosing-a-gpu-sharing-approach.md): the tradeoffs, and how to make the case for or against MPS.
+
 ## Reproducing the Results
 
 The manifests, scripts, and step-by-step guides for every configuration are in the [`examples/gpu-sharing`](https://github.com/ai-dynamo/dynamo/tree/main/examples/gpu-sharing) directory on GitHub. Start with its [README](https://github.com/ai-dynamo/dynamo/blob/main/examples/gpu-sharing/README.md), which covers the shared workload, the files, and the commands.

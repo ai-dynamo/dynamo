@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1236" height="440" viewBox="0 0 1236 440" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
+  <title id="title">Replicas compared with distinct models</title>
+  <desc id="desc">Two replicas of one model packed onto one GPU store and read the same weights twice and each batch only half the requests; one engine on the whole GPU holds one copy of the weights and batches all requests, so replicas should not be packed. Two distinct models have different weights and cannot share a batch, so giving each a capped share of one GPU is the only way to use the capacity each leaves idle.</desc>
+  <defs><marker id="a-ink" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1A1A1A"/></marker><marker id="a-gray" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#9CA3AF"/></marker><marker id="a-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="a-red" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#C62828"/></marker></defs>
+  <rect x="0.0" y="0.0" width="1236.0" height="440.0" fill="#FFFFFF"/>
+  <text x="24.0" y="44.0" font-size="24" font-weight="700" fill="#1A1A1A" text-anchor="start">Replicas compared with distinct models</text>
+  <rect x="24.0" y="66.0" width="384.0" height="355.0" fill="#FFFFFF" rx="12" stroke="#D1D5DB" stroke-width="2"/>
+  <text x="42.0" y="98.0" font-size="19" font-weight="700" fill="#1A1A1A" text-anchor="start">Two replicas on one GPU</text>
+  <rect x="42.0" y="110.0" width="61.0" height="26.0" fill="#FBE3E3" rx="13"/>
+  <text x="52.0" y="128.0" font-size="14" font-weight="700" fill="#C62828" text-anchor="start">Avoid</text>
+  <rect x="42.0" y="152.0" width="348.0" height="170.0" fill="#FFFFFF" rx="8" stroke="#1A1A1A" stroke-width="1.5"/>
+  <text x="52.0" y="172.0" font-size="13" font-weight="700" fill="#5A6270" text-anchor="start">One GPU</text>
+  <rect x="52.0" y="184.0" width="159.0" height="80.0" fill="#EAF5D3" rx="6" stroke="#76B900" stroke-width="1.5"/>
+  <text x="131.5" y="230.0" font-size="14" font-weight="700" fill="#76B900" text-anchor="middle">Model X weights</text>
+  <rect x="52.0" y="272.0" width="159.0" height="38.0" fill="#FFFFFF" rx="6" stroke="#76B900" stroke-width="1.5" stroke-dasharray="4 3"/>
+  <text x="131.5" y="296.0" font-size="13" font-weight="400" fill="#1A1A1A" text-anchor="middle">1 request</text>
+  <line x1="216.0" y1="182.0" x2="216.0" y2="314.0" stroke="#9CA3AF" stroke-width="2" stroke-linecap="round" stroke-dasharray="5 4"/>
+  <rect x="221.0" y="184.0" width="159.0" height="80.0" fill="#EAF5D3" rx="6" stroke="#76B900" stroke-width="1.5"/>
+  <text x="300.5" y="230.0" font-size="14" font-weight="700" fill="#76B900" text-anchor="middle">Model X weights</text>
+  <rect x="221.0" y="272.0" width="159.0" height="38.0" fill="#FFFFFF" rx="6" stroke="#76B900" stroke-width="1.5" stroke-dasharray="4 3"/>
+  <text x="300.5" y="296.0" font-size="13" font-weight="400" fill="#1A1A1A" text-anchor="middle">1 request</text>
+  <text x="42.0" y="352.0" font-size="15" font-weight="400" fill="#1A1A1A" text-anchor="start">Same weights stored twice.</text>
+  <text x="42.0" y="376.0" font-size="15" font-weight="400" fill="#1A1A1A" text-anchor="start">Same weights read twice per step.</text>
+  <text x="42.0" y="400.0" font-size="15" font-weight="400" fill="#1A1A1A" text-anchor="start">Each copy batches only its own requests.</text>
+  <rect x="426.0" y="66.0" width="384.0" height="355.0" fill="#FFFFFF" rx="12" stroke="#D1D5DB" stroke-width="2"/>
+  <text x="444.0" y="98.0" font-size="19" font-weight="700" fill="#1A1A1A" text-anchor="start">One engine for the same traffic</text>
+  <rect x="444.0" y="110.0" width="184.0" height="26.0" fill="#EAF5D3" rx="13"/>
+  <text x="454.0" y="128.0" font-size="14" font-weight="700" fill="#76B900" text-anchor="start">Do this for replicas</text>
+  <rect x="444.0" y="152.0" width="348.0" height="170.0" fill="#FFFFFF" rx="8" stroke="#1A1A1A" stroke-width="1.5"/>
+  <text x="454.0" y="172.0" font-size="13" font-weight="700" fill="#5A6270" text-anchor="start">One GPU</text>
+  <rect x="454.0" y="184.0" width="328.0" height="80.0" fill="#EAF5D3" rx="6" stroke="#76B900" stroke-width="1.5"/>
+  <text x="618.0" y="230.0" font-size="14" font-weight="700" fill="#76B900" text-anchor="middle">Model X weights</text>
+  <rect x="454.0" y="272.0" width="328.0" height="38.0" fill="#FFFFFF" rx="6" stroke="#76B900" stroke-width="1.5" stroke-dasharray="4 3"/>
+  <text x="618.0" y="296.0" font-size="13" font-weight="400" fill="#1A1A1A" text-anchor="middle">2 requests, one batch</text>
+  <text x="444.0" y="352.0" font-size="15" font-weight="400" fill="#1A1A1A" text-anchor="start">One copy of the weights.</text>
+  <text x="444.0" y="376.0" font-size="15" font-weight="400" fill="#1A1A1A" text-anchor="start">Read once per step for both requests.</text>
+  <text x="444.0" y="400.0" font-size="15" font-weight="400" fill="#1A1A1A" text-anchor="start">Add whole-GPU replicas as traffic grows.</text>
+  <rect x="828.0" y="66.0" width="384.0" height="355.0" fill="#FFFFFF" rx="12" stroke="#76B900" stroke-width="2"/>
+  <text x="846.0" y="98.0" font-size="19" font-weight="700" fill="#1A1A1A" text-anchor="start">Two distinct models on one GPU</text>
+  <rect x="846.0" y="110.0" width="151.2" height="26.0" fill="#EAF5D3" rx="13"/>
+  <text x="856.0" y="128.0" font-size="14" font-weight="700" fill="#76B900" text-anchor="start">Good fit for MPS</text>
+  <rect x="846.0" y="152.0" width="348.0" height="170.0" fill="#FFFFFF" rx="8" stroke="#1A1A1A" stroke-width="1.5"/>
+  <text x="856.0" y="172.0" font-size="13" font-weight="700" fill="#5A6270" text-anchor="start">One GPU</text>
+  <rect x="856.0" y="184.0" width="159.0" height="80.0" fill="#EAF5D3" rx="6" stroke="#76B900" stroke-width="1.5"/>
+  <text x="935.5" y="230.0" font-size="14" font-weight="700" fill="#76B900" text-anchor="middle">Model A weights</text>
+  <rect x="856.0" y="272.0" width="159.0" height="38.0" fill="#FFFFFF" rx="6" stroke="#76B900" stroke-width="1.5" stroke-dasharray="4 3"/>
+  <text x="935.5" y="296.0" font-size="13" font-weight="400" fill="#1A1A1A" text-anchor="middle">1 request</text>
+  <line x1="1020.0" y1="182.0" x2="1020.0" y2="314.0" stroke="#9CA3AF" stroke-width="2" stroke-linecap="round" stroke-dasharray="5 4"/>
+  <rect x="1025.0" y="184.0" width="159.0" height="80.0" fill="#DDEBFD" rx="6" stroke="#2F80ED" stroke-width="1.5"/>
+  <text x="1104.5" y="230.0" font-size="14" font-weight="700" fill="#2F80ED" text-anchor="middle">Model B weights</text>
+  <rect x="1025.0" y="272.0" width="159.0" height="38.0" fill="#FFFFFF" rx="6" stroke="#2F80ED" stroke-width="1.5" stroke-dasharray="4 3"/>
+  <text x="1104.5" y="296.0" font-size="13" font-weight="400" fill="#1A1A1A" text-anchor="middle">1 request</text>
+  <text x="846.0" y="352.0" font-size="15" font-weight="400" fill="#1A1A1A" text-anchor="start">Different weights can't share a batch.</text>
+  <text x="846.0" y="376.0" font-size="15" font-weight="400" fill="#1A1A1A" text-anchor="start">Alone, each leaves the GPU mostly idle.</text>
+  <text x="846.0" y="400.0" font-size="15" font-weight="400" fill="#1A1A1A" text-anchor="start">MPS gives each a capped share.</text>
+</svg>

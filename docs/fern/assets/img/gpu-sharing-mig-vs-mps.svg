@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1290" height="600" viewBox="0 0 1290 600" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
+  <title id="title">The same three models on one H100 80GB, with MPS and with MIG</title>
+  <desc id="desc">chat-8b needs 50% of the SMs and 32 GB, code-7b needs 30% and 24 GB, and guard-1b needs 20% and 8 GB. With MPS each model gets exactly its share and all three fit, using 64 of 80 GB. With MIG each model is rounded up to a fixed profile: chat-8b gets a 4g.40gb instance with 57% of the SMs and code-7b gets a 3g.40gb instance with 43%, which uses the whole GPU, so guard-1b needs another GPU. MIG walls off memory bandwidth, L2 cache and faults; MPS leaves them shared.</desc>
+  <defs><marker id="a-ink" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1A1A1A"/></marker><marker id="a-gray" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#9CA3AF"/></marker><marker id="a-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="a-red" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#C62828"/></marker></defs>
+  <rect x="0.0" y="0.0" width="1290.0" height="600.0" fill="#FFFFFF"/>
+  <text x="24.0" y="44.0" font-size="24" font-weight="700" fill="#1A1A1A" text-anchor="start">The same three models on one H100 80GB, with MPS and with MIG</text>
+  <rect x="24.0" y="66.0" width="300.0" height="420.0" fill="#FFFFFF" rx="12" stroke="#D1D5DB" stroke-width="2"/>
+  <text x="42.0" y="98.0" font-size="18" font-weight="700" fill="#1A1A1A" text-anchor="start">What each model needs</text>
+  <text x="42.0" y="122.0" font-size="13" font-weight="400" fill="#5A6270" text-anchor="start">From its traffic and latency targets</text>
+  <rect x="42.0" y="146.0" width="264.0" height="72.0" fill="#EAF5D3" rx="8" stroke="#76B900" stroke-width="1.5"/>
+  <text x="58.0" y="174.0" font-size="17" font-weight="700" fill="#76B900" text-anchor="start">chat-8b</text>
+  <text x="58.0" y="198.0" font-size="15" font-weight="400" fill="#1A1A1A" text-anchor="start">50% of SMs · 32 GB</text>
+  <rect x="42.0" y="232.0" width="264.0" height="72.0" fill="#DDEBFD" rx="8" stroke="#2F80ED" stroke-width="1.5"/>
+  <text x="58.0" y="260.0" font-size="17" font-weight="700" fill="#2F80ED" text-anchor="start">code-7b</text>
+  <text x="58.0" y="284.0" font-size="15" font-weight="400" fill="#1A1A1A" text-anchor="start">30% of SMs · 24 GB</text>
+  <rect x="42.0" y="318.0" width="264.0" height="72.0" fill="#FDEBD3" rx="8" stroke="#D97706" stroke-width="1.5"/>
+  <text x="58.0" y="346.0" font-size="17" font-weight="700" fill="#D97706" text-anchor="start">guard-1b</text>
+  <text x="58.0" y="370.0" font-size="15" font-weight="400" fill="#1A1A1A" text-anchor="start">20% of SMs · 8 GB</text>
+  <text x="42.0" y="420.0" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="start">Sum: 100% of SMs, 64 GB</text>
+  <text x="42.0" y="442.0" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="start">of 80 GB.</text>
+  <rect x="342.0" y="66.0" width="448.0" height="420.0" fill="#FFFFFF" rx="12" stroke="#76B900" stroke-width="2"/>
+  <text x="360.0" y="98.0" font-size="18" font-weight="700" fill="#1A1A1A" text-anchor="start">MPS (GPU fractions)</text>
+  <text x="360.0" y="120.0" font-size="13" font-weight="400" fill="#5A6270" text-anchor="start">Each model gets exactly its share</text>
+  <line x1="382.0" y1="390.0" x2="762.0" y2="390.0" stroke="#1A1A1A" stroke-width="1.5" stroke-linecap="round"/>
+  <line x1="382.0" y1="390.0" x2="382.0" y2="144.0" stroke="#1A1A1A" stroke-width="1.5" stroke-linecap="round"/>
+  <line x1="382.0" y1="150.0" x2="762.0" y2="150.0" stroke="#9CA3AF" stroke-width="1.5" stroke-linecap="round" stroke-dasharray="5 4"/>
+  <text x="762.0" y="144.0" font-size="12" font-weight="400" fill="#5A6270" text-anchor="end">80 GB</text>
+  <text x="572.0" y="412.0" font-size="13" font-weight="400" fill="#5A6270" text-anchor="middle">share of SMs →</text>
+  <text x="370" y="270.0" font-size="13" fill="#5A6270" text-anchor="middle" transform="rotate(-90 370 270.0)">memory →</text>
+  <rect x="383.0" y="294.0" width="188.0" height="96.0" fill="#EAF5D3" rx="3" stroke="#76B900" stroke-width="1.5"/>
+  <text x="477.0" y="286.0" font-size="13" font-weight="700" fill="#76B900" text-anchor="middle">chat-8b</text>
+  <rect x="573.0" y="318.0" width="112.0" height="72.0" fill="#DDEBFD" rx="3" stroke="#2F80ED" stroke-width="1.5"/>
+  <text x="629.0" y="310.0" font-size="13" font-weight="700" fill="#2F80ED" text-anchor="middle">code-7b</text>
+  <rect x="687.0" y="366.0" width="74.0" height="24.0" fill="#FDEBD3" rx="3" stroke="#D97706" stroke-width="1.5"/>
+  <text x="724.0" y="358.0" font-size="13" font-weight="700" fill="#D97706" text-anchor="middle">guard-1b</text>
+  <rect x="360.0" y="432.0" width="412.0" height="40.0" fill="#EAF5D3" rx="6"/>
+  <text x="372.0" y="457.0" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="start">All three fit. 16 GB of memory left over.</text>
+  <rect x="808.0" y="66.0" width="448.0" height="420.0" fill="#FFFFFF" rx="12" stroke="#D1D5DB" stroke-width="2"/>
+  <text x="826.0" y="98.0" font-size="18" font-weight="700" fill="#1A1A1A" text-anchor="start">MIG</text>
+  <text x="826.0" y="120.0" font-size="13" font-weight="400" fill="#5A6270" text-anchor="start">Each model is rounded up to a fixed profile</text>
+  <line x1="848.0" y1="390.0" x2="1228.0" y2="390.0" stroke="#1A1A1A" stroke-width="1.5" stroke-linecap="round"/>
+  <line x1="848.0" y1="390.0" x2="848.0" y2="144.0" stroke="#1A1A1A" stroke-width="1.5" stroke-linecap="round"/>
+  <line x1="848.0" y1="150.0" x2="1228.0" y2="150.0" stroke="#9CA3AF" stroke-width="1.5" stroke-linecap="round" stroke-dasharray="5 4"/>
+  <text x="1228.0" y="144.0" font-size="12" font-weight="400" fill="#5A6270" text-anchor="end">80 GB</text>
+  <text x="1038.0" y="412.0" font-size="13" font-weight="400" fill="#5A6270" text-anchor="middle">share of SMs →</text>
+  <text x="836" y="270.0" font-size="13" fill="#5A6270" text-anchor="middle" transform="rotate(-90 836 270.0)">memory →</text>
+  <rect x="849.0" y="270.0" width="215.1" height="120.0" fill="#FFFFFF" rx="3" stroke="#76B900" stroke-width="2" stroke-dasharray="6 4"/>
+  <rect x="849.0" y="294.0" width="188.0" height="96.0" fill="#EAF5D3" rx="3" stroke="#76B900" stroke-width="1.5"/>
+  <text x="956.6" y="262.0" font-size="13" font-weight="700" fill="#76B900" text-anchor="middle">4g.40gb: chat-8b</text>
+  <text x="1059.1" y="288.0" font-size="12" font-weight="400" fill="#5A6270" text-anchor="end">57% SMs</text>
+  <rect x="1066.1" y="270.0" width="160.9" height="120.0" fill="#FFFFFF" rx="3" stroke="#2F80ED" stroke-width="2" stroke-dasharray="6 4"/>
+  <rect x="1066.1" y="318.0" width="112.0" height="72.0" fill="#DDEBFD" rx="3" stroke="#2F80ED" stroke-width="1.5"/>
+  <text x="1146.6" y="262.0" font-size="13" font-weight="700" fill="#2F80ED" text-anchor="middle">3g.40gb: code-7b</text>
+  <text x="1222.0" y="288.0" font-size="12" font-weight="400" fill="#5A6270" text-anchor="end">43% SMs</text>
+  <line x1="1065.1" y1="146.0" x2="1065.1" y2="390.0" stroke="#1A1A1A" stroke-width="4" stroke-linecap="round"/>
+  <text x="858.0" y="180.0" font-size="12" font-weight="400" fill="#5A6270" text-anchor="start" font-style="italic">Dashed: MIG instance</text>
+  <text x="858.0" y="198.0" font-size="12" font-weight="400" fill="#5A6270" text-anchor="start" font-style="italic">Solid: model's need</text>
+  <rect x="826.0" y="432.0" width="412.0" height="40.0" fill="#FBE3E3" rx="6"/>
+  <text x="838.0" y="457.0" font-size="15" font-weight="700" fill="#C62828" text-anchor="start">guard-1b doesn't fit: it needs another GPU.</text>
+  <rect x="24.0" y="506.0" width="1242.0" height="76.0" fill="#F3F4F6" rx="12" stroke="#D1D5DB" stroke-width="1.5"/>
+  <text x="42.0" y="534.0" font-size="16" font-weight="700" fill="#1A1A1A" text-anchor="start">The other half of the tradeoff</text>
+  <text x="42.0" y="560.0" font-size="14" font-weight="400" fill="#1A1A1A" text-anchor="start">MPS leaves memory bandwidth, L2 cache, power and the fault domain shared, so a busy or crashing neighbor can still affect you.</text>
+  <text x="42.0" y="578.0" font-size="1" font-weight="400" fill="#1A1A1A" text-anchor="start"></text>
+  <text x="1248.0" y="534.0" font-size="16" font-weight="700" fill="#1A1A1A" text-anchor="end">MIG walls all of them off.</text>
+</svg>

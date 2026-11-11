@@ -1,0 +1,85 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1240" height="600" viewBox="0 0 1240 600" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
+  <title id="title">MPS v2 compared with MPS v3</title>
+  <desc id="desc">In MPS v2 one control daemon runs one MPS server for one Linux user. The daemon sets default limits, and each client can only lower them through environment variables. In MPS v3 one daemon runs several named servers, for example one per GPU, and each server holds namespaces. Each namespace carries its own compute and memory limits, and a pod connects to exactly one namespace through its pipe directory. V3 also adds cgroup memory limits per container per GPU, a configuration file, and client priority. Both versions support static SM partitions.</desc>
+  <defs><marker id="a-ink" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1A1A1A"/></marker><marker id="a-gray" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#9CA3AF"/></marker><marker id="a-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="a-red" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#C62828"/></marker></defs>
+  <rect x="0.0" y="0.0" width="1240.0" height="600.0" fill="#FFFFFF"/>
+  <text x="24.0" y="44.0" font-size="24" font-weight="700" fill="#1A1A1A" text-anchor="start">MPS v2 compared with MPS v3</text>
+  <rect x="24.0" y="66.0" width="440.0" height="515.0" fill="#FFFFFF" rx="12" stroke="#D1D5DB" stroke-width="2"/>
+  <text x="44.0" y="98.0" font-size="20" font-weight="700" fill="#1A1A1A" text-anchor="start">MPS v2 (legacy interface)</text>
+  <rect x="124.0" y="118.0" width="240.0" height="54.0" fill="#F3F4F6" rx="8" stroke="#1A1A1A" stroke-width="1.5"/>
+  <text x="244.0" y="141.8" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="middle">Control daemon</text>
+  <text x="244.0" y="158.7" font-size="13" font-weight="400" fill="#5A6270" text-anchor="middle">one per Linux user</text>
+  <line x1="244.0" y1="172.0" x2="244.0" y2="196.0" stroke="#1A1A1A" stroke-width="1.8" stroke-linecap="round" marker-end="url(#a-ink)"/>
+  <rect x="124.0" y="198.0" width="240.0" height="54.0" fill="#F3F4F6" rx="8" stroke="#1A1A1A" stroke-width="1.5"/>
+  <text x="244.0" y="221.8" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="middle">One MPS server</text>
+  <text x="244.0" y="238.7" font-size="13" font-weight="400" fill="#5A6270" text-anchor="middle">default limits for every client</text>
+  <line x1="204.0" y1="252.0" x2="139.0" y2="288.0" stroke="#1A1A1A" stroke-width="1.8" stroke-linecap="round" marker-end="url(#a-ink)"/>
+  <line x1="284.0" y1="252.0" x2="349.0" y2="288.0" stroke="#1A1A1A" stroke-width="1.8" stroke-linecap="round" marker-end="url(#a-ink)"/>
+  <rect x="49.0" y="290.0" width="180.0" height="66.0" fill="#EAF5D3" rx="8" stroke="#76B900" stroke-width="1.5"/>
+  <text x="139.0" y="311.4" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="middle">Client A</text>
+  <text x="139.0" y="328.2" font-size="13" font-weight="400" fill="#5A6270" text-anchor="middle">env: 60% of SMs</text>
+  <text x="139.0" y="345.2" font-size="13" font-weight="400" fill="#5A6270" text-anchor="middle">env: 30 GB</text>
+  <rect x="259.0" y="290.0" width="180.0" height="66.0" fill="#DDEBFD" rx="8" stroke="#2F80ED" stroke-width="1.5"/>
+  <text x="349.0" y="311.4" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="middle">Client B</text>
+  <text x="349.0" y="328.2" font-size="13" font-weight="400" fill="#5A6270" text-anchor="middle">env: 40% of SMs</text>
+  <text x="349.0" y="345.2" font-size="13" font-weight="400" fill="#5A6270" text-anchor="middle">env: 20 GB</text>
+  <text x="46.0" y="392.0" font-size="15" font-weight="400" fill="#1A1A1A" text-anchor="start">• Each client sets its own limits in its</text>
+  <text x="46.0" y="414.0" font-size="15" font-weight="400" fill="#1A1A1A" text-anchor="start">   environment. It can lower the server's</text>
+  <text x="46.0" y="436.0" font-size="15" font-weight="400" fill="#1A1A1A" text-anchor="start">   defaults but not raise them.</text>
+  <text x="46.0" y="458.0" font-size="15" font-weight="400" fill="#1A1A1A" text-anchor="start">• One server and one user at a time.</text>
+  <text x="46.0" y="480.0" font-size="15" font-weight="400" fill="#1A1A1A" text-anchor="start">• On Kubernetes, the NVIDIA device plugin's</text>
+  <text x="46.0" y="502.0" font-size="15" font-weight="400" fill="#1A1A1A" text-anchor="start">   MPS mode cuts a GPU into equal replicas.</text>
+  <rect x="42.0" y="532.0" width="404.0" height="34.0" fill="#FBE3E3" rx="6"/>
+  <text x="54.0" y="554.0" font-size="14" font-weight="700" fill="#C62828" text-anchor="start">Limits travel with the client, not the server.</text>
+  <rect x="488.0" y="66.0" width="728.0" height="515.0" fill="#FFFFFF" rx="12" stroke="#76B900" stroke-width="2"/>
+  <text x="508.0" y="98.0" font-size="20" font-weight="700" fill="#1A1A1A" text-anchor="start">MPS v3 (driver r615 and newer)</text>
+  <rect x="732.0" y="112.0" width="240.0" height="50.0" fill="#F3F4F6" rx="8" stroke="#1A1A1A" stroke-width="1.5"/>
+  <text x="852.0" y="133.8" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="middle">Control daemon</text>
+  <text x="852.0" y="150.7" font-size="13" font-weight="400" fill="#5A6270" text-anchor="middle">one per node</text>
+  <rect x="510.0" y="194.0" width="444.0" height="50.0" fill="#F3F4F6" rx="8" stroke="#1A1A1A" stroke-width="1.5"/>
+  <text x="732.0" y="215.8" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="middle">Server gpu-0</text>
+  <text x="732.0" y="232.7" font-size="13" font-weight="400" fill="#5A6270" text-anchor="middle">allowed devices: GPU 0</text>
+  <rect x="980.0" y="194.0" width="214.0" height="50.0" fill="#F3F4F6" rx="8" stroke="#1A1A1A" stroke-width="1.5"/>
+  <text x="1087.0" y="215.8" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="middle">Server gpu-1</text>
+  <text x="1087.0" y="232.7" font-size="13" font-weight="400" fill="#5A6270" text-anchor="middle">allowed devices: GPU 1</text>
+  <line x1="812.0" y1="162.0" x2="732.0" y2="192.0" stroke="#1A1A1A" stroke-width="1.8" stroke-linecap="round" marker-end="url(#a-ink)"/>
+  <line x1="892.0" y1="162.0" x2="1087.0" y2="192.0" stroke="#1A1A1A" stroke-width="1.8" stroke-linecap="round" marker-end="url(#a-ink)"/>
+  <line x1="580.0" y1="244.0" x2="580.0" y2="266.0" stroke="#1A1A1A" stroke-width="1.5" stroke-linecap="round" marker-end="url(#a-ink)"/>
+  <rect x="510.0" y="268.0" width="140.0" height="62.0" fill="#EAF5D3" rx="8" stroke="#76B900" stroke-width="1.5"/>
+  <text x="580.0" y="288.3" font-size="14" font-weight="700" fill="#1A1A1A" text-anchor="middle">chat-8b</text>
+  <text x="580.0" y="303.9" font-size="12" font-weight="400" fill="#5A6270" text-anchor="middle">namespace</text>
+  <text x="580.0" y="319.5" font-size="12" font-weight="400" fill="#5A6270" text-anchor="middle">50% SMs · 32 GB</text>
+  <line x1="580.0" y1="330.0" x2="580.0" y2="350.0" stroke="#76B900" stroke-width="1.5" stroke-linecap="round"/>
+  <rect x="530.0" y="352.0" width="100.0" height="36.0" fill="#FFFFFF" rx="8" stroke="#76B900" stroke-width="1.5"/>
+  <text x="580.0" y="374.9" font-size="14" font-weight="700" fill="#1A1A1A" text-anchor="middle">pod</text>
+  <line x1="732.0" y1="244.0" x2="732.0" y2="266.0" stroke="#1A1A1A" stroke-width="1.5" stroke-linecap="round" marker-end="url(#a-ink)"/>
+  <rect x="662.0" y="268.0" width="140.0" height="62.0" fill="#DDEBFD" rx="8" stroke="#2F80ED" stroke-width="1.5"/>
+  <text x="732.0" y="288.3" font-size="14" font-weight="700" fill="#1A1A1A" text-anchor="middle">code-7b</text>
+  <text x="732.0" y="303.9" font-size="12" font-weight="400" fill="#5A6270" text-anchor="middle">namespace</text>
+  <text x="732.0" y="319.5" font-size="12" font-weight="400" fill="#5A6270" text-anchor="middle">30% SMs · 24 GB</text>
+  <line x1="732.0" y1="330.0" x2="732.0" y2="350.0" stroke="#2F80ED" stroke-width="1.5" stroke-linecap="round"/>
+  <rect x="682.0" y="352.0" width="100.0" height="36.0" fill="#FFFFFF" rx="8" stroke="#2F80ED" stroke-width="1.5"/>
+  <text x="732.0" y="374.9" font-size="14" font-weight="700" fill="#1A1A1A" text-anchor="middle">pod</text>
+  <line x1="884.0" y1="244.0" x2="884.0" y2="266.0" stroke="#1A1A1A" stroke-width="1.5" stroke-linecap="round" marker-end="url(#a-ink)"/>
+  <rect x="814.0" y="268.0" width="140.0" height="62.0" fill="#FDEBD3" rx="8" stroke="#D97706" stroke-width="1.5"/>
+  <text x="884.0" y="288.3" font-size="14" font-weight="700" fill="#1A1A1A" text-anchor="middle">guard-1b</text>
+  <text x="884.0" y="303.9" font-size="12" font-weight="400" fill="#5A6270" text-anchor="middle">namespace</text>
+  <text x="884.0" y="319.5" font-size="12" font-weight="400" fill="#5A6270" text-anchor="middle">20% SMs · 8 GB</text>
+  <line x1="884.0" y1="330.0" x2="884.0" y2="350.0" stroke="#D97706" stroke-width="1.5" stroke-linecap="round"/>
+  <rect x="834.0" y="352.0" width="100.0" height="36.0" fill="#FFFFFF" rx="8" stroke="#D97706" stroke-width="1.5"/>
+  <text x="884.0" y="374.9" font-size="14" font-weight="700" fill="#1A1A1A" text-anchor="middle">pod</text>
+  <line x1="1087.0" y1="244.0" x2="1087.0" y2="266.0" stroke="#1A1A1A" stroke-width="1.5" stroke-linecap="round" marker-end="url(#a-ink)"/>
+  <rect x="980.0" y="268.0" width="214.0" height="62.0" fill="#F3F4F6" rx="8" stroke="#9CA3AF" stroke-width="1.5" stroke-dasharray="5 4"/>
+  <text x="1087.0" y="296.1" font-size="14" font-weight="700" fill="#1A1A1A" text-anchor="middle">more namespaces</text>
+  <text x="1087.0" y="311.7" font-size="12" font-weight="400" fill="#5A6270" text-anchor="middle">one per pod on GPU 1</text>
+  <text x="510.0" y="412.0" font-size="14" font-weight="400" fill="#5A6270" text-anchor="start">Each pod sees only its namespace's pipe directory, such as &lt;pipe&gt;/gpu-0/chat-8b.</text>
+  <text x="510.0" y="432.0" font-size="14" font-weight="400" fill="#5A6270" text-anchor="start">The limits live in the namespace, on the server side.</text>
+  <rect x="506.0" y="448.0" width="692.0" height="118.0" fill="#EAF5D3" rx="6"/>
+  <text x="518.0" y="472.0" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="start">Also new in v3</text>
+  <text x="518.0" y="496.0" font-size="14" font-weight="400" fill="#1A1A1A" text-anchor="start">• Namespaces: separate limits per model</text>
+  <text x="518.0" y="518.0" font-size="14" font-weight="400" fill="#1A1A1A" text-anchor="start">• cgroup memory limits per container, per GPU</text>
+  <text x="518.0" y="540.0" font-size="14" font-weight="400" fill="#1A1A1A" text-anchor="start">• Several named servers in one daemon</text>
+  <text x="855.0" y="496.0" font-size="14" font-weight="400" fill="#1A1A1A" text-anchor="start">• TOML configuration file</text>
+  <text x="855.0" y="518.0" font-size="14" font-weight="400" fill="#1A1A1A" text-anchor="start">• Client priority per namespace</text>
+  <text x="855.0" y="540.0" font-size="14" font-weight="400" fill="#1A1A1A" text-anchor="start">• Each pod sized independently</text>
+</svg>

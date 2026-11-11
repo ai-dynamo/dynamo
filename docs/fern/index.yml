@@ -872,7 +872,17 @@ navigation:
         icon: layer-group
         slug: gpu-sharing
         path: pages/use-cases/gpu-sharing/overview.mdx
-        contents: []
+        contents:
+          - page: How GPU Sharing Works
+            path: pages/use-cases/gpu-sharing/how-gpu-sharing-works.md
+          - page: MPS v2 and v3
+            path: pages/use-cases/gpu-sharing/mps-v2-and-v3.md
+          - page: Which Models to Share a GPU
+            path: pages/use-cases/gpu-sharing/which-models-to-share.md
+          - page: Example MPS Architecture
+            path: pages/use-cases/gpu-sharing/example-mps-architecture.md
+          - page: Choosing a GPU Sharing Approach
+            path: pages/use-cases/gpu-sharing/choosing-a-gpu-sharing-approach.md
   - tab: recipes
     layout:
       # ==================== Model Recipes ====================

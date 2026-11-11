@@ -1,0 +1,132 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1230" height="520" viewBox="0 0 1230 520" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
+  <title id="title">Four ways to share one GPU between two models</title>
+  <desc id="desc">Time-slicing and HAMi make two models take turns on all of the GPU's SMs; HAMi adds a memory cap. Each process keeps its own fault domain. MPS lets both models run at the same time, each under a compute ceiling and a memory cap, but memory bandwidth and L2 cache stay shared, and by default so does the fault domain. MIG cuts the GPU into hardware instances with walls around SMs, memory, bandwidth and L2, and separate fault domains, in fixed sizes.</desc>
+  <defs><marker id="a-ink" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1A1A1A"/></marker><marker id="a-gray" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#9CA3AF"/></marker><marker id="a-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="a-red" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#C62828"/></marker></defs>
+  <rect x="0.0" y="0.0" width="1230.0" height="520.0" fill="#FFFFFF"/>
+  <text x="24.0" y="44.0" font-size="24" font-weight="700" fill="#1A1A1A" text-anchor="start">Four ways to share one GPU between two models</text>
+  <rect x="976.0" y="28.0" width="18.0" height="18.0" fill="#EAF5D3" rx="3" stroke="#76B900" stroke-width="2"/>
+  <text x="1002.0" y="43.0" font-size="14" font-weight="400" fill="#1A1A1A" text-anchor="start">Model A</text>
+  <rect x="1091.0" y="28.0" width="18.0" height="18.0" fill="#DDEBFD" rx="3" stroke="#2F80ED" stroke-width="2"/>
+  <text x="1117.0" y="43.0" font-size="14" font-weight="400" fill="#1A1A1A" text-anchor="start">Model B</text>
+  <rect x="24.0" y="70.0" width="282.0" height="435.0" fill="#FFFFFF" rx="12" stroke="#D1D5DB" stroke-width="2"/>
+  <text x="42.0" y="102.0" font-size="20" font-weight="700" fill="#1A1A1A" text-anchor="start">Time-slicing</text>
+  <text x="42.0" y="122.0" font-size="13" font-weight="400" fill="#5A6270" text-anchor="start">CUDA driver switches contexts</text>
+  <text x="42.0" y="152.0" font-size="13" font-weight="700" fill="#5A6270" text-anchor="start">SMs</text>
+  <text x="288.0" y="152.0" font-size="12" font-weight="400" fill="#5A6270" text-anchor="end">time →</text>
+  <rect x="42.0" y="160.0" width="27.8" height="100.0" fill="#EAF5D3" rx="3" stroke="#76B900" stroke-width="1.5"/>
+  <text x="55.9" y="215.0" font-size="14" font-weight="700" fill="#76B900" text-anchor="middle">A</text>
+  <rect x="72.8" y="160.0" width="27.8" height="100.0" fill="#DDEBFD" rx="3" stroke="#2F80ED" stroke-width="1.5"/>
+  <text x="86.6" y="215.0" font-size="14" font-weight="700" fill="#2F80ED" text-anchor="middle">B</text>
+  <rect x="103.5" y="160.0" width="27.8" height="100.0" fill="#EAF5D3" rx="3" stroke="#76B900" stroke-width="1.5"/>
+  <text x="117.4" y="215.0" font-size="14" font-weight="700" fill="#76B900" text-anchor="middle">A</text>
+  <rect x="134.2" y="160.0" width="27.8" height="100.0" fill="#DDEBFD" rx="3" stroke="#2F80ED" stroke-width="1.5"/>
+  <text x="148.1" y="215.0" font-size="14" font-weight="700" fill="#2F80ED" text-anchor="middle">B</text>
+  <rect x="165.0" y="160.0" width="27.8" height="100.0" fill="#EAF5D3" rx="3" stroke="#76B900" stroke-width="1.5"/>
+  <text x="178.9" y="215.0" font-size="14" font-weight="700" fill="#76B900" text-anchor="middle">A</text>
+  <rect x="195.8" y="160.0" width="27.8" height="100.0" fill="#DDEBFD" rx="3" stroke="#2F80ED" stroke-width="1.5"/>
+  <text x="209.6" y="215.0" font-size="14" font-weight="700" fill="#2F80ED" text-anchor="middle">B</text>
+  <rect x="226.5" y="160.0" width="27.8" height="100.0" fill="#EAF5D3" rx="3" stroke="#76B900" stroke-width="1.5"/>
+  <text x="240.4" y="215.0" font-size="14" font-weight="700" fill="#76B900" text-anchor="middle">A</text>
+  <rect x="257.2" y="160.0" width="27.8" height="100.0" fill="#DDEBFD" rx="3" stroke="#2F80ED" stroke-width="1.5"/>
+  <text x="271.1" y="215.0" font-size="14" font-weight="700" fill="#2F80ED" text-anchor="middle">B</text>
+  <text x="42.0" y="287.0" font-size="13" font-weight="700" fill="#5A6270" text-anchor="start">Memory</text>
+  <rect x="42.0" y="295.0" width="246.0" height="30.0" fill="#F3F4F6" rx="3" stroke="#D1D5DB" stroke-width="1.5"/>
+  <rect x="42.0" y="295.0" width="152.5" height="30.0" fill="#EAF5D3" rx="3" stroke="#76B900" stroke-width="1.5"/>
+  <rect x="194.5" y="295.0" width="64.0" height="30.0" fill="#DDEBFD" rx="3" stroke="#2F80ED" stroke-width="1.5"/>
+  <text x="118.3" y="315.0" font-size="12" font-weight="400" fill="#76B900" text-anchor="middle">A takes what it can</text>
+  <text x="226.5" y="315.0" font-size="12" font-weight="700" fill="#2F80ED" text-anchor="middle">B</text>
+  <text x="42.0" y="352.0" font-size="13" font-weight="700" fill="#5A6270" text-anchor="start">Memory bandwidth and L2 cache</text>
+  <rect x="42.0" y="360.0" width="246.0" height="26.0" fill="#F3F4F6" rx="3" stroke="#9CA3AF" stroke-width="1.5"/>
+  <text x="165.0" y="378.0" font-size="12" font-weight="400" fill="#1A1A1A" text-anchor="middle">shared: one model's traffic slows the other</text>
+  <text x="42.0" y="415.0" font-size="13" font-weight="700" fill="#5A6270" text-anchor="start">Fault domain:</text>
+  <text x="134.0" y="415.0" font-size="13" font-weight="700" fill="#76B900" text-anchor="start">Separate per process</text>
+  <rect x="42.0" y="432.0" width="246.0" height="56.0" fill="#F3F4F6" rx="6"/>
+  <text x="52.0" y="455.0" font-size="14" font-weight="700" fill="#1A1A1A" text-anchor="start">Models take turns.</text>
+  <text x="52.0" y="475.0" font-size="14" font-weight="700" fill="#1A1A1A" text-anchor="start">No compute or memory caps.</text>
+  <rect x="324.0" y="70.0" width="282.0" height="435.0" fill="#FFFFFF" rx="12" stroke="#D1D5DB" stroke-width="2"/>
+  <text x="342.0" y="102.0" font-size="20" font-weight="700" fill="#1A1A1A" text-anchor="start">HAMi</text>
+  <text x="342.0" y="122.0" font-size="13" font-weight="400" fill="#5A6270" text-anchor="start">CUDA calls intercepted in the container</text>
+  <text x="342.0" y="152.0" font-size="13" font-weight="700" fill="#5A6270" text-anchor="start">SMs</text>
+  <text x="588.0" y="152.0" font-size="12" font-weight="400" fill="#5A6270" text-anchor="end">time →</text>
+  <rect x="342.0" y="160.0" width="27.8" height="100.0" fill="#EAF5D3" rx="3" stroke="#76B900" stroke-width="1.5"/>
+  <text x="355.9" y="215.0" font-size="14" font-weight="700" fill="#76B900" text-anchor="middle">A</text>
+  <rect x="372.8" y="160.0" width="27.8" height="100.0" fill="#DDEBFD" rx="3" stroke="#2F80ED" stroke-width="1.5"/>
+  <text x="386.6" y="215.0" font-size="14" font-weight="700" fill="#2F80ED" text-anchor="middle">B</text>
+  <rect x="403.5" y="160.0" width="27.8" height="100.0" fill="#EAF5D3" rx="3" stroke="#76B900" stroke-width="1.5"/>
+  <text x="417.4" y="215.0" font-size="14" font-weight="700" fill="#76B900" text-anchor="middle">A</text>
+  <rect x="434.2" y="160.0" width="27.8" height="100.0" fill="#DDEBFD" rx="3" stroke="#2F80ED" stroke-width="1.5"/>
+  <text x="448.1" y="215.0" font-size="14" font-weight="700" fill="#2F80ED" text-anchor="middle">B</text>
+  <rect x="465.0" y="160.0" width="27.8" height="100.0" fill="#EAF5D3" rx="3" stroke="#76B900" stroke-width="1.5"/>
+  <text x="478.9" y="215.0" font-size="14" font-weight="700" fill="#76B900" text-anchor="middle">A</text>
+  <rect x="495.8" y="160.0" width="27.8" height="100.0" fill="#DDEBFD" rx="3" stroke="#2F80ED" stroke-width="1.5"/>
+  <text x="509.6" y="215.0" font-size="14" font-weight="700" fill="#2F80ED" text-anchor="middle">B</text>
+  <rect x="526.5" y="160.0" width="27.8" height="100.0" fill="#EAF5D3" rx="3" stroke="#76B900" stroke-width="1.5"/>
+  <text x="540.4" y="215.0" font-size="14" font-weight="700" fill="#76B900" text-anchor="middle">A</text>
+  <rect x="557.2" y="160.0" width="27.8" height="100.0" fill="#DDEBFD" rx="3" stroke="#2F80ED" stroke-width="1.5"/>
+  <text x="571.1" y="215.0" font-size="14" font-weight="700" fill="#2F80ED" text-anchor="middle">B</text>
+  <text x="342.0" y="287.0" font-size="13" font-weight="700" fill="#5A6270" text-anchor="start">Memory</text>
+  <rect x="342.0" y="295.0" width="121.0" height="30.0" fill="#EAF5D3" rx="3" stroke="#76B900" stroke-width="1.5"/>
+  <rect x="467.0" y="295.0" width="121.0" height="30.0" fill="#DDEBFD" rx="3" stroke="#2F80ED" stroke-width="1.5"/>
+  <text x="403.5" y="315.0" font-size="12" font-weight="700" fill="#76B900" text-anchor="middle">A: capped</text>
+  <text x="526.5" y="315.0" font-size="12" font-weight="700" fill="#2F80ED" text-anchor="middle">B: capped</text>
+  <line x1="465.0" y1="291.0" x2="465.0" y2="329.0" stroke="#9CA3AF" stroke-width="2" stroke-linecap="round" stroke-dasharray="5 4"/>
+  <text x="342.0" y="352.0" font-size="13" font-weight="700" fill="#5A6270" text-anchor="start">Memory bandwidth and L2 cache</text>
+  <rect x="342.0" y="360.0" width="246.0" height="26.0" fill="#F3F4F6" rx="3" stroke="#9CA3AF" stroke-width="1.5"/>
+  <text x="465.0" y="378.0" font-size="12" font-weight="400" fill="#1A1A1A" text-anchor="middle">shared: one model's traffic slows the other</text>
+  <text x="342.0" y="415.0" font-size="13" font-weight="700" fill="#5A6270" text-anchor="start">Fault domain:</text>
+  <text x="434.0" y="415.0" font-size="13" font-weight="700" fill="#76B900" text-anchor="start">Separate per process</text>
+  <rect x="342.0" y="432.0" width="246.0" height="56.0" fill="#F3F4F6" rx="6"/>
+  <text x="352.0" y="455.0" font-size="14" font-weight="700" fill="#1A1A1A" text-anchor="start">Models take turns.</text>
+  <text x="352.0" y="475.0" font-size="14" font-weight="700" fill="#1A1A1A" text-anchor="start">Memory capped in the container.</text>
+  <rect x="624.0" y="70.0" width="282.0" height="435.0" fill="#FFFFFF" rx="12" stroke="#76B900" stroke-width="2"/>
+  <text x="642.0" y="102.0" font-size="20" font-weight="700" fill="#1A1A1A" text-anchor="start">MPS</text>
+  <text x="642.0" y="122.0" font-size="13" font-weight="400" fill="#5A6270" text-anchor="start">One MPS server runs both clients</text>
+  <text x="642.0" y="152.0" font-size="13" font-weight="700" fill="#5A6270" text-anchor="start">SMs</text>
+  <text x="888.0" y="152.0" font-size="12" font-weight="400" fill="#5A6270" text-anchor="end">time →</text>
+  <rect x="642.0" y="160.0" width="246.0" height="58.0" fill="#EAF5D3" rx="3" stroke="#76B900" stroke-width="1.5"/>
+  <rect x="642.0" y="222.0" width="246.0" height="38.0" fill="#DDEBFD" rx="3" stroke="#2F80ED" stroke-width="1.5"/>
+  <text x="652.0" y="195.0" font-size="13" font-weight="700" fill="#76B900" text-anchor="start">A: up to 60% of SMs</text>
+  <text x="652.0" y="246.0" font-size="13" font-weight="700" fill="#2F80ED" text-anchor="start">B: up to 40% of SMs</text>
+  <line x1="638.0" y1="220.0" x2="892.0" y2="220.0" stroke="#9CA3AF" stroke-width="2" stroke-linecap="round" stroke-dasharray="5 4"/>
+  <text x="642.0" y="287.0" font-size="13" font-weight="700" fill="#5A6270" text-anchor="start">Memory</text>
+  <rect x="642.0" y="295.0" width="121.0" height="30.0" fill="#EAF5D3" rx="3" stroke="#76B900" stroke-width="1.5"/>
+  <rect x="767.0" y="295.0" width="121.0" height="30.0" fill="#DDEBFD" rx="3" stroke="#2F80ED" stroke-width="1.5"/>
+  <text x="703.5" y="315.0" font-size="12" font-weight="700" fill="#76B900" text-anchor="middle">A: capped</text>
+  <text x="826.5" y="315.0" font-size="12" font-weight="700" fill="#2F80ED" text-anchor="middle">B: capped</text>
+  <line x1="765.0" y1="291.0" x2="765.0" y2="329.0" stroke="#9CA3AF" stroke-width="2" stroke-linecap="round" stroke-dasharray="5 4"/>
+  <text x="642.0" y="352.0" font-size="13" font-weight="700" fill="#5A6270" text-anchor="start">Memory bandwidth and L2 cache</text>
+  <rect x="642.0" y="360.0" width="246.0" height="26.0" fill="#F3F4F6" rx="3" stroke="#9CA3AF" stroke-width="1.5"/>
+  <text x="765.0" y="378.0" font-size="12" font-weight="400" fill="#1A1A1A" text-anchor="middle">shared: one model's traffic slows the other</text>
+  <text x="642.0" y="415.0" font-size="13" font-weight="700" fill="#5A6270" text-anchor="start">Fault domain:</text>
+  <text x="734.0" y="415.0" font-size="13" font-weight="700" fill="#C62828" text-anchor="start">Shared by default</text>
+  <rect x="642.0" y="432.0" width="246.0" height="56.0" fill="#EAF5D3" rx="6"/>
+  <text x="652.0" y="455.0" font-size="14" font-weight="700" fill="#1A1A1A" text-anchor="start">Models run at the same time.</text>
+  <text x="652.0" y="475.0" font-size="14" font-weight="700" fill="#1A1A1A" text-anchor="start">Compute and memory capped.</text>
+  <rect x="924.0" y="70.0" width="282.0" height="435.0" fill="#FFFFFF" rx="12" stroke="#D1D5DB" stroke-width="2"/>
+  <text x="942.0" y="102.0" font-size="20" font-weight="700" fill="#1A1A1A" text-anchor="start">MIG</text>
+  <text x="942.0" y="122.0" font-size="13" font-weight="400" fill="#5A6270" text-anchor="start">GPU split into hardware instances</text>
+  <text x="942.0" y="152.0" font-size="13" font-weight="700" fill="#5A6270" text-anchor="start">SMs</text>
+  <text x="1188.0" y="152.0" font-size="12" font-weight="400" fill="#5A6270" text-anchor="end">time →</text>
+  <rect x="942.0" y="160.0" width="246.0" height="58.0" fill="#EAF5D3" rx="3" stroke="#76B900" stroke-width="1.5"/>
+  <rect x="942.0" y="222.0" width="246.0" height="38.0" fill="#DDEBFD" rx="3" stroke="#2F80ED" stroke-width="1.5"/>
+  <text x="952.0" y="195.0" font-size="13" font-weight="700" fill="#76B900" text-anchor="start">A: 4 of 7 SM slices</text>
+  <text x="952.0" y="246.0" font-size="13" font-weight="700" fill="#2F80ED" text-anchor="start">B: 3 of 7 SM slices</text>
+  <line x1="938.0" y1="220.0" x2="1192.0" y2="220.0" stroke="#1A1A1A" stroke-width="5" stroke-linecap="round"/>
+  <text x="942.0" y="287.0" font-size="13" font-weight="700" fill="#5A6270" text-anchor="start">Memory</text>
+  <rect x="942.0" y="295.0" width="121.0" height="30.0" fill="#EAF5D3" rx="3" stroke="#76B900" stroke-width="1.5"/>
+  <rect x="1067.0" y="295.0" width="121.0" height="30.0" fill="#DDEBFD" rx="3" stroke="#2F80ED" stroke-width="1.5"/>
+  <text x="1003.5" y="315.0" font-size="12" font-weight="700" fill="#76B900" text-anchor="middle">A: capped</text>
+  <text x="1126.5" y="315.0" font-size="12" font-weight="700" fill="#2F80ED" text-anchor="middle">B: capped</text>
+  <line x1="1065.0" y1="291.0" x2="1065.0" y2="329.0" stroke="#1A1A1A" stroke-width="5" stroke-linecap="round"/>
+  <text x="942.0" y="352.0" font-size="13" font-weight="700" fill="#5A6270" text-anchor="start">Memory bandwidth and L2 cache</text>
+  <rect x="942.0" y="360.0" width="121.0" height="26.0" fill="#EAF5D3" rx="3" stroke="#76B900" stroke-width="1.5"/>
+  <rect x="1067.0" y="360.0" width="121.0" height="26.0" fill="#DDEBFD" rx="3" stroke="#2F80ED" stroke-width="1.5"/>
+  <line x1="1065.0" y1="356.0" x2="1065.0" y2="390.0" stroke="#1A1A1A" stroke-width="5" stroke-linecap="round"/>
+  <text x="1003.5" y="378.0" font-size="12" font-weight="700" fill="#76B900" text-anchor="middle">A's slice</text>
+  <text x="1126.5" y="378.0" font-size="12" font-weight="700" fill="#2F80ED" text-anchor="middle">B's slice</text>
+  <text x="942.0" y="415.0" font-size="13" font-weight="700" fill="#5A6270" text-anchor="start">Fault domain:</text>
+  <text x="1034.0" y="415.0" font-size="13" font-weight="700" fill="#76B900" text-anchor="start">Separate per instance</text>
+  <rect x="942.0" y="432.0" width="246.0" height="56.0" fill="#EAF5D3" rx="6"/>
+  <text x="952.0" y="455.0" font-size="14" font-weight="700" fill="#1A1A1A" text-anchor="start">Models run at the same time.</text>
+  <text x="952.0" y="475.0" font-size="14" font-weight="700" fill="#1A1A1A" text-anchor="start">Hardware walls, fixed sizes.</text>
+</svg>
