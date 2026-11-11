@@ -3,7 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Record slime-demo.sh to the Slime Integration overview asciicast and embed
-# the Dynamo Glass theme that the landing-page hero demo uses.
+# the dark fern-code palette. The overview plays it with TerminalDemo's
+# fern-code theme, which follows the site's light and dark mode.
 #
 # Usage:
 #   ./record-slime-demo.sh                    # -> ../../assets/slime-rl-demo.cast at 120x25
@@ -31,5 +32,5 @@ asciinema rec --overwrite ${HEADLESS} \
   --command "bash slime-demo.sh" \
   "$OUT"
 
-python3 "${DIR}/../hero-demo/apply-hero-theme.py" "$OUT"
+python3 "${DIR}/apply-fern-code-theme.py" "$OUT"
 echo "Recorded + themed: $OUT (${COLS}x${ROWS})"
