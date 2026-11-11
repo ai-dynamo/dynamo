@@ -6,11 +6,10 @@ use std::{
     sync::Arc,
 };
 
-use dynamo_kv_router::{
-    protocols::RoutingConstraints, scheduling::SchedulingRequest, selector::HostedWorkerPicker,
-};
 use dynamo_lora::policy::{LoadGuard, RequestPolicy, Stage};
 use dynamo_runtime::pipeline::{Error, RouterMode};
+use dynamo_scheduler::host::{KvSchedulerError, RoutingConstraints, SchedulingRequest};
+use dynamo_worker_selection::host::HostedWorkerPicker;
 
 use crate::{
     discovery::RuntimeConfigWatch,
@@ -39,9 +38,9 @@ pub(crate) fn execution_requirements(request: &PreprocessedRequest) -> Execution
         allows_replay: policy.allows_replay(),
         policy_required: policy.requires_candidate_policy(),
         accounting_attribution: if policy.tracks_legacy_load() {
-            dynamo_kv_router::scheduling::AccountingAttribution::UseRoutingName
+            dynamo_scheduler::host::AccountingAttribution::UseRoutingName
         } else {
-            dynamo_kv_router::scheduling::AccountingAttribution::Exclude
+            dynamo_scheduler::host::AccountingAttribution::Exclude
         },
     }
 }
@@ -215,7 +214,8 @@ impl HostedCandidatePolicy for LoraHostedPolicy {
             }
             None => self
                 .picker
-                .select(&candidates, None, &hosted_request(request))?,
+                .select(&candidates, None, &hosted_request(request))
+                .map_err(KvSchedulerError::from)?,
         };
         Ok(Some(CandidateSelection {
             worker,
@@ -429,7 +429,7 @@ mod tests {
     #[test]
     fn accounting_uses_typed_runtime_metadata_not_adapter_name() {
         use crate::protocols::common::preprocessor::RoutingHints;
-        use dynamo_kv_router::scheduling::AccountingAttribution;
+        use dynamo_scheduler::host::AccountingAttribution;
 
         let mut request = PreprocessedRequest::builder()
             .model("base".to_string())
@@ -465,7 +465,7 @@ mod tests {
     #[test]
     fn partial_runtime_metadata_is_rejected_and_never_replayed() {
         use crate::protocols::common::preprocessor::RoutingHints;
-        use dynamo_kv_router::scheduling::AccountingAttribution;
+        use dynamo_scheduler::host::AccountingAttribution;
 
         let mut request = PreprocessedRequest::builder()
             .model("base".to_string())
@@ -685,7 +685,8 @@ mod tests {
 
     #[test]
     fn kv_admission_intersects_live_and_allowed_workers_on_each_refresh() {
-        use dynamo_kv_router::{protocols::WorkerWithDpRank, scheduling::ScheduleMode};
+        use dynamo_router_protocol::worker::WorkerWithDpRank;
+        use dynamo_scheduler::host::ScheduleMode;
         let policy = LoraKvPolicy::kv(Arc::new(LoraFilter::new(
             LoraRoutingTable::new(),
             LoraStateTracker::new(),

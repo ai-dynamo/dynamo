@@ -12,7 +12,7 @@ will fail early, before hitting runtime deserialization errors.
 This test is the early warning for vLLM KV-event wire-format changes.
 
 In the normal case, if this fails, first check whether
-`lib/kv-router/src/zmq_wire.rs` already accepts the new upstream vLLM event
+`lib/kv-events/src/zmq_wire/deserialize.rs` already accepts the new upstream vLLM event
 shape. If not, update that compatibility layer before updating this test.
 
 That file is Dynamo's compatibility layer for vLLM KV events:
@@ -119,7 +119,7 @@ class TestVllmKvEventsApi:
             f"Expected: {expected_fields}\n"
             f"Actual:   {actual_fields}\n"
             f"Required follow-up:\n"
-            f"  - Update lib/kv-router/src/zmq_wire.rs to match the new BlockStored wire format.\n"
+            f"  - Update lib/kv-events/src/zmq_wire/deserialize.rs to match the new BlockStored wire format.\n"
             f"  - Update this test's expected_fields and msgpack shape checks.\n"
             f"  - If needed, add or update a regression test in lib/llm/src/kv_router/publisher.rs."
         )
@@ -148,7 +148,7 @@ class TestVllmKvEventsApi:
             f"Expected: {expected_fields}\n"
             f"Actual:   {actual_fields}\n"
             f"Required follow-up:\n"
-            f"  - Update lib/kv-router/src/zmq_wire.rs RawKvEvent::BlockRemoved seq deserializer.\n"
+            f"  - Update lib/kv-events/src/zmq_wire/deserialize.rs RawKvEvent::BlockRemoved seq deserializer.\n"
             f"  - Update this test's expected_fields."
         )
 
@@ -166,7 +166,7 @@ class TestVllmKvEventsApi:
             f"Expected: {expected_fields}\n"
             f"Actual:   {actual_fields}\n"
             f"Required follow-up:\n"
-            f"  - Update lib/kv-router/src/zmq_wire.rs KvEventBatch Deserialize impl.\n"
+            f"  - Update lib/kv-events/src/zmq_wire/deserialize.rs KvEventBatch Deserialize impl.\n"
             f"  - Update subscriber.rs VllmEventBatch tuple if batch field order changes.\n"
             f"  - Update this test's expected_fields."
         )
@@ -177,7 +177,7 @@ class TestVllmKvEventsApi:
         assert struct_config is not None, "KVCacheEvent is not a msgspec Struct"
         assert struct_config.array_like is False, (
             "KVCacheEvent changed away from tagged-map serialization. "
-            "Check lib/kv-router/src/zmq_wire/deserialize.rs compatibility."
+            "Check lib/kv-events/src/zmq_wire/deserialize.rs compatibility."
         )
 
     def test_kv_cache_event_uses_tag(self):

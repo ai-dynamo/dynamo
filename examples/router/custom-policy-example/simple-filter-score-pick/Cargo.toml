@@ -12,6 +12,6 @@ repository.workspace = true
 description = "Filter, scorer, and picker custom worker-selection policy example for Dynamo"
 
 [dependencies]
-dynamo-kv-router = { workspace = true, features = ["standalone-selection"] }
+dynamo-kv-router = { workspace = true }
 serde.workspace = true
 serde_json.workspace = true
