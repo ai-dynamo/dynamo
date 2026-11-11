@@ -264,7 +264,7 @@ impl Drop for Selector {
 
 #[cfg(test)]
 mod tests {
-    use dynamo_kv_router::RoutingPartitionId;
+    use dynamo_router_protocol::identity::RoutingPartitionId;
     use dynamo_session_affinity::SessionAffinityConfig;
     use dynamo_session_affinity::host::MAX_SESSION_AFFINITY_ID_BYTES;
     use std::collections::HashMap;
