@@ -1,0 +1,47 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Parser Compatibility Runner
+
+on:
+  pull_request:
+    paths:
+      - components/src/dynamo/compatibility/**
+      - .github/workflows/parser-compatibility.yml
+  push:
+    branches: [main]
+    paths:
+      - components/src/dynamo/compatibility/**
+      - .github/workflows/parser-compatibility.yml
+
+permissions:
+  contents: read
+
+jobs:
+  runner-contract:
+    name: Runner contract (no model certification)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: '3.11'
+      - name: Install runner test dependency
+        run: python3 -m pip install 'pytest>=8,<9'
+      - name: Check strict exits, coverage and report generation
+        env:
+          PYTHONPATH: components/src
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
+        run: >-
+          python3 -m pytest --noconftest
+          -c components/src/dynamo/compatibility/tests/pytest.ini
+          components/src/dynamo/compatibility/tests/test_runner.py
+          -q --junitxml=runner-contract.xml
+      - name: Preserve executor test evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: parser-runner-contract
+          path: runner-contract.xml
+          if-no-files-found: error

@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "profile": "qwen3-text-input-smoke-v1",
+  "model": "Qwen/Qwen3-0.6B",
+  "provenance": {
+    "model_revision": "SET_TO_DEPLOYED_REVISION",
+    "dynamo_build": "SET_TO_DEPLOYED_BUILD",
+    "sglang_build": "SET_TO_DEPLOYED_BUILD",
+    "processor": "SET_TO_DEPLOYED_PROCESSOR"
+  },
+  "required_cases": ["single-turn", "system-and-unicode", "tool-history"],
+  "cases": [
+    {
+      "id": "single-turn",
+      "request": {
+        "messages": [{"role": "user", "content": "Say hello."}]
+      }
+    },
+    {
+      "id": "system-and-unicode",
+      "request": {
+        "messages": [
+          {"role": "system", "content": "Answer briefly."},
+          {"role": "user", "content": "你好。\nKeep spaces: a  b."}
+        ]
+      }
+    },
+    {
+      "id": "tool-history",
+      "request": {
+        "messages": [
+          {"role": "user", "content": "What is 2 + 3?"},
+          {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [{"id": "call_sum", "type": "function", "function": {"name": "add", "arguments": "{\"a\":2,\"b\":3}"}}]
+          },
+          {"role": "tool", "tool_call_id": "call_sum", "content": "5"},
+          {"role": "user", "content": "Explain the result."}
+        ],
+        "tools": [{"type": "function", "function": {"name": "add", "description": "Add two integers.", "parameters": {"type": "object", "properties": {"a": {"type": "integer"}, "b": {"type": "integer"}}, "required": ["a", "b"]}}}],
+        "tool_choice": "auto"
+      }
+    }
+  ]
+}
