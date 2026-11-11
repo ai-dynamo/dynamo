@@ -11670,8 +11670,6 @@ spec:
                             format: int32
                             minimum: 2
                             type: integer
-                        required:
-                          - nodeCount
                         type: object
                       providerOverride:
                         description: |-
@@ -11950,9 +11948,9 @@ spec:
                           preserves the implicit multinode role layout.
 
                           LPX components each require an agent role. A DGD may contain independent
-                          LPX components, each with its own conductor role, or a shared draft and
-                          target pair with a conductor role only on the target. Every LPX role
-                          requires its own podTemplate.
+                          LPX components, each serving through its own conductor role or agent
+                          runtime init container, or a draft and target pair in which only the
+                          target serves. Every LPX role requires its own podTemplate.
                         items:
                           description: |-
                             ComponentRoleSpec configures one named Pod-producing role inside a compound component.
@@ -29549,9 +29547,9 @@ spec:
                           preserves the implicit multinode role layout.
 
                           LPX components each require an agent role. A DGD may contain independent
-                          LPX components, each with its own conductor role, or a shared draft and
-                          target pair with a conductor role only on the target. Every LPX role
-                          requires its own podTemplate.
+                          LPX components, each serving through its own conductor role or agent
+                          runtime init container, or a draft and target pair in which only the
+                          target serves. Every LPX role requires its own podTemplate.
                         items:
                           description: |-
                             ComponentRoleSpec configures one named Pod-producing role inside a compound component.
