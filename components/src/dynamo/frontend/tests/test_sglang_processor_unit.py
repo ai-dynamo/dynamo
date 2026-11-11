@@ -190,6 +190,27 @@ class TestBuildDynamoPreproc:  # FRONTEND.7 — worker subprocess preproc constr
         assert sampling["frequency_penalty"] == 0.0
         assert sampling["repetition_penalty"] == 1.0
         assert sampling["seed"] is None
+        assert sampling["logit_bias"] is None
+
+    @pytest.mark.core
+    @pytest.mark.parametrize(
+        ("request_data", "expected"),
+        [
+            pytest.param({"logit_bias": {"151667": 2}}, {151667: 2.0}, id="positive"),
+            pytest.param({}, None, id="omitted"),
+            pytest.param({"logit_bias": None}, None, id="null"),
+            pytest.param({"logit_bias": {}}, None, id="empty"),
+        ],
+    )
+    def test_logit_bias_projection(self, request_data, expected):
+        request = {"model": "test", "messages": [], **request_data}
+        result = _build_dynamo_preproc(request, [1, 2], "test", None)
+        assert result["sampling_options"]["logit_bias"] == expected
+        if expected is not None:
+            # The preproc holds its own copy, so the request map stays isolated.
+            assert result["sampling_options"]["logit_bias"] is not (
+                request["logit_bias"]
+            )
 
     @pytest.mark.parametrize(
         ("request_data", "expected"),
@@ -4600,6 +4621,517 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
         assert dynamo_preproc["multi_modal_data"] == {
             "image_url": [{"Url": "https://example.com/k3.png"}]
         }
+
+    def _preprocess_with_kimi_k3_template_capture(
+        self,
+        monkeypatch,
+        request,
+        *,
+        chat_template=None,
+        mutate_template_kwargs=None,
+        tool_call_parser_name=None,
+        reasoning_parser_name="kimi_k3",
+        cached_renderer=False,
+        renderer_chat_template=None,
+    ):
+        captured = {}
+
+        class CapturingTokenizer:
+            def apply_chat_template(self, messages, **kwargs):
+                captured["messages"] = messages
+                captured["kwargs"] = kwargs
+                if mutate_template_kwargs is not None:
+                    mutate_template_kwargs(kwargs)
+                return [1, 2, 3]
+
+        CapturingTokenizer.chat_template = chat_template
+
+        def fake_create_parsers(*args, force_reasoning=False, **kwargs):
+            return None, types.SimpleNamespace(force_reasoning=force_reasoning)
+
+        monkeypatch.setattr(
+            sglang_prepost_module,
+            "create_parsers",
+            fake_create_parsers,
+        )
+        monkeypatch.setattr(
+            sglang_prompt_renderer_module,
+            "process_content_for_template_format",
+            lambda message, *args, **kwargs: message,
+        )
+
+        tokenizer = CapturingTokenizer()
+        prompt_renderer = (
+            build_prompt_renderer(
+                tokenizer,
+                chat_template=renderer_chat_template,
+                tool_call_parser_name=tool_call_parser_name,
+                reasoning_parser_name=reasoning_parser_name,
+            )
+            if cached_renderer
+            else None
+        )
+        result = preprocess_chat_request(
+            request,
+            tokenizer=tokenizer,
+            tool_call_parser_name=tool_call_parser_name,
+            reasoning_parser_name=reasoning_parser_name,
+            prompt_renderer=prompt_renderer,
+        )
+        return result, captured
+
+    def test_kimi_k3_forwards_required_choice_response_format_and_effort(
+        self, monkeypatch
+    ):
+        request = {
+            "model": "moonshotai/Kimi-K3",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "tools": [parity_tool()],
+            "tool_choice": "required",
+            "response_format": {"type": "json_object"},
+            "reasoning_effort": "high",
+        }
+
+        _, captured = self._preprocess_with_kimi_k3_template_capture(
+            monkeypatch, request
+        )
+        kwargs = captured["kwargs"]
+
+        assert kwargs["tool_choice"] == "required"
+        assert kwargs["response_format"] == {"type": "json_object"}
+        assert kwargs["thinking_effort"] == "high"
+        assert "reasoning_effort" not in kwargs
+        assert kwargs["tokenize"] is True
+        assert kwargs["return_dict"] is False
+        assert len(captured["messages"]) == 1
+
+    @pytest.mark.parametrize("structural_tag_mode", ["off", "on"])
+    @pytest.mark.parametrize("choice", ["required", "named"])
+    def test_kimi_k3_forced_choice_keeps_guidance_and_parser_paired(
+        self, structural_tag_mode, choice
+    ):
+        class NativeTokenizer:
+            chat_template = None
+
+            def apply_chat_template(self, messages, **kwargs):
+                return [1, 2, 3]
+
+        request = {
+            "model": "moonshotai/Kimi-K3.1-Pro",
+            "messages": [{"role": "user", "content": "Weather in Paris?"}],
+            "tools": [parity_tool()],
+            "tool_choice": tool_choice_value(choice),
+            "chat_template_kwargs": {"thinking": False},
+        }
+        result = preprocess_chat_request(
+            request,
+            tokenizer=NativeTokenizer(),
+            tool_call_parser_name="kimi_k3",
+            reasoning_parser_name="kimi_k3",
+            structural_tag_mode=structural_tag_mode,
+        )
+
+        assert result.guided_decoding is not None
+        if structural_tag_mode == "off":
+            assert set(result.guided_decoding) == {"json"}
+            assert isinstance(result.tool_call_parser, JsonArrayParser)
+            payload = '[{"name":"get_weather","parameters":{"city":"Paris"}}]'
+            # Dynamo reparses JSON-array output at finish time via this helper.
+            calls = _parse_json_array_buffer(payload)
+        else:
+            assert set(result.guided_decoding) == {"structural_tag"}
+            assert isinstance(result.tool_call_parser, FunctionCallParser)
+            payload = (
+                '<|open|>tools<|sep|><|open|>call tool="get_weather" index="1"<|sep|>'
+                '<|open|>argument key="city" type="string"<|sep|>Paris'
+                "<|close|>argument<|sep|><|close|>call<|sep|><|close|>tools<|sep|>"
+            )
+            _, calls = result.tool_call_parser.parse_non_stream(payload)
+        assert len(calls) == 1
+        assert calls[0].name == "get_weather"
+        assert json.loads(calls[0].parameters) == {"city": "Paris"}
+
+    def test_kimi_k3_named_choice_renders_forced_call_without_filtering_tools(
+        self, monkeypatch
+    ):
+        request = {
+            "model": "moonshotai/Kimi-K3",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "tools": [
+                parity_tool(),
+                {
+                    "type": "function",
+                    "function": {"name": "get_time", "parameters": {}},
+                },
+            ],
+            "tool_choice": {
+                "type": "function",
+                "function": {"name": "get_weather"},
+            },
+        }
+
+        _, captured = self._preprocess_with_kimi_k3_template_capture(
+            monkeypatch, request
+        )
+        kwargs = captured["kwargs"]
+
+        assert "tool_choice" not in kwargs
+        assert kwargs["thinking"] is False
+        assert kwargs["enable_thinking"] is False
+        assert [tool["function"]["name"] for tool in kwargs["tools"]] == [
+            "get_weather",
+            "get_time",
+        ]
+        assert captured["messages"][-1] == {
+            "role": "system",
+            "content": (
+                "The system is invoked with `tool_choice=specified`.\n"
+                "You MUST call the tool `get_weather` in the next message."
+            ),
+        }
+        assert len(request["messages"]) == 1
+
+    def test_kimi_k3_developer_tools_render_as_system_without_mutating_request(
+        self, monkeypatch
+    ):
+        request = {
+            "model": "moonshotai/Kimi-K3",
+            "messages": [
+                {
+                    "role": "developer",
+                    "content": "Use the declared tools.",
+                    "tools": [parity_tool()],
+                },
+                {"role": "user", "content": "Hello"},
+            ],
+            "tool_choice": "auto",
+        }
+        original_messages = copy.deepcopy(request["messages"])
+
+        _, captured = self._preprocess_with_kimi_k3_template_capture(
+            monkeypatch, request
+        )
+
+        assert captured["messages"][0]["role"] == "system"
+        assert request["messages"] == original_messages
+
+    def test_kimi_k3_does_not_forward_none_without_tools(self, monkeypatch):
+        request = {
+            "model": "moonshotai/Kimi-K3",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "tool_choice": "none",
+        }
+
+        _, captured = self._preprocess_with_kimi_k3_template_capture(
+            monkeypatch, request
+        )
+
+        assert "tool_choice" not in captured["kwargs"]
+        assert "tools" not in captured["kwargs"]
+
+    def test_kimi_k3_forwards_none_with_tools(self, monkeypatch):
+        request = {
+            "model": "moonshotai/Kimi-K3",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "tools": [parity_tool()],
+            "tool_choice": "none",
+        }
+
+        _, captured = self._preprocess_with_kimi_k3_template_capture(
+            monkeypatch, request
+        )
+
+        assert captured["kwargs"]["tool_choice"] == "none"
+
+    def test_kimi_k3_rejects_required_without_tools(self, monkeypatch):
+        request = {
+            "model": "moonshotai/Kimi-K3",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "tool_choice": "required",
+        }
+
+        with pytest.raises(
+            PreprocessError, match='tool_choice is "required" but tools is empty'
+        ):
+            self._preprocess_with_kimi_k3_template_capture(monkeypatch, request)
+
+    def test_kimi_k3_rejects_unsupported_effort(self, monkeypatch):
+        request = {
+            "model": "moonshotai/Kimi-K3",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "reasoning_effort": "medium",
+        }
+
+        with pytest.raises(
+            PreprocessError,
+            match=(
+                r"Kimi K3 does not support reasoning_effort='medium'; "
+                r"supported values are 'low', 'high', and 'max'"
+            ),
+        ):
+            self._preprocess_with_kimi_k3_template_capture(monkeypatch, request)
+
+    def test_kimi_k3_rejects_unsupported_explicit_thinking_effort(self, monkeypatch):
+        request = {
+            "model": "moonshotai/Kimi-K3",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "chat_template_kwargs": {"thinking_effort": "medium"},
+        }
+
+        with pytest.raises(
+            PreprocessError,
+            match=(
+                r"Kimi K3 does not support thinking_effort='medium'; "
+                r"supported values are 'low', 'high', and 'max'"
+            ),
+        ):
+            self._preprocess_with_kimi_k3_template_capture(monkeypatch, request)
+
+    def test_kimi_k3_reasoning_effort_none_does_not_set_an_effort(self, monkeypatch):
+        request = {
+            "model": "moonshotai/Kimi-K3",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "reasoning_effort": "none",
+            "chat_template_kwargs": {"thinking": False},
+        }
+
+        _, captured = self._preprocess_with_kimi_k3_template_capture(
+            monkeypatch, request
+        )
+
+        assert "thinking_effort" not in captured["kwargs"]
+        assert "reasoning_effort" not in captured["kwargs"]
+
+    def test_kimi_k3_explicit_thinking_effort_wins_over_root_effort(self, monkeypatch):
+        request = {
+            "model": "moonshotai/Kimi-K3",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "reasoning_effort": "high",
+            "chat_template_kwargs": {"thinking_effort": "low"},
+        }
+
+        _, captured = self._preprocess_with_kimi_k3_template_capture(
+            monkeypatch, request
+        )
+
+        assert captured["kwargs"]["thinking_effort"] == "low"
+        assert "reasoning_effort" not in captured["kwargs"]
+
+    @pytest.mark.parametrize("cached_renderer", [False, True])
+    @pytest.mark.parametrize("explicit_null", [False, True])
+    def test_kimi_k3_preserves_null_versus_omitted_effort(
+        self, monkeypatch, cached_renderer, explicit_null
+    ):
+        request = {
+            "model": "moonshotai/Kimi-K3.1-Pro",
+            "messages": [{"role": "user", "content": "Hello"}],
+        }
+        if explicit_null:
+            request["reasoning_effort"] = "high"
+            request["chat_template_kwargs"] = {"thinking_effort": None}
+        original = copy.deepcopy(request)
+
+        _, captured = self._preprocess_with_kimi_k3_template_capture(
+            monkeypatch, request, cached_renderer=cached_renderer
+        )
+
+        kwargs = captured["kwargs"]
+        assert ("thinking_effort" in kwargs) is explicit_null
+        if explicit_null:
+            assert kwargs["thinking_effort"] is None
+        assert "reasoning_effort" not in kwargs
+        assert request == original
+
+    @pytest.mark.parametrize("effort_key", ["thinking_effort", "reasoning_effort"])
+    @pytest.mark.parametrize("effort", [[], {}])
+    @pytest.mark.parametrize("thinking_disabled", [False, True])
+    def test_kimi_k3_nonstring_effort_respects_thinking_mode(
+        self, monkeypatch, effort_key, effort, thinking_disabled
+    ):
+        request = {
+            "model": "moonshotai/Kimi-K3",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "chat_template_kwargs": {"thinking": not thinking_disabled},
+        }
+        if effort_key == "thinking_effort":
+            request["chat_template_kwargs"][effort_key] = effort
+        else:
+            request[effort_key] = effort
+
+        if thinking_disabled:
+            result, _ = self._preprocess_with_kimi_k3_template_capture(
+                monkeypatch, request
+            )
+            assert result.force_reasoning is False
+        else:
+            with pytest.raises(
+                PreprocessError, match=f"does not support {effort_key}="
+            ):
+                self._preprocess_with_kimi_k3_template_capture(monkeypatch, request)
+
+    @pytest.mark.parametrize(
+        ("model", "tool_parser", "reasoning_parser", "is_kimi"),
+        [
+            ("moonshotai/Kimi-K3.1-Pro", None, None, True),
+            ("local-model", "kimi_k3", None, True),
+            ("local-model", None, "kimi-k3", True),
+            ("moonshotai/Kimi-K2.5", None, "kimi_k2", False),
+            ("generic-model", None, None, False),
+        ],
+    )
+    def test_kimi_k3_cached_renderer_selects_by_request_or_parser_hints(
+        self, monkeypatch, model, tool_parser, reasoning_parser, is_kimi
+    ):
+        request = {
+            "model": model,
+            "messages": [{"role": "developer", "content": "Hello"}],
+            "reasoning_effort": "high",
+        }
+
+        _, captured = self._preprocess_with_kimi_k3_template_capture(
+            monkeypatch,
+            request,
+            tool_call_parser_name=tool_parser,
+            reasoning_parser_name=reasoning_parser,
+            cached_renderer=True,
+        )
+
+        assert captured["messages"][0]["role"] == ("system" if is_kimi else "developer")
+        assert (
+            captured["kwargs"].get("thinking_effort" if is_kimi else "reasoning_effort")
+            == "high"
+        )
+        assert ("return_dict" in captured["kwargs"]) is is_kimi
+
+    def test_kimi_k3_explicit_jinja_renderer_bypasses_native_preprocessing(
+        self, monkeypatch
+    ):
+        request = {
+            "model": "moonshotai/Kimi-K3",
+            "messages": [{"role": "developer", "content": "Hello"}],
+            "tools": [
+                parity_tool(),
+                {"type": "function", "function": {"name": "get_time"}},
+            ],
+            "tool_choice": {"type": "function", "function": {"name": "get_weather"}},
+            "chat_template_kwargs": {"thinking": True},
+            "reasoning_effort": "high",
+        }
+
+        result, captured = self._preprocess_with_kimi_k3_template_capture(
+            monkeypatch,
+            request,
+            cached_renderer=True,
+            renderer_chat_template="custom-template",
+        )
+
+        assert captured["messages"] == request["messages"]
+        assert result.force_reasoning is True
+        assert captured["kwargs"]["thinking"] is True
+        assert captured["kwargs"]["reasoning_effort"] == "high"
+        assert "thinking_effort" not in captured["kwargs"]
+        assert "return_dict" not in captured["kwargs"]
+        assert [tool["function"]["name"] for tool in captured["kwargs"]["tools"]] == [
+            "get_weather"
+        ]
+
+    def test_kimi_k3_template_kwargs_override_controls_not_token_output_shape(
+        self, monkeypatch
+    ):
+        request = {
+            "model": "moonshotai/Kimi-K3",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "tools": [parity_tool()],
+            "tool_choice": "required",
+            "response_format": {"type": "json_object"},
+            "chat_template_kwargs": {
+                "tool_choice": "none",
+                "response_format": {"type": "text"},
+                "tokenize": False,
+                "return_dict": True,
+            },
+        }
+
+        _, captured = self._preprocess_with_kimi_k3_template_capture(
+            monkeypatch, request
+        )
+
+        assert captured["kwargs"]["tool_choice"] == "none"
+        assert captured["kwargs"]["response_format"] == {"type": "text"}
+        assert captured["kwargs"]["tokenize"] is True
+        assert captured["kwargs"]["return_dict"] is False
+
+    def test_kimi_k3_jinja_template_keeps_openai_reasoning_effort(self, monkeypatch):
+        request = {
+            "model": "moonshotai/Kimi-K3",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "tools": [parity_tool()],
+            "tool_choice": "required",
+            "response_format": {"type": "json_object"},
+            "reasoning_effort": "high",
+        }
+
+        _, captured = self._preprocess_with_kimi_k3_template_capture(
+            monkeypatch, request, chat_template="template"
+        )
+        kwargs = captured["kwargs"]
+
+        assert kwargs["reasoning_effort"] == "high"
+        assert "thinking_effort" not in kwargs
+        assert "tool_choice" not in kwargs
+        assert "response_format" not in kwargs
+        assert "return_dict" not in kwargs
+
+    def test_kimi_k3_forwards_json_schema_response_format(self, monkeypatch):
+        response_format = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "answer",
+                "schema": {
+                    "type": "object",
+                    "properties": {"answer": {"type": "string"}},
+                    "required": ["answer"],
+                },
+            },
+        }
+        request = {
+            "model": "moonshotai/Kimi-K3",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "response_format": response_format,
+        }
+
+        _, captured = self._preprocess_with_kimi_k3_template_capture(
+            monkeypatch, request
+        )
+
+        assert captured["kwargs"]["response_format"] == response_format
+
+    def test_kimi_k3_tokenizer_cannot_mutate_request_response_format(self, monkeypatch):
+        request = {
+            "model": "moonshotai/Kimi-K3",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "answer",
+                    "schema": {"type": "object"},
+                },
+            },
+        }
+        original_response_format = copy.deepcopy(request["response_format"])
+
+        def mutate_response_format(kwargs):
+            forwarded = kwargs["response_format"]
+            forwarded["type"] = "mutated"
+            forwarded["json_schema"]["schema"]["type"] = "string"
+
+        self._preprocess_with_kimi_k3_template_capture(
+            monkeypatch,
+            request,
+            mutate_template_kwargs=mutate_response_format,
+        )
+
+        assert request["response_format"] == original_response_format
 
 
 # ---------------------------------------------------------------------------
