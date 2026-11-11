@@ -263,12 +263,15 @@ pub struct WorkerSet {
     /// The `reasoning_effort` Anthropic disabled thinking selects on a native Mistral card,
     /// resolved from its `tekken.json` when the set is prepared.
     mistral_disabled_thinking_effort: Option<ReasoningEffort>,
+    /// Follows the shared chat engine, even when an adapter card has no tokenizer.
+    is_native_mistral_renderer: bool,
     unsupported_unified_family: Option<&'static str>,
 }
 
 impl WorkerSet {
     /// Create an unbound set; engines and discovery admission are installed later.
     pub fn new(namespace: String, mdcsum: String, card: ModelDeploymentCard) -> Self {
+        let is_native_mistral_renderer = card.uses_native_mistral_renderer();
         Self {
             namespace,
             endpoint_id: None,
@@ -299,6 +302,7 @@ impl WorkerSet {
             allocator_trim: None,
             allocator_trim_wrapped: false,
             mistral_disabled_thinking_effort: None,
+            is_native_mistral_renderer,
             unsupported_unified_family: None,
         }
     }
@@ -473,7 +477,7 @@ impl WorkerSet {
                 .get(crate::preprocessor::DEFAULT_THINKING_MODE_RUNTIME_KEY)
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_string),
-            native_mistral_renderer: self.card.uses_native_mistral_renderer(),
+            native_mistral_renderer: self.is_native_mistral_renderer,
             mistral_disabled_thinking_effort: self.mistral_disabled_thinking_effort.clone(),
             unsupported_unified_family: self.unsupported_unified_family.map(str::to_string),
             structural_tag: self.card.runtime_config.structural_tag.clone(),
@@ -644,6 +648,7 @@ impl WorkerSet {
             allocator_trim_wrapped: false,
             // An adapter renders through the base model's chat engine and tokenizer.
             mistral_disabled_thinking_effort: self.mistral_disabled_thinking_effort.clone(),
+            is_native_mistral_renderer: self.is_native_mistral_renderer,
             unsupported_unified_family: self.unsupported_unified_family,
         };
         if self.allocator_trim.is_some() {
@@ -765,8 +770,16 @@ mod tests {
     }
 
     #[test]
-    fn adapter_view_keeps_the_mistral_disabled_thinking_effort() {
-        let mut base = make_worker_set("ns1", "abc123");
+    fn adapter_view_keeps_the_mistral_renderer_and_disabled_thinking_effort() {
+        let card = ModelDeploymentCard::load_from_disk(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/data/sample-models/mock-mistral-tekken"
+            ),
+            None,
+        )
+        .unwrap();
+        let mut base = WorkerSet::new("ns1".to_string(), "abc123".to_string(), card);
         base.set_mistral_disabled_thinking_effort(Some(ReasoningEffort::Low));
         let mut adapter_card = ModelDeploymentCard::with_name_only("adapter-model");
         adapter_card.lora = Some(crate::model_card::LoraInfo {
@@ -774,7 +787,9 @@ mod tests {
             max_gpu_lora_count: Some(4),
         });
         let adapter = base.adapter_view(adapter_card);
+        assert!(adapter.card.tokenizer.is_none());
         for set in [&base, &adapter] {
+            assert!(set.parsing_options().native_mistral_renderer);
             assert_eq!(
                 set.parsing_options().mistral_disabled_thinking_effort,
                 Some(ReasoningEffort::Low)
