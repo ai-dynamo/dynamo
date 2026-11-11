@@ -74,6 +74,12 @@ _SEND_TIMEOUT_S = 60.0
 _SHUTDOWN_GRACE_S = 60.0
 # The status code TokenSpeed puts on an abort that refuses a client error.
 _CLIENT_ERROR_STATUS = 400
+# How long an aborted request waits for the engine's final chunk. The pinned
+# TokenSpeed client sends none for a request aborted while still queued
+# (lightseekorg/tokenspeed#3227), so the stream ends on its own after this.
+_ABORT_GRACE_S = 5.0
+# Put on a request's stream when its abort went unanswered for the grace period.
+_ABORT_UNANSWERED = object()
 
 
 class TokenspeedLLMEngine(LLMEngine):
@@ -106,6 +112,7 @@ class TokenspeedLLMEngine(LLMEngine):
         self._monitor: asyncio.Task | None = None
         self._stopping = False
         self._failure: str | None = None
+        self._abort_grace_s = _ABORT_GRACE_S
 
     @classmethod
     async def from_args(
@@ -428,9 +435,13 @@ class TokenspeedLLMEngine(LLMEngine):
             submitted = True
             if rid in self._cancelled:
                 # abort() ran while the submission was in flight.
-                await self._abort_native(rid)
+                await self._abort_and_end(rid)
             while not finished:
                 item = await stream.get()
+                if item is _ABORT_UNANSWERED:
+                    finished = True
+                    yield {"index": 0, "token_ids": [], "finish_reason": "cancelled"}
+                    break
                 if isinstance(item, BaseException):
                     raise RuntimeError(str(item)) from item
                 chunk = convert_output_to_chunk(item, cancelled=rid in self._cancelled)
@@ -498,8 +509,25 @@ class TokenspeedLLMEngine(LLMEngine):
         if self.frontend is None or rid is None or rid not in self._streams:
             return
         self._cancelled.add(rid)
-        await self._abort_native(rid)
+        await self._abort_and_end(rid)
         logger.debug("Aborted TokenSpeed request %s", rid)
+
+    async def _abort_and_end(self, rid: str) -> None:
+        """Abort a request and make sure its stream ends. The engine's final
+        chunk normally ends it; if none arrives within the grace period, end it
+        here so the request does not stay in flight in the worker."""
+        await self._abort_native(rid)
+        stream = self._streams.get(rid)
+        if stream is None:
+            return
+
+        def end_unanswered() -> None:
+            # The stream may have finished, or its id been reused, meanwhile.
+            if self._streams.get(rid) is stream:
+                logger.debug("TokenSpeed sent no final chunk for aborted %s", rid)
+                stream.put_nowait(_ABORT_UNANSWERED)
+
+        asyncio.get_running_loop().call_later(self._abort_grace_s, end_unanswered)
 
     async def _abort_native(self, rid: str) -> None:
         frontend = self.frontend

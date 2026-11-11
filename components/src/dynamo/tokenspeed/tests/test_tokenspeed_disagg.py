@@ -133,6 +133,10 @@ class FakeFrontend:
         self.native.aborted.append(rid)
         if rid not in self.unfinished:
             return False
+        if not self.native.abort_answers:
+            # The pinned client's behavior for a request still queued in the
+            # engine: the request stays in flight and no chunk follows.
+            return True
         self.deliver(
             rid,
             wire_output(
@@ -167,6 +171,7 @@ class FakeNative:
         self.launcher_exit_code = None
         self.submitted = []
         self.aborted = []
+        self.abort_answers = True
         self.submit_gate = None
         self.frontend = None
         self._registered = threading.Event()
@@ -1056,6 +1061,27 @@ async def test_abort_mid_stream_ends_with_cancelled(native):
         chunks = await drain(stream)
         assert chunks[-1]["finish_reason"] == "cancelled"
         assert native.aborted == ["stream-cancel"]
+        assert engine._streams == {}
+        assert engine._cancelled == set()
+    finally:
+        await stream.aclose()
+        await engine.cleanup()
+
+
+async def test_unanswered_abort_still_ends_the_stream(native):
+    native.respond = lambda request: [wire_output([20])]
+    native.abort_answers = False
+    engine = make_engine()
+    engine._abort_grace_s = 0
+    await engine.start(worker_id=1)
+    ctx = context("queued-cancel")
+    stream = engine.generate({"token_ids": [10]}, ctx)
+    try:
+        assert (await anext(stream))["token_ids"] == [20]
+        await engine.abort(ctx)
+        chunks = await drain(stream)
+        assert chunks[-1]["finish_reason"] == "cancelled"
+        assert native.aborted == ["queued-cancel"]
         assert engine._streams == {}
         assert engine._cancelled == set()
     finally:
