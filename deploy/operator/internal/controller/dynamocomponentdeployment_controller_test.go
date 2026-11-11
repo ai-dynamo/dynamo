@@ -1236,7 +1236,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 								},
 								ExtraPodSpec: &v1alpha1.ExtraPodSpec{
 									PodSpec: &corev1.PodSpec{
-										TerminationGracePeriodSeconds: new(int64(10)),
+										TerminationGracePeriodSeconds: new(int64(60)),
 										Containers: []corev1.Container{
 											{
 												Image: "another-image:latest",
@@ -1308,7 +1308,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 								"nvidia.com/annotation1": "annotation1",
 							},
 							Spec: corev1.PodSpec{
-								TerminationGracePeriodSeconds: new(int64(10)),
+								TerminationGracePeriodSeconds: new(int64(60)),
 								SecurityContext: &corev1.PodSecurityContext{
 									FSGroup: ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
 								},
@@ -1441,7 +1441,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 								},
 							},
 							Spec: corev1.PodSpec{
-								TerminationGracePeriodSeconds: new(int64(10)),
+								TerminationGracePeriodSeconds: new(int64(60)),
 								SecurityContext: &corev1.PodSecurityContext{
 									FSGroup: ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
 								},
