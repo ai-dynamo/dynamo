@@ -46,7 +46,6 @@ Run each command from the Dynamo repository root in its own terminal. These sour
 ```bash
 DYN_ROUTER_WORKER_SELECTION_POLICY=soft-pin-repin \
 python -m dynamo.frontend \
-  --router-mode kv \
   --router-policy-config examples/router/custom-policy-example/soft-pin-repin/worker-selection.yaml \
   --router-session-affinity-ttl-secs 60 \
   --router-session-affinity-mode soft \

@@ -229,7 +229,6 @@ CARGO_TARGET_DIR="$DYNAMO_DIR/target" maturin develop --uv --features custom-pol
 cd "$DYNAMO_DIR"
 uv pip install -e .
 python3 -m dynamo.frontend \
-  --router-mode kv \
   --router-policy-config /path/to/worker-selection.yaml
 ```
 
@@ -285,7 +284,6 @@ In the first terminal, start the frontend. The YAML selects `simple-filter-score
 
 ```bash
 python -m dynamo.frontend \
-  --router-mode kv \
   --router-policy-config /tmp/worker-selection.yaml \
   --discovery-backend file \
   --http-port 8000
@@ -319,7 +317,6 @@ Keep the Mocker process active to try `simple-stacked-score-pick`. It takes no p
 ```bash
 DYN_ROUTER_WORKER_SELECTION_POLICY=simple-stacked-score-pick \
 python -m dynamo.frontend \
-  --router-mode kv \
   --router-policy-config /tmp/worker-selection.yaml \
   --discovery-backend file \
   --http-port 8000
@@ -333,7 +330,6 @@ Stop the frontend and Mocker processes. Start the frontend again; the YAML's `pr
 
 ```bash
 python -m dynamo.frontend \
-  --router-mode kv \
   --router-policy-config /tmp/worker-selection.yaml \
   --discovery-backend file \
   --http-port 8000

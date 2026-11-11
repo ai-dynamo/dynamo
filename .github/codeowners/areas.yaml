@@ -76,6 +76,7 @@ areas:
   - lib/router-plugins/
   - examples/router/policy-class-queues.yaml
   - examples/router/custom-policy-example/
+  - examples/router/policies/
 - label: global-router
   github_team: '@ai-dynamo/dynamo-global-router-codeowners'
   path_globs:

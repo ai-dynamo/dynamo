@@ -3897,13 +3897,17 @@ def _test_disagg_per_role_router_modes(
     test_payload: dict,
     store_backend: str = "etcd",
     request_plane: str = "nats",
+    router_policy_config: str | None = None,
 ):
     """Validate that prefill and decode tiers can run different router modes.
 
-    The prefill mockers advertise ``RouterConfig(RouterMode.KV)`` in their model
-    deployment cards while the decode mockers advertise nothing, so decode
-    inherits the frontend's ``--router-mode round-robin``. This asserts the two
-    hops are genuinely routed on different terms:
+    Without ``router_policy_config``, the prefill mockers advertise
+    ``RouterConfig(RouterMode.KV)`` in their model deployment cards while the
+    decode mockers advertise nothing, so decode inherits the frontend's
+    ``--router-mode round-robin``. With it, no worker advertises anything and
+    the frontend takes only the policy file, which selects a KV policy for
+    prefill and round-robin for decode. Either way, this asserts the two hops
+    are genuinely routed on different terms:
 
     1. Progressive prefix-extending requests converge on ONE prefill worker,
        which only KV routing produces — round-robin would rotate.
@@ -3922,15 +3926,15 @@ def _test_disagg_per_role_router_modes(
         decode_workers.namespace,
         store_backend,
         request_plane=request_plane,
-        router_mode="round-robin",
+        router_mode=None if router_policy_config is not None else "round-robin",
+        router_policy_config=router_policy_config,
         min_initial_workers=decode_workers.num_workers,
     ):
         frontend_url = f"http://localhost:{frontend_port}"
         chat_url = f"{frontend_url}/v1/chat/completions"
 
         logger.info(
-            "Waiting for prefill and decode workers to register with the "
-            "round-robin frontend..."
+            "Waiting for prefill and decode workers to register with the frontend..."
         )
         asyncio.run(
             wait_for_frontend_ready(
@@ -4005,25 +4009,33 @@ def _test_disagg_per_role_router_modes(
             len(decode_ids) == num_requests
         ), f"Expected {num_requests} decode_worker_ids, got {len(decode_ids)}."
 
-        # The prefill tier advertised KV, so prefix reuse must concentrate it.
+        # The prefill tier is KV-routed, so prefix reuse must concentrate it.
         # As in the all-KV disagg test, the TCP request plane can show a
         # transient on the first request before the initial "stored" KV events
         # are ingested, so only requests 2..N are required to converge there.
         converged = prefill_ids[1:] if request_plane == "tcp" else prefill_ids
         assert len(set(converged)) == 1, (
-            f"Prefill advertised RouterMode.KV, so prefix-extending requests must "
+            f"Prefill is KV-routed, so prefix-extending requests must "
             f"converge on one prefill worker; got {set(converged)}. "
             f"Full list: {prefill_ids}"
         )
 
-        # The decode tier inherited round-robin, so it must NOT converge. If the
-        # prefill card's override had leaked into the decode router (or the
-        # decode set had been dragged into KV mode), these would collapse to one.
+        # The decode tier is round-robin, so it must NOT converge. If the
+        # prefill tier's policy had leaked into the decode router, these would
+        # collapse to one.
         assert len(set(decode_ids)) > 1, (
-            f"Decode inherited round-robin, so requests must spread across "
+            f"Decode is round-robin, so requests must spread across "
             f"workers; all {num_requests} landed on {set(decode_ids)}. "
             f"This means the per-role router config did not take effect."
         )
+        if router_policy_config is not None:
+            # Without the file's `decode: round-robin`, decode runs the default
+            # KV selector, which breaks ties at random and repeats a worker.
+            repeats = [a for a, b in zip(decode_ids, decode_ids[1:]) if a == b]
+            assert not repeats, (
+                f"Decode is round-robin, so consecutive requests must land on "
+                f"different workers; got {decode_ids}."
+            )
 
         assert prefill_ids[0] not in set(decode_ids), (
             f"Prefill worker {prefill_ids[0]} should not appear in the decode "

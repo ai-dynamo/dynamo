@@ -43,7 +43,6 @@ Start the frontend against your existing aggregated workers, using the same disc
 
 ```bash
 python3 -m dynamo.frontend \
-  --router-mode kv \
   --router-policy-config thunderagent.yaml \
   --router-session-affinity-ttl-secs 1800 \
   --router-session-affinity-mode soft

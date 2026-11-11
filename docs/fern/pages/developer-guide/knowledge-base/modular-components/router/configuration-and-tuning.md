@@ -114,6 +114,9 @@ link no catalog and reject a configured policy type at startup.
 | Policy type | Behavior |
 |---|---|
 | `default` | Dynamo's built-in selector and cost model. Reserved; always available. |
+| `round-robin` | One shared rotation over the eligible workers. |
+| `random` | A uniform random eligible worker. |
+| `least-loaded` | The eligible worker with the fewest active requests, ties broken at random. |
 | `dynamo-default-cost-fn` | The default cost model with configurable scoring and sampling parameters. |
 | `thunderagent` | Honors the paired ThunderAgent classifier's worker/rank preference, then falls back to the least-loaded eligible worker. Enable both roles for program-aware admission and repacking; see [Schedule Agents with ThunderAgent](../../../../use-cases/agents/thunderagent-program-scheduler.md#native-frontend-plugin). |
 | `dynamo-two-tier-cost-fn` | Ranks on two tiers instead of one additive cost: active-request load first, then device-KV prefix overlap. Prefers the worker holding the largest prefix overlap unless load is badly imbalanced. Thresholds and selection order ported from the experimental SGLang router's `cache_aware_zmq` policy. Thresholds are tunable; the defaults reproduce it exactly. |
@@ -130,7 +133,9 @@ worker_selection:
 ```
 
 `aggregated`, `prefill`, `decode`, and `encode` each select a policy, so prefill and decode pools
-can run different policies. An omitted role falls back to the built-in selector; one role never
+can run different policies; see the tested
+[KV prefill, round-robin decode sample](https://github.com/ai-dynamo/dynamo/blob/main/examples/router/policies/kv-prefill-round-robin-decode.yaml).
+An omitted role falls back to the built-in selector; one role never
 inherits another role's selection. A bare string is a policy type from the table above with its
 default parameters. To tune a policy, write a mapping with `type` and `parameters` instead (see
 [Configure the Default Policy](#configure-the-default-policy)).
@@ -142,8 +147,20 @@ default parameters. To tune a policy, write a mapping with `type` and `parameter
 > selected it.
 
 ```bash
-python3 -m dynamo.frontend --router-mode kv --router-policy-config worker-selection.yaml
+python3 -m dynamo.frontend --router-policy-config worker-selection.yaml
 ```
+
+The file selects each role's policy, so the frontend takes no `--router-mode`. To run one policy
+type on every role with its default parameters, name the type on the command line and omit the
+file:
+
+```bash
+python3 -m dynamo.frontend --router-mode dynamo-two-tier-cost-fn
+```
+
+`--router-mode` and `--router-policy-config` are mutually exclusive: the frontend rejects a policy
+file passed with any `--router-mode` other than `kv`. `--router-mode kv` is an alias for the
+default KV cost function and may still accompany a policy file.
 
 #### Configure the Default Policy
 
@@ -211,7 +228,7 @@ router:
   router_predicted_ttl_secs: null
 ```
 
-Start with `--router-mode kv --router-policy-config worker-selection.yaml`. The default policy then routes by load without requesting cache inputs.
+Start with `--router-policy-config worker-selection.yaml`. The default policy then routes by load without requesting cache inputs.
 
 #### Tune a Policy
 
@@ -404,7 +421,6 @@ the router uses a synthetic `default` class, which queues only when
 
 ```bash
 python -m dynamo.frontend \
-    --router-mode kv \
     --router-policy-config examples/router/policy-class-queues.yaml
 ```
 

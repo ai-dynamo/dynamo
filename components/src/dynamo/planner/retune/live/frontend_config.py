@@ -65,6 +65,7 @@ from dynamo.common.configuration.groups.kv_router_args import (
 from dynamo.common.configuration.groups.router_args import (
     RouterConfigBase,
     add_worker_router_arguments,
+    resolve_router_mode,
 )
 from dynamo.common.configuration.utils import ArgEnv
 from dynamo.frontend.frontend_args import build_frontend_parser
@@ -199,6 +200,7 @@ _ROUTER_ADMISSION_FIELDS = (
 # rejects them), so they are checked on the parsed flags.
 _SERDE_SKIPPED_DEFAULTS: dict[str, Any] = {
     "router_approximate_cache_policy": "ttl",
+    "router_worker_selection_policy": None,
     "router_prefill_policy": None,
     "router_decode_policy": None,
 }
@@ -720,6 +722,11 @@ def _parse(
             f"({view.router_policy_config}); the planner cannot read that file, "
             "and live retune needs the builtin default policy"
         )
+    # FrontendConfig.validate: an omitted mode is round-robin, and a policy
+    # type selects that type for every role on the KV router.
+    view.router_mode, view.router_worker_selection_policy = resolve_router_mode(
+        view.router_mode, None
+    )
     try:
         view.apply_load_aware_preset()
         view.apply_conditional_disagg_config()

@@ -195,6 +195,7 @@ fn log_env_config(config: &KvRouterConfig) {
         router_tracking_key_id = ?config.router_tracking_key_id,
         router_queue_threshold = ?config.router_queue_threshold,
         router_policy_config = ?config.router_policy_config,
+        router_worker_selection_policy = ?config.router_worker_selection_policy,
         router_prefill_policy = ?config.router_prefill_policy,
         router_decode_policy = ?config.router_decode_policy,
         conditional_disagg_enabled = config.conditional_disagg_enabled,
@@ -889,6 +890,14 @@ pub struct KvRouterConfig {
     /// Optional startup-only YAML configuration for policy-class queues and custom worker selection.
     pub router_policy_config: Option<String>,
 
+    /// Worker-selection policy type every role uses, set by `--router-mode <type>`.
+    ///
+    /// A role's deprecated `router_prefill_policy` or `router_decode_policy` override wins over
+    /// it, and it wins over `DYN_ROUTER_WORKER_SELECTION_POLICY`. This process-local value is not
+    /// serialized into worker model cards.
+    #[serde(skip)]
+    pub router_worker_selection_policy: Option<String>,
+
     /// Optional prefill worker-selection instance override.
     ///
     /// This process-local value is not serialized into worker model cards.
@@ -1028,6 +1037,7 @@ impl Default for KvRouterConfig {
             router_approximate_cache_policy: ApproximateCachePolicyKind::default(),
             router_queue_threshold: None,
             router_policy_config: None,
+            router_worker_selection_policy: None,
             router_prefill_policy: None,
             router_decode_policy: None,
             policy_model_name: None,
@@ -1093,6 +1103,7 @@ impl TryFrom<KvRouterConfigSerde> for KvRouterConfig {
             router_approximate_cache_policy: ApproximateCachePolicyKind::default(),
             router_queue_threshold: compat.router_queue_threshold,
             router_policy_config: compat.router_policy_config,
+            router_worker_selection_policy: None,
             router_prefill_policy: None,
             router_decode_policy: None,
             policy_model_name: None,
@@ -1402,9 +1413,10 @@ impl KvRouterConfig {
         let policy_config = self
             .worker_selection_config()
             .map_err(|source| WorkerSelectionPolicyConfigError::Config { source })?;
-        let global = selected
+        let environment = selected
             .map_err(|source| WorkerSelectionPolicyConfigError::Environment { source })?
             .and_then(|name| named(Some(&name)));
+        let global = named(self.router_worker_selection_policy.as_deref()).or(environment);
         let yaml =
             |select: fn(&WorkerSelectionConfig) -> Option<&WorkerSelectionPolicySelection>| {
                 policy_config.and_then(select).cloned()
@@ -2382,6 +2394,22 @@ worker_selection:
             }
         );
 
+        // `--router-mode <type>` selects one type for every role. A role's own override still
+        // wins, and the type wins over the environment override.
+        config.router_worker_selection_policy = Some("mode-type".to_string());
+        assert_eq!(
+            config
+                .selected_worker_selection_policy_instances_from(Ok(Some("global".to_string())))
+                .unwrap(),
+            WorkerSelectionPolicySelections {
+                aggregated: Some(named("mode-type")),
+                prefill: Some(named("cli-prefill")),
+                decode: None,
+                encode: Some(named("mode-type")),
+            }
+        );
+        config.router_worker_selection_policy = None;
+
         assert_eq!(
             config
                 .selected_worker_selection_policy_instance_for(WorkerType::Encode)
@@ -2549,11 +2577,13 @@ worker_selection:
         assert!(value.get("router_approximate_cache_policy").is_none());
 
         let frontend_config = KvRouterConfig {
+            router_worker_selection_policy: Some("mode-type".to_string()),
             router_prefill_policy: Some("prefill-policy".to_string()),
             router_decode_policy: Some("decode-policy".to_string()),
             ..Default::default()
         };
         let value = serde_json::to_value(frontend_config).unwrap();
+        assert!(value.get("router_worker_selection_policy").is_none());
         assert!(value.get("router_prefill_policy").is_none());
         assert!(value.get("router_decode_policy").is_none());
 

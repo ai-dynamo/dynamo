@@ -616,9 +616,11 @@ def test_opaque_reference_in_a_typed_non_router_arg_is_fine(args):
     ("args", "match"),
     [
         # Router flags whose value is unreadable.
+        # --router-mode accepts any policy type, so the parser takes the value
+        # and the unreadable-destination check rejects it.
         (
             ("-m", "dynamo.frontend", "--router-mode", "$(HTTP_PORT)"),
-            "router arg references $(HTTP_PORT)",
+            "frontend args set router_mode from env the planner cannot read",
         ),
         (
             (*KV_ARGS, "--router-temp", "$(HTTP_PORT)"),
@@ -784,11 +786,6 @@ def test_router_policy_config_is_unparseable():
     [
         ((*KV_ARGS, "--router-kv-overlap-score-credit", "-1"), {}, "invalid"),
         ((*KV_ARGS, "--router-temperature", "hot"), {}, "cannot parse"),
-        (
-            ("-m", "dynamo.frontend", "--router-mode", "power-of-two"),
-            {},
-            "cannot parse",
-        ),
         ((*KV_ARGS,), {"DYN_ROUTER_TEMPERATURE": "hot"}, "invalid frontend env"),
         (
             (*KV_ARGS, "--router-approximate-cache-policy", "lru"),
@@ -960,6 +957,12 @@ def test_parse_error_fails_p4_only():
             ),
             {},
             "router_approximate_cache_policy='lru'",
+        ),
+        # A --router-mode that names a policy type selects it for every role.
+        (
+            ("-m", "dynamo.frontend", "--router-mode", "dynamo-two-tier-cost-fn"),
+            {},
+            "router_worker_selection_policy='dynamo-two-tier-cost-fn'",
         ),
         ((*KV_ARGS, "--router-prefill-policy", "default"), {}, "router_prefill_policy"),
         ((*KV_ARGS, "--router-decode-policy", "default"), {}, "router_decode_policy"),

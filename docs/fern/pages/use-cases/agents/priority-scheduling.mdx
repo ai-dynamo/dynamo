@@ -55,11 +55,10 @@ policy_classes:
     prefill_busy_threshold_frac: 1.0
 ```
 
-Start the frontend with KV routing and the policy file:
+Start the frontend with the policy file:
 
 ```bash
 python -m dynamo.frontend \
-  --router-mode kv \
   --router-policy-config policy.yaml
 ```
 

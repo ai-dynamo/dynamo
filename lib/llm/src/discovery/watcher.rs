@@ -1546,6 +1546,10 @@ fn effective_router_config<'a>(
     };
 
     let mut effective = worker_config.clone();
+    effective.kv_router_config.router_worker_selection_policy = frontend_config
+        .kv_router_config
+        .router_worker_selection_policy
+        .clone();
     effective.kv_router_config.router_prefill_policy = frontend_config
         .kv_router_config
         .router_prefill_policy
@@ -3751,6 +3755,8 @@ request_classifier:
         let mut frontend = RouterConfig::default();
         frontend.kv_router_config.router_prefill_policy = Some("frontend-prefill".to_string());
         frontend.kv_router_config.router_decode_policy = Some("frontend-decode".to_string());
+        frontend.kv_router_config.router_worker_selection_policy =
+            Some("frontend-type".to_string());
 
         let mut worker = RouterConfig::default();
         worker.kv_router_config.router_temperature = 0.75;
@@ -3769,6 +3775,13 @@ request_classifier:
         assert_eq!(
             effective.kv_router_config.router_decode_policy.as_deref(),
             Some("frontend-decode")
+        );
+        assert_eq!(
+            effective
+                .kv_router_config
+                .router_worker_selection_policy
+                .as_deref(),
+            Some("frontend-type")
         );
         assert!(worker.kv_router_config.router_prefill_policy.is_none());
         assert!(worker.kv_router_config.router_decode_policy.is_none());

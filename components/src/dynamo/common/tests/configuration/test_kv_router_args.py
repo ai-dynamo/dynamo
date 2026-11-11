@@ -427,6 +427,85 @@ def test_load_aware_preserves_deprecated_overlap_score_weight_env(monkeypatch) -
     assert kwargs["overlap_score_weight"] == 2.5
 
 
+def _frontend_config(argv: list[str]) -> FrontendConfig:
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+    config = FrontendConfig.from_cli_args(parser.parse_args(argv))
+    config.validate()
+    return config
+
+
+@pytest.mark.parametrize(
+    ("argv", "policy_file", "expected_mode", "expected_type"),
+    [
+        pytest.param([], False, "round-robin", None, id="neither"),
+        pytest.param([], True, "kv", None, id="file-alone"),
+        pytest.param(["--router-mode", "kv"], False, "kv", None, id="kv"),
+        pytest.param(["--router-mode", "kv"], True, "kv", None, id="kv-with-file"),
+        pytest.param(
+            ["--router-mode", "least-loaded"],
+            False,
+            "least-loaded",
+            None,
+            id="routing-mode",
+        ),
+        pytest.param(
+            ["--router-mode", "dynamo-two-tier-cost-fn"],
+            False,
+            "kv",
+            "dynamo-two-tier-cost-fn",
+            id="policy-type",
+        ),
+    ],
+)
+def test_frontend_routes_by_a_policy_type_or_a_policy_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    argv: list[str],
+    policy_file: bool,
+    expected_mode: str,
+    expected_type: str | None,
+) -> None:
+    monkeypatch.delenv("DYN_ROUTER_MODE", raising=False)
+    monkeypatch.delenv("DYN_ROUTER_POLICY_CONFIG", raising=False)
+    if policy_file:
+        path = tmp_path / "policy.yaml"
+        path.write_text("worker_selection:\n  decode: round-robin\n")
+        argv = [*argv, "--router-policy-config", str(path)]
+
+    config = _frontend_config(argv)
+
+    assert config.router_mode == expected_mode
+    kwargs = config.kv_router_kwargs()
+    assert kwargs["router_worker_selection_policy"] == expected_type
+    assert (kwargs["router_policy_config"] is not None) == policy_file
+
+
+@pytest.mark.parametrize(
+    "router_mode", ["round-robin", "direct", "dynamo-two-tier-cost-fn"]
+)
+def test_frontend_rejects_a_policy_file_with_a_router_mode_other_than_kv(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, router_mode: str
+) -> None:
+    monkeypatch.delenv("DYN_ROUTER_MODE", raising=False)
+    path = tmp_path / "policy.yaml"
+    path.write_text("worker_selection:\n  decode: round-robin\n")
+
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        _frontend_config(
+            ["--router-mode", router_mode, "--router-policy-config", str(path)]
+        )
+
+
+def test_frontend_rejects_an_empty_router_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DYN_ROUTER_MODE", "")
+
+    with pytest.raises(ValueError, match="--router-mode is empty"):
+        _frontend_config([])
+
+
 def test_load_aware_frontend_implies_kv_router_mode() -> None:
     parser = argparse.ArgumentParser()
     FrontendArgGroup().add_arguments(parser)

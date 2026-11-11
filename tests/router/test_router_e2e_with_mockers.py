@@ -515,7 +515,9 @@ def test_mocker_router(
 
 
 @pytest.mark.timeout(180)
-@pytest.mark.parametrize("router_mode", ["kv", "round-robin", "random"])
+@pytest.mark.parametrize(
+    "router_mode", ["kv", "round-robin", "random", "dynamo-two-tier-cost-fn"]
+)
 @pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
 def test_mocker_router_soak(
     request,
@@ -1483,6 +1485,50 @@ def test_disagg_per_role_router_modes(
             frontend_port=allocate_frontend_ports(request, 1)[0],
             test_payload=TEST_PAYLOAD,
             request_plane="nats",
+        )
+
+
+@pytest.mark.timeout(180)
+def test_disagg_per_role_policy_file(
+    request,
+    runtime_services_dynamic_ports,
+    predownload_tokenizers,
+):
+    """KV-routed prefill in front of round-robin decode, from a policy file alone.
+
+    The frontend takes only ``--router-policy-config`` and no worker advertises a
+    router configuration. The file is the shipped example, so this also proves
+    the example runs as documented.
+    """
+    shared_namespace = f"test-namespace-{generate_random_suffix()}"
+    mocker_args = {
+        "speedup_ratio": SPEEDUP_RATIO,
+        "block_size": BLOCK_SIZE,
+    }
+    policy_file = (
+        Path(__file__).resolve().parents[2]
+        / "examples/router/policies/kv-prefill-round-robin-decode.yaml"
+    )
+
+    with launch_disagg_workers(
+        request,
+        shared_namespace,
+        "prefill_first",
+        prefill_mocker_args=mocker_args,
+        decode_mocker_args=mocker_args,
+        num_prefill_mockers=2,
+        num_decode_mockers=2,
+        enable_disagg_bootstrap=False,
+    ) as (prefill_workers, decode_workers):
+        _test_disagg_per_role_router_modes(
+            prefill_workers=prefill_workers,
+            decode_workers=decode_workers,
+            block_size=BLOCK_SIZE,
+            request=request,
+            frontend_port=allocate_frontend_ports(request, 1)[0],
+            test_payload=TEST_PAYLOAD,
+            request_plane="nats",
+            router_policy_config=str(policy_file),
         )
 
 

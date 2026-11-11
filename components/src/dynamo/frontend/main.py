@@ -444,8 +444,8 @@ async def async_main():
         config.session_affinity_max_entries
     )
     # Shared with the backends so a worker's advertised config is built from the
-    # same flags and semantics. --router-mode always has a default here, so this
-    # never returns None.
+    # same flags and semantics. FrontendConfig.validate resolved the router mode,
+    # so this never returns None.
     router_config = build_router_config(config)
 
     metrics_prefix = (
