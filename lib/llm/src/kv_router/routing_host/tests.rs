@@ -12,13 +12,9 @@ use std::{
 
 use super::builder::{check_hint_policies_route_on_kv_path, hosted_picker};
 use crate::kv_router::SelectionPolicySource;
-use dynamo_kv_router::plugins::worker_selection::WorkerCandidates;
-use dynamo_kv_router::{
-    config::KvRouterConfig,
-    plugins::request_classifier::{
-        ClassifierError, ClassifyEvent, ClassifyFuture, ClassifyRequest, RequestClassifier,
-    },
-    protocols::RoutingConstraints,
+use dynamo_kv_router::config::KvRouterConfig;
+use dynamo_kv_router::plugins::request_classifier::{
+    ClassifierError, ClassifyEvent, ClassifyFuture, ClassifyRequest, RequestClassifier, WorkerView,
 };
 use dynamo_runtime::{
     DistributedRuntime, Runtime,
@@ -33,6 +29,7 @@ use dynamo_runtime::{
     storage::kv::Selector,
     traits::DistributedRuntimeProvider,
 };
+use dynamo_scheduler::host::RoutingConstraints;
 use tokio::sync::{Notify, mpsc, watch};
 
 use super::*;
@@ -2415,11 +2412,7 @@ struct RecordingClassifier {
 
 #[async_trait::async_trait]
 impl RequestClassifier for RecordingClassifier {
-    fn classify(
-        &mut self,
-        request: ClassifyRequest,
-        _workers: WorkerCandidates<'_>,
-    ) -> ClassifyFuture {
+    fn classify(&mut self, request: ClassifyRequest, _workers: &dyn WorkerView) -> ClassifyFuture {
         self.calls.fetch_add(1, Ordering::Relaxed);
         Box::pin(async move { Ok(request) })
     }
@@ -2452,11 +2445,7 @@ struct RejectingClassifier {
 
 #[async_trait::async_trait]
 impl RequestClassifier for RejectingClassifier {
-    fn classify(
-        &mut self,
-        _request: ClassifyRequest,
-        _workers: WorkerCandidates<'_>,
-    ) -> ClassifyFuture {
+    fn classify(&mut self, _request: ClassifyRequest, _workers: &dyn WorkerView) -> ClassifyFuture {
         self.calls.fetch_add(1, Ordering::Relaxed);
         Box::pin(async { Err(Box::new(ClassifierRejected) as Box<ClassifierError>) })
     }
@@ -2526,11 +2515,7 @@ struct TypedRejectingClassifier {
 
 #[async_trait::async_trait]
 impl RequestClassifier for TypedRejectingClassifier {
-    fn classify(
-        &mut self,
-        _request: ClassifyRequest,
-        _workers: WorkerCandidates<'_>,
-    ) -> ClassifyFuture {
+    fn classify(&mut self, _request: ClassifyRequest, _workers: &dyn WorkerView) -> ClassifyFuture {
         self.calls.fetch_add(1, Ordering::Relaxed);
         let error_type = self.error_type;
         Box::pin(async move {
@@ -2729,11 +2714,7 @@ struct PausingClassifier {
 }
 
 impl RequestClassifier for PausingClassifier {
-    fn classify(
-        &mut self,
-        request: ClassifyRequest,
-        _workers: WorkerCandidates<'_>,
-    ) -> ClassifyFuture {
+    fn classify(&mut self, request: ClassifyRequest, _workers: &dyn WorkerView) -> ClassifyFuture {
         let entered = Arc::clone(&self.entered);
         let resumed = Arc::clone(&self.resumed);
         Box::pin(async move {
@@ -3085,20 +3066,13 @@ async fn tracked_admission_without_lifecycle_bypasses_classifier() {
 }
 
 struct TokenContractClassifier {
-    classified: mpsc::UnboundedSender<(
-        usize,
-        dynamo_kv_router::plugins::request_classifier::RequestProgress,
-    )>,
+    classified: mpsc::UnboundedSender<(usize, dynamo_admission::host::RequestProgress)>,
     completed: mpsc::UnboundedSender<usize>,
 }
 
 #[async_trait::async_trait]
 impl RequestClassifier for TokenContractClassifier {
-    fn classify(
-        &mut self,
-        request: ClassifyRequest,
-        _workers: WorkerCandidates<'_>,
-    ) -> ClassifyFuture {
+    fn classify(&mut self, request: ClassifyRequest, _workers: &dyn WorkerView) -> ClassifyFuture {
         self.classified
             .send((request.isl_tokens(), request.progress().clone()))
             .unwrap();
@@ -3228,7 +3202,7 @@ async fn track_request(
 }
 
 /// Scheduler-reported loads with no prompt, the way the reservation tests read them.
-async fn potential_loads(router: &RoutingHost) -> Vec<dynamo_kv_router::protocols::PotentialLoad> {
+async fn potential_loads(router: &RoutingHost) -> Vec<dynamo_scheduler::host::PotentialLoad> {
     router
         .kv_router()
         .get_potential_loads(&[], None, None, None, None)
@@ -3237,7 +3211,7 @@ async fn potential_loads(router: &RoutingHost) -> Vec<dynamo_kv_router::protocol
 }
 
 fn active_requests_for(
-    loads: &[dynamo_kv_router::protocols::PotentialLoad],
+    loads: &[dynamo_scheduler::host::PotentialLoad],
     worker_id: u64,
     dp_rank: u32,
 ) -> usize {
