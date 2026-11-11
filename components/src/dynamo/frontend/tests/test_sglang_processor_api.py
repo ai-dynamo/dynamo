@@ -27,7 +27,7 @@ pytestmark = [
 
 
 def test_get_tokenizer_importable():
-    from sglang.srt.utils.hf_transformers_utils import get_tokenizer
+    from dynamo.frontend.sglang_processor import get_tokenizer
 
     assert callable(get_tokenizer)
 
@@ -63,7 +63,7 @@ def test_sglang_tool_importable():
 
 
 def test_get_tokenizer_accepts_tokenizer_mode():
-    from sglang.srt.utils.hf_transformers_utils import get_tokenizer
+    from dynamo.frontend.sglang_processor import get_tokenizer
 
     sig = inspect.signature(get_tokenizer)
     params = sig.parameters

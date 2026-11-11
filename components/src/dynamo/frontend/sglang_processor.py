@@ -18,7 +18,6 @@ from dataclasses import dataclass
 from typing import Any, cast
 
 from sglang.srt.parser.conversation import chat_template_exists
-from sglang.srt.utils.hf_transformers_utils import get_tokenizer
 
 from dynamo._internal import ModelDeploymentCard
 from dynamo.common.multimodal.cache_uuid import reject_unsupported_multimodal_uuids
@@ -58,6 +57,23 @@ from .utils import (
     resolve_chat_template,
     worker_warmup,
 )
+
+# SGLang moved these helpers twice; retain support for older releases.
+try:
+    from sglang.srt.hf_transformers import get_tokenizer
+except ModuleNotFoundError as exc:
+    if exc.name != "sglang.srt.hf_transformers":
+        raise
+    try:
+        from sglang.srt.utils.hf_transformers import get_tokenizer
+    except ModuleNotFoundError as exc:
+        if exc.name not in (
+            "sglang.srt.utils",
+            "sglang.srt.utils.hf_transformers",
+        ):
+            raise
+        from sglang.srt.utils.hf_transformers_utils import get_tokenizer
+
 
 logger = logging.getLogger(__name__)
 
