@@ -71,6 +71,19 @@ The September 22 implementation was validated before being split into the three-
 
 The focused Python suite passed 7 coordinator unit tests and 12 transport/process cases. Container runs use Qwen3-0.6B and the images listed below; the revised runs completed their streams, exited zero, and left no live captured engine descendants. Measured SIGTERM-to-exit times were 12.90 seconds for vLLM, 8.69 seconds for SGLang, and 6.13 seconds for TensorRT-LLM, all against a 30-second total. These are aggregated Python results, not sidecar or active-KV-transfer results.
 
+### Shutdown edge-case fixes: November 10, 2026
+
+The follow-up to PR3 `2760e137` fixes four shutdown cases:
+
+- Velo skips the extra HTTP admission delay after all graceful serving tasks finish. An outstanding HTTP owner still retains its admission window, including when its first response has not registered yet.
+- SGLang nonleaders wait for their scheduler processes to exit, bounded by the shared drain deadline. Child lifetime uses the remaining drain allowance independently of the local request cap.
+- vLLM transcription uses the shared admission gate and request count, and the existing lifecycle owner cleans up its handler and engine.
+- SIGTERM during SDK endpoint handoff exits cleanly. A genuine handoff or registration failure remains an error, including when a signal arrives during cleanup.
+
+Validation with freshly rebuilt native bindings passed 199 backend-common tests, nine Velo response tests, and 18 native process/TCP/NATS tests. The cached `nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.4.1` container passed 44 focused tests without skips. Ten additional CPU process cases passed both locally and in that container: TCP/Velo cleanup budgets, early/late startup signals, follower scheduler lifetime/deadline/escalation, and transcription admission/drain/cleanup. The transcription case executes the actual factory method and existing regression with inert vendor imports; it does not collect the full vLLM test module. The new child-lifetime and transcription regressions fail against the previous behavior. Mypy and changed-file pre-commit checks passed.
+
+These runs validate CPU orchestration, native transports, signals, and deadlines. They do not run real multi-rank SGLang schedulers, GPU transcription, active distributed KV transfers, or Kubernetes deletion. Historical GPU results below do not validate these latest fixes.
+
 ### Review-comment fixes: October 2, 2026
 
 The follow-up to `b80fe1fc161e79f4abbf166b84fe1ea25c6831b9` persists incomplete runtime teardown as an error for every waiter and propagates it through the native, Python, and C callers. Startup cancellation retains the native admission tracker. Python closes and joins engine-control callbacks before discovery withdrawal, joins SGLang shared-pause publication, and protects initialization awaits with the engine owner's cleanup scope. The LWS fixture now uses a budget-compatible grace period.

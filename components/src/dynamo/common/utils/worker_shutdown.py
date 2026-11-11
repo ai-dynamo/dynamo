@@ -305,14 +305,17 @@ class WorkerShutdown:
         self._observe_stage("stop_admission", "completed", 0.0)
         logger.info("shutdown stage=stop_admission reason=completed")
 
-        async def inflight():
-            await self.idle.wait()
-            if self.wait_for_children is not None:
-                await self.wait_for_children()
-
         await self._stage(
-            "inflight", inflight(), min(self._caps["inflight"], self._drain_remaining())
+            "inflight",
+            self.idle.wait(),
+            min(self._caps["inflight"], self._drain_remaining()),
         )
+        if self.wait_for_children is not None:
+            # Children and remote ranks can still own KV transfers after their
+            # requests finish. The request-only cap must not free their engine.
+            await self._stage(
+                "children", self.wait_for_children(), self._drain_remaining()
+            )
 
         # Request completion is not evidence of remote KV-read completion.
         # These engines declare the same conservative fallback as the sidecars.

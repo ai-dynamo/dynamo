@@ -111,6 +111,57 @@ def test_shutdown_drains_admitted_stream_before_engine_and_runtime(shutdown_env)
     asyncio.run(run())
 
 
+def test_child_lifetime_is_not_limited_by_the_request_stage(shutdown_env, monkeypatch):
+    # Followers can still serve rank-0 requests or KV reads after the parent's
+    # local request cap expires; engine cleanup must await their retirement.
+    monkeypatch.setenv("DYN_WORKER_SHUTDOWN_INFLIGHT_TIMEOUT_SECS", "0")
+
+    async def run():
+        started = asyncio.Event()
+        waiting = asyncio.Event()
+        retired = asyncio.Event()
+        cleaned = asyncio.Event()
+
+        class Runtime:
+            async def shutdown_engine_routes(self):
+                pass
+
+            async def shutdown_and_wait(self, timeout_secs=None):
+                assert cleaned.is_set()
+
+        shutdown = ws.WorkerShutdown(Runtime(), [], asyncio.Event())
+
+        async def wait_for_children():
+            waiting.set()
+            await retired.wait()
+
+        shutdown.wait_for_children = wait_for_children
+
+        async def worker():
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                assert retired.is_set(), "engine closed before the child retired"
+                cleaned.set()
+
+        owner = asyncio.create_task(shutdown.run(worker(), install_signals=False))
+        await started.wait()
+        shutdown.request_shutdown()
+        try:
+            await waiting.wait()
+            done, _ = await asyncio.wait({owner}, timeout=0.02)
+            assert not done, "the request cap ended the child's drain"
+            assert not cleaned.is_set()
+        finally:
+            retired.set()
+            await owner
+        assert cleaned.is_set()
+        shutdown_env.finish.assert_called_once()
+
+    asyncio.run(run())
+
+
 def test_delayed_child_signal_keeps_parent_deadline(shutdown_env, monkeypatch):
     # Regression: time spent joining parent controls must not restart the child
     # budget; exercise the actual inherited descriptor across a process boundary.

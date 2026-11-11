@@ -5197,19 +5197,28 @@ async def test_transcription_worker_reuses_snapshot_engine(
 async def test_transcription_worker_publishes_metrics_and_cleans_up(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A fresh transcription worker builds and publishes a stat logger factory,
-    as the realtime worker does, and removes its Prometheus temp dir on exit."""
+    """Transcription owns its engine until every admitted request has finished."""
+    from dynamo.common.utils import worker_shutdown as ws
+
+    monkeypatch.setenv("DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS", "0")
+    monkeypatch.setenv("DYN_WORKER_SHUTDOWN_TOTAL_TIMEOUT_SECS", "2")
+    monkeypatch.setenv("DYN_WORKER_SHUTDOWN_CLEANUP_TIMEOUT_SECS", "0.5")
+    monkeypatch.setattr(ws, "ShutdownWatchdog", Mock())
     endpoint = Mock()
     endpoint.connection_id.return_value = "worker-1"
     endpoint.serve_endpoint = AsyncMock()
+    endpoint.unregister_endpoint_instance = AsyncMock()
     runtime = Mock()
     runtime.endpoint.return_value = endpoint
+    runtime.shutdown_engine_routes = AsyncMock()
+    runtime.shutdown_and_wait = AsyncMock()
 
     prometheus_temp_dir = Mock()
     vllm_config = Mock()
     vllm_config.cache_config.num_gpu_blocks = 128
+    engine_client = Mock()
     setup_vllm_engine = Mock(
-        return_value=(Mock(), vllm_config, Mock(), prometheus_temp_dir, Mock())
+        return_value=(engine_client, vllm_config, Mock(), prometheus_temp_dir, Mock())
     )
     stat_logger_factory = Mock()
     stat_logger_factory_cls = Mock(return_value=stat_logger_factory)
@@ -5237,8 +5246,49 @@ async def test_transcription_worker_publishes_metrics_and_cleans_up(
         model="openai/whisper-tiny",
     )
 
-    await factory._create_transcription_worker(runtime, config, asyncio.Event(), [])
+    started = asyncio.Event()
+    release = asyncio.Event()
+    completed = asyncio.Event()
 
+    async def generate(_request):
+        started.set()
+        await release.wait()
+        yield {"text": "completed transcription"}
+        completed.set()
+
+    async def serve(generate, **_kwargs):
+        async for _ in generate({}):
+            pass
+
+    handler.generate = generate
+    endpoint.serve_endpoint.side_effect = serve
+    shutdown = ws.WorkerShutdown(runtime, [], asyncio.Event())
+    factory.shutdown = shutdown
+    owner = asyncio.create_task(
+        shutdown.run(
+            factory._create_transcription_worker(
+                runtime, config, shutdown.shutdown_event, shutdown.endpoints
+            ),
+            install_signals=False,
+        )
+    )
+    try:
+        await asyncio.wait_for(started.wait(), timeout=2)
+        assert shutdown.inflight == 1
+        shutdown.request_shutdown()
+        await asyncio.sleep(0)
+        engine_client.shutdown.assert_not_called()
+        handler.cleanup.assert_not_called()
+        release.set()
+        await asyncio.wait_for(owner, timeout=2)
+        assert completed.is_set()
+    finally:
+        release.set()
+        if not shutdown.started:
+            shutdown.request_shutdown()
+        await owner
+
+    engine_client.shutdown.assert_called_once_with(timeout=vllm_config.shutdown_timeout)
     stat_logger_factory_cls.assert_called_once_with(endpoint=endpoint)
     assert setup_vllm_engine.call_args.args[1] is stat_logger_factory
     stat_logger_factory.set_num_gpu_blocks_all.assert_called_once_with(128)

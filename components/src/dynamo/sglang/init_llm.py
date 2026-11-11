@@ -41,6 +41,7 @@ from dynamo.sglang.publisher import (
 )
 from dynamo.sglang.register import register_model_with_readiness_gate
 from dynamo.sglang.request_handlers import DecodeWorkerHandler, PrefillWorkerHandler
+from dynamo.sglang.shutdown import coordinate_non_leader_shutdown
 from dynamo.sglang.snapshot import warmup_engine
 from dynamo.sglang.state_agent import StateAgentLifecycle
 
@@ -231,6 +232,7 @@ async def init_decode(
 
     engine_closed = False
     try:
+        coordinate_non_leader_shutdown(engine, shutdown)
         server_args = config.use_resolved_server_args(engine.server_args)
         gateway_count = gateway_worker_count(server_args, dynamo_args)
         if gateway_count > 1:
@@ -468,6 +470,7 @@ async def init_prefill(
 
     engine_closed = False
     try:
+        coordinate_non_leader_shutdown(engine, shutdown)
         server_args = config.use_resolved_server_args(engine.server_args)
         gateway_count = gateway_worker_count(server_args, dynamo_args)
         if gateway_count > 1:

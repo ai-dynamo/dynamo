@@ -36,6 +36,7 @@ from dynamo.sglang.request_handlers import (
     ImageDiffusionWorkerHandler,
     VideoGenerationWorkerHandler,
 )
+from dynamo.sglang.shutdown import coordinate_non_leader_shutdown
 
 
 async def init_llm_diffusion(
@@ -70,6 +71,7 @@ async def init_llm_diffusion(
     metrics_task = None
     body_failed = True
     try:
+        coordinate_non_leader_shutdown(engine, shutdown)
         server_args = config.use_resolved_server_args(engine.server_args)
 
         shutdown_endpoints[:] = [generate_endpoint]
