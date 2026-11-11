@@ -1256,12 +1256,13 @@ impl Worker {
             result = &mut start_fut => match result {
                 Ok(endpoint) => endpoint,
                 Err(error) => {
+                    let shutdown_requested = shutdown.is_cancelled();
                     self.begin_engine_route_shutdown().await;
                     self.orchestrator_steps(&endpoint).await;
                     // A signal can fence registration while the endpoint handoff
                     // is still finishing. That is the same clean pre-serve stop
                     // as the cancellation arm below, not a serving failure.
-                    if shutdown.is_cancelled() {
+                    if shutdown_requested {
                         return Ok(());
                     }
                     return Err(err(
@@ -3737,7 +3738,8 @@ mod handoff_and_lifecycle_tests {
     struct HandoffMockEngine {
         log: Arc<StdMutex<Vec<&'static str>>>,
         endpoint_ready_should_fail: bool,
-        shutdown_on_handoff: Option<CancellationToken>,
+        shutdown: Option<CancellationToken>,
+        signal_during_cleanup: bool,
         controls: Vec<String>,
         updates: Vec<String>,
     }
@@ -3752,7 +3754,8 @@ mod handoff_and_lifecycle_tests {
             let eng = Arc::new(Self {
                 log: log.clone(),
                 endpoint_ready_should_fail,
-                shutdown_on_handoff: None,
+                shutdown: None,
+                signal_during_cleanup: false,
                 controls,
                 updates,
             });
@@ -3782,6 +3785,9 @@ mod handoff_and_lifecycle_tests {
 
         async fn cleanup(&self) -> Result<(), DynamoError> {
             self.log.lock().unwrap().push("cleanup");
+            if self.signal_during_cleanup {
+                self.shutdown.as_ref().unwrap().cancel();
+            }
             Ok(())
         }
 
@@ -3850,8 +3856,10 @@ mod handoff_and_lifecycle_tests {
             endpoint: dynamo_runtime::component::Endpoint,
         ) -> Result<(), DynamoError> {
             self.log.lock().unwrap().push("on_endpoint_ready");
-            if let Some(shutdown) = &self.shutdown_on_handoff {
-                shutdown.cancel();
+            if let Some(shutdown) = &self.shutdown {
+                if !self.signal_during_cleanup {
+                    shutdown.cancel();
+                }
                 endpoint.drt().runtime().mark_shutting_down();
             }
             if self.endpoint_ready_should_fail {
@@ -3876,11 +3884,15 @@ mod handoff_and_lifecycle_tests {
                 ("DYN_WORKER_SHUTDOWN_TOTAL_TIMEOUT_SECS", Some("5")),
             ],
             async {
-                for handoff_fails in [false, true] {
+                for (handoff_fails, signal_during_cleanup) in
+                    [(false, false), (true, false), (false, true)]
+                {
                     let endpoint = test_local_endpoint().await;
                     let shutdown = CancellationToken::new();
                     let (mut engine, log) = HandoffMockEngine::new(handoff_fails, vec![], vec![]);
-                    Arc::get_mut(&mut engine).unwrap().shutdown_on_handoff = Some(shutdown.clone());
+                    let engine_mut = Arc::get_mut(&mut engine).unwrap();
+                    engine_mut.shutdown = Some(shutdown.clone());
+                    engine_mut.signal_during_cleanup = signal_during_cleanup;
                     let result = Worker::new(engine, WorkerConfig::default())
                         .run_with_drt(endpoint.drt().clone(), shutdown)
                         .await;
@@ -3890,6 +3902,13 @@ mod handoff_and_lifecycle_tests {
                                 .unwrap_err()
                                 .to_string()
                                 .contains("synthetic on_endpoint_ready failure")
+                        );
+                    } else if signal_during_cleanup {
+                        assert!(
+                            result
+                                .unwrap_err()
+                                .to_string()
+                                .contains("runtime is shutting down")
                         );
                     } else {
                         result.expect("shutdown fencing is a clean pre-serve stop");
