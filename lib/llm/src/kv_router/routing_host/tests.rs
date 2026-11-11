@@ -5630,11 +5630,14 @@ async fn kv_session_affinity_hit_logs_selected_worker_and_records_kv_metrics() {
     );
     let session_id = SessionAffinityId::new("kv-affinity-hit-observability");
     bind_affinity_target(&router, &session_id, AffinityTarget::new(7, Some(0))).await;
-    let hit_rate_samples = router.request_metrics.kv_hit_rate.get_sample_count();
-
     let tracker = Arc::new(RequestTracker::new());
     let mut input = request();
     input.tracker = Some(Arc::clone(&tracker));
+    let hit_rate = router
+        .request_metrics
+        .kv_hit_rate
+        .with_label_values(&[RequestPhase::Aggregated.as_str(), &input.model]);
+    let hit_rate_samples = hit_rate.get_sample_count();
     let mut request = Context::new(input);
     request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_id);
 
@@ -5684,10 +5687,7 @@ async fn kv_session_affinity_hit_logs_selected_worker_and_records_kv_metrics() {
         Some("session_affinity")
     );
 
-    assert_eq!(
-        router.request_metrics.kv_hit_rate.get_sample_count(),
-        hit_rate_samples + 1
-    );
+    assert_eq!(hit_rate.get_sample_count(), hit_rate_samples + 1);
 
     selection.booking.take();
     drop(guard);
