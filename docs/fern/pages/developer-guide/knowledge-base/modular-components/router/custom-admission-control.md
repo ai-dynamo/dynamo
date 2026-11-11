@@ -70,7 +70,7 @@ cargo add --manifest-path "$PLUGIN_DIR/catalog/Cargo.toml" --path "$DYNAMO_DIR/l
 
 ### Classify Requests
 
-Put the classifier in `classifier/src/lib.rs`. `set_due_at` tells Dynamo when to stop queueing the request:
+Put the classifier in `classifier/src/lib.rs`. `set_due_at` tells Dynamo when to stop queueing the request. It takes precedence over the class's `slo_ttft_ms`, whether earlier or later, and an `edf` class orders the request by it:
 
 ```rust
 use std::time::Duration;
@@ -278,12 +278,12 @@ Every row also returns its `WorkerInfo` from `info()` without a declaration. To 
 | Setter | Effect |
 |---|---|
 | `set_policy_class(name)` | Select a configured policy class by name |
-| `set_due_at(instant)` | Set a deadline for router queue waiting |
+| `set_due_at(instant)` | Set a deadline for router queue waiting; it replaces the class `slo_ttft_ms` as the request's due time |
 | `set_scheduling_cost_tokens(tokens)` | Override the cost used by queue scheduling |
 | `set_worker_selection_target(worker)` | Set a soft worker/rank preference, subject to hard pins and eligibility |
 | `clear_worker_selection_target()` | Clear the soft preference |
 
-Use a class name from the [router policy configuration](configuration-and-tuning.md) with `set_policy_class`. A name that matches no configured class fails the request; it does not fall back to the default class. Dynamo refreshes cache estimates when the admitted request enters the queue and applies the classifier's explicit overrides.
+Use a class name from the [router policy configuration](configuration-and-tuning.md) with `set_policy_class`. A name that matches no configured class fails the request; it does not fall back to the default class. With a [deprecated policy-family profile](configuration-and-tuning.md#migrate-from-policy-families-and-cache-buckets), `set_policy_class` and `queue_thresholds_for` take a family or explicit class name, and a family resolves to its class for the request's uncached tokens. Dynamo refreshes cache estimates when the admitted request enters the queue and applies the classifier's explicit overrides.
 
 ## Defer Requests and Track Their Lifecycle
 

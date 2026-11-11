@@ -88,7 +88,7 @@ class SglangUtils:
         engine: Any | None = None,
     ) -> dict:
         """Build sampling parameters for SGLang engine (generic functionality)"""
-        sampling_params = {}
+        sampling_params: dict[str, Any] = {}
 
         # Extract sampling options from request
         sampling_options = request.request.sampling_options
@@ -102,6 +102,13 @@ class SglangUtils:
             sampling_params["top_k"] = sampling_options.top_k
         if sampling_options.n is not None:
             sampling_params["n"] = sampling_options.n
+        # SGLang validates token ids against the vocab.
+        if sampling_options.logit_bias:
+            # SGLang declares SamplingParams.logit_bias as Dict[str, float].
+            sampling_params["logit_bias"] = {
+                str(token_id): bias
+                for token_id, bias in sampling_options.logit_bias.items()
+            }
         if stop_conditions.max_tokens:
             sampling_params["max_new_tokens"] = stop_conditions.max_tokens
         if stop_conditions.min_tokens:

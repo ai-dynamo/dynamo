@@ -7,13 +7,14 @@ subtitle: Weighted arbitration across router policy classes
 
 The router uses a Deficit Round Robin (DRR) variant that is work-conserving
 across dispatchable policy classes. DRR determines which class can
-dispatch next; the configured FCFS or WSPT policy determines request order
-within that class's shared and exact-worker lanes.
+dispatch next; the class's queue policy, EDF by default for configured classes,
+determines request order within that class's shared and exact-worker lanes.
 
 This separation provides:
 
 - Weighted service across policy classes with different request sizes.
-- Independent within-class ordering, exact-worker lanes, and strict-priority tiers.
+- Independent within-class ordering and exact-worker lanes, plus strict-priority
+  tiers in classes whose queue policy is not EDF.
 - Progress for requests whose token cost is much larger than their class quantum.
 - Bounded arbitration work that does not loop once per token or DRR round.
 
@@ -41,8 +42,7 @@ amounts of credit.
 The scheduler maintains the following state for each class:
 
 - A shared pending heap for requests that can use any eligible worker.
-- One pending heap per exact-worker target, ordered by the same strict priority
-  and FCFS or WSPT policy.
+- One pending heap per exact-worker target, ordered by the same queue policy.
 - A deficit containing earned but unspent credit.
 - A quantum controlling how quickly the deficit grows.
 
@@ -119,7 +119,11 @@ scheduler adds no bulk credit.
 ## Charging and Cursor Movement
 
 After selecting a request, the scheduler subtracts its immutable scheduling
-cost from the class deficit.
+cost from the class deficit once the request is admitted. A selected request
+that is not admitted, because its due time passed, its client went away, or
+worker selection or booking failed, spends no credit, and its class keeps that
+credit for its next head. A request that expires while it waits leaves its
+queue without spending credit either.
 
 - If the class becomes empty, its deficit resets and the cursor advances.
 - If the next head is already affordable, the cursor stays on the class so it
@@ -142,8 +146,8 @@ DP-rank bounds, taints, and overload filtering.
 Head-of-line blocking is lane-local. The shared heap does not search past a
 blocked shared head, and an exact-worker lane does not search past its own
 blocked head. A blocked exact-worker lane does not prevent another exact-worker
-lane, or a dispatchable shared head, from competing for the class. FCFS/WSPT
-ordering is not bypassed within any individual lane.
+lane, or a dispatchable shared head, from competing for the class. The class's
+queue policy is not bypassed within any individual lane.
 
 New arrivals also join an existing backlog in their resolved class instead of
 bypassing queued work. Queue limits, ordering, and DRR charging apply equally
@@ -181,11 +185,9 @@ default_policy_class: standard
 policy_classes:
   - name: priority
     quantum: 800
-    queue_policy: fcfs
     slo_ttft_ms: 1000
   - name: standard
     quantum: 200
-    queue_policy: fcfs
     slo_ttft_ms: 3000
 ```
 
@@ -195,8 +197,10 @@ backlogged, `priority` is visited first, its next requests cost 300 and 500
 tokens, and `standard`'s next request costs 200. One round dispatches both
 `priority` requests for 800 credit and the `standard` request for 200: an
 80/20 split of charged cost, but a 2:1 split of requests. When `standard` has no
-dispatchable work, `priority` can use the idle capacity. `slo_ttft_ms` does not
-affect this order.
+dispatchable work, `priority` can use the idle capacity. `slo_ttft_ms` orders
+requests only within each EDF class, and with `controlled_delay: true` it also
+rejects a request still waiting when its budget passes; it does not give a class
+with a shorter budget a larger share.
 
 Use larger quantum ratios only when the corresponding classes should receive
 larger shares of uncached-token service. For the complete policy-class schema,

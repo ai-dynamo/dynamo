@@ -83,13 +83,20 @@ its configuration even if the endpoint is unchanged.
 
 For how queue backpressure differs from candidate filtering and busy-threshold overload handling, see [Router Filtering](worker-filtering.md).
 
+`edf`, the default for policy-class YAML, orders by earliest due time: a request classifier's
+explicit deadline, else router ingress plus the class's `slo_ttft_ms`. A request with neither sorts
+after every request with a due time, and equal or absent due times keep enqueue order. Strict
+priority and priority jumps do not reorder `edf`. An `edf` class with `controlled_delay: true`
+rejects a request that is still waiting when its due time passes, and an explicit deadline expires
+a waiting request in every class; see [Policy-Class Queues](#policy-class-queues).
 `fcfs` orders by adjusted arrival time (`priority_jump - arrival_offset`) and optimizes tail TTFT.
 `wspt` orders by `(1 + priority_jump) / scheduling_cost_tokens` and optimizes average TTFT, where
-`scheduling_cost_tokens = max(1, raw_isl_tokens - cached_tokens)`. Both the CLI and policy-class
-YAML accept only `fcfs` and `wspt`.
+`scheduling_cost_tokens = max(1, raw_isl_tokens - cached_tokens)`. The CLI accepts `fcfs`, its
+default, and `wspt`; policy-class YAML accepts `edf`, `fcfs`, and `wspt`.
 
-For each policy, the complete pending-queue key is
-`(strict_priority, due_at, policy_key)`. Higher strict tiers always win; see
+For `fcfs` and `wspt`, the complete pending-queue key is
+`(strict_priority, due_at, policy_key)`, where `due_at` is only a request classifier's explicit
+deadline. Higher strict tiers always win; see
 [Priority Scheduling](../../../../use-cases/agents/priority-scheduling.md) for how due-time
 ordering applies within a tier.
 
@@ -267,21 +274,25 @@ To write your own policy instead of using a built-in one, see
 ### Policy-Class Queues
 
 A policy profile is one flat list of named classes. Each class has one queue
-and directly sets its DRR quantum, an optional TTFT budget, its queue limits,
-and its busy thresholds:
+and directly sets its DRR quantum, an optional TTFT budget and whether it
+enforces it, its queue limits, and its busy thresholds:
 
 ```yaml
 default_policy_class: standard
 policy_classes:
   - name: priority
     quantum: 800
-    queue_policy: fcfs
     slo_ttft_ms: 1000
+    controlled_delay: true
   - name: standard
     quantum: 200
-    queue_policy: fcfs
     slo_ttft_ms: 3000
 ```
+
+The rest of this section describes flat classes. A profile in the deprecated
+policy-family and cache-bucket format still loads; see
+[Migrate from Policy Families and Cache Buckets](#migrate-from-policy-families-and-cache-buckets)
+for how it selects classes and how to migrate it.
 
 Clients select a class by sending its exact name in
 `x-dynamo-meta-policy-class`. A request without the header uses
@@ -295,7 +306,6 @@ class is the default and `default_policy_class` can be omitted:
 policy_classes:
   - name: standard
     quantum: 1000
-    queue_policy: fcfs
     slo_ttft_ms: 3000
 ```
 
@@ -308,9 +318,9 @@ per-worker `CACHE` rows. Cached tokens also set each request's default
 scheduling cost and queue accounting, and prefix overlap still guides worker
 selection.
 
-Each class owns a shared FCFS or WSPT heap plus one heap for each exact-worker
-lane, along with its busy thresholds, queue limits, quantum, deficit, and
-counters. Arbitration compares the shared head with the currently dispatchable
+Each class owns a shared heap plus one heap for each exact-worker lane, all
+ordered by the class's queue policy, along with its busy thresholds, queue
+limits, quantum, deficit, and counters. Arbitration compares the shared head with the currently dispatchable
 exact-worker lane heads. Absolute and fractional busy thresholds use OR
 semantics. The absolute `prefill_busy_threshold` is deprecated and will be
 removed in v1.7; use `prefill_busy_threshold_frac`.
@@ -343,12 +353,45 @@ bulk-credit behavior, see
 
 Class names must be unique within a profile and use metric-safe identifiers
 (`[A-Za-z0-9_.-]+`). `quantum` is a required positive integer, in uncached
-input tokens. `queue_policy` is `fcfs`, the default, or `wspt`. `slo_ttft_ms` is
-an optional time-to-first-token budget in whole milliseconds and must be a
-positive integer: leaving it unset means the class has no budget, and `0` is
-rejected. Currently the router only validates and stores `slo_ttft_ms`. It
-does not set request deadlines, reorder queues, or expire queued requests based
-on it.
+input tokens. `queue_policy` is `edf`, the default, `fcfs`, or `wspt`. An `edf`
+class ignores the `strict_priority` and soft `priority` request hints when it
+orders its queue; to let these hints reorder a class's queue, set its
+`queue_policy` to `fcfs` or `wspt`. The soft `priority` can still affect a
+backend engine that has priority scheduling enabled. Earlier releases read an
+omitted `queue_policy` as `fcfs` and reject `edf`, so while an older frontend
+reads the same policy file, set `queue_policy` to `fcfs` or `wspt` explicitly.
+`slo_ttft_ms` is an optional time-to-first-token budget in
+whole milliseconds and must be a positive integer of at most `4294967295`
+(about 49.7 days): leaving it unset means the class has no budget, and `0` is
+rejected. An `edf` class orders each request by its router ingress time plus
+`slo_ttft_ms`, unless a request classifier sets an explicit deadline, which
+takes precedence whether earlier or later. The budget counts from when the
+request entered the router, so classification and queue waits spend it, and a
+later capacity recheck or cache refresh does not restart it.
+
+`controlled_delay` is an optional boolean, `false` by default, and only an
+`edf` class may set it to `true`; any other `queue_policy` with `true` is
+rejected at startup. With it, the class rejects a request that is still waiting
+for admission when its due time passes: the request's explicit deadline, which
+wins even when later, else router ingress plus `slo_ttft_ms`. The request gets
+the router's queue-deadline error, spends none of its class's
+scheduling credit, and is counted in
+`dynamo_frontend_router_admission_rejected_total` with
+`reason="due_time_passed"`. A request whose client has already disconnected
+when the router checks it is dropped uncounted. Each class queue keeps its own
+expiry timer, so a request expires on time even when no request arrives and no
+capacity frees. Without `controlled_delay`, the budget only orders the class.
+`fcfs` and `wspt` classes neither order by the budget nor expire on it. In
+every class, a classifier's explicit deadline expires a waiting request,
+including one waiting behind an `edf` head whose class due time only orders
+it. The budget bounds waiting for router admission only: it does not limit an
+admitted request or predict its TTFT.
+
+> [!NOTE]
+> Older frontends without `controlled_delay` support reject a policy YAML that contains the key,
+> even `controlled_delay: false`. Workers that advertise `--router-policy-config` publish only the
+> path, and each frontend reads the file from its own filesystem. Omit the key until every frontend
+> that reads the file supports it.
 
 Profiles resolve in this order: exact model profile, root profile, then the
 synthetic single-class fallback. A model profile completely replaces the root
@@ -378,16 +421,52 @@ it does not exclude the entire router instance.
 
 #### Migrate from Policy Families and Cache Buckets
 
-Policy classes no longer form a family and cache-bucket matrix.
-`default_policy_family`, `uncached_isl_buckets`, `policy_family`, and
-`cache_bucket` are removed. A profile that still sets any of them, even to
-`null` or an empty value, fails to load with an error naming the field.
+> [!WARNING]
+> **Deprecated; removal planned for 1.8.0.**
+> `default_policy_family`, `uncached_isl_buckets`, `policy_family`, and
+> `cache_bucket` still load, and the router selects their classes by policy family and cache
+> bucket as described below. Each time the router loads a policy file in which any profile uses
+> them, it logs one deprecation warning. Migrate to flat policy classes.
 
-Every class name is now a direct selector. Previously, requests named a family,
-the router chose that family's class from the observed cache bucket, and a
-class bound to a family could not be requested by its own name. Now requests and
-classifiers name the class itself. When each family had a single bucket, delete
-the bucket fields and name the default family's class in
+Each profile, the root or one model's, uses one format. A profile that sets
+any of these keys, even to `null` or an empty value, uses the deprecated
+format: it must set `default_policy_family`, `uncached_isl_buckets`, and
+`policy_classes`, and it cannot set `default_policy_class`, or the file fails
+to load. A root that sets no `policy_classes` and sets these keys only to
+`null` defines no root profile. Other profiles in the same file can use flat
+classes.
+
+In a deprecated profile, a class that sets both `policy_family` and
+`cache_bucket` serves that family for that bucket, and every family needs
+exactly one class for each bucket. A class that sets neither is an explicit
+class; setting only one is invalid. Bucket floors in `uncached_isl_buckets`
+begin at `min_tokens: 0` and increase strictly. The router computes a
+request's uncached input sequence length (ISL) as its ISL minus the best cached
+tokens across eligible workers, then uses the bucket with the highest floor at
+or below it. A request that names an explicit class enters that class and
+bypasses cache-based selection. A request that names a configured family
+enters that family's class for its bucket, even when a family-bound class has
+the same name. A request whose name identifies neither an explicit class nor a
+configured family uses `default_policy_family` the same way: no name, an empty
+or unknown name, and the name of a family-bound class that is not also a
+family name. Such a request does not fail, and a client cannot bypass
+bucketing by naming a family-bound class. A request classifier's
+`set_policy_class` must name a family or an explicit class; any other name
+fails the request.
+
+An omitted `queue_policy` is `fcfs` in a deprecated profile and `edf` for flat
+classes. A deprecated profile accepts `fcfs` or `wspt`; `edf`, `slo_ttft_ms`,
+and `controlled_delay` need flat classes, and a deprecated profile that sets
+any of them fails to load. Busy thresholds, queue limits, quanta, and model
+profiles work the same in both formats.
+
+To migrate, rewrite each deprecated profile as flat classes. Every class name
+then selects its class directly, and a name that matches no class fails the
+request with HTTP 400 instead of using a default family. Set `queue_policy` on
+each class to keep its ordering: an omitted value that meant `fcfs` means
+`edf` after migration. When each family had a single bucket, delete
+`default_policy_family`, `uncached_isl_buckets`, and each class's
+`policy_family` and `cache_bucket`, then name the default family's class in
 `default_policy_class`. This profile:
 
 ```yaml
@@ -412,17 +491,22 @@ becomes:
 default_policy_class: regular
 policy_classes:
   - name: premium
+    queue_policy: fcfs
     quantum: 512
   - name: regular
+    queue_policy: fcfs
     quantum: 128
 ```
 
 Here each class already has its family's name, so clients keep sending the same
-values.
+values. To adopt `edf` ordering instead, omit `queue_policy`. A class budget
+is optional: an `edf` class orders a request by its explicit deadline, else by
+router ingress plus `slo_ttft_ms` when the class sets it, and requests with
+neither follow in enqueue order.
 
 When a family had several buckets, choose the classes you want, then update
 the `x-dynamo-meta-policy-class` values that clients or gateways send and the
-names your request classifiers set. The router does not reproduce cache-based
+names your request classifiers set. Flat classes do not reproduce cache-based
 bucketing: to keep separate queues for cached and uncached traffic, give each
 queue its own class and select it upstream or with a
 [custom request classifier](custom-admission-control.md).
@@ -687,7 +771,7 @@ Use `--router-track-output-blocks` when your workload is output-heavy and you wa
 
 This threshold delays dispatch. It does not remove workers from the candidate set; for that distinction, see [Router Filtering](worker-filtering.md).
 
-Use `DYN_ROUTER_OVERLAP_REFRESH_AFTER_SECS` when queued requests may wait long enough for worker cache state to materially change before dispatch. The default is `10` seconds; set it to `0` to disable dequeue-time overlap refresh.
+Use `DYN_ROUTER_OVERLAP_REFRESH_AFTER_SECS` when queued requests may wait long enough for worker cache state to materially change before dispatch. The default is `10` seconds; set it to `0` to disable dequeue-time overlap refresh. Arriving requests, capacity changes, and other requests' queue deadlines are handled while the refresh runs, and the request then dispatches with the refreshed scores. A refresh that takes longer than 250 ms is abandoned, and the request dispatches with its queued scores. If the request's own due time passes first, the router rejects it, and if its client disconnects, the router drops it, without waiting for the refresh.
 
 **Note for the SGLang backend.** In Dynamo v1.1.0 and later, the value the SGLang worker publishes for `max_num_batched_tokens` in its Model Deployment Card depends on the server args:
 

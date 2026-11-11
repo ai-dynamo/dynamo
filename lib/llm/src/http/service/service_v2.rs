@@ -52,7 +52,8 @@ use tokio_util::sync::CancellationToken;
 use tower_http::trace::TraceLayer;
 
 use crate::frontend_config::{
-    ChatTemplateDefaults, DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION, FrontendApiConfig, MetricsConfig,
+    ChatTemplateDefaults, DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION, FrontendApiConfig,
+    MediaRejectionConfig, MetricsConfig,
 };
 
 /// Middleware that echoes `x-request-id` from request to response headers.
@@ -903,6 +904,10 @@ impl State {
 
     pub fn chat_template_defaults(&self) -> &ChatTemplateDefaults {
         self.frontend_api_config.chat_template_defaults()
+    }
+
+    pub fn media_rejection(&self) -> MediaRejectionConfig {
+        self.frontend_api_config.media_rejection()
     }
 }
 
@@ -1936,6 +1941,13 @@ impl HttpServiceConfigBuilder {
         self.frontend_api_config
             .get_or_insert_with(FrontendApiConfig::default)
             .set_reasoning_field(reasoning_field);
+        self
+    }
+
+    pub fn media_rejection(mut self, media_rejection: MediaRejectionConfig) -> Self {
+        self.frontend_api_config
+            .get_or_insert_with(FrontendApiConfig::default)
+            .set_media_rejection(media_rejection);
         self
     }
 

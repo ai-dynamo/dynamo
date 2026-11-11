@@ -1968,6 +1968,8 @@ class KvRouterConfig:
                 When > 1, uses a concurrent radix tree with a thread pool,
                 including for approximate routing when KV events are disabled.
             router_queue_policy: Scheduling policy for the router queue (default: "fcfs").
+                It sets the synthetic policy class; configured policy classes default to "edf".
+                "edf": earliest due time first, then arrival order; priorities do not reorder it.
                 "fcfs": first-come first-served with priority bumps — optimizes tail TTFT.
                 "lcfs": last-come first-served with priority bumps — intentionally worsens tail behavior for policy comparisons.
                 "wspt": weighted shortest processing time (Smith's rule) — optimizes average TTFT.
@@ -3033,7 +3035,11 @@ class KvRouter:
             cache_namespace: Optional cache namespace used in block hash computation.
             policy_class: Requested policy class name. An omitted name uses
                           the configured default class; a name that matches no
-                          configured class raises an error.
+                          configured class raises an error. With a deprecated
+                          policy-family profile, an explicit class name selects
+                          that class; a family name selects that family's class,
+                          and any other name the default family's, for the
+                          request's uncached tokens.
 
         Returns:
             A tuple of (worker_id, dp_rank, overlap_blocks) where:
@@ -3194,6 +3200,8 @@ class EntrypointArgs:
         tokenizer_fallback: Optional[bool] = None,
         batch_gateway_url: Optional[str] = None,
         default_chat_template_kwargs: Optional[Mapping[str, Any]] = None,
+        reject_media: Optional[bool] = None,
+        reject_media_status_code: Optional[int] = None,
     ) -> None:
         """
         Create EntrypointArgs.
@@ -3235,6 +3243,8 @@ class EntrypointArgs:
             batch_gateway_url: Internal Batch Gateway URL for the files and batch APIs.
             default_chat_template_kwargs: Chat template kwargs that the frontend applies
                 under each request's own kwargs, for every discovered model
+            reject_media: Optional override: refuse chat requests carrying image, video, or audio content before routing
+            reject_media_status_code: Optional 4xx/5xx status for a request refused by reject_media (default 415)
         """
         ...
 

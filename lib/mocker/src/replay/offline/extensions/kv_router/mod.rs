@@ -25,8 +25,8 @@ use dynamo_kv_router::protocols::{
     WorkerWithDpRank, compute_block_hash_for_seq,
 };
 use dynamo_kv_router::scheduling::{
-    OverlapAnalysis, OverlapSignals, PolicyClassConfig, PolicyProfile, PolicyQueue, QueueSnapshot,
-    ScheduleMode, SchedulingContext, WorkerPlacement,
+    OverlapAnalysis, OverlapSignals, PolicyClassConfig, PolicyProfile, PolicyQueue, QueueMetadata,
+    QueueSnapshot, ScheduleMode, SchedulingContext, WorkerPlacement,
 };
 use dynamo_kv_router::sequences::topology::WorkerDpRange;
 use dynamo_kv_router::services::selection::affinity::{
@@ -1021,9 +1021,22 @@ impl OfflineReplayRouter {
         now_ms: f64,
     ) -> Result<RouterEffects> {
         let decay_now = self.decay_now(now_ms);
-        let class_index = self
+        let (class_index, snapshot) = match self
             .profile
-            .resolve_class_index(pending.policy_class.as_deref())?;
+            .direct_class_index(pending.policy_class.as_deref())?
+        {
+            Some(class_index) => (class_index, None),
+            None => {
+                let snapshot = self.snapshot_for(&mut pending);
+                (
+                    self.profile.resolve_class_index_for_uncached_tokens(
+                        pending.policy_class.as_deref(),
+                        snapshot.uncached_tokens,
+                    )?,
+                    Some(snapshot),
+                )
+            }
+        };
         let class = self.profile.class(class_index);
         let should_queue = class.queueing_enabled()
             && (self.pending.has_backlog(class_index)
@@ -1035,7 +1048,7 @@ impl OfflineReplayRouter {
                 ));
 
         if should_queue {
-            let snapshot = self.snapshot_for(&mut pending);
+            let snapshot = snapshot.unwrap_or_else(|| self.snapshot_for(&mut pending));
             let placement = pending
                 .affinity_hold
                 .as_ref()
@@ -1046,16 +1059,24 @@ impl OfflineReplayRouter {
                         .map(|rank| WorkerWithDpRank::new(target.worker_id, rank))
                 })
                 .map_or(WorkerPlacement::Any, WorkerPlacement::Exact);
+            let metadata = QueueMetadata {
+                class_index,
+                snapshot,
+                due_at: None,
+                // Replay requests carry no explicit deadline. A class budget counts from the
+                // virtual time the request reaches the scheduler, as the live router counts it
+                // from scheduler ingress, after any affinity wait.
+                class_due_at: class.slo_ttft_due_at(decay_now),
+                arrival_offset_secs: now_ms.max(0.0) / 1000.0,
+            };
             let priority_jump = pending.priority_jump;
             let strict_priority = pending.strict_priority;
             self.pending
-                .enqueue(
-                    class_index,
+                .enqueue_with_due_at(
+                    metadata,
                     self.workers_with_configs
                         .len()
                         .saturating_mul(self.dp_size as usize),
-                    snapshot,
-                    now_ms.max(0.0) / 1000.0,
                     priority_jump,
                     strict_priority,
                     placement,
@@ -2802,6 +2823,207 @@ models:
     }
 
     #[test]
+    fn family_bucket_mapping_and_model_selection_use_shared_replay_queue_logic() {
+        let path =
+            std::env::temp_dir().join(format!("dynamo-replay-policy-{}.yaml", Uuid::new_v4()));
+        std::fs::write(
+            &path,
+            r#"
+default_policy_family: root
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
+policy_classes:
+  - name: root
+    policy_family: root
+    cache_bucket: all
+    quantum: 1
+models:
+  replay-model:
+    default_policy_family: latency
+    uncached_isl_buckets:
+      - min_tokens: 0
+        bucket: cached
+      - min_tokens: 32
+        bucket: uncached
+    policy_classes:
+      - name: latency_cached
+        policy_family: latency
+        cache_bucket: cached
+        quantum: 1
+        prefill_busy_threshold: 0
+        request_queue_limit_per_worker: 1
+      - name: latency_uncached
+        policy_family: latency
+        cache_bucket: uncached
+        quantum: 1
+        prefill_busy_threshold: 0
+        request_queue_limit_per_worker: 0
+      - name: batch_cached
+        policy_family: batch
+        cache_bucket: cached
+        quantum: 4
+        prefill_busy_threshold: 1024
+      - name: batch_uncached
+        policy_family: batch
+        cache_bucket: uncached
+        quantum: 4
+        prefill_busy_threshold: 1024
+"#,
+        )
+        .unwrap();
+        let config = KvRouterConfig {
+            router_policy_config: Some(path.display().to_string()),
+            ..KvRouterConfig::default()
+        }
+        .with_policy_model_name(Some("replay-model".to_string()));
+        let mut router = OfflineReplayRouter::new(&queueing_args(), Some(config), None, 1).unwrap();
+        std::fs::remove_file(path).unwrap();
+
+        let mut active = request(1, 1);
+        active.policy_class = Some("latency".to_string());
+        assert_eq!(
+            router
+                .on_request_arrival(&active, None, 0.0)
+                .unwrap()
+                .admissions
+                .len(),
+            1
+        );
+
+        let mut mapped_batch = request(2, 2);
+        mapped_batch.policy_class = Some("batch".to_string());
+        assert_eq!(
+            router
+                .on_request_arrival(&mapped_batch, None, 0.0)
+                .unwrap()
+                .admissions
+                .len(),
+            1,
+            "the batch family should select batch_uncached and use its higher busy threshold"
+        );
+
+        let mut cached_latency = request(3, 3);
+        cached_latency.policy_class = Some("latency".to_string());
+        let cached_hashes =
+            ReplayRequestHashes::from_tokens(&cached_latency.tokens, router.block_size);
+        router
+            .on_kv_events(vec![store_event(
+                0,
+                1,
+                cached_hashes.local_block_hashes[0],
+                StorageTier::Device,
+            )])
+            .unwrap();
+        assert!(
+            router
+                .on_request_arrival(&cached_latency, Some(cached_hashes.clone()), 0.0)
+                .unwrap()
+                .admissions
+                .is_empty(),
+            "the latency family should select latency_cached from observed cache state"
+        );
+
+        let mut ordinary_class_name = request(4, 4);
+        ordinary_class_name.policy_class = Some("latency_cached".to_string());
+        let error = router
+            .on_request_arrival(&ordinary_class_name, None, 0.0)
+            .unwrap_err();
+        let rejection = error
+            .downcast_ref::<dynamo_kv_router::scheduling::QueueRejection>()
+            .expect("replay should preserve the typed queue rejection");
+        assert_eq!(rejection.policy_class, "latency_uncached");
+        assert_eq!(rejection.current, 0);
+        assert_eq!(rejection.limit, 0);
+
+        router.add_worker(1, false).unwrap();
+        let mut scaled_latency = request(5, 3);
+        scaled_latency.policy_class = Some("latency".to_string());
+        assert!(
+            router
+                .on_request_arrival(&scaled_latency, Some(cached_hashes.clone()), 0.0)
+                .unwrap()
+                .admissions
+                .is_empty(),
+            "a second discovered worker should raise the effective queue limit"
+        );
+        assert_eq!(router.pending_count(), 2);
+
+        router.remove_worker(1).unwrap();
+        let mut rejected_after_shrink = request(6, 3);
+        rejected_after_shrink.policy_class = Some("latency".to_string());
+        let error = router
+            .on_request_arrival(&rejected_after_shrink, Some(cached_hashes), 0.0)
+            .unwrap_err();
+        let rejection = error
+            .downcast_ref::<dynamo_kv_router::scheduling::QueueRejection>()
+            .expect("worker removal should retain the typed queue rejection");
+        assert_eq!(rejection.current, 2);
+        assert_eq!(rejection.limit, 1);
+        assert_eq!(router.pending_count(), 2);
+    }
+
+    #[test]
+    fn replay_cache_bucket_ignores_removed_worker_entries() {
+        let path =
+            std::env::temp_dir().join(format!("dynamo-replay-policy-{}.yaml", Uuid::new_v4()));
+        std::fs::write(
+            &path,
+            r#"
+default_policy_family: standard
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: cached
+  - min_tokens: 32
+    bucket: uncached
+policy_classes:
+  - name: cached
+    policy_family: standard
+    cache_bucket: cached
+    quantum: 1
+    prefill_busy_threshold: 0
+  - name: uncached
+    policy_family: standard
+    cache_bucket: uncached
+    quantum: 1
+    prefill_busy_threshold: 1024
+"#,
+        )
+        .unwrap();
+        let config = KvRouterConfig {
+            router_policy_config: Some(path.display().to_string()),
+            ..KvRouterConfig::default()
+        };
+        let mut router = OfflineReplayRouter::new(&queueing_args(), Some(config), None, 2).unwrap();
+        std::fs::remove_file(path).unwrap();
+
+        let target = request(2, 2);
+        let target_hashes = ReplayRequestHashes::from_tokens(&target.tokens, router.block_size);
+        router
+            .on_kv_events(vec![store_event(
+                1,
+                1,
+                target_hashes.local_block_hashes[0],
+                StorageTier::Device,
+            )])
+            .unwrap();
+        router.remove_worker(1).unwrap();
+
+        router
+            .on_request_arrival(&request(1, 1), None, 0.0)
+            .unwrap();
+        let effects = router
+            .on_request_arrival(&target, Some(target_hashes), 0.0)
+            .unwrap();
+        assert_eq!(
+            effects.admissions.len(),
+            1,
+            "cache state from a removed worker must not select the cached queue"
+        );
+        assert_eq!(router.pending_count(), 0);
+    }
+
+    #[test]
     fn replay_snapshot_ignores_removed_worker_cache() {
         let path =
             std::env::temp_dir().join(format!("dynamo-replay-policy-{}.yaml", Uuid::new_v4()));
@@ -2967,6 +3189,60 @@ policy_classes:
             .map(|request| request.uuid)
             .collect::<Vec<_>>();
         assert_eq!(pending, vec![Uuid::from_u128(3), Uuid::from_u128(2)]);
+    }
+
+    #[test]
+    fn edf_offline_queue_orders_by_virtual_due_time_without_priority_modifiers() {
+        let path = std::env::temp_dir().join(format!("dynamo-replay-edf-{}.yaml", Uuid::new_v4()));
+        std::fs::write(
+            &path,
+            r#"
+policy_classes:
+  - name: standard
+    quantum: 64
+    slo_ttft_ms: 250
+    prefill_busy_threshold_frac: 0.5
+"#,
+        )
+        .unwrap();
+        let config = KvRouterConfig {
+            router_policy_config: Some(path.display().to_string()),
+            ..KvRouterConfig::default()
+        };
+        let mut router = OfflineReplayRouter::new(&queueing_args(), Some(config), None, 1).unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(router.profile.class(0).queue_policy, RouterQueuePolicy::Edf);
+
+        router
+            .on_request_arrival(&request(1, 1), None, 0.0)
+            .unwrap();
+        // Each class due time counts from the virtual arrival, so later arrivals keep their
+        // order; soft and strict priority do not move them ahead.
+        for (uuid, priority, strict_priority, now_ms) in
+            [(2, 0, 0, 10.0), (3, 1_000_000, 9, 20.0), (4, 0, 0, 30.0)]
+        {
+            router
+                .on_request_arrival(
+                    &request_with_priorities(uuid, uuid as u32, 64, priority, strict_priority),
+                    None,
+                    now_ms,
+                )
+                .unwrap();
+        }
+        let pending = router
+            .debug_snapshot(30.0)
+            .pending
+            .into_iter()
+            .map(|request| request.uuid.as_u128())
+            .collect::<Vec<_>>();
+        assert_eq!(pending, [2, 3, 4]);
+
+        // A passed class budget neither rejects nor delays a queued request.
+        let admitted = router
+            .on_request_completed(Uuid::from_u128(1), 10_000.0)
+            .unwrap();
+        assert_eq!(admitted_uuids(admitted), [Uuid::from_u128(2)]);
+        assert_eq!(router.pending_count(), 2);
     }
 
     #[test]

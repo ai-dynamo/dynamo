@@ -694,7 +694,7 @@ vLLM, SGLang, and TensorRT-LLM workers report F4 on the final response chunk of 
 
 ### Router Queue Metrics
 
-These metrics have series once a KV router starts, whether or not queueing is enabled; the queue metrics stay at zero unless queueing is enabled by `--router-queue-threshold` or a threshold in `--router-policy-config`. They carry `model`, `worker_type`, and `policy_class`, the resolved class: a request that names no class is reported as the default class, and a request whose class, after any request-classifier override, is unknown fails before it is queued, so these queue metrics do not count it.
+These metrics have series once a KV router starts, whether or not queueing is enabled; the queue metrics stay at zero unless queueing is enabled by `--router-queue-threshold` or a threshold in `--router-policy-config`. They carry `model`, `worker_type`, and `policy_class`, the resolved class. With flat classes, a request that names no class is reported as the default class, and a request whose class, after any request-classifier override, is unknown fails before it is queued, so these queue metrics do not count it. With a deprecated policy-family profile, a request that names an explicit class is reported as that class, and any other request as the class that its family selects for its uncached tokens, using the default family when it names no family; only a request-classifier override that names neither a family nor an explicit class fails before it is queued.
 
 <ParamField path="dynamo_frontend_router_queue_pending_requests" type="gauge">
   Requests pending in the router scheduler queue.
@@ -717,7 +717,7 @@ These metrics have series once a KV router starts, whether or not queueing is en
 </ParamField>
 
 <ParamField path="dynamo_frontend_router_admission_rejected_total" type="counter">
-  Attempts rejected because their deadline passed (`reason="due_time_passed"`). The `predicted_miss` reason is reserved and always 0.
+  Scheduling attempts rejected before admission, counted once each and labeled by `reason`: `due_time_passed` when the request's explicit deadline, or the budget of an `edf` class with `controlled_delay`, passes before admission, or `queue_size_exceeded` when a class queue request or token limit rejects it. An attempt whose response receiver is already closed when the router checks it, because the client went away, is not counted; a receiver that closes after that check can still be counted. `predicted_miss` is reserved and stays zero. A `queue_size_exceeded` rejection is also counted, by limit, in `dynamo_frontend_router_queue_backpressure_total` when the frontend's selection call returns that queue rejection; a cancellation can drop the call before it returns, so the two counts can differ. They describe the same rejections: do not add them together.
 </ParamField>
 
 ### KV Indexer Metrics
