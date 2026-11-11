@@ -843,7 +843,7 @@ impl crate::selector::WorkerPicker for CapturingPicker {
         &self,
         context: &crate::selector::WorkerSelectionContext<'_>,
         input: crate::selector::WorkerInputView<'_>,
-    ) -> Result<usize, crate::WorkerSelectionPolicyError> {
+    ) -> Result<usize, crate::types::WorkerSelectionPolicyError> {
         self.observed.lock().push(SelectionObservation {
             session_context: context.session_context().cloned(),
             affinity_target: context.affinity_target(),
@@ -1382,7 +1382,7 @@ async fn session_context_reaches_worker_selection() {
         assert_eq!(context.session_final(), Some(true));
         assert_eq!(
             context.input_trigger(),
-            Some(crate::WorkerSelectionInputTrigger::ToolResult)
+            Some(crate::types::WorkerSelectionInputTrigger::ToolResult)
         );
         assert!(std::ptr::eq(
             context.agent_headers(),
@@ -2072,7 +2072,7 @@ async fn explicit_reservation_of_a_live_id_is_a_conflict() {
 
 #[test]
 fn index_observer_replaces_stale_and_claimed_rows_of_its_partition() {
-    use crate::AttemptId;
+    use crate::types::AttemptId;
     let index = Arc::new(RwLock::new(HashMap::new()));
     let partition = default_key();
     let observer = ReservationIndexObserver {
@@ -2132,7 +2132,7 @@ fn index_observer_replaces_stale_and_claimed_rows_of_its_partition() {
 
 #[tokio::test]
 async fn index_observer_releases_displaced_affinity_after_unlock() {
-    use crate::AttemptId;
+    use crate::types::AttemptId;
     use dynamo_session_affinity::{AffinityReplicaSink, AffinityVersion};
 
     struct UnlockedIndexSink {
@@ -2185,7 +2185,7 @@ async fn index_observer_releases_displaced_affinity_after_unlock() {
 async fn replaced_claim_cannot_remove_or_overwrite_a_new_reservation(
     #[values("drop", "pending", "installed")] replacement: &str,
 ) {
-    use crate::AttemptId;
+    use crate::types::AttemptId;
     let core = local_core(test_config(false));
     let key = default_key();
     core.upsert_worker(worker(1)).await.unwrap();

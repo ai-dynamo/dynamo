@@ -10,12 +10,14 @@ use async_trait::async_trait;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
+use super::approximate_lru::{ApproximateLruCommandSink, ApproximateLruLane};
+use super::types::RoutingDecisionRequest;
 use super::{
-    ApproximateLruClient, ApproximateLruCommandSink, ApproximateLruIncarnation, ApproximateLruLane,
-    ApproximateLruLease, ApproximateLruStats, ApproximateLruTask, ApproximateRetentionConfig,
-    ContainsWorkerBlockRequest, DumpRequest, EventKind, FlushRequest, GetWorkersRequest,
-    KvIndexerInterface, KvIndexerMetrics, KvRouterError, MatchDetails, MatchDetailsRequest,
-    MatchRequest, PreBoundEventCounters, RadixTree, RoutingDecisionRequest, panic_payload_message,
+    ApproximateLruClient, ApproximateLruIncarnation, ApproximateLruLease, ApproximateLruStats,
+    ApproximateLruTask, ApproximateRetentionConfig, ContainsWorkerBlockRequest, DumpRequest,
+    EventKind, FlushRequest, GetWorkersRequest, KvIndexerInterface, KvIndexerMetrics,
+    KvRouterError, MatchDetails, MatchDetailsRequest, MatchRequest, PreBoundEventCounters,
+    RadixTree, panic_payload_message,
 };
 use crate::prelude::*;
 use crate::pruning::{BlockEntry, PruneConfig, WorkerPruneManager};
@@ -172,7 +174,7 @@ fn apply_approximate_lru_task(
         command, response, ..
     } = task;
     let result = lane.apply(command).and_then(|output| {
-        let super::ApproximateLruApplyOutput {
+        let super::approximate_lru::ApproximateLruApplyOutput {
             events,
             reply,
             ttl_update,

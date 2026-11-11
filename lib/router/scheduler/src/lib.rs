@@ -36,7 +36,7 @@ pub use config::{
     CacheHitWeights, PolicyProfileSource, RouterConfig, RouterConfigError, Validated,
 };
 pub use config::{RouterConfigOverride, RouterPrefillLoadModel};
-pub use filter::*;
+pub use filter::{RoutingEligibility, WorkerEligibilityError};
 pub use local::LocalScheduler;
 pub use overlap::{
     CacheHitEstimates, OverlapAnalysis, OverlapScoresResponse, OverlapSignals,
@@ -50,4 +50,10 @@ pub use prefill_load::{
     InvalidEffectivePrefillTokens, PrefillLoadEstimator, effective_prefill_tokens,
     prefill_load_hint_from_effective_tokens,
 };
-pub use types::*;
+pub use types::{
+    AccountingAttribution, AdmissionAttempt, AdmittedSchedulingResponse,
+    AdvisorySchedulingResponse, AdvisoryWorkerLoad, KvSchedulerError, NonMaxOverlapSelection,
+    NonMaxOverlapSelectionObserver, OverloadedWorkerProvider, ScheduleMode, ScheduleRequest,
+    SchedulingContext, SchedulingRequest, SchedulingResponse, TierOverlapBlocks,
+    WorkerAvailabilityProvider, WorkerIdSet,
+};
