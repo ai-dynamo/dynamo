@@ -2735,15 +2735,20 @@ func buildCliqueFromTemplate(p cliqueParams, template corev1.PodTemplateSpec) (*
 	if p.isMultinode && (!p.isInterPodFailover || !p.component.IsInterPodGMSEnabled()) {
 		minAvailable = p.r.Replicas
 	}
-	// Grove rejects template replicas <= 0 and minAvailable > replicas, so the
-	// template keeps a positive seed even while WaitForCheckpoint is pending.
-	// The Grove scaler holds the live PodClique or PodCliqueScalingGroup at
-	// zero until the checkpoint is ready.
+	replicas := p.r.Replicas
+	// While WaitForCheckpoint is pending, a standalone clique template keeps the
+	// smallest valid seed (Grove requires minAvailable <= replicas). The Grove
+	// scaler holds the live PodClique at zero until the checkpoint is ready.
+	// Cliques in a scaling group keep their per-role count; the scaling group
+	// seed is reduced instead.
+	if !p.usesPCSG && p.r.Role != RoleGMS && isWaitingForCheckpoint(p.checkpointInfo) {
+		replicas = minAvailable
+	}
 	clique := &grovev1alpha1.PodCliqueTemplateSpec{
 		Name: strings.ToLower(p.r.Name),
 		Spec: grovev1alpha1.PodCliqueSpec{
 			RoleName:     strings.ToLower(p.r.Name),
-			Replicas:     p.r.Replicas,
+			Replicas:     replicas,
 			MinAvailable: new(minAvailable),
 			PodSpec:      template.Spec,
 		},
@@ -3003,6 +3008,7 @@ func GenerateGrovePodCliqueSet(
 				dynamoDeployment.Spec.TopologyConstraint,
 				roles,
 				cliqueNames,
+				checkpointInfo,
 				isInterPodGMS,
 			))
 		}
@@ -3125,21 +3131,37 @@ func buildGroveScalingGroupConfig(
 	deploymentTopologyConstraint *v1beta1.SpecTopologyConstraint,
 	roles []ServiceRole,
 	cliqueNames []string,
+	checkpointInfo *checkpoint.CheckpointInfo,
 	isInterPodGMS bool,
 ) grovev1alpha1.PodCliqueScalingGroupConfig {
-	// Template replicas stay positive while WaitForCheckpoint is pending; the
-	// Grove scaler gates the live PodCliqueScalingGroup instead.
+	replicas := component.Replicas
+	minAvailable := provideroverride.EffectiveGroveMinAvailable(component)
+	// While WaitForCheckpoint is pending, the template keeps the smallest valid
+	// seed (Grove rejects replicas <= 0). The Grove scaler holds the live
+	// PodCliqueScalingGroup at zero until the checkpoint is ready.
+	if isWaitingForCheckpoint(checkpointInfo) {
+		replicas = new(minAvailable)
+	}
 	pcsg := grovev1alpha1.PodCliqueScalingGroupConfig{
 		Name:               strings.ToLower(componentName),
 		CliqueNames:        cliqueNames,
-		Replicas:           component.Replicas,
-		MinAvailable:       new(provideroverride.EffectiveGroveMinAvailable(component)),
+		Replicas:           replicas,
+		MinAvailable:       new(minAvailable),
 		TopologyConstraint: toGroveTopologyConstraint(component.TopologyConstraint, deploymentTopologyConstraint),
 	}
 	if isInterPodGMS {
 		pcsg.ResourceSharing = gmsResourceSharingEntries(componentName, roles)
 	}
 	return pcsg
+}
+
+// isWaitingForCheckpoint reports whether a component's WaitForCheckpoint startup
+// is still pending. A nil checkpointInfo means the component has no checkpoint.
+func isWaitingForCheckpoint(checkpointInfo *checkpoint.CheckpointInfo) bool {
+	return checkpointInfo != nil &&
+		checkpointInfo.Enabled &&
+		checkpointInfo.StartupPolicy == v1alpha1.CheckpointStartupPolicyWaitForCheckpoint &&
+		!checkpointInfo.Ready
 }
 
 // generatePodSpecForRole builds the pod spec for a single role, handling GMS

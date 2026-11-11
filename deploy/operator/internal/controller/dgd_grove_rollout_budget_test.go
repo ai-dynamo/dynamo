@@ -167,8 +167,8 @@ func TestGroveRendererRolloutBudgetSurvivesTemplateSeed(t *testing.T) {
 	}
 }
 
-// A pending WaitForCheckpoint must not rewrite the existing PCS template seed:
-// Grove rejects zero template replicas, and the scaler gates the live child.
+// A pending WaitForCheckpoint must not rewrite the existing PCS template seed;
+// the scaler gates the live child.
 func TestGroveRendererWaitForCheckpointKeepsTemplateSeed(t *testing.T) {
 	for _, grouped := range []bool{false, true} {
 		t.Run(fmt.Sprintf("grouped=%t", grouped), func(t *testing.T) {
@@ -193,25 +193,24 @@ func TestGroveRendererWaitForCheckpointKeepsTemplateSeed(t *testing.T) {
 			renderer := groveWorkloadRenderer{reader: reader, config: config, runtimeConfig: runtimeConfig, dockerSecretRetriever: secrets}
 			dgd.Spec.Components[0].Replicas = new(desired)
 
-			for _, ready := range []bool{false, true} {
-				t.Logf("Render with checkpoint ready=%t", ready)
-				rendered, err := renderer.Render(t.Context(), groveReconcileRequest{DGD: dgd}, nil, map[string]*checkpoint.CheckpointInfo{
-					"worker": {
-						Enabled:       true,
-						Ready:         ready,
-						StartupPolicy: nvidiacomv1alpha1.CheckpointStartupPolicyWaitForCheckpoint,
-					},
-				}, false)
-				require.NoError(t, err)
-				template := rendered.desired.Spec.Template
-				if grouped {
-					require.Len(t, template.PodCliqueScalingGroupConfigs, 1)
-					require.NotNil(t, template.PodCliqueScalingGroupConfigs[0].Replicas)
-					require.Equal(t, seed, *template.PodCliqueScalingGroupConfigs[0].Replicas)
-				} else {
-					require.Len(t, template.Cliques, 1)
-					require.Equal(t, seed, template.Cliques[0].Spec.Replicas)
-				}
+			t.Log("Render with the checkpoint pending")
+			rendered, err := renderer.Render(t.Context(), groveReconcileRequest{DGD: dgd}, nil, map[string]*checkpoint.CheckpointInfo{
+				"worker": {
+					Enabled:       true,
+					StartupPolicy: nvidiacomv1alpha1.CheckpointStartupPolicyWaitForCheckpoint,
+				},
+			}, false)
+			require.NoError(t, err)
+
+			t.Log("The existing template seed is kept")
+			template := rendered.desired.Spec.Template
+			if grouped {
+				require.Len(t, template.PodCliqueScalingGroupConfigs, 1)
+				require.NotNil(t, template.PodCliqueScalingGroupConfigs[0].Replicas)
+				require.Equal(t, seed, *template.PodCliqueScalingGroupConfigs[0].Replicas)
+			} else {
+				require.Len(t, template.Cliques, 1)
+				require.Equal(t, seed, template.Cliques[0].Spec.Replicas)
 			}
 		})
 	}

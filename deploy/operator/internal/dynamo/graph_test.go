@@ -9500,9 +9500,9 @@ func TestGenerateGrovePodCliqueSet_IntraPodFailoverCheckpointTargets(t *testing.
 	assert.True(t, sawDecode, "test setup should produce the decode engine clique")
 }
 
-// Grove v0.2.0-beta1 rejects PCS templates with replicas <= 0, minAvailable <= 0,
-// or minAvailable > replicas. A pending WaitForCheckpoint must keep a valid
-// template; the Grove scaler holds the live children at zero instead.
+// Grove v0.2.0-beta1 rejects scaling-group replicas <= 0 and minAvailable >
+// replicas. A pending WaitForCheckpoint renders the smallest valid seed; the
+// Grove scaler holds the live children at zero instead.
 func TestGenerateGrovePodCliqueSet_WaitForCheckpointKeepsPositiveTemplateSeed(t *testing.T) {
 	tests := []struct {
 		name              string
@@ -9518,7 +9518,7 @@ func TestGenerateGrovePodCliqueSet_WaitForCheckpointKeepsPositiveTemplateSeed(t 
 		},
 		{
 			name:              "standalone clique",
-			wantCliqueReplica: 3,
+			wantCliqueReplica: 1,
 		},
 	}
 
@@ -9571,7 +9571,7 @@ func TestGenerateGrovePodCliqueSet_WaitForCheckpointKeepsPositiveTemplateSeed(t 
 				require.Len(t, got.Spec.Template.PodCliqueScalingGroupConfigs, 1)
 				pcsg := got.Spec.Template.PodCliqueScalingGroupConfigs[0]
 				require.NotNil(t, pcsg.Replicas)
-				assert.EqualValues(t, 3, *pcsg.Replicas)
+				assert.EqualValues(t, 1, *pcsg.Replicas)
 				require.NotNil(t, pcsg.MinAvailable)
 				assert.EqualValues(t, 1, *pcsg.MinAvailable)
 				assert.LessOrEqual(t, *pcsg.MinAvailable, *pcsg.Replicas)
