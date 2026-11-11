@@ -20,7 +20,7 @@ spec:
   objective:
     mode: Pareto
     sla: {}
-  aisimulate:
+  aisim:
     inputOverrides:
       engine:
         mode: aggregated

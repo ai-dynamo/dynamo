@@ -919,7 +919,12 @@ class DGDRRunOutputPlugin:
         is_pareto: bool | None = None,
     ) -> DGDRRunOutputAdapter:
         resolved = DGDRRunOutputConfig.model_validate(dict(config))
-        return DGDRRunOutputAdapter(resolved, workload, is_pareto=is_pareto)
+        return DGDRRunOutputAdapter(
+            resolved,
+            workload,
+            is_pareto=is_pareto,
+            pareto_objectives=resolved.pareto_objectives,
+        )
 
     def write(
         self,
