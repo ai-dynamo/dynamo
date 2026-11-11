@@ -38,8 +38,9 @@ To profile on Kubernetes, see [Profiling with Nsight Operator](../../kubernetes/
 |---|---|---|
 | `DYN_NVTX` | unset (off) | Enables NVTX annotations in the Rust runtime and the Python components. Accepts `1`, `true`, `on`, or `yes` to enable and `0`, `false`, `off`, `no`, or empty to disable, trimmed and case-insensitive. Any other value is an error at startup, in both layers, rather than a silent "off". |
 
-`DYN_NVTX` is available since v1.7.0. It replaces `DYN_ENABLE_RUST_NVTX`, which Dynamo no longer
-reads.
+Since v1.7.0, `DYN_NVTX` also switches the Rust runtime's markers. It replaces
+`DYN_ENABLE_RUST_NVTX`, which Dynamo no longer reads. Earlier releases read `DYN_NVTX` only in the
+Python components, and accepted only `0` or `1`; any other value fails at import.
 
 ## Build Requirements
 
@@ -49,8 +50,8 @@ reads.
 | Python components | Multimodal loading, encoding, and embedding transfer in the frontend and in the vLLM and SGLang workers | The `nvtx` Python package: `pip install "ai-dynamo[profiling]"`, already in the container images |
 
 The published wheels and images have compiled the Rust markers in since v1.6.0, so they need no
-rebuild. With `DYN_NVTX` unset, each annotation site costs one relaxed atomic load and a
-predictable branch, and the marker name is never built.
+rebuild. With `DYN_NVTX` unset, the markers add almost no cost; see
+[Profiling Overhead](#profiling-overhead).
 
 If `DYN_NVTX` is on but the `nvtx` Python package is missing, the Python layer logs
 `DYN_NVTX is set but the nvtx package is not installed; NVTX markers are disabled` and the
@@ -96,7 +97,7 @@ another after an `.await` still renders as one bar.
 | `frontend.http.completions.*` | The same stages for `/v1/completions`, without `validate` |
 | `preprocess.template` | Applying the chat template |
 | `preprocess.tokenize` | Tokenizing the prompt |
-| `route.select_worker` | Selecting a worker |
+| `route.select_worker` | Selecting a worker, with KV-aware routing |
 | `route.kv_match` | Scoring KV cache overlap, with KV-aware routing |
 | `transport.tcp.request`, `transport.nats.request` | Sending a request to the chosen worker and opening its response stream |
 | `transport.tcp.send` | Writing the request to the worker |
@@ -134,8 +135,16 @@ the gap before `worker.egress.chunk` and reads as engine time.
 
 ## Python Ranges
 
-The Python components use `mm:*` and `mm_*` names on the multimodal paths. For the SGLang worker
-ranges, see [SGLang Multimodal](../../developer-guide/knowledge-base/modular-components/backends/sglang/multimodal.md#profiling).
+The Python components use `mm:*` and `mm_*` names on the multimodal paths. They are emitted into
+the NVTX domain `dynamo`, while the Rust ranges use the default domain. In the Nsight Systems GUI
+they appear as separate NVTX rows, and `nsys stats --nvtx-domain-include` filters them separately.
+
+For the SGLang worker ranges, see [SGLang Multimodal](../../developer-guide/knowledge-base/modular-components/backends/sglang/multimodal.md#profiling).
+The vLLM ranges are not listed yet. They include `mm_frontend:*` in the frontend's vLLM processor
+(for example `mm_frontend:preprocess_chat`, `mm_frontend:process_inputs`, and
+`mm_frontend:routed_engine_generate`), `mm_backend:build_prompt` in the vLLM worker, and the shared
+multimodal loaders under `mm:img:*`, `mm:audio:*`, `mm:nixl:*`, and `mm:local:*`.
+
 Python and Rust ranges from one process land on the same timeline, together with the engine's own
 NVTX ranges, such as TensorRT-LLM's.
 
@@ -170,7 +179,8 @@ Annotation is cheap when `DYN_NVTX` is unset and costs measurable CPU time when 
 | `DYN_NVTX=1`, no profiler attached | About 0.1 µs |
 | `DYN_NVTX=1`, under `nsys --trace=nvtx` | About 1.3 µs |
 
-The frontend emits about two ranges per streamed token (`detokenize` and `sse_chunk`), so at high
+The figures were measured at 4096 concurrent streams on mock workers, so treat them as an
+estimate on other hardware. The frontend emits about two ranges per streamed token (`detokenize` and `sse_chunk`), so at high
 token rates the profiler shows up in frontend CPU time. Keep profiled runs out of measured
 benchmarks.
 

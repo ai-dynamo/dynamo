@@ -82,11 +82,13 @@ cd lib/bindings/python
 # Minimal build
 maturin develop --uv
 
-# Build with the same features as the release wheels
+# Build with the release wheel features, except media-ffmpeg
 maturin develop --uv --features kv-indexer,slot-tracker,select-service,mm-routing,ais-forward-pass,request-trace-s3,nvtx
 ```
 
 最小构建不包含[发布版 wheel](https://github.com/ai-dynamo/dynamo/blob/main/container/templates/wheel_builder.Dockerfile) 的以下 features：独立的 KV indexer、slot tracker 和 select service（部分 router 测试会启动它们）、多模态 KV 路由、AISimulate 性能模型、S3 请求追踪，以及用于 Nsight Systems profile 的 NVTX 标注。NVTX 标注在设置 `DYN_NVTX` 之前保持关闭；参见 [NVTX Profiling](../../../../../pages/reference/observability/nvtx-profiling.md)。
+
+Linux 主发布版 wheel 还启用了 `media-ffmpeg`。上面的命令没有包含它，因为它需要 FFmpeg 开发库；如果已安装这些库，可将其加入 feature 列表。
 
 ## 6. 安装 GPU Memory Service
 

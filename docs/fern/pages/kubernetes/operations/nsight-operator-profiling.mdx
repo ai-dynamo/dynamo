@@ -175,7 +175,8 @@ spec:
 
 - `--cuda-graph-trace=node` shows every kernel inside CUDA graphs and costs the most. For lower overhead, use
   `--cuda-graph-trace=graph`, which shows each graph launch as one item.
-- For every Dynamo range and how to read the gaps between them, see
+- NVTX markers are off until `DYN_NVTX` is set. The published images include the Rust `nvtx` build feature; a
+  custom image built from source needs it too. For every Dynamo range and how to read the gaps between them, see
   [NVTX Profiling](../../reference/observability/nvtx-profiling.md).
 - Set the NVTX variables in the component's container `env`, or in the DGD's `spec.env` to set them on every
   component, before the pods start.
