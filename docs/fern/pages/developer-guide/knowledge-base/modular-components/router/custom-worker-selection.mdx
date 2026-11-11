@@ -24,7 +24,7 @@ flowchart LR
     Validate --> Reserve["Accounting and reservation"]
 ```
 
-For multiple compile-checked policies, see the [custom policy examples](https://github.com/ai-dynamo/dynamo/tree/main/examples/router/custom-policy-example). Repository contributors who use a coding agent must also provide the [worker-selection API rules](https://github.com/ai-dynamo/dynamo/blob/main/lib/kv-router/src/scheduling/CLAUDE.md).
+For multiple compile-checked policies, see the [custom policy examples](https://github.com/ai-dynamo/dynamo/tree/main/examples/router/custom-policy-example). Repository contributors who use a coding agent must also provide the [worker-selection API rules](https://github.com/ai-dynamo/dynamo/blob/main/lib/router/worker-selection/README.md).
 
 ## Use a Built-In Policy First
 
@@ -81,7 +81,7 @@ Add `dynamo-kv-router` from the same checkout that builds the frontend or EPP:
 # Add the worker-selection API to the policy crate.
 cargo add \
   --manifest-path "$POLICY_DIR/policy/Cargo.toml" \
-  --path "$DYNAMO_DIR/lib/kv-router" \
+  --path "$DYNAMO_DIR/lib/router/kv-router" \
   dynamo-kv-router
 
 # Add parameter deserialization to the policy crate.
@@ -98,7 +98,7 @@ cargo add \
 # Add the registry API to the catalog.
 cargo add \
   --manifest-path "$POLICY_DIR/catalog/Cargo.toml" \
-  --path "$DYNAMO_DIR/lib/kv-router" \
+  --path "$DYNAMO_DIR/lib/router/kv-router" \
   dynamo-kv-router
 ```
 
@@ -568,7 +568,7 @@ cargo add --manifest-path "$POLICY_DIR/epp/Cargo.toml" tokio@=1.48.0 --features 
 
 # Add the policy catalog and worker-selection API.
 cargo add --manifest-path "$POLICY_DIR/epp/Cargo.toml" --path "$POLICY_DIR/catalog" acme-routing-catalog
-cargo add --manifest-path "$POLICY_DIR/epp/Cargo.toml" --path "$DYNAMO_DIR/lib/kv-router" --features standalone-selection dynamo-kv-router
+cargo add --manifest-path "$POLICY_DIR/epp/Cargo.toml" --path "$DYNAMO_DIR/lib/router/kv-router" --features http,ingest-zmq,replica-sync-zmq,peer-recovery dynamo-kv-router
 
 # Add the standard EPP runner.
 cargo add --manifest-path "$POLICY_DIR/epp/Cargo.toml" --path "$DYNAMO_DIR/deploy/inference-gateway/ext-proc" dynamo-ext-proc

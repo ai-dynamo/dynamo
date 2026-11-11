@@ -35,7 +35,7 @@ worker_selection:
 
 ## Implement and Register a Policy
 
-Implement `HintPolicy` from `dynamo_kv_router::plugins::hint_policy`. The router calls `build_hints` once per booking with a `HintContext`, which carries the request ID, the booked worker, the prompt length, the block size, and the session context. It returns the actions for that worker, in the engine's format. A policy that sends committed KV copies declares `Commitments::KV_COPY` and reads the copy from `HintContext::committed_kv_copy`.
+Implement `HintPolicy` from `dynamo_kv_router::plugins::prelude`. The router calls `build_hints` once per booking with a `HintContext`, which carries the request ID, the booked worker, the prompt length, the block size, and the session context. It returns the actions for that worker, in the engine's format. A policy that sends committed KV copies declares `Commitments::KV_COPY` and reads the copy from `HintContext::committed_kv_copy`.
 
 Register the policy with a provider that parses its parameters:
 

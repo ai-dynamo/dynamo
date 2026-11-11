@@ -7,10 +7,7 @@
 
 use super::parameters::PolicyParameters;
 use super::scorer::DefaultScorer;
-use dynamo_kv_router::plugins::worker_selection::{
-    WorkerCandidate, WorkerCandidates, WorkerInputs, WorkerScorer, WorkerSelectionContext,
-    WorkerSelectionPolicyError,
-};
+use dynamo_kv_router::plugins::prelude::*;
 
 /// [`super::scorer::build`] for the `kvcr` preset: the same cost plus credit for the blocks a
 /// worker could copy from a peer, at the shared-cache multiplier.

@@ -9,17 +9,7 @@
 
 use std::sync::Arc;
 
-use dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicyFactory;
-use dynamo_kv_router::plugins::worker_selection::{
-    ScoredWorkerCandidate, WorkerInputView, WorkerInputs, WorkerPicker, WorkerSelectionContext,
-    WorkerSelectionPolicy,
-};
-use dynamo_kv_router::protocols::WorkerAffinityTarget;
-use dynamo_kv_router::services::selection::{
-    RouterPluginRegistry, WorkerSelectionPolicyParameters, WorkerSelectionPolicyProviderError,
-    WorkerSelectionPolicyRegistryError,
-};
-use dynamo_kv_router::{KvRouterConfig, WorkerSelectionPolicyError};
+use dynamo_kv_router::plugins::prelude::*;
 
 struct SoftPinRepinPicker {
     max_active_requests: usize,
@@ -34,7 +24,7 @@ impl SoftPinRepinPicker {
 
     fn least_loaded_row(
         candidates: &[ScoredWorkerCandidate],
-        loads: &[dynamo_kv_router::plugins::worker_selection::WorkerLoadInput],
+        loads: &[dynamo_kv_router::plugins::prelude::WorkerLoadInput],
         excluded_target: Option<WorkerAffinityTarget>,
     ) -> Option<usize> {
         candidates
@@ -100,7 +90,7 @@ fn provider(
     let max_active_requests = parameters.max_active_requests;
 
     Ok(Arc::new(
-        move |config: &KvRouterConfig, worker_type, _partition| {
+        move |config: &SelectionConfig, worker_type, _partition| {
             WorkerSelectionPolicy::new(
                 config.clone(),
                 worker_type.as_str(),
@@ -123,11 +113,9 @@ pub fn register(
 mod tests {
     use std::collections::HashMap;
 
-    use dynamo_kv_router::protocols::{RoutingConstraints, WorkerConfigLike, WorkerWithDpRank};
-    use dynamo_kv_router::scheduling::{OverlapSignals, ScheduleMode};
-    use dynamo_kv_router::{
-        SchedulingRequest, WorkerLoadProjection, WorkerSelectionInput, WorkerSelector,
-    };
+    use dynamo_kv_router::plugins::prelude::*;
+    use dynamo_scheduler::host::WorkerSelectionInput;
+    use dynamo_scheduler::host::WorkerSelector;
 
     use super::*;
 
@@ -194,7 +182,7 @@ mod tests {
 
     fn policy(max_active_requests: usize) -> WorkerSelectionPolicy {
         WorkerSelectionPolicy::new(
-            KvRouterConfig::default(),
+            SelectionConfig::default(),
             "test",
             Vec::new(),
             Box::new(SoftPinRepinPicker {

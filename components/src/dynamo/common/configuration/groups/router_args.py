@@ -45,7 +45,7 @@ _ROUTER_FIELDS: tuple[str, ...] = (
     "session_affinity_mode",
 )
 
-# Matches MAX_SESSION_AFFINITY_ENTRIES in lib/kv-router's affinity table.
+# Matches MAX_SESSION_AFFINITY_ENTRIES in lib/router/session-affinity.
 DEFAULT_SESSION_AFFINITY_MAX_ENTRIES = 65_536
 
 # TODO(v1.7): Remove --active-prefill-tokens-threshold.
