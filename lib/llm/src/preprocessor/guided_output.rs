@@ -113,6 +113,23 @@ impl OpenAIPreprocessor {
         {
             return Ok(None);
         }
+        let capability = self
+            .runtime_config
+            .runtime_data
+            .get(GUIDED_OUTPUT_REASONING_RUNTIME_KEY)
+            .and_then(|value| {
+                if value.get("version").and_then(Value::as_u64) != Some(1) {
+                    tracing::warn!("Unavailable guided-output worker capability version");
+                    return None;
+                }
+                match serde_json::from_value::<GuidedOutputCapability>(value.clone()) {
+                    Ok(capability) => Some(capability),
+                    Err(error) => {
+                        tracing::warn!(%error, "Unavailable guided-output worker capability");
+                        None
+                    }
+                }
+            });
         let parser = self.runtime_config.reasoning_parser.as_deref();
         let family = crate::protocols::openai::chat_completions::unified_parser::configured_family(
             self.tool_call_parser.as_deref(),
@@ -125,6 +142,17 @@ impl OpenAIPreprocessor {
                     prompt.legacy
                         || prompt.unified
                         || Self::reasoning_is_mandatory(family)
+                        || (parser.is_none()
+                            && family.is_none()
+                            && capability
+                                .as_ref()
+                                .is_some_and(|value| value.reasoner.is_some())
+                            && Self::normalize_thinking_aliases(
+                                request.chat_template_args.as_ref(),
+                                capability
+                                    .as_ref()
+                                    .and_then(|value| value.reasoner.as_deref()),
+                            ) != Some(false))
                         || Self::known_reasoning_enabled(
                             parser.or(family),
                             request.chat_template_args.as_ref(),
@@ -146,28 +174,11 @@ impl OpenAIPreprocessor {
                 "force_nonempty_content=true cannot be combined with a guided answer constraint and enabled reasoning",
             ));
         }
-        if matches!(constraint, FinalAnswerConstraint::Json(_))
-            && (installed.uses_structural_tag() || installed.frames_structured_answer())
-        {
+        let native_json = matches!(constraint, FinalAnswerConstraint::Json(_))
+            && (installed.uses_structural_tag() || installed.frames_structured_answer());
+        if native_json && !common.native_json_requires_reasoning_gate {
             return Ok(Some(GuidedOutputPlan::NativeJson));
         }
-        let capability = self
-            .runtime_config
-            .runtime_data
-            .get(GUIDED_OUTPUT_REASONING_RUNTIME_KEY)
-            .and_then(|value| {
-                if value.get("version").and_then(Value::as_u64) != Some(1) {
-                    tracing::warn!("Unavailable guided-output worker capability version");
-                    return None;
-                }
-                match serde_json::from_value::<GuidedOutputCapability>(value.clone()) {
-                    Ok(capability) => Some(capability),
-                    Err(error) => {
-                        tracing::warn!(%error, "Unavailable guided-output worker capability");
-                        None
-                    }
-                }
-            });
         let unsupported = || {
             invalid_argument_error(concat!(
                 "The selected workers cannot preserve this guided-answer reasoning policy. ",
@@ -201,12 +212,13 @@ impl OpenAIPreprocessor {
                 "tool_call_structural_tag_excludes_reasoning",
                 "tool_call_structural_tag_reasoning_gate",
             ] {
-                if self
-                    .runtime_config
-                    .get_engine_specific::<bool>(key)?
-                    .unwrap_or(false)
-                {
-                    return Err(unsupported());
+                match self.runtime_config.runtime_data.get(key) {
+                    None | Some(Value::Bool(false)) => {}
+                    Some(Value::Bool(true)) => return Err(unsupported()),
+                    Some(_) => {
+                        tracing::warn!(key, "Unverified legacy guided-output reasoning metadata");
+                        return Err(unsupported());
+                    }
                 }
             }
         }
@@ -244,6 +256,10 @@ impl OpenAIPreprocessor {
                 chat.insert("thinking".into(), json!(reasoning));
                 chat.insert("enable_thinking".into(), json!(reasoning));
             }
+        }
+        if native_json {
+            // Tool/answer envelopes keep their parser after the engine gate is verified.
+            return Ok(Some(GuidedOutputPlan::NativeJson));
         }
         let plan = if reasoning {
             GuidedOutputPlan::EngineGated(capability.expect("validated above"))
@@ -659,6 +675,191 @@ mod tests {
                 .is_err(),
             "an unknown default must not silently suppress reasoning"
         );
+    }
+
+    #[test]
+    fn guided_output_honors_engine_only_reasoning_and_direct_controls() {
+        for mode in [
+            GuidedReasoningMode::ExplicitGate,
+            GuidedReasoningMode::Unsupported,
+            GuidedReasoningMode::Immediate,
+        ] {
+            let mut capability = gate();
+            capability.mode = mode;
+            let mut processor = processor(Some(capability));
+            std::sync::Arc::get_mut(&mut processor)
+                .unwrap()
+                .runtime_config
+                .reasoning_parser = None;
+            for thinking in [None, Some(true), Some(false)] {
+                let mut request = request(json!({"guided_choice":["yes"]}));
+                request.chat_template_args = thinking.map(|value| {
+                    std::collections::HashMap::from([("enable_thinking".into(), json!(value))])
+                });
+                let mut common = processor
+                    .builder_with_lora(&request, None)
+                    .unwrap()
+                    .token_ids(vec![])
+                    .build()
+                    .unwrap();
+                let result = processor.resolve_guided_output_plan(
+                    &request,
+                    &mut common,
+                    &false.into(),
+                    &GuidedToolConstraint::None,
+                );
+                if thinking == Some(false) {
+                    assert_eq!(result.unwrap(), Some(GuidedOutputPlan::Direct));
+                    assert!(!common.require_reasoning);
+                    assert_eq!(common.extra_args.as_ref().unwrap()["reasoning_ended"], true);
+                } else if mode == GuidedReasoningMode::ExplicitGate {
+                    assert!(matches!(
+                        result.unwrap(),
+                        Some(GuidedOutputPlan::EngineGated(_))
+                    ));
+                    assert!(common.require_reasoning);
+                    assert_eq!(
+                        common.extra_args.as_ref().unwrap()["reasoning_ended"],
+                        false
+                    );
+                } else {
+                    assert!(result.unwrap_err().to_string().contains("cannot preserve"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn guided_output_malformed_legacy_gate_metadata_has_a_configuration_error() {
+        let mut processor = processor(None);
+        for key in [
+            "tool_call_structural_tag_excludes_reasoning",
+            "tool_call_structural_tag_reasoning_gate",
+        ] {
+            std::sync::Arc::get_mut(&mut processor)
+                .unwrap()
+                .runtime_config
+                .runtime_data
+                .insert(key.into(), json!("malformed"));
+            let mut request = request(json!({"guided_regex":"yes"}));
+            request.chat_template_args = Some(std::collections::HashMap::from([(
+                "enable_thinking".into(),
+                json!(false),
+            )]));
+            let mut common = processor
+                .builder_with_lora(&request, None)
+                .unwrap()
+                .token_ids(vec![])
+                .build()
+                .unwrap();
+            let error = processor
+                .resolve_guided_output_plan(
+                    &request,
+                    &mut common,
+                    &false.into(),
+                    &GuidedToolConstraint::None,
+                )
+                .unwrap_err();
+            assert!(error.to_string().contains("cannot preserve"), "{error}");
+            std::sync::Arc::get_mut(&mut processor)
+                .unwrap()
+                .runtime_config
+                .runtime_data
+                .remove(key);
+        }
+    }
+
+    #[tokio::test]
+    async fn guided_output_native_composites_validate_the_actual_engine_gate() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::guided_output_native_composites_validate_the_actual_engine_gate"
+            ),
+            &[(
+                dynamo_runtime::config::environment_names::llm::DYN_PARSER_VERSION,
+                "2",
+            )],
+        ) {
+            return;
+        }
+        for (reasoner, tool, capability) in [
+            ("minimax_m3", "minimax_m3", None),
+            (
+                "minimax_m3",
+                "minimax_m3",
+                Some(GuidedReasoningMode::Unsupported),
+            ),
+            (
+                "qwen3",
+                "qwen3_coder",
+                Some(GuidedReasoningMode::ExplicitGate),
+            ),
+        ] {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
+            let mut card =
+                crate::model_card::ModelDeploymentCard::load_from_disk(path, None).unwrap();
+            card.runtime_config.reasoning_parser = Some(reasoner.into());
+            card.runtime_config.tool_call_parser = Some(tool.into());
+            card.runtime_config.structural_tag =
+                Some(crate::local_model::runtime_config::StructuralTagConfig {
+                    allow_tool_calls_with_structured_output: true,
+                    ..Default::default()
+                });
+            card.runtime_config
+                .set_engine_specific("tool_call_structural_tag_excludes_reasoning", true)
+                .unwrap();
+            if let Some(mode) = capability {
+                let mut value = gate();
+                value.mode = mode;
+                card.runtime_config
+                    .set_engine_specific(GUIDED_OUTPUT_REASONING_RUNTIME_KEY, value)
+                    .unwrap();
+            }
+            let processor = OpenAIPreprocessor::new(card).unwrap();
+            for format in [
+                json!({"guided_json":{"type":"object"}}),
+                json!({"response_format":{"type":"json_schema","json_schema":{"name":"guided_json","schema":{"type":"object"}}}}),
+            ] {
+                let mut fields = json!({"chat_template_kwargs":{"thinking_mode":"enabled","enable_thinking":true},"tool_choice":"auto","tools":[{"type":"function","function":{"name":"weather","parameters":{"type":"object","properties":{"city":{"type":"string","enum":["Paris"]}}}}}]});
+                fields
+                    .as_object_mut()
+                    .unwrap()
+                    .extend(format.as_object().unwrap().clone());
+                let mut request = request(fields);
+                normalize_guided_json(&mut request).unwrap();
+                let mut common = processor
+                    .builder_with_lora(&request, None)
+                    .unwrap()
+                    .token_ids(vec![])
+                    .build()
+                    .unwrap();
+                let prefill: PromptReasoningPrefill = true.into();
+                let installed = processor
+                    .apply_tool_choice_guided_decoding(&request, &mut common, prefill.clone())
+                    .unwrap();
+                assert!(installed.uses_structural_tag());
+                assert!(common.native_json_requires_reasoning_gate);
+                let result = processor.resolve_guided_output_plan(
+                    &request,
+                    &mut common,
+                    &prefill,
+                    &installed,
+                );
+                if capability == Some(GuidedReasoningMode::ExplicitGate) {
+                    assert_eq!(result.unwrap(), Some(GuidedOutputPlan::NativeJson));
+                    assert!(common.guided_output_plan.is_none());
+                    assert!(common.require_reasoning);
+                    assert_eq!(
+                        common.extra_args.as_ref().unwrap()["reasoning_ended"],
+                        false
+                    );
+                } else {
+                    assert!(result.unwrap_err().to_string().contains("cannot preserve"));
+                }
+            }
+        }
     }
 
     #[test]

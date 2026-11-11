@@ -173,6 +173,7 @@ def test_sglang_uses_actual_detector_ids_and_rejects_native_frames(
     assert runtime.value["mode"] == (
         expected if detector_name == "Qwen3Detector" else "unsupported"
     )
+    assert runtime.value["request_controls"] is True
 
 
 def test_sglang_old_reasoner_api_does_not_break_worker_startup() -> None:
@@ -189,6 +190,7 @@ def test_sglang_old_reasoner_api_does_not_break_worker_startup() -> None:
         SimpleNamespace(reasoning_parser="qwen3", skip_tokenizer_init=False),
     )
     assert runtime.value["mode"] == "unsupported"
+    assert runtime.value["request_controls"] is True
 
 
 @pytest.mark.parametrize("error_type", [AttributeError, TypeError, RuntimeError])
@@ -278,4 +280,5 @@ def test_sglang_missing_detector_gate_api_is_unavailable(
         SimpleNamespace(reasoning_parser="qwen3", skip_tokenizer_init=False),
     )
     assert runtime.value["mode"] == "unsupported"
+    assert runtime.value["request_controls"] is True
     assert "capability unavailable" in caplog.text

@@ -22,12 +22,16 @@ def publish_guided_output_capability(
     parser_name = server_args.reasoning_parser
     capability = GuidedOutputCapability("sglang", "immediate", parser_name or None)
     if parser_name:
-        capability = GuidedOutputCapability("sglang", "unsupported", parser_name)
+        controls = engine is not None and has_named_parameter(
+            engine.async_generate, "require_reasoning"
+        )
+        capability = GuidedOutputCapability(
+            "sglang", "unsupported", parser_name, controls
+        )
         try:
             if (
-                engine is not None
+                controls
                 and not server_args.skip_tokenizer_init
-                and has_named_parameter(engine.async_generate, "require_reasoning")
                 and has_named_parameter(ReasoningParser, "tokenizer")
             ):
                 tokenizer = engine.tokenizer_manager.tokenizer

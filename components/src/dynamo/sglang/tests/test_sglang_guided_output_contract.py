@@ -53,6 +53,7 @@ def test_installed_qwen3_detector_and_engine_api_match_published_capability() ->
     current_reasoner = has_named_parameter(reasoning.ReasoningParser, "tokenizer")
     expected = "explicit_gate" if named and current_reasoner else "unsupported"
     assert published["mode"] == expected
+    assert published["request_controls"] == named
     if expected == "explicit_gate":
         assert published["end_token_ids"] == [2]
         assert published["end_text"] == "</think>"
