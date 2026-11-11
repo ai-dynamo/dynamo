@@ -1455,6 +1455,38 @@ func (r *dgdWorkerRolloutReconciler) buildRollingUpdateContext(
 	oldWorkerDCDReplicas := make(map[string]int32)
 	newWorkerReplicas := make(map[string]int32)
 
+	// Prefill and decode workers pair only within one worker generation's
+	// runtime namespace, so a new replica can serve only once every desired
+	// worker component has an available replica in the new generation. Until
+	// then, new availability must not be spent to retire old replicas, or an
+	// old decode can lose its only prefill peer while the new decode is still
+	// unschedulable.
+	newStates := make(map[string]dcdComponentState)
+	newGenerationServes := true
+	for i := range dgd.Spec.Components {
+		spec := &dgd.Spec.Components[i]
+		if !dynamo.IsWorkerComponent(string(spec.ComponentType)) {
+			continue
+		}
+		componentName := spec.ComponentName
+
+		var newState dcdComponentState
+		newDCDName := dynamo.GetDCDResourceName(dgd, componentName, newWorkerHash)
+		newDCD := &nvidiacomv1beta1.DynamoComponentDeployment{}
+		if err := r.Get(ctx, types.NamespacedName{Name: newDCDName, Namespace: dgd.Namespace}, newDCD); err == nil {
+			if metav1.IsControlledBy(newDCD, dgd) && newDCD.DeletionTimestamp == nil {
+				newState = dcdComponentStateFromDCD(newDCD)
+			}
+		} else if !apierrors.IsNotFound(err) {
+			return dynamo.RollingUpdateContext{}, fmt.Errorf("failed to get new worker DCD %s: %w", newDCDName, err)
+		}
+		newStates[componentName] = newState
+
+		if (spec.Replicas == nil || *spec.Replicas > 0) && newState.Available == 0 {
+			newGenerationServes = false
+		}
+	}
+
 	for i := range dgd.Spec.Components {
 		spec := &dgd.Spec.Components[i]
 		componentName := spec.ComponentName
@@ -1472,17 +1504,7 @@ func (r *dgdWorkerRolloutReconciler) buildRollingUpdateContext(
 			desired = *spec.Replicas
 		}
 
-		var newState dcdComponentState
-		newDCDName := dynamo.GetDCDResourceName(dgd, componentName, newWorkerHash)
-		newDCD := &nvidiacomv1beta1.DynamoComponentDeployment{}
-		if err := r.Get(ctx, types.NamespacedName{Name: newDCDName, Namespace: dgd.Namespace}, newDCD); err == nil {
-			if metav1.IsControlledBy(newDCD, dgd) && newDCD.DeletionTimestamp == nil {
-				newState = dcdComponentStateFromDCD(newDCD)
-			}
-		} else if !apierrors.IsNotFound(err) {
-			return dynamo.RollingUpdateContext{}, fmt.Errorf("failed to get new worker DCD %s: %w", newDCDName, err)
-		}
-
+		newState := newStates[componentName]
 		oldState := oldStates[componentName]
 		annotations := dynamo.GetDGDComponentResourceAnnotations(dgd, componentName, spec)
 		strategy := deploymentStrategyFromAnnotations(annotations)
@@ -1506,12 +1528,16 @@ func (r *dgdWorkerRolloutReconciler) buildRollingUpdateContext(
 			maxSurge, maxUnavailable = resolveRollingUpdateParams(annotations, desired)
 			minAvailable = desired - maxUnavailable
 
-			newUnavailable := max(int32(0), newState.Spec-newState.Available)
+			newAvailable := newState.Available
+			if !newGenerationServes {
+				newAvailable = 0
+			}
+			newUnavailable := max(int32(0), newState.Spec-newAvailable)
 			// maxScaledDown is the maximum number of old replicas that can be scaled down
 			maxScaledDown := max(int32(0), (oldState.Spec+newState.Spec)-minAvailable-newUnavailable)
 			oldUnhealthy := max(int32(0), oldState.Spec-oldState.Available)
 			// availableSurplus is how many extra available replicas we have above minAvailable (min 0)
-			availableSurplus := max(int32(0), (oldState.Available+newState.Available)-minAvailable)
+			availableSurplus := max(int32(0), (oldState.Available+newAvailable)-minAvailable)
 			oldTarget = max(int32(0), oldState.Spec-min(maxScaledDown, oldUnhealthy+availableSurplus))
 
 			// Surge budget uses Spec (declared intent) like K8s Deployment controller; scheduler enforces actual resource constraints.
@@ -1533,6 +1559,7 @@ func (r *dgdWorkerRolloutReconciler) buildRollingUpdateContext(
 			"minAvailable", minAvailable,
 			"old", oldState,
 			"new", newState,
+			"newGenerationServes", newGenerationServes,
 			"oldTarget", oldTarget,
 			"newTarget", newTarget)
 	}
