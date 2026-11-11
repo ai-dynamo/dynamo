@@ -224,10 +224,12 @@ class TestPromptEmbedsE2E:
 
     def test_invalid_tensor_data_rejected(self, dynamo_client):
         """
-        Test that invalid tensor data is properly rejected by Python decoder.
+        Test that invalid tensor data is properly rejected by the worker's decoder.
 
-        This tests the Python-side torch.load() error handling, which
-        Rust validation cannot cover (Rust only checks base64 and size).
+        This tests the worker-side torch.load() error handling (vLLM's
+        safe_load_prompt_embeds), which Rust validation cannot cover (Rust only
+        checks base64 and size). The worker returns the loader's reason to the
+        client as a 400.
 
         Non-streaming mode should surface invalid prompt_embeds as an error and
         the OpenAI client should raise an exception.
@@ -248,8 +250,13 @@ class TestPromptEmbedsE2E:
 
         assert exc_info.value.status_code == 400
         error_msg = str(exc_info.value)
+        # "could not be deserialized" separates the torch.load failure from the
+        # --enable-prompt-embeds gate and the base64 check, which also return
+        # "Invalid prompt_embeds:" with a 400. torch's own reason is not checked
+        # because it depends on the torch version.
         assert (
-            "Failed to decode prompt_embeds as PyTorch tensor" in error_msg
+            "Invalid prompt_embeds:" in error_msg
+            and "could not be deserialized as a torch tensor" in error_msg
         ), f"Expected the worker's tensor decode error, got: {error_msg}"
 
     def test_usage_prompt_tokens_not_zero(self, dynamo_client):
