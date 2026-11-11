@@ -1221,11 +1221,11 @@ class HandlerBase(BaseGenerativeHandler):
 
         # TensorRT-LLM 1.4.0rc2 imports the prefill token without checking max_tokens.
         # Cap decode output and drain the rest so KV frees normally; drop once fixed.
-        output_token_cap = (
-            sampling_params.max_tokens
-            if getattr(disaggregated_params, "request_type", None) == "generation_only"
-            else None
+        is_generation_only = (
+            disaggregated_params is not None
+            and disaggregated_params.request_type == "generation_only"
         )
+        output_token_cap = sampling_params.max_tokens if is_generation_only else None
         capped_choices: set[int] = set()
 
         # TODO: Instead of True, we should use streaming from the request.
@@ -1527,10 +1527,6 @@ class HandlerBase(BaseGenerativeHandler):
                                 # attempt already reported cache reuse.
                                 prompt_tokens_details = prefill_prompt_tokens_details
                             else:
-                                is_generation_only = (
-                                    getattr(disaggregated_params, "request_type", None)
-                                    == "generation_only"
-                                )
                                 prompt_tokens_details = _prompt_tokens_details(
                                     res, num_input_tokens, is_generation_only
                                 )

@@ -1106,9 +1106,11 @@ class TestGenerateLocally:
 
         generation_result = MagicMock()
         generation_result.finished = False
+        consumed = []
 
         async def mock_aiter(self_mock):
             for res in results:
+                consumed.append(res)
                 yield res
             generation_result.finished = True
 
@@ -1135,6 +1137,8 @@ class TestGenerateLocally:
             expected_tokens
         )
         assert sum("finish_reason" in c for c in chunks) == 1
+        # The engine must run to completion so the KV transfer finishes.
+        assert len(consumed) == len(engine_steps)
         generation_result.abort.assert_not_called()
 
     @pytest.mark.asyncio
