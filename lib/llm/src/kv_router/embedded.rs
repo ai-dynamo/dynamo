@@ -22,7 +22,7 @@ use dynamo_kv_router::protocols::{WorkerConfigLike, WorkerId, WorkerWithDpRank};
 use dynamo_kv_router::scheduling::queue::DEFAULT_MAX_BATCHED_TOKENS;
 use dynamo_kv_router::scheduling::{
     NonMaxOverlapSelectionObserver, OverloadedWorkerProvider, QueueLimitKind, QueueRejection,
-    RejectThresholdsProvider, WorkerAvailabilityProvider,
+    QueueWaitObserver, RejectThresholdsProvider, WorkerAvailabilityProvider,
 };
 use dynamo_kv_router::sequences::{LocalWorkerLoad, ReplicaWorkerPolicy};
 use dynamo_kv_router::services::selection::{
@@ -143,6 +143,24 @@ fn spawn_queue_metrics_updater(
             }
         }
     });
+}
+
+/// Observe each admitted attempt's scheduler queue wait on its policy class's histogram.
+///
+/// `per_class` is indexed by the scheduler's class index, in the order the resolved profile
+/// lists its classes. Runs inline on the scheduler actor: one histogram observation, no I/O.
+fn queue_wait_observer(per_class: Vec<RouterQueueMetricHandles>) -> QueueWaitObserver {
+    Arc::new(move |wait| {
+        let Some(handles) = per_class.get(wait.class_index) else {
+            debug_assert!(
+                false,
+                "missing queue wait histogram for policy class {}",
+                wait.class_index
+            );
+            return;
+        };
+        handles.queue_wait_seconds.observe(wait.wait.as_secs_f64());
+    })
 }
 
 fn non_max_overlap_observer(worker_type: &'static str) -> NonMaxOverlapSelectionObserver {
@@ -332,6 +350,12 @@ impl EmbeddedSelection {
             queue_metrics.clone(),
             cancellation_token.child_token(),
         );
+        if !partition
+            .scheduler()
+            .set_queue_wait_observer(queue_wait_observer(queue_metrics.clone()))
+        {
+            anyhow::bail!("queue wait observer is already installed");
+        }
         if worker_type == WorkerType::Prefill
             && !partition
                 .scheduler()
@@ -519,7 +543,33 @@ pub(crate) fn worker_request_from_runtime_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dynamo_kv_router::scheduling::{QueueWait, QueueWaitPath};
     use dynamo_kv_router::services::selection::SchedulerLoadSink;
+
+    #[test]
+    fn queue_wait_observer_records_on_the_class_histogram() {
+        let handles: Vec<_> = ["latency", "bulk"]
+            .iter()
+            .map(|class| ROUTER_QUEUE_METRICS.handles("queue-wait-test", "prefill", class))
+            .collect();
+        let observer = queue_wait_observer(handles.clone());
+
+        observer(QueueWait {
+            class_index: 1,
+            wait: Duration::from_millis(250),
+            path: QueueWaitPath::Queued,
+        });
+        observer(QueueWait {
+            class_index: 0,
+            wait: Duration::ZERO,
+            path: QueueWaitPath::Direct,
+        });
+
+        assert_eq!(handles[0].queue_wait_seconds.get_sample_count(), 1);
+        assert_eq!(handles[0].queue_wait_seconds.get_sample_sum(), 0.0);
+        assert_eq!(handles[1].queue_wait_seconds.get_sample_count(), 1);
+        assert!((handles[1].queue_wait_seconds.get_sample_sum() - 0.25).abs() < 1e-9);
+    }
 
     #[test]
     fn queue_metrics_are_updated_by_class_index() {

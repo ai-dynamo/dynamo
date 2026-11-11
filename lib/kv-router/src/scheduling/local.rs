@@ -26,8 +26,8 @@ use super::selector::{WorkerSelector, log_selection};
 use super::types::{
     AdmissionAttempt, AdmittedSchedulingResponse, AdvisorySchedulingResponse, AttemptId,
     KvSchedulerError, NonMaxOverlapSelectionObserver, OverloadedWorkerProvider, PotentialLoad,
-    ScheduleMode, ScheduleRequest, SchedulingRequest, SchedulingResponse, TierOverlapBlocks,
-    WorkerAvailabilityProvider,
+    QueueWaitObserver, ScheduleMode, ScheduleRequest, SchedulingRequest, SchedulingResponse,
+    TierOverlapBlocks, WorkerAvailabilityProvider,
 };
 use crate::plugins::request_classifier::{ClassifyRequest, RequestClassifier};
 use crate::plugins::worker_selection::{WorkerCapacity, WorkerInputs};
@@ -518,6 +518,13 @@ where
         observer: NonMaxOverlapSelectionObserver,
     ) -> bool {
         self.queue.set_non_max_overlap_selection_observer(observer)
+    }
+
+    /// Install the observer for queue waits of requests that reach admission.
+    ///
+    /// Returns `false` when an observer is already installed.
+    pub fn set_queue_wait_observer(&self, observer: QueueWaitObserver) -> bool {
+        self.queue.set_queue_wait_observer(observer)
     }
 
     /// Install per-candidate cost capture for admitted selections.
