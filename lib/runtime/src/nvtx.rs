@@ -88,12 +88,29 @@
 //! [`IDENTITY_STAGE`]) is the cross-language contract; it is specified, with its pinned
 //! test vectors, in the `request_id` submodule (`nvtx/request_id.rs`) and re-exported here.
 //!
-//! **Explicit markers** — [`dynamo_nvtx_request_mark!`] / [`dynamo_nvtx_request_range!`]
-//! produce request-scoped ranges and marks. They test [`enabled()`] first, so nothing is formatted or allocated while annotations are off. A
-//! non-empty `attrs` also emits an identity mark carrying those attributes. Where one
-//! request opens several ranges (the worker's ingress and per-chunk egress ranges, the
-//! router's selection ranges), [`request_key`] hashes the id once and
-//! [`dynamo_nvtx_keyed_range!`] reuses it.
+//! Two sources produce them:
+//!
+//! - **Explicit markers** — [`dynamo_nvtx_request_mark!`] / [`dynamo_nvtx_request_range!`].
+//!   They test [`enabled()`] first, so nothing is formatted or allocated while annotations
+//!   are off. A non-empty `attrs` also emits an identity mark carrying those attributes.
+//!   Where one request opens several ranges (the worker's ingress and per-chunk egress
+//!   ranges, the router's selection ranges), [`request_key`] hashes the id once and
+//!   [`dynamo_nvtx_keyed_range!`] reuses it.
+//! - **Tracing mirror** (`span_layer`, feature `nvtx` only) — a `tracing` layer installed
+//!   by `logging::init` only when `DYN_NVTX` is truthy. It mirrors every INFO-or-above
+//!   span that belongs to a request (own `request_id` / `dynamo.request.id` field, or
+//!   inherited from an ancestor span) into an NVTX start/end range that ends when the
+//!   span closes; the stage is the span name plus a lowercase `:<phase>` when the span has
+//!   a `phase` field. A span that takes its id from its own field, while its parent does not
+//!   already carry that id, also emits the identity mark (with `trace=` and `xrid=` when
+//!   known). `trace=` is the inbound trace id when the span has one; otherwise it is the
+//!   trace id OpenTelemetry generated for the span, read after the span's first enter, and
+//!   the mark follows the range start instead of preceding it. Spans with no request id are
+//!   ignored. It sits behind the console logger's filter, so it mirrors exactly
+//!   the spans `DYN_LOG` already creates (the default `info` covers the whole catalog;
+//!   `request_span` spans are always on) and never changes a callsite's cached interest.
+//!   A layer that is absent rather than `None` is what keeps the off path at one cached
+//!   check per disabled `debug!`: see `registry_dispatch!` in `logging.rs`.
 //!
 //! Raw-trace recipes against the nsys SQLite export:
 //!
@@ -111,7 +128,9 @@
 //! ```
 //!
 //! Cost: with the feature off, none of this is compiled. With the feature on and
-//! `DYN_NVTX` off, explicit sites cost the usual relaxed load plus branch.
+//! `DYN_NVTX` off, explicit sites cost the usual relaxed load plus branch and the layer is
+//! not installed. Enabled, each mirrored span costs a field visit, one message `String`
+//! and the NVTX call (about the 1.3 µs above under `nsys`).
 //!
 //! # Build
 //!
@@ -124,6 +143,9 @@ use anyhow::Context as _;
 mod request_id;
 
 pub use request_id::{IDENTITY_STAGE, MAX_VALUE_BYTES, format_request_message, rid_key};
+
+#[cfg(feature = "nvtx")]
+pub(crate) mod span_layer;
 
 #[cfg(feature = "nvtx")]
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -282,6 +304,19 @@ pub fn init() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Whether `DYN_NVTX` currently reads as on, without touching the runtime flag.
+///
+/// An unset, unparsable or non-unicode value reads as off; [`init`] is what reports
+/// those. Used by `logging::init`, which runs before [`init`], to decide whether to
+/// install the tracing mirror layer.
+#[cfg(feature = "nvtx")]
+pub(crate) fn switch_from_env() -> bool {
+    std::env::var(ENV_VAR)
+        .ok()
+        .and_then(|raw| parse_switch(Some(&raw)).ok())
+        .unwrap_or(false)
+}
+
 /// Returns `true` when the `nvtx` feature is compiled in **and** `DYN_NVTX` is set.
 #[inline(always)]
 pub fn enabled() -> bool {
@@ -415,6 +450,16 @@ impl NvtxRangeGuard {
         }
     }
 
+    /// Open a request-scoped range without consulting the runtime flag. Only for the
+    /// tracing mirror layer, which is installed solely when `DYN_NVTX` is on and runs before
+    /// [`init`] has stored the flag.
+    #[cfg(feature = "nvtx")]
+    pub(crate) fn new_with_payload_unchecked<M: std::fmt::Display>(stage: M, key: u64) -> Self {
+        NvtxRangeGuard {
+            id: Some(ffi::range_start_payload(stage, key)),
+        }
+    }
+
     /// A guard that ends nothing — the cold half of the macros' `enabled()` branch.
     #[doc(hidden)]
     #[inline(always)]
@@ -544,6 +589,19 @@ macro_rules! dynamo_nvtx_range {
 #[must_use]
 pub fn request_key(rid: &str) -> Option<u64> {
     if enabled() { Some(rid_key(rid)) } else { None }
+}
+
+/// Message of the identity mark for `rid` with `attrs`.
+#[cfg(feature = "nvtx")]
+pub(crate) fn identity_message(rid: &str, attrs: &[(&str, &str)]) -> String {
+    format_request_message(rid, attrs)
+}
+
+/// Emit the identity mark without consulting the runtime flag. Only for the tracing mirror
+/// layer (see [`NvtxRangeGuard::new_with_payload_unchecked`]).
+#[cfg(feature = "nvtx")]
+pub(crate) fn identity_mark_unchecked(message: &str, key: u64) {
+    ffi::mark_payload(message, key);
 }
 
 /// Record a request-scoped marker. Prefer [`dynamo_nvtx_request_mark!`].
