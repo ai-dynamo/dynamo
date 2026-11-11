@@ -233,11 +233,11 @@ func podCliqueScalingGroupPredicate() predicate.Funcs {
 	}
 }
 
-// isPlacedCyborgPod selects the Cyborg Pods of workloads with fabric-pod placement.
-// Grove copies the PodClique template annotations to every Pod.
+// isPlacedCyborgPod selects the Cyborg Pods that this controller places by fabric
+// pod. renderPodCliqueSet marks their PodClique template, and Grove copies the
+// template labels to every Pod.
 func isPlacedCyborgPod(obj client.Object) bool {
-	annotations := obj.GetAnnotations()
-	return annotations[lpxv1alpha1.PodRoleAnnotation] == lpxv1alpha1.PodRoleCyborgWorker && annotations[cyborgPlacementAnnotation] != ""
+	return obj.GetLabels()[lpx.CyborgPlacementLabel] != ""
 }
 
 // placedCyborgPodPredicate passes the Pod changes that can change a placement.

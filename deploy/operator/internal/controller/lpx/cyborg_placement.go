@@ -6,6 +6,7 @@ package lpx
 import (
 	"cmp"
 	"context"
+	"encoding/json"
 	"fmt"
 	"maps"
 	"slices"
@@ -20,6 +21,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/component-helpers/scheduling/corev1/nodeaffinity"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -28,16 +30,17 @@ import (
 
 const (
 	// cyborgPlacementAnnotation on a hybrid conductor role's Pod template selects how
-	// this controller distributes the role's Cyborg Pods.
+	// this controller distributes the role's Cyborg Pods. Its value is a placement
+	// mode, such as lpx.CyborgPlacementPerFabricPod.
 	cyborgPlacementAnnotation = "lpx.nvidia.com/cyborg-placement"
-	// cyborgPlacementPerFabricPod keeps the role's replica count in every fabric pod
-	// that holds LPUs of the same workload replica.
-	cyborgPlacementPerFabricPod = "per-fabric-pod"
 	// fabricPodLabel is the Node label from which the LPX scheduler reads the fabric
 	// of LPU Nodes and of Cyborg Nodes.
 	fabricPodLabel = "network.topology.nvidia.com/lpu-fabric-pod"
 	// cyborgFabricPodLabel records the fabric pod in which this controller placed a Cyborg Pod.
 	cyborgFabricPodLabel = "lpx.nvidia.com/fabric-pod"
+	// grovePodGangGate is the scheduling gate that Grove sets on each Pod it creates
+	// and removes when the Pod's PodGang permits scheduling.
+	grovePodGangGate = "grove.io/podgang-pending-creation"
 )
 
 // cyborgPlacement is the desired distribution of one Cyborg PodClique: replicas
@@ -65,10 +68,10 @@ func cyborgPlacementApplies(component *v1beta1.DynamoComponentDeploymentSharedSp
 	switch mode := role.PodTemplate.Annotations[cyborgPlacementAnnotation]; mode {
 	case "":
 		return false, nil
-	case cyborgPlacementPerFabricPod:
+	case lpx.CyborgPlacementPerFabricPod:
 	default:
 		return false, fmt.Errorf("component %q: annotation %s must be %q, not %q",
-			component.ComponentName, cyborgPlacementAnnotation, cyborgPlacementPerFabricPod, mode)
+			component.ComponentName, cyborgPlacementAnnotation, lpx.CyborgPlacementPerFabricPod, mode)
 	}
 
 	// A Cyborg that runs every partition on its GPU has no LPU fabric pod.
@@ -104,17 +107,14 @@ func (r *graphReconciler) resolveCyborgPlacements(
 		plan, workload := plans[groupName], workloads[groupName]
 		component := dgd.GetComponentByName(groupName)
 
-		// Only workloads that select the placement take part; they need Node labels.
+		// Only workloads that select the placement take part. renderPodCliqueSet has
+		// rejected them where this controller cannot read Node labels.
 		placed, err := cyborgPlacementApplies(component, plan)
 		if err != nil {
 			return nil, err
 		}
 		if !placed {
 			continue
-		}
-		if r.config.Namespace.Restricted != "" {
-			return nil, fmt.Errorf("component %q: annotation %s needs cluster-wide Node access, which namespace-restricted mode does not have",
-				component.ComponentName, cyborgPlacementAnnotation)
 		}
 
 		// The role's count applies to each fabric pod and must form complete client groups.
@@ -314,17 +314,27 @@ func (r *graphReconciler) reconcileCyborgPlacement(
 			continue
 		}
 
-		// Grove can lift its scheduling gate before this controller sees the Pod. Such
-		// a Pod binds without a selector: keep it where its Node has an open position.
+		// Where Pod admission did not add this controller's scheduling gate, Grove can
+		// release a Pod before the pin. Such a Pod binds without a selector: keep it
+		// where its Node has an open position.
 		fabricPod, selector := "", map[string]string(nil)
 		if pod.Spec.NodeName != "" {
 			var err error
 			if fabricPod, err = r.nodeFabricPod(ctx, pod.Spec.NodeName); err != nil {
 				return changed, err
 			}
-		} else if index := slices.IndexFunc(placement.fabricPods, func(fabricPod string) bool { return open[fabricPod] > 0 }); index >= 0 {
-			fabricPod = placement.fabricPods[index]
-			selector = map[string]string{fabricPodLabel: fabricPod}
+		} else {
+			// Kubernetes accepts a selector only on a gated Pod. Grove removes its gate with
+			// a patch that lists the gates it keeps, and Kubernetes refuses that patch when
+			// a listed gate is gone. So this controller's gate leaves last, with the pin.
+			held := hasSchedulingGate(pod, lpx.CyborgPlacementGate)
+			if len(pod.Spec.SchedulingGates) == 0 || (held && hasSchedulingGate(pod, grovePodGangGate)) {
+				continue
+			}
+			if index := slices.IndexFunc(placement.fabricPods, func(fabricPod string) bool { return open[fabricPod] > 0 }); index >= 0 {
+				fabricPod = placement.fabricPods[index]
+				selector = map[string]string{fabricPodLabel: fabricPod}
+			}
 		}
 
 		// Without an open position, a bound Pod holds a GPU that no placement uses.
@@ -376,21 +386,33 @@ func (r *graphReconciler) reconcileCyborgPlacement(
 	return true, nil
 }
 
-// placeCyborgPod records fabricPod on the non-nil cached Pod and, with a non-nil
-// selector, pins the Pod to it. The write carries the observed resource version.
+// placeCyborgPod records fabricPod on the non-nil cached Pod. With a non-nil
+// selector it also pins the Pod to that fabric pod and, in the same write, removes
+// this controller's scheduling gate, so the Pod is never schedulable without its
+// pin. The write carries the observed resource version.
 // It returns false without an error when the API server refuses the write for a
 // reason that a later observation resolves: a newer Pod version, a deleted Pod,
-// or a selector change after Grove lifted the scheduling gate.
+// or a selector change on a Pod that lost its last scheduling gate.
 func (r *graphReconciler) placeCyborgPod(ctx context.Context, pod *corev1.Pod, fabricPod string, selector map[string]string) (bool, error) {
-	// The cached Pod is a projection; a merge patch sends only these two fields.
-	desired := pod.DeepCopy()
-	if desired.Labels == nil {
-		desired.Labels = make(map[string]string)
+	// The cached Pod is a projection, so name the changes. A strategic merge patch
+	// removes one gate by name and keeps every other gate; the removal does nothing
+	// on a Pod that admission did not gate.
+	patch := map[string]any{"metadata": map[string]any{
+		"resourceVersion": pod.ResourceVersion,
+		"labels":          map[string]string{cyborgFabricPodLabel: fabricPod},
+	}}
+	if selector != nil {
+		patch["spec"] = map[string]any{
+			"nodeSelector":    selector,
+			"schedulingGates": []map[string]string{{"name": lpx.CyborgPlacementGate, "$patch": "delete"}},
+		}
 	}
-	desired.Labels[cyborgFabricPodLabel] = fabricPod
-	desired.Spec.NodeSelector = selector
+	data, err := json.Marshal(patch)
+	if err != nil {
+		return false, fmt.Errorf("encode the placement of Cyborg Pod %q: %w", pod.Name, err)
+	}
 
-	err := r.Patch(ctx, desired, client.MergeFromWithOptions(pod, client.MergeFromWithOptimisticLock{}))
+	err = r.Patch(ctx, pod, client.RawPatch(types.StrategicMergePatchType, data))
 	if err == nil {
 		return true, nil
 	}
@@ -415,6 +437,11 @@ func (r *graphReconciler) nodeFabricPod(ctx context.Context, nodeName string) (s
 		return "", fmt.Errorf("observe Node %q of a Cyborg Pod: %w", nodeName, err)
 	}
 	return node.Labels[fabricPodLabel], nil
+}
+
+// hasSchedulingGate reports whether the non-nil Pod has the named scheduling gate.
+func hasSchedulingGate(pod *corev1.Pod, name string) bool {
+	return slices.ContainsFunc(pod.Spec.SchedulingGates, func(gate corev1.PodSchedulingGate) bool { return gate.Name == name })
 }
 
 // compareCyborgRetention orders Pods by how much a placement loses with them:

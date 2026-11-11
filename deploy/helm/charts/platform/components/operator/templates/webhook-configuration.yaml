@@ -399,3 +399,38 @@ webhooks:
     - pods
   sideEffects: None
   timeoutSeconds: {{ .Values.webhook.timeoutSeconds }}
+{{- if and .Values.lpx.enabled (not .Values.namespaceRestriction.enabled) }}
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    {{- if and (not .Values.webhook.certManager.enabled) .Values.webhook.certificateSecret.external }}
+    {{- if .Values.webhook.caBundle }}
+    caBundle: {{ .Values.webhook.caBundle }}
+    {{- end }}
+    {{- end }}
+    service:
+      name: {{ include "dynamo-operator.fullname" . }}-webhook-service
+      namespace: {{ .Release.Namespace }}
+      path: /mutate-core-v1-pod-cyborg-placement
+  failurePolicy: {{ .Values.webhook.podCyborgPlacementFailurePolicy | default "Fail" }}
+  name: mpodcyborgplacement.kb.io
+  # Only the LPX controller sets this label, on the Cyborg Pods that it pins to an
+  # LPU fabric pod. No other Pod reaches this webhook, so Fail blocks no other Pod.
+  objectSelector:
+    matchExpressions:
+    - key: lpx.nvidia.com/cyborg-placement
+      operator: Exists
+  rules:
+  - apiGroups:
+    - ""
+    apiVersions:
+    - v1
+    # The webhook adds a scheduling gate, which Kubernetes accepts only at Pod
+    # creation.
+    operations:
+    - CREATE
+    resources:
+    - pods
+  sideEffects: None
+  timeoutSeconds: {{ .Values.webhook.timeoutSeconds }}
+{{- end }}

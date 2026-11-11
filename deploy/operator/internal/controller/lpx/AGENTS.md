@@ -69,7 +69,7 @@ SPDX-License-Identifier: Apache-2.0
   ordinary error retries, and DGD edits use the existing watch.
 - Per-fabric-pod Cyborg placement is the only reader of Pods and Nodes through
   watches. Its Pod watch selects only Cyborg Pods that carry the placement
-  annotation, and its Node watch is metadata-only. Do not widen either watch or
+  label, and its Node watch is metadata-only. Do not widen either watch or
   add a complete Node cache.
 - Observations are not an atomic snapshot. Publishing previously observed
   intent during a concurrent edit is accepted; watches drive convergence.
@@ -182,6 +182,11 @@ SPDX-License-Identifier: Apache-2.0
   conductor role's Pod template selects it. It applies only to a workload with a
   Cyborg and at least one LPU Agent. An unknown value is an error. Without the
   annotation nothing changes, so an operator upgrade does not roll a workload.
+- Where the placement applies, `renderPodCliqueSet` sets the label
+  `lpx.nvidia.com/cyborg-placement` on the Cyborg template, and so on its Pods.
+  Only this controller sets the label; it removes an authored one. Pod admission
+  and the Pod watch select Pods by the label, so the label must imply that this
+  controller pins the Pod. Do not set it where the placement does not apply.
 - The role's replica count applies to each fabric pod, the value of Node label
   `network.topology.nvidia.com/lpu-fabric-pod`. It must form complete client
   groups, as a count without placement must.
@@ -194,16 +199,39 @@ SPDX-License-Identifier: Apache-2.0
   node selector and required node affinity. Taints and free capacity are not
   evaluated: a Pod pinned to a fabric pod without capacity stays Pending and
   gives the LPX scheduler no evidence. No selectable Node is an error.
-- Do not change the Cyborg template for placement. Grove replaces template
-  scheduling gates, rejects `topologySpreadConstraints`, and rolls every Pod on a
-  template change, and the LPX scheduler fences the Cyborg template hash.
-- Pin each Pod with a `nodeSelector` merge patch that carries the observed
-  resource version, and record the fabric pod in Pod label
-  `lpx.nvidia.com/fabric-pod`: the operator Pod cache holds no node selector.
-  The patch succeeds only while Grove's own scheduling gate is present. A
-  conflict or a refusal is not an error; a later Pod version wakes the
-  controller. A Pod that binds without a selector is adopted when its Node's
-  fabric pod has an open position, and is deleted otherwise.
+- Do not change the Cyborg template when a placement changes. Grove replaces
+  template scheduling gates, rejects `topologySpreadConstraints`, and rolls every
+  Pod on a template change, and the LPX scheduler fences the Cyborg template
+  hash. The placement label is static: it follows only the DGD and its build.
+- Pod admission adds the scheduling gate `lpx.nvidia.com/fabric-pod-pending` to
+  each Pod with the placement label
+  (`internal/webhook/mutation/pod_cyborg_placement_handler.go`). Kubernetes
+  accepts a new gate only at Pod creation. Grove sets and removes only its own
+  gate, so this gate holds the Pod until the pin. The chart registers the
+  webhook only with `lpx.enabled` in cluster-wide mode, with an object selector
+  on the label and failure policy `Fail`.
+- Pin each Pod with one strategic merge patch that carries the observed
+  resource version. It sets the `nodeSelector`, records the fabric pod in Pod
+  label `lpx.nvidia.com/fabric-pod`, and removes the placement gate by name.
+  The operator Pod cache holds the scheduling gates but no node selector, so
+  the patch names its changes. Never remove the gate in a separate write: the
+  Pod would be schedulable without its pin. A conflict or a refusal is not an
+  error; a later Pod version wakes the controller.
+- Pin a Pod that has the placement gate only after Grove removed its own gate.
+  Grove removes its gate with a merge patch that lists the gates that stay.
+  Kubernetes refuses that patch when a listed gate is gone, and Grove then
+  records an error on the PodClique. The placement gate therefore leaves last.
+- The gate leaves a Pod only with its pin. A gated Pod waits until a
+  reconciliation reaches the placement step. A pass that stops earlier leaves it
+  gated: a missing DGD handoff, model or checkpoint downloads for a new
+  revision, an input error, or no selectable Node. So does a replica that is
+  retiring. This is intended: a Cyborg Pod without its pin serves no fabric pod.
+- A Pod without the placement gate can exist: the webhook is not registered,
+  its failure policy is `Ignore` during an outage, or the Pod is older than the
+  webhook. Pin such a Pod while Grove's gate holds it. When Grove releases it
+  first, it has no gate, Kubernetes accepts no selector, and it binds without
+  one. Adopt it when its Node's fabric pod has an open position, and delete it
+  otherwise.
 - Fill fabric pods in name order with Pods in Grove index order, so that a
   complete provision gives each fabric pod one contiguous index block.
 - Keep bound Pods before unbound, ready before not ready, and older before
@@ -226,7 +254,8 @@ SPDX-License-Identifier: Apache-2.0
 - Placement needs a scheduler that places each pinned Pod independently, such as
   the default scheduler. KAI schedules the PodClique as one gang and does not
   continue past a member that cannot run.
-- Namespace-restricted mode cannot read Nodes; reject the annotation there.
+- Namespace-restricted mode cannot read Nodes. Reject the annotation there when
+  rendering, before a PodCliqueSet can create a Pod with the placement label.
 
 # Scheduling Cycles
 

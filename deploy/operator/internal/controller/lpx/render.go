@@ -141,9 +141,25 @@ func (r *graphReconciler) renderPodCliqueSet(
 		if serving == "" {
 			serving = plan.Agents[len(plan.Agents)-1].TemplateName
 		}
+
+		// Only this controller marks the Cyborg Pods that it places by fabric pod. Pod
+		// admission gates each marked Pod, so the mark must imply that a pin follows.
+		placed, err := cyborgPlacementApplies(dgd.GetComponentByName(groupName), plan)
+		if err != nil {
+			return nil, nil, err
+		}
+		if placed && r.config.Namespace.Restricted != "" {
+			return nil, nil, fmt.Errorf("component %q: annotation %s needs cluster-wide Node access, which namespace-restricted mode does not have",
+				groupName, cyborgPlacementAnnotation)
+		}
+
 		for _, clique := range rendered.Cliques {
 			if token := deployment.Annotations[dynamo.LPXRestartAnnotation]; token != "" {
 				clique.Annotations[consts.RestartAnnotation] = token
+			}
+			delete(clique.Labels, lpx.CyborgPlacementLabel)
+			if placed && clique.Name == plan.CyborgTemplate {
+				clique.Labels[lpx.CyborgPlacementLabel] = lpx.CyborgPlacementPerFabricPod
 			}
 			delete(clique.Labels, dynamo.LPXServingLabel)
 			if clique.Name == serving {

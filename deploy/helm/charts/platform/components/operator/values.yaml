@@ -266,6 +266,12 @@ webhook:
   # Defaults to Ignore so a webhook outage falls back to cold-start instead of
   # blocking workload Pods.
   podCheckpointRestoreFailurePolicy: Ignore
+  # -- Failure policy for the Pod CREATE mutating webhook that holds each Cyborg
+  # Pod with fabric-pod placement out of scheduling until the LPX controller pins
+  # it. The webhook matches only Pods with the label lpx.nvidia.com/cyborg-placement.
+  # Defaults to Fail so that no such Pod is scheduled without its pin. With Ignore,
+  # a Pod that is created during a webhook outage is scheduled without a pin.
+  podCyborgPlacementFailurePolicy: Fail
 
   # Timeout for webhook calls (in seconds)
   timeoutSeconds: 10

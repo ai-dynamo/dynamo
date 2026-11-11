@@ -1,0 +1,76 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: LPX Cyborg placement admission
+templates:
+  - charts/dynamo-operator/templates/webhook-configuration.yaml
+tests:
+  - it: registers no Pod placement admission while LPX is disabled
+    asserts:
+      - lengthEqual:
+          path: webhooks
+          count: 4
+        documentIndex: 1
+
+  - it: gates only Pods with the placement label when LPX is enabled
+    set:
+      global.grove.enabled: true
+      dynamo-operator.lpx.enabled: true
+    asserts:
+      - lengthEqual:
+          path: webhooks
+          count: 5
+        documentIndex: 1
+      - equal:
+          path: webhooks[4].name
+          value: mpodcyborgplacement.kb.io
+        documentIndex: 1
+      - equal:
+          path: webhooks[4].clientConfig.service.path
+          value: /mutate-core-v1-pod-cyborg-placement
+        documentIndex: 1
+      - equal:
+          path: webhooks[4].failurePolicy
+          value: Fail
+        documentIndex: 1
+      - equal:
+          path: webhooks[4].objectSelector
+          value:
+            matchExpressions:
+              - key: lpx.nvidia.com/cyborg-placement
+                operator: Exists
+        documentIndex: 1
+      - equal:
+          path: webhooks[4].rules
+          value:
+            - apiGroups: [""]
+              apiVersions: [v1]
+              operations: [CREATE]
+              resources: [pods]
+        documentIndex: 1
+      - notExists:
+          path: webhooks[4].namespaceSelector
+        documentIndex: 1
+
+  - it: lets an installation schedule unpinned Pods during a webhook outage
+    set:
+      global.grove.enabled: true
+      dynamo-operator.lpx.enabled: true
+      dynamo-operator.webhook.podCyborgPlacementFailurePolicy: Ignore
+    asserts:
+      - equal:
+          path: webhooks[4].failurePolicy
+          value: Ignore
+        documentIndex: 1
+
+  - it: registers no Pod placement admission for a namespace-restricted operator, which cannot place Pods
+    set:
+      global.grove.enabled: true
+      dynamo-operator.lpx.enabled: true
+      dynamo-operator.namespaceRestriction.enabled: true
+      dynamo-operator.upgradeCRD: false
+    asserts:
+      - lengthEqual:
+          path: webhooks
+          count: 4
+        documentIndex: 1

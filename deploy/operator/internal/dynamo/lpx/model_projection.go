@@ -22,6 +22,16 @@ const (
 	WorkloadDigestAnnotation = "scheduling.lpu.nvidia.com/dynamo-workload-digest"
 	// WorkloadModeAnnotation records the projected LPX workload mode on rendered objects.
 	WorkloadModeAnnotation = "scheduling.lpu.nvidia.com/workload-mode"
+
+	// CyborgPlacementLabel is on the Cyborg Pods that the LPX controller places by
+	// fabric pod; its value is the placement mode. Pod admission selects by it.
+	CyborgPlacementLabel = "lpx.nvidia.com/cyborg-placement"
+	// CyborgPlacementPerFabricPod keeps a Cyborg replica count in every fabric pod
+	// that holds LPUs of the same workload replica.
+	CyborgPlacementPerFabricPod = "per-fabric-pod"
+	// CyborgPlacementGate is the scheduling gate that holds a placed Cyborg Pod
+	// until the LPX controller selects its fabric pod.
+	CyborgPlacementGate = "lpx.nvidia.com/fabric-pod-pending"
 )
 
 // WorkloadDigest is the SHA-256 identity of a projected LPX workload.

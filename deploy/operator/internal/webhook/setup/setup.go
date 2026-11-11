@@ -131,5 +131,10 @@ func Setup(mgr ctrl.Manager, opts Options) error {
 	if err := podCheckpointRestoreMutator.RegisterWithManager(mgr, gate); err != nil {
 		return fmt.Errorf("unable to register Pod checkpoint restore mutating webhook: %w", err)
 	}
+
+	podCyborgPlacementMutator := webhookmutation.NewPodCyborgPlacementMutator(cfg, runtimeConfig)
+	if err := podCyborgPlacementMutator.RegisterWithManager(mgr, gate); err != nil {
+		return fmt.Errorf("unable to register Pod Cyborg placement mutating webhook: %w", err)
+	}
 	return nil
 }

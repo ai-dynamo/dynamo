@@ -23,6 +23,7 @@ func HelmConfigurations() ([]*admissionregistrationv1.MutatingWebhookConfigurati
 		Namespace:   "operatorenv",
 		Values: map[string]any{
 			"dgdrV1Beta2": map[string]any{"enabled": true},
+			"lpx":         map[string]any{"enabled": true},
 		},
 	})
 	if err != nil {
