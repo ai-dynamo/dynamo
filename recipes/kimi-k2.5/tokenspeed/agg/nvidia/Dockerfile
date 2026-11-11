@@ -85,13 +85,15 @@ ENV RUSTUP_HOME=/root/.rustup
 ENV PATH="${CARGO_HOME}/bin:${PATH}"
 # build-essential and git already installed in tokenspeed_base for the
 # TokenSpeed kernel build; this layer adds the remaining Rust/Dynamo tooling.
+# libprotobuf-dev ships google/protobuf/*.proto, needed by the sidecar protos.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
         libclang-dev \
         pkg-config \
-        protobuf-compiler; \
+        protobuf-compiler \
+        libprotobuf-dev; \
     rm -rf /var/lib/apt/lists/*
 RUN --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/root/.cargo/git \

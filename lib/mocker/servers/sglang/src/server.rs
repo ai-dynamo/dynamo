@@ -11,7 +11,9 @@ use clap::ValueEnum;
 use dynamo_mocker::common::protocols::{
     EngineType, KvEventPublishers, MockerConfig, OutputSignal, WorkerType,
 };
-use dynamo_mocker::live::{LiveEngine, LiveEngineConfig, LiveRequest, stable_request_uuid};
+use dynamo_mocker::live::{
+    LiveEngine, LiveEngineConfig, LiveRequest, RequestOutputBuffering, stable_request_uuid,
+};
 use dynamo_mocker::scheduler::MockerMetrics;
 use dynamo_mocker::services::zmq_events::ZmqKvEventSink;
 use dynamo_sglang_sidecar::proto as pb;
@@ -189,7 +191,8 @@ impl SglangMockerService {
                 engine_args.max_num_batched_tokens
             },
         };
-        let engine = LiveEngine::start_with_config(
+        // Buffer the full response so a slow gRPC consumer is never shed, as in the TRT-LLM mock.
+        let engine = LiveEngine::start_with_config_and_request_output_buffering(
             engine_args,
             DP_RANK,
             LiveEngineConfig {
@@ -199,6 +202,7 @@ impl SglangMockerService {
                 ),
                 ..Default::default()
             },
+            RequestOutputBuffering::FullResponse,
         )?;
         let max_concurrent_requests = config.max_concurrent_requests;
         Ok(Self {
@@ -264,6 +268,7 @@ impl SglangMockerService {
                 "max_prefill_tokens": self.discovery.max_prefill_tokens,
                 "dp_size": 1,
                 "context_length": self.config.context_length,
+                "allow_auto_truncate": false,
                 "served_model_name": self.config.model,
                 "disaggregation_bootstrap_port": self.config.bootstrap_port,
                 "dist_init_addr": format!(
@@ -303,38 +308,12 @@ impl pb::sglang_service_server::SglangService for SglangMockerService {
         request: Request<pb::GenerateRequest>,
     ) -> Result<Response<Self::GenerateStream>, Status> {
         let (prepared, mut live, permit) = self.start_generation(request.into_inner()).await?;
-        // Keep LiveEngine's fixed delivery queue independent of client and
-        // transport pacing. This request-owned buffer cannot exceed the
-        // validated output-token budget, and dropping the client stream closes
-        // the receiver so the pump drops `live` and cancels unfinished work.
-        let (signal_tx, mut signal_rx) = tokio::sync::mpsc::channel(prepared.max_output_tokens);
-        tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    biased;
-                    _ = signal_tx.closed() => break,
-                    signal = live.recv() => {
-                        let Some(signal) = signal else {
-                            if live.is_aborted() {
-                                let _ = signal_tx.send(Err(Status::cancelled("Request aborted"))).await;
-                            }
-                            break;
-                        };
-                        let completed = signal.completed;
-                        if signal_tx.send(Ok(signal)).await.is_err() || completed {
-                            break;
-                        }
-                    }
-                }
-            }
-        });
         let stream = async_stream::try_stream! {
             let _permit = permit;
             let mut completion_tokens = 0_usize;
             // The sidecar contract enables SGLang's incremental streaming output,
             // so each response contains only this chunk's token and metadata.
-            while let Some(signal) = signal_rx.recv().await {
-                let signal = signal?;
+            while let Some(signal) = live.recv().await {
                 let token_id = checked_token(&signal).map_err(|status| *status)?;
                 let output_id = i32::try_from(token_id)
                     .map_err(|_| Status::internal("synthetic token ID does not fit i32"))?;
@@ -347,10 +326,14 @@ impl pb::sglang_service_server::SglangService for SglangMockerService {
                         signal.completed,
                     ),
                     finished: signal.completed,
+                    text: prepared.output_text(token_id),
                 };
                 if signal.completed {
                     return;
                 }
+            }
+            if live.is_aborted() {
+                Err(Status::cancelled("Request aborted"))?;
             }
             Err(Status::internal(
                 "Mocker output channel closed before a terminal response",

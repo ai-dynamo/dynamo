@@ -11,8 +11,10 @@ use parking_lot::Mutex;
 use super::policy::WorkerSelectionPolicyStateRef;
 use super::{
     CandidateData, MaterializedSelectionInput, WorkerInputs, WorkerSelectionContext,
-    WorkerSelectionInput, WorkerSelector, select_worker_with_policy,
+    WorkerSelectionInput, WorkerSelector, select_worker_with_policy, source_prefix_blocks,
 };
+use crate::kv_hints::KvTransferScope;
+use crate::plugins::worker_selection::WorkerTransferInput;
 use crate::protocols::{WorkerConfigLike, WorkerId, WorkerSelectionResult, WorkerWithDpRank};
 use crate::scheduling::config::KvRouterConfig;
 use crate::scheduling::filter::RoutingEligibility;
@@ -265,21 +267,47 @@ impl DefaultScoringContext {
     }
 }
 
-fn default_row(
+fn default_row<C: WorkerConfigLike>(
     input: &MaterializedSelectionInput<'_>,
     context: DefaultScoringContext,
     worker: WorkerWithDpRank,
+    config: &C,
     preferred_taint_multiplier: Option<f64>,
 ) -> CandidateData {
     input.track_kept_candidate(worker);
-    input.row_with_device_overlap(
+    let mut row = input.row_with_device_overlap(
         worker,
         preferred_taint_multiplier,
         WorkerInputs::ALL,
         |effective_overlap_blocks, device_overlap_blocks| {
             context.device_overlap(effective_overlap_blocks, device_overlap_blocks)
         },
-    )
+    );
+    // Like the builtin scorer, read fetchable prefixes only when they earn credit.
+    if context.weights.shared_cache_multiplier != 0.0 {
+        row.transfer = kv_transfer_input(input, worker, config);
+    }
+    row
+}
+
+/// A row's fetch input from the sources [`pick_default_worker`] built before
+/// scoring; `None` when the request has no transfer candidates.
+fn kv_transfer_input<C: WorkerConfigLike>(
+    input: &MaterializedSelectionInput<'_>,
+    worker: WorkerWithDpRank,
+    config: &C,
+) -> Option<WorkerTransferInput> {
+    let sources = input.kv_transfer_sources.get()?;
+    let source = config.kv_transfer_keys().target().and_then(|target| {
+        sources.source_for(
+            worker,
+            target,
+            input.request.transfer_local_prefix_blocks_for(worker),
+        )
+    });
+    Some(WorkerTransferInput {
+        source_prefix_blocks: source.map(source_prefix_blocks),
+    })
 }
 
 impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
@@ -299,13 +327,26 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
         let device_overlap_blocks = cache.device_overlap_blocks;
         let shared_beyond_device_blocks = context
             .request
-            .shared_cache_hits
-            .as_ref()
+            .and_then(|request| request.shared_cache_hits.as_ref())
             .map_or(0, |hits| {
                 hits.hits_beyond(device_overlap_blocks.round().max(0.0) as u32)
             });
-        let shared_overlap_blocks =
-            weights.shared_cache_multiplier * shared_beyond_device_blocks as f64;
+        // Blocks a fetch would add beyond everything this worker already holds.
+        // Raw device overlap: `cache.device_overlap_blocks` may be the effective estimate.
+        let fetchable_blocks = row
+            .transfer
+            .and_then(|transfer| transfer.source_prefix_blocks)
+            .map_or(0, |source_blocks| {
+                let local_blocks = context
+                    .request
+                    .map_or(0, |request| {
+                        request.transfer_local_prefix_blocks_for(worker)
+                    })
+                    .saturating_add(cache.disk_overlap_blocks as usize);
+                source_blocks.saturating_sub(u32::try_from(local_blocks).unwrap_or(u32::MAX))
+            });
+        let remote_blocks = shared_beyond_device_blocks + fetchable_blocks;
+        let shared_overlap_blocks = weights.shared_cache_multiplier * remote_blocks as f64;
         // Normalize backlog above the least-loaded eligible worker by this request's
         // size. The rational decay softly trades cache locality for prefill balance,
         // while leaving workers at the load floor with their full device credit.
@@ -351,7 +392,10 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
             // `SchedulerQueueActor` task, so the logging layer cannot attach request identity to
             // it, and this branch returns early without reaching them.
             tracing::debug!(
-                request_id = context.request.mode.request_id().unwrap_or("-"),
+                request_id = context
+                    .request
+                    .and_then(|request| request.mode.request_id())
+                    .unwrap_or("-"),
                 worker_type = self.worker_type,
                 "{formula_name} for worker_id={} dp_rank={:?} with {effective_overlap_blocks:.2} effective cached blocks: {logit:.3} \
                  = max(0, decode_blocks - overlap_credit_blocks) + active_request_cost_blocks \
@@ -367,10 +411,10 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
         let raw_prefill_tokens = if context.track_prefill_tokens {
             if load.available {
                 let cached_tokens = cache.estimated_cached_tokens;
-                let uncached_tokens = context.request.isl_tokens.saturating_sub(cached_tokens);
+                let uncached_tokens = context.isl_tokens.saturating_sub(cached_tokens);
                 (load.active_prefill_tokens + uncached_tokens).saturating_add(cached_tokens)
             } else {
-                context.request.isl_tokens
+                context.isl_tokens
             }
         } else {
             0
@@ -386,26 +430,32 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
         // `request_id` is the same value `[ROUTING] Best` logs, and `worker_type` separates the
         // prefill-pool and decode-pool decisions that interleave into one log. Both are evaluated
         // inside the macro so they cost nothing when DEBUG is disabled.
-        if shared_beyond_device_blocks > 0 {
+        if remote_blocks > 0 {
             tracing::debug!(
-                request_id = context.request.mode.request_id().unwrap_or("-"),
+                request_id = context
+                    .request
+                    .and_then(|request| request.mode.request_id())
+                    .unwrap_or("-"),
                 worker_type = self.worker_type,
                 "{formula_name} for worker_id={} dp_rank={:?} with {effective_overlap_blocks:.2} effective cached blocks, \
-                 {} shared blocks beyond device (multiplier={shared_cache_multiplier:.2}): {logit:.3} \
+                 {} shared or fetchable blocks beyond the local prefix (multiplier={shared_cache_multiplier:.2}): {logit:.3} \
                  = prefill_load_scale * adjusted_prefill_blocks + decode_blocks + active_request_cost_blocks \
                  = {prefill_load_scale:.3} * {adjusted_prefill_blocks:.3} + {decode_cost_blocks:.3} + {active_request_cost_blocks:.3} \
                  (raw_prefill_blocks: {:.3}, overlap_credit_blocks: {overlap_credit_blocks:.3}, \
                  overlap_credit_decay: {overlap_credit_decay:.3})",
                 worker.worker_id,
                 worker.dp_rank,
-                shared_beyond_device_blocks,
+                remote_blocks,
                 raw_prefill_blocks,
                 shared_cache_multiplier = weights.shared_cache_multiplier,
                 prefill_load_scale = weights.prefill_load_scale
             );
         } else {
             tracing::debug!(
-                request_id = context.request.mode.request_id().unwrap_or("-"),
+                request_id = context
+                    .request
+                    .and_then(|request| request.mode.request_id())
+                    .unwrap_or("-"),
                 worker_type = self.worker_type,
                 "{formula_name} for worker_id={} dp_rank={:?} with {effective_overlap_blocks:.2} effective cached blocks: {logit:.3} \
                  = prefill_load_scale * adjusted_prefill_blocks + decode_blocks + active_request_cost_blocks \
@@ -463,8 +513,18 @@ pub(super) fn pick_default_worker<C: WorkerConfigLike>(
         eligibility,
         selection_weights(scorer.kv_router_config, request),
     );
+    // Rows are scored as they are built, so build every fetch source first.
+    if default_context.weights.shared_cache_multiplier != 0.0 {
+        input.kv_transfer_sources(workers, KvTransferScope::all);
+    }
     if let Some(worker) = eligibility.pinned_worker() {
-        let row = default_row(input, default_context, worker, None);
+        let row = default_row(
+            input,
+            default_context,
+            worker,
+            &workers[&worker.worker_id],
+            None,
+        );
         return Some((
             worker,
             scorer.worker_logit(&input.context, default_context, &row, "Pinned formula"),
@@ -482,7 +542,13 @@ pub(super) fn pick_default_worker<C: WorkerConfigLike>(
         scorer.worker_cost(
             &input.context,
             default_context,
-            &default_row(input, default_context, worker, preferred_taint_multiplier),
+            &default_row(
+                input,
+                default_context,
+                worker,
+                config,
+                preferred_taint_multiplier,
+            ),
         )
     };
 
@@ -584,6 +650,10 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
         true
     }
 
+    fn applies_worker_filters(&self) -> bool {
+        false
+    }
+
     fn required_worker_inputs(&self) -> WorkerInputs {
         WorkerInputs::CACHE | WorkerInputs::LOAD
     }
@@ -593,14 +663,11 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
         &self,
         input: WorkerSelectionInput<'_, C>,
     ) -> Result<WorkerSelectionResult, KvSchedulerError> {
-        let (workers, request, eligibility, block_size) = input.into_configured()?;
         select_worker_with_policy(
             self.worker_type,
             WorkerSelectionPolicyStateRef::Reference(&self.kv_router_config, &self.picker),
-            workers,
-            request,
-            eligibility,
-            block_size,
+            input,
+            None,
             None,
         )
         .map(|(result, _)| result)
@@ -634,7 +701,13 @@ mod tests {
             .worker_logit(
                 &input.context,
                 default_context,
-                &default_row(&input, default_context, worker, None),
+                &default_row(
+                    &input,
+                    default_context,
+                    worker,
+                    &workers[&worker.worker_id],
+                    None,
+                ),
                 "test",
             )
     }
@@ -753,6 +826,7 @@ mod tests {
             (30, SimpleWorkerConfig::default()),
         ]);
         let request = SchedulingRequest {
+            accounting_attribution: Default::default(),
             mode: ScheduleMode::QueryOnly {
                 request_id: Some("test".into()),
             },
@@ -1157,6 +1231,7 @@ mod tests {
             },
         )]);
         let request = SchedulingRequest {
+            accounting_attribution: Default::default(),
             mode: ScheduleMode::QueryOnly {
                 request_id: Some("test".into()),
             },
@@ -1216,6 +1291,7 @@ mod tests {
             ),
         ]);
         let request = SchedulingRequest {
+            accounting_attribution: Default::default(),
             mode: ScheduleMode::QueryOnly {
                 request_id: Some("test".into()),
             },
@@ -1293,6 +1369,7 @@ mod tests {
             decode_blocks.insert(WorkerWithDpRank::from_worker_id(noisy_worker_id), 400_000);
 
             let request = SchedulingRequest {
+                accounting_attribution: Default::default(),
                 mode: ScheduleMode::QueryOnly {
                     request_id: Some("test".into()),
                 },
@@ -1368,6 +1445,7 @@ mod tests {
         decode_blocks.insert(WorkerWithDpRank::from_worker_id(20), 90);
 
         let request = SchedulingRequest {
+            accounting_attribution: Default::default(),
             mode: ScheduleMode::QueryOnly {
                 request_id: Some("test".into()),
             },
@@ -1439,6 +1517,7 @@ mod tests {
         decode_blocks.insert(WorkerWithDpRank::from_worker_id(20), 100);
 
         let request = SchedulingRequest {
+            accounting_attribution: Default::default(),
             mode: ScheduleMode::QueryOnly {
                 request_id: Some("test".into()),
             },
@@ -1526,6 +1605,7 @@ mod tests {
 
         let (tx, _rx) = tokio::sync::oneshot::channel();
         let request = SchedulingRequest {
+            accounting_attribution: Default::default(),
             mode: ScheduleMode::QueryOnly {
                 request_id: Some("test".into()),
             },
@@ -1604,6 +1684,7 @@ mod tests {
 
         let (tx, _rx) = tokio::sync::oneshot::channel();
         let request = SchedulingRequest {
+            accounting_attribution: Default::default(),
             mode: ScheduleMode::QueryOnly {
                 request_id: Some("test".into()),
             },
@@ -1906,6 +1987,7 @@ mod tests {
 
         let (tx, _rx) = tokio::sync::oneshot::channel();
         let request = SchedulingRequest {
+            accounting_attribution: Default::default(),
             mode: ScheduleMode::QueryOnly {
                 request_id: Some("test".into()),
             },
@@ -1968,8 +2050,9 @@ mod tests {
         let input = MaterializedSelectionInput::new(&request, 16);
         let default_context =
             DefaultScoringContext::new(&workers, &request, request.eligibility(), weights);
+        let config = &workers[&worker.worker_id];
         let custom_row = input.row(worker, None, WorkerInputs::CACHE);
-        let default_row = default_row(&input, default_context, worker, None);
+        let default_row = default_row(&input, default_context, worker, config, None);
 
         assert_eq!(custom_row.cache.device_overlap_blocks, 0.0);
         assert_eq!(
@@ -2010,6 +2093,7 @@ mod tests {
 
         let (tx, _rx) = tokio::sync::oneshot::channel();
         let request = SchedulingRequest {
+            accounting_attribution: Default::default(),
             mode: ScheduleMode::QueryOnly {
                 request_id: Some("test".into()),
             },

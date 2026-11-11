@@ -41,6 +41,7 @@ from sglang.srt.utils.hf_transformers_utils import get_tokenizer
 
 import dynamo.frontend.sglang_prepost as sglang_prepost_module
 import dynamo.frontend.sglang_processor as sglang_processor_module
+import dynamo.frontend.sglang_prompt_renderer as sglang_prompt_renderer_module
 from dynamo.common.backend.logprobs import (
     build_sglang_logprob_kwargs,
     extract_from_sglang_meta,
@@ -49,10 +50,8 @@ from dynamo.common.backend.logprobs import (
 from dynamo.frontend.sglang_prepost import (
     SglangPreprocessResult,
     SglangStreamingPostProcessor,
-    _flatten_message_content,
     _guided_output_requires_reasoning,
     _normalize_assistant_tool_call_arguments,
-    _normalize_prompt_token_ids,
     _normalize_sglang_parser_name,
     _parse_json_array_buffer,
     build_response_format_guided_decoding,
@@ -75,13 +74,18 @@ from dynamo.frontend.sglang_processor import (
     _runtime_config_parser_name,
     _tokenizer_eos_token_ids,
 )
+from dynamo.frontend.sglang_prompt_renderer import (
+    _flatten_message_content,
+    _normalize_prompt_token_ids,
+    build_prompt_renderer,
+)
 from dynamo.frontend.utils import (
     PreprocessError,
     nvext_extra_field_requested,
     random_call_id,
     random_uuid,
 )
-from dynamo.llm.exceptions import InvalidArgument
+from dynamo.llm.exceptions import InvalidArgument, Unknown, WorkerUnavailable
 from dynamo.sglang.thinking_budget import apply_thinking_budget
 
 # Needs sglang packages (gpu_1 container), but does not allocate GPU VRAM.
@@ -166,12 +170,7 @@ class TestBuildDynamoPreproc:  # FRONTEND.7 — worker subprocess preproc constr
         result = _build_dynamo_preproc(request, [1, 2], "test", None)
         assert result["output_options"]["prompt_logprobs"] == expected
         if expected is None:
-            assert (
-                build_sglang_logprob_kwargs(
-                    result["output_options"], allow_top_logprobs=True
-                )
-                == {}
-            )
+            assert build_sglang_logprob_kwargs(result["output_options"]) == {}
 
     def test_defaults(self):
         """Default sampling options when request has minimal fields."""
@@ -191,6 +190,27 @@ class TestBuildDynamoPreproc:  # FRONTEND.7 — worker subprocess preproc constr
         assert sampling["frequency_penalty"] == 0.0
         assert sampling["repetition_penalty"] == 1.0
         assert sampling["seed"] is None
+        assert sampling["logit_bias"] is None
+
+    @pytest.mark.core
+    @pytest.mark.parametrize(
+        ("request_data", "expected"),
+        [
+            pytest.param({"logit_bias": {"151667": 2}}, {151667: 2.0}, id="positive"),
+            pytest.param({}, None, id="omitted"),
+            pytest.param({"logit_bias": None}, None, id="null"),
+            pytest.param({"logit_bias": {}}, None, id="empty"),
+        ],
+    )
+    def test_logit_bias_projection(self, request_data, expected):
+        request = {"model": "test", "messages": [], **request_data}
+        result = _build_dynamo_preproc(request, [1, 2], "test", None)
+        assert result["sampling_options"]["logit_bias"] == expected
+        if expected is not None:
+            # The preproc holds its own copy, so the request map stays isolated.
+            assert result["sampling_options"]["logit_bias"] is not (
+                request["logit_bias"]
+            )
 
     @pytest.mark.parametrize(
         ("request_data", "expected"),
@@ -694,14 +714,44 @@ class TestBuildDynamoPreproc:  # FRONTEND.7 — worker subprocess preproc constr
         assert result["output_options"]["logprobs"] == 0
 
     def test_logprobs_true_without_top_logprobs(self):
-        """logprobs=True without top_logprobs yields 1."""
+        """logprobs=True without top_logprobs asks for the sampled token only."""
         result = _build_dynamo_preproc(
             {"model": "test", "logprobs": True},
             [1],
             "test",
             None,
         )
-        assert result["output_options"]["logprobs"] == 1
+        assert result["output_options"]["logprobs"] == 0
+
+    @pytest.mark.parametrize("logprobs", [None, False, 3])
+    def test_top_logprobs_without_logprobs_true_is_rejected(self, logprobs):
+        with pytest.raises(PreprocessError, match="`logprobs` must be set to true"):
+            _build_dynamo_preproc(
+                {"model": "test", "logprobs": logprobs, "top_logprobs": 5},
+                [1],
+                "test",
+                None,
+            )
+
+    @pytest.mark.parametrize("logprobs", [False, None])
+    def test_zero_top_logprobs_without_logprobs_disables_logprobs(self, logprobs):
+        result = _build_dynamo_preproc(
+            {"model": "test", "logprobs": logprobs, "top_logprobs": 0},
+            [1],
+            "test",
+            None,
+        )
+        assert result["output_options"]["logprobs"] is None
+
+    @pytest.mark.parametrize("top_logprobs", [-1, True, "2"])
+    def test_invalid_top_logprobs_is_rejected(self, top_logprobs):
+        with pytest.raises(PreprocessError, match="must be an integer >= 0"):
+            _build_dynamo_preproc(
+                {"model": "test", "logprobs": True, "top_logprobs": top_logprobs},
+                [1],
+                "test",
+                None,
+            )
 
     def test_logprobs_integer(self):
         """Integer logprobs pass through."""
@@ -726,12 +776,7 @@ class TestBuildDynamoPreproc:  # FRONTEND.7 — worker subprocess preproc constr
             None,
         )
         assert result["output_options"]["logprobs"] is None
-        assert (
-            build_sglang_logprob_kwargs(
-                result["output_options"], allow_top_logprobs=True
-            )
-            == {}
-        )
+        assert build_sglang_logprob_kwargs(result["output_options"]) == {}
 
     def test_metadata_upload_nvext_is_forwarded_to_backend(self):
         result = _build_dynamo_preproc(
@@ -864,6 +909,10 @@ class TestMapFinishReason:  # FRONTEND.5 — finish_reason remap (frontend layer
         """Unknown reasons pass through unchanged."""
         assert _map_finish_reason("tool_calls") == "tool_calls"
 
+    def test_structured_error_returns_none(self):
+        """A non-string finish_reason is not used as a map key."""
+        assert _map_finish_reason({"error": "kv transfer failed"}) is None
+
 
 # ---------------------------------------------------------------------------
 # convert_tools
@@ -872,6 +921,70 @@ class TestMapFinishReason:  # FRONTEND.5 — finish_reason remap (frontend layer
 
 class TestConvertTools:  # FRONTEND.3 — OpenAI tool schema → SGLang Tool/Function
     """Test OpenAI tool dict to SGLang Tool conversion."""
+
+    @pytest.mark.parametrize(
+        "function_flag, tool_flag, expected",
+        [
+            (None, None, None),
+            (True, None, True),
+            (False, None, False),
+            (None, True, True),
+            (None, False, False),
+            (False, True, False),
+            (True, False, True),
+        ],
+    )
+    def test_defer_loading_reaches_template(self, function_flag, tool_flag, expected):
+        tool = {"type": "function", "function": {"name": "lookup"}}
+        if function_flag is not None:
+            tool["function"]["defer_loading"] = function_flag
+        if tool_flag is not None:
+            tool["defer_loading"] = tool_flag
+        original = copy.deepcopy(tool)
+        dumped = convert_tools([tool])[0].model_dump()
+        assert dumped["function"].get("defer_loading") is expected
+        assert ("defer_loading" in dumped["function"]) == (expected is not None)
+        assert tool == original
+
+    @pytest.mark.parametrize("nested", [False, True])
+    def test_named_choice_renders_deferred_tool_eagerly(self, nested):
+        tool = {
+            "type": "function",
+            "function": {
+                "name": "lookup",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                },
+            },
+        }
+        if nested:
+            tool["function"]["defer_loading"] = True
+        else:
+            tool["defer_loading"] = True
+        sglang_tools = convert_tools(
+            [tool, {"type": "function", "function": {"name": "other"}}]
+        )
+        original = [value.model_dump() for value in sglang_tools]
+        selected = sglang_prepost_module._filter_template_tools(
+            {"tool_choice": {"type": "function", "function": {"name": "lookup"}}},
+            sglang_tools=sglang_tools,
+            exclude_tools_when_tool_choice_none=True,
+        )
+        assert len(selected) == 1
+        assert selected[0]["function"]["name"] == "lookup"
+        assert "defer_loading" not in selected[0]
+        assert "defer_loading" not in selected[0]["function"]
+        assert selected[0]["function"]["parameters"] == tool["function"]["parameters"]
+        assert [value.model_dump() for value in sglang_tools] == original
+        for choice in ("auto", "required"):
+            visible = sglang_prepost_module._filter_template_tools(
+                {"tool_choice": choice},
+                sglang_tools=sglang_tools,
+                exclude_tools_when_tool_choice_none=True,
+            )
+            assert len(visible) == 2
+            assert visible[0]["function"]["defer_loading"] is True
 
     def test_none_returns_none(self):
         assert convert_tools(None) is None
@@ -1123,6 +1236,36 @@ def test_mistral_force_reasoning_uses_reasoning_effort(request_data, expected):
     )
 
 
+@pytest.mark.parametrize("template_default", [False, True])
+@pytest.mark.parametrize(
+    ("request_data", "expected"),
+    [
+        ({}, True),
+        ({"reasoning_effort": "high"}, True),
+        ({"reasoning_effort": "none"}, False),
+        ({"reasoning_effort": "no_think"}, False),
+        ({"chat_template_kwargs": {"reasoning_effort": "none"}}, False),
+        ({"chat_template_args": {"reasoning_effort": "no_think"}}, False),
+        (
+            {
+                "reasoning_effort": "high",
+                "chat_template_kwargs": {"reasoning_effort": "none"},
+            },
+            True,
+        ),
+    ],
+)
+def test_hunyuan_force_reasoning_uses_reasoning_effort(
+    request_data, expected, template_default
+):
+    assert (
+        resolve_request_force_reasoning(
+            request_data, "hunyuan", template_default=template_default
+        )
+        is expected
+    )
+
+
 def _mistral_guided_request(tool_choice):
     return {
         "model": MODEL,
@@ -1151,6 +1294,42 @@ def _qwen_guided_request_without_separation(tool_choice):
     request.pop("reasoning_effort")
     request["separate_reasoning"] = False
     return request
+
+
+@pytest.mark.parametrize(
+    ("routed_error", "expected"),
+    [
+        (WorkerUnavailable("prefill routing is still activating"), WorkerUnavailable),
+        (RuntimeError("worker crashed"), Unknown),
+    ],
+)
+def test_routed_engine_rejection_keeps_worker_unavailable(
+    tokenizer, routed_error, expected
+):
+    class RejectingRoutedEngine(FakeRoutedEngine):
+        async def generate(self, preprocessed, **kwargs):
+            raise routed_error
+
+    processor = SglangProcessor(
+        tokenizer=tokenizer,
+        routed_engine=RejectingRoutedEngine(),
+        tool_call_parser_name="qwen25",
+        reasoning_parser_name="qwen3",
+        eos_token_ids=[tokenizer.eos_token_id],
+    )
+    request = {
+        "model": MODEL,
+        "messages": [{"role": "user", "content": "Say hello."}],
+        "max_tokens": 4,
+    }
+
+    async def collect():
+        return [item async for item in processor.generator(request)]
+
+    with pytest.raises(expected) as caught:
+        asyncio.run(collect())
+    if expected is WorkerUnavailable:
+        assert caught.value is routed_error
 
 
 @pytest.mark.parametrize(
@@ -2890,7 +3069,12 @@ class TestChatTemplateErrors:
                 "tokens": "_normalize_prompt_token_ids",
                 "parsers": "create_parsers",
             }[stage]
-            monkeypatch.setattr(sglang_prepost_module, target, fail)
+            module = (
+                sglang_prepost_module
+                if stage == "parsers"
+                else sglang_prompt_renderer_module
+            )
+            monkeypatch.setattr(module, target, fail)
         classified = stage == "render" and error_type is not RuntimeError
         with pytest.raises(PreprocessError if classified else error_type) as caught:
             preprocess_chat_request(
@@ -3514,42 +3698,66 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
         with pytest.raises(ValueError, match="supports only .jinja"):
             _load_chat_template(str(template_file))
 
-    def test_init_worker_propagates_exclude_flag_true(self):
+    def test_init_worker_propagates_exclude_flag_true(self, monkeypatch):
         """_init_worker sets the worker-global exclude_tools flag to True."""
+        monkeypatch.setattr(sglang_processor_module, "_w_prompt_renderer", None)
         _init_worker(MODEL, None, None, exclude_tools_when_tool_choice_none=True)
         assert sglang_processor_module._w_exclude_tools_when_tool_choice_none is True
 
-    def test_init_worker_propagates_exclude_flag_false(self):
+    def test_init_worker_propagates_exclude_flag_false(self, monkeypatch):
         """_init_worker sets the worker-global exclude_tools flag to False."""
+        monkeypatch.setattr(sglang_processor_module, "_w_prompt_renderer", None)
         _init_worker(MODEL, None, None, exclude_tools_when_tool_choice_none=False)
         assert sglang_processor_module._w_exclude_tools_when_tool_choice_none is False
         # Reset to default
         sglang_processor_module._w_exclude_tools_when_tool_choice_none = True
 
-    def test_init_worker_applies_chat_template_override(self, monkeypatch):
-        """Preprocess workers use the same chat template override as the main process."""
+    @pytest.mark.parametrize("override", [None, "custom template"])
+    def test_init_worker_renders_checkpoint_with_template_precedence(
+        self, monkeypatch, tmp_path, override
+    ):
+        (tmp_path / "config.json").write_text('{"model_type": "deepseek_v41"}')
 
         class FakeTokenizer:
-            chat_template = "original"
+            chat_template = "checkpoint template"
+
+            def apply_chat_template(self, messages, **kwargs):
+                assert self.chat_template == override
+                return [4, 5, 6]
+
+        def render_recipe(request, *, spec, **kwargs):
+            assert spec == "dsv41"
+            return [1, 2, 3]
 
         monkeypatch.setattr(
             sglang_processor_module,
             "get_tokenizer",
-            lambda model_path, trust_remote_code=False: FakeTokenizer(),
+            lambda *args, **kwargs: FakeTokenizer(),
         )
-
+        monkeypatch.setattr(sglang_prompt_renderer_module, "recipe_renderer", object())
+        monkeypatch.setattr(
+            sglang_prompt_renderer_module, "render_recipe_prompt", render_recipe
+        )
+        monkeypatch.setattr(sglang_processor_module, "_w_prompt_renderer", None)
         _init_worker(
-            MODEL,
+            str(tmp_path),
             None,
             None,
-            exclude_tools_when_tool_choice_none=True,
-            chat_template="custom template",
+            chat_template=override,
             default_thinking_mode="disabled",
             structural_tag_mode="on",
             structural_tag_scope="always",
             structural_tag_schema="strict",
         )
-        assert sglang_processor_module._w_tokenizer.chat_template == "custom template"
+        result = _preprocess_worker(
+            {
+                "model": "served-alias",
+                "messages": [{"role": "user", "content": "Hello"}],
+            },
+            "served-alias",
+            None,
+        )
+        assert result.prompt_token_ids == ([1, 2, 3] if override is None else [4, 5, 6])
         assert sglang_processor_module._w_default_thinking_mode == "disabled"
         assert sglang_processor_module._w_structural_tag_mode == "on"
         assert sglang_processor_module._w_structural_tag_scope == "always"
@@ -3597,6 +3805,7 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
         self, monkeypatch
     ):
         """DeepSeek-V4 uses SGLang's encoder instead of HF chat_template."""
+        monkeypatch.setattr(sglang_prompt_renderer_module, "recipe_renderer", None)
         captured = {}
         fake_module = types.ModuleType("sglang.srt.entrypoints.openai.encoding_dsv4")
 
@@ -3659,6 +3868,52 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
         assert captured["messages"][0]["tools"][0]["function"]["name"] == "get_weather"
         assert captured["messages"][1]["role"] == "user"
 
+    @pytest.mark.parametrize("chat_template", [None, "checkpoint template"])
+    def test_deepseek_checkpoint_spec_overrides_model_alias(
+        self, monkeypatch, tmp_path, chat_template
+    ):
+        (tmp_path / "config.json").write_text('{"model_type": "deepseek_v41"}')
+        captured = {}
+
+        def render(request, **kwargs):
+            captured.update(kwargs)
+            return [1, 2, 3]
+
+        class CheckpointTokenizer:
+            def __init__(self):
+                self.chat_template = chat_template
+
+            def apply_chat_template(self, *args, **kwargs):
+                raise AssertionError("checkpoint recipe must take precedence")
+
+        monkeypatch.setattr(sglang_prompt_renderer_module, "recipe_renderer", object())
+        monkeypatch.setattr(
+            sglang_prompt_renderer_module,
+            "_render_deepseek_v4_prompt_token_ids",
+            render,
+        )
+        tokenizer = CheckpointTokenizer()
+        result = preprocess_chat_request(
+            {
+                "model": "deepseek-v4-prod",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "chat_template_kwargs": {"thinking": False},
+            },
+            tokenizer=tokenizer,
+            tool_call_parser_name=None,
+            reasoning_parser_name=None,
+            prompt_renderer=build_prompt_renderer(tokenizer, model_path=str(tmp_path)),
+        )
+        assert captured["spec"] == "dsv41"
+        assert result.prompt_token_ids == [1, 2, 3]
+
+    def test_deepseek_v41_rejects_legacy_v4_encoder(self, monkeypatch):
+        monkeypatch.setattr(sglang_prompt_renderer_module, "recipe_renderer", None)
+        with pytest.raises(ValueError, match="DeepSeek-V4.1 preprocessing requires"):
+            sglang_prompt_renderer_module._render_deepseek_v4_prompt_token_ids(
+                {}, messages=[], tokenizer=object(), template_tools=None, spec="dsv41"
+            )
+
     def test_deepseek_v4_tool_call_arguments_reach_encoder_as_json_string(
         self, monkeypatch
     ):
@@ -3673,6 +3928,7 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
         spurious nested ``{"arguments": {...}}`` call. The render path must
         re-serialize to a string.
         """
+        monkeypatch.setattr(sglang_prompt_renderer_module, "recipe_renderer", None)
         captured = {}
         fake_module = types.ModuleType("sglang.srt.entrypoints.openai.encoding_dsv4")
 
@@ -3739,6 +3995,7 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
 
     def test_deepseek_v4_accepts_openai_thinking_payload(self, monkeypatch):
         """OpenAI-style thinking payload maps to DS-V4 thinking."""
+        monkeypatch.setattr(sglang_prompt_renderer_module, "recipe_renderer", None)
         captured = {}
         fake_module = types.ModuleType("sglang.srt.entrypoints.openai.encoding_dsv4")
 
@@ -4016,6 +4273,7 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
         assert "thinking_mode" not in captured["kwargs"]
 
     def test_deepseek_v4_named_tool_choice_filters_encoder_tools(self, monkeypatch):
+        monkeypatch.setattr(sglang_prompt_renderer_module, "recipe_renderer", None)
         captured = {}
         fake_module = types.ModuleType("sglang.srt.entrypoints.openai.encoding_dsv4")
 
@@ -4066,6 +4324,7 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
         assert [tool["function"]["name"] for tool in tools] == ["get_time"]
 
     def test_deepseek_v4_respects_existing_chat_template(self, monkeypatch):
+        monkeypatch.setattr(sglang_prompt_renderer_module, "recipe_renderer", object())
         fake_module = types.ModuleType("sglang.srt.entrypoints.openai.encoding_dsv4")
 
         def fake_encode_messages(messages, *, thinking_mode, reasoning_effort=None):
@@ -4106,6 +4365,7 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
     def test_deepseek_v4_normalizes_none_content_without_mutating_request(
         self, monkeypatch
     ):
+        monkeypatch.setattr(sglang_prompt_renderer_module, "recipe_renderer", None)
         captured = {}
         fake_module = types.ModuleType("sglang.srt.entrypoints.openai.encoding_dsv4")
 
@@ -4143,6 +4403,7 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
         assert request["messages"] == [{"role": "assistant", "content": None}]
 
     def test_deepseek_v4_tool_choice_none_strips_encoder_tools(self, monkeypatch):
+        monkeypatch.setattr(sglang_prompt_renderer_module, "recipe_renderer", None)
         captured = {}
         fake_module = types.ModuleType("sglang.srt.entrypoints.openai.encoding_dsv4")
 
@@ -4322,7 +4583,7 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
             return normalized
 
         monkeypatch.setattr(
-            sglang_prepost_module,
+            sglang_prompt_renderer_module,
             "process_content_for_template_format",
             normalize_for_template,
         )
@@ -4360,6 +4621,517 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
         assert dynamo_preproc["multi_modal_data"] == {
             "image_url": [{"Url": "https://example.com/k3.png"}]
         }
+
+    def _preprocess_with_kimi_k3_template_capture(
+        self,
+        monkeypatch,
+        request,
+        *,
+        chat_template=None,
+        mutate_template_kwargs=None,
+        tool_call_parser_name=None,
+        reasoning_parser_name="kimi_k3",
+        cached_renderer=False,
+        renderer_chat_template=None,
+    ):
+        captured = {}
+
+        class CapturingTokenizer:
+            def apply_chat_template(self, messages, **kwargs):
+                captured["messages"] = messages
+                captured["kwargs"] = kwargs
+                if mutate_template_kwargs is not None:
+                    mutate_template_kwargs(kwargs)
+                return [1, 2, 3]
+
+        CapturingTokenizer.chat_template = chat_template
+
+        def fake_create_parsers(*args, force_reasoning=False, **kwargs):
+            return None, types.SimpleNamespace(force_reasoning=force_reasoning)
+
+        monkeypatch.setattr(
+            sglang_prepost_module,
+            "create_parsers",
+            fake_create_parsers,
+        )
+        monkeypatch.setattr(
+            sglang_prompt_renderer_module,
+            "process_content_for_template_format",
+            lambda message, *args, **kwargs: message,
+        )
+
+        tokenizer = CapturingTokenizer()
+        prompt_renderer = (
+            build_prompt_renderer(
+                tokenizer,
+                chat_template=renderer_chat_template,
+                tool_call_parser_name=tool_call_parser_name,
+                reasoning_parser_name=reasoning_parser_name,
+            )
+            if cached_renderer
+            else None
+        )
+        result = preprocess_chat_request(
+            request,
+            tokenizer=tokenizer,
+            tool_call_parser_name=tool_call_parser_name,
+            reasoning_parser_name=reasoning_parser_name,
+            prompt_renderer=prompt_renderer,
+        )
+        return result, captured
+
+    def test_kimi_k3_forwards_required_choice_response_format_and_effort(
+        self, monkeypatch
+    ):
+        request = {
+            "model": "moonshotai/Kimi-K3",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "tools": [parity_tool()],
+            "tool_choice": "required",
+            "response_format": {"type": "json_object"},
+            "reasoning_effort": "high",
+        }
+
+        _, captured = self._preprocess_with_kimi_k3_template_capture(
+            monkeypatch, request
+        )
+        kwargs = captured["kwargs"]
+
+        assert kwargs["tool_choice"] == "required"
+        assert kwargs["response_format"] == {"type": "json_object"}
+        assert kwargs["thinking_effort"] == "high"
+        assert "reasoning_effort" not in kwargs
+        assert kwargs["tokenize"] is True
+        assert kwargs["return_dict"] is False
+        assert len(captured["messages"]) == 1
+
+    @pytest.mark.parametrize("structural_tag_mode", ["off", "on"])
+    @pytest.mark.parametrize("choice", ["required", "named"])
+    def test_kimi_k3_forced_choice_keeps_guidance_and_parser_paired(
+        self, structural_tag_mode, choice
+    ):
+        class NativeTokenizer:
+            chat_template = None
+
+            def apply_chat_template(self, messages, **kwargs):
+                return [1, 2, 3]
+
+        request = {
+            "model": "moonshotai/Kimi-K3.1-Pro",
+            "messages": [{"role": "user", "content": "Weather in Paris?"}],
+            "tools": [parity_tool()],
+            "tool_choice": tool_choice_value(choice),
+            "chat_template_kwargs": {"thinking": False},
+        }
+        result = preprocess_chat_request(
+            request,
+            tokenizer=NativeTokenizer(),
+            tool_call_parser_name="kimi_k3",
+            reasoning_parser_name="kimi_k3",
+            structural_tag_mode=structural_tag_mode,
+        )
+
+        assert result.guided_decoding is not None
+        if structural_tag_mode == "off":
+            assert set(result.guided_decoding) == {"json"}
+            assert isinstance(result.tool_call_parser, JsonArrayParser)
+            payload = '[{"name":"get_weather","parameters":{"city":"Paris"}}]'
+            # Dynamo reparses JSON-array output at finish time via this helper.
+            calls = _parse_json_array_buffer(payload)
+        else:
+            assert set(result.guided_decoding) == {"structural_tag"}
+            assert isinstance(result.tool_call_parser, FunctionCallParser)
+            payload = (
+                '<|open|>tools<|sep|><|open|>call tool="get_weather" index="1"<|sep|>'
+                '<|open|>argument key="city" type="string"<|sep|>Paris'
+                "<|close|>argument<|sep|><|close|>call<|sep|><|close|>tools<|sep|>"
+            )
+            _, calls = result.tool_call_parser.parse_non_stream(payload)
+        assert len(calls) == 1
+        assert calls[0].name == "get_weather"
+        assert json.loads(calls[0].parameters) == {"city": "Paris"}
+
+    def test_kimi_k3_named_choice_renders_forced_call_without_filtering_tools(
+        self, monkeypatch
+    ):
+        request = {
+            "model": "moonshotai/Kimi-K3",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "tools": [
+                parity_tool(),
+                {
+                    "type": "function",
+                    "function": {"name": "get_time", "parameters": {}},
+                },
+            ],
+            "tool_choice": {
+                "type": "function",
+                "function": {"name": "get_weather"},
+            },
+        }
+
+        _, captured = self._preprocess_with_kimi_k3_template_capture(
+            monkeypatch, request
+        )
+        kwargs = captured["kwargs"]
+
+        assert "tool_choice" not in kwargs
+        assert kwargs["thinking"] is False
+        assert kwargs["enable_thinking"] is False
+        assert [tool["function"]["name"] for tool in kwargs["tools"]] == [
+            "get_weather",
+            "get_time",
+        ]
+        assert captured["messages"][-1] == {
+            "role": "system",
+            "content": (
+                "The system is invoked with `tool_choice=specified`.\n"
+                "You MUST call the tool `get_weather` in the next message."
+            ),
+        }
+        assert len(request["messages"]) == 1
+
+    def test_kimi_k3_developer_tools_render_as_system_without_mutating_request(
+        self, monkeypatch
+    ):
+        request = {
+            "model": "moonshotai/Kimi-K3",
+            "messages": [
+                {
+                    "role": "developer",
+                    "content": "Use the declared tools.",
+                    "tools": [parity_tool()],
+                },
+                {"role": "user", "content": "Hello"},
+            ],
+            "tool_choice": "auto",
+        }
+        original_messages = copy.deepcopy(request["messages"])
+
+        _, captured = self._preprocess_with_kimi_k3_template_capture(
+            monkeypatch, request
+        )
+
+        assert captured["messages"][0]["role"] == "system"
+        assert request["messages"] == original_messages
+
+    def test_kimi_k3_does_not_forward_none_without_tools(self, monkeypatch):
+        request = {
+            "model": "moonshotai/Kimi-K3",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "tool_choice": "none",
+        }
+
+        _, captured = self._preprocess_with_kimi_k3_template_capture(
+            monkeypatch, request
+        )
+
+        assert "tool_choice" not in captured["kwargs"]
+        assert "tools" not in captured["kwargs"]
+
+    def test_kimi_k3_forwards_none_with_tools(self, monkeypatch):
+        request = {
+            "model": "moonshotai/Kimi-K3",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "tools": [parity_tool()],
+            "tool_choice": "none",
+        }
+
+        _, captured = self._preprocess_with_kimi_k3_template_capture(
+            monkeypatch, request
+        )
+
+        assert captured["kwargs"]["tool_choice"] == "none"
+
+    def test_kimi_k3_rejects_required_without_tools(self, monkeypatch):
+        request = {
+            "model": "moonshotai/Kimi-K3",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "tool_choice": "required",
+        }
+
+        with pytest.raises(
+            PreprocessError, match='tool_choice is "required" but tools is empty'
+        ):
+            self._preprocess_with_kimi_k3_template_capture(monkeypatch, request)
+
+    def test_kimi_k3_rejects_unsupported_effort(self, monkeypatch):
+        request = {
+            "model": "moonshotai/Kimi-K3",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "reasoning_effort": "medium",
+        }
+
+        with pytest.raises(
+            PreprocessError,
+            match=(
+                r"Kimi K3 does not support reasoning_effort='medium'; "
+                r"supported values are 'low', 'high', and 'max'"
+            ),
+        ):
+            self._preprocess_with_kimi_k3_template_capture(monkeypatch, request)
+
+    def test_kimi_k3_rejects_unsupported_explicit_thinking_effort(self, monkeypatch):
+        request = {
+            "model": "moonshotai/Kimi-K3",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "chat_template_kwargs": {"thinking_effort": "medium"},
+        }
+
+        with pytest.raises(
+            PreprocessError,
+            match=(
+                r"Kimi K3 does not support thinking_effort='medium'; "
+                r"supported values are 'low', 'high', and 'max'"
+            ),
+        ):
+            self._preprocess_with_kimi_k3_template_capture(monkeypatch, request)
+
+    def test_kimi_k3_reasoning_effort_none_does_not_set_an_effort(self, monkeypatch):
+        request = {
+            "model": "moonshotai/Kimi-K3",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "reasoning_effort": "none",
+            "chat_template_kwargs": {"thinking": False},
+        }
+
+        _, captured = self._preprocess_with_kimi_k3_template_capture(
+            monkeypatch, request
+        )
+
+        assert "thinking_effort" not in captured["kwargs"]
+        assert "reasoning_effort" not in captured["kwargs"]
+
+    def test_kimi_k3_explicit_thinking_effort_wins_over_root_effort(self, monkeypatch):
+        request = {
+            "model": "moonshotai/Kimi-K3",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "reasoning_effort": "high",
+            "chat_template_kwargs": {"thinking_effort": "low"},
+        }
+
+        _, captured = self._preprocess_with_kimi_k3_template_capture(
+            monkeypatch, request
+        )
+
+        assert captured["kwargs"]["thinking_effort"] == "low"
+        assert "reasoning_effort" not in captured["kwargs"]
+
+    @pytest.mark.parametrize("cached_renderer", [False, True])
+    @pytest.mark.parametrize("explicit_null", [False, True])
+    def test_kimi_k3_preserves_null_versus_omitted_effort(
+        self, monkeypatch, cached_renderer, explicit_null
+    ):
+        request = {
+            "model": "moonshotai/Kimi-K3.1-Pro",
+            "messages": [{"role": "user", "content": "Hello"}],
+        }
+        if explicit_null:
+            request["reasoning_effort"] = "high"
+            request["chat_template_kwargs"] = {"thinking_effort": None}
+        original = copy.deepcopy(request)
+
+        _, captured = self._preprocess_with_kimi_k3_template_capture(
+            monkeypatch, request, cached_renderer=cached_renderer
+        )
+
+        kwargs = captured["kwargs"]
+        assert ("thinking_effort" in kwargs) is explicit_null
+        if explicit_null:
+            assert kwargs["thinking_effort"] is None
+        assert "reasoning_effort" not in kwargs
+        assert request == original
+
+    @pytest.mark.parametrize("effort_key", ["thinking_effort", "reasoning_effort"])
+    @pytest.mark.parametrize("effort", [[], {}])
+    @pytest.mark.parametrize("thinking_disabled", [False, True])
+    def test_kimi_k3_nonstring_effort_respects_thinking_mode(
+        self, monkeypatch, effort_key, effort, thinking_disabled
+    ):
+        request = {
+            "model": "moonshotai/Kimi-K3",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "chat_template_kwargs": {"thinking": not thinking_disabled},
+        }
+        if effort_key == "thinking_effort":
+            request["chat_template_kwargs"][effort_key] = effort
+        else:
+            request[effort_key] = effort
+
+        if thinking_disabled:
+            result, _ = self._preprocess_with_kimi_k3_template_capture(
+                monkeypatch, request
+            )
+            assert result.force_reasoning is False
+        else:
+            with pytest.raises(
+                PreprocessError, match=f"does not support {effort_key}="
+            ):
+                self._preprocess_with_kimi_k3_template_capture(monkeypatch, request)
+
+    @pytest.mark.parametrize(
+        ("model", "tool_parser", "reasoning_parser", "is_kimi"),
+        [
+            ("moonshotai/Kimi-K3.1-Pro", None, None, True),
+            ("local-model", "kimi_k3", None, True),
+            ("local-model", None, "kimi-k3", True),
+            ("moonshotai/Kimi-K2.5", None, "kimi_k2", False),
+            ("generic-model", None, None, False),
+        ],
+    )
+    def test_kimi_k3_cached_renderer_selects_by_request_or_parser_hints(
+        self, monkeypatch, model, tool_parser, reasoning_parser, is_kimi
+    ):
+        request = {
+            "model": model,
+            "messages": [{"role": "developer", "content": "Hello"}],
+            "reasoning_effort": "high",
+        }
+
+        _, captured = self._preprocess_with_kimi_k3_template_capture(
+            monkeypatch,
+            request,
+            tool_call_parser_name=tool_parser,
+            reasoning_parser_name=reasoning_parser,
+            cached_renderer=True,
+        )
+
+        assert captured["messages"][0]["role"] == ("system" if is_kimi else "developer")
+        assert (
+            captured["kwargs"].get("thinking_effort" if is_kimi else "reasoning_effort")
+            == "high"
+        )
+        assert ("return_dict" in captured["kwargs"]) is is_kimi
+
+    def test_kimi_k3_explicit_jinja_renderer_bypasses_native_preprocessing(
+        self, monkeypatch
+    ):
+        request = {
+            "model": "moonshotai/Kimi-K3",
+            "messages": [{"role": "developer", "content": "Hello"}],
+            "tools": [
+                parity_tool(),
+                {"type": "function", "function": {"name": "get_time"}},
+            ],
+            "tool_choice": {"type": "function", "function": {"name": "get_weather"}},
+            "chat_template_kwargs": {"thinking": True},
+            "reasoning_effort": "high",
+        }
+
+        result, captured = self._preprocess_with_kimi_k3_template_capture(
+            monkeypatch,
+            request,
+            cached_renderer=True,
+            renderer_chat_template="custom-template",
+        )
+
+        assert captured["messages"] == request["messages"]
+        assert result.force_reasoning is True
+        assert captured["kwargs"]["thinking"] is True
+        assert captured["kwargs"]["reasoning_effort"] == "high"
+        assert "thinking_effort" not in captured["kwargs"]
+        assert "return_dict" not in captured["kwargs"]
+        assert [tool["function"]["name"] for tool in captured["kwargs"]["tools"]] == [
+            "get_weather"
+        ]
+
+    def test_kimi_k3_template_kwargs_override_controls_not_token_output_shape(
+        self, monkeypatch
+    ):
+        request = {
+            "model": "moonshotai/Kimi-K3",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "tools": [parity_tool()],
+            "tool_choice": "required",
+            "response_format": {"type": "json_object"},
+            "chat_template_kwargs": {
+                "tool_choice": "none",
+                "response_format": {"type": "text"},
+                "tokenize": False,
+                "return_dict": True,
+            },
+        }
+
+        _, captured = self._preprocess_with_kimi_k3_template_capture(
+            monkeypatch, request
+        )
+
+        assert captured["kwargs"]["tool_choice"] == "none"
+        assert captured["kwargs"]["response_format"] == {"type": "text"}
+        assert captured["kwargs"]["tokenize"] is True
+        assert captured["kwargs"]["return_dict"] is False
+
+    def test_kimi_k3_jinja_template_keeps_openai_reasoning_effort(self, monkeypatch):
+        request = {
+            "model": "moonshotai/Kimi-K3",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "tools": [parity_tool()],
+            "tool_choice": "required",
+            "response_format": {"type": "json_object"},
+            "reasoning_effort": "high",
+        }
+
+        _, captured = self._preprocess_with_kimi_k3_template_capture(
+            monkeypatch, request, chat_template="template"
+        )
+        kwargs = captured["kwargs"]
+
+        assert kwargs["reasoning_effort"] == "high"
+        assert "thinking_effort" not in kwargs
+        assert "tool_choice" not in kwargs
+        assert "response_format" not in kwargs
+        assert "return_dict" not in kwargs
+
+    def test_kimi_k3_forwards_json_schema_response_format(self, monkeypatch):
+        response_format = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "answer",
+                "schema": {
+                    "type": "object",
+                    "properties": {"answer": {"type": "string"}},
+                    "required": ["answer"],
+                },
+            },
+        }
+        request = {
+            "model": "moonshotai/Kimi-K3",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "response_format": response_format,
+        }
+
+        _, captured = self._preprocess_with_kimi_k3_template_capture(
+            monkeypatch, request
+        )
+
+        assert captured["kwargs"]["response_format"] == response_format
+
+    def test_kimi_k3_tokenizer_cannot_mutate_request_response_format(self, monkeypatch):
+        request = {
+            "model": "moonshotai/Kimi-K3",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "answer",
+                    "schema": {"type": "object"},
+                },
+            },
+        }
+        original_response_format = copy.deepcopy(request["response_format"])
+
+        def mutate_response_format(kwargs):
+            forwarded = kwargs["response_format"]
+            forwarded["type"] = "mutated"
+            forwarded["json_schema"]["schema"]["type"] = "string"
+
+        self._preprocess_with_kimi_k3_template_capture(
+            monkeypatch,
+            request,
+            mutate_template_kwargs=mutate_response_format,
+        )
+
+        assert request["response_format"] == original_response_format
 
 
 # ---------------------------------------------------------------------------
@@ -4637,7 +5409,9 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
         assert chunks[1]["nvext"]["stop_reason"] == "END"
         assert "prompt_logprobs" not in chunks[1]["choices"][0]
 
-    def _run_logprob_stream(self, items, request=None):
+    def _run_logprob_stream(
+        self, items, request=None, eos_token_ids=None, prompt_ids=()
+    ):
         if request is None:
             request = {"model": "test-model", "logprobs": True}
         processor = SglangProcessor(
@@ -4652,18 +5426,60 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
             tokenizer=self.ByteTokenizer(),
             tool_call_parser=None,
             reasoning_parser=None,
+            eos_token_ids=eos_token_ids,
         )
 
         async def collect():
             return [
                 item["data"]
                 async for item in processor._generate_and_stream(
-                    "req-logprobs", request, {}, [], post
+                    "req-logprobs", request, {}, list(prompt_ids), post
                 )
                 if "data" in item
             ]
 
         return asyncio.run(collect())
+
+    def test_hidden_eos_keeps_score_and_requested_ids(self):
+        """All 48 generated tokens keep a score and ID; only EOS text stays hidden."""
+        eos = 0
+        generated = [*b"x" * 47, eos]
+        logprobs = [-float(position) for position in range(1, len(generated) + 1)]
+        items = [
+            {"token_ids": [token_id], "log_probs": [logprob]}
+            for token_id, logprob in zip(generated, logprobs)
+        ]
+        items[-1]["finish_reason"] = "stop"
+
+        chunks = self._run_logprob_stream(
+            items,
+            request={
+                "model": "test-model",
+                "logprobs": True,
+                "nvext": {"extra_fields": ["completion_token_ids", "prompt_token_ids"]},
+            },
+            eos_token_ids=[eos],
+            prompt_ids=[1, 2, 3],
+        )
+
+        choices = [chunk["choices"][0] for chunk in chunks]
+        content = "".join(choice["delta"].get("content", "") for choice in choices)
+        assert content == "x" * 47
+        assert choices[-1]["finish_reason"] == "stop"
+        scores = [
+            entry["logprob"]
+            for choice in choices
+            for entry in choice["logprobs"]["content"]
+        ]
+        assert scores == logprobs
+        completion_ids = [
+            token_id
+            for chunk in chunks
+            for token_id in chunk["nvext"]["completion_token_ids"]
+        ]
+        assert completion_ids == generated
+        prompt_ids = [chunk["nvext"].get("prompt_token_ids") for chunk in chunks]
+        assert prompt_ids == [None] * (len(chunks) - 1) + [[1, 2, 3]]
 
     @pytest.mark.parametrize(
         "prompt_count,logprobs,top_logprobs,expected_top_count",
@@ -4671,6 +5487,7 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
             (0, None, None, None),
             (0, False, None, None),
             (0, True, 0, 0),
+            (3, True, None, 0),
             (3, True, 1, 1),
             (0, True, 3, 3),
             (1, True, 3, 3),
@@ -4690,7 +5507,7 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
         }
         preproc = _build_dynamo_preproc(request, [1, 17], MODEL, None)
         options = preproc["output_options"]
-        kwargs = build_sglang_logprob_kwargs(options, allow_top_logprobs=True)
+        kwargs = build_sglang_logprob_kwargs(options)
         assert kwargs["top_logprobs_num"] == max(prompt_count, expected_top_count or 0)
         alternatives = [
             (-0.1, ord("A"), "A"),
@@ -4914,13 +5731,19 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
             "cancelled",
         ],
     )
+    @pytest.mark.parametrize("usage_mode", ["stream", "unary"])
     def test_processor_finishes_locally_without_stopping_parent_context(
-        self, with_tool_parser, backend_end
+        self, with_tool_parser, backend_end, usage_mode
     ):
         payload = [None, {"17": {"logprob": -0.25, "rank": 1}}]
         terminal = {"token_ids": list(b"not-displayed"), "finish_reason": "stop"}
         if backend_end == "metadata":
             terminal["engine_data"] = {"prompt_logprobs": payload}
+            terminal["completion_usage"] = {
+                "prompt_tokens": 7,
+                "completion_tokens": 999,
+                "prompt_tokens_details": {"cached_tokens": 0},
+            }
         elif backend_end == "error":
             terminal = FakeRoutedItem(
                 None, is_error=True, comments=["backend disconnected"]
@@ -4984,9 +5807,17 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
                     "req-stop",
                     {
                         "model": "test-model",
+                        "stream": usage_mode == "stream",
+                        "nvext": (
+                            {"extra_fields": ["prompt_logprobs"]}
+                            if usage_mode == "stream" and backend_end != "unrequested"
+                            else {}
+                        ),
                         "logprobs": True,
                         "prompt_logprobs": None if backend_end == "unrequested" else 0,
-                        "stream_options": {"include_usage": True},
+                        "stream_options": (
+                            {"include_usage": True} if usage_mode == "stream" else None
+                        ),
                     },
                     {},
                     [1, 2],
@@ -5017,14 +5848,24 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
         assert chunks[1]["choices"][0]["delta"] == {}
         assert chunks[1]["choices"][0]["finish_reason"] == "stop"
         assert chunks[1]["choices"][0]["logprobs"] is None
-        assert chunks[1]["usage"] == {
-            "prompt_tokens": 2,
+        expected_usage = {
+            "prompt_tokens": 7 if backend_end == "metadata" else 2,
             "completion_tokens": 11,
-            "total_tokens": 13,
+            "total_tokens": 18 if backend_end == "metadata" else 13,
         }
-        assert chunks[1].get("prompt_logprobs") == (
-            payload if backend_end == "metadata" else None
+        if backend_end == "metadata":
+            expected_usage["prompt_tokens_details"] = {"cached_tokens": 0}
+        assert chunks[1]["usage"] == expected_usage
+        if backend_end == "metadata":
+            assert chunks[1]["llm_metrics"]["cached_tokens"] == 0
+            assert chunks[1]["llm_metrics"]["input_tokens"] == 2
+            assert chunks[1]["llm_metrics"]["output_tokens"] == 11
+        projected_logprobs = (
+            chunks[1].get("nvext", {}).get("prompt_logprobs")
+            if usage_mode == "stream"
+            else chunks[1].get("prompt_logprobs")
         )
+        assert projected_logprobs == (payload if backend_end == "metadata" else None)
 
     @pytest.mark.parametrize("include_prompt_logprobs", [False, True])
     def test_logprob_shape_flush_finishes_without_stopping_parent_context(
@@ -5292,10 +6133,10 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
         assert chunk["nvext"]["stop_reason"] == "END"
         assert "stop_reason" not in chunk["choices"][0]
 
-    def _run_stream(self, tokenizer, items):
+    def _run_stream(self, tokenizer, items, engine=None):
         processor = SglangProcessor(
             tokenizer=tokenizer,
-            routed_engine=FakeRoutedEngine(items=items),
+            routed_engine=engine or FakeRoutedEngine(items=items),
             tool_call_parser_name=None,
             reasoning_parser_name=None,
             eos_token_ids=None,
@@ -5341,6 +6182,41 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
             "event": "error",
             "comment": ["backend disconnected"],
         }
+
+    @pytest.mark.parametrize(
+        "finish_reason",
+        [{"error": "kv transfer failed"}, "error: kv transfer failed"],
+    )
+    @pytest.mark.parametrize("after_output", [False, True])
+    def test_finish_reason_error_ends_stream_with_error_envelope(
+        self, after_output, finish_reason
+    ):
+        """An error finish_reason ends the stream with one error frame."""
+        prefix = [{"token_ids": [ord("A")]}] if after_output else []
+        engine = FakeRoutedEngine(
+            items=[
+                *prefix,
+                {"token_ids": [], "finish_reason": finish_reason},
+                {"token_ids": [ord("B")], "finish_reason": None},
+            ]
+        )
+        items = self._run_stream(self.ByteTokenizer(), [], engine=engine)
+        assert len(items) == len(prefix) + 1
+        if after_output:
+            assert items[0]["choices"][0]["delta"]["content"] == "A"
+            assert items[0]["choices"][0]["finish_reason"] is None
+        assert items[-1] == {
+            "_dynamo_annotated": True,
+            "event": "error",
+            "comment": ["kv transfer failed"],
+        }
+        assert not any(
+            choice.get("finish_reason") == "error"
+            for item in items
+            for choice in item.get("choices", [])
+        )
+        # The chunk after the error was never read from the routed stream.
+        assert engine.yielded == len(prefix) + 1
 
     @pytest.mark.parametrize("after_output", [False, True])
     def test_routed_validation_exception_preserves_type_and_message(self, after_output):
@@ -6210,3 +7086,84 @@ class TestThinkingControlParity:  # FRONTEND.10
             reasoning_parser_name=None,
         )
         assert result.request.get("chat_template_kwargs", {}) == case.expected
+
+
+@pytest.mark.core
+@pytest.mark.parametrize(
+    "native,choice,exclude",
+    [
+        (False, "auto", True),
+        (True, "auto", True),
+        (True, "none", True),
+        (True, "none", False),
+    ],
+    ids=["legacy", "native", "excluded", "retained"],
+)
+def test_preprocess_preserves_responses_native_tools(native, choice, exclude):
+    seen = []
+    template = (
+        "{% set deferred_render_mode = deferred_render_mode | default('tool_name_only') %}"
+        if native
+        else ""
+    ) + "TOOL_USE {{ tools | tojson }}"
+    default = "DEFAULT {{ tools | tojson }}"
+
+    class CapturingTokenizer:
+        chat_template = template
+
+        def get_chat_template(self, chat_template=None, tools=None):
+            return chat_template or (template if tools else default)
+
+        def apply_chat_template(self, messages, **kwargs):
+            seen.append(
+                (
+                    kwargs.get("tools"),
+                    kwargs.get("chat_template")
+                    or self.get_chat_template(tools=kwargs.get("tools")),
+                )
+            )
+            return [1]
+
+    function = {"name": "read", "parameters": {"type": "object"}}
+    catalog = [
+        {
+            "type": "namespace",
+            "name": "fs",
+            "description": "Files",
+            "defer_loading": True,
+            "tools": [function],
+        }
+    ]
+    request = {
+        "model": MODEL,
+        "messages": [{"role": "user", "content": "Read a file"}],
+        "tool_choice": choice,
+        "tools": [{"type": "function", "function": function}],
+    }
+    request["responses_native_tools"] = {
+        "tools": [{"type": "function", "function": {**function, "name": "fs.read"}}],
+        "template_tools": catalog,
+        "messages": request["messages"],
+        "tool_choice": choice,
+    }
+    result = preprocess_chat_request(
+        request,
+        tokenizer=CapturingTokenizer(),
+        tool_call_parser_name=None,
+        reasoning_parser_name=None,
+        exclude_tools_when_tool_choice_none=exclude,
+    )
+    excluded = choice == "none" and exclude
+    assert result.request["tools"][0]["function"]["name"] == (
+        "fs.read" if native and not excluded else "read"
+    )
+    rendered_tools, selected_template = seen[0]
+    assert selected_template == (default if excluded else template)
+    if excluded:
+        assert rendered_tools is None
+    elif native:
+        assert rendered_tools == catalog
+    else:
+        assert rendered_tools[0]["type"] == "function"
+        assert rendered_tools[0]["function"]["name"] == "read"
+    assert request["tools"][0]["function"]["name"] == "read"

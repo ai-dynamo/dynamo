@@ -38,6 +38,7 @@ processor:
     # LPXGraphDeployment is an operator-generated private child, not a public API.
     - "LPXGraphDeployment.*$"
     - "LPXComponentStatus$"
+    - "CheckpointDownloadStatus$"
     - "DynamoComponentDeploymentStatus$"
     - "BaseStatus$"
     - "ExcludedNamespacesChecker"
@@ -48,6 +49,12 @@ render:
     - name: DynamoGraphDeploymentRequest
       package: github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1
       link: "#v1beta1-dynamographdeploymentrequest"
+    - name: DynamoGraphDeploymentRequestNativeSpec
+      package: github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1
+      link: "#v1beta1-dynamographdeploymentrequestnativespec"
+    - name: DynamoGraphDeploymentRequestNativeStatus
+      package: github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1
+      link: "#v1beta1-dynamographdeploymentrequestnativestatus"
     - name: DynamoGraphDeploymentRequestSpec
       package: github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1
       link: "#v1beta1-dynamographdeploymentrequestspec"

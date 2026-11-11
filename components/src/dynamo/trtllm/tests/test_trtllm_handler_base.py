@@ -3,7 +3,9 @@
 
 import asyncio
 import logging
+import os
 import re as re_mod
+import threading
 from copy import deepcopy
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -23,6 +25,7 @@ if not torch.cuda.is_available():
         allow_module_level=True,
     )
 from tensorrt_llm.executor.request import DEFAULT_REQUEST_PRIORITY
+from tensorrt_llm.executor.utils import RequestError
 from tensorrt_llm.llmapi import DisaggregatedParams
 from tensorrt_llm.llmapi.llm import SamplingParams
 
@@ -157,6 +160,18 @@ class TestOverrideSamplingParams:
 
         assert result.n == 2
         assert result.best_of == 2
+
+    def test_logit_bias_is_rejected(self):
+        sampling_params = MockSamplingParams()
+        request = {
+            "sampling_options": {
+                "logit_bias": {"18": -100},
+                "temperature": 0.5,
+            }
+        }
+
+        with pytest.raises(InvalidArgument, match="logit_bias"):
+            HandlerBase._override_sampling_params(sampling_params, request)
 
     def test_unknown_attributes_raise_error(self):
         """Test that unknown attributes raise a TypeError.
@@ -431,6 +446,7 @@ class TestDeferredAbortGuard:
         from dynamo.trtllm.request_handlers.handler_base import _DeferredAbort
 
         generation_result = MagicMock()
+        generation_result.finished = False
         # Make generation_result iterable (background task will try to read it)
         generation_result.__aiter__ = MagicMock(return_value=generation_result)
         never_resolve = asyncio.get_event_loop().create_future()
@@ -448,6 +464,7 @@ class TestDeferredAbortGuard:
         from dynamo.trtllm.request_handlers.handler_base import _DeferredAbort
 
         generation_result = MagicMock()
+        generation_result.finished = False
         guard = _DeferredAbort(generation_result)
 
         guard.signal_first_token()
@@ -462,6 +479,7 @@ class TestDeferredAbortGuard:
         from dynamo.trtllm.request_handlers.handler_base import _DeferredAbort
 
         generation_result = MagicMock()
+        generation_result.finished = False
         result_queue = asyncio.Queue()
 
         async def mock_anext(self_mock):
@@ -485,10 +503,48 @@ class TestDeferredAbortGuard:
         generation_result.abort.assert_called_once()
 
     @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_deferred_task_skips_abort_when_first_result_finishes(
+        self, monkeypatch
+    ):
+        from dynamo.trtllm.request_handlers.handler_base import _DeferredAbort
+
+        generation_result = MagicMock()
+        generation_result.finished = False
+        result_queue = asyncio.Queue()
+
+        async def mock_anext(self_mock):
+            val = await result_queue.get()
+            generation_result.finished = True
+            return val
+
+        generation_result.__aiter__ = MagicMock(return_value=generation_result)
+        generation_result.__anext__ = lambda self: mock_anext(self)
+
+        original_create_task = asyncio.create_task
+        deferred_tasks = []
+
+        def track_deferred_task(coro):
+            task = original_create_task(coro)
+            deferred_tasks.append(task)
+            return task
+
+        monkeypatch.setattr(asyncio, "create_task", track_deferred_task)
+
+        guard = _DeferredAbort(generation_result)
+        guard.abort()
+
+        await result_queue.put("only_token")
+        await deferred_tasks[0]
+
+        generation_result.abort.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_no_guard_in_non_disagg_mode(self):
         """Without _DeferredAbort wrapper, abort fires immediately on cancel."""
         handler = self._make_handler()
         generation_result = MagicMock()
+        generation_result.finished = False
         context = MagicMock()
         killed_future = asyncio.get_event_loop().create_future()
         killed_future.set_result(None)
@@ -500,12 +556,27 @@ class TestDeferredAbortGuard:
         generation_result.abort.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_finished_request_is_not_aborted(self):
+        handler = self._make_handler()
+        generation_result = MagicMock()
+        generation_result.finished = True
+        context = MagicMock()
+        killed_future = asyncio.get_event_loop().create_future()
+        killed_future.set_result(None)
+        context.async_killed_or_stopped.return_value = killed_future
+        context.id.return_value = "test-finished"
+
+        await handler._handle_cancellation(generation_result, context)
+        generation_result.abort.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_cancellation_monitor_cleans_up_waiters_on_normal_completion(
         self, monkeypatch
     ):
         handler = self._make_handler()
         handler.shutdown_event = asyncio.Event()
         generation_result = MagicMock()
+        generation_result.finished = False
         context = MagicMock()
         killed_future = asyncio.get_event_loop().create_future()
         context.async_killed_or_stopped.return_value = killed_future
@@ -541,6 +612,7 @@ class TestDeferredAbortGuard:
         from dynamo.trtllm.request_handlers.handler_base import _DeferredAbort
 
         generation_result = MagicMock()
+        generation_result.finished = False
         guard = _DeferredAbort(generation_result)
 
         context = MagicMock()
@@ -1065,6 +1137,69 @@ class TestGenerateLocally:
         handler._initiate_shutdown.assert_not_awaited()
 
     @pytest.mark.asyncio
+    @pytest.mark.core
+    async def test_presubmit_request_error_raises_invalid_argument(self):
+        """Preserve an engine rejection as a client error without shutting down."""
+        handler = self._make_handler()
+        error = RequestError(
+            "The prompt length (5.0) should not exceed max_num_tokens (4)"
+        )
+        handler.engine.llm.generate_async = MagicMock(side_effect=error)
+        handler._initiate_shutdown = mock.AsyncMock()
+
+        request = {
+            "token_ids": [1, 2, 3, 4, 5],
+            "stop_conditions": {"max_tokens": 10},
+            "sampling_options": {},
+        }
+        with pytest.raises(InvalidArgument) as exc_info:
+            async for _ in handler.generate_locally(request, self._make_context()):
+                pass
+
+        assert str(exc_info.value) == str(error)
+        assert exc_info.value.__cause__ is error
+        handler.engine.llm.generate_async.assert_called_once()
+        handler._initiate_shutdown.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.core
+    async def test_long_encoder_prompt_reaches_engine(self):
+        """Let the engine validate decoder length after encoder preprocessing."""
+        handler = self._make_handler()
+        handler.engine.llm.args = SimpleNamespace(
+            backend="pytorch",
+            enable_chunked_prefill=False,
+            max_num_tokens=4,
+            parallel_config=SimpleNamespace(cp_size=1),
+        )
+        handler.engine.llm._is_encoder_decoder_model.return_value = True
+        handler.engine.llm.generate_async = MagicMock(
+            return_value=self._make_mock_generation_result()
+        )
+        handler._initiate_shutdown = mock.AsyncMock()
+        request = {
+            "token_ids": [1, 2, 3, 4, 5],
+            "stop_conditions": {"max_tokens": 10},
+            "sampling_options": {},
+        }
+
+        chunks = [
+            chunk
+            async for chunk in handler.generate_locally(request, self._make_context())
+        ]
+
+        assert chunks[-1]["token_ids"] == [42]
+        handler.engine.llm.generate_async.assert_called_once()
+        assert handler.engine.llm.generate_async.call_args.kwargs["inputs"] == [
+            1,
+            2,
+            3,
+            4,
+            5,
+        ]
+        handler._initiate_shutdown.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_presubmit_signature_type_error_is_fatal(self):
         handler = self._make_handler()
 
@@ -1103,9 +1238,38 @@ class TestGenerateLocally:
         assert str(shutdown_error) == error_message
 
     @pytest.mark.asyncio
-    async def test_validation_error_during_iteration_remains_fatal(self):
+    @pytest.mark.core
+    @pytest.mark.parametrize(
+        "error",
+        [
+            ValueError("invalid executor result"),
+            RequestError("request failed"),
+            RequestError("Guided decoding error: CUDA error: illegal memory access"),
+            RequestError(
+                "Guided decoding error: Request 7 failed to accept last new token: 42."
+            ),
+            RequestError(
+                "Guided decoding error: [12:00:00] json_schema_converter.cc:1: "
+                "Internal compiler failure"
+            ),
+            RequestError(
+                "Guided decoding error: [12:00:00] regex_converter.cc:1: "
+                "Internal matcher failure"
+            ),
+        ],
+        ids=[
+            "fatal-error",
+            "request-error",
+            "guided-internal-error",
+            "guided-token-error",
+            "schema-internal-error",
+            "regex-internal-error",
+        ],
+    )
+    async def test_error_during_iteration_keeps_existing_handling(self, error):
+        """During iteration, a RequestError other than a guided-decoding
+        rejection keeps the error chunk; it is not an InvalidArgument."""
         handler = self._make_handler()
-        error = ValueError("invalid executor result")
         generation_result = MagicMock()
         generation_result.abort = MagicMock()
 
@@ -1133,7 +1297,154 @@ class TestGenerateLocally:
                 "token_ids": [],
             }
         ]
-        handler._initiate_shutdown.assert_awaited_once_with(error)
+        if isinstance(error, RequestError):
+            handler._initiate_shutdown.assert_not_awaited()
+        else:
+            handler._initiate_shutdown.assert_awaited_once_with(error)
+
+    @pytest.mark.asyncio
+    @pytest.mark.core
+    @pytest.mark.parametrize(
+        "error_msg",
+        [
+            'Guided decoding error: [12:00:00] json_schema_converter.cc:1: Unsupported type "invalid_type"',
+            "Guided decoding error: [12:00:00] regex_converter.cc:100: Regex parsing error at position 11: Unclosed '['",
+            'Guided decoding error: [12:00:00] /project/xgrammar/cpp/json_schema_converter.cc:902: Unsupported type "invalid_type"\nStack trace:\n...',
+            "Guided decoding error: [12:00:00] /project/xgrammar/cpp/regex_converter.cc:100: Regex parsing error at position 11: Unclosed '['\nStack trace:\n...",
+        ],
+        ids=["invalid-schema", "malformed-regex", "schema-path", "regex-path"],
+    )
+    async def test_guided_decoding_error_during_iteration_raises_invalid_argument(
+        self,
+        error_msg,
+    ):
+        """A grammar rejection from the engine is a client error, not a shutdown."""
+        handler = self._make_handler()
+        error = RequestError(error_msg)
+        generation_result = MagicMock()
+        generation_result.abort = MagicMock()
+
+        async def raise_during_iteration(self_mock):
+            raise error
+            yield
+
+        generation_result.__aiter__ = raise_during_iteration
+        handler.engine.llm.generate_async = MagicMock(return_value=generation_result)
+        handler._initiate_shutdown = mock.AsyncMock()
+
+        request = {
+            "token_ids": [1, 2, 3],
+            "stop_conditions": {"max_tokens": 10},
+            "sampling_options": {},
+        }
+        with pytest.raises(InvalidArgument) as exc_info:
+            async for _ in handler.generate_locally(request, self._make_context()):
+                pass
+
+        assert str(exc_info.value) == str(error)
+        assert exc_info.value.__cause__ is error
+        handler._initiate_shutdown.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.core
+    @pytest.mark.parametrize(
+        "error_msg",
+        [
+            "Guided decoding error: Request 7 failed to accept last new token: 42.",
+            'Guided decoding error: [12:00:00] json_schema_converter.cc:1: Unsupported type "invalid_type"',
+            "Guided decoding error: [12:00:00] regex_converter.cc:100: Regex parsing error at position 11: Unclosed '['",
+        ],
+        ids=["token-error", "schema-error", "regex-error"],
+    )
+    async def test_guided_decoding_error_after_output_keeps_error_chunk(
+        self, error_msg
+    ):
+        """After a token is emitted, a guided decoding error is engine-side."""
+        handler = self._make_handler()
+        error = RequestError(error_msg)
+        output = MagicMock()
+        output.token_ids = [42]
+        output.finish_reason = None
+        output.stop_reason = None
+        output.request_perf_metrics = None
+        output.prompt_logprobs = []
+        res = MagicMock()
+        res.outputs = [output]
+        res.finished = False
+        generation_result = MagicMock()
+        generation_result.abort = MagicMock()
+
+        async def yield_then_raise(self_mock):
+            yield res
+            raise error
+
+        generation_result.__aiter__ = yield_then_raise
+        handler.engine.llm.generate_async = MagicMock(return_value=generation_result)
+        handler._initiate_shutdown = mock.AsyncMock()
+
+        request = {
+            "token_ids": [1, 2, 3],
+            "stop_conditions": {"max_tokens": 10},
+            "sampling_options": {},
+        }
+        chunks = [
+            chunk
+            async for chunk in handler.generate_locally(request, self._make_context())
+        ]
+
+        assert len(chunks) == 2
+        assert chunks[0]["token_ids"] == [42]
+        assert chunks[1] == {
+            "finish_reason": {"error": str(error)},
+            "token_ids": [],
+        }
+        handler._initiate_shutdown.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(10)
+    async def test_engine_dead_error_exits_without_engine_teardown(self, monkeypatch):
+        """After an MPI rank dies, TRT-LLM teardown can block forever on IPC to
+        the dead rank. The fatal path must skip it and exit promptly."""
+        from tensorrt_llm.executor.utils import EngineDeadError
+
+        from dynamo.trtllm import engine_monitor as engine_monitor_module
+
+        exit_calls = []
+        monkeypatch.setattr(os, "_exit", exit_calls.append)
+        monkeypatch.setattr(
+            engine_monitor_module, "_fatal_exit_lock", threading.Lock(), raising=False
+        )
+
+        handler = self._make_handler()
+        error = EngineDeadError(RuntimeError("MPI worker rank 0 exited unexpectedly"))
+        release = threading.Event()
+        engine = MagicMock()
+        engine.get_health_check_fatal_error.return_value = error
+        engine.shutdown.side_effect = lambda: release.wait()
+        engine.cleanup = mock.AsyncMock(side_effect=lambda: release.wait())
+        engine.llm.generate_async = MagicMock(side_effect=error)
+        handler.engine = engine
+        handler.runtime = MagicMock()
+
+        request = {
+            "token_ids": [1, 2, 3],
+            "stop_conditions": {"max_tokens": 10},
+            "sampling_options": {},
+        }
+        try:
+            chunks = [
+                chunk
+                async for chunk in handler.generate_locally(
+                    request, self._make_context()
+                )
+            ]
+        finally:
+            release.set()
+
+        assert chunks == [{"finish_reason": {"error": str(error)}, "token_ids": []}]
+        assert exit_calls == [1]
+        handler.runtime.shutdown.assert_called_once()
+        engine.shutdown.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_zero_prompt_logprobs_is_forwarded_and_returned(self):

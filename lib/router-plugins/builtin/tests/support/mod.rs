@@ -27,6 +27,7 @@ pub fn fixture(
     prompt_tokens: usize,
 ) -> (HashMap<u64, TestWorker>, SchedulingRequest) {
     let mut request = SchedulingRequest {
+        accounting_attribution: Default::default(),
         mode: ScheduleMode::QueryOnly { request_id: None },
         token_seq: None,
         isl_tokens: prompt_tokens,
@@ -83,10 +84,10 @@ pub fn fixture(
     (workers, request)
 }
 
-pub fn selection_input<'a>(
-    workers: &'a HashMap<u64, TestWorker>,
+pub fn selection_input<'a, C: WorkerConfigLike>(
+    workers: &'a HashMap<u64, C>,
     request: &'a SchedulingRequest,
     block_size: u32,
-) -> WorkerSelectionInput<'a, TestWorker> {
+) -> WorkerSelectionInput<'a, C> {
     WorkerSelectionInput::configured(workers, request, request.eligibility(), block_size)
 }

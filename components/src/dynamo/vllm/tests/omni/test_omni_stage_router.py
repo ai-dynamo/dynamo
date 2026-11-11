@@ -113,6 +113,45 @@ def test_router_loads_stage_configs_from_model_deploy_config():
     assert router.stage_configs == stage_configs
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("output_modalities", [["image"], ["IMAGE"], []])
+async def test_stage_router_advertises_no_image_edits(output_modalities):
+    """Stage-router discovery must reject edits, including fallback image output."""
+    config = SimpleNamespace(
+        namespace="test",
+        component="router",
+        endpoint="generate",
+        model="test-model",
+        served_model_name="served-model",
+        output_modalities=output_modalities,
+        stage_configs_path="stages.yaml",
+    )
+    router = _make_router([_make_stage_cfg(0)], {})
+    generate_endpoint = SimpleNamespace(serve_endpoint=AsyncMock())
+    stage_client = SimpleNamespace(wait_for_instances=AsyncMock())
+    stage_endpoint = SimpleNamespace(client=AsyncMock(return_value=stage_client))
+    runtime = MagicMock()
+    runtime.endpoint.side_effect = [generate_endpoint, stage_endpoint]
+    shutdown_endpoints = []
+
+    with (
+        patch.object(stage_router, "OmniStageRouter", return_value=router),
+        patch.object(stage_router, "setup_metrics_collection"),
+        patch.object(
+            stage_router, "register_model", new_callable=AsyncMock
+        ) as register,
+        patch.object(stage_router, "register_model_taint_route"),
+    ):
+        await stage_router.init_omni_stage_router(runtime, config, shutdown_endpoints)
+
+    register.assert_awaited_once()
+    assert register.call_args.kwargs["user_data"] == {
+        "image_edits": {"schema_version": 1, "max_input_images": 0}
+    }
+    assert shutdown_endpoints == [generate_endpoint]
+    generate_endpoint.serve_endpoint.assert_awaited_once()
+
+
 # ── issue-004: opaque router ──────────────────────────────
 
 
@@ -311,6 +350,37 @@ async def test_invalid_image_output_format_is_rejected_before_stage_call():
         [chunk async for chunk in router.generate(request, context=None)]
 
     assert not stage_called
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("modality", ["image", "IMAGE"])
+@pytest.mark.parametrize(
+    "reference",
+    [
+        "https://example.com/image.png?signature=private",
+        "data:image/png;base64,aW1hZ2U=",
+        ["https://example.com/image.png"],
+        ["https://example.com/first.png", "https://example.com/second.png"],
+    ],
+    ids=["url", "data-url", "singleton-array", "multiple-images"],
+)
+async def test_stage_router_rejects_edit_references_before_dispatch(
+    modality, reference
+):
+    """Older frontends must not let image edits reach stages that ignore references."""
+    client = SimpleNamespace(round_robin=AsyncMock())
+    router = _make_router(
+        [_make_stage_cfg(0)], {"stage0": client}, output_modalities=[modality]
+    )
+    with pytest.raises(InvalidArgument) as error:
+        async for _ in router.generate(
+            {"prompt": "edit", "input_reference": reference}, context=None
+        ):
+            pytest.fail("Unsupported image edits must not yield a generation result")
+
+    assert str(error.value) == "Image edits are not supported by the Omni stage router"
+    client.round_robin.assert_not_awaited()
+    router._formatter.format.assert_not_awaited()
 
 
 @pytest.mark.asyncio

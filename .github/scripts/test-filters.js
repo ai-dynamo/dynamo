@@ -61,6 +61,31 @@ function checkFilter(file, patterns) {
 // expectations: { filterName: expectedValue, ... }
 const testCases = [
   {
+    file: 'lib/llm/tests/data/media/triangle_240p_10.mp4',
+    expect: { sidecar_trtllm_image: true },
+    desc: 'the video fixture triggers the nightly harness checksum tests'
+  },
+  {
+    file: 'lib/sidecar/trtllm/ci/resolve_nightly.py',
+    expect: { sidecar_trtllm_image: true },
+    desc: 'nightly resolver changes run its CPU tests'
+  },
+  {
+    file: '.github/workflows/pr.yaml',
+    expect: { sidecar_trtllm_image: true },
+    desc: 'PR workflow wiring runs the nightly resolver CPU tests'
+  },
+  {
+    file: 'lib/llm/src/lib.rs',
+    expect: { sidecar_trtllm_image: false },
+    desc: 'unrelated Rust changes do not run resolver CPU tests'
+  },
+  {
+    file: 'scripts/protocol_compatibility/composition/openai.py',
+    expect: { ignore: true, rust: false, core: false, frontend: false },
+    desc: 'protocol tooling is covered without unrelated runtime builds'
+  },
+  {
     file: 'components/src/dynamo/artifacts/storage.py',
     expect: { core: true, frontend: true, vllm: false },
     desc: 'generic artifact transport keeps shared runtime CI'
@@ -160,9 +185,24 @@ const testCases = [
     desc: 'any docs/tests descendant triggers recipe check without core'
   },
   {
+    file: 'docs/fern/pages/recipes/_catalog/recipes/kimi-k3.yaml',
+    expect: { core: false, docs: true, examples: true },
+    desc: 'recipe catalog entry triggers the catalog validator in recipe check'
+  },
+  {
+    file: 'docs/fern/pages/recipes/feature-benchmarks/_catalog/schema.json',
+    expect: { core: false, docs: true, examples: true },
+    desc: 'benchmark catalog triggers the catalog validator in recipe check'
+  },
+  {
     file: 'deploy/operator/config/crd/bases/nvidia.com_dynamomodels.yaml',
     expect: { core: false, docs: false, examples: true, operator: true },
     desc: 'every operator CRD base triggers generated recipe OpenAPI checks'
+  },
+  {
+    file: '.github/workflows/pre-merge.yml',
+    expect: { examples: true },
+    desc: 'a change to the Recipe Check job definition runs Recipe Check'
   },
   {
     file: 'components/src/dynamo/vllm/worker.py',
@@ -193,7 +233,7 @@ const testCases = [
   },
   {
     file: 'lib/sidecar/trtllm/src/lib.rs',
-    expect: { sidecar: true, rust: true, core: false, frontend: false, vllm: false, sglang: false, trtllm: false },
+    expect: { sidecar: true, sidecar_trtllm_image: false, rust: true, core: false, frontend: false, vllm: false, sglang: false, trtllm: false },
     desc: 'trtllm sidecar source does not route to sglang or trtllm E2E'
   },
   {
@@ -223,7 +263,7 @@ const testCases = [
   },
   {
     file: 'Cargo.lock',
-    expect: { sidecar: true, rust: true },
+    expect: { sidecar: true, sidecar_trtllm_image: false, rust: true },
     desc: 'root lockfile is a sidecar image build input'
   },
 

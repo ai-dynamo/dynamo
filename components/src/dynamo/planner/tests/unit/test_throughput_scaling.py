@@ -25,6 +25,9 @@ pytestmark = [
 
 
 class _PrefillRegression:
+    def has_valid_engine_limits(self):
+        return True
+
     def find_engine_capacity_rps(self, **kwargs):
         return SimpleNamespace(rps=1.0, ttft_ms=1002.0, eligible=False)
 
@@ -39,6 +42,7 @@ class _ThroughputScalingHarness(ThroughputScalingMixin):
             max_throughput_scaling_replicas=8,
         )
         self._prefill_regression = _PrefillRegression()
+        self._diag_throughput_metadata_available = {}
         self._diag_throughput_reason = None
         self._diag_engine_rps_prefill = None
 
@@ -545,12 +549,13 @@ def test_agg_throughput_uses_replica_cap():
         )
     )
     state._agg_regression = SimpleNamespace(
+        has_valid_engine_limits=lambda: True,
         find_engine_capacity_rps=lambda **_kwargs: SimpleNamespace(
             rps=1.0,
             ttft_ms=1.0,
             itl_ms=1.0,
             eligible=True,
-        )
+        ),
     )
 
     decision = state._throughput_agg(100.0, 1.0, 1.0)
@@ -577,12 +582,13 @@ def test_agg_throughput_applies_min_endpoint_floor_when_perf_model_not_ready():
         )
     )
     state._agg_regression = SimpleNamespace(
+        has_valid_engine_limits=lambda: True,
         find_engine_capacity_rps=lambda **_kwargs: SimpleNamespace(
             rps=0.0,
             ttft_ms=1.0,
             itl_ms=1.0,
             eligible=True,
-        )
+        ),
     )
 
     decision = state._throughput_agg(1.0, 1.0, 1.0)
@@ -669,11 +675,12 @@ def test_startup_cancellation_requires_a_throughput_estimate(mode, model_ready):
             )
         )
         state._agg_regression = SimpleNamespace(
+            has_valid_engine_limits=lambda: True,
             find_engine_capacity_rps=lambda **_kwargs: (
                 SimpleNamespace(rps=1.0, ttft_ms=1.0, itl_ms=1.0, eligible=True)
                 if model_ready
                 else None
-            )
+            ),
         )
         decision = state._throughput_agg(1.0, 1.0, 1.0)
     elif mode == "disagg":

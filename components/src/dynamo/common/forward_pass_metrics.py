@@ -158,8 +158,14 @@ class ForwardPassMetrics(
     """Per-iteration metrics emitted by InstrumentedScheduler.
 
     One message is emitted per scheduler iteration (one per forward pass).
-    An idle heartbeat (all zeros, wall_time=0) is emitted once when the
-    engine transitions from active to idle.
+    A heartbeat is emitted when no message has been sent for about one
+    second, which includes while a long forward pass is still running.
+    A heartbeat has wall_time=0 and empty scheduled_requests. vLLM heartbeats
+    carry its latest waiting-queue snapshot; empty heartbeats are suppressed
+    while scheduler-visible requests, scheduled batches, or pending connector
+    work remain. Other
+    publishers may still emit empty heartbeats during work. Heartbeats alone
+    do not establish EngineCore idleness or clear Planner's cached idle frame.
     """
 
     # Schema version. Consumers must check this before interpreting
@@ -179,7 +185,7 @@ class ForwardPassMetrics(
 
     # Wall-clock time of this iteration: from schedule() to update_from_output().
     # Covers scheduling + model forward pass + output processing.
-    # 0.0 for idle heartbeat messages.
+    # 0.0 for heartbeat messages, which report no finished pass.
     wall_time: float = 0.0
 
     # Requests that were scheduled and executed in this iteration.
@@ -187,6 +193,13 @@ class ForwardPassMetrics(
 
     # Requests that exist in the waiting queue but were not scheduled.
     queued_requests: QueuedRequestMetrics = QueuedRequestMetrics()
+
+    def is_idle(self) -> bool:
+        """Whether both scheduled and queued work are empty."""
+        return (
+            self.scheduled_requests == ScheduledRequestMetrics()
+            and self.queued_requests == QueuedRequestMetrics()
+        )
 
 
 _encoder = msgspec.msgpack.Encoder()

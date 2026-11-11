@@ -7,6 +7,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from dynamo.llm import HttpError
+from dynamo.llm.exceptions import InvalidArgument
 from dynamo.sglang.request_handlers import cancellation
 from dynamo.sglang.request_handlers.llm.prefill_handler import PrefillWorkerHandler
 
@@ -24,6 +26,7 @@ pytestmark = [
 @pytest.mark.timeout(5)
 @pytest.mark.parametrize("native", [False, True])
 @pytest.mark.parametrize("ordered_cancellation", [False, True])
+@pytest.mark.parametrize("error_bearing_abort", [False, True])
 @pytest.mark.parametrize(
     "phase", ["before_registration", "before_dispatch", "after_dispatch"]
 )
@@ -32,6 +35,7 @@ async def test_prefill_cancellation_waits_for_dispatch_and_drains(
     phase: str,
     native: bool,
     ordered_cancellation: bool,
+    error_bearing_abort: bool,
 ):
     request_id = "native-request-id" if native else "request-id"
     engine_request_id = "internal-request-id"
@@ -66,6 +70,17 @@ async def test_prefill_cancellation_waits_for_dispatch_and_drains(
             response = {"meta_info": {"id": rid}}
             yield response
             await aborted.wait()
+            if error_bearing_abort:
+                yield {
+                    "meta_info": {
+                        "id": rid,
+                        "finish_reason": {
+                            "type": "abort",
+                            "status_code": 500,
+                            "message": "Prefill bootstrap failed: Aborted by AbortReq.",
+                        },
+                    }
+                }
         finally:
             registry.pop(rid, None)
             drained.set()
@@ -333,6 +348,123 @@ async def test_prefill_omits_kv_cache_hit_after_cancellation(
 
     assert len(chunks) == 1
     assert "disaggregated_params" in chunks[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
+@pytest.mark.parametrize("native_metadata", [False, True])
+@pytest.mark.parametrize(
+    "status_code,message,exception",
+    [
+        (400, "Input length exceeds the maximum allowed length", InvalidArgument),
+        (500, "Prefill bootstrap failed", HttpError),
+        (500, "Prefill transfer failed", HttpError),
+        (500, "Grammar accept_token failed", HttpError),
+    ],
+)
+async def test_prefill_propagates_backend_abort(
+    monkeypatch, native_metadata, status_code, message, exception
+):
+    meta_info = {
+        "id": "request-id",
+        "finish_reason": {
+            "type": "abort",
+            "status_code": status_code,
+            "message": message,
+        },
+        "prompt_tokens": 3,
+        "cached_tokens": 2,
+    }
+    response = {"meta_info": meta_info}
+    if native_metadata:
+        response = {"engine_data": {"sglang_response": response}}
+    handler = _kv_hit_prefill_handler(monkeypatch, [response], cancelled=False)
+    context = SimpleNamespace(
+        id=lambda: "request-id", trace_id=None, trace_headers=lambda: {}
+    )
+    stream = handler.generate(
+        {"request": {"token_ids": [1, 2, 3], "routing": {}}, "sampling_params": {}},
+        context,
+    )
+
+    assert "disaggregated_params" in await anext(stream)
+    with pytest.raises(exception, match=message):
+        await anext(stream)
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
+@pytest.mark.parametrize("native_metadata", [False, True])
+@pytest.mark.parametrize("cancelled", [False, True])
+async def test_prefill_bootstrap_abort_after_router_cancellation(
+    monkeypatch, native_metadata, cancelled
+):
+    """Only an already cancelled request may suppress SGLang's bootstrap 500."""
+    message = (
+        "Prefill bootstrap failed for request rank=0 req.rid='request-id' "
+        "req.bootstrap_room=17 with exception Aborted by AbortReq."
+    )
+    response = {
+        "meta_info": {
+            "id": "request-id",
+            "finish_reason": {
+                "type": "abort",
+                "status_code": 500,
+                "message": message,
+            },
+            "prompt_tokens": 3,
+            "cached_tokens": 2,
+        }
+    }
+    if native_metadata:
+        response = {"engine_data": {"sglang_response": response}}
+    handler = _kv_hit_prefill_handler(monkeypatch, [response], cancelled=cancelled)
+    context = SimpleNamespace(
+        id=lambda: "request-id", trace_id=None, trace_headers=lambda: {}
+    )
+    stream = handler.generate(
+        {"request": {"token_ids": [1, 2, 3], "routing": {}}, "sampling_params": {}},
+        context,
+    )
+
+    assert "disaggregated_params" in await anext(stream)
+    if cancelled:
+        assert await _drain(stream) == []
+    else:
+        with pytest.raises(HttpError, match="Aborted by AbortReq"):
+            await anext(stream)
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
+async def test_prefill_reports_backend_cancellation_without_success_cache_stats(
+    monkeypatch,
+):
+    handler = _kv_hit_prefill_handler(
+        monkeypatch,
+        [
+            {
+                "meta_info": {
+                    "id": "request-id",
+                    "finish_reason": {"type": "abort", "message": "Aborted"},
+                    "prompt_tokens": 3,
+                    "cached_tokens": 2,
+                }
+            }
+        ],
+        cancelled=False,
+    )
+    context = SimpleNamespace(
+        id=lambda: "request-id", trace_id=None, trace_headers=lambda: {}
+    )
+    chunks = await _drain(
+        handler.generate(
+            {"request": {"token_ids": [1, 2, 3], "routing": {}}, "sampling_params": {}},
+            context,
+        )
+    )
+    assert len(chunks) == 2
+    assert chunks[1] == {"token_ids": [], "finish_reason": "cancelled"}
 
 
 async def _drain(stream):

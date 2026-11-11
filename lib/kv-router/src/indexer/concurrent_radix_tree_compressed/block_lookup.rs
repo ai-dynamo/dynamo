@@ -13,10 +13,33 @@ use crate::protocols::ExternalSequenceBlockHash;
 const MIN_CAPACITY: usize = 16;
 const PREFETCH_DISTANCE: usize = 8;
 
+/// The key is kept as two `u32` halves so the slot needs only 4-byte alignment: with
+/// a non-zero 4-byte value, `Option<Slot<V>>` is 12 bytes rather than 16.
+pub(super) struct Slot<V> {
+    key: [u32; 2],
+    value: V,
+}
+
+impl<V> Slot<V> {
+    #[inline]
+    fn new(key: ExternalSequenceBlockHash, value: V) -> Self {
+        Self {
+            key: [key.0 as u32, (key.0 >> 32) as u32],
+            value,
+        }
+    }
+
+    #[inline]
+    fn key(&self) -> ExternalSequenceBlockHash {
+        let [lo, hi] = self.key;
+        ExternalSequenceBlockHash(u64::from(lo) | (u64::from(hi) << 32))
+    }
+}
+
 pub(crate) struct BlockLookup<V> {
     /// Power-of-two length, or empty before the first insert. At most three quarters
     /// full, so every probe run ends at an empty slot.
-    slots: Box<[Option<(ExternalSequenceBlockHash, V)>]>,
+    slots: Box<[Option<Slot<V>>]>,
     len: usize,
     shift: u32,
 }
@@ -55,7 +78,7 @@ impl<V> BlockLookup<V> {
         loop {
             match &self.slots[i] {
                 None => return Err(i),
-                Some((k, _)) if *k == key => return Ok(i),
+                Some(slot) if slot.key() == key => return Ok(i),
                 Some(_) => i = (i + 1) & mask,
             }
         }
@@ -77,28 +100,28 @@ impl<V> BlockLookup<V> {
         } else {
             empty
         };
-        self.slots[empty] = Some((key, value));
+        self.slots[empty] = Some(Slot::new(key, value));
         self.len += 1;
     }
 
     pub(crate) fn get(&self, key: &ExternalSequenceBlockHash) -> Option<&V> {
         let i = self.find(*key)?;
-        self.slots[i].as_ref().map(|(_, value)| value)
+        self.slots[i].as_ref().map(|slot| &slot.value)
     }
 
     fn get_mut(&mut self, key: ExternalSequenceBlockHash) -> Option<&mut V> {
         let i = self.find(key)?;
-        self.slots[i].as_mut().map(|(_, value)| value)
+        self.slots[i].as_mut().map(|slot| &mut slot.value)
     }
 
     pub(crate) fn contains_key(&self, key: &ExternalSequenceBlockHash) -> bool {
         self.find(*key).is_some()
     }
 
-    pub(crate) fn iter(&self) -> impl Iterator<Item = (&ExternalSequenceBlockHash, &V)> {
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (ExternalSequenceBlockHash, &V)> {
         self.slots
             .iter()
-            .filter_map(|slot| slot.as_ref().map(|(key, value)| (key, value)))
+            .filter_map(|slot| slot.as_ref().map(|slot| (slot.key(), &slot.value)))
     }
 
     fn reserve(&mut self, additional: usize) {
@@ -113,21 +136,23 @@ impl<V> BlockLookup<V> {
         let old = std::mem::replace(&mut self.slots, (0..capacity).map(|_| None).collect());
         self.shift = 64 - capacity.trailing_zeros();
         let mask = capacity - 1;
-        for (key, value) in old.into_vec().into_iter().flatten() {
-            let mut i = self.home(key);
+        for slot in old.into_vec().into_iter().flatten() {
+            let mut i = self.home(slot.key());
             while self.slots[i].is_some() {
                 i = (i + 1) & mask;
             }
-            self.slots[i] = Some((key, value));
+            self.slots[i] = Some(slot);
         }
     }
 
     pub(crate) fn insert(&mut self, key: ExternalSequenceBlockHash, value: V) -> Option<V> {
-        self.reserve(1);
+        if self.slots.is_empty() {
+            self.reserve(1);
+        }
         match self.probe(key) {
             Ok(i) => self.slots[i]
                 .as_mut()
-                .map(|(_, existing)| std::mem::replace(existing, value)),
+                .map(|slot| std::mem::replace(&mut slot.value, value)),
             Err(empty) => {
                 self.insert_vacant(empty, key, value);
                 None
@@ -137,7 +162,7 @@ impl<V> BlockLookup<V> {
 
     pub(crate) fn remove(&mut self, key: &ExternalSequenceBlockHash) -> Option<V> {
         let mut hole = self.find(*key)?;
-        let (_, value) = self.slots[hole].take()?;
+        let value = self.slots[hole].take()?.value;
         self.len -= 1;
 
         // Backward-shift deletion: pull later entries of the probe run into the hole
@@ -146,10 +171,10 @@ impl<V> BlockLookup<V> {
         let mut j = hole;
         loop {
             j = (j + 1) & mask;
-            let Some((k, _)) = &self.slots[j] else {
+            let Some(slot) = &self.slots[j] else {
                 break;
             };
-            let home = self.home(*k);
+            let home = self.home(slot.key());
             if (j.wrapping_sub(home) & mask) >= (j.wrapping_sub(hole) & mask) {
                 self.slots[hole] = self.slots[j].take();
                 hole = j;
@@ -228,14 +253,16 @@ impl<V: Copy + Eq> BlockLookup<V> {
     where
         I: Iterator<Item = ExternalSequenceBlockHash> + Clone,
     {
-        self.reserve(1);
+        if self.slots.is_empty() {
+            self.reserve(1);
+        }
         let mut changed = 0;
         self.for_each_prefetched(keys, |lookup, key| match lookup.probe(key) {
             Ok(i) => {
-                if let Some((_, existing)) = lookup.slots[i].as_mut()
-                    && *existing != value
+                if let Some(slot) = lookup.slots[i].as_mut()
+                    && slot.value != value
                 {
-                    on_replaced(std::mem::replace(existing, value));
+                    on_replaced(std::mem::replace(&mut slot.value, value));
                     changed += 1;
                 }
             }
@@ -245,6 +272,23 @@ impl<V: Copy + Eq> BlockLookup<V> {
             }
         });
         changed
+    }
+
+    /// How many leading `keys` hold `value`, prefetching slots ahead as the batch
+    /// operations do.
+    pub(crate) fn leading_holding(&self, keys: &[ExternalSequenceBlockHash], value: V) -> usize {
+        for &key in keys.iter().take(PREFETCH_DISTANCE) {
+            self.prefetch(key);
+        }
+        for (i, key) in keys.iter().enumerate() {
+            if let Some(&ahead) = keys.get(i + PREFETCH_DISTANCE) {
+                self.prefetch(ahead);
+            }
+            if self.get(key) != Some(&value) {
+                return i;
+            }
+        }
+        keys.len()
     }
 
     /// Points keys holding `from` at `to`, leaving missing keys and keys holding anything
@@ -279,6 +323,28 @@ mod tests {
 
     fn key(k: u64) -> ExternalSequenceBlockHash {
         ExternalSequenceBlockHash(k)
+    }
+
+    #[test]
+    fn existing_keys_do_not_grow_a_full_lookup() {
+        let mut lookup = BlockLookup::default();
+        for k in 0..12 {
+            lookup.insert(key(k), 1u32);
+        }
+        let capacity = lookup.slots.len();
+        assert_eq!(lookup.len() * 4, capacity * 3);
+
+        lookup.insert(key(0), 2);
+        assert_eq!(lookup.slots.len(), capacity);
+        lookup.upsert_all([key(0)].into_iter(), 2, |_| {});
+        assert_eq!(lookup.slots.len(), capacity);
+        lookup.upsert_all([key(0)].into_iter(), 3, |_| {});
+        assert_eq!(lookup.slots.len(), capacity);
+        lookup.upsert_all(std::iter::empty(), 3, |_| {});
+        assert_eq!(lookup.slots.len(), capacity);
+
+        lookup.upsert_all([key(12)].into_iter(), 4, |_| {});
+        assert_eq!(lookup.slots.len(), capacity * 2);
     }
 
     /// Randomized differential test against `HashMap`. A small key space forces long
@@ -354,7 +420,7 @@ mod tests {
                 assert_eq!(lookup.get(&k), model.get(&k));
             }
 
-            let mut entries: Vec<_> = lookup.iter().map(|(k, v)| (*k, *v)).collect();
+            let mut entries: Vec<_> = lookup.iter().map(|(k, v)| (k, *v)).collect();
             let mut expected: Vec<_> = model.into_iter().collect();
             entries.sort();
             expected.sort();

@@ -123,7 +123,15 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
             .transpose()?;
 
         // Convert tool_choice
-        let tool_choice = req.tool_choice.as_ref().map(convert_anthropic_tool_choice);
+        let tool_choice = req
+            .tool_choice
+            .as_ref()
+            .map(convert_anthropic_tool_choice)
+            .transpose()?
+            // vLLM rejects explicit auto without tools; use the backend default.
+            .filter(|choice| {
+                tools.is_some() || !matches!(choice, ChatCompletionToolChoiceOption::Auto)
+            });
         let parallel_tool_calls = req
             .tool_choice
             .as_ref()
@@ -167,6 +175,8 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
             .transpose()?;
 
         Ok(NvCreateChatCompletionRequest {
+            preserve_thinking: None,
+            responses_tools: None,
             inner: dynamo_protocols::types::CreateChatCompletionRequest {
                 messages,
                 model: req.model,
@@ -292,14 +302,13 @@ fn convert_user_blocks(
 fn convert_image(
     source: &AnthropicImageSource,
 ) -> Result<dynamo_protocols::types::ChatCompletionRequestMessageContentPartImage, anyhow::Error> {
-    if source.source_type != "base64" {
-        anyhow::bail!(
-            "unsupported image source type {:?}; only base64 is supported",
-            source.source_type
-        );
-    }
+    // URL sources are accepted by the protocol type but not fetched here;
+    // only inline base64 is converted.
+    let AnthropicImageSource::Base64 { media_type, data } = source else {
+        anyhow::bail!("unsupported image source type \"url\"; only base64 is supported");
+    };
 
-    let data_uri = format!("data:{};base64,{}", source.media_type, source.data);
+    let data_uri = format!("data:{media_type};base64,{data}");
     let url =
         url::Url::parse(&data_uri).map_err(|e| anyhow::anyhow!("invalid image data URI: {e}"))?;
     let image_url = ImageUrl::from(url.to_string());
@@ -454,6 +463,7 @@ fn convert_assistant_blocks(
                 // same as client tool use for conversion purposes.
                 segments.push(std::mem::take(&mut pending_reasoning));
                 tool_calls.push(ChatCompletionMessageToolCall {
+                    custom: None,
                     id: id.clone(),
                     r#type: FunctionType::Function,
                     function: dynamo_protocols::types::FunctionCall {
@@ -533,12 +543,15 @@ fn convert_anthropic_tools(
                 anyhow::anyhow!("tools[{tool_index}].input_schema: field required for client tools")
             })?;
             Ok(ChatCompletionTool {
+                custom: None,
                 r#type: ChatCompletionToolType::Function,
+                defer_loading: None,
                 function: FunctionObject {
                     name: tool.name.clone(),
                     description: tool.description.clone(),
                     parameters: Some(schema),
                     strict: tool.strict,
+                    defer_loading: None,
                 },
             })
         })
@@ -546,24 +559,27 @@ fn convert_anthropic_tools(
 }
 
 /// Convert Anthropic tool_choice to ChatCompletionToolChoiceOption.
-fn convert_anthropic_tool_choice(tc: &AnthropicToolChoice) -> ChatCompletionToolChoiceOption {
-    match tc {
+fn convert_anthropic_tool_choice(
+    tc: &AnthropicToolChoice,
+) -> anyhow::Result<ChatCompletionToolChoiceOption> {
+    Ok(match tc {
         AnthropicToolChoice::Simple(simple) => match simple.choice_type {
             AnthropicToolChoiceMode::Auto => ChatCompletionToolChoiceOption::Auto,
             AnthropicToolChoiceMode::Any => ChatCompletionToolChoiceOption::Required,
             AnthropicToolChoiceMode::None => ChatCompletionToolChoiceOption::None,
             AnthropicToolChoiceMode::Tool => {
-                // {"type": "tool"} without a "name" field is invalid per the Anthropic spec.
-                // It deserialized as Simple because Named requires the name field.
-                // Treat as "any" (required) since the caller wants a specific tool but
-                // didn't specify which — this is the closest semantic match.
-                tracing::warn!(
-                    "tool_choice has type 'tool' without a 'name' field; treating as 'any' (required)"
-                );
-                ChatCompletionToolChoiceOption::Required
+                anyhow::bail!("tool_choice.name: field required when tool_choice.type is \"tool\"");
             }
         },
         AnthropicToolChoice::Named(named) => {
+            anyhow::ensure!(
+                named.choice_type == AnthropicToolChoiceMode::Tool,
+                "tool_choice.name: only allowed for type tool"
+            );
+            anyhow::ensure!(
+                !named.name.is_empty(),
+                "tool_choice.name: must be a non-empty string"
+            );
             ChatCompletionToolChoiceOption::Named(ChatCompletionNamedToolChoice {
                 r#type: ChatCompletionToolType::Function,
                 function: FunctionName {
@@ -571,7 +587,7 @@ fn convert_anthropic_tool_choice(tc: &AnthropicToolChoice) -> ChatCompletionTool
                 },
             })
         }
-    }
+    })
 }
 
 /// Convert Dynamo's OpenAI-compatible usage into Anthropic's non-overlapping
@@ -604,6 +620,31 @@ pub(super) fn completion_usage_to_anthropic(usage: &CompletionUsage) -> Anthropi
 /// Generate an Anthropic-native `tool_use` id.
 pub(super) fn new_tool_use_id() -> String {
     format!("toolu_{}", Uuid::new_v4().simple())
+}
+
+/// The `tool_use` id a client sees for a backend tool call, derived from the
+/// chat completion id, the backend id, and `occurrence`, the number of earlier
+/// tool calls in the same response with that backend id, so request traces can
+/// record the same id. Backend ids such as `call-1` repeat across requests; the
+/// chat completion id keeps the result unique. Some parsers repeat a backend id
+/// within one response; `occurrence` keeps those distinct. Count every earlier
+/// call, including ones no `tool_use` block was emitted for: the id must depend
+/// only on the call's own identity so the trace, which sees every call, derives
+/// the same id. A missing id gets a random id.
+pub fn tool_use_id(chat_id: &str, backend_id: &str, occurrence: u32) -> String {
+    if chat_id.is_empty() || backend_id.is_empty() {
+        return new_tool_use_id();
+    }
+    let key = format!("{chat_id}\n{backend_id}\n{occurrence}");
+    format!("toolu_{:032x}", xxhash_rust::xxh3::xxh3_128(key.as_bytes()))
+}
+
+/// How many of `earlier` equal `backend_id`: the `occurrence` for [`tool_use_id`].
+pub fn backend_id_occurrence<'a>(
+    earlier: impl IntoIterator<Item = &'a str>,
+    backend_id: &str,
+) -> u32 {
+    earlier.into_iter().filter(|id| *id == backend_id).count() as u32
 }
 
 /// Decide what an Anthropic `tool_use` block shows for a call whose `arguments` do not
@@ -816,7 +857,14 @@ pub fn chat_completion_to_anthropic_response(
         // Extract tool calls
         if let Some(tool_calls) = choice.message.tool_calls {
             let last_call = tool_calls.len().saturating_sub(1);
+            // Derived before suppression so a suppressed call still counts as
+            // an occurrence of its backend id, as it does in the request trace.
+            let backend_ids: Vec<String> = tool_calls.iter().map(|tc| tc.id.clone()).collect();
             for (call_index, tc) in tool_calls.into_iter().enumerate() {
+                let occurrence = backend_id_occurrence(
+                    backend_ids[..call_index].iter().map(String::as_str),
+                    &tc.id,
+                );
                 let Some(input) = tool_use_input(
                     &tc.function.name,
                     &tc.function.arguments,
@@ -824,7 +872,7 @@ pub fn chat_completion_to_anthropic_response(
                 ) else {
                     continue;
                 };
-                let emitted_id = new_tool_use_id();
+                let emitted_id = tool_use_id(&chat_resp.inner.id, &tc.id, occurrence);
                 tracing::debug!(
                     backend_id = %tc.id,
                     emitted_id = %emitted_id,
@@ -1448,6 +1496,30 @@ mod tests {
     }
 
     #[test]
+    fn test_tool_choice_conversion_rejects_malformed_discriminators() {
+        for tool_choice in [
+            serde_json::json!({"type": "none", "name": "read"}),
+            serde_json::json!({"type": "auto", "name": "read"}),
+            serde_json::json!({"type": "any", "name": "read"}),
+            serde_json::json!({"type": "tool"}),
+            serde_json::json!({"type": "tool", "name": ""}),
+        ] {
+            let request: AnthropicCreateMessageRequest =
+                serde_json::from_value(serde_json::json!({
+                    "model": "test", "max_tokens": 16,
+                    "messages": [{"role": "user", "content": "ping"}],
+                    "tool_choice": tool_choice,
+                }))
+                .unwrap();
+            let error = NvCreateChatCompletionRequest::try_from(request).unwrap_err();
+            assert!(
+                error.to_string().contains("tool_choice.name"),
+                "{tool_choice}: {error}"
+            );
+        }
+    }
+
+    #[test]
     fn test_tool_choice_conversion_preserves_request_level_parser_policy() {
         for (label, tool_choice, parsing_enabled) in [
             ("auto", serde_json::json!({"type": "auto"}), true),
@@ -1496,10 +1568,46 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_tool_choice_without_tools() {
+        for tools in [serde_json::Value::Null, serde_json::json!([])] {
+            for choice in [
+                serde_json::Value::Null,
+                serde_json::json!({"type": "auto"}),
+                serde_json::json!({"type": "none"}),
+            ] {
+                let mut payload = serde_json::json!({
+                    "model": "test-model",
+                    "max_tokens": 100,
+                    "messages": [{"role": "user", "content": "Hi"}],
+                    "tool_choice": choice
+                });
+                if !tools.is_null() {
+                    payload["tools"] = tools.clone();
+                }
+                let req: AnthropicCreateMessageRequest = serde_json::from_value(payload).unwrap();
+                let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
+                assert!(chat_req.inner.tools.is_none());
+                if choice["type"] == "none" {
+                    assert_eq!(
+                        chat_req.inner.tool_choice,
+                        Some(ChatCompletionToolChoiceOption::None)
+                    );
+                } else {
+                    assert_eq!(
+                        chat_req.inner.tool_choice, None,
+                        "tools={tools}, choice={choice}"
+                    );
+                }
+            }
+        }
+    }
+
     #[allow(deprecated)]
     #[test]
     fn test_chat_completion_to_anthropic_response() {
         let chat_resp = NvCreateChatCompletionResponse {
+            response_events: Vec::new(),
             inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 id: "chatcmpl-xyz".into(),
                 choices: vec![dynamo_protocols::types::ChatChoice {
@@ -1559,6 +1667,7 @@ mod tests {
         // cached tokens (11). Anthropic input_tokens must report only the
         // uncached portion (12 - 11 = 1), with cache_read reported separately.
         let chat_resp = NvCreateChatCompletionResponse {
+            response_events: Vec::new(),
             inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 id: "chatcmpl-cache".into(),
                 choices: vec![dynamo_protocols::types::ChatChoice {
@@ -1635,6 +1744,7 @@ mod tests {
     #[test]
     fn test_anthropic_response_emits_zero_cache_creation_when_backend_reports_no_usage() {
         let chat_resp = NvCreateChatCompletionResponse {
+            response_events: Vec::new(),
             inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 id: "chatcmpl-no-usage".into(),
                 choices: vec![dynamo_protocols::types::ChatChoice {
@@ -1675,6 +1785,7 @@ mod tests {
     #[test]
     fn test_anthropic_response_does_not_emit_nvext() {
         let chat_resp = NvCreateChatCompletionResponse {
+            response_events: Vec::new(),
             inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 id: "chatcmpl-xyz".into(),
                 choices: vec![dynamo_protocols::types::ChatChoice {
@@ -2557,8 +2668,7 @@ mod tests {
                             cache_control: None,
                         },
                         AnthropicContentBlock::Image {
-                            source: AnthropicImageSource {
-                                source_type: "base64".into(),
+                            source: AnthropicImageSource::Base64 {
                                 media_type: "image/png".into(),
                                 data: "iVBORw0KGgo=".into(), // tiny valid-ish base64
                             },
@@ -2702,8 +2812,7 @@ mod tests {
                     content: AnthropicMessageContent::Blocks {
                         content: vec![
                             AnthropicContentBlock::Image {
-                                source: AnthropicImageSource {
-                                    source_type: "base64".into(),
+                                source: AnthropicImageSource::Base64 {
                                     media_type: "image/jpeg".into(),
                                     data: "/9j/4AAQ".into(),
                                 },
@@ -2766,17 +2875,75 @@ mod tests {
 mod anthropic_types_tests {
     use super::*;
 
-    #[allow(deprecated)]
+    #[test]
+    fn tool_use_ids_derive_from_chat_and_backend_ids() {
+        let id = tool_use_id("chatcmpl-r1", "call_1", 0);
+        assert!(id.starts_with("toolu_") && id.len() == "toolu_".len() + 32);
+        // A request trace derives the same id; another request does not.
+        assert_eq!(id, tool_use_id("chatcmpl-r1", "call_1", 0));
+        assert_ne!(id, tool_use_id("chatcmpl-r2", "call_1", 0));
+        // A backend id repeated within one response gets its own id.
+        assert_ne!(id, tool_use_id("chatcmpl-r1", "call_1", 1));
+        assert_eq!(
+            backend_id_occurrence(["call_1", "call_2", "call_1"], "call_1"),
+            2
+        );
+        assert_eq!(backend_id_occurrence([], "call_1"), 0);
+
+        let response = converted_tool_use_response_for(
+            dynamo_protocols::types::FinishReason::ToolCalls,
+            &["{}"],
+        );
+        assert!(matches!(
+            &response.content[0],
+            AnthropicResponseContentBlock::ToolUse { id, .. }
+                if *id == tool_use_id("chatcmpl-wiring", "call_1", 0)
+        ));
+    }
+
+    /// A suppressed earlier call with the same backend id still counts, so the
+    /// emitted id matches what the request trace derives for that call index.
+    #[test]
+    fn tool_use_ids_count_suppressed_repeats() {
+        let response = converted_tool_use_response_with_ids(
+            dynamo_protocols::types::FinishReason::ToolCalls,
+            &[("call_1", "[]"), ("call_1", "{}")],
+        );
+        let ids: Vec<_> = response
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                AnthropicResponseContentBlock::ToolUse { id, .. } => Some(id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ids, vec![tool_use_id("chatcmpl-wiring", "call_1", 1)]);
+    }
+
     fn converted_tool_use_response_for(
         finish_reason: dynamo_protocols::types::FinishReason,
         arguments: &[&str],
     ) -> AnthropicMessageResponse {
-        let tool_calls = arguments
+        let ids: Vec<String> = (1..=arguments.len()).map(|i| format!("call_{i}")).collect();
+        let calls: Vec<(&str, &str)> = ids
             .iter()
-            .enumerate()
+            .map(String::as_str)
+            .zip(arguments.iter().copied())
+            .collect();
+        converted_tool_use_response_with_ids(finish_reason, &calls)
+    }
+
+    #[allow(deprecated)]
+    fn converted_tool_use_response_with_ids(
+        finish_reason: dynamo_protocols::types::FinishReason,
+        calls: &[(&str, &str)],
+    ) -> AnthropicMessageResponse {
+        let tool_calls = calls
+            .iter()
             .map(
-                |(index, arguments)| dynamo_protocols::types::ChatCompletionMessageToolCall {
-                    id: format!("call_{}", index + 1),
+                |(id, arguments)| dynamo_protocols::types::ChatCompletionMessageToolCall {
+                    custom: None,
+                    id: (*id).into(),
                     r#type: dynamo_protocols::types::FunctionType::Function,
                     function: dynamo_protocols::types::FunctionCall {
                         name: "record_literal".into(),
@@ -2786,6 +2953,7 @@ mod anthropic_types_tests {
             )
             .collect();
         let chat_resp = NvCreateChatCompletionResponse {
+            response_events: Vec::new(),
             inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 id: "chatcmpl-wiring".into(),
                 choices: vec![dynamo_protocols::types::ChatChoice {

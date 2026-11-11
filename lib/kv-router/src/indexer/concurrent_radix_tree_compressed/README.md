@@ -136,6 +136,12 @@ not `internal`, the parent hash is still the edge tail, and the worker covers
 that tail. If the node has ever had children, decode falls back to child
 insertion or splitting instead of extending the compressed edge.
 
+A store tries this first, before parent planning: when the worker's lookup entry
+for the parent names a node, that node's conditions are checked and the blocks
+appended under one exclusive shape gate, so no shape version from an earlier
+read is needed. Anchors never extend. Any store this declines goes through the
+planned path, which may still extend through `try_extend_leaf_with_version`.
+
 ### Suffix Reuse And Splitting
 
 When a store names a parent hash inside an existing compressed edge, the node can
@@ -202,8 +208,11 @@ waits for that gate.
   produce a suffix that is dead from birth, which no removal will kill; the
   splitting lane queues it with the prefix as its parent.
 - **Background sweep.** `ThreadPoolIndexer` runs a `kv-maint` thread that
-  sweeps once 1,024 nodes have died since the last sweep or 30 s have passed,
-  checking every 50 ms. The walk takes no gates: it records holder-less
+  sweeps once the nodes that died since the last sweep reach the larger of
+  1,024 and an eighth of the nodes that sweep visited, or 30 s have passed,
+  checking every 50 ms. The walk visits the whole tree; sizing the threshold by
+  the last walk keeps each walk near eight node visits per death. The walk takes
+  no gates: it records holder-less
   children under the root and every anchor, descending only into nodes with
   children. Each parent's candidates are re-checked and unlinked under one
   try-locked gate, deepest parents first. The sweep catches what the drain
@@ -268,7 +277,10 @@ Node internals use separate protection for edge state and child maps:
 
 - `CrtcNodeState` is protected by a `parking_lot::RwLock`.
 - `children` publishes compact snapshots through `ArcSwap`, promoting to a
-  `DashMap` when fanout exceeds four children.
+  `DashMap` when fanout exceeds four children. A node allocates its `ArcSwap`
+  only when it gets its first child, which seeds it directly: dropping or
+  swapping one walks every thread's `arc_swap` debt list, and most nodes that
+  cleanup frees are leaves that never had a child.
 - `shape_gate` and `shape_version` coordinate plans that depend on the relation
   between the edge and child map.
 
