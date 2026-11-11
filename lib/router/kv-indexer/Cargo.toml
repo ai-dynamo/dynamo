@@ -31,11 +31,9 @@ anyhow = { workspace = true }
 arc-swap = "1.9.1"
 async-trait = { workspace = true }
 blake3 = { workspace = true }
-crossbeam-utils = "0.8"
 dashmap = { workspace = true }
 fastrand = "2"
 flume = "0.12.0"
-futures-util = { workspace = true }
 parking_lot = { workspace = true }
 prometheus = { workspace = true, optional = true }
 rustc-hash = "2.1.1"

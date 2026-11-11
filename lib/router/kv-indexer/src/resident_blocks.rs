@@ -12,16 +12,26 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use arc_swap::{ArcSwap, Guard};
-use crossbeam_utils::CachePadded;
 use rustc_hash::FxHashMap;
 
 use crate::prelude::WorkerWithDpRank;
 
-/// Padded so counters written by different event threads never share a cache line.
-type Counter = CachePadded<AtomicU64>;
+/// Padded so counters written by different event threads never share a cache line: 128 bytes
+/// covers the line, and the adjacent-line prefetch pair, on x86-64 and Apple arm64.
+#[derive(Debug)]
+#[repr(align(128))]
+struct Counter(AtomicU64);
+
+impl std::ops::Deref for Counter {
+    type Target = AtomicU64;
+
+    fn deref(&self) -> &AtomicU64 {
+        &self.0
+    }
+}
 
 fn counter(blocks: usize) -> Arc<Counter> {
-    Arc::new(CachePadded::new(AtomicU64::new(blocks as u64)))
+    Arc::new(Counter(AtomicU64::new(blocks as u64)))
 }
 
 /// The counters of every rank an indexer holds, as of one load of a

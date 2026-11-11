@@ -644,19 +644,35 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
 
     /// Each worker thread's per-rank block counts, or `None` for a thread that has exited.
     async fn lane_lookup_stats(&self) -> Vec<Option<WorkerLookupStats>> {
-        let lanes = self.worker_event_channels.iter().zip(&self.thread_exited);
-        futures_util::future::join_all(lanes.map(|(channel, exited)| async move {
-            let (resp_tx, resp_rx) = oneshot::channel();
-            channel.send(WorkerTask::Stats(resp_tx)).ok()?;
+        // Every request goes out before the first wait, so the threads answer in parallel and
+        // the wait is the slowest lane's, not their sum.
+        let pending: Vec<_> = self
+            .worker_event_channels
+            .iter()
+            .zip(&self.thread_exited)
+            .map(|(channel, exited)| {
+                let (resp_tx, resp_rx) = oneshot::channel();
+                channel
+                    .send(WorkerTask::Stats(resp_tx))
+                    .ok()
+                    .map(|()| (resp_rx, exited))
+            })
+            .collect();
+        let mut stats = Vec::with_capacity(pending.len());
+        for lane in pending {
+            let Some((resp_rx, exited)) = lane else {
+                stats.push(None);
+                continue;
+            };
             // A thread that exits with this request queued neither answers nor drops it, since
             // our own senders keep its queue alive.
-            tokio::select! {
+            stats.push(tokio::select! {
                 biased;
                 stats = resp_rx => stats.ok(),
                 _ = exited.cancelled() => None,
-            }
-        }))
-        .await
+            });
+        }
+        stats
     }
 
     pub(crate) async fn worker_lookup_stats(&self) -> WorkerLookupStats {
