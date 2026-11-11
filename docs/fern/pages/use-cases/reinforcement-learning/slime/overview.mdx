@@ -2,13 +2,38 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Slime Integration
-subtitle: Run Slime external rollouts through Dynamo on Kubernetes
 hide-toc: true
 ---
 
 import { TerminalDemo } from "@/components/TerminalDemo";
 
-<Tooltip tip="Validated with Dynamo 1.6.1, Slime 0.4.0, and KubeRay 1.7.1 on H100 GPUs. Manifests and flags can change between releases."><Badge intent="warning" minimal>Experimental</Badge></Tooltip> [Slime](https://github.com/THUDM/slime) trains with Megatron-LM on KubeRay while Dynamo serves the SGLang engines that generate its rollouts.
+<Warning title="Experimental">
+Validated with Dynamo 1.6.1, Slime 0.4.0, and KubeRay 1.7.1 on H100 GPUs. Manifests and flags can change between releases.
+</Warning>
+
+[Slime](https://github.com/THUDM/slime) trains with Megatron-LM on KubeRay while Dynamo serves the SGLang engines that generate its rollouts.
+
+## Tutorial: Train Qwen3-0.6B with Slime + Dynamo
+
+This tutorial covers how to train Qwen3-0.6B to solve elementary math problems through reinforcement learning on the GSM8K (Grade School Math 8K) dataset using the GRPO algorithm. The RL loop will run on Slime through KubeRay using Megatron-LM. This differs from the typical Slime use case in that instead of serving inference through Ray, the Dynamo operator is brought in so that the model and rollout can be deployed through DGD.
+
+<Note>
+Although Slime doesn't require Kubernetes, this tutorial covers the Kubernetes use case because the Dynamo operator requires it.
+</Note>
+
+<CardGroup cols={3}>
+  <Card title="1. Install + Setup" icon="regular download" href="installation.mdx">
+    Install the Dynamo platform and KubeRay, then stage the model and dataset on a shared volume.
+  </Card>
+  <Card title="2. Serve Inference with Dynamo" icon="regular server" href="serve-inference.mdx">
+    Run two SGLang engines behind the Dynamo frontend in a DynamoGraphDeployment.
+  </Card>
+  <Card title="3. Train with Slime + KubeRay" icon="regular brain" href="train.mdx">
+    Run Slime's GRPO loop with Megatron-LM in a RayJob that sends its rollouts through Dynamo.
+  </Card>
+</CardGroup>
+
+## Seeing it in action
 
 <TerminalDemo
   src="../../../../assets/slime-rl-demo.cast"
@@ -20,14 +45,3 @@ import { TerminalDemo } from "@/components/TerminalDemo";
   idleTimeLimit={1.5}
 />
 
-<CardGroup cols={3}>
-  <Card title="Installation and Setup" icon="regular download" href="installation.mdx">
-    Install the Dynamo platform and KubeRay, then stage the model and dataset on a shared volume.
-  </Card>
-  <Card title="Serve Inference with Dynamo" icon="regular server" href="serve-inference.mdx">
-    Run two SGLang engines behind the Dynamo frontend in a DynamoGraphDeployment.
-  </Card>
-  <Card title="Train with Slime on KubeRay" icon="regular brain" href="train.mdx">
-    Run Slime's GRPO loop with Megatron-LM in a RayJob that sends its rollouts through Dynamo.
-  </Card>
-</CardGroup>
