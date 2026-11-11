@@ -18,7 +18,6 @@ import (
 	"golang.org/x/crypto/ssh"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -56,6 +55,11 @@ func (rsaKeyPairGenerator) Generate() ([]byte, []byte, error) {
 	}
 
 	return privPEM, ssh.MarshalAuthorizedKey(sshPub), nil
+}
+
+// GenerateSSHKeyPair returns a new MPI SSH key pair in the same format as the shared Secret.
+func GenerateSSHKeyPair() (privateKeyPEM, publicKeyAuthorized []byte, err error) {
+	return rsaKeyPairGenerator{}.Generate()
 }
 
 // SSHKeyManager ensures the MPI SSH key pair secret exists and can replicate
@@ -121,12 +125,10 @@ func (m *SSHKeyManager) ensureSourceSecret(ctx context.Context) error {
 	}
 
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: m.cfg.SSHSecretNamespace,
-			Name:      m.cfg.SSHSecretName,
-			Labels: map[string]string{
-				"app.kubernetes.io/managed-by": "dynamo-operator",
-			},
+		Namespace: m.cfg.SSHSecretNamespace,
+		Name:      m.cfg.SSHSecretName,
+		Labels: map[string]string{
+			"app.kubernetes.io/managed-by": "dynamo-operator",
 		},
 		Data: map[string][]byte{
 			privateKeyFile: privKey,
@@ -162,12 +164,10 @@ func (m *SSHKeyManager) replicateToNamespace(ctx context.Context, targetNamespac
 	}
 
 	replica := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: targetNamespace,
-			Name:      m.cfg.SSHSecretName,
-			Labels: map[string]string{
-				"app.kubernetes.io/managed-by": "dynamo-operator",
-			},
+		Namespace: targetNamespace,
+		Name:      m.cfg.SSHSecretName,
+		Labels: map[string]string{
+			"app.kubernetes.io/managed-by": "dynamo-operator",
 		},
 		Type: source.Type,
 		Data: source.Data,

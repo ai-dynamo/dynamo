@@ -9,8 +9,6 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/utils/ptr"
 )
 
 func TestComponentsByNameNil(t *testing.T) {
@@ -21,11 +19,9 @@ func TestComponentsByNameNil(t *testing.T) {
 
 func TestGetDCDComponentNamePrefersSpecOverLegacyMetadata(t *testing.T) {
 	dcd := &v1beta1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "metadata-name",
-			Labels: map[string]string{
-				commonconsts.KubeLabelDynamoComponent: "label-component",
-			},
+		Name: "metadata-name",
+		Labels: map[string]string{
+			commonconsts.KubeLabelDynamoComponent: "label-component",
 		},
 		Spec: v1beta1.DynamoComponentDeploymentSpec{
 			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
@@ -45,9 +41,7 @@ func TestGetDCDComponentNameIgnoresStalePreservedServiceName(t *testing.T) {
 		labelComponentName = "stable-label-component"
 	)
 	dcd := dcdFromAlpha(t, v1alpha1.DynamoComponentDeploymentSpec{
-		DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-			ServiceName: "stale-alpha-service-name",
-		},
+		ServiceName: "stale-alpha-service-name",
 	})
 	dcd.Spec.ComponentName = specComponentName
 	dcd.Labels = map[string]string{
@@ -77,11 +71,9 @@ func TestGetDCDComponentNameLegacyFallbacks(t *testing.T) {
 		{
 			name: "label",
 			dcd: &v1beta1.DynamoComponentDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: "metadata-name",
-					Labels: map[string]string{
-						commonconsts.KubeLabelDynamoComponent: "label-component",
-					},
+				Name: "metadata-name",
+				Labels: map[string]string{
+					commonconsts.KubeLabelDynamoComponent: "label-component",
 				},
 			},
 			want: "label-component",
@@ -89,7 +81,7 @@ func TestGetDCDComponentNameLegacyFallbacks(t *testing.T) {
 		{
 			name: "metadata name",
 			dcd: &v1beta1.DynamoComponentDeployment{
-				ObjectMeta: metav1.ObjectMeta{Name: "metadata-name"},
+				Name: "metadata-name",
 			},
 			want: "metadata-name",
 		},
@@ -107,16 +99,14 @@ func TestGetDCDComponentNameLegacyFallbacks(t *testing.T) {
 func TestDCDAlphaCompatibilityHelpersReadThroughAPIConversion(t *testing.T) {
 	dynamoNamespace := "canonical-namespace"
 	dcd := dcdFromAlpha(t, v1alpha1.DynamoComponentDeploymentSpec{
-		DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-			Annotations:      map[string]string{"canonical-annotation": "kept"},
-			Labels:           map[string]string{"canonical-label": "kept"},
-			DynamoNamespace:  &dynamoNamespace,
-			SubComponentType: "canonical-sub",
-			Ingress: &v1alpha1.IngressSpec{
-				Enabled:                    true,
-				Host:                       "canonical.example.com",
-				IngressControllerClassName: ptr.To("nginx"),
-			},
+		Annotations:      map[string]string{"canonical-annotation": "kept"},
+		Labels:           map[string]string{"canonical-label": "kept"},
+		DynamoNamespace:  &dynamoNamespace,
+		SubComponentType: "canonical-sub",
+		Ingress: &v1alpha1.IngressSpec{
+			Enabled:                    true,
+			Host:                       "canonical.example.com",
+			IngressControllerClassName: new("nginx"),
 		},
 	})
 	dcd.Labels = map[string]string{
@@ -189,22 +179,18 @@ func TestComponentRuntimeNamespace(t *testing.T) {
 
 func TestGetDCDRuntimeNamespaceUsesMetadataWorkerHashBeforePodTemplate(t *testing.T) {
 	dcd := &v1beta1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "dcd",
-			Namespace: "k8s",
-			Labels: map[string]string{
-				commonconsts.KubeLabelDynamoNamespace:  "base",
-				commonconsts.KubeLabelDynamoWorkerHash: "abc123",
-			},
+		Name:      "dcd",
+		Namespace: "k8s",
+		Labels: map[string]string{
+			commonconsts.KubeLabelDynamoNamespace:  "base",
+			commonconsts.KubeLabelDynamoWorkerHash: "abc123",
 		},
 		Spec: v1beta1.DynamoComponentDeploymentSpec{
 			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
 				ComponentType: commonconsts.ComponentTypeWorker,
 				PodTemplate: &corev1.PodTemplateSpec{
-					ObjectMeta: metav1.ObjectMeta{
-						Labels: map[string]string{
-							commonconsts.KubeLabelDynamoWorkerHash: "pod-template-hash",
-						},
+					Labels: map[string]string{
+						commonconsts.KubeLabelDynamoWorkerHash: "pod-template-hash",
 					},
 				},
 			},
@@ -221,21 +207,17 @@ func TestGetDCDRuntimeNamespaceUsesMetadataWorkerHashBeforePodTemplate(t *testin
 
 func TestGetDCDRuntimeNamespaceUsesPodTemplateWorkerHashWhenMetadataMissing(t *testing.T) {
 	dcd := &v1beta1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "dcd",
-			Namespace: "k8s",
-			Labels: map[string]string{
-				commonconsts.KubeLabelDynamoNamespace: "base",
-			},
+		Name:      "dcd",
+		Namespace: "k8s",
+		Labels: map[string]string{
+			commonconsts.KubeLabelDynamoNamespace: "base",
 		},
 		Spec: v1beta1.DynamoComponentDeploymentSpec{
 			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
 				ComponentType: commonconsts.ComponentTypeWorker,
 				PodTemplate: &corev1.PodTemplateSpec{
-					ObjectMeta: metav1.ObjectMeta{
-						Labels: map[string]string{
-							commonconsts.KubeLabelDynamoWorkerHash: "abc123",
-						},
+					Labels: map[string]string{
+						commonconsts.KubeLabelDynamoWorkerHash: "abc123",
 					},
 				},
 			},
@@ -252,13 +234,11 @@ func TestGetDCDRuntimeNamespaceUsesPodTemplateWorkerHashWhenMetadataMissing(t *t
 
 func TestGetDCDRuntimeNamespaceUsesLegacyMetadataOnlyHash(t *testing.T) {
 	dcd := &v1beta1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "dcd",
-			Namespace: "k8s",
-			Labels: map[string]string{
-				commonconsts.KubeLabelDynamoNamespace:  "base",
-				commonconsts.KubeLabelDynamoWorkerHash: commonconsts.LegacyWorkerHash,
-			},
+		Name:      "dcd",
+		Namespace: "k8s",
+		Labels: map[string]string{
+			commonconsts.KubeLabelDynamoNamespace:  "base",
+			commonconsts.KubeLabelDynamoWorkerHash: commonconsts.LegacyWorkerHash,
 		},
 		Spec: v1beta1.DynamoComponentDeploymentSpec{
 			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
@@ -277,21 +257,17 @@ func TestGetDCDRuntimeNamespaceUsesLegacyMetadataOnlyHash(t *testing.T) {
 
 func TestGetDCDRuntimeNamespaceUsesLegacyPodTemplateHash(t *testing.T) {
 	dcd := &v1beta1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "dcd",
-			Namespace: "k8s",
-			Labels: map[string]string{
-				commonconsts.KubeLabelDynamoNamespace: "base",
-			},
+		Name:      "dcd",
+		Namespace: "k8s",
+		Labels: map[string]string{
+			commonconsts.KubeLabelDynamoNamespace: "base",
 		},
 		Spec: v1beta1.DynamoComponentDeploymentSpec{
 			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
 				ComponentType: commonconsts.ComponentTypeWorker,
 				PodTemplate: &corev1.PodTemplateSpec{
-					ObjectMeta: metav1.ObjectMeta{
-						Labels: map[string]string{
-							commonconsts.KubeLabelDynamoWorkerHash: commonconsts.LegacyWorkerHash,
-						},
+					Labels: map[string]string{
+						commonconsts.KubeLabelDynamoWorkerHash: commonconsts.LegacyWorkerHash,
 					},
 				},
 			},
@@ -308,10 +284,8 @@ func TestGetDCDRuntimeNamespaceUsesLegacyPodTemplateHash(t *testing.T) {
 
 func TestGetDCDWorkloadComponentTypePreservesLegacyAlphaWorkerSelector(t *testing.T) {
 	dcd := dcdFromAlpha(t, v1alpha1.DynamoComponentDeploymentSpec{
-		DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-			ComponentType:    commonconsts.ComponentTypeWorker,
-			SubComponentType: commonconsts.ComponentTypeDecode,
-		},
+		ComponentType:    commonconsts.ComponentTypeWorker,
+		SubComponentType: commonconsts.ComponentTypeDecode,
 	})
 	dcd.Labels = map[string]string{
 		commonconsts.KubeLabelDynamoGraphDeploymentName: "qwen",
@@ -334,7 +308,7 @@ func TestToAlphaCheckpointConfigSetsNilIdentityThroughConverter(t *testing.T) {
 	got := ToAlphaCheckpointConfig(&v1beta1.ComponentCheckpointConfig{
 		Enabled:       true,
 		Mode:          v1beta1.CheckpointMode("auto"),
-		CheckpointRef: ptr.To("checkpoint"),
+		CheckpointRef: new("checkpoint"),
 	})
 	if got == nil {
 		t.Fatalf("ToAlphaCheckpointConfig() = nil")
@@ -388,11 +362,9 @@ func dcdFromAlpha(t *testing.T, spec v1alpha1.DynamoComponentDeploymentSpec) *v1
 	t.Helper()
 
 	alpha := &v1alpha1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "dcd",
-			Namespace: "test-ns",
-		},
-		Spec: spec,
+		Name:      "dcd",
+		Namespace: "test-ns",
+		Spec:      spec,
 	}
 	beta := &v1beta1.DynamoComponentDeployment{}
 	if err := alpha.ConvertTo(beta); err != nil {

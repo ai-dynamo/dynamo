@@ -18,6 +18,12 @@
 package controller
 
 import (
+	"context"
+	"fmt"
+
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -36,4 +42,32 @@ func newDGDResourceSyncer(kubeClient client.Client, recorder events.EventRecorde
 
 func (s *dgdResourceSyncer) GetRecorder() events.EventRecorder {
 	return s.recorder
+}
+
+// deleteIfControlledBy deletes the object at key only if owner controls it, with a UID
+// precondition against same-name replacement. Absent is success; obj must be empty.
+func (s *dgdResourceSyncer) deleteIfControlledBy(
+	ctx context.Context,
+	owner metav1.Object,
+	key types.NamespacedName,
+	obj client.Object,
+	kind string,
+) error {
+	err := s.Get(ctx, key, obj)
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("failed to get %s %s: %w", kind, key.Name, err)
+	}
+	if !metav1.IsControlledBy(obj, owner) {
+		return nil
+	}
+
+	uid := obj.GetUID()
+	err = s.Delete(ctx, obj, client.Preconditions{UID: &uid})
+	if err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("failed to delete %s %s: %w", kind, key.Name, err)
+	}
+	return nil
 }

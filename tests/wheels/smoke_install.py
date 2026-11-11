@@ -17,9 +17,7 @@ from urllib.parse import unquote, urlparse
 
 GLIBC_FLOOR = (2, 28)
 MANYLINUX_POLICY = "manylinux_2_28"
-RUNTIME_PY_TAGS = {"cp310", "cp311", "cp312"}
-# First-party optional wheel that must ship with the core wheels.
-REQUIRED_OPTIONAL_DIST = "kvbm"
+RUNTIME_PY_TAGS = {"cp311", "cp312"}
 # Wheels we ship but do not own / do not validate as manylinux: nixl lives under the
 # nixl/ subdir (excluded by considering only top-level wheels); gpu-memory-service is
 # not a shipped artifact and is a non-manylinux wheel.
@@ -162,19 +160,6 @@ def assert_no_bundled_libraries(wheelhouse: Path) -> None:
         )
 
 
-def check_optional_wheels(wheelhouse: Path, target_arch: str | None) -> None:
-    kvbm = require_one_wheel(wheelhouse, REQUIRED_OPTIONAL_DIST)
-    metadata = wheel_metadata(kvbm)
-    print(
-        f"required wheel present: {kvbm.name} "
-        f"({metadata.get('Name')} {metadata.get('Version')})"
-    )
-    assert_arch_tag(kvbm, target_arch)
-
-    for wheel in find_wheels(wheelhouse, "nixl"):
-        print(f"third-party wheel present (not asserted): {wheel.name}")
-
-
 def binary_wheels(wheelhouse: Path) -> list[Path]:
     # Top-level wheels only: the nixl/ subdir is third-party and excluded here.
     ignored = {canonical_name(dist) for dist in IGNORED_BINARY_DISTS}
@@ -264,7 +249,7 @@ def assert_glibc_floor(wheelhouse: Path) -> None:
 
 
 def create_venv(python_spec: str) -> Path:
-    # python_spec is a version ("3.10") or an interpreter path; uv fetches the
+    # python_spec is a version ("3.11") or an interpreter path; uv fetches the
     # interpreter if needed and --seed installs pip into the fresh venv.
     venv_dir = Path(tempfile.mkdtemp(prefix="dynamo-wheel-venv-"))
     run(["uv", "venv", "--seed", "--python", python_spec, str(venv_dir)])
@@ -277,7 +262,7 @@ AISIMULATE_FIND_LINKS = "https://pypi.nvidia.com/aisimulate/"
 
 def pip_install(venv_python: Path, wheelhouse: Path, requirements: list[str]) -> None:
     # --find-links only registers search paths; nixl is pulled from nixl/ only when a
-    # requirement (e.g. kvbm's nixl[cu12]) resolves to it, not installed on its own.
+    # requirement resolves to it, not installed on its own.
     find_links = []
     for path in (wheelhouse, wheelhouse / "nixl"):
         if path.exists():
@@ -466,32 +451,16 @@ assert diagnostics["last_warning"] is None
     run([str(venv_python), "-c", code])
 
 
-OPTIONAL_IMPORT_NAMES = {"kvbm": "kvbm"}
-
-
-def install_core(
-    wheelhouse: Path, python_spec: str, also: tuple[str, ...] = ()
-) -> None:
+def install_core(wheelhouse: Path, python_spec: str) -> None:
     ai_dynamo = require_one_wheel(wheelhouse, "ai-dynamo")
     runtime = require_one_wheel(wheelhouse, "ai-dynamo-runtime")
-    also_wheels = {dist: require_one_wheel(wheelhouse, dist) for dist in also}
 
     venv_python = create_venv(python_spec)
     try:
-        requirements = [
-            str(runtime),
-            str(ai_dynamo),
-            *(str(w) for w in also_wheels.values()),
-        ]
-        pip_install(venv_python, wheelhouse, requirements)
+        pip_install(venv_python, wheelhouse, [str(runtime), str(ai_dynamo)])
         pip_check(venv_python)
         assert_dynamo_local_install(venv_python, wheelhouse, ai_dynamo, runtime)
         run_core_import_smoke(venv_python)
-
-        for dist, wheel in also_wheels.items():
-            assert_local_direct_url(venv_python, dist, wheel, wheelhouse)
-            import_name = OPTIONAL_IMPORT_NAMES.get(dist, dist)
-            run([str(venv_python), "-c", f"import {import_name}; assert {import_name}"])
     finally:
         shutil.rmtree(venv_python.parent.parent, ignore_errors=True)
 

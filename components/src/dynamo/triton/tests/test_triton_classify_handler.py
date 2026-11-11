@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for dynamo.triton.pooling_handlers.ClassifyWorkerHandler:
+"""Unit tests for dynamo.triton.classify_handler.ClassifyWorkerHandler:
 config-driven input/output resolution, request/response translation for the
 OpenAI /v1/classify wire, id2label lookup, and validation of unsupported
 inputs (token-ID variants, pooling requests, empty payloads)."""
@@ -16,9 +16,9 @@ from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
-import tritonclient.grpc.model_config_pb2 as mc
+import tritonclient.grpc.model_config_pb2 as TritonModelConfigPb
 
-from dynamo.triton.pooling_handlers import ClassifyWorkerHandler
+from dynamo.triton.classify_handler import ClassifyWorkerHandler
 
 pytestmark = [
     pytest.mark.unit,
@@ -38,9 +38,9 @@ def _make_config_proto(
     outputs: list[tuple[str, int]],
     name: str = "mock-classifier",
     max_batch_size: int = 8,
-) -> mc.ModelConfig:
+) -> TritonModelConfigPb.ModelConfig:
     """Build a minimal ModelConfig with the given input/output (name, dtype) pairs."""
-    config = mc.ModelConfig(name=name, max_batch_size=max_batch_size)
+    config = TritonModelConfigPb.ModelConfig(name=name, max_batch_size=max_batch_size)
     for input_name, dtype in inputs:
         config.input.add(name=input_name, data_type=dtype, dims=[-1])
     for output_name, dtype in outputs:
@@ -143,8 +143,8 @@ def _make_handler(
     classify_output_name: str | None = None,
 ) -> tuple[_MockModel, ClassifyWorkerHandler]:
     config = _make_config_proto(
-        inputs=inputs or [("TEXT", mc.DataType.TYPE_STRING)],
-        outputs=outputs or [("probs", mc.DataType.TYPE_FP32)],
+        inputs=inputs or [("TEXT", TritonModelConfigPb.DataType.TYPE_STRING)],
+        outputs=outputs or [("probs", TritonModelConfigPb.DataType.TYPE_FP32)],
         max_batch_size=max_batch_size,
     )
     model = _MockModel(responses or [], max_batch_size=max_batch_size)
@@ -167,12 +167,12 @@ class TestInitAndResolve:
     def test_explicit_overrides_win(self) -> None:
         _, handler = _make_handler(
             inputs=[
-                ("TEXT_A", mc.DataType.TYPE_STRING),
-                ("TEXT_B", mc.DataType.TYPE_STRING),
+                ("TEXT_A", TritonModelConfigPb.DataType.TYPE_STRING),
+                ("TEXT_B", TritonModelConfigPb.DataType.TYPE_STRING),
             ],
             outputs=[
-                ("probs_a", mc.DataType.TYPE_FP32),
-                ("probs_b", mc.DataType.TYPE_FP32),
+                ("probs_a", TritonModelConfigPb.DataType.TYPE_FP32),
+                ("probs_b", TritonModelConfigPb.DataType.TYPE_FP32),
             ],
             classify_input_name="TEXT_B",
             classify_output_name="probs_a",
@@ -184,27 +184,29 @@ class TestInitAndResolve:
         with pytest.raises(ValueError, match="TYPE_STRING input tensor"):
             _make_handler(
                 inputs=[
-                    ("A", mc.DataType.TYPE_STRING),
-                    ("B", mc.DataType.TYPE_STRING),
+                    ("A", TritonModelConfigPb.DataType.TYPE_STRING),
+                    ("B", TritonModelConfigPb.DataType.TYPE_STRING),
                 ]
             )
 
     def test_no_bytes_input_fails(self) -> None:
         with pytest.raises(ValueError, match="TYPE_STRING input tensor"):
-            _make_handler(inputs=[("tokens", mc.DataType.TYPE_INT64)])
+            _make_handler(inputs=[("tokens", TritonModelConfigPb.DataType.TYPE_INT64)])
 
     def test_ambiguous_fp32_output_without_override_fails(self) -> None:
         with pytest.raises(ValueError, match="TYPE_FP32 output tensor"):
             _make_handler(
                 outputs=[
-                    ("probs", mc.DataType.TYPE_FP32),
-                    ("scores", mc.DataType.TYPE_FP32),
+                    ("probs", TritonModelConfigPb.DataType.TYPE_FP32),
+                    ("scores", TritonModelConfigPb.DataType.TYPE_FP32),
                 ]
             )
 
     def test_no_fp32_output_fails(self) -> None:
         with pytest.raises(ValueError, match="TYPE_FP32 output tensor"):
-            _make_handler(outputs=[("classes", mc.DataType.TYPE_INT32)])
+            _make_handler(
+                outputs=[("classes", TritonModelConfigPb.DataType.TYPE_INT32)]
+            )
 
     def test_explicit_input_name_unknown_raises(self) -> None:
         with pytest.raises(ValueError, match="no TYPE_STRING input named 'MISSING'"):
@@ -214,8 +216,8 @@ class TestInitAndResolve:
         with pytest.raises(ValueError, match="no TYPE_STRING input named 'tokens'"):
             _make_handler(
                 inputs=[
-                    ("TEXT", mc.DataType.TYPE_STRING),
-                    ("tokens", mc.DataType.TYPE_INT64),
+                    ("TEXT", TritonModelConfigPb.DataType.TYPE_STRING),
+                    ("tokens", TritonModelConfigPb.DataType.TYPE_INT64),
                 ],
                 classify_input_name="tokens",
             )
@@ -228,8 +230,8 @@ class TestInitAndResolve:
         with pytest.raises(ValueError, match="no TYPE_FP32 output named 'classes'"):
             _make_handler(
                 outputs=[
-                    ("probs", mc.DataType.TYPE_FP32),
-                    ("classes", mc.DataType.TYPE_INT32),
+                    ("probs", TritonModelConfigPb.DataType.TYPE_FP32),
+                    ("classes", TritonModelConfigPb.DataType.TYPE_INT32),
                 ],
                 classify_output_name="classes",
             )
@@ -243,8 +245,8 @@ class TestInitAndResolve:
                 return {}
 
         config = _make_config_proto(
-            inputs=[("TEXT", mc.DataType.TYPE_STRING)],
-            outputs=[("probs", mc.DataType.TYPE_FP32)],
+            inputs=[("TEXT", TritonModelConfigPb.DataType.TYPE_STRING)],
+            outputs=[("probs", TritonModelConfigPb.DataType.TYPE_FP32)],
             max_batch_size=8,
         )
         model = _EmptyRuntimeMockModel([])
@@ -255,13 +257,21 @@ class TestInitAndResolve:
         )
         assert handler._batched is True
 
-    def _config_with_input_dims(self, dims: list[int]) -> "mc.ModelConfig":
+    def _config_with_input_dims(
+        self, dims: list[int]
+    ) -> "TritonModelConfigPb.ModelConfig":
         """Build a classify-shaped ModelConfig with explicit STRING input
         dims so dims-validation tests can probe shapes the shared fixture
         does not expose."""
-        config = mc.ModelConfig(name="mock-classifier", max_batch_size=8)
-        config.input.add(name="TEXT", data_type=mc.DataType.TYPE_STRING, dims=dims)
-        config.output.add(name="probs", data_type=mc.DataType.TYPE_FP32, dims=[-1])
+        config = TritonModelConfigPb.ModelConfig(
+            name="mock-classifier", max_batch_size=8
+        )
+        config.input.add(
+            name="TEXT", data_type=TritonModelConfigPb.DataType.TYPE_STRING, dims=dims
+        )
+        config.output.add(
+            name="probs", data_type=TritonModelConfigPb.DataType.TYPE_FP32, dims=[-1]
+        )
         return config
 
     def test_rank_2_string_input_dims_rejected(self) -> None:
@@ -481,6 +491,14 @@ class TestClassify:
         _, handler = _make_handler(max_batch_size=0)
         with pytest.raises(ValueError, match="received 2 prompts"):
             _run(handler, {"input": ["a", "b"]})
+
+    def test_batch_larger_than_max_batch_size_rejected(self) -> None:
+        # A batchable model with max_batch_size=2 receiving 3 prompts must
+        # 400 at the handler; otherwise Triton returns a shape-mismatch
+        # server error for the [3, 1] tensor.
+        _, handler = _make_handler(max_batch_size=2)
+        with pytest.raises(ValueError, match="accepts at most 2 prompts"):
+            _run(handler, {"input": ["a", "b", "c"]})
 
 
 # ---------------------------------------------------------------------------

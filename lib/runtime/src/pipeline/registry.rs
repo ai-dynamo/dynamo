@@ -61,6 +61,11 @@ impl Registry {
         );
     }
 
+    /// Insert an existing shared object without allocating another Arc.
+    pub fn insert_arc<K: ToString, U: Send + Sync + 'static>(&mut self, key: K, value: Arc<U>) {
+        self.shared_storage.insert(key.to_string(), value);
+    }
+
     /// Retrieve a shared object from the registry by key and type.
     pub fn get_shared<V: Send + Sync + 'static>(&self, key: &str) -> Result<Arc<V>, String> {
         self.get_shared_optional(key)?
