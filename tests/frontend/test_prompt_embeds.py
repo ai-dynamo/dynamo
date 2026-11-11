@@ -250,10 +250,8 @@ class TestPromptEmbedsE2E:
 
         assert exc_info.value.status_code == 400
         error_msg = str(exc_info.value)
-        # "could not be deserialized" separates the torch.load failure from the
-        # --enable-prompt-embeds gate, which also returns "Invalid prompt_embeds:"
-        # with a 400. torch's own reason is not checked because it depends on the
-        # torch version.
+        # The --enable-prompt-embeds gate also returns a 400 "Invalid prompt_embeds:";
+        # torch's own reason varies by torch version, so it is not matched.
         assert (
             "Invalid prompt_embeds:" in error_msg
             and "could not be deserialized as a torch tensor" in error_msg
