@@ -770,9 +770,8 @@ async fn prefill_reports_its_cache_count_and_decode_counts_no_transferred_kv() {
         .kv_transfer_params
         .expect("prefill terminal carries a KV handoff");
 
-    // Guard, not a regression proof: the transferred prompt KV must not count
-    // as a cache hit (8 here). The scheduler reports this as a measured zero
-    // today; an unknown count would be equally correct.
+    // Transferred prompt KV must not count as a cache hit (8 here);
+    // a measured zero and an unknown count are both correct.
     let mut decode_request = nine_token_request("decode");
     decode_request.kv = Some(pb::KvCacheParameters {
         kv_transfer_params: Some(handoff),
