@@ -5,142 +5,94 @@ import asyncio
 import inspect
 import logging
 import signal
-import sys
 from collections import defaultdict
-from typing import Any, Awaitable, Callable, DefaultDict
+from contextlib import contextmanager
 
-from dynamo._core import DistributedRuntime
-from dynamo.common.utils.graceful_shutdown import graceful_shutdown_with_discovery
+import psutil  # type: ignore[import-untyped]
 
-SignalCallback = Callable[..., Any]
+from dynamo.common.utils.worker_shutdown import WorkerShutdown
 
 
-def install_graceful_shutdown(
-    loop: asyncio.AbstractEventLoop,
-    runtime: DistributedRuntime,
-    endpoints: list[str],
-    shutdown_event: asyncio.Event,
-    *,
-    signals: tuple[int, ...] = (signal.SIGTERM, signal.SIGINT),
-) -> Callable[[], Awaitable[None]]:
-    """
-    Set up graceful shutdown with discovery unregister and grace period.
+def coordinate_non_leader_shutdown(engine, shutdown: WorkerShutdown | None) -> None:
+    """Keep follower schedulers alive while rank 0 drains requests and KV reads."""
+    if shutdown is None or engine.server_args.node_rank == 0:
+        return
 
-    Owns OS-level SIGTERM/SIGINT via signal.signal() so SGLang's internal
-    loop.add_signal_handler registrations cannot replace our handler.
-    Monkey-patches loop.add_signal_handler to capture (defer) those
-    registrations. Returns run_deferred_handlers to be invoked in init
-    finally blocks (after the asyncio loop / serve_endpoint is done).
-    """
-    deferred_handlers: DefaultDict[
-        int, list[tuple[SignalCallback, tuple[Any, ...]]]
-    ] = defaultdict(
-        list
-    )  # type: ignore[assignment]
+    async def wait_for_schedulers() -> None:
+        # Rank 0's ShutdownReq stops every rank after its drain. Do not run
+        # block_until_scheduler_exits in an executor: cancellation cannot stop
+        # its join thread, which would then hold interpreter shutdown open.
+        get_pids = getattr(engine, "get_all_child_pids", None)
+        pids = get_pids() if callable(get_pids) else None
+        if not pids:
+            logging.warning(
+                "SGLang does not expose scheduler PIDs; keeping follower alive "
+                "until the shutdown drain deadline"
+            )
+            await asyncio.Event().wait()
+            return
 
-    shutdown_started = False
-    shutdown_signum: int | None = None
-    deferred_task: asyncio.Task[None] | None = None
-    shutdown_task: asyncio.Task[None] | None = None
-
-    async def _run_deferred_handlers() -> None:
-        shutdown_error: Exception | None = None
-
-        # Join the shutdown sequence first. It is a detached task, and it sets
-        # `shutdown_event` *before* awaiting the runtime teardown — so the serve
-        # loop that called us has already returned and the loop is about to
-        # close. Without this the teardown is destroyed while still suspended.
-        if shutdown_task is not None:
+        processes = []
+        for pid in pids:
             try:
-                await asyncio.shield(shutdown_task)
-            except asyncio.CancelledError:
-                raise
-            except Exception as error:
-                shutdown_error = error
-                logging.exception("Graceful shutdown sequence failed")
-
-        signums = (
-            [shutdown_signum]
-            if shutdown_signum is not None
-            else list(deferred_handlers.keys())
-        )
-        for sig in signums:
-            for cb, args in list(deferred_handlers.get(sig, [])):
+                processes.append(psutil.Process(pid))
+            except psutil.NoSuchProcess:
+                continue
+        while processes:
+            alive = []
+            for process in processes:
                 try:
-                    res = cb(*args)
-                    if inspect.isawaitable(res):
-                        await res
-                except Exception:
-                    logging.exception("Deferred signal callback failed: %r", cb)
+                    if (
+                        process.is_running()
+                        and process.status() != psutil.STATUS_ZOMBIE
+                    ):
+                        alive.append(process)
+                except psutil.NoSuchProcess:
+                    continue
+            processes = alive
+            if processes:
+                await asyncio.sleep(0.05)
 
-        if shutdown_error is not None:
-            raise shutdown_error
+    # Only the serving leader knows when remote KV reads are done. Its
+    # scheduler lifetime includes that wait; a second follower wait is redundant.
+    shutdown.prefill = False
+    shutdown.wait_for_children = wait_for_schedulers
 
-    async def run_deferred_handlers() -> None:
-        nonlocal deferred_task
-        if not shutdown_started:
+
+@contextmanager
+def defer_engine_signals(loop: asyncio.AbstractEventLoop, shutdown: WorkerShutdown):
+    """Keep engine signal callbacks behind engine cleanup and runtime teardown."""
+    signals = (signal.SIGTERM, signal.SIGINT)
+    callbacks: dict[int, list] = defaultdict(list)
+    previous = {}
+    signum = None
+    original_add = loop.add_signal_handler
+
+    def on_signal(sig, _frame):
+        nonlocal signum
+        signum = sig
+        shutdown.request_shutdown(sig)
+
+    def capture(sig, callback, *args):
+        if sig in signals:
+            callbacks[sig].append((callback, args))
+        else:
+            original_add(sig, callback, *args)
+
+    async def run_deferred():
+        if signum is None:
             return
-        application_error = sys.exc_info()[1]
-        if deferred_task is None:
-            deferred_task = asyncio.create_task(_run_deferred_handlers())
-        # Own the entire operation, including callbacks. Cancelling a waiter
-        # must neither interrupt cleanup nor make a second waiter skip it.
-        cancelled = False
-        while not deferred_task.done():
-            try:
-                await asyncio.wait([deferred_task])
-            except asyncio.CancelledError:
-                cancelled = True
-        try:
-            deferred_task.result()
-        except Exception:
-            if application_error is None and not cancelled:
-                raise
-        if cancelled and application_error is None:
-            raise asyncio.CancelledError
-
-    async def _shutdown_sequence(signum: int, frame: Any | None) -> None:
-        nonlocal shutdown_started, shutdown_signum
-        if shutdown_started:
-            return
-        shutdown_signum = signum
-        shutdown_started = True
-
-        logging.info("Received signal %s, starting graceful shutdown", signum)
-        await graceful_shutdown_with_discovery(
-            runtime,
-            endpoints,
-            shutdown_event=shutdown_event,
-            grace_period_s=None,
-        )
-
-    def _schedule_shutdown(signum: int, frame: Any | None) -> None:
-        def _kick() -> None:
-            nonlocal shutdown_task
-            if shutdown_task is None:
-                shutdown_task = asyncio.create_task(_shutdown_sequence(signum, frame))
-
-        loop.call_soon_threadsafe(_kick)
-
-    def _os_signal_handler(signum: int, frame: Any) -> None:
-        _schedule_shutdown(signum, frame)
+        for callback, args in callbacks.get(signum, []):
+            result = callback(*args)
+            if inspect.isawaitable(result):
+                await result
 
     for sig in signals:
-        signal.signal(sig, _os_signal_handler)
-
-    orig_add = loop.add_signal_handler
-
-    def watching_add_signal_handler(sig: int, callback: SignalCallback, *args: Any):
-        if sig in signals:
-            logging.debug(
-                "Captured underlying service trying to register for loop.add_signal_handler(%s, %r, ...).",
-                sig,
-                callback,
-            )
-            deferred_handlers[sig].append((callback, args))
-            return None
-        return orig_add(sig, callback, *args)
-
-    loop.add_signal_handler = watching_add_signal_handler  # type: ignore[assignment]
-
-    return run_deferred_handlers
+        previous[sig] = signal.signal(sig, on_signal)
+    loop.add_signal_handler = capture  # type: ignore[method-assign, assignment]
+    try:
+        yield run_deferred
+    finally:
+        loop.add_signal_handler = original_add  # type: ignore[method-assign]
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)

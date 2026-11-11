@@ -805,6 +805,8 @@ class TestNoBleedIntoOtherEngines:
     def test_only_trtllm_handlers_declare_response_sender(self):
         offenders = {}
         for path in (_COMPONENTS_SRC / "dynamo").rglob("*.py"):
+            if "tests" in path.parts:
+                continue  # Synthetic test handlers are not production endpoints.
             if "/trtllm/" in path.as_posix():
                 continue  # the one engine that is supposed to have it
             hits = self._declares_response_sender(path)

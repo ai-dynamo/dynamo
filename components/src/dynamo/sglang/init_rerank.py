@@ -4,6 +4,7 @@
 import asyncio
 from typing import Awaitable, Callable
 
+from dynamo.common.utils.worker_shutdown import WorkerShutdown
 from dynamo.runtime import DistributedRuntime
 from dynamo.sglang.args import Config
 from dynamo.sglang.init_embedding import _init_pooling
@@ -15,6 +16,7 @@ async def init_rerank(
     shutdown_event: asyncio.Event,
     shutdown_endpoints: list,
     run_deferred_handlers: Callable[[], Awaitable[None]] | None = None,
+    shutdown: WorkerShutdown | None = None,
 ) -> None:
     """Serve and advertise a dedicated cross-encoder worker."""
     await _init_pooling(
@@ -23,5 +25,6 @@ async def init_rerank(
         shutdown_event,
         shutdown_endpoints,
         run_deferred_handlers,
+        shutdown=shutdown,
         rerank=True,
     )

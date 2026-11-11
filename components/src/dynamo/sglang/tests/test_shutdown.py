@@ -2,111 +2,72 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
-import signal
-from unittest.mock import Mock
+import subprocess
+import sys
+from types import SimpleNamespace
 
 import pytest
 
-from dynamo.sglang import shutdown
+from dynamo.sglang.shutdown import coordinate_non_leader_shutdown
 
 pytestmark = [
-    pytest.mark.unit,
+    pytest.mark.integration,
+    pytest.mark.sglang,
+    pytest.mark.framework_agnostic,
+    pytest.mark.core,
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
     pytest.mark.timeout(10),
 ]
 
 
-@pytest.mark.parametrize("back_to_back", [False, True])
-@pytest.mark.parametrize("cancel_waiter", [False, True])
-def test_repeated_signals_join_original_teardown(
-    monkeypatch, back_to_back, cancel_waiter
-):
-    # Regression: replacing the first task lets deferred engine cleanup run
-    # while runtime teardown is still pending.
-    async def scenario():
-        loop = asyncio.get_running_loop()
-        started = asyncio.Event()
-        release = asyncio.Event()
-        handlers = {}
-        engine_cleanup = Mock()
-
-        async def teardown(*args, **kwargs):
-            started.set()
-            await release.wait()
-
-        monkeypatch.setattr(shutdown, "graceful_shutdown_with_discovery", teardown)
-        monkeypatch.setattr(
-            signal, "signal", lambda sig, callback: handlers.update({sig: callback})
+@pytest.mark.asyncio
+async def test_follower_waits_for_scheduler_exit_without_reaping_it():
+    # Regression: a follower's empty request count allowed cleanup to kill its
+    # schedulers while the leader still needed them to drain admitted work.
+    with subprocess.Popen(
+        [sys.executable, "-c", "import sys; sys.stdin.buffer.read(1)"],
+        stdin=subprocess.PIPE,
+    ) as scheduler:
+        shutdown = SimpleNamespace(prefill=True, wait_for_children=None)
+        engine = SimpleNamespace(
+            server_args=SimpleNamespace(node_rank=1),
+            get_all_child_pids=lambda: [scheduler.pid],
         )
-        # Restore the instance attribute patched by the production helper.
-        monkeypatch.setattr(loop, "add_signal_handler", loop.add_signal_handler)
-        deferred = shutdown.install_graceful_shutdown(loop, Mock(), [], asyncio.Event())
-        loop.add_signal_handler(signal.SIGTERM, engine_cleanup)
-        handlers[signal.SIGTERM](signal.SIGTERM, None)
-        if not back_to_back:
-            await started.wait()
-        handlers[signal.SIGINT](signal.SIGINT, None)
-        await started.wait()
-        await asyncio.sleep(0)
-        joined = asyncio.create_task(deferred())
+        coordinate_non_leader_shutdown(engine, shutdown)
+        waiting = asyncio.create_task(shutdown.wait_for_children())
         try:
-            # Let the queued signal task and joiner reach their awaits.
             await asyncio.sleep(0)
-            await asyncio.sleep(0)
-            if cancel_waiter:
-                joined.cancel()
-                await asyncio.sleep(0)
-                joined.cancel()
-                await asyncio.sleep(0)
-            assert not joined.done()
-            engine_cleanup.assert_not_called()
+            assert not waiting.done()
+            assert scheduler.poll() is None
+            scheduler.stdin.close()
+            # The engine owns reaping. A zombie must count as exited, otherwise
+            # shutdown waits until its deadline despite rank 0 having finished.
+            await asyncio.wait_for(waiting, timeout=2)
+            assert scheduler.wait(timeout=1) == 0
         finally:
-            release.set()
-            if cancel_waiter:
-                with pytest.raises(asyncio.CancelledError):
-                    await joined
-            else:
-                await joined
-        await deferred()
-        engine_cleanup.assert_called_once()
-
-    asyncio.run(scenario())
+            waiting.cancel()
+            await asyncio.gather(waiting, return_exceptions=True)
+            if scheduler.poll() is None:
+                scheduler.kill()
+                scheduler.wait(timeout=1)
 
 
-@pytest.mark.parametrize("application_failed", [False, True])
-def test_teardown_failure_survives_deferred_cleanup(monkeypatch, application_failed):
-    # Regression: failed runtime teardown must not report success or replace an
-    # existing application failure, and required engine cleanup must still run.
-    async def scenario():
-        loop = asyncio.get_running_loop()
-        handlers = {}
-        started = asyncio.Event()
-        engine_cleanup = Mock()
-        teardown_error = RuntimeError("runtime teardown incomplete")
-        application_error = ValueError("application failed")
-
-        async def teardown(*args, **kwargs):
-            started.set()
-            raise teardown_error
-
-        monkeypatch.setattr(shutdown, "graceful_shutdown_with_discovery", teardown)
-        monkeypatch.setattr(
-            signal, "signal", lambda sig, callback: handlers.update({sig: callback})
-        )
-        monkeypatch.setattr(loop, "add_signal_handler", loop.add_signal_handler)
-        deferred = shutdown.install_graceful_shutdown(loop, Mock(), [], asyncio.Event())
-        loop.add_signal_handler(signal.SIGTERM, engine_cleanup)
-        handlers[signal.SIGTERM](signal.SIGTERM, None)
-        await started.wait()
-        expected = application_error if application_failed else teardown_error
-        with pytest.raises(type(expected)) as caught:
-            try:
-                if application_failed:
-                    raise application_error
-            finally:
-                await deferred()
-        assert caught.value is expected
-        engine_cleanup.assert_called_once()
-
-    asyncio.run(scenario())
+@pytest.mark.asyncio
+@pytest.mark.parametrize("empty_pid_list", [False, True])
+async def test_follower_without_scheduler_pids_waits_until_cancelled(empty_pid_list):
+    # No observable processes is not evidence that rank 0 has drained. The
+    # coordinator's drain deadline must remain the fallback, with no join thread.
+    shutdown = SimpleNamespace(prefill=True, wait_for_children=None)
+    engine = SimpleNamespace(server_args=SimpleNamespace(node_rank=1))
+    if empty_pid_list:
+        engine.get_all_child_pids = lambda: []
+    coordinate_non_leader_shutdown(engine, shutdown)
+    waiting = asyncio.create_task(shutdown.wait_for_children())
+    try:
+        await asyncio.sleep(0)
+        assert not waiting.done()
+    finally:
+        waiting.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(waiting, timeout=1)

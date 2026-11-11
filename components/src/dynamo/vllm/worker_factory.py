@@ -29,6 +29,7 @@ from dynamo.common.utils.prometheus import (
     register_embedding_cache_metrics,
     register_image_loader_metrics,
 )
+from dynamo.common.utils.worker_shutdown import WorkerShutdown, serve_endpoint
 from dynamo.frontend.thinking import apply_default_thinking_mode_to_template_kwargs
 from dynamo.llm import ModelInput, ModelType, WorkerType, register_model
 from dynamo.runtime import DistributedRuntime, Endpoint
@@ -38,6 +39,7 @@ from .cache_info import configure_kv_event_block_size
 from .capacity import per_rank_kv_blocks
 from .constants import DisaggregationMode
 from .dp_topology import get_dp_range_for_worker
+from .embedding_worker_processes import EmbeddingEngineCleanupResource
 from .handlers import (
     BaseWorkerHandler,
     DecodeWorkerHandler,
@@ -1707,7 +1709,7 @@ SetupMetricsCollectionFn = Callable[..., None]
 
 @dataclass
 class _WorkerLifecycle:
-    """Owns the engine and handler of a prefill, decode, or aggregated worker.
+    """Owns the engine and handler of a token or transcription worker.
 
     On exit it shuts the vLLM EngineCore down explicitly. EngineCore is a
     non-daemon child, so leaving it to interpreter exit can block the main
@@ -1716,7 +1718,7 @@ class _WorkerLifecycle:
 
     engine_client: Optional[AsyncLLM] = None
     vllm_config: Optional[VllmConfig] = None
-    handler: Optional[BaseWorkerHandler] = None
+    handler: Optional[BaseWorkerHandler | TranscriptionWorkerHandler] = None
     shutdown_event: asyncio.Event | None = None
 
     def __enter__(self) -> "_WorkerLifecycle":
@@ -1731,7 +1733,9 @@ class _WorkerLifecycle:
         try:
             self.cleanup()
         except Exception:
-            if original_error is None:
+            if original_error is None or isinstance(
+                original_error, asyncio.CancelledError
+            ):
                 raise
             logger.exception("Failed to clean up worker after an earlier failure")
 
@@ -1760,6 +1764,7 @@ class WorkerFactory:
         setup_metrics_collection_fn: SetupMetricsCollectionFn,
         setup_kv_state_attachment_owner_fn: SetupKvStateAttachmentOwnerFn | None = None,
         state_agent_lifecycle: StateAgentLifecycle | None = None,
+        shutdown: WorkerShutdown | None = None,
     ):
         self.setup_vllm_engine = setup_vllm_engine_fn
         self.setup_kv_event_publisher = setup_kv_event_publisher_fn
@@ -1768,6 +1773,7 @@ class WorkerFactory:
         self.setup_fpm_relay = setup_fpm_relay_fn
         self.setup_metrics_collection = setup_metrics_collection_fn
         self.state_agent_lifecycle = state_agent_lifecycle or StateAgentLifecycle()
+        self.shutdown = shutdown
 
     async def _setup_kv_routing(
         self,
@@ -1920,97 +1926,103 @@ class WorkerFactory:
                 factory,
                 fpm_worker_id=fpm_worker_id,
             )
-        await configure_kv_event_block_size(engine_client, vllm_config)
-        _, dp_size = get_dp_range_for_worker(vllm_config)
-        num_gpu_blocks = per_rank_kv_blocks(
-            vllm_config.cache_config.num_gpu_blocks,
-            dp_size,
-        )
-        factory.set_num_gpu_blocks_all(num_gpu_blocks or 0)
-        factory.init_publish()
-
-        model_name = config.served_model_name or config.model
-        supported_tasks = await engine_client.get_supported_tasks()
-        handlers: dict[str, RealtimeTextHandler | RealtimeTranscriptionHandler] = {}
-        if "generate" in supported_tasks:
-            handlers["realtime"] = RealtimeTextHandler.from_engine(
-                engine_client=engine_client,
-                model_name=model_name,
-                model_path=config.model_source_path,
-                chat_template_path=config.custom_jinja_template,
-                tool_parser=config.dyn_tool_call_parser,
-                reasoning_parser=config.dyn_reasoning_parser,
-                default_chat_template_kwargs=apply_default_thinking_mode_to_template_kwargs(
-                    {}, config.dyn_default_thinking_mode
-                ),
-            )
-        if "realtime" in supported_tasks:
-            handlers["transcription"] = RealtimeTranscriptionHandler.from_engine(
-                engine_client=engine_client,
-                model_name=model_name,
-                model_path=config.model_source_path,
-            )
-        if not handlers:
-            raise ValueError(
-                f"Model {model_name!r} does not support realtime text or transcription"
-            )
-        handler = RealtimeHandler(handlers)
-        self.setup_metrics_collection(config, generate_endpoint, logger)
-
-        await self.register_vllm_model(
-            ModelInput.Text,
-            ModelType.Realtime,
-            generate_endpoint,
-            config,
-            engine_client,
-            vllm_config,
-            worker_type=WorkerType.Aggregated,
-            needs=[],
-        )
-        register_model_taint_route(runtime, generate_endpoint)
-
-        metrics_labels = [
-            (prometheus_names.labels.MODEL, model_name),
-            (prometheus_names.labels.MODEL_NAME, model_name),
-        ]
-        serve_tasks = []
-        if config.endpoint_types != "none":
-            if "realtime" not in handlers:
-                raise ValueError(
-                    f"Serving {config.endpoint_types} endpoints with realtime "
-                    f"requires a text generation model, not {model_name!r}"
-                )
-            serve_tasks.append(
-                await self._realtime_chat_endpoint(
-                    runtime,
-                    config,
-                    engine_client,
-                    vllm_config,
-                    default_sampling_params,
-                    shutdown_event,
-                    shutdown_endpoints,
-                    metrics_labels,
-                )
-            )
-        logger.info(
-            "Starting realtime worker endpoint for model: %s",
-            model_name,
-        )
-        serve_tasks.append(
-            generate_endpoint.serve_bidirectional_endpoint(
-                handler.generate,
-                graceful_shutdown=True,
-                metrics_labels=metrics_labels,
-            )
-        )
         try:
+            await configure_kv_event_block_size(engine_client, vllm_config)
+            _, dp_size = get_dp_range_for_worker(vllm_config)
+            num_gpu_blocks = per_rank_kv_blocks(
+                vllm_config.cache_config.num_gpu_blocks,
+                dp_size,
+            )
+            factory.set_num_gpu_blocks_all(num_gpu_blocks or 0)
+            factory.init_publish()
+
+            model_name = config.served_model_name or config.model
+            supported_tasks = await engine_client.get_supported_tasks()
+            handlers: dict[str, RealtimeTextHandler | RealtimeTranscriptionHandler] = {}
+            if "generate" in supported_tasks:
+                handlers["realtime"] = RealtimeTextHandler.from_engine(
+                    engine_client=engine_client,
+                    model_name=model_name,
+                    model_path=config.model_source_path,
+                    chat_template_path=config.custom_jinja_template,
+                    tool_parser=config.dyn_tool_call_parser,
+                    reasoning_parser=config.dyn_reasoning_parser,
+                    default_chat_template_kwargs=apply_default_thinking_mode_to_template_kwargs(
+                        {}, config.dyn_default_thinking_mode
+                    ),
+                )
+            if "realtime" in supported_tasks:
+                handlers["transcription"] = RealtimeTranscriptionHandler.from_engine(
+                    engine_client=engine_client,
+                    model_name=model_name,
+                    model_path=config.model_source_path,
+                )
+            if not handlers:
+                raise ValueError(
+                    f"Model {model_name!r} does not support realtime text or transcription"
+                )
+            handler = RealtimeHandler(handlers)
+            self.setup_metrics_collection(config, generate_endpoint, logger)
+
+            await self.register_vllm_model(
+                ModelInput.Text,
+                ModelType.Realtime,
+                generate_endpoint,
+                config,
+                engine_client,
+                vllm_config,
+                worker_type=WorkerType.Aggregated,
+                needs=[],
+            )
+            register_model_taint_route(runtime, generate_endpoint)
+
+            metrics_labels = [
+                (prometheus_names.labels.MODEL, model_name),
+                (prometheus_names.labels.MODEL_NAME, model_name),
+            ]
+            serve_tasks = []
+            if config.endpoint_types != "none":
+                if "realtime" not in handlers:
+                    raise ValueError(
+                        f"Serving {config.endpoint_types} endpoints with realtime "
+                        f"requires a text generation model, not {model_name!r}"
+                    )
+                serve_tasks.append(
+                    await self._realtime_chat_endpoint(
+                        runtime,
+                        config,
+                        engine_client,
+                        vllm_config,
+                        default_sampling_params,
+                        shutdown_event,
+                        shutdown_endpoints,
+                        metrics_labels,
+                    )
+                )
+            logger.info(
+                "Starting realtime worker endpoint for model: %s",
+                model_name,
+            )
+            serve_tasks.append(
+                serve_endpoint(
+                    generate_endpoint,
+                    handler.generate,
+                    shutdown=self.shutdown,
+                    bidirectional=True,
+                    graceful_shutdown=True,
+                    metrics_labels=metrics_labels,
+                )
+            )
             await asyncio.gather(*serve_tasks)
         except Exception as exc:
             logger.error("Realtime worker failed: %s", exc)
             raise
         finally:
-            if prometheus_temp_dir is not None:
-                prometheus_temp_dir.cleanup()
+            try:
+                engine_client.shutdown(timeout=vllm_config.shutdown_timeout)
+            finally:
+                if prometheus_temp_dir is not None:
+                    prometheus_temp_dir.cleanup()
 
     async def _realtime_chat_endpoint(
         self,
@@ -2059,8 +2071,10 @@ class WorkerFactory:
             "Starting realtime chat endpoint with endpoint types: %s",
             config.endpoint_types,
         )
-        return chat_endpoint.serve_endpoint(
+        return serve_endpoint(
+            chat_endpoint,
             chat_handler.generate,  # type: ignore
+            shutdown=self.shutdown,
             graceful_shutdown=True,
             metrics_labels=metrics_labels,
             health_check_payload=VllmHealthCheckPayload(
@@ -2087,38 +2101,41 @@ class WorkerFactory:
             enable_frontend_decoding=config.frontend_decoding,
             embedding_cache_capacity_gb=config.multimodal_embedding_cache_capacity_gb,
         )
-        await handler.async_init(runtime)
-        register_image_loader_metrics(
-            endpoint=generate_endpoint,
-            loader=handler.image_loader,
-            model_name=config.served_model_name or config.model,
-            component_name=config.component,
-        )
-
-        # Encode workers register a model card so the frontend's
-        # serving-readiness gate can count them. The card carries no OpenAI
-        # surface (`ModelType.Empty`) — the encode endpoint isn't routed by
-        # the OpenAI dispatch. `needs` is the DNF for an encode worker:
-        # either a P+D pair or a single Aggregated peer.
-        await register_model(
-            ModelInput.Tokens,
-            ModelType.Empty,
-            generate_endpoint,
-            config.model,
-            model_name=config.served_model_name or config.model,
-            worker_type=WorkerType.Encode,
-            needs=[
-                [WorkerType.Prefill, WorkerType.Decode],
-                [WorkerType.Aggregated],
-            ],
-        )
-        register_model_taint_route(runtime, generate_endpoint)
-        logger.info("Starting to serve the encode worker endpoint...")
-
         try:
+            await handler.async_init(runtime)
+            register_image_loader_metrics(
+                endpoint=generate_endpoint,
+                loader=handler.image_loader,
+                model_name=config.served_model_name or config.model,
+                component_name=config.component,
+            )
+
+            # Encode workers register a model card so the frontend's
+            # serving-readiness gate can count them. The card carries no OpenAI
+            # surface (`ModelType.Empty`) — the encode endpoint isn't routed by
+            # the OpenAI dispatch. `needs` is the DNF for an encode worker:
+            # either a P+D pair or a single Aggregated peer.
+            await register_model(
+                ModelInput.Tokens,
+                ModelType.Empty,
+                generate_endpoint,
+                config.model,
+                model_name=config.served_model_name or config.model,
+                worker_type=WorkerType.Encode,
+                needs=[
+                    [WorkerType.Prefill, WorkerType.Decode],
+                    [WorkerType.Aggregated],
+                ],
+            )
+            register_model_taint_route(runtime, generate_endpoint)
+            logger.info("Starting to serve the encode worker endpoint...")
+
             await asyncio.gather(
-                generate_endpoint.serve_endpoint(
-                    handler.generate, metrics_labels=[("model", config.model)]
+                serve_endpoint(
+                    generate_endpoint,
+                    handler.generate,
+                    metrics_labels=[("model", config.model)],
+                    shutdown=self.shutdown,
                 ),
             )
         except Exception as e:
@@ -2173,50 +2190,60 @@ class WorkerFactory:
                 stat_logger_factory,
                 fpm_worker_id=fpm_worker_id,
             )
-        _, dp_size = get_dp_range_for_worker(vllm_config)
-        stat_logger_factory.set_num_gpu_blocks_all(
-            per_rank_kv_blocks(vllm_config.cache_config.num_gpu_blocks, dp_size) or 0
-        )
-        stat_logger_factory.init_publish()
-        handler = TranscriptionWorkerHandler(
-            runtime=runtime,
-            engine=engine_client,
-            config=config,
-            shutdown_event=shutdown_event,
-        )
-        self.setup_metrics_collection(config, generate_endpoint, logger)
-        model_name = config.served_model_name or config.model
-        health_payload = VllmTranscriptionHealthCheckPayload(model_name).to_dict()
-        metric_labels = [
-            (prometheus_names.labels.MODEL, model_name),
-            (prometheus_names.labels.MODEL_NAME, model_name),
-        ]
-
-        register_model_taint_route(runtime, generate_endpoint)
-        logger.info("Starting to serve the transcription worker endpoint...")
         try:
-            await asyncio.gather(
-                generate_endpoint.serve_endpoint(
-                    handler.generate,
-                    metrics_labels=metric_labels,
-                    health_check_payload=health_payload,
-                ),
-                self.register_vllm_model(
-                    ModelInput.Text,
-                    ModelType.Transcriptions,
-                    generate_endpoint,
-                    config,
-                    engine_client,
-                    vllm_config,
-                    worker_type=WorkerType.Aggregated,
-                    needs=[],
-                ),
-            )
+            with _WorkerLifecycle(
+                engine_client=engine_client,
+                vllm_config=vllm_config,
+                shutdown_event=shutdown_event,
+            ) as lifecycle:
+                _, dp_size = get_dp_range_for_worker(vllm_config)
+                stat_logger_factory.set_num_gpu_blocks_all(
+                    per_rank_kv_blocks(vllm_config.cache_config.num_gpu_blocks, dp_size)
+                    or 0
+                )
+                stat_logger_factory.init_publish()
+                handler = TranscriptionWorkerHandler(
+                    runtime=runtime,
+                    engine=engine_client,
+                    config=config,
+                    shutdown_event=shutdown_event,
+                )
+                lifecycle.handler = handler
+                self.setup_metrics_collection(config, generate_endpoint, logger)
+                model_name = config.served_model_name or config.model
+                health_payload = VllmTranscriptionHealthCheckPayload(
+                    model_name
+                ).to_dict()
+                metric_labels = [
+                    (prometheus_names.labels.MODEL, model_name),
+                    (prometheus_names.labels.MODEL_NAME, model_name),
+                ]
+
+                register_model_taint_route(runtime, generate_endpoint)
+                logger.info("Starting to serve the transcription worker endpoint...")
+                await asyncio.gather(
+                    serve_endpoint(
+                        generate_endpoint,
+                        handler.generate,
+                        shutdown=self.shutdown,
+                        metrics_labels=metric_labels,
+                        health_check_payload=health_payload,
+                    ),
+                    self.register_vllm_model(
+                        ModelInput.Text,
+                        ModelType.Transcriptions,
+                        generate_endpoint,
+                        config,
+                        engine_client,
+                        vllm_config,
+                        worker_type=WorkerType.Aggregated,
+                        needs=[],
+                    ),
+                )
         except Exception:
             logger.exception("Failed to serve transcription worker endpoint")
             raise
         finally:
-            handler.cleanup()
             if prometheus_temp_dir is not None:
                 prometheus_temp_dir.cleanup()
 
@@ -2286,6 +2313,12 @@ class WorkerFactory:
             engine_cleanup_resource,
             _component_gauges,
         ) = self.setup_vllm_engine(config, factory, fpm_worker_id=fpm_worker_id)
+        if self.shutdown is not None and isinstance(
+            engine_cleanup_resource, EmbeddingEngineCleanupResource
+        ):
+            group = engine_cleanup_resource.process_group
+            self.shutdown.notify_children = group.begin_shutdown
+            self.shutdown.wait_for_children = group.wait_for_shutdown
 
         handler = EmbeddingWorkerHandler(
             runtime=runtime,
@@ -2302,8 +2335,10 @@ class WorkerFactory:
         logger.info("Starting to serve the embedding worker endpoint...")
         try:
             await asyncio.gather(
-                generate_endpoint.serve_endpoint(
+                serve_endpoint(
+                    generate_endpoint,
                     handler.generate,
+                    shutdown=self.shutdown,
                     metrics_labels=[("model", config.model)],
                     health_check_payload=embedding_health_check_payload,
                 ),
@@ -2329,19 +2364,28 @@ class WorkerFactory:
             logger.error(f"Failed to serve embedding worker endpoint: {e}")
             raise
         finally:
-            handler.cleanup()
             # Attached multi-client AsyncLLMs do not own EngineCore. Close all
             # clients first, then let the parent cleanup resource terminate
             # child endpoints and finally the shared EngineCore.
             try:
-                engine_client.shutdown()
-            except Exception:
-                logger.exception("Failed to shut down embedding AsyncLLM client")
-            if engine_cleanup_resource is not None:
+                handler.cleanup()
+            finally:
                 try:
-                    engine_cleanup_resource.cleanup()
-                except Exception:
-                    logger.exception("Failed to clean up embedding engine resources")
+                    engine_client.shutdown()
+                finally:
+                    if engine_cleanup_resource is not None:
+                        if (
+                            isinstance(
+                                engine_cleanup_resource, EmbeddingEngineCleanupResource
+                            )
+                            and self.shutdown is not None
+                            and self.shutdown.started
+                        ):
+                            engine_cleanup_resource.cleanup(
+                                timeout=self.shutdown.cleanup_remaining() / 2
+                            )
+                        else:
+                            engine_cleanup_resource.cleanup()
 
     async def _create_classify_worker(
         self,
@@ -2389,8 +2433,10 @@ class WorkerFactory:
         logger.info("Starting to serve the classify worker endpoint...")
         try:
             await asyncio.gather(
-                generate_endpoint.serve_endpoint(
+                serve_endpoint(
+                    generate_endpoint,
                     handler.generate,
+                    shutdown=self.shutdown,
                     metrics_labels=[("model", config.model)],
                     health_check_payload=classify_health_check_payload,
                 ),
@@ -2409,7 +2455,10 @@ class WorkerFactory:
             logger.error(f"Failed to serve classify worker endpoint: {e}")
             raise
         finally:
-            handler.cleanup()
+            try:
+                handler.cleanup()
+            finally:
+                engine_client.shutdown(timeout=vllm_config.shutdown_timeout)
 
     def _maybe_create_failover_metrics(self, config: Config, generate_endpoint):
         """Create + register per-engine failover metrics (shadow mode only).
@@ -2741,26 +2790,34 @@ class WorkerFactory:
             serve_tasks = [
                 # for decode, we want to transfer the in-flight requests to other decode engines,
                 # because waiting them to finish can take a long time for long OSLs
-                generate_endpoint.serve_endpoint(
+                serve_endpoint(
+                    generate_endpoint,
                     handler.generate,  # type: ignore
+                    shutdown=self.shutdown,
                     graceful_shutdown=True,
                     metrics_labels=model_metrics_labels,
                     health_check_payload=health_check_payload,
                 ),
-                clear_endpoint.serve_endpoint(
+                serve_endpoint(
+                    clear_endpoint,
                     handler.clear_kv_blocks,
+                    shutdown=self.shutdown,
                     metrics_labels=model_metrics_labels,
                 ),
-                perf_endpoint.serve_endpoint(
+                serve_endpoint(
+                    perf_endpoint,
                     handler.get_perf_metrics,
+                    shutdown=self.shutdown,
                     metrics_labels=model_metrics_labels,
                 ),
             ]
 
             if rl_endpoint is not None:
                 serve_tasks.append(
-                    rl_endpoint.serve_endpoint(
+                    serve_endpoint(
+                        rl_endpoint,
                         handler.rl_dispatch,
+                        shutdown=self.shutdown,
                         metrics_labels=model_metrics_labels,
                     )
                 )
@@ -2768,16 +2825,22 @@ class WorkerFactory:
             if lora_enabled:
                 serve_tasks.extend(
                     [
-                        load_lora_endpoint.serve_endpoint(
+                        serve_endpoint(
+                            load_lora_endpoint,
                             handler.load_lora,
+                            shutdown=self.shutdown,
                             metrics_labels=model_metrics_labels,
                         ),
-                        unload_lora_endpoint.serve_endpoint(
+                        serve_endpoint(
+                            unload_lora_endpoint,
                             handler.unload_lora,
+                            shutdown=self.shutdown,
                             metrics_labels=model_metrics_labels,
                         ),
-                        list_loras_endpoint.serve_endpoint(
+                        serve_endpoint(
+                            list_loras_endpoint,
                             handler.list_loras,
+                            shutdown=self.shutdown,
                             metrics_labels=model_metrics_labels,
                         ),
                     ]
@@ -3024,41 +3087,55 @@ class WorkerFactory:
         try:
             logger.debug("Starting serve_endpoint for prefill worker")
             serve_tasks = [
-                generate_endpoint.serve_endpoint(
+                serve_endpoint(
+                    generate_endpoint,
                     handler.generate,  # type: ignore
+                    shutdown=self.shutdown,
                     graceful_shutdown=True,
                     metrics_labels=prefill_metrics_labels,
                     health_check_payload=health_check_payload,
                 ),
-                clear_endpoint.serve_endpoint(
+                serve_endpoint(
+                    clear_endpoint,
                     handler.clear_kv_blocks,  # type: ignore
+                    shutdown=self.shutdown,
                     metrics_labels=prefill_metrics_labels,
                 ),
-                perf_endpoint.serve_endpoint(
+                serve_endpoint(
+                    perf_endpoint,
                     handler.get_perf_metrics,
+                    shutdown=self.shutdown,
                     metrics_labels=prefill_metrics_labels,
                 ),
             ]
             if rl_endpoint is not None:
                 serve_tasks.append(
-                    rl_endpoint.serve_endpoint(
+                    serve_endpoint(
+                        rl_endpoint,
                         handler.rl_dispatch,
+                        shutdown=self.shutdown,
                         metrics_labels=prefill_metrics_labels,
                     )
                 )
             if lora_enabled:
                 serve_tasks.extend(
                     [
-                        load_lora_endpoint.serve_endpoint(
+                        serve_endpoint(
+                            load_lora_endpoint,
                             handler.load_lora,
+                            shutdown=self.shutdown,
                             metrics_labels=prefill_metrics_labels,
                         ),
-                        unload_lora_endpoint.serve_endpoint(
+                        serve_endpoint(
+                            unload_lora_endpoint,
                             handler.unload_lora,
+                            shutdown=self.shutdown,
                             metrics_labels=prefill_metrics_labels,
                         ),
-                        list_loras_endpoint.serve_endpoint(
+                        serve_endpoint(
+                            list_loras_endpoint,
                             handler.list_loras,
+                            shutdown=self.shutdown,
                             metrics_labels=prefill_metrics_labels,
                         ),
                     ]
