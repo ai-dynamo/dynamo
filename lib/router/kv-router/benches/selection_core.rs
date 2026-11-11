@@ -29,7 +29,7 @@ use dynamo_scheduler::host::{
 };
 use dynamo_scheduler::protocols::RoutingConstraints;
 use dynamo_scheduler::types::{RejectThresholdsProvider, WorkerSelectionPolicyFactory};
-use dynamo_slot_tracker::busy::BusyThresholds;
+use dynamo_slot_tracker::BusyThresholds;
 use tokio_util::sync::CancellationToken;
 
 const BLOCK_SIZE: u32 = 16;

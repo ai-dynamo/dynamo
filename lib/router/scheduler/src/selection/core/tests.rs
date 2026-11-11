@@ -12,10 +12,11 @@ use crate::protocols::RoutingConstraints;
 use crate::replication::HostReplicaChannels;
 use crate::test_utils::{local_test_core, test_core_with, test_router_config};
 use dynamo_kv_events::residency::StorageTier;
-use dynamo_kv_indexer::backend::{RemotePrimary, test_util::store_event};
-use dynamo_kv_indexer::residency::ResidencyOwnerKeyExt;
+use dynamo_kv_indexer::RemotePrimary;
+use dynamo_kv_indexer::ResidencyOwnerKeyExt;
+use dynamo_kv_indexer::testing::store_event;
 use dynamo_session_affinity::SessionAffinityMode;
-use dynamo_slot_tracker::wire::{ActiveSequenceEvent, ActiveSequenceEventData};
+use dynamo_slot_tracker::{ActiveSequenceEvent, ActiveSequenceEventData};
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::sleep;
@@ -590,7 +591,7 @@ async fn fetch_continuation_books_one_source_from_each_actual_local_frontier() {
     use dynamo_kv_hashing::routing::{
         BlockHashOptions, compute_block_hash_for_seq, compute_seq_hash_for_block,
     };
-    use dynamo_kv_indexer::residency::{
+    use dynamo_kv_indexer::{
         ResidencyProjection, ResidencyRoutingSnapshot, RouterHintSourceMetadata,
     };
 
@@ -1916,8 +1917,8 @@ async fn shutdown_interrupts_indexer_waits(
 /// releases the id claim.
 #[tokio::test]
 async fn dropped_book_selection_during_routing_record_frees_booking_and_claim() {
+    use dynamo_kv_indexer::RemotePrimary;
     use dynamo_kv_indexer::TieredMatchDetails;
-    use dynamo_kv_indexer::backend::RemotePrimary;
     struct PausedRecord {
         entered: AtomicBool,
         release: tokio::sync::Notify,
@@ -3738,7 +3739,7 @@ fn hint_resolves_a_persistent_cache_owner_over_a_state_agent_worker() {
         RoutingScopeId, StableDpSlotId,
     };
     use dynamo_kv_events::residency::ResidencyOwner;
-    use dynamo_kv_indexer::residency::{
+    use dynamo_kv_indexer::{
         ResidencyProjection, ResidencyRoutingSnapshot, RouterHintSourceMetadata,
     };
     let mut stale = hint_config("prefill", &[(0, "tcp://stale-worker:23280")]);
@@ -3940,7 +3941,7 @@ fn cache_owner_island_is_published_or_taken_from_its_attached_worker() {
         RoutingScopeId, StableDpSlotId,
     };
     use dynamo_kv_events::residency::ResidencyOwner;
-    use dynamo_kv_indexer::residency::{
+    use dynamo_kv_indexer::{
         ResidencyProjection, ResidencyRoutingSnapshot, RouterHintSourceMetadata,
     };
     let owner = |slot: u8| {

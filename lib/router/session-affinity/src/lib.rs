@@ -27,7 +27,9 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 pub mod host;
-pub mod wire;
+mod wire;
+
+pub use wire::AffinityBindingEvent;
 
 /// A worker affinity target that may apply to every data-parallel rank of a worker.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]

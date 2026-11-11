@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use dynamo_slot_tracker::wire::PrefillLoadHint;
+use dynamo_slot_tracker::PrefillLoadHint;
 
 pub trait PrefillLoadEstimator: Send + Sync {
     fn predict_prefill_duration(

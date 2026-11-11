@@ -10,8 +10,7 @@ use dynamo_kv_events::event::{
 use dynamo_kv_hashing::routing::compute_seq_hash_for_block;
 use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
 use dynamo_kv_indexer::{
-    KvIndexerDelegate, KvIndexerInterface, ThreadPoolIndexer,
-    concurrent_radix_tree_compressed::ConcurrentRadixTreeCompressed,
+    ConcurrentRadixTreeCompressed, KvIndexerDelegate, KvIndexerInterface, ThreadPoolIndexer,
 };
 
 struct Delegate;

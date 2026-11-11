@@ -4,7 +4,7 @@
 //! The kernel's implementation of the classifier's [`WorkerView`] over the rows worker
 //! selection builds, so admission reads the same columns a filter or scorer would.
 
-use dynamo_admission::classifier::{WorkerCacheView, WorkerLoadView, WorkerView};
+use dynamo_admission::{WorkerCacheView, WorkerLoadView, WorkerView};
 use dynamo_worker_selection::{WorkerCandidate, WorkerInfo, WorkerInputRows};
 
 /// Rows built for one classification, read through the classifier's view.

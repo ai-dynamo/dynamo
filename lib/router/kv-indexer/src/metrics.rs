@@ -193,6 +193,7 @@ pub const METRIC_STATUS_INDEXER_INVARIANT_VIOLATION: &str = "indexer_invariant_v
 pub const METRIC_STATUS_UNSUPPORTED_RESIDENCY_DOMAIN: &str = "unsupported_residency_domain";
 /// An error kind this crate does not know: `KvCacheEventError` is non-exhaustive and lives in
 /// `dynamo-kv-events`, so a newer event crate can report kinds this indexer predates.
+#[cfg(feature = "export")]
 pub const METRIC_STATUS_UNKNOWN: &str = "unknown";
 
 /// Metric event labels.

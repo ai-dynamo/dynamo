@@ -431,7 +431,7 @@ mod tests {
     #[cfg(feature = "http")]
     use dynamo_router_protocol::identity::RoutingPartitionId;
     use dynamo_router_protocol::worker::WorkerWithDpRank;
-    use dynamo_slot_tracker::wire::{ActiveSequenceEvent, ActiveSequenceEventData};
+    use dynamo_slot_tracker::{ActiveSequenceEvent, ActiveSequenceEventData};
 
     #[cfg(feature = "http")]
     use crate::services::slot_tracker::registry::SlotTrackerRegistry;

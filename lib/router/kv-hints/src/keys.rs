@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::transfer::WorkerKvTransferKeys;
 
-pub use dynamo_kv_indexer::kv_hints::{label_key, topology_keys};
+pub use dynamo_kv_indexer::{label_key, topology_keys};
 
 /// TRANSFER hint metadata a worker config exposes for one global DP rank.
 ///
