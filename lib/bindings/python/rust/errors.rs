@@ -327,6 +327,8 @@ fn build_http_like_error(code: u16, message: String) -> DynamoError {
 
 #[cfg(test)]
 mod tests {
+    // `extension-module` does not link libpython into standalone Rust tests.
+    // Exercise Python exception conversion in tests/test_request_plane_python_payload.py.
     use super::*;
     use serde::Deserialize;
 
@@ -359,24 +361,6 @@ mod tests {
             .message("no workers")
             .build();
         assert!(!is_worker_unavailable(&pool_unavailable));
-    }
-
-    #[test]
-    fn only_explicit_python_rejection_marks_missing_kv_receiver() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
-            let message = "invalid sampling options";
-            let explicit = DecodeRejectedBeforeKvReceiver::new_err(message);
-            let ordinary = InvalidArgument::new_err(message);
-            assert!(explicit.is_instance_of::<InvalidArgument>(py));
-
-            let explicit = dynamo_exception_to_error(py, &explicit).unwrap();
-            let ordinary = dynamo_exception_to_error(py, &ordinary).unwrap();
-            assert!(explicit.rejected_before_kv_receiver());
-            assert!(!ordinary.rejected_before_kv_receiver());
-            assert_eq!(explicit.error_type(), ordinary.error_type());
-            assert_eq!(explicit.public_message(), ordinary.public_message());
-        });
     }
 
     #[test]
