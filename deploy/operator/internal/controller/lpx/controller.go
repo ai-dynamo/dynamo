@@ -86,7 +86,9 @@ func (r *graphReconciler) GetRecorder() events.EventRecorder {
 // +kubebuilder:rbac:groups=grove.io,resources=podcliquesets/finalizers,verbs=update
 // +kubebuilder:rbac:groups=grove.io,resources=podcliques/scale;podcliquescalinggroups/scale,verbs=update
 // +kubebuilder:rbac:groups=scheduling.lpu.nvidia.com,resources=lpupipelinerequests,verbs=get;list;watch;create;delete
-// +kubebuilder:rbac:groups=core,resources=pods,verbs=get;delete
+// Per-fabric-pod Cyborg placement pins and removes Cyborg Pods and reads Node labels.
+// +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;patch;delete
+// +kubebuilder:rbac:groups=core,resources=nodes,verbs=get;list;watch
 
 // Reconcile observes dependencies once, then persists the final child status.
 // Workload observations use the cache; Grove validates writes against its installed API.
@@ -259,6 +261,7 @@ func (r *graphReconciler) reconcileWorkloads(
 		missingRequests  []*lpxv1alpha1.LPUPipelineRequest
 		expiredRequests  []*lpxv1alpha1.LPUPipelineRequest
 		deadlineAt       time.Time
+		cyborgPlacements map[string]cyborgPlacement
 	)
 
 	// Prepare requests only after observing the PCS, in publication order.
@@ -289,6 +292,15 @@ func (r *graphReconciler) reconcileWorkloads(
 			}
 			expiredRequests = append(expiredRequests, expired...)
 			deadlineAt = next
+		}
+
+		// Cyborg placement follows the committed plans of the complete graph's requests.
+		cyborgPlacements, err = r.resolveCyborgPlacements(ctx, dgd, pcs, pcsgs, pclqs, desiredRequests, workloads, plans)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		for name, placement := range cyborgPlacements {
+			scalingRequired = scalingRequired || pclqs[name].Spec.Replicas != placement.total()
 		}
 	}
 
@@ -326,6 +338,12 @@ func (r *graphReconciler) reconcileWorkloads(
 		setScalingDeferredCondition(deployment, scalingRequired)
 		setReadyCondition(deployment, v1beta1.DGDStatePending, "Waiting for the PodCliqueSet cache observation")
 		return ctrl.Result{}, nil
+	}
+
+	// Pin Cyborg Pods while Grove still gates them; the Pod and PodClique watches
+	// deliver each write, and no later step of this pass depends on Cyborg Pods.
+	if _, err := r.reconcileCyborgPlacements(ctx, pclqs, cyborgPlacements, scalingBlocked); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	// Scale owned groups only when the rollout permits replica writes.
@@ -414,7 +432,12 @@ func resolveWorkloadCapacity(
 ) (int32, *int32, bool, error) {
 	replicas, explicit := plan.Replicas, component.Replicas
 	required := explicit != nil && *explicit != pcsg.Spec.Replicas
-	if plan.CyborgTemplate != "" {
+	placed, err := cyborgPlacementApplies(component, plan)
+	if err != nil {
+		return 0, nil, false, err
+	}
+	// A fabric-pod placement reports its own Cyborg capacity changes.
+	if plan.CyborgTemplate != "" && !placed {
 		if role := component.ComponentRole(v1beta1.ComponentRoleLPXConductor); role != nil && role.Replicas != nil {
 			for index := range pcsg.Spec.Replicas {
 				name := grovecommon.GeneratePodCliqueName(grovecommon.ResourceNameReplica{Name: pcsg.Name, Replica: int(index)}, plan.CyborgTemplate)
@@ -516,6 +539,11 @@ func (r *graphReconciler) reconcileWorkloadCapacity(
 
 	if plan.CyborgTemplate == "" {
 		return false, nil
+	}
+
+	// A fabric-pod placement owns the Cyborg capacity of its workload.
+	if placed, err := cyborgPlacementApplies(component, plan); placed || err != nil {
+		return false, err
 	}
 
 	if replicas := component.ComponentRole(v1beta1.ComponentRoleLPXConductor).Replicas; replicas != nil {
