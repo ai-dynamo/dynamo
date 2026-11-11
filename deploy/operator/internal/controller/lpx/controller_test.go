@@ -3309,7 +3309,10 @@ func newLPXTestClient(t testing.TB, objects ...client.Object) client.WithWatch {
 			default:
 				return fmt.Errorf("unsupported test scale resource %T", object)
 			}
-			live.SetResourceVersion(scale.ResourceVersion)
+			// The API server applies a scale without a resource version unconditionally.
+			if scale.ResourceVersion != "" {
+				live.SetResourceVersion(scale.ResourceVersion)
+			}
 			live.SetGeneration(live.GetGeneration() + 1)
 			if err := delegated.Update(ctx, live); err != nil {
 				return err

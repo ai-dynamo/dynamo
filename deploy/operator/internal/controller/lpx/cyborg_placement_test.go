@@ -264,6 +264,55 @@ func TestLPXCyborgPlacementWaitsForScaling(t *testing.T) {
 	require.Equal(t, int32(1), clique.Spec.Replicas)
 }
 
+func TestLPXCyborgPruneDoesNotLoopOnFailedScale(t *testing.T) {
+	ctx := t.Context()
+
+	t.Log("The scheduler selected fabric pod a of three, and the API server refuses the lower capacity")
+	clique := &grovev1alpha1.PodClique{ObjectMeta: metav1.ObjectMeta{Name: "pcs-0-lpx-0-cond", Namespace: "default", UID: "clique-uid", ResourceVersion: "1"}}
+	clique.Spec.Replicas = 3
+	kept, prunedB, prunedC := newTestCyborgPod(clique, 0), newTestCyborgPod(clique, 1), newTestCyborgPod(clique, 2)
+	kept.Labels[cyborgFabricPodLabel], prunedB.Labels[cyborgFabricPodLabel], prunedC.Labels[cyborgFabricPodLabel] = "a", "b", "c"
+	kept.Spec.NodeName = "gpu-a"
+	refuseScale := true
+	base := newLPXTestClient(t, clique, kept, prunedB, prunedC, newTestFabricPodNode("gpu-a", "a"))
+	r := &graphReconciler{Client: interceptor.NewClient(base, interceptor.Funcs{
+		SubResourceUpdate: func(ctx context.Context, delegated client.Client, subresource string, object client.Object, opts ...client.SubResourceUpdateOption) error {
+			if refuseScale {
+				return apierrors.NewServiceUnavailable("scale is unavailable")
+			}
+			return delegated.SubResource(subresource).Update(ctx, object, opts...)
+		},
+	})}
+	placement := cyborgPlacement{fabricPods: []string{"a"}, replicas: 1}
+
+	t.Log("Remove the two placed Pods outside fabric pod a, then report the failed capacity write")
+	_, err := r.reconcileCyborgPlacement(ctx, clique, placement, false)
+	require.ErrorContains(t, err, "scale Cyborg PodClique")
+	require.Equal(t, []string{"a"}, testCyborgFabricPods(listTestCyborgPods(t, ctx, r.Client, clique)))
+
+	t.Log("Grove replaces both Pods because its capacity is still three; one replacement binds in fabric pod a")
+	floating, gated := newTestCyborgPod(clique, 1), newTestCyborgPod(clique, 2)
+	floating.Name, floating.UID, floating.Spec.NodeName = floating.Name+"-r", floating.UID+"-r", "gpu-a"
+	gated.Name, gated.UID = gated.Name+"-r", gated.UID+"-r"
+	createLPXTestObjects(t, ctx, r.Client, floating, gated)
+
+	t.Log("Leave the replacements to Grove's scale-in: a second removal only makes Grove create them again")
+	for range 3 {
+		_, err = r.reconcileCyborgPlacement(ctx, clique, placement, false)
+		require.ErrorContains(t, err, "scale Cyborg PodClique")
+		require.Equal(t, []string{"a", "", ""}, testCyborgFabricPods(listTestCyborgPods(t, ctx, r.Client, clique)))
+	}
+
+	t.Log("Write the capacity when the API server accepts it, still without a removal")
+	refuseScale = false
+	changed, err := r.reconcileCyborgPlacement(ctx, clique, placement, false)
+	require.NoError(t, err)
+	require.True(t, changed)
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(clique), clique))
+	require.Equal(t, int32(1), clique.Spec.Replicas)
+	require.Len(t, listTestCyborgPods(t, ctx, r.Client, clique), 3)
+}
+
 func TestEligibleFabricPods(t *testing.T) {
 	nodes := []client.Object{
 		newTestFabricPodNode("gpu-a", "a", "pool", "gpu"),

@@ -16,6 +16,7 @@ import (
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 	grovecommon "github.com/ai-dynamo/grove/operator/api/common"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	autoscalingv1 "k8s.io/api/autoscaling/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -248,11 +249,16 @@ func (r *graphReconciler) reconcileCyborgPlacements(
 }
 
 // reconcileCyborgPlacement converges one non-nil, owned Cyborg PodClique on its
-// placement. It pins each unplaced Pod to a fabric pod with an open position,
-// deletes the Pods that the placement does not keep, and only then writes the
-// PodClique capacity, so that Grove finds no excess Pod to select by itself.
-// Capacity writes, and the removals that a lower capacity needs, wait while
-// scalingBlocked is true.
+// placement. It pins each unplaced Pod to a fabric pod with an open position and
+// deletes the placed Pods that the placement does not keep. Only then does it
+// write the PodClique capacity, so that Grove finds no placed Pod to select by
+// itself. Capacity writes, and the removals that a lower capacity needs, wait
+// while scalingBlocked is true.
+//
+// While a lower capacity is not yet written, Grove replaces each removed Pod. The
+// controller leaves those unplaced Pods to Grove's scale-in, which removes
+// unbound and newer Pods first; it never deletes them, so a failed capacity write
+// cannot start a create and delete loop.
 func (r *graphReconciler) reconcileCyborgPlacement(
 	ctx context.Context,
 	clique *grovev1alpha1.PodClique,
@@ -277,6 +283,8 @@ func (r *graphReconciler) reconcileCyborgPlacement(
 	})
 
 	// Each target fabric pod has replicas open positions.
+	total := placement.total()
+	shrinking := clique.Spec.Replicas > total
 	open := make(map[string]int32, len(placement.fabricPods))
 	for _, fabricPod := range placement.fabricPods {
 		open[fabricPod] = placement.replicas
@@ -313,8 +321,13 @@ func (r *graphReconciler) reconcileCyborgPlacement(
 			fabricPod = placement.fabricPods[index]
 			selector = map[string]string{fabricPodLabel: fabricPod}
 		}
+
+		// Without an open position, a bound Pod holds a GPU that no placement uses.
+		// Grove's scale-in removes every other unplaced Pod.
 		if open[fabricPod] == 0 {
-			surplus = append(surplus, pod)
+			if pod.Spec.NodeName != "" && !shrinking {
+				surplus = append(surplus, pod)
+			}
 			continue
 		}
 
@@ -329,22 +342,29 @@ func (r *graphReconciler) reconcileCyborgPlacement(
 		}
 	}
 
-	// Removals come before a lower capacity; both wait while Grove defers replica writes.
-	total := placement.total()
-	if clique.Spec.Replicas <= total || !scalingBlocked {
-		for _, pod := range surplus {
-			if err := client.IgnoreNotFound(r.Delete(ctx, pod, client.Preconditions{UID: &pod.UID})); err != nil {
-				return changed, fmt.Errorf("delete Cyborg Pod %q outside its placement: %w", pod.Name, err)
-			}
-			changed = true
-			logger.Info("Deleted Cyborg Pod outside its placement", "pod", pod.Name, "fabricPod", pod.Labels[cyborgFabricPodLabel], "fabricPods", placement.fabricPods)
+	// A lower capacity needs its removals first, and both wait while Grove defers replica writes.
+	if shrinking && scalingBlocked {
+		return changed, nil
+	}
+	for _, pod := range surplus {
+		if err := client.IgnoreNotFound(r.Delete(ctx, pod, client.Preconditions{UID: &pod.UID})); err != nil {
+			return changed, fmt.Errorf("delete Cyborg Pod %q outside its placement: %w", pod.Name, err)
 		}
+		changed = true
+		logger.Info("Deleted Cyborg Pod outside its placement", "pod", pod.Name, "fabricPod", pod.Labels[cyborgFabricPodLabel], "node", pod.Spec.NodeName, "fabricPods", placement.fabricPods)
 	}
 
 	if clique.Spec.Replicas == total || scalingBlocked {
 		return changed, nil
 	}
-	if err := updateScale(ctx, r, clique, total); err != nil {
+
+	// The placement is the only owner of this capacity. A version precondition would
+	// only delay the write that stops Grove from replacing the removed Pods.
+	scale := &autoscalingv1.Scale{
+		ObjectMeta: metav1.ObjectMeta{Name: clique.Name, Namespace: clique.Namespace},
+		Spec:       autoscalingv1.ScaleSpec{Replicas: total},
+	}
+	if err := r.SubResource("scale").Update(ctx, clique, client.WithSubResourceBody(scale)); err != nil {
 		return changed, fmt.Errorf("scale Cyborg PodClique %q: %w", clique.Name, err)
 	}
 	logger.Info("Scaled Cyborg PodClique for its placement", "replicas", total, "fabricPods", placement.fabricPods)
