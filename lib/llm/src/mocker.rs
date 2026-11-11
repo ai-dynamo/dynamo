@@ -24,7 +24,8 @@ use crate::protocols::TokenIdType;
 use crate::protocols::common::FinishReason;
 use crate::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
 use anyhow::{Context, Result, bail};
-use dynamo_kv_router::protocols::{KvCacheEvent, StorageTier};
+use dynamo_kv_events::event::KvCacheEvent;
+use dynamo_kv_events::residency::StorageTier;
 use dynamo_mocker::common::handoff::HandoffId;
 use dynamo_mocker::common::protocols::{
     DirectRequest, EngineType, KvCacheEventSink, KvEventPublishers, MockerConfig, RawKvEvent,
@@ -696,6 +697,8 @@ impl MockerExecutionContext {
                                 topic: String::new(),
                                 image_token_id: None,
                                 video_token_id: None,
+                                engine_owned_mm_identity: false,
+                                recovery: None,
                             });
                             match KvEventPublisher::new_with_local_indexer(
                                 endpoint.clone(),
@@ -901,7 +904,6 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             .await
             .map_err(|error| Error::msg(error.to_string()))?;
 
-        let request_uuid = ctx.id().parse().unwrap_or(Uuid::new_v4());
         let replay_key = request
             .get_annotation_value(OUTPUT_REPLAY_ID_ANNOTATION_KEY)
             .or_else(|| {
@@ -962,7 +964,9 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             tokens: request.token_ids.as_ref().clone(),
             max_output_tokens,
             output_token_ids: planned_output_token_ids,
-            uuid: Some(request_uuid),
+            // A migration retry reuses the logical request ID and can land here while an
+            // earlier attempt is still active, so each invocation gets its own engine ID.
+            uuid: Some(Uuid::new_v4()),
             dp_rank,
             arrival_timestamp_ms: request.request_timestamp_ms,
             replay_context: request
@@ -1007,7 +1011,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             let identity = BootstrapIdentity {
                 handoff_id,
                 bootstrap_room: bootstrap_info.bootstrap_room,
-                request_id: request_uuid,
+                request_id: ctx.id().parse().unwrap_or_else(|_| Uuid::new_v4()),
             };
             let order = match order_for_engine(self.engine_args.backend) {
                 Ok(order) => order,
@@ -1107,6 +1111,13 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                     "aggregated mocker request cannot carry handoff metadata",
                 ));
             }
+        } else if self.engine_args.is_decode() && request.prefill_result.is_some() {
+            // Sequential handoff (vLLM, TRT-LLM): the prompt KV arrives from prefill, and the
+            // prefill worker already waited out the modeled transfer.
+            live_request = engine
+                .submit_decode(direct_request)
+                .await
+                .map_err(|error| Error::msg(error.to_string()))?;
         } else {
             live_request = engine
                 .submit(direct_request)
@@ -1638,6 +1649,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sequential_decode_starts_from_transferred_prompt_kv() {
+        use crate::protocols::common::preprocessor::PrefillResult;
+        use dynamo_mocker::common::protocols::{ForwardPassSnapshot, FpmPublisher, FpmSink};
+        use dynamo_mocker::live::LiveEngineConfig;
+
+        #[derive(Default)]
+        struct Passes(std::sync::Mutex<usize>);
+        impl FpmSink for Passes {
+            fn publish(&self, _: ForwardPassSnapshot) -> anyhow::Result<()> {
+                *self.0.lock().unwrap() += 1;
+                Ok(())
+            }
+        }
+
+        let args = MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "worker_type": WorkerType::Decode,
+                "block_size": 4,
+                "num_gpu_blocks": 256,
+                "max_num_batched_tokens": 64,
+                "speedup_ratio": 1000.0
+            }
+        }))
+        .unwrap();
+        let passes = Arc::new(Passes::default());
+        let live = LiveEngine::start_with_config(
+            args.clone(),
+            0,
+            LiveEngineConfig {
+                fpm_publisher: FpmPublisher::new(Some(passes.clone())),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let engine = MockerExecutionContext::new(args);
+        assert!(engine.engines.set(vec![live]).is_ok());
+        let mut request = decode_request(640, 1);
+        request.prefill_result = Some(PrefillResult {
+            disaggregated_params: serde_json::json!({}),
+            prompt_tokens_details: None,
+        });
+
+        let mut stream = engine.generate(SingleIn::new(request)).await.unwrap();
+        while stream.next().await.is_some() {}
+        // Recomputing the prompt would take 640 / 64 = 10 passes before the token.
+        assert_eq!(*passes.0.lock().unwrap(), 1);
+    }
+
+    #[tokio::test]
     async fn context_capped_completion_maps_to_length() {
         let args = MockerConfig::from_value(serde_json::json!({
             "engine": {
@@ -1917,6 +1977,61 @@ mod tests {
         let mut replacement = engine.generate(input).await.unwrap();
         while replacement.next().await.is_some() {}
         assert_eq!(live.active_request_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn retry_with_same_request_id_runs_beside_active_attempt() {
+        let args = MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "block_size": 4,
+                "num_gpu_blocks": 4096,
+                "max_num_batched_tokens": 64,
+                "speedup_ratio": 1.0
+            }
+        }))
+        .unwrap();
+        let live = LiveEngine::start(args.clone(), 0).unwrap();
+        let engine = MockerExecutionContext::new(args);
+        assert!(engine.engines.set(vec![live.clone()]).is_ok());
+        let request_id = Uuid::from_u128(101).to_string();
+        let attempt = |max_tokens| {
+            SingleIn::with_id_and_metadata(
+                decode_request(1, max_tokens),
+                request_id.clone(),
+                BTreeMap::new(),
+            )
+        };
+
+        let mut first = engine.generate(attempt(10_000)).await.unwrap();
+        first.next().await.unwrap().data.unwrap();
+        let mut retry = engine
+            .generate(attempt(2))
+            .await
+            .expect("a retry must not collide with the still-active first attempt");
+        assert_eq!(live.active_request_count(), 2);
+
+        let mut output_tokens = 0;
+        let mut finish = None;
+        while let Some(output) = retry.next().await {
+            let output = output.data.unwrap();
+            output_tokens += output.token_ids.len();
+            if output.finish_reason.is_some() {
+                finish = output.finish_reason;
+            }
+        }
+        assert_eq!(output_tokens, 2);
+        assert_eq!(finish, LLMEngineOutput::length().finish_reason);
+        assert_eq!(live.active_request_count(), 1);
+        first.next().await.unwrap().data.unwrap();
+
+        drop(first);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while live.active_request_count() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("dropping the first attempt must cancel it");
     }
 
     #[tokio::test]

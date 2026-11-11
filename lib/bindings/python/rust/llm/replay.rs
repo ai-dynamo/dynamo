@@ -242,7 +242,7 @@ fn replay_paths_equal(left: &Path, right: &Path) -> bool {
 }
 
 #[pyfunction]
-#[pyo3(signature = (trace_files, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, ais_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, trace_block_size=None, trace_format="mooncake", trace_shared_prefix_ratio=0.0, trace_num_prefix_groups=0, report_jsonl_path=None, max_sim_time_ms=None, model_name=None, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None, capture_per_request=false, capture_planner_details=true, scaling_policy=None, agentic_lanes=None, execution_model=None, weka_nested_timestamp_basis=None, capture_telemetry=false, telemetry_sample_interval_ms=1_000.0, telemetry_callback=None, telemetry_jsonl_path=None, kv_event_lag_ms=None, agentic_snapshot=None, agentic_warmup=false, agentic_profile=None, deterministic=false))]
+#[pyo3(signature = (trace_files, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, ais_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, trace_block_size=None, trace_format="mooncake", trace_shared_prefix_ratio=0.0, trace_num_prefix_groups=0, report_jsonl_path=None, max_sim_time_ms=None, model_name=None, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None, capture_per_request=false, capture_planner_details=true, scaling_policy=None, agentic_lanes=None, execution_model=None, weka_nested_timestamp_basis=None, capture_telemetry=false, telemetry_sample_interval_ms=1_000.0, telemetry_callback=None, telemetry_jsonl_path=None, kv_event_lag_ms=None, agentic_snapshot=None, agentic_warmup=false, agentic_profile=None, deterministic=false, conversation_affinity=None))]
 #[allow(clippy::too_many_arguments)]
 pub fn run_mocker_trace_replay(
     py: Python<'_>,
@@ -284,7 +284,18 @@ pub fn run_mocker_trace_replay(
     agentic_warmup: bool,
     agentic_profile: Option<&Bound<'_, PyAny>>,
     deterministic: bool,
+    conversation_affinity: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<PyObject> {
+    let conversation_affinity = conversation_affinity
+        .map(pythonize::depythonize::<dynamo_mocker::replay::ConversationAffinityConfig>)
+        .transpose()?;
+    if conversation_affinity.is_some()
+        && (replay_mode != "offline" || router_mode != "kv_router" || scaling_policy.is_some())
+    {
+        return Err(PyValueError::new_err(
+            "conversation_affinity requires offline kv_router replay with fixed workers",
+        ));
+    }
     let kv_event_lag_ms = validate_kv_event_lag_ms(kv_event_lag_ms, replay_mode, router_mode)?;
     if telemetry_jsonl_path.as_deref().is_some_and(|path| {
         report_jsonl_path
@@ -633,6 +644,7 @@ pub fn run_mocker_trace_replay(
     };
     let scope = ReplayScope {
         kv_event_lag_ms,
+        conversation_affinity,
         router_controls: None,
         determinism: if deterministic {
             ReplayDeterminism::CanonicalV1
@@ -744,6 +756,7 @@ fn run_loaded_dynamo_request_trace(
                             max_in_flight,
                             num_workers,
                             router_mode,
+                            /* accumulate_session_deltas */ false,
                             record_per_request,
                             max_sim_time_ms,
                             sla,
@@ -799,6 +812,7 @@ fn run_loaded_dynamo_request_trace(
                             trace,
                             max_in_flight,
                             router_mode,
+                            /* accumulate_session_deltas */ false,
                             record_per_request,
                             max_sim_time_ms,
                             sla,
@@ -912,7 +926,7 @@ fn write_per_request_jsonl(
 }
 
 #[pyfunction]
-#[pyo3(signature = (input_tokens, output_tokens, request_count, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, ais_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, request_rate=None, arrival_interval_ms=None, arrival_seed=42, turns_per_session=1, shared_prefix_ratio=0.0, num_prefix_groups=0, inter_turn_delay_ms=0.0, model_name=None, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None, capture_per_request=false, capture_planner_details=true, scaling_policy=None, capture_telemetry=false, telemetry_sample_interval_ms=1_000.0, telemetry_callback=None, telemetry_jsonl_path=None, kv_event_lag_ms=None))]
+#[pyo3(signature = (input_tokens, output_tokens, request_count, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, ais_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, request_rate=None, arrival_interval_ms=None, arrival_seed=42, turns_per_session=1, shared_prefix_ratio=0.0, num_prefix_groups=0, inter_turn_delay_ms=0.0, accumulate_session_deltas=false, model_name=None, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None, capture_per_request=false, capture_planner_details=true, scaling_policy=None, capture_telemetry=false, telemetry_sample_interval_ms=1_000.0, telemetry_callback=None, telemetry_jsonl_path=None, kv_event_lag_ms=None))]
 #[allow(clippy::too_many_arguments)]
 pub fn run_mocker_synthetic_trace_replay(
     py: Python<'_>,
@@ -938,6 +952,7 @@ pub fn run_mocker_synthetic_trace_replay(
     shared_prefix_ratio: f64,
     num_prefix_groups: usize,
     inter_turn_delay_ms: f64,
+    accumulate_session_deltas: bool,
     model_name: Option<String>,
     sla_ttft_ms: Option<f64>,
     sla_itl_ms: Option<f64>,
@@ -960,6 +975,11 @@ pub fn run_mocker_synthetic_trace_replay(
     if scaling_policy.is_some() && replay_mode != "offline" {
         return Err(PyValueError::new_err(
             "scaling_policy only supports replay_mode='offline'",
+        ));
+    }
+    if accumulate_session_deltas && replay_mode != "offline" {
+        return Err(PyValueError::new_err(
+            "accumulate_session_deltas only supports replay_mode='offline'",
         ));
     }
     validate_sla_threshold("sla_ttft_ms", sla_ttft_ms)?;
@@ -1062,6 +1082,7 @@ pub fn run_mocker_synthetic_trace_replay(
                             max_in_flight,
                             num_workers,
                             router_mode,
+                            accumulate_session_deltas,
                             record_per_request,
                             None,
                             sla,
@@ -1076,6 +1097,7 @@ pub fn run_mocker_synthetic_trace_replay(
                             trace,
                             num_workers,
                             router_mode,
+                            accumulate_session_deltas,
                             record_per_request,
                             None,
                             sla,
@@ -1122,6 +1144,7 @@ pub fn run_mocker_synthetic_trace_replay(
                             trace,
                             max_in_flight,
                             router_mode,
+                            accumulate_session_deltas,
                             record_per_request,
                             None,
                             sla,
@@ -1133,6 +1156,7 @@ pub fn run_mocker_synthetic_trace_replay(
                             prefill_load_estimator.clone(),
                             trace,
                             router_mode,
+                            accumulate_session_deltas,
                             record_per_request,
                             None,
                             sla,

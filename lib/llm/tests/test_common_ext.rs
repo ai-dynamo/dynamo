@@ -61,6 +61,7 @@ fn test_sampling_parameters_include_stop_str_in_output_extraction() {
     use dynamo_llm::protocols::common::SamplingOptionsProvider;
 
     let request = NvCreateChatCompletionRequest {
+        responses_tools: None,
         inner: Default::default(),
         common: CommonExt::builder()
             .include_stop_str_in_output(true)
@@ -72,6 +73,7 @@ fn test_sampling_parameters_include_stop_str_in_output_extraction() {
         media_io_kwargs: None,
         return_tokens_as_token_ids: None,
         thinking_token_budget: None,
+        preserve_thinking: None,
         unsupported_fields: Default::default(),
     };
 
@@ -317,6 +319,8 @@ fn test_completions_common_values() {
 fn test_serialization_preserves_structure() {
     // Test that serialization preserves the flattened structure
     let request = NvCreateChatCompletionRequest {
+        preserve_thinking: None,
+        responses_tools: None,
         inner: dynamo_protocols::types::CreateChatCompletionRequest {
             model: "test-model".to_string(),
             messages: vec![dynamo_protocols::types::ChatCompletionRequestMessage::User(
@@ -386,6 +390,7 @@ fn test_sampling_parameters_extraction() {
 
     // Test that top_k and repetition_penalty are extracted in sampling options when passed a top level
     let request = NvCreateChatCompletionRequest {
+        responses_tools: None,
         inner: Default::default(),
         common: CommonExt::builder()
             .top_k(42)
@@ -398,6 +403,7 @@ fn test_sampling_parameters_extraction() {
         media_io_kwargs: None,
         return_tokens_as_token_ids: None,
         thinking_token_budget: None,
+        preserve_thinking: None,
         unsupported_fields: Default::default(),
     };
 

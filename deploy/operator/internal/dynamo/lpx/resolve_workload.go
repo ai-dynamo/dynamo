@@ -54,7 +54,7 @@ func ResolveWorkload(
 	}
 
 	// Preserve draft-before-target runtime identities independently of authored order.
-	if len(components) == 2 && components[0].ComponentRole(dynamov1beta1.ComponentRoleLPXConductor) != nil {
+	if len(components) == 2 && ServesEndpoint(components[0]) {
 		components[0], components[1] = components[1], components[0]
 	}
 
@@ -90,6 +90,11 @@ func ResolveWorkload(
 			snapshot = acquired
 		}
 
+		// Paired readers share configuration; they must move to units together.
+		if len(projections) != 0 && projections[0].placesLPUUnits() != (snapshot.lpuUnits.Len() != 0) {
+			return nil, fmt.Errorf("LPX workload mixes builds with and without lpuUnits: components %q and %q must use the same placement format", projections[0].stage, configuredModel)
+		}
+
 		// Validated model cardinality fixes one runtime shape for the selected workload.
 		if pipeline == "" {
 			pipeline = PipelineSingle
@@ -105,8 +110,7 @@ func ResolveWorkload(
 		}
 
 		// Project the component once into the resolver-owned aggregate destination.
-		hasConductor := stage.ComponentRole(dynamov1beta1.ComponentRoleLPXConductor) != nil
-		modelNames := expandedModelNames(len(components), hasConductor, int(ptr.Deref(stage.Replicas, 1)))
+		modelNames := expandedModelNames(len(components), ServesEndpoint(stage), int(ptr.Deref(stage.Replicas, 1)))
 		intent := ModelProjectionInput{
 			Pipeline:        pipeline,
 			Models:          modelNames,
@@ -158,10 +162,10 @@ func validateWorkloadConductor(
 	pipeline Pipeline,
 	requiresGPU bool,
 ) error {
-	// Only an LPU-only single model's engine runs in the Agent Pods with its runtime sidecar.
-	if agentRuntimeSidecar(component) != nil && pipeline != PipelineSingle {
+	// An LPU-only engine runs in the Agent Pods with its runtime sidecar, alone or with its draft.
+	if agentRuntimeSidecar(component) != nil && pipeline == PipelineHybrid {
 		return fmt.Errorf(
-			"%w: component %q agent %q sidecar requires an LPU-only single-model build; declare the conductor role instead",
+			"%w: component %q agent %q sidecar requires an LPU-only build; declare the conductor role instead",
 			ErrUnsupportedRuntime, component.ComponentName, commonconsts.RuntimeContainerName,
 		)
 	}
@@ -182,6 +186,11 @@ func validateWorkloadConductor(
 			return fmt.Errorf("%w: the shared speculative runtime requires LPU-only builds", ErrUnsupportedRuntime)
 		}
 		template := conductor.PodTemplate
+		// The hybrid GPU engine serves only through the LPX sidecar.
+		if common.FindContainerByName(template.Spec.InitContainers, commonconsts.RuntimeContainerName) == nil {
+			return fmt.Errorf("%w: component %q conductor of a hybrid build requires the LPX sidecar; declare the %q init container",
+				ErrUnsupportedRuntime, component.ComponentName, commonconsts.RuntimeContainerName)
+		}
 		container := common.FindContainerByName(template.Spec.Containers, commonconsts.MainContainerName)
 		count, err := dra.ResolveGPUCount(ctx, reader, namespace, &template.Spec, container.Resources)
 		if err != nil {
@@ -206,12 +215,12 @@ func validateWorkloadConductor(
 	return nil
 }
 
-func expandedModelNames(componentCount int, hasConductor bool, draftCount int) []string {
+func expandedModelNames(componentCount int, target bool, draftCount int) []string {
 	// Component membership retains Nova's existing default/draft/target identities.
 	if componentCount == 1 {
 		return []string{"default"}
 	}
-	if hasConductor {
+	if target {
 		return []string{runtimeModelTarget}
 	}
 	names := make([]string, draftCount)

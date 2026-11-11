@@ -7,6 +7,8 @@ subtitle: Reference for creating counters, gauges, and histograms with Dynamo's 
 
 This guide explains how to create and use custom metrics in Dynamo components using the Dynamo metrics API.
 
+Before you add or change a metric, read the [metrics guidelines](https://github.com/ai-dynamo/dynamo/blob/main/.ai/metrics-guidelines.md). They cover when to use a metric instead of a log or a trace, and the rules for names, labels, registration, stability, and documentation.
+
 ## Metrics Exposure
 
 All metrics created via the Dynamo metrics API are automatically exposed on the `/metrics` HTTP endpoint in Prometheus Exposition Format text when the following environment variable is set:
@@ -87,10 +89,10 @@ latency.observe(0.023);  // 23ms
 
 ```rust
 // Create vector metrics with label names
-let requests_by_model = endpoint.metrics().create_countervec(
-    "requests_by_model",
-    "Requests by model",
-    &["model_type", "model_size"],
+let model_requests_total = endpoint.metrics().create_countervec(
+    "model_requests_total",
+    "Requests handled, by served model",
+    &["model"],
     &[]
 )?;
 
@@ -101,8 +103,8 @@ let memory_by_gpu = endpoint.metrics().create_gaugevec(
     &[]
 )?;
 
-// Use with specific label values
-requests_by_model.with_label_values(&["llama", "7b"]).inc();
+// Use with specific label values; take the model from the served models, not the request
+model_requests_total.with_label_values(&["Qwen/Qwen3-0.6B"]).inc();
 memory_by_gpu.with_label_values(&["0", "allocated"]).set(8192.0);
 ```
 

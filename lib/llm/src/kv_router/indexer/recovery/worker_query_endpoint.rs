@@ -8,13 +8,11 @@ use std::sync::{
 
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
-use dynamo_kv_router::{
-    indexer::{
-        KvStateAgentStatus, KvStateRecoveryReceipt, LocalKvIndexer, WorkerKvQueryKind,
-        WorkerKvQueryRequest, WorkerKvQueryResponse,
-    },
-    protocols::DpRank,
+use dynamo_kv_indexer::host::{
+    KvStateAgentStatus, KvStateRecoveryReceipt, LocalKvIndexer, WorkerKvQueryKind,
+    WorkerKvQueryRequest, WorkerKvQueryResponse,
 };
+use dynamo_router_protocol::worker::DpRank;
 use dynamo_runtime::{
     component::{Component, StartedEndpoint},
     pipeline::{
@@ -26,6 +24,8 @@ use dynamo_runtime::{
 };
 use futures::StreamExt;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+
+use crate::kv_router::indexer::reply::WorkerKvQueryReply;
 
 /// Maximum recovery queries served past the event buffer at once.
 ///
@@ -143,13 +143,13 @@ pub(super) struct WorkerKvQueryEngine {
 }
 
 #[async_trait]
-impl AsyncEngine<SingleIn<WorkerKvQueryRequest>, ManyOut<WorkerKvQueryResponse>, anyhow::Error>
+impl AsyncEngine<SingleIn<WorkerKvQueryRequest>, ManyOut<WorkerKvQueryReply>, anyhow::Error>
     for WorkerKvQueryEngine
 {
     async fn generate(
         &self,
         request: SingleIn<WorkerKvQueryRequest>,
-    ) -> anyhow::Result<ManyOut<WorkerKvQueryResponse>> {
+    ) -> anyhow::Result<ManyOut<WorkerKvQueryReply>> {
         let (request, ctx) = request.into_parts();
 
         tracing::debug!(
@@ -321,10 +321,7 @@ impl AsyncEngine<SingleIn<WorkerKvQueryRequest>, ManyOut<WorkerKvQueryResponse>,
                 request.worker_id, self.worker_id
             );
             let response = WorkerKvQueryResponse::Error(error_message);
-            return Ok(ResponseStream::new(
-                Box::pin(stream::iter(vec![response])),
-                ctx.context(),
-            ));
+            return Ok(single_response(response, ctx.context()));
         }
 
         if self.status.is_none() && request.dp_rank != self.dp_rank {
@@ -333,10 +330,7 @@ impl AsyncEngine<SingleIn<WorkerKvQueryRequest>, ManyOut<WorkerKvQueryResponse>,
                 request.dp_rank, self.dp_rank
             );
             let response = WorkerKvQueryResponse::Error(error_message);
-            return Ok(ResponseStream::new(
-                Box::pin(stream::iter(vec![response])),
-                ctx.context(),
-            ));
+            return Ok(single_response(response, ctx.context()));
         }
 
         // Check if this request can likely be served from buffer (fast path).
@@ -353,12 +347,10 @@ impl AsyncEngine<SingleIn<WorkerKvQueryRequest>, ManyOut<WorkerKvQueryResponse>,
                 }
                 _ = futures::future::select(engine_ctx.stopped(), engine_ctx.killed()) => {
                     tracing::warn!("Worker<>Router KV query request cancelled while waiting for semaphore");
-                    return Ok(ResponseStream::new(
-                        // this response will be dropped on the router side since the request was cancelled,
-                        // but we return it here to satisfy the function signature and provide some context in logs if it does get processed for some reason.
-                        Box::pin(stream::iter(vec![WorkerKvQueryResponse::Error(
-                            "Request cancelled by client".to_string(),
-                        )])),
+                    // this response will be dropped on the router side since the request was cancelled,
+                    // but we return it here to satisfy the function signature and provide some context in logs if it does get processed for some reason.
+                    return Ok(single_response(
+                        WorkerKvQueryResponse::Error("Request cancelled by client".to_string()),
                         ctx.context(),
                     ));
                 }
@@ -443,10 +435,10 @@ fn permit_guarded_response(
     response: WorkerKvQueryResponse,
     permit: Option<OwnedSemaphorePermit>,
     context: Arc<dyn dynamo_runtime::pipeline::AsyncEngineContext>,
-) -> ManyOut<WorkerKvQueryResponse> {
-    let stream = stream::iter([response]).map(move |response| {
+) -> ManyOut<WorkerKvQueryReply> {
+    let stream = stream::iter([WorkerKvQueryReply(response)]).map(move |reply| {
         let _permit = &permit;
-        response
+        reply
     });
     ResponseStream::new(Box::pin(stream), context)
 }
@@ -461,16 +453,16 @@ fn recovery_response_cursor(response: &WorkerKvQueryResponse) -> Option<u64> {
 
 fn filter_state_agent_events(
     response: WorkerKvQueryResponse,
-    state_source: dynamo_kv_router::identity::CacheOwnerId,
+    state_source: dynamo_router_protocol::identity::CacheOwnerId,
     include_worker: bool,
     worker_only: bool,
 ) -> WorkerKvQueryResponse {
-    let retain = |event: &dynamo_kv_router::protocols::RouterEvent| {
+    let retain = |event: &dynamo_kv_events::event::RouterEvent| {
         event
             .resolved_residency_domain()
             .is_ok_and(|domain| match domain {
-                dynamo_kv_router::protocols::ResidencyDomain::Worker => include_worker,
-                dynamo_kv_router::protocols::ResidencyDomain::CacheOwner => {
+                dynamo_kv_events::residency::ResidencyDomain::Worker => include_worker,
+                dynamo_kv_events::residency::ResidencyDomain::CacheOwner => {
                     !worker_only && event.state_source == Some(state_source)
                 }
             })
@@ -503,13 +495,13 @@ fn filter_state_agent_events(
                 // upgrades. Such consumers have no CacheOwner state and accept
                 // only an all-rank replacement.
                 // TODO(v1.5): Remove when v1.2 leaves the N-2 compatibility window.
-                dynamo_kv_router::protocols::ResetScope::All
+                dynamo_kv_events::residency::ResetScope::All
             } else if !include_worker {
-                dynamo_kv_router::protocols::ResetScope::Domain(
-                    dynamo_kv_router::protocols::ResidencyDomain::CacheOwner,
+                dynamo_kv_events::residency::ResetScope::Domain(
+                    dynamo_kv_events::residency::ResidencyDomain::CacheOwner,
                 )
             } else {
-                dynamo_kv_router::protocols::ResetScope::All
+                dynamo_kv_events::residency::ResetScope::All
             };
             WorkerKvQueryResponse::TreeDump {
                 events,
@@ -524,8 +516,11 @@ fn filter_state_agent_events(
 fn single_response(
     response: WorkerKvQueryResponse,
     context: Arc<dyn dynamo_runtime::pipeline::AsyncEngineContext>,
-) -> ManyOut<WorkerKvQueryResponse> {
-    ResponseStream::new(Box::pin(stream::iter(vec![response])), context)
+) -> ManyOut<WorkerKvQueryReply> {
+    ResponseStream::new(
+        Box::pin(stream::iter(vec![WorkerKvQueryReply(response)])),
+        context,
+    )
 }
 
 fn negotiate_tree_dump_failure(
@@ -570,12 +565,11 @@ impl Drop for SlowQueryGuard {
 
 #[cfg(test)]
 mod tests {
-    use dynamo_kv_router::identity::{
-        CacheOwnerId, CacheSemanticsId, DcId, IdentitySource, IndexerDomainId, PoolId,
+    use dynamo_kv_events::event::{KvCacheEvent, KvCacheEventData, RouterEvent};
+    use dynamo_kv_events::residency::{ResidencyDomain, StorageTier};
+    use dynamo_router_protocol::identity::{
+        CacheOwnerId, CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId,
         RoutingScopeId, StableDpSlotId,
-    };
-    use dynamo_kv_router::protocols::{
-        KvCacheEvent, KvCacheEventData, ResidencyDomain, RouterEvent, StorageTier,
     };
 
     use super::*;
@@ -587,7 +581,7 @@ mod tests {
                     CacheSemanticsId::new([1; 16], IdentitySource::Explicit),
                     RoutingScopeId::new([2; 16], IdentitySource::Explicit),
                 ),
-                DcId::new(3),
+                ClusterId::new(3),
             ),
             StableDpSlotId::new([4; 16], IdentitySource::Explicit),
         )
@@ -601,7 +595,7 @@ mod tests {
             local_indexer: Arc::new(LocalKvIndexer::new(
                 tokio_util::sync::CancellationToken::new(),
                 4,
-                Arc::new(dynamo_kv_router::indexer::KvIndexerMetrics::new_unregistered()),
+                Arc::new(dynamo_kv_indexer::host::KvIndexerMetrics::new_unregistered()),
                 16,
             )),
             status: None,
@@ -620,7 +614,7 @@ mod tests {
         let mut stream = engine.generate(SingleIn::new(request)).await.unwrap();
         assert!(matches!(
             stream.next().await,
-            Some(WorkerKvQueryResponse::TreeDump { .. })
+            Some(WorkerKvQueryReply(WorkerKvQueryResponse::TreeDump { .. }))
         ));
         assert!(stream.next().await.is_none());
         // The transport encodes and sends before dropping an exhausted stream.
@@ -671,7 +665,7 @@ mod tests {
                 event(1, ResidencyDomain::CacheOwner).with_state_source(test_owner()),
             ],
             last_event_id: 3,
-            reset_scope: dynamo_kv_router::protocols::ResetScope::All,
+            reset_scope: dynamo_kv_events::residency::ResetScope::All,
         };
 
         let WorkerKvQueryResponse::TreeDump {
@@ -684,7 +678,7 @@ mod tests {
         };
         assert_eq!(last_event_id, 3);
         assert_eq!(events.len(), 2);
-        assert_eq!(reset_scope, dynamo_kv_router::protocols::ResetScope::All);
+        assert_eq!(reset_scope, dynamo_kv_events::residency::ResetScope::All);
 
         let detached = filter_state_agent_events(
             WorkerKvQueryResponse::TreeDump {
@@ -700,7 +694,7 @@ mod tests {
             detached,
             WorkerKvQueryResponse::TreeDump {
                 events,
-                reset_scope: dynamo_kv_router::protocols::ResetScope::Domain(
+                reset_scope: dynamo_kv_events::residency::ResetScope::Domain(
                     ResidencyDomain::CacheOwner
                 ),
                 ..

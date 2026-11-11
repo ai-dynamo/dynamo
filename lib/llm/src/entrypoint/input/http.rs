@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use dynamo_kv_router::plugins::RouterPlugins;
+use dynamo_kv_router::plugins::request_classifier::RequestClassifierFactory;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -17,14 +19,9 @@ use crate::{
     local_model::runtime_config::TokenizerBackend,
     model_type::ModelType,
     namespace::NamespaceFilter,
-    types::openai::{
-        chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
-        completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
+    types::openai::chat_completions::{
+        NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
     },
-};
-use dynamo_kv_router::{
-    KvRouterConfig, RoutingPartitionRef, WorkerSelectionPolicy, WorkerType,
-    plugins::{RouterPlugins, request_classifier::RequestClassifierFactory},
 };
 use dynamo_runtime::DistributedRuntime;
 use dynamo_runtime::metrics::MetricsHierarchy;
@@ -44,8 +41,7 @@ impl HttpFrontend {
     /// Install a resolved plugin bundle for all routers created by this frontend.
     ///
     /// This replaces all previously configured plugins. Call this before
-    /// [`Self::worker_selection_policy_factory`] or [`Self::request_classifier_factory`]
-    /// to retain overrides made by those setters.
+    /// [`Self::request_classifier_factory`] to retain the override made by that setter.
     pub fn plugins(mut self, plugins: RouterPlugins) -> Self {
         self.plugins = plugins;
         self
@@ -64,28 +60,6 @@ impl HttpFrontend {
     /// `None` falls back to `DYN_HTTP_FORWARD_ROUTES`.
     pub fn forward_routes(mut self, forward_routes: Option<Vec<String>>) -> Self {
         self.forward_routes = forward_routes;
-        self
-    }
-
-    /// Replace the registry-resolved worker-selection policy with a statically linked native one.
-    ///
-    /// The factory is called when each decode or prefill worker set is constructed, not per
-    /// request. Workers must advertise an explicit typed role; legacy untyped cards are rejected
-    /// because decode and aggregated workers cannot be distinguished. Dynamo continues to own
-    /// discovery, scheduling, validation, and accounting.
-    // TODO(v1.7): Remove this compatibility setter; use plugins with RouterPlugins::with_worker_selection.
-    pub fn worker_selection_policy_factory<F>(mut self, factory: F) -> Self
-    where
-        F: for<'a> Fn(
-                &KvRouterConfig,
-                WorkerType,
-                RoutingPartitionRef<'a>,
-            ) -> WorkerSelectionPolicy
-            + Send
-            + Sync
-            + 'static,
-    {
-        self.plugins = self.plugins.with_worker_selection(Arc::new(factory));
         self
     }
 
@@ -114,6 +88,25 @@ impl HttpFrontend {
             && !matches!(&engine_config, EngineConfig::Dynamic { .. })
         {
             anyhow::bail!("custom router plugins require a dynamic engine");
+        }
+
+        // Hosts that pass no resolved plugins resolve the policy file later, so read its
+        // selection from the config as well.
+        let router_config = engine_config.local_model().router_config();
+        if router_config.router_mode.is_kv_routing()
+            && !self.plugins.has_custom_worker_selection()
+            && matches!(
+                router_config
+                    .kv_router_config
+                    .selected_worker_selection_policy_instance(),
+                Ok(None)
+            )
+        {
+            tracing::warn!(
+                "Starting with Dynamo 1.8, --router-mode kv will default to the two-tier cost \
+                 function (dynamo-two-tier-cost-fn). To keep the current cost function, select a \
+                 dynamo-default-cost-fn instance in --router-policy-config."
+            );
         }
 
         let plugins = RouterPluginBuilder::new(self.plugins);
@@ -222,6 +215,7 @@ async fn run_with_router_plugins(
         http_service_builder.with_request_template(engine_config.local_model().request_template());
     http_service_builder = http_service_builder
         .metrics_config(local_model.metrics_config().clone())
+        .migration_limit(local_model.migration_limit())
         .batch_gateway_url(local_model.batch_gateway_url().map(str::to_owned))
         .frontend_api_config(local_model.frontend_api_config().clone());
     // Inject the DRT's metrics registry so that component-scoped metrics
@@ -266,6 +260,7 @@ async fn run_with_router_plugins(
             let local_model_path =
                 (!model.path().as_os_str().is_empty()).then(|| model.path().to_path_buf());
             let generate_engine_capabilities = http_service.generate_engine_capabilities();
+            let systemone_enabled = http_service.state().systemone_enabled();
             run_watcher(
                 distributed_runtime.clone(),
                 http_service.state().manager_clone(),
@@ -281,6 +276,7 @@ async fn run_with_router_plugins(
                 model.runtime_config().tokenizer_backend,
                 model.runtime_config().tokenizer_fallback_enabled,
                 generate_engine_capabilities,
+                systemone_enabled,
                 plugins,
             )
             .await?;
@@ -314,11 +310,8 @@ async fn run_with_router_plugins(
             .await?;
             manager.add_chat_completions_model(model.display_name(), checksum, chat_pipeline)?;
 
-            let cmpl_pipeline = common::build_pipeline::<
-                NvCreateCompletionRequest,
-                NvCreateCompletionResponse,
-            >(model.card(), inner_engine, tokenizer)
-            .await?;
+            let cmpl_pipeline =
+                common::build_completions_pipeline(model.card(), inner_engine, tokenizer)?;
             manager.add_completions_model(model.display_name(), checksum, cmpl_pipeline)?;
             enable_in_process_model_endpoints(&http_service)?;
             http_service
@@ -333,7 +326,8 @@ async fn run_with_router_plugins(
             .collect::<Vec<String>>()
     );
 
-    let run_result = http_service.run(distributed_runtime.primary_token()).await;
+    let _graceful_task = distributed_runtime.register_graceful_task();
+    let run_result = http_service.run(distributed_runtime.child_token()).await;
 
     // Initiate runtime shutdown whenever the server exits, including bind
     // failures, for both discovery-backed and in-process engines.
@@ -345,7 +339,7 @@ async fn run_with_router_plugins(
 
 fn enable_in_process_model_endpoints(http_service: &HttpService) -> anyhow::Result<()> {
     for endpoint_type in EndpointType::all() {
-        if endpoint_type != EndpointType::Batch {
+        if !matches!(endpoint_type, EndpointType::Batch | EndpointType::SystemOne) {
             http_service.enable_model_endpoint(endpoint_type, true)?;
         }
     }
@@ -365,11 +359,12 @@ async fn run_watcher(
     http_service: Arc<HttpService>,
     metrics: Arc<crate::http::service::metrics::Metrics>,
     chat_engine_factory: Option<ChatEngineFactoryCallback>,
-    prefill_load_estimator: Option<Arc<dyn dynamo_kv_router::PrefillLoadEstimator>>,
+    prefill_load_estimator: Option<Arc<dyn dynamo_scheduler::host::PrefillLoadEstimator>>,
     local_model_path: Option<PathBuf>,
     tokenizer_backend: Option<TokenizerBackend>,
     tokenizer_fallback_enabled: Option<bool>,
     generate_engine_capabilities: Vec<&'static str>,
+    systemone_enabled: bool,
     plugins: RouterPluginBuilder,
 ) -> anyhow::Result<()> {
     // Start the LoRA allocation controller when LoRA serving is enabled. The
@@ -395,6 +390,7 @@ async fn run_watcher(
     watch_obj.set_tokenizer_backend(tokenizer_backend);
     watch_obj.set_tokenizer_fallback_enabled(tokenizer_fallback_enabled);
     watch_obj.set_generate_engine_capabilities(generate_engine_capabilities);
+    watch_obj.set_systemone_enabled(systemone_enabled);
     tracing::debug!("Waiting for remote model");
     let discovery = runtime.discovery();
     let discovery_stream = discovery
@@ -489,6 +485,7 @@ mod tests {
     use crate::engines::make_echo_engine;
     use crate::model_card::{LoraInfo, ModelDeploymentCard};
     use crate::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine;
+    use dynamo_kv_router::config::KvRouterConfig;
 
     #[tokio::test]
     async fn configured_classifier_requires_installed_plugin() {

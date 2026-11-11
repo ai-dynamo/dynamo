@@ -20,25 +20,28 @@
 
 mod anthropic;
 mod batch_proxy;
+mod decision_lifecycle;
 mod image_edits;
 pub mod metadata;
 mod openai;
 mod server;
+mod transcriptions;
 mod write_timeout;
 
 pub mod busy_threshold;
 pub mod disconnect;
 pub mod error;
+pub mod format_generate;
 mod forward;
 pub mod frontend_extension;
-pub mod generate;
+
 pub mod health;
 pub mod metrics;
 pub mod openapi_docs;
 pub mod realtime;
 pub mod router_policy;
 pub mod service_v2;
-pub mod sglang_generate;
+pub mod systemone;
 mod worker_metrics;
 
 pub use axum;
@@ -126,8 +129,8 @@ mod tests {
 
     #[test]
     fn raw_batch_reasoning_policy_respects_deployment_default_and_client_override() {
-        let mut options =
-            ParsingOptions::new(Some("gemma4".to_string()), Some("gemma4".to_string()));
+        // Reasoning selector only: the Gemma 4 tool-call parser keeps reasoning on.
+        let mut options = ParsingOptions::new(None, Some("gemma4".to_string()));
         options.default_thinking_mode = Some("enabled".to_string());
         assert!(
             !apply_request_tool_call_parsing_options(options.clone(), &request(json!("auto")))
@@ -141,6 +144,42 @@ mod tests {
                 .unwrap()
                 .reasoning_disabled
         );
+    }
+
+    #[test]
+    fn frontend_thinking_default_reaches_reasoning_policy() {
+        // Kimi K2.5 reasons unless the request or a default turns thinking off.
+        let options = ParsingOptions::new(None, Some("kimi_k25".to_string()));
+        let reasoning_disabled = |defaults: &crate::frontend_config::ChatTemplateDefaults,
+                                  kwargs: Value| {
+            let mut req = request(json!("auto"));
+            req.chat_template_args = serde_json::from_value(kwargs).unwrap();
+            defaults.apply_to_request(&mut req);
+            req.normalize_reasoning_template_args().unwrap();
+            apply_request_tool_call_parsing_options(options.clone(), &req)
+                .unwrap()
+                .reasoning_disabled
+        };
+        let mut defaults = crate::frontend_config::ChatTemplateDefaults::default();
+        assert!(!reasoning_disabled(&defaults, Value::Null));
+        defaults.set_default_chat_template_kwargs(
+            json!({"enable_thinking": false}).as_object().cloned(),
+        );
+        assert!(reasoning_disabled(&defaults, Value::Null));
+        for unset in [Value::Null, json!("auto")] {
+            assert!(reasoning_disabled(
+                &defaults,
+                json!({"enable_thinking": unset})
+            ));
+            assert!(reasoning_disabled(
+                &defaults,
+                json!({"reasoning_effort": unset})
+            ));
+        }
+        assert!(!reasoning_disabled(
+            &defaults,
+            json!({"enable_thinking": true})
+        ));
     }
 
     #[test]
@@ -226,7 +265,13 @@ mod tests {
                         result.reasoning_disabled,
                         match family {
                             "gpt_oss" => false,
-                            "gemma4" => thinking != Some(true),
+                            "glm47" => false,
+                            "beam" => false,
+                            // Kept on with the Gemma 4 tool-call parser.
+                            "gemma4" => thinking != Some(true) && tool.is_none(),
+                            // Spark's template has no reasoning-off mode; keep parsing
+                            // its private channel even when thinking=false is requested.
+                            "muse_spark" => false,
                             _ => thinking == Some(false),
                         },
                         "{selector} {tool:?} {reasoning:?} {thinking:?}"
@@ -872,6 +917,8 @@ pub enum OpenApiRouteKind {
     Completions,
     Embeddings,
     Responses,
+    Decisions,
+    SystemOne,
 }
 
 /// Documentation for a route, with optional handler-specific schema metadata.

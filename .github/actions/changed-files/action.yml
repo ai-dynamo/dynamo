@@ -61,6 +61,9 @@ outputs:
   planner:
     description: 'Whether planner files changed'
     value: ${{ steps.filter.outputs.planner_any_modified }}
+  sidecar_trtllm_image:
+    description: 'Whether the standalone TRT-LLM image integration test is affected'
+    value: ${{ steps.filter.outputs.sidecar_trtllm_image_any_modified }}
   sidecar:
     description: 'Whether sidecar files changed'
     value: ${{ steps.filter.outputs.sidecar_any_modified }}
