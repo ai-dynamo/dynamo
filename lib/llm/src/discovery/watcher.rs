@@ -489,7 +489,9 @@ impl ModelWatcher {
         let mut worker_set =
             WorkerSet::new(namespace.clone(), spec.mdc_checksum.clone(), card.clone());
         worker_set.set_mistral_disabled_thinking_effort(card.mistral_disabled_thinking_effort()?);
-        worker_set.set_unsupported_unified_family(unsupported_unified_family(card)?);
+        let mut tokenizer = None;
+        worker_set
+            .set_unsupported_unified_family(unsupported_unified_family(card, &mut tokenizer)?);
         let allocator_trim = worker_set.initialize_allocator_trim_on_teardown();
         worker_set.set_lifecycle_cancellation(cancellation.clone());
         if card.model_type.supports_images() {
@@ -563,11 +565,11 @@ impl ModelWatcher {
             // handle Chat or Completions requests, so handle whatever the model supports.
 
             // Loading the tokenizer is expensive (~10 MiB JSON), so only do it
-            // once and only when a local pipeline actually needs it.  Models
+            // once, reusing any tokenizer needed by the parser-family check. Models
             // without tokenizer.json (e.g. Qwen3-Omni) set tokenizer = None;
             // they rely on a Python chat_engine_factory for tokenization.
             // When a chat_engine_factory handles chat and no completions are
-            // needed, skip tokenizer loading entirely — even if the file exists.
+            // needed, only the parser-family check can require a tokenizer.
             let needs_local_chat_pipeline =
                 card.model_type.supports_chat() && self.chat_engine_factory.is_none();
             let needs_local_completions_pipeline = card.model_type.supports_completions();
@@ -576,9 +578,16 @@ impl ModelWatcher {
             let needs_local_tokenizer =
                 needs_local_chat_pipeline || needs_local_completions_pipeline;
             let tokenizer = if needs_local_tokenizer && card.has_tokenizer() {
-                Some(card.tokenizer().context("tokenizer")?)
+                Some(
+                    tokenizer
+                        .map_or_else(|| card.tokenizer(), Ok)
+                        .context("tokenizer")?,
+                )
             } else if needs_systemone_preprocessor && card.has_tokenizer() {
-                match card.tokenizer().context("System One tokenizer") {
+                match tokenizer
+                    .map_or_else(|| card.tokenizer(), Ok)
+                    .context("System One tokenizer")
+                {
                     Ok(tokenizer) => Some(tokenizer),
                     Err(cause) => {
                         tracing::warn!(
@@ -1144,9 +1153,12 @@ impl ModelWatcher {
 }
 
 /// The configured unified family this card's tokenizer cannot serve. Only a family
-/// that checks the vocabulary loads the tokenizer here, so per-request parsing agrees
-/// with the preprocessor even when no local chat pipeline loads one.
-fn unsupported_unified_family(card: &ModelDeploymentCard) -> anyhow::Result<Option<&'static str>> {
+/// that checks the vocabulary loads the tokenizer here. Keep it for local pipelines,
+/// while also checking cards that use a factory or text-input pipeline.
+fn unsupported_unified_family(
+    card: &ModelDeploymentCard,
+    tokenizer: &mut Option<crate::tokenizers::Tokenizer>,
+) -> anyhow::Result<Option<&'static str>> {
     use crate::protocols::openai::chat_completions::unified_parser;
     let tool_call_parser = card.runtime_config.tool_call_parser.as_deref();
     let reasoning_parser = card.runtime_config.reasoning_parser.as_deref();
@@ -1156,10 +1168,14 @@ fn unsupported_unified_family(card: &ModelDeploymentCard) -> anyhow::Result<Opti
     {
         return Ok(None);
     }
-    let tokenizer = card
-        .tokenizer()
-        .context("tokenizer for the unified parser family check")?;
-    unified_parser::unsupported_family(tool_call_parser, reasoning_parser, &**tokenizer)
+    let tokenizer = match tokenizer {
+        Some(tokenizer) => tokenizer,
+        None => tokenizer.insert(
+            card.tokenizer()
+                .context("tokenizer for the unified parser family check")?,
+        ),
+    };
+    unified_parser::unsupported_family(tool_call_parser, reasoning_parser, tokenizer.as_ref())
 }
 
 #[async_trait]
@@ -1653,6 +1669,37 @@ mod tests {
     use dynamo_runtime::pipeline::Error;
     use dynamo_runtime::{Runtime, distributed::DistributedConfig};
     use futures::StreamExt;
+
+    #[test]
+    fn mistral_family_check_reuses_tokenizer_for_all_input_modes() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("tekken.json");
+        std::fs::copy(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/data/sample-models/mock-mistral-tekken/tekken.json"
+            ),
+            &path,
+        )?;
+        let mut card = ModelDeploymentCard::with_name_only("mistral");
+        card.model_type = ModelType::Chat;
+        card.runtime_config.tool_call_parser = Some("mistral".to_string());
+        card.tokenizer = Some(crate::model_card::TokenizerKind::TekkenJson(
+            crate::common::checked_file::CheckedFile::from_disk(&path)?,
+        ));
+        let mut tokenizer = None;
+        assert_eq!(unsupported_unified_family(&card, &mut tokenizer)?, None);
+        let shared = tokenizer.as_ref().unwrap().clone();
+        std::fs::remove_file(&path)?;
+
+        for input in [ModelInput::Tokens, ModelInput::Text] {
+            card.model_input = input;
+            assert_eq!(unsupported_unified_family(&card, &mut tokenizer)?, None);
+            assert!(Arc::ptr_eq(tokenizer.as_ref().unwrap(), &shared));
+        }
+        assert!(unsupported_unified_family(&card, &mut None).is_err());
+        Ok(())
+    }
 
     #[test]
     fn direct_routing_gets_a_threshold_handle_that_ignores_thresholds() {

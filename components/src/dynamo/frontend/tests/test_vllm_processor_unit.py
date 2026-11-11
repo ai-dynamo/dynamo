@@ -3034,8 +3034,8 @@ class TestChatParamsResponseFormat:
     """The renderer must see the caller's response_format, as in vLLM's serving.
 
     vLLM renders from build_chat_params() before any parser adjusts the request,
-    and some renderers write response_format into the prompt (a v15 Mistral
-    tokenizer puts its JSON schema in [MODEL_SETTINGS]).
+    and renderers such as Kimi K3 consume ChatParams.response_format directly.
+    Stock vLLM 0.33.0's Mistral renderer/tokenizer do not forward that field.
     """
 
     def _prepare(self, tokenizer, request_extra, **parsers):
