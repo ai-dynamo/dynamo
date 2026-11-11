@@ -29,6 +29,7 @@ Follow the established page-scoped style component for specialized surfaces:
 | Blog | `BlogStyles` |
 | Recipes and feature benchmarks | `RecipeStyles` |
 | Custom Reference components | `ReferenceStyles` |
+| Other pages that set `hide-toc: true` | `HideTocStyles` |
 
 Import the component explicitly and render it once near the start of the page. Do not duplicate its
 rules in page-local inline styles.
