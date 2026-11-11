@@ -33,8 +33,10 @@ from tests.frontend.route_extension_provider import (
     ECHO_PATH,
     HELLO_BODY,
     HELLO_PATH,
+    OWN_TIMEOUT_PATH,
     READINESS_PATH,
     SLOW_PATH,
+    STATE_PATH,
 )
 from tests.utils.constants import DynamoPortRange
 from tests.utils.managed_process import DynamoFrontendProcess
@@ -138,14 +140,12 @@ def test_frontend_route_extension_serves_custom_route(request, tmp_path, selecto
         assert ctx_response.status_code == 200
         assert ctx_response.json() == {"ready": False}
 
-        # Request body reaches a synchronous POST handler.
         base = f"http://localhost:{frontend.frontend_port}"
         payload = [{"ticket_id": "t1"}, {"ticket_id": "t2"}]
         echo = requests.post(f"{base}{ECHO_PATH}", json=payload, timeout=5)
         assert echo.status_code == 200, echo.text
         assert echo.json() == payload
 
-        # An async handler gets the body, headers and the frontend's runtime.
         echo_async = requests.post(
             f"{base}{ECHO_ASYNC_PATH}",
             json=payload,
@@ -162,6 +162,21 @@ def test_frontend_route_extension_serves_custom_route(request, tmp_path, selecto
         # The route's own timeout_s (0.5 s) bounds an async handler.
         slow = requests.post(f"{base}{SLOW_PATH}", json={}, timeout=10)
         assert slow.status_code == 503, slow.text
+        # The HTTP timer alone returns that 503; the event loop cancels the
+        # handler separately, and may do so just after the response.
+        cancel_deadline = time.time() + 2
+        while not requests.get(f"{base}{STATE_PATH}", timeout=5).json()[
+            "slow_cancelled"
+        ]:
+            assert (
+                time.time() < cancel_deadline
+            ), "slow handler was not cancelled at its timeout"
+            time.sleep(0.05)
+
+        # A TimeoutError the handler raises itself is a handler failure (500),
+        # not the route's timeout (503).
+        own_timeout = requests.post(f"{base}{OWN_TIMEOUT_PATH}", json={}, timeout=5)
+        assert own_timeout.status_code == 500, own_timeout.text
 
 
 @pytest.mark.timeout(120)

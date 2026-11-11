@@ -750,9 +750,10 @@ curl -s localhost:8000/metrics | grep dynamo_frontend_inter_token_latency_second
   `serving_ready_display_names()`.
 - **Execution limits:** Synchronous handlers run in a small dedicated thread pool. A handler still
   running when the route's `timeout_s` has passed since the request arrived returns 503; an async
-  handler is cancelled then, or never started. With 64 handlers already waiting or running, new
-  extension requests are rejected with the configured overload status code, 529 by default.
-  Request bodies are limited by `DYN_HTTP_BODY_LIMIT_MB`, 45 MB by default.
+  handler is cancelled then. Each route admits 64 calls at once, waiting or running; a request
+  beyond that, or one that finds the pool's queue full, is rejected with the configured overload
+  status code, 529 by default. A handler that raises returns 500. Request bodies are limited by
+  `DYN_HTTP_BODY_LIMIT_MB`, 45 MB by default.
 - **Multiple providers:** Repeating the CLI option or listing whitespace-separated environment
   values loads multiple providers. Duplicate provider names are de-duplicated.
 

@@ -27,6 +27,11 @@ READINESS_PATH = "/test/ctx/ready"
 ECHO_PATH = "/test/echo"
 ECHO_ASYNC_PATH = "/test/echo_async"
 SLOW_PATH = "/test/slow"
+OWN_TIMEOUT_PATH = "/test/own_timeout"
+STATE_PATH = "/test/state"
+
+# Handler side effects the test reads back through STATE_PATH.
+_state = {"slow_cancelled": False}
 
 
 def _hello(ctx: Any) -> dict:
@@ -40,7 +45,6 @@ def _readiness(ctx: Any) -> dict:
 
 
 def _echo(ctx: Any) -> Any:
-    """Synchronous POST handler: returns the parsed JSON request body."""
     return json.loads(ctx.body)
 
 
@@ -55,9 +59,24 @@ async def _echo_async(ctx: Any) -> dict:
 
 
 async def _slow(ctx: Any) -> dict:
-    """Outlives its route's timeout."""
-    await asyncio.sleep(5)
+    """Outlives its route's timeout, and records that the frontend cancelled it."""
+    try:
+        await asyncio.sleep(5)
+    except asyncio.CancelledError:
+        _state["slow_cancelled"] = True
+        raise
     return {}
+
+
+async def _own_timeout(ctx: Any) -> dict:
+    """Raises its own TimeoutError long before the route's 30 s timeout."""
+    async with asyncio.timeout(0.01):
+        await asyncio.sleep(1)
+    return {}
+
+
+def _read_state(ctx: Any) -> dict:
+    return dict(_state)
 
 
 def routes():
@@ -70,6 +89,8 @@ def routes():
         FrontendRoute("POST", ECHO_PATH, _echo),
         FrontendRoute("POST", ECHO_ASYNC_PATH, _echo_async),
         FrontendRoute("POST", SLOW_PATH, _slow, timeout_s=0.5),
+        FrontendRoute("POST", OWN_TIMEOUT_PATH, _own_timeout),
+        FrontendRoute("GET", STATE_PATH, _read_state),
     ]
 
 

@@ -184,20 +184,21 @@ tokenization. That pool also starts each async handler, which then runs on the F
 Keep handlers fast and non-blocking:
 
 - A handler that exceeds its route's `timeout_s` (30 seconds by default, measured from request
-  arrival) returns HTTP 503. An async handler is cancelled at the timeout, and one that has not
-  started by then never starts.
+  arrival) returns HTTP 503. An async handler is cancelled at the timeout, and a call the event loop
+  picks up after its timeout is dropped without running the handler. A 503 does not mean the handler
+  had no effect: it may have been cancelled partway.
 - A client that disconnects does not cancel a running handler.
-- At most 64 handlers can be waiting or running at once. Further requests are rejected with the
-  configured overload status code, HTTP 529 by default. An async handler holds its slot until it
-  finishes or is cancelled.
-- Handler failures return HTTP 500.
+- Each route admits at most 64 calls at once, waiting or running. A request beyond that, or one that
+  finds the thread pool's queue full, is rejected with the configured overload status code, HTTP 529
+  by default. An async handler holds its slot until it finishes or is cancelled.
+- A handler that raises returns HTTP 500. That includes a `TimeoutError` the handler raises itself
+  before the route's timeout.
 - Request bodies are limited by `DYN_HTTP_BODY_LIMIT_MB`, 45 MB by default, the same limit as the
   inference routes.
-- Network, disk, or compute-heavy operations in a synchronous handler can block other extension
-  routes because Python handlers contend for the Global Interpreter Lock (GIL). In an async handler,
-  a blocking call stalls the Frontend's event loop, which also runs Python chat processors
-  (`--dyn-chat-processor vllm` or `sglang`) and shutdown handling. Await the work or move it to a
-  thread.
+- Slow work in a synchronous handler delays other extension routes: it occupies a pool thread, and
+  Python code holds the Global Interpreter Lock (GIL). In an async handler, a blocking call stalls
+  the Frontend's event loop, which also runs Python chat processors (`--dyn-chat-processor vllm` or
+  `sglang`) and shutdown handling. Await the work or move it to a thread.
 
 ## Load multiple providers
 
