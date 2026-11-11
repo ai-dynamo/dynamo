@@ -25,18 +25,19 @@ not answer quality.
 The target deployment must be ready and `shared-model-cache` must be mounted in
 the namespace. Choose the profile matching the deployed eight-worker target.
 
-From the repository root:
+From the repository root, with `CONTEXT` and `NAMESPACE` set to the cluster
+and namespace of the deployment:
 
 ```bash
 export PROFILE=round-robin # or: session-affinity
-kubectl -n "$NAMESPACE" apply \
+kubectl --context "$CONTEXT" -n "$NAMESPACE" apply \
   -f "recipes/cosmos3-super-reasoner/perf/profiles/${PROFILE}.yaml"
-kubectl -n "$NAMESPACE" delete job cosmos3-super-reasoner-perf \
+kubectl --context "$CONTEXT" -n "$NAMESPACE" delete job cosmos3-super-reasoner-perf \
   --ignore-not-found
-kubectl -n "$NAMESPACE" apply \
+kubectl --context "$CONTEXT" -n "$NAMESPACE" apply \
   -f recipes/cosmos3-super-reasoner/perf/perf.yaml
-kubectl -n "$NAMESPACE" logs -f job/cosmos3-super-reasoner-perf
-kubectl -n "$NAMESPACE" wait \
+kubectl --context "$CONTEXT" -n "$NAMESPACE" logs -f job/cosmos3-super-reasoner-perf
+kubectl --context "$CONTEXT" -n "$NAMESPACE" wait \
   --for=condition=Complete job/cosmos3-super-reasoner-perf \
   --timeout=14400s
 ```
@@ -60,10 +61,10 @@ To copy a completed run locally while the deployment is running:
 ```bash
 RUN_ROOT="<artifact-directory-from-the-job-log>"
 export DGD="cosmos3-super-reasoner-agg-h200-${PROFILE}"
-WORKER="$(kubectl -n "$NAMESPACE" get pods \
+WORKER="$(kubectl --context "$CONTEXT" -n "$NAMESPACE" get pods \
   -l "nvidia.com/dynamo-graph-deployment-name=${DGD}" \
   -o name | grep worker | head -n 1)"
-kubectl -n "$NAMESPACE" cp \
+kubectl --context "$CONTEXT" -n "$NAMESPACE" cp \
   "${WORKER#pod/}:${RUN_ROOT}" "./$(basename "$RUN_ROOT")"
 ```
 
@@ -107,12 +108,12 @@ non-empty chat completion:
 
 ```bash
 export PROFILE=round-robin # or: session-affinity
-kubectl -n "$NAMESPACE" apply \
+kubectl --context "$CONTEXT" -n "$NAMESPACE" apply \
   -f "recipes/cosmos3-super-reasoner/perf/profiles/${PROFILE}.yaml"
-kubectl -n "$NAMESPACE" delete job cosmos3-super-reasoner-smoke \
+kubectl --context "$CONTEXT" -n "$NAMESPACE" delete job cosmos3-super-reasoner-smoke \
   --ignore-not-found
-kubectl -n "$NAMESPACE" apply -f recipes/cosmos3-super-reasoner/perf/smoke.yaml
-kubectl -n "$NAMESPACE" logs -f job/cosmos3-super-reasoner-smoke
+kubectl --context "$CONTEXT" -n "$NAMESPACE" apply -f recipes/cosmos3-super-reasoner/perf/smoke.yaml
+kubectl --context "$CONTEXT" -n "$NAMESPACE" logs -f job/cosmos3-super-reasoner-smoke
 ```
 
 ## Compare the routing profiles
