@@ -146,9 +146,9 @@ class DynamoDeploymentClient:
         # Version segment of the DynamoGraphDeployment apiVersion, reset from the
         # manifest in create_deployment: the request path must match the body.
         self.api_version: str = "v1beta1"
-        self.deployment_spec: Optional[Dict[str, Any]] = (
-            None  # Will store the full deployment spec
-        )
+        self.deployment_spec: Optional[
+            Dict[str, Any]
+        ] = None  # Will store the full deployment spec
         self.base_log_dir = Path(base_log_dir) if base_log_dir else Path("logs")
         self.frontend_port = frontend_port
         self.port_forward_process: Optional[subprocess.Popen[bytes]] = None
@@ -271,9 +271,9 @@ class DynamoDeploymentClient:
             self.deployment_spec = deployment
 
         # Ensure deployment_spec is properly loaded
-        assert self.deployment_spec is not None, (
-            "Failed to load deployment specification"
-        )
+        assert (
+            self.deployment_spec is not None
+        ), "Failed to load deployment specification"
 
         self.api_version = (
             self.deployment_spec.get("apiVersion") or "nvidia.com/v1beta1"

@@ -21,11 +21,12 @@ pytest.importorskip("aiofiles")
 pytest.importorskip("kubernetes_asyncio")
 pytest.importorskip("httpx")
 
+from kubernetes_asyncio import client as k8s_client  # noqa: E402
+
 from deploy.utils.dynamo_deployment import (  # noqa: E402
     DeploymentFailedError,
     DynamoDeploymentClient,
 )
-from kubernetes_asyncio import client as k8s_client  # noqa: E402
 
 pytestmark = pytest.mark.pre_merge
 
