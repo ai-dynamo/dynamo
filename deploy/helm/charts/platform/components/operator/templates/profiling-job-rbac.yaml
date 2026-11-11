@@ -48,6 +48,13 @@ rules:
 - apiGroups: ["nvidia.com"]
   resources: ["dynamographdeployments"]
   verbs: ["get", "create", "delete", "list", "watch"]
+# Services and component owners - needed to discover the graph's actual frontend endpoint
+- apiGroups: [""]
+  resources: ["services"]
+  verbs: ["list"]
+- apiGroups: ["nvidia.com"]
+  resources: ["dynamocomponentdeployments"]
+  verbs: ["get"]
 # Pods - needed for listing pods by label selector and getting logs from test deployments
 - apiGroups: [""]
   resources: ["pods"]
@@ -97,6 +104,13 @@ rules:
 - apiGroups: ["nvidia.com"]
   resources: ["dynamographdeployments"]
   verbs: ["get", "create", "delete", "list", "watch"]
+# Services and component owners - needed to discover the graph's actual frontend endpoint
+- apiGroups: [""]
+  resources: ["services"]
+  verbs: ["list"]
+- apiGroups: ["nvidia.com"]
+  resources: ["dynamocomponentdeployments"]
+  verbs: ["get"]
 # Pods - needed for listing pods by label selector and getting logs from test deployments
 - apiGroups: [""]
   resources: ["pods"]

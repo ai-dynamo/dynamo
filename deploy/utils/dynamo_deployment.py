@@ -67,7 +67,7 @@ def find_available_port(start_port: int = 8000) -> int:
         except OSError:
             continue
     raise RuntimeError(
-        f"No available ports found in range {start_port}-{start_port+99}"
+        f"No available ports found in range {start_port}-{start_port + 99}"
     )
 
 
@@ -134,20 +134,21 @@ class DynamoDeploymentClient:
             namespace: The Kubernetes namespace
             deployment_name: Name of the deployment, defaults to vllm-v1-agg
             base_log_dir: Base directory for storing logs, defaults to ./logs if not specified
-            service_name: Service name for connecting to the service, defaults to {deployment_name}-frontend
+            service_name: Service name for connecting to the service; otherwise discover the owned frontend Service when the deployment is ready
         """
         self.namespace = namespace
         self.deployment_name = f"{deployment_name}-{str(uuid.uuid4())[:4]}"
         self.model_name = model_name
-        self.service_name = service_name or f"{self.deployment_name}-frontend"
+        self.service_name = service_name or None
+        self._explicit_service_name = bool(service_name)
         self.components: List[str] = []  # Will store component names from CR
         self._original_components: List[str] = []
         # Version segment of the DynamoGraphDeployment apiVersion, reset from the
         # manifest in create_deployment: the request path must match the body.
         self.api_version: str = "v1beta1"
-        self.deployment_spec: Optional[
-            Dict[str, Any]
-        ] = None  # Will store the full deployment spec
+        self.deployment_spec: Optional[Dict[str, Any]] = (
+            None  # Will store the full deployment spec
+        )
         self.base_log_dir = Path(base_log_dir) if base_log_dir else Path("logs")
         self.frontend_port = frontend_port
         self.port_forward_process: Optional[subprocess.Popen[bytes]] = None
@@ -175,6 +176,11 @@ class DynamoDeploymentClient:
             local_port: Local port to forward to (if None, find first available port starting from 8000)
             quiet: If True, suppress kubectl port-forward output messages (default: False)
         """
+        if self.service_name is None:
+            raise RuntimeError(
+                "Wait for deployment readiness before connecting to its frontend"
+            )
+
         if local_port is None:
             local_port = find_available_port(8000)
             if not quiet:
@@ -239,6 +245,10 @@ class DynamoDeploymentClient:
         """
         Get the service URL using Kubernetes service DNS.
         """
+        if self.service_name is None:
+            raise RuntimeError(
+                "Wait for deployment readiness before connecting to its frontend"
+            )
         service_url = f"http://{self.service_name}.{self.namespace}.svc.cluster.local:{self.frontend_port}"
         print(f"Using service URL: {service_url}")
         return service_url
@@ -261,9 +271,9 @@ class DynamoDeploymentClient:
             self.deployment_spec = deployment
 
         # Ensure deployment_spec is properly loaded
-        assert (
-            self.deployment_spec is not None
-        ), "Failed to load deployment specification"
+        assert self.deployment_spec is not None, (
+            "Failed to load deployment specification"
+        )
 
         self.api_version = (
             self.deployment_spec.get("apiVersion") or "nvidia.com/v1beta1"
@@ -319,6 +329,62 @@ class DynamoDeploymentClient:
             else:
                 print(f"Failed to create deployment {self.deployment_name}: {e}")
                 raise
+
+    async def _resolve_frontend_service(self, deployment: Dict[str, Any]) -> bool:
+        """Find the frontend Service owned by this graph or one of its components.
+
+        Read the actual name instead of repeating the operator's naming rules.
+        This also supports an existing numeric Service retained during an upgrade.
+        """
+        graph_uid = deployment["metadata"]["uid"]
+        services = await self.core_api.list_namespaced_service(
+            namespace=self.namespace,
+            label_selector=f"nvidia.com/dynamo-graph-deployment-name={self.deployment_name}",
+        )
+        frontend_names = []
+        for service in services.items:
+            if (service.spec.selector or {}).get(
+                "nvidia.com/dynamo-component-type"
+            ) != "frontend":
+                continue
+            for owner in service.metadata.owner_references or []:
+                if (
+                    not owner.controller
+                    or not owner.uid
+                    or not owner.api_version.startswith("nvidia.com/")
+                ):
+                    continue
+                if owner.kind == "DynamoGraphDeployment" and owner.uid == graph_uid:
+                    frontend_names.append(service.metadata.name)
+                    break
+                if owner.kind != "DynamoComponentDeployment":
+                    continue
+                component = await self.custom_api.get_namespaced_custom_object(
+                    group="nvidia.com",
+                    version=owner.api_version.split("/")[-1],
+                    namespace=self.namespace,
+                    plural="dynamocomponentdeployments",
+                    name=owner.name,
+                )
+                metadata = component["metadata"]
+                if metadata["uid"] == owner.uid and any(
+                    reference.get("controller")
+                    and reference["kind"] == "DynamoGraphDeployment"
+                    and reference["apiVersion"].startswith("nvidia.com/")
+                    and reference["uid"] == graph_uid
+                    for reference in metadata.get("ownerReferences", [])
+                ):
+                    frontend_names.append(service.metadata.name)
+                    break
+
+        if not frontend_names:
+            return False
+        if len(frontend_names) != 1:
+            raise DeploymentFailedError(
+                f"Deployment '{self.deployment_name}' has multiple owned frontend Services: {frontend_names}"
+            )
+        self.service_name = frontend_names[0]
+        return True
 
     async def _detect_terminal_pod_failure(self) -> Optional[str]:
         """Inspect this deployment's worker pods for a terminal failure.
@@ -459,7 +525,7 @@ class DynamoDeploymentClient:
                         # Show first 2 components, abbreviate if more
                         components_str = ", ".join(not_ready_components[:2])
                         if len(not_ready_components) > 2:
-                            components_str += f" +{len(not_ready_components)-2} more"
+                            components_str += f" +{len(not_ready_components) - 2} more"
                         status_str = f"Waiting for: {components_str}"
                     else:
                         status_str = f"State: {current_state}"
@@ -488,7 +554,14 @@ class DynamoDeploymentClient:
                         last_conditions_str = conditions_str
 
                 # Check if deployment is ready
-                if ready_condition and state_successful:
+                if (
+                    ready_condition
+                    and state_successful
+                    and (
+                        self._explicit_service_name
+                        or await self._resolve_frontend_service(status)
+                    )
+                ):
                     progress.finish(
                         f"✅ Deployment '{self.deployment_name}' ready after {elapsed:.1f}s"
                     )

@@ -173,6 +173,11 @@ func (r *graphReconciler) renderPodCliqueSet(
 			if err != nil {
 				return nil, nil, err
 			}
+			// Keep an owned discovery Service at its pre-upgrade address.
+			service.Name, err = dynamo.ResolveComponentServiceName(ctx, r.Client, deployment, plan.ResourcePrefix+"-serve")
+			if err != nil {
+				return nil, nil, err
+			}
 			service.Spec.Selector[dynamo.LPXServingLabel] = consts.KubeLabelValueTrue
 			service.Spec.Selector[grovecommon.LabelPartOfKey] = pcs.Name
 			resources = append(resources, service)

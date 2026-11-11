@@ -25,6 +25,7 @@ from deploy.utils.dynamo_deployment import (  # noqa: E402
     DeploymentFailedError,
     DynamoDeploymentClient,
 )
+from kubernetes_asyncio import client as k8s_client  # noqa: E402
 
 pytestmark = pytest.mark.pre_merge
 
@@ -137,3 +138,141 @@ async def test_create_deployment_owner_reference_targets_v1beta1_dgdr(monkeypatc
     assert owner_references[0]["apiVersion"] == "nvidia.com/v1beta1"
     assert owner_references[0]["kind"] == "DynamoGraphDeploymentRequest"
     assert owner_references[0]["name"] == "dgdr-test"
+
+
+@pytest.mark.unit
+@pytest.mark.gpu_0
+@pytest.mark.parametrize(
+    ("deployment_name", "service_name", "owner_kind"),
+    [
+        (
+            "70b-llama-production",
+            "svc-70b-llama-production-abcd-frontend",
+            "DynamoComponentDeployment",
+        ),
+        (
+            "70b-llama-production",
+            "70b-llama-production-abcd-frontend",
+            "DynamoGraphDeployment",
+        ),
+        ("7" + "a" * 49, "svc-7" + "a" * 53 + "-beef", "DynamoComponentDeployment"),
+        ("graph.with.dots", "graph-with-dots-abcd-frontend", "DynamoGraphDeployment"),
+    ],
+)
+async def test_ready_deployment_uses_actual_owned_frontend_service(
+    monkeypatch, deployment_name, service_name, owner_kind
+):
+    """Both connection methods must use the rendered or retained Service name."""
+    monkeypatch.setattr("deploy.utils.dynamo_deployment.uuid.uuid4", lambda: "abcd")
+    client = DynamoDeploymentClient(namespace="ns", deployment_name=deployment_name)
+    graph_uid = "graph-uid"
+    component_uid = "component-uid"
+    component_name = f"{client.deployment_name}-frontend"
+    service = k8s_client.V1Service(
+        metadata=k8s_client.V1ObjectMeta(
+            name=service_name,
+            owner_references=[
+                k8s_client.V1OwnerReference(
+                    api_version="nvidia.com/v1beta1",
+                    kind=owner_kind,
+                    name=component_name
+                    if owner_kind == "DynamoComponentDeployment"
+                    else client.deployment_name,
+                    uid=component_uid
+                    if owner_kind == "DynamoComponentDeployment"
+                    else graph_uid,
+                    controller=True,
+                )
+            ],
+        ),
+        spec=k8s_client.V1ServiceSpec(
+            selector={"nvidia.com/dynamo-component-type": "frontend"}
+        ),
+    )
+    client.core_api = MagicMock()
+    unowned_service = k8s_client.V1Service(
+        metadata=k8s_client.V1ObjectMeta(name="unowned-frontend"),
+        spec=k8s_client.V1ServiceSpec(
+            selector={"nvidia.com/dynamo-component-type": "frontend"}
+        ),
+    )
+    worker_service = k8s_client.V1Service(
+        metadata=k8s_client.V1ObjectMeta(
+            name="worker", owner_references=service.metadata.owner_references
+        ),
+        spec=k8s_client.V1ServiceSpec(
+            selector={"nvidia.com/dynamo-component-type": "worker"}
+        ),
+    )
+    client.core_api.list_namespaced_service = AsyncMock(
+        return_value=k8s_client.V1ServiceList(
+            items=[unowned_service, worker_service, service]
+        )
+    )
+    client.custom_api = MagicMock()
+
+    async def read_resource(**kwargs):
+        """Return a ready graph or the component that owns its Service."""
+        if kwargs["plural"] == "dynamographdeployments":
+            return {
+                "metadata": {"uid": graph_uid},
+                "status": {
+                    "state": "successful",
+                    "conditions": [{"type": "Ready", "status": "True"}],
+                },
+            }
+        assert kwargs["plural"] == "dynamocomponentdeployments"
+        assert kwargs["name"] == component_name
+        return {
+            "metadata": {
+                "uid": component_uid,
+                "ownerReferences": [
+                    {
+                        "apiVersion": "nvidia.com/v1beta1",
+                        "kind": "DynamoGraphDeployment",
+                        "uid": graph_uid,
+                        "controller": True,
+                    }
+                ],
+            }
+        }
+
+    client.custom_api.get_namespaced_custom_object = AsyncMock(
+        side_effect=read_resource
+    )
+    assert await client.wait_for_deployment_ready() is True
+    assert (
+        client.get_service_url()
+        == f"http://{service_name}.ns.svc.cluster.local:{client.frontend_port}"
+    )
+    client.core_api.list_namespaced_service.assert_awaited_once_with(
+        namespace="ns",
+        label_selector=f"nvidia.com/dynamo-graph-deployment-name={client.deployment_name}",
+    )
+
+    popen = MagicMock()
+    monkeypatch.setattr("deploy.utils.dynamo_deployment.subprocess.Popen", popen)
+    monkeypatch.setattr("deploy.utils.dynamo_deployment.time.sleep", lambda _: None)
+    client.port_forward_frontend(local_port=client.frontend_port + 1, quiet=True)
+    assert popen.call_args.args[0][2] == f"svc/{service_name}"
+
+
+@pytest.mark.unit
+@pytest.mark.gpu_0
+async def test_ready_deployment_preserves_explicit_service_name():
+    """An explicit endpoint must not require Service discovery permissions."""
+    client = DynamoDeploymentClient(namespace="ns", service_name="custom-endpoint")
+    client.custom_api = MagicMock()
+    client.custom_api.get_namespaced_custom_object = AsyncMock(
+        return_value={
+            "status": {
+                "state": "successful",
+                "conditions": [{"type": "Ready", "status": "True"}],
+            }
+        }
+    )
+    client._resolve_frontend_service = AsyncMock()  # type: ignore[method-assign]
+
+    assert await client.wait_for_deployment_ready() is True
+    client._resolve_frontend_service.assert_not_awaited()
+    assert client.service_name == "custom-endpoint"

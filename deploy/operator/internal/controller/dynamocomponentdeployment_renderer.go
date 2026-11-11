@@ -146,7 +146,7 @@ func (r *dcdWorkloadRenderer) renderMultinodePodTemplateSpecsForDGDComponent(
 		dynamo.AddBaseModelLabel(podLabels, effective.ModelRef)
 		dynamo.AddBaseModelAnnotation(podAnnotations, effective.ModelRef)
 		componentType, err := r.getWorkloadComponentType(
-			ctx, dgd.Namespace, workloadName, string(effective.ComponentType), podLabels,
+			ctx, dgd.Namespace, workloadName, string(effective.ComponentType), podLabels, dgd,
 		)
 		if err != nil {
 			return nil, nil, err
@@ -577,8 +577,13 @@ func (r *dcdWorkloadRenderer) generateService(
 	ctx context.Context,
 	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
 ) (*corev1.Service, bool, error) {
+	// Preserve a Service that this DCD or its parent DGD already controls.
+	resolvedName, err := dynamo.ResolveComponentServiceName(ctx, r.reader, dcd, dcd.Name)
+	if err != nil {
+		return nil, false, err
+	}
 	deleteStub := &corev1.Service{
-		Name:      dynamo.ComponentServiceName(dcd.Name),
+		Name:      resolvedName,
 		Namespace: dcd.Namespace,
 	}
 
@@ -612,6 +617,7 @@ func (r *dcdWorkloadRenderer) generateService(
 	if err != nil {
 		return nil, false, err
 	}
+	svc.Name = resolvedName
 	if dcd.IsMultinode() {
 		svc.Spec.Selector[dcdWorkloadRoleLabel] = string(dynamo.RoleLeader)
 	}
@@ -625,6 +631,11 @@ func (r *dcdWorkloadRenderer) generateServiceForDGDComponent(
 	componentName string,
 	serviceName string,
 ) (*corev1.Service, bool, error) {
+	// Stable Services keep their identity when an unchanged graph is upgraded.
+	resolvedName, err := dynamo.ResolveComponentServiceName(ctx, r.reader, dgd, serviceName)
+	if err != nil {
+		return nil, false, err
+	}
 	annotations := dynamo.GetDGDComponentResourceAnnotations(dgd, componentName, component)
 	labels := dynamo.GetDGDComponentResourceLabels(dgd, componentName, component)
 	labels[commonconsts.KubeLabelDynamoGraphDeploymentName] = dgd.Name
@@ -635,13 +646,13 @@ func (r *dcdWorkloadRenderer) generateServiceForDGDComponent(
 	isK8sDiscovery := commonController.IsK8sDiscoveryEnabled(r.config.Discovery.Backend, annotations)
 	componentType := string(component.ComponentType)
 	if !isK8sDiscovery && componentType != commonconsts.ComponentTypeFrontend {
-		return &corev1.Service{Name: dynamo.ComponentServiceName(serviceName), Namespace: dgd.Namespace}, true, nil
+		return &corev1.Service{Name: resolvedName, Namespace: dgd.Namespace}, true, nil
 	}
 	dynamoNamespace := dynamo.GetDynamoNamespace(dgd, component)
 	if dynamoNamespace == "" {
 		return nil, false, fmt.Errorf("expected component %s to have a dynamoNamespace", componentName)
 	}
-	workloadComponentType, err := r.getWorkloadComponentType(ctx, dgd.Namespace, serviceName, componentType, labels)
+	workloadComponentType, err := r.getWorkloadComponentType(ctx, dgd.Namespace, serviceName, componentType, labels, dgd)
 	if err != nil {
 		return nil, false, err
 	}
@@ -658,6 +669,7 @@ func (r *dcdWorkloadRenderer) generateServiceForDGDComponent(
 	if err != nil {
 		return nil, false, err
 	}
+	service.Name = resolvedName
 	if component.IsMultinode() {
 		service.Spec.Selector[dcdWorkloadRoleLabel] = string(dynamo.RoleLeader)
 	}
@@ -701,6 +713,7 @@ func (r *dcdWorkloadRenderer) getDCDWorkloadComponentType(
 		dcd.Name,
 		dynamo.GetDCDWorkloadComponentType(dcd),
 		dcd.GetLabels(),
+		dcd,
 	)
 }
 
@@ -710,6 +723,7 @@ func (r *dcdWorkloadRenderer) getWorkloadComponentType(
 	workloadName string,
 	componentType string,
 	labels map[string]string,
+	owner metav1.Object,
 ) (string, error) {
 	if componentType == commonconsts.ComponentTypeWorker || !dynamo.IsWorkerComponent(componentType) {
 		return componentType, nil
@@ -719,7 +733,7 @@ func (r *dcdWorkloadRenderer) getWorkloadComponentType(
 		return commonconsts.ComponentTypeWorker, nil
 	}
 
-	legacy, err := r.hasExistingLegacyWorkerSelector(ctx, namespace, workloadName, componentType)
+	legacy, err := r.hasExistingLegacyWorkerSelector(ctx, namespace, workloadName, componentType, owner)
 	if err != nil {
 		return "", err
 	}
@@ -735,6 +749,7 @@ func (r *dcdWorkloadRenderer) hasExistingLegacyWorkerSelector(
 	namespace string,
 	workloadName string,
 	componentType string,
+	owner metav1.Object,
 ) (bool, error) {
 	if r == nil || r.reader == nil {
 		return false, nil
@@ -765,7 +780,11 @@ func (r *dcdWorkloadRenderer) hasExistingLegacyWorkerSelector(
 		}
 	}
 
-	serviceName := dynamo.ComponentServiceName(workloadName)
+	// Inspect the same owned Service that rendering will retain or create.
+	serviceName, err := dynamo.ResolveComponentServiceName(ctx, r.reader, owner, workloadName)
+	if err != nil {
+		return false, err
+	}
 	service := &corev1.Service{}
 	if err := r.reader.Get(ctx, types.NamespacedName{Name: serviceName, Namespace: namespace}, service); err == nil {
 		return hasLegacyWorkerSelector(service.Spec.Selector, componentType), nil

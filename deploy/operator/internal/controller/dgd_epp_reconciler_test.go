@@ -21,15 +21,22 @@ import (
 	"context"
 	"testing"
 
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/epp"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/onsi/gomega"
+	"github.com/stretchr/testify/require"
+	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/uuid"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	gaiev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 )
 
 // TestDGDEPPReconciler_deleteOwnedLegacyEPPConfigMap covers the migration
@@ -101,4 +108,39 @@ func TestDGDEPPReconciler_deleteOwnedLegacyEPPConfigMap(t *testing.T) {
 
 		g.Expect(reconciler.deleteOwnedLegacyEPPConfigMap(ctx, dgd)).To(gomega.Succeed())
 	})
+}
+
+func TestDGDEPPReconcilerRetainsLegacyChildServiceReference(t *testing.T) {
+	t.Log("Seed an existing numeric EPP Service controlled by the graph's child DCD")
+	scheme := newDynamoGraphDeploymentControllerTestScheme(t)
+	require.NoError(t, gaiev1.Install(scheme))
+	require.NoError(t, networkingv1beta1.AddToScheme(scheme))
+	dgd := &v1beta1.DynamoGraphDeployment{
+		Name: "7model", Namespace: "default", UID: "graph-uid",
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
+				ComponentName: "epp", ComponentType: v1beta1.ComponentTypeEPP,
+			}},
+		},
+	}
+	name := dynamo.GetDCDResourceName(dgd, "epp", "")
+	dcd := &v1beta1.DynamoComponentDeployment{Name: name, Namespace: dgd.Namespace, UID: "component-uid"}
+	require.NoError(t, controllerutil.SetControllerReference(dgd, dcd, scheme))
+	service := &corev1.Service{Name: name, Namespace: dgd.Namespace}
+	require.NoError(t, controllerutil.SetControllerReference(dcd, service, scheme))
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(dgd, dcd, service).Build()
+	config := &configv1alpha1.OperatorConfiguration{
+		ServiceMesh: configv1alpha1.ServiceMeshConfiguration{Provider: "istio", Istio: &configv1alpha1.IstioMeshConfiguration{}},
+	}
+	reconciler := newDGDEPPReconciler(newDGDResourceSyncer(kubeClient, nil), config,
+		&commoncontroller.RuntimeConfig{Gate: features.Gates{Istio: true}}, nil)
+
+	t.Log("Reconcile the graph-owned pool and DestinationRule without renaming the child Service")
+	require.NoError(t, reconciler.Reconcile(t.Context(), dgd))
+	pool := &gaiev1.InferencePool{}
+	require.NoError(t, kubeClient.Get(t.Context(), types.NamespacedName{Name: epp.GetPoolName(dgd.Name), Namespace: dgd.Namespace}, pool))
+	require.Equal(t, name, string(pool.Spec.EndpointPickerRef.Name))
+	destinationRule := &networkingv1beta1.DestinationRule{}
+	require.NoError(t, kubeClient.Get(t.Context(), types.NamespacedName{Name: name, Namespace: dgd.Namespace}, destinationRule))
+	require.Equal(t, name+".default.svc.cluster.local", destinationRule.Spec.Host)
 }

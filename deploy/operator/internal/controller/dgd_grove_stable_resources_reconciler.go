@@ -177,11 +177,17 @@ func (r *groveStableResourcesReconciler) reconcileComponentService(
 	componentName := component.ComponentName
 	params := groveComponentServiceParams(dgd, component, podCliqueSet)
 	params.IsK8sDiscovery = isK8sDiscoveryEnabled
+	// Keep the address of a Service already owned by this graph.
+	resolvedName, err := dynamo.ResolveComponentServiceName(ctx, r, dgd, params.ServiceName)
+	if err != nil {
+		return nil, err
+	}
 	service, err := dynamo.GenerateComponentService(params)
 	if err != nil {
 		logger.Error(err, "failed to generate the main component service")
 		return nil, fmt.Errorf("failed to generate the main component service: %w", err)
 	}
+	service.Name = resolvedName
 	_, syncedService, err := commoncontroller.SyncResource(
 		ctx,
 		r,
@@ -293,6 +299,15 @@ func (r *groveStableResourcesReconciler) reconcileElasticEPLeaderService(
 	params := groveComponentServiceParams(dgd, component, podCliqueSet)
 	service := dynamo.GenerateElasticEPHeadlessService(params)
 
+	// Preserve a legacy Ray Service independently of the discovery Service.
+	resolvedName, err := dynamo.ResolveComponentServiceName(ctx, r, dgd, params.ServiceName+"-ray")
+	if err != nil {
+		return nil, err
+	}
+	if resolvedName != dynamo.ComponentServiceName(params.ServiceName+"-ray") {
+		service.Name = resolvedName
+	}
+
 	// Handle removal here rather than through SyncResource, which resolves the live object
 	// by name alone and would delete a Service this DGD never created.
 	if toDelete {
@@ -347,12 +362,19 @@ func (r *groveStableResourcesReconciler) reconcileFrontendIngress(
 		ingressSpec = preservedIngressSpec
 	}
 
+	// Both routing resources must use the retained Service name.
+	resolvedName, err := dynamo.ResolveComponentServiceName(ctx, r, dgd, dynamo.GetDCDResourceName(dgd, componentName, ""))
+	if err != nil {
+		return nil, err
+	}
+
 	ingress := dynamo.GenerateComponentIngress(
 		ctx,
 		dynamo.GetDCDResourceName(dgd, componentName, ""),
 		dgd.Namespace,
 		ingressSpec,
 	)
+	ingress.Spec.Rules[0].HTTP.Paths[0].Backend.Service.Name = resolvedName
 	_, syncedIngress, err := commoncontroller.SyncResource(
 		ctx,
 		r,
@@ -390,6 +412,7 @@ func (r *groveStableResourcesReconciler) reconcileFrontendIngress(
 		dgd.Namespace,
 		ingressSpec,
 	)
+	virtualService.Spec.Http[0].Route[0].Destination.Host = resolvedName
 	_, syncedVirtualService, err := commoncontroller.SyncResource(
 		ctx,
 		r,

@@ -17,3 +17,41 @@ tests:
             apiGroups: [""]
             resources: ["nodes"]
             verbs: ["get", "list", "watch"]
+  - it: should allow endpoint discovery in cluster-wide mode
+    documentIndex: 0
+    asserts:
+      - equal:
+          path: kind
+          value: ClusterRole
+      - contains:
+          path: rules
+          content:
+            apiGroups: [""]
+            resources: ["services"]
+            verbs: ["list"]
+      - contains:
+          path: rules
+          content:
+            apiGroups: ["nvidia.com"]
+            resources: ["dynamocomponentdeployments"]
+            verbs: ["get"]
+  - it: should allow endpoint discovery in namespace-restricted mode
+    set:
+      dynamo-operator.namespaceRestriction.enabled: true
+    documentIndex: 1
+    asserts:
+      - equal:
+          path: kind
+          value: Role
+      - contains:
+          path: rules
+          content:
+            apiGroups: [""]
+            resources: ["services"]
+            verbs: ["list"]
+      - contains:
+          path: rules
+          content:
+            apiGroups: ["nvidia.com"]
+            resources: ["dynamocomponentdeployments"]
+            verbs: ["get"]

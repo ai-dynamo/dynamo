@@ -108,8 +108,12 @@ func (r *dgdEPPReconciler) Reconcile(
 	}
 
 	eppServiceName := dynamo.GetDCDResourceName(dgd, componentName, "")
-	// The pool must reference the Service by the name GenerateComponentService gives it.
-	inferencePool, err := epp.GenerateInferencePool(dgd, componentName, dynamo.ComponentServiceName(eppServiceName))
+	// The pool must use the same owned Service as the component renderer.
+	resolvedName, err := dynamo.ResolveComponentServiceName(ctx, r, dgd, eppServiceName)
+	if err != nil {
+		return err
+	}
+	inferencePool, err := epp.GenerateInferencePool(dgd, componentName, resolvedName)
 	if err != nil {
 		logger.Error(err, "Failed to generate EPP InferencePool")
 		return fmt.Errorf("failed to generate EPP InferencePool: %w", err)
@@ -131,6 +135,7 @@ func (r *dgdEPPReconciler) Reconcile(
 	}
 	if istioAvailable {
 		destinationRule := dynamo.GenerateEPPDestinationRule(eppServiceName, dgd.Namespace, r.config.ServiceMesh)
+		destinationRule.Spec.Host = fmt.Sprintf("%s.%s.svc.cluster.local", resolvedName, dgd.Namespace)
 		if _, _, err := commoncontroller.SyncResource(ctx, r, dgd, func(context.Context) (*networkingv1beta1.DestinationRule, bool, error) {
 			return destinationRule, !meshEnabled, nil
 		}); err != nil {

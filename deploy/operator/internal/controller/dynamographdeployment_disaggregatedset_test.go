@@ -1296,3 +1296,44 @@ func TestWorkloadRoutingAnnotationsChanged(t *testing.T) {
 func updateEvent(oldObj, newObj *nvidiacomv1beta1.DynamoGraphDeployment) event.UpdateEvent {
 	return event.UpdateEvent{ObjectOld: oldObj, ObjectNew: newObj}
 }
+
+func TestDisaggregatedSetStableServicePreservesNumericNameOnUpgrade(t *testing.T) {
+	t.Log("Seed a graph's existing numeric frontend Service from before the operator upgrade")
+	scheme := runtime.NewScheme()
+	require.NoError(t, nvidiacomv1beta1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
+		Name: "70b-llama-production", Namespace: "default", UID: "graph-uid",
+		Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
+			Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{{
+				ComponentName: "frontend", ComponentType: nvidiacomv1beta1.ComponentTypeFrontend,
+			}},
+		},
+	}
+	component := &dgd.Spec.Components[0]
+	legacyName := dynamo.GetDCDResourceName(dgd, "frontend", "")
+	legacy := &corev1.Service{
+		Name: legacyName, Namespace: dgd.Namespace, UID: "service-uid",
+		OwnerReferences: []metav1.OwnerReference{*dgdControllerOwnerReference(dgd)},
+		Spec:            corev1.ServiceSpec{ClusterIP: "10.0.0.42"},
+	}
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(dgd, legacy).Build()
+	renderer := newDCDWorkloadRenderer(kubeClient, &configv1alpha1.OperatorConfiguration{}, &commoncontroller.RuntimeConfig{}, nil)
+	stable := newDisaggregatedSetStableResourcesReconciler(kubeClient, renderer)
+
+	t.Log("Reconcile the unchanged graph and remove stale stable Services")
+	desired, err := stable.Reconcile(t.Context(), dgd, nil,
+		map[string]*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{"frontend": component},
+		disaggregatedSetSelection{}, "", false, dynamo.RollingUpdateContext{})
+	require.NoError(t, err)
+	require.Contains(t, desired, legacyName)
+	require.NoError(t, stable.DeleteStale(t.Context(), dgd, desired))
+
+	t.Log("Verify the original DNS name, UID, and ClusterIP survive without a replacement")
+	service := &corev1.Service{}
+	require.NoError(t, kubeClient.Get(t.Context(), client.ObjectKeyFromObject(legacy), service))
+	require.Equal(t, legacy.UID, service.UID)
+	require.Equal(t, legacy.Spec.ClusterIP, service.Spec.ClusterIP)
+	err = kubeClient.Get(t.Context(), client.ObjectKey{Namespace: dgd.Namespace, Name: dynamo.ComponentServiceName(legacyName)}, &corev1.Service{})
+	require.True(t, apierrors.IsNotFound(err))
+}

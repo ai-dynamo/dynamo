@@ -22,6 +22,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sort"
 	"strings"
 	"testing"
@@ -3641,6 +3642,67 @@ func TestDCDWorkloadRenderer_FrontendStartupProbeOrigin(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, tt.wantEnabled, pod.Spec.Containers[0].StartupProbe != nil)
 			require.Equal(t, original, dcd)
+		})
+	}
+}
+
+func TestDCDServicePreservesOwnedNumericName(t *testing.T) {
+	for _, owned := range []bool{true, false} {
+		t.Run(fmt.Sprintf("legacy-owned-%t", owned), func(t *testing.T) {
+			t.Log("Seed a legacy numeric Service, either owned by this DCD or by another DCD")
+			dcd := &v1beta1.DynamoComponentDeployment{
+				Name: "70b-frontend", Namespace: "default", UID: "dcd-uid",
+				Labels: map[string]string{commonconsts.KubeLabelDynamoNamespace: "graph", commonconsts.KubeLabelDynamoGraphDeploymentName: "70b"},
+				Spec: v1beta1.DynamoComponentDeploymentSpec{
+					DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+						ComponentName: "frontend", ComponentType: v1beta1.ComponentTypeFrontend,
+					},
+				},
+			}
+			ownerUID := dcd.UID
+			if !owned {
+				ownerUID = "other-dcd-uid"
+			}
+			legacy := &corev1.Service{
+				Name: dcd.Name, Namespace: dcd.Namespace,
+				OwnerReferences: []metav1.OwnerReference{{
+					APIVersion: v1beta1.GroupVersion.String(), Kind: "DynamoComponentDeployment",
+					Name: dcd.Name, UID: ownerUID, Controller: new(true),
+				}},
+			}
+			s := scheme.Scheme
+			require.NoError(t, v1beta1.AddToScheme(s))
+			r := &DynamoComponentDeploymentReconciler{
+				Client: fake.NewClientBuilder().WithScheme(s).WithObjects(dcd, legacy).Build(),
+				Config: &configv1alpha1.OperatorConfiguration{Ingress: configv1alpha1.IngressConfiguration{ControllerClassName: "nginx", VirtualServiceGateway: "mesh/gateway"}},
+			}
+
+			t.Log("Render the frontend Service and use a legacy name only for the matching owner")
+			service, deleted, err := r.generateService(t.Context(), generateResourceOption{dynamoComponentDeployment: dcd})
+			require.NoError(t, err)
+			require.False(t, deleted)
+			want := dynamo.ComponentServiceName(dcd.Name)
+			if owned {
+				want = legacy.Name
+			}
+			require.Equal(t, want, service.Name)
+
+			t.Log("Verify the Ingress and VirtualService reference the resolved frontend Service")
+			ingress, deleted, err := r.generateIngress(t.Context(), generateResourceOption{dynamoComponentDeployment: dcd})
+			require.NoError(t, err)
+			require.False(t, deleted)
+			require.Equal(t, want, ingress.Spec.Rules[0].HTTP.Paths[0].Backend.Service.Name)
+			virtualService, deleted, err := r.generateVirtualService(t.Context(), generateResourceOption{dynamoComponentDeployment: dcd})
+			require.NoError(t, err)
+			require.False(t, deleted)
+			require.Equal(t, want, virtualService.Spec.Http[0].Route[0].Destination.Host)
+
+			t.Log("Render worker cleanup with the same resolved Service name")
+			dcd.Spec.ComponentType = v1beta1.ComponentTypeWorker
+			stub, deleted, err := r.generateService(t.Context(), generateResourceOption{dynamoComponentDeployment: dcd})
+			require.NoError(t, err)
+			require.True(t, deleted)
+			require.Equal(t, want, stub.Name)
 		})
 	}
 }

@@ -813,7 +813,14 @@ func (r *DynamoComponentDeploymentReconciler) generateIngress(ctx context.Contex
 		log.Info("Ingress is not enabled")
 		return ingress, true, nil
 	}
-	return dynamo.GenerateComponentIngress(ctx, opt.dynamoComponentDeployment.Name, opt.dynamoComponentDeployment.Namespace, ingressSpec), false, nil
+	// Route to an owned legacy Service when this DCD predates the naming fix.
+	serviceName, err := dynamo.ResolveComponentServiceName(ctx, r.Client, opt.dynamoComponentDeployment, opt.dynamoComponentDeployment.Name)
+	if err != nil {
+		return nil, false, err
+	}
+	ingress = dynamo.GenerateComponentIngress(ctx, opt.dynamoComponentDeployment.Name, opt.dynamoComponentDeployment.Namespace, ingressSpec)
+	ingress.Spec.Rules[0].HTTP.Paths[0].Backend.Service.Name = serviceName
+	return ingress, false, nil
 }
 
 func (r *DynamoComponentDeploymentReconciler) generateVirtualService(ctx context.Context, opt generateResourceOption) (*networkingv1beta1.VirtualService, bool, error) {
@@ -833,7 +840,14 @@ func (r *DynamoComponentDeploymentReconciler) generateVirtualService(ctx context
 		log.Info("VirtualService is not enabled")
 		return vs, true, nil
 	}
-	return dynamo.GenerateComponentVirtualService(ctx, opt.dynamoComponentDeployment.Name, opt.dynamoComponentDeployment.Namespace, ingressSpec), false, nil
+	// Route to an owned legacy Service when this DCD predates the naming fix.
+	serviceName, err := dynamo.ResolveComponentServiceName(ctx, r.Client, opt.dynamoComponentDeployment, opt.dynamoComponentDeployment.Name)
+	if err != nil {
+		return nil, false, err
+	}
+	vs = dynamo.GenerateComponentVirtualService(ctx, opt.dynamoComponentDeployment.Name, opt.dynamoComponentDeployment.Namespace, ingressSpec)
+	vs.Spec.Http[0].Route[0].Destination.Host = serviceName
+	return vs, false, nil
 }
 
 func preservedAlphaIngressSpec(dcd *nvidiacomv1beta1.DynamoComponentDeployment) (dynamo.IngressSpec, bool, error) {

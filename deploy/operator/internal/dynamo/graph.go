@@ -813,13 +813,63 @@ func NormalizeKubeResourceName(name string) string {
 const componentServiceNamePrefix = "svc-"
 
 // ComponentServiceName returns the DNS-1035 name of a component's Service; every
-// reference must use it. Only digit-leading names change, so existing Services keep theirs.
+// reference to a new Service must use it. Owned legacy names are resolved separately.
 func ComponentServiceName(name string) string {
 	normalized := NormalizeKubeResourceName(name)
 	if normalized == "" || ('a' <= normalized[0] && normalized[0] <= 'z') {
 		return normalized
 	}
 	return shortenServiceName(componentServiceNamePrefix + normalized)
+}
+
+// ResolveComponentServiceName keeps a legacy Service controlled by owner, its
+// parent DGD, or a verified child DCD. owner must be non-nil; a nil reader
+// supports offline rendering.
+func ResolveComponentServiceName(ctx context.Context, reader ctrlclient.Reader, owner metav1.Object, name string) (string, error) {
+	// Letter-leading names need no compatibility lookup.
+	normalizedName := NormalizeKubeResourceName(name)
+	desiredName := ComponentServiceName(name)
+	if reader == nil || normalizedName == desiredName {
+		return desiredName, nil
+	}
+
+	// Only a Service belonging to this deployment may retain its legacy identity.
+	legacyName := shortenServiceName(normalizedName)
+	service := &corev1.Service{}
+	err := reader.Get(ctx, types.NamespacedName{Name: legacyName, Namespace: owner.GetNamespace()}, service)
+	if k8serrors.IsNotFound(err) {
+		return desiredName, nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("resolve legacy Service %s/%s: %w", owner.GetNamespace(), legacyName, err)
+	}
+	if owner.GetUID() != "" && metav1.IsControlledBy(service, owner) {
+		return legacyName, nil
+	}
+
+	// DGD stable Services can be referenced by their child DCD renderer.
+	parent := metav1.GetControllerOf(owner)
+	controller := metav1.GetControllerOf(service)
+	if parent != nil && controller != nil && parent.UID != "" &&
+		parent.Kind == "DynamoGraphDeployment" &&
+		strings.HasPrefix(parent.APIVersion, v1beta1.GroupVersion.Group+"/") &&
+		strings.HasPrefix(controller.APIVersion, v1beta1.GroupVersion.Group+"/") &&
+		parent.Kind == controller.Kind && parent.UID == controller.UID {
+		return legacyName, nil
+	}
+	// EPP references are graph-owned even when the Service belongs to a child DCD.
+	if _, graphOwner := owner.(*v1beta1.DynamoGraphDeployment); graphOwner && controller != nil &&
+		controller.Kind == "DynamoComponentDeployment" && strings.HasPrefix(controller.APIVersion, v1beta1.GroupVersion.Group+"/") {
+		component := &v1beta1.DynamoComponentDeployment{}
+		if err := reader.Get(ctx, types.NamespacedName{Name: controller.Name, Namespace: owner.GetNamespace()}, component); err != nil {
+			return "", fmt.Errorf("resolve legacy Service owner %s: %w", controller.Name, err)
+		}
+		if component.UID == controller.UID && owner.GetUID() != "" && metav1.IsControlledBy(component, owner) {
+			return legacyName, nil
+		}
+	}
+
+	return desiredName, nil
 }
 
 type SecretsRetriever interface {
