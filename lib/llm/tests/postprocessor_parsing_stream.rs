@@ -6530,6 +6530,7 @@ async fn kimi_native_adapter_releases_open_strings_and_keeps_completed_siblings(
     let uses_unified = dynamo_runtime::config::selected_parser_version().unwrap()
         != dynamo_runtime::config::ParserVersion::V1;
     let q = "q".repeat(4096);
+    let mut k3_ids = std::collections::BTreeSet::new();
     let shapes = [
         (
             "kimi_k2",
@@ -6539,7 +6540,6 @@ async fn kimi_native_adapter_releases_open_strings_and_keeps_completed_siblings(
             "\"}",
             "<|tool_call_end|>",
             "<|tool_calls_section_end|>",
-            "functions.write_file:0",
         ),
         (
             "kimi_k3",
@@ -6549,7 +6549,6 @@ async fn kimi_native_adapter_releases_open_strings_and_keeps_completed_siblings(
             "<|close|>argument<|sep|>",
             "<|close|>call<|sep|>",
             "<|close|>tools<|sep|>",
-            "write_file:0",
         ),
         (
             "kimi-k3",
@@ -6559,10 +6558,9 @@ async fn kimi_native_adapter_releases_open_strings_and_keeps_completed_siblings(
             "\"}<|close|>json<|sep|>",
             "<|close|>call<|sep|>",
             "<|close|>tools<|sep|>",
-            "write_file:0",
         ),
     ];
-    for (tool, reason, warmup, header, value_end, call_end, section_end, expected_id) in shapes {
+    for (tool, reason, warmup, header, value_end, call_end, section_end) in shapes {
         for size in [7, 1024] {
             for thinking in ["default", "disabled", "prefill"] {
                 for tail in ["complete", "truncated", "sibling", "unclosed_valid_json"] {
@@ -6621,18 +6619,28 @@ async fn kimi_native_adapter_releases_open_strings_and_keeps_completed_siblings(
                             chunks.push(item.expect("source remains open"));
                         }
                         let early = kimi_native_calls(&chunks);
-                        if uses_unified {
+                        let first_id = if uses_unified {
                             assert_eq!(early.len(), 1, "{tool}/{size}/{thinking}");
                             let call = early.get(&0).unwrap();
-                            assert_eq!(call.id.as_deref(), Some(expected_id));
+                            let id = call.id.as_deref().expect("first chunk carries an ID");
+                            if tool == "kimi_k2" {
+                                assert_eq!(id, "functions.write_file:0");
+                            } else {
+                                let uuid = uuid::Uuid::parse_str(id.strip_prefix("call-").unwrap())
+                                    .unwrap();
+                                assert_eq!(uuid.get_version_num(), 4);
+                                assert!(k3_ids.insert(id.to_owned()), "K3 ID reused: {id}");
+                            }
                             assert_eq!(call.name.as_deref(), Some("write_file"));
                             assert_eq!(
                                 call.arguments.bytes().filter(|byte| *byte == b'q').count(),
                                 3072
                             );
+                            Some(id.to_owned())
                         } else {
                             assert!(early.is_empty(), "legacy calls remain buffered");
-                        }
+                            None
+                        };
                         if tail != "truncated" {
                             tx.unbounded_send(kimi_native_chunk(
                                 &format!("{}{value_end}", &q[3072..]),
@@ -6682,7 +6690,7 @@ async fn kimi_native_adapter_releases_open_strings_and_keeps_completed_siblings(
                             .collect();
                         let calls = kimi_native_calls(&chunks);
                         if uses_unified && tail != "truncated" {
-                            assert_eq!(calls[&0].id.as_deref(), Some(expected_id));
+                            assert_eq!(calls[&0].id.as_deref(), first_id.as_deref());
                             assert_eq!(
                                 serde_json::from_str::<Value>(&calls[&0].arguments).unwrap(),
                                 serde_json::json!({"count":7,"content":q})
@@ -6716,7 +6724,7 @@ async fn kimi_native_adapter_releases_open_strings_and_keeps_completed_siblings(
                                 serde_json::json!({"count":7,"content":q})
                             );
                             if uses_unified {
-                                assert_eq!(final_calls[0].id, expected_id);
+                                assert_eq!(Some(final_calls[0].id.as_str()), first_id.as_deref());
                             }
                         }
                         assert_eq!(
