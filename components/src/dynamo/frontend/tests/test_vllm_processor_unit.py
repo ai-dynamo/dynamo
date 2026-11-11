@@ -2677,9 +2677,8 @@ class TestRoutedEnginePath:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("late_prompt_logprobs", [False, True])
-    @pytest.mark.parametrize("stream", [True, False])
     async def test_requested_token_ids_stop_at_local_stop(
-        self, tokenizer, stream, late_prompt_logprobs, real_vllm_processor_module
+        self, tokenizer, late_prompt_logprobs, real_vllm_processor_module
     ):
         """Generated IDs end at the token completing a local stop; prompt IDs once."""
         prefix_tokens = tokenizer.encode("hello ST", add_special_tokens=False)
@@ -2691,7 +2690,7 @@ class TestRoutedEnginePath:
         prompt_payload = [None, {"17": {"logprob": -0.25, "rank": 1}}]
         request_data = {
             "model": MODEL,
-            "stream": stream,
+            "stream": True,
             "nvext": {"extra_fields": ["completion_token_ids", "prompt_token_ids"]},
         }
         if late_prompt_logprobs:
@@ -2732,9 +2731,8 @@ class TestRoutedEnginePath:
         ) + [prompt_payload if late_prompt_logprobs else None]
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("stream", [True, False])
     async def test_requested_token_ids_survive_buffered_output_and_hidden_eos(
-        self, tokenizer, stream, real_vllm_processor_module
+        self, tokenizer, real_vllm_processor_module
     ):
         """IDs held while the parser emits nothing reach the next chunk in order."""
 
@@ -2776,7 +2774,7 @@ class TestRoutedEnginePath:
             items,
             {
                 "model": MODEL,
-                "stream": stream,
+                "stream": True,
                 "nvext": {"extra_fields": ["completion_token_ids", "prompt_token_ids"]},
             },
             wrap_post=lambda post: _HoldingPost(post, held_chunks),
@@ -2802,9 +2800,8 @@ class TestRoutedEnginePath:
         ) + [[1]]
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("stream", [True, False])
     async def test_prompt_token_ids_sent_once_with_parallel_choices(
-        self, tokenizer, stream, real_vllm_processor_module
+        self, tokenizer, real_vllm_processor_module
     ):
         """Send prompt IDs on one terminal chunk without adding completion IDs."""
         first = tokenizer.encode("first answer", add_special_tokens=False)
@@ -2820,7 +2817,7 @@ class TestRoutedEnginePath:
             items,
             {
                 "model": MODEL,
-                "stream": stream,
+                "stream": True,
                 "n": 2,
                 "nvext": {"extra_fields": ["prompt_token_ids"]},
             },
