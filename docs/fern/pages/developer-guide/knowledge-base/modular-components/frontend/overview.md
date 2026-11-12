@@ -90,6 +90,16 @@ spec:
 
 See the [KServe gRPC Frontend](frontend-guide.md) page for KServe configuration options.
 
+## Responses API Output
+
+Dynamo serves `/v1/responses` by converting each request to Chat Completions and converting the result back. The converted output differs from the OpenAI Responses API in these ways:
+
+- Reasoning items are always returned when the model produces reasoning, with the raw trace in `content` as `reasoning_text` parts and streamed through `reasoning_text` events. Dynamo does not generate reasoning summaries: `summary` remains empty even when `reasoning.summary` is requested.
+- Assistant messages carry `phase`. When the model's output parser delimits assistant messages, as the Muse Spark parser does, each message keeps the phase the parser reports. Otherwise text followed by a function call is `commentary`, and text still open when the response ends is `final_answer`. Text followed by more reasoning is `commentary` when the request can call tools (it defines tools and `tool_choice` is not `none`), and `final_answer` otherwise.
+- For messages the parser does not delimit, streaming sets `phase` on `response.output_item.done` and in `response.completed`, not on `response.output_item.added`.
+- Non-streaming responses preserve the recorded post-parse output order when it still matches the final aggregated content and calls. A text, call, text sequence returns a `commentary` message, the call, and a `final_answer` message in both modes. If later post-processing invalidates the recorded order, conversion falls back to the aggregate fields and places text before calls.
+- When a request replays earlier output, consecutive assistant messages merge into one assistant turn regardless of `phase`, unless the model's chat template renders phases, as Muse Spark's does.
+
 ## Next Steps
 
 | Document | Description |

@@ -1432,11 +1432,14 @@ pub(crate) fn responses_incomplete_reason(
 }
 
 impl ResponseParams {
-    fn reasoning_summary_requested(&self) -> bool {
-        self.reasoning
-            .as_ref()
-            .and_then(|reasoning| reasoning.summary)
-            .is_some()
+    /// The request defines tools and `tool_choice` is not `none`, so the model
+    /// may follow text with a call.
+    fn tools_callable(&self) -> bool {
+        self.tools.as_ref().is_some_and(|tools| !tools.is_empty())
+            && !matches!(
+                self.tool_choice,
+                Some(RequestToolChoiceParam::Option(ToolChoiceOptions::None))
+            )
     }
 
     /// Borrow the retained history-aware map, or rebuild from current tool definitions
@@ -1513,18 +1516,31 @@ pub(super) fn normalize_tools(tools: Vec<Tool>) -> Vec<Tool> {
 }
 
 /// Build an assistant text message output item.
-fn make_text_message(id: String, text: String) -> OutputItem {
+fn make_text_message(id: String, text: String, phase: Option<MessagePhase>) -> OutputItem {
     OutputItem::Message(OutputMessage {
         id,
         role: AssistantRole::Assistant,
         status: OutputStatus::Completed,
-        phase: None,
+        phase,
         content: vec![OutputMessageContent::OutputText(OutputTextContent {
             text,
             annotations: vec![],
             logprobs: Some(vec![]),
         })],
     })
+}
+
+/// No summarizer runs in this conversion, so raw reasoning stays in `content`.
+fn reasoning_item(id: String, text: String, status: OutputStatus) -> ReasoningItem {
+    ReasoningItem {
+        id: Some(id),
+        summary: vec![],
+        content: Some(vec![ReasoningItemContent::ReasoningText(
+            ReasoningTextContent { text },
+        )]),
+        encrypted_content: None,
+        status: Some(status),
+    }
 }
 
 /// Convert a ChatCompletion response into a Responses API response object,
@@ -1549,26 +1565,20 @@ pub fn chat_completion_to_response(
     if let Some(choice) = choice {
         incomplete_reason = responses_incomplete_reason(choice.finish_reason);
 
-        // Reasoning precedes tool calls so output order matches the decoded turn.
+        // Reasoning precedes visible output so output order matches the decoded turn.
         if let Some(reasoning_text) = choice.message.reasoning_content
             && !reasoning_text.is_empty()
-            && params.reasoning_summary_requested()
         {
-            output.push(OutputItem::Reasoning(ReasoningItem {
-                id: Some(format!("rs_{}", Uuid::new_v4().simple())),
-                summary: vec![],
-                content: Some(vec![ReasoningItemContent::ReasoningText(
-                    ReasoningTextContent {
-                        text: reasoning_text,
-                    },
-                )]),
-                encrypted_content: None,
-                status: Some(OutputStatus::Completed),
-            }));
+            output.push(OutputItem::Reasoning(reasoning_item(
+                format!("rs_{}", Uuid::new_v4().simple()),
+                reasoning_text,
+                OutputStatus::Completed,
+            )));
         }
 
         let replay_calls = choice.message.tool_calls.clone().unwrap_or_default();
         // Handle structured tool calls
+        let mut function_calls = Vec::new();
         if let Some(tool_calls) = choice.message.tool_calls {
             if let Some(disallowed) = tool_calls.iter().find(|tc| {
                 allowed_names
@@ -1581,7 +1591,7 @@ pub fn chat_completion_to_response(
                 );
             }
             for tc in &tool_calls {
-                output.push(params.tool_output(
+                function_calls.push(params.tool_output(
                     format!("fc_{}", Uuid::new_v4().simple()),
                     tc.id.clone(),
                     &tc.function.name,
@@ -1615,14 +1625,22 @@ pub fn chat_completion_to_response(
             }));
         }
         if !content.is_empty() {
+            // An aggregate without retained parser events cannot locate text
+            // relative to calls, so it falls back to commentary before them.
+            let phase = if function_calls.is_empty() {
+                MessagePhase::FinalAnswer
+            } else {
+                MessagePhase::Commentary
+            };
             output.push(OutputItem::Message(OutputMessage {
                 id: message_id.clone(),
                 role: AssistantRole::Assistant,
                 status: OutputStatus::Completed,
-                phase: None,
+                phase: Some(phase),
                 content,
             }));
         }
+        output.extend(function_calls);
 
         if !response_events.is_empty() {
             // Batch parsing can supply boundaries without ordered reasoning
@@ -1647,10 +1665,10 @@ pub fn chat_completion_to_response(
                     let OutputItem::Message(mut message) = make_text_message(
                         format!("msg_{}", Uuid::new_v4().simple()),
                         std::mem::take(text),
+                        Some(phase.unwrap_or(MessagePhase::FinalAnswer)),
                     ) else {
                         unreachable!()
                     };
-                    message.phase = phase;
                     message.status = status;
                     output.push(OutputItem::Message(message));
                     *open = false;
@@ -1681,23 +1699,24 @@ pub fn chat_completion_to_response(
                         phase = None;
                     }
                     ResponseOutputEvent::Reasoning(reasoning) => {
+                        let inferred_phase = if params.tools_callable() {
+                            MessagePhase::Commentary
+                        } else {
+                            MessagePhase::FinalAnswer
+                        };
                         flush(
                             &mut output,
                             &mut text,
-                            phase,
+                            Some(phase.unwrap_or(inferred_phase)),
                             OutputStatus::Completed,
                             &mut open,
                         );
-                        if params.reasoning_summary_requested() && !reasoning.is_empty() {
-                            output.push(OutputItem::Reasoning(ReasoningItem {
-                                id: Some(format!("rs_{}", Uuid::new_v4().simple())),
-                                summary: vec![],
-                                content: Some(vec![ReasoningItemContent::ReasoningText(
-                                    ReasoningTextContent { text: reasoning },
-                                )]),
-                                encrypted_content: None,
-                                status: Some(OutputStatus::Completed),
-                            }));
+                        if !reasoning.is_empty() {
+                            output.push(OutputItem::Reasoning(reasoning_item(
+                                format!("rs_{}", Uuid::new_v4().simple()),
+                                reasoning,
+                                OutputStatus::Completed,
+                            )));
                         }
                     }
                     ResponseOutputEvent::Text(delta) => text.push_str(&delta),
@@ -1705,7 +1724,7 @@ pub fn chat_completion_to_response(
                         flush(
                             &mut output,
                             &mut text,
-                            phase,
+                            Some(phase.unwrap_or(MessagePhase::Commentary)),
                             OutputStatus::Completed,
                             &mut open,
                         );
@@ -1759,11 +1778,19 @@ pub fn chat_completion_to_response(
         }
 
         if output.is_empty() {
-            output.push(make_text_message(message_id, String::new()));
+            output.push(make_text_message(
+                message_id,
+                String::new(),
+                Some(MessagePhase::FinalAnswer),
+            ));
         }
     } else {
         tracing::warn!("No choices in chat completion response, using empty content");
-        output.push(make_text_message(message_id, String::new()));
+        output.push(make_text_message(
+            message_id,
+            String::new(),
+            Some(MessagePhase::FinalAnswer),
+        ));
     }
 
     // Apply `include` filtering: strip logprobs from output text unless
@@ -1793,28 +1820,15 @@ pub fn chat_completion_to_response(
     if incomplete_reason.is_some() {
         // The budget runs out once, inside the item the model was still writing.
         // Earlier output items were complete and must not be relabelled.
-        let terminal = output.iter().rposition(|item| {
-            matches!(
-                item,
-                OutputItem::Message(_)
-                    | OutputItem::FunctionCall(_)
-                    | OutputItem::CustomToolCall(_)
-                    | OutputItem::ToolSearchCall(_)
-            )
-        });
-        for (index, item) in output.iter_mut().enumerate() {
+        if let Some(item) = output.last_mut() {
             match item {
-                OutputItem::Message(message) if Some(index) == terminal => {
-                    message.status = OutputStatus::Incomplete
-                }
-                OutputItem::FunctionCall(call) if Some(index) == terminal => {
-                    call.status = Some(OutputStatus::Incomplete)
-                }
-                OutputItem::ToolSearchCall(call) if Some(index) == terminal => {
+                OutputItem::Message(message) => message.status = OutputStatus::Incomplete,
+                OutputItem::FunctionCall(call) => call.status = Some(OutputStatus::Incomplete),
+                OutputItem::ToolSearchCall(call) => {
                     call.status =
                         dynamo_protocols::types::responses::FunctionCallStatus::Incomplete;
                 }
-                OutputItem::Reasoning(reasoning) if terminal.is_none() => {
+                OutputItem::Reasoning(reasoning) => {
                     reasoning.status = Some(OutputStatus::Incomplete)
                 }
                 _ => {}
@@ -3938,6 +3952,7 @@ mod tests {
             _ => panic!("Expected Message variant"),
         };
         assert_eq!(msg.role, AssistantRole::Assistant);
+        assert_eq!(msg.phase, Some(MessagePhase::FinalAnswer));
 
         match &msg.content[0] {
             OutputMessageContent::OutputText(txt) => {
@@ -4118,16 +4133,17 @@ mod tests {
         chat.inner.choices[0].finish_reason = Some(FinishReason::ToolCalls);
         let response = chat_completion_to_response(chat, &params, None).unwrap();
         assert_eq!(response.inner.output.len(), 2);
-        let OutputItem::FunctionCall(call) = &response.inner.output[0] else {
+        let OutputItem::FunctionCall(call) = &response.inner.output[1] else {
             panic!("expected the structured function call");
         };
         assert_eq!(call.call_id, "call_original");
         assert_eq!(call.name, "get_weather");
         assert_eq!(call.namespace.as_deref(), Some("weather"));
         assert_eq!(call.arguments, r#"{"city":"Paris"}"#);
-        let OutputItem::Message(message) = &response.inner.output[1] else {
+        let OutputItem::Message(message) = &response.inner.output[0] else {
             panic!("expected the original text");
         };
+        assert_eq!(message.phase, Some(MessagePhase::Commentary));
         let OutputMessageContent::OutputText(content) = &message.content[0] else {
             panic!("expected output text");
         };
@@ -4586,40 +4602,91 @@ mod tests {
     }
 
     #[test]
-    fn test_reasoning_text_requires_explicit_request() {
+    fn test_raw_reasoning_is_returned_without_fabricating_a_summary() {
         let unrequested = chat_completion_to_response(
-            make_chat_resp_with_reasoning("private reasoning"),
+            make_chat_resp_with_reasoning("raw reasoning"),
             &ResponseParams::default(),
             None,
         )
         .unwrap();
-        assert!(
-            unrequested
-                .inner
-                .output
-                .iter()
-                .all(|item| !matches!(item, OutputItem::Reasoning(_)))
-        );
+        let [
+            OutputItem::Reasoning(reasoning),
+            OutputItem::Message(message),
+        ] = unrequested.inner.output.as_slice()
+        else {
+            panic!("expected reasoning before the message");
+        };
+        assert!(reasoning.summary.is_empty());
+        assert_eq!(reasoning_text(reasoning), "raw reasoning");
+        assert_eq!(message.phase, Some(MessagePhase::FinalAnswer));
 
         let params = requested_reasoning_params();
         let requested =
             chat_completion_to_response(make_chat_resp_with_reasoning("summary"), &params, None)
                 .unwrap();
-        let reasoning = requested
-            .inner
-            .output
-            .iter()
-            .find_map(|item| match item {
-                OutputItem::Reasoning(reasoning) => Some(reasoning),
-                _ => None,
-            })
-            .expect("requested reasoning output");
+        let OutputItem::Reasoning(reasoning) = &requested.inner.output[0] else {
+            panic!("expected reasoning output");
+        };
         assert!(reasoning.summary.is_empty());
         assert_eq!(reasoning_text(reasoning), "summary");
     }
 
     #[test]
-    fn test_reasoning_summary_precedes_structured_tool_calls() {
+    fn test_reasoning_only_response_has_no_placeholder_message() {
+        let mut chat_resp = make_chat_resp_with_reasoning("only thinking");
+        chat_resp.inner.choices[0].message.content = None;
+
+        let response =
+            chat_completion_to_response(chat_resp, &ResponseParams::default(), None).unwrap();
+        assert!(matches!(
+            response.inner.output.as_slice(),
+            [OutputItem::Reasoning(_)]
+        ));
+
+        let mut empty = make_chat_resp_with_text("");
+        empty.inner.choices[0].message.content = None;
+        let response =
+            chat_completion_to_response(empty, &ResponseParams::default(), None).unwrap();
+        let [OutputItem::Message(placeholder)] = response.inner.output.as_slice() else {
+            panic!("expected only the placeholder message");
+        };
+        assert_eq!(placeholder.phase, Some(MessagePhase::FinalAnswer));
+    }
+
+    /// Text that accompanies calls is commentary placed before them, and a
+    /// length stop marks only the last call incomplete.
+    #[test]
+    fn test_unary_output_orders_reasoning_commentary_then_calls() {
+        let mut chat_resp = make_chat_resp_with_tool_calls(
+            dynamo_protocols::types::FinishReason::Length,
+            &[r#"{"location":"SF"}"#, r#"{"location":"NY"#],
+        );
+        let message = &mut chat_resp.inner.choices[0].message;
+        message.reasoning_content = Some("check both cities".into());
+        message.content = Some(dynamo_protocols::types::ChatCompletionMessageContent::Text(
+            "Checking.".into(),
+        ));
+
+        let response =
+            chat_completion_to_response(chat_resp, &ResponseParams::default(), None).unwrap();
+        let [
+            OutputItem::Reasoning(reasoning),
+            OutputItem::Message(message),
+            OutputItem::FunctionCall(first),
+            OutputItem::FunctionCall(last),
+        ] = response.inner.output.as_slice()
+        else {
+            panic!("expected reasoning, message, then calls");
+        };
+        assert_eq!(reasoning.status, Some(OutputStatus::Completed));
+        assert_eq!(message.phase, Some(MessagePhase::Commentary));
+        assert_eq!(message.status, OutputStatus::Completed);
+        assert_eq!(first.status, Some(OutputStatus::Completed));
+        assert_eq!(last.status, Some(OutputStatus::Incomplete));
+    }
+
+    #[test]
+    fn test_requested_summary_keeps_raw_reasoning_before_tool_calls() {
         use dynamo_protocols::types::responses::{Reasoning, ReasoningSummary};
 
         let mut chat_resp = make_chat_resp_with_reasoning("look up the weather");
@@ -5009,6 +5076,7 @@ mod tests {
             serde_json::json!({"type": "reasoning_text", "text": "raw reasoning"})
         );
         assert_eq!(json["output"][1]["type"], "message");
+        assert_eq!(json["output"][1]["phase"], "final_answer");
 
         // Nullable-required fields must be present as null (not missing).
         for key in [
