@@ -8,7 +8,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU8;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, LazyLock};
+use std::sync::{Arc, LazyLock, OnceLock};
 use std::time::Duration;
 
 use axum::body::Body;
@@ -56,15 +56,23 @@ use crate::frontend_config::{
     MediaRejectionConfig, MetricsConfig,
 };
 
-/// Middleware that echoes `x-request-id` from request to response headers.
-async fn echo_request_id_header(
+/// Middleware on every route: echoes `x-request-id` from request to response, and
+/// once shutdown has begun retires the HTTP/1.x connection after this response so
+/// connection pools stop reusing a terminating frontend. HTTP/2 and gRPC
+/// connections are retired with GOAWAY by the accept loop instead.
+async fn finalize_response_headers(
+    axum::extract::State(state): axum::extract::State<Arc<State>>,
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
     let x_request_id = request.headers().get("x-request-id").cloned();
+    let version = request.version();
     let mut response = next.run(request).await;
     if let Some(value) = x_request_id {
         response.headers_mut().insert("x-request-id", value);
+    }
+    if version <= Version::HTTP_11 && !state.is_ready() {
+        response = close_draining_connection(response, version);
     }
     response
 }
@@ -124,6 +132,14 @@ fn close_draining_connection(
     response
 }
 
+/// Advise clients to retry a straggler rejected during the drain on another
+/// frontend, after one second.
+fn add_retry_after(response: &mut axum::response::Response) {
+    response
+        .headers_mut()
+        .insert(header::RETRY_AFTER, header::HeaderValue::from_static("1"));
+}
+
 /// Error protocol of a mounted inference route, used when the readiness gate
 /// rejects a request before the route's own error handling runs.
 #[derive(Clone, Copy)]
@@ -154,9 +170,15 @@ impl InferenceReadinessState {
                     status,
                     error.message(),
                 );
-                return close_draining_connection(response, request.version());
+                let mut response = close_draining_connection(response, request.version());
+                add_retry_after(&mut response);
+                return response;
             }
-            None => return draining_inference_response(request.version()),
+            None => {
+                let mut response = draining_inference_response(request.version());
+                add_retry_after(&mut response);
+                return response;
+            }
         };
         let decision_error = dynamo_decisions::DecisionError::new(
             dialect,
@@ -167,7 +189,9 @@ impl InferenceReadinessState {
         let mut response = (status, axum::Json(decision_error.response_body())).into_response();
         let request_id = super::openai::get_or_create_request_id(request.headers());
         super::systemone::attach_request_ids(&mut response, &request_id);
-        close_draining_connection(response, request.version())
+        let mut response = close_draining_connection(response, request.version());
+        add_retry_after(&mut response);
+        response
     }
 }
 
@@ -176,18 +200,18 @@ async fn track_inflight_inference(
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    use futures::StreamExt;
     let state = &readiness.state;
 
-    // Requests rejected during draining should not extend the drain window.
-    if !state.is_ready() {
+    // Requests rejected while the frontend is no longer admitting should not
+    // extend the drain window.
+    if !state.is_admitting() {
         return readiness.rejection(&request);
     }
 
     let permit = state.acquire_inflight();
-    // Close the race where shutdown starts after the readiness check but
+    // Close the race where draining starts after the admission check but
     // before this request is counted as inflight.
-    if !state.is_ready() {
+    if !state.is_admitting() {
         drop(permit);
         return readiness.rejection(&request);
     }
@@ -195,11 +219,13 @@ async fn track_inflight_inference(
     let response = next.run(request).await;
     let (parts, body) = response.into_parts();
     // Keep the permit alive until the full response body, including streams,
-    // finishes or is dropped.
-    let stream = body.into_data_stream().map(move |result| {
-        let _permit = &permit;
-        result
-    });
+    // finishes or is dropped, and end the stream with an error if the shutdown
+    // controller aborts it at the deadline (no chunk terminator / RST_STREAM).
+    let stream = super::shutdown::AbortableBodyStream::new(
+        body.into_data_stream(),
+        state.abort_token(),
+        permit,
+    );
     Response::from_parts(parts, Body::from_stream(stream))
 }
 
@@ -209,6 +235,12 @@ pub struct State {
     manager: Arc<ModelManager>,
     discovery_client: Arc<dyn Discovery>,
     service_observer: Arc<ServiceObserver>,
+    /// The shutdown controller for the current serving run. Set when `run()`
+    /// starts; handlers reach it to observe the abort deadline.
+    shutdown_controller: OnceLock<Arc<super::shutdown::ShutdownController>>,
+    /// The runtime's force-shutdown token, so a second signal skips the window
+    /// and the drain. Unset for standalone listeners with no runtime.
+    force_token: OnceLock<CancellationToken>,
     flags: StateFlags,
     cancel_token: CancellationToken,
     // Frontend API behavior read by request handlers after the service is built.
@@ -404,16 +436,20 @@ impl BackendErrorCheck {
 /// Lifecycle stage for the HTTP frontend.
 ///
 /// The stage gates readiness and request admission separately from the runtime
-/// cancellation token so the frontend can stop accepting new requests before
+/// cancellation token so the frontend can withdraw readiness, keep serving
+/// during a propagation window, then stop accepting new requests, all before
 /// tearing down discovery and transport state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ServiceStage {
     /// The frontend is ready to admit new inference requests.
     Ready = 0,
+    /// Readiness is withdrawn, but every request is still admitted and served so
+    /// that endpoint updates can propagate to the load balancers.
+    Propagating = 1,
     /// The frontend is rejecting new requests while admitted responses drain.
-    Draining = 1,
+    Draining = 2,
     /// The frontend is cancelling runtime state and shutting down.
-    Stopping = 2,
+    Stopping = 3,
 }
 
 impl ServiceStage {
@@ -424,9 +460,15 @@ impl ServiceStage {
     fn from_u8(value: u8) -> Self {
         match value {
             0 => Self::Ready,
-            1 => Self::Draining,
+            1 => Self::Propagating,
+            2 => Self::Draining,
             _ => Self::Stopping,
         }
+    }
+
+    /// Whether the frontend admits new inference requests in this stage.
+    pub fn is_admitting(self) -> bool {
+        matches!(self, Self::Ready | Self::Propagating)
     }
 }
 
@@ -434,6 +476,7 @@ impl std::fmt::Display for ServiceStage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Ready => f.write_str("ready"),
+            Self::Propagating => f.write_str("propagating"),
             Self::Draining => f.write_str("draining"),
             Self::Stopping => f.write_str("stopping"),
         }
@@ -469,15 +512,38 @@ impl ServiceObserver {
         ServiceStage::from_u8(self.stage.load(Ordering::Acquire))
     }
 
-    /// Return true when the frontend should admit new inference requests.
+    /// Return true when the frontend is ready: it reports healthy and `ServerReady`.
     pub fn is_ready(&self) -> bool {
         self.stage() == ServiceStage::Ready
     }
 
+    /// Return true when the frontend admits new inference requests: either ready
+    /// or serving inside the propagation window.
+    pub fn is_admitting(&self) -> bool {
+        self.stage().is_admitting()
+    }
+
+    /// Mark the frontend as propagating.
+    ///
+    /// Propagating withdraws readiness so load balancers stop routing new
+    /// connections here, while every admitted request is still served so that
+    /// the endpoint update can reach them first.
+    pub fn start_propagating(&self) {
+        if self.stage() != ServiceStage::Ready {
+            return;
+        }
+        tracing::info!(
+            inflight_requests = self.inflight_count(),
+            "frontend service entering propagating stage"
+        );
+        self.stage
+            .store(ServiceStage::Propagating.as_u8(), Ordering::Release);
+    }
+
     /// Mark the frontend as draining.
     ///
-    /// Draining makes readiness fail and causes request admission checks to
-    /// reject new inference requests while existing response bodies continue.
+    /// Draining makes request admission checks reject new inference requests
+    /// while existing response bodies continue.
     pub fn start_draining(&self) {
         tracing::info!(
             previous_stage = ?self.stage(),
@@ -681,6 +747,8 @@ impl State {
             metrics: Arc::new(Metrics::new_with_prefix(config.metrics_config.prefix())),
             discovery_client,
             service_observer: Arc::new(ServiceObserver::default()),
+            shutdown_controller: OnceLock::new(),
+            force_token: OnceLock::new(),
             nvext_enabled: config.nvext_enabled,
             flags: StateFlags {
                 chat_endpoints_enabled: AtomicBool::new(false),
@@ -778,6 +846,74 @@ impl State {
         self.service_observer.is_ready()
     }
 
+    /// Whether the frontend admits new inference requests (ready or propagating).
+    pub fn is_admitting(&self) -> bool {
+        self.service_observer.is_admitting()
+    }
+
+    /// Record the shutdown controller for the current serving run. Called once,
+    /// when `run()` starts; a second `run()` on the same service keeps the first.
+    pub(super) fn set_shutdown_controller(
+        &self,
+        controller: Arc<super::shutdown::ShutdownController>,
+    ) {
+        if self.shutdown_controller.set(controller).is_err() {
+            tracing::warn!(
+                "HTTP service run() called again on the same instance; handlers keep \
+                 observing the first run's shutdown controller"
+            );
+        }
+    }
+
+    pub(super) fn shutdown_controller(&self) -> Option<&Arc<super::shutdown::ShutdownController>> {
+        self.shutdown_controller.get()
+    }
+
+    /// Record the runtime's force-shutdown token so a second signal can skip the
+    /// window and drain. Called once, before `run()`; a later call is ignored
+    /// with a warning because the controller may already observe the first token.
+    pub(super) fn set_force_token(&self, token: CancellationToken) {
+        if self.force_token.set(token).is_err() {
+            tracing::warn!("force-shutdown token set after the HTTP service already had one");
+        }
+    }
+
+    /// Use `token` as the force-shutdown token unless one was set explicitly.
+    pub(super) fn init_force_token(&self, token: CancellationToken) {
+        let _ = self.force_token.get_or_init(|| token);
+    }
+
+    /// The force token for this run. When none was wired from a runtime, a
+    /// process-local token is created and stored on first use, so the controller
+    /// and [`State::force_shutdown`] share the same one.
+    pub(super) fn force_token(&self) -> CancellationToken {
+        self.force_token.get_or_init(CancellationToken::new).clone()
+    }
+
+    /// Force the in-progress shutdown: the frontend skips its propagation window
+    /// and drain and aborts in-flight exchanges. Normally driven by the runtime's
+    /// force-shutdown token; also callable directly (tests, embedders).
+    pub fn force_shutdown(&self) {
+        self.force_token().cancel();
+    }
+
+    /// The force-shutdown token for this run, so another listener sharing this
+    /// state (the gRPC frontend reusing the metrics service) can observe a forced
+    /// shutdown.
+    pub fn force_shutdown_token(&self) -> CancellationToken {
+        self.force_token()
+    }
+
+    /// The token that fires when the shutdown controller aborts in-flight
+    /// exchanges at the drain deadline. A fresh token (never cancelled) before
+    /// the service is serving, so handlers can always observe it.
+    pub(super) fn abort_token(&self) -> CancellationToken {
+        self.shutdown_controller
+            .get()
+            .map(|controller| controller.abort_token())
+            .unwrap_or_default()
+    }
+
     /// Check the model's local HTTP routes independently of process readiness.
     /// Tensor-only models have no HTTP inference route. Every HTTP engine
     /// registered for this model must have its corresponding route enabled.
@@ -815,6 +951,10 @@ impl State {
             && routes
                 .iter()
                 .all(|(has_engine, endpoint)| !*has_engine || self.flags.get(endpoint))
+    }
+
+    pub fn start_propagating(&self) {
+        self.service_observer.start_propagating();
     }
 
     pub fn start_draining(&self) {
@@ -950,6 +1090,7 @@ pub struct HttpService {
     /// Admin routes, served on their own listener when enabled.
     admin: Option<AdminListener>,
     frontend_load_target: Option<FrontendLoadTarget>,
+    shutdown_timings: Option<super::shutdown::ShutdownTimings>,
 }
 
 /// Admin routes and the address they are served on.
@@ -1101,6 +1242,12 @@ pub struct HttpServiceConfig {
     /// explicitly.
     #[builder(default = "BackendErrorCheck::from_env()")]
     streaming_backend_error_check: BackendErrorCheck,
+
+    /// Shutdown timings (propagation window, drain timeout, close bound). Defaults
+    /// to `DYN_FRONTEND_PROPAGATION_DELAY_SECS` and
+    /// `DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS` when not set explicitly.
+    #[builder(setter(strip_option), default = "None")]
+    shutdown_timings: Option<super::shutdown::ShutdownTimings>,
 }
 
 fn default_rl_port() -> u16 {
@@ -1132,6 +1279,21 @@ impl HttpService {
 
     pub fn state(&self) -> &State {
         Arc::as_ref(&self.state)
+    }
+
+    /// Wire the runtime's force-shutdown token so a second shutdown signal makes
+    /// this frontend skip the propagation window and the drain and abort
+    /// in-flight exchanges. Only needed when the service was built without a
+    /// runtime (the Python binding); call before `run()`.
+    pub fn set_force_shutdown_token(&self, token: CancellationToken) {
+        self.state.set_force_token(token);
+    }
+
+    /// The shutdown timings this service runs with: the explicit builder value,
+    /// else the environment.
+    pub(crate) fn shutdown_timings(&self) -> super::shutdown::ShutdownTimings {
+        self.shutdown_timings
+            .unwrap_or_else(super::shutdown::ShutdownTimings::from_env)
     }
 
     pub fn model_manager(&self) -> &ModelManager {
@@ -1252,32 +1414,38 @@ impl HttpService {
         };
         tracing::info!(address = %listener.local_addr()?, "{protocol} server listening");
 
-        self.spawn_admin_listener_if_configured(&cancel_token, tls.clone())?;
-        self.spawn_rl_listener_if_configured(&cancel_token).await?;
+        // One controller drives the shutdown stages for every listener of this run:
+        // the main HTTP(S) listener, the admin listener, and the RL listener. When
+        // the service was built with a runtime, a second shutdown signal reaches
+        // the controller through the runtime's force token.
+        let timings = self.shutdown_timings();
+        warn_if_runtime_backstop_too_small(timings);
+        if let Some(target) = &self.frontend_load_target {
+            state.init_force_token(target.runtime.force_shutdown_token());
+        }
+        let controller = Arc::new(super::shutdown::ShutdownController::new(
+            state.service_observer(),
+            timings,
+            state.force_token(),
+        ));
+        state.set_shutdown_controller(controller.clone());
+        // `observer` fires on Phase 1 of the runtime shutdown (endpoint token
+        // cancelled); `state_cancel` is cancelled once the drain has finished.
+        controller.start(observer, state_cancel);
+
+        self.spawn_admin_listener_if_configured(&controller, tls.clone())?;
+        self.spawn_rl_listener_if_configured(&controller).await?;
 
         // Spawn canary after all fallible startup so it won't leak on early errors
         tokio::spawn(tokio_metrics_and_canary_loop(cancel_token.clone()));
         self.start_frontend_load_publisher(&publisher_cancel);
 
-        // The server keeps accepting while inflight requests drain, then gives open
-        // connections what is left of the shutdown budget.
-        let shutdown = async {
-            observer.cancelled().await;
-            state.start_draining();
-            tracing::info!("{protocol} server shutdown requested");
-            let shutdown_timeout = Duration::from_secs(get_graceful_shutdown_timeout() as u64);
-            let drain_started = tokio::time::Instant::now();
-            if !state.wait_inflight_zero_or_timeout(shutdown_timeout).await {
-                tracing::warn!(
-                    inflight_requests = state.inflight_count(),
-                    "Timed out waiting for inflight inference requests to drain"
-                );
-            }
-            shutdown_timeout.saturating_sub(drain_started.elapsed())
-        };
-        super::server::serve(listener, tls, router, write_idle_timeout(), shutdown).await;
-        state.start_stopping();
-        state_cancel.cancel();
+        super::server::serve(listener, tls, router, write_idle_timeout(), &controller).await;
+        // The accept loop has stopped; the controller is still retiring and
+        // draining connections (including upgraded WebSocket sessions) on its
+        // tracker. Hold this task — and the caller's graceful-shutdown guard —
+        // until it reaches Stopping so Phase 3 cannot race the drain.
+        controller.stopped_token().cancelled().await;
         Ok(())
     }
 
@@ -1300,10 +1468,10 @@ impl HttpService {
     }
 
     /// Serves the admin routes on their own listener, with the same TLS settings as
-    /// the HTTP service.
+    /// the HTTP service, retiring under the same shutdown controller.
     fn spawn_admin_listener_if_configured(
         &self,
-        cancel_token: &CancellationToken,
+        controller: &Arc<super::shutdown::ShutdownController>,
         tls: Option<tokio_rustls::TlsAcceptor>,
     ) -> Result<()> {
         let Some(admin) = self.admin.clone() else {
@@ -1312,23 +1480,23 @@ impl HttpService {
         let listener = bind_listener(admin.addr)
             .map_err(|e| anyhow::anyhow!("Failed to bind admin listener on {}: {e}", admin.addr))?;
         tracing::info!(address = %admin.addr, "Admin listener started");
-        let admin_cancel = cancel_token.child_token();
-        tokio::spawn(super::server::serve(
-            listener,
-            tls,
-            admin.router,
-            write_idle_timeout(),
-            async move {
-                admin_cancel.cancelled_owned().await;
-                Duration::ZERO
-            },
-        ));
+        let controller = controller.clone();
+        tokio::spawn(async move {
+            super::server::serve(
+                listener,
+                tls,
+                admin.router,
+                write_idle_timeout(),
+                &controller,
+            )
+            .await;
+        });
         Ok(())
     }
 
     async fn spawn_rl_listener_if_configured(
         &self,
-        cancel_token: &CancellationToken,
+        controller: &Arc<super::shutdown::ShutdownController>,
     ) -> Result<()> {
         let Some(rl_router) = self.rl_router.clone() else {
             return Ok(());
@@ -1349,16 +1517,10 @@ impl HttpService {
             address = %rl_addr,
             "RL worker discovery listener started"
         );
-        let rl_cancel = cancel_token.child_token();
+        let controller = controller.clone();
         tokio::spawn(async move {
-            if let Err(e) = axum::serve(listener, rl_router)
-                .with_graceful_shutdown(async move {
-                    rl_cancel.cancelled_owned().await;
-                })
-                .await
-            {
-                tracing::error!("RL worker discovery listener error: {e}");
-            }
+            super::server::serve(listener, None, rl_router, write_idle_timeout(), &controller)
+                .await;
         });
         Ok(())
     }
@@ -1394,11 +1556,21 @@ impl HttpService {
     }
 }
 
-fn get_graceful_shutdown_timeout() -> usize {
-    std::env::var(env_llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS)
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(5)
+/// Phase 2 of the runtime shutdown (`DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS`,
+/// default 900s) bounds the frontend's whole drain. Warn when it is shorter than
+/// the frontend's own budget, since the runtime would then tear transports down
+/// mid-drain.
+fn warn_if_runtime_backstop_too_small(timings: super::shutdown::ShutdownTimings) {
+    let backstop = dynamo_runtime::runtime::graceful_shutdown_timeout();
+    if backstop < timings.total() {
+        tracing::warn!(
+            runtime_backstop_secs = backstop.as_secs(),
+            frontend_budget_secs = timings.total().as_secs(),
+            "DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS is shorter than the frontend's \
+             propagation + drain + close budget; the runtime may tear down transports \
+             before the frontend finishes draining"
+        );
+    }
 }
 
 fn write_idle_timeout() -> Duration {
@@ -1870,8 +2042,12 @@ impl HttpServiceConfigBuilder {
             );
         let router = router.fallback_service(unmatched_router);
 
-        // Echo x-request-id from request to response headers for client correlation
-        let router = router.layer(axum::middleware::from_fn(echo_request_id_header));
+        // Echo x-request-id for client correlation and, once shutdown begins, retire
+        // HTTP/1.x connections after their response, on every route.
+        let router = router.layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            finalize_response_headers,
+        ));
 
         let enable_rl_router = config.enable_rl || env_is_truthy("DYN_ENABLE_RL");
         let rl_router = if enable_rl_router {
@@ -1915,6 +2091,7 @@ impl HttpServiceConfigBuilder {
                 runtime,
                 namespace: crate::frontend_load::frontend_load_namespace(config.namespace),
             }),
+            shutdown_timings: config.shutdown_timings,
         })
     }
 
@@ -2244,21 +2421,6 @@ mod tests {
             server_cert: write_pem(&server_cert.pem()),
             server_key: write_pem(&server_key.serialize_pem()),
             client_identity_pem,
-        }
-    }
-
-    async fn wait_for_service_stage(state: &State, expected: ServiceStage) {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
-        loop {
-            if state.service_stage() == expected {
-                return;
-            }
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "service did not enter {expected} before timeout; current stage is {}",
-                state.service_stage()
-            );
-            tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
 
@@ -2899,97 +3061,104 @@ mod tests {
         assert_eq!(docs.len(), 1);
     }
 
+    /// `/health` reports 503 and `/live` stays 200 once readiness is withdrawn,
+    /// in both the Propagating and the Draining stage (invariant I1).
     #[tokio::test]
-    #[serial_test::serial]
-    async fn test_liveness_endpoint_stays_live_while_draining() {
-        temp_env::async_with_vars(
-            [(env_llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS, Some("1"))],
-            async {
-                let cancel_token = Arc::new(CancellationToken::new());
-                let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-                    .await
-                    .expect("failed to bind ephemeral port");
-                let port = listener.local_addr().unwrap().port();
-                let service = HttpService::builder().port(port).build().unwrap();
-                let state = service.state_clone();
-                let inflight = state.acquire_inflight();
+    async fn liveness_and_health_across_shutdown_stages() {
+        let (port, state, handle) = spawn_service(|builder| builder).await;
+        let client = reqwest::Client::new();
+        let live = |client: reqwest::Client| async move {
+            client
+                .get(format!("http://localhost:{port}/live"))
+                .send()
+                .await
+                .expect("live request failed")
+                .status()
+        };
+        let health = |client: reqwest::Client| async move {
+            client
+                .get(format!("http://localhost:{port}/health"))
+                .send()
+                .await
+                .expect("health request failed")
+                .status()
+        };
 
-                let service_token = cancel_token.clone();
-                let handle = tokio::spawn(async move {
-                    service
-                        .run_with_listener((*service_token).clone(), listener)
-                        .await
-                        .unwrap();
-                });
+        // Ready: healthy and live.
+        assert_eq!(health(client.clone()).await, reqwest::StatusCode::OK);
+        assert_eq!(live(client.clone()).await, reqwest::StatusCode::OK);
 
-                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-                cancel_token.cancel();
-                wait_for_service_stage(&state, ServiceStage::Draining).await;
+        // Propagating: readiness withdrawn, still live.
+        state.start_propagating();
+        assert_eq!(state.service_stage(), ServiceStage::Propagating);
+        assert_eq!(
+            health(client.clone()).await,
+            reqwest::StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(live(client.clone()).await, reqwest::StatusCode::OK);
 
-                let resp = reqwest::Client::new()
-                    .get(format!("http://localhost:{}/live", port))
-                    .send()
-                    .await
-                    .expect("Request failed");
+        // Draining: still not ready, still live.
+        state.start_draining();
+        assert_eq!(state.service_stage(), ServiceStage::Draining);
+        assert_eq!(
+            health(client.clone()).await,
+            reqwest::StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(live(client.clone()).await, reqwest::StatusCode::OK);
 
-                assert_eq!(resp.status(), reqwest::StatusCode::OK);
-
-                drop(inflight);
-                handle.abort();
-            },
-        )
-        .await;
+        handle.abort();
     }
 
+    /// The response layer retires HTTP/1.x connections on every route once
+    /// readiness is withdrawn, and leaves HTTP/2 alone (U3).
     #[tokio::test]
-    #[serial_test::serial]
-    async fn test_health_endpoint_reflects_draining_before_cancellation() {
-        temp_env::async_with_vars(
-            [(env_llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS, Some("1"))],
-            async {
-                let cancel_token = Arc::new(CancellationToken::new());
-                let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-                    .await
-                    .expect("failed to bind ephemeral port");
-                let port = listener.local_addr().unwrap().port();
-                let service = HttpService::builder().port(port).build().unwrap();
-                let state = service.state_clone();
-                let inflight = state.acquire_inflight();
+    async fn connection_close_applies_to_http1_only_once_not_ready() {
+        use tower::ServiceExt;
+        let service = HttpService::builder().build().unwrap();
+        let state = service.state_clone();
+        let app = service.router.clone().with_state(());
+        let connection = |response: &axum::response::Response| {
+            response
+                .headers()
+                .get(header::CONNECTION)
+                .map(|value| value.to_str().unwrap().to_string())
+        };
+        let send = |version: Version, path: &str| {
+            let app = app.clone();
+            let request = axum::http::Request::builder()
+                .uri(path)
+                .version(version)
+                .body(Body::empty())
+                .unwrap();
+            async move { app.oneshot(request).await.unwrap() }
+        };
 
-                let service_token = cancel_token.clone();
-                let handle = tokio::spawn(async move {
-                    service
-                        .run_with_listener((*service_token).clone(), listener)
-                        .await
-                        .unwrap();
-                });
+        // Ready: no retirement on any protocol version.
+        for version in [Version::HTTP_10, Version::HTTP_11, Version::HTTP_2] {
+            assert_eq!(
+                connection(&send(version, "/health").await),
+                None,
+                "{version:?}"
+            );
+        }
 
-                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-                cancel_token.cancel();
-                wait_for_service_stage(&state, ServiceStage::Draining).await;
-
-                assert_eq!(state.service_stage(), ServiceStage::Draining);
-
-                let client = reqwest::Client::new();
-                let health = client
-                    .get(format!("http://localhost:{}/health", port))
-                    .send()
-                    .await
-                    .expect("health request failed");
-                assert_eq!(health.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
-
-                let live = client
-                    .get(format!("http://localhost:{}/live", port))
-                    .send()
-                    .await
-                    .expect("live request failed");
-                assert_eq!(live.status(), reqwest::StatusCode::OK);
-
-                drop(inflight);
-                handle.abort();
-            },
-        )
-        .await;
+        state.start_propagating();
+        for path in ["/health", "/live", "/no-such-route"] {
+            for version in [Version::HTTP_10, Version::HTTP_11] {
+                let response = send(version, path).await;
+                assert_eq!(
+                    connection(&response).as_deref(),
+                    Some("close"),
+                    "{version:?} {path}"
+                );
+                assert_eq!(response.version(), version, "{path}");
+            }
+            assert_eq!(
+                connection(&send(Version::HTTP_2, path).await),
+                None,
+                "HTTP/2 is retired with GOAWAY, not a header: {path}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -3268,6 +3437,7 @@ mod tests {
             [
                 (env_llm::DYN_BATCH_MAX_FILE_TRANSFERS, Some("1")),
                 (env_llm::DYN_HTTP_WRITE_IDLE_TIMEOUT_SECS, Some("120")),
+                (env_llm::DYN_FRONTEND_PROPAGATION_DELAY_SECS, Some("0")),
                 (env_llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS, Some("1")),
             ],
             tokio::time::timeout(Duration::from_secs(20), async {
@@ -3384,7 +3554,10 @@ mod tests {
     #[serial_test::serial]
     async fn shutdown_deadline_interrupts_handlers_and_response_bodies() {
         temp_env::async_with_vars(
-            [(env_llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS, Some("1"))],
+            [
+                (env_llm::DYN_FRONTEND_PROPAGATION_DELAY_SECS, Some("0")),
+                (env_llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS, Some("1")),
+            ],
             async {
                 for (tls, before_headers) in [(false, false), (true, true)] {
                         let certificates = make_mtls_test_certificates();
@@ -3929,7 +4102,6 @@ mod tests {
             .build()
             .unwrap();
         let state = service.state_clone();
-        let inflight = state.acquire_inflight();
 
         let service_token = cancel_token.clone();
         let handle = tokio::spawn(async move {
@@ -3940,15 +4112,17 @@ mod tests {
         });
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
-        cancel_token.cancel();
-        wait_for_service_stage(&state, ServiceStage::Draining).await;
+        // Drive the stage directly so the service keeps serving: the extension
+        // route must stay available once readiness is withdrawn.
+        state.start_draining();
+        assert_eq!(state.service_stage(), ServiceStage::Draining);
 
         assert_eq!(
             get_status(port, "/test/frontend-route/draining").await,
             reqwest::StatusCode::ACCEPTED
         );
 
-        drop(inflight);
+        cancel_token.cancel();
         handle.abort();
     }
 

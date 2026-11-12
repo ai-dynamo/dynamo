@@ -88,10 +88,14 @@ use inference::{
 
 use prost::Message;
 
-/// gRPC service state - shares metrics with HTTP service for unified metrics collection
+/// gRPC service state - shares metrics and the lifecycle observer with the HTTP
+/// service for unified metrics collection and a single shutdown contract.
 pub struct State {
     metrics: Arc<Metrics>,
     manager: Arc<ModelManager>,
+    /// Shared with the companion HTTP service so readiness and request admission
+    /// follow the same shutdown stages across both listeners.
+    service_observer: Arc<http_service::ServiceObserver>,
 }
 
 #[derive(Default, Builder)]
@@ -106,6 +110,8 @@ pub(crate) struct StateConfig {
     metrics: Option<Arc<Metrics>>,
     #[builder(default, setter(strip_option))]
     manager: Option<Arc<ModelManager>>,
+    #[builder(default, setter(strip_option))]
+    service_observer: Option<Arc<http_service::ServiceObserver>>,
 }
 
 impl State {
@@ -146,7 +152,15 @@ impl StateBuilder {
             metrics: config
                 .metrics
                 .unwrap_or_else(|| Arc::new(Metrics::default())),
+            service_observer: config.service_observer.unwrap_or_default(),
         })
+    }
+}
+
+impl State {
+    /// Whether the frontend admits new inference RPCs (ready or propagating).
+    fn is_admitting(&self) -> bool {
+        self.service_observer.is_admitting()
     }
 }
 
@@ -202,6 +216,11 @@ pub struct KserveServiceConfig {
     /// Default: GrpcTuningConfig::from_env() - reads from environment variables with fallback to defaults.
     #[builder(default = "GrpcTuningConfig::from_env()")]
     grpc_tuning: GrpcTuningConfig,
+
+    /// Shutdown timings shared by the gRPC and metrics listeners. Defaults to the
+    /// environment when not set explicitly.
+    #[builder(setter(strip_option), default = "None")]
+    shutdown_timings: Option<crate::http::service::ShutdownTimings>,
 }
 
 impl KserveService {
@@ -259,9 +278,24 @@ impl KserveService {
             builder = builder.initial_stream_window_size(size);
         }
 
+        // Honor the propagation window before tonic stops accepting: on the first
+        // signal keep serving for `propagation` seconds (admission and readiness
+        // follow the shared observer, driven by the companion HTTP service), then
+        // let tonic send GOAWAY and drain in-flight RPCs. A forced shutdown skips
+        // the remaining window. The runtime's Phase 2 backstop bounds the drain.
+        let timings = self.http_service.shutdown_timings();
+        let force = self.http_service.state().force_shutdown_token();
+        let shutdown = async move {
+            observer.cancelled_owned().await;
+            tokio::select! {
+                _ = tokio::time::sleep(timings.propagation) => {}
+                _ = force.cancelled() => {}
+            }
+        };
+
         builder
             .add_service(GrpcInferenceServiceServer::new(self.clone()))
-            .serve_with_shutdown(address.parse()?, observer.cancelled_owned())
+            .serve_with_shutdown(address.parse()?, shutdown)
             .await
             .inspect_err(|_| cancel_token.cancel())?;
 
@@ -280,7 +314,7 @@ impl KserveServiceConfigBuilder {
         // Create HTTP service with only non-inference endpoints (metrics, health, models list)
         // This provides the metrics endpoint, the shared metrics object, and the
         // frontend load publisher.
-        let http_service = http_service::HttpService::builder()
+        let mut http_service_builder = http_service::HttpService::builder()
             .port(config.http_metrics_port)
             .host(config.http_metrics_host.clone())
             .metrics_prefix(config.metrics_prefix)
@@ -292,14 +326,19 @@ impl KserveServiceConfigBuilder {
             .enable_cmpl_endpoints(false)
             .enable_embeddings_endpoints(false)
             .enable_responses_endpoints(false)
-            .enable_anthropic_endpoints(false)
-            .build()?;
+            .enable_anthropic_endpoints(false);
+        if let Some(timings) = config.shutdown_timings {
+            http_service_builder = http_service_builder.shutdown_timings(timings);
+        }
+        let http_service = http_service_builder.build()?;
 
-        // Share the HTTP service's model manager and metrics object with gRPC state
+        // Share the HTTP service's model manager, metrics, and lifecycle observer
+        // with gRPC state so both listeners honor one readiness and shutdown contract.
         let state = Arc::new(
             State::builder()
                 .manager(http_service.state().manager_clone())
                 .metrics(http_service.state().metrics_clone())
+                .service_observer(http_service.state().service_observer())
                 .build()?,
         );
 
@@ -602,6 +641,9 @@ impl GrpcInferenceService for KserveService {
         &self,
         request: Request<ModelInferRequest>,
     ) -> Result<Response<ModelInferResponse>, Status> {
+        if !self.state.is_admitting() {
+            return Err(Status::unavailable("frontend shutting down"));
+        }
         let (metadata, _extensions, request) = request.into_parts();
         let request_id = request.id.clone();
 
@@ -621,6 +663,9 @@ impl GrpcInferenceService for KserveService {
         &self,
         request: Request<tonic::Streaming<ModelInferRequest>>,
     ) -> Result<Response<Self::ModelStreamInferStream>, Status> {
+        if !self.state.is_admitting() {
+            return Err(Status::unavailable("frontend shutting down"));
+        }
         let (metadata, _extensions, request_stream) = request.into_parts();
         let mut request_stream = request_stream;
         let state = self.state_clone();
@@ -912,9 +957,11 @@ impl GrpcInferenceService for KserveService {
     ) -> Result<Response<inference::ServerReadyResponse>, Status> {
         // Only report ready when at least one model has a WorkerSet that can
         // actually serve an inference request — a registered ModelDeploymentCard
-        // is not enough (the WorkerSet is wired up afterwards).
+        // is not enough (the WorkerSet is wired up afterwards) — and the frontend
+        // has not begun shutting down (readiness is withdrawn at the first signal).
         Ok(Response::new(inference::ServerReadyResponse {
-            ready: self.state.manager().has_any_ready_model(),
+            ready: self.state.service_observer.is_ready()
+                && self.state.manager().has_any_ready_model(),
         }))
     }
 
@@ -1038,6 +1085,44 @@ mod readiness_gate_tests {
                 .ready,
             "a complete worker set → ServerReady=true"
         );
+
+        // Readiness is withdrawn the moment shutdown begins, even though the
+        // worker set is still complete: load balancers must stop routing here.
+        svc.http_service().state().start_propagating();
+        assert!(
+            !svc.server_ready(Request::new(ServerReadyRequest {}))
+                .await
+                .unwrap()
+                .get_ref()
+                .ready,
+            "ServerReady must be false once the frontend is shutting down"
+        );
+    }
+
+    /// Inference RPCs follow the shared admission gate: still served inside the
+    /// propagation window, rejected with UNAVAILABLE once the frontend drains.
+    #[tokio::test]
+    async fn infer_rpcs_follow_the_shutdown_admission_gate() {
+        let svc = KserveService::builder().build().unwrap();
+        let infer = || {
+            Request::new(ModelInferRequest {
+                model_name: "unknown".to_string(),
+                ..Default::default()
+            })
+        };
+
+        svc.http_service().state().start_propagating();
+        let status = svc.model_infer(infer()).await.unwrap_err();
+        assert_eq!(
+            status.code(),
+            tonic::Code::NotFound,
+            "propagating still admits the RPC: {status:?}"
+        );
+
+        svc.http_service().state().start_draining();
+        let status = svc.model_infer(infer()).await.unwrap_err();
+        assert_eq!(status.code(), tonic::Code::Unavailable, "{status:?}");
+        assert_eq!(status.message(), "frontend shutting down");
     }
 }
 

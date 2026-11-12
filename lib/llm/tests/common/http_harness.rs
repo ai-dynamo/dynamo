@@ -39,6 +39,7 @@ pub struct HarnessService {
     pub engine: Arc<ScriptedChatEngine>,
     #[allow(dead_code)]
     pub metrics: Arc<Metrics>,
+    state: Arc<dynamo_llm::http::service::service_v2::State>,
     cancel: CancellationToken,
     join: Option<tokio::task::JoinHandle<Result<()>>>,
 }
@@ -101,6 +102,7 @@ impl HarnessService {
             .add_chat_completions_model_with_card(MODEL, &checksum, card, engine.clone())
             .expect("failed to register scripted harness model");
 
+        let state = service.state_clone();
         let cancel = CancellationToken::new();
         let join = service.spawn_with_listener(cancel.clone(), listener).await;
         let base_url = format!("http://127.0.0.1:{port}");
@@ -111,12 +113,16 @@ impl HarnessService {
             client,
             engine,
             metrics,
+            state,
             cancel,
             join: Some(join),
         }
     }
 
     pub async fn shutdown(mut self) {
+        // Force the drain so teardown skips the propagation window and completes
+        // promptly, regardless of the configured shutdown timings.
+        self.state.force_shutdown();
         self.cancel.cancel();
         let join = self.join.take().expect("harness join handle is missing");
         tokio::time::timeout(Duration::from_secs(2), join)

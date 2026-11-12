@@ -60,6 +60,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/utils/ptr"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
+	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 // RestartState holds the restart state for DGD components.
@@ -1997,7 +1998,84 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 		}
 	}
 
+	// Size the frontend's drain timeout from the final grace period, now that the
+	// podTemplate override and defaults are both applied.
+	applyFrontendDrainBudget(&podSpec, component.ComponentType, componentContext.Annotations)
+
 	return &podSpec, nil
+}
+
+// Frontend drain-budget env var names and constants, matching the Rust frontend
+// (lib/llm/src/http/service/shutdown.rs) and the operator's default grace period.
+const (
+	envFrontendPropagationDelaySecs = "DYN_FRONTEND_PROPAGATION_DELAY_SECS"
+	envFrontendDrainTimeoutSecs     = "DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS"
+	defaultFrontendPropagationSecs  = int64(5)
+	frontendShutdownMarginSecs      = int64(5)
+	defaultGracePeriodSecs          = int64(60)
+)
+
+// applyFrontendDrainBudget derives the frontend's drain timeout from the pod's
+// termination grace period, unless the user set it explicitly.
+//
+// The frontend serves a propagation window, then drains in-flight work. Keeping
+// propagation + drain + a margin within the grace period lets it finish before
+// Kubernetes sends SIGKILL. A user-set drain timeout is never overridden; it only
+// warns when it does not fit. Only frontend components are affected, and only in
+// graphs created by an operator that carries this derivation (the
+// FrontendDrainBudget gate), so an operator-only upgrade does not roll existing
+// frontends. `annotations` are the pod template annotations carrying the origin.
+func applyFrontendDrainBudget(podSpec *corev1.PodSpec, componentType v1beta1.ComponentType, annotations map[string]string) {
+	if componentType != v1beta1.ComponentTypeFrontend || len(podSpec.Containers) == 0 {
+		return
+	}
+	if !compatibility.FrontendDrainBudget.Enabled(annotations) {
+		return
+	}
+	main := &podSpec.Containers[0]
+
+	// The grace period is final here: the podTemplate override or the 60s default.
+	grace := defaultGracePeriodSecs
+	if podSpec.TerminationGracePeriodSeconds != nil {
+		grace = *podSpec.TerminationGracePeriodSeconds
+	}
+
+	// Propagation defaults to 5s unless the user pinned a literal value.
+	propagation := defaultFrontendPropagationSecs
+	if env := findEnvVar(main.Env, envFrontendPropagationDelaySecs); env != nil && env.ValueFrom == nil {
+		if parsed, err := strconv.ParseInt(strings.TrimSpace(env.Value), 10, 64); err == nil && parsed >= 0 {
+			propagation = parsed
+		}
+	}
+
+	// A user-set drain timeout wins; warn only when the total overruns the grace period.
+	if env := findEnvVar(main.Env, envFrontendDrainTimeoutSecs); env != nil {
+		if env.ValueFrom != nil {
+			return
+		}
+		if drain, err := strconv.ParseInt(strings.TrimSpace(env.Value), 10, 64); err == nil &&
+			propagation+drain+frontendShutdownMarginSecs > grace {
+			ctrllog.Log.WithName("frontend-drain-budget").Info(
+				"user-set frontend drain timeout plus propagation and margin exceeds terminationGracePeriodSeconds; Kubernetes may SIGKILL before the drain completes",
+				"propagationSecs", propagation, "drainSecs", drain, "graceSecs", grace)
+		}
+		return
+	}
+
+	// Derive the drain timeout so propagation + drain + margin fits the grace period.
+	// A grace period that cannot fit even a one-second drain still gets one, so the
+	// frontend does not fall back to its 50 s default and overrun SIGKILL by more.
+	drain := grace - propagation - frontendShutdownMarginSecs
+	if drain < 1 {
+		drain = 1
+		ctrllog.Log.WithName("frontend-drain-budget").Info(
+			"terminationGracePeriodSeconds is too small for the frontend propagation window and margin; clamping the derived drain timeout to 1s",
+			"propagationSecs", propagation, "graceSecs", grace)
+	}
+	main.Env = append(main.Env, corev1.EnvVar{
+		Name:  envFrontendDrainTimeoutSecs,
+		Value: strconv.FormatInt(drain, 10),
+	})
 }
 
 func validateContainerVolumeMounts(volumeMounts []corev1.VolumeMount) error {

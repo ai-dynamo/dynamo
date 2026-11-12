@@ -109,6 +109,9 @@ impl HttpService {
         }
 
         let service = self.inner.clone();
+        // A second shutdown signal cancels this token; the frontend then skips the
+        // propagation window and the drain and aborts in-flight exchanges.
+        service.set_force_shutdown_token(runtime.inner().force_shutdown_token());
         // Only create token if we passed the check above
         let token = runtime.inner().child_token();
 

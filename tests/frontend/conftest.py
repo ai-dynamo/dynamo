@@ -239,7 +239,7 @@ class MockerWorkerProcess(ManagedProcess):
         model: str,
         frontend_port: int,
         system_port: int,
-        speedup_ratio: int = 100,
+        speedup_ratio: float = 100,
         worker_id: str = "mocker-worker",
         extra_args: list = None,
         extra_env: dict = None,

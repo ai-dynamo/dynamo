@@ -46,11 +46,19 @@ Three environment variables control Dynamo's internal draining. Set the HTTP tim
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS` | `5` | How long the Frontend waits for admitted HTTP and WebSocket inference requests to finish before it cancels runtime state. |
+| `DYN_FRONTEND_PROPAGATION_DELAY_SECS` | `5` | How long the Frontend keeps serving every request after it is signaled, so endpoint updates reach load balancers before it stops accepting. Set `0` to disable. |
+| `DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS` | `50` | How long the Frontend then lets admitted HTTP, gRPC, and WebSocket exchanges finish before it aborts the rest and cancels runtime state. Ends early once connections close. |
 | `DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS` | `5` | How long workers keep serving after endpoints unregister from discovery, before endpoints are invalidated. |
 | `DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS` | `900` | Upper bound on waiting for in-flight requests to finish. If draining exceeds this, Dynamo logs the remaining endpoint count and tears down anyway. |
 
-The defaults are sound for most deployments. Raise the relevant timeout only for long generations or sustained high utilization. Keep every internal timeout below `terminationGracePeriodSeconds` so Dynamo can finish its own cleanup before Kubernetes force-kills the pod.
+On the Frontend, the operator derives `DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS` from the pod's
+`terminationGracePeriodSeconds` as `grace − propagation − 5` whenever you have not set it, so the
+window, the drain, and a 5-second margin fit the grace period. Raise `terminationGracePeriodSeconds`
+(step 1) for long generations and the drain grows with it. If you set the drain timeout yourself,
+keep the propagation window plus the drain plus 5 seconds within the grace period. The other
+timeouts are sound for most deployments; raise them only for long generations or sustained high
+utilization, and keep every internal timeout below `terminationGracePeriodSeconds` so Dynamo can
+finish its own cleanup before Kubernetes force-kills the pod.
 
 </Step>
 
@@ -87,9 +95,12 @@ DEBUG Cleaning up worker
 ```
 
 During Frontend shutdown, `/health` returns 503 so readiness routing stops, while `/live` remains
-200 so Kubernetes does not restart the process during the drain. New OpenAI-compatible requests return
-503, but admitted response bodies and accepted `/v1/realtime` WebSocket sessions continue until they
-finish or `DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS` expires.
+200 so Kubernetes does not restart the process during the drain. For the first
+`DYN_FRONTEND_PROPAGATION_DELAY_SECS`, the Frontend still serves every request so endpoint updates
+can propagate; after that it stops accepting, retires open connections, and lets admitted response
+bodies and accepted `/v1/realtime` WebSocket sessions finish until they complete or
+`DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS` expires. A second `SIGTERM` forces the Frontend to skip
+the window and the drain and abort in-flight work.
 
 During worker shutdown, endpoints unregister and stop receiving new work while admitted requests
 have time to complete. If a pod receives `SIGKILL` before draining finishes, increase

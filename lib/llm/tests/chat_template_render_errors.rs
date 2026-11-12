@@ -17,6 +17,7 @@
 use std::sync::Arc;
 
 use anyhow::Error;
+use dynamo_llm::http::service::ShutdownTimings;
 use dynamo_llm::http::service::service_v2::HttpService;
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::preprocessor::{BackendOutput, OpenAIPreprocessor, PreprocessedRequest};
@@ -151,6 +152,7 @@ impl TestService {
 
         let (listener, port) = bind_random_port().await;
         let service = HttpService::builder()
+            .shutdown_timings(ShutdownTimings::immediate())
             .port(port)
             .host("127.0.0.1")
             .enable_chat_endpoints(true)

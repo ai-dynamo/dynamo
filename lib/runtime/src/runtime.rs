@@ -23,7 +23,10 @@ use futures::Future;
 use once_cell::sync::OnceCell;
 use std::{
     mem::ManuallyDrop,
-    sync::{Arc, atomic::Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 use tokio::{signal, sync::Mutex, task::JoinHandle};
@@ -32,7 +35,13 @@ pub use tokio_util::sync::CancellationToken;
 
 const DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_SECS: u64 = 15 * 60;
 
-pub(crate) fn graceful_shutdown_timeout() -> Duration {
+/// How long a forced shutdown still waits for graceful tasks to release their
+/// guards before tearing down the transports under them.
+const FORCED_SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
+
+/// The bound on Phase 2 of [`Runtime::shutdown`], from
+/// `DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS` (default 900 seconds).
+pub fn graceful_shutdown_timeout() -> Duration {
     let timeout_secs = std::env::var(
         config::environment_names::runtime::DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
     )
@@ -44,18 +53,10 @@ pub(crate) fn graceful_shutdown_timeout() -> Duration {
 }
 
 /// How long the Velo response service stays open after the main token is
-/// cancelled: the HTTP service's drain, `DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS`
-/// (default 5, read by dynamo-llm). Requests it admits may still be queued or
-/// tokenizing, and register their responses later.
-fn velo_response_drain_window() -> Duration {
-    let timeout_secs =
-        std::env::var(config::environment_names::llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS)
-            .ok()
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(5);
-
-    Duration::from_secs(timeout_secs)
-}
+/// cancelled. Frontends finish their own drain inside Phase 2, before the main
+/// token is cancelled, so this only covers requests a frontend admitted at the
+/// very end of that drain and that have yet to register their responses.
+const VELO_RESPONSE_DRAIN_WINDOW: Duration = Duration::from_secs(5);
 
 /// How long Velo responses still open after that window get to finish.
 const VELO_RESPONSE_DRAIN_HEADROOM: Duration = Duration::from_secs(10);
@@ -76,6 +77,10 @@ pub struct Runtime {
     cancellation_token: CancellationToken,
     endpoint_shutdown_token: CancellationToken,
     shutdown_started: CancellationToken,
+    /// Cancelled by [`Runtime::force_shutdown`]: a second signal that asks
+    /// graceful tasks to abort what they are draining.
+    force_shutdown: CancellationToken,
+    shutdown_requested: Arc<AtomicBool>,
     graceful_shutdown_tracker: Arc<GracefulShutdownTracker>,
     velo_response_service: Arc<crate::pipeline::network::velo_response::RuntimeService>,
     compute_pool: Option<Arc<compute::ComputePool>>,
@@ -123,6 +128,8 @@ impl Runtime {
             cancellation_token,
             endpoint_shutdown_token,
             shutdown_started,
+            force_shutdown: CancellationToken::new(),
+            shutdown_requested: Arc::new(AtomicBool::new(false)),
             graceful_shutdown_tracker: Arc::new(GracefulShutdownTracker::new()),
             velo_response_service,
             compute_pool,
@@ -384,8 +391,23 @@ impl Runtime {
         self.shutdown_started.child_token()
     }
 
+    /// Observe a forced shutdown. Graceful tasks that drain work, such as the
+    /// frontend's listeners, abort that work when this token is cancelled.
+    pub fn force_shutdown_token(&self) -> CancellationToken {
+        self.force_shutdown.child_token()
+    }
+
+    /// Whether [`Runtime::force_shutdown`] has been called.
+    pub fn is_force_shutdown(&self) -> bool {
+        self.force_shutdown.is_cancelled()
+    }
+
     /// Shuts down the [`Runtime`] instance
     pub fn shutdown(&self) {
+        if self.shutdown_requested.swap(true, Ordering::AcqRel) {
+            tracing::debug!("Runtime shutdown already in progress");
+            return;
+        }
         self.mark_shutting_down();
         tracing::info!("Runtime shutdown initiated");
 
@@ -393,6 +415,7 @@ impl Runtime {
         let tracker = self.graceful_shutdown_tracker.clone();
         let main_token = self.cancellation_token.clone();
         let endpoint_token = self.endpoint_shutdown_token.clone();
+        let force = self.force_shutdown.clone();
         let velo_response_service = self.velo_response_service.clone();
 
         // Use the runtime handle to spawn the task
@@ -410,10 +433,20 @@ impl Runtime {
 
             if count != 0 {
                 let timeout = graceful_shutdown_timeout();
-                if tokio::time::timeout(timeout, tracker.wait_for_completion())
-                    .await
-                    .is_err()
-                {
+                let completed = tokio::select! {
+                    biased;
+                    _ = tracker.wait_for_completion() => true,
+                    // A forced shutdown asks graceful tasks to abort their work; they
+                    // release their guards within moments, so wait only briefly for them.
+                    _ = force.cancelled() => {
+                        tracing::warn!("Forced shutdown: aborting graceful endpoint drain");
+                        tokio::time::timeout(FORCED_SHUTDOWN_GRACE, tracker.wait_for_completion())
+                            .await
+                            .is_ok()
+                    }
+                    _ = tokio::time::sleep(timeout) => false,
+                };
+                if !completed {
                     let remaining = tracker.get_count();
                     tracing::error!(
                         timeout_secs = timeout.as_secs(),
@@ -428,16 +461,30 @@ impl Runtime {
             velo_response_service.close();
             main_token.cancel();
 
-            // The main token also starts the HTTP drain, so close the response
-            // service only after that drain and its streams finish. Other
-            // Runtime owners in this process keep their shared service alive.
-            // The main token is already cancelled and nothing awaits this task,
-            // so a slow close cannot hold up shutdown.
+            // Frontends drain inside Phase 2, so the responses they admitted have
+            // mostly registered by now; the window covers the last admissions.
+            // Other Runtime owners in this process keep their shared service
+            // alive. The main token is already cancelled and nothing awaits this
+            // task, so a slow close cannot hold up shutdown.
             velo_response_service
-                .drain(velo_response_drain_window(), VELO_RESPONSE_DRAIN_HEADROOM)
+                .drain(VELO_RESPONSE_DRAIN_WINDOW, VELO_RESPONSE_DRAIN_HEADROOM)
                 .await;
             velo_response_service.shutdown().await;
         });
+    }
+
+    /// Forces the shutdown started by [`Runtime::shutdown`], starting it first if
+    /// it has not been requested yet.
+    ///
+    /// Graceful tasks observing [`Runtime::force_shutdown_token`] abort the work
+    /// they were draining, and Phase 2 stops waiting for them shortly after.
+    /// Calling this more than once has no further effect.
+    pub fn force_shutdown(&self) {
+        self.shutdown();
+        if !self.force_shutdown.is_cancelled() {
+            tracing::warn!("Runtime shutdown forced: aborting in-flight work");
+            self.force_shutdown.cancel();
+        }
     }
 }
 
@@ -527,6 +574,73 @@ mod tests {
 
                 assert!(main_token.is_cancelled());
                 assert_eq!(tracker.get_count(), 1);
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn force_shutdown_is_idempotent_and_unblocks_the_graceful_wait() {
+        temp_env::async_with_vars(
+            [(
+                env_runtime::DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
+                Some("900"),
+            )],
+            async {
+                let runtime = Runtime::from_current().unwrap();
+                let tracker = runtime.graceful_shutdown_tracker();
+                let guard = tracker.register_task();
+                let main_token = runtime.primary_token();
+                let endpoint_token = runtime.child_token();
+                let force = runtime.force_shutdown_token();
+
+                // The first force starts the shutdown and raises the force token at once.
+                runtime.force_shutdown();
+                tokio::task::yield_now().await;
+                assert!(endpoint_token.is_cancelled());
+                assert!(force.is_cancelled());
+                assert!(runtime.is_force_shutdown());
+                assert!(!main_token.is_cancelled());
+
+                // A graceful task that releases its guard lets Phase 3 run without the
+                // 900 second backstop.
+                runtime.force_shutdown();
+                drop(guard);
+                tokio::task::yield_now().await;
+                assert!(main_token.is_cancelled());
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn force_shutdown_bounds_a_task_that_ignores_it() {
+        temp_env::async_with_vars(
+            [(
+                env_runtime::DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
+                Some("900"),
+            )],
+            async {
+                let runtime = Runtime::from_current().unwrap();
+                let tracker = runtime.graceful_shutdown_tracker();
+                let _guard = tracker.register_task();
+                let main_token = runtime.primary_token();
+
+                runtime.shutdown();
+                tokio::task::yield_now().await;
+                tokio::time::advance(Duration::from_secs(30)).await;
+                tokio::task::yield_now().await;
+                assert!(!main_token.is_cancelled());
+
+                runtime.force_shutdown();
+                tokio::task::yield_now().await;
+                tokio::time::advance(FORCED_SHUTDOWN_GRACE - Duration::from_secs(1)).await;
+                tokio::task::yield_now().await;
+                assert!(!main_token.is_cancelled());
+
+                tokio::time::advance(Duration::from_secs(1)).await;
+                tokio::task::yield_now().await;
+                assert!(main_token.is_cancelled());
             },
         )
         .await;
