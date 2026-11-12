@@ -10,7 +10,7 @@
 use std::sync::Arc;
 
 use super::{Commitments, HintContext, HintPolicy};
-use crate::kv_hints::{KvCopyLocations, KvCopySource, KvHint, KvHintAction};
+use crate::kv_hints::{KvCopyLocations, KvCopySource, KvHint};
 use crate::types::SessionContext;
 use dynamo_router_protocol::worker::WorkerWithDpRank;
 use dynamo_worker_selection::WorkerInputs;
@@ -106,8 +106,8 @@ pub(crate) struct UndeliveredCommitment {
     reason: String,
 }
 
-/// Compose one booking's KV hint: the router's own fetch, then the policy that sends committed
-/// copies, then the other policies in configured order.
+/// Compose one booking's KV hint: the policy that sends committed copies, then the other policies
+/// in configured order.
 ///
 /// Each policy's output is accepted or dropped whole, and numbered `a1`, `a2`, and so on in hint
 /// order. A policy's output is dropped, with a warning, when [`HintPolicy::build_hints`] fails or
@@ -117,7 +117,6 @@ pub(crate) struct UndeliveredCommitment {
 pub(crate) fn compose_kv_hint(
     policies: &[HintPolicySlot],
     inputs: &HintInputs<'_>,
-    router_fetch: Option<KvHintAction>,
 ) -> Result<Option<KvHint>, UndeliveredCommitment> {
     if !inputs.worker_accepts_hints {
         return Ok(None);
@@ -130,10 +129,6 @@ pub(crate) fn compose_kv_hint(
         });
     }
     let mut hint = KvHint::for_request(inputs.request_id);
-    if let Some(fetch) = router_fetch {
-        hint.append_numbered(vec![fetch])
-            .expect("an empty hint has room for one action");
-    }
     // `resolve_role` already puts the consumer first; keep that order even for hand-built slots.
     let run_order = policies
         .iter()

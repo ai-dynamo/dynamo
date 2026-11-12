@@ -33,6 +33,12 @@ worker_selection:
 - A role whose worker-selection policy commits KV copies, such as `kvcr` with `shared_cache_multiplier` above `0`, must run exactly one hint policy that sends them, or startup fails.
 - The router sends one hint per booking, only to workers that advertise `router_hint`. It numbers the actions `a1`, `a2`, and so on, up to 32. A policy that fails drops only its own actions.
 
+## Built-In Hint Policies
+
+| Type | Behavior |
+|---|---|
+| `kv_fetch` | Sends the booked worker a `kv.fetch` hint naming a peer that holds KV it lacks: the copy its worker-selection policy committed it to, or else a best-effort fetch that adds at least `min_additional_blocks` (default `1`). On by default under `kvcr`. |
+
 ## Implement and Register a Policy
 
 Implement `HintPolicy` from `dynamo_kv_router::plugins::prelude`. The router calls `build_hints` once per booking with a `HintContext`, which carries the request ID, the booked worker, the prompt length, the block size, and the session context. It returns the actions for that worker, in the engine's format. A policy that sends committed KV copies declares `Commitments::KV_COPY` and reads the copy from `HintContext::committed_kv_copy`.

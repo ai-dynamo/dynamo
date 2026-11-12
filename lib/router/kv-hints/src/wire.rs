@@ -25,9 +25,6 @@ pub const KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY: &str =
 const KV_HINT_PROTOCOL_VERSION: &str = "0.1";
 /// Upper bound on the actions one hint carries.
 pub const MAX_KV_HINT_ACTIONS: usize = 32;
-const KV_FETCH_ACTION_TYPE: &str = "kv.fetch";
-const KV_FETCH_ACTION_VERSION: &str = "1.0";
-
 /// Typed payload for the `kv.fetch@1.0` point-to-point action.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct KvSourceLocationsPayload {
@@ -78,26 +75,6 @@ impl KvHintAction {
         payload: BTreeMap<String, serde_json::Value>,
     ) -> Self {
         Self::new(String::new(), action_type, action_version, payload)
-    }
-
-    /// The `kv.fetch@1.0` action with its typed payload.
-    pub fn fetch(action_id: impl Into<String>, payload: KvSourceLocationsPayload) -> Self {
-        let KvSourceLocationsPayload {
-            source_control_endpoint,
-            block_hashes,
-        } = payload;
-        Self::new(
-            action_id,
-            KV_FETCH_ACTION_TYPE,
-            KV_FETCH_ACTION_VERSION,
-            BTreeMap::from([
-                (
-                    "source_control_endpoint".to_string(),
-                    serde_json::json!(source_control_endpoint),
-                ),
-                ("block_hashes".to_string(), serde_json::json!(block_hashes)),
-            ]),
-        )
     }
 }
 
@@ -187,40 +164,6 @@ pub use dynamo_kv_indexer::kv_hints::{KvTransferCandidateSource, KvTransferSourc
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn serializes_versioned_fetch_action() {
-        let hint = KvHint::new(
-            "msg-123",
-            vec![KvHintAction::fetch(
-                "a1",
-                KvSourceLocationsPayload {
-                    source_control_endpoint: "tcp://127.0.0.1:23280".to_string(),
-                    block_hashes: vec![
-                        ExternalSequenceBlockHash(11),
-                        ExternalSequenceBlockHash(22),
-                    ],
-                },
-            )],
-        );
-
-        assert_eq!(
-            serde_json::to_value(hint).unwrap(),
-            serde_json::json!({
-                "protocol_version": "0.1",
-                "message_id": "msg-123",
-                "actions": [{
-                    "action_id": "a1",
-                    "action_type": "kv.fetch",
-                    "action_version": "1.0",
-                    "payload": {
-                        "source_control_endpoint": "tcp://127.0.0.1:23280",
-                        "block_hashes": [11, 22],
-                    },
-                }],
-            })
-        );
-    }
 
     #[test]
     fn appended_actions_are_numbered_and_bounded() {

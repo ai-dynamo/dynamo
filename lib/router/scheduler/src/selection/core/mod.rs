@@ -20,7 +20,7 @@ use tracing::Instrument;
 use crate::config::{CacheHitWeights, RouterConfig, Validated};
 use crate::hint_policy::HintPolicyFactory;
 use crate::identity::RoutingPartitionId;
-use crate::kv_hints::{KvHint, KvHintAction, KvSourceLocationsPayload, KvTransferCandidates};
+use crate::kv_hints::{KvHint, KvTransferCandidates};
 use crate::overlap_summary::MooncakeOverlapSummary;
 use crate::protocols::WorkerConfigLike;
 use crate::queue::SchedulerBookingDescriptor;

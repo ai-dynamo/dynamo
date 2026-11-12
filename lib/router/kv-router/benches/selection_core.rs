@@ -28,7 +28,7 @@ use dynamo_kv_router::plugins::worker_selection::{
     WorkerSelectionContext, WorkerSelectionPolicy, WorkerSelectionPolicyError,
 };
 use dynamo_kv_router::services::indexer::backend::Indexer;
-use dynamo_kv_router::services::selection::{local_selection_core, local_selection_core_with_host};
+use dynamo_kv_router::services::selection::local_selection_core_with_host;
 use dynamo_router_protocol::identity::RoutingPartitionId;
 use dynamo_router_protocol::worker::WorkerWithDpRank;
 use dynamo_scheduler::host::{
@@ -119,7 +119,8 @@ impl WorkerPicker for LowestCostPicker {
 }
 
 /// Sends the committed copy, or else the booked worker's best-effort copy source, as a fetch of
-/// the source's prefix blocks.
+/// the source's prefix blocks. It stands in for the builtin `kv_fetch`, which this crate cannot
+/// depend on: the router sends no fetch of its own.
 struct CopySender;
 
 impl HintPolicy for CopySender {
@@ -171,11 +172,6 @@ fn core_with_copy_credit(
             Box::new(LowestCostPicker),
         )
     });
-    let hints = HintPolicyFactory::for_all_roles([(
-        "copy".to_string(),
-        HintPolicyConstructor::shared(CopySender),
-    )])
-    .expect("hint policies");
     let core = local_selection_core_with_host(
         KvRouterConfig {
             use_kv_events: true,
@@ -186,16 +182,26 @@ fn core_with_copy_credit(
         CancellationToken::new(),
         SelectionCacheConfig::default(),
         policy,
-        SelectionHost {
-            hints: HostHints {
-                policies: Some(hints),
-            },
-            ..Default::default()
-        },
+        copy_sender_host(),
     )
     .expect("core");
     upsert_workers(runtime, &core, workers, true, true);
     core
+}
+
+/// A host whose only hint policy is [`CopySender`].
+fn copy_sender_host() -> SelectionHost {
+    let hints = HintPolicyFactory::for_all_roles([(
+        "copy".to_string(),
+        HintPolicyConstructor::shared(CopySender),
+    )])
+    .expect("hint policies");
+    SelectionHost {
+        hints: HostHints {
+            policies: Some(hints),
+        },
+        ..Default::default()
+    }
 }
 
 fn core_with_workers(
@@ -225,12 +231,13 @@ fn core_with_config(
     hints: bool,
     config: KvRouterConfig,
 ) -> SelectionCore {
-    let core = local_selection_core(
+    let core = local_selection_core_with_host(
         config,
         1,
         CancellationToken::new(),
         SelectionCacheConfig::default(),
         reference_policy_factory(),
+        copy_sender_host(),
     )
     .expect("core");
     upsert_workers(runtime, &core, workers, hints, true);

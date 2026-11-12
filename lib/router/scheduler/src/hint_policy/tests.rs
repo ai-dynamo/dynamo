@@ -348,7 +348,8 @@ fn a_scorer_that_reads_copy_offers_commits_copies_that_a_consumer_sends() {
     )
     .unwrap();
     assert!(responsibilities.commit_kv_copy);
-    assert!(responsibilities.compute_booked_copy_source);
+    // The consumer reads no uncommitted copy source, so bookings compute none.
+    assert!(!responsibilities.compute_booked_copy_source);
     assert!(
         responsibilities
             .prepare_inputs()
@@ -375,10 +376,34 @@ fn a_scorer_that_reads_copy_offers_commits_copies_that_a_consumer_sends() {
             "{error}"
         );
         assert!(
-            error.to_string().contains("Commitments::KV_COPY"),
+            error
+                .to_string()
+                .contains("none of the hints in worker_selection.prefill.hints sends them"),
             "{error}"
         );
     }
+
+    // Default hints that send no copies point at listing one instead.
+    let error = resolve_role(
+        WorkerType::Prefill,
+        &committing(),
+        role_policies(vec![("other", Recorder::new("other"))], true),
+        true,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            PluginConfigError::UnsentDefaultCopies { role: "prefill" }
+        ),
+        "{error}"
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("none of its default hints sends them"),
+        "{error}"
+    );
 
     // Copy offers need an index that keeps the block chain.
     let error = resolve_role(
@@ -424,16 +449,6 @@ fn copy() -> KvCopySource {
     )
 }
 
-fn router_fetch() -> KvHintAction {
-    KvHintAction::fetch(
-        "ignored",
-        crate::kv_hints::KvSourceLocationsPayload {
-            source_control_endpoint: "tcp://worker-2:9000".to_string(),
-            block_hashes: vec![ExternalSequenceBlockHash(7)],
-        },
-    )
-}
-
 fn ids_and_types(hint: &crate::kv_hints::KvHint) -> Vec<(String, String)> {
     hint.actions
         .iter()
@@ -442,7 +457,7 @@ fn ids_and_types(hint: &crate::kv_hints::KvHint) -> Vec<(String, String)> {
 }
 
 #[test]
-fn actions_are_numbered_in_hint_order_after_the_router_fetch() {
+fn actions_are_numbered_in_hint_order() {
     let policies = [
         slot(
             "two",
@@ -453,7 +468,7 @@ fn actions_are_numbered_in_hint_order_after_the_router_fetch() {
         ),
         slot("one", Recorder::new("one")),
     ];
-    let hint = compose_kv_hint(&policies, &inputs(), Some(router_fetch()))
+    let hint = compose_kv_hint(&policies, &inputs())
         .unwrap()
         .expect("hint");
     assert_eq!(hint.message_id, "request-1");
@@ -461,10 +476,7 @@ fn actions_are_numbered_in_hint_order_after_the_router_fetch() {
         .into_iter()
         .map(|(id, kind)| format!("{id}:{kind}"))
         .collect();
-    assert_eq!(
-        pairs,
-        ["a1:kv.fetch", "a2:test.two", "a3:test.two", "a4:test.one"]
-    );
+    assert_eq!(pairs, ["a1:test.two", "a2:test.two", "a3:test.one"]);
 }
 
 #[test]
@@ -492,7 +504,7 @@ fn output_that_fails_or_overflows_is_dropped_whole() {
         ),
         slot("fits", Recorder::new("fits")),
     ];
-    let hint = compose_kv_hint(&policies, &inputs(), None)
+    let hint = compose_kv_hint(&policies, &inputs())
         .unwrap()
         .expect("hint");
     assert_eq!(failing.calls(), 1);
@@ -513,11 +525,7 @@ fn workers_without_router_hint_get_no_hint_and_run_no_policy() {
         worker_accepts_hints: false,
         ..inputs()
     };
-    assert!(
-        compose_kv_hint(&policies, &inputs, Some(router_fetch()))
-            .unwrap()
-            .is_none()
-    );
+    assert!(compose_kv_hint(&policies, &inputs).unwrap().is_none());
     assert_eq!(recorder.calls(), 0);
 }
 
@@ -555,11 +563,7 @@ fn the_copy_consumer_runs_first_even_when_listed_last() {
             )),
         ),
     ];
-    assert!(
-        compose_kv_hint(&policies, &inputs(), None)
-            .unwrap()
-            .is_none()
-    );
+    assert!(compose_kv_hint(&policies, &inputs()).unwrap().is_none());
     assert_eq!(*calls.lock(), ["consumer", "other"]);
 }
 
@@ -588,16 +592,16 @@ fn an_unsent_committed_copy_fails_the_booking() {
             slot("other", Recorder::new("other")),
             slot("consumer", consumer),
         ];
-        let error = compose_kv_hint(&policies, &committed(), None).unwrap_err();
+        let error = compose_kv_hint(&policies, &committed()).unwrap_err();
         assert!(error.to_string().contains("\"consumer\""), "{error}");
     }
     // No policy sends committed copies.
     let policies = [slot("other", Recorder::new("other"))];
-    assert!(compose_kv_hint(&policies, &committed(), None).is_err());
+    assert!(compose_kv_hint(&policies, &committed()).is_err());
 
     // Any action counts as delivery; the stage never reads payloads.
     let policies = [slot("consumer", Recorder::consumer("consumer"))];
-    let hint = compose_kv_hint(&policies, &committed(), None)
+    let hint = compose_kv_hint(&policies, &committed())
         .unwrap()
         .expect("hint");
     assert_eq!(
@@ -613,11 +617,7 @@ fn an_unsent_committed_copy_fails_the_booking() {
             ..Recorder::consumer("consumer")
         },
     )];
-    assert!(
-        compose_kv_hint(&policies, &inputs(), None)
-            .unwrap()
-            .is_none()
-    );
+    assert!(compose_kv_hint(&policies, &inputs()).unwrap().is_none());
 }
 
 /// A test worker config that advertises `router_hint` with one source endpoint.
@@ -728,7 +728,7 @@ fn copy_accessors_follow_each_policys_declarations() {
             Arc::new(Probe(WorkerInputs::KV_COPY, Commitments::NONE)),
         ),
     ];
-    let hint = compose_kv_hint(&policies, &inputs, None)
+    let hint = compose_kv_hint(&policies, &inputs)
         .unwrap()
         .expect("the reader's action");
     assert_eq!(hint.actions.len(), 1);

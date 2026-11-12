@@ -7,10 +7,12 @@ use super::reservations::{
 };
 use super::*;
 use crate::config::RouterConfig;
-use crate::kv_hints::{KvCopySource, KvTransferCandidateSource, kv_copy_locations};
+use crate::kv_hints::{
+    KvCopySource, KvSourceLocationsPayload, KvTransferCandidateSource, kv_copy_locations,
+};
 use crate::protocols::RoutingConstraints;
 use crate::replication::HostReplicaChannels;
-use crate::test_utils::{local_test_core, test_core_with, test_router_config};
+use crate::test_utils::{test_core_with, test_router_config};
 use dynamo_kv_events::residency::StorageTier;
 use dynamo_kv_indexer::backend::{RemotePrimary, test_util::store_event};
 use dynamo_kv_indexer::residency::ResidencyOwnerKeyExt;
@@ -39,9 +41,75 @@ fn local_core_with(
     indexer_threads: usize,
     cancel_token: CancellationToken,
 ) -> SelectionCore {
-    local_test_core(config, indexer_threads, cancel_token)
+    test_core_with(
+        config,
+        indexer_threads,
+        cancel_token,
+        default_hints(),
+        None,
+        WorkerType::Aggregated,
+        None,
+    )
 }
 
+/// Stands in for the builtin `kv_fetch` hint policy, which hosts install as the default hint
+/// policy: it sends committed copies and best-effort fetches as `kv.fetch@1.0`.
+struct TestFetch;
+
+impl crate::hint_policy::HintPolicy for TestFetch {
+    fn required_worker_inputs(&self) -> dynamo_worker_selection::WorkerInputs {
+        dynamo_worker_selection::WorkerInputs::KV_COPY
+    }
+
+    fn commitments(&self) -> crate::hint_policy::Commitments {
+        crate::hint_policy::Commitments::KV_COPY
+    }
+
+    fn build_hints(
+        &self,
+        context: &crate::hint_policy::HintContext<'_>,
+    ) -> Result<Vec<crate::kv_hints::KvHintAction>, crate::hint_policy::HintPolicyError> {
+        let committed = context.committed_kv_copy();
+        let Some(copy) = committed.or(context.kv_copy_source()) else {
+            return Ok(Vec::new());
+        };
+        let Some(locations) = context.kv_copy_locations(copy) else {
+            return match committed {
+                Some(_) => Err(crate::hint_policy::HintPolicyError::new(
+                    "the copy source is no longer reachable",
+                )),
+                None => Ok(Vec::new()),
+            };
+        };
+        let payload = KvSourceLocationsPayload {
+            source_control_endpoint: locations.source_address().to_string(),
+            block_hashes: locations.chain()[..locations.source_prefix_blocks()].to_vec(),
+        };
+        Ok(vec![crate::kv_hints::KvHintAction::unnumbered(
+            "kv.fetch",
+            "1.0",
+            serde_json::from_value(serde_json::to_value(payload).unwrap()).unwrap(),
+        )])
+    }
+}
+
+/// [`TestFetch`] as every role's default hint policy, as hosts register `kv_fetch`.
+fn default_hints() -> SelectionHost {
+    use crate::hint_policy::{HintPolicyConstructor, HintPolicyFactory};
+
+    let fetch = || {
+        vec![(
+            Arc::from("kv_fetch"),
+            HintPolicyConstructor::shared(TestFetch),
+        )]
+    };
+    host_with_hints(HintPolicyFactory::from_roles([
+        (WorkerType::Aggregated, fetch(), true),
+        (WorkerType::Prefill, fetch(), true),
+        (WorkerType::Decode, fetch(), true),
+        (WorkerType::Encode, fetch(), true),
+    ]))
+}
 fn core_with(
     config: RouterConfig,
     host: SelectionHost,
@@ -3871,7 +3939,7 @@ fn transfer_hint_for_selection(
     )
 }
 
-/// The router's `kv.fetch` payload for `copy`: every block from 0 through the source's prefix.
+/// The `kv.fetch` payload for `copy`: every block from 0 through the source's prefix.
 fn fetch_payload(
     configs: &HashMap<WorkerId, SelectionWorkerConfig>,
     copy: KvCopySource,
@@ -4544,7 +4612,7 @@ mod hint_policies {
     use super::*;
     use crate::hint_policy::{
         Commitments, HintContext, HintPolicy, HintPolicyConstructor, HintPolicyError,
-        HintPolicyFactory,
+        HintPolicyFactory, KvHintAction,
     };
     use dynamo_worker_selection::{
         WorkerCandidates, WorkerInputView, WorkerInputs, WorkerPicker, WorkerScorer,
@@ -4712,10 +4780,10 @@ mod hint_policies {
             .iter()
             .map(|action| format!("{}:{}", action.action_id, action.action_type))
             .collect();
-        // The router's own fetch comes first, then the policies; the stage numbers them all.
-        assert_eq!(actions, ["a1:kv.fetch", "a2:test.record"]);
+        // Configured policies replace the default `kv_fetch`; the stage numbers their actions.
+        assert_eq!(actions, ["a1:test.record"]);
         assert_eq!(hint.message_id, "to-worker-2");
-        assert_eq!(hint.actions[1].payload["worker_id"], serde_json::json!(2));
+        assert_eq!(hint.actions[0].payload["worker_id"], serde_json::json!(2));
     }
 
     #[tokio::test]
@@ -4754,7 +4822,7 @@ mod hint_policies {
         assert_eq!(recorder.calls.load(Ordering::SeqCst), 1);
         let hint = reserved.kv_hint.expect("the booked worker's actions");
         assert_eq!(hint.message_id, "two-phase");
-        // A replay carries no copy data, so there is no router fetch.
+        // Only the configured policy runs.
         assert_eq!(hint.actions.len(), 1);
         assert_eq!(hint.actions[0].action_id, "a1");
         assert_eq!(hint.actions[0].payload["worker_id"], serde_json::json!(1));
@@ -4876,7 +4944,7 @@ mod hint_policies {
     }
 
     #[tokio::test]
-    async fn a_committed_copy_goes_to_its_consumer_instead_of_the_router_fetch() {
+    async fn a_committed_copy_goes_to_its_consumer() {
         let (core, _entry, tokens) = hint_policy_fixture(
             hints_with(vec![(
                 "copy",
@@ -5014,10 +5082,8 @@ mod hint_policies {
             .await
             .expect("upsert");
         assert!(
-            record
-                .not_schedulable_reasons
-                .iter()
-                .any(|reason| reason.contains("no hint policy")),
+            record.not_schedulable_reasons.iter().any(|reason| reason
+                .contains("none of the hints in worker_selection.aggregated.hints sends them")),
             "{record:?}"
         );
     }

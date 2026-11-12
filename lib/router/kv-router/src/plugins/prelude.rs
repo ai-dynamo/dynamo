@@ -47,8 +47,8 @@ pub use crate::plugins::{
 // Wire vocabulary the signal views carry.
 pub use dynamo_kv_hashing::ExternalSequenceBlockHash;
 pub use dynamo_kv_hints::{
-    KvHintTransferWorkerMetadata, KvTransferEnforcement, WorkerKvTransferKeys,
-    WorkerKvTransferKeysCache,
+    KvHintTransferWorkerMetadata, KvSourceLocationsPayload, KvTransferEnforcement,
+    WorkerKvTransferKeys, WorkerKvTransferKeysCache,
 };
 pub use dynamo_kv_indexer::kv_hints::{KvTransferCandidateSource, KvTransferCandidates};
 pub use dynamo_router_protocol::WorkerType;
