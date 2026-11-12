@@ -36,6 +36,7 @@ use dynamo_admission::RouterQueuePolicy;
 use dynamo_admission::classifier::{ClassifyRequest, RequestClassifier};
 use dynamo_admission::classifier::{RequestClassifierRuntime, RequestLifecycle};
 use dynamo_kv_hashing::LocalBlockHash;
+use dynamo_kv_indexer::ResidentBlockCountsHandle;
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 use dynamo_slot_tracker::busy::BusyThresholds;
 use dynamo_slot_tracker::topology::WorkerDpRange;
@@ -567,6 +568,14 @@ where
     /// on this pool's room waits for.
     pub fn subscribe_room_changed(&self) -> watch::Receiver<()> {
         self.queue.room_changed().subscribe()
+    }
+
+    /// Lend the partition's live resident block counts to every selection, for a policy that
+    /// declared [`WorkerInputs::RESIDENT_BLOCKS`].
+    ///
+    /// Returns `false` when counts are already installed.
+    pub fn set_resident_block_counts(&self, counts: ResidentBlockCountsHandle) -> bool {
+        self.queue.set_resident_block_counts(counts)
     }
 
     #[expect(clippy::too_many_arguments)]
