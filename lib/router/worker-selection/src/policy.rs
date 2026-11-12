@@ -732,6 +732,10 @@ impl ComposedPolicyState {
                 .contains(WorkerInputs::ACTIVE_REQUESTS)
                 .then_some(&active_requests),
             &info,
+            picker_inputs
+                .contains(WorkerInputs::RESIDENT_BLOCKS)
+                .then_some(cache_snapshot.resident_blocks)
+                .flatten(),
         );
         let row = picker.pick(context, picker_input)?;
         let Some(candidate) = candidates.get(row) else {

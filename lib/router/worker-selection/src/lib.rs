@@ -17,6 +17,7 @@
 pub mod conditional_disagg;
 mod context;
 mod error;
+pub mod experimental;
 pub mod host;
 mod hosted;
 mod inputs;
@@ -37,9 +38,9 @@ pub use hosted::{HostedSelectionRequest, HostedWorkerPicker};
 #[allow(deprecated)]
 pub use inputs::WorkerTransferInput;
 pub use inputs::{
-    CacheSnapshot, CandidateData, ScoredWorkerCandidate, WorkerCacheData, WorkerCacheInput,
-    WorkerCacheInputs, WorkerCandidate, WorkerCandidates, WorkerCapacity, WorkerCopyInput,
-    WorkerInfo, WorkerInputRows, WorkerInputView, WorkerInputs, WorkerLoadInput,
+    CacheSnapshot, CandidateData, ResidentBlockSource, ScoredWorkerCandidate, WorkerCacheData,
+    WorkerCacheInput, WorkerCacheInputs, WorkerCandidate, WorkerCandidates, WorkerCapacity,
+    WorkerCopyInput, WorkerInfo, WorkerInputRows, WorkerInputView, WorkerInputs, WorkerLoadInput,
 };
 pub use policy::{
     CandidatePreparer, CandidateRank, CandidateRowSource, PreparedRows, RankVisitor, RowPick,
