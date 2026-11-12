@@ -273,6 +273,27 @@ def _request_for_vllm_structural_tag(
     return request.model_copy(update={"tools": tools})
 
 
+def _limit_structural_tag_to_single_call(tag: dict[str, Any]) -> None:
+    """Apply vLLM's single-call limit to serialized formats, including older hooks.
+
+    Only format children are visited, so argument schemas are left unchanged.
+    These three list formats repeat tool calls in vLLM's registered tags.
+    """
+    if tag.get("type") in (
+        "triggered_tags",
+        "token_triggered_tags",
+        "tags_with_separator",
+    ):
+        tag["stop_after_first"] = True
+    for key in ("format", "content"):
+        child = tag.get(key)
+        if isinstance(child, dict):
+            _limit_structural_tag_to_single_call(child)
+    for key in ("elements", "tags"):
+        for child in tag.get(key, []):
+            _limit_structural_tag_to_single_call(child)
+
+
 def build_tool_call_guided_decoding(
     request: ChatCompletionRequest,
     tool_parser: ToolParser | None,
@@ -345,6 +366,8 @@ def build_tool_call_guided_decoding(
                 if hasattr(structural_tag, "model_dump")
                 else structural_tag
             )
+            if request.parallel_tool_calls is False:
+                _limit_structural_tag_to_single_call(tag_value)
             return {"structural_tag": tag_value}
 
     if parser_guided_decoding is not None:
