@@ -41,6 +41,12 @@ import sys
 
 import pytest
 
+try:
+    import av
+    from av.codec.codec import UnknownCodecError
+except ImportError:
+    av = None
+
 # Deliberately NO framework marker here. tests/conftest.py skips an item when any
 # framework marker it carries names a module that is absent, so listing all three
 # would mean "requires vllm AND sglang AND tensorrt_llm" -- true in no image, and
@@ -152,10 +158,8 @@ def _assert_pyav_carries_no_codec() -> None:
     The NIM enterprise base ships PyAV built against its own LGPL FFmpeg, so
     presence alone is not a violation; what PyAV can decode is.
     """
-    if importlib.util.find_spec("av") is None:
+    if av is None:
         return
-    import av
-
     assert av.codecs_available, (
         "PyAV reports no codecs at all; the probe is broken and the exclusion "
         "check below would pass vacuously"
@@ -164,7 +168,7 @@ def _assert_pyav_carries_no_codec() -> None:
     for name in _EXCLUDED_DECODERS:
         try:
             av.Codec(name, "r")
-        except Exception:
+        except UnknownCodecError:
             continue
         present.append(name)
     assert (
