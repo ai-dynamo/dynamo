@@ -28,6 +28,7 @@ from sglang.srt.parser.jinja_template_utils import (
     process_content_for_template_format,
 )
 from sglang.srt.parser.reasoning_parser import GptOssDetector, ReasoningParser
+from xgrammar import StructuralTag, StructuralTagItem
 
 from dynamo.common.utils.engine_response import trailing_stop_prefix_len
 from dynamo.common.utils.guided_json import admits_only_empty_object
@@ -802,34 +803,21 @@ def _serialize_tool_constraint(
 
 
 def _legacy_structural_tag_with_one_call(tag: dict[str, Any]) -> dict[str, Any]:
-    """Rewrite a legacy tool tag so generation ends after its first call.
-
-    The legacy format cannot express ``parallel_tool_calls=false``: after the
-    first call the grammar releases, and the model may add more calls or text
-    until ``max_tokens``. This is the xgrammar format the backend converts the
-    legacy tag to, plus ``stop_after_first``.
-    """
-    return {
-        "type": "structural_tag",
-        "format": {
-            "type": "triggered_tags",
-            "triggers": tag["triggers"],
-            "tags": [
-                {
-                    "type": "tag",
-                    "begin": structure["begin"],
-                    "content": {
-                        "type": "json_schema",
-                        "json_schema": structure.get("schema") or {},
-                    },
-                    "end": structure["end"],
-                }
-                for structure in tag["structures"]
-            ],
-            "at_least_one": tag.get("at_least_one", False),
-            "stop_after_first": True,
-        },
-    }
+    """Use XGrammar to convert a legacy tag and stop after its first call."""
+    converted = StructuralTag.from_legacy_structural_tag(
+        [
+            StructuralTagItem(
+                begin=structure["begin"],
+                schema=structure.get("schema") or {},
+                end=structure["end"],
+            )
+            for structure in tag["structures"]
+        ],
+        tag["triggers"],
+    )
+    converted.format.at_least_one = tag.get("at_least_one", False)
+    converted.format.stop_after_first = True
+    return converted.model_dump()
 
 
 def build_response_format_guided_decoding(

@@ -2194,6 +2194,9 @@ def test_structural_tag_respects_named_tool_choice(
             )
         return call
 
+    assert grammar.copy().matcher.accept_token(tokenizer.eos_token_id) is (
+        tool_choice == "auto"
+    )
     call = call_for("get_forecast")
     single = grammar.copy().matcher
     assert single.accept_string(call)

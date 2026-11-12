@@ -111,7 +111,9 @@ def tool_grammar_compiler():
 )
 @pytest.mark.parametrize("tool_choice", ["auto", "required", "named"])
 @pytest.mark.parametrize("parallel", [True, False])
-@pytest.mark.parametrize("parser_path", ["registry", "typed_hook", "dict_hook"])
+@pytest.mark.parametrize(
+    "parser_path", ["registry", "typed_hook", "dict_hook", "typed_hook_without_limiter"]
+)
 def test_dynamo_structural_tag_limits_call_count(
     tool_grammar_compiler,
     monkeypatch,
@@ -149,6 +151,8 @@ def test_dynamo_structural_tag_limits_call_count(
         ),
         parallel_tool_calls=parallel,
     )
+    if parser_path == "typed_hook_without_limiter":
+        monkeypatch.setattr(prepost_module, "limit_to_single_tool_call", None)
     parser = SimpleNamespace(structural_tag_model=model_format)
     if parser_path != "registry":
 
