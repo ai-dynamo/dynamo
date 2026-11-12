@@ -861,7 +861,7 @@ fn bare_json_starting_state(family: &str) -> UnifiedParserStartingState {
 fn detect_prefill(family: &str, content: &str) -> anyhow::Result<UnifiedParserStartingState> {
     match family {
         "qwen3" | "deepseek_v4" | "deepseek_v41" | "glm47" | "kimi_k2" | "minimax_m3"
-        | "nemotron_v3" => {
+        | "nemotron_v3" | "hermes" => {
             let (opener_marker, closer_marker) = reasoning_marker_pair(family)
                 .expect("think-marker families have a configured reasoning pair");
             // Compare FIRST-occurrence positions, not mere presence: a prompt that
@@ -958,9 +958,8 @@ fn beam_prefill(content: &str) -> UnifiedParserStartingState {
 fn reasoning_marker_pair(family: &str) -> Option<(&'static str, &'static str)> {
     match family {
         "minimax_m3" => Some(("<mm:think>", "</mm:think>")),
-        "qwen3" | "deepseek_v4" | "deepseek_v41" | "glm47" | "kimi_k2" | "nemotron_v3" => {
-            Some(("<think>", "</think>"))
-        }
+        "qwen3" | "deepseek_v4" | "deepseek_v41" | "glm47" | "kimi_k2" | "nemotron_v3"
+        | "hermes" => Some(("<think>", "</think>")),
         "gemma4" => Some(("<|channel>", "<channel|>")),
         _ => None,
     }
@@ -1406,7 +1405,7 @@ fn unified_parser_control_markers(family: &str) -> Vec<String> {
 fn native_family_marker(family: &str) -> Option<&'static str> {
     match family {
         "minimax_m3" => Some("]<]minimax[>[<tool_call>"),
-        "qwen3" | "glm47" | "nemotron_v3" => Some("<tool_call>"),
+        "qwen3" | "glm47" | "nemotron_v3" | "hermes" => Some("<tool_call>"),
         "deepseek_v4" => Some("<｜DSML｜tool_calls>"),
         "deepseek_v41" => Some("<｜DSML｜ calls>"),
         "gemma4" => Some("<|tool_call>"),
@@ -6391,6 +6390,128 @@ pub(crate) mod tests {
         assert_eq!(ids[0].0, 0);
         assert_eq!(ids[1].0, 1);
         assert_ne!(ids[0].1, ids[1].1, "each call gets its own id");
+    }
+
+    #[tokio::test]
+    async fn every_family_api_tool_ids_follow_protocol_across_turns() {
+        use dynamo_parsers_v2::{REGISTERED_UNIFIED_FAMILIES, canonical_unified_family};
+        use std::collections::{BTreeMap, BTreeSet};
+
+        let inputs: BTreeMap<String, String> = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/data/unified_tool_call_ids.json"
+        )))
+        .unwrap();
+        let registered: BTreeSet<_> = REGISTERED_UNIFIED_FAMILIES
+            .iter()
+            .map(|family| canonical_unified_family(family).unwrap())
+            .collect();
+        assert_eq!(
+            inputs.keys().map(String::as_str).collect::<BTreeSet<_>>(),
+            registered
+        );
+        for (family, input) in inputs {
+            let family = canonical_unified_family(&family).unwrap();
+            let mut conversation_ids = BTreeSet::new();
+            for character_chunks in [false, true] {
+                for turn in 0..2 {
+                    let pieces = if character_chunks {
+                        input.chars().map(|ch| ch.to_string()).collect::<Vec<_>>()
+                    } else {
+                        vec![input.clone()]
+                    };
+                    let chunks = pieces
+                        .iter()
+                        .map(|text| chunk(text, false))
+                        .chain([chunk("", true)])
+                        .collect::<Vec<_>>();
+                    let responses = apply_stream_with_constraint(
+                        stream::iter(chunks),
+                        Some(weather_tools()),
+                        GuidedToolConstraint::None,
+                        UnifiedParserStartingState::None,
+                        family,
+                        true,
+                    )
+                    .collect::<Vec<_>>()
+                    .await;
+                    assert!(
+                        responses.iter().all(|response| !response.is_error()),
+                        "{family}"
+                    );
+                    let mut calls = BTreeMap::<u32, (String, String, String)>::new();
+                    for choice in collect_choices(&responses) {
+                        let Some(deltas) = &choice.delta.tool_calls else {
+                            continue;
+                        };
+                        assert_eq!(deltas.len(), 1, "each API event carries one call: {family}");
+                        for delta in deltas {
+                            let function = delta.function.as_ref().unwrap();
+                            if let Some((_, _, arguments)) = calls.get_mut(&delta.index) {
+                                assert!(
+                                    delta.id.is_none(),
+                                    "ID repeated after first chunk: {family}"
+                                );
+                                assert!(function.name.is_none());
+                                arguments
+                                    .push_str(function.arguments.as_deref().unwrap_or_default());
+                            } else {
+                                calls.insert(
+                                    delta.index,
+                                    (
+                                        delta.id.clone().expect("first API chunk must carry an ID"),
+                                        function
+                                            .name
+                                            .clone()
+                                            .expect("first API chunk must carry a name"),
+                                        function.arguments.clone().unwrap_or_default(),
+                                    ),
+                                );
+                            }
+                        }
+                    }
+                    assert_eq!(
+                        calls.keys().copied().collect::<Vec<_>>(),
+                        [0, 1],
+                        "{family}"
+                    );
+                    for (index, (id, name, arguments)) in calls {
+                        assert_eq!(name, "get_weather");
+                        assert_eq!(
+                            serde_json::from_str::<serde_json::Value>(&arguments).unwrap(),
+                            serde_json::json!({"city":"Paris"})
+                        );
+                        if family == "kimi_k2" {
+                            assert_eq!(id, format!("functions.get_weather:{index}"));
+                        } else {
+                            assert!(
+                                conversation_ids.insert(id),
+                                "API ID reused: {family}, turn={turn}, char_chunks={character_chunks}"
+                            );
+                        }
+                    }
+                    let batch = parse_complete(
+                        family,
+                        &input,
+                        &GuidedToolConstraint::None,
+                        &weather_tools(),
+                    )
+                    .unwrap();
+                    assert_eq!(batch.tool_calls.len(), 2, "{family}");
+                    for (index, call) in batch.tool_calls.into_iter().enumerate() {
+                        assert_eq!(call.function.name, "get_weather");
+                        if family == "kimi_k2" {
+                            assert_eq!(call.id, format!("functions.get_weather:{index}"));
+                        } else {
+                            assert!(
+                                conversation_ids.insert(call.id),
+                                "batch reused an API ID: {family}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -11747,7 +11868,22 @@ pub(crate) mod tests {
         )
         .unwrap();
         assert_eq!(parsed.tool_calls.len(), 1);
-        assert_eq!(parsed.tool_calls[0].id, "good:1");
+        let call = &parsed.tool_calls[0];
+        assert_eq!(call.function.name, "good");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&call.function.arguments).unwrap(),
+            serde_json::json!({"x": 7})
+        );
+        let id = uuid::Uuid::parse_str(call.id.strip_prefix("call-").unwrap()).unwrap();
+        assert_eq!(id.get_version_num(), 4);
+        let repeated = parse_complete(
+            KIMI_K3_UNIFIED_FAMILY,
+            input,
+            &GuidedToolConstraint::None,
+            &[],
+        )
+        .unwrap();
+        assert_ne!(call.id, repeated.tool_calls[0].id);
     }
     #[tokio::test]
     async fn kimi3_short_close_before_guided_json_survives_every_split() {
@@ -13151,8 +13287,12 @@ pub(crate) mod tests {
         }
     }
 
-    fn all_family_native_calls() -> [(&'static str, &'static str); 9] {
+    fn all_family_native_calls() -> [(&'static str, &'static str); 10] {
         [
+            (
+                "hermes",
+                r#"<tool_call>{"name":"get_weather","arguments":{"city":"Tokyo"}}</tool_call>"#,
+            ),
             (
                 "minimax_m3",
                 r#"]<]minimax[>[<tool_call>]<]minimax[>[<invoke name="get_weather">]<]minimax[>[<city>Tokyo]<]minimax[>[</city>]<]minimax[>[</invoke>]<]minimax[>[</tool_call>"#,
@@ -13813,7 +13953,7 @@ pub(crate) mod tests {
         for (tool, reasoning) in [
             (Some("qwen3_coder"), Some("glm47")),
             (Some("qwen3_coder"), Some("deepseek_r1")),
-            (Some("hermes"), None),
+            (Some("unregistered"), None),
             (None, Some("deepseek_r1")),
             (None, None),
         ] {

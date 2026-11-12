@@ -2730,15 +2730,14 @@ mod tests {
                         ),
                     )
                     .await;
-                    let unsupported = match super::super::tool_parser_v2::selected_version()
-                        .unwrap()
-                    {
-                        super::super::tool_parser_v2::ParserVersion::V2 => tool == Some("hermes"),
-                        super::super::tool_parser_v2::ParserVersion::V1 => {
-                            tool == Some("deepseek_v41")
-                        }
-                        super::super::tool_parser_v2::ParserVersion::Auto => false,
-                    };
+                    let unsupported =
+                        match super::super::tool_parser_v2::selected_version().unwrap() {
+                            super::super::tool_parser_v2::ParserVersion::V1 => {
+                                tool == Some("deepseek_v41")
+                            }
+                            super::super::tool_parser_v2::ParserVersion::V2
+                            | super::super::tool_parser_v2::ParserVersion::Auto => false,
+                        };
                     if unsupported {
                         assert!(
                             result.is_err(),
@@ -3796,9 +3795,16 @@ mod tests {
         assert!(result.is_ok());
         let response = result.unwrap();
         let choice = &response.inner.choices[0];
+        let expected_content = match super::super::tool_parser_v2::selected_version().unwrap() {
+            super::super::tool_parser_v2::ParserVersion::V1 => "hello",
+            super::super::tool_parser_v2::ParserVersion::Auto
+            | super::super::tool_parser_v2::ParserVersion::V2 => "hello\n",
+        };
         assert_eq!(
             choice.message.content,
-            Some(ChatCompletionMessageContent::Text("hello".to_string()))
+            Some(ChatCompletionMessageContent::Text(
+                expected_content.to_string()
+            ))
         );
         assert_eq!(
             choice.finish_reason,
