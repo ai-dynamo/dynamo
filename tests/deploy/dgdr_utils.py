@@ -508,7 +508,10 @@ class ManagedDGDR:
                 if time.monotonic() < deadline:
                     raise
                 break
-            except aiohttp.ClientConnectionError as error:
+            except (
+                aiohttp.ClientConnectionError,
+                aiohttp.ClientPayloadError,
+            ) as error:
                 # The tunnel watchdog can outlast the per-call retries, so keep
                 # polling through a bounded outage instead of ending the wait.
                 if outage_started is None:
