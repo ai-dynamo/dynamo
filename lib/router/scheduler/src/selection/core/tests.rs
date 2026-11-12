@@ -16,6 +16,10 @@ use dynamo_kv_indexer::backend::{RemotePrimary, test_util::store_event};
 use dynamo_kv_indexer::residency::ResidencyOwnerKeyExt;
 use dynamo_session_affinity::SessionAffinityMode;
 use dynamo_slot_tracker::wire::{ActiveSequenceEvent, ActiveSequenceEventData};
+use dynamo_worker_selection::experimental::resident_blocks::ResidentBlocksByRow;
+use dynamo_worker_selection::{
+    WorkerInputView, WorkerInputs, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicyError,
+};
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::sleep;
@@ -996,6 +1000,110 @@ async fn wire_explicit_pin_does_not_report_affinity_overlap_loss() {
     );
 }
 
+/// Picker that declares `inputs`, records the resident block count of row 0, and takes it.
+struct ResidentBlocksRecorder {
+    inputs: WorkerInputs,
+    observed: Arc<parking_lot::Mutex<Vec<Option<u64>>>>,
+}
+
+impl WorkerPicker for ResidentBlocksRecorder {
+    fn required_worker_inputs(&self) -> WorkerInputs {
+        self.inputs
+    }
+
+    fn pick(
+        &self,
+        _context: &WorkerSelectionContext<'_>,
+        input: WorkerInputView<'_>,
+    ) -> Result<usize, WorkerSelectionPolicyError> {
+        self.observed.lock().push(input.resident_blocks(0));
+        Ok(0)
+    }
+}
+
+fn resident_blocks_core(
+    inputs: WorkerInputs,
+) -> (SelectionCore, Arc<parking_lot::Mutex<Vec<Option<u64>>>>) {
+    let observed = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let factory_observed = Arc::clone(&observed);
+    let factory: WorkerSelectionPolicyFactory = Arc::new(move |config, worker_type, _partition| {
+        WorkerSelectionPolicy::new(
+            config.clone(),
+            worker_type.as_str(),
+            Vec::new(),
+            Box::new(ResidentBlocksRecorder {
+                inputs,
+                observed: Arc::clone(&factory_observed),
+            }),
+        )
+    });
+    let core = core_with(
+        test_config(true),
+        SelectionHost::default(),
+        Some(factory),
+        WorkerType::Aggregated,
+        None,
+    );
+    (core, observed)
+}
+
+#[tokio::test]
+async fn declaring_policy_reads_live_resident_blocks() {
+    let (core, observed) =
+        resident_blocks_core(WorkerInputs::CACHE | WorkerInputs::RESIDENT_BLOCKS);
+    core.upsert_worker(worker_with_kv_events(1))
+        .await
+        .expect("worker upsert");
+    let entry = core.entry(&default_key()).expect("entry");
+    entry
+        .indexer
+        .apply_event_routed(store_event(
+            1,
+            0,
+            1,
+            &[],
+            &[11, 12, 13],
+            StorageTier::Device,
+        ))
+        .await
+        .unwrap();
+    entry.indexer.flush().await;
+
+    core.select(select_request()).await.expect("select");
+    assert_eq!(observed.lock().last(), Some(&Some(3)));
+}
+
+#[tokio::test]
+async fn only_a_declaring_policy_tracks_resident_blocks() {
+    let indexer = dynamo_kv_indexer::backend::create_indexer(16, 1);
+    let key = default_key();
+    let track = |inputs| super::workers::track_resident_blocks(&key, inputs, &indexer);
+    assert!(track(WorkerInputs::CACHE | WorkerInputs::LOAD).is_none());
+    assert!(track(WorkerInputs::CACHE | WorkerInputs::RESIDENT_BLOCKS).is_some());
+}
+
+#[tokio::test]
+async fn partition_rejects_resident_blocks_without_cache() {
+    let (core, _) = resident_blocks_core(WorkerInputs::RESIDENT_BLOCKS);
+    let record = core
+        .upsert_worker(worker_with_kv_events(1))
+        .await
+        .expect("worker upsert");
+    assert_eq!(record.lifecycle, WorkerLifecycle::Incomplete);
+    assert!(
+        record
+            .not_schedulable_reasons
+            .iter()
+            .any(|reason| reason.contains("WorkerInputs::CACHE")),
+        "{:?}",
+        record.not_schedulable_reasons
+    );
+    assert!(
+        core.index_registry.get_indexer(&default_key()).is_none(),
+        "a rejected partition opened an indexer"
+    );
+}
+
 // Keep clock- and poll-order tests independent of the native indexer thread.
 struct ReadyIndexer;
 #[async_trait::async_trait]
@@ -1632,6 +1740,94 @@ async fn queued_selection_errors_on_shutdown() {
         err,
         SelectionError::Scheduler(KvSchedulerError::SubscriberShutdown)
     ));
+}
+
+#[tokio::test]
+async fn uncached_selection_stays_uncached_after_queue_refresh_deadline() {
+    let shared_queries = SharedCacheCalls::default();
+    let mut config = test_router_config(false, Some(0.0));
+    config.selection.shared_cache_multiplier = Some(0.0);
+    let mut host = SelectionHost::default();
+    host.cache.shared = Some(Arc::new(RecordingSharedCache {
+        calls: Arc::clone(&shared_queries),
+    }));
+    let core = Arc::new(core_with(config, host, None, WorkerType::Aggregated, None));
+    core.upsert_worker(worker(1)).await.unwrap();
+    let mut held = reserve_request("held");
+    held.prompt.token_ids = Some((1..=8).collect());
+    assert_eq!(
+        core.select_and_reserve(held)
+            .await
+            .unwrap()
+            .effective_prefill_tokens,
+        8
+    );
+    let input = prompt();
+    let block_hashes = input.view().block_hashes_for_indexer(4, false).unwrap();
+    let entry = core.entry(&default_key()).unwrap();
+    assert!(entry.indexer.supports_overlap_refresh());
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let cached = entry
+                .indexer
+                .find_tiered_matches(block_hashes.clone())
+                .await
+                .unwrap();
+            if cached
+                .device
+                .overlap_scores
+                .scores
+                .get(&WorkerWithDpRank::new(1, 0))
+                == Some(&1)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(shared_queries.lock().len(), 1);
+    let refresh_after = crate::overlap_refresh::read_overlap_refresh_after()
+        .expect("overlap refresh must be enabled for this regression");
+    tokio::time::pause();
+    let queued_core = Arc::clone(&core);
+    let queued = tokio::spawn(async move {
+        let input = prompt();
+        let mut operation = lease_operation(input.view(), "uncached", true);
+        operation.return_routing_hashes = true;
+        queued_core
+            .run_selection_with_cache_credit(operation, false)
+            .await
+            .result
+            .unwrap()
+    });
+    wait_for_pending_selection(&core).await;
+    tokio::time::advance(refresh_after + Duration::from_secs(1)).await;
+    tokio::time::resume();
+    core.free_reservation("held").await.unwrap();
+    let SelectionOutcome::Selected(selected) = tokio::time::timeout(Duration::from_secs(1), queued)
+        .await
+        .unwrap()
+        .unwrap()
+    else {
+        panic!("queued request rejected");
+    };
+    assert_eq!(selected.response.cached_tokens, 0);
+    assert_eq!(selected.effective_prefill_tokens, 4);
+    assert_eq!(
+        selected.routing_hashes.as_deref(),
+        Some(block_hashes.as_slice())
+    );
+    assert!(selected.kv_hint.is_none());
+    assert!(selected.shared_cache_hits.is_none());
+    assert_eq!(shared_queries.lock().len(), 1);
+    drop(selected);
+    wait_until("uncached booking release", || {
+        !entry.scheduler.has_request("uncached")
+    })
+    .await;
+    core.shutdown();
 }
 
 #[tokio::test]
