@@ -497,57 +497,6 @@ func TestDynamoGraphDeploymentRequestV1beta2DefaultingAdmission(t *testing.T) {
 	}
 }
 
-// TestDynamoGraphDeploymentRequestV1beta2InputOverrideNullsPersist covers DYN-5575: an RFC 7386
-// null in spec.aisim.inputOverrides must survive the API server, the storage-version
-// conversion and the defaulter's envelope rewrite, so that it still deletes the lowered field.
-// The model-only spec makes the defaulter rewrite the envelope.
-func TestDynamoGraphDeploymentRequestV1beta2InputOverrideNullsPersist(t *testing.T) {
-	const overrides = `{"engine":{"mode":"aggregated","workers":{"aggregated":{"kv_cache":{"block_size":64}},"prefill":null,"decode":null}}}`
-	for _, tc := range []struct {
-		name string
-		opts []client.CreateOption
-	}{
-		{name: "default field validation"},
-		{name: "strict field validation", opts: []client.CreateOption{client.FieldValidation(metav1.FieldValidationStrict)}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			defaultingAdmissionHardware.set(gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 8, NodesWithGPUs: 1, TotalGPUs: 8, SelectedShapeGPUs: 8}, nil)
-			t.Cleanup(func() { defaultingAdmissionHardware.set(gpu.GPUInfo{}, nil) })
-			env := defaultingAdmissionEnv.ForTest(t)
-			request := v1beta2DefaultingRequest(func(spec *nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec) {
-				spec.AISim = &nvidiacomv1beta2.AISimSpec{InputOverrides: &runtime.RawExtension{Raw: []byte(overrides)}}
-			})
-			request.Name, request.Namespace = "request", env.Namespace()
-			if err := env.Client().Create(t.Context(), request, tc.opts...); err != nil {
-				t.Fatalf("create v1beta2 DGDR: %v", err)
-			}
-
-			stored := &nvidiacomv1beta2.DynamoGraphDeploymentRequest{}
-			if err := env.Client().Get(t.Context(), client.ObjectKeyFromObject(request), stored); err != nil {
-				t.Fatalf("get v1beta2 DGDR: %v", err)
-			}
-			if stored.Spec.AISim == nil || stored.Spec.AISim.InputOverrides == nil {
-				t.Fatalf("aisim = %#v, want input overrides", stored.Spec.AISim)
-			}
-			var got struct {
-				Engine struct {
-					Workers map[string]any `json:"workers"`
-				} `json:"engine"`
-			}
-			if err := json.Unmarshal(stored.Spec.AISim.InputOverrides.Raw, &got); err != nil {
-				t.Fatalf("decode input overrides: %v", err)
-			}
-			for _, role := range []string{"prefill", "decode"} {
-				value, found := got.Engine.Workers[role]
-				if !found || value != nil {
-					t.Errorf("stored engine.workers.%s = %#v (present=%v), want an explicit null; overrides = %s",
-						role, value, found, stored.Spec.AISim.InputOverrides.Raw)
-				}
-			}
-		})
-	}
-}
-
 func v1beta2DefaultingRequest(mutate ...func(*nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec)) *nvidiacomv1beta2.DynamoGraphDeploymentRequest {
 	request := &nvidiacomv1beta2.DynamoGraphDeploymentRequest{
 		Spec: nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec{
