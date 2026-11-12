@@ -20,6 +20,7 @@ from dynamo.planner.config.parallelization import PickedParallelConfig
 from dynamo.planner.monitoring import perf_metrics as pm
 
 pytestmark = [
+    pytest.mark.planner,
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
     pytest.mark.unit,
