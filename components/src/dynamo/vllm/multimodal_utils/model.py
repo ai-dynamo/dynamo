@@ -28,6 +28,12 @@ from transformers import AutoModel
 from vllm import LLM
 from vllm.utils.system_utils import update_environment_variables
 
+try:
+    from vllm.config import MultiModalConfig
+    from vllm.multimodal.gpu_ipc_memory import reserve_mm_ipc_gpu_memory
+except ImportError:
+    reserve_mm_ipc_gpu_memory = None
+
 logger = logging.getLogger(__name__)
 
 # [gluo NOTE] Debug flag to compare vLLM encoder vs transformers encoder,
@@ -195,10 +201,7 @@ def _encoder_kv_cache_memory_bytes() -> int:
     override = os.getenv("DYN_VLLM_ENCODER_KV_CACHE_MEMORY_BYTES")
     if override is not None:
         return int(override)
-    try:
-        from vllm.config import MultiModalConfig
-        from vllm.multimodal.gpu_ipc_memory import reserve_mm_ipc_gpu_memory
-    except ImportError:
+    if reserve_mm_ipc_gpu_memory is None:
         return _ENCODER_KV_CACHE_MEMORY_BYTES
     probe = 1 << 50
     reserved = probe - reserve_mm_ipc_gpu_memory(probe, MultiModalConfig())
