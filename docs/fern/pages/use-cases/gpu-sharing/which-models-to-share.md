@@ -25,23 +25,15 @@ Even distinct models pay a cost for sharing. Each model still reads its own weig
 
 These workloads have several distinct models whose combined demand fits in one GPU:
 
-| Workload | Why it fits |
-|---|---|
-| A long tail of models, each with light or intermittent traffic, such as full fine-tunes per customer, internal tools, or language-specific models | Each model would leave a dedicated GPU mostly idle, and their weights differ, so they can't share an engine |
-| Supporting models next to an application's main model: embedding, reranking, guardrail and safety classifiers, small routing models | They are small, distinct, and lightly loaded, and they can fill the share a larger model leaves |
-| Several model families behind one product, such as chat, code, SQL, and summarization | Each sees part of the product's traffic, and none needs a whole GPU |
-| Development, staging, and evaluation environments with many candidate models | Utilization is low and bursty, and GPU count matters more than peak throughput |
-| One large tensor-parallel model held to a share of each of its GPUs, with small models in the rest | A model that spans GPUs for memory may not need all of their compute; see [Per-GPU Compute and Memory Limits with MPS](https://github.com/ai-dynamo/dynamo/blob/main/examples/gpu-sharing/docs/mps-per-gpu-limits.md) |
+![Five workloads that fit GPU fractions. A long tail of lightly used models, such as full fine-tunes per customer, internal tools, or language-specific models: each would leave a dedicated GPU mostly idle, and their weights differ, so they can't share an engine. Supporting models beside a main model, such as embedding, reranking, guardrail and safety classifiers, and small routers: they are small, distinct, and lightly loaded, so they fill the share a larger model leaves. Several model families behind one product, such as chat, code, SQL, and summarization: each sees part of the product's traffic, and none needs a whole GPU. Development, staging, and evaluation environments with many candidate models used in bursts: utilization is low and bursty, and GPU count matters more than peak throughput. A large tensor-parallel model held to a share of each of its GPUs, with small models in the rest: a model that spans GPUs for its memory may not need all of their compute.](../../../assets/img/gpu-sharing-workloads-fit.svg)
+
+For the last case, [Per-GPU Compute and Memory Limits with MPS](https://github.com/ai-dynamo/dynamo/blob/main/examples/gpu-sharing/docs/mps-per-gpu-limits.md) shows how to hold a tensor-parallel model to a share of each GPU.
 
 ## Workloads That Don't Fit
 
-| Workload | Better choice |
-|---|---|
-| One model with enough traffic to keep a GPU busy | Dedicated GPUs, scaled with whole-GPU replicas |
-| Replicas of one model, or LoRA adapters of one base model | One engine per base model, with batching or multi-LoRA serving |
-| A model whose weights and KV cache need most of the GPU's memory | Dedicated GPUs; there is no room for a neighbor |
-| Strict tail-latency targets that can't absorb a neighbor's memory bandwidth or power draw | Dedicated GPUs, or MIG, which partitions memory bandwidth |
-| Tenants that don't trust each other, or that must not share a fault domain | MIG, or separate GPUs |
+These workloads are better served another way:
+
+![Five workloads that don't fit GPU fractions, each with a better choice. One model with enough traffic to keep a GPU busy: use dedicated GPUs, scaled with whole-GPU replicas. Replicas of one model, or LoRA adapters of one base model: use one engine per base model, with batching or multi-LoRA serving. A model whose weights and KV cache need most of the GPU's memory: use dedicated GPUs, because there is no room for a neighbor. Strict tail-latency targets that can't absorb a neighbor's memory bandwidth or power draw: use dedicated GPUs, or MIG, which partitions memory bandwidth. Tenants that don't trust each other, or that must not share a fault domain: use MIG, or separate GPUs, so each gets its own fault domain.](../../../assets/img/gpu-sharing-workloads-no-fit.svg)
 
 ## Sizing Each Share
 

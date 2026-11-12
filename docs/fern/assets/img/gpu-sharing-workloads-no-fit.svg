@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1240" height="632" viewBox="0 0 1240 632" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
+  <title id="title">Workloads that don't fit GPU fractions</title>
+  <desc id="desc">Five kinds of workload that don't fit MPS GPU fractions, each with a better choice. One model with enough traffic to keep a GPU busy: use Dedicated GPUs, scaled with whole-GPU replicas. Replicas of one model, or LoRA adapters of one base model: use One engine per base model, with batching or multi-LoRA serving. A model whose weights and KV cache need most of the GPU's memory: use Dedicated GPUs, there is no room for a neighbor. Strict tail-latency targets that can't absorb a neighbor's memory bandwidth or power draw: use Dedicated GPUs, or MIG, MIG partitions memory bandwidth. Tenants that don't trust each other, or must not share a fault domain: use MIG, or separate GPUs, each gets its own fault domain.</desc>
+  <defs><marker id="a-ink" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1A1A1A"/></marker><marker id="a-gray" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#9CA3AF"/></marker><marker id="a-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="a-red" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#C62828"/></marker></defs>
+  <rect x="0.0" y="0.0" width="1240.0" height="632.0" fill="#FFFFFF"/>
+  <text x="24.0" y="44.0" font-size="24" font-weight="700" fill="#1A1A1A" text-anchor="start">Workloads that don't fit GPU fractions</text>
+  <text x="24.0" y="70.0" font-size="15" font-weight="400" fill="#5A6270" text-anchor="start">Each of these is better served another way.</text>
+  <text x="40.0" y="106.0" font-size="13" font-weight="700" fill="#5A6270" text-anchor="start">Workload</text>
+  <text x="750.0" y="106.0" font-size="13" font-weight="700" fill="#5A6270" text-anchor="start">Better choice</text>
+  <rect x="24.0" y="120.0" width="640.0" height="88.0" fill="#FFFFFF" rx="12" stroke="#D1D5DB" stroke-width="1.5"/>
+  <rect x="36.0" y="130.0" width="88.0" height="68.0" fill="#FBE3E3" rx="8"/>
+  <rect x="44.0" y="142.0" width="72.0" height="44.0" fill="#FFFFFF" rx="5" stroke="#1A1A1A" stroke-width="1.5"/>
+  <rect x="49.0" y="147.0" width="62.0" height="34.0" fill="#DDEBFD" rx="3" stroke="#2F80ED" stroke-width="1.2"/>
+  <text x="80.0" y="169.0" font-size="12" font-weight="700" fill="#2F80ED" text-anchor="middle">100%</text>
+  <text x="140.0" y="169.0" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="start">One model with enough traffic to keep a GPU busy</text>
+  <line x1="676.0" y1="164.0" x2="722.0" y2="164.0" stroke="#9CA3AF" stroke-width="2" stroke-linecap="round" marker-end="url(#a-gray)"/>
+  <rect x="734.0" y="120.0" width="482.0" height="88.0" fill="#EAF5D3" rx="12" stroke="#76B900" stroke-width="1.5"/>
+  <text x="754.0" y="161.0" font-size="16" font-weight="700" fill="#3B6B00" text-anchor="start">Dedicated GPUs</text>
+  <text x="754.0" y="183.0" font-size="14" font-weight="400" fill="#1A1A1A" text-anchor="start">scaled with whole-GPU replicas</text>
+  <rect x="24.0" y="220.0" width="640.0" height="88.0" fill="#FFFFFF" rx="12" stroke="#D1D5DB" stroke-width="1.5"/>
+  <rect x="36.0" y="230.0" width="88.0" height="68.0" fill="#FBE3E3" rx="8"/>
+  <rect x="44.0" y="240.0" width="50.0" height="30.0" fill="#DDEBFD" rx="3" stroke="#2F80ED" stroke-width="1.2"/>
+  <text x="69.0" y="259.2" font-size="12" font-weight="700" fill="#1A1A1A" text-anchor="middle"></text>
+  <rect x="52.0" y="248.0" width="50.0" height="30.0" fill="#DDEBFD" rx="3" stroke="#2F80ED" stroke-width="1.2"/>
+  <text x="77.0" y="267.2" font-size="12" font-weight="700" fill="#1A1A1A" text-anchor="middle"></text>
+  <rect x="60.0" y="256.0" width="50.0" height="30.0" fill="#DDEBFD" rx="3" stroke="#2F80ED" stroke-width="1.2"/>
+  <text x="85.0" y="275.2" font-size="12" font-weight="700" fill="#1A1A1A" text-anchor="middle">X</text>
+  <text x="140.0" y="269.0" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="start">Replicas of one model, or LoRA adapters of one base model</text>
+  <line x1="676.0" y1="264.0" x2="722.0" y2="264.0" stroke="#9CA3AF" stroke-width="2" stroke-linecap="round" marker-end="url(#a-gray)"/>
+  <rect x="734.0" y="220.0" width="482.0" height="88.0" fill="#EAF5D3" rx="12" stroke="#76B900" stroke-width="1.5"/>
+  <text x="754.0" y="261.0" font-size="16" font-weight="700" fill="#3B6B00" text-anchor="start">One engine per base model</text>
+  <text x="754.0" y="283.0" font-size="14" font-weight="400" fill="#1A1A1A" text-anchor="start">with batching or multi-LoRA serving</text>
+  <rect x="24.0" y="320.0" width="640.0" height="88.0" fill="#FFFFFF" rx="12" stroke="#D1D5DB" stroke-width="1.5"/>
+  <rect x="36.0" y="330.0" width="88.0" height="68.0" fill="#FBE3E3" rx="8"/>
+  <rect x="44.0" y="354.0" width="72.0" height="22.0" fill="#FFFFFF" rx="4" stroke="#1A1A1A" stroke-width="1.5"/>
+  <rect x="47.0" y="357.0" width="64.0" height="16.0" fill="#DDEBFD" rx="2" stroke="#2F80ED" stroke-width="1.2"/>
+  <text x="80.0" y="348.0" font-size="11" font-weight="700" fill="#5A6270" text-anchor="middle">memory</text>
+  <text x="112.0" y="388.0" font-size="11" font-weight="700" fill="#C62828" text-anchor="end">full</text>
+  <text x="140.0" y="359.0" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="start">A model whose weights and KV cache need most of the GPU's</text>
+  <text x="140.0" y="379.0" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="start">memory</text>
+  <line x1="676.0" y1="364.0" x2="722.0" y2="364.0" stroke="#9CA3AF" stroke-width="2" stroke-linecap="round" marker-end="url(#a-gray)"/>
+  <rect x="734.0" y="320.0" width="482.0" height="88.0" fill="#EAF5D3" rx="12" stroke="#76B900" stroke-width="1.5"/>
+  <text x="754.0" y="361.0" font-size="16" font-weight="700" fill="#3B6B00" text-anchor="start">Dedicated GPUs</text>
+  <text x="754.0" y="383.0" font-size="14" font-weight="400" fill="#1A1A1A" text-anchor="start">there is no room for a neighbor</text>
+  <rect x="24.0" y="420.0" width="640.0" height="88.0" fill="#FFFFFF" rx="12" stroke="#D1D5DB" stroke-width="1.5"/>
+  <rect x="36.0" y="430.0" width="88.0" height="68.0" fill="#FBE3E3" rx="8"/>
+  <line x1="42.0" y1="489.0" x2="118.0" y2="489.0" stroke="#1A1A1A" stroke-width="1.5" stroke-linecap="round"/>
+  <line x1="44.0" y1="456.0" x2="116.0" y2="456.0" stroke="#C62828" stroke-width="1.2" stroke-linecap="round" stroke-dasharray="4 3"/>
+  <path d="M44,480.0 L68,478.0 L76,446.0 L84,478.0 L116,480.0" stroke="#2F80ED" stroke-width="2" fill="none" stroke-linejoin="round" stroke-linecap="round"/>
+  <text x="140.0" y="459.0" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="start">Strict tail-latency targets that can't absorb a neighbor's</text>
+  <text x="140.0" y="479.0" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="start">memory bandwidth or power draw</text>
+  <line x1="676.0" y1="464.0" x2="722.0" y2="464.0" stroke="#9CA3AF" stroke-width="2" stroke-linecap="round" marker-end="url(#a-gray)"/>
+  <rect x="734.0" y="420.0" width="482.0" height="88.0" fill="#EAF5D3" rx="12" stroke="#76B900" stroke-width="1.5"/>
+  <text x="754.0" y="461.0" font-size="16" font-weight="700" fill="#3B6B00" text-anchor="start">Dedicated GPUs, or MIG</text>
+  <text x="754.0" y="483.0" font-size="14" font-weight="400" fill="#1A1A1A" text-anchor="start">MIG partitions memory bandwidth</text>
+  <rect x="24.0" y="520.0" width="640.0" height="88.0" fill="#FFFFFF" rx="12" stroke="#D1D5DB" stroke-width="1.5"/>
+  <rect x="36.0" y="530.0" width="88.0" height="68.0" fill="#FBE3E3" rx="8"/>
+  <rect x="44.0" y="546.0" width="32.0" height="36.0" fill="#EAF5D3" rx="3" stroke="#76B900" stroke-width="1.2"/>
+  <text x="60.0" y="568.5" font-size="13" font-weight="700" fill="#1A1A1A" text-anchor="middle">A</text>
+  <rect x="84.0" y="546.0" width="32.0" height="36.0" fill="#DDEBFD" rx="3" stroke="#2F80ED" stroke-width="1.2"/>
+  <text x="100.0" y="568.5" font-size="13" font-weight="700" fill="#1A1A1A" text-anchor="middle">B</text>
+  <line x1="80.0" y1="540.0" x2="80.0" y2="590.0" stroke="#1A1A1A" stroke-width="4" stroke-linecap="round"/>
+  <text x="140.0" y="559.0" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="start">Tenants that don't trust each other, or must not share a</text>
+  <text x="140.0" y="579.0" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="start">fault domain</text>
+  <line x1="676.0" y1="564.0" x2="722.0" y2="564.0" stroke="#9CA3AF" stroke-width="2" stroke-linecap="round" marker-end="url(#a-gray)"/>
+  <rect x="734.0" y="520.0" width="482.0" height="88.0" fill="#EAF5D3" rx="12" stroke="#76B900" stroke-width="1.5"/>
+  <text x="754.0" y="561.0" font-size="16" font-weight="700" fill="#3B6B00" text-anchor="start">MIG, or separate GPUs</text>
+  <text x="754.0" y="583.0" font-size="14" font-weight="400" fill="#1A1A1A" text-anchor="start">each gets its own fault domain</text>
+</svg>

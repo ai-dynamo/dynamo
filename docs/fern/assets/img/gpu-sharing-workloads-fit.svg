@@ -1,0 +1,90 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1240" height="604" viewBox="0 0 1240 604" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
+  <title id="title">Workloads that fit GPU fractions</title>
+  <desc id="desc">Five kinds of workload that fit MPS GPU fractions, each with several distinct models whose combined demand fits in one GPU. A long tail of lightly used models, such as full fine-tunes per customer, internal tools, language-specific models: Each would leave a dedicated GPU mostly idle, and their weights differ, so they can't share an engine. Supporting models beside a main model, such as embedding, reranking, guardrail and safety classifiers, small routers: They are small, distinct, and lightly loaded, so they fill the share a larger model leaves. Several model families behind one product, such as chat, code, sql, and summarization: Each sees part of the product's traffic, and none needs a whole GPU. Development, staging, and evaluation, such as many candidate models, used in bursts: Utilization is low and bursty, and GPU count matters more than peak throughput. A large tensor-parallel model, plus small ones, such as the large model held to a share of each of its gpus: A model that spans GPUs for its memory may not need all of their compute.</desc>
+  <defs><marker id="a-ink" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1A1A1A"/></marker><marker id="a-gray" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#9CA3AF"/></marker><marker id="a-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="a-red" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#C62828"/></marker></defs>
+  <rect x="0.0" y="0.0" width="1240.0" height="604.0" fill="#FFFFFF"/>
+  <text x="24.0" y="44.0" font-size="24" font-weight="700" fill="#1A1A1A" text-anchor="start">Workloads that fit GPU fractions</text>
+  <text x="24.0" y="70.0" font-size="15" font-weight="400" fill="#5A6270" text-anchor="start">Several distinct models, each lightly loaded, whose combined demand fits in one GPU.</text>
+  <rect x="24.0" y="98.0" width="386.7" height="231.0" fill="#FFFFFF" rx="12" stroke="#76B900" stroke-width="2"/>
+  <rect x="40.0" y="114.0" width="88.0" height="68.0" fill="#EAF5D3" rx="8"/>
+  <rect x="48.0" y="126.0" width="7.0" height="46.0" fill="#EAF5D3" rx="1.5" stroke="#76B900" stroke-width="1.2"/>
+  <rect x="57.2" y="142.0" width="7.0" height="30.0" fill="#EAF5D3" rx="1.5" stroke="#76B900" stroke-width="1.2"/>
+  <rect x="66.4" y="150.0" width="7.0" height="22.0" fill="#EAF5D3" rx="1.5" stroke="#76B900" stroke-width="1.2"/>
+  <rect x="75.6" y="156.0" width="7.0" height="16.0" fill="#EAF5D3" rx="1.5" stroke="#76B900" stroke-width="1.2"/>
+  <rect x="84.8" y="160.0" width="7.0" height="12.0" fill="#EAF5D3" rx="1.5" stroke="#76B900" stroke-width="1.2"/>
+  <rect x="94.0" y="162.0" width="7.0" height="10.0" fill="#EAF5D3" rx="1.5" stroke="#76B900" stroke-width="1.2"/>
+  <rect x="103.2" y="164.0" width="7.0" height="8.0" fill="#EAF5D3" rx="1.5" stroke="#76B900" stroke-width="1.2"/>
+  <rect x="112.4" y="165.0" width="7.0" height="7.0" fill="#EAF5D3" rx="1.5" stroke="#76B900" stroke-width="1.2"/>
+  <line x1="46.0" y1="173.0" x2="122.0" y2="173.0" stroke="#1A1A1A" stroke-width="1.5" stroke-linecap="round"/>
+  <text x="142.0" y="134.0" font-size="16" font-weight="700" fill="#1A1A1A" text-anchor="start">A long tail of lightly used</text>
+  <text x="142.0" y="154.0" font-size="16" font-weight="700" fill="#1A1A1A" text-anchor="start">models</text>
+  <text x="142.0" y="176.0" font-size="13" font-weight="400" fill="#5A6270" text-anchor="start" font-style="italic">Full fine-tunes per customer, internal</text>
+  <text x="142.0" y="193.0" font-size="13" font-weight="400" fill="#5A6270" text-anchor="start" font-style="italic">tools, language-specific models</text>
+  <line x1="40.0" y1="211.0" x2="394.7" y2="211.0" stroke="#D1D5DB" stroke-width="1" stroke-linecap="round"/>
+  <text x="40.0" y="235.0" font-size="13" font-weight="700" fill="#3B6B00" text-anchor="start">✓  Why it fits</text>
+  <text x="40.0" y="259.0" font-size="14" font-weight="400" fill="#1A1A1A" text-anchor="start">Each would leave a dedicated GPU mostly idle, and</text>
+  <text x="40.0" y="279.0" font-size="14" font-weight="400" fill="#1A1A1A" text-anchor="start">their weights differ, so they can't share an</text>
+  <text x="40.0" y="299.0" font-size="14" font-weight="400" fill="#1A1A1A" text-anchor="start">engine.</text>
+  <rect x="426.7" y="98.0" width="386.7" height="231.0" fill="#FFFFFF" rx="12" stroke="#76B900" stroke-width="2"/>
+  <rect x="442.7" y="114.0" width="88.0" height="68.0" fill="#EAF5D3" rx="8"/>
+  <rect x="450.7" y="126.0" width="72.0" height="44.0" fill="#FFFFFF" rx="5" stroke="#1A1A1A" stroke-width="1.5"/>
+  <rect x="455.7" y="131.0" width="34.0" height="34.0" fill="#DDEBFD" rx="3" stroke="#2F80ED" stroke-width="1.2"/>
+  <text x="472.7" y="151.5" font-size="10" font-weight="700" fill="#1A1A1A" text-anchor="middle">main</text>
+  <rect x="494.7" y="131.0" width="23.0" height="10.0" fill="#EAF5D3" rx="2" stroke="#76B900" stroke-width="1.2"/>
+  <rect x="494.7" y="143.0" width="23.0" height="10.0" fill="#FDEBD3" rx="2" stroke="#D97706" stroke-width="1.2"/>
+  <rect x="494.7" y="155.0" width="23.0" height="10.0" fill="#ECE6FB" rx="2" stroke="#7C5CD6" stroke-width="1.2"/>
+  <text x="544.7" y="134.0" font-size="16" font-weight="700" fill="#1A1A1A" text-anchor="start">Supporting models beside a</text>
+  <text x="544.7" y="154.0" font-size="16" font-weight="700" fill="#1A1A1A" text-anchor="start">main model</text>
+  <text x="544.7" y="176.0" font-size="13" font-weight="400" fill="#5A6270" text-anchor="start" font-style="italic">Embedding, reranking, guardrail and</text>
+  <text x="544.7" y="193.0" font-size="13" font-weight="400" fill="#5A6270" text-anchor="start" font-style="italic">safety classifiers, small routers</text>
+  <line x1="442.7" y1="211.0" x2="797.3" y2="211.0" stroke="#D1D5DB" stroke-width="1" stroke-linecap="round"/>
+  <text x="442.7" y="235.0" font-size="13" font-weight="700" fill="#3B6B00" text-anchor="start">✓  Why it fits</text>
+  <text x="442.7" y="259.0" font-size="14" font-weight="400" fill="#1A1A1A" text-anchor="start">They are small, distinct, and lightly loaded, so</text>
+  <text x="442.7" y="279.0" font-size="14" font-weight="400" fill="#1A1A1A" text-anchor="start">they fill the share a larger model leaves.</text>
+  <rect x="829.3" y="98.0" width="386.7" height="231.0" fill="#FFFFFF" rx="12" stroke="#76B900" stroke-width="2"/>
+  <rect x="845.3" y="114.0" width="88.0" height="68.0" fill="#EAF5D3" rx="8"/>
+  <rect x="853.3" y="126.0" width="72.0" height="44.0" fill="#FFFFFF" rx="5" stroke="#1A1A1A" stroke-width="1.5"/>
+  <rect x="858.3" y="131.0" width="30.0" height="16.0" fill="#EAF5D3" rx="2" stroke="#76B900" stroke-width="1.2"/>
+  <text x="873.3" y="142.2" font-size="9" font-weight="700" fill="#1A1A1A" text-anchor="middle">chat</text>
+  <rect x="890.3" y="131.0" width="30.0" height="16.0" fill="#DDEBFD" rx="2" stroke="#2F80ED" stroke-width="1.2"/>
+  <text x="905.3" y="142.2" font-size="9" font-weight="700" fill="#1A1A1A" text-anchor="middle">code</text>
+  <rect x="858.3" y="149.0" width="30.0" height="16.0" fill="#FDEBD3" rx="2" stroke="#D97706" stroke-width="1.2"/>
+  <text x="873.3" y="160.2" font-size="9" font-weight="700" fill="#1A1A1A" text-anchor="middle">SQL</text>
+  <rect x="890.3" y="149.0" width="30.0" height="16.0" fill="#ECE6FB" rx="2" stroke="#7C5CD6" stroke-width="1.2"/>
+  <text x="905.3" y="160.2" font-size="9" font-weight="700" fill="#1A1A1A" text-anchor="middle">sum</text>
+  <text x="947.3" y="134.0" font-size="16" font-weight="700" fill="#1A1A1A" text-anchor="start">Several model families</text>
+  <text x="947.3" y="154.0" font-size="16" font-weight="700" fill="#1A1A1A" text-anchor="start">behind one product</text>
+  <text x="947.3" y="176.0" font-size="13" font-weight="400" fill="#5A6270" text-anchor="start" font-style="italic">Chat, code, SQL, and summarization</text>
+  <line x1="845.3" y1="211.0" x2="1200.0" y2="211.0" stroke="#D1D5DB" stroke-width="1" stroke-linecap="round"/>
+  <text x="845.3" y="235.0" font-size="13" font-weight="700" fill="#3B6B00" text-anchor="start">✓  Why it fits</text>
+  <text x="845.3" y="259.0" font-size="14" font-weight="400" fill="#1A1A1A" text-anchor="start">Each sees part of the product's traffic, and none</text>
+  <text x="845.3" y="279.0" font-size="14" font-weight="400" fill="#1A1A1A" text-anchor="start">needs a whole GPU.</text>
+  <rect x="225.3" y="345.0" width="386.7" height="231.0" fill="#FFFFFF" rx="12" stroke="#76B900" stroke-width="2"/>
+  <rect x="241.3" y="361.0" width="88.0" height="68.0" fill="#EAF5D3" rx="8"/>
+  <line x1="247.3" y1="420.0" x2="323.3" y2="420.0" stroke="#1A1A1A" stroke-width="1.5" stroke-linecap="round"/>
+  <path d="M249.33333333333334,417 L261.33333333333337,417 L265.33333333333337,381 L269.33333333333337,417 L287.33333333333337,417 L291.33333333333337,393 L295.33333333333337,417 L309.33333333333337,417 L313.33333333333337,401 L317.33333333333337,417 L323.33333333333337,417" stroke="#76B900" stroke-width="2" fill="none" stroke-linejoin="round" stroke-linecap="round"/>
+  <text x="343.3" y="381.0" font-size="16" font-weight="700" fill="#1A1A1A" text-anchor="start">Development, staging, and</text>
+  <text x="343.3" y="401.0" font-size="16" font-weight="700" fill="#1A1A1A" text-anchor="start">evaluation</text>
+  <text x="343.3" y="423.0" font-size="13" font-weight="400" fill="#5A6270" text-anchor="start" font-style="italic">Many candidate models, used in bursts</text>
+  <line x1="241.3" y1="458.0" x2="596.0" y2="458.0" stroke="#D1D5DB" stroke-width="1" stroke-linecap="round"/>
+  <text x="241.3" y="482.0" font-size="13" font-weight="700" fill="#3B6B00" text-anchor="start">✓  Why it fits</text>
+  <text x="241.3" y="506.0" font-size="14" font-weight="400" fill="#1A1A1A" text-anchor="start">Utilization is low and bursty, and GPU count</text>
+  <text x="241.3" y="526.0" font-size="14" font-weight="400" fill="#1A1A1A" text-anchor="start">matters more than peak throughput.</text>
+  <rect x="628.0" y="345.0" width="386.7" height="231.0" fill="#FFFFFF" rx="12" stroke="#76B900" stroke-width="2"/>
+  <rect x="644.0" y="361.0" width="88.0" height="68.0" fill="#EAF5D3" rx="8"/>
+  <rect x="652.0" y="373.0" width="34.0" height="46.0" fill="#FFFFFF" rx="4" stroke="#1A1A1A" stroke-width="1.5"/>
+  <rect x="656.0" y="377.0" width="26.0" height="24.0" fill="#DDEBFD" rx="2" stroke="#2F80ED" stroke-width="1.2"/>
+  <rect x="656.0" y="404.0" width="26.0" height="11.0" fill="#EAF5D3" rx="2" stroke="#76B900" stroke-width="1.2"/>
+  <rect x="690.0" y="373.0" width="34.0" height="46.0" fill="#FFFFFF" rx="4" stroke="#1A1A1A" stroke-width="1.5"/>
+  <rect x="694.0" y="377.0" width="26.0" height="24.0" fill="#DDEBFD" rx="2" stroke="#2F80ED" stroke-width="1.2"/>
+  <rect x="694.0" y="404.0" width="26.0" height="11.0" fill="#EAF5D3" rx="2" stroke="#76B900" stroke-width="1.2"/>
+  <line x1="682.0" y1="389.0" x2="696.0" y2="389.0" stroke="#2F80ED" stroke-width="1.5" stroke-linecap="round" stroke-dasharray="3 2"/>
+  <text x="746.0" y="381.0" font-size="16" font-weight="700" fill="#1A1A1A" text-anchor="start">A large tensor-parallel</text>
+  <text x="746.0" y="401.0" font-size="16" font-weight="700" fill="#1A1A1A" text-anchor="start">model, plus small ones</text>
+  <text x="746.0" y="423.0" font-size="13" font-weight="400" fill="#5A6270" text-anchor="start" font-style="italic">The large model held to a share of each</text>
+  <text x="746.0" y="440.0" font-size="13" font-weight="400" fill="#5A6270" text-anchor="start" font-style="italic">of its GPUs</text>
+  <line x1="644.0" y1="458.0" x2="998.7" y2="458.0" stroke="#D1D5DB" stroke-width="1" stroke-linecap="round"/>
+  <text x="644.0" y="482.0" font-size="13" font-weight="700" fill="#3B6B00" text-anchor="start">✓  Why it fits</text>
+  <text x="644.0" y="506.0" font-size="14" font-weight="400" fill="#1A1A1A" text-anchor="start">A model that spans GPUs for its memory may not need</text>
+  <text x="644.0" y="526.0" font-size="14" font-weight="400" fill="#1A1A1A" text-anchor="start">all of their compute.</text>
+</svg>
