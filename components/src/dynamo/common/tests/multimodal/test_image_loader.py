@@ -752,7 +752,6 @@ def _rgba_png_bytes() -> bytes:
 
 
 async def _load_rgba(loader: ImageLoader, source: str) -> Image.Image:
-    """Load the RGBA fixture through one of the loader's three input paths."""
     content = _rgba_png_bytes()
     if source == "data":
         encoded = base64.b64encode(content).decode()

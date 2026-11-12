@@ -240,7 +240,6 @@ async def test_worker_transparent_pixels_become_white():
     ],
 )
 async def test_worker_image_matches_vllm_loader(build_image):
-    """The worker hands vLLM the pixels vLLM's own loader makes from the same bytes."""
     content = build_image()
     processor = _processor(real_image_loader=True)
 
