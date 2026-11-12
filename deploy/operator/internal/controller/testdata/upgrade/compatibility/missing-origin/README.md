@@ -38,7 +38,7 @@ envtest Kubernetes binaries:
 
 ```bash
 KUBEBUILDER_ASSETS=/absolute/path/to/envtest/binaries \
-  python3 deploy/operator/hack/capture_missing_origin.py --output /new/staging/directory
+  python3 deploy/operator/hack/capture_compatibility.py missing-origin --output /new/staging/directory
 ```
 
 Review bootstrap captures and their provenance before initializing this fixture.

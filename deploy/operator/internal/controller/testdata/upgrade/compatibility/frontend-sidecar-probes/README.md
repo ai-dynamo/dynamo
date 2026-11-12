@@ -31,7 +31,7 @@ Kubernetes binaries:
 
 ```bash
 KUBEBUILDER_ASSETS=/absolute/path/to/envtest/binaries \
-  python3 deploy/operator/hack/capture_frontend_sidecar_probes.py --output /new/staging/directory
+  python3 deploy/operator/hack/capture_compatibility.py frontend-sidecar-probes --output /new/staging/directory
 ```
 
 `TestClusterOperatorUpgrade/frontend-sidecar-probes` seeds the snapshot through the
