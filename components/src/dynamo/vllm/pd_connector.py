@@ -30,15 +30,6 @@ except ModuleNotFoundError as exc:
 
 from vllm.v1.core.sched.output import SchedulerOutput
 
-# Optional import for KVBM support
-_DynamoConnector: Optional[Type] = None
-try:
-    from kvbm.vllm_integration.connector.dynamo_connector import DynamoConnector
-
-    _DynamoConnector = DynamoConnector
-except ImportError:
-    pass
-
 # Optional import for LMCache support
 _LMCacheConnectorV1: Optional[Type] = None
 try:
@@ -78,10 +69,10 @@ class PdConnectorMetadata(MultiKVConnectorMetadata):
 
 class PdConnector(MultiConnector):
     """
-    A wrapper for using KV offloading Connectors (e.g. KVBM, LMCache, or FlexKV) and NIXL Connector for PD disaggregated serving.
+    A wrapper for using KV offloading Connectors (e.g. LMCache or FlexKV) and NIXL Connector for PD disaggregated serving.
 
     The current logic is:
-    - The first connector must be KVBM, LMCache, or FlexKV and would be used by prefill worker to offload and onboard KV blocks.
+    - The first connector must be LMCache or FlexKV and would be used by prefill worker to offload and onboard KV blocks.
     - The second connector must be NIXL and will be used by decode worker to get KV blocks from prefill worker.
     """
 
@@ -103,9 +94,7 @@ class PdConnector(MultiConnector):
 
         # Build allowed types for first connector
         allowed_first_types = tuple(
-            t
-            for t in (_DynamoConnector, _LMCacheConnectorV1, _FlexKVConnectorV1)
-            if t is not None
+            t for t in (_LMCacheConnectorV1, _FlexKVConnectorV1) if t is not None
         )
         if not isinstance(self._connectors[0], allowed_first_types):
             allowed_names = [t.__name__ for t in allowed_first_types]

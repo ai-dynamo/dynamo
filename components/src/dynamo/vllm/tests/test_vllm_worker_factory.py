@@ -293,8 +293,6 @@ async def test_state_agent_setup_failure_never_falls_back_to_legacy(monkeypatch)
         Mock(),
         Mock(),
         Mock(),
-        consolidator_enabled=False,
-        consolidator_port=0,
     )
 
     assert result is None
