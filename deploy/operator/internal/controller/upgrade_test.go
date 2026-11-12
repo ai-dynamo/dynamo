@@ -522,7 +522,7 @@ spec:
 					t.Log("render LeaderWorkerSet from the converted DCD and existing LeaderWorkerSet")
 					dcd := parent.(*v1beta1.DynamoComponentDeployment)
 					reconciler := newUpgradeDCDReconciler(t, dcd, child)
-					lws, toDelete, err := reconciler.generateLeaderWorkerSet(ctx, generateResourceOption{dynamoComponentDeployment: dcd})
+					lws, toDelete, err := reconciler.generateLeaderWorkerSet(ctx, generateResourceOption{dynamoComponentDeployment: dcd}, child.GetName())
 					require.NoError(t, err)
 					require.False(t, toDelete)
 

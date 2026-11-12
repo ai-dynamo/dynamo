@@ -2166,6 +2166,116 @@ class ResponsesStreamPayload(BasePayload):
         return ResponsesStreamPayload.extract_content(response)
 
 
+def _validate_responses_logprobs(entries: Any, top_logprobs: int) -> None:
+    """Check `output_text.logprobs` entries from the Responses API."""
+    assert entries, "Expected output_text logprobs when include requests them"
+    for entry in entries:
+        assert isinstance(entry["token"], str), f"Invalid token: {entry!r}"
+        value = entry["logprob"]
+        assert math.isfinite(value) and value <= 0, f"Invalid logprob: {entry!r}"
+        # Output parts carry `bytes`; the text stream events do not.
+        if "bytes" in entry:
+            assert isinstance(entry["bytes"], list), f"Invalid token bytes: {entry!r}"
+        assert (
+            len(entry["top_logprobs"]) <= top_logprobs
+        ), f"More alternatives than requested: {entry!r}"
+        for top in entry["top_logprobs"]:
+            assert isinstance(top["token"], str), f"Invalid top token: {top!r}"
+            assert math.isfinite(top["logprob"]) and top["logprob"] <= 0
+
+
+@dataclass
+class ResponsesPayloadWithLogprobs(ResponsesPayload):
+    """Non-streaming Responses payload that requests and validates output logprobs.
+
+    One score per generated token must reach `output_text.logprobs`, so the entry
+    count is checked against `usage.output_tokens`.
+    """
+
+    def validate(self, response: Any, content: str) -> None:
+        super().validate(response, content)
+        result = response.json()
+        top_logprobs = self.body.get("top_logprobs") or 0
+        assert (
+            result.get("top_logprobs") == top_logprobs
+        ), f"top_logprobs echo mismatch: {result.get('top_logprobs')} != {top_logprobs}"
+        text_part = result["output"][0]["content"][0]
+        entries = text_part.get("logprobs")
+        _validate_responses_logprobs(entries, top_logprobs)
+        output_tokens = result["usage"]["output_tokens"]
+        assert (
+            len(entries) == output_tokens
+        ), f"Expected {output_tokens} logprob entries, got {len(entries)}"
+        logger.info(
+            "Responses logprobs validation passed: %d entries, top_logprobs=%d",
+            len(entries),
+            top_logprobs,
+        )
+
+
+@dataclass
+class ResponsesStreamPayloadWithLogprobs(ResponsesStreamPayload):
+    """Streaming Responses payload that validates logprobs on text events.
+
+    Every `output_text.delta` carries a logprobs array; `output_text.done` and the
+    completed output carry the full record, which starts with the concatenated delta
+    scores and may end with scores that arrived after the last delta (hidden EOS).
+    """
+
+    def response_handler(self, response: Any) -> str:
+        response.raise_for_status()
+        events: list[tuple[str, Any]] = []
+        event_type = ""
+        for line in response.iter_lines(decode_unicode=True):
+            if not line:
+                continue
+            if line.startswith("event: "):
+                event_type = line[len("event: ") :]
+            elif line.startswith("data: "):
+                data_str = line[len("data: ") :]
+                if data_str != "[DONE]":
+                    events.append((event_type, json.loads(data_str)))
+
+        top_logprobs = self.body.get("top_logprobs") or 0
+        deltas = [e for t, e in events if t == "response.output_text.delta"]
+        assert deltas, "Missing output_text.delta events"
+        assert all(
+            isinstance(d.get("logprobs"), list) for d in deltas
+        ), "Every output_text.delta must carry a logprobs array"
+        delta_tokens = [lp["token"] for d in deltas for lp in d["logprobs"]]
+        assert delta_tokens, "No logprobs on any output_text.delta"
+
+        done_events = [e for t, e in events if t == "response.output_text.done"]
+        assert (
+            len(done_events) == 1
+        ), f"Expected 1 output_text.done, got {len(done_events)}"
+        done_entries = done_events[0]["logprobs"]
+        _validate_responses_logprobs(done_entries, top_logprobs)
+        done_tokens = [lp["token"] for lp in done_entries]
+        assert (
+            done_tokens[: len(delta_tokens)] == delta_tokens
+        ), "output_text.done logprobs must start with the delta logprobs"
+
+        completed = [e for t, e in events if t == "response.completed"]
+        assert (
+            len(completed) == 1
+        ), f"Expected 1 response.completed, got {len(completed)}"
+        final = completed[0]["response"]
+        assert final.get("top_logprobs") == top_logprobs, "top_logprobs echo mismatch"
+        final_entries = final["output"][0]["content"][0]["logprobs"]
+        assert [lp["token"] for lp in final_entries] == done_tokens
+        output_tokens = final["usage"]["output_tokens"]
+        assert (
+            len(done_tokens) == output_tokens
+        ), f"Expected {output_tokens} logprob entries, got {len(done_tokens)}"
+        logger.info(
+            "Responses stream logprobs validation passed: %d on deltas, %d total",
+            len(delta_tokens),
+            len(done_tokens),
+        )
+        return "".join(d["delta"] for d in deltas)
+
+
 @dataclass
 class AnthropicMessagesPayload(BasePayload):
     """Payload for the Anthropic Messages API endpoint (/v1/messages)."""

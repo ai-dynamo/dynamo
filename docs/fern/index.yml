@@ -528,6 +528,8 @@ navigation:
                         path: pages/developer-guide/knowledge-base/modular-components/router/custom-worker-selection.mdx
                       - page: Write an Admission Control Plugin
                         path: pages/developer-guide/knowledge-base/modular-components/router/custom-admission-control.md
+                      - page: Write a KV Hint Plugin
+                        path: pages/developer-guide/knowledge-base/modular-components/router/hint-policies.md
                       - page: Router Examples
                         path: pages/developer-guide/knowledge-base/modular-components/router/router-examples.md
                       - page: Router Testing
@@ -967,6 +969,9 @@ navigation:
               - page: Cosmos3 Nano Reasoner
                 path: pages/recipes/model-recipes/cosmos3-nano-reasoner.mdx
                 slug: cosmos3-nano-reasoner
+              - page: Cosmos3 Super Reasoner
+                path: pages/recipes/model-recipes/cosmos3-super-reasoner.mdx
+                slug: cosmos3-super-reasoner
               - page: Nemotron 3 Ultra
                 path: pages/recipes/model-recipes/nemotron-3-ultra.mdx
                 slug: nemotron-3-ultra
