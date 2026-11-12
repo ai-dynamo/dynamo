@@ -68,6 +68,7 @@ use crate::protocols::common::extensions::{
 use crate::protocols::common::input_trigger::{
     classify_chat_request, classify_completion_request, classify_response_request,
 };
+use crate::protocols::common::metadata_upload::UniqueJsonValue;
 use crate::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
 use crate::protocols::openai::{
     MediaDelivery, ParsingOptions,
@@ -2825,7 +2826,9 @@ where
 /// `reasoning_content` is authoritative. It is dropped only when it is null and `reasoning`
 /// carries a value, so a null on one side never erases the real reasoning on the other.
 fn drop_duplicate_reasoning(body: &[u8]) -> Option<Vec<u8>> {
-    let mut value: serde_json::Value = serde_json::from_slice(body).ok()?;
+    // A plain `Value` keeps the last copy of a repeated key, so it would accept a second
+    // `model` or `messages` that the typed parse rejects.
+    let UniqueJsonValue(mut value) = serde_json::from_slice(body).ok()?;
     let messages = value.get_mut("messages")?.as_array_mut()?;
     for message in messages.iter_mut() {
         if let Some(object) = message.as_object_mut()
@@ -6656,10 +6659,18 @@ mod tests {
 
     #[test]
     fn test_parse_chat_completion_request_still_rejects_other_duplicate_fields() {
-        let body = br#"{"model":"m","model":"n","messages":[{"role":"user","content":"hi"}]}"#;
-        assert!(
-            parse_json_request::<NvCreateChatCompletionRequest>("chat completions", body).is_err()
-        );
+        let pair = r#"{"role":"assistant","content":"a","reasoning":"r","reasoning_content":"r"}"#;
+        for body in [
+            format!(r#"{{"model":"m","messages":[{pair}],"model":"n"}}"#),
+            format!(r#"{{"model":"m","messages":[{pair}],"messages":[{{"role":"user","content":"x"}}]}}"#),
+            r#"{"model":"m","messages":[{"role":"assistant","content":"a","reasoning_content":"x","reasoning_content":"y"}]}"#.to_string(),
+        ] {
+            assert!(
+                parse_json_request::<NvCreateChatCompletionRequest>("chat completions", body.as_bytes())
+                    .is_err(),
+                "{body}"
+            );
+        }
     }
 
     #[test]
