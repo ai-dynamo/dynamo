@@ -407,9 +407,8 @@ func TestLowerIncludesPublicEngineRoleUnderlay(t *testing.T) {
 	}
 }
 
-// TestLowerEngineRolesFollowConcreteMode covers DYN-5575: AISimulate rejects a role that a
-// concrete engine.mode does not run, so the lowered input must hold only the active roles,
-// whether or not the stored Request kept the caller's null deletions.
+// TestLowerEngineRolesFollowConcreteMode (DYN-5575): a concrete engine.mode keeps only its active
+// roles, whether or not the stored Request kept the caller's null deletions.
 func TestLowerEngineRolesFollowConcreteMode(t *testing.T) {
 	for _, tc := range []struct {
 		name      string

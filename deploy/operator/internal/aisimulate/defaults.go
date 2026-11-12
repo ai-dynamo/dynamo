@@ -37,14 +37,8 @@ const (
 	DefaultMaxTrials int64 = 320
 )
 
-// publicUnderlay supplies the empty role objects AISimulate needs for the engine mode that
-// spec.aisim.inputOverrides selects, the only source of engine.mode. Empty workers retain the
-// upstream parallelism, scheduler, KV-cache and timing defaults. AISimulate reads engine.mode,
-// or its choices, as a set of modes and rejects a role that a single-mode set does not run, so
-// {aggregated} gets only the aggregated role and {disaggregated} only prefill and decode. Any
-// other set (no mode, several choices, afd) keeps all three roles for AISimulate's default
-// aggregated-and-disaggregated search. Overrides are applied after this, so a role the caller
-// names is kept in every mode.
+// publicUnderlay returns empty worker roles for a single engine.mode in overrides, because AISimulate
+// rejects a role that mode does not run; any other mode set keeps all three roles.
 func publicUnderlay(overrides map[string]any) map[string]any {
 	modes, _, _ := unstructured.NestedStringSlice(overrides, engineModeChoices...)
 	if mode, found, _ := unstructured.NestedString(overrides, engineMode...); found {
