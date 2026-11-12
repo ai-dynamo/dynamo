@@ -11,6 +11,7 @@
 pub mod classifier_rows;
 pub mod config;
 pub mod filter;
+pub mod hint_policy;
 pub mod host;
 pub mod identity;
 pub mod kv_hints;
@@ -23,6 +24,7 @@ pub mod prefill_load;
 pub mod protocols;
 pub mod queue;
 pub mod replication;
+pub(crate) mod resolve;
 pub mod selection;
 pub mod selector;
 pub mod shared_cache;
