@@ -2404,7 +2404,9 @@ mod tests {
                     include_logprobs.then_some(top_logprobs.unwrap_or(0))
                 );
                 crate::engines::ValidateRequest::validate(&nv_req).unwrap_or_else(|e| {
-                    panic!("include_logprobs={include_logprobs}, top_logprobs={top_logprobs:?}: {e}")
+                    panic!(
+                        "include_logprobs={include_logprobs}, top_logprobs={top_logprobs:?}: {e}"
+                    )
                 });
             }
         }
