@@ -170,7 +170,7 @@ impl WorkerSelectionPolicy {
     ) -> Self {
         let picker_declared_inputs = picker.required_worker_inputs();
         // Fetch inputs are filled once every row is built, so only scorers receive them.
-        let picker_inputs = picker_declared_inputs.without(WorkerInputs::KV_TRANSFER);
+        let picker_inputs = picker_declared_inputs.without(WorkerInputs::KV_COPY);
         // Freeze each declaration once; callbacks must not inherit another component's access.
         // Active-request counts are a picker lookup, so filters and scorers never receive them.
         let filters: Vec<_> = filters
@@ -179,7 +179,7 @@ impl WorkerSelectionPolicy {
                 (
                     filter
                         .required_worker_inputs()
-                        .without(WorkerInputs::KV_TRANSFER | WorkerInputs::ACTIVE_REQUESTS),
+                        .without(WorkerInputs::KV_COPY | WorkerInputs::ACTIVE_REQUESTS),
                     filter,
                 )
             })
@@ -732,6 +732,10 @@ impl ComposedPolicyState {
                 .contains(WorkerInputs::ACTIVE_REQUESTS)
                 .then_some(&active_requests),
             &info,
+            picker_inputs
+                .contains(WorkerInputs::RESIDENT_BLOCKS)
+                .then_some(cache_snapshot.resident_blocks)
+                .flatten(),
         );
         let row = picker.pick(context, picker_input)?;
         let Some(candidate) = candidates.get(row) else {

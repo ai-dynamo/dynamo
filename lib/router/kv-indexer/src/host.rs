@@ -39,6 +39,7 @@ pub use crate::registry::IndexRegistry;
 pub use crate::residency::{
     ResidencyOwnerKeyExt, ResidencyProjection, ResidencyRoutingSnapshot, RouterHintSourceMetadata,
 };
+pub use crate::resident_blocks::{ResidentBlockCounts, ResidentBlockCountsHandle};
 pub use crate::session_prefix_index::{
     SessionPrefixIndexer, SessionResidencyOwner, SharedCacheBackend,
 };
