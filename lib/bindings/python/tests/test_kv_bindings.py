@@ -521,9 +521,8 @@ async def test_selection_service_not_ready_carries_status(monkeypatch):
         service.shutdown()
 
 
-# KvRouter.generate and generate_from_request read `token_ids` and `extra_args` directly
-# when they are exact builtins and fall back to pythonize otherwise. Either way the
-# worker must receive what pythonize alone produced, or the call must raise its error.
+# KvRouter reads exact builtin `token_ids` and `extra_args` directly, else uses pythonize;
+# the worker must get pythonize's result, or the call must raise pythonize's error.
 
 
 def _preprocessed(token_ids=(1, 2, 3), **fields):
