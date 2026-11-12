@@ -17,8 +17,8 @@ use reqwest::Url;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
-use super::write_timeout::ConnectionDeadline;
 use super::{RouteDoc, validate_extension_route_path};
+use dynamo_http_server::write_timeout::ConnectionDeadline;
 
 #[derive(Clone)]
 struct ProxyState {

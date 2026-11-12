@@ -121,7 +121,7 @@ pub async fn serve(listener: TcpListener, app: Router, shutdown: CancellationTok
     // connection waits on its own child token, whose lock no other connection
     // touches; `axum::serve` has every connection poll one shared `Notify`,
     // which locks its waiter list on every poll of a pending waiter. This
-    // mirrors lib/llm/src/http/service/server.rs.
+    // mirrors lib/http-server/src/server.rs.
     //
     // Build each route's handler once, as `Router::into_make_service` does,
     // not per request.

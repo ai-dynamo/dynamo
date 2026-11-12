@@ -108,7 +108,7 @@ async fn admitted_worker_removal_during_fanout_does_not_reroute_siblings() {
         "worker-removal".into(),
         parent.clone(),
         permit,
-        Arc::new(super::super::super::metrics::Metrics::new()),
+        Arc::new(dynamo_http_server::metrics::Metrics::new()),
         canonical_request(3),
     )
     .await;

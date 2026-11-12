@@ -18,7 +18,7 @@ use axum::{
     Router as AxumRouter, http::StatusCode, http::header::CONTENT_TYPE, response::IntoResponse,
     routing::get,
 };
-use dynamo_llm::http::service::metrics::generate_log_buckets;
+use dynamo_http_server::metrics::generate_log_buckets;
 use prometheus::{
     Encoder, Histogram, HistogramOpts, HistogramVec, Registry, TEXT_FORMAT, TextEncoder,
 };

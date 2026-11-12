@@ -110,7 +110,7 @@ async fn deadline_kills_stalled_dispatch_and_releases_local_admission() {
         "deadline".into(),
         parent.clone(),
         permit,
-        Arc::new(super::super::metrics::Metrics::new()),
+        Arc::new(dynamo_http_server::metrics::Metrics::new()),
         canonical_request(1),
     ));
     tokio::time::timeout(Duration::from_secs(2), engine.started.notified())
@@ -747,7 +747,7 @@ async fn dispatch_request(
         request_id.to_string(),
         parent.clone(),
         permit,
-        Arc::new(super::super::metrics::Metrics::new()),
+        Arc::new(dynamo_http_server::metrics::Metrics::new()),
         canonical_request(branch_count),
     )
     .await;
@@ -766,7 +766,7 @@ async fn dispatch_limits_active_siblings_and_cancels_queued_work() {
         "bounded-fanout".to_string(),
         parent.clone(),
         permit,
-        Arc::new(super::super::metrics::Metrics::new()),
+        Arc::new(dynamo_http_server::metrics::Metrics::new()),
         canonical_request(20),
     ));
     tokio::time::timeout(Duration::from_secs(2), async {
@@ -904,7 +904,7 @@ async fn assert_cancellation(behavior: EngineBehavior) {
         "request".to_string(),
         parent.clone(),
         permit,
-        Arc::new(super::super::metrics::Metrics::new()),
+        Arc::new(dynamo_http_server::metrics::Metrics::new()),
         canonical_request(2),
     ));
     tokio::time::timeout(Duration::from_secs(2), engine.started.notified())
