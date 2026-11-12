@@ -171,6 +171,7 @@ ignore:
 ci: &ci
   - '.github/ci/**'
   - '.github/workflows/**'
+  - '.github/codeql/**'
   - '.github/filters.yaml'
   - '.github/actions/**'
   - '.github/scripts/parse_buildkit_output.py'
