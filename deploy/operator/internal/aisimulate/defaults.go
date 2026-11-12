@@ -17,7 +17,11 @@
 
 package aisimulate
 
-import "k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+import (
+	"slices"
+
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+)
 
 // The derived defaults. No API field carries them: each depends on the typed underlay, so
 // no single typed field can supply it.
@@ -33,19 +37,36 @@ const (
 	DefaultMaxTrials int64 = 320
 )
 
-// publicUnderlay supplies the role objects required by AISimulate's default
-// aggregated-and-disaggregated engine search. Empty workers retain the upstream
-// parallelism, scheduler, KV-cache and timing defaults.
-func publicUnderlay() map[string]any {
-	return map[string]any{
-		"engine": map[string]any{
-			"workers": map[string]any{
-				"aggregated": map[string]any{},
-				"prefill":    map[string]any{},
-				"decode":     map[string]any{},
-			},
-		},
+// publicUnderlay supplies the empty role objects AISimulate needs for the engine mode that
+// spec.aisim.inputOverrides selects, the only source of engine.mode. Empty workers retain the
+// upstream parallelism, scheduler, KV-cache and timing defaults. AISimulate reads engine.mode,
+// or its choices, as a set of modes and rejects a role that a single-mode set does not run, so
+// {aggregated} gets only the aggregated role and {disaggregated} only prefill and decode. Any
+// other set (no mode, several choices, afd) keeps all three roles for AISimulate's default
+// aggregated-and-disaggregated search. Overrides are applied after this, so a role the caller
+// names is kept in every mode.
+func publicUnderlay(overrides map[string]any) map[string]any {
+	modes, _, _ := unstructured.NestedStringSlice(overrides, engineModeChoices...)
+	if mode, found, _ := unstructured.NestedString(overrides, engineMode...); found {
+		modes = []string{mode}
 	}
+	slices.Sort(modes)
+	modes = slices.Compact(modes)
+
+	workers := map[string]any{
+		"aggregated": map[string]any{},
+		"prefill":    map[string]any{},
+		"decode":     map[string]any{},
+	}
+	if len(modes) == 1 {
+		switch modes[0] {
+		case "aggregated":
+			workers = map[string]any{"aggregated": map[string]any{}}
+		case "disaggregated":
+			workers = map[string]any{"prefill": map[string]any{}, "decode": map[string]any{}}
+		}
+	}
+	return map[string]any{"engine": map[string]any{"workers": workers}}
 }
 
 // applyDefaults adds the derived defaults to the typed underlay, before the public-input

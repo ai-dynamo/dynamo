@@ -26,8 +26,9 @@
 // lowers that snapshot once, records the result in status.aisim.input and passes the same
 // document to the Job.
 //
-// Lower starts with the public engine-role underlay required for AISimulate's default
-// aggregated-and-disaggregated search. It then translates the typed spec (model, backends,
+// Lower starts with the public engine-role underlay: the empty worker roles that the
+// overrides' engine.mode runs, or all three for AISimulate's default
+// aggregated-and-disaggregated search when no concrete mode is set. It then translates the typed spec (model, backends,
 // hardware, workload, objective) into that input. The derived defaults that no API field
 // carries are added next: the request count (not for a trace, which accepts only a virtual-time
 // stop), a bounded trial budget for every search, and optimization.strict_sla when an
