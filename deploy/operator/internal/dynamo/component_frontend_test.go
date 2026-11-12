@@ -98,6 +98,76 @@ func TestFrontendSidecarProbeOverride(t *testing.T) {
 	}
 }
 
+// TestFrontendSidecarProbeMergeByOrigin pins the 1.6.0 field merge for workloads
+// created before operator 1.7.0, which complete-value replacement would otherwise
+// change on an operator-only upgrade. The merged values match release/1.6.0.
+func TestFrontendSidecarProbeMergeByOrigin(t *testing.T) {
+	health := corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: "/health", Port: intstr.FromString("http")}}
+	tests := []struct {
+		name     string
+		origin   string
+		authored *corev1.Probe
+		want     *corev1.Probe
+	}{
+		{
+			name:     "legacy origin merges a partial probe with the frontend defaults",
+			origin:   "1.6.0",
+			authored: &corev1.Probe{ProbeHandler: health, InitialDelaySeconds: 30},
+			want:     &corev1.Probe{ProbeHandler: health, InitialDelaySeconds: 30, PeriodSeconds: 10, TimeoutSeconds: 3, FailureThreshold: 3},
+		},
+		{
+			name:     "absent origin merges a partial probe with the frontend defaults",
+			authored: &corev1.Probe{ProbeHandler: health, InitialDelaySeconds: 30},
+			want:     &corev1.Probe{ProbeHandler: health, InitialDelaySeconds: 30, PeriodSeconds: 10, TimeoutSeconds: 3, FailureThreshold: 3},
+		},
+		{
+			name:     "legacy origin completes a timing-only probe from the default handler",
+			origin:   "1.6.0",
+			authored: &corev1.Probe{InitialDelaySeconds: 45},
+			want:     &corev1.Probe{ProbeHandler: health, InitialDelaySeconds: 45, PeriodSeconds: 10, TimeoutSeconds: 3, FailureThreshold: 3},
+		},
+		{
+			name:     "current origin keeps the authored probe as a complete value",
+			origin:   "1.7.0",
+			authored: &corev1.Probe{ProbeHandler: health, InitialDelaySeconds: 30},
+			want:     &corev1.Probe{ProbeHandler: health, InitialDelaySeconds: 30},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Author a partial readiness probe on the frontend sidecar of a graph with the given origin")
+			annotations := map[string]string{}
+			if tt.origin != "" {
+				annotations[commonconsts.KubeAnnotationDynamoOperatorOriginVersion] = tt.origin
+			}
+			component := &v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker,
+				RuntimeVersionOverride: "1.6.0", FrontendSidecar: new("frontend"),
+				PodTemplate: &corev1.PodTemplateSpec{
+					Annotations: annotations,
+					Spec: corev1.PodSpec{Containers: []corev1.Container{
+						{Name: commonconsts.MainContainerName, Image: "worker:1.6.0"},
+						{Name: "frontend", Image: "frontend:1.6.0", ReadinessProbe: tt.authored.DeepCopy()},
+					}}},
+			}
+
+			t.Log("Render the pod specification through the production entry point")
+			pod, err := GenerateBasePodSpec(
+				component, BackendFrameworkVLLM, nil, "test-dgd", "test-ns", RoleMain, 1,
+				&configv1alpha1.OperatorConfiguration{}, commonconsts.MultinodeDeploymentTypeGrove,
+				"worker", nil, staticContainerGPUCount(0),
+			)
+
+			t.Log("Compare the rendered readiness probe with the expected value for this origin")
+			require.NoError(t, err)
+			require.Len(t, pod.Containers, 2)
+			require.Equal(t, "frontend", pod.Containers[1].Name)
+			require.Equal(t, tt.want, pod.Containers[1].ReadinessProbe)
+		})
+	}
+}
+
 func TestFrontendStartupProbeOriginPropagation(t *testing.T) {
 	tests := []struct {
 		name        string
