@@ -2384,6 +2384,15 @@ impl<
         }
     }
 
+    /// Whether a load projection counts each rank's overlap with the request's active prompts.
+    /// Finding it walks the prompt trie, and only `LOAD` rows read it; without them, only the
+    /// selected rank's is computed.
+    fn projects_overlap(&self) -> bool {
+        self.selector
+            .required_worker_inputs()
+            .contains(WorkerInputs::LOAD)
+    }
+
     /// Refresh derived load for every request, retaining the allocation through
     /// selection, booking, and response-field capture, including error paths.
     fn with_projected_loads<R>(
@@ -2393,6 +2402,7 @@ impl<
         handle: impl FnOnce(&Self, &mut SchedulingRequest) -> R,
     ) -> R {
         request.worker_loads = std::mem::take(&mut self.projected_loads);
+        let project_overlap = self.projects_overlap();
         // The host's reject thresholds are judged in the same pass that projects each rank's
         // load, so selection only consults the ranks found full: no second read per rank.
         let full_ranks = match self
@@ -2411,7 +2421,7 @@ impl<
             }
         };
         self.slots.project_worker_loads_into(
-            request.token_seq.as_deref(),
+            request.token_seq.as_deref().filter(|_| project_overlap),
             decay_now,
             &mut request.worker_loads,
             full_ranks,
@@ -2489,6 +2499,16 @@ impl<
                     trace,
                 )
                 .map(|(mut selection, selection_trace)| {
+                    // A projection without overlap counts none of the request's blocks as
+                    // new on any rank. Count them for the selected rank alone.
+                    if !self.projects_overlap()
+                        && let Some(token_seq) = request.token_seq.as_deref()
+                        && request.worker_loads.contains_key(&selection.worker)
+                    {
+                        selection.potential_decode_blocks += self
+                            .slots
+                            .additional_active_blocks(token_seq, selection.worker);
+                    }
                     // Measure affinity selections against every eligible worker so cache
                     // metrics still mean "best eligible worker". Explicit pins are not
                     // widened, nor are selectors whose own filters may reject workers.
@@ -3818,6 +3838,71 @@ mod tests {
                 })
                 .unwrap())
         }
+    }
+
+    struct PickWorker {
+        inputs: WorkerInputs,
+        target: WorkerWithDpRank,
+    }
+
+    impl dynamo_worker_selection::WorkerPicker for PickWorker {
+        fn required_worker_inputs(&self) -> WorkerInputs {
+            self.inputs
+        }
+
+        fn pick(
+            &self,
+            _context: &dynamo_worker_selection::WorkerSelectionContext<'_>,
+            input: dynamo_worker_selection::WorkerInputView<'_>,
+        ) -> Result<usize, dynamo_worker_selection::WorkerSelectionPolicyError> {
+            Ok(input
+                .candidates()
+                .iter()
+                .position(|candidate| candidate.worker() == self.target)
+                .unwrap())
+        }
+    }
+
+    #[tokio::test]
+    async fn selected_worker_decode_blocks_count_active_overlap_without_load_rows() {
+        let block_size = 16;
+        let target = WorkerWithDpRank::new(0, 0);
+        let mut decode_blocks = Vec::new();
+        for inputs in [WorkerInputs::LOAD, WorkerInputs::ACTIVE_REQUESTS] {
+            let policy = dynamo_worker_selection::WorkerSelectionPolicy::new(
+                dynamo_worker_selection::SelectionConfig::default(),
+                "test",
+                vec![],
+                Box::new(PickWorker { inputs, target }),
+            );
+            let (queue, slots) = make_queue_with_custom_selector(2, block_size, 64, None, policy);
+            // Four active blocks on the target, the first three shared with the probe.
+            slots
+                .add_request(
+                    dynamo_slot_tracker::SequenceRequest {
+                        request_id: "active".to_string(),
+                        token_sequence: Some(vec![1, 2, 3, 9]),
+                        track_prefill_tokens: true,
+                        expected_output_tokens: None,
+                        prefill_load_hint: None,
+                        worker: target,
+                        lora_name: None,
+                    },
+                    decay_now(),
+                )
+                .unwrap();
+            let (mut probe, _rx) = make_request("probe", 4 * block_size as usize);
+            probe.token_seq = Some(vec![1, 2, 3, 4]);
+            let response = queue
+                .select_without_admission(probe)
+                .await
+                .unwrap()
+                .response;
+            assert_eq!(response.best_worker, target);
+            decode_blocks.push(response.potential_decode_blocks);
+        }
+        // Four active blocks plus the probe's one block not active on the target.
+        assert_eq!(decode_blocks, [5, 5]);
     }
 
     fn counting_policy(
