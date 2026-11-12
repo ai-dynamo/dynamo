@@ -2192,7 +2192,7 @@ mod tests {
             for inputs in [
                 WorkerInputs::LOAD,
                 WorkerInputs::CACHE | WorkerInputs::LOAD,
-                WorkerInputs::KV_TRANSFER | WorkerInputs::LOAD,
+                WorkerInputs::KV_COPY | WorkerInputs::LOAD,
             ] {
                 for overlap_score_credit in [0.0, 1.0, 2.0] {
                     for use_kv_events in [false, true] {
@@ -2206,7 +2206,7 @@ mod tests {
                                     ..Default::default()
                                 };
                                 let reads_index = inputs.contains(WorkerInputs::CACHE)
-                                    || inputs.contains(WorkerInputs::KV_TRANSFER);
+                                    || inputs.contains(WorkerInputs::KV_COPY);
                                 let expected =
                                     if !reads_index || !use_kv_events || use_remote_indexer {
                                         KvEventSourceRequirement::NotRequired

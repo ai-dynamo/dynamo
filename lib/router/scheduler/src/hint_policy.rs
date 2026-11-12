@@ -43,7 +43,7 @@ use runtime::BookedCopy;
 /// tasks, and must be bounded: no I/O, awaits, or unbounded index traversal.
 pub trait HintPolicy: Send + Sync + 'static {
     /// Router data this policy reads, from the documented [`WorkerInputs`] list. Reading
-    /// [`WorkerInputs::KV_TRANSFER`] provides [`HintContext::kv_copy_source`]. The router rejects
+    /// [`WorkerInputs::KV_COPY`] provides [`HintContext::kv_copy_source`]. The router rejects
     /// a policy that declares any other input, which [`HintContext`] can't serve.
     fn required_worker_inputs(&self) -> WorkerInputs {
         WorkerInputs::NONE
@@ -113,7 +113,7 @@ impl<'a> HintContext<'a> {
     }
 
     /// The booked worker's best copy source, when the selection committed none. Set only for a
-    /// policy that reads [`WorkerInputs::KV_TRANSFER`], when the partition's workers advertise
+    /// policy that reads [`WorkerInputs::KV_COPY`], when the partition's workers advertise
     /// `router_hint` and the KV index keeps the request's block chain.
     pub fn kv_copy_source(&self) -> Option<&'a KvCopySource> {
         self.kv_copy_source.map(BookedCopy::copy)

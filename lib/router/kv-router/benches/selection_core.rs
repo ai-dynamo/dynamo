@@ -19,13 +19,21 @@ use dynamo_kv_hashing::routing::{
 };
 use dynamo_kv_indexer::KvIndexerInterface;
 use dynamo_kv_router::config::KvRouterConfig;
+use dynamo_kv_router::plugins::hint_policy::{
+    HintContext, HintPolicy, HintPolicyConstructor, HintPolicyError, HintPolicyFactory,
+    KvHintAction,
+};
+use dynamo_kv_router::plugins::worker_selection::{
+    Commitments, WorkerCandidates, WorkerInputView, WorkerInputs, WorkerPicker, WorkerScorer,
+    WorkerSelectionContext, WorkerSelectionPolicy, WorkerSelectionPolicyError,
+};
 use dynamo_kv_router::services::indexer::backend::Indexer;
 use dynamo_kv_router::services::selection::{local_selection_core, local_selection_core_with_host};
 use dynamo_router_protocol::identity::RoutingPartitionId;
 use dynamo_router_protocol::worker::WorkerWithDpRank;
 use dynamo_scheduler::host::{
-    HostLoad, PromptRequest, SelectAndReserveRequest, SelectionCacheConfig, SelectionCore,
-    SelectionHost, WorkerRequest,
+    HostHints, HostLoad, PromptRequest, SelectAndReserveRequest, SelectionCacheConfig,
+    SelectionCore, SelectionHost, WorkerRequest,
 };
 use dynamo_scheduler::protocols::RoutingConstraints;
 use dynamo_scheduler::types::{RejectThresholdsProvider, WorkerSelectionPolicyFactory};
@@ -47,6 +55,147 @@ fn reference_policy_factory() -> WorkerSelectionPolicyFactory {
             role.default_selector_label(),
         )
     })
+}
+
+/// Costs uncached blocks and load and, with `copy_credit > 0`, credits the blocks each worker can
+/// copy from another worker. Reading `KV_COPY` commits the booked worker to its copy.
+struct CopyCreditScorer {
+    copy_credit: f64,
+}
+
+impl WorkerScorer for CopyCreditScorer {
+    fn required_worker_inputs(&self) -> WorkerInputs {
+        let inputs = WorkerInputs::CACHE | WorkerInputs::LOAD;
+        if self.copy_credit > 0.0 {
+            inputs | WorkerInputs::KV_COPY
+        } else {
+            inputs
+        }
+    }
+
+    fn score(
+        &self,
+        context: &WorkerSelectionContext<'_>,
+        candidates: WorkerCandidates<'_>,
+        costs: &mut [f64],
+    ) -> Result<(), WorkerSelectionPolicyError> {
+        for (candidate, cost) in candidates.iter().zip(costs) {
+            let cache = candidate
+                .cache()
+                .ok_or_else(|| WorkerSelectionPolicyError::failed("cache input unavailable"))?;
+            let load = candidate
+                .load()
+                .ok_or_else(|| WorkerSelectionPolicyError::failed("load input unavailable"))?;
+            let cached = cache.device_overlap_blocks();
+            let copied = candidate
+                .kv_copy()
+                .and_then(|copy| copy.source_prefix_blocks())
+                .map_or(0.0, |blocks| (f64::from(blocks) - cached).max(0.0));
+            let uncached = (context.request_blocks() as f64 - cached).max(0.0);
+            *cost = uncached - self.copy_credit * copied
+                + load.active_prefill_tokens() as f64 / context.block_size() as f64
+                + load.active_requests() as f64;
+        }
+        Ok(())
+    }
+}
+
+struct LowestCostPicker;
+
+impl WorkerPicker for LowestCostPicker {
+    fn pick(
+        &self,
+        _context: &WorkerSelectionContext<'_>,
+        input: WorkerInputView<'_>,
+    ) -> Result<usize, WorkerSelectionPolicyError> {
+        input
+            .candidates()
+            .iter()
+            .enumerate()
+            .min_by(|(_, left), (_, right)| left.cost().total_cmp(&right.cost()))
+            .map(|(row, _)| row)
+            .ok_or_else(|| WorkerSelectionPolicyError::failed("no eligible worker"))
+    }
+}
+
+/// Sends the committed copy, or else the booked worker's best-effort copy source, as a fetch of
+/// the source's prefix blocks.
+struct CopySender;
+
+impl HintPolicy for CopySender {
+    fn required_worker_inputs(&self) -> WorkerInputs {
+        WorkerInputs::KV_COPY
+    }
+
+    fn commitments(&self) -> Commitments {
+        Commitments::KV_COPY
+    }
+
+    fn build_hints(&self, context: &HintContext<'_>) -> Result<Vec<KvHintAction>, HintPolicyError> {
+        let Some(locations) = context
+            .committed_kv_copy()
+            .or_else(|| context.kv_copy_source())
+            .and_then(|copy| context.kv_copy_locations(copy))
+        else {
+            return Ok(Vec::new());
+        };
+        Ok(vec![KvHintAction::unnumbered(
+            "bench.fetch",
+            "1",
+            [
+                (
+                    "source".to_string(),
+                    serde_json::json!(locations.source_address()),
+                ),
+                (
+                    "block_hashes".to_string(),
+                    serde_json::json!(&locations.chain()[..locations.source_prefix_blocks()]),
+                ),
+            ]
+            .into(),
+        )])
+    }
+}
+
+/// A core whose policy is [`CopyCreditScorer`] and whose hint policy is [`CopySender`].
+fn core_with_copy_credit(
+    runtime: &tokio::runtime::Runtime,
+    workers: u64,
+    copy_credit: f64,
+) -> SelectionCore {
+    let policy: WorkerSelectionPolicyFactory = Arc::new(move |config, role, _| {
+        WorkerSelectionPolicy::new(
+            config.clone(),
+            role.as_str(),
+            vec![Box::new(CopyCreditScorer { copy_credit })],
+            Box::new(LowestCostPicker),
+        )
+    });
+    let hints = HintPolicyFactory::for_all_roles([(
+        "copy".to_string(),
+        HintPolicyConstructor::shared(CopySender),
+    )])
+    .expect("hint policies");
+    let core = local_selection_core_with_host(
+        KvRouterConfig {
+            use_kv_events: true,
+            router_queue_threshold: None,
+            ..Default::default()
+        },
+        1,
+        CancellationToken::new(),
+        SelectionCacheConfig::default(),
+        policy,
+        SelectionHost {
+            hints: HostHints {
+                policies: Some(hints),
+            },
+            ..Default::default()
+        },
+    )
+    .expect("core");
+    upsert_workers(runtime, &core, workers, true, true);
+    core
 }
 
 fn core_with_workers(
@@ -272,23 +421,18 @@ fn bench_select_and_reserve(c: &mut Criterion) {
 }
 
 /// Every worker holds a different-length prefix of the prompt, so every
-/// worker is a fetch source and every unpinned booking chooses one.
-/// `credit` scores fetchable blocks (`shared_cache_multiplier: 0.5`).
+/// worker is a copy source and every unpinned booking chooses one.
+/// `credit0.5` reads `KV_COPY`, so every row reads its copy source and every
+/// booking commits to and sends one copy; `credit0` reads neither.
 fn bench_fetch_sources(c: &mut Criterion) {
     let mut group = c.benchmark_group("selection_core/fetch_sources");
     group.measurement_time(Duration::from_secs(5));
     group.throughput(Throughput::Elements(1));
     let prompt_blocks = prompt_tokens().len() / BLOCK_SIZE as usize;
     for &workers in &[256u64, 1024, 4096] {
-        for (name, multiplier) in [("credit0", 0.0), ("credit0.5", 0.5)] {
-            let config = KvRouterConfig {
-                use_kv_events: true,
-                router_queue_threshold: None,
-                shared_cache_multiplier: Some(multiplier),
-                ..Default::default()
-            };
+        for (name, copy_credit) in [("credit0", 0.0), ("credit0.5", 0.5)] {
             let runtime = runtime();
-            let core = core_with_config(&runtime, workers, true, config);
+            let core = core_with_copy_credit(&runtime, workers, copy_credit);
             runtime.block_on(async {
                 for worker_id in 1..=workers {
                     let blocks = worker_id as usize % prompt_blocks + 1;

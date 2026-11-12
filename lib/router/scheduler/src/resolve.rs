@@ -18,8 +18,9 @@ pub(crate) struct RouterResponsibilities {
     /// Decides which resources start: the KV index and its event subscription, the shared cache,
     /// load tracking. Default hint policies add nothing.
     pub(crate) prepare_inputs: WorkerInputs,
-    /// Some scorer reads [`WorkerInputs::KV_TRANSFER`]: compute a copy offer for every candidate
-    /// and keep the request's block chain, for previews as well as bookings.
+    /// Some scorer reads [`WorkerInputs::KV_COPY`]: compute a copy offer for every candidate,
+    /// keep the request's block chain, for previews as well as bookings, and commit the selected
+    /// worker to its offer.
     pub(crate) commit_kv_copy: bool,
     /// Compute the booked worker's copy source at booking.
     pub(crate) compute_booked_copy_source: bool,
@@ -74,7 +75,15 @@ pub enum PluginConfigError {
     )]
     CopySourcesUnavailable { role: &'static str, policy: String },
     #[error(
-        "hint policy {policy:?} for {role} declares {inputs}, which hint policies can't read; a hint policy may declare only WorkerInputs::KV_TRANSFER"
+        "the worker-selection policy for {role} commits KV copies, but no hint policy for {role} sends them; add a hint policy that declares Commitments::KV_COPY"
+    )]
+    UnsentCopies { role: &'static str },
+    #[error(
+        "the worker-selection policy for {role} reads KV copy offers, which need a local, event-driven KV index without a remote or predicted-TTL indexer; enable KV events or select a policy without copy credit"
+    )]
+    CopyOffersUnavailable { role: &'static str },
+    #[error(
+        "hint policy {policy:?} for {role} declares {inputs}, which hint policies can't read; a hint policy may declare only WorkerInputs::KV_COPY"
     )]
     UnreadableHintInputs {
         role: &'static str,
@@ -86,14 +95,18 @@ pub enum PluginConfigError {
 /// Work out the router's responsibilities for one role, or reject the config with a message that
 /// names the fix.
 ///
-/// Rejects the config when more than one hint policy declares
-/// [`Commitments::KV_COPY`](crate::hint_policy::Commitments::KV_COPY), or when a
-/// configured hint policy reads [`WorkerInputs::KV_TRANSFER`] but the KV index can't keep the
-/// request's block chain (`kv_chain_retention` is false). Default hint policies are passive: they add no inputs, never move the
-/// role onto the KV path, and do without copy data where the index can't provide it.
+/// Rejects the config when:
+/// - the selection commits copies (a scorer reads [`WorkerInputs::KV_COPY`]) and no hint policy
+///   declares [`Commitments::KV_COPY`](crate::hint_policy::Commitments::KV_COPY), or more than
+///   one does;
+/// - the selection, or a configured hint policy, reads [`WorkerInputs::KV_COPY`] but the KV index
+///   can't keep the request's block chain (`kv_chain_retention` is false).
+///
+/// Default hint policies are passive: they add no inputs, and do without copy data where the
+/// index can't provide it.
 ///
 /// Also rejects any hint policy, default or configured, that declares an input other than
-/// [`WorkerInputs::KV_TRANSFER`]: [`HintContext`](crate::hint_policy::HintContext) can't serve
+/// [`WorkerInputs::KV_COPY`]: [`HintContext`](crate::hint_policy::HintContext) can't serve
 /// it, so the router would start resources the policy never reads.
 pub(crate) fn resolve_role(
     role: WorkerType,
@@ -104,13 +117,17 @@ pub(crate) fn resolve_role(
     let role_label = role.as_str();
     let (policies, defaults) = hint_policies.into_parts();
     let selection_inputs = selection.required_worker_inputs();
+    let commit_kv_copy = selection_inputs.contains(WorkerInputs::KV_COPY);
+    if commit_kv_copy && !kv_chain_retention {
+        return Err(PluginConfigError::CopyOffersUnavailable { role: role_label });
+    }
     let mut prepare_inputs = selection_inputs;
     let mut consumers: Vec<HintPolicySlot> = Vec::new();
     let mut others = Vec::with_capacity(policies.len());
     for (name, policy) in policies {
         let slot = HintPolicySlot::new(name, policy);
         let inputs = slot.policy.required_worker_inputs();
-        let unreadable = inputs.without(WorkerInputs::KV_TRANSFER);
+        let unreadable = inputs.without(WorkerInputs::KV_COPY);
         if unreadable != WorkerInputs::NONE {
             return Err(PluginConfigError::UnreadableHintInputs {
                 role: role_label,
@@ -140,12 +157,15 @@ pub(crate) fn resolve_role(
             others.push(slot);
         }
     }
+    if commit_kv_copy && consumers.is_empty() {
+        return Err(PluginConfigError::UnsentCopies { role: role_label });
+    }
     consumers.append(&mut others);
     Ok(RouterResponsibilities {
         prepare_inputs,
-        commit_kv_copy: selection_inputs.contains(WorkerInputs::KV_TRANSFER),
+        commit_kv_copy,
         // The router sends its own fetch from the booked worker's copy source for every booking,
-        // so every role computes it; hint policies that read KV_TRANSFER read the same source.
+        // so every role computes it; hint policies that read KV_COPY read the same source.
         compute_booked_copy_source: true,
         run_hint_policies: consumers,
     })

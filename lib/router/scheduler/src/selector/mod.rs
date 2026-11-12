@@ -37,7 +37,7 @@ use crate::kv_hints::{
 };
 use dynamo_worker_selection::{
     CacheSnapshot, CandidateData, ResidentBlockSource, WorkerCacheData, WorkerCapacity,
-    WorkerInputRows, WorkerTransferInput,
+    WorkerCopyInput, WorkerInputRows,
 };
 pub use dynamo_worker_selection::{
     CandidatePreparer, CandidateRank, CandidateRowSource, PreparedRows, RankVisitor, RowPick,
@@ -348,11 +348,7 @@ impl<'a, C: WorkerConfigLike> SelectionRowSource<'a, C> {
     }
 
     /// A row's fetch input; `None` when the request has no transfer candidates.
-    fn kv_transfer_input(
-        &self,
-        worker: WorkerWithDpRank,
-        config: &C,
-    ) -> Option<WorkerTransferInput> {
+    fn kv_transfer_input(&self, worker: WorkerWithDpRank, config: &C) -> Option<WorkerCopyInput> {
         let sources = self.kv_transfer_sources(|| self.eligible_transfer_scope())?;
         let source = config.kv_transfer_keys().target().and_then(|target| {
             sources.source_for(
@@ -361,7 +357,7 @@ impl<'a, C: WorkerConfigLike> SelectionRowSource<'a, C> {
                 self.request.transfer_local_prefix_blocks_for(worker),
             )
         });
-        Some(WorkerTransferInput {
+        Some(WorkerCopyInput {
             source_prefix_blocks: source.map(source_prefix_blocks),
         })
     }
@@ -440,7 +436,7 @@ impl<'a, C: WorkerConfigLike> SelectionRowSource<'a, C> {
             inputs,
             |_, device_overlap_blocks| device_overlap_blocks,
         );
-        if inputs.contains(WorkerInputs::KV_TRANSFER) {
+        if inputs.contains(WorkerInputs::KV_COPY) {
             row.transfer = self.kv_transfer_input(worker, config);
         }
         row

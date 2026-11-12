@@ -24,7 +24,7 @@ pub struct CandidateData {
     pub cache: WorkerCacheData,
     pub load: WorkerLoadInput,
     /// `Some` once the fetch column is filled, which needs the request's transfer candidates.
-    pub transfer: Option<WorkerTransferInput>,
+    pub transfer: Option<WorkerCopyInput>,
     /// The request's preference for this rank's taints, when asked for and not pinned.
     pub preferred_taint_multiplier: Option<f64>,
     /// The worker's data-parallel size, set only on prepared rows so the scheduler actor can
@@ -99,16 +99,23 @@ impl<'a> WorkerCandidate<'a> {
     }
 
     /// This worker's KV copy offer, only for a scorer that declared
-    /// KV_TRANSFER; filters and pickers do not receive it. None also means the
+    /// KV_COPY; filters and pickers do not receive it. None also means the
     /// host has no copy data for this request: no worker in the partition
     /// advertises `router_hint`, or the indexer cannot retain the matched block chain.
     #[inline]
-    pub fn kv_transfer(self) -> Option<WorkerTransferInput> {
-        if self.inputs.contains(WorkerInputs::KV_TRANSFER) {
+    pub fn kv_copy(self) -> Option<WorkerCopyInput> {
+        if self.inputs.contains(WorkerInputs::KV_COPY) {
             self.data.transfer
         } else {
             None
         }
+    }
+
+    /// Previous name of [`Self::kv_copy`].
+    // TODO(v1.9): Remove this alias.
+    #[deprecated(since = "1.7.0", note = "use `WorkerCandidate::kv_copy`")]
+    pub fn kv_transfer(self) -> Option<WorkerCopyInput> {
+        self.kv_copy()
     }
 
     /// Preferred-taint cost multiplier, only when this component declared PREFERRED_TAINT.
@@ -382,12 +389,18 @@ const _: () = assert!(size_of::<WorkerLoadInput>() == 40);
 pub use dynamo_router_protocol::columns::{WorkerInfo, WorkerInputs};
 pub use dynamo_router_protocol::worker::WorkerCapacity;
 
+/// A worker's KV copy offer, read through [`WorkerCandidate::kv_copy`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct WorkerTransferInput {
-    /// Blocks of the prompt a fetch source holds beyond this rank's local prefix, when one
+pub struct WorkerCopyInput {
+    /// Blocks of the prompt a copy source holds beyond this rank's local prefix, when one
     /// was chosen for the rank.
     pub source_prefix_blocks: Option<u32>,
 }
+
+/// Previous name of [`WorkerCopyInput`].
+// TODO(v1.9): Remove this alias.
+#[deprecated(since = "1.7.0", note = "use `WorkerCopyInput`")]
+pub type WorkerTransferInput = WorkerCopyInput;
 
 /// Borrowed, index-aligned view of one custom picker's requested worker inputs.
 ///
@@ -450,8 +463,8 @@ impl CandidateData {
             } else {
                 WorkerLoadInput::default()
             },
-            transfer: if inputs.contains(WorkerInputs::KV_TRANSFER) {
-                if self.inputs.contains(WorkerInputs::KV_TRANSFER) {
+            transfer: if inputs.contains(WorkerInputs::KV_COPY) {
+                if self.inputs.contains(WorkerInputs::KV_COPY) {
                     self.transfer
                 } else {
                     additional.transfer
@@ -587,7 +600,7 @@ impl WorkerLoadInput {
     }
 }
 
-impl WorkerTransferInput {
+impl WorkerCopyInput {
     /// Root-aligned prefix, in blocks, held by the source this worker would
     /// fetch from, and so the prefix it holds after the fetch. None when no
     /// eligible source holds more than this worker's device and host-pinned

@@ -28,15 +28,9 @@ struct ReservationBooking {
     /// Public block hashes to record into an approximate indexer once booked.
     routing_hashes: Option<Vec<LocalBlockHash>>,
     session_id: Option<String>,
-    /// What the hint policies of a replayed selection's booking read; `None` for an explicit
-    /// reservation, which skips selection and runs no hint policy.
-    replay_hint: Option<ReplayHint>,
-}
-
-/// The replayed selection's values its booking's hint policies read.
-struct ReplayHint {
-    isl_tokens: usize,
-    session_context: Option<SessionContext>,
+    /// The replayed selection, whose booking runs the partition's hint policies; `None` for an
+    /// explicit reservation, which skips selection and runs no hint policy.
+    replay: Option<Arc<PendingSelection>>,
 }
 
 /// `selection_id` -> the booking it holds.
@@ -260,10 +254,7 @@ impl SelectionCore {
                 accounting_attribution: pending.accounting_attribution,
                 routing_hashes: pending.routing_hashes.clone(),
                 session_id: pending.session_id.clone(),
-                replay_hint: Some(ReplayHint {
-                    isl_tokens: pending.isl_tokens,
-                    session_context: pending.session_context.clone(),
-                }),
+                replay: Some(Arc::clone(&pending)),
             },
         )
         .await
@@ -374,7 +365,7 @@ impl SelectionCore {
                 accounting_attribution: AccountingAttribution::default(),
                 routing_hashes,
                 session_id: None,
-                replay_hint: None,
+                replay: None,
             },
         )
         .await
@@ -401,7 +392,7 @@ impl SelectionCore {
             accounting_attribution,
             routing_hashes,
             session_id,
-            replay_hint,
+            replay,
         } = booking;
 
         let claim = self.claim_reservation(&selection_id, &key)?;
@@ -430,16 +421,19 @@ impl SelectionCore {
             })?;
         // A replayed selection runs its partition's hint policies for the booked worker. A
         // failure returns while the booking handle is armed, so the booking is freed.
-        let kv_hint = match &replay_hint {
-            Some(replay) => booking_hint(
+        let kv_hint = match &replay {
+            Some(pending) => booking_hint(
                 &entry,
                 BookingHint {
                     request_id: &selection_id,
                     worker,
-                    isl_tokens: replay.isl_tokens,
-                    session_context: replay.session_context.as_ref(),
-                    kv_copy_source: None,
-                    kv_transfer_candidates: None,
+                    isl_tokens: pending.isl_tokens,
+                    session_context: pending.session_context.as_ref(),
+                    kv_copy_source: pending.kv_copy.as_ref().map(|kv_copy| kv_copy.copy),
+                    kv_transfer_candidates: pending
+                        .kv_copy
+                        .as_ref()
+                        .map(|kv_copy| &kv_copy.candidates),
                 },
             )?,
             None => None,

@@ -14,10 +14,10 @@ pub use crate::plugins::worker_selection::{
     HostedSelectionRequest, HostedWorkerPicker, RuntimePolicyBuilder, RuntimePolicyConfig,
     RuntimePolicyError, RuntimePolicyUpdate, ScoredWorkerCandidate, SelectionConfig,
     SelectionFailure, WorkerCacheInput, WorkerCacheInputs, WorkerCandidate, WorkerCandidates,
-    WorkerCapacity, WorkerFilter, WorkerInfo, WorkerInputView, WorkerInputs, WorkerLoadInput,
-    WorkerPicker, WorkerScorer, WorkerSelectionConfig, WorkerSelectionContext,
+    WorkerCapacity, WorkerCopyInput, WorkerFilter, WorkerInfo, WorkerInputView, WorkerInputs,
+    WorkerLoadInput, WorkerPicker, WorkerScorer, WorkerSelectionConfig, WorkerSelectionContext,
     WorkerSelectionInstance, WorkerSelectionPolicy, WorkerSelectionPolicyError,
-    WorkerSelectionPolicyFactory, WorkerSelectionPolicySelection, WorkerTransferInput,
+    WorkerSelectionPolicyFactory, WorkerSelectionPolicySelection,
 };
 
 // Request-classifier contracts and the request they classify.

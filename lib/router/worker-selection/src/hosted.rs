@@ -280,8 +280,8 @@ mod tests {
             ),
             // Stripped from the picker's effective inputs, but still a KV-only declaration.
             (
-                "KV_TRANSFER",
-                policy(Vec::new(), Vec::new(), declaring(WorkerInputs::KV_TRANSFER)),
+                "KV_COPY",
+                policy(Vec::new(), Vec::new(), declaring(WorkerInputs::KV_COPY)),
             ),
         ];
         for (case, policy) in cases {

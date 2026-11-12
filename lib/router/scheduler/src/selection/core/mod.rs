@@ -74,7 +74,7 @@ use super::catalog::WorkerCatalog;
 use super::error::SelectionError;
 use super::ingress::{KvEventIngress, LocalIndexIngress};
 use super::input::{PromptView, TrackingHashInput};
-use super::pending::{PendingSelection, SelectionCache, SelectionCacheConfig};
+use super::pending::{PendingKvCopy, PendingSelection, SelectionCache, SelectionCacheConfig};
 use super::types::{
     ModelLoadResponse, OverlapScoresRequest, OverlapScoresResponse, PotentialLoadsRequest,
     ReadyResponse, ReservationRequest, ReservationResponse, SelectAndReserveRequest, SelectRequest,

@@ -132,6 +132,14 @@ pub fn resolve_transfer_sources<C: WorkerConfigLike>(
     resolved
 }
 
+/// Whether any worker in the published partition snapshot can receive router hints (worker-level
+/// metadata, so one rank suffices).
+pub(crate) fn hint_capable_partition<C: WorkerConfigLike>(configs: &HashMap<WorkerId, C>) -> bool {
+    configs
+        .values()
+        .any(|config| config.kv_transfer_keys().target().is_some())
+}
+
 /// A KV copy the router found for one target worker: the eligible source with the longest prefix
 /// beyond the target's local prefix.
 ///
@@ -165,6 +173,11 @@ impl KvCopySource {
     /// The worker or cache owner the blocks come from.
     pub fn source(&self) -> KvTransferCandidateSource {
         self.choice.source
+    }
+
+    /// The root-aligned prefix, in blocks, the source holds.
+    pub(crate) fn source_prefix_blocks(&self) -> usize {
+        self.choice.prefix_blocks
     }
 
     /// Blocks the copy adds beyond the target's device and host-pinned prefix; at least one.

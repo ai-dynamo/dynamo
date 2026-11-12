@@ -10,6 +10,8 @@
 
 mod config;
 
+#[allow(deprecated)]
+pub use dynamo_worker_selection::WorkerTransferInput;
 pub use dynamo_worker_selection::experimental;
 pub use dynamo_worker_selection::selection_config;
 pub use dynamo_worker_selection::{
@@ -19,9 +21,9 @@ pub use dynamo_worker_selection::{
     ScoredWorkerCandidate, SelectionConfig, SelectionFailure, SelectionTrace, SelectionTraceRow,
     SelectionTraceSpec, SessionContext, SharedCacheHits, SharedCacheType, WorkerCacheData,
     WorkerCacheInput, WorkerCacheInputs, WorkerCandidate, WorkerCandidates, WorkerCapacity,
-    WorkerFilter, WorkerInfo, WorkerInputRows, WorkerInputView, WorkerInputs, WorkerLoadInput,
-    WorkerPicker, WorkerScorer, WorkerSelectionContext, WorkerSelectionPolicy,
-    WorkerSelectionPolicyError, WorkerTransferInput,
+    WorkerCopyInput, WorkerFilter, WorkerInfo, WorkerInputRows, WorkerInputView, WorkerInputs,
+    WorkerLoadInput, WorkerPicker, WorkerScorer, WorkerSelectionContext, WorkerSelectionPolicy,
+    WorkerSelectionPolicyError,
 };
 #[cfg(any(test, feature = "bench"))]
 pub use dynamo_worker_selection::{DefaultPick, DefaultWorkerPicker};

@@ -372,7 +372,7 @@ Each worker policy is constructed once per routing partition. An empty bundle re
 
 Worker identity and ordinary request metadata are always available. Dynamo calculates optional per-worker signals only for groups that a filter, scorer, or picker requests.
 
-Routing cache resources start only if a component requests `CACHE` or a scorer requests `KV_TRANSFER`. `serve_indexer`, `enable_session_prefix_index`, and the experimental `RESIDENT_BLOCKS` input require `CACHE`.
+Routing cache resources start only if a component requests `CACHE` or a scorer requests `KV_COPY`. `serve_indexer`, `enable_session_prefix_index`, and the experimental `RESIDENT_BLOCKS` input require `CACHE`.
 
 ### Request Context
 
@@ -454,8 +454,8 @@ If a component needs no optional worker data, return `WorkerInputs::NONE`. Combi
 | `LOAD` | `active_requests()` | Requests currently active on the worker |
 | `PREFERRED_TAINT` | `preferred_taint_multiplier()` | Optional cost multiplier from matching preferred routing taints |
 | `ACTIVE_REQUESTS` | `WorkerInputView::active_requests(row)` | Picker only. Requests in flight on the row's worker; `None` only when the picker did not declare the group or the row is out of range |
-| `KV_TRANSFER` | `kv_transfer()` | `None` if the host has no transfer data for this request: no worker in the partition consumes router hints, or the indexer cannot retain the matched block chain |
-| `KV_TRANSFER` | `source_prefix_blocks()` | Prefix blocks held by the source this worker would fetch from, and so held by the worker after the fetch; `None` when no eligible source holds more than the worker's device-resident plus host-pinned prefix |
+| `KV_COPY` | `kv_copy()` | The worker's copy offer. `None` if the host has no copy data for this request: no worker in the partition advertises `router_hint`, or the indexer cannot retain the matched block chain |
+| `KV_COPY` | `source_prefix_blocks()` | Prefix blocks held by the source this worker would copy from, and so held by the worker after the copy; `None` when no eligible source holds more than the worker's device-resident plus host-pinned prefix |
 
 The GPU, CPU, and disk overlap accessors return raw tier counts. A missing tier or worker entry is zero; Dynamo does not substitute its weighted effective-overlap estimate. Each custom scorer chooses how to combine the raw counts.
 
@@ -465,9 +465,11 @@ A filter or scorer reads groups through `WorkerCandidate::cache()` or `load()`. 
 
 Declare `ACTIVE_REQUESTS` instead of `LOAD` when a request count is all the picker needs. It is cheaper, and `LOAD` needs the KV scheduler, which tracks each worker's active tokens and blocks.
 
-A scorer reads `KV_TRANSFER` through `WorkerCandidate::kv_transfer()`. Filters and pickers do not receive it, and declaring it there has no effect. The host picks each worker's source with the [KV fetch hint](topology-aware-kv-transfer.md#kv-fetch-hints) rules, including topology islands, and booking a worker attaches a fetch hint for that same source. Fetches are best effort: the source may no longer hold the blocks when the request runs.
+A scorer reads `KV_COPY` through `WorkerCandidate::kv_copy()`. Filters and pickers do not receive it, and declaring it there has no effect. The host picks each worker's copy offer with the [KV fetch hint](topology-aware-kv-transfer.md#kv-fetch-hints) rules, including topology islands.
 
-This scorer charges each worker for the prompt blocks it can neither reuse nor fetch. A worker without transfer data still counts its own cache:
+A policy whose scorer reads `KV_COPY` commits the selected worker to its offer, so the worker's role must run a [hint policy](hint-policies.md) that sends it.
+
+This scorer charges each worker for the prompt blocks it can neither reuse nor copy. A worker without copy data still counts its own cache:
 
 ```rust
 use dynamo_kv_router::plugins::worker_selection::{
@@ -478,7 +480,7 @@ struct UncoveredPromptScorer;
 
 impl WorkerScorer for UncoveredPromptScorer {
     fn required_worker_inputs(&self) -> WorkerInputs {
-        WorkerInputs::CACHE | WorkerInputs::KV_TRANSFER
+        WorkerInputs::CACHE | WorkerInputs::KV_COPY
     }
 
     fn score(
@@ -493,11 +495,11 @@ impl WorkerScorer for UncoveredPromptScorer {
                     + cache.host_overlap_blocks()
                     + cache.disk_overlap_blocks()
             });
-            let fetchable = candidate
-                .kv_transfer()
-                .and_then(|transfer| transfer.source_prefix_blocks())
+            let copyable = candidate
+                .kv_copy()
+                .and_then(|copy| copy.source_prefix_blocks())
                 .map_or(0.0, f64::from);
-            *cost = (context.request_blocks() as f64 - cached.max(fetchable)).max(0.0);
+            *cost = (context.request_blocks() as f64 - cached.max(copyable)).max(0.0);
         }
         Ok(())
     }
@@ -700,9 +702,9 @@ worker_selection:
 ```
 
 The provider also accepts `overlap_score_credit_decay`, `decode_active_request_weight`,
-`host_cache_hit_weight`, `disk_cache_hit_weight`, and `shared_cache_multiplier`. The multiplier
-also credits blocks a worker can fetch through a KV fetch hint, so set it to enable that credit
-without shared cache. Values must be finite and non-negative. Per-request score and temperature
+`host_cache_hit_weight`, `disk_cache_hit_weight`, and `shared_cache_multiplier`. The `kvcr`
+policy takes the same parameters and also credits blocks a worker can copy from a peer at that
+multiplier. Values must be finite and non-negative. Per-request score and temperature
 overrides do not apply to this policy.
 
 Omitted parameters normally inherit router configuration. When the resolved
@@ -715,8 +717,7 @@ nonzero host, disk, or shared-cache weight therefore enables cache inputs even w
 `overlap_score_credit: 0`. This changes startup behavior for existing policy YAML that
 previously used zero device credit to suppress all cache inputs despite explicit nonzero tier
 weights. Set all four cache-scoring weights to zero to keep such a policy load-only. Plain
-disaggregated decode always resolves all four weights to zero and skips cache inputs. A nonzero
-shared-cache multiplier also requires `KV_TRANSFER` inputs.
+disaggregated decode always resolves all four weights to zero and skips cache inputs.
 
 ## Runtime Configuration
 

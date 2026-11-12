@@ -222,7 +222,7 @@ fn resolve_role_rejects_two_copy_consumers() {
 #[test]
 fn resolve_role_rejects_copy_reads_the_index_cannot_serve() {
     let reader = Recorder {
-        inputs: WorkerInputs::KV_TRANSFER,
+        inputs: WorkerInputs::KV_COPY,
         ..Recorder::new("reader")
     };
     let error = resolve_role(
@@ -267,7 +267,7 @@ fn resolve_role_rejects_hint_inputs_the_context_cannot_serve() {
             role_policies(
                 vec![(
                     "reader",
-                    reader(WorkerInputs::CACHE | WorkerInputs::KV_TRANSFER),
+                    reader(WorkerInputs::CACHE | WorkerInputs::KV_COPY),
                 )],
                 defaults,
             ),
@@ -282,7 +282,7 @@ fn resolve_role_rejects_hint_inputs_the_context_cannot_serve() {
         assert!(
             error
                 .to_string()
-                .contains("may declare only WorkerInputs::KV_TRANSFER"),
+                .contains("may declare only WorkerInputs::KV_COPY"),
             "{error}"
         );
     }
@@ -290,7 +290,7 @@ fn resolve_role_rejects_hint_inputs_the_context_cannot_serve() {
     let responsibilities = resolve_role(
         WorkerType::Prefill,
         &selection(WorkerInputs::LOAD),
-        role_policies(vec![("reader", reader(WorkerInputs::KV_TRANSFER))], false),
+        role_policies(vec![("reader", reader(WorkerInputs::KV_COPY))], false),
         true,
     )
     .unwrap();
@@ -303,7 +303,7 @@ fn resolve_role_rejects_hint_inputs_the_context_cannot_serve() {
 #[test]
 fn configured_policies_add_inputs_and_defaults_add_none() {
     let reader = Recorder {
-        inputs: WorkerInputs::KV_TRANSFER,
+        inputs: WorkerInputs::KV_COPY,
         ..Recorder::new("reader")
     };
     let configured = resolve_role(
@@ -315,7 +315,7 @@ fn configured_policies_add_inputs_and_defaults_add_none() {
     .unwrap();
     assert_eq!(
         configured.prepare_inputs(),
-        WorkerInputs::LOAD | WorkerInputs::KV_TRANSFER
+        WorkerInputs::LOAD | WorkerInputs::KV_COPY
     );
 
     let defaulted = resolve_role(
@@ -338,11 +338,12 @@ fn configured_policies_add_inputs_and_defaults_add_none() {
 }
 
 #[test]
-fn a_scorer_that_reads_copy_offers_computes_them_for_every_selection() {
+fn a_scorer_that_reads_copy_offers_commits_copies_that_a_consumer_sends() {
+    let committing = || selection(WorkerInputs::CACHE | WorkerInputs::KV_COPY);
     let responsibilities = resolve_role(
         WorkerType::Prefill,
-        &selection(WorkerInputs::CACHE | WorkerInputs::KV_TRANSFER),
-        RoleHintPolicies::none(),
+        &committing(),
+        role_policies(vec![("consumer", Recorder::consumer("consumer"))], false),
         true,
     )
     .unwrap();
@@ -351,7 +352,45 @@ fn a_scorer_that_reads_copy_offers_computes_them_for_every_selection() {
     assert!(
         responsibilities
             .prepare_inputs()
-            .contains(WorkerInputs::KV_TRANSFER)
+            .contains(WorkerInputs::KV_COPY)
+    );
+
+    // A default consumer pairs too: defaults are passive, not absent.
+    resolve_role(
+        WorkerType::Prefill,
+        &committing(),
+        role_policies(vec![("consumer", Recorder::consumer("consumer"))], true),
+        true,
+    )
+    .unwrap();
+
+    // Committed copies that nothing sends are rejected, even with other hint policies.
+    for policies in [
+        RoleHintPolicies::none(),
+        role_policies(vec![("other", Recorder::new("other"))], false),
+    ] {
+        let error = resolve_role(WorkerType::Prefill, &committing(), policies, true).unwrap_err();
+        assert!(
+            matches!(error, PluginConfigError::UnsentCopies { role: "prefill" }),
+            "{error}"
+        );
+        assert!(
+            error.to_string().contains("Commitments::KV_COPY"),
+            "{error}"
+        );
+    }
+
+    // Copy offers need an index that keeps the block chain.
+    let error = resolve_role(
+        WorkerType::Prefill,
+        &committing(),
+        role_policies(vec![("consumer", Recorder::consumer("consumer"))], false),
+        false,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(error, PluginConfigError::CopyOffersUnavailable { .. }),
+        "{error}"
     );
 }
 
@@ -686,7 +725,7 @@ fn copy_accessors_follow_each_policys_declarations() {
         ),
         HintPolicySlot::new(
             Arc::from("reader"),
-            Arc::new(Probe(WorkerInputs::KV_TRANSFER, Commitments::NONE)),
+            Arc::new(Probe(WorkerInputs::KV_COPY, Commitments::NONE)),
         ),
     ];
     let hint = compose_kv_hint(&policies, &inputs, None)

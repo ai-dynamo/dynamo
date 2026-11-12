@@ -1,11 +1,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! The default policy credits blocks a worker can fetch from a KV transfer source.
+//! The `kvcr` preset credits blocks a worker can copy from a KV transfer source; the router
+//! commits the selected worker to that copy. The default policy credits no copy.
 
 mod support;
 use dynamo_kv_router::plugins::prelude::*;
-use dynamo_router_policies::{default_policy, default_policy_with_rng};
+use dynamo_router_policies::{default_policy, default_policy_with_rng, kvcr_policy};
 use dynamo_scheduler::host::WorkerSelector;
 use std::collections::HashMap;
 
@@ -121,13 +122,25 @@ fn config(multiplier: f64) -> KvRouterConfig {
     }
 }
 
-/// The selected worker and the source its fetch hint would name.
+/// The worker `kvcr` selects and the source its fetch hint would name.
 fn select(
     workers: &HashMap<u64, HintWorker>,
     request: &SchedulingRequest,
     multiplier: f64,
 ) -> (u64, Option<(KvTransferCandidateSource, usize)>) {
-    let selected = default_policy(SelectionConfig::from(&config(multiplier)), "test")
+    select_with(
+        kvcr_policy(SelectionConfig::from(&config(multiplier)), "test"),
+        workers,
+        request,
+    )
+}
+
+fn select_with(
+    policy: WorkerSelectionPolicy,
+    workers: &HashMap<u64, HintWorker>,
+    request: &SchedulingRequest,
+) -> (u64, Option<(KvTransferCandidateSource, usize)>) {
+    let selected = policy
         .select_worker(support::selection_input(workers, request, BLOCK_SIZE))
         .unwrap();
     (
@@ -156,8 +169,17 @@ fn idle_worker_that_can_fetch_beats_a_busy_cached_one() {
     assert_eq!(select(&workers, &request, 0.0), (0, from_c));
     // At half credit A costs 17 and B costs 15: B wins and fetches everything from C.
     assert_eq!(select(&workers, &request, 0.5), (1, from_c));
+    // The default credits no fetch, so A still wins; the router still names C for it.
+    assert_eq!(
+        select_with(
+            default_policy(SelectionConfig::from(&config(0.5)), "test"),
+            &workers,
+            &request,
+        ),
+        (0, from_c)
+    );
     // Fetch credit only scores; it does not count as cached for prefill booking.
-    let selected = default_policy(SelectionConfig::from(&config(0.5)), "test")
+    let selected = kvcr_policy(SelectionConfig::from(&config(0.5)), "test")
         .select_worker(support::selection_input(&workers, &request, BLOCK_SIZE))
         .unwrap();
     assert_eq!(selected.cached_tokens, 0);
@@ -187,6 +209,7 @@ fn credit_follows_the_target_island() {
     assert_eq!(select(&workers, &request, 0.5), (0, None));
 }
 
+/// The reference selector, like the default, gives copies no credit.
 #[test]
 fn seeded_selection_matches_reference_with_fetchable_prefixes() {
     let workers: HashMap<_, _> = (0..8)
@@ -239,4 +262,29 @@ fn seeded_selection_matches_reference_with_fetchable_prefixes() {
             }
         }
     }
+}
+
+/// `kvcr` reads copy offers, which commits the selected worker to its copy, only when the
+/// multiplier gives copies credit. The default policy never reads them.
+#[test]
+fn kvcr_reads_copy_offers_only_with_a_positive_multiplier() {
+    use dynamo_kv_router::plugins::worker_selection::WorkerInputs;
+
+    let reads_offers =
+        |policy: dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicy| {
+            WorkerSelector::<HintWorker>::required_worker_inputs(&policy)
+                .contains(WorkerInputs::KV_COPY)
+        };
+    assert!(!reads_offers(kvcr_policy(
+        SelectionConfig::from(&config(0.0)),
+        "test"
+    )));
+    assert!(reads_offers(kvcr_policy(
+        SelectionConfig::from(&config(0.5)),
+        "test"
+    )));
+    assert!(!reads_offers(default_policy(
+        SelectionConfig::from(&config(0.5)),
+        "test"
+    )));
 }

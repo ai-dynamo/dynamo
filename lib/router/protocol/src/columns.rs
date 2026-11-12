@@ -45,9 +45,16 @@ impl WorkerInputs {
     /// | --- | --- | --- | --- | --- |
     /// | `CACHE`, `LOAD`, `PREFERRED_TAINT` | Yes | Yes | Yes | Rejected |
     /// | `ACTIVE_REQUESTS` | No | No | Yes | Rejected |
-    /// | `KV_TRANSFER` | No | Yes | No | The booked worker's copy source |
-    pub const KV_TRANSFER: Self = Self(1 << 6);
-    /// Every optional column but the fetch column, which only scorers may declare.
+    /// | `KV_COPY` | No | Yes | No | The booked worker's copy source |
+    ///
+    /// A scorer that reads it commits the selected worker to its offer: the copy becomes the
+    /// booking's committed copy, which the role's `Commitments::KV_COPY` hint policy sends.
+    pub const KV_COPY: Self = Self(1 << 6);
+    /// Previous name of [`Self::KV_COPY`].
+    // TODO(v1.9): Remove this alias.
+    #[deprecated(since = "1.7.0", note = "use `WorkerInputs::KV_COPY`")]
+    pub const KV_TRANSFER: Self = Self::KV_COPY;
+    /// Every optional column but the copy column, which only scorers may declare.
     pub const ALL: Self = Self(Self::CACHE.0 | Self::LOAD.0 | Self::PREFERRED_TAINT.0);
 
     #[inline]
@@ -56,11 +63,11 @@ impl WorkerInputs {
     }
 
     /// Whether a policy reads the KV index: its overlaps (`CACHE`) or the
-    /// prefixes workers could fetch (`KV_TRANSFER`). Each component still reads
+    /// prefixes workers could copy (`KV_COPY`). Each component still reads
     /// only the inputs it declares.
     #[inline]
     pub const fn reads_kv_index(self) -> bool {
-        self.contains(Self::CACHE) || self.contains(Self::KV_TRANSFER)
+        self.contains(Self::CACHE) || self.contains(Self::KV_COPY)
     }
 
     /// The groups in `self` that are not in `other`.
