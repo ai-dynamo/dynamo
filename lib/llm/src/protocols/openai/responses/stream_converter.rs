@@ -1424,7 +1424,8 @@ impl Serialize for ResponseForSpec<'_> {
             serialize_optional_entry(&mut map, "tool_choice", &response.tool_choice)?;
         }
         if let Some(tools) = self.spec.template_tools {
-            map.serialize_entry("tools", tools)?;
+            let tools = super::echoed_tools_json(tools).map_err(serde::ser::Error::custom)?;
+            map.serialize_entry("tools", &tools)?;
         } else {
             serialize_optional_entry(&mut map, "tools", &response.tools)?;
         }
@@ -1659,6 +1660,7 @@ mod tests {
             prompt_logprobs: None,
             llm_metrics: None,
             tool_call_completion: Vec::new(),
+            model_eos: Vec::new(),
         }
     }
 
@@ -1692,6 +1694,7 @@ mod tests {
             prompt_logprobs: None,
             llm_metrics: None,
             tool_call_completion: Vec::new(),
+            model_eos: Vec::new(),
         }
     }
 
@@ -1725,6 +1728,7 @@ mod tests {
             prompt_logprobs: None,
             llm_metrics: None,
             tool_call_completion: Vec::new(),
+            model_eos: Vec::new(),
         }
     }
 
@@ -1839,6 +1843,38 @@ mod tests {
                 {"type":"output_text", "text":"Explanation.", "annotations":[], "logprobs":[]},
             ])
         );
+    }
+
+    /// The V1 tool jail can send late scores on an empty-delta choice after `finish_reason`.
+    /// Responses carries no chat logprobs, so that choice must not change the output.
+    #[test]
+    fn post_finish_score_only_choice_emits_no_events() {
+        let mut score_only = finish_chunk(FinishReason::Stop);
+        let choice = &mut score_only.inner.choices[0];
+        *choice = crate::protocols::openai::chat_completions::unified_parser::empty_choice(0);
+        choice.logprobs = Some(
+            serde_json::from_value(serde_json::json!({
+                "content": [{"token": "eos", "logprob": -0.5, "bytes": [], "top_logprobs": []}],
+                "refusal": null
+            }))
+            .unwrap(),
+        );
+
+        let mut conv = ResponseStreamConverter::new("test-model".into(), default_params());
+        conv.process_chunk(&text_chunk("hi"));
+        conv.process_chunk(&finish_chunk(FinishReason::Stop));
+
+        assert!(conv.process_chunk(&score_only).is_empty());
+        assert_eq!(
+            event_types(&conv.emit_end_events()),
+            [
+                "response.output_text.done",
+                "response.content_part.done",
+                "response.output_item.done",
+                "response.completed",
+            ]
+        );
+        assert_eq!(conv.completed_output().len(), 1);
     }
 
     /// Parseable arguments remain open until an explicit tool-call finish reason.
@@ -3290,5 +3326,59 @@ mod tests {
             completed_json["response"]["output"][0]["content"][0]["type"],
             "reasoning_text"
         );
+    }
+
+    /// Lifecycle snapshots echo function tools with a present `description`
+    /// key, `null` when the request omitted it or sent `null`.
+    #[test]
+    fn test_lifecycle_events_echo_null_function_tool_descriptions() {
+        let tools: Vec<super::super::RequestTool> = serde_json::from_value(serde_json::json!([
+            {"type":"function","name":"fn0","parameters":{"type":"object"}},
+            {"type":"function","name":"fn1","description":null,"parameters":{"type":"object"}},
+            {"type":"function","name":"fn2","description":"fixture","parameters":{"type":"object"}},
+            {"type":"namespace","name":"fs","description":"Files","tools":[
+                {"type":"function","name":"read","parameters":{"type":"object"}}]}
+        ]))
+        .unwrap();
+        let params = ResponseParams {
+            tools: Some(tools.iter().map(|tool| tool.inner.clone()).collect()),
+            template_tools: Some(tools),
+            ..Default::default()
+        };
+        let mut conv = ResponseStreamConverter::new("test-model".into(), params);
+        let events = [
+            ResponseStreamEvent::ResponseCreated(ResponseCreatedEvent {
+                sequence_number: conv.next_seq(),
+                response: conv.make_response(Status::InProgress, vec![]),
+            }),
+            ResponseStreamEvent::ResponseInProgress(ResponseInProgressEvent {
+                sequence_number: conv.next_seq(),
+                response: conv.make_response(Status::InProgress, vec![]),
+            }),
+            ResponseStreamEvent::ResponseCompleted(ResponseCompletedEvent {
+                sequence_number: conv.next_seq(),
+                response: conv.make_response(Status::Completed, vec![]),
+            }),
+        ];
+        for event in &events {
+            let json = optimized_event_json(&conv, event);
+            let tools = &json["response"]["tools"];
+            // Presence-aware: indexing a missing key also yields `Null`.
+            for (tool, expected) in [
+                (&tools[0], serde_json::Value::Null),
+                (&tools[1], serde_json::Value::Null),
+                (&tools[2], serde_json::json!("fixture")),
+                (&tools[3]["tools"][0], serde_json::Value::Null),
+            ] {
+                let tool = tool.as_object().unwrap();
+                assert!(
+                    tool.contains_key("description"),
+                    "{}: {tool:?}",
+                    json["type"]
+                );
+                assert_eq!(tool["description"], expected);
+                assert_eq!(tool["strict"], true);
+            }
+        }
     }
 }

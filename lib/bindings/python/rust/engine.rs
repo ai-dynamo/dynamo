@@ -264,7 +264,15 @@ impl
             move |py, request| {
                 // Ordinary Chat Completions retain direct typed serialization.
                 if request.responses_tools.is_none() {
-                    return Ok(pythonize(py, &request)?.unbind());
+                    let object = pythonize(py, &request)?;
+                    // Named passthrough fields (`stop_token_ids`, ...) are not
+                    // serialized with the request; add them at the top level, as
+                    // the client sent them.
+                    let dict = object.downcast::<PyDict>()?;
+                    for (key, value) in request.passthrough_extra_fields() {
+                        dict.set_item(key, pythonize(py, value)?)?;
+                    }
+                    return Ok(object.unbind());
                 }
                 let value = request
                     .python_chat_processor_request_json(&runtime_config)
@@ -448,15 +456,22 @@ where
 
     let current_trace_context = get_distributed_tracing_context();
     let metadata = context.metadata().clone();
+    let py_context = if engine.has_context {
+        Some(
+            Context::new(ctx.clone(), current_trace_context, None, metadata)
+                .with_session_affinity_from(&context)
+                .map_err(anyhow::Error::msg)?,
+        )
+    } else {
+        None
+    };
     let stream = invoke_generator(
         engine.generator.clone(),
         engine.event_loop.clone(),
         move |py| to_python_input(py, request),
-        engine.has_context.then_some({
-            let ctx = ctx.clone();
+        py_context.map(|py_context| {
             move |py: Python<'_>| {
-                Py::new(py, Context::new(ctx, current_trace_context, None, metadata))
-                    .map(|context| vec![("context", context.into_any())])
+                Py::new(py, py_context).map(|context| vec![("context", context.into_any())])
             }
         }),
     )

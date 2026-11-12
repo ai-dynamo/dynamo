@@ -23,6 +23,7 @@ use crate::protocols::common::extensions::{
 pub mod aggregator;
 pub(crate) mod custom_tools;
 mod delta;
+pub(crate) mod tool_call_merge;
 pub mod tool_parser_v2;
 pub(crate) mod unified_parser;
 
@@ -159,6 +160,18 @@ pub struct NvCreateChatCompletionRequest {
 }
 
 impl NvCreateChatCompletionRequest {
+    /// The named passthrough fields (`validate::PASSTHROUGH_EXTRA_FIELDS`) this
+    /// request carries. They are not serialized with the request, so a Python
+    /// chat processor receives them through this accessor.
+    /// Unknown fields kept by `DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS` are skipped.
+    pub fn passthrough_extra_fields(
+        &self,
+    ) -> impl Iterator<Item = (&'static str, &serde_json::Value)> {
+        validate::PASSTHROUGH_EXTRA_FIELDS
+            .iter()
+            .filter_map(|key| self.unsupported_fields.get(*key).map(|value| (*key, value)))
+    }
+
     /// Resolve the request's reasoning controls into `chat_template_args`.
     /// Runs once at the HTTP boundary, so every render path reads one answer.
     /// Model-specific overrides still apply later in the default preprocessor.
@@ -251,6 +264,11 @@ impl NvCreateChatCompletionRequest {
 const THINKING_TOGGLES: [&str; 2] = ["thinking", "enable_thinking"];
 const THINKING_KEYS: [&str; 3] = ["thinking", "enable_thinking", "thinking_mode"];
 
+/// A `chat_template_kwargs` key that the normalizer reads as a thinking control.
+pub(crate) fn is_thinking_control_key(key: &str) -> bool {
+    THINKING_KEYS.contains(&key) || key == "reasoning_effort"
+}
+
 fn set_thinking(args: &mut HashMap<String, serde_json::Value>, on: bool) {
     args.insert("thinking".to_string(), serde_json::Value::Bool(on));
     args.insert("enable_thinking".to_string(), serde_json::Value::Bool(on));
@@ -322,6 +340,15 @@ pub struct NvCreateChatCompletionResponse {
 }
 
 /// Parser lifecycle evidence carried between serving components, never to OpenAI clients.
+///
+/// Evidence is keyed by choice and tool index. It may repeat or arrive without
+/// a matching choice or tool-call delta.
+///
+/// In unified-parser output, `complete` reflects parser state after processing
+/// the source chunk. Multiple rewritten children can carry that final state,
+/// including a name-only child before its argument fragments. It is not an
+/// argument-delivery barrier: consumers must not infer that all arguments have
+/// arrived, or interpret empty arguments as a parameterless call, from it alone.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct ToolCallCompletion {
     pub choice_index: u32,
@@ -356,6 +383,12 @@ pub struct NvCreateChatCompletionStreamResponse {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[schema(ignore)]
     pub tool_call_completion: Vec<ToolCallCompletion>,
+    /// Choice indices with confirmed model EOS under an installed Beam turn grammar.
+    /// User stops, unconstrained output and transport EOF never authorize closure.
+    /// Defaulting makes older frontend/worker transports conservative; HTTP removes it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schema(ignore)]
+    pub model_eos: Vec<u32>,
 }
 
 fn deserialize_prompt_logprobs<'de, D>(
@@ -429,6 +462,7 @@ pub(crate) fn scrub_synthetic_chunk_metadata(
     data.llm_metrics = None;
     data.tool_call_completion.clear();
     data.message_boundary = None;
+    data.model_eos.clear();
     data.nvext = None;
     data.prompt_logprobs = None;
     Some(())
@@ -1144,6 +1178,30 @@ mod tests {
             serde_json::from_value(invalid_stop_token_ids).expect("Failed to deserialize request");
         let err = ValidateRequest::validate(&request).expect_err("invalid stop_token_ids");
         assert!(err.to_string().contains("stop_token_ids"));
+    }
+
+    #[test]
+    fn passthrough_extra_fields_skips_ignored_unknown_fields() {
+        let mut request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stop_token_ids": [7],
+            "allowed_token_ids": [10, 11],
+        }))
+        .expect("Failed to deserialize request");
+        // DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS keeps unknown fields in the map.
+        request
+            .unsupported_fields
+            .insert("experimental_field".to_string(), json!("value"));
+
+        let fields: Vec<_> = request.passthrough_extra_fields().collect();
+        assert_eq!(
+            fields,
+            vec![
+                ("stop_token_ids", &json!([7])),
+                ("allowed_token_ids", &json!([10, 11])),
+            ]
+        );
     }
 
     #[test]

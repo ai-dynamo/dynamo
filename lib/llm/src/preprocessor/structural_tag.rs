@@ -14,6 +14,7 @@ use crate::local_model::runtime_config::{
     TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY,
 };
 use crate::preprocessor::{OpenAIPreprocessor, PreprocessedRequest};
+use crate::protocols::openai::chat_completions::tool_parser_v2::unified_family_names;
 use crate::protocols::openai::tools::{ToolChoiceValidation, validate_tool_choice_against_names};
 
 use dynamo_parsers::tool_calling::{StructuralTagSchemaMode, ToolChoice, ToolDefinition};
@@ -21,6 +22,18 @@ use dynamo_protocols::types::ResponseFormat;
 #[cfg(test)]
 use dynamo_runtime::config::environment_names::llm as env_llm;
 use dynamo_runtime::error::{DynamoError, ErrorType};
+
+/// Get selectable parser names with registered structural-tag builders.
+pub fn structural_tag_parser_names() -> Vec<&'static str> {
+    let mut names = dynamo_parsers::tool_calling::parsers::get_available_tool_parsers();
+    names.extend_from_slice(unified_family_names());
+    names.retain(|name| {
+        v1::StructuralTagBuilder::for_parser(name).is_some() || v2::supports_family(name)
+    });
+    names.sort_unstable();
+    names.dedup();
+    names
+}
 
 struct StructuralTagBuildRequest<'a> {
     tool_choice: &'a ToolChoice,
@@ -662,6 +675,21 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn grammar_capability_inventory_is_sorted_and_selectable() {
+        let names = structural_tag_parser_names();
+        for family in ["hermes", "deepseek_v4", "deepseek_v41", "glm45", "kimi_k25"] {
+            assert!(names.contains(&family), "missing grammar: {family}");
+        }
+        assert!(names.windows(2).all(|pair| pair[0] < pair[1]));
+        let mut selectable = dynamo_parsers::tool_calling::parsers::get_available_tool_parsers();
+        selectable.extend_from_slice(unified_family_names());
+        assert!(names.iter().all(|family| selectable.contains(family)));
+        assert!(selectable.contains(&"gemma4"));
+        assert!(!names.contains(&"gemma4"));
+        assert!(!names.contains(&"no_such_parser"));
+    }
 
     fn structural_tag_preprocessor(exclude_tools_when_none: bool) -> Arc<OpenAIPreprocessor> {
         let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))

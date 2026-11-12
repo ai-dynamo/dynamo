@@ -27,17 +27,14 @@ default = ["custom-policy"]
 # dependency alias below. Enabled by default so a deployment can select a shipped policy through
 # router-policy YAML without rebuilding. A private image replaces only the catalog dependency, so
 # its policies are added alongside the shipped ones rather than displacing them.
-custom-policy = [
-  "dep:dynamo-worker-selection-policy-catalog",
-  "dynamo-kv-router/standalone-selection",
-]
+custom-policy = ["dep:dynamo-worker-selection-policy-catalog"]
 media-ffmpeg = ["dynamo-llm/media-ffmpeg"]
-kv-indexer = ["dep:clap", "dep:tracing-subscriber", "dynamo-kv-router/standalone-indexer"]
+kv-indexer = ["dep:clap", "dep:tracing-subscriber", "dynamo-kv-router/http", "dynamo-kv-router/ingest-zmq", "dynamo-kv-router/peer-recovery"]
 kv-indexer-metrics = ["kv-indexer", "dynamo-kv-router/metrics"]
 # Exposes the optional Relay stats/snapshot methods to Python diagnostic builds.
 ckf-diagnostics = ["dynamo-llm/ckf-diagnostics"]
-slot-tracker = ["dep:clap", "dep:tracing-subscriber", "dynamo-kv-router/standalone-slot-tracker"]
-select-service = ["dep:clap", "dep:tracing-subscriber", "dynamo-kv-router/standalone-selection"]
+slot-tracker = ["dep:clap", "dep:tracing-subscriber", "dynamo-kv-router/http", "dynamo-kv-router/replica-sync-zmq"]
+select-service = ["dep:clap", "dep:tracing-subscriber", "dynamo-kv-router/http", "dynamo-kv-router/ingest-zmq", "dynamo-kv-router/replica-sync-zmq", "dynamo-kv-router/peer-recovery"]
 # Replay parity benchmark builds. Deterministic replay itself is the `deterministic`
 # argument of `run_mocker_trace_replay` and needs no feature.
 replay-bench = ["dynamo-mocker/replay-bench"]
@@ -50,7 +47,12 @@ velo-ucx = ["dynamo-runtime/velo-ucx"]
 # to keep the default wheel lean. Production containers and the MM
 # recipes pass this flag explicitly; the dev container's
 # `.devcontainer/post-create.sh` also enables it for local workflows.
-mm-routing = ["dynamo-llm/mm-routing", "dynamo-vllm-sidecar/mm-routing"]
+mm-routing = [
+    "dynamo-llm/mm-routing",
+    "dynamo-vllm-sidecar/mm-routing",
+    "dynamo-sglang-sidecar/mm-routing",
+    "dynamo-trtllm-sidecar/mm-routing",
+]
 # Enable the native S3 destination for the request-trace sink. Production wheel
 # builds enable this flag in container/templates/wheel_builder.Dockerfile so
 # `DYN_REQUEST_TRACE_SINKS=s3` works on shipped artifacts.
@@ -64,11 +66,12 @@ request-trace-s3 = ["dynamo-llm/request-trace-s3"]
 aisimulate-core = { version = "=0.13.0-dev.202610290000000087", optional = true, features = ["python"] }
 dynamo-runtime = { path = "../../runtime" }
 dynamo-mocker = { path = "../../mocker" }
-dynamo-parsers = { version = "=10.2.2" }
+dynamo-parsers = { version = "=11.0.11" }
 dynamo-backend-common = { path = "../../backend-common" }
 dynamo-sidecar-common = { path = "../../sidecar/common" }
-dynamo-sglang-sidecar = { path = "../../sidecar/sglang" }
-dynamo-trtllm-sidecar = { path = "../../sidecar/trtllm" }
+# default-features = false: sidecar defaults (mm-routing) must not reach the wheel.
+dynamo-sglang-sidecar = { path = "../../sidecar/sglang", default-features = false }
+dynamo-trtllm-sidecar = { path = "../../sidecar/trtllm", default-features = false }
 dynamo-vllm-sidecar = { path = "../../sidecar/vllm", default-features = false }
 
 anyhow = { version = "1" }
@@ -98,9 +101,18 @@ opentelemetry = { version = "0.31.0", features = ["trace"] }
 uuid = { version = "1.18.1" }
 
 # kv-indexer / slot-tracker / shared kv-router types
-dynamo-kv-router = { path = "../../kv-router" }
-dynamo-custom-policy-builtin = { path = "../../router-plugins/builtin" }
+dynamo-kv-router = { path = "../../router/kv-router" }
+dynamo-admission = { path = "../../router/admission" }
+dynamo-kv-events = { path = "../../kv-events" }
+dynamo-kv-hashing = { path = "../../kv-hashing" }
+dynamo-kv-indexer = { path = "../../router/kv-indexer" }
+dynamo-router-protocol = { path = "../../router/protocol" }
+dynamo-scheduler = { path = "../../router/scheduler" }
+dynamo-worker-selection = { path = "../../router/worker-selection" }
+dynamo-router-policies = { path = "../../router-plugins/builtin" }
 dynamo-worker-selection-policy-catalog = { path = "../../router-plugins/catalog", optional = true }
+# The replaceable /generate format catalog; custom images point this name at their own.
+dynamo-generate-format-catalog = { path = "../../generate-format-catalog" }
 clap = { version = "4.5", features = ["derive"], optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
 
@@ -132,6 +144,7 @@ dynamo-llm = { path = "../../llm" }
 dynamo-llm = { path = "../../llm", default-features = false }
 
 [dev-dependencies]
+http = "1"
 opentelemetry_sdk = { version = "0.31.0", features = ["trace"] }
 tracing-subscriber = { version = "0.3", features = ["registry"] }
 

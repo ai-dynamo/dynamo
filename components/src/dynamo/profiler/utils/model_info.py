@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import importlib
 import json
 import logging
 from pathlib import Path
@@ -22,6 +23,15 @@ except ImportError:
         pass
 
     _load_model_config_from_model_path = None
+
+# huggingface_hub raises its HTTP client's network errors, which are not
+# OSError: httpx in 1.x, httpx2 in 2.x. Older versions use requests (OSError).
+HUB_NETWORK_ERRORS: tuple[type[Exception], ...] = ()
+for _client in ("httpx", "httpx2"):
+    try:
+        HUB_NETWORK_ERRORS += (importlib.import_module(_client).HTTPError,)
+    except ImportError:
+        pass
 logger = logging.getLogger(__name__)
 
 DTYPE_BYTES_MAP = {
@@ -60,10 +70,61 @@ MOE_ADDITIONAL_TP_ARCHITECTURES = {
 }
 
 
+# Checkpoint formats in the order vLLM's default loader prefers them.
+HUB_WEIGHT_EXTENSIONS = (".safetensors", ".bin", ".pt", ".pth")
+SAFETENSORS_INDEX_NAME = "model.safetensors.index.json"
+# Root files that are not model weights: PEFT adapters and training state,
+# as in vLLM's filter_files_not_needed_for_inference.
+NON_WEIGHT_FILENAMES = {
+    "adapter_model.safetensors",
+    "adapter_model.bin",
+    "training_args.bin",
+    "optimizer.bin",
+    "optimizer.pt",
+    "scheduler.bin",
+    "scheduler.pt",
+    "scaler.pt",
+}
+
+
+def _select_weight_files(root_names) -> tuple[Optional[str], list[str]]:
+    """Return the first weight format among repo-root file names, and its files.
+
+    Like vLLM's default loader, this tries the formats in
+    ``HUB_WEIGHT_EXTENSIONS`` order and skips ``NON_WEIGHT_FILENAMES``, so a
+    repo that ships the weights in two formats counts one of them.
+    """
+    names = [name for name in root_names if name not in NON_WEIGHT_FILENAMES]
+    for ext in HUB_WEIGHT_EXTENSIONS:
+        files = [name for name in names if name.endswith(ext)]
+        if files:
+            return ext, files
+    return None, []
+
+
+def _read_indexed_shards(index_path: Union[str, Path]) -> set[str]:
+    """Return indexed shard names, raising ValueError for unreadable indexes."""
+    try:
+        with open(index_path) as f:
+            weight_map = json.load(f)["weight_map"]
+        if not isinstance(weight_map, dict) or not weight_map:
+            raise ValueError("weight_map must be a nonempty object")
+        if any(not isinstance(name, str) or not name for name in weight_map.values()):
+            raise ValueError("weight_map must contain nonempty shard file names")
+        return set(weight_map.values())
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        raise ValueError(f"Cannot read weight_map from {index_path}: {e!r}") from e
+
+
 def get_local_model_weight_size(
     model_path: Union[str, Path],
 ) -> float:
-    """Return model size in MB by scanning local directory."""
+    """Return model size in MB from the weight files vLLM would load locally.
+
+    Uses the same file selection as the Hub reader: root files only (nested
+    copies such as ``original/`` are ignored), and only the shards listed in
+    ``model.safetensors.index.json`` when there is one.
+    """
     model_path = Path(model_path)
 
     if not model_path.exists():
@@ -72,17 +133,65 @@ def get_local_model_weight_size(
     if not model_path.is_dir():
         raise ValueError(f"Model path is not a directory: {model_path}")
 
-    # Weight file extensions to look for
-    weight_extensions = [".safetensors", ".bin", ".pt", ".pth"]
+    root_files = {path.name: path for path in model_path.iterdir() if path.is_file()}
+    ext, names = _select_weight_files(root_files)
+    if not names:
+        logger.warning("No weight files at the root of %s", model_path)
+        return 0.0
 
-    total_size_bytes = 0
-    for file_path in model_path.rglob("*"):
-        if file_path.is_file() and any(
-            str(file_path).endswith(ext) for ext in weight_extensions
-        ):
-            total_size_bytes += file_path.stat().st_size
+    index_path = root_files.get(SAFETENSORS_INDEX_NAME)
+    if ext == ".safetensors" and index_path is not None:
+        # Unlike the Hub reader, there is no parameter-count estimate to fall
+        # back on, so an unreadable or incomplete index is an error.
+        indexed = _read_indexed_shards(index_path)
+        missing = indexed.difference(names)
+        if missing:
+            raise ValueError(
+                f"{index_path} lists shards missing from {model_path}: "
+                f"{sorted(missing)}"
+            )
+        names = [name for name in names if name in indexed]
 
+    # stat() follows symlinks, as in a Hugging Face cache snapshot.
+    total_size_bytes = sum(root_files[name].stat().st_size for name in names)
     return total_size_bytes / (1024**2)
+
+
+def _select_hub_checkpoint_files(model_name: str, info, token: Optional[str]) -> list:
+    """Return the Hub repo files that vLLM would load as the model weights.
+
+    Like vLLM's default loader, this takes the repo-root files of the first
+    format present, skips non-weight files, and keeps only the files listed in
+    ``model.safetensors.index.json`` when the repo has one. That counts one
+    copy when a repo ships the weights twice (gpt2 in two formats, Mistral's
+    consolidated file, Llama's ``original/`` folder).
+    """
+    root_siblings = {
+        sibling.rfilename: sibling
+        for sibling in info.siblings or []
+        if "/" not in sibling.rfilename
+    }
+    ext, names = _select_weight_files(root_siblings)
+    if ext == ".safetensors" and SAFETENSORS_INDEX_NAME in root_siblings:
+        try:
+            index_path = hf_hub_download(
+                repo_id=model_name,
+                filename=SAFETENSORS_INDEX_NAME,
+                revision=info.sha,
+                token=token,
+            )
+            indexed = _read_indexed_shards(index_path)
+        except (OSError, ValueError, *HUB_NETWORK_ERRORS) as e:
+            # Gated repos refuse the download; the network can fail.
+            logger.warning(
+                "Cannot read %s for %s: %s", SAFETENSORS_INDEX_NAME, model_name, e
+            )
+            return []
+        names = [name for name in names if name in indexed]
+        # An indexed file missing from the repo would make the sum too small.
+        if len(names) != len(indexed):
+            return []
+    return [root_siblings[name] for name in names]
 
 
 def get_model_weight_size_from_hub(
@@ -91,18 +200,16 @@ def get_model_weight_size_from_hub(
 ) -> float:
     """Return model size in MB by querying Hugging Face Hub API."""
     try:
-        info = model_info(model_name, token=token)
+        # Sibling file sizes are only populated when file metadata is requested.
+        info = model_info(model_name, token=token, files_metadata=True)
 
-        # Filter for model weight files (safetensors or pytorch bin files)
-        # Also filter out files with None size
-        weight_extensions = [".safetensors", ".bin", ".pt", ".pth"]
         total_size_bytes = 0
-
-        if info.siblings is not None:
-            for sibling in info.siblings:
-                if any(sibling.rfilename.endswith(ext) for ext in weight_extensions):
-                    if sibling.size is not None:
-                        total_size_bytes += sibling.size
+        checkpoint_files = _select_hub_checkpoint_files(model_name, info, token)
+        # A partial sum would undercount, so fall back to the estimate instead.
+        if checkpoint_files and all(
+            sibling.size is not None for sibling in checkpoint_files
+        ):
+            total_size_bytes = sum(sibling.size for sibling in checkpoint_files)
 
         # If no file sizes were available, try to estimate from safetensors metadata
         if total_size_bytes == 0 and info.safetensors is not None:

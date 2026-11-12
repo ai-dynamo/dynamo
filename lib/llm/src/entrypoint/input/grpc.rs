@@ -12,9 +12,8 @@ use crate::{
     http::service::metrics::Metrics,
     local_model::runtime_config::TokenizerBackend,
     namespace::NamespaceFilter,
-    types::openai::{
-        chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
-        completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
+    types::openai::chat_completions::{
+        NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
     },
 };
 use dynamo_runtime::DistributedRuntime;
@@ -99,11 +98,8 @@ pub async fn run(
             .await?;
             manager.add_chat_completions_model(model.service_name(), checksum, chat_pipeline)?;
 
-            let cmpl_pipeline = common::build_pipeline::<
-                NvCreateCompletionRequest,
-                NvCreateCompletionResponse,
-            >(model.card(), inner_engine, tokenizer)
-            .await?;
+            let cmpl_pipeline =
+                common::build_completions_pipeline(model.card(), inner_engine, tokenizer)?;
             manager.add_completions_model(model.service_name(), checksum, cmpl_pipeline)?;
             grpc_service
         }
@@ -111,7 +107,8 @@ pub async fn run(
 
     // Run both HTTP (for metrics) and gRPC servers concurrently
     let http_service = grpc_service.http_service().clone();
-    let shutdown_token = distributed_runtime.primary_token();
+    let _graceful_task = distributed_runtime.register_graceful_task();
+    let shutdown_token = distributed_runtime.child_token();
 
     // Wait for both servers to complete, propagating the first error if any occurs
     // Both tasks should run indefinitely until cancelled by the shutdown token
@@ -138,7 +135,7 @@ async fn run_watcher(
     migration_limit: u32,
     migration_max_seq_len: Option<u32>,
     namespace_filter: NamespaceFilter,
-    prefill_load_estimator: Option<Arc<dyn dynamo_kv_router::PrefillLoadEstimator>>,
+    prefill_load_estimator: Option<Arc<dyn dynamo_scheduler::host::PrefillLoadEstimator>>,
     local_model_path: Option<PathBuf>,
     metrics_prefix: Option<String>,
     tokenizer_backend: Option<TokenizerBackend>,
@@ -170,7 +167,7 @@ async fn run_watcher(
     let discovery = runtime.discovery();
     let discovery_stream = discovery
         .list_and_watch(
-            dynamo_runtime::discovery::DiscoveryQuery::AllModels,
+            namespace_filter.model_query(),
             Some(runtime.primary_token()),
         )
         .await?;

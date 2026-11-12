@@ -8,7 +8,7 @@ use std::{collections::HashMap, sync::Arc};
 use anyhow::{Context, Result};
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
-use dynamo_kv_router::identity::CacheOwnerId;
+use dynamo_router_protocol::identity::CacheOwnerId;
 use dynamo_runtime::{
     component::{Component, Endpoint, StartedEndpoint},
     discovery::{
@@ -139,7 +139,7 @@ struct HostedSlot {
     publisher_index: Option<usize>,
     global_dp_rank: u32,
     kv_state_endpoint: dynamo_runtime::protocols::EndpointId,
-    indexer_domain_id: dynamo_kv_router::identity::IndexerDomainId,
+    indexer_domain_id: dynamo_router_protocol::identity::IndexerDomainId,
     kv_block_size: u32,
     ingress_protocol: KvStateIngressProtocol,
 }
@@ -261,7 +261,7 @@ impl KvStateAgentHost {
         let control_target = control.instance().clone();
         let discovery_id = host_discovery_id(component.drt().connection_id());
         let host_ad = KvStateHostAdvertisement {
-            protocol_version: dynamo_kv_router::indexer::KvStateProtocolVersion::V2,
+            protocol_version: dynamo_kv_indexer::host::KvStateProtocolVersion::V2,
             host_instance: control_target.clone(),
             control_target: control_target.clone(),
             max_slots: config.max_slots,
@@ -735,6 +735,7 @@ async fn reconcile_owner(
                 topic: intent.raw_topic.clone(),
                 image_token_id: intent.image_token_id,
                 video_token_id: intent.video_token_id,
+                engine_owned_mm_identity: intent.engine_owned_mm_identity,
                 ingress_protocol: intent.ingress_protocol,
             },
         })
@@ -811,11 +812,12 @@ fn host_discovery_id(instance_id: u64) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use dynamo_kv_router::identity::{
+    use dynamo_kv_indexer::host::RouterHintSourceMetadata;
+    use dynamo_router_protocol::identity::{
         CacheOwnerId, CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId,
         RoutingScopeId, StableDpSlotId,
     };
-    use dynamo_kv_router::protocols::{RouterHintSourceMetadata, WorkerWithDpRank};
+    use dynamo_router_protocol::worker::WorkerWithDpRank;
     use dynamo_runtime::component::{Instance, TransportType};
     use dynamo_runtime::discovery::DiscoveryInstanceId;
     use dynamo_runtime::protocols::EndpointId;
@@ -1079,6 +1081,7 @@ mod tests {
             raw_topic: "kv-events-residency-v1".to_string(),
             image_token_id: None,
             video_token_id: None,
+            engine_owned_mm_identity: false,
             router_hint_source: None,
         }
     }
