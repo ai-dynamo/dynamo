@@ -4688,10 +4688,9 @@ mod tests {
             }
             let (mut active, mut active_rx) = make_request("held-b", 64);
             active.pinned_worker = Some(b);
-            let metadata = queue
-                .default_queue_metadata(&active, Instant::now())
-                .unwrap();
-            assert!(actor.handle_enqueue(active, None, None, None, None, metadata));
+            assert!(enqueue_request_into_actor(
+                &queue, &mut actor, active, None, None
+            ));
             actor.handle_enqueued(None).await;
             assert_eq!(active_rx.try_recv().unwrap().unwrap().best_worker, b);
 
@@ -4703,10 +4702,9 @@ mod tests {
             let (mut ordinary, mut ordinary_rx) = make_request("ordinary-b", 48);
             ordinary.allowed_worker_ids = Some(HashSet::from([1]));
             for request in [soft, hard, ordinary] {
-                let metadata = queue
-                    .default_queue_metadata(&request, Instant::now())
-                    .unwrap();
-                assert!(actor.handle_enqueue(request, None, None, None, None, metadata));
+                assert!(enqueue_request_into_actor(
+                    &queue, &mut actor, request, None, None
+                ));
                 actor.handle_enqueued(None).await;
             }
             for rx in [&mut soft_rx, &mut hard_rx, &mut ordinary_rx] {
@@ -4794,20 +4792,18 @@ mod tests {
         for (id, worker) in [("held-a", a), ("held-b", b)] {
             let (mut active, mut active_rx) = make_request(id, 64);
             active.pinned_worker = Some(worker);
-            let metadata = queue
-                .default_queue_metadata(&active, Instant::now())
-                .unwrap();
-            assert!(actor.handle_enqueue(active, None, None, None, None, metadata));
+            assert!(enqueue_request_into_actor(
+                &queue, &mut actor, active, None, None
+            ));
             actor.handle_enqueued(None).await;
             assert_eq!(active_rx.try_recv().unwrap().unwrap().best_worker, worker);
         }
 
         let (mut older, mut older_rx) = make_request("older-soft", 48);
         older.affinity_target = Some(b.into());
-        let metadata = queue
-            .default_queue_metadata(&older, Instant::now())
-            .unwrap();
-        assert!(actor.handle_enqueue(older, None, None, None, None, metadata));
+        assert!(enqueue_request_into_actor(
+            &queue, &mut actor, older, None, None
+        ));
         actor.handle_enqueued(None).await;
         assert!(matches!(
             older_rx.try_recv(),
@@ -4838,10 +4834,9 @@ mod tests {
         );
 
         let (plain, mut plain_rx) = make_request("later-plain", 48);
-        let metadata = queue
-            .default_queue_metadata(&plain, Instant::now())
-            .unwrap();
-        assert!(actor.handle_enqueue(plain, None, None, None, None, metadata));
+        assert!(enqueue_request_into_actor(
+            &queue, &mut actor, plain, None, None
+        ));
         actor.handle_enqueued(None).await;
         assert!(matches!(
             plain_rx.try_recv(),

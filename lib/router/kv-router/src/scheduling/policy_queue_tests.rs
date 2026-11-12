@@ -804,11 +804,9 @@ fn class_budget_expiry_reaches_every_lane_root_including_blocked_lanes() {
         ("worker-17", 17, worker_only),
         ("worker-60", 60, worker_only),
     ] {
-        assert!(
-            queue
-                .enqueue_in_lane(timed(1, None, at(millis)), 1, 0.0, 0, lane, payload)
-                .is_ok()
-        );
+        queue
+            .enqueue_in_lane(timed(1, None, at(millis)), 1, 0.0, 0, lane, payload)
+            .unwrap();
     }
     let readiness = |_: usize, _: &PolicyClassConfig, payload: &&str| {
         if payload.starts_with("soft") {
@@ -1217,11 +1215,8 @@ fn worker_update_rechecks_only_that_blocked_lane() {
         queue
             .enqueue_in_lane(
                 QueueMetadata {
-                    class_index: 0,
-                    snapshot: QueueSnapshot::new(1, 0),
-                    due_at: None,
-                    class_due_at: None,
                     arrival_offset_secs: sequence as f64,
+                    ..timed(1, None, None)
                 },
                 2,
                 0.0,
@@ -1234,32 +1229,13 @@ fn worker_update_rechecks_only_that_blocked_lane() {
 
     assert!(queue.pop_next(|_, _, _| false).is_none());
     queue.recheck_worker(WorkerWithDpRank::new(1, 1));
-    assert_eq!(
-        queue.pop_next(|_, _, _| true).unwrap().into_payload(),
-        "host-1"
-    );
-    assert!(queue.pop_next(|_, _, _| true).is_none());
+    assert_eq!(drain_all(&mut queue), ["host-1"]);
     queue.recheck_worker(worker_1);
-    assert_eq!(
-        queue.pop_next(|_, _, _| true).unwrap().into_payload(),
-        "worker-1"
-    );
-    assert_eq!(
-        queue.pop_next(|_, _, _| true).unwrap().into_payload(),
-        "soft-1"
-    );
-    assert!(queue.pop_next(|_, _, _| true).is_none());
+    assert_eq!(drain_all(&mut queue), ["worker-1", "soft-1"]);
     queue.recheck_affinity_target(worker_2.into());
-    assert_eq!(
-        queue.pop_next(|_, _, _| true).unwrap().into_payload(),
-        "soft-2"
-    );
-    assert!(queue.pop_next(|_, _, _| true).is_none());
+    assert_eq!(drain_all(&mut queue), ["soft-2"]);
     queue.recheck_worker(worker_2);
-    assert_eq!(
-        queue.pop_next(|_, _, _| true).unwrap().into_payload(),
-        "worker-2"
-    );
+    assert_eq!(drain_all(&mut queue), ["worker-2"]);
 }
 
 #[test]
