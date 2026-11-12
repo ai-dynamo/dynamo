@@ -39,7 +39,7 @@ targets:
   - nixl-gdr
   workload:
     type: trace-replay
-    traffic: 'Agentic MoonTrace: 64K avg ISL / 400 OSL, 90% KV reuse; 1P1D (TP8 + EP per worker), decode MTP-2'
+    traffic: 'Agentic MoonTrace: 64K avg ISL / 400 OSL, 90% KV reuse; 1P1D (TP8 + EP per worker), MTP-2 on prefill and decode'
     sla: user output >= 50 tok/s (floor-pick)
   deploy:
     asset: recipes/deepseek-v4/deepseek-v4-pro/vllm/disagg-b200-agentic/deploy.yaml

@@ -16,14 +16,14 @@ Shared operational details — [workloads](../README.md#optimization-targets), [
 
 ### Agentic (vLLM)
 
-Prefill/decode parallelism + spec-decode differ in disaggregated variants (`prefill / decode`).
+Prefill/decode parallelism + spec-decode differ in disaggregated variants (`prefill / decode`). Disaggregated prefill and decode must use the same MTP/EAGLE speculative method; vLLM's NIXL handshake rejects a pair where only one side has it.
 
 | Variant | GPUs | Prefill / Decode | MoE backend | Spec. decode | `max_model_len` | Disagg fabric |
 |---|---|---|---|---|---|---|
 | [`agg-b200-agentic`](vllm/agg-b200-agentic/deploy.yaml) | 4× B200 | TP4 | FLASHINFER_TRTLLM | none | 1,048,576 | — |
 | [`agg-h200-agentic`](vllm/agg-h200-agentic/deploy.yaml) | 4× H200 | DP4 + TP1 + EP | MARLIN (FLASHINFER_MLA attn) | MTP-1 | 1,048,576 | — |
 | [`disagg-b200-agentic`](vllm/disagg-b200-agentic/deploy.yaml) | 12× B200 (2P·1D) | TP4 / TP4 | FLASHINFER_TRTLLM | none | 1,048,576 | NIXL GDR |
-| [`disagg-h200-agentic`](vllm/disagg-h200-agentic/deploy.yaml) | 28× H200 (4P·3D) | DP4+TP1+EP / DP4+TP1+EP | MARLIN (FLASHINFER_MLA attn) | none / MTP-1 | 1,048,576 | NIXL GDR ¹ |
+| [`disagg-h200-agentic`](vllm/disagg-h200-agentic/deploy.yaml) | 28× H200 (4P·3D) | DP4+TP1+EP / DP4+TP1+EP | MARLIN (FLASHINFER_MLA attn) | MTP-1 / MTP-1 | 1,048,576 | NIXL GDR ¹ |
 
 B200 = `nvidia/DeepSeek-V4-Flash-NVFP4`; H200 = `deepseek-ai/DeepSeek-V4-Flash`. Common: FP8 KV, block 256, KV-aware routing, prefix caching. Modality: text; reasoning + tool calling supported.
 
