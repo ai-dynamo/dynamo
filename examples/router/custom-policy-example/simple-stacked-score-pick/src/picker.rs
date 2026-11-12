@@ -3,9 +3,7 @@
 
 //! Lowest-cost picker for the `simple-stacked-score-pick` policy.
 
-use dynamo_kv_router::{
-    WorkerInputView, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicyError,
-};
+use dynamo_kv_router::plugins::prelude::*;
 
 pub(crate) struct LowestCostPicker;
 

@@ -35,6 +35,12 @@ To set the thinking mode used when a request omits an explicit control, pass
 adaptive thinking, take precedence. See
 [Deployment-Level Thinking Default](../../../../../use-cases/tool-calling-and-reasoning/reasoning-parsing.mdx#deployment-level-thinking-default).
 
+Set chat template defaults with `--default-chat-template-kwargs` on the
+frontend, not on the worker. The frontend renders the chat template for workers
+and sidecars, so the worker refuses the vLLM flag at startup. A `vllm-rs serve`
+engine behind the vLLM sidecar applies its own flag only to its own HTTP server,
+and the sidecar cannot detect it.
+
 For reasoning models with structured output (`response_format`, JSON schema,
 or required/named tool choice), configure both reasoning parsers on the worker:
 
@@ -69,7 +75,7 @@ also using the router queue, configure the frontend-side
 after a request reaches the worker.
 
 For the cross-layer behavior, see
-[Priority Scheduling](../../../../../use-cases/agents/priority-scheduling.md). For the upstream
+[Priority Scheduling](../../../../../use-cases/agents/priority-scheduling.mdx). For the upstream
 flag definition, see the
 [vLLM serve args documentation](https://docs.vllm.ai/en/stable/configuration/serve_args.html).
 

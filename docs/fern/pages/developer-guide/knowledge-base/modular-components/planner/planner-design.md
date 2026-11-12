@@ -255,7 +255,11 @@ Each engine emits per-iteration `ForwardPassMetrics` via ZMQ -> FpmEventRelay ->
 - **scheduled_requests.sum_prefill_tokens**: prefill regression input
 - **scheduled_requests.sum_decode_kv_tokens**: decode regression input
 - **queued_requests**: queued prefill/decode load for TTFT/ITL simulation
-- Idle heartbeats (wall_time=0) are skipped
+- Heartbeats (wall_time=0) are not added as regression observations, but they update moving averages and their `queued_requests` still count as queued load.
+
+The vLLM scheduler suppresses empty heartbeats while requests remain in its running or waiting queues, a scheduled batch still awaits output processing, or the parent scheduler reports pending connector work. This includes finished requests retained for connector cleanup and pending KV or encoder-cache pushes. Nonempty heartbeats carry the latest queue snapshot. The scheduler reuses completed-pass snapshots and limits extra queue scans to once per heartbeat interval, plus when an empty snapshot first gains waiting work. That transition scan ensures a new long pass reports waiting load; later steps reuse it. Counts can lag changes between snapshots. All mutable queue traversal stays on the scheduler thread.
+
+This is a partial fix for scheduler-visible work. It does not establish EngineCore idleness across input-queue work, data-parallel dummy execution, or independent timing and result lifecycles. Suppressing a new empty heartbeat does not invalidate an idle frame already cached by Planner. Those lifecycles, cached-frame handling, and the Rust publishers used by TensorRT-LLM and the mocker need follow-up work. Heartbeats do not prove end-to-end autoscaling correctness.
 
 ### Diagnostics
 
@@ -289,18 +293,26 @@ When both modes are enabled, throughput-based scaling (longer interval) sets a l
 
 In aggregated mode (`mode: agg`), engines handle both prefill and decode via chunked prefill. The planner maintains both TTFT and ITL regression models but uses per-worker time-averaged metrics (not instantaneous) for regression training to smooth out chunked prefill noise. Scale up if either prefill or decode signals overload; scale down only if both signal underload.
 
-## Retune (Experimental, Simulation Only)
+<a id="retune-experimental-simulation-only"></a>
+
+## Retune (Experimental)
 
 > [!WARNING]
-> **Experimental.** Retune runs only in planner-in-the-loop offline replay in this release. A live
-> Planner rejects a configuration that sets `retune` at startup.
+> **Experimental.** With `retune.executor: local`, the default, retune runs only in
+> planner-in-the-loop offline replay, and a live Planner rejects it at startup. With
+> `executor: dgdr`, a live Planner on Kubernetes retunes three KV router knobs, and with scaling
+> its own Planner fields, through DGDR v1beta2 Requests; it is for development clusters only. See
+> [Planner Live Retune](../../../../kubernetes/auto-deployment/planner-live-retune.md).
 
 Retune periodically replays the last window of recorded traffic against a grid of router and
 Planner parameters and applies the best point. The [Planner Guide](planner-guide.md#periodic-retune-experimental)
 covers the concept, the
-[`retune` reference](../../../../reference/components/planner-configuration.mdx#retune-experimental-simulation-only)
-the fields, and [Simulate Retune](aisimulate-planner-replay.mdx#simulate-retune-experimental) how to
-run it. This section describes the mechanics.
+[`retune` reference](../../../../reference/components/planner-configuration.mdx#retune-experimental)
+the fields, [Simulate Retune](aisimulate-planner-replay.mdx#simulate-retune-experimental) how to
+run it in replay, and
+[Planner Live Retune](../../../../kubernetes/auto-deployment/planner-live-retune.md)
+how to run it on a live deployment. This section describes the mechanics of replay retune,
+executor `local`.
 
 ### Engine Integration
 
@@ -326,10 +338,12 @@ Retune lives in the Planner engine (`OrchestratorEngineAdapter`), not in a plugi
   type, and `PlannerEffects.retune_decisions`, which carry the `planner_changes` for the host to
   apply. Router parameters are level-triggered desired state: the host applies the difference.
 - In retune-only mode, `retune` set with both scaling flags explicitly `false`, the adapter returns
-  no `scale_to`. The [`retune` field](../../../../reference/components/planner-configuration.mdx#retune-experimental-simulation-only)
+  no `scale_to`. The [`retune` field](../../../../reference/components/planner-configuration.mdx#retune-experimental)
   lists what else that mode turns off.
-- The live runtime base, `NativePlannerBase`, raises `planner.retune is replay-only in this release`
-  at construction.
+- The live runtime base, `NativePlannerBase`, raises
+  `planner.retune is replay-only with executor 'local'; use executor: dgdr` at construction when
+  `retune.executor` is `local`. With `dgdr`, it starts the live retune supervisor of
+  [Planner Live Retune](../../../../kubernetes/auto-deployment/planner-live-retune.md) instead.
 
 ### Windows
 
@@ -360,17 +374,22 @@ was recorded or a role had no ready worker then, the decision is `failed`.
 ### Candidates and the Sweep
 
 `retune.router` and `retune.planner` use the AISimulate recommendation syntax of the Dynamo router
-and Planner adapters. `planner/retune/domains.py` expands them into a Cartesian grid keyed by live
-names: PATCH `/router_policy` parameters and `PlannerConfig` fields. The candidate set is the grid
-plus the startup point plus the current point, at most `max_candidates` + 2 points in a canonical
-order.
+and Planner adapters. `planner/retune/domains.py` expands them into a grid keyed by live names:
+PATCH `/router_policy` parameters and `PlannerConfig` fields. The router grid is a Cartesian product;
+the Planner grid is a list of points, because a scaling policy is one correlated choice of its four
+fields. Each Planner point is made canonical: fields that its own scaling modes make inactive, such
+as `load_scaling_down_sensitivity` without load scaling or `max_throughput_scaling_replicas` without
+throughput scaling, take the running value, and equal points are kept once. Points that turn both
+modes off, order the intervals wrongly, or use an interval `scheduling.scale_interval_seconds` does
+not divide are dropped. The candidate set is the router grid times the Planner points, plus the
+startup point and the current point, at most `max_candidates` + 2 points in a canonical order.
 
 When the Planner starts, the controller validates each Planner grid point and each load-predictor
 candidate once against the startup configuration, not their product. A grid point that fails
 `PlannerConfig` validation or does not fit the deployment's worker capabilities is dropped, and one
 warning reports how many points were dropped, with an example and its error. Engine construction
-fails only when some value of a searched Planner knob fits in no remaining point, or when a
-load-predictor candidate is invalid.
+fails only when some value of a searched Planner knob other than a scaling-policy field fits in no
+remaining point, or when a load-predictor candidate is invalid.
 Before an `applied` decision changes Planner fields, the controller checks the combination the host
 will apply against the live configuration again; if it no longer validates or fits, the decision is
 `failed`.
@@ -379,18 +398,20 @@ will apply against the live configuration again; if it no longer validates or fi
 up to `max_parallel` worker processes with the `spawn` method, at niceness 10, and feeds each one
 task at a time over its own pipe:
 
-1. A read task writes the window to a temporary sweep directory. For an inner Planner that scales
-   on throughput, it also reads the history before the window once and buckets it twice at the
-   inner Planner's throughput interval: ending at the window end, with the window, for the
-   pre-sweep and a predictor swap, and ending at the window start as the inner Planner's predictor
-   warmup.
+1. A read task writes the window to a temporary sweep directory. When the inner Planner or a
+   candidate scales on throughput, it also reads the history before the window once and buckets it
+   twice at each throughput interval in use: ending at the window end, with the window, for the
+   pre-sweep and a predictor swap, and ending at the window start as the predictor warmup of an
+   inner Planner at that interval.
 2. With a searched load predictor, one pre-sweep task per predictor candidate runs, as described
    below.
 3. One `dynamo.replay.run_trace_replay` per distinct candidate replays the window file with
    `trace_format="dynamo"`, the pinned engine, and the candidate's router parameters. Candidates
    that resolve to the same configuration share one replay.
-4. When the pre-sweep winner changes the load predictor, one more task prepares that predictor on
-   the swap's warmup observations, as the host will (see [Predictor Swap](#predictor-swap)). It is
+4. For each throughput interval at which a candidate would need a new load predictor (the
+   pre-sweep winner changes it, the interval differs from the current one, or the candidate turns
+   throughput scaling on), one more task prepares that predictor on the swap's warmup observations
+   at that interval, as the host will (see [Predictor Swap](#predictor-swap)). These tasks are
    queued ahead of the candidate replays, so a long ARIMA or Prophet fit overlaps them.
 
 Every candidate replay, the current point's included, runs with the canonical router seed and
@@ -402,9 +423,12 @@ depend on which sweep worker process replays the candidate, including with an in
 uses `optimization_target: sla`. The outer replay keeps its default, non-deterministic routing.
 
 Without scaling, a candidate replay keeps the replica counts fixed. With scaling, it runs an inner
-Planner: the current configuration with the candidate's Planner fields, retune disabled, no
-diagnostics report, and, with throughput scaling, the history buckets that end at the window start
-as its predictor warmup. A worker that dies fails only its task and is replaced. At
+Planner: the current configuration with the candidate's Planner fields, scaling policy included,
+retune disabled, no diagnostics report, and, with throughput scaling, the history buckets of its
+own throughput interval that end at the window start as its predictor warmup. Every inner Planner,
+the current point's included, starts at the window start with a freshly warmed predictor, so a
+candidate is not credited for re-warming the predictor; the host re-warms the running one only when
+the applied point needs a new predictor. A worker that dies fails only its task and is replaced. At
 `timeout_seconds` of wall-clock time every worker is killed and the decision is `timeout`; closing
 the controller kills them the same way. Workers keep their temporary files, such as Prophet's model
 files, in the sweep directory, which is removed when the sweep ends.
@@ -412,15 +436,17 @@ files, in the sweep directory, which is removed when the sweep ends.
 ### Load-Predictor Pre-Sweep
 
 The load predictor is never a grid dimension. With `optimization_target: sla` and throughput
-scaling, the sweep buckets the history and window traffic at the inner Planner's throughput
-interval. Each predictor candidate observes the history buckets, then forecasts each bucket of the
+scaling in some candidate, the sweep buckets the history and window traffic at each throughput
+interval in use, and runs the pre-sweep once per interval. Each predictor candidate observes the history buckets, then forecasts each bucket of the
 window one step ahead and observes it. Its loss is the mean over window buckets of a weighted
 forecast error: input tokens and output tokens 40% each, average input and output length 10% each.
 A candidate therefore costs three forecasts per window bucket however long the history is. The lowest loss wins, the earliest candidate on ties, and a candidate
 whose forecast fails cannot win.
 
-Every candidate except the current point then uses the winner's predictor fields; the current point
-keeps the current predictor. The decision records the result in `predictor_presweep`.
+Every candidate that scales on throughput, except the current point, then uses the predictor
+fields of the winner at its own interval; the current point keeps the current predictor. The
+decision records the result in `predictor_presweep`: one summary with `interval_seconds`, or
+`{"by_interval": {...}}` with candidates at several intervals.
 
 ### Scoring and Outcomes
 
@@ -480,7 +506,7 @@ With `D` = `decision_latency_seconds` and `Δ` = `scheduling.scale_interval_seco
 launched at tick time `t` is ready at `t + max(D, Δ)`, and the decision lands on the first tick at
 or after that time at which the sweep is done, never in the launch tick. With `measured`, `D` is
 the modeled sweep time that the
-[`decision_latency_seconds` field](../../../../reference/components/planner-configuration.mdx#retune-experimental-simulation-only)
+[`decision_latency_seconds` field](../../../../reference/components/planner-configuration.mdx#retune-experimental)
 defines.
 
 Under a `VirtualClock`, the replay host, the controller waits for the sweep inside the launch tick,
@@ -494,10 +520,15 @@ after the tick, so Planner fields take effect from the next tick.
 
 ### Predictor Swap
 
-A decision that changes the load predictor carries the history and window observations that warm
-the new predictor (`predictor_warmup`). The sweep prepares the winning predictor on those
-observations in a worker process, beside the candidate replays, the way the host will, so the
-Planner tick never fits a predictor. If that traffic is too short for it, for example in the first
+A decision needs a new load predictor when it changes a predictor field, changes
+`throughput_adjustment_interval_seconds` (the predictor's step and the bucket length of its
+history), or turns throughput scaling on. It then carries the history and window observations,
+bucketed at the new interval, that warm the new predictor (`predictor_warmup`). The sweep prepares
+that predictor on those observations in a worker process, beside the candidate replays, the way the
+host will, so the Planner tick never fits a predictor. A scaling-policy change re-registers the
+builtin plugins of the running engine: a mode turned on starts its plugins one interval later, as at
+startup, and turning throughput scaling off drops the last throughput targets that floor load
+scaling. If that traffic is too short for it, for example in the first
 window of a replay without earlier history, the decision is `failed` and nothing changes. The
 warmup ends at the window end, and the new predictor takes over after the decision tick, so the
 traffic of the grace period and the decision latency, `G + max(D, Δ)`, is not in its history.
@@ -535,7 +566,12 @@ trace that ends at or before the first replayed request; without throughput scal
   `runtime_decision.router_parameters`.
 
 The AISimulate Planner adapter (`planner/simulation/provider.py`) passes `planner.retune` through to
-`PlannerConfig` and fills the scoring SLA from `evaluation.sla`. `dynamo.replay` (`run_trace_replay`,
+`PlannerConfig` and fills the scoring SLA from `evaluation.sla`. For live retune with scaling, it
+also reads `planner.retune_sweep` in `aisimulate recommend`: the live Planner's scaling fields
+(`base`), the Planner points to search (`points`) and the history warm-up by throughput interval
+(`warmup`). Each candidate replays `base` with its point applied, warmed with the rows of its own
+interval, which `DynamoReplayRunner` hands to `run_trace_replay`; its concrete config is the
+section narrowed to that point, which `aisimulate predict` replays again. `dynamo.replay` (`run_trace_replay`,
 and `prepare_planner_replay` for synthetic traffic) rejects traffic that is not an open-loop Dynamo
 request trace, and its error names the AISimulate setting.
 
@@ -544,15 +580,14 @@ request trace, and its error names the AISimulate setting.
 1. **Adjustment interval vs scaling latency**: If a plugin interval is shorter than the time to scale, later ticks may observe an in-progress transition and hold rather than stacking new replica changes.
 2. **Average-based prediction**: Throughput-based scaling uses average ISL/OSL, which may not represent bimodal or heavy-tailed distributions well.
 3. **Local Planner scope**: Each local Planner instance directly manages one DGD. Use GlobalPlanner for shared GPU budgets and coordination across multiple DGDs.
-4. **Retune is experimental and simulation-only**: See the retune [limitations](aisimulate-planner-replay.mdx#limitations).
+4. **Retune is experimental**: executor `local` runs only in simulation; see the retune [limitations](aisimulate-planner-replay.mdx#limitations). Executor `dgdr` runs on a live Planner with the limitations in [Planner Live Retune](../../../../kubernetes/auto-deployment/planner-live-retune.md#limitations).
 
 ## Future Work
 
 - Distribution-aware interpolation (beyond mean ISL/OSL)
 - Adaptive adjustment interval based on observed scaling latency
-- Retune on a live Planner: reading the frontend request traces as they are written, patching
-  `/router_policy` on the frontends, and restoring the previous point when a deployment rejects an
-  applied change
+- Live retune of Planner parameters, with load or throughput scaling, and of the router knobs
+  that a DGDR v1beta2 Request cannot express
 
 ## File Map
 
@@ -573,6 +608,7 @@ request trace, and its error names the AISimulate setting.
 | `components/src/dynamo/planner/retune/sweep.py` | Sweep worker processes, candidate replays, scoring, and the load-predictor pre-sweep. |
 | `components/src/dynamo/planner/retune/window.py` | Request-trace window and history reader for sweeps. |
 | `components/src/dynamo/planner/retune/domains.py` | Expansion of `retune.router` and `retune.planner` into the candidate grid. |
+| `components/src/dynamo/planner/retune/live/` | Live retune (`executor: dgdr`): deployment rules, window cuts, DGDR v1beta2 sweeps, leadership and state Leases, router actuation, and clean-up. |
 | `components/src/dynamo/planner/offline/replay_adapter.py` | Replay host: tick records, scaling events, router parameter updates, and retune actuation. |
 | `components/src/dynamo/planner/simulation/` | AISimulate Planner adapter: the `planner` section of `aisimulate predict` and `recommend`. |
 | `components/src/dynamo/router/simulation/config.py` | AISimulate router section schemas, including `retune.router`. |

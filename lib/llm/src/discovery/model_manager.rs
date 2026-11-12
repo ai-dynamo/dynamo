@@ -13,12 +13,11 @@ use std::{
 use crate::model_card::LoraInfo;
 use arc_swap::ArcSwap;
 use dashmap::{DashMap, mapref::entry::Entry};
-use dynamo_kv_router::{
-    PrefillLoadEstimator,
-    config::KvRouterConfig,
-    protocols::{KvTransferEnforcement, RoutingConstraints, WorkerId, WorkerWithDpRank},
-    selector::WorkerInputs,
-};
+use dynamo_kv_hints::KvTransferEnforcement;
+use dynamo_kv_router::config::KvRouterConfig;
+use dynamo_kv_router::plugins::worker_selection::WorkerInputs;
+use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
+use dynamo_scheduler::host::{PrefillLoadEstimator, RoutingConstraints};
 use tokio_util::sync::CancellationToken;
 
 use super::worker_monitor::LoadThresholdConfig;
@@ -2434,17 +2433,19 @@ impl ModelManager {
             metric_worker_type,
             model_name.as_deref(),
         )?;
-        // A policy that does not consume cache input must not create a shared-cache client or
-        // subscribe to its updates.
-        let wants_cache = policy.inputs().contains(WorkerInputs::CACHE);
-        let shared_cache: Option<Arc<dyn dynamo_kv_router::SharedKvCache>> = if wants_cache {
+        // A configured hint policy that reads KV copy sources starts the KV index and its event
+        // subscription even when the worker-selection policy reads none. Only the
+        // worker-selection policy reads cache input; without it, create no shared-cache client.
+        let index_inputs = policy.prepare_inputs();
+        let wants_cache = index_inputs.contains(WorkerInputs::CACHE);
+        let shared_cache: Option<Arc<dyn dynamo_scheduler::host::SharedKvCache>> = if wants_cache {
             match kv_router_config
                 .as_ref()
                 .map(|c| c.shared_cache_type)
                 .unwrap_or_default()
             {
-                dynamo_kv_router::SharedCacheType::None => None,
-                dynamo_kv_router::SharedCacheType::Hicache => {
+                dynamo_worker_selection::host::SharedCacheType::None => None,
+                dynamo_worker_selection::host::SharedCacheType::Hicache => {
                     let worker_component_name = &endpoint.id().component;
                     tracing::info!(
                         worker_component = worker_component_name,
@@ -2462,7 +2463,7 @@ impl ModelManager {
         let kv_event_source_requirement = KvEventSourceRequirement::derive(
             worker_role,
             &effective_kv_router_config,
-            policy.inputs(),
+            index_inputs,
         );
         let kv_source_membership = if kv_event_source_requirement.should_subscribe() {
             Some(
@@ -2488,7 +2489,8 @@ impl ModelManager {
             model_name,
             is_eagle,
             shared_cache,
-            self.lora_enabled.then(|| lora_domain.filter.clone()),
+            self.lora_enabled
+                .then(|| crate::lora_routing::LoraKvPolicy::kv(lora_domain.filter.clone())),
             scheduler_load,
             cancellation_token,
         )
@@ -2866,6 +2868,21 @@ impl ModelManager {
         Some(configs.get(&worker_id)?.data_parallel_size)
     }
 
+    pub fn worker_supports_runtime_capability(
+        &self,
+        endpoint_id: &EndpointId,
+        worker_id: WorkerId,
+        capability: &str,
+    ) -> bool {
+        let Some(rx) = self.runtime_configs.get(endpoint_id) else {
+            return false;
+        };
+        let configs = rx.borrow();
+        configs
+            .get(&worker_id)
+            .is_some_and(|config| config.supports_runtime_capability(capability))
+    }
+
     /// Whether any worker on this endpoint advertises a required KV-transfer topology policy.
     pub fn has_kv_transfer_required_routing_policy(&self, endpoint_id: &EndpointId) -> bool {
         let Some(rx) = self.runtime_configs.get(endpoint_id) else {
@@ -2959,7 +2976,8 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
-    use dynamo_kv_router::protocols::{KV_EVENT_SUBJECT, WorkerWithDpRank};
+    use dynamo_kv_events::event::KV_EVENT_SUBJECT;
+    use dynamo_router_protocol::worker::WorkerWithDpRank;
     use dynamo_runtime::{
         DistributedRuntime, Runtime,
         discovery::{Discovery, DiscoverySpec, MockDiscovery, SharedMockRegistry},
@@ -2975,7 +2993,7 @@ mod tests {
     };
     use crate::{
         discovery::{KvEventSource, KvSourceStatus},
-        local_model::runtime_config::ModelRuntimeConfig,
+        local_model::runtime_config::{DISAGG_PREFILL_CANCEL_ANYTIME_V1, ModelRuntimeConfig},
     };
 
     fn make_worker_set(namespace: &str, mdcsum: &str) -> WorkerSet {
@@ -3363,6 +3381,42 @@ mod tests {
     }
 
     #[test]
+    fn runtime_capability_lookup_is_worker_specific_and_fail_closed() {
+        let manager = ModelManager::new();
+        let endpoint_id = EndpointId::from("test.prefill.generate");
+        let missing_endpoint = EndpointId::from("test.missing.generate");
+        let mut enabled = ModelRuntimeConfig::default();
+        enabled.runtime_data.insert(
+            DISAGG_PREFILL_CANCEL_ANYTIME_V1.to_string(),
+            serde_json::Value::Bool(true),
+        );
+        let mut disabled = ModelRuntimeConfig::default();
+        disabled.runtime_data.insert(
+            DISAGG_PREFILL_CANCEL_ANYTIME_V1.to_string(),
+            serde_json::Value::Bool(false),
+        );
+        insert_runtime_configs(
+            &manager,
+            &endpoint_id,
+            HashMap::from([(7, enabled), (8, disabled)]),
+        );
+
+        assert!(manager.worker_supports_runtime_capability(
+            &endpoint_id,
+            7,
+            DISAGG_PREFILL_CANCEL_ANYTIME_V1,
+        ));
+        for (endpoint, worker_id) in [(&endpoint_id, 8), (&endpoint_id, 9), (&missing_endpoint, 7)]
+        {
+            assert!(!manager.worker_supports_runtime_capability(
+                endpoint,
+                worker_id,
+                DISAGG_PREFILL_CANCEL_ANYTIME_V1,
+            ));
+        }
+    }
+
+    #[test]
     fn lora_load_feed_starts_for_aggregated_and_decode_not_prefill() {
         use crate::protocols::common::timing::{WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL};
         // Aggregated and disaggregated-decode deployments both route via WORKER_TYPE_DECODE
@@ -3388,8 +3442,8 @@ mod tests {
 
     #[test]
     fn lora_state_and_load_are_isolated_by_endpoint() {
-        use crate::kv_router::protocols::WorkerWithDpRank;
         use crate::model_card::LoraInfo;
+        use dynamo_router_protocol::worker::WorkerWithDpRank;
 
         let manager = ModelManager::new();
         let endpoint_a = EndpointId::from("test.worker-a.generate");
