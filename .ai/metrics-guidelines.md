@@ -35,7 +35,7 @@ Everything else is a structured log event.
 For example, failed requests are counted in
 `dynamo_frontend_requests_total{model, endpoint, request_type, status, error_type}`, which
 feeds an error-rate alert. The request ID and tenant of each failure go in a log event.
-`record_unsupported_residency_event` in `lib/kv-router/src/indexer/metrics.rs` shows the
+`record_unsupported_residency_event` in `lib/router/kv-indexer/src/metrics.rs` shows the
 pair in code: it increments a counter whose labels have a fixed set of values, and it logs
 the worker and rank as fields of a rate-limited event.
 
