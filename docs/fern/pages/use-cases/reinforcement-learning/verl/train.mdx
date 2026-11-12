@@ -14,6 +14,7 @@ The entrypoint runs verl's trainer. verl-recipe's Dynamo backend starts etcd, NA
 - Complete [Installation and Setup](installation.mdx). The commands use its `NAMESPACE` variable.
 - Have one node with 8 free GPUs, 64 CPUs, and 800 GiB of memory.
 - If your GPU nodes have taints, add matching tolerations to the Ray head's Pod template.
+- Restrict network access to the Ray head, with a NetworkPolicy that your cluster's network plugin enforces, or run the tutorial in an isolated cluster that only trusted users and workloads can reach. The head's dashboard and Jobs API accept requests without authentication, so anyone who can reach the Pod can run code in it. See [Current Limitations](#current-limitations).
 
 ## Start Training
 
@@ -201,7 +202,7 @@ SUCC cli.py:67 -- Job 'verl-grpo-nrcsf' succeeded
 
 Each step takes about 20 seconds, and the whole run about 15 minutes.
 
-Just before `logprob channel probe OK`, the log also shows `ERROR ... [DynamoHttpServer] NO TOKEN IDS in the frontend response (hit #1)`. The probe causes it: the recipe builds the probe's one-token prompt with the function that substitutes for missing token IDs, and that function logs the error. Text rollouts don't use that function: with `calculate_log_probs=True`, a response without token IDs fails the job with a `RuntimeError` instead.
+Just before `logprob channel probe OK`, the log also shows `ERROR ... [DynamoHttpServer] NO TOKEN IDS in the frontend response (hit #1)`. The probe causes it: the recipe builds the probe's one-token prompt with the function that substitutes for missing token IDs, and that function logs the error. Text rollouts don't use that function. With `calculate_log_probs=True`, a finished response without token IDs raises a `RuntimeError`, so the probe fails the job before training if its finished response has none. During training, the error fails only its request and can leave the trainer waiting instead of ending the job.
 
   </Step>
 </Steps>
