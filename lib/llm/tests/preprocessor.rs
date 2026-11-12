@@ -894,9 +894,9 @@ mod media_io_kwargs_forwarding {
     use std::sync::Arc;
 
     use super::Request;
+    use dynamo_llm::media_config::MediaDecoder;
     use dynamo_llm::model_card::ModelDeploymentCard;
     use dynamo_llm::preprocessor::OpenAIPreprocessor;
-    use dynamo_llm::preprocessor::media::MediaDecoder;
     use rstest::rstest;
 
     const MODEL_PATH: &str = "tests/data/sample-models/mock-llama-3.1-8b-instruct";

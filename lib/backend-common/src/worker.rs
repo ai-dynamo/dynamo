@@ -19,8 +19,8 @@ use dynamo_llm::local_model::runtime_config::{
     DisaggregatedEndpoint, ModelRuntimeConfig, StructuralTagConfig, TOPOLOGY_TAINT_PREFIX,
 };
 use dynamo_llm::local_model::{LocalModel, LocalModelBuilder, update_model_taints};
+use dynamo_llm::media_config::{MediaDecoder, MediaFetcher};
 use dynamo_llm::model_type::{ModelInput, ModelType};
-use dynamo_llm::preprocessor::media::{MediaDecoder, MediaFetcher};
 use dynamo_llm::worker_type::WorkerType;
 use dynamo_runtime::config::HealthStatus;
 use dynamo_runtime::engine_routes::EngineRouteCallback;

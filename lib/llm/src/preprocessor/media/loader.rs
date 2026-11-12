@@ -4,7 +4,6 @@
 use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, LazyLock};
-use std::time::Duration;
 
 use anyhow::Result;
 use ipnet::IpNet;
@@ -15,8 +14,10 @@ use dynamo_memory::nixl::NixlAgent;
 use dynamo_protocols::types::ChatCompletionRequestUserMessageContentPart;
 use dynamo_runtime::error::{DynamoError, ErrorType};
 
+use crate::media_config::{MediaDecoder, MediaFetcher};
+
 use super::common::EncodedMediaData;
-use super::decoders::{Decoder, MediaDecoder};
+use super::decoders::{Decoder, warn_if_unavailable_backends};
 use super::rdma::{DataType, RdmaMediaDataDescriptor, drain_nixl_notifications, get_nixl_agent};
 use super::require_image_url;
 use super::{IMAGE_FETCH_FORBIDDEN_MESSAGE, IMAGE_FETCH_NOT_FOUND_MESSAGE};
@@ -25,8 +26,6 @@ use parking_lot::Mutex;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
-const DEFAULT_HTTP_USER_AGENT: &str = "dynamo-ai/dynamo";
-const DEFAULT_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_REDIRECTS: usize = 3;
 
 const IMAGE_FETCH_FAILED: &str = "Failed to fetch the image_url media";
@@ -190,95 +189,29 @@ fn image_fetch_error(error: anyhow::Error) -> anyhow::Error {
     media_input_error(public, error)
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct MediaFetcher {
-    pub user_agent: String,
-    pub allow_direct_ip: bool,
-    pub allow_direct_port: bool,
-    /// When `false` (default), reject URLs that target blocked locations:
-    /// an IP literal in the RFC-range blocklist (`BLOCKED_IP_NETWORKS`),
-    /// a hostname in the literal blocklist (`BLOCKED_HOSTS`, e.g.
-    /// `localhost` / `metadata.google.internal`), or — in
-    /// `check_if_url_allowed_with_dns` — a hostname that DNS-resolves
-    /// to a blocked IP. The name reads "IP" but semantically this is a
-    /// single "allow internal / on-prem targets" switch that covers
-    /// both IP and hostname blocklists together: real on-prem
-    /// deployments need both at once (private CIDRs *and* internal
-    /// service names), and splitting them would give no useful config
-    /// while doubling the footgun surface. **Never** set on anything
-    /// public-facing.
-    pub allow_private_ips: bool,
-    pub allowed_media_domains: Option<HashSet<String>>,
-    pub timeout: Option<Duration>,
-    /// When `false`, reject every `http(s)://` URL; only `data:` URLs pass.
-    #[serde(default = "default_allow_remote_urls")]
-    pub allow_remote_urls: bool,
+/// URL policy and HTTP client construction for a [`MediaFetcher`] configuration.
+pub trait MediaFetcherPolicy {
+    fn is_policy_rejection(error: &anyhow::Error) -> bool;
+
+    /// Restore policy classification when reqwest hides a redirect cause.
+    fn map_fetch_error(error: anyhow::Error) -> anyhow::Error;
+
+    fn check_if_url_allowed(&self, url: &url::Url) -> Result<()>;
+
+    /// Full policy check: runs `check_if_url_allowed` and, for hostname
+    /// URLs, resolves DNS and checks each resulting IP against the blocked ranges.
+    fn check_if_url_allowed_with_dns(
+        &self,
+        url: &url::Url,
+    ) -> impl Future<Output = Result<()>> + Send;
+
+    /// Build a `reqwest::Client` that enforces this fetcher's policy on every
+    /// request and every redirect hop.
+    fn build_http_client(&self) -> Result<reqwest::Client>;
 }
 
-fn default_allow_remote_urls() -> bool {
-    true
-}
-
-impl Default for MediaFetcher {
-    fn default() -> Self {
-        Self {
-            user_agent: DEFAULT_HTTP_USER_AGENT.to_string(),
-            allow_direct_ip: false,
-            allow_direct_port: false,
-            allow_private_ips: false,
-            allowed_media_domains: None,
-            timeout: Some(DEFAULT_HTTP_TIMEOUT),
-            allow_remote_urls: default_allow_remote_urls(),
-        }
-    }
-}
-
-impl MediaFetcher {
-    fn with_internal_access(allow_internal: bool) -> Self {
-        Self {
-            allow_direct_ip: allow_internal,
-            allow_direct_port: allow_internal,
-            allow_private_ips: allow_internal,
-            ..Self::default()
-        }
-    }
-
-    /// Build a `MediaFetcher` whose defaults respect the shared
-    /// `DYN_MM_ALLOW_INTERNAL` environment variable. Mirrors the Python
-    /// `UrlValidationPolicy.from_env()` behavior so both fetch paths
-    /// (frontend decode in Rust, backend decode in Python) honor the
-    /// same on-prem opt-in flag.
-    ///
-    /// `DYN_MM_ALLOW_INTERNAL=1` flips `allow_direct_ip`,
-    /// `allow_direct_port`, and `allow_private_ips` all to `true` at
-    /// once.
-    ///
-    /// `DYN_MM_ALLOW_REMOTE_URLS=0` (or any other false value) sets
-    /// `allow_remote_urls` to `false`.
-    pub fn from_env() -> Self {
-        let allow_internal = std::env::var("DYN_MM_ALLOW_INTERNAL").ok().as_deref() == Some("1");
-        let allow_remote = std::env::var("DYN_MM_ALLOW_REMOTE_URLS").ok();
-        Self {
-            allow_remote_urls: Self::allow_remote_urls_from(allow_remote.as_deref()),
-            ..Self::with_internal_access(allow_internal)
-        }
-    }
-
-    /// Unset or empty keeps remote URLs on. A value that is not a boolean
-    /// turns them off, so a typo fails closed.
-    fn allow_remote_urls_from(value: Option<&str>) -> bool {
-        let Some(value) = value.filter(|v| !v.trim().is_empty()) else {
-            return true;
-        };
-        dynamo_runtime::config::parse_bool(value).unwrap_or_else(|error| {
-            tracing::error!(%error, "Invalid DYN_MM_ALLOW_REMOTE_URLS; disabling remote media URLs");
-            false
-        })
-    }
-}
-
-impl MediaFetcher {
-    pub(crate) fn is_policy_rejection(error: &anyhow::Error) -> bool {
+impl MediaFetcherPolicy for MediaFetcher {
+    fn is_policy_rejection(error: &anyhow::Error) -> bool {
         error.chain().any(|cause| {
             cause
                 .downcast_ref::<DynamoError>()
@@ -287,7 +220,7 @@ impl MediaFetcher {
     }
 
     /// Restore policy classification when reqwest hides a redirect cause.
-    pub(crate) fn map_fetch_error(error: anyhow::Error) -> anyhow::Error {
+    fn map_fetch_error(error: anyhow::Error) -> anyhow::Error {
         if Self::is_policy_rejection(&error) {
             return error;
         }
@@ -309,7 +242,7 @@ impl MediaFetcher {
         error
     }
 
-    pub fn check_if_url_allowed(&self, url: &url::Url) -> Result<()> {
+    fn check_if_url_allowed(&self, url: &url::Url) -> Result<()> {
         if !matches!(url.scheme(), "http" | "https" | "data") {
             return Err(policy_rejection("Only HTTP(S) and data URLs are allowed").into());
         }
@@ -378,7 +311,7 @@ impl MediaFetcher {
 
     /// Full policy check: runs `check_if_url_allowed` and, for hostname
     /// URLs, resolves DNS and checks each resulting IP against the blocked ranges.
-    pub async fn check_if_url_allowed_with_dns(&self, url: &url::Url) -> Result<()> {
+    async fn check_if_url_allowed_with_dns(&self, url: &url::Url) -> Result<()> {
         self.check_if_url_allowed(url)?;
 
         // Only hostnames need DNS resolution; IP-literal hosts were already
@@ -414,7 +347,7 @@ impl MediaFetcher {
     /// user-agent / timeout. Callers that want a single security contract
     /// across every outbound HTTP request in the frontend should reuse this
     /// — the connection pool stays warm and SSRF policy can't be bypassed.
-    pub fn build_http_client(&self) -> Result<reqwest::Client> {
+    fn build_http_client(&self) -> Result<reqwest::Client> {
         let fetcher_for_redirects = self.clone();
         let redirect_policy = Policy::custom(move |attempt| {
             if attempt.previous().len() >= MAX_REDIRECTS {
@@ -583,7 +516,7 @@ impl MediaLoader {
         mut media_decoder: MediaDecoder,
         media_fetcher: Option<MediaFetcher>,
     ) -> Result<Self> {
-        media_decoder.warn_if_unavailable_backends();
+        warn_if_unavailable_backends(&media_decoder);
         if let Some(image) = &mut media_decoder.image {
             image.apply_exif_orientation = media_decoder.apply_exif_orientation;
         }
@@ -797,9 +730,9 @@ impl MediaLoader {
 
 #[cfg(all(test, feature = "testing-nixl"))]
 mod tests {
-    use super::super::decoders::ImageDecoder;
     use super::super::rdma::DataType;
     use super::*;
+    use crate::media_config::ImageDecoder;
     use dynamo_protocols::types::{ChatCompletionRequestMessageContentPartImage, ImageUrl};
 
     #[test]
@@ -1233,6 +1166,7 @@ mod tests {
 #[cfg(test)]
 mod tests_non_nixl {
     use super::*;
+    use std::time::Duration;
 
     fn assert_invalid_argument_in_chain(error: &(dyn std::error::Error + 'static)) {
         let mut current = Some(error);
@@ -1352,7 +1286,7 @@ mod tests_non_nixl {
         // element. Matroska resync finds Info, then returns EIO on premature EOF.
         let bytes =
             b"\x1a\x45\xdf\xa3\x87\x42\x82\x84webm\x00\x15\x49\xa9\x66\x8c\x2a\xd7\xb1\x88\x00";
-        let decoder = super::super::decoders::video::VideoDecoder::default();
+        let decoder = crate::media_config::VideoDecoder::default();
         let error = decoder
             .decode(EncodedMediaData::from_bytes(bytes.to_vec()))
             .expect_err("truncated WebM must fail to decode");
@@ -1459,16 +1393,6 @@ mod tests_non_nixl {
 
         let data_url = url::Url::parse("data:image/png;base64,dGVzdA==").unwrap();
         assert!(fetcher.check_if_url_allowed(&data_url).is_ok());
-    }
-
-    #[test]
-    fn test_allow_remote_urls_from_env_value() {
-        for off in [Some("0"), Some("disabled")] {
-            assert!(!MediaFetcher::allow_remote_urls_from(off));
-        }
-        for on in [None, Some("1"), Some("")] {
-            assert!(MediaFetcher::allow_remote_urls_from(on));
-        }
     }
 
     #[test]
@@ -1606,19 +1530,6 @@ mod tests_non_nixl {
         let url = url::Url::parse("https://Metadata.Google.Internal/x").unwrap();
         let error = fetcher.check_if_url_allowed(&url).unwrap_err();
         assert_invalid_argument_in_chain(error.as_ref());
-    }
-
-    #[test]
-    fn test_internal_access_defaults() {
-        let f = MediaFetcher::with_internal_access(false);
-        assert!(!f.allow_private_ips);
-        assert!(!f.allow_direct_ip);
-        assert!(!f.allow_direct_port);
-
-        let f = MediaFetcher::with_internal_access(true);
-        assert!(f.allow_private_ips);
-        assert!(f.allow_direct_ip);
-        assert!(f.allow_direct_port);
     }
 
     #[test]

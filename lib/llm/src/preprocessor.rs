@@ -71,12 +71,15 @@ use crate::local_model::runtime_config::{
 use crate::local_model::runtime_config::{
     SGLANG_GENERATE_CAPABILITY, TOKEN_BUDGET_RUNTIME_KEY, TokenBudget,
 };
+use crate::media_config::MediaDecoder;
+#[cfg(feature = "mm-routing")]
+use crate::media_config::MediaFetcher;
 #[cfg(feature = "mm-routing")]
 use crate::model_card::ModelInfoType;
 use crate::model_card::{ModelDeploymentCard, ModelInfo, PromptFormatterArtifact};
 #[cfg(feature = "mm-routing")]
-use crate::preprocessor::media::MediaFetcher;
-use crate::preprocessor::media::{MediaDecoder, MediaLoader, max_data_url_bytes};
+use crate::preprocessor::media::MediaFetcherPolicy;
+use crate::preprocessor::media::{MediaLoader, max_data_url_bytes};
 use crate::protocols::common::preprocessor::{
     MultimodalData, MultimodalDataMap, MultimodalItemRef, MultimodalUuidMap,
     PreprocessedRequestBuilder, RoutingHints,
@@ -1716,8 +1719,8 @@ fn mdc_model_dir(mdc: &ModelDeploymentCard) -> Option<std::path::PathBuf> {
 /// request 20 minutes in. Text-only deployments skip the force, leaving
 /// the LazyLock dormant.
 #[cfg(feature = "mm-routing")]
-static DIM_FETCH_MEDIA_FETCHER: std::sync::LazyLock<crate::preprocessor::media::MediaFetcher> =
-    std::sync::LazyLock::new(crate::preprocessor::media::MediaFetcher::from_env);
+static DIM_FETCH_MEDIA_FETCHER: std::sync::LazyLock<crate::media_config::MediaFetcher> =
+    std::sync::LazyLock::new(crate::media_config::MediaFetcher::from_env);
 
 #[cfg(feature = "mm-routing")]
 static DIM_FETCH_HTTP_CLIENT: std::sync::LazyLock<reqwest::Client> =
@@ -5545,7 +5548,7 @@ impl OpenAIPreprocessor {
                 .send()
                 .await
                 .map_err(|error| {
-                    crate::preprocessor::media::MediaFetcher::map_fetch_error(error.into())
+                    crate::media_config::MediaFetcher::map_fetch_error(error.into())
                 })?;
             let status = resp.status();
             // Require 206 Partial Content — if the origin ignored the

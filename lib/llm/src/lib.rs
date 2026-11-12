@@ -30,6 +30,7 @@ pub mod kv_router;
 pub mod local_model;
 pub mod lora;
 mod lora_routing;
+pub mod media_config;
 pub mod migration;
 pub mod mocker;
 pub mod model_card;

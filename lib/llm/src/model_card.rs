@@ -32,7 +32,7 @@ use dynamo_runtime::{slug::Slug, storage::kv};
 use serde::{Deserialize, Serialize};
 use tokenizers::Tokenizer as HfTokenizer;
 
-use crate::preprocessor::media::{MediaDecoder, MediaFetcher};
+use crate::media_config::{MediaDecoder, MediaFetcher};
 use crate::protocols::TokenIdType;
 
 const FALLBACK_TOKENIZER_CACHE_BYTES: usize = 64 * 1024 * 1024;

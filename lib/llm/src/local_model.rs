@@ -15,9 +15,9 @@ use modelexpress_common::providers::{HuggingFaceProvider, ModelProviderTrait as 
 
 use crate::common::checked_file::CheckedFile;
 use crate::frontend_config::{ChatTemplateDefaults, FrontendApiConfig, MetricsConfig};
+use crate::media_config::{MediaDecoder, MediaFetcher};
 use crate::model_card::{ModelDeploymentCard, is_weight_file};
 use crate::model_type::{ModelInput, ModelType};
-use crate::preprocessor::media::{MediaDecoder, MediaFetcher};
 use crate::protocols::tensor::TensorModelConfig;
 use crate::reasoning_field::ReasoningField;
 use crate::request_template::RequestTemplate;
