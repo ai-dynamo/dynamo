@@ -159,15 +159,20 @@ plan for frontend replacement, including a possible single-replica Grove Service
 ##### Complete health probes
 
 **Change:** Each supplied `startupProbe`, `livenessProbe`, or `readinessProbe` must include
-exactly one handler: `exec`, `httpGet`, `tcpSocket`, or `grpc`. Admission rejects timing-only
-probes and probes with multiple handlers. An authored probe replaces the applicable operator
-default as a complete value. For `main` and the `runtime` sidecar this was already the
-rendering behavior. For the container selected by `frontendSidecar`, operator 1.6.x
-field-merged an authored probe with its frontend defaults; complete-value replacement applies
-to workloads whose operator origin is 1.7.0 or later.
+exactly one handler: `exec`, `httpGet`, `tcpSocket`, or `grpc`. These are the rules Kubernetes
+applies to every Pod probe; the DGD and DCD CRDs now apply them at admission, so a timing-only
+probe or a probe with two handlers is rejected on the manifest instead of failing later when the
+operator creates the Deployment or Grove creates the Pods. An authored probe replaces the
+applicable operator default as a complete value. For `main` and the `runtime` sidecar this was
+already the rendering behavior, so a probe that passes the new rules rendered the same before.
+For the container selected by `frontendSidecar`, operator 1.6.x field-merged an authored probe
+with its frontend defaults, which made a timing-only sidecar probe produce a valid Pod; that is
+the one shape the rules reject that previously worked. Complete-value replacement applies to
+workloads whose operator origin is 1.7.0 or later.
 
 **Affected:** DGD and DCD manifests in both `v1alpha1` and `v1beta1`, including main
-containers, sidecars, and role templates.
+containers, sidecars, and role templates. In practice, `frontendSidecar` containers with
+timing-only probes; every other rejected shape already failed at Pod creation.
 
 **Action:** Before upgrading, supply a complete handler with any custom timing settings, or
 omit the probe to use the applicable operator default. A frontend-sidecar probe that relied on
