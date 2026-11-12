@@ -23,7 +23,7 @@ dynamo-runtime = { workspace = true }
 dynamo-sidecar-common = { workspace = true }
 # Generated `openengine.v1` types; see `src/lib.rs`. The Mocker server
 # (`lib/mocker/servers/trtllm`) reuses them the same way.
-dynamo-trtllm-sidecar = { path = "../trtllm" }
+dynamo-trtllm-sidecar = { workspace = true }
 
 anyhow = { workspace = true }
 async-stream = { workspace = true }

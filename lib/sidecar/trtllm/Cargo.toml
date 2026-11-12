@@ -29,7 +29,7 @@ mm-routing = ["dynamo-llm/mm-routing"]
 dynamo-backend-common = { workspace = true }
 dynamo-sidecar-common = { workspace = true }
 dynamo-kv-events = { workspace = true }
-dynamo-llm = { path = "../../llm", default-features = false }
+dynamo-llm = { workspace = true, default-features = false }
 dynamo-runtime = { workspace = true }
 
 anyhow = { workspace = true }

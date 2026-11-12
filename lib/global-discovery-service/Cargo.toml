@@ -38,7 +38,7 @@ tracing = { workspace = true }
 url = { workspace = true }
 
 [dev-dependencies]
-dynamo-global-discovery-client = { path = "../global-discovery-client" }
+dynamo-global-discovery-client = { workspace = true }
 
 reqwest = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
