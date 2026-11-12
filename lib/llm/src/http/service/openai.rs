@@ -69,9 +69,10 @@ use crate::protocols::common::extensions::{
 use crate::protocols::common::input_trigger::{
     classify_chat_request, classify_completion_request, classify_response_request,
 };
-use crate::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
-use crate::protocols::openai::chat_completions::tool_call_merge::{
-    ToolCallMergeOutcome, merge_tool_call_chunk,
+use crate::protocols::openai::chat_completions::{
+    aggregator::ChatCompletionAggregator,
+    allowed_tools::{AllowedToolsRequest, ToolAllowlist},
+    tool_call_merge::{ToolCallMergeOutcome, merge_tool_call_chunk},
 };
 use crate::protocols::openai::{
     MediaDelivery, ParsingOptions,
@@ -2631,6 +2632,42 @@ async fn pooling(
     Ok(response)
 }
 
+fn parse_chat_completion_request(
+    body: &[u8],
+) -> Result<(NvCreateChatCompletionRequest, Option<ToolAllowlist>), ErrorResponse> {
+    match parse_json_request("chat completions", body) {
+        Ok(request) => Ok((request, None)),
+        Err(original) => {
+            let request: AllowedToolsRequest = match parse_json_request("chat completions", body) {
+                Ok(request) => request,
+                Err(error) if names_allowed_tools_choice(body) => return Err(error),
+                Err(_) => return Err(original),
+            };
+            let (request, allowlist) = request.normalize().map_err(|error| {
+                ErrorMessage::from_anyhow(
+                    invalid_argument(error.to_string()).into(),
+                    "Invalid allowed_tools",
+                )
+            })?;
+            Ok((request, Some(allowlist)))
+        }
+    }
+}
+
+fn names_allowed_tools_choice(body: &[u8]) -> bool {
+    #[derive(serde::Deserialize)]
+    struct Probe {
+        tool_choice: Option<serde_json::Value>,
+    }
+
+    serde_json::from_slice::<Probe>(body)
+        .ok()
+        .and_then(|probe| probe.tool_choice)
+        .is_some_and(|choice| {
+            choice.get("type").and_then(|kind| kind.as_str()) == Some("allowed_tools")
+        })
+}
+
 async fn handler_chat_completions(
     State((state, template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
     headers: HeaderMap,
@@ -2651,15 +2688,14 @@ async fn handler_chat_completions(
             return Err(error);
         }
     };
-    let mut request: NvCreateChatCompletionRequest =
-        match parse_json_request("chat completions", &body) {
-            Ok(request) => request,
-            Err(error) => {
-                lifecycle_request.record_session(&request_id, None);
-                terminal.finish(terminal_outcome_for_error_response(&error));
-                return Err(error);
-            }
-        };
+    let (mut request, allowed_tools) = match parse_chat_completion_request(&body) {
+        Ok(request) => request,
+        Err(error) => {
+            lifecycle_request.record_session(&request_id, None);
+            terminal.finish(terminal_outcome_for_error_response(&error));
+            return Err(error);
+        }
+    };
     if *FORCE_INCLUDE_USAGE && request.inner.stream.unwrap_or(false) {
         delta_common::force_include_usage(&mut request.inner.stream_options);
     }
@@ -2757,7 +2793,7 @@ async fn handler_chat_completions(
             chat_completions(
                 state,
                 template,
-                request,
+                (request, allowed_tools),
                 stream_handle,
                 lifecycle,
                 request_lifecycle.clone(),
@@ -4051,7 +4087,10 @@ fn apply_chat_completions_request_template(
 async fn chat_completions(
     state: Arc<service_v2::State>,
     template: Option<RequestTemplate>,
-    mut request: Context<NvCreateChatCompletionRequest>,
+    (mut request, allowed_tools): (
+        Context<NvCreateChatCompletionRequest>,
+        Option<ToolAllowlist>,
+    ),
     stream_handle: ConnectionHandle,
     lifecycle: LifecycleTrace,
     request_lifecycle: tracing::Span,
@@ -4102,6 +4141,20 @@ async fn chat_completions(
     state
         .chat_template_defaults()
         .apply_to_request(&mut request);
+    if allowed_tools.is_some()
+        && request
+            .chat_template_args
+            .as_ref()
+            .is_some_and(|args| args.contains_key("builtin_tools"))
+    {
+        let response = ErrorMessage::from_anyhow(
+            invalid_argument("allowed_tools cannot be combined with builtin_tools".to_owned())
+                .into(),
+            "Invalid allowed_tools",
+        );
+        inflight_guard.mark_error(extract_error_type_from_response(&response));
+        return Err(response);
+    }
     if let Err(err_response) = normalize_chat_reasoning_template_args(&mut request) {
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         return Err(err_response);
@@ -4275,6 +4328,16 @@ async fn chat_completions(
         // `UntilFirstEvent` ends on the first event or on the client
         // disconnecting, and on nothing else.
         let stream = custom_tools.stream(stream);
+        // Reassembling delayed tool identity can put partial arguments in the
+        // same delta as the name. Only regular SSE is safe for these requests.
+        let tool_dispatch_enabled =
+            state.streaming_tool_dispatch_enabled() && allowed_tools.is_none();
+        let stream = match allowed_tools {
+            Some(allowlist) => {
+                futures::future::Either::Left(allowlist.stream(stream, enforce_single_tool_call))
+            }
+            None => futures::future::Either::Right(stream),
+        };
         let stream = until_client_disconnects(
             check_for_backend_error_info(stream, state.streaming_backend_error_check()),
             &ctx,
@@ -4286,7 +4349,6 @@ async fn chat_completions(
         })?;
 
         let mut http_queue_guard = Some(http_queue_guard);
-        let tool_dispatch_enabled = state.streaming_tool_dispatch_enabled();
         let reasoning_dispatch_enabled = state.streaming_reasoning_dispatch_enabled();
         let reasoning_field = state.reasoning_field();
         let mut reasoning_buffer: HashMap<u32, String> = HashMap::new();
@@ -4513,6 +4575,14 @@ async fn chat_completions(
                 inflight_guard.mark_error(extract_error_type_from_response(&response));
                 response
             })?;
+
+        if let Some(allowlist) = allowed_tools {
+            allowlist.validate_response(&response).map_err(|error| {
+                let response = ErrorMessage::from_anyhow(error, "Invalid tool call output");
+                inflight_guard.mark_error(extract_error_type_from_response(&response));
+                response
+            })?;
+        }
 
         inflight_guard.mark_ok();
         // If the engine context was killed (client disconnect), the response was
@@ -9231,6 +9301,7 @@ mod tests {
         let request = NvCreateChatCompletionRequest {
             preserve_thinking: None,
             responses_tools: None,
+            chat_template_tools: None,
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
                 messages: vec![],
@@ -9263,6 +9334,7 @@ mod tests {
         let request = NvCreateChatCompletionRequest {
             preserve_thinking: None,
             responses_tools: None,
+            chat_template_tools: None,
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
                 messages: vec![ChatCompletionRequestMessage::User(
@@ -9518,6 +9590,7 @@ mod tests {
         let request = NvCreateChatCompletionRequest {
             preserve_thinking: None,
             responses_tools: None,
+            chat_template_tools: None,
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
                 messages: vec![ChatCompletionRequestMessage::User(
@@ -9553,6 +9626,7 @@ mod tests {
         let request = NvCreateChatCompletionRequest {
             preserve_thinking: None,
             responses_tools: None,
+            chat_template_tools: None,
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
                 messages: vec![ChatCompletionRequestMessage::User(
@@ -9587,6 +9661,7 @@ mod tests {
         let request = NvCreateChatCompletionRequest {
             preserve_thinking: None,
             responses_tools: None,
+            chat_template_tools: None,
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
                 messages: vec![ChatCompletionRequestMessage::User(
@@ -9621,6 +9696,7 @@ mod tests {
         let request = NvCreateChatCompletionRequest {
             preserve_thinking: None,
             responses_tools: None,
+            chat_template_tools: None,
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
                 messages: vec![ChatCompletionRequestMessage::User(
@@ -9655,6 +9731,7 @@ mod tests {
         let request = NvCreateChatCompletionRequest {
             preserve_thinking: None,
             responses_tools: None,
+            chat_template_tools: None,
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
                 messages: vec![ChatCompletionRequestMessage::User(
@@ -9691,6 +9768,7 @@ mod tests {
         let request = NvCreateChatCompletionRequest {
             preserve_thinking: None,
             responses_tools: None,
+            chat_template_tools: None,
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
                 messages: vec![ChatCompletionRequestMessage::User(

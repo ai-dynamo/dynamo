@@ -3148,6 +3148,7 @@ request_classifier:
                     .unwrap();
             let request = NvCreateChatCompletionRequest {
                 responses_tools: None,
+                chat_template_tools: None,
                 inner: dynamo_protocols::types::CreateChatCompletionRequestArgs::default()
                     .model(adapter_card.name())
                     .messages(messages)

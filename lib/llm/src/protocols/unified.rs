@@ -555,6 +555,7 @@ mod tests {
             common: CommonExt::default(),
             nvext: None,
             responses_tools: None,
+            chat_template_tools: None,
             chat_template_args: None,
             thinking: None,
             media_io_kwargs: None,

@@ -842,9 +842,10 @@ def preprocess_chat_request(
             "structural_tag response format"
         )
 
+    catalog = request.get("chat_template_tools")
     template_tools = _filter_template_tools(
         request,
-        sglang_tools=sglang_tools,
+        sglang_tools=convert_tools(catalog) if catalog else sglang_tools,
         exclude_tools_when_tool_choice_none=exclude_tools_when_tool_choice_none,
         filter_named_choice=not kimi_k3_bridge,
     )

@@ -206,6 +206,7 @@ fn create_chat_request(
     NvCreateChatCompletionRequest {
         preserve_thinking: None,
         responses_tools: None,
+        chat_template_tools: None,
         inner,
         common: Default::default(),
         nvext: None,
@@ -802,6 +803,7 @@ fn create_nonstreaming_chat_request() -> NvCreateChatCompletionRequest {
     NvCreateChatCompletionRequest {
         preserve_thinking: None,
         responses_tools: None,
+        chat_template_tools: None,
         inner,
         common: Default::default(),
         nvext: None,

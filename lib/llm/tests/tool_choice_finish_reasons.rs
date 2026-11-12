@@ -24,6 +24,7 @@ fn create_test_request() -> NvCreateChatCompletionRequest {
     NvCreateChatCompletionRequest {
         preserve_thinking: None,
         responses_tools: None,
+        chat_template_tools: None,
         inner: CreateChatCompletionRequest {
             model: "test-model".to_string(),
             messages,

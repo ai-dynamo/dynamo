@@ -11854,7 +11854,8 @@ mod tests {
         tool_choice: ChatCompletionToolChoiceOption,
     ) -> NvCreateChatCompletionRequest {
         NvCreateChatCompletionRequest {
-responses_tools: None,
+            responses_tools: None,
+            chat_template_tools: None,
             inner: dynamo_protocols::types::CreateChatCompletionRequestArgs::default()
                 .model("test")
                 .messages(vec![dynamo_protocols::types::ChatCompletionRequestMessage::User(

@@ -1357,6 +1357,7 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
             },
             common: Default::default(),
             responses_tools,
+            chat_template_tools: None,
             nvext: resp.nvext,
             chat_template_args: resp.chat_template_args,
             thinking: None,

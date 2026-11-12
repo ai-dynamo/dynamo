@@ -258,7 +258,10 @@ impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
         if let Some(tools) = self.declared_template_tools() {
             return may_be_fix_tool_schema(tools);
         }
-        let tools = self.inner.tools.as_ref()?;
+        let tools = self
+            .chat_template_tools
+            .as_deref()
+            .or(self.inner.tools.as_deref())?;
         // Custom tools use the function schema before template-specific repair.
         may_be_fix_tool_schema(
             serde_json::to_value(
@@ -720,6 +723,49 @@ fn truncate_rendered_prompt(prompt: RenderedPrompt, end: usize) -> RenderedPromp
 #[cfg(test)]
 mod tests {
     use super::normalize_tool_call_arguments;
+
+    #[test]
+    fn chat_allowed_tools_renders_catalog_and_constrains_generation_to_subset() {
+        use crate::protocols::openai::{
+            chat_completions::allowed_tools::AllowedToolsRequest, tools::get_json_schema_from_tools,
+        };
+        use dynamo_renderer::{ChatTemplate, ContextMixins, PromptFormatter};
+        use serde_json::json;
+
+        let template: ChatTemplate = serde_json::from_value(json!({
+            "chat_template": "{% for tool in tools %}{{ tool.function.name }} {% endfor %}"
+        }))
+        .unwrap();
+        let PromptFormatter::OAI(formatter) =
+            PromptFormatter::from_parts(template, ContextMixins::new(&[]), true).unwrap();
+        let wire: AllowedToolsRequest = serde_json::from_value(json!({
+            "model": "test",
+            "messages": [{"role": "user", "content": "Look it up"}],
+            "tools": [
+                {"type": "function", "function": {"name": "lookup"}},
+                {"type": "function", "function": {"name": "delete"}}
+            ],
+            "tool_choice": {"type": "allowed_tools", "allowed_tools": {
+                "mode": "required", "tools": [{"type": "function", "function": {"name": "lookup"}}]
+            }}
+        }))
+        .unwrap();
+        let (request, _) = wire.normalize().unwrap();
+        assert_eq!(formatter.render(&request).unwrap().trim(), "lookup delete");
+        let schema = get_json_schema_from_tools(
+            request.inner.tool_choice.as_ref(),
+            request.inner.tools.as_deref(),
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        let alternatives = schema["items"]["anyOf"].as_array().unwrap();
+        assert_eq!(alternatives.len(), 1);
+        assert_eq!(
+            alternatives[0]["properties"]["name"]["enum"],
+            json!(["lookup"])
+        );
+    }
 
     #[test]
     fn chat_tool_deferral_reaches_prompt_and_python_request() {
