@@ -68,6 +68,25 @@ def _valid_clip_data_url() -> str:
     return f"data:video/mp4;base64,{payload}"
 
 
+def _non_video_data_url() -> str:
+    payload = base64.b64encode(b"not-a-video").decode("ascii")
+    return f"data:video/mp4;base64,{payload}"
+
+
+def _sse_error(raw: str) -> Dict:
+    """The error object from the first SSE data frame that carries one."""
+    for line in raw.splitlines():
+        if not line.startswith("data: "):
+            continue
+        payload = line[len("data: ") :]
+        if payload.strip() == "[DONE]":
+            continue
+        event = json.loads(payload)
+        if "error" in event:
+            return event["error"]
+    raise AssertionError(f"no SSE error frame; got: {raw}")
+
+
 def _video_request(model_name: str, url: str, stream: bool) -> Dict:
     body = {
         "model": model_name,
@@ -403,6 +422,51 @@ async def test_valid_video_clip_streams_without_an_error_event(http_server):
     assert content == "This is a mock response."
     assert '"error"' not in raw
     assert "Unsupported video media" not in raw
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(60)
+@pytest.mark.forked
+async def test_non_video_data_url_is_unsupported_over_http(http_server):
+    """Bytes with no codec and no container are a client error, not a completion."""
+    base_url, model_name = http_server
+    url = f"{base_url}/v1/chat/completions"
+    data = _video_request(model_name, _non_video_data_url(), stream=False)
+    async with aiohttp.ClientSession(
+        timeout=aiohttp.ClientTimeout(total=10)
+    ) as session:
+        async with session.post(url, json=data) as response:
+            body = await response.text()
+            assert response.status == 415, body
+            assert json.loads(body) == {
+                "message": "Unsupported video media",
+                "type": "Unsupported Media Type",
+                "code": 415,
+            }
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(60)
+@pytest.mark.forked
+async def test_non_video_data_url_is_unsupported_over_sse(http_server):
+    """The same bytes on a stream arrive as an SSE error, not a completion."""
+    base_url, model_name = http_server
+    url = f"{base_url}/v1/chat/completions"
+    data = _video_request(model_name, _non_video_data_url(), stream=True)
+    async with aiohttp.ClientSession(
+        timeout=aiohttp.ClientTimeout(total=10)
+    ) as session:
+        async with session.post(url, json=data) as response:
+            assert response.status == 200
+            assert response.content_type == "text/event-stream"
+            raw = await response.text()
+
+    assert _sse_error(raw) == {
+        "message": "Unsupported video media",
+        "type": "invalid_request_error",
+        "code": 415,
+    }
+    assert "This is a mock response." not in raw
 
 
 @pytest.mark.asyncio

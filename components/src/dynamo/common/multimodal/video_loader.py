@@ -56,6 +56,10 @@ _FAILED_OPEN = "Could not open video stream"
 # MPEG-TS packets are 188 bytes. One leading 0x47 is the letter "G".
 _MPEG_TS_PACKET = 188
 
+# ASF Header Object GUID, little-endian. WMV and WMA use this container, and
+# the codec probe does not name their codecs.
+_ASF_HEADER = b"\x30\x26\xb2\x75\x8e\x66\xcf\x11\xa6\xd9\x00\xaa\x00\x62\xce\x6c"
+
 
 def _has_video_container(data: bytes) -> bool:
     """A container signature, including codecs the probe does not name."""
@@ -68,6 +72,10 @@ def _has_video_container(data: bytes) -> bool:
     if data.startswith(b"OggS"):
         return True
     if data.startswith(b"\x00\x00\x01\xba"):  # MPEG program stream
+        return True
+    if data.startswith(b"FLV\x01"):  # FLV version 1, including flv1
+        return True
+    if data.startswith(_ASF_HEADER):
         return True
     return (
         len(data) >= _MPEG_TS_PACKET * 2 + 1
