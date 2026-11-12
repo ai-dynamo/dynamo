@@ -13,6 +13,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use std::sync::Arc;
+use std::time::Duration;
 
 /// Unified interface for request plane servers
 ///
@@ -77,19 +78,28 @@ pub trait RequestPlaneServer: Send + Sync {
     /// Built-in servers return an error without removing a handler if multiple namespaces
     /// or components match. Use [`Self::unregister_endpoint_instance`] to disambiguate.
     /// An endpoint that is not registered is a no-op.
-    async fn unregister_endpoint(&self, endpoint_name: &str, instance_id: u64) -> Result<()>;
+    /// `drain_timeout` bounds the in-flight drain and must match the runtime's
+    /// phase-two allowance so transport teardown cannot overtake it.
+    async fn unregister_endpoint(
+        &self,
+        endpoint_name: &str,
+        instance_id: u64,
+        drain_timeout: Duration,
+    ) -> Result<()>;
 
     /// Unregister the handler with the namespace, component, name, and instance ID
     /// used at registration. An endpoint that is not registered is a no-op.
     ///
     /// The default delegates to the name-based method for existing implementations.
     /// Servers supporting same-named endpoints across components should override it.
+    /// `drain_timeout` has the same meaning as in [`Self::unregister_endpoint`].
     async fn unregister_endpoint_instance(
         &self,
         endpoint_id: &EndpointId,
         instance_id: u64,
+        drain_timeout: Duration,
     ) -> Result<()> {
-        self.unregister_endpoint(&endpoint_id.name, instance_id)
+        self.unregister_endpoint(&endpoint_id.name, instance_id, drain_timeout)
             .await
     }
 
@@ -148,7 +158,12 @@ mod tests {
             unreachable!()
         }
 
-        async fn unregister_endpoint(&self, endpoint_name: &str, instance_id: u64) -> Result<()> {
+        async fn unregister_endpoint(
+            &self,
+            endpoint_name: &str,
+            instance_id: u64,
+            _drain_timeout: Duration,
+        ) -> Result<()> {
             *self.removed.lock() = Some((endpoint_name.to_string(), instance_id));
             Ok(())
         }
@@ -176,7 +191,7 @@ mod tests {
         };
         let plane: &dyn RequestPlaneServer = &server;
         plane
-            .unregister_endpoint_instance(&endpoint_id, 0xa)
+            .unregister_endpoint_instance(&endpoint_id, 0xa, Duration::from_secs(5))
             .await
             .unwrap();
         assert_eq!(*server.removed.lock(), Some(("generate".into(), 0xa)));
