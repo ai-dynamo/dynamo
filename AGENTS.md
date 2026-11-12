@@ -11,7 +11,7 @@ SPDX-License-Identifier: Apache-2.0
 
 | Path | Contents |
 |------|----------|
-| `lib/` | Rust crates, including `runtime`, `llm`, `kv-router`, `kvbm-*`, `mocker`, `sidecar/*` (engine gRPC sidecars), and `bindings/python` (the PyO3 extension, built with maturin, outside the Cargo workspace) |
+| `lib/` | Rust crates, including `runtime`, `llm`, `kv-router`, `mocker`, `sidecar/*` (engine gRPC sidecars), and `bindings/python` (the PyO3 extension, built with maturin, outside the Cargo workspace) |
 | `components/src/dynamo/` | Python packages: `frontend`, `planner`, `router`, `vllm`/`sglang`/`trtllm`/`tokenspeed` backends, `mocker`, `profiler`, and more |
 | `deploy/` | Kubernetes `operator`, Helm charts, `inference-gateway` ext-proc, `observability` |
 | `container/` | Dockerfiles and build scripts for runtime and dev images |
