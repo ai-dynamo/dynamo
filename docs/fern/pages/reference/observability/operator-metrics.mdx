@@ -74,7 +74,9 @@ These labels are specific to operator metrics and are distinct from the applicat
 </ParamField>
 
 <ParamField path="reason" type="string">
-  On `dynamo_operator_webhook_denials_total` — the validation failure reason, e.g. `immutable_field_changed`, `invalid_config`.
+  On `dynamo_operator_webhook_denials_total` — the Kubernetes API error category of the error that denied the request, not a free-text reason. Field validation failures, including changes to immutable fields, are reported as `validation`. Errors that are not Kubernetes status errors, such as a webhook configuration or conversion mismatch or a missing InferencePool API, are reported as `internal`.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>validation</Badge> <Badge intent="note" minimal>internal</Badge> <Badge intent="note" minimal>bad_request</Badge> <Badge intent="note" minimal>forbidden</Badge> <Badge intent="note" minimal>unauthorized</Badge> <Badge intent="note" minimal>not_found</Badge> <Badge intent="note" minimal>already_exists</Badge> <Badge intent="note" minimal>conflict</Badge> <Badge intent="note" minimal>timeout</Badge> <Badge intent="note" minimal>server_timeout</Badge> <Badge intent="note" minimal>unavailable</Badge> <Badge intent="note" minimal>rate_limited</Badge></span>
 </ParamField>
 
 <ParamField path="status" type="string">
