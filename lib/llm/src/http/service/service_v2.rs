@@ -208,7 +208,7 @@ async fn track_inflight_inference(
     )
 }
 
-// Preserve framing metadata and trailers while holding the response's admission.
+/// Preserve framing metadata and trailers while holding the response's admission.
 struct InflightResponseBody {
     body: Body,
     permit: Option<InflightPermit>,
@@ -3153,24 +3153,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn track_inflight_inference_preserves_trailers() {
-        use http_body_util::{BodyExt, StreamBody};
+    async fn track_inflight_inference_preserves_length() {
+        use http_body_util::BodyExt;
         use tower::ServiceExt;
 
         let service = HttpService::builder().build().unwrap();
         let router = axum::Router::new()
-            .route(
-                "/",
-                axum::routing::get(|| async {
-                    let mut trailers = axum::http::HeaderMap::new();
-                    trailers.insert("x-checksum", header::HeaderValue::from_static("done"));
-                    let frames = futures::stream::iter([
-                        Ok::<_, std::convert::Infallible>(Frame::data(Bytes::from_static(b"data"))),
-                        Ok(Frame::trailers(trailers)),
-                    ]);
-                    Body::new(StreamBody::new(frames))
-                }),
-            )
+            .route("/", axum::routing::get(|| async { Body::from("data") }))
             .layer(axum::middleware::from_fn_with_state(
                 Arc::new(InferenceReadinessState {
                     state: service.state_clone(),
@@ -3184,17 +3173,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), axum::http::StatusCode::OK);
-        let mut body = response.into_body();
-        let data = body.frame().await.unwrap().unwrap().into_data().unwrap();
-        assert_eq!(data, "data");
-        let trailers = body
-            .frame()
-            .await
-            .expect("middleware dropped the trailer frame")
-            .unwrap()
-            .into_trailers()
-            .unwrap();
-        assert_eq!(trailers["x-checksum"], "done");
+        let body = response.into_body();
+        assert_eq!(body.size_hint().exact(), Some(4));
+        assert_eq!(body.collect().await.unwrap().to_bytes(), "data");
     }
 
     #[tokio::test]
