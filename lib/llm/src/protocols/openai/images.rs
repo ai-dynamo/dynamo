@@ -365,6 +365,138 @@ impl NvImagesResponse {
             nvext: None,
         }
     }
+
+    /// Serializes the response to the bytes `serde_json::to_vec` writes.
+    ///
+    /// serde_json checks every byte of a string for characters to escape,
+    /// which costs about 1 ms of CPU for a 2.9 MB `b64_json` image. Base64
+    /// needs no escaping, so each `b64_json` goes through `write_json_str`
+    /// and every other value through serde_json.
+    ///
+    /// Temporary: serde_json 1.0.154 still checks one byte at a time. Once a
+    /// release scans faster (serde-rs/json#1360, #1363 or #1366), remove this
+    /// method and its helpers, and serve the response with `Json` again.
+    pub fn to_json_vec(&self) -> serde_json::Result<Vec<u8>> {
+        // Every field is named, so a field added to the struct fails to
+        // compile here until it is written below, in declaration order.
+        let Self {
+            created,
+            data,
+            background,
+            output_format,
+            size,
+            quality,
+            usage,
+            nvext,
+        } = self;
+        let mut out = Vec::with_capacity(self.json_capacity());
+        out.extend_from_slice(b"{\"created\":");
+        serde_json::to_writer(&mut out, created)?;
+        out.extend_from_slice(b",\"data\":[");
+        for (i, image) in data.iter().enumerate() {
+            if i > 0 {
+                out.push(b',');
+            }
+            image.write_json(&mut out)?;
+        }
+        out.push(b']');
+        write_json_field(&mut out, "background", background)?;
+        write_json_field(&mut out, "output_format", output_format)?;
+        write_json_field(&mut out, "size", size)?;
+        write_json_field(&mut out, "quality", quality)?;
+        write_json_field(&mut out, "usage", usage)?;
+        if let Some(nvext) = nvext {
+            write_json_field(&mut out, "nvext", nvext)?;
+        }
+        out.push(b'}');
+        Ok(out)
+    }
+
+    /// The body length when no string needs escaping, rounded up, so the
+    /// buffer is not regrown after megabytes of images are in it.
+    fn json_capacity(&self) -> usize {
+        // Keys, numbers, enum values, `usage` and `nvext` fit in 1 KiB, and
+        // each image's keys and punctuation in 64 bytes.
+        let strings: usize = self
+            .data
+            .iter()
+            .flat_map(|image| [&image.url, &image.b64_json, &image.revised_prompt])
+            .flatten()
+            .map(String::len)
+            .sum();
+        1024 + self.size.as_ref().map_or(0, String::len) + 64 * self.data.len() + strings
+    }
+}
+
+impl ImageData {
+    /// Writes the bytes the derived `Serialize` writes; see
+    /// [`NvImagesResponse::to_json_vec`].
+    fn write_json(&self, out: &mut Vec<u8>) -> serde_json::Result<()> {
+        let Self {
+            url,
+            b64_json,
+            revised_prompt,
+        } = self;
+        out.push(b'{');
+        if let Some(url) = url {
+            out.extend_from_slice(b"\"url\":");
+            serde_json::to_writer(&mut *out, url)?;
+            out.push(b',');
+        }
+        if let Some(b64_json) = b64_json {
+            out.extend_from_slice(b"\"b64_json\":");
+            write_json_str(out, b64_json)?;
+            out.push(b',');
+        }
+        out.extend_from_slice(b"\"revised_prompt\":");
+        serde_json::to_writer(&mut *out, revised_prompt)?;
+        out.push(b'}');
+        Ok(())
+    }
+}
+
+/// Writes `,"key":value` as serde_json does. `key` must need no escaping.
+fn write_json_field<T: Serialize>(
+    out: &mut Vec<u8>,
+    key: &str,
+    value: &T,
+) -> serde_json::Result<()> {
+    out.extend_from_slice(b",\"");
+    out.extend_from_slice(key.as_bytes());
+    out.extend_from_slice(b"\":");
+    serde_json::to_writer(out, value)
+}
+
+/// Writes `s` as a JSON string, byte for byte as serde_json does.
+///
+/// serde_json looks up each byte in its escape table one at a time. Here a
+/// vectorized check finds whether any byte needs escaping, and a string with
+/// none, such as base64, is copied between quotes. A string that needs
+/// escaping goes to serde_json.
+fn write_json_str(out: &mut Vec<u8>, s: &str) -> serde_json::Result<()> {
+    if needs_json_escape(s.as_bytes()) {
+        return serde_json::to_writer(out, s);
+    }
+    out.reserve(s.len() + 2);
+    out.push(b'"');
+    out.extend_from_slice(s.as_bytes());
+    out.push(b'"');
+    Ok(())
+}
+
+/// Whether serde_json escapes any byte of `bytes`: `"`, `\`, or a control
+/// character below 0x20.
+fn needs_json_escape(bytes: &[u8]) -> bool {
+    const fn escapes(b: u8) -> bool {
+        (b < 0x20) | (b == b'"') | (b == b'\\')
+    }
+    // Folding a fixed-size chunk with no early exit lets the compiler compare
+    // the whole chunk in SIMD registers; `any` alone checks byte by byte.
+    let (chunks, tail) = bytes.as_chunks::<32>();
+    chunks
+        .iter()
+        .any(|chunk| chunk.iter().fold(false, |acc, &b| acc | escapes(b)))
+        || tail.iter().copied().any(escapes)
 }
 
 /// Implements `AnnotationsProvider` for `NvCreateImageRequest`,
@@ -1014,5 +1146,29 @@ mod tests {
         assert_eq!(out["size"], serde_json::json!("768x512"));
         assert_eq!(out["output_format"], serde_json::json!("png"));
         assert_eq!(out["usage"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn image_response_json_body_matches_serde() {
+        let b64 = "aGVsbG8gd29ybGQ=".repeat(100);
+        // One escape per `b64_json`, so each case of the escape check has to
+        // catch it alone. The control character opens a 41-byte string, so it
+        // is found in a 32-byte chunk; the other two are found in the tail.
+        let escapes = format!(
+            r#"{{"b64_json":"YQ==\""}},{{"b64_json":"YQ==\\"}},{{"b64_json":"\u0001{}"}}"#,
+            "A".repeat(40)
+        );
+        let responses = [
+            FULL_IMAGE_RESPONSE.to_owned(),
+            format!(r#"{{"created":1,"data":[{escapes}]}}"#),
+            format!(
+                r#"{{"created":1,"data":[{{"b64_json":"{b64}"}}],"nvext":{{"usage":{{"output_images":1}}}}}}"#
+            ),
+        ];
+        for json in responses {
+            let response: NvImagesResponse = serde_json::from_str(&json).unwrap();
+            let body = String::from_utf8(response.to_json_vec().unwrap()).unwrap();
+            assert_eq!(body, serde_json::to_string(&response).unwrap());
+        }
     }
 }

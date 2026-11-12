@@ -4,7 +4,10 @@
 use std::{borrow::Cow, fmt::Display, sync::LazyLock};
 
 use dynamo_protocols::types::{
-    ChatCompletionTool, ChatCompletionToolType, CreateChatCompletionRequest, FunctionObject,
+    ChatCompletionRequestMessage, ChatCompletionRequestToolMessageContent,
+    ChatCompletionRequestToolMessageContentPart, ChatCompletionRequestUserMessageContent,
+    ChatCompletionRequestUserMessageContentPart, ChatCompletionTool, ChatCompletionToolType,
+    CreateChatCompletionRequest, FunctionObject,
 };
 use dynamo_protocols::validation;
 
@@ -470,9 +473,7 @@ pub fn validate_stop(stop: &Option<dynamo_protocols::types::Stop>) -> Result<(),
 //
 
 /// Validates messages array
-pub fn validate_messages(
-    messages: &[dynamo_protocols::types::ChatCompletionRequestMessage],
-) -> Result<(), anyhow::Error> {
+pub fn validate_messages(messages: &[ChatCompletionRequestMessage]) -> Result<(), anyhow::Error> {
     if messages.is_empty() {
         anyhow::bail!("Messages array cannot be empty");
     }
@@ -480,7 +481,23 @@ pub fn validate_messages(
     // as a JSON object string; reject bad non-empty shapes before chat-template rendering.
     // This was caught in MiniMax-M3 multi-turn tool-call tests
     for (message_index, message) in messages.iter().enumerate() {
-        if let dynamo_protocols::types::ChatCompletionRequestMessage::Assistant(assistant) = message
+        let has_custom_content = match message {
+            ChatCompletionRequestMessage::User(user) => matches!(
+                &user.content,
+                ChatCompletionRequestUserMessageContent::Array(parts)
+                    if parts.iter().any(|part| matches!(part, ChatCompletionRequestUserMessageContentPart::Custom(_)))
+            ),
+            ChatCompletionRequestMessage::Tool(tool) => matches!(
+                &tool.content,
+                ChatCompletionRequestToolMessageContent::Array(parts)
+                    if parts.iter().any(|part| matches!(part, ChatCompletionRequestToolMessageContentPart::Custom(_)))
+            ),
+            _ => false,
+        };
+        if has_custom_content {
+            anyhow::bail!("messages[{message_index}].content custom parts are not supported");
+        }
+        if let ChatCompletionRequestMessage::Assistant(assistant) = message
             && let Some(tool_calls) = &assistant.tool_calls
         {
             for (tool_call_index, tool_call) in tool_calls.iter().enumerate() {
@@ -1015,6 +1032,42 @@ mod tests {
     use super::*;
     use crate::engines::ValidateRequest;
     use crate::protocols::openai::completions::NvCreateCompletionRequest;
+
+    #[test]
+    fn custom_message_content_is_rejected_before_model_validation() {
+        use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
+
+        let custom = json!({"type":"custom", "kind":"sensor", "fields":{"payload":"value"}});
+        for message in [
+            json!({"role":"user", "content":[custom.clone()]}),
+            json!({"role":"tool", "tool_call_id":"call_1", "content":[custom]}),
+        ] {
+            for model in ["test", ""] {
+                let request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+                    "model":model, "messages":[message.clone()]
+                }))
+                .unwrap();
+                assert_eq!(
+                    request.validate().unwrap_err().to_string(),
+                    "messages[0].content custom parts are not supported"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn text_message_content_remains_valid() {
+        use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
+
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model":"test", "messages":[
+                {"role":"user", "content":[{"type":"text", "text":"question"}]},
+                {"role":"tool", "tool_call_id":"call_1", "content":[{"type":"text", "text":"result"}]}
+            ]
+        }))
+        .unwrap();
+        request.validate().unwrap();
+    }
 
     /// Echoing client-controlled keys can duplicate a whole request body while
     /// building HTTP errors, so oversized keys must also yield a fixed diagnostic.

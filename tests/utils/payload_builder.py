@@ -34,7 +34,9 @@ from tests.utils.payloads import (
     MetricsPayload,
     PoolingPayload,
     ResponsesPayload,
+    ResponsesPayloadWithLogprobs,
     ResponsesStreamPayload,
+    ResponsesStreamPayloadWithLogprobs,
     RouterNvextChatPayload,
     SGLangGenerateCancellationPayload,
     SGLangGenerateRecoveryPayload,
@@ -1250,6 +1252,59 @@ def responses_stream_payload_default(
         expected_log=expected_log or [],
         expected_response=expected_response
         or ["AI", "knock", "joke", "think", "artificial", "intelligence"],
+    )
+
+
+def responses_payload_with_logprobs(
+    repeat_count: int = 1,
+    expected_response: Optional[List[str]] = None,
+    max_tokens: int = 50,
+    temperature: float = 0.0,
+    top_logprobs: int = 3,
+    extra_body: Optional[Dict[str, Any]] = None,
+) -> ResponsesPayloadWithLogprobs:
+    """Create a non-streaming Responses payload that requests output logprobs."""
+    body: Dict[str, Any] = {
+        "input": TEXT_PROMPT,
+        "max_output_tokens": max_tokens,
+        "temperature": temperature,
+        "include": ["message.output_text.logprobs"],
+        "top_logprobs": top_logprobs,
+    }
+    if extra_body:
+        body.update(extra_body)
+    return ResponsesPayloadWithLogprobs(
+        body=body,
+        repeat_count=repeat_count,
+        expected_log=[],
+        expected_response=expected_response or ["AI", "knock", "joke"],
+    )
+
+
+def responses_stream_payload_with_logprobs(
+    repeat_count: int = 1,
+    expected_response: Optional[List[str]] = None,
+    max_tokens: int = 50,
+    temperature: float = 0.0,
+    top_logprobs: int = 3,
+    extra_body: Optional[Dict[str, Any]] = None,
+) -> ResponsesStreamPayloadWithLogprobs:
+    """Create a streaming Responses payload that requests output logprobs."""
+    body: Dict[str, Any] = {
+        "input": TEXT_PROMPT,
+        "stream": True,
+        "max_output_tokens": max_tokens,
+        "temperature": temperature,
+        "include": ["message.output_text.logprobs"],
+        "top_logprobs": top_logprobs,
+    }
+    if extra_body:
+        body.update(extra_body)
+    return ResponsesStreamPayloadWithLogprobs(
+        body=body,
+        repeat_count=repeat_count,
+        expected_log=[],
+        expected_response=expected_response or ["AI", "knock", "joke"],
     )
 
 

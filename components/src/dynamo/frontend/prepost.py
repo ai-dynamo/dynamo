@@ -1081,6 +1081,7 @@ class StreamingPostProcessor:
         # this correctly, so we accumulate text here and fall back to the
         # non-streaming extract_tool_calls() once the buffer is complete.
         self._tool_text_buffer: str | None = None
+        self._pending_tool_opener = ""
         self._dynamo_json_fallback_chunks: dict[int, list[str]] = {}
 
     @property
@@ -1513,6 +1514,20 @@ class StreamingPostProcessor:
                 return None
             return self._build_choice(output, delta)
 
+        if self._pending_tool_opener:
+            delta_text = self._pending_tool_opener + delta_text
+            self._pending_tool_opener = ""
+            markers = self._tool_start_markers()
+            if any(delta_text.startswith(marker) for marker in markers):
+                self._tool_text_buffer = ""
+            elif any(marker.startswith(delta_text) for marker in markers):
+                if not output.finish_reason:
+                    self._pending_tool_opener = delta_text
+                    return None
+                return self._build_choice(
+                    output, {"role": "assistant", "content": delta_text}
+                )
+
         current_text = self.previous_text + delta_text
         current_token_ids = self.previous_token_ids + delta_token_ids
 
@@ -1628,7 +1643,21 @@ class StreamingPostProcessor:
                             None,
                         )
                 else:
-                    # Plain content (or no content) after reasoning end.
+                    if post_content and not output.finish_reason:
+                        # Hold only the trailing text that can complete a tool opener.
+                        # The preceding text can still be streamed immediately.
+                        prefix_length = max(
+                            (
+                                size
+                                for marker in tool_start_markers
+                                for size in range(1, len(marker))
+                                if post_content.endswith(marker[:size])
+                            ),
+                            default=0,
+                        )
+                        if prefix_length:
+                            self._pending_tool_opener = post_content[-prefix_length:]
+                            post_content = post_content[:-prefix_length]
                     delta_message = self._compose_delta_message(
                         reasoning=saved_reasoning,
                         content=post_content if post_content else None,

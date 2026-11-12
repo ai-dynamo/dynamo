@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use dynamo_kv_router::plugins::RouterPlugins;
+use dynamo_kv_router::plugins::request_classifier::RequestClassifierFactory;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -21,7 +23,6 @@ use crate::{
         NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
     },
 };
-use dynamo_kv_router::plugins::{RouterPlugins, request_classifier::RequestClassifierFactory};
 use dynamo_runtime::DistributedRuntime;
 use dynamo_runtime::metrics::MetricsHierarchy;
 
@@ -81,8 +82,33 @@ impl HttpFrontend {
             anyhow::bail!("custom router plugins require a dynamic engine");
         }
 
+        // Hosts that pass no resolved plugins resolve the policy file later, so read its
+        // selection from the config as well.
+        let router_config = engine_config.local_model().router_config();
+        if router_config.router_mode.is_kv_routing()
+            && !self.plugins.has_custom_worker_selection()
+            && matches!(
+                router_config
+                    .kv_router_config
+                    .selected_worker_selection_policy_instance(),
+                Ok(None)
+            )
+        {
+            tracing::warn!(
+                "Starting with Dynamo 1.8, --router-mode kv will default to the two-tier cost \
+                 function (dynamo-two-tier-cost-fn). To keep the current cost function, select a \
+                 dynamo-default-cost-fn instance in --router-policy-config."
+            );
+        }
+
         let plugins = RouterPluginBuilder::new(self.plugins);
-        plugins.validate_config(&engine_config.local_model().router_config().kv_router_config)?;
+        let router_config = engine_config.local_model().router_config();
+        plugins.validate_config(&router_config.kv_router_config)?;
+        crate::kv_router::check_hint_policies_route_on_kv_path(
+            router_config.router_mode,
+            &router_config.kv_router_config,
+            &crate::kv_router::EVERY_ROLE,
+        )?;
 
         // Callers that reach the frontend without going through `run_input`
         // still have to drain the trace sinks before the process exits. The
@@ -326,7 +352,7 @@ async fn run_watcher(
     http_service: Arc<HttpService>,
     metrics: Arc<crate::http::service::metrics::Metrics>,
     chat_engine_factory: Option<ChatEngineFactoryCallback>,
-    prefill_load_estimator: Option<Arc<dyn dynamo_kv_router::PrefillLoadEstimator>>,
+    prefill_load_estimator: Option<Arc<dyn dynamo_scheduler::host::PrefillLoadEstimator>>,
     local_model_path: Option<PathBuf>,
     tokenizer_backend: Option<TokenizerBackend>,
     tokenizer_fallback_enabled: Option<bool>,
@@ -362,7 +388,7 @@ async fn run_watcher(
     let discovery = runtime.discovery();
     let discovery_stream = discovery
         .list_and_watch(
-            dynamo_runtime::discovery::DiscoveryQuery::AllModels,
+            namespace_filter.model_query(),
             Some(runtime.primary_token()),
         )
         .await?;
@@ -452,7 +478,7 @@ mod tests {
     use crate::engines::make_echo_engine;
     use crate::model_card::{LoraInfo, ModelDeploymentCard};
     use crate::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine;
-    use dynamo_kv_router::KvRouterConfig;
+    use dynamo_kv_router::config::KvRouterConfig;
 
     #[tokio::test]
     async fn configured_classifier_requires_installed_plugin() {
