@@ -3,16 +3,28 @@
 
 //! Dynamo observation conversion shared by offline replay and Live Mocker.
 
-use aisimulate_core::engine::{ForwardPassMetrics, KvEvent, KvEventData};
-use dynamo_kv_router::protocols::{
-    ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData,
-    KvCacheStoredBlockData, LocalBlockHash,
+use aisimulate_core::engine::{ForwardPassMetrics, KvEvent, KvEventData, KvEventTier};
+use dynamo_kv_events::event::{
+    KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData,
 };
+use dynamo_kv_events::residency::StorageTier;
+use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
 
 use crate::common::protocols::ForwardPassSnapshot;
 
-pub(crate) fn dynamo_kv_event(event: KvEvent) -> (KvCacheEvent, Option<Vec<Vec<u32>>>) {
-    let (data, block_token_ids) = match event.data {
+/// Router storage tier of a native KV event. `HostPinned` events describe a
+/// G2 host pool (per-rank or cluster-shared) and must never enter the device (G1) index.
+pub(crate) fn dynamo_storage_tier(tier: KvEventTier) -> StorageTier {
+    match tier {
+        KvEventTier::Device => StorageTier::Device,
+        KvEventTier::HostPinned => StorageTier::HostPinned,
+    }
+}
+
+pub(crate) fn dynamo_kv_event(
+    event: KvEvent,
+) -> (KvCacheEvent, Option<Vec<Vec<u32>>>, Option<String>) {
+    let (data, block_token_ids, session_id) = match event.data {
         KvEventData::Stored(stored) => {
             let block_token_ids = stored
                 .blocks
@@ -35,7 +47,7 @@ pub(crate) fn dynamo_kv_event(event: KvEvent) -> (KvCacheEvent, Option<Vec<Vec<u
                     })
                     .collect(),
             });
-            (data, block_token_ids)
+            (data, block_token_ids, stored.session_id)
         }
         KvEventData::Removed { block_hashes } => (
             KvCacheEventData::Removed(KvCacheRemoveData {
@@ -44,6 +56,7 @@ pub(crate) fn dynamo_kv_event(event: KvEvent) -> (KvCacheEvent, Option<Vec<Vec<u
                     .map(ExternalSequenceBlockHash)
                     .collect(),
             }),
+            None,
             None,
         ),
     };
@@ -54,6 +67,7 @@ pub(crate) fn dynamo_kv_event(event: KvEvent) -> (KvCacheEvent, Option<Vec<Vec<u
             dp_rank: event.dp_rank,
         },
         block_token_ids,
+        session_id,
     )
 }
 
@@ -86,10 +100,10 @@ mod tests {
     use std::sync::Arc;
 
     use aisimulate_core::engine::{KvBlock, StoredBlocks};
-    use dynamo_kv_router::indexer::{KvIndexer, KvIndexerInterface, KvIndexerMetrics};
-    use dynamo_kv_router::protocols::{
-        KvCacheEventData, LocalBlockHash, RouterEvent, WorkerWithDpRank,
-    };
+    use dynamo_kv_events::event::{KvCacheEventData, RouterEvent};
+    use dynamo_kv_hashing::LocalBlockHash;
+    use dynamo_kv_indexer::host::{KvIndexer, KvIndexerInterface, KvIndexerMetrics};
+    use dynamo_router_protocol::worker::WorkerWithDpRank;
     use tokio_util::sync::CancellationToken;
 
     use super::*;
@@ -102,6 +116,7 @@ mod tests {
         blocks: &[(u64, u64, &[u32])],
     ) -> KvEvent {
         KvEvent {
+            tier: aisimulate_core::engine::KvEventTier::Device,
             event_id,
             dp_rank,
             data: KvEventData::Stored(StoredBlocks {
@@ -115,19 +130,21 @@ mod tests {
                         token_ids: Some(token_ids.to_vec()),
                     })
                     .collect(),
+                session_id: Some("session-1".to_owned()),
             }),
         }
     }
 
     #[test]
     fn stored_and_removed_events_preserve_router_identity_and_token_metadata() {
-        let (event, token_ids) = dynamo_kv_event(stored_event(
+        let (event, token_ids, session_id) = dynamo_kv_event(stored_event(
             17,
             3,
             Some(99),
             7,
             &[(101, 11, &[1, 2, 3, 4]), (102, 22, &[5, 6, 7, 8])],
         ));
+        assert_eq!(session_id.as_deref(), Some("session-1"));
         assert_eq!(event.event_id, 17);
         assert_eq!(event.dp_rank, 3);
         let KvCacheEventData::Stored(stored) = event.data else {
@@ -142,7 +159,8 @@ mod tests {
         assert_eq!(stored.blocks[1].tokens_hash, LocalBlockHash(22));
         assert_eq!(token_ids, Some(vec![vec![1, 2, 3, 4], vec![5, 6, 7, 8]]));
 
-        let (event, token_ids) = dynamo_kv_event(KvEvent {
+        let (event, token_ids, session_id) = dynamo_kv_event(KvEvent {
+            tier: aisimulate_core::engine::KvEventTier::Device,
             event_id: 18,
             dp_rank: 3,
             data: KvEventData::Removed {
@@ -160,6 +178,7 @@ mod tests {
             ]
         );
         assert_eq!(token_ids, None);
+        assert_eq!(session_id, None);
     }
 
     #[tokio::test]
@@ -193,6 +212,7 @@ mod tests {
         assert_eq!(matches.scores.get(&worker), Some(&2));
 
         let removed = dynamo_kv_event(KvEvent {
+            tier: aisimulate_core::engine::KvEventTier::Device,
             event_id: 3,
             dp_rank: 3,
             data: KvEventData::Removed {

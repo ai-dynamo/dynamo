@@ -1,0 +1,30 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "dynamo-generate-format-catalog"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Default build-time /generate format catalog for Dynamo"
+
+[dependencies]
+dynamo-llm = { workspace = true }
+anyhow = { workspace = true }
+dynamo-sglang-generate = { workspace = true }
+dynamo-vllm-generate = { workspace = true }
+
+[dev-dependencies]
+dynamo-sglang-generate = { workspace = true, features = ["testkit"] }
+dynamo-runtime = { workspace = true }
+axum = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tower = { workspace = true }
+prometheus = { workspace = true }
+uuid = { workspace = true }

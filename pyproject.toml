@@ -3,7 +3,7 @@
 
 [project]
 name = "ai-dynamo"
-version = "1.6.0"
+version = "1.7.0"
 description = "Distributed Inference Framework"
 readme = "README.md"
 authors = [
@@ -11,11 +11,13 @@ authors = [
 ]
 license = { text = "Apache-2.0" }
 license-files = ["LICENSE"]
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
-    "ai-dynamo-runtime==1.6.0",
-    "aisimulate==0.12.0; python_version >= '3.11' and python_version < '3.14'",
+    "ai-dynamo-runtime==1.7.0",
+    "aisimulate==0.13.0.dev202610290000000087 ; python_version >= '3.11' and python_version < '3.14'",
     "aiohttp>=3.14.3,<4.0",
+    # Set the CA bundle floor for transitive HTTP clients outside containers too.
+    "certifi>=2026.10.23",
     "transformers>=4.56.0",
     "kubernetes>=32.0.1,<33.0.0",
     "prometheus_client>=0.23.1,<1.0",
@@ -23,8 +25,6 @@ dependencies = [
     "redis>=6.2.0,<9.0.0",
     "zstandard>=0.23.0,<1.0",
     "pyzmq>=26.0.0",
-    # typing.Self is 3.11+; declared minimum is 3.10 (see requires-python),
-    # so back-port Self via typing_extensions in dynamo.common.configuration.
     "typing_extensions>=4.10.0",
     "tqdm>=4.0.0",
 ]
@@ -36,7 +36,6 @@ classifiers = [
     "Intended Audience :: Information Technology",
     "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering",
@@ -49,9 +48,13 @@ keywords = ["llm", "genai", "inference", "nvidia", "distributed", "dynamo"]
 Repository = "https://github.com/ai-dynamo/dynamo.git"
 
 [project.optional-dependencies]
+artifact-delivery = [
+    "opendal==0.47.10",
+]
+
 trtllm =[
     "uvloop",
-    "tensorrt-llm==1.3.0rc27",
+    "tensorrt-llm==1.4.0rc2",
     # tensorrt-llm declares an uncapped `mpmath>=1.3.0`; under `--pre` the resolver
     # picks mpmath 1.5.0a0 (mpmath.libmp.bitcount removed) and backtracks sympy to
     # the uncapped 1.14.0rc1, which still imports bitcount -> torch._dynamo dies at
@@ -61,8 +64,8 @@ trtllm =[
 
 vllm = [
     "uvloop",
-    "nixl[cu13]==1.3.2",
-    "vllm[flashinfer,runai,otel]==0.30.0",
+    "nixl[cu13]==1.5.0",
+    "vllm[flashinfer,runai,otel]==0.33.0",
     # vllm-omni is not part of ai-dynamo[vllm]: container builds inherit the
     # framework stack from vllm/vllm-openai, and pip/uv dependency resolution
     # for omni can override the vLLM torch stack.
@@ -75,12 +78,23 @@ vllm = [
 
 sglang = [
     "uvloop",
-    "sglang[diffusion]==0.5.19",
+    "sglang[diffusion]==0.5.23",
     # sglang[diffusion] dropped accelerate in 0.5.12; diffusers still needs it.
     "accelerate>=0.17.0",
     "blake3>=1.0.0,<2.0.0",
-    "nixl[cu13]==1.4.0",
+    "nixl[cu13]==1.5.0",
     "cupy-cuda13x>=13.6.0",
+]
+
+# NVTX profiling. Opt-in only: dynamo.common.utils.nvtx_utils imports `nvtx`
+# only when DYN_NVTX is on (1/true/on/yes), and is pure-Python no-ops when it is
+# off or unset, so the marker call sites throughout components/ carry no
+# dependency on this extra. Install it alongside DYN_NVTX=1 to record markers.
+# A range, not a pin: vllm pins its own nvtx, and an exact pin that differs from
+# it makes ai-dynamo[vllm,profiling] unresolvable. The container pin is in
+# container/deps/requirements.common.txt.
+profiling = [
+    "nvtx>=0.2.14,<0.3",
 ]
 
 [tool.uv]
@@ -108,14 +122,14 @@ conflicts = [
 [tool.uv.dependency-groups]
 docs = { requires-python = ">=3.11" }
 
+[project.entry-points."vllm.general_plugins"]
+dynamo_nixl_telemetry = "dynamo.vllm.nixl_telemetry:allow_nixl_telemetry_capture"
+
 [project.entry-points.pytest11]
 vllm_tests = "dynamo.vllm.tests.conftest"
 trtllm_tests = "dynamo.trtllm.tests.conftest"
 triton_tests = "dynamo.triton.tests.conftest"
 sglang_tests = "dynamo.sglang.tests.conftest"
-
-[project.entry-points."vllm.general_plugins"]
-dynamo_kv_cache_metadata = "dynamo.vllm.kv_cache_metadata_compat:register"
 
 [project.entry-points."aisimulate.sweep_config_providers"]
 "dynamo.planner" = "dynamo.planner.simulation:create_provider"
@@ -127,6 +141,10 @@ dynamo = "dynamo.replay.simulation:DynamoReplayRunnerFactory"
 [project.entry-points."aisimulate.config_adapters"]
 "dynamo.planner" = "dynamo.planner.simulation:create_provider"
 "dynamo.router" = "dynamo.router.simulation:create_provider"
+
+[project.entry-points."aisimulate.output_adapters"]
+dgd = "dynamo.aisimulate.output.dgd:create_adapter"
+dgdr_run = "dynamo.aisimulate.output.dgdr_run:create_adapter"
 
 [dependency-groups]
 docs = [
@@ -208,7 +226,7 @@ known_first_party = ["dynamo", "deploy"]
 # failure. To mitigate 1) one can install 3rd party lib so that isort is aware of it,
 # 2) hardcode 3rd party lib here, 3) add "# isort: skip_file" to problematic files
 # as the last resort.
-known_third_party = ["vllm", "tensorrt_llm", "sglang", "tokenspeed", "aiconfigurator", "aiconfigurator_core"]
+known_third_party = ["vllm", "tensorrt_llm", "sglang", "tokenspeed", "aisimulate", "aisimulate_core"]
 
 [tool.pytest.ini_options]
 minversion = "8.0"
@@ -230,6 +248,10 @@ addopts = [
     "--ignore-glob=*_inc.py",
     "--ignore-glob=*/llm/tensorrtllm*",
     "--ignore-glob=docs/fern/*",
+    # Protocol compatibility tests have pinned tooling-only dependencies and run
+    # in their path-triggered unittest workflow. Generic runtime images do not
+    # install those dependencies, so do not collect this standalone suite there.
+    "--ignore-glob=scripts/protocol_compatibility/tests/*",
     # power-agent ships a standalone suite run in-image (deploy/power-agent
     # Dockerfile `test` stage + its own pytest.ini); its tests/ package name
     # collides with the repo-root tests/ package during repo-wide collection.
@@ -244,9 +266,13 @@ xfail_strict = true
 log_cli_level = "INFO"
 filterwarnings = [
     "error",
-    # DGDR still uses AISimulate 0.12's supported legacy sweep API until its
+    # kr8s 0.20.13 predates Kubernetes 1.36; keep its version warning visible
+    # without aborting deploy tests. Remove when the pinned release supports 1.36.
+    # Upstream coverage: https://github.com/kr8s-org/kr8s/pull/744
+    'default:^Kubernetes version v1\.36\.\d+ is not supported\. Supported versions for kr8s 0\.20\.13 are 1\.28 to 1\.34\.$:UserWarning:kr8s\._api$',
+    # DGDR still uses AISimulate's supported legacy sweep API until its
     # migration to the new Sweeper API is implemented.
-    'ignore:`aiconfigurator\.sdk\.sweep\.sweep_(agg|disagg)\(\)` is deprecated:DeprecationWarning',
+    'ignore:`aisimulate\.sdk\.sweep\.sweep_(agg|disagg)\(\)` is a deprecated sweep API:DeprecationWarning',
     # chardet 6.x is pulled in transitively but requests 2.32.x only supports chardet <6;
     # charset_normalizer is used at runtime so the warning is benign.
     "ignore:.*doesn't match a supported version",
@@ -265,6 +291,8 @@ filterwarnings = [
     "ignore:Arch from arch\\.py is deprecated:DeprecationWarning",
     # SGLang GGUF quantization emits UserWarning on non-CUDA platforms (arm64 CPU-only CI)
     "ignore:Only CUDA.*support GGUF quantization:UserWarning",
+    # SGLang still subclasses its deprecated MultiPlatformOp internally.
+    "ignore:MultiPlatformOp is deprecated; subclass sglang\\.kernels\\.fused_op\\.BaseFusedOp instead:DeprecationWarning",
     # protobuf C extension warning
     "ignore:.*PyType_Spec.*custom tp_new.*:DeprecationWarning",
     # unclosed socket/event loop warnings
@@ -303,18 +331,22 @@ filterwarnings = [
     # SGLang quantization warnings on CPU-only runners
     "ignore:Only CUDA, HIP and XPU support AWQ currently.*:UserWarning",
     "ignore:Only CUDA support GGUF quantization currently.*:UserWarning",
-    # pandas 2.3 emits this from pd.concat on empty/all-NA frames; aiconfigurator hits it
+    # pandas 2.3 emits this from pd.concat on empty/all-NA frames; AISimulate hits it
     # during disagg pareto search and re-raises as RuntimeError, breaking planner tests.
     "ignore:The behavior of DataFrame concatenation with empty or all-NA entries is deprecated.*:FutureWarning",
-    # pandas 2.3 emits this from aiconfigurator pareto filtering under filterwarnings=error.
+    # pandas 2.3 emits this from AISimulate pareto filtering under filterwarnings=error.
     "ignore:Downcasting behavior in `replace` is deprecated.*:FutureWarning",
     # pandas 2.3 emits this from the bundled compatibility report path on fillna.
-    "ignore:Downcasting object dtype arrays on .fillna.*:FutureWarning:aiconfigurator.cli.report_and_save",
+    "ignore:Downcasting object dtype arrays on .fillna.*:FutureWarning:aisimulate.legacy_cli.report_and_save",
+    # pandas 3.1 deprecates DataFrame.drop(inplace=...) with Pandas4Warning, a DeprecationWarning
+    # subclass; AISimulate still passes it in aisimulate.sdk.pareto_analysis, which picking calls.
+    "ignore:The inplace keyword in DataFrame.drop is deprecated.*:DeprecationWarning:aisimulate",
 ]
 
 
 # NOTE: Can also manually mark tests with @pytest.mark.asyncio
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 markers = [
     "pre_merge: marks tests to run before merging",
     "post_merge: marks tests to run after merge",
@@ -365,6 +397,7 @@ markers = [
     "router: marks tests for router component",
     "planner: marks tests for planner component",
     "sidecar: marks tests that launch a Dynamo dynamo-*-sidecar binary against its native-gRPC engine via lib/sidecar/*/launch/*.sh",
+    "engine_ports: dynamo_dynamic_ports also allocates per-worker engine HTTP/gRPC ports, exported as DYN_ENGINE_{HTTP,GRPC}_PORT{N}",
     "kvbm: marks tests for KV behavior and model determinism",
     "kvbm_consolidator: marks KVBM consolidator/router integration tests",
     "kvbm_determinism: marks KVBM model determinism tests",
@@ -398,6 +431,13 @@ markers = [
 # Same as Black.
 line-length = 88
 indent-width = 4
+
+[tool.ruff.lint]
+# E4, E7, E9, and F are the rules that ruff 0.5.2 enabled by default. Newer ruff enables many more.
+# W605 flags invalid escape sequences, and PLW0602 flags a `global` name that is never assigned.
+# TODO: enable flake8-bugbear (B) after its findings on main are fixed. Ruff has no B950;
+# E501 (line too long) is the closest ruff rule.
+select = ["E4", "E7", "E9", "F", "W605", "PLW0602"]
 
 [tool.ruff.lint.extend-per-file-ignores]
 "icp/tests/**/test_*.py" = ["F811", "F401"]
@@ -559,10 +599,10 @@ module = [
     "ray",
     "ray.*",
     "pydantic_core",
-    "aiconfigurator",
-    "aiconfigurator.*",
-    "aiconfigurator_core",
-    "aiconfigurator_core.*",
+    "aisimulate",
+    "aisimulate.*",
+    "aisimulate_core",
+    "aisimulate_core.*",
     "soundfile",
     "soundfile.*",
     "librosa",

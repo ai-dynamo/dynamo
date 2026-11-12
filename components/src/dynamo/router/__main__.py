@@ -18,10 +18,11 @@ from typing import Optional
 
 import uvloop
 
-from dynamo.llm import AicPerfConfig, KvRouter, KvRouterConfig
+from dynamo.common.utils.token_ids import token_ids_to_list
+from dynamo.llm import AisPerfConfig, KvRouter, KvRouterConfig
 from dynamo.router.args import (
     DynamoRouterConfig,
-    build_aic_perf_config,
+    build_ais_perf_config,
     build_kv_router_config,
 )
 from dynamo.router.args import parse_args as parse_router_args
@@ -41,13 +42,13 @@ class StandaloneRouterHandler:
         worker_endpoint_path: str,
         block_size: int,
         kv_router_config: KvRouterConfig,
-        aic_perf_config: Optional[AicPerfConfig],
+        ais_perf_config: Optional[AisPerfConfig],
     ):
         self.runtime = runtime
         self.worker_endpoint_path = worker_endpoint_path
         self.block_size = block_size
         self.kv_router_config = kv_router_config
-        self.aic_perf_config = aic_perf_config
+        self.ais_perf_config = ais_perf_config
         self.kv_router: Optional[KvRouter] = None
         self.worker_client: Optional[Client] = None
 
@@ -73,14 +74,14 @@ class StandaloneRouterHandler:
                 endpoint=worker_endpoint,
                 block_size=self.block_size,
                 kv_router_config=self.kv_router_config,
-                aic_perf_config=self.aic_perf_config,
+                ais_perf_config=self.ais_perf_config,
             )
 
         except Exception as e:
             logger.error(f"Failed to initialize KvRouter: {e}")
             raise
 
-    async def generate(self, request):
+    async def generate(self, request, context=None):
         """
         Generate tokens using the KV-aware router.
 
@@ -100,7 +101,8 @@ class StandaloneRouterHandler:
             preprocessed_request["routing"] = {"dp_rank": dp_rank}
 
         async for worker_output in await self.kv_router.generate_from_request(
-            preprocessed_request
+            preprocessed_request,
+            context=context,
         ):
             yield worker_output
 
@@ -139,7 +141,7 @@ class StandaloneRouterHandler:
             raise RuntimeError("Router not initialized")
 
         scores = await self.kv_router.get_overlap_scores(
-            request["token_ids"],
+            token_ids_to_list(request["token_ids"]),
             request.get("router_config_override"),
             request.get("block_mm_infos"),
             request.get("lora_name"),
@@ -188,7 +190,7 @@ async def worker(runtime: DistributedRuntime):
     )
 
     kv_router_config = build_kv_router_config(config)
-    aic_perf_config = build_aic_perf_config(config)
+    ais_perf_config = build_ais_perf_config(config)
 
     # Create handler
     handler = StandaloneRouterHandler(
@@ -196,7 +198,7 @@ async def worker(runtime: DistributedRuntime):
         config.endpoint,
         config.router_block_size,
         kv_router_config,
-        aic_perf_config,
+        ais_perf_config,
     )
     await handler.initialize()
 

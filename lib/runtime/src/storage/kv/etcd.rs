@@ -55,6 +55,13 @@ impl Store for EtcdStore {
     fn shutdown(&self) {
         // Revoke the lease? etcd will do it for us on disconnect.
     }
+
+    async fn check_connection(&self) -> Result<(), StoreError> {
+        self.client
+            .check_connection()
+            .await
+            .map_err(|e| StoreError::EtcdError(e.to_string()))
+    }
 }
 
 pub struct EtcdBucket {
@@ -128,7 +135,16 @@ impl Bucket for EtcdBucket {
     async fn watch(
         &self,
     ) -> Result<Pin<Box<dyn futures::Stream<Item = WatchEvent> + Send + 'life0>>, StoreError> {
-        let prefix = make_key(&self.bucket_name, &"".into());
+        self.watch_under("").await
+    }
+
+    /// Watches only the keys under `bucket/sub/`, so etcd neither ranges nor streams the rest
+    /// of the bucket.
+    async fn watch_under(
+        &self,
+        sub: &str,
+    ) -> Result<Pin<Box<dyn futures::Stream<Item = WatchEvent> + Send + 'life0>>, StoreError> {
+        let prefix = self.key_prefix(sub);
         tracing::trace!("etcd watch: {prefix}");
         let watcher = self
             .client
@@ -184,7 +200,12 @@ impl Bucket for EtcdBucket {
     }
 
     async fn entries(&self) -> Result<HashMap<Key, bytes::Bytes>, StoreError> {
-        let k = make_key(&self.bucket_name, &"".into());
+        self.entries_under("").await
+    }
+
+    /// Ranges only the keys under `bucket/sub/`.
+    async fn entries_under(&self, sub: &str) -> Result<HashMap<Key, bytes::Bytes>, StoreError> {
+        let k = self.key_prefix(sub);
         tracing::trace!("etcd entries: {k}");
 
         let resp = self
@@ -205,6 +226,16 @@ impl Bucket for EtcdBucket {
 }
 
 impl EtcdBucket {
+    /// The etcd key prefix of the keys under `sub`: `bucket/` for the whole bucket, else
+    /// `bucket/sub/`, so a sibling such as `bucket/sub-2` is not included.
+    fn key_prefix(&self, sub: &str) -> String {
+        if sub.is_empty() {
+            format!("{}/", self.bucket_name)
+        } else {
+            format!("{}/{sub}/", self.bucket_name)
+        }
+    }
+
     async fn create(
         &self,
         key: &Key,
@@ -397,6 +428,66 @@ mod concurrent_create_tests {
 
             bucket.delete(&existing).await.unwrap();
             bucket.delete(&later).await.unwrap();
+        });
+    }
+
+    /// A scoped read or watch covers exactly `bucket/sub/`: not the rest of the bucket, and not
+    /// a sibling whose name starts with `sub` (`ns-1` and `ns-10`).
+    #[test]
+    fn scoped_entries_and_watch_cover_only_their_subtree() {
+        let rt = Runtime::single_threaded().unwrap();
+        let rt_clone = rt.clone();
+
+        rt_clone.primary().block_on(async move {
+            let etcd_client =
+                etcd_transport::Client::new(etcd_transport::ClientOptions::default(), rt)
+                    .await
+                    .unwrap();
+            let storage = crate::storage::kv::Manager::etcd(etcd_client);
+            let bucket_name = format!("test_scoped_{}", uuid::Uuid::new_v4());
+            let bucket = storage
+                .get_or_create_bucket(&bucket_name, None)
+                .await
+                .unwrap();
+            let keys =
+                ["ns-1/a", "ns-1/deeper/b", "ns-10/c", "other/d"].map(|k| Key::new(k.into()));
+            for key in &keys {
+                bucket.insert(key, "v".into(), 0).await.unwrap();
+            }
+            let full = |key: &Key| Key::new(make_key(&bucket_name, key));
+
+            let scoped = bucket.entries_under("ns-1").await.unwrap();
+            let mut scoped: Vec<_> = scoped.into_keys().collect();
+            scoped.sort_by(|a, b| a.as_ref().cmp(b.as_ref()));
+            assert_eq!(scoped, vec![full(&keys[0]), full(&keys[1])]);
+            assert_eq!(bucket.entries_under("").await.unwrap().len(), keys.len());
+
+            let mut events = bucket.watch_under("ns-1").await.unwrap();
+            let first = events.next().await.unwrap();
+            let WatchEvent::Resync(snapshot) = first else {
+                panic!("expected the initial resync, got {first:?}");
+            };
+            let mut snapshot: Vec<_> = snapshot.into_keys().collect();
+            snapshot.sort_by(|a, b| a.as_ref().cmp(b.as_ref()));
+            assert_eq!(snapshot, vec![full(&keys[0]), full(&keys[1])]);
+
+            // A change in the sibling arrives first in etcd but never on this watch.
+            let sibling = Key::new("ns-10/late".into());
+            let inside = Key::new("ns-1/late".into());
+            bucket.insert(&sibling, "v".into(), 0).await.unwrap();
+            bucket.insert(&inside, "v".into(), 0).await.unwrap();
+            let next = tokio::time::timeout(Duration::from_secs(10), events.next())
+                .await
+                .expect("no event within 10 s")
+                .unwrap();
+            let WatchEvent::Put(item) = next else {
+                panic!("expected a put, got {next:?}");
+            };
+            assert_eq!(item.key_str(), make_key(&bucket_name, &inside));
+
+            for key in keys.iter().chain([&sibling, &inside]) {
+                bucket.delete(key).await.unwrap();
+            }
         });
     }
 

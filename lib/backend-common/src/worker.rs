@@ -13,10 +13,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use dynamo_llm::admission_gate::{AdmissionEngine, WorkerAdmissionGate};
 use dynamo_llm::first_token::FirstTokenSource;
 use dynamo_llm::local_model::runtime_config::{
-    DisaggregatedEndpoint, ModelRuntimeConfig, StructuralTagMode, StructuralTagSchemaMode,
-    StructuralTagScope, TOPOLOGY_TAINT_PREFIX,
+    DisaggregatedEndpoint, ModelRuntimeConfig, StructuralTagConfig, TOPOLOGY_TAINT_PREFIX,
 };
 use dynamo_llm::local_model::{LocalModel, LocalModelBuilder, update_model_taints};
 use dynamo_llm::model_type::{ModelInput, ModelType};
@@ -70,15 +70,25 @@ const MODEL_TAINT_UPDATE_ROUTE: &str = "update/model_taints";
 
 /// Per-worker transport configuration. Explicit values take precedence over
 /// environment defaults when the worker constructs its distributed runtime.
-#[derive(Clone, Debug, Default)]
+#[derive(clap::Args, Clone, Debug, Default, PartialEq, Eq)]
 pub struct RuntimeConfig {
     /// Discovery backend selector — e.g. `"etcd"`, `"kubernetes"`, `"file"`,
     /// `"mem"`. Maps to `DYN_DISCOVERY_BACKEND`.
+    #[arg(long, env = "DYN_DISCOVERY_BACKEND", value_parser = ["kubernetes", "etcd", "file", "mem"])]
     pub discovery_backend: Option<String>,
     /// Request-plane transport — e.g. `"tcp"`, `"nats"`. Maps to `DYN_REQUEST_PLANE`.
+    #[arg(long, env = "DYN_REQUEST_PLANE", value_parser = ["tcp", "nats"], ignore_case = true)]
     pub request_plane: Option<String>,
+    /// Response transport. Frontend and workers must use the same value.
+    /// Maps to `DYN_RESPONSE_PLANE`.
+    #[arg(long, env = "DYN_RESPONSE_PLANE", value_parser = ["tcp", "quic", "velo"])]
+    pub response_plane: Option<String>,
     /// Event-plane transport — `"nats"` or `"zmq"`. When `None` the runtime
-    /// derives a default from the discovery backend. Maps to `DYN_EVENT_PLANE`.
+    /// uses its default transport. Maps to `DYN_EVENT_PLANE`.
+    #[arg(long, env = "DYN_EVENT_PLANE", value_parser = [
+        clap::builder::PossibleValue::new("nats"),
+        clap::builder::PossibleValue::new("zmq").alias(""),
+    ])]
     pub event_plane: Option<String>,
 }
 
@@ -86,7 +96,32 @@ impl RuntimeConfig {
     pub fn has_overrides(&self) -> bool {
         self.discovery_backend.is_some()
             || self.request_plane.is_some()
+            || self.response_plane.is_some()
             || self.event_plane.is_some()
+    }
+
+    /// Resolve transport settings without changing the process environment.
+    pub fn to_distributed_config(
+        &self,
+    ) -> anyhow::Result<dynamo_runtime::distributed::DistributedConfig> {
+        use dynamo_runtime::pipeline::network::ResponsePlaneMode;
+
+        let mut config =
+            dynamo_runtime::distributed::DistributedConfig::from_settings_with_overrides(
+                self.discovery_backend.as_deref(),
+                self.request_plane.as_deref(),
+                self.event_plane.as_deref(),
+            )?;
+        config.response_plane = match self.response_plane.as_deref() {
+            Some("tcp") => Some(ResponsePlaneMode::Tcp),
+            Some("quic") => Some(ResponsePlaneMode::Quic),
+            Some("velo") => Some(ResponsePlaneMode::Velo),
+            Some(value) => {
+                anyhow::bail!("invalid response plane '{value}'; expected 'tcp', 'quic', or 'velo'")
+            }
+            None => None,
+        };
+        Ok(config)
     }
 
     /// Apply each set field to the corresponding environment variable.
@@ -108,6 +143,9 @@ impl RuntimeConfig {
         if let Some(ref value) = self.request_plane {
             set("DYN_REQUEST_PLANE", value);
         }
+        if let Some(ref value) = self.response_plane {
+            set("DYN_RESPONSE_PLANE", value);
+        }
         if let Some(ref value) = self.event_plane {
             set("DYN_EVENT_PLANE", value);
         }
@@ -126,7 +164,8 @@ pub struct WorkerConfig {
     /// Optional KV-state event endpoint. When unset, KV state uses the serving endpoint.
     pub kv_state_endpoint: Option<EndpointId>,
     /// HF repo name or local model path. Empty means name-only registration
-    /// (no tokenizer / chat-template on the card).
+    /// (no tokenizer / chat-template on the card). An HF repo is fetched
+    /// without weight files; the engine loads weights itself.
     pub model_name: String,
     /// Public-facing model name (operator CLI override). When unset, the
     /// served name falls back to `EngineConfig.served_model_name`, then to
@@ -172,14 +211,10 @@ pub struct WorkerConfig {
     /// Python sets this via `--health-check-payload` / env; Rust-only
     /// engines leave it `None` and let `Worker` read the env directly.
     pub health_check_payload: Option<serde_json::Value>,
-    /// Structural tag guided decoding mode.
-    pub structural_tag_mode: StructuralTagMode,
-    /// Structural tag activation scope.
-    pub structural_tag_scope: StructuralTagScope,
-    /// Structural tag schema strictness.
-    pub structural_tag_schema: StructuralTagSchemaMode,
-    /// Runtime / transport overrides applied via env vars before the
-    /// `DistributedRuntime` is constructed.
+    /// Structural-tag guided-decoding policy. Presence enables structural tags.
+    pub structural_tag: Option<StructuralTagConfig>,
+    /// Runtime / transport overrides used when constructing the
+    /// `DistributedRuntime`.
     pub runtime: RuntimeConfig,
     /// When `true`, this worker declares an upstream `Encode` dependency in
     /// its topology `needs`. Meaningful only for `Prefill` and `Aggregated`
@@ -227,9 +262,7 @@ impl Default for WorkerConfig {
             metrics_labels: Vec::new(),
             disaggregation_mode: DisaggregationMode::Aggregated,
             health_check_payload: None,
-            structural_tag_mode: StructuralTagMode::Off,
-            structural_tag_scope: StructuralTagScope::Auto,
-            structural_tag_schema: StructuralTagSchemaMode::Auto,
+            structural_tag: None,
             runtime: RuntimeConfig::default(),
             route_to_encoder: false,
             enable_rl: false,
@@ -302,6 +335,14 @@ impl EngineKind {
         match self {
             EngineKind::Llm(e) => e.setup_metrics(ctx).await,
             EngineKind::Raw(e) => e.setup_metrics(ctx).await,
+        }
+    }
+
+    /// See [`LLMEngine::engine_lost`].
+    async fn engine_lost(&self) -> DynamoError {
+        match self {
+            EngineKind::Llm(e) => e.engine_lost().await,
+            EngineKind::Raw(_) => std::future::pending().await,
         }
     }
 
@@ -415,6 +456,8 @@ pub struct Worker {
     /// adapters that detach work (such as a separately scheduled language
     /// runtime task) remain responsible for cancelling that work themselves.
     engine_route_shutdown: CancellationToken,
+    /// Cancelled as `engine.cleanup()` starts; see `EngineAdapter::with_engine_cleanup`.
+    engine_cleanup: CancellationToken,
     /// KV-aware-routing publisher handles. Drained in `cleanup_once` while NATS is alive.
     publishers: Option<PublisherHandles>,
     /// Framework-owned lifecycle gauges. Set in `setup_publishing` after
@@ -422,6 +465,10 @@ pub struct Worker {
     /// step. Always present once `start()` returns Ok, independent of
     /// whether the engine returned a component publisher.
     lifecycle: Option<crate::metrics::LifecycleGauges>,
+    /// This worker's backend admission gate, which its token pipeline admits
+    /// network requests through. Created as the worker serves, for its
+    /// component; anything else serving for this worker holds a clone.
+    admission_gate: WorkerAdmissionGate,
 }
 
 impl Worker {
@@ -446,9 +493,19 @@ impl Worker {
             )),
             engine_route_mutation: Arc::new(tokio::sync::Mutex::new(())),
             engine_route_shutdown: CancellationToken::new(),
+            engine_cleanup: CancellationToken::new(),
             publishers: None,
             lifecycle: None,
+            admission_gate: WorkerAdmissionGate::default(),
         }
+    }
+
+    /// Admit this worker's requests through `admission_gate`, a handle its
+    /// caller also gave the worker's engine, so the engine's own registrations
+    /// size the gate the worker admits through rather than another.
+    pub fn with_admission_gate(mut self, admission_gate: WorkerAdmissionGate) -> Self {
+        self.admission_gate = admission_gate;
+        self
     }
 
     /// Lifecycle driver. Takes owned `self` — `Worker` is single-shot and
@@ -480,7 +537,7 @@ impl Worker {
     ///
     /// `engine.cleanup()` is guaranteed to run exactly once if
     /// `engine.start()` succeeded, regardless of which path led to shutdown.
-    pub async fn run(mut self, runtime: Runtime) -> Result<(), DynamoError> {
+    pub async fn run(self, runtime: Runtime) -> Result<(), DynamoError> {
         // Validate the worker config up front so misconfiguration surfaces
         // before any signal handlers, tokio tasks, or runtime construction.
         // The same validation is also reachable via `run_inner`, but doing
@@ -523,20 +580,57 @@ impl Worker {
             signal_token.cancel();
         });
 
+        let outcome = self.run_with_shutdown(runtime, None, shutdown_token).await;
+        signal_handle.abort();
+        let _ = signal_handle.await;
+        outcome
+    }
+
+    /// Run on the sidecar's already-connected runtime and process shutdown token.
+    /// Registration, drain and cleanup retain the ordinary Worker behavior.
+    pub async fn run_with_drt(
+        self,
+        drt: DistributedRuntime,
+        shutdown: CancellationToken,
+    ) -> Result<(), DynamoError> {
+        validate_model_input(self.config.model_input, &self.engine)?;
+        validate_route_to_encoder(&self.config)?;
+        self.run_with_shutdown(drt.runtime().clone(), Some(drt), shutdown)
+            .await
+    }
+
+    async fn run_with_shutdown(
+        mut self,
+        runtime: Runtime,
+        drt: Option<DistributedRuntime>,
+        shutdown_token: CancellationToken,
+    ) -> Result<(), DynamoError> {
         // Mirror `dynamo_runtime::Worker::execute`'s shutdown deadline:
         // once a signal arrives, the orchestrator + cleanup must finish
         // within `DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT` seconds (plus the
         // grace-period sleep, which is a fixed wait rather than a hang
         // risk), otherwise we exit(911). Healthy long-running workers
         // never hit this — the timer only starts after `shutdown_token`
-        // is cancelled.
+        // is cancelled. A lost engine starts the same shutdown.
+        let engine = self.engine.clone();
         let outcome = {
-            let inner_fut = self.run_inner(runtime, &shutdown_token);
+            let inner_fut = self.run_inner(runtime.clone(), drt, &shutdown_token);
             tokio::pin!(inner_fut);
 
-            tokio::select! {
-                result = &mut inner_fut => result,
-                _ = shutdown_token.cancelled() => {
+            let (finished, lost) = tokio::select! {
+                biased;
+                result = &mut inner_fut => (Some(result), None),
+                _ = shutdown_token.cancelled() => (None, None),
+                error = engine.engine_lost() => (None, Some(error)),
+            };
+            match finished {
+                Some(result) => result,
+                None => {
+                    if let Some(error) = &lost {
+                        tracing::error!(%error, "Engine lost; shutting down the worker");
+                        shutdown_token.cancel();
+                    }
+                    runtime.mark_shutting_down();
                     let timeout = graceful_shutdown_timeout();
                     let grace = grace_period_secs();
                     let deadline = shutdown_deadline(timeout, grace);
@@ -546,7 +640,7 @@ impl Worker {
                         timeout.as_secs(),
                         grace,
                     );
-                    match tokio::time::timeout(deadline, &mut inner_fut).await {
+                    let result = match tokio::time::timeout(deadline, &mut inner_fut).await {
                         Ok(result) => result,
                         Err(_) => {
                             tracing::error!(
@@ -556,16 +650,23 @@ impl Worker {
                             );
                             std::process::exit(911);
                         }
+                    };
+                    match lost {
+                        Some(error) => {
+                            if let Err(stopped) = result {
+                                tracing::warn!(error = %stopped, "Worker shutdown failed");
+                            }
+                            Err(error)
+                        }
+                        None => result,
                     }
                 }
             }
         };
 
-        signal_handle.abort();
-        let _ = signal_handle.await;
-
         // Final safety net: guarantee engine.cleanup() runs if start()
         // succeeded. No-op if cleanup already ran via the orchestrator.
+        runtime.mark_shutting_down();
         self.cleanup_once().await;
 
         outcome
@@ -576,29 +677,35 @@ impl Worker {
     async fn run_inner(
         &mut self,
         runtime: Runtime,
+        drt: Option<DistributedRuntime>,
         shutdown: &CancellationToken,
     ) -> Result<(), DynamoError> {
         // model_input was already validated at the top of `run`; re-checking
         // here would double-error on misconfig.
-        let config = dynamo_runtime::distributed::DistributedConfig::from_settings_with_overrides(
-            self.config.runtime.discovery_backend.as_deref(),
-            self.config.runtime.request_plane.as_deref(),
-            self.config.runtime.event_plane.as_deref(),
-        )
-        .map_err(|e| {
-            err(
-                ErrorType::Backend(BackendError::InvalidArgument),
-                format!("distributed runtime config: {e}"),
-            )
-        })?;
-        let drt = DistributedRuntime::new(runtime, config)
-            .await
-            .map_err(|e| {
-                err(
-                    ErrorType::Backend(BackendError::CannotConnect),
-                    format!("distributed runtime: {e}"),
-                )
-            })?;
+        let drt = match drt {
+            Some(drt) => drt,
+            None => {
+                let config = self.config.runtime.to_distributed_config().map_err(|e| {
+                    err(
+                        ErrorType::Backend(BackendError::InvalidArgument),
+                        format!("distributed runtime config: {e}"),
+                    )
+                })?;
+                let result = DistributedRuntime::new(runtime, config).await;
+                // A signal cancels DRT initialization through the runtime token.
+                // Preserve the clean pre-start shutdown contract before mapping
+                // independent connection failures to CannotConnect.
+                if shutdown.is_cancelled() {
+                    return Ok(());
+                }
+                result.map_err(|e| {
+                    err(
+                        ErrorType::Backend(BackendError::CannotConnect),
+                        format!("distributed runtime: {e}"),
+                    )
+                })?
+            }
+        };
         tracing::debug!("distributed runtime connected");
 
         let component = drt
@@ -863,6 +970,7 @@ impl Worker {
     /// grace period → engine drain → cleanup. Shared by every shutdown path —
     /// pre-serve (mid-start signal) and the serve loop's signal arm.
     async fn orchestrator_steps(&mut self, endpoint: &dynamo_runtime::component::Endpoint) {
+        endpoint.drt().runtime().mark_shutting_down();
         if let Err(e) = endpoint.unregister_endpoint_instance().await {
             tracing::warn!(error = %e, "discovery unregister failed");
         } else {
@@ -912,6 +1020,7 @@ impl Worker {
             LifecycleState::Running | LifecycleState::StartFailed => {}
         }
         let cleanup_start = std::time::Instant::now();
+        self.engine_cleanup.cancel();
         match self.engine.cleanup().await {
             Ok(()) => tracing::info!("Engine cleanup complete"),
             Err(e) => tracing::error!(error = %e, "engine cleanup failed"),
@@ -959,6 +1068,14 @@ impl Worker {
         let mut local_model =
             build_local_model(&self.config, engine_config, self.engine.is_raw()).await?;
         tracing::debug!("local model built");
+
+        // An LLM engine admits its network requests through this worker's
+        // gate. Create it before the engine receives its endpoint or the model
+        // is published, so an invalid admission configuration fails startup
+        // with nothing published; the ingress below gets the same gate.
+        if let EngineKind::Llm(_) = &self.engine {
+            self.admission_gate.get_or_create(endpoint.component())?;
+        }
 
         // Hand the engine its serving endpoint before registering the model
         // with discovery. on_endpoint_ready is a fatal handoff: doing it first
@@ -1013,7 +1130,8 @@ impl Worker {
         ) = match &self.engine {
             EngineKind::Llm(engine) => {
                 let mut engine_adapter =
-                    EngineAdapter::new(engine.clone(), self.config.disaggregation_mode);
+                    EngineAdapter::new(engine.clone(), self.config.disaggregation_mode)
+                        .with_engine_cleanup(self.engine_cleanup.clone());
                 if let Some(source) = self
                     .publishers
                     .as_ref()
@@ -1028,14 +1146,22 @@ impl Worker {
                     DisaggregationMode::Encode => LifecycleOperationRole::Encode,
                     DisaggregationMode::Aggregated => LifecycleOperationRole::Worker,
                 };
-                let ingress =
-                    Ingress::for_engine_with_lifecycle_role(engine_adapter.clone(), lifecycle_role)
-                        .map_err(|e| {
-                            err(
-                                ErrorType::Backend(BackendError::Unknown),
-                                format!("ingress: {e}"),
-                            )
-                        })?;
+                // Network requests are admitted through this worker's gate
+                // before they reach the engine, sized by the model card it
+                // registered above; the local health-check probe below calls
+                // the adapter directly, outside admission.
+                let admission_gate = self.admission_gate.get()?;
+                admission_gate.record_model_card(local_model.card());
+                let ingress = Ingress::for_engine_with_lifecycle_role(
+                    AdmissionEngine::new(admission_gate, engine_adapter.clone()),
+                    lifecycle_role,
+                )
+                .map_err(|e| {
+                    err(
+                        ErrorType::Backend(BackendError::Unknown),
+                        format!("ingress: {e}"),
+                    )
+                })?;
                 let probe = Arc::new(crate::adapter::JsonProbeAdapter::new(engine_adapter));
                 (ingress, probe)
             }
@@ -2140,9 +2266,7 @@ async fn build_local_model(
         tool_call_parser: config.tool_call_parser.clone(),
         reasoning_parser: config.reasoning_parser.clone(),
         exclude_tools_when_tool_choice_none: config.exclude_tools_when_tool_choice_none,
-        structural_tag_mode: config.structural_tag_mode,
-        structural_tag_scope: config.structural_tag_scope,
-        structural_tag_schema: config.structural_tag_schema,
+        structural_tag: config.structural_tag.clone(),
         enable_local_indexer,
         kv_state_endpoint: config.kv_state_endpoint.clone(),
         disaggregated_endpoint,
@@ -2176,7 +2300,8 @@ async fn build_local_model(
         })? {
             PathBuf::from(&source)
         } else {
-            LocalModel::fetch(&source, false).await.map_err(|e| {
+            // Skip weights: the engine loaded them in start(); the card needs only metadata.
+            LocalModel::fetch(&source, true).await.map_err(|e| {
                 err(
                     ErrorType::Backend(BackendError::CannotConnect),
                     format!("fetch '{source}': {e}"),
@@ -2586,6 +2711,44 @@ mod tests {
         assert_eq!(local_model.card().aliases, ["media-alias"]);
     }
 
+    /// A weights-free HF cache is enough to register: the engine loads weights itself.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn build_local_model_uses_weights_free_hf_cache() {
+        use dynamo_runtime::config::environment_names::model::huggingface;
+
+        // hf-hub cache layout whose snapshot is the metadata-only fixture.
+        let cache = tempfile::TempDir::new().unwrap();
+        let repo = cache.path().join("models--test-org--weights-free");
+        std::fs::create_dir_all(repo.join("refs")).unwrap();
+        std::fs::create_dir_all(repo.join("snapshots")).unwrap();
+        std::fs::write(repo.join("refs/main"), "rev").unwrap();
+        std::os::unix::fs::symlink(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../llm/tests/data/sample-models/mock-llama-3.1-8b-instruct"
+            ),
+            repo.join("snapshots/rev"),
+        )
+        .unwrap();
+
+        let config = WorkerConfig {
+            model_name: "test-org/weights-free".to_string(),
+            ..WorkerConfig::default()
+        };
+        temp_env::async_with_vars(
+            [
+                (huggingface::HF_HUB_CACHE, cache.path().to_str()),
+                // Offline mode accepts a weights-free cache even without the fix.
+                (huggingface::HF_HUB_OFFLINE, None),
+                (huggingface::HF_ENDPOINT, Some("http://127.0.0.1:9")),
+            ],
+            build_local_model(&config, &EngineConfig::default(), false),
+        )
+        .await
+        .expect("a weights-free cache must be enough to register");
+    }
+
     #[test]
     fn resolve_model_type_aggregated_uses_endpoint_types() {
         let config = WorkerConfig {
@@ -2926,6 +3089,7 @@ mod tests {
     /// `start` success/failure via a flag.
     struct StateMockEngine {
         start_should_fail: bool,
+        start_calls: AtomicUsize,
         cleanup_calls: Arc<AtomicUsize>,
     }
 
@@ -2934,6 +3098,7 @@ mod tests {
             let cleanup_calls = Arc::new(AtomicUsize::new(0));
             let eng = Arc::new(Self {
                 start_should_fail,
+                start_calls: AtomicUsize::new(0),
                 cleanup_calls: cleanup_calls.clone(),
             });
             (eng, cleanup_calls)
@@ -2943,6 +3108,7 @@ mod tests {
     #[async_trait]
     impl LLMEngine for StateMockEngine {
         async fn start(&self, _worker_id: u64) -> Result<EngineConfig, DynamoError> {
+            self.start_calls.fetch_add(1, Ordering::SeqCst);
             if self.start_should_fail {
                 Err(err(
                     ErrorType::Backend(BackendError::EngineShutdown),
@@ -2987,6 +3153,66 @@ mod tests {
                 ..WorkerConfig::default()
             },
         )
+    }
+
+    #[tokio::test]
+    async fn shutdown_during_runtime_connection_distinguishes_signals_from_failure() {
+        // Hold a real etcd connection before its first RPC can complete.
+        let peer = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let etcd_url = format!("http://{}", peer.local_addr().unwrap());
+        temp_env::async_with_vars(
+            [
+                ("DYN_DISCOVERY_BACKEND", Some("etcd")),
+                ("DYN_REQUEST_PLANE", Some("tcp")),
+                ("DYN_EVENT_PLANE", Some("zmq")),
+                ("DYN_SYSTEM_PORT", None),
+                ("NATS_SERVER", None),
+                ("ETCD_ENDPOINTS", Some(etcd_url.as_str())),
+                ("ETCD_STARTUP_CONNECT_TIMEOUT_SECONDS", Some("30")),
+                ("ETCD_AUTH_USERNAME", None),
+                ("ETCD_AUTH_PASSWORD", None),
+                ("ETCD_AUTH_CA", None),
+                ("ETCD_AUTH_CLIENT_CERT", None),
+                ("ETCD_AUTH_CLIENT_KEY", None),
+            ],
+            async {
+                for signal in [false, true] {
+                    let runtime = Runtime::from_current().unwrap();
+                    let shutdown = CancellationToken::new();
+                    let (engine, cleanup_calls) = StateMockEngine::new(false);
+                    let mut run = Box::pin(worker_with(engine.clone()).run_with_shutdown(
+                        runtime.clone(), None, shutdown.clone(),
+                    ));
+                    let (_connection, _) = tokio::select! {
+                        result = &mut run => panic!("worker completed before etcd replied: {result:?}"),
+                        peer = tokio::time::timeout(Duration::from_secs(5), peer.accept()) => {
+                            peer.unwrap().unwrap()
+                        }
+                    };
+                    if signal {
+                        // Exercise the same token as Worker's SIGTERM handler.
+                        shutdown.cancel();
+                    } else {
+                        runtime.mark_shutting_down();
+                    }
+                    let result = tokio::time::timeout(Duration::from_secs(5), run)
+                        .await
+                        .expect("pending runtime connection is cancelled");
+                    if signal {
+                        result.expect("SIGTERM before engine start exits cleanly");
+                    } else {
+                        assert_eq!(
+                            result.unwrap_err().error_type(),
+                            ErrorType::Backend(BackendError::CannotConnect),
+                        );
+                    }
+                    assert_eq!(engine.start_calls.load(Ordering::SeqCst), 0);
+                    assert_eq!(cleanup_calls.load(Ordering::SeqCst), 0);
+                    runtime.shutdown();
+                }
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -3430,6 +3656,7 @@ mod tests {
         let cfg = RuntimeConfig {
             discovery_backend: Some("file".to_string()),
             request_plane: Some("tcp".to_string()),
+            response_plane: Some("quic".to_string()),
             event_plane: Some("zmq".to_string()),
         };
 
@@ -3440,6 +3667,7 @@ mod tests {
             vec![
                 ("DYN_DISCOVERY_BACKEND".to_string(), "file".to_string()),
                 ("DYN_REQUEST_PLANE".to_string(), "tcp".to_string()),
+                ("DYN_RESPONSE_PLANE".to_string(), "quic".to_string()),
                 ("DYN_EVENT_PLANE".to_string(), "zmq".to_string()),
             ]
         );
@@ -3450,6 +3678,7 @@ mod tests {
         let cfg = RuntimeConfig {
             discovery_backend: Some("etcd".to_string()),
             request_plane: None,
+            response_plane: None,
             event_plane: None,
         };
 
@@ -4195,6 +4424,109 @@ mod handoff_and_lifecycle_tests {
         );
 
         worker.begin_engine_route_shutdown().await;
+    }
+
+    /// A lost engine withdraws the serving worker, runs cleanup, and makes the
+    /// worker return the engine's error.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn lost_engine_withdraws_the_worker_and_returns_its_error() {
+        struct LostEngine {
+            lost: CancellationToken,
+            cleanup_calls: std::sync::atomic::AtomicUsize,
+        }
+
+        #[async_trait]
+        impl LLMEngine for LostEngine {
+            async fn start(&self, _worker_id: u64) -> Result<EngineConfig, DynamoError> {
+                Ok(EngineConfig {
+                    model: "lost-mock".to_string(),
+                    ..EngineConfig::default()
+                })
+            }
+
+            async fn generate(
+                &self,
+                _request: PreprocessedRequest,
+                _ctx: crate::engine::GenerateContext,
+            ) -> Result<
+                BoxStream<'static, Result<crate::engine::LLMEngineOutput, DynamoError>>,
+                DynamoError,
+            > {
+                unreachable!("not used in engine-loss tests")
+            }
+
+            async fn cleanup(&self) -> Result<(), DynamoError> {
+                self.cleanup_calls
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            }
+
+            async fn engine_lost(&self) -> DynamoError {
+                self.lost.cancelled().await;
+                DynamoError::builder()
+                    .error_type(ErrorType::Backend(BackendError::EngineShutdown))
+                    .message("synthetic engine loss")
+                    .build()
+            }
+        }
+
+        let runtime = dynamo_runtime::Runtime::from_current().unwrap();
+        let config = dynamo_runtime::distributed::DistributedConfig::process_local();
+        let drt = DistributedRuntime::new(runtime, config).await.unwrap();
+        let engine = Arc::new(LostEngine {
+            lost: CancellationToken::new(),
+            cleanup_calls: Default::default(),
+        });
+        let config = WorkerConfig::default();
+        let query = DiscoveryQuery::Endpoint {
+            namespace: config.namespace.clone(),
+            component: config.component.clone(),
+            endpoint: config.endpoint.clone(),
+        };
+        let shutdown = CancellationToken::new();
+        let run = tokio::spawn(
+            Worker::new(engine.clone(), config).run_with_drt(drt.clone(), shutdown.clone()),
+        );
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while drt
+                .discovery()
+                .list(query.clone())
+                .await
+                .unwrap()
+                .is_empty()
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("worker registers its endpoint");
+
+        engine.lost.cancel();
+        let error = tokio::time::timeout(Duration::from_secs(30), run)
+            .await
+            .expect("a lost engine stops the worker")
+            .unwrap()
+            .expect_err("a lost engine fails the worker");
+        assert_eq!(
+            error.error_type(),
+            ErrorType::Backend(BackendError::EngineShutdown)
+        );
+        assert!(
+            error.to_string().contains("synthetic engine loss"),
+            "{error}"
+        );
+        assert!(
+            drt.discovery().list(query).await.unwrap().is_empty(),
+            "a lost engine must leave no endpoint"
+        );
+        assert_eq!(
+            engine
+                .cleanup_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert!(shutdown.is_cancelled(), "engine loss uses the SIGTERM path");
     }
 
     /// Ensures a payload-free Rust backend publishes readiness while it is

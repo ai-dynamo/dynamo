@@ -1,24 +1,20 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Agent Harnesses
-subtitle: Point coding-agent CLIs at a Dynamo deployment
+title: Connect an Agent Harness
+subtitle: Point Claude Code, Codex, OpenCode, and other coding agents at a Dynamo deployment
 ---
 
-Dynamo exposes `v1/chat/completions`, `v1/responses`, and `v1/messages`, so any agent that uses these APIs can talk to a Dynamo endpoint even if it is not listed in this guide. This guide focuses on popular agent harnesses that send stable session IDs. Dynamo normalizes these IDs for tracing and other explicitly configured consumers.
+By the end of this guide, your coding agent is sending its requests to Dynamo, and each request carries the agent's own session ID.
 
-<Steps toc={true}>
-<Step title="Start a local agent endpoint" id="local-setup">
-To locally test these out, we have a small script that runs an SGLang-backed `zai-org/GLM-4.7-Flash` endpoint. This script starts a TP2 instance on port 8000 and enables request tracing for replay and visualization. By default traces are saved in `/tmp/dynamo-request-trace-$(date +%Y%m%d-%H%M%S)`
+Dynamo serves `v1/chat/completions`, `v1/responses`, and `v1/messages`, so any agent that uses one of these APIs can talk to a Dynamo endpoint, even if it is not listed here. The harnesses below also send stable session IDs, which Dynamo normalizes for tracing and other explicitly configured consumers.
 
-To start it, run:
+## Before You Start
 
-```bash
-bash examples/backends/sglang/launch/agg_agent.sh
-```
+You need a running Dynamo endpoint. To start a local one, follow [Run an agent on Dynamo](run-an-agent-on-dynamo.md). The examples use `http://localhost:8000` and `zai-org/GLM-4.7-Flash`; replace them with your endpoint and model.
 
-</Step>
-<Step title="Configure a harness" id="configure-a-harness">
+## Configure Your Harness
+
 <Tabs>
   <Tab title="Codex">
 
@@ -201,8 +197,17 @@ bash examples/backends/sglang/launch/agg_agent.sh
   </Tab>
 </Tabs>
 
-</Step>
-</Steps>
+## Check That Dynamo Sees the Session
+
+Send a request from the harness, then follow the trace check in [Run an agent on Dynamo](run-an-agent-on-dynamo.md#check-the-trace). Each request should show a session ID. If it does not, the harness is not sending a session header; see [Identify agent sessions](session-ids.mdx#native-agent-headers) for the headers Dynamo recognizes.
+
+## Run a sandboxed coding benchmark
+
+[Run SWE-bench Verified with Harbor, Pi, and Substrate](harbor-substrate.mdx)
+walks through sandbox preparation, one trial, a concurrent batch, and result
+inspection. Use Dynamo inference or a compatible external endpoint. The
+[runnable example](https://github.com/ai-dynamo/dynamo/tree/main/examples/agents/harbor-substrate)
+contains the environment adapter, prepared-image build, and telemetry configuration.
 
 ## Drive a Harness from Another Agent
 
@@ -210,24 +215,12 @@ Use the repository's `.agents/skills/dynamo-agent-harness` skill when an agent n
 
 The skill pins the Claude Code and Codex ACP adapters. If a harness release changes the model, endpoint, session header, authentication, or mode configuration, update this page and the skill in the same change after running a persistent two-turn tool smoke test.
 
-## Compaction Signals
+## Tool Schema Validation
 
-An agent harness can compact older conversation history into a summary when its context approaches a limit. The harness creates the summary request and keeps the logical session ID stable. Dynamo observes supported compaction signals but does not start compaction.
+On Chat Completions and Responses requests, function tools with explicit `strict: true` receive schema preflight before inference. Invalid schemas now return HTTP 400 where earlier versions could accept them. Responses validates every submitted function, including namespace members and functions excluded by `allowed_tools` or `tool_choice: "none"`. Omitted, `null`, or `false` strictness and omitted or `null` parameters retain existing behavior.
 
-| Harness | Signal recognized by Dynamo | Normalized agent context |
-| --- | --- | --- |
-| Codex | `x-codex-turn-metadata` with `request_kind` set to `compaction` | `agent_context.compaction` |
-| Claude Code | No supported mapping | Unset |
-| OpenCode | No supported mapping | Unset |
+Preflight runs independently of structural-tag activation. Passing preflight does not guarantee complete OpenAI compatibility or backend enforcement. See [Request Validation](../tool-calling-and-reasoning/structural-tag.md#request-validation) for object rules, size budgets, and Dynamo's bounded local-reference support.
 
-For Codex, Dynamo preserves the optional `trigger`, `reason`, `implementation`, `phase`, and `strategy` values. The object appears only on the inference request that creates the summary. Invalid JSON and other request kinds leave it unset.
+## Next
 
-Workers receive the field in `AgentContext` but do not act on it.
-
-Compaction metadata is passive. It does not rotate `session_id`, change request routing, or evict KV cache blocks. See [Agent Tracing](agent-tracing.md#compaction-metadata) for the request-trace format.
-
-## See Also
-
-- [Session IDs](session-ids.mdx)
-- [Agent Tracing](agent-tracing.md)
-- [SGLang for Agentic Workloads](../../developer-guide/knowledge-base/modular-components/backends/sglang/agents-on-sglang.md)
+[Identify agent sessions](session-ids.mdx) explains how Dynamo reads these headers and how subagents are linked to their parent.

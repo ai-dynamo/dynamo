@@ -10,7 +10,6 @@ use tokio::sync::{Notify, mpsc::Sender};
 
 use anyhow::Context as _;
 use async_trait::async_trait;
-use dynamo_kv_router::PrefillLoadEstimator;
 use dynamo_runtime::{
     DistributedRuntime,
     discovery::{DiscoveryInstance, DiscoveryQuery, DiscoveryStream, ModelCardInstanceId},
@@ -20,6 +19,7 @@ use dynamo_runtime::{
     },
     protocols::{EndpointId, annotated::Annotated},
 };
+use dynamo_scheduler::host::PrefillLoadEstimator;
 
 use dynamo_renderer::PromptFormatter;
 
@@ -31,6 +31,7 @@ use crate::{
     kv_router::plugins::RouterPluginBuilder,
     kv_router::{EncoderRouter, PrefillRouter, RouterLoadSource, RoutingLoadContext},
     local_model::runtime_config::{
+        DISAGG_PREFILL_CANCEL_ANYTIME_V1, SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
         TokenizerBackend, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
         VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
     },
@@ -52,11 +53,13 @@ use crate::{
             images::{NvCreateImageRequest, NvImagesResponse},
             pooling::{NvCreatePoolingRequest, NvCreatePoolingResponse},
             rerank::{NvCreateRerankRequest, NvCreateRerankResponse},
+            transcriptions::{NvAudioTranscriptionResponse, NvCreateAudioTranscriptionRequest},
             videos::{NvCreateVideoRequest, NvVideosResponse},
         },
         tensor::{NvCreateTensorRequest, NvCreateTensorResponse},
     },
-    types::generic::realtime::{RealtimeClientEvent, RealtimeServerEvent},
+    types::generic::realtime::{DynamoRealtimeClientEvent, RealtimeServerEvent},
+    utils::json::canonicalize_json_object_keys,
     worker_type::WorkerType,
 };
 
@@ -65,7 +68,7 @@ use super::{
     ModelManager,
     controller::{ControllerHost, DesiredInstance, GroupKey, GroupSpec, ModelDiscoveryController},
 };
-use crate::namespace::NamespaceFilter;
+use crate::namespace::{NamespaceFilter, NamespacePrefixMode};
 use tokio_util::sync::CancellationToken;
 
 /// Constructs a collision-free WorkerSet storage key from its exact endpoint,
@@ -97,6 +100,18 @@ fn worker_set_key(
         wt.as_str(),
     ))
     .expect("serializing WorkerSet key strings cannot fail")
+}
+
+/// Refresh committed capability records without changing controller admission.
+fn update_image_edit_capabilities(worker_set: &WorkerSet, members: &[DesiredInstance]) {
+    if let Some(admission) = &worker_set.image_edit_admission {
+        admission.replace(members.iter().map(|member| {
+            (
+                member.mcid.instance_id,
+                super::image_edits::advertised_limit(&member.card),
+            )
+        }));
+    }
 }
 
 fn model_card_endpoint_id(mcid: &ModelCardInstanceId) -> EndpointId {
@@ -182,6 +197,7 @@ pub enum ModelUpdate {
 }
 
 pub struct ModelWatcher {
+    namespace_prefix_mode: NamespacePrefixMode,
     manager: Arc<ModelManager>,
     drt: DistributedRuntime,
     router_config: RouterConfig,
@@ -205,6 +221,7 @@ pub struct ModelWatcher {
     /// Worker capabilities accepted by the frontend's engine-native Generate routes.
     /// Keep raw pipelines out of default-off and backend-mismatched paths.
     generate_engine_capabilities: Vec<&'static str>,
+    systemone_enabled: bool,
     plugins: RouterPluginBuilder,
 }
 
@@ -229,6 +246,7 @@ const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::Embedding,
     ModelType::Images,
     ModelType::Audios,
+    ModelType::Transcriptions,
     ModelType::Videos,
     ModelType::TensorBased,
     ModelType::Realtime,
@@ -301,6 +319,7 @@ impl ModelWatcher {
     ) -> Self {
         Self {
             manager: model_manager,
+            namespace_prefix_mode: NamespacePrefixMode::from_env(),
             drt: runtime,
             router_config,
             migration_limit,
@@ -315,6 +334,7 @@ impl ModelWatcher {
             tokenizer_backend: None,
             tokenizer_fallback_enabled: None,
             generate_engine_capabilities: Vec::new(),
+            systemone_enabled: false,
             plugins,
         }
     }
@@ -327,6 +347,10 @@ impl ModelWatcher {
         self.local_model_path = path;
     }
 
+    pub fn set_namespace_prefix_mode(&mut self, mode: NamespacePrefixMode) {
+        self.namespace_prefix_mode = mode;
+    }
+
     pub fn set_tokenizer_backend(&mut self, tokenizer_backend: Option<TokenizerBackend>) {
         self.tokenizer_backend = tokenizer_backend;
     }
@@ -337,6 +361,10 @@ impl ModelWatcher {
 
     pub(crate) fn set_generate_engine_capabilities(&mut self, capabilities: Vec<&'static str>) {
         self.generate_engine_capabilities = capabilities;
+    }
+
+    pub(crate) fn set_systemone_enabled(&mut self, enabled: bool) {
+        self.systemone_enabled = enabled;
     }
     /// Compatibility wrapper for callers that enable the vLLM Generate route.
     pub fn set_generate_engine_enabled(&mut self, enabled: bool) {
@@ -412,16 +440,21 @@ impl ModelWatcher {
         card.download_config(self.local_model_path.as_deref())
             .await?;
 
+        validate_card_parser_version(card, self.chat_engine_factory.is_some())?;
+
         validate_policy_worker_role(card, &self.plugins)?;
 
         // Prepare without exact video routing unless the cohort agreed on a contract.
-        if spec.video_contract.is_none()
-            && card
-                .runtime_config
-                .runtime_data
-                .remove(VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY)
-                .is_some()
-        {
+        let mut removed_video_contract = false;
+        if spec.video_contract.is_none() {
+            for key in [
+                VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+                SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+            ] {
+                removed_video_contract |= card.runtime_config.runtime_data.remove(key).is_some();
+            }
+        }
+        if removed_video_contract {
             tracing::warn!(
                 target: "mm_routing",
                 model_name = card.name(),
@@ -430,7 +463,6 @@ impl ModelWatcher {
                  exact video routing disabled for this group"
             );
         }
-
         // Use per-worker-set router config if the worker provided one in its MDC,
         // otherwise fall back to the frontend-level global config. Policy selections
         // are process-local, so preserve them when the MDC supplies the base config.
@@ -458,6 +490,11 @@ impl ModelWatcher {
             WorkerSet::new(namespace.clone(), spec.mdc_checksum.clone(), card.clone());
         let allocator_trim = worker_set.initialize_allocator_trim_on_teardown();
         worker_set.set_lifecycle_cancellation(cancellation.clone());
+        if card.model_type.supports_images() {
+            worker_set.image_edit_admission = Some(Arc::new(
+                super::image_edits::ImageEditAdmission::new(admitted_ids.clone()),
+            ));
+        }
         worker_set.set_topology_target(super::CommittedWorkerSetTarget {
             endpoint: endpoint.clone(),
             group: spec.key.id(),
@@ -532,10 +569,24 @@ impl ModelWatcher {
             let needs_local_chat_pipeline =
                 card.model_type.supports_chat() && self.chat_engine_factory.is_none();
             let needs_local_completions_pipeline = card.model_type.supports_completions();
-            let tokenizer = if (needs_local_chat_pipeline || needs_local_completions_pipeline)
-                && card.has_tokenizer()
-            {
+            let needs_systemone_preprocessor =
+                self.systemone_enabled && card.is_systemone_serial_eligible();
+            let needs_local_tokenizer =
+                needs_local_chat_pipeline || needs_local_completions_pipeline;
+            let tokenizer = if needs_local_tokenizer && card.has_tokenizer() {
                 Some(card.tokenizer().context("tokenizer")?)
+            } else if needs_systemone_preprocessor && card.has_tokenizer() {
+                match card.tokenizer().context("System One tokenizer") {
+                    Ok(tokenizer) => Some(tokenizer),
+                    Err(cause) => {
+                        tracing::warn!(
+                            model_name = card.name(),
+                            error = %format!("{cause:#}"),
+                            "System One tokenizer is unavailable; keeping other model surfaces active"
+                        );
+                        None
+                    }
+                }
             } else {
                 None
             };
@@ -549,8 +600,7 @@ impl ModelWatcher {
             let needs_preprocessed_routing =
                 needs_factory_chat_pipeline || tokenizer.is_some() || needs_generate_pipeline;
 
-            let load_thresholds =
-                LoadThresholdHandle::new(router_config.load_threshold_config.clone());
+            let load_thresholds = load_threshold_handle(&router_config);
             let load_context = if needs_preprocessed_routing {
                 let source = RouterLoadSource::from_worker_type(effective_worker_type(
                     card.worker_type,
@@ -625,6 +675,8 @@ impl ModelWatcher {
                     None,
                     self.manager.clone(),
                     router_config.router_mode,
+                    card.runtime_config
+                        .supports_runtime_capability(DISAGG_PREFILL_CANCEL_ANYTIME_V1),
                     card.kv_cache_block_size,
                     Some(prefill_config),
                     self.plugins.selection_policy(),
@@ -657,6 +709,31 @@ impl ModelWatcher {
                 router as Arc<dyn crate::kv_router::prefill_router::PrefillRouterLifecycle>
             });
             worker_set.encoder_router = encoder_chooser.clone();
+
+            if needs_systemone_preprocessor {
+                worker_set.systemone_preprocessor = match tokenizer.clone() {
+                    Some(tokenizer) => {
+                        match worker_set_chat_preprocessor(card, tokenizer, &cancellation) {
+                            Ok(preprocessor) => Some(preprocessor),
+                            Err(error) => {
+                                tracing::warn!(
+                                    model = card.name(),
+                                    error = %format!("{error:#}"),
+                                    "System One preprocessor is unavailable"
+                                );
+                                None
+                            }
+                        }
+                    }
+                    None => {
+                        tracing::warn!(
+                            model = card.name(),
+                            "System One preprocessor is unavailable: model has no supported Rust tokenizer"
+                        );
+                        None
+                    }
+                };
+            }
 
             let preprocessed_routing = if needs_preprocessed_routing {
                 Some(
@@ -702,8 +779,10 @@ impl ModelWatcher {
                     )
                 } else if let Some(tk) = tokenizer.clone() {
                     // Only chat pipelines use speculative prefill.
-                    let preprocessor =
-                        worker_set_chat_preprocessor(card, tk.clone(), &cancellation)?;
+                    let preprocessor = match worker_set.systemone_preprocessor.clone() {
+                        Some(preprocessor) => preprocessor,
+                        None => worker_set_chat_preprocessor(card, tk.clone(), &cancellation)?,
+                    };
                     Some(
                         routing
                             .build_pipeline::<
@@ -741,11 +820,9 @@ impl ModelWatcher {
             // and we have a tokenizer (completions always uses the Rust preprocessor).
             if card.model_type.supports_completions() {
                 if let Some(tk) = tokenizer {
-                    let formatter = PromptFormatter::no_op();
-                    let PromptFormatter::OAI(formatter) = formatter;
                     let preprocessor =
-                        OpenAIPreprocessor::new_with_parts(card.clone(), formatter, tk.clone())
-                            .context("OpenAIPreprocessor::new_with_parts")?;
+                        OpenAIPreprocessor::new_for_completions(card.clone(), tk.clone())
+                            .context("OpenAIPreprocessor::new_for_completions")?;
                     let routing = preprocessed_routing.as_ref().ok_or_else(|| {
                         anyhow::anyhow!("completions pipeline requires preprocessed routing")
                     })?;
@@ -802,8 +879,7 @@ impl ModelWatcher {
             // OpenAI surfaces. Build each declared surface independently:
             // ModelType is a bitflag, so choosing one mutually-exclusive branch
             // would silently omit engines for mixed-capability cards.
-            let load_thresholds =
-                LoadThresholdHandle::new(router_config.load_threshold_config.clone());
+            let load_thresholds = load_threshold_handle(&router_config);
             let load_context = RoutingLoadContext::start(
                 client,
                 RouterLoadSource::from_worker_type(effective_worker_type(
@@ -821,8 +897,10 @@ impl ModelWatcher {
                 let push_router = PushRouter::<
                     NvCreateEmbeddingRequest,
                     Annotated<NvCreateEmbeddingResponse>,
-                >::from_client_with_monitor(
-                    client.clone(), router_config.router_mode, None
+                >::from_client_with_options(
+                    client.clone(),
+                    router_config.router_mode,
+                    crate::kv_router::plugins::push_router_options(),
                 )
                 .await?;
                 worker_set.embeddings_engine = Some(Arc::new(push_router));
@@ -832,8 +910,10 @@ impl ModelWatcher {
                 let push_router = PushRouter::<
                     NvCreateClassifyRequest,
                     Annotated<NvCreateClassifyResponse>,
-                >::from_client_with_monitor(
-                    client.clone(), router_config.router_mode, None
+                >::from_client_with_options(
+                    client.clone(),
+                    router_config.router_mode,
+                    crate::kv_router::plugins::push_router_options(),
                 )
                 .await?;
                 worker_set.classify_engine = Some(Arc::new(push_router));
@@ -843,8 +923,10 @@ impl ModelWatcher {
                 let push_router = PushRouter::<
                     NvCreatePoolingRequest,
                     Annotated<NvCreatePoolingResponse>,
-                >::from_client_with_monitor(
-                    client.clone(), router_config.router_mode, None
+                >::from_client_with_options(
+                    client.clone(),
+                    router_config.router_mode,
+                    crate::kv_router::plugins::push_router_options(),
                 )
                 .await?;
                 worker_set.pooling_engine = Some(Arc::new(push_router));
@@ -854,8 +936,10 @@ impl ModelWatcher {
                 let push_router = PushRouter::<
                     NvCreateRerankRequest,
                     Annotated<NvCreateRerankResponse>,
-                >::from_client_with_monitor(
-                    client.clone(), router_config.router_mode, None
+                >::from_client_with_options(
+                    client.clone(),
+                    router_config.router_mode,
+                    crate::kv_router::plugins::push_router_options(),
                 )
                 .await?;
                 worker_set.rerank_engine = Some(Arc::new(push_router));
@@ -865,8 +949,10 @@ impl ModelWatcher {
                 let chat_router = PushRouter::<
                     NvCreateChatCompletionRequest,
                     Annotated<NvCreateChatCompletionStreamResponse>,
-                >::from_client_with_monitor(
-                    client.clone(), router_config.router_mode, None
+                >::from_client_with_options(
+                    client.clone(),
+                    router_config.router_mode,
+                    crate::kv_router::plugins::push_router_options(),
                 )
                 .await?;
                 worker_set.chat_engine = Some(Arc::new(chat_router));
@@ -876,8 +962,10 @@ impl ModelWatcher {
                 let completions_router = PushRouter::<
                     NvCreateCompletionRequest,
                     Annotated<NvCreateCompletionResponse>,
-                >::from_client_with_monitor(
-                    client.clone(), router_config.router_mode, None
+                >::from_client_with_options(
+                    client.clone(),
+                    router_config.router_mode,
+                    crate::kv_router::plugins::push_router_options(),
                 )
                 .await?;
                 worker_set.completions_engine = Some(Arc::new(completions_router));
@@ -887,16 +975,31 @@ impl ModelWatcher {
                 let images_router = PushRouter::<
                     NvCreateImageRequest,
                     Annotated<NvImagesResponse>,
-                >::from_client_with_monitor(client.clone(), router_config.router_mode, None)
+                >::from_client_with_options(
+                    client.clone(),
+                    router_config.router_mode,
+                    crate::kv_router::plugins::push_router_options(),
+                )
                 .await?;
-                worker_set.images_engine = Some(Arc::new(images_router));
+                let admission = worker_set
+                    .image_edit_admission
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("image admission state was not initialized"))?;
+                worker_set.images_engine = Some(Arc::new(super::image_edits::ImageEditEngine {
+                    router: images_router,
+                    admission: admission.clone(),
+                }));
             }
 
             if card.model_type.supports_videos() {
                 let videos_router = PushRouter::<
                     NvCreateVideoRequest,
                     Annotated<NvVideosResponse>,
-                >::from_client_with_monitor(client.clone(), router_config.router_mode, None)
+                >::from_client_with_options(
+                    client.clone(),
+                    router_config.router_mode,
+                    crate::kv_router::plugins::push_router_options(),
+                )
                 .await?;
                 worker_set.videos_engine = Some(Arc::new(videos_router));
             }
@@ -905,20 +1008,37 @@ impl ModelWatcher {
                 let audios_router = PushRouter::<
                     NvCreateAudioSpeechRequest,
                     Annotated<NvAudioSpeechResponse>,
-                >::from_client_with_monitor(
-                    client.clone(), router_config.router_mode, None
+                >::from_client_with_options(
+                    client.clone(),
+                    router_config.router_mode,
+                    crate::kv_router::plugins::push_router_options(),
                 )
                 .await?;
                 worker_set.audios_engine = Some(Arc::new(audios_router));
             }
 
+            if card.model_type.supports_transcriptions() {
+                let transcriptions_router = PushRouter::<
+                    NvCreateAudioTranscriptionRequest,
+                    Annotated<NvAudioTranscriptionResponse>,
+                >::from_client_with_options(
+                    client.clone(),
+                    router_config.router_mode,
+                    crate::kv_router::plugins::push_router_options(),
+                )
+                .await?;
+                worker_set.transcriptions_engine = Some(Arc::new(transcriptions_router));
+            }
+
             if card.model_type.supports_realtime() {
                 // `Text` is overloaded for Realtime; its I/O passes through.
                 let realtime_router = PushRouter::<
-                    RealtimeClientEvent,
+                    DynamoRealtimeClientEvent,
                     Annotated<RealtimeServerEvent>,
-                >::from_client_with_monitor(
-                    client.clone(), router_config.router_mode, None
+                >::from_client_with_options(
+                    client.clone(),
+                    router_config.router_mode,
+                    crate::kv_router::plugins::push_router_options(),
                 )
                 .await?;
                 worker_set.realtime_engine = Some(Arc::new(realtime_router));
@@ -953,8 +1073,10 @@ impl ModelWatcher {
             let router = PushRouter::<
                 PreprocessedEmbeddingRequest,
                 Annotated<EmbeddingsEngineOutput>,
-            >::from_client_with_monitor(
-                client, router_config.router_mode, None
+            >::from_client_with_options(
+                client,
+                router_config.router_mode,
+                crate::kv_router::plugins::push_router_options(),
             )
             .await?;
 
@@ -977,9 +1099,11 @@ impl ModelWatcher {
             let push_router = PushRouter::<
                 NvCreateTensorRequest,
                 Annotated<NvCreateTensorResponse>,
-            >::from_client_with_monitor(
-                client, router_config.router_mode, None
-            )
+            >::from_client_with_options(
+                    client,
+                    router_config.router_mode,
+                    crate::kv_router::plugins::push_router_options(),
+                )
             .await?;
             worker_set.tensor_engine = Some(Arc::new(push_router));
         } else if card.model_type.is_empty() {
@@ -1000,7 +1124,7 @@ impl ModelWatcher {
             // prefill is routed off `worker_type`.)
             anyhow::bail!(
                 "Unsupported model configuration: {} with {} input. Supported combinations: \
-                Tokens+(Chat|Completions), Text+(Chat|Completions|Images|Audios|Videos|Embeddings|Classify|Pooling|Rerank|Realtime), \
+                Tokens+(Chat|Completions), Text+(Chat|Completions|Images|Audios|Transcriptions|Videos|Embeddings|Classify|Pooling|Rerank|Realtime), \
                 Tokens+Embeddings, Tensor+TensorBased",
                 card.model_type,
                 card.model_input.as_str()
@@ -1027,14 +1151,24 @@ impl ControllerHost for ModelWatcher {
         namespace_filter: &NamespaceFilter,
     ) -> anyhow::Result<Option<DesiredInstance>> {
         let mcid = model_card_instance_id(&instance)?;
-        if !namespace_filter.matches(&mcid.namespace) {
+        if !namespace_filter.matches_with_prefix_mode(&mcid.namespace, self.namespace_prefix_mode) {
             return Ok(None);
         }
 
         let mut card = instance.deserialize_model::<ModelDeploymentCard>()?;
         normalize_legacy_prefill_topology(&mut card);
+        card.runtime_config.normalize_structural_tag_compatibility();
         self.apply_tokenizer_overrides(&mut card);
         validate_card_shape(&card)?;
+        let router_mode =
+            effective_router_config(card.router_config.as_ref(), &self.router_config).router_mode;
+        anyhow::ensure!(
+            card.model_input != ModelInput::Text || !router_mode.is_kv_routing(),
+            "model '{}': KV routing is incompatible with text-input workers (e.g. vLLM \
+             --use-vllm-tokenizer) because it requires frontend tokenization; enable frontend \
+             tokenization or explicitly configure a non-KV router mode",
+            card.name()
+        );
         anyhow::ensure!(
             mcid.model_suffix.is_some() == card.lora.is_some(),
             "LoRA discovery identity and card metadata disagree"
@@ -1091,6 +1225,7 @@ impl ControllerHost for ModelWatcher {
             .worker_set
             .take()
             .ok_or_else(|| anyhow::anyhow!("prepared WorkerSet was already consumed"))?;
+        update_image_edit_capabilities(&worker_set, members);
         let mut committed_members = members
             .iter()
             .map(|member| (member.key.clone(), member.card.clone()))
@@ -1174,6 +1309,13 @@ impl ControllerHost for ModelWatcher {
                 .map(|adapter| (adapter.key.clone(), adapter.card.clone()))
                 .collect(),
         )?;
+        if let Some(worker_set) = self
+            .manager
+            .get_committed_model(&key.model_name)
+            .and_then(|model| model.get_worker_set(&key.worker_set_key))
+        {
+            update_image_edit_capabilities(&worker_set, members);
+        }
         for (name, card) in &desired {
             if !was_available.get(name).copied().unwrap_or(false)
                 && self.manager.get_committed_model(name).is_some()
@@ -1224,6 +1366,7 @@ impl ControllerHost for ModelWatcher {
             .worker_set
             .take()
             .ok_or_else(|| anyhow::anyhow!("prepared WorkerSet was already consumed"))?;
+        update_image_edit_capabilities(&worker_set, members);
         let mut committed_members = members
             .iter()
             .map(|member| (member.key.clone(), member.card.clone()))
@@ -1297,12 +1440,24 @@ impl ControllerHost for ModelWatcher {
         );
     }
 
+    fn publish_group_observation(
+        &self,
+        key: &GroupKey,
+        observation: Option<super::worker_inventory::WorkerGroupObservation>,
+    ) {
+        self.manager
+            .publish_worker_group_observation(key.id(), observation);
+    }
+
     fn discard_prepared(&self, prepared: Self::Prepared) {
         drop(prepared);
     }
 
-    async fn list_instances(&self) -> anyhow::Result<Vec<DiscoveryInstance>> {
-        self.drt.discovery().list(DiscoveryQuery::AllModels).await
+    async fn list_instances(
+        &self,
+        query: DiscoveryQuery,
+    ) -> anyhow::Result<Vec<DiscoveryInstance>> {
+        self.drt.discovery().list(query).await
     }
 }
 
@@ -1338,6 +1493,51 @@ fn validate_card_shape(card: &ModelDeploymentCard) -> anyhow::Result<()> {
         card.model_input.as_str()
     );
     Ok(())
+}
+
+fn validate_card_parser_version(
+    card: &ModelDeploymentCard,
+    has_chat_engine_factory: bool,
+) -> anyhow::Result<()> {
+    if should_validate_parser_version(card) {
+        // The token-chat factory owns both registries; generation environment validation still applies.
+        let (tool, reasoning) = if card.model_input == ModelInput::Tokens && has_chat_engine_factory
+        {
+            (None, None)
+        } else {
+            (
+                card.runtime_config.tool_call_parser.as_deref(),
+                card.runtime_config.reasoning_parser.as_deref(),
+            )
+        };
+        crate::protocols::openai::chat_completions::tool_parser_v2::validate_parser_version(
+            tool, reasoning,
+        )?;
+    }
+    Ok(())
+}
+
+fn should_validate_parser_version(card: &ModelDeploymentCard) -> bool {
+    card.model_type.supports_chat()
+        && effective_worker_type(card.worker_type, card.model_type) != WorkerType::Prefill
+}
+
+/// A frontend in direct routing mode does not pick workers, so its handle
+/// ignores busy-worker thresholds: they belong to the caller that picks workers.
+/// The prefill router shares this handle, because in direct mode the caller
+/// (EPP) picks both workers, decode and prefill.
+fn load_threshold_handle(router_config: &RouterConfig) -> LoadThresholdHandle {
+    if !router_config.router_mode.is_direct_routing() {
+        return LoadThresholdHandle::new(router_config.load_threshold_config.clone());
+    }
+    if router_config.load_threshold_config.is_configured() {
+        tracing::warn!(
+            thresholds = ?router_config.load_threshold_config,
+            "ignoring busy-worker thresholds in direct routing mode: the caller picks workers, \
+             not this frontend"
+        );
+    }
+    LoadThresholdHandle::disabled()
 }
 
 fn effective_router_config<'a>(
@@ -1383,38 +1583,27 @@ fn lora_projection_fingerprint(card: &ModelDeploymentCard) -> anyhow::Result<Str
         "base_capacity": card.runtime_config.max_gpu_lora_count,
         "requires_registration": card.runtime_config.runtime_flag_enabled(crate::lora::LORA_REQUIRES_REGISTRATION),
     });
-    canonicalize_json(&mut value);
+    canonicalize_json_object_keys(&mut value);
     Ok(blake3::hash(&serde_json::to_vec(&value)?).to_string())
 }
 
 /// Hashes the published Qwen video prompt-expansion contract.
 pub(super) fn qwen_video_contract_digest(card: &ModelDeploymentCard) -> Option<String> {
-    let mut contract = card
-        .runtime_config
-        .runtime_data
-        .get(VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY)?
-        .clone();
-    canonicalize_json(&mut contract);
-    Some(blake3::hash(contract.to_string().as_bytes()).to_string())
-}
-
-fn canonicalize_json(value: &mut serde_json::Value) {
-    match value {
-        serde_json::Value::Object(object) => {
-            let mut entries = std::mem::take(object).into_iter().collect::<Vec<_>>();
-            entries.sort_by(|left, right| left.0.cmp(&right.0));
-            for (key, mut value) in entries {
-                canonicalize_json(&mut value);
-                object.insert(key, value);
-            }
+    let mut contracts = serde_json::Map::new();
+    for key in [
+        VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+        SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+    ] {
+        if let Some(contract) = card.runtime_config.runtime_data.get(key) {
+            contracts.insert(key.to_string(), contract.clone());
         }
-        serde_json::Value::Array(values) => {
-            for value in values {
-                canonicalize_json(value);
-            }
-        }
-        _ => {}
     }
+    if contracts.is_empty() {
+        return None;
+    }
+    let mut contracts = serde_json::Value::Object(contracts);
+    canonicalize_json_object_keys(&mut contracts);
+    Some(blake3::hash(contracts.to_string().as_bytes()).to_string())
 }
 
 fn worker_set_chat_preprocessor(
@@ -1446,6 +1635,75 @@ mod tests {
     use dynamo_runtime::pipeline::Error;
     use dynamo_runtime::{Runtime, distributed::DistributedConfig};
     use futures::StreamExt;
+
+    #[test]
+    fn direct_routing_gets_a_threshold_handle_that_ignores_thresholds() {
+        let thresholds = crate::discovery::LoadThresholdConfig {
+            active_decode_blocks_threshold: Some(0.9),
+            ..Default::default()
+        };
+        let config = |router_mode| {
+            RouterConfig::new(
+                router_mode,
+                dynamo_kv_router::config::KvRouterConfig::default(),
+            )
+            .with_load_threshold_config(thresholds.clone())
+        };
+        let direct = load_threshold_handle(&config(RouterMode::Direct));
+        direct.update(&thresholds);
+        assert!(!direct.is_enabled());
+        assert!(!direct.is_configured());
+        assert!(load_threshold_handle(&config(RouterMode::KV)).is_configured());
+    }
+
+    #[test]
+    fn qwen_video_contract_digest_is_canonical_and_engine_specific() {
+        fn card_with_contract(key: &str, contract: serde_json::Value) -> ModelDeploymentCard {
+            let mut card = ModelDeploymentCard::with_name_only("model");
+            card.runtime_config
+                .runtime_data
+                .insert(key.to_string(), contract);
+            card
+        }
+
+        let absent = ModelDeploymentCard::with_name_only("model");
+        assert_eq!(qwen_video_contract_digest(&absent), None);
+
+        let vllm = card_with_contract(
+            VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+            serde_json::json!({
+                "placeholder_target": "bare_video_token",
+                "resize_mode": "round_ties_even",
+                "sampling": {"max_frames": 768, "fps": 2.0, "steps": [{"z": 1, "a": null}, [3, 1, 2]]},
+            }),
+        );
+        let reordered_vllm = card_with_contract(
+            VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+            serde_json::json!({
+                "sampling": {"steps": [{"a": null, "z": 1}, [3, 1, 2]], "fps": 2.0, "max_frames": 768},
+                "resize_mode": "round_ties_even",
+                "placeholder_target": "bare_video_token",
+            }),
+        );
+        let sglang = card_with_contract(
+            SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+            serde_json::json!({
+                "placeholder_target": "bare_video_token",
+                "resize_mode": "round_ties_even",
+                "sampling": {"max_frames": 768, "fps": 2.0, "steps": [{"z": 1, "a": null}, [3, 1, 2]]},
+            }),
+        );
+
+        assert_eq!(
+            qwen_video_contract_digest(&vllm),
+            qwen_video_contract_digest(&reordered_vllm)
+        );
+        assert_ne!(
+            qwen_video_contract_digest(&vllm),
+            qwen_video_contract_digest(&sglang),
+            "engine-specific contracts must not share a cohort fingerprint"
+        );
+    }
 
     #[tokio::test]
     async fn retired_worker_set_prevents_late_prefill_from_retained_chat_pipeline() {
@@ -1603,6 +1861,68 @@ mod tests {
         })
     }
 
+    #[tokio::test]
+    async fn operator_namespace_scope_filters_model_discovery() {
+        let runtime = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let make_watcher = || {
+            ModelWatcher::new(
+                drt.clone(),
+                Arc::new(ModelManager::new()),
+                RouterConfig::default(),
+                0,
+                None,
+                None,
+                None,
+                Arc::new(Metrics::new()),
+            )
+        };
+        temp_env::with_var("DYN_NAMESPACE_PREFIX_STRICT", None::<&str>, || {
+            assert_eq!(
+                make_watcher().namespace_prefix_mode,
+                NamespacePrefixMode::Literal
+            );
+        });
+        let mut watcher = temp_env::with_var("DYN_NAMESPACE_PREFIX_STRICT", Some("true"), || {
+            let watcher = make_watcher();
+            assert_eq!(
+                watcher.namespace_prefix_mode,
+                NamespacePrefixMode::WorkerGeneration
+            );
+            watcher
+        });
+        let card = ModelDeploymentCard::with_name_only("isolated-model");
+        let literal = NamespaceFilter::from_namespace_and_prefix(None, Some("default-foo"));
+        for (namespace, admitted) in [
+            ("default-foo", true),
+            ("default-foo-1a2b3c4d", true),
+            ("default-foo-legacy", true),
+            ("default-foo-bar", false),
+            ("default-foo-bar-1a2b3c4d", false),
+        ] {
+            let DiscoveryEvent::Added(instance) = discovered_card(namespace, 1, &card) else {
+                unreachable!();
+            };
+            watcher.set_namespace_prefix_mode(NamespacePrefixMode::WorkerGeneration);
+            assert_eq!(
+                watcher
+                    .normalize(instance.clone(), &literal)
+                    .unwrap()
+                    .is_some(),
+                admitted,
+                "{namespace}"
+            );
+            watcher.set_namespace_prefix_mode(NamespacePrefixMode::Literal);
+            assert!(
+                watcher.normalize(instance, &literal).unwrap().is_some(),
+                "manual scope: {namespace}"
+            );
+        }
+        runtime.shutdown();
+    }
+
     type TestDiscoverySender =
         tokio::sync::mpsc::UnboundedSender<(DiscoveryEvent, tokio::sync::oneshot::Sender<()>)>;
 
@@ -1685,34 +2005,20 @@ mod tests {
         );
         let test_name = TEST.split_once("::").unwrap().1;
         if std::env::var("DYNAMO_ALIAS_TEST").as_deref() != Ok(test_name) {
-            let output = tokio::time::timeout(
-                Duration::from_secs(30),
-                tokio::process::Command::new(std::env::current_exe().unwrap())
-                    .args(["--exact", test_name, "--nocapture"])
-                    .env("DYNAMO_ALIAS_TEST", test_name)
-                    .env("DYN_TCP_RPC_HOST", "127.0.0.1")
-                    .env("DYN_TCP_RPC_PORT", "0")
-                    .env("DYN_TCP_RESPONSE_STREAM_HOST", "127.0.0.1")
-                    .env("DYN_TCP_RESPONSE_STREAM_PORT", "0")
-                    .kill_on_drop(true)
-                    .output(),
-            )
-            .await
-            .expect("classify subprocess must finish within its deadline")
-            .expect("classify subprocess must start");
-            assert!(
-                output.status.success(),
-                "{}\n{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            assert!(
-                stdout
-                    .lines()
-                    .any(|line| line.starts_with("test result: ok. 1 passed; 0 failed;")),
-                "classify subprocess must run exactly one passing test: {stdout}"
-            );
+            let mut command = crate::test_utils::isolated_command(test_name);
+            command
+                .env("DYNAMO_ALIAS_TEST", test_name)
+                .env("DYN_TCP_RPC_HOST", "127.0.0.1")
+                .env("DYN_TCP_RPC_PORT", "0")
+                .env("DYN_TCP_RESPONSE_STREAM_HOST", "127.0.0.1")
+                .env("DYN_TCP_RESPONSE_STREAM_PORT", "0");
+            let mut command = command.into_tokio();
+            command.kill_on_drop(true);
+            let output = tokio::time::timeout(Duration::from_secs(30), command.output())
+                .await
+                .expect("classify subprocess must finish within its deadline")
+                .expect("classify subprocess must start");
+            crate::test_utils::assert_isolated_success(&output);
             return;
         }
 
@@ -2044,32 +2350,25 @@ mod tests {
         if std::env::var("DYNAMO_CLASSIFIER_CATALOG_TEST").as_deref() != Ok(test_name) {
             // Isolate the process-global request plane and give the debug routing future
             // more than libtest's default 2 MiB stack, like the prefill routing tests.
-            let output = tokio::time::timeout(
-                Duration::from_secs(30),
-                tokio::process::Command::new(std::env::current_exe().unwrap())
-                    .args(["--exact", test_name, "--nocapture"])
-                    .env("DYNAMO_CLASSIFIER_CATALOG_TEST", test_name)
-                    .env("RUST_MIN_STACK", (4 * 1024 * 1024).to_string())
-                    .env("DYN_TCP_RPC_HOST", "127.0.0.1")
-                    .env("DYN_TCP_RPC_PORT", "0")
-                    .env("DYN_TCP_RESPONSE_STREAM_HOST", "127.0.0.1")
-                    .env("DYN_TCP_RESPONSE_STREAM_PORT", "0")
-                    .kill_on_drop(true)
-                    .output(),
-            )
-            .await
-            .expect("classifier subprocess timed out")
-            .unwrap();
-            assert!(
-                output.status.success(),
-                "{}\n{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
+            let mut command = crate::test_utils::isolated_command(test_name);
+            command
+                .env("DYNAMO_CLASSIFIER_CATALOG_TEST", test_name)
+                .env("RUST_MIN_STACK", (4 * 1024 * 1024).to_string())
+                .env("DYN_TCP_RPC_HOST", "127.0.0.1")
+                .env("DYN_TCP_RPC_PORT", "0")
+                .env("DYN_TCP_RESPONSE_STREAM_HOST", "127.0.0.1")
+                .env("DYN_TCP_RESPONSE_STREAM_PORT", "0");
+            let mut command = command.into_tokio();
+            command.kill_on_drop(true);
+            let output = tokio::time::timeout(Duration::from_secs(30), command.output())
+                .await
+                .expect("classifier subprocess timed out")
+                .unwrap();
+            crate::test_utils::assert_isolated_success(&output);
             return;
         }
-        use dynamo_kv_router::scheduling::{
-            ClassifyEvent, ClassifyFuture, ClassifyRequest, RequestClassifier,
+        use dynamo_kv_router::plugins::request_classifier::{
+            ClassifyEvent, ClassifyFuture, ClassifyRequest, RequestClassifier, WorkerView,
         };
         use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -2080,7 +2379,11 @@ mod tests {
         }
         #[async_trait]
         impl RequestClassifier for RejectingClassifier {
-            fn classify(&mut self, _request: ClassifyRequest) -> ClassifyFuture {
+            fn classify(
+                &mut self,
+                _request: ClassifyRequest,
+                _workers: &dyn WorkerView,
+            ) -> ClassifyFuture {
                 self.calls += 1;
                 self.events
                     .send((self.instance, "classify", self.calls))
@@ -2103,9 +2406,6 @@ mod tests {
             r#"
 worker_selection:
   aggregated: test
-  instances:
-    - name: test
-      type: test
 request_classifier:
   type: test
 "#,
@@ -2113,7 +2413,7 @@ request_classifier:
         .unwrap();
         let router_config = RouterConfig::new(
             RouterMode::KV,
-            dynamo_kv_router::KvRouterConfig {
+            dynamo_kv_router::config::KvRouterConfig {
                 use_kv_events: false,
                 router_policy_config: Some(policy_file.path().display().to_string()),
                 ..Default::default()
@@ -2121,19 +2421,20 @@ request_classifier:
         );
         let instances = Arc::new(AtomicUsize::new(0));
         let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
-        let factory: dynamo_kv_router::scheduling::RequestClassifierFactory = Arc::new({
-            let instances = instances.clone();
-            move |context| {
-                assert_eq!(context.block_size(), 16);
-                Box::new(RejectingClassifier {
-                    instance: instances.fetch_add(1, Ordering::Relaxed),
-                    calls: 0,
-                    events: events.clone(),
-                })
-            }
-        });
+        let factory: dynamo_kv_router::plugins::request_classifier::RequestClassifierFactory =
+            Arc::new({
+                let instances = instances.clone();
+                move |context| {
+                    assert_eq!(context.block_size(), 16);
+                    Box::new(RejectingClassifier {
+                        instance: instances.fetch_add(1, Ordering::Relaxed),
+                        calls: 0,
+                        events: events.clone(),
+                    })
+                }
+            });
         let selectors = Arc::new(parking_lot::Mutex::new(Vec::new()));
-        let mut registry = dynamo_custom_policy_builtin::default_registry();
+        let mut registry = dynamo_router_policies::default_registry();
         registry
             .register_request_classifier("test", Arc::new(move |_| Ok(factory.clone())))
             .unwrap();
@@ -2146,7 +2447,7 @@ request_classifier:
                         let selectors = selectors.clone();
                         Ok(Arc::new(move |config, role, partition| {
                             selectors.lock().push((role, partition.into_owned()));
-                            dynamo_custom_policy_builtin::default_policy(
+                            dynamo_router_policies::default_policy(
                                 config.clone(),
                                 role.default_selector_label(),
                             )
@@ -2267,9 +2568,9 @@ request_classifier:
             (0..2)
                 .map(|instance| (
                     WorkerType::Aggregated,
-                    dynamo_kv_router::RoutingPartitionId::new(
+                    dynamo_router_protocol::identity::RoutingPartitionId::new(
                         format!("classifier-model-{instance}"),
-                        dynamo_kv_router::DEFAULT_ROUTING_GROUP
+                        dynamo_router_protocol::identity::DEFAULT_ROUTING_GROUP
                     ),
                 ))
                 .collect::<Vec<_>>()
@@ -2408,6 +2709,227 @@ request_classifier:
                 .active_decode_blocks_threshold,
             Some(0.8)
         );
+    }
+
+    #[tokio::test]
+    async fn text_transcriptions_register_under_selector_router_modes() {
+        let runtime = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(runtime, DistributedConfig::process_local())
+            .await
+            .unwrap();
+        for (index, router_mode) in [
+            RouterMode::RoundRobin,
+            RouterMode::Random,
+            RouterMode::LeastLoaded,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let manager = Arc::new(ModelManager::new());
+            let watcher = Arc::new(ModelWatcher::new(
+                drt.clone(),
+                manager.clone(),
+                RouterConfig {
+                    router_mode,
+                    ..Default::default()
+                },
+                0,
+                None,
+                None,
+                None,
+                Arc::new(Metrics::new_with_prefix(Some(format!(
+                    "watcher_transcriptions_test_{index}"
+                )))),
+            ));
+            let model_name = format!("stt-model-{index}");
+            let mcid = ModelCardInstanceId {
+                namespace: format!("stt-ns-{index}"),
+                component: "workers".to_string(),
+                endpoint: "generate".to_string(),
+                instance_id: 1,
+                model_suffix: None,
+            };
+            let mut card = ModelDeploymentCard::with_name_only(&model_name);
+            card.model_input = ModelInput::Text;
+            card.model_type = ModelType::Transcriptions;
+            card.worker_type = Some(WorkerType::Aggregated);
+
+            let endpoint_id = model_card_endpoint_id(&mcid);
+            let key = GroupKey {
+                model_name: card.name().to_string(),
+                worker_set_key: worker_set_key(&endpoint_id, card.model_type, card.worker_type),
+            };
+            let desired = DesiredInstance {
+                key: mcid.to_path(),
+                mcid,
+                endpoint_id,
+                mdc_checksum: card.mdcsum().to_string(),
+                projection_fingerprint: lora_projection_fingerprint(&card).unwrap(),
+                video_contract: qwen_video_contract_digest(&card),
+                card,
+                group_key: key.clone(),
+            };
+            let spec = GroupSpec {
+                key,
+                mdc_checksum: desired.mdc_checksum.clone(),
+                fingerprint: desired.mdc_checksum.clone(),
+                generation: 1,
+                representative: desired.clone(),
+                video_contract: desired.video_contract.clone(),
+            };
+            let (_admission_tx, admission_rx) = tokio::sync::watch::channel(vec![1]);
+            let prepared = watcher
+                .prepare_worker_set(&spec, admission_rx, CancellationToken::new())
+                .await
+                .unwrap_or_else(|err| panic!("{router_mode:?}: {err:#}"));
+            watcher
+                .commit_group(&spec, prepared, &[desired], &[])
+                .unwrap();
+
+            assert!(
+                manager
+                    .get_model(&model_name)
+                    .unwrap()
+                    .has_transcriptions_engine(),
+                "{router_mode:?}: transcription engine not registered"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn discovery_rejects_text_input_with_effective_kv_routing() {
+        let runtime = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        for frontend_mode in [RouterMode::RoundRobin, RouterMode::KV] {
+            let watcher = ModelWatcher::new(
+                drt.clone(),
+                Arc::new(ModelManager::new()),
+                RouterConfig {
+                    router_mode: frontend_mode,
+                    ..Default::default()
+                },
+                0,
+                None,
+                None,
+                None,
+                Arc::new(Metrics::new()),
+            );
+            for worker_mode in [None, Some(RouterMode::RoundRobin), Some(RouterMode::KV)] {
+                for model_input in [ModelInput::Text, ModelInput::Tokens] {
+                    let mut card = ModelDeploymentCard::with_name_only("kv-text-model");
+                    card.model_input = model_input;
+                    card.model_type = ModelType::Chat;
+                    card.worker_type = Some(WorkerType::Aggregated);
+                    card.router_config = worker_mode.map(|router_mode| RouterConfig {
+                        router_mode,
+                        ..Default::default()
+                    });
+                    let DiscoveryEvent::Added(instance) = discovered_card("kv-text-ns", 1, &card)
+                    else {
+                        unreachable!();
+                    };
+                    let result = watcher.normalize(instance, &NamespaceFilter::Global);
+                    if model_input == ModelInput::Text
+                        && worker_mode.unwrap_or(frontend_mode).is_kv_routing()
+                    {
+                        let error = result.expect_err("text-input KV card must be rejected");
+                        let message = error.to_string();
+                        assert!(message.contains("kv-text-model"), "{message}");
+                        assert!(message.contains("KV routing is incompatible"), "{message}");
+                        assert!(message.contains("frontend tokenization"), "{message}");
+                    } else {
+                        let desired = result.unwrap().expect("valid card must be admitted");
+                        assert_eq!(
+                            desired
+                                .card
+                                .router_config
+                                .as_ref()
+                                .map(|config| config.router_mode),
+                            worker_mode
+                        );
+                        assert_eq!(desired.card.model_input, model_input);
+                    }
+                }
+            }
+        }
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
+    async fn rejected_kv_text_workers_preserve_valid_models() {
+        let runtime = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let endpoint = drt
+            .namespace("kv-text-preserve")
+            .unwrap()
+            .component("workers")
+            .unwrap()
+            .endpoint("generate");
+        endpoint.register_endpoint_instance().await.unwrap();
+        let worker_id = drt.discovery().instance_id();
+        let manager = Arc::new(ModelManager::new());
+        let (events, task) = watch_test_cards(
+            drt,
+            manager.clone(),
+            RouterConfig {
+                router_mode: RouterMode::KV,
+                ..Default::default()
+            },
+        );
+        let mut valid = ModelDeploymentCard::with_name_only("valid-text-model");
+        valid.model_input = ModelInput::Text;
+        valid.model_type = ModelType::Chat;
+        valid.worker_type = Some(WorkerType::Aggregated);
+        valid.router_config = Some(RouterConfig {
+            router_mode: RouterMode::RoundRobin,
+            ..Default::default()
+        });
+        apply_discovery_event(
+            &events,
+            discovered_card("kv-text-preserve", worker_id, &valid),
+        )
+        .await;
+        let original = wait_for_model(&manager, valid.name(), Model::is_ready_to_serve).await;
+
+        let mut invalid = valid.clone();
+        invalid.router_config = None;
+        // A rejected update must not remove the existing worker or replace its pipeline.
+        apply_discovery_event(
+            &events,
+            discovered_card("kv-text-preserve", worker_id, &invalid),
+        )
+        .await;
+        // An incompatible newcomer must not join the serving set either.
+        apply_discovery_event(
+            &events,
+            discovered_card("kv-text-preserve", worker_id + 1, &invalid),
+        )
+        .await;
+        let mut other = ModelDeploymentCard::with_name_only("invalid-text-model");
+        other.model_input = ModelInput::Text;
+        other.model_type = ModelType::Chat;
+        other.worker_type = Some(WorkerType::Aggregated);
+        apply_discovery_event(
+            &events,
+            discovered_card("kv-text-preserve", worker_id + 2, &other),
+        )
+        .await;
+
+        let model = manager.get_committed_model(valid.name()).unwrap();
+        assert!(Arc::ptr_eq(&original, &model));
+        assert!(model.is_ready_to_serve());
+        assert_eq!(model.total_workers(), 1);
+        assert_eq!(manager.get_model_cards().len(), 1);
+        assert_eq!(manager.get_model_cards()[0].mdcsum(), valid.mdcsum());
+        assert!(manager.get_committed_model(other.name()).is_none());
+        assert!(!task.is_finished());
+        drop(events);
+        task.await.unwrap();
+        runtime.shutdown();
     }
 
     #[tokio::test]
@@ -2625,6 +3147,7 @@ request_classifier:
                 serde_json::from_str(r#"[{"role":"user","content":"populate tokenizer cache"}]"#)
                     .unwrap();
             let request = NvCreateChatCompletionRequest {
+                responses_tools: None,
                 inner: dynamo_protocols::types::CreateChatCompletionRequestArgs::default()
                     .model(adapter_card.name())
                     .messages(messages)
@@ -2635,6 +3158,7 @@ request_classifier:
                 chat_template_args: None,
                 thinking: None,
                 thinking_token_budget: None,
+                preserve_thinking: None,
                 media_io_kwargs: None,
                 return_tokens_as_token_ids: None,
                 unsupported_fields: Default::default(),
@@ -2702,6 +3226,7 @@ request_classifier:
         assert!(is_model_type_list_empty(&mm, ModelType::Embedding));
         assert!(is_model_type_list_empty(&mm, ModelType::Images));
         assert!(is_model_type_list_empty(&mm, ModelType::Audios));
+        assert!(is_model_type_list_empty(&mm, ModelType::Transcriptions));
         assert!(is_model_type_list_empty(&mm, ModelType::Videos));
         assert!(is_model_type_list_empty(&mm, ModelType::TensorBased));
         assert!(is_model_type_list_empty(&mm, ModelType::Realtime));
@@ -2771,6 +3296,22 @@ request_classifier:
 
     /// Stand-in engine for registration-only tests; never invoked.
     struct UncalledEngine;
+
+    #[async_trait::async_trait]
+    impl
+        AsyncEngine<
+            SingleIn<NvCreateChatCompletionRequest>,
+            ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
+            Error,
+        > for UncalledEngine
+    {
+        async fn generate(
+            &self,
+            _request: SingleIn<NvCreateChatCompletionRequest>,
+        ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error> {
+            anyhow::bail!("engine is never invoked by this test")
+        }
+    }
 
     #[async_trait::async_trait]
     impl
@@ -2956,8 +3497,8 @@ request_classifier:
     #[test]
     fn only_explicit_policies_require_typed_model_cards() {
         let unresolved = RouterPluginBuilder::default();
-        let resolved = dynamo_custom_policy_builtin::default_registry()
-            .resolve_plugins(&dynamo_kv_router::KvRouterConfig::default())
+        let resolved = dynamo_router_policies::default_registry()
+            .resolve_plugins(&dynamo_kv_router::config::KvRouterConfig::default())
             .unwrap();
         assert!(resolved.worker_selection().is_some());
         let builtin = RouterPluginBuilder::new(resolved);
@@ -2973,6 +3514,241 @@ request_classifier:
 
         card.worker_type = Some(WorkerType::Decode);
         assert!(validate_policy_worker_role(&card, &custom).is_ok());
+    }
+
+    #[test]
+    fn parser_validation_skips_non_chat_and_prefill_workers() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::parser_validation_skips_non_chat_and_prefill_workers"
+            ),
+            &[("DYN_PARSER_VERSION", "2")],
+        ) {
+            return;
+        }
+
+        let mut card = ModelDeploymentCard::with_name_only("model");
+        card.runtime_config.tool_call_parser = Some("llama3_json".to_string());
+        card.model_type = ModelType::Embedding;
+        assert!(validate_card_parser_version(&card, false).is_ok());
+        card.model_type = ModelType::Chat;
+        card.worker_type = Some(WorkerType::Prefill);
+        assert!(validate_card_parser_version(&card, false).is_ok());
+        for role in [None, Some(WorkerType::Decode), Some(WorkerType::Encode)] {
+            card.worker_type = role;
+            assert!(validate_card_parser_version(&card, false).is_err());
+        }
+        card.runtime_config.tool_call_parser = Some("qwen3_coder".to_string());
+        card.runtime_config.reasoning_parser = Some("qwen3".to_string());
+        assert!(validate_card_parser_version(&card, false).is_ok());
+    }
+
+    #[test]
+    fn auto_validates_parser_fallback_before_model_setup() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::auto_validates_parser_fallback_before_model_setup"
+            ),
+            &[("DYN_PARSER_VERSION", "auto")],
+        ) {
+            return;
+        }
+
+        let mut card = ModelDeploymentCard::with_name_only("model");
+        card.model_type = ModelType::Chat;
+        card.runtime_config.tool_call_parser = Some("muse_glimmer".to_string());
+        card.runtime_config.reasoning_parser = Some("qwen3".to_string());
+        let error = validate_card_parser_version(&card, false)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("--dyn-tool-call-parser"), "{error}");
+        assert!(error.contains("muse_glimmer"), "{error}");
+
+        card.runtime_config.tool_call_parser = Some("muse_glimmer".to_string());
+        card.runtime_config.reasoning_parser = Some("muse_glimmer".to_string());
+        assert!(validate_card_parser_version(&card, false).is_ok());
+    }
+
+    #[tokio::test]
+    async fn parser_validation_respects_engine_factory_ownership() {
+        use crate::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine;
+        use std::sync::atomic::Ordering;
+
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::parser_validation_respects_engine_factory_ownership"
+            ),
+            &[("DYN_PARSER_VERSION", "auto")],
+        ) {
+            return;
+        }
+        let runtime = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        for (index, input, factory, completions, accepted) in [
+            (0, ModelInput::Tokens, false, false, false),
+            (1, ModelInput::Text, true, false, false),
+            (2, ModelInput::Tokens, true, false, true),
+            (3, ModelInput::Tokens, true, true, true),
+        ] {
+            let manager = Arc::new(ModelManager::new());
+            let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let callback: ChatEngineFactoryCallback = {
+                let calls = calls.clone();
+                Arc::new(move |_, card, _| {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    assert_eq!(
+                        card.runtime_config.tool_call_parser.as_deref(),
+                        Some("engine_native_tool")
+                    );
+                    assert_eq!(
+                        card.runtime_config.reasoning_parser.as_deref(),
+                        Some("openai_gptoss")
+                    );
+                    Box::pin(async {
+                        Ok(Arc::new(UncalledEngine) as OpenAIChatCompletionsStreamingEngine)
+                    })
+                })
+            };
+            let watcher = ModelWatcher::new(
+                drt.clone(),
+                manager.clone(),
+                RouterConfig::default(),
+                0,
+                None,
+                factory.then_some(callback),
+                None,
+                Arc::new(Metrics::new()),
+            );
+            let namespace = format!("parser-factory-{index}");
+            let endpoint = watcher
+                .drt
+                .namespace(&namespace)
+                .unwrap()
+                .component("workers")
+                .unwrap()
+                .endpoint("generate");
+            let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
+            let mut card = ModelDeploymentCard::load_from_disk(model_path, None).unwrap();
+            card.set_name(&format!("parser-factory-model-{index}"));
+            card.model_input = input;
+            card.model_type = if completions {
+                ModelType::Chat | ModelType::Completions
+            } else {
+                ModelType::Chat
+            };
+            card.worker_type = Some(WorkerType::Aggregated);
+            card.runtime_config.tool_call_parser = Some("engine_native_tool".to_string());
+            card.runtime_config.reasoning_parser = Some("openai_gptoss".to_string());
+            let checksum = card.mdcsum().to_string();
+            let worker_id = watcher.drt.discovery().instance_id();
+            if accepted {
+                endpoint.register_endpoint_instance().await.unwrap();
+                crate::local_model::register_model_card(&endpoint, &card)
+                    .await
+                    .unwrap();
+                let mut workers = manager
+                    .get_or_create_runtime_config_watcher(&endpoint)
+                    .await
+                    .unwrap();
+                tokio::time::timeout(
+                    Duration::from_secs(5),
+                    workers.wait_for(|workers| workers.contains_key(&worker_id)),
+                )
+                .await
+                .expect("worker runtime config was not discovered")
+                .unwrap();
+            }
+            let DiscoveryEvent::Added(discovery) = discovered_card(&namespace, worker_id, &card)
+            else {
+                unreachable!()
+            };
+            let desired = watcher
+                .normalize(discovery, &NamespaceFilter::Global)
+                .unwrap()
+                .unwrap();
+            let spec = GroupSpec {
+                key: desired.group_key.clone(),
+                mdc_checksum: desired.mdc_checksum.clone(),
+                fingerprint: desired.mdc_checksum.clone(),
+                generation: index + 1,
+                video_contract: desired.video_contract.clone(),
+                representative: desired.clone(),
+            };
+            let (_tx, rx) = tokio::sync::watch::channel(vec![worker_id]);
+            let prepared = watcher
+                .prepare_worker_set(&spec, rx, runtime.child_token())
+                .await;
+            if accepted {
+                let prepared = prepared.unwrap();
+                let worker_set = prepared.worker_set.as_ref().unwrap();
+                assert_eq!(worker_set.card().mdcsum(), checksum);
+                watcher
+                    .commit_group(&spec, prepared, &[desired], &[])
+                    .unwrap();
+                let model = manager.get_model(card.name()).unwrap();
+                assert!(model.has_chat_engine());
+                assert_eq!(model.has_completions_engine(), completions);
+                assert_eq!(calls.load(Ordering::SeqCst), 1);
+            } else {
+                let error = prepared
+                    .err()
+                    .expect("Rust-owned selectors must be rejected")
+                    .to_string();
+                assert!(error.contains("--dyn-tool-call-parser"), "{error}");
+                assert!(manager.get_model(card.name()).is_none());
+                assert_eq!(calls.load(Ordering::SeqCst), 0);
+            }
+        }
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn engine_factory_still_validates_parser_generation() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::engine_factory_still_validates_parser_generation"
+            ),
+            &[("DYN_PARSER_VERSION", "invalid")],
+        ) {
+            return;
+        }
+        let mut card = ModelDeploymentCard::with_name_only("model");
+        card.model_type = ModelType::Chat;
+        card.model_input = ModelInput::Tokens;
+        assert!(
+            validate_card_parser_version(&card, true)
+                .unwrap_err()
+                .to_string()
+                .contains("DYN_PARSER_VERSION")
+        );
+    }
+
+    #[test]
+    fn parser_version_validation_applies_only_to_chat_surfaces() {
+        let mut card = ModelDeploymentCard::with_name_only("model");
+        card.runtime_config.tool_call_parser = Some("hermes".to_string());
+
+        card.model_type = ModelType::Embedding;
+        assert!(!should_validate_parser_version(&card));
+
+        card.model_type = ModelType::Chat;
+        assert!(should_validate_parser_version(&card));
+
+        card.worker_type = Some(WorkerType::Encode);
+        assert!(should_validate_parser_version(&card));
+
+        card.worker_type = Some(WorkerType::Prefill);
+        assert!(!should_validate_parser_version(&card));
+
+        card.worker_type = Some(WorkerType::Decode);
+        assert!(should_validate_parser_version(&card));
     }
 
     #[test]
@@ -3062,6 +3838,64 @@ request_classifier:
         assert_eq!(legacy.card.needs, vec![vec![WorkerType::Decode]]);
         assert_eq!(legacy.group_key, current.group_key);
         assert_eq!(legacy.mdc_checksum, current.mdc_checksum);
+    }
+
+    #[tokio::test]
+    async fn discovery_normalizes_legacy_and_future_structural_tag_fields() {
+        use crate::local_model::runtime_config::{StructuralTagConfig, StructuralTagScope};
+
+        let runtime = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(runtime, DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let watcher = ModelWatcher::new(
+            drt,
+            Arc::new(ModelManager::new()),
+            RouterConfig::default(),
+            0,
+            None,
+            None,
+            None,
+            Arc::new(Metrics::new()),
+        );
+
+        let card = serde_json::to_value(ModelDeploymentCard::with_name_only("model")).unwrap();
+        let mut legacy_card = card.clone();
+        let legacy_runtime = legacy_card["runtime_config"].as_object_mut().unwrap();
+        legacy_runtime.insert("structural_tag_mode".into(), serde_json::json!("on"));
+        legacy_runtime.insert("structural_tag_scope".into(), serde_json::json!("always"));
+
+        let mut future_card = card;
+        future_card["runtime_config"]["structural_tag"] = serde_json::json!({
+            "scope": "always",
+            "future_option": true
+        });
+
+        let normalize = |instance_id, card_json| {
+            watcher
+                .normalize(
+                    DiscoveryInstance::Model {
+                        namespace: "ns1".to_string(),
+                        component: "workers".to_string(),
+                        endpoint: "generate".to_string(),
+                        instance_id,
+                        card_json,
+                        model_suffix: None,
+                    },
+                    &NamespaceFilter::Global,
+                )
+                .unwrap()
+                .unwrap()
+        };
+        let legacy = normalize(1, legacy_card);
+        let future = normalize(2, future_card);
+        let expected = Some(StructuralTagConfig {
+            scope: StructuralTagScope::Always,
+            ..Default::default()
+        });
+
+        assert_eq!(legacy.card.runtime_config.structural_tag, expected);
+        assert_eq!(future.card.runtime_config.structural_tag, expected);
     }
 
     #[test]

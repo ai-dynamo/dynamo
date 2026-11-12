@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::BTreeMap;
 use std::fmt::Display;
 use std::future::Future;
 use std::path::PathBuf;
@@ -13,19 +14,19 @@ use pyo3::{
 };
 use pyo3_async_runtimes::TaskLocals;
 
-use dynamo_kv_router::TrackingHashAlgorithm as RsTrackingHashAlgorithm;
+use dynamo_kv_indexer::host::ApproximateCachePolicyKind as RsApproximateCachePolicyKind;
 use dynamo_kv_router::config::{
-    ApproximateCachePolicyKind as RsApproximateCachePolicyKind,
-    ConditionalDisaggPolicyKind as RsConditionalDisaggPolicyKind,
-    KvRouterConfig as RsKvRouterConfig, RouterPrefillLoadModel as RsRouterPrefillLoadModel,
-    apply_deprecated_overlap_score_weight_override,
+    KvRouterConfig as RsKvRouterConfig, apply_deprecated_overlap_score_weight_override,
 };
+use dynamo_llm::admission_gate::WorkerAdmissionGate;
 use dynamo_llm::discovery::LoadThresholdConfig as RsLoadThresholdConfig;
 use dynamo_llm::entrypoint::EngineConfig as RsEngineConfig;
 use dynamo_llm::entrypoint::RouterConfig as RsRouterConfig;
 use dynamo_llm::entrypoint::input::Input;
 use dynamo_llm::entrypoint::{ChatEngineFactoryCallback, HttpFrontend, PrefillRoutedEngine};
-use dynamo_llm::frontend_config::{FrontendApiConfig, MetricsConfig};
+use dynamo_llm::frontend_config::{
+    ChatTemplateDefaults, FrontendApiConfig, MediaRejectionConfig, MetricsConfig,
+};
 use dynamo_llm::local_model::DEFAULT_HTTP_PORT;
 use dynamo_llm::local_model::runtime_config::TokenizerBackend;
 use dynamo_llm::local_model::{LocalModel, LocalModelBuilder};
@@ -34,11 +35,17 @@ use dynamo_llm::model_card::ModelDeploymentCard as RsModelDeploymentCard;
 use dynamo_llm::reasoning_field::ReasoningField;
 use dynamo_llm::session_affinity::SessionAffinityMode as RsSessionAffinityMode;
 use dynamo_llm::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine;
-use dynamo_mocker::common::perf_model::PerfModel;
+use dynamo_scheduler::host::{
+    RouterPrefillLoadModel as RsRouterPrefillLoadModel,
+    TrackingHashAlgorithm as RsTrackingHashAlgorithm,
+};
+use dynamo_worker_selection::host::ConditionalDisaggPolicyKind as RsConditionalDisaggPolicyKind;
 
-use super::aic_callback::{create_aic_callback, create_aic_prefill_load_estimator};
-use super::replay::MockEngineArgs as PyMockEngineArgs;
-use dynamo_mocker::common::protocols::MockEngineArgs as RsMockEngineArgs;
+use super::ais_callback::create_ais_prefill_load_estimator;
+use super::replay::{
+    materialize_mocker_config, mocker_config_from_json, mocker_config_from_python,
+};
+use dynamo_mocker::config::MockerConfig;
 use dynamo_runtime::discovery::ModelCardInstanceId as RsModelCardInstanceId;
 use dynamo_runtime::protocols::EndpointId;
 
@@ -87,162 +94,51 @@ impl KvRouterConfig {
 
 #[pyclass]
 #[derive(Clone, Debug)]
-pub struct AicPerfConfig {
-    aic_backend: String,
-    aic_system: String,
-    aic_backend_version: Option<String>,
-    aic_tp_size: usize,
-    aic_model_path: String,
-    aic_moe_tp_size: Option<usize>,
-    aic_moe_ep_size: Option<usize>,
-    aic_attention_dp_size: Option<usize>,
-    aic_gemm_dtype: Option<String>,
-    aic_moe_dtype: Option<String>,
-    aic_fmha_dtype: Option<String>,
-    aic_kv_cache_dtype: Option<String>,
-    aic_comm_dtype: Option<String>,
-    aic_nextn: Option<usize>,
-    aic_nextn_accept_rates: Option<String>,
+pub struct AisPerfConfig {
+    config: serde_json::Value,
 }
 
-impl AicPerfConfig {
-    pub(crate) fn backend_name(&self) -> &str {
-        &self.aic_backend
+impl AisPerfConfig {
+    pub(crate) fn config(&self) -> &serde_json::Value {
+        &self.config
     }
+}
 
-    pub(crate) fn system(&self) -> &str {
-        &self.aic_system
-    }
-
-    pub(crate) fn backend_version(&self) -> Option<&str> {
-        self.aic_backend_version.as_deref()
-    }
-
-    pub(crate) fn tp_size(&self) -> usize {
-        self.aic_tp_size
-    }
-
-    pub(crate) fn model_path(&self) -> &str {
-        &self.aic_model_path
-    }
-
-    pub(crate) fn moe_tp_size(&self) -> Option<usize> {
-        self.aic_moe_tp_size
-    }
-
-    pub(crate) fn moe_ep_size(&self) -> Option<usize> {
-        self.aic_moe_ep_size
-    }
-
-    pub(crate) fn attention_dp_size(&self) -> Option<usize> {
-        self.aic_attention_dp_size
-    }
-
-    pub(crate) fn gemm_dtype(&self) -> Option<&str> {
-        self.aic_gemm_dtype.as_deref()
-    }
-
-    pub(crate) fn moe_dtype(&self) -> Option<&str> {
-        self.aic_moe_dtype.as_deref()
-    }
-
-    pub(crate) fn fmha_dtype(&self) -> Option<&str> {
-        self.aic_fmha_dtype.as_deref()
-    }
-
-    pub(crate) fn kv_cache_dtype(&self) -> Option<&str> {
-        self.aic_kv_cache_dtype.as_deref()
-    }
-
-    pub(crate) fn comm_dtype(&self) -> Option<&str> {
-        self.aic_comm_dtype.as_deref()
-    }
-
-    pub(crate) fn nextn(&self) -> Option<usize> {
-        self.aic_nextn
-    }
-
-    pub(crate) fn nextn_accept_rates(&self) -> Option<&str> {
-        self.aic_nextn_accept_rates.as_deref()
-    }
+pub(super) fn normalize_ais_perf_config(
+    py: Python<'_>,
+    config: &Bound<'_, PyAny>,
+) -> PyResult<serde_json::Value> {
+    let mapping = if config.hasattr("to_dict")? {
+        config.call_method0("to_dict")?
+    } else {
+        py.import("builtins")?.call_method1("dict", (config,))?
+    };
+    let canonical = py
+        .import("aisimulate_core.sdk")?
+        .getattr("ForwardPassPerfModelConfig")?
+        .call((), Some(mapping.downcast::<pyo3::types::PyDict>()?))?;
+    Ok(pythonize::depythonize(&canonical.call_method0("to_dict")?)?)
 }
 
 #[pymethods]
-impl AicPerfConfig {
+impl AisPerfConfig {
     #[new]
-    #[pyo3(signature = (aic_backend, aic_system, aic_model_path, aic_tp_size=1, aic_backend_version=None, aic_moe_tp_size=None, aic_moe_ep_size=None, aic_attention_dp_size=None, aic_nextn=None, aic_nextn_accept_rates=None, aic_gemm_dtype=None, aic_moe_dtype=None, aic_fmha_dtype=None, aic_kv_cache_dtype=None, aic_comm_dtype=None))]
-    #[allow(clippy::too_many_arguments)]
-    fn new(
-        aic_backend: String,
-        aic_system: String,
-        aic_model_path: String,
-        aic_tp_size: usize,
-        aic_backend_version: Option<String>,
-        aic_moe_tp_size: Option<usize>,
-        aic_moe_ep_size: Option<usize>,
-        aic_attention_dp_size: Option<usize>,
-        aic_nextn: Option<usize>,
-        aic_nextn_accept_rates: Option<String>,
-        aic_gemm_dtype: Option<String>,
-        aic_moe_dtype: Option<String>,
-        aic_fmha_dtype: Option<String>,
-        aic_kv_cache_dtype: Option<String>,
-        aic_comm_dtype: Option<String>,
-    ) -> PyResult<Self> {
-        if aic_backend.is_empty() {
-            return Err(PyValueError::new_err("aic_backend must be non-empty"));
-        }
-        if aic_system.is_empty() {
-            return Err(PyValueError::new_err("aic_system must be non-empty"));
-        }
-        if aic_model_path.is_empty() {
-            return Err(PyValueError::new_err("aic_model_path must be non-empty"));
-        }
-        if aic_tp_size == 0 {
-            return Err(PyValueError::new_err("aic_tp_size must be >= 1"));
-        }
-        for (name, value) in [
-            ("aic_moe_tp_size", aic_moe_tp_size),
-            ("aic_moe_ep_size", aic_moe_ep_size),
-            ("aic_attention_dp_size", aic_attention_dp_size),
-        ] {
-            if matches!(value, Some(0)) {
-                return Err(PyValueError::new_err(format!("{name} must be >= 1")));
-            }
-        }
-        // AIC caps MTP draft tokens at 5; >5 would IndexError in calc_expectation.
-        if let Some(nextn) = aic_nextn
-            && !(1..=5).contains(&nextn)
-        {
-            return Err(PyValueError::new_err(
-                "aic_nextn must be 1..=5 when set (omit to disable spec dec)",
-            ));
-        }
-
+    fn new(py: Python<'_>, config: &Bound<'_, PyAny>) -> PyResult<Self> {
         Ok(Self {
-            aic_backend,
-            aic_system,
-            aic_backend_version,
-            aic_tp_size,
-            aic_model_path,
-            aic_moe_tp_size,
-            aic_moe_ep_size,
-            aic_attention_dp_size,
-            aic_gemm_dtype,
-            aic_moe_dtype,
-            aic_fmha_dtype,
-            aic_kv_cache_dtype,
-            aic_comm_dtype,
-            aic_nextn,
-            aic_nextn_accept_rates,
+            config: normalize_ais_perf_config(py, config)?,
         })
+    }
+
+    fn to_dict(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let text = serde_json::to_string(&self.config).map_err(to_pyerr)?;
+        Ok(py.import("json")?.call_method1("loads", (text,))?.unbind())
     }
 }
 
 #[pymethods]
 impl KvRouterConfig {
     #[new]
-    #[pyo3(signature = (overlap_score_weight=None, host_cache_hit_weight=0.75, disk_cache_hit_weight=0.25, router_temperature=0.0, use_kv_events=true, *, router_replica_sync=false, router_track_active_blocks=true, router_track_output_blocks=false, router_assume_kv_reuse=true, router_track_prefill_tokens=true, router_prefill_load_model="none", router_ttl_secs=120.0, router_approximate_cache_policy="ttl", router_queue_threshold=None, router_event_threads=4, router_queue_policy="fcfs", use_remote_indexer=false, serve_indexer=false, enable_session_prefix_index=false, shared_cache_multiplier=0.0, shared_cache_type="none", router_predicted_ttl_secs=None, conditional_disagg_enabled=false, conditional_disagg_policy="isl_bounding", conditional_disagg_eff_isl_threshold=2048, conditional_disagg_eff_isl_ratio_threshold=0.7, conditional_disagg_prefill_busy_threshold=None, conditional_disagg_decode_busy_threshold=None, overlap_score_credit=1.0, overlap_score_credit_decay=0.0, prefill_load_scale=1.0, decode_active_request_weight=0.0, router_policy_config=None, router_prefill_policy=None, router_decode_policy=None, router_tracking_hash="public-xxh3-v1", router_tracking_key_file=None, router_tracking_key_id=None))]
+    #[pyo3(signature = (overlap_score_weight=None, host_cache_hit_weight=0.75, disk_cache_hit_weight=0.25, router_temperature=0.0, use_kv_events=true, *, router_replica_sync=false, router_track_active_blocks=true, router_track_output_blocks=false, router_assume_kv_reuse=true, router_track_prefill_tokens=true, router_prefill_load_model="none", router_ttl_secs=120.0, router_approximate_cache_policy="ttl", router_queue_threshold=None, router_event_threads=4, router_queue_policy="fcfs", use_remote_indexer=false, serve_indexer=false, enable_session_prefix_index=false, shared_cache_multiplier=None, shared_cache_type="none", router_predicted_ttl_secs=None, conditional_disagg_enabled=false, conditional_disagg_policy="isl_bounding", conditional_disagg_eff_isl_threshold=2048, conditional_disagg_eff_isl_ratio_threshold=0.7, conditional_disagg_prefill_busy_threshold=None, conditional_disagg_decode_busy_threshold=None, overlap_score_credit=1.0, overlap_score_credit_decay=0.0, prefill_load_scale=1.0, decode_active_request_weight=0.0, router_policy_config=None, router_prefill_policy=None, router_decode_policy=None, router_tracking_hash="public-xxh3-v1", router_tracking_key_file=None, router_tracking_key_id=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         overlap_score_weight: Option<f64>,
@@ -264,7 +160,7 @@ impl KvRouterConfig {
         use_remote_indexer: bool,
         serve_indexer: bool,
         enable_session_prefix_index: bool,
-        shared_cache_multiplier: f64,
+        shared_cache_multiplier: Option<f64>,
         shared_cache_type: &str,
         router_predicted_ttl_secs: Option<f64>,
         conditional_disagg_enabled: bool,
@@ -292,7 +188,7 @@ impl KvRouterConfig {
             );
         }
 
-        let inner = RsKvRouterConfig {
+        let mut inner = RsKvRouterConfig {
             overlap_score_credit,
             overlap_score_credit_decay,
             prefill_load_scale,
@@ -342,21 +238,69 @@ impl KvRouterConfig {
             conditional_disagg_decode_busy_threshold,
             router_predicted_ttl_secs,
         };
+        inner.apply_policy_config().map_err(PyValueError::new_err)?;
         validate_kv_router_config(&inner)?;
         Ok(KvRouterConfig { inner })
     }
 
     #[staticmethod]
     fn from_json(config_json: &str) -> PyResult<Self> {
-        let inner = serde_json::from_str::<RsKvRouterConfig>(config_json).map_err(|e| {
+        let mut inner = serde_json::from_str::<RsKvRouterConfig>(config_json).map_err(|e| {
             PyValueError::new_err(format!("Failed to parse KvRouterConfig JSON: {e}"))
         })?;
+        inner.apply_policy_config().map_err(PyValueError::new_err)?;
         validate_kv_router_config(&inner)?;
         Ok(KvRouterConfig { inner })
     }
 
     fn copy(&self) -> Self {
         self.clone()
+    }
+
+    /// Serialize this configuration as JSON that `from_json` accepts.
+    ///
+    /// The serialization is lossy: the process-local fields `router_approximate_cache_policy`,
+    /// `router_prefill_policy`, `router_decode_policy` and the replay model selector are not
+    /// serialized, so `from_json` restores their defaults. Re-serializing the parsed result
+    /// yields the same JSON.
+    fn to_json(&self) -> PyResult<String> {
+        serde_json::to_string(&self.inner).map_err(|e| {
+            PyValueError::new_err(format!("Failed to serialize KvRouterConfig JSON: {e}"))
+        })
+    }
+
+    /// Resolved default-policy parameters a router built from this configuration starts with
+    /// for `worker_type` (`"aggregated"`, `"prefill"` or `"decode"`).
+    ///
+    /// The keys are the `PATCH /router_policy` parameter names. Plain decode workers (decode
+    /// without conditional disaggregation) report zero cache credits. Raises `ValueError` when
+    /// the configuration (or `DYN_ROUTER_WORKER_SELECTION_POLICY`) selects a worker-selection
+    /// policy instance for `worker_type`: its own parameters are not resolved here.
+    fn policy_parameters(&self, worker_type: &str) -> PyResult<BTreeMap<String, f64>> {
+        let role = dynamo_mocker::replay::parse_router_worker_type(worker_type)
+            .map_err(|e| PyValueError::new_err(format!("worker_type: {e}")))?;
+        let selected = self
+            .inner
+            .selected_worker_selection_policy_instance_for(role)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        if let Some(instance) = selected {
+            return Err(PyValueError::new_err(format!(
+                "policy_parameters covers the builtin default policy only; this configuration \
+                 selects worker-selection policy instance {instance:?} for {worker_type}"
+            )));
+        }
+        dynamo_router_policies::startup_policy_parameters(
+            &dynamo_worker_selection::host::SelectionConfig::from(&self.inner),
+            role,
+        )
+        .into_iter()
+        .map(|(name, value)| match value.as_f64() {
+            Some(value) => Ok((name, value)),
+            None => Err(PyValueError::new_err(format!(
+                "policy parameter {name} is not a number: {value}"
+            ))),
+        })
+        .collect()
     }
 
     #[getter]
@@ -577,13 +521,15 @@ pub(crate) struct EntrypointArgs {
     http_host: Option<String>,
     http_port: u16,
     http_metrics_port: Option<u16>,
+    batch_gateway_url: Option<String>,
     metrics_config: Option<MetricsConfig>,
     frontend_api_config: Option<FrontendApiConfig>,
+    chat_template_defaults: ChatTemplateDefaults,
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
     tls_client_ca_cert_path: Option<PathBuf>,
     extra_engine_args: Option<PathBuf>,
-    mocker_engine_args: Option<PyMockEngineArgs>,
+    mocker_engine_args: Option<MockerConfig>,
     runtime_config: ModelRuntimeConfig,
     namespace: Option<String>,
     namespace_prefix: Option<String>,
@@ -592,14 +538,14 @@ pub(crate) struct EntrypointArgs {
     migration_limit: u32,
     migration_max_seq_len: Option<u32>,
     chat_engine_factory: Option<PyEngineFactory>,
-    aic_perf_config: Option<AicPerfConfig>,
+    ais_perf_config: Option<AisPerfConfig>,
 }
 
 #[pymethods]
 impl EntrypointArgs {
     #[allow(clippy::too_many_arguments)]
     #[new]
-    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, mocker_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, is_decode=false, migration_limit=0, migration_max_seq_len=None, chat_engine_factory=None, aic_perf_config=None, *, tls_client_ca_cert_path=None, metrics_prefix=None, enable_anthropic_api=None, strip_anthropic_preamble=None, enable_streaming_tool_dispatch=None, enable_streaming_reasoning_dispatch=None, reasoning_field_name=None, tokenizer_backend=None, tokenizer_fallback=None))]
+    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, mocker_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, is_decode=false, migration_limit=0, migration_max_seq_len=None, chat_engine_factory=None, ais_perf_config=None, *, tls_client_ca_cert_path=None, metrics_prefix=None, enable_anthropic_api=None, enable_systemone_api=None, strip_anthropic_preamble=None, enable_streaming_tool_dispatch=None, enable_streaming_reasoning_dispatch=None, reasoning_field_name=None, tokenizer_backend=None, tokenizer_fallback=None, batch_gateway_url=None, reject_media=None, reject_media_status_code=None, default_chat_template_kwargs=None))]
     pub fn new(
         py: Python<'_>,
         engine_type: EngineType,
@@ -615,7 +561,7 @@ impl EntrypointArgs {
         tls_cert_path: Option<PathBuf>,
         tls_key_path: Option<PathBuf>,
         extra_engine_args: Option<PathBuf>,
-        mocker_engine_args: Option<PyMockEngineArgs>,
+        mocker_engine_args: Option<&Bound<'_, PyAny>>,
         runtime_config: Option<ModelRuntimeConfig>,
         namespace: Option<String>,
         namespace_prefix: Option<String>,
@@ -624,16 +570,21 @@ impl EntrypointArgs {
         migration_limit: u32,
         migration_max_seq_len: Option<u32>,
         chat_engine_factory: Option<PyObject>,
-        aic_perf_config: Option<AicPerfConfig>,
+        ais_perf_config: Option<AisPerfConfig>,
         tls_client_ca_cert_path: Option<PathBuf>,
         metrics_prefix: Option<String>,
         enable_anthropic_api: Option<bool>,
+        enable_systemone_api: Option<bool>,
         strip_anthropic_preamble: Option<bool>,
         enable_streaming_tool_dispatch: Option<bool>,
         enable_streaming_reasoning_dispatch: Option<bool>,
         reasoning_field_name: Option<String>,
         tokenizer_backend: Option<String>,
         tokenizer_fallback: Option<bool>,
+        batch_gateway_url: Option<String>,
+        reject_media: Option<bool>,
+        reject_media_status_code: Option<u16>,
+        default_chat_template_kwargs: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
         let endpoint_id_obj: Option<EndpointId> = endpoint_id.as_deref().map(EndpointId::from);
         if (tls_cert_path.is_some() && tls_key_path.is_none())
@@ -680,6 +631,19 @@ impl EntrypointArgs {
             })
             .transpose()?;
 
+        let mut chat_template_defaults = ChatTemplateDefaults::default();
+        chat_template_defaults.set_default_chat_template_kwargs(
+            default_chat_template_kwargs
+                .map(|kwargs| {
+                    pythonize::depythonize(kwargs).map_err(|err| {
+                        PyValueError::new_err(format!(
+                            "default_chat_template_kwargs must be a JSON object: {err}"
+                        ))
+                    })
+                })
+                .transpose()?,
+        );
+
         let mut runtime_config = runtime_config.unwrap_or_default();
         if let Some(tokenizer_backend) = tokenizer_backend {
             runtime_config
@@ -693,6 +657,26 @@ impl EntrypointArgs {
         }
         runtime_config.validate_config()?;
 
+        let mut frontend_api_config = FrontendApiConfig::from_optional_flags(
+            enable_anthropic_api,
+            enable_systemone_api,
+            strip_anthropic_preamble,
+            enable_streaming_tool_dispatch,
+            enable_streaming_reasoning_dispatch,
+            reasoning_field,
+        );
+        if reject_media.is_some() || reject_media_status_code.is_some() {
+            let config = frontend_api_config.get_or_insert_with(FrontendApiConfig::default);
+            let defaults = config.media_rejection();
+            config.set_media_rejection(
+                MediaRejectionConfig::new(
+                    reject_media.unwrap_or_else(|| defaults.enabled()),
+                    reject_media_status_code.unwrap_or_else(|| defaults.status_code()),
+                )
+                .map_err(|e| PyValueError::new_err(e.to_string()))?,
+            );
+        }
+
         Ok(EntrypointArgs {
             engine_type,
             model_path,
@@ -704,19 +688,17 @@ impl EntrypointArgs {
             http_host,
             http_port: http_port.unwrap_or(DEFAULT_HTTP_PORT),
             http_metrics_port,
+            batch_gateway_url,
             metrics_config: metrics_prefix.map(|prefix| MetricsConfig::new(Some(prefix))),
-            frontend_api_config: FrontendApiConfig::from_optional_flags(
-                enable_anthropic_api,
-                strip_anthropic_preamble,
-                enable_streaming_tool_dispatch,
-                enable_streaming_reasoning_dispatch,
-                reasoning_field,
-            ),
+            frontend_api_config,
+            chat_template_defaults,
             tls_cert_path,
             tls_key_path,
             tls_client_ca_cert_path,
             extra_engine_args,
-            mocker_engine_args,
+            mocker_engine_args: mocker_engine_args
+                .map(|value| mocker_config_from_python(value.py(), value))
+                .transpose()?,
             runtime_config,
             namespace,
             namespace_prefix,
@@ -725,7 +707,7 @@ impl EntrypointArgs {
             migration_limit,
             migration_max_seq_len,
             chat_engine_factory,
-            aic_perf_config,
+            ais_perf_config,
         })
     }
 }
@@ -761,12 +743,14 @@ pub fn make_engine<'p>(
         .http_host(args.http_host.clone())
         .http_port(args.http_port)
         .http_metrics_port(args.http_metrics_port);
+    builder.batch_gateway_url(args.batch_gateway_url.clone());
     if let Some(metrics_config) = args.metrics_config.clone() {
         builder.metrics_config(metrics_config);
     }
     if let Some(frontend_api_config) = args.frontend_api_config.clone() {
         builder.frontend_api_config(frontend_api_config);
     }
+    builder.chat_template_defaults(args.chat_template_defaults.clone());
     builder
         .tls_cert_path(args.tls_cert_path.clone())
         .tls_key_path(args.tls_key_path.clone())
@@ -819,6 +803,7 @@ fn py_engine_factory_to_callback(factory: PyEngineFactory) -> ChatEngineFactoryC
             let locals = locals.clone();
 
             Box::pin(async move {
+                let runtime_config = card.runtime_config.clone();
                 // Acquire GIL to call Python callback and convert coroutine to future
                 let py_future = Python::with_gil(|py| {
                     let py_instance_id =
@@ -855,7 +840,7 @@ fn py_engine_factory_to_callback(factory: PyEngineFactory) -> ChatEngineFactoryC
                     let engine: PythonAsyncEngine = py_result.extract(py).map_err(|e| {
                         anyhow::anyhow!("Failed to extract PythonAsyncEngine: {}", e)
                     })?;
-                    Ok::<_, anyhow::Error>(Arc::new(engine))
+                    Ok::<_, anyhow::Error>(Arc::new(engine.chat_engine(runtime_config)))
                 })?;
 
                 Ok(engine)
@@ -881,29 +866,10 @@ async fn select_engine(
             //  Convert Python chat engine factory to Rust callback
             let chat_engine_factory = args.chat_engine_factory.map(py_engine_factory_to_callback);
             let prefill_load_estimator = args
-                .aic_perf_config
+                .ais_perf_config
                 .as_ref()
                 .map(|config| {
-                    Python::with_gil(|py| {
-                        create_aic_prefill_load_estimator(
-                            py,
-                            config.backend_name(),
-                            config.system(),
-                            config.model_path(),
-                            config.tp_size(),
-                            config.backend_version(),
-                            config.moe_tp_size(),
-                            config.moe_ep_size(),
-                            config.attention_dp_size(),
-                            config.gemm_dtype(),
-                            config.moe_dtype(),
-                            config.fmha_dtype(),
-                            config.kv_cache_dtype(),
-                            config.comm_dtype(),
-                            config.nextn(),
-                            config.nextn_accept_rates(),
-                        )
-                    })
+                    Python::with_gil(|py| create_ais_prefill_load_estimator(py, config.config()))
                 })
                 .transpose()?;
             RsEngineConfig::Dynamic {
@@ -914,91 +880,48 @@ async fn select_engine(
         }
         EngineType::Mocker => {
             let mut mocker_args = if let Some(mocker_engine_args) = args.mocker_engine_args {
-                mocker_engine_args.inner()
+                mocker_engine_args
             } else if let Some(extra_args_path) = args.extra_engine_args {
-                RsMockEngineArgs::from_json_file(&extra_args_path).map_err(|e| {
-                    anyhow::anyhow!(
-                        "Failed to load mocker args from {:?}: {}",
-                        extra_args_path,
-                        e
-                    )
-                })?
+                tokio::fs::read_to_string(&extra_args_path)
+                    .await
+                    .map_err(anyhow::Error::from)
+                    .and_then(|config_json| {
+                        Python::with_gil(|py| Ok(mocker_config_from_json(py, &config_json)?))
+                    })
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "Failed to load mocker args from {:?}: {}",
+                            extra_args_path,
+                            e
+                        )
+                    })?
             } else {
                 tracing::warn!(
                     "No extra_engine_args specified for mocker engine. Using default mocker args."
                 );
-                RsMockEngineArgs::default()
+                MockerConfig::default()
             };
 
-            // If aic_backend is set, create Python AIC callback and override perf_model
-            if let Some(ref backend_name) = mocker_args.aic_backend {
-                let backend = backend_name.clone();
-                let system = mocker_args.aic_system.as_deref().unwrap_or("h200_sxm");
-                let model_name = mocker_args
-                    .aic_model_path
-                    .as_deref()
-                    .unwrap_or_else(|| local_model.card().source_path());
-                let backend_version = mocker_args.aic_backend_version.as_deref();
-                let tp_size = mocker_args.aic_tp_size.unwrap_or(1);
-                let moe_tp_size = mocker_args.aic_moe_tp_size;
-                let moe_ep_size = mocker_args.aic_moe_ep_size;
-                let attention_dp_size = mocker_args.aic_attention_dp_size;
-                let gemm_dtype = mocker_args.aic_gemm_dtype.as_deref();
-                let moe_dtype = mocker_args.aic_moe_dtype.as_deref();
-                let fmha_dtype = mocker_args.aic_fmha_dtype.as_deref();
-                let kv_cache_dtype = mocker_args.aic_kv_cache_dtype.as_deref();
-                let comm_dtype = mocker_args.aic_comm_dtype.as_deref();
-                let nextn = mocker_args.aic_nextn;
-                let undiscounted_accept_rates = mocker_args.undiscounted_aic_accept_rates();
-                match Python::with_gil(|py| {
-                    create_aic_callback(
-                        py,
-                        &backend,
-                        system,
-                        model_name,
-                        tp_size,
-                        backend_version,
-                        moe_tp_size,
-                        moe_ep_size,
-                        attention_dp_size,
-                        gemm_dtype,
-                        moe_dtype,
-                        fmha_dtype,
-                        kv_cache_dtype,
-                        comm_dtype,
-                        nextn,
-                        undiscounted_accept_rates.as_deref(),
-                    )
-                }) {
-                    Ok(callback) => {
-                        tracing::info!(
-                            "AIC perf model: backend={}, gpu={}, model={}, version={:?}",
-                            backend,
-                            system,
-                            model_name,
-                            backend_version
-                        );
-                        mocker_args.perf_model = Arc::new(PerfModel::from_aic_callback(callback));
-                    }
-                    Err(e) => {
-                        return Err(anyhow::anyhow!(
-                            "Failed to create AIC callback (--aic-perf-model was requested): {}",
-                            e
-                        ));
-                    }
-                }
-            }
+            mocker_args = Python::with_gil(|py| materialize_mocker_config(py, mocker_args))?;
 
             let endpoint = local_model.endpoint_id().clone();
 
-            let engine =
-                make_mocker_engine(distributed_runtime.inner, endpoint, mocker_args).await?;
+            let engine = make_mocker_engine(
+                distributed_runtime.inner,
+                endpoint,
+                mocker_args,
+                local_model.display_name().to_string(),
+            )
+            .await?;
 
+            // This config is the mocker worker: every endpoint serving it, or a
+            // clone of it, admits through this one gate.
             RsEngineConfig::InProcessTokens {
                 engine,
                 model: Box::new(local_model),
                 is_prefill: args.is_prefill,
                 is_decode: args.is_decode,
+                admission_gate: WorkerAdmissionGate::default(),
             }
         }
     };
@@ -1101,7 +1024,7 @@ mod plugin_input_tests {
     #[test]
     fn explicit_policy_retains_frontend_restrictions() {
         let plugins = RouterPlugins::default()
-            .with_worker_selection(dynamo_custom_policy_builtin::default_factory());
+            .with_worker_selection(dynamo_router_policies::default_factory());
         assert!(validate_router_plugin_input(&plugins, &Input::Http, true).is_ok());
         assert_eq!(
             validate_router_plugin_input(&plugins, &Input::Http, false),

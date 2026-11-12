@@ -5,6 +5,16 @@
 
 const ARTICLES = [
   {
+    title: "Benchmarking LLM Inference at Scale with AIPerf",
+    description:
+      "AIPerf, the successor to GenAI-Perf: a multiprocess load generator that measures the server, not the client, from a first vLLM run to shaped traffic.",
+    href: "/dynamo/dev/digest/aiperf-benchmarking",
+    date: "September 18, 2026",
+    readTime: "1 min read",
+    category: "Benchmarking",
+    art: "aiperf",
+  },
+  {
     title: "When to use EPD Disaggregation for Multimodal Serving",
     description:
       "A guide to when splitting the vision encoder off from prefill and decode pays off in multimodal serving, and when it does not.",
