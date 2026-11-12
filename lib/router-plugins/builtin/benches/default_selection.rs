@@ -403,5 +403,111 @@ fn kv_transfer(c: &mut Criterion) {
     }
 }
 
-criterion_group!(benches, bench, stacked, shared_cache, kv_transfer);
+/// `dynamo-kv-capacity-aware` against the default decode policy on the same rows. Ranks hold
+/// 16,384 blocks; `mixed` puts every other worker over capacity, `fallback` all of them, and
+/// `unknown` reports no capacity at all.
+fn kv_capacity_aware(c: &mut Criterion) {
+    use dynamo_kv_router::plugins::prelude::*;
+    use dynamo_router_policies::{default_factory, default_registry, register};
+    use std::collections::HashMap;
+
+    #[derive(Clone, Copy)]
+    struct UnknownCapacity;
+    impl WorkerConfigLike for UnknownCapacity {
+        fn data_parallel_start_rank(&self) -> u32 {
+            0
+        }
+        fn data_parallel_size(&self) -> u32 {
+            2
+        }
+        fn max_num_batched_tokens(&self) -> Option<u64> {
+            None
+        }
+        fn total_kv_blocks(&self) -> Option<u64> {
+            None
+        }
+    }
+
+    let partition = RoutingPartitionRef::new("model", "default");
+    let kvca = |parameters: &str| {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            file.path(),
+            format!(
+                "worker_selection:\n  decode:\n    type: dynamo-kv-capacity-aware\n    \
+                 parameters: {parameters}\n"
+            ),
+        )
+        .unwrap();
+        let config = KvRouterConfig {
+            router_policy_config: Some(file.path().display().to_string()),
+            ..Default::default()
+        };
+        let mut registry = default_registry();
+        register(&mut registry).unwrap();
+        let factory = registry
+            .resolve(&config)
+            .unwrap()
+            .expect("a decode instance");
+        factory(
+            &SelectionConfig::from(&config),
+            WorkerType::Decode,
+            partition,
+        )
+    };
+    let default_decode =
+        default_factory()(&SelectionConfig::default(), WorkerType::Decode, partition);
+    let kvca_default = kvca("{}");
+    let kvca_degenerate = kvca("{capacity_fraction: null, count_priority: false}");
+
+    for scenario in ["fits", "mixed", "fallback", "unknown"] {
+        let mut group = c.benchmark_group(format!("kv_capacity_aware_selection/{scenario}"));
+        group
+            .warm_up_time(Duration::from_millis(200))
+            .measurement_time(Duration::from_millis(500))
+            .sample_size(30)
+            .nresamples(1_000);
+        for count in [8, 64, 256, 1024, 4096] {
+            let (workers, mut request) = support::fixture(count, 2048);
+            if scenario == "mixed" || scenario == "fallback" {
+                for (worker, load) in request.worker_loads.iter_mut() {
+                    if scenario == "fallback" || worker.worker_id % 2 == 0 {
+                        load.active_decode_blocks += 16_384;
+                    }
+                }
+            }
+            let unknown: HashMap<u64, UnknownCapacity> =
+                workers.keys().map(|&id| (id, UnknownCapacity)).collect();
+            for (arm, policy) in [
+                ("default_decode", &default_decode),
+                ("kvca", &kvca_default),
+                ("kvca_degenerate", &kvca_degenerate),
+            ] {
+                let mut select = || {
+                    let selection = if scenario == "unknown" {
+                        policy.select_worker(support::selection_input(&unknown, &request, 16))
+                    } else {
+                        policy.select_worker(support::selection_input(&workers, &request, 16))
+                    };
+                    black_box(selection.unwrap());
+                };
+                let allocs = allocations(&mut select);
+                eprintln!(
+                    "kv_capacity_aware allocations per 100 warm selections: scenario={scenario} arm={arm} workers={count} allocations={allocs}"
+                );
+                group.bench_function(BenchmarkId::new(arm, count), |b| b.iter(&mut select));
+            }
+        }
+        group.finish();
+    }
+}
+
+criterion_group!(
+    benches,
+    bench,
+    stacked,
+    shared_cache,
+    kv_transfer,
+    kv_capacity_aware
+);
 criterion_main!(benches);

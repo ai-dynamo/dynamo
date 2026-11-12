@@ -1,0 +1,9 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# The default decode cost D + W·N with W = 1000 blocks per active request.
+worker_selection:
+  decode:
+    type: dynamo-default-cost-fn
+    parameters:
+      decode_active_request_weight: 1000
