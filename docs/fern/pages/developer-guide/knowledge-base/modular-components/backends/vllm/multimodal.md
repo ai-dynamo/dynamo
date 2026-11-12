@@ -166,6 +166,8 @@ For the user-facing workflow, see [Multimodal KV Routing](../../../../../use-cas
 
 Dynamo supports multimodal image and video requests for Vision Language Models (VLMs). `Qwen/Qwen3-VL-2B-Instruct` is a good example because the same model can handle both `image_url` and `video_url` requests through the standard OpenAI chat endpoint.
 
+The vLLM worker pastes a transparent image on a white background, as vLLM does. A separate encode worker and the Python chat processor still drop transparency.
+
 ### Aggregated Serving
 
 Use the single-worker aggregated launcher for the simplest image/video setup:

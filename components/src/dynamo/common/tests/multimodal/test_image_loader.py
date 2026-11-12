@@ -40,6 +40,7 @@ from dynamo.common.multimodal.image_loader import (
     URL_VARIANT_KEY,
     ImageLoader,
     image_cache_scope_from_request,
+    read_decoded_media_via_nixl,
 )
 from dynamo.common.multimodal.shared_image_cache import (
     SharedImageCache,
@@ -736,6 +737,110 @@ async def test_frontend_decoded_grayscale_image_is_converted_to_rgb(
     assert image.mode == "RGB"
     assert image.size == (3, 2)
     assert image.getpixel((0, 0)) == (127, 127, 127)
+
+
+# 2x1 RGBA: an opaque red pixel, then a fully transparent pixel whose stored colour is black.
+_RGBA_PIXELS = ((255, 0, 0, 255), (0, 0, 0, 0))
+
+
+def _rgba_png_bytes() -> bytes:
+    image = Image.new("RGBA", (2, 1))
+    image.putdata(_RGBA_PIXELS)
+    buf = BytesIO()
+    image.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+async def _load_rgba(loader: ImageLoader, source: str) -> Image.Image:
+    """Load the RGBA fixture through one of the loader's three input paths."""
+    content = _rgba_png_bytes()
+    if source == "data":
+        encoded = base64.b64encode(content).decode()
+        return await loader.load_image(f"data:image/png;base64,{encoded}")
+    if source == "http":
+        with patch(_FETCH_BYTES_PATH, _mock_fetch_bytes(content)):
+            return await loader.load_image("https://example.com/logo.png")
+    # The frontend decoder hands RGBA pixels over NIXL as an (H, W, 4) uint8 array.
+    loader._nixl_connector = object()
+    decoded = np.array([_RGBA_PIXELS], dtype=np.uint8)
+    with patch(
+        "dynamo.common.multimodal.image_loader.read_decoded_media_via_nixl",
+        new=AsyncMock(return_value=decoded),
+    ):
+        return await loader._read_and_convert_nixl_image({})
+
+
+async def test_frontend_decoded_read_keeps_alpha_channel() -> None:
+    """The NIXL read returns all four channels, so the loader's conversion sees the alpha."""
+    decoded_meta = {
+        "nixl_metadata": "metadata",
+        "nixl_descriptor": {"addr": 1, "size": 16},
+        "shape": [2, 2, 4],
+    }
+
+    array = await read_decoded_media_via_nixl(AsyncMock(), decoded_meta)
+
+    assert array.shape == (2, 2, 4)
+
+
+@pytest.mark.parametrize("source", ["data", "http", "decoded"])
+async def test_default_conversion_drops_alpha(loader: ImageLoader, source: str) -> None:
+    """A backend that passes no to_rgb keeps Pillow's convert("RGB") on every path."""
+    image = await _load_rgba(loader, source)
+
+    assert image.mode == "RGB"
+    assert [image.getpixel((0, 0)), image.getpixel((1, 0))] == [(255, 0, 0), (0, 0, 0)]
+
+
+@pytest.mark.parametrize("source", ["data", "http", "decoded"])
+async def test_to_rgb_receives_alpha_on_every_path(source: str) -> None:
+    """A backend's conversion sees the decoded image with its alpha, and owns the result."""
+    seen: list[tuple[str, tuple[int, ...]]] = []
+
+    def to_rgb(image: Image.Image) -> Image.Image:
+        seen.append((image.mode, image.getpixel((1, 0))))
+        return Image.new("RGB", image.size, (1, 2, 3))
+
+    loader = ImageLoader(url_policy=_permissive_policy(), to_rgb=to_rgb)
+    image = await _load_rgba(loader, source)
+
+    assert seen == [("RGBA", (0, 0, 0, 0))]
+    assert image.getpixel((1, 0)) == (1, 2, 3)
+
+
+async def test_to_rgb_runs_on_shared_cache_hit(monkeypatch) -> None:
+    """The shared cache holds encoded bytes, so a hit still goes through the conversion."""
+    _enable_shared_image_cache(monkeypatch)
+    client = AsyncMock()
+    client.get.return_value = _rgba_png_bytes()
+    seen: list[str] = []
+
+    def to_rgb(image: Image.Image) -> Image.Image:
+        seen.append(image.mode)
+        return image.convert("RGB")
+
+    with (
+        patch(_REDIS_CLUSTER_FACTORY_PATH, return_value=client),
+        patch(_FETCH_BYTES_PATH, _mock_fetch_bytes()) as origin_fetch,
+    ):
+        loader = ImageLoader(url_policy=_permissive_policy(), to_rgb=to_rgb)
+        await loader.load_image("https://example.com/logo.png")
+
+    origin_fetch.assert_not_called()
+    assert seen == ["RGBA"]
+
+
+async def test_truncated_image_is_rejected_when_to_rgb_returns_its_argument() -> None:
+    """The loader decodes before converting, so a conversion cannot hide truncated data."""
+    buf = BytesIO()
+    Image.new("RGB", (64, 64), (10, 20, 30)).save(buf, format="PNG")
+    encoded = base64.b64encode(buf.getvalue()[:-40]).decode()
+    loader = ImageLoader(url_policy=_permissive_policy(), to_rgb=lambda image: image)
+
+    with pytest.raises(HttpStatusError) as exc_info:
+        await loader.load_image(f"data:image/png;base64,{encoded}")
+
+    assert exc_info.value.status == 400
 
 
 async def test_unsupported_format_batch_data_url_raises_415(
