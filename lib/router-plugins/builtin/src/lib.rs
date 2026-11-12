@@ -3,18 +3,20 @@
 
 //! Router plugins Dynamo ships.
 //!
-//! Routing hosts always link the default through `default_registry`. The optional custom
-//! catalog adds the named default, two-tier, and ThunderAgent providers through `register`. The default
-//! itself uses the same public candidate inputs and scorer/picker dispatch as external policies.
-//! Sequence tracking, eligibility, and admission remain in dynamo-kv-router.
+//! Routing hosts always link the default through `default_registry`. The optional custom catalog
+//! adds the named default, `kvcr` with its `kv_fetch` hint policy, two-tier, and ThunderAgent
+//! providers through `register`. The default itself uses the same public candidate inputs and scorer/picker
+//! dispatch as external policies. Sequence tracking, eligibility, and admission remain in
+//! dynamo-kv-router.
 
 mod default;
+pub mod kv_fetch;
 pub mod router_modes;
 mod sticky_min_load;
 mod thunderagent;
 mod two_tier_cost_fn;
 pub use default::{
-    DefaultWorkerSelector, DefaultWorkerSelectorControl, default_factory, default_policy,
+    KVCR_POLICY_TYPE, default_factory, default_policy, default_policy_with_rng, kvcr_policy,
     startup_policy_parameters,
 };
 
@@ -24,16 +26,16 @@ pub fn default_registry() -> RouterPluginRegistry {
     with_defaults(RouterPluginRegistry::default())
 }
 
-/// `registry` plus what [`default_registry`] holds: the required default and each routing mode
-/// it doesn't already provide. A host applies this to the catalog it installs, so
-/// `--router-mode` resolves however that catalog was built.
+/// `registry` plus what [`default_registry`] holds: the required default and each routing mode it
+/// doesn't already provide. A host applies this to the catalog it installs, so `--router-mode`
+/// resolves however that catalog was built.
 pub fn with_defaults(registry: RouterPluginRegistry) -> RouterPluginRegistry {
     let mut registry = registry.with_default_factory(default_factory());
     router_modes::register_missing(&mut registry);
     registry
 }
 
-use dynamo_kv_router::plugins::{RouterPluginRegistry, RouterPluginRegistryError};
+use dynamo_kv_router::plugins::prelude::*;
 
 /// Register the named providers Dynamo ships, without changing the host's default factory.
 ///
@@ -42,6 +44,8 @@ use dynamo_kv_router::plugins::{RouterPluginRegistry, RouterPluginRegistryError}
 /// than overriding it.
 pub fn register(registry: &mut RouterPluginRegistry) -> Result<(), RouterPluginRegistryError> {
     default::register(registry)?;
+    // kv_fetch names kvcr as a host, where it is on by default, so it registers with it.
+    kv_fetch::register(registry)?;
     sticky_min_load::register(registry)?;
     two_tier_cost_fn::register(registry)?;
     thunderagent::register(registry)?;
@@ -50,9 +54,7 @@ pub fn register(registry: &mut RouterPluginRegistry) -> Result<(), RouterPluginR
 
 #[cfg(test)]
 mod tests {
-    use dynamo_kv_router::plugins::WorkerSelectionPolicyRegistryError;
-    use dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicyFactory;
-    use dynamo_kv_router::{KvRouterConfig, RoutingPartitionRef, WorkerType};
+    use dynamo_kv_router::plugins::prelude::*;
 
     use super::*;
 
@@ -87,9 +89,6 @@ worker_selection:
   aggregated: dynamo-two-tier-cost-fn
   prefill: dynamo-two-tier-cost-fn
   decode: dynamo-two-tier-cost-fn
-  instances:
-    - name: dynamo-two-tier-cost-fn
-      type: dynamo-two-tier-cost-fn
 "#,
         );
         let factory = resolved
@@ -102,7 +101,7 @@ worker_selection:
             WorkerType::Prefill,
             WorkerType::Decode,
         ] {
-            factory(&config, worker_type, partition);
+            factory(&SelectionConfig::from(&config), worker_type, partition);
         }
     }
 
@@ -111,14 +110,18 @@ worker_selection:
         let (config, resolved) = resolve(
             r#"
 worker_selection:
-  aggregated: sticky
-  prefill: sticky
-  decode: sticky
-  instances:
-    - name: sticky
-      type: dynamo-sticky-min-load
-      parameters:
-        max_idle_secs: 600
+  aggregated:
+    type: dynamo-sticky-min-load
+    parameters:
+      max_idle_secs: 600
+  prefill:
+    type: dynamo-sticky-min-load
+    parameters:
+      max_idle_secs: 600
+  decode:
+    type: dynamo-sticky-min-load
+    parameters:
+      max_idle_secs: 600
 "#,
         );
         let factory = resolved
@@ -130,7 +133,85 @@ worker_selection:
             WorkerType::Prefill,
             WorkerType::Decode,
         ] {
-            factory(&config, worker_type, partition);
+            factory(&SelectionConfig::from(&config), worker_type, partition);
+        }
+    }
+
+    /// `kvcr` resolves by type name and takes the default's parameters.
+    #[test]
+    fn resolves_kvcr_by_type_name() {
+        let (config, resolved) = resolve(
+            r#"
+worker_selection:
+  prefill:
+    type: kvcr
+    parameters:
+      shared_cache_multiplier: 0.5
+"#,
+        );
+        let factory = resolved
+            .unwrap()
+            .expect("a configured instance resolves to a factory");
+        factory(
+            &SelectionConfig::from(&config),
+            WorkerType::Prefill,
+            RoutingPartitionRef::new("model", "default"),
+        );
+    }
+
+    /// `kv_fetch` is on by default only under `kvcr`: a `kvcr` role runs it without listing it, a
+    /// role under another policy runs it only when it lists it, and other policies run no hints by
+    /// default.
+    #[test]
+    fn kv_fetch_is_on_by_default_only_under_kvcr() {
+        let policy_file = tempfile::NamedTempFile::new().unwrap();
+        let config = |yaml: &str| {
+            std::fs::write(policy_file.path(), yaml).unwrap();
+            KvRouterConfig {
+                router_policy_config: Some(policy_file.path().display().to_string()),
+                ..Default::default()
+            }
+        };
+        let mut registry = default_registry();
+        register(&mut registry).unwrap();
+        let resolved = registry
+            .resolve_hint_policies(&config(
+                r#"
+worker_selection:
+  prefill:
+    type: kvcr
+    hints:
+      - type: kv_fetch
+        parameters: {min_additional_blocks: 2}
+  decode: kvcr
+  aggregated: dynamo-default-cost-fn
+"#,
+            ))
+            .unwrap();
+        assert_eq!(resolved.names(WorkerType::Prefill), [kv_fetch::POLICY_TYPE]);
+        assert!(!resolved.uses_defaults(WorkerType::Prefill));
+        assert_eq!(resolved.names(WorkerType::Decode), [kv_fetch::POLICY_TYPE]);
+        assert!(resolved.uses_defaults(WorkerType::Decode));
+        assert!(resolved.names(WorkerType::Aggregated).is_empty());
+        assert!(resolved.names(WorkerType::Encode).is_empty());
+
+        // Any other policy runs it only when its role lists it.
+        let listed = registry
+            .resolve_hint_policies(&config(
+                "worker_selection:\n  prefill:\n    type: dynamo-default-cost-fn\n    hints:\n      - type: kv_fetch\n",
+            ))
+            .unwrap();
+        assert_eq!(listed.names(WorkerType::Prefill), [kv_fetch::POLICY_TYPE]);
+        assert!(!listed.uses_defaults(WorkerType::Prefill));
+
+        for parameters in ["{min_additional_blocks: 0}", "{min_blocks: 2}"] {
+            let yaml = format!(
+                "worker_selection:\n  prefill:\n    type: kvcr\n    hints:\n      - type: kv_fetch\n        parameters: {parameters}\n"
+            );
+            assert!(
+                registry.resolve_hint_policies(&config(&yaml)).is_err(),
+                "{parameters}"
+            );
         }
     }
 
@@ -141,12 +222,10 @@ worker_selection:
         let (_config, resolved) = resolve(
             r#"
 worker_selection:
-  aggregated: dynamo-two-tier-cost-fn
-  instances:
-    - name: dynamo-two-tier-cost-fn
-      type: dynamo-two-tier-cost-fn
-      parameters:
-        cache_affinity_threshold: 0.8
+  aggregated:
+    type: dynamo-two-tier-cost-fn
+    parameters:
+      cache_affinity_threshold: 0.8
 "#,
         );
 
@@ -175,12 +254,10 @@ worker_selection:
             let (_config, resolved) = resolve(&format!(
                 r#"
 worker_selection:
-  aggregated: mode
-  instances:
-    - name: mode
-      type: {policy_type}
-      parameters:
-        temperature: 0.5
+  aggregated:
+    type: {policy_type}
+    parameters:
+      temperature: 0.5
 "#
             ));
             let Err(error) = resolved else {
