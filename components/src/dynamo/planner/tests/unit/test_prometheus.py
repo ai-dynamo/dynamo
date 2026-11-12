@@ -566,6 +566,14 @@ def test_engine_metric_filter_keeps_equality_for_single_namespace_form():
     assert selector == 'dynamo_namespace="my_app"'
 
 
+def test_engine_metric_filter_quotes_regex_for_promql_string_layer():
+    client = PrometheusAPIClient("http://localhost:9090", "my.app-ns")
+
+    selector = client._engine_metric_filter(None, None)
+
+    assert selector == r'dynamo_namespace=~"my\\.app-ns|my\\.app_ns"'
+
+
 @pytest.mark.parametrize(
     ("value", "expected"),
     [

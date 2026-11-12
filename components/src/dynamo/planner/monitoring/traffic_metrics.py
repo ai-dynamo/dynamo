@@ -576,7 +576,8 @@ class PrometheusAPIClient:
                 _escape_label_regex(form) for form in namespace_forms
             )
             namespace_filter = (
-                f'{prometheus_names.labels.NAMESPACE}=~"{namespace_pattern}"'
+                f'{prometheus_names.labels.NAMESPACE}=~"'
+                f'{self._quote_label_value(namespace_pattern)}"'
             )
         filters = [namespace_filter]
         if model_name:
