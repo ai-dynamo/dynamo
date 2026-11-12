@@ -98,12 +98,15 @@ allow_exact_paths:
 # Explicit third-party exceptions: LOGGED in the report but do NOT fail the build.
 # Every entry must carry a reason and an owner so the waiver is auditable.
 exceptions:
-  - glob: "/usr/local/lib/lib*-nimlgpl.so*"
-    reason: >-
+  - glob: "/usr/local/lib/libav*-nimlgpl.so*"
+    reason: &nim_ffmpeg >-
       The NIM vLLM enterprise base ships its own LGPL FFmpeg libraries
       (libav*/libsw* with the -nimlgpl suffix) for its PyNvVideoCodec and audio
       paths. They are approved and validated by NIM and kept as shipped; the
       in-tree FFmpeg uses distinct _dynamo SONAMEs and does not replace them.
+    owner: NIM
+  - glob: "/usr/local/lib/libsw*-nimlgpl.so*"
+    reason: *nim_ffmpeg
     owner: NIM
   - glob: "**/nvidia/dali/.libs/libav*"
     reason: >-

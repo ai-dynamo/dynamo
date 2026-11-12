@@ -73,6 +73,23 @@ def test_nim_ffmpeg_is_a_nim_exception(tmp_path: Path):
     }
 
 
+def test_nim_suffixed_non_ffmpeg_codec_lib_is_denied(tmp_path: Path):
+    """The NIM exception covers only its libav*/libsw* FFmpeg libraries."""
+    rels = sorted(
+        f"usr/local/lib/{name}"
+        for name in (
+            "libx264-nimlgpl.so.164",
+            "libx265-nimlgpl.so.199",
+            "libfdk-aac-nimlgpl.so.2",
+        )
+    )
+    for rel in rels:
+        _touch(tmp_path, rel)
+    violations, exceptions, allowed = scan_filesystem(tmp_path, _POLICY)
+    assert exceptions == [] and allowed == []
+    assert sorted(v["path"] for v in violations) == ["/" + rel for rel in rels]
+
+
 def test_unsuffixed_usr_local_codec_lib_is_denied(tmp_path: Path):
     """allow_paths covers only the _dynamo libraries under /usr/local/lib."""
     for rel in (
