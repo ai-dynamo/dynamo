@@ -1940,6 +1940,205 @@ def test_native_transcription_emits_before_commit_and_feeds_tokens_back():
     assert events[-1]["usage"]["output_tokens"] == 4
 
 
+_QWEN_TEMPLATE = [100, 101]
+_QWEN_GUESS = 900
+_QWEN_EOS = 999
+_QWEN_CLIP_SECONDS = 13
+
+
+class _QwenTokenizer:
+    def encode(self, text, *, truncation=None, add_special_tokens=True):
+        del text, truncation, add_special_tokens
+        return list(_QWEN_TEMPLATE)
+
+    def decode(self, token_ids, *, skip_special_tokens=False):
+        del skip_special_tokens
+        names = {_QWEN_GUESS: "guess ", _QWEN_EOS: "<eos>"}
+        return "".join(names.get(token, f"w{token} ") for token in token_ids)
+
+
+class _QwenEngine:
+    """Hears two words per second; guesses the last two until the clip ends."""
+
+    def __init__(self) -> None:
+        self.prompts: list = []
+        self.request_ids: list[str] = []
+
+    async def generate(self, *, prompt, sampling_params, request_id):
+        del sampling_params
+        self.prompts.append(prompt)
+        self.request_ids.append(request_id)
+        if not isinstance(prompt, dict):
+            # vLLM StreamingInput path: one resumable request per turn.
+            async for _ in prompt:
+                pass
+            return
+        seconds = len(prompt["multi_modal_data"]["audio"]) / 16_000
+        words = list(range(1, round(seconds * 2) + 1))
+        if round(seconds) < _QWEN_CLIP_SECONDS:
+            words[-2:] = [_QWEN_GUESS, _QWEN_GUESS]
+        prefix = prompt["prompt_token_ids"][len(_QWEN_TEMPLATE) :]
+        yield SimpleNamespace(
+            prompt_token_ids=prompt["prompt_token_ids"],
+            outputs=[
+                SimpleNamespace(
+                    token_ids=words[len(prefix) :] + [_QWEN_EOS],
+                    finish_reason="stop",
+                    stop_reason=None,
+                )
+            ],
+        )
+
+
+def _realtime_serving(monkeypatch, model_cls):
+    async def render_cmpl_async(prompts):
+        return prompts
+
+    async def transcribe_realtime(audio_stream, input_stream):
+        del input_stream
+        async for audio in audio_stream:
+            yield {"prompt_token_ids": _QWEN_TEMPLATE, "multi_modal_data": audio}
+
+    serving = SimpleNamespace(
+        model_cls=model_cls,
+        model_config=SimpleNamespace(is_encoder_decoder=False),
+        renderer=SimpleNamespace(
+            get_tokenizer=_QwenTokenizer, render_cmpl_async=render_cmpl_async
+        ),
+        transcribe_realtime=transcribe_realtime,
+    )
+    monkeypatch.setattr(
+        "dynamo.vllm.realtime.handlers.transcription.build_realtime_serving",
+        lambda **_: serving,
+    )
+    return serving
+
+
+def _qwen_realtime_cls():
+    qwen = pytest.importorskip("vllm.model_executor.models.qwen3_asr_realtime")
+
+    class QwenRealtime(qwen.Qwen3ASRRealtimeGeneration):
+        @classmethod
+        def get_speech_to_text_config(cls, model_config, task_type):
+            del model_config, task_type
+            return SimpleNamespace(sample_rate=16_000)
+
+    return QwenRealtime
+
+
+def _seconds_of_pcm(seconds: int) -> list[dict]:
+    pcm = base64.b64encode(np.ones(24_000, dtype=np.int16).tobytes()).decode()
+    return [{"type": "input_audio_buffer.append", "audio": pcm}] * seconds
+
+
+async def _drive_qwen_turn(handler) -> list[dict]:
+    """Send 6 s, 6 s and 1 s of audio, each after the previous delta."""
+    deltas = asyncio.Queue()
+
+    async def request_stream():
+        yield {"type": "session.update", "session": _session()}
+        for seconds, wait_for_delta in ((6, False), (6, True), (1, True)):
+            if wait_for_delta:
+                await deltas.get()
+            for event in _seconds_of_pcm(seconds):
+                yield event
+        yield {"type": "input_audio_buffer.commit"}
+
+    events = []
+    async for event in handler.generate(request_stream(), _Context()):
+        events.append(event)
+        if event["type"] == "conversation.item.input_audio_transcription.delta":
+            deltas.put_nowait(event)
+    return events
+
+
+def test_qwen_transcription_decodes_accumulated_audio_as_one_user_turn(monkeypatch):
+    _realtime_serving(monkeypatch, _qwen_realtime_cls())
+    engine = _QwenEngine()
+    handler = RealtimeTranscriptionHandler.from_engine(
+        engine_client=engine, model_name=MODEL, model_path=MODEL
+    )
+
+    asyncio.run(asyncio.wait_for(_drive_qwen_turn(handler), timeout=5))
+
+    # Each request is a plain prompt with one audio item: all audio so far,
+    # never per-segment prompts appended to an earlier conversation.
+    assert len(engine.prompts) >= 3
+    assert all(isinstance(prompt, dict) for prompt in engine.prompts)
+    lengths = [len(prompt["multi_modal_data"]["audio"]) for prompt in engine.prompts]
+    assert lengths == sorted(set(lengths))
+    assert lengths[-1] == _QWEN_CLIP_SECONDS * 16_000
+    for prompt in engine.prompts:
+        token_ids = prompt["prompt_token_ids"]
+        assert token_ids[: len(_QWEN_TEMPLATE)] == _QWEN_TEMPLATE
+        # The assistant prefix holds only heard words, never a rolled-back
+        # guess or an end-of-sequence token.
+        prefix = token_ids[len(_QWEN_TEMPLATE) :]
+        assert prefix == list(range(1, len(prefix) + 1))
+    assert len(set(engine.request_ids)) == len(engine.request_ids)
+
+
+def test_qwen_transcription_deltas_only_grow_and_join_to_transcript(monkeypatch):
+    _realtime_serving(monkeypatch, _qwen_realtime_cls())
+    handler = RealtimeTranscriptionHandler.from_engine(
+        engine_client=_QwenEngine(), model_name=MODEL, model_path=MODEL
+    )
+
+    events = asyncio.run(asyncio.wait_for(_drive_qwen_turn(handler), timeout=5))
+
+    types = [event["type"] for event in events]
+    deltas = [
+        event["delta"]
+        for event in events
+        if event["type"] == "conversation.item.input_audio_transcription.delta"
+    ]
+    expected = "".join(f"w{word} " for word in range(1, _QWEN_CLIP_SECONDS * 2 + 1))
+    assert types.index(
+        "conversation.item.input_audio_transcription.delta"
+    ) < types.index("input_audio_buffer.committed")
+    assert events[-1]["type"] == "conversation.item.input_audio_transcription.completed"
+    assert events[-1]["transcript"] == expected
+    assert "".join(deltas) == expected
+    assert events[-1]["usage"]["output_tokens"] == _QWEN_CLIP_SECONDS * 2
+    assert len({event["item_id"] for event in events if "item_id" in event}) == 1
+
+
+def test_non_qwen_realtime_model_keeps_streaming_input(monkeypatch):
+    pytest.importorskip("vllm.model_executor.models.qwen3_asr_realtime")
+
+    class OtherRealtime:
+        supports_realtime = True
+        realtime_max_tokens = 64
+
+        @classmethod
+        def get_speech_to_text_config(cls, model_config, task_type):
+            del model_config, task_type
+            return SimpleNamespace(sample_rate=16_000)
+
+    _realtime_serving(monkeypatch, OtherRealtime)
+    engine = _QwenEngine()
+    handler = RealtimeTranscriptionHandler.from_engine(
+        engine_client=engine, model_name=MODEL, model_path=MODEL
+    )
+
+    asyncio.run(
+        asyncio.wait_for(
+            _drive(
+                handler,
+                [
+                    {"type": "session.update", "session": _session()},
+                    *_seconds_of_pcm(6),
+                    {"type": "input_audio_buffer.commit"},
+                ],
+            ),
+            timeout=5,
+        )
+    )
+
+    assert len(engine.prompts) == 1
+    assert not isinstance(engine.prompts[0], dict)
+
+
 @pytest.mark.parametrize("operation", ["create_chat_completion", "render_chat_request"])
 def test_text_serving_preserves_error_message(monkeypatch, caplog, operation):
     from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat

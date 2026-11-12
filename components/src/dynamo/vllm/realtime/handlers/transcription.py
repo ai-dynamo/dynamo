@@ -11,7 +11,7 @@ import binascii
 import logging
 import math
 import uuid
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from typing import Any
 
 import numpy as np
@@ -29,6 +29,7 @@ from ..events import (
     session_updated_event,
 )
 from ..factories import StreamingInputFactory, build_realtime_serving
+from .qwen3_asr import build_qwen3_asr_transcriber
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +39,7 @@ RESAMPLE_BLOCK_MILLISECONDS = 100
 MAX_UTTERANCE_SECONDS = 60
 
 SamplingParamsFactory = Callable[[], Any]
+TurnRunner = Callable[["_Turn", Context], Awaitable[None]]
 
 
 def _default_sampling_params() -> Any:
@@ -134,12 +136,14 @@ class RealtimeTranscriptionHandler:
         model_sample_rate: int | float,
         streaming_input_factory: StreamingInputFactory,
         sampling_params_factory: SamplingParamsFactory = _default_sampling_params,
+        run_turn: TurnRunner | None = None,
     ) -> None:
         self.engine_client = engine_client
         self.model_name = model_name
         self.model_sample_rate = int(model_sample_rate)
         self._streaming_input_factory = streaming_input_factory
         self._sampling_params_factory = sampling_params_factory
+        self._turn_runner = run_turn or self._run_turn
 
     @classmethod
     def from_engine(
@@ -167,6 +171,22 @@ class RealtimeTranscriptionHandler:
             serving.model_config, "transcribe"
         )
 
+        from vllm.model_executor.models.qwen3_asr_realtime import (
+            Qwen3ASRRealtimeGeneration,
+        )
+
+        run_turn = None
+        # vLLM carries each 5-second Qwen segment into one growing multi-turn
+        # session, which repeats the opening. Remove this branch once vLLM
+        # decodes Qwen realtime segments without that context
+        # (vllm-project/vllm#56218).
+        if issubclass(serving.model_cls, Qwen3ASRRealtimeGeneration):
+            run_turn = build_qwen3_asr_transcriber(
+                engine_client=engine_client,
+                serving=serving,
+                sample_rate=int(speech_config.sample_rate),
+            ).run_turn
+
         def sampling_params() -> Any:
             from vllm.sampling_params import RequestOutputKind, SamplingParams
 
@@ -183,6 +203,7 @@ class RealtimeTranscriptionHandler:
             model_sample_rate=speech_config.sample_rate,
             streaming_input_factory=serving.transcribe_realtime,
             sampling_params_factory=sampling_params,
+            run_turn=run_turn,
         )
 
     async def _run_turn(
@@ -284,7 +305,7 @@ class RealtimeTranscriptionHandler:
 
         connection = RealtimeConnection[_Turn](
             context=context,
-            run_turn=self._run_turn,
+            run_turn=self._turn_runner,
             max_concurrent_turns=1,
             max_queued_turns=1,
         )
