@@ -11,10 +11,6 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use dynamo_kv_router::{
-    PrefillLoadEstimator, conditional_disagg::ConditionalDisaggPolicy,
-    config::RouterConfigOverride, protocols::RoutingConstraints,
-};
 use dynamo_runtime::{
     error::{DynamoError, ErrorClass, ErrorType, match_error_chain},
     pipeline::{
@@ -23,6 +19,8 @@ use dynamo_runtime::{
     },
     protocols::{EndpointId, annotated::Annotated},
 };
+use dynamo_scheduler::host::{PrefillLoadEstimator, RouterConfigOverride, RoutingConstraints};
+use dynamo_worker_selection::host::ConditionalDisaggPolicy;
 use futures::stream::{self, StreamExt};
 
 use crate::{
@@ -926,8 +924,9 @@ fn merge_decode_topology_constraints(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dynamo_kv_router::config::{KvRouterConfig, RouterConfigOverride};
+    use dynamo_kv_router::config::KvRouterConfig;
     use dynamo_runtime::{engine::AsyncEngine, pipeline::Error};
+    use dynamo_scheduler::host::RouterConfigOverride;
     use futures::StreamExt;
     use std::{
         collections::{HashMap, HashSet},

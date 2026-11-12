@@ -135,7 +135,7 @@ async fn run_watcher(
     migration_limit: u32,
     migration_max_seq_len: Option<u32>,
     namespace_filter: NamespaceFilter,
-    prefill_load_estimator: Option<Arc<dyn dynamo_kv_router::PrefillLoadEstimator>>,
+    prefill_load_estimator: Option<Arc<dyn dynamo_scheduler::host::PrefillLoadEstimator>>,
     local_model_path: Option<PathBuf>,
     metrics_prefix: Option<String>,
     tokenizer_backend: Option<TokenizerBackend>,
@@ -167,7 +167,7 @@ async fn run_watcher(
     let discovery = runtime.discovery();
     let discovery_stream = discovery
         .list_and_watch(
-            dynamo_runtime::discovery::DiscoveryQuery::AllModels,
+            namespace_filter.model_query(),
             Some(runtime.primary_token()),
         )
         .await?;

@@ -12,13 +12,9 @@ use std::{
 
 use super::builder::hosted_picker;
 use crate::kv_router::SelectionPolicySource;
-use dynamo_kv_router::plugins::worker_selection::WorkerCandidates;
-use dynamo_kv_router::{
-    config::KvRouterConfig,
-    plugins::request_classifier::{
-        ClassifierError, ClassifyEvent, ClassifyFuture, ClassifyRequest, RequestClassifier,
-    },
-    protocols::RoutingConstraints,
+use dynamo_kv_router::config::KvRouterConfig;
+use dynamo_kv_router::plugins::request_classifier::{
+    ClassifierError, ClassifyEvent, ClassifyFuture, ClassifyRequest, RequestClassifier, WorkerView,
 };
 use dynamo_runtime::{
     DistributedRuntime, Runtime,
@@ -33,6 +29,7 @@ use dynamo_runtime::{
     storage::kv::Selector,
     traits::DistributedRuntimeProvider,
 };
+use dynamo_scheduler::host::RoutingConstraints;
 use tokio::sync::{Notify, mpsc, watch};
 
 use super::*;
@@ -2166,6 +2163,146 @@ async fn router_with_config_and_classifier(
     (router, runtime)
 }
 
+#[tokio::test]
+#[serial_test::serial]
+async fn aggregated_prompt_logprobs_deny_cache_credit_in_selection_and_booking() {
+    let (host, runtime) = router_with_config(
+        None,
+        HashMap::from([
+            (7, ModelRuntimeConfig::default()),
+            (8, ModelRuntimeConfig::default()),
+        ]),
+        KvRouterConfig {
+            skip_initial_worker_wait: true,
+            use_kv_events: false,
+            router_track_active_blocks: false,
+            router_track_prefill_tokens: true,
+            router_temperature: 0.0,
+            overlap_score_credit: 1.0,
+            overlap_score_credit_decay: 0.0,
+            decode_active_request_weight: 0.0,
+            ..Default::default()
+        },
+    )
+    .await;
+    let tokens = (0..32).collect::<Vec<_>>();
+    host.kv_router()
+        .record_routing_decision(
+            TokensWithHashes::new(tokens.clone(), 16),
+            WorkerWithDpRank::new(7, 0),
+        )
+        .await
+        .unwrap();
+    let mut warm = request();
+    warm.token_ids = tokens.clone().into();
+    let warm = Context::new(warm);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let (selection, _) = host
+                .select_with_affinity(
+                    &warm,
+                    RequestPhase::Aggregated,
+                    true,
+                    &CleanupBudget::default(),
+                )
+                .await
+                .unwrap();
+            if selection.cached_tokens == 32 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("recorded prefix becomes visible");
+
+    let mut held = request();
+    held.token_ids = (100..116).collect::<Vec<_>>().into();
+    held.routing_mut().backend_instance_id = Some(7);
+    let held_request = Context::new(held);
+    let (mut held, _) = host
+        .select_with_affinity(
+            &held_request,
+            RequestPhase::Aggregated,
+            false,
+            &CleanupBudget::default(),
+        )
+        .await
+        .unwrap();
+
+    for (phase, prompt, extra, pinned, query, worker, cached) in [
+        (RequestPhase::Aggregated, Some(0), None, false, true, 8, 0),
+        (RequestPhase::Aggregated, Some(1), None, false, false, 8, 0),
+        (
+            RequestPhase::Aggregated,
+            Some(0),
+            Some(serde_json::json!({"sampling_options": {"skip_reading_prefix_cache": false}})),
+            true,
+            false,
+            7,
+            0,
+        ),
+        (RequestPhase::Aggregated, None, None, false, false, 7, 32),
+        (
+            RequestPhase::Aggregated,
+            None,
+            Some(serde_json::json!({"sampling_options": {"skip_reading_prefix_cache": true}})),
+            false,
+            false,
+            7,
+            32,
+        ),
+        (RequestPhase::Decode, Some(1), None, false, false, 7, 32),
+        (RequestPhase::Prefill, Some(1), None, false, false, 7, 32),
+    ] {
+        let mut input = request();
+        input.token_ids = tokens.clone().into();
+        input.output_options.prompt_logprobs = prompt;
+        input.output_options.logprobs = Some(1);
+        input.extra_args = extra;
+        if pinned {
+            input.routing_mut().backend_instance_id = Some(7);
+        }
+        let input = Context::new(input);
+        let (mut selection, _) = host
+            .select_with_affinity(&input, phase, query, &CleanupBudget::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            selection.worker.worker_id, worker,
+            "{phase:?}, prompt={prompt:?}"
+        );
+        assert_eq!(
+            selection.cached_tokens, cached,
+            "{phase:?}, prompt={prompt:?}"
+        );
+        let loads = potential_loads(&host).await;
+        assert_eq!(
+            loads.iter().map(|load| load.active_requests).sum::<usize>(),
+            1 + usize::from(!query)
+        );
+        assert_eq!(
+            loads
+                .iter()
+                .map(|load| load.potential_prefill_tokens)
+                .sum::<usize>(),
+            16 + if query { 0 } else { 32 - cached }
+        );
+        if let Some(booking) = selection.booking.take() {
+            booking.release().await.unwrap();
+        }
+    }
+    held.booking.take().unwrap().release().await.unwrap();
+    assert!(
+        potential_loads(&host)
+            .await
+            .iter()
+            .all(|load| load.active_requests == 0)
+    );
+    drop(host);
+    runtime.shutdown();
+}
+
 /// A dispatch plane that yields before completing, unlike [`CompletedBuiltinDispatch`].
 /// A recorded worker id therefore means the dispatch survived, not merely started.
 #[derive(Default)]
@@ -2415,11 +2552,7 @@ struct RecordingClassifier {
 
 #[async_trait::async_trait]
 impl RequestClassifier for RecordingClassifier {
-    fn classify(
-        &mut self,
-        request: ClassifyRequest,
-        _workers: WorkerCandidates<'_>,
-    ) -> ClassifyFuture {
+    fn classify(&mut self, request: ClassifyRequest, _workers: &dyn WorkerView) -> ClassifyFuture {
         self.calls.fetch_add(1, Ordering::Relaxed);
         Box::pin(async move { Ok(request) })
     }
@@ -2452,11 +2585,7 @@ struct RejectingClassifier {
 
 #[async_trait::async_trait]
 impl RequestClassifier for RejectingClassifier {
-    fn classify(
-        &mut self,
-        _request: ClassifyRequest,
-        _workers: WorkerCandidates<'_>,
-    ) -> ClassifyFuture {
+    fn classify(&mut self, _request: ClassifyRequest, _workers: &dyn WorkerView) -> ClassifyFuture {
         self.calls.fetch_add(1, Ordering::Relaxed);
         Box::pin(async { Err(Box::new(ClassifierRejected) as Box<ClassifierError>) })
     }
@@ -2526,11 +2655,7 @@ struct TypedRejectingClassifier {
 
 #[async_trait::async_trait]
 impl RequestClassifier for TypedRejectingClassifier {
-    fn classify(
-        &mut self,
-        _request: ClassifyRequest,
-        _workers: WorkerCandidates<'_>,
-    ) -> ClassifyFuture {
+    fn classify(&mut self, _request: ClassifyRequest, _workers: &dyn WorkerView) -> ClassifyFuture {
         self.calls.fetch_add(1, Ordering::Relaxed);
         let error_type = self.error_type;
         Box::pin(async move {
@@ -2729,11 +2854,7 @@ struct PausingClassifier {
 }
 
 impl RequestClassifier for PausingClassifier {
-    fn classify(
-        &mut self,
-        request: ClassifyRequest,
-        _workers: WorkerCandidates<'_>,
-    ) -> ClassifyFuture {
+    fn classify(&mut self, request: ClassifyRequest, _workers: &dyn WorkerView) -> ClassifyFuture {
         let entered = Arc::clone(&self.entered);
         let resumed = Arc::clone(&self.resumed);
         Box::pin(async move {
@@ -3085,20 +3206,13 @@ async fn tracked_admission_without_lifecycle_bypasses_classifier() {
 }
 
 struct TokenContractClassifier {
-    classified: mpsc::UnboundedSender<(
-        usize,
-        dynamo_kv_router::plugins::request_classifier::RequestProgress,
-    )>,
+    classified: mpsc::UnboundedSender<(usize, dynamo_admission::host::RequestProgress)>,
     completed: mpsc::UnboundedSender<usize>,
 }
 
 #[async_trait::async_trait]
 impl RequestClassifier for TokenContractClassifier {
-    fn classify(
-        &mut self,
-        request: ClassifyRequest,
-        _workers: WorkerCandidates<'_>,
-    ) -> ClassifyFuture {
+    fn classify(&mut self, request: ClassifyRequest, _workers: &dyn WorkerView) -> ClassifyFuture {
         self.classified
             .send((request.isl_tokens(), request.progress().clone()))
             .unwrap();
@@ -3228,7 +3342,7 @@ async fn track_request(
 }
 
 /// Scheduler-reported loads with no prompt, the way the reservation tests read them.
-async fn potential_loads(router: &RoutingHost) -> Vec<dynamo_kv_router::protocols::PotentialLoad> {
+async fn potential_loads(router: &RoutingHost) -> Vec<dynamo_scheduler::host::PotentialLoad> {
     router
         .kv_router()
         .get_potential_loads(&[], None, None, None, None)
@@ -3237,7 +3351,7 @@ async fn potential_loads(router: &RoutingHost) -> Vec<dynamo_kv_router::protocol
 }
 
 fn active_requests_for(
-    loads: &[dynamo_kv_router::protocols::PotentialLoad],
+    loads: &[dynamo_scheduler::host::PotentialLoad],
     worker_id: u64,
     dp_rank: u32,
 ) -> usize {
