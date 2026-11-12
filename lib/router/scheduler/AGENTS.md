@@ -21,7 +21,9 @@ Costing, classification, queue placement, readiness and selection share the same
 `QueueEligibility` snapshots. An eligible exclusive soft target supplies the cached
 work and capacity checks; an ineligible target permits fallback within the original
 constraints. Exact pins remain exact. Prepared rows keep main's configuration,
-availability and overload freshness checks; load is read at actor-side selection.
+availability and overload freshness checks. Callers may project loads and fill rows;
+the actor repairs ranks it wrote since, or projects again. Configured reject thresholds
+keep the full load and eligibility pass on the actor.
 
 Affinity lanes wake on target capacity changes, matching arrivals, or a 100 ms
 `AFFINITY_RECHECK_INTERVAL` while affinity backlog exists. This is a recheck cadence,

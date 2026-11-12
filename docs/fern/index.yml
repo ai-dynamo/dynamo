@@ -969,6 +969,9 @@ navigation:
               - page: Cosmos3 Nano Reasoner
                 path: pages/recipes/model-recipes/cosmos3-nano-reasoner.mdx
                 slug: cosmos3-nano-reasoner
+              - page: Cosmos3 Super Reasoner
+                path: pages/recipes/model-recipes/cosmos3-super-reasoner.mdx
+                slug: cosmos3-super-reasoner
               - page: Nemotron 3 Ultra
                 path: pages/recipes/model-recipes/nemotron-3-ultra.mdx
                 slug: nemotron-3-ultra

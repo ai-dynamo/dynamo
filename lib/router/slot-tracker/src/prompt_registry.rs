@@ -142,6 +142,8 @@ struct WorkerLoadTable {
     // slot so the per-request scan streams the same bytes as before and reads capacity only
     // when a pass judges busy thresholds.
     capacities: Vec<WorkerCapacity>,
+    /// Changes whenever a rank is added or removed.
+    version: u64,
 }
 
 impl WorkerLoadTable {
@@ -189,6 +191,7 @@ impl WorkerLoadTable {
             .or_insert_with(|| WorkerLoadSlot::new(WorkerLoadSnapshot::default()));
         if self.entries.len() > before {
             self.capacities.push(WorkerCapacity::default());
+            self.version += 1;
         }
     }
 
@@ -206,6 +209,7 @@ impl WorkerLoadTable {
         } else {
             self.entries.insert(worker, WorkerLoadSlot::new(load));
             self.capacities.push(WorkerCapacity::default());
+            self.version += 1;
         }
     }
 
@@ -213,6 +217,7 @@ impl WorkerLoadTable {
         // `swap_remove` moves the last entry into the hole; mirror it so indices stay aligned.
         if let Some((index, _, _)) = self.entries.swap_remove_full(&worker) {
             self.capacities.swap_remove(index);
+            self.version += 1;
         }
     }
 }
@@ -400,17 +405,19 @@ impl PromptRegistry {
 
     /// Project every registered rank's load for one request into `projections`. With
     /// `full_ranks`, the same pass also judges each rank's projection against the busy
-    /// thresholds it carries and counts the ranks without room per worker.
+    /// thresholds it carries and counts the ranks without room per worker. Returns the
+    /// load table's version, which changes whenever a rank is added or removed.
     pub fn project_worker_loads_into(
         &self,
         token_sequence: Option<&[SequenceHash]>,
         decay_now: Instant,
         projections: &mut FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
         full_ranks: Option<&mut FullRankCounts>,
-    ) {
+    ) -> u64 {
         let query_len = token_sequence.map_or(0, |query| query.len());
         let matched_depth = self.membership.compute_overlap_depths(token_sequence);
         let loads = self.loads.read();
+        let version = loads.version;
         let project = |worker: WorkerWithDpRank, load: WorkerLoadSnapshot| {
             let overlap_depth = matched_depth.get(&worker).copied().unwrap_or(0);
             load.projection(decay_now, query_len.saturating_sub(overlap_depth))
@@ -429,7 +436,7 @@ impl PromptRegistry {
                         .is_some()
                 })
             {
-                return;
+                return version;
             }
 
             projections.clear();
@@ -439,7 +446,7 @@ impl PromptRegistry {
                     .iter()
                     .map(|(worker, load)| (worker, project(worker, load))),
             );
-            return;
+            return version;
         };
 
         // The same two shapes, judging each rank as its projection is written.
@@ -454,7 +461,7 @@ impl PromptRegistry {
                     .is_some()
             });
             if refreshed {
-                return;
+                return version;
             }
             // The in-place pass counted a prefix before the key sets diverged.
             full_ranks.clear();
@@ -467,6 +474,54 @@ impl PromptRegistry {
             full_ranks.record(worker, loads.capacity_at(index), &projection);
             (worker, projection)
         }));
+        version
+    }
+
+    /// Overwrite each of `workers`' entries in `projections` with its entry in
+    /// [`Self::project_worker_loads_into`]. `version` is what that pass returned: false,
+    /// with nothing overwritten, when a rank was added or removed since.
+    pub(super) fn reproject_worker_loads(
+        &self,
+        token_sequence: Option<&[SequenceHash]>,
+        decay_now: Instant,
+        workers: &[WorkerWithDpRank],
+        version: u64,
+        projections: &mut FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
+    ) -> bool {
+        // Each edge on the query's path is matched once for every worker.
+        let additional_active_blocks: Vec<usize> = match token_sequence {
+            Some(query) => {
+                let path = self.membership.overlap_path(query);
+                workers
+                    .iter()
+                    .map(|&worker| query.len().saturating_sub(path.depth_for(worker)))
+                    .collect()
+            }
+            None => vec![0; workers.len()],
+        };
+        let loads = self.loads.read();
+        if loads.version != version {
+            return false;
+        }
+        // NOTE(perf): read every rank before writing any. A slot read ends in a memory
+        // barrier, and `projections` was filled on another thread, so written in the same
+        // loop each cache miss on it would wait for the one before.
+        let reread: Vec<Option<WorkerLoadProjection>> = workers
+            .iter()
+            .zip(additional_active_blocks)
+            .map(|(&worker, additional_active_blocks)| {
+                let load = loads.get(worker)?;
+                Some(load.projection(decay_now, additional_active_blocks))
+            })
+            .collect();
+        drop(loads);
+        for (worker, reread) in workers.iter().zip(reread) {
+            // The ranks are those of the pass, so one it did not project is not registered.
+            if let (Some(reread), Some(projection)) = (reread, projections.get_mut(worker)) {
+                *projection = reread;
+            }
+        }
+        true
     }
 
     pub(super) fn record_full_worker_ranks_at(
