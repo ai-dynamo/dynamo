@@ -10,7 +10,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use super::builder::hosted_picker;
+use super::builder::{check_hint_policies_route_on_kv_path, hosted_picker};
 use crate::kv_router::SelectionPolicySource;
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::plugins::request_classifier::{
@@ -2161,6 +2161,146 @@ async fn router_with_config_and_classifier(
         .override_discovered_instances(worker_ids.clone());
     router.inner.client.override_instance_avail(worker_ids);
     (router, runtime)
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn aggregated_prompt_logprobs_deny_cache_credit_in_selection_and_booking() {
+    let (host, runtime) = router_with_config(
+        None,
+        HashMap::from([
+            (7, ModelRuntimeConfig::default()),
+            (8, ModelRuntimeConfig::default()),
+        ]),
+        KvRouterConfig {
+            skip_initial_worker_wait: true,
+            use_kv_events: false,
+            router_track_active_blocks: false,
+            router_track_prefill_tokens: true,
+            router_temperature: 0.0,
+            overlap_score_credit: 1.0,
+            overlap_score_credit_decay: 0.0,
+            decode_active_request_weight: 0.0,
+            ..Default::default()
+        },
+    )
+    .await;
+    let tokens = (0..32).collect::<Vec<_>>();
+    host.kv_router()
+        .record_routing_decision(
+            TokensWithHashes::new(tokens.clone(), 16),
+            WorkerWithDpRank::new(7, 0),
+        )
+        .await
+        .unwrap();
+    let mut warm = request();
+    warm.token_ids = tokens.clone().into();
+    let warm = Context::new(warm);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let (selection, _) = host
+                .select_with_affinity(
+                    &warm,
+                    RequestPhase::Aggregated,
+                    true,
+                    &CleanupBudget::default(),
+                )
+                .await
+                .unwrap();
+            if selection.cached_tokens == 32 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("recorded prefix becomes visible");
+
+    let mut held = request();
+    held.token_ids = (100..116).collect::<Vec<_>>().into();
+    held.routing_mut().backend_instance_id = Some(7);
+    let held_request = Context::new(held);
+    let (mut held, _) = host
+        .select_with_affinity(
+            &held_request,
+            RequestPhase::Aggregated,
+            false,
+            &CleanupBudget::default(),
+        )
+        .await
+        .unwrap();
+
+    for (phase, prompt, extra, pinned, query, worker, cached) in [
+        (RequestPhase::Aggregated, Some(0), None, false, true, 8, 0),
+        (RequestPhase::Aggregated, Some(1), None, false, false, 8, 0),
+        (
+            RequestPhase::Aggregated,
+            Some(0),
+            Some(serde_json::json!({"sampling_options": {"skip_reading_prefix_cache": false}})),
+            true,
+            false,
+            7,
+            0,
+        ),
+        (RequestPhase::Aggregated, None, None, false, false, 7, 32),
+        (
+            RequestPhase::Aggregated,
+            None,
+            Some(serde_json::json!({"sampling_options": {"skip_reading_prefix_cache": true}})),
+            false,
+            false,
+            7,
+            32,
+        ),
+        (RequestPhase::Decode, Some(1), None, false, false, 7, 32),
+        (RequestPhase::Prefill, Some(1), None, false, false, 7, 32),
+    ] {
+        let mut input = request();
+        input.token_ids = tokens.clone().into();
+        input.output_options.prompt_logprobs = prompt;
+        input.output_options.logprobs = Some(1);
+        input.extra_args = extra;
+        if pinned {
+            input.routing_mut().backend_instance_id = Some(7);
+        }
+        let input = Context::new(input);
+        let (mut selection, _) = host
+            .select_with_affinity(&input, phase, query, &CleanupBudget::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            selection.worker.worker_id, worker,
+            "{phase:?}, prompt={prompt:?}"
+        );
+        assert_eq!(
+            selection.cached_tokens, cached,
+            "{phase:?}, prompt={prompt:?}"
+        );
+        let loads = potential_loads(&host).await;
+        assert_eq!(
+            loads.iter().map(|load| load.active_requests).sum::<usize>(),
+            1 + usize::from(!query)
+        );
+        assert_eq!(
+            loads
+                .iter()
+                .map(|load| load.potential_prefill_tokens)
+                .sum::<usize>(),
+            16 + if query { 0 } else { 32 - cached }
+        );
+        if let Some(booking) = selection.booking.take() {
+            booking.release().await.unwrap();
+        }
+    }
+    held.booking.take().unwrap().release().await.unwrap();
+    assert!(
+        potential_loads(&host)
+            .await
+            .iter()
+            .all(|load| load.active_requests == 0)
+    );
+    drop(host);
+    runtime.shutdown();
 }
 
 /// A dispatch plane that yields before completing, unlike [`CompletedBuiltinDispatch`].
@@ -5776,4 +5916,55 @@ async fn committed_session_lease_lives_as_long_as_the_response_stream() {
     assert_eq!(affinity.query_target(&session_id, None).unwrap(), None);
     drop(router);
     runtime.shutdown();
+}
+
+#[test]
+fn listed_hints_reject_every_non_kv_mode() {
+    use dynamo_kv_router::WorkerType;
+
+    let policy_file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(
+        policy_file.path(),
+        r#"
+worker_selection:
+  aggregated:
+    type: dynamo-default-cost-fn
+    hints:
+      - type: some_hint
+  prefill:
+    type: dynamo-default-cost-fn
+    hints: []
+  decode: dynamo-default-cost-fn
+"#,
+    )
+    .unwrap();
+    let config = KvRouterConfig {
+        router_policy_config: Some(policy_file.path().display().to_string()),
+        ..Default::default()
+    };
+    for mode in [
+        RouterMode::RoundRobin,
+        RouterMode::Random,
+        RouterMode::LeastLoaded,
+        RouterMode::Direct,
+        RouterMode::DeviceAwareWeighted,
+    ] {
+        let error = check_hint_policies_route_on_kv_path(mode, &config, &[WorkerType::Aggregated])
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("the hints in worker_selection.aggregated run only on the KV path"),
+            "{mode:?}: {error}"
+        );
+    }
+    check_hint_policies_route_on_kv_path(RouterMode::KV, &config, &[WorkerType::Aggregated])
+        .unwrap();
+    // An empty list, a bare entry and an unlisted role run only the passive defaults.
+    check_hint_policies_route_on_kv_path(
+        RouterMode::RoundRobin,
+        &config,
+        &[WorkerType::Prefill, WorkerType::Decode, WorkerType::Encode],
+    )
+    .unwrap();
 }

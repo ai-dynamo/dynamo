@@ -526,6 +526,32 @@ impl PromptMembershipTrie {
         matched_depth
     }
 
+    /// `worker`'s entry in [`Self::compute_overlap_depths`], walking only the query's path.
+    pub(super) fn overlap_depth_for(
+        &self,
+        query: &[SequenceHash],
+        worker: WorkerWithDpRank,
+    ) -> usize {
+        let mut depth = 0usize;
+        let mut next_child = query
+            .first()
+            .and_then(|first| self.root.read().children.get(first).cloned());
+        while let Some(child) = next_child.take() {
+            let guard = child.read();
+            let edge_match_len = Self::matching_prefix_len(&guard.edge, &query[depth..]);
+            if !guard.full_edge_workers.contains(&worker) {
+                let cutoff = guard.worker_cutoffs.get(&worker).copied().unwrap_or(0);
+                return depth + cutoff.min(edge_match_len);
+            }
+            depth += edge_match_len;
+            if edge_match_len < guard.edge.len() || depth == query.len() {
+                break;
+            }
+            next_child = guard.children.get(&query[depth]).cloned();
+        }
+        depth
+    }
+
     #[cfg(test)]
     pub(super) fn worker_hashes(&self) -> FxHashMap<WorkerWithDpRank, FxHashSet<SequenceHash>> {
         let mut worker_hashes = FxHashMap::default();
@@ -767,13 +793,16 @@ mod tests {
         let workers = [worker(1, 0), worker(2, 0), worker(2, 1)];
         // Every hash denotes exactly one lineage position. Shared prefixes
         // reuse hashes; branches and unrelated roots use distinct hashes.
+        // Prompts that end inside another prompt's edge leave partial coverage.
         let prompts = [
             vec![1, 2, 3, 4],
             vec![1, 2, 3, 5],
             vec![1, 2, 6],
             vec![1, 7],
+            vec![1, 2],
             vec![8, 9, 10],
             vec![8, 9, 11],
+            vec![8],
             vec![12],
         ];
         let mut active: FxHashMap<WorkerWithDpRank, Vec<Vec<SequenceHash>>> = FxHashMap::default();
@@ -837,11 +866,19 @@ mod tests {
                 .collect();
             assert_eq!(trie.worker_hashes(), expected_hashes, "step {step}");
             for query in &prompts {
+                let expected = expected_depths(&active, query);
                 assert_eq!(
                     trie.compute_overlap_depths(Some(query)),
-                    expected_depths(&active, query),
+                    expected,
                     "step {step}, query {query:?}"
                 );
+                for worker in workers {
+                    assert_eq!(
+                        trie.overlap_depth_for(query, worker),
+                        expected.get(&worker).copied().unwrap_or(0),
+                        "step {step}, query {query:?}, {worker:?}"
+                    );
+                }
             }
         }
     }

@@ -115,6 +115,7 @@ link no catalog and reject a configured policy type at startup.
 |---|---|
 | `default` | Dynamo's built-in selector and cost model. Reserved; always available. |
 | `dynamo-default-cost-fn` | The default cost model with configurable scoring and sampling parameters. |
+| `kvcr` | The default cost model plus credit for the blocks a worker could copy from a peer through a [KV fetch hint](topology-aware-kv-transfer.md#kv-fetch-hints), weighted by `shared_cache_multiplier`. Takes the same parameters as `dynamo-default-cost-fn`. |
 | `thunderagent` | Honors the paired ThunderAgent classifier's worker/rank preference, then falls back to the least-loaded eligible worker. Enable both roles for program-aware admission and repacking; see [Schedule Agents with ThunderAgent](../../../../use-cases/agents/thunderagent-program-scheduler.md#native-frontend-plugin). |
 | `dynamo-two-tier-cost-fn` | Ranks on two tiers instead of one additive cost: active-request load first, then device-KV prefix overlap. Prefers the worker holding the largest prefix overlap unless load is badly imbalanced. Thresholds and selection order ported from the experimental SGLang router's `cache_aware_zmq` policy. Thresholds are tunable; the defaults reproduce it exactly. |
 | `dynamo-sticky-min-load` | Session-sticky least-loaded placement. A session's first request goes to the eligible worker with the fewest active requests; later requests carrying the same `X-Dynamo-Session-ID` return to that worker until it leaves the candidate set. Ignores cache overlap and load once a session is bound. Requests without a session ID go to the least-loaded worker. Inspired by SMG's `manual` policy with `assignment_mode: min_load`. |
@@ -166,7 +167,7 @@ worker_selection:
 Give `prefill` and `decode` their own `type` and `parameters` the same way when those pools need
 tuning; a role without a selection keeps the default selector with its flag-derived parameters.
 
-Explicit parameters take precedence over router flags and environment variables. Omitted parameters inherit their existing values or defaults. The default policy uses `shared_cache_multiplier: 0.5` when shared cache is enabled; an explicit `0` disables shared-cache credit. The same multiplier credits the blocks a worker could fetch from a peer through a [KV fetch hint](topology-aware-kv-transfer.md#kv-fetch-hints), such as from KVCR. Without shared cache it defaults to `0`, so set it to enable that credit. Roles omitted from `worker_selection` keep the default selector.
+Explicit parameters take precedence over router flags and environment variables. Omitted parameters inherit their existing values or defaults. The default policy uses `shared_cache_multiplier: 0.5` when shared cache is enabled; an explicit `0` disables shared-cache credit. The default policy does not credit the blocks a worker could fetch from a peer through a [KV fetch hint](topology-aware-kv-transfer.md#kv-fetch-hints); select `kvcr`, which applies the same multiplier to them. Without shared cache the multiplier defaults to `0`, so set it to enable that credit. Roles omitted from `worker_selection` keep the default selector.
 
 > [!WARNING]
 > The flags below and their environment variables are deprecated for removal in v1.7. They still work and emit a warning. Move their values into the policy’s `parameters` mapping.
@@ -818,8 +819,9 @@ term does not prevent restoring its startup value later.
 Any nonzero device, host, disk, or shared-cache scoring weight requires cache inputs. A
 router that started with those inputs can set device credit to zero while keeping another
 cache tier's scoring weight active. A cache-free router rejects attempts to enable any of
-these weights, without advancing its revision. A nonzero shared-cache multiplier also requires
-KV fetch inputs, so a router that started with a zero multiplier rejects raising it.
+these weights, without advancing its revision. Under `kvcr`, a nonzero shared-cache multiplier
+also requires KV copy inputs, so a router that started `kvcr` with a zero multiplier rejects
+raising it.
 
 Legacy load-only configurations inherit zero effective cache-scoring weights when device
 credit is zero; explicit policy parameters can enable individual tiers at startup. Plain
