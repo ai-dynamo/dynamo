@@ -20,6 +20,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use tracing::Instrument;
 use tracing::info_span;
+use velo::streaming::ByteItemBuilder;
 
 /// Metrics configuration for profiling work handlers
 #[derive(Clone, Debug)]
@@ -146,6 +147,17 @@ impl Drop for RequestMetricsGuard {
 
 trait ResponsePublisher {
     async fn send(&self, payload: Bytes) -> anyhow::Result<()>;
+
+    /// An empty item to encode the next frame into, when this publisher sends
+    /// one as it is ([`Self::send_item`]) rather than copying the bytes given
+    /// to [`Self::send`] into a frame of its own.
+    fn new_item(&self) -> Option<ByteItemBuilder> {
+        None
+    }
+    async fn send_item(&self, _item: ByteItemBuilder) -> anyhow::Result<()> {
+        anyhow::bail!("this response transport does not take prebuilt items")
+    }
+
     async fn send_prologue(&mut self, error: Option<String>) -> anyhow::Result<()>;
 
     /// Send a failure prologue keeping the worker's [`crate::error::ErrorType`]
@@ -171,9 +183,37 @@ trait ResponsePublisher {
     }
 }
 
+/// One encoded response frame, in the form its publisher sends.
+enum ResponsePayload {
+    Bytes(Bytes),
+    Item(ByteItemBuilder),
+}
+
+impl ResponsePayload {
+    fn len(&self) -> usize {
+        match self {
+            Self::Bytes(bytes) => bytes.len(),
+            Self::Item(item) => item.payload().len(),
+        }
+    }
+
+    async fn publish(self, publisher: &impl ResponsePublisher) -> anyhow::Result<()> {
+        match self {
+            Self::Bytes(bytes) => publisher.send(bytes).await,
+            Self::Item(item) => publisher.send_item(item).await,
+        }
+    }
+}
+
 impl ResponsePublisher for velo_response::VeloResponseSender {
     async fn send(&self, payload: Bytes) -> anyhow::Result<()> {
         velo_response::VeloResponseSender::send(self, payload).await
+    }
+    fn new_item(&self) -> Option<ByteItemBuilder> {
+        Some(velo_response::VeloResponseSender::new_item(self))
+    }
+    async fn send_item(&self, item: ByteItemBuilder) -> anyhow::Result<()> {
+        velo_response::VeloResponseSender::send_item(self, item).await
     }
     async fn send_prologue(&mut self, error: Option<String>) -> anyhow::Result<()> {
         velo_response::VeloResponseSender::send_prologue(
@@ -275,6 +315,35 @@ where
     Resp: PipelineIO,
     Adapter: Send + Sync + 'static,
 {
+    /// Encode the complete-final frame for `publisher`: into an item it sends
+    /// as it is, when it takes one, or else as bytes.
+    ///
+    /// [`Self::pump_response_stream`] encodes each response chunk inline the
+    /// same way. A helper's future would first move each ~1 KB response into
+    /// itself.
+    async fn encode_final_frame<U>(
+        &self,
+        publisher: &impl ResponsePublisher,
+        payload_codec: RequestPlanePayloadCodec,
+    ) -> Result<EncodedResponseFrame<ResponsePayload>, PipelineError>
+    where
+        U: Data,
+        Adapter: IngressResponseEncoder<U>,
+    {
+        if let Some(mut item) = publisher.new_item() {
+            let frame = self
+                .payload_adapter
+                .encode_response_into(payload_codec, None::<U>, true, item.buffer())
+                .await?;
+            return Ok(frame.map(|()| ResponsePayload::Item(item)));
+        }
+        let frame = self
+            .payload_adapter
+            .encode_response(payload_codec, None::<U>, true)
+            .await?;
+        Ok(frame.map(ResponsePayload::Bytes))
+    }
+
     /// Pump every chunk from the engine's response stream out to the
     /// upstream response transport, plus the terminal complete-final
     /// frame. Captures the per-frame metrics, the publish-failure error
@@ -304,11 +373,20 @@ where
             let _nvtx_chunk = dynamo_nvtx_range!("worker.egress.chunk");
             tracing::trace!("Sending response: {:?}", resp);
             let nvtx_encode = dynamo_nvtx_range!("worker.egress.encode");
-            let encoded = match self
-                .payload_adapter
-                .encode_response(payload_codec, Some(resp), false)
-                .await
-            {
+            // Inline, not a helper: its future would first move each ~1 KB response into itself.
+            let frame = match publisher.new_item() {
+                Some(mut item) => self
+                    .payload_adapter
+                    .encode_response_into(payload_codec, Some(resp), false, item.buffer())
+                    .await
+                    .map(|frame| frame.map(|()| ResponsePayload::Item(item))),
+                None => self
+                    .payload_adapter
+                    .encode_response(payload_codec, Some(resp), false)
+                    .await
+                    .map(|frame| frame.map(ResponsePayload::Bytes)),
+            };
+            let encoded = match frame {
                 Ok(encoded) => encoded,
                 Err(err) => {
                     tracing::error!(%err, "failed to encode request-plane response");
@@ -330,12 +408,12 @@ where
             if !is_error && let Some(notifier) = self.endpoint_health_check_notifier.get() {
                 notifier.notify_one();
             }
-            let resp_bytes = encoded.bytes;
+            let payload = encoded.bytes;
             if let Some(m) = self.metrics() {
-                m.response_bytes.inc_by(resp_bytes.len() as u64);
+                m.response_bytes.inc_by(payload.len() as u64);
             }
             let nvtx_publish = dynamo_nvtx_range!("worker.egress.publish");
-            let publish_result = publisher.send(resp_bytes).await;
+            let publish_result = payload.publish(publisher).await;
             drop(nvtx_publish);
             if let Err(send_err) = publish_result {
                 send_complete_final = false;
@@ -386,11 +464,7 @@ where
             send_complete_final = false;
         }
         if send_complete_final {
-            let encoded = match self
-                .payload_adapter
-                .encode_response(payload_codec, None, true)
-                .await
-            {
+            let encoded = match self.encode_final_frame::<U>(publisher, payload_codec).await {
                 Ok(encoded) => encoded,
                 Err(err) => {
                     tracing::error!(%err, "failed to encode request-plane final response");
@@ -402,11 +476,11 @@ where
                     return;
                 }
             };
-            let resp_bytes = encoded.bytes;
+            let payload = encoded.bytes;
             if let Some(m) = self.metrics() {
-                m.response_bytes.inc_by(resp_bytes.len() as u64);
+                m.response_bytes.inc_by(payload.len() as u64);
             }
-            if (publisher.send(resp_bytes).await).is_err() {
+            if payload.publish(publisher).await.is_err() {
                 // `is_stopped()` is `state != Live`, so it is also true after
                 // `kill()` — which the response-stream reader does on a TCP read
                 // error. Excluding killed narrows this to `state == Stopped` so

@@ -43,6 +43,8 @@ pub struct AnthropicStreamConverter {
     // falls back to counting output deltas so that every `content_block_delta`
     // still carries a non-zero output-token estimate.
     saw_backend_usage: bool,
+    // Highest usage stamped on the wire; no later event carries less.
+    published: AnthropicUsage,
     // Tool call tracking
     tool_call_states: Vec<ToolCallState>,
     // The chat completion id, from the first chunk; `tool_use` ids derive from it.
@@ -113,6 +115,7 @@ impl AnthropicStreamConverter {
                 ..Default::default()
             },
             saw_backend_usage: false,
+            published: AnthropicUsage::default(),
             tool_call_states: Vec::new(),
             chat_id: String::new(),
             pending_text: Vec::new(),
@@ -417,10 +420,10 @@ impl AnthropicStreamConverter {
         for (event_type, event, usage_override) in self.drain_buffered_tool_events(is_final) {
             // Route through serialize_event so tool-argument `content_block_delta`
             // chunks also carry the per-chunk usage triple. Fragments carry the
-            // snapshot taken when their chunk was processed; everything else uses
-            // the current usage.
-            let usage = usage_override.as_ref().unwrap_or(&self.usage);
-            events.push(self.serialize_event_with_usage(event_type, &event, usage));
+            // snapshot taken when their chunk was processed, raised to the usage
+            // already on the wire; everything else uses the current usage.
+            let usage = usage_override.unwrap_or_else(|| self.usage.clone());
+            events.push(self.serialize_event_with_usage(event_type, &event, &usage));
         }
     }
 
@@ -444,7 +447,7 @@ impl AnthropicStreamConverter {
     }
 
     /// Serialize an event to SSE, stamping the current cumulative `usage` onto
-    /// every `content_block_delta`.
+    /// every `content_block_delta` and `ping`.
     ///
     /// Anthropic's native protocol only reports usage on `message_start` and the
     /// terminal `message_delta`, so a proxy that reads the stream for live
@@ -454,22 +457,33 @@ impl AnthropicStreamConverter {
     /// This is a Dynamo extension to the wire format (the field is additive;
     /// spec-compliant clients ignore unknown fields).
     fn serialize_event(
-        &self,
+        &mut self,
         event_type: &'static str,
         event: &AnthropicStreamEvent,
     ) -> Result<Event, anyhow::Error> {
-        self.serialize_event_with_usage(event_type, event, &self.usage)
+        let usage = self.usage.clone();
+        self.serialize_event_with_usage(event_type, event, &usage)
     }
 
     /// Like `serialize_event` but stamps an explicit `usage` onto the
     /// `content_block_delta`. Used to replay buffered tool-argument fragments
     /// with the usage snapshot from their own chunk (see `record_tool_call`).
     fn serialize_event_with_usage(
-        &self,
+        &mut self,
         event_type: &'static str,
         event: &AnthropicStreamEvent,
         usage: &AnthropicUsage,
     ) -> Result<Event, anyhow::Error> {
+        // Never lower the usage already on the wire: a buffered fragment
+        // carries the older snapshot of its own chunk.
+        if carries_usage(event) && usage.output_tokens > self.published.output_tokens {
+            self.published = usage.clone();
+        }
+        let usage = if usage.output_tokens < self.published.output_tokens {
+            &self.published
+        } else {
+            usage
+        };
         let value = event_json_with_usage(event, usage)?;
         Ok(Event::default()
             .event(event_type)
@@ -549,6 +563,7 @@ impl AnthropicStreamConverter {
                         &choice.delta.content,
                         Some(ChatCompletionMessageContent::Text(t)) if !t.is_empty()
                     )
+                    || choice.delta.refusal.as_ref().is_some_and(|r| !r.is_empty())
                     || choice
                         .delta
                         .tool_calls
@@ -619,8 +634,12 @@ impl AnthropicStreamConverter {
                 _ => None,
             };
 
-            if let Some(text) = content_text
-                && !text.is_empty()
+            // Anthropic Messages has no refusal block, so dedicated refusal
+            // text streams as text_delta after this chunk's content text.
+            for text in [content_text, delta.refusal.as_deref()]
+                .into_iter()
+                .flatten()
+                .filter(|text| !text.is_empty())
             {
                 // Close thinking block before text starts (Anthropic spec: thinking → text → tool_use)
                 if self.thinking_block_started && !self.thinking_block_closed {
@@ -732,6 +751,23 @@ impl AnthropicStreamConverter {
         {
             self.append_buffered_tool_events(events, false);
         }
+        // A held tool call, and text after it, emits no delta until the call
+        // completes, so publish its usage on a `ping` instead.
+        self.append_usage_ping(events, 1);
+    }
+
+    /// Publish usage on a `ping` when the wire lags the generated tokens by more
+    /// than `tolerance`. While streaming, one token is the detokenizer's usual
+    /// hold-back, which the next delta publishes.
+    fn append_usage_ping(
+        &mut self,
+        events: &mut Vec<Result<Event, anyhow::Error>>,
+        tolerance: u32,
+    ) {
+        if self.usage.output_tokens > self.published.output_tokens + tolerance {
+            let ping = self.serialize_event("ping", &AnthropicStreamEvent::Ping {});
+            events.push(ping);
+        }
     }
 
     /// Emit the final events when the stream ends.
@@ -779,7 +815,7 @@ impl AnthropicStreamConverter {
             },
             usage: self.usage.clone(),
         };
-        events.push(make_message_delta_sse_event(&message_delta));
+        events.push(make_sse_event("message_delta", &message_delta));
 
         // Emit message_stop
         let message_stop = AnthropicStreamEvent::MessageStop {};
@@ -810,6 +846,9 @@ impl AnthropicStreamConverter {
         events: &mut Vec<Result<Event, anyhow::Error>>,
         error: AnthropicErrorBody,
     ) {
+        // `error` carries no usage and no delta follows it, so publish the
+        // tokens the one-token tolerance held back.
+        self.append_usage_ping(events, 0);
         let error_event = AnthropicStreamEvent::Error { error };
         events.push(make_sse_event("error", &error_event));
     }
@@ -869,21 +908,17 @@ fn make_sse_event(event_type: &str, event: &AnthropicStreamEvent) -> Result<Even
     Ok(Event::default().event(event_type).data(data))
 }
 
-/// Serialize `message_delta` with the `delta.stop_sequence: null` Anthropic sends but
-/// `dynamo-protocols` skips. Remove once the upstream type stops skipping it.
-fn make_message_delta_sse_event(event: &AnthropicStreamEvent) -> Result<Event, anyhow::Error> {
-    let mut value = serde_json::to_value(event)?;
-    if let Some(serde_json::Value::Object(delta)) = value.get_mut("delta") {
-        delta
-            .entry("stop_sequence")
-            .or_insert(serde_json::Value::Null);
-    }
-    let data = serde_json::to_string(&value)?;
-    Ok(Event::default().event("message_delta").data(data))
+/// Whether `event_json_with_usage` stamps a `usage` triple onto `event`.
+fn carries_usage(event: &AnthropicStreamEvent) -> bool {
+    matches!(
+        event,
+        AnthropicStreamEvent::ContentBlockDelta { .. } | AnthropicStreamEvent::Ping {}
+    )
 }
 
 /// Serialize an Anthropic stream event to JSON, injecting a `usage` triple onto
-/// `content_block_delta` events (and leaving every other event untouched).
+/// `content_block_delta` and `ping` events (and leaving every other event
+/// untouched).
 ///
 /// `dynamo-protocols`'s `AnthropicStreamEvent::ContentBlockDelta` has no `usage`
 /// field — the type is an external crate we don't own — so the field is added at
@@ -903,8 +938,8 @@ fn event_json_with_usage(
     usage: &AnthropicUsage,
 ) -> Result<serde_json::Value, anyhow::Error> {
     let mut value = serde_json::to_value(event)?;
-    if let (AnthropicStreamEvent::ContentBlockDelta { .. }, serde_json::Value::Object(map)) =
-        (event, &mut value)
+    if carries_usage(event)
+        && let serde_json::Value::Object(map) = &mut value
     {
         let mut usage_value = serde_json::to_value(usage)?;
         if let serde_json::Value::Object(usage_map) = &mut usage_value {
@@ -1005,8 +1040,12 @@ impl AnthropicStreamConverter {
                 _ => None,
             };
 
-            if let Some(text) = content_text
-                && !text.is_empty()
+            // Anthropic Messages has no refusal block, so dedicated refusal
+            // text streams as text_delta after this chunk's content text.
+            for text in [content_text, delta.refusal.as_deref()]
+                .into_iter()
+                .flatten()
+                .filter(|text| !text.is_empty())
             {
                 // Close thinking block before text starts
                 if self.thinking_block_started && !self.thinking_block_closed {
@@ -1273,6 +1312,16 @@ mod tests {
             .collect()
     }
 
+    /// Like `sse_values`, without the usage `ping`s that a held call publishes;
+    /// they carry no content.
+    async fn content_values(events: Vec<Result<Event, anyhow::Error>>) -> Vec<serde_json::Value> {
+        sse_values(events)
+            .await
+            .into_iter()
+            .filter(|value| value["type"] != "ping")
+            .collect()
+    }
+
     #[rstest::rstest]
     #[case(false)]
     #[case(true)]
@@ -1284,12 +1333,13 @@ mod tests {
 
         let mut conv = AnthropicStreamConverter::new("test-model".into(), 5);
         assert!(
-            conv.process_chunk(&tool_call_chunk(
+            content_values(conv.process_chunk(&tool_call_chunk(
                 0,
                 (!late_identity).then_some("call_a"),
                 (!late_identity).then_some("read_a"),
                 Some("{\"path\":")
-            ))
+            )))
+            .await
             .is_empty()
         );
         let mut second = tool_call_chunk(1, Some("call_b"), Some("read_b"), Some("{}"));
@@ -1298,7 +1348,7 @@ mod tests {
             tool_index: 1,
             complete: true,
         });
-        assert!(conv.process_chunk(&second).is_empty());
+        assert!(content_values(conv.process_chunk(&second)).await.is_empty());
 
         let mut completion = text_chunk("");
         completion.inner.choices.clear();
@@ -1307,13 +1357,21 @@ mod tests {
             tool_index: 0,
             complete: true,
         });
-        assert!(conv.process_chunk(&completion).is_empty());
+        assert!(
+            content_values(conv.process_chunk(&completion))
+                .await
+                .is_empty()
+        );
         let mut repeated_second = completion.clone();
         repeated_second.tool_call_completion[0].tool_index = 1;
-        assert!(conv.process_chunk(&repeated_second).is_empty());
+        assert!(
+            content_values(conv.process_chunk(&repeated_second))
+                .await
+                .is_empty()
+        );
         let mut events = conv.process_chunk(&tool_call_chunk(0, None, None, Some("\"/a\"}")));
         if late_identity {
-            assert!(events.is_empty());
+            assert!(content_values(events).await.is_empty());
             events = conv.process_chunk(&tool_call_chunk(0, Some("call_a"), Some("read_a"), None));
         }
         let values = sse_values(events).await;
@@ -1343,11 +1401,18 @@ mod tests {
                 .iter()
                 .filter_map(|v| v["usage"]["output_tokens"].as_u64())
                 .collect::<Vec<_>>(),
-            [1, 3, 2]
+            // A ping published 2 while the calls were held, so no fragment
+            // carries less.
+            [2, 3, 3]
         );
-        assert!(conv.process_chunk(&completion).is_empty());
         assert!(
-            conv.process_chunk(&finish_chunk(FinishReason::ToolCalls))
+            content_values(conv.process_chunk(&completion))
+                .await
+                .is_empty()
+        );
+        assert!(
+            content_values(conv.process_chunk(&finish_chunk(FinishReason::ToolCalls)))
+                .await
                 .is_empty()
         );
     }
@@ -1487,7 +1552,7 @@ mod tests {
             );
             let first =
                 tool_call_chunk(0, Some("call_a"), Some("read_a"), (!single).then_some("{}"));
-            assert!(conv.process_chunk(&first).is_empty());
+            assert!(content_values(conv.process_chunk(&first)).await.is_empty());
             let mut completion = text_chunk("");
             completion.inner.choices.clear();
             completion.tool_call_completion.push(ToolCallCompletion {
@@ -1495,18 +1560,22 @@ mod tests {
                 tool_index: 0,
                 complete: true,
             });
-            assert!(conv.process_chunk(&completion).is_empty());
+            assert!(
+                content_values(conv.process_chunk(&completion))
+                    .await
+                    .is_empty()
+            );
             completion.tool_call_completion[0].choice_index = 0;
-            let values = sse_values(conv.process_chunk(&completion)).await;
+            let values = content_values(conv.process_chunk(&completion)).await;
             assert_eq!(values.len(), if single { 0 } else { 3 });
             if !single {
                 assert_eq!(values[0]["content_block"]["name"], "read_a");
             }
 
             let second = tool_call_chunk(1, Some("call_b"), Some("read_b"), Some("{}"));
-            assert!(conv.process_chunk(&second).is_empty());
+            assert!(content_values(conv.process_chunk(&second)).await.is_empty());
             let values =
-                sse_values(conv.process_chunk(&finish_chunk(FinishReason::ToolCalls))).await;
+                content_values(conv.process_chunk(&finish_chunk(FinishReason::ToolCalls))).await;
             assert_eq!(values.len(), if single { 0 } else { 3 });
             let final_values = sse_values(conv.emit_end_events()).await;
             assert_eq!(
@@ -1527,6 +1596,7 @@ mod tests {
         }
     }
 
+    /// Terminal events include an explicit null or the matched stop string, exactly once.
     #[tokio::test]
     async fn test_stream_stop_sequence_metadata() {
         // `matched` is the backend's `nvext.stop_reason`; `None` sends no nvext.
@@ -1703,7 +1773,7 @@ mod tests {
             finish_chunk(reason),
         ] {
             conv.append_chunk_events(&chunk, &mut events);
-            assert!(events.is_empty());
+            assert!(content_values(std::mem::take(&mut events)).await.is_empty());
         }
 
         conv.append_chunk_events(
@@ -1746,13 +1816,17 @@ mod tests {
                 .iter()
                 .map(|v| v["usage"]["output_tokens"].as_u64().unwrap())
                 .collect::<Vec<_>>(),
-            [1, 2, 3, 4]
+            // A ping published 2 while the call was held.
+            [2, 2, 3, 4]
         );
 
         let mut events = Vec::new();
         conv.append_chunk_events(&finish_chunk(reason), &mut events);
         conv.append_chunk_events(&usage_chunk(5, None, 9), &mut events);
-        assert!(events.is_empty());
+        let ping = sse_values(std::mem::take(&mut events)).await;
+        assert_eq!(ping.len(), 1);
+        assert_eq!(ping[0]["type"], "ping");
+        assert_eq!(ping[0]["usage"]["output_tokens"], 9);
         conv.append_end_events(&mut events);
         let values = sse_values(events).await;
         assert_eq!(values.len(), 2);
@@ -1843,9 +1917,9 @@ mod tests {
             &tool_call_chunk(1, Some("call_1"), Some("second"), Some("{}")),
             &mut events,
         );
-        assert!(events.is_empty());
+        assert!(content_values(std::mem::take(&mut events)).await.is_empty());
         conv.append_chunk_events(&finish_chunk(FinishReason::ToolCalls), &mut events);
-        let first_flush = sse_values(events).await;
+        let first_flush = content_values(events).await;
         let second_emits = !disable_parallel_tool_use || delayed_identity;
         if second_emits {
             assert_eq!(first_flush.len(), 3);
@@ -1863,7 +1937,7 @@ mod tests {
             tool_call_chunk(0, None, None, Some("\"/tmp/example.txt\"}"))
         };
         conv.append_chunk_events(&completion, &mut events);
-        let late_flush = sse_values(events).await;
+        let late_flush = content_values(events).await;
         if disable_parallel_tool_use && second_emits {
             assert!(late_flush.is_empty());
         } else {
@@ -1908,13 +1982,18 @@ mod tests {
             &mut events,
         );
         conv.append_chunk_events(&finish_chunk(FinishReason::ToolCalls), &mut events);
-        assert_eq!(events.len(), if has_complete_call { 3 } else { 0 });
-        events.clear();
+        assert_eq!(
+            content_values(std::mem::take(&mut events)).await.len(),
+            if has_complete_call { 3 } else { 0 }
+        );
         if backend_error {
             conv.append_error_events(&mut events);
             let terminal = sse_values(events).await;
-            assert_eq!(terminal.len(), 1);
-            assert_eq!(terminal[0]["type"], "error");
+            assert_eq!(terminal.len(), 2);
+            // The held call's estimated token reaches the wire before `error`.
+            assert_eq!(terminal[0]["type"], "ping");
+            assert_eq!(terminal[0]["usage"]["output_tokens"], 1);
+            assert_eq!(terminal[1]["type"], "error");
         } else {
             conv.append_end_events(&mut events);
             let terminal = sse_values(events).await;
@@ -2144,10 +2223,10 @@ mod tests {
         // Exercise the production chunk path rather than its tagged test mirror.
         let mut events = Vec::new();
         conv.append_chunk_events(&usage_chunk(12, Some(11), 5), &mut events);
-        // A usage-only chunk carries no content deltas, so it emits no SSE
-        // events; the reconciled usage is stamped onto subsequent token chunks
-        // and the terminal message_delta.
-        assert!(events.is_empty(), "usage-only chunk emits no SSE events");
+        // A usage-only chunk carries no content deltas, so its tokens go out on
+        // a `ping`; the reconciled usage is also stamped onto subsequent token
+        // chunks and the terminal message_delta.
+        assert_eq!(events.len(), 1, "usage-only chunk emits only a usage ping");
         assert_eq!(conv.usage.input_tokens, 1);
         assert_eq!(conv.usage.cache_read_input_tokens, Some(11));
         assert_eq!(conv.usage.cache_creation_input_tokens, Some(0));
@@ -2166,6 +2245,81 @@ mod tests {
                 assert_eq!(usage.output_tokens, 5);
             }
             other => panic!("expected MessageDelta, got {other:?}"),
+        }
+    }
+
+    /// Streaming usage reports cache writes as `cache_creation_input_tokens` (zero when
+    /// absent), excluded from `input_tokens`; `total_tokens` stays prompt plus completion.
+    #[tokio::test]
+    async fn test_stream_usage_defaults_and_preserves_cache_write_tokens() {
+        use dynamo_protocols::types::PromptTokensDetails;
+
+        // (details, input_tokens, cache_read_input_tokens, cache_creation_input_tokens)
+        for (prompt_tokens_details, expected_input, expected_read, expected_write) in [
+            (None, 13, None, 0),
+            (
+                Some(PromptTokensDetails {
+                    cached_tokens: Some(3),
+                    ..Default::default()
+                }),
+                10,
+                Some(3),
+                0,
+            ),
+            (
+                Some(PromptTokensDetails {
+                    cached_tokens: Some(3),
+                    cache_write_tokens: Some(7),
+                    ..Default::default()
+                }),
+                3,
+                Some(3),
+                7,
+            ),
+        ] {
+            let mut conv = AnthropicStreamConverter::new("test-model".into(), 19);
+            let mut chunk = text_chunk("hi");
+            chunk.inner.usage = usage_chunk(13, None, 2).inner.usage;
+            chunk
+                .inner
+                .usage
+                .as_mut()
+                .expect("usage_chunk sets usage")
+                .prompt_tokens_details = prompt_tokens_details;
+            let mut events = Vec::new();
+            conv.append_chunk_events(&chunk, &mut events);
+
+            let values = sse_values(events).await;
+            let delta = values
+                .iter()
+                .find(|v| v["type"] == "content_block_delta")
+                .expect("content_block_delta present");
+            assert_eq!(delta["usage"]["input_tokens"], expected_input);
+            assert_eq!(
+                delta["usage"]["cache_read_input_tokens"],
+                serde_json::json!(expected_read)
+            );
+            assert_eq!(
+                delta["usage"]["cache_creation_input_tokens"],
+                expected_write
+            );
+            assert_eq!(delta["usage"]["total_tokens"], 13 + 2);
+
+            let end = sse_values(conv.emit_end_events()).await;
+            let message_delta = end
+                .iter()
+                .find(|v| v["type"] == "message_delta")
+                .expect("message_delta present");
+            assert_eq!(message_delta["usage"]["input_tokens"], expected_input);
+            assert_eq!(
+                message_delta["usage"]["cache_read_input_tokens"],
+                serde_json::json!(expected_read)
+            );
+            assert_eq!(
+                message_delta["usage"]["cache_creation_input_tokens"],
+                expected_write
+            );
+            assert_eq!(message_delta["usage"]["output_tokens"], 2);
         }
     }
 
@@ -2734,10 +2888,11 @@ mod tests {
             &mut sink,
         );
         conv.append_chunk_events(&tool_call_chunk(0, None, None, Some(".txt\"}")), &mut sink);
-        // Tool blocks are buffered until a finish/EOF flush, so nothing is
-        // emitted per chunk.
-        assert!(
-            sink.is_empty(),
+        // Tool blocks are buffered until a finish/EOF flush, so only a usage
+        // `ping` is emitted once the wire lags by more than one token.
+        assert_eq!(
+            sink.len(),
+            1,
             "tool blocks are buffered, not emitted per chunk"
         );
         // Fallback counted one token per tool-call chunk.
@@ -2766,6 +2921,95 @@ mod tests {
             fragment_outputs,
             vec![1, 2],
             "each fragment stamps the cumulative output count as of its own chunk"
+        );
+    }
+
+    /// A held tool call emits no delta, so its usage goes out on a `ping` once
+    /// the wire lags by more than one token. After the block flushes with its
+    /// per-fragment snapshots, a `ping` restores the latest usage on the wire.
+    #[tokio::test]
+    async fn test_usage_ping_publishes_held_tool_call_usage() {
+        let with_usage = |mut chunk: NvCreateChatCompletionStreamResponse, output| {
+            chunk.inner.usage = usage_chunk(10, None, output).inner.usage;
+            chunk
+        };
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 5);
+        let mut events = Vec::new();
+
+        let first = tool_call_chunk(0, Some("call-1"), Some("Read"), Some("{\"path\":"));
+        conv.append_chunk_events(&with_usage(first, 1), &mut events);
+        assert!(
+            events.is_empty(),
+            "the call is held and one token of lag is tolerated"
+        );
+        let second = tool_call_chunk(0, None, None, Some("\"/a\"}"));
+        conv.append_chunk_events(&with_usage(second, 2), &mut events);
+        // A usage-only chunk that adds no tokens must not ping again.
+        conv.append_chunk_events(&usage_chunk(10, None, 2), &mut events);
+        assert_eq!(
+            sse_values(std::mem::take(&mut events)).await,
+            vec![
+                serde_json::json!({"type": "ping", "usage": {"input_tokens": 10,
+                "output_tokens": 2, "cache_creation_input_tokens": 0, "total_tokens": 12}})
+            ],
+            "one ping, not repeated while usage is unchanged"
+        );
+
+        let finish = with_usage(finish_chunk(FinishReason::ToolCalls), 5);
+        conv.append_chunk_events(&finish, &mut events);
+        let outputs: Vec<_> = sse_values(events)
+            .await
+            .iter()
+            .filter_map(|value| Some((value["type"].as_str()?.to_owned(), value.get("usage")?)))
+            .map(|(kind, usage)| (kind, usage["output_tokens"].as_u64().unwrap()))
+            .collect();
+        assert_eq!(
+            outputs,
+            [
+                ("content_block_delta".to_owned(), 2),
+                ("content_block_delta".to_owned(), 2),
+                ("ping".to_owned(), 5),
+            ],
+            "fragments older than the ping never lower the usage on the wire"
+        );
+    }
+
+    /// `error` carries no usage, so a backend error first publishes on a `ping`
+    /// the tokens generated since the wire's last usage, even within the
+    /// one-token tolerance that a later delta would otherwise cover.
+    #[tokio::test]
+    async fn test_error_publishes_usage_within_ping_tolerance() {
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 5);
+        let mut events = Vec::new();
+        for (output, arguments) in [(1, "{\"path\":"), (2, "\"/a\""), (3, "}")] {
+            let first = output == 1;
+            let mut chunk = tool_call_chunk(
+                0,
+                first.then_some("call-1"),
+                first.then_some("Read"),
+                Some(arguments),
+            );
+            chunk.inner.usage = usage_chunk(10, None, output).inner.usage;
+            conv.append_chunk_events(&chunk, &mut events);
+        }
+        conv.append_error_events(&mut events);
+        let wire: Vec<_> = sse_values(events)
+            .await
+            .iter()
+            .map(|value| {
+                (
+                    value["type"].as_str().unwrap().to_owned(),
+                    value["usage"]["output_tokens"].as_u64(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            wire,
+            [
+                ("ping".to_owned(), Some(2)),
+                ("ping".to_owned(), Some(3)),
+                ("error".to_owned(), None),
+            ]
         );
     }
 
@@ -2836,6 +3080,54 @@ mod tests {
             AnthropicStreamEvent::ContentBlockStop { index } => assert_eq!(*index, 0),
             other => panic!("expected text stop at index 0, got {other:?}"),
         }
+    }
+
+    /// Dedicated `refusal` fragments stream as `text_delta` events on the text
+    /// block, after the same chunk's content; empty refusals emit nothing.
+    #[tokio::test]
+    async fn test_refusal_streams_as_text_deltas() {
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
+
+        let mut mixed = text_chunk("Pong.");
+        mixed.inner.choices[0].delta.refusal = Some("I cannot ".into());
+        let mut refusal_only = text_chunk("");
+        refusal_only.inner.choices[0].delta.content = None;
+        refusal_only.inner.choices[0].delta.refusal = Some("help with that.".into());
+        let mut empty_refusal = text_chunk("");
+        empty_refusal.inner.choices[0].delta.content = None;
+        empty_refusal.inner.choices[0].delta.refusal = Some(String::new());
+
+        let mut events = conv.process_chunk(&mixed);
+        events.extend(conv.process_chunk(&refusal_only));
+        let before_empty = events.len();
+        events.extend(conv.process_chunk(&empty_refusal));
+        assert_eq!(
+            events.len(),
+            before_empty,
+            "empty refusal must emit nothing"
+        );
+        assert_eq!(conv.usage.output_tokens, 2);
+
+        let values = sse_values(events).await;
+        assert_eq!(values[0]["type"], "content_block_start");
+        assert_eq!(values[0]["index"], 0);
+        assert_eq!(values[0]["content_block"]["type"], "text");
+        let deltas: Vec<(&serde_json::Value, &str)> = values[1..]
+            .iter()
+            .map(|value| {
+                assert_eq!(value["type"], "content_block_delta");
+                assert_eq!(value["delta"]["type"], "text_delta");
+                (&value["index"], value["delta"]["text"].as_str().unwrap())
+            })
+            .collect();
+        assert_eq!(
+            deltas,
+            vec![
+                (&serde_json::json!(0), "Pong."),
+                (&serde_json::json!(0), "I cannot "),
+                (&serde_json::json!(0), "help with that."),
+            ]
+        );
     }
 
     fn reasoning_chunk(text: &str) -> NvCreateChatCompletionStreamResponse {
