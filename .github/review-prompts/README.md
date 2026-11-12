@@ -53,3 +53,15 @@ Keep these prompts in plain English and usable directly when updating them. Add 
 concern when multiple source discussions substantiate it, retain
 the concrete behavioral distinction, and avoid turning a historical fix into an
 unconditional requirement for unrelated changes.
+
+## Metrics review prompt
+
+The [metrics](../../.ai/metrics-review.md) prompt lives with the agent guidelines in
+`.ai/` because it applies across codeowner areas and review tools. It applies the
+[metrics guidelines](../../.ai/metrics-guidelines.md) to the metrics, log events, and
+trace spans that a change adds or modifies, in any area of the repository. Its checks
+come from that written policy rather than from review history, and each one cites the
+guideline rule it enforces. The guideline owns the rules: change a rule there first,
+then update the check that cites it. The prompt also defines what a finding must
+contain, so that each one names the correction, and it keeps questions that only the
+author can answer, such as a metric's reader, separate from defects.

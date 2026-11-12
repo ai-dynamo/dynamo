@@ -48,9 +48,10 @@ fn unary(params: &ResponseParams, name: &str, args: &str) -> anyhow::Result<NvRe
     chat_completion_to_response(response, params, None)
 }
 
-/// Only allowed declarations reach a legacy template.
+/// `allowed_tools` narrows the backend tools; a legacy template still renders
+/// every declared tool.
 #[test]
-fn allowed_tools_filter_legacy_prompt() {
+fn allowed_tools_keep_declared_catalog_in_legacy_prompt() {
     let req: NvCreateResponse = serde_json::from_value(json!({"model":"m","input":"hi",
         "tools":[func("alpha"), func("beta")],
         "tool_choice":{"type":"allowed_tools","mode":"auto","tools":[{"type":"function","name":"alpha"}]}}))
@@ -69,9 +70,10 @@ fn allowed_tools_filter_legacy_prompt() {
         .collect();
     let rendered = f.render(&chat).unwrap();
     assert_eq!(inner, vec!["alpha".to_string()]);
+    assert!(rendered.contains("alpha"), "{rendered}");
     assert!(
-        !rendered.contains("beta"),
-        "unselected tool rendered: {rendered}"
+        rendered.contains("beta"),
+        "declared tool missing from prompt: {rendered}"
     );
 }
 
@@ -344,7 +346,7 @@ fn phased_history_keeps_typed_images_for_media_collection() {
 }
 
 #[test]
-fn allowed_tools_filter_native_namespace_members() {
+fn allowed_tools_keep_declared_native_namespace_members() {
     let req: NvCreateResponse = serde_json::from_value(json!({"model":"m","input":"hi",
         "tools":[{"type":"namespace","name":"web","description":"Web","defer_loading":true,"tools":[func("alpha"),func("beta")]}],
         "tool_choice":{"type":"allowed_tools","mode":"auto","tools":[{"type":"function","name":"alpha","namespace":"web"}]}})).unwrap();
@@ -359,8 +361,8 @@ fn allowed_tools_filter_native_namespace_members() {
             .get_or_insert_default()
             .insert("deferred_render_mode".into(), json!("tool_name_only"));
         let rendered = f.render(&chat).unwrap();
-        assert!(rendered.contains("alpha"));
-        assert!(!rendered.contains("beta"), "{rendered}");
+        assert!(rendered.contains("alpha"), "{rendered}");
+        assert!(rendered.contains("beta"), "{rendered}");
         assert_eq!(chat.inner.tools.as_ref().unwrap().len(), 1);
     }
 }

@@ -277,6 +277,142 @@ async fn disallowed_streamed_function_call_kills_backend_context() {
     .await;
 }
 
+/// `allowed_tools` restricts calls, not context: every declared definition
+/// reaches the prompt renderer while the backend sees only the allowed subset,
+/// and calls outside that subset fail in both transports.
+#[tokio::test]
+#[serial]
+async fn allowed_tools_keep_declared_catalog_and_enforce_calls() {
+    use dynamo_renderer::OAIChatLikeRequest;
+
+    fn sentinel_tool(name: &str, sentinel: &str) -> Value {
+        json!({
+            "type": "function",
+            "name": name,
+            "description": format!("Return the current value for a city. {sentinel}"),
+            "parameters": {
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"],
+                "additionalProperties": false
+            },
+            "strict": true
+        })
+    }
+    let allowed = |names: &[&str]| {
+        let tools: Vec<_> = names
+            .iter()
+            .map(|name| json!({"type": "function", "name": name}))
+            .collect();
+        json!({"type": "allowed_tools", "mode": "auto", "tools": tools})
+    };
+    let both = ["get_weather", "get_time"];
+    let choices = [
+        (json!("auto"), &both[..]),
+        (allowed(&both), &both[..]),
+        (allowed(&["get_weather"]), &both[..1]),
+        (allowed(&["get_time"]), &both[1..]),
+    ];
+    let body = |stream: bool, choice: &Value| {
+        json!({
+            "model": MODEL,
+            "input": "Reply only with OK.",
+            "stream": stream,
+            "tools": [
+                sentinel_tool("get_weather", "WEATHER_CATALOG_SENTINEL"),
+                sentinel_tool("get_time", "TIME_CATALOG_SENTINEL")
+            ],
+            "tool_choice": choice
+        })
+    };
+
+    temp_env::async_with_vars(ENV, async {
+        for stream in [false, true] {
+            for (choice, names) in &choices {
+                let svc =
+                    HarnessService::start([load_agent_fixture("text.sse").await.unwrap()]).await;
+                let response = post_responses(&svc, &body(stream, choice)).await;
+                assert_eq!(response.status(), reqwest::StatusCode::OK);
+                let _ = response.bytes().await.unwrap();
+                let requests = svc.engine.take_requests().await;
+                assert_eq!(requests.len(), 1);
+                let backend: Vec<_> = requests[0]
+                    .inner
+                    .tools
+                    .iter()
+                    .flatten()
+                    .map(|tool| tool.function.name.as_str())
+                    .collect();
+                assert_eq!(backend, *names, "stream={stream} choice={choice}");
+                let rendered = requests[0].tools().unwrap().to_string();
+                for sentinel in ["WEATHER_CATALOG_SENTINEL", "TIME_CATALOG_SENTINEL"] {
+                    assert!(
+                        rendered.contains(sentinel),
+                        "stream={stream} choice={choice}: {sentinel} missing from {rendered}"
+                    );
+                }
+                svc.shutdown().await;
+            }
+
+            for (choice, names) in &choices[2..] {
+                let forbidden = both.into_iter().find(|name| *name != names[0]).unwrap();
+                for (call, permitted) in [(names[0], true), (forbidden, false)] {
+                    let svc = HarnessService::start([tool_call_script(call).await]).await;
+                    let response = post_responses(&svc, &body(stream, choice)).await;
+                    let context = format!("stream={stream} choice={choice} call={call}");
+                    if stream {
+                        assert_eq!(response.status(), reqwest::StatusCode::OK, "{context}");
+                        let events = parse_responses_sse(&response.text().await.unwrap())
+                            .await
+                            .unwrap();
+                        let called = events.iter().any(|event| {
+                            event.event == "response.output_item.done"
+                                && event.data["item"]["type"] == "function_call"
+                                && event.data["item"]["name"] == call
+                        });
+                        let failed = events.iter().any(|event| event.event == "response.failed");
+                        assert_eq!((called, failed), (permitted, !permitted), "{context}");
+                    } else if permitted {
+                        assert_eq!(response.status(), reqwest::StatusCode::OK, "{context}");
+                        let body: Value = response.json().await.unwrap();
+                        assert!(
+                            body["output"].as_array().unwrap().iter().any(|item| {
+                                item["type"] == "function_call" && item["name"] == call
+                            }),
+                            "{context}: {body}"
+                        );
+                    } else {
+                        // Unary enforcement surfaces as a conversion failure.
+                        assert_eq!(
+                            response.status(),
+                            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+                            "{context}"
+                        );
+                    }
+                    svc.shutdown().await;
+                }
+            }
+        }
+    })
+    .await;
+}
+
+/// A one-call backend script that invokes `name`.
+async fn tool_call_script(name: &str) -> scripted_chat_engine::Script {
+    let mut script = load_agent_fixture("fragmented-tool.sse").await.unwrap();
+    for call in script
+        .iter_mut()
+        .filter_map(|chunk| chunk.data.as_mut())
+        .flat_map(|data| data.inner.choices.iter_mut())
+        .flat_map(|choice| choice.delta.tool_calls.iter_mut().flatten())
+    {
+        if let Some(function) = call.function.as_mut().filter(|f| f.name.is_some()) {
+            function.name = Some(name.to_owned());
+        }
+    }
+    script
+}
+
 /// Exercise the production handler's shared name map, including historical
 /// identities that are absent from the current tool definitions.
 #[tokio::test]

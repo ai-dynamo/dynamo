@@ -20,7 +20,7 @@ use dynamo_backend_common::{
     MultimodalData, PreprocessedRequest, PromptTokensDetails, StopReason, TopLogprob, usage,
 };
 
-use dynamo_kv_router::zmq_wire::IMAGE_ROUTING_UUID_PREFIX;
+use dynamo_kv_events::zmq_wire::IMAGE_ROUTING_UUID_PREFIX;
 
 use crate::client::{self, ModelLimits};
 use crate::disagg;
