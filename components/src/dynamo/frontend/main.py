@@ -190,7 +190,7 @@ def _resolve_provider(name: str, entry_points: list, *, group: str, kind: str) -
             obj: Any = importlib.import_module(module_path)
         except ImportError as exc:
             raise ValueError(
-                f"Could not import module '{module_path}' for {kind} '{name}'"
+                f"Could not import module '{module_path}' for {kind} '{name}': {exc}"
             ) from exc
         try:
             for part in attr.split("."):

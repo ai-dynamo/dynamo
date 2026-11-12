@@ -118,6 +118,7 @@ from dynamo.llm.exceptions import InvalidArgument
 async def generate(request, context):
     context.set_response_header("x-my-header", "value")
     raise InvalidArgument("refused")
+    yield  # unreachable; makes `generate` an async generator
 ```
 
 The header is on the response, error responses included, when the Frontend reads your engine's

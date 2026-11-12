@@ -4,6 +4,7 @@
 import importlib.metadata
 import sys
 import types
+from pathlib import Path
 
 import pytest
 
@@ -157,6 +158,27 @@ def test_unknown_chat_processor_is_named_at_parse_time(
     error = capsys.readouterr().err
     assert "Unknown chat processor 'missing'" in error
     assert "Available: fake" in error
+
+
+def test_chat_processor_import_error_names_its_cause(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    # The processor's module exists; one of its own imports does not.
+    (tmp_path / "broken_chat_processor.py").write_text("import missing_dependency\n")
+    monkeypatch.syspath_prepend(tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["dynamo.frontend", "--dyn-chat-processor", "broken_chat_processor:provider"],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        parse_args()
+
+    assert exc.value.code == 2
+    assert "No module named 'missing_dependency'" in capsys.readouterr().err
 
 
 def test_chat_processor_config_needs_a_custom_processor(
