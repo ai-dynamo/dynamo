@@ -3,7 +3,8 @@
 
 use async_trait::async_trait;
 use dynamo_backend_common::{DynamoError, EngineConfig, GenerateContext, RawEngine};
-use dynamo_llm::protocols::tensor::{NvCreateTensorRequest, TensorModelConfig};
+use dynamo_llm::protocols::tensor::NvCreateTensorRequest;
+use dynamo_llm::tensor_model::TensorModelConfig;
 use futures::stream::BoxStream;
 
 use crate::client::TritonClient;
@@ -90,9 +91,9 @@ impl RawEngine for TritonModelEngine {
 mod tests {
     use dynamo_backend_common::{BackendError, ErrorType, GenerateContext, RawEngine};
     use dynamo_llm::protocols::tensor::{
-        DataType, FlattenTensor, NvCreateTensorRequest, NvCreateTensorResponse, Tensor,
-        TensorMetadata,
+        FlattenTensor, NvCreateTensorRequest, NvCreateTensorResponse, Tensor,
     };
+    use dynamo_llm::tensor_model::{DataType, TensorMetadata};
     use futures::StreamExt;
     use serde_json::json;
 

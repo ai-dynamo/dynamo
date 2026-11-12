@@ -48,6 +48,7 @@ pub mod router_config;
 mod routing_policy;
 pub mod session_affinity;
 pub mod telemetry;
+pub mod tensor_model;
 pub use dynamo_tokenizers as tokenizers;
 pub use dynamo_tokenizers::{file_json_field, log_json_err};
 pub mod types;

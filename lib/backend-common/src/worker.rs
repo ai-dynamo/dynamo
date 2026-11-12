@@ -361,7 +361,7 @@ impl EngineKind {
         }
     }
 
-    fn tensor_model_config(&self) -> Option<dynamo_llm::protocols::tensor::TensorModelConfig> {
+    fn tensor_model_config(&self) -> Option<dynamo_llm::tensor_model::TensorModelConfig> {
         match self {
             EngineKind::Llm(_) => None,
             EngineKind::Raw(engine) => engine.tensor_model_config(),
@@ -2225,7 +2225,7 @@ pub(crate) async fn build_local_model(
     config: &WorkerConfig,
     engine_config: &EngineConfig,
     name_only: bool,
-    tensor_model_config: Option<dynamo_llm::protocols::tensor::TensorModelConfig>,
+    tensor_model_config: Option<dynamo_llm::tensor_model::TensorModelConfig>,
 ) -> Result<LocalModel, DynamoError> {
     let served_name = resolve_served_name(config, engine_config)
         .or_else(|| Some(engine_config.model.clone()))
@@ -2714,7 +2714,7 @@ mod tests {
 
     #[tokio::test]
     async fn build_local_model_carries_tensor_model_config() {
-        let tensor_model_config = dynamo_llm::protocols::tensor::TensorModelConfig {
+        let tensor_model_config = dynamo_llm::tensor_model::TensorModelConfig {
             name: "identity".to_string(),
             triton_model_config: Some(vec![1, 2, 3]),
             ..Default::default()

@@ -12,7 +12,7 @@ use llm_rs::local_model::runtime_config::DisaggregatedEndpoint as RsDisaggregate
 use llm_rs::local_model::runtime_config::ModelRuntimeConfig as RsModelRuntimeConfig;
 use llm_rs::local_model::runtime_config::StructuralTagConfig as RsStructuralTagConfig;
 use llm_rs::local_model::runtime_config::TokenizerBackend as RsTokenizerBackend;
-use llm_rs::protocols::tensor::TensorModelConfig;
+use llm_rs::tensor_model::TensorModelConfig;
 use pyo3::exceptions::PyValueError;
 
 fn validate_model_runtime_config(config: &RsModelRuntimeConfig) -> PyResult<()> {

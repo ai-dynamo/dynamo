@@ -22,8 +22,8 @@ use crate::local_model::runtime_config::{
     SPEC_DECODE_RUNTIME_KEY, TokenizerBackend, VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
 };
 use crate::model_type::{ModelInput, ModelType};
-use crate::protocols::tensor::TensorModelConfig;
 use crate::router_config::RouterConfig;
+use crate::tensor_model::TensorModelConfig;
 use crate::utils::json::canonicalize_json_object_keys;
 use anyhow::{Context, Result};
 use derive_builder::Builder;

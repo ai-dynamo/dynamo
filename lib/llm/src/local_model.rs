@@ -18,10 +18,10 @@ use crate::frontend_config::{ChatTemplateDefaults, FrontendApiConfig, MetricsCon
 use crate::media_config::{MediaDecoder, MediaFetcher};
 use crate::model_card::{ModelDeploymentCard, is_weight_file};
 use crate::model_type::{ModelInput, ModelType};
-use crate::protocols::tensor::TensorModelConfig;
 use crate::reasoning_field::ReasoningField;
 use crate::request_template::RequestTemplate;
 use crate::router_config::RouterConfig;
+use crate::tensor_model::TensorModelConfig;
 
 pub mod runtime_config;
 
