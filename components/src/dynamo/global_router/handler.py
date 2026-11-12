@@ -16,6 +16,7 @@ Both modes support priority-based pool overrides from agent hints.
 import logging
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
+from dynamo.common.utils.token_ids import normalize_request_token_ids, token_ids_len
 from dynamo.runtime import Client, DistributedRuntime
 
 from .pool_selection import get_priority_retry_order, load_config
@@ -79,6 +80,7 @@ class GlobalRouterHandler:
         namespaces: List[str],
         clients: Dict[str, Client],
         pool_priorities: List[int],
+        context=None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         Forward a request to the selected pool and retry faster pools on failure.
@@ -91,6 +93,9 @@ class GlobalRouterHandler:
             pool_priorities=pool_priorities,
             enable_priority_retry=self.config.enable_priority_retry,
         )
+        # The egress codec is chosen per destination; a JSON destination would read
+        # a packed buffer as one id per byte, so forward a list.
+        request = normalize_request_token_ids(dict(request))
 
         for attempt_idx, pool_idx in enumerate(pool_order):
             namespace = namespaces[pool_idx]
@@ -98,13 +103,19 @@ class GlobalRouterHandler:
             yielded_output = False
 
             try:
-                stream = await client.generate(request)
+                stream = await client.generate(request, context=context)
                 async for output in stream:
                     yielded_output = True
                     data = output.data() if hasattr(output, "data") else output
                     yield data
                 return
             except Exception as e:
+                if context is not None and context.is_stopped():
+                    logger.debug(
+                        "Request context was cancelled; skipping priority retry"
+                    )
+                    raise
+
                 is_last_attempt = attempt_idx == len(pool_order) - 1
                 if yielded_output:
                     logger.error(
@@ -206,7 +217,7 @@ class GlobalRouterHandler:
         logger.info(f"Global Router initialized (agg): {len(self.agg_clients)} pools")
 
     async def handle_prefill(
-        self, request: Dict[str, Any]
+        self, request: Dict[str, Any], context=None
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         Handle prefill requests from the frontend (disagg mode).
@@ -218,9 +229,7 @@ class GlobalRouterHandler:
         assert self.config.prefill_pool_selection_strategy is not None
         assert self.config.prefill_pool_dynamo_namespaces is not None
 
-        # Extract ISL (input sequence length)
-        token_ids = request.get("token_ids", [])
-        isl = len(token_ids)
+        isl = token_ids_len(request.get("token_ids"))
 
         # Extract TTFT target from nvext.router (forwarded by the preprocessor
         # as the `router` field on PreprocessedRequest), fallback to CLI default.
@@ -260,11 +269,12 @@ class GlobalRouterHandler:
             namespaces=self.config.prefill_pool_dynamo_namespaces,
             clients=self.prefill_clients,
             pool_priorities=self.config.prefill_pool_priorities,
+            context=context,
         ):
             yield data
 
     async def handle_decode(
-        self, request: Dict[str, Any]
+        self, request: Dict[str, Any], context=None
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         Handle decode requests from the frontend (disagg mode).
@@ -278,8 +288,7 @@ class GlobalRouterHandler:
 
         # The strategy field retains the context_length name, but decode routing
         # currently sees the request token IDs before generation begins.
-        token_ids = request.get("token_ids", [])
-        context_length = len(token_ids)
+        context_length = token_ids_len(request.get("token_ids"))
 
         router_params = request.get("router") or {}
         itl_target_ms = router_params.get("itl_target")
@@ -318,11 +327,12 @@ class GlobalRouterHandler:
             namespaces=self.config.decode_pool_dynamo_namespaces,
             clients=self.decode_clients,
             pool_priorities=self.config.decode_pool_priorities,
+            context=context,
         ):
             yield data
 
     async def handle_generate(
-        self, request: Dict[str, Any]
+        self, request: Dict[str, Any], context=None
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         Handle generate requests (agg mode).
@@ -335,8 +345,7 @@ class GlobalRouterHandler:
         assert self.config.agg_pool_selection_strategy is not None
         assert self.config.agg_pool_dynamo_namespaces is not None
 
-        token_ids = request.get("token_ids", [])
-        isl = len(token_ids)
+        isl = token_ids_len(request.get("token_ids"))
 
         # Extract SLA targets from nvext.router (forwarded by the preprocessor
         # as the `router` field on PreprocessedRequest), fallback to CLI defaults.
@@ -388,6 +397,7 @@ class GlobalRouterHandler:
             namespaces=self.config.agg_pool_dynamo_namespaces,
             clients=self.agg_clients,
             pool_priorities=self.config.agg_pool_priorities,
+            context=context,
         ):
             yield data
 

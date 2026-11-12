@@ -12,12 +12,14 @@
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
+use std::time::Instant;
 
 use anyhow::{Context, Result, ensure};
 use clap::{Parser, ValueEnum};
 use dynamo_kv_router::config::KvRouterConfig;
+use dynamo_mocker::common::perf_model::PerfModel;
 use dynamo_mocker::common::protocols::{
-    EngineType, KvTransferTimingMode, MockEngineArgs, SglangArgs, WorkerType,
+    EngineType, KvTransferTimingMode, MockerConfig, WorkerType,
 };
 use dynamo_mocker::loadgen::Trace;
 use dynamo_mocker::replay::{
@@ -165,6 +167,12 @@ struct Args {
     #[arg(long, value_enum, default_value_t = RouterModeArg::KvRouter)]
     router_mode: RouterModeArg,
 
+    /// Queue KV-router requests while every worker's active prefill tokens
+    /// exceed this fraction of its batched-token budget. Unset admits every
+    /// request immediately.
+    #[arg(long)]
+    router_queue_threshold: Option<f64>,
+
     /// Compress trace arrival timestamps by this factor
     #[arg(long, default_value_t = 4.0)]
     arrival_speedup_ratio: f64,
@@ -218,6 +226,12 @@ struct Args {
     iterations: usize,
 
     /// Emit one JSON object per measured replay iteration to this path.
+    ///
+    /// `replay_call_ms` and `replay_cpu_ms` cover only the replay call, after
+    /// trace loading and cloning. `wall_time_ms` is the replayer's own timer,
+    /// which also covers engine setup and report finalization. Replay runs on
+    /// the calling thread, so `replay_cpu_ms` excludes time the thread spent
+    /// preempted on a shared host.
     #[arg(long)]
     timings_jsonl: Option<PathBuf>,
 
@@ -231,38 +245,52 @@ struct Args {
     bench: bool,
 }
 
-fn build_engine_args(args: &Args) -> Result<MockEngineArgs> {
-    let mut builder = MockEngineArgs::builder()
-        .engine_type(args.engine_type.into())
-        .block_size(args.block_size)
-        .kv_bytes_per_token(args.kv_bytes_per_token)
-        .kv_transfer_bandwidth(args.kv_transfer_bandwidth)
-        .kv_transfer_timing_mode(args.kv_transfer_timing_mode.into());
-    if args.engine_type == EngineTypeArg::Sglang {
-        builder = builder.sglang(Some(SglangArgs {
-            page_size: Some(args.block_size),
-            ..Default::default()
-        }));
+fn build_engine_args(args: &Args) -> Result<MockerConfig> {
+    let mut rank = serde_json::json!({
+        "backend":EngineType::from(args.engine_type),"block_size":args.block_size,
+        "kv_transfer_bytes_per_token":args.kv_bytes_per_token,
+        "kv_transfer_bandwidth":args.kv_transfer_bandwidth,
+        "kv_transfer_timing_mode":KvTransferTimingMode::from(args.kv_transfer_timing_mode)
+    });
+    for (key, value) in [
+        ("max_num_seqs", args.max_num_seqs),
+        ("num_gpu_blocks", args.num_gpu_blocks),
+        ("max_num_batched_tokens", args.max_num_batched_tokens),
+    ] {
+        if let Some(value) = value {
+            rank[key] = serde_json::json!(value);
+        }
     }
-    if let Some(max_num_seqs) = args.max_num_seqs {
-        builder = builder.max_num_seqs(Some(max_num_seqs));
+    for (key, value) in [
+        ("speedup_ratio", args.speedup_ratio),
+        ("decode_speedup_ratio", args.decode_speedup_ratio),
+    ] {
+        if let Some(value) = value {
+            rank[key] = serde_json::json!(value);
+        }
     }
-    if let Some(num_gpu_blocks) = args.num_gpu_blocks {
-        builder = builder.num_gpu_blocks(num_gpu_blocks);
-    }
-    if let Some(max_num_batched_tokens) = args.max_num_batched_tokens {
-        builder = builder.max_num_batched_tokens(Some(max_num_batched_tokens));
-    }
-    if let Some(speedup_ratio) = args.speedup_ratio {
-        builder = builder.speedup_ratio(speedup_ratio);
-    }
-    if let Some(decode_speedup_ratio) = args.decode_speedup_ratio {
-        builder = builder.decode_speedup_ratio(decode_speedup_ratio);
-    }
-    builder
-        .build()
-        .context("failed to build replay engine args")?
-        .normalized()
+    MockerConfig::from_value(serde_json::json!({
+        "engine": rank
+    }))
+    .context("invalid replay engine config")
+}
+
+fn router_config(args: &Args) -> Result<Option<KvRouterConfig>> {
+    let Some(threshold) = args.router_queue_threshold else {
+        return Ok(None);
+    };
+    ensure!(
+        args.router_mode == RouterModeArg::KvRouter,
+        "--router-queue-threshold requires --router-mode kv-router"
+    );
+    let config = KvRouterConfig {
+        router_queue_threshold: Some(threshold),
+        ..KvRouterConfig::default()
+    };
+    config
+        .validate()
+        .map_err(|error| anyhow::anyhow!("invalid --router-queue-threshold: {error}"))?;
+    Ok(Some(config))
 }
 
 fn canonical_capture_options(enabled: bool) -> ReplayCaptureOptions {
@@ -278,39 +306,19 @@ fn canonical_capture_options(enabled: bool) -> ReplayCaptureOptions {
     }
 }
 
-fn canonical_aic_identity(args: &MockEngineArgs) -> Value {
-    let enabled = args.aic_backend.is_some();
-    json!({
-        "backend": args.aic_backend,
-        "system": enabled.then(|| args.aic_system.clone().unwrap_or_else(|| "h200_sxm".to_string())),
-        "backend_version": args.aic_backend_version,
-        "tp_size": enabled.then(|| args.aic_tp_size.unwrap_or(1)),
-        "model": args.aic_model_path,
-        "moe_tp_size": args.aic_moe_tp_size,
-        "moe_ep_size": args.aic_moe_ep_size,
-        "attention_dp_size": args.aic_attention_dp_size,
-        "gemm_dtype": args.aic_gemm_dtype,
-        "moe_dtype": args.aic_moe_dtype,
-        "fmha_dtype": args.aic_fmha_dtype,
-        "kv_cache_dtype": args.aic_kv_cache_dtype,
-        "comm_dtype": args.aic_comm_dtype,
-        "nextn": args.aic_nextn,
-        "nextn_accept_rates": args.aic_nextn_accept_rates,
-    })
-}
-
-fn canonical_engine_pool_metadata(args: &MockEngineArgs) -> Result<Value> {
+fn canonical_engine_pool_metadata(args: &MockerConfig) -> Result<Value> {
     ensure!(
-        args.planner_profile_data.is_none(),
-        "canonical replay does not support planner_profile_data"
+        !matches!(args.perf_model.as_ref(), PerfModel::Interpolated { .. }),
+        "canonical replay does not support dynamo_profile timing"
     );
     ensure!(
-        args.response_replay_trace_path.is_none(),
+        args.runtime.response_replay_trace_path.is_none(),
         "canonical replay does not support response_replay_trace_path"
     );
+    let ais_config = args.ais_perf_config();
     ensure!(
-        args.aic_backend.is_none() || args.aic_backend_version.is_some(),
-        "canonical AIC replay requires a resolved backend version"
+        ais_config.is_none_or(|config| config["backend_version"].as_str().is_some()),
+        "canonical AIS replay requires a resolved backend version"
     );
     let mut metadata = serde_json::to_value(args)?;
     let metadata = metadata
@@ -319,18 +327,18 @@ fn canonical_engine_pool_metadata(args: &MockEngineArgs) -> Result<Value> {
     metadata.insert(
         "performance_model".to_string(),
         json!({
-            "kind": if args.aic_backend.is_some() {
-                "aic_callback"
+            "kind": if ais_config.is_some() {
+                "ais_callback"
             } else {
                 "builtin_polynomial"
             },
-            "aic": canonical_aic_identity(args),
+            "ais": ais_config,
         }),
     );
     Ok(Value::Object(metadata.clone()))
 }
 
-fn canonical_engine_config(args: &Args, engine_args: &MockEngineArgs) -> Result<Value> {
+fn canonical_engine_config(args: &Args, engine_args: &MockerConfig) -> Result<Value> {
     match args.serving_mode {
         ServingModeArg::Aggregated => Ok(json!({
             "aggregated": canonical_engine_pool_metadata(engine_args)?,
@@ -350,12 +358,12 @@ fn canonical_engine_config(args: &Args, engine_args: &MockEngineArgs) -> Result<
 
 fn canonical_metadata(
     args: &Args,
-    engine_args: &MockEngineArgs,
+    engine_args: &MockerConfig,
     workload_digest: &str,
 ) -> Result<Value> {
     let router_config = match args.router_mode {
         RouterModeArg::RoundRobin => Value::Null,
-        RouterModeArg::KvRouter => serde_json::to_value(KvRouterConfig::default())?,
+        RouterModeArg::KvRouter => serde_json::to_value(router_config(args)?.unwrap_or_default())?,
     };
     Ok(json!({
         "replay_bench": cfg!(feature = "replay-bench"),
@@ -374,9 +382,9 @@ fn canonical_metadata(
             "replay_concurrency": Value::Null,
             "arrival_speedup_ratio": args.arrival_speedup_ratio,
             "max_sim_time_ms": Value::Null,
-            "aic_prefill_load_estimator": Value::Null,
-            "aic_performance_model_implementation": Value::Null,
-            "aic_prefill_load_estimator_implementation": Value::Null,
+            "ais_prefill_load_estimator": Value::Null,
+            "ais_performance_model_implementation": Value::Null,
+            "ais_prefill_load_estimator_implementation": Value::Null,
         },
         "engine_config": canonical_engine_config(args, engine_args)?,
         "router": {
@@ -397,7 +405,7 @@ fn canonical_metadata(
         "semantic_features": {
             "canonical_replay": true,
             "mocker_kvbm_offload": false,
-            "aic_forward_pass": false,
+            "ais_forward_pass": false,
         },
     }))
 }
@@ -405,13 +413,42 @@ fn canonical_metadata(
 fn canonical_report(
     report: &TraceSimulationReport,
     args: &Args,
-    engine_args: &MockEngineArgs,
+    engine_args: &MockerConfig,
     workload_digest: &str,
     capture_options: ReplayCaptureOptions,
 ) -> Result<CanonicalReplayRecord> {
     let metadata = canonical_metadata(args, engine_args, workload_digest)?;
     let coverage = CanonicalReplayCoverage::from_report(report, capture_options);
     CanonicalReplayRecord::build(report, metadata, &coverage, Value::Null)
+}
+
+#[cfg(target_os = "linux")]
+fn thread_cpu_time_ms() -> Option<f64> {
+    let mut timestamp = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    let rc = unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut timestamp) };
+    (rc == 0).then(|| timestamp.tv_sec as f64 * 1_000.0 + timestamp.tv_nsec as f64 / 1_000_000.0)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn thread_cpu_time_ms() -> Option<f64> {
+    None
+}
+
+/// Process high-water RSS so far, so later iterations report the maximum over
+/// all earlier ones.
+#[cfg(target_os = "linux")]
+fn peak_rss_kib() -> Option<i64> {
+    let mut usage = unsafe { std::mem::zeroed::<libc::rusage>() };
+    let rc = unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
+    (rc == 0).then_some(usage.ru_maxrss)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn peak_rss_kib() -> Option<i64> {
+    None
 }
 
 fn main() -> Result<()> {
@@ -426,6 +463,7 @@ fn main() -> Result<()> {
         "--canonical-reports-jsonl requires building with --features replay-bench"
     );
     let engine_args = build_engine_args(&args)?;
+    let router_config = router_config(&args)?;
     let canonical_workload = if args.canonical_reports_jsonl.is_some() {
         let trace_bytes = std::fs::read(&args.trace_file)
             .with_context(|| format!("failed to read trace input at {:?}", args.trace_file))?;
@@ -437,7 +475,9 @@ fn main() -> Result<()> {
     } else {
         None
     };
+    let trace_load_start = Instant::now();
     let trace = Trace::from_mooncake(&args.trace_file, args.trace_block_size)?;
+    let trace_load_ms = trace_load_start.elapsed().as_secs_f64() * 1_000.0;
     if let Some((trace_bytes, _)) = canonical_workload.as_ref() {
         ensure!(
             std::fs::read(&args.trace_file)? == *trace_bytes,
@@ -467,13 +507,16 @@ fn main() -> Result<()> {
     let mut first_canonical_line: Option<Vec<u8>> = None;
     let mut last_report = None;
     for iteration in 0..args.iterations {
+        let trace = trace.clone();
+        let call_start = Instant::now();
+        let cpu_start = thread_cpu_time_ms();
         let report = match args.serving_mode {
             ServingModeArg::Aggregated => {
                 simulate_loaded_trace_with_router_mode_and_capture_options(
                     engine_args.clone(),
+                    router_config.clone(),
                     None,
-                    None,
-                    trace.clone(),
+                    trace,
                     args.num_workers,
                     args.arrival_speedup_ratio,
                     args.router_mode.into(),
@@ -494,9 +537,9 @@ fn main() -> Result<()> {
                         num_prefill_workers: args.num_prefill_workers,
                         num_decode_workers: args.num_decode_workers,
                     },
+                    router_config.clone(),
                     None,
-                    None,
-                    trace.clone(),
+                    trace,
                     args.arrival_speedup_ratio,
                     args.router_mode.into(),
                     capture_options,
@@ -505,12 +548,20 @@ fn main() -> Result<()> {
                 )?
             }
         };
+        let replay_cpu_ms = thread_cpu_time_ms()
+            .zip(cpu_start)
+            .map(|(end, start)| end - start);
+        let replay_call_ms = call_start.elapsed().as_secs_f64() * 1_000.0;
         if let Some(writer) = timing_writer.as_mut() {
             serde_json::to_writer(
                 &mut *writer,
                 &serde_json::json!({
                     "iteration": iteration,
                     "wall_time_ms": report.throughput.wall_time_ms,
+                    "replay_call_ms": replay_call_ms,
+                    "replay_cpu_ms": replay_cpu_ms,
+                    "trace_load_ms": trace_load_ms,
+                    "peak_rss_kib": peak_rss_kib(),
                     "serving_mode": args.serving_mode.as_str(),
                     "router_mode": args.router_mode.as_str(),
                     "engine_type": args.engine_type.as_str(),

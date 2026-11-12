@@ -62,9 +62,25 @@ impl HarnessService {
         .await
     }
 
+    #[allow(dead_code)]
+    pub async fn start_with_generate_error(error: DynamoError) -> Self {
+        Self::start_with_engine(Arc::new(ScriptedChatEngine::with_generate_error(error))).await
+    }
+
     pub async fn start_with_engine(engine: Arc<ScriptedChatEngine>) -> Self {
+        Self::start_with_engine_and_card(engine, ModelDeploymentCard::with_name_only(MODEL)).await
+    }
+
+    /// Start with a model card of the caller's choosing, so handler behavior that depends
+    /// on the registered parsing options (tool-call / reasoning parser) can be exercised.
+    #[allow(dead_code)]
+    pub async fn start_with_engine_and_card(
+        engine: Arc<ScriptedChatEngine>,
+        card: ModelDeploymentCard,
+    ) -> Self {
         let client = reqwest::Client::builder()
             .no_proxy()
+            .timeout(Duration::from_secs(10))
             .build()
             .expect("failed to build harness HTTP client");
         let (listener, port) = bind_random_port().await;
@@ -72,17 +88,17 @@ impl HarnessService {
             .port(port)
             .host("127.0.0.1")
             .enable_chat_endpoints(true)
-            .enable_cmpl_endpoints(false)
+            .enable_cmpl_endpoints(true)
             .enable_responses_endpoints(true)
             .enable_anthropic_endpoints(true)
             .build()
             .expect("failed to build harness HTTP service");
 
-        let card = ModelDeploymentCard::with_name_only(MODEL);
         let metrics = service.state_clone().metrics_clone();
+        let checksum = card.mdcsum().to_string();
         service
             .model_manager()
-            .add_chat_completions_model(MODEL, card.mdcsum(), engine.clone())
+            .add_chat_completions_model_with_card(MODEL, &checksum, card, engine.clone())
             .expect("failed to register scripted harness model");
 
         let cancel = CancellationToken::new();
@@ -247,8 +263,58 @@ fn find_sse_frame_separator(bytes: &[u8]) -> Option<(usize, usize)> {
     None
 }
 
+#[allow(dead_code)]
 pub async fn parse_json_sse(body: &str) -> Result<Vec<JsonSseEvent>> {
     validate_terminal_data(body, "response SSE stream")?;
+    parse_json_sse_events(body).await
+}
+
+#[allow(dead_code)]
+pub async fn parse_responses_sse(body: &str) -> Result<Vec<JsonSseEvent>> {
+    parse_typed_sse(
+        body,
+        "Responses",
+        &[
+            "response.completed",
+            "response.incomplete",
+            "response.failed",
+        ],
+    )
+    .await
+}
+
+#[allow(dead_code)]
+pub async fn parse_anthropic_sse(body: &str) -> Result<Vec<JsonSseEvent>> {
+    parse_typed_sse(body, "Anthropic", &["message_stop", "error"]).await
+}
+
+async fn parse_typed_sse(
+    body: &str,
+    protocol: &str,
+    terminal_events: &[&str],
+) -> Result<Vec<JsonSseEvent>> {
+    if body
+        .lines()
+        .filter_map(|line| line.strip_prefix("data:"))
+        .any(|data| data.trim() == "[DONE]")
+    {
+        return Err(anyhow!("{protocol} SSE stream contains a [DONE] sentinel"));
+    }
+
+    let events = parse_json_sse_events(body).await?;
+    let terminal = events
+        .iter()
+        .position(|event| terminal_events.contains(&event.event.as_str()));
+    match terminal {
+        Some(index) if index + 1 == events.len() => Ok(events),
+        Some(_) => Err(anyhow!(
+            "{protocol} SSE stream contains data after its terminal event"
+        )),
+        None => Err(anyhow!("{protocol} SSE stream is missing a terminal event")),
+    }
+}
+
+async fn parse_json_sse_events(body: &str) -> Result<Vec<JsonSseEvent>> {
     let mut messages = create_message_stream(body);
     let mut events = Vec::new();
 

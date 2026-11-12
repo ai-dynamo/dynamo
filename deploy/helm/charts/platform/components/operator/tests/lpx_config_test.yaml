@@ -1,0 +1,55 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: standalone LPX and Grove configuration
+templates:
+  - templates/operator-config.yaml
+  - templates/validate-values.yaml
+tests:
+  - it: leaves LPX disabled when Grove is not configured
+    template: templates/operator-config.yaml
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: '(?m)^lpx:\n  enabled: false$'
+
+  - it: rejects LPX when global values are absent
+    template: templates/validate-values.yaml
+    set:
+      lpx.enabled: true
+    asserts:
+      - failedTemplate:
+          errorPattern: "LPX requires Grove integration to be enabled"
+
+  - it: rejects LPX when Grove integration is explicitly disabled
+    template: templates/validate-values.yaml
+    set:
+      lpx.enabled: true
+      global.grove.enabled: false
+      global.grove.install: false
+    asserts:
+      - failedTemplate:
+          errorPattern: "LPX requires Grove integration to be enabled"
+
+  - it: enables LPX with externally installed Grove
+    template: templates/operator-config.yaml
+    set:
+      lpx.enabled: true
+      global.grove.enabled: true
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: '(?m)^lpx:\n  enabled: true$'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: '(?m)^  grove:\n    enabled: true$'
+
+  - it: rejects install-only Grove settings without a parent chart
+    template: templates/validate-values.yaml
+    set:
+      lpx.enabled: true
+      global.grove.enabled: false
+      global.grove.install: true
+    asserts:
+      - failedTemplate:
+          errorPattern: "LPX requires Grove integration to be enabled"

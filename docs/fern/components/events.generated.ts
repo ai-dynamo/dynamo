@@ -22,87 +22,127 @@ export interface DynamoEvent {
 }
 
 /** Generation date in Pacific, YYYY-MM-DD. The calendar grid treats this as "today". */
-export const GENERATED_ON = "2026-09-18";
+export const GENERATED_ON = "2026-11-11";
 
-export const UPCOMING_EVENTS: DynamoEvent[] = [];
+export const UPCOMING_EVENTS: DynamoEvent[] = [
+  {
+    "title": "SIG Frontend — Biweekly Sync",
+    "start": "2026-11-12T21:00:00.000Z",
+    "month": "Nov",
+    "day": "12",
+    "year": "2026",
+    "dateLabel": "Thu, Nov 12, 2026",
+    "timeLabel": "1:00 PM",
+    "isPast": false,
+    "location": null,
+    "locationUrl": null,
+    "addUrl": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=SIG+Frontend+%E2%80%94+Biweekly+Sync&dates=20261112T210000Z%2F20261112T220000Z&details=Join+with+Google+Meet%3A+https%3A%2F%2Fmeet.google.com%2Fkuz-iapc-efd%0AOr+dial%3A+%28US%29+%2B1+929-333-4713+PIN%3A+602380682%23%0AMore+phone+numbers%3A+https%3A%2F%2Ftel.meet%2Fkuz-iapc-efd%3Fpin%3D5046305483125%26hs%3D7%0A%0ALearn+more+about+Meet+at%3A+https%3A%2F%2Fsupport.google.com%2Fa%2Fusers%2Fanswer%2F9282720"
+  },
+  {
+    "title": "SIG Engines — Biweekly Sync",
+    "start": "2026-11-13T01:00:00.000Z",
+    "month": "Nov",
+    "day": "12",
+    "year": "2026",
+    "dateLabel": "Thu, Nov 12, 2026",
+    "timeLabel": "5:00 PM",
+    "isPast": false,
+    "location": null,
+    "locationUrl": null,
+    "addUrl": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=SIG+Engines+%E2%80%94+Biweekly+Sync&dates=20261113T010000Z%2F20261113T020000Z&details=Join+with+Google+Meet%3A+https%3A%2F%2Fmeet.google.com%2Fhha-vzes-szx%0AOr+dial%3A+%28US%29+%2B1+724-505-2767+PIN%3A+501573420%23%0AMore+phone+numbers%3A+https%3A%2F%2Ftel.meet%2Fhha-vzes-szx%3Fpin%3D9222789232381%26hs%3D7%0A%0ALearn+more+about+Meet+at%3A+https%3A%2F%2Fsupport.google.com%2Fa%2Fusers%2Fanswer%2F9282720"
+  },
+  {
+    "title": "SIG Router",
+    "start": "2026-11-19T16:30:00.000Z",
+    "month": "Nov",
+    "day": "19",
+    "year": "2026",
+    "dateLabel": "Thu, Nov 19, 2026",
+    "timeLabel": "8:30 AM",
+    "isPast": false,
+    "location": null,
+    "locationUrl": null,
+    "addUrl": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=SIG+Router&dates=20261119T163000Z%2F20261119T173000Z&details=Join+with+Google+Meet%3A+https%3A%2F%2Fmeet.google.com%2Fwan-wzmn-zfz%0AOr+dial%3A+%28US%29+%2B1+316-789-6527+PIN%3A+316996382%23%0AMore+phone+numbers%3A+https%3A%2F%2Ftel.meet%2Fwan-wzmn-zfz%3Fpin%3D8174162176244%26hs%3D7%0A%0ALearn+more+about+Meet+at%3A+https%3A%2F%2Fsupport.google.com%2Fa%2Fusers%2Fanswer%2F9282720"
+  }
+];
 
 export const PAST_EVENTS: DynamoEvent[] = [
   {
-    "title": "Baseten x Dynamo x SGLang RL post training meetup",
-    "start": "2026-09-11T01:00:00.000Z",
-    "month": "Sep",
-    "day": "10",
+    "title": "Dynamo SIG RL",
+    "start": "2026-11-06T02:00:00.000Z",
+    "month": "Nov",
+    "day": "5",
     "year": "2026",
-    "dateLabel": "Thu, Sep 10, 2026",
+    "dateLabel": "Thu, Nov 5, 2026",
     "timeLabel": "6:00 PM",
     "isPast": true,
-    "location": "Luma",
-    "locationUrl": "https://luma.com/BaseDynSGL",
-    "addUrl": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=Baseten+x+Dynamo+x+SGLang+RL+post+training+meetup&dates=20260911T010000Z%2F20260911T040000Z&location=https%3A%2F%2Fluma.com%2FBaseDynSGL"
+    "location": null,
+    "locationUrl": null,
+    "addUrl": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=Dynamo+SIG+RL&dates=20261106T020000Z%2F20261106T023000Z&details=Join+with+Google+Meet%3A+https%3A%2F%2Fmeet.google.com%2Fzcd-qdkb-jvg%0AOr+dial%3A+%28US%29+%2B1+216-755-4682+PIN%3A+144011069%23%0AMore+phone+numbers%3A+https%3A%2F%2Ftel.meet%2Fzcd-qdkb-jvg%3Fpin%3D7388412058326%26hs%3D7%0A%0ALearn+more+about+Meet+at%3A+https%3A%2F%2Fsupport.google.com%2Fa%2Fusers%2Fanswer%2F9282720"
   },
   {
-    "title": "vLLM x Dynamo meetup",
-    "start": "2026-08-25T01:00:00.000Z",
-    "month": "Aug",
-    "day": "24",
+    "title": "SIG Router",
+    "start": "2026-11-05T16:30:00.000Z",
+    "month": "Nov",
+    "day": "5",
     "year": "2026",
-    "dateLabel": "Mon, Aug 24, 2026",
-    "timeLabel": "6:00 PM",
+    "dateLabel": "Thu, Nov 5, 2026",
+    "timeLabel": "8:30 AM",
     "isPast": true,
-    "location": "Luma",
-    "locationUrl": "https://luma.com/r8o604o0",
-    "addUrl": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=vLLM+x+Dynamo+meetup&dates=20260825T010000Z%2F20260825T040000Z&location=https%3A%2F%2Fluma.com%2Fr8o604o0"
+    "location": null,
+    "locationUrl": null,
+    "addUrl": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=SIG+Router&dates=20261105T163000Z%2F20261105T173000Z&details=Join+with+Google+Meet%3A+https%3A%2F%2Fmeet.google.com%2Fwan-wzmn-zfz%0AOr+dial%3A+%28US%29+%2B1+316-789-6527+PIN%3A+316996382%23%0AMore+phone+numbers%3A+https%3A%2F%2Ftel.meet%2Fwan-wzmn-zfz%3Fpin%3D8174162176244%26hs%3D7%0A%0ALearn+more+about+Meet+at%3A+https%3A%2F%2Fsupport.google.com%2Fa%2Fusers%2Fanswer%2F9282720"
   },
   {
-    "title": "Dynamo Afterhours",
-    "start": "2026-07-31T01:00:00.000Z",
-    "month": "Jul",
-    "day": "30",
+    "title": "Dynamo SIG Deploy",
+    "start": "2026-11-03T16:00:00.000Z",
+    "month": "Nov",
+    "day": "3",
     "year": "2026",
-    "dateLabel": "Thu, Jul 30, 2026",
+    "dateLabel": "Tue, Nov 3, 2026",
+    "timeLabel": "8:00 AM",
+    "isPast": true,
+    "location": null,
+    "locationUrl": null,
+    "addUrl": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=Dynamo+SIG+Deploy&dates=20261103T160000Z%2F20261103T170000Z&details=Join+with+Google+Meet%3A+https%3A%2F%2Fmeet.google.com%2Fmer-jrnu-mry%0AOr+dial%3A+%28DE%29+%2B49+40+8081618610+PIN%3A+612378808%23%0AMore+phone+numbers%3A+https%3A%2F%2Ftel.meet%2Fmer-jrnu-mry%3Fpin%3D2635519655187%26hs%3D7%0A%0ALearn+more+about+Meet+at%3A+https%3A%2F%2Fsupport.google.com%2Fa%2Fusers%2Fanswer%2F9282720"
+  },
+  {
+    "title": "CoreWeave x NVIDIA Dynamo Meetup",
+    "start": "2026-10-16T01:00:00.000Z",
+    "month": "Oct",
+    "day": "15",
+    "year": "2026",
+    "dateLabel": "Thu, Oct 15, 2026",
     "timeLabel": "6:00 PM",
     "isPast": true,
-    "location": "Luma",
-    "locationUrl": "https://luma.com/JulyDynamoAfterHours",
-    "addUrl": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=Dynamo+Afterhours&dates=20260731T010000Z%2F20260731T040000Z&location=https%3A%2F%2Fluma.com%2FJulyDynamoAfterHours"
+    "location": "San Francisco",
+    "locationUrl": null,
+    "addUrl": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=CoreWeave+x+NVIDIA+Dynamo+Meetup&dates=20261016T010000Z%2F20261016T040000Z&location=San+Francisco%2C+CA+%28venue+details+via+Luma+registration%29&details=Join+CoreWeave+and+NVIDIA+Dynamo+for+technical+talks+and+developer+networking+on+production+inference+and+RL+post-training.%0A%0ATopics%3A+CoreWeave+Forge%2C+Dynamo+inference+at+scale%2C+efficient+rollouts%2C+and+fast+weight+updates.%0A%0AAgenda+%28Pacific%29%3A%0A6%3A00+pm%3A+Doors+open%0A6%3A30+pm%3A+CoreWeave+talk%0A6%3A45+pm%3A+NVIDIA+Dynamo+talk%0A7%3A00%E2%80%939%3A00+pm%3A+Developer+networking%0A%0ARegister%3A+https%3A%2F%2Fluma.com%2FCWDynOctMeetup%0ARegistration+is+required.+Use+Luma+for+attendance+approval+and+venue+details.+Adding+this+calendar+event+does+not+register+you."
+  },
+  {
+    "title": "Dynamo Engineering Sync",
+    "start": "2026-10-13T16:00:00.000Z",
+    "month": "Oct",
+    "day": "13",
+    "year": "2026",
+    "dateLabel": "Tue, Oct 13, 2026",
+    "timeLabel": "9:00 AM",
+    "isPast": true,
+    "location": null,
+    "locationUrl": null,
+    "addUrl": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=Dynamo+Engineering+Sync&dates=20261013T160000Z%2F20261013T170000Z&details=%3Ca+href%3D%22https%3A%2F%2Fdocs.google.com%2Fdocument%2Fd%2F1uR8xD_hlYGwV6QspvSc36k1H-wo1BUcVmFbHH9xlXd8%2Fview%3Fpli%3D1%26amp%3Btab%3Dt.pgw0qvggnec%22+class%3D%22pastedDriveLink-0%22%3EDynamo+Engineering+Sync+Meeting+Notes+-+Google+Docs%3C%2Fa%3E%0A%0AJoin+with+Google+Meet%3A+https%3A%2F%2Fmeet.google.com%2Fzyn-hfqk-asm%0AOr+dial%3A+%28US%29+%2B1+347-486-6566+PIN%3A+403835665%23%0AMore+phone+numbers%3A+https%3A%2F%2Ftel.meet%2Fzyn-hfqk-asm%3Fpin%3D5772284027174%26hs%3D7%0A%0ALearn+more+about+Meet+at%3A+https%3A%2F%2Fsupport.google.com%2Fa%2Fusers%2Fanswer%2F9282720"
   },
   {
     "title": "Dynamo community meeting",
-    "start": "2026-07-29T17:30:00.000Z",
-    "month": "Jul",
-    "day": "29",
+    "start": "2026-09-23T17:30:00.000Z",
+    "month": "Sep",
+    "day": "23",
     "year": "2026",
-    "dateLabel": "Wed, Jul 29, 2026",
+    "dateLabel": "Wed, Sep 23, 2026",
     "timeLabel": "10:30 AM",
     "isPast": true,
     "location": "Online",
     "locationUrl": "https://meet.google.com/heb-demu-qok",
-    "addUrl": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=Dynamo+community+meeting&dates=20260729T173000Z%2F20260729T181500Z&location=https%3A%2F%2Fmeet.google.com%2Fheb-demu-qok"
-  },
-  {
-    "title": "AI Infra Builders Meetup with dstack, Crusoe, and SGLang",
-    "start": "2026-07-24T00:30:00.000Z",
-    "month": "Jul",
-    "day": "23",
-    "year": "2026",
-    "dateLabel": "Thu, Jul 23, 2026",
-    "timeLabel": "5:30 PM",
-    "isPast": true,
-    "location": "Luma",
-    "locationUrl": "https://luma.com/rxsn0u0h",
-    "addUrl": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=AI+Infra+Builders+Meetup+with+dstack%2C+Crusoe%2C+and+SGLang&dates=20260724T003000Z%2F20260724T043000Z&location=https%3A%2F%2Fluma.com%2Frxsn0u0h"
-  },
-  {
-    "title": "Austin vLLM & llm-d AI Inference Meetup",
-    "start": "2026-07-16T22:00:00.000Z",
-    "month": "Jul",
-    "day": "16",
-    "year": "2026",
-    "dateLabel": "Thu, Jul 16, 2026",
-    "timeLabel": "3:00 PM",
-    "isPast": true,
-    "location": "Luma",
-    "locationUrl": "https://luma.com/rxmldtp2?tk=XiKvay",
-    "addUrl": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=Austin+vLLM+%26+llm-d+AI+Inference+Meetup&dates=20260716T220000Z%2F20260716T230000Z&location=https%3A%2F%2Fluma.com%2Frxmldtp2%3Ftk%3DXiKvay&details=%3Cp%3E%E2%80%8B%3Cstrong%3E5%3A00PM+%E2%80%93+5%3A30PM+%E2%80%94+Doors+Open%2C+Check-In%3C%2Fstrong%3E%3Cbr%3E%3Cbr%3E%3Cstrong%3E5%3A30PM+%E2%80%93+5%3A40PM+%E2%80%94+Welcome+and+Opening+Remarks%3C%2Fstrong%3E%3C%2Fp%3E%3Cblockquote%3E%3Cp%3E%E2%80%8BJake+O%27Shea%2C+Principal%2C+Antler+%26amp%3B+Co-Founder+%2F+Organizer%2C+AITX%3Cbr%3ESasa+Zelenovic%2C+Sr.+Technical+Marketing+Manager%2C+Red+Hat+AI%3C%2Fp%3E%3C%2Fblockquote%3E%3Cp%3E%E2%80%8B%3Cstrong%3E5%3A40PM+%E2%80%93+6%3A10PM+%E2%80%94+Intro+to+vLLM+and+Project+Update%3C%2Fstrong%3E%3C%2Fp%3E%3Cblockquote%3E%3Cp%3E%E2%80%8BKyle+Sayers%2C+Sr.+Machine+Learning+Engineer%2C+Red+Hat+AI%3C%2Fp%3E%3C%2Fblockquote%3E%3Cp%3E%E2%80%8B%3Cstrong%3E6%3A10PM+%E2%80%93+6%3A30PM+%E2%80%94+Intro+to+Scalable%2C+Distributed+Inference+with+Kubernetes+and+llm-d%3C%2Fstrong%3E%3C%2Fp%3E%3Cblockquote%3E%3Cp%3E%E2%80%8BWill+Eaton%2C+Senior+Principal+Software+Engineer%2C+AI+Engineering%2C+Red+Hat+AI%3C%2Fp%3E%3C%2Fblockquote%3E%3Cp%3E%E2%80%8B%3Cstrong%3E6%3A30PM+%E2%80%93+6%3A45PM+%E2%80%94+NemoClaw%3A+Build+%26amp%3B+Deploy+Always-On+Agents%3C%2Fstrong%3E%3C%2Fp%3E%3Cblockquote%3E%3Cp%3E%E2%80%8BPatrick+Moorhead%2C+Technical+Marketing+Engineer%2C+AI%2C+NVIDIA%3C%2Fp%3E%3C%2Fblockquote%3E%3Cp%3E%E2%80%8B%3Cstrong%3E6%3A45PM+%E2%80%93+7%3A00PM+%E2%80%94+ModelExpress%3A+Fast+Weights+and+Compile+Caches+for+Inference+and+RL+Post-Training%3C%2Fstrong%3E%3C%2Fp%3E%3Cblockquote%3E%3Cp%3E%E2%80%8BGanesh+Kudleppanavar+-+Tech+Lead+Manager%2C+AI+Inference+NVIDIA%3C%2Fp%3E%3C%2Fblockquote%3E%3Cp%3E%E2%80%8B%3Cstrong%3E7%3A00PM+%E2%80%93+7%3A40PM+%E2%80%94+Hands-on+Workshop%3A+Getting+Started+with+Accurate+Model+Compression+and+Benchmarking%3C%2Fstrong%3E%3C%2Fp%3E%3Cblockquote%3E%3Cp%3E%E2%80%8BLegare+Kerrison%2C+Developer+Advocate%2C+Red+Hat+AI%3Cbr%3EGrace+Ableidinger%2C+Developer+Advocate%2C+Red+Hat+AI%3C%2Fp%3E%3C%2Fblockquote%3E%3Cp%3E%E2%80%8B%3Cstrong%3E7%3A40PM+%E2%80%93+8%3A00PM+%E2%80%94+Discussion+and+Q%26amp%3BA%3C%2Fstrong%3E%3C%2Fp%3E%3Cp%3E%E2%80%8B%3Cstrong%3E8%3A00PM+%E2%80%93+9%3A00PM+%E2%80%94+Networking%2C+Food+and+Drinks%3C%2Fstrong%3E%3C%2Fp%3E"
+    "addUrl": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=Dynamo+community+meeting&dates=20260923T173000Z%2F20260923T181500Z&location=https%3A%2F%2Fmeet.google.com%2Fheb-demu-qok"
   }
 ];

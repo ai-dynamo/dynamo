@@ -106,10 +106,16 @@ impl KeyValue {
     }
 }
 
+/// One change reported by a [`Bucket::watch`] stream.
 #[derive(Debug, Clone, PartialEq)]
 pub enum WatchEvent {
+    /// A key was created or its value changed after the last snapshot.
     Put(KeyValue),
+    /// A key was deleted after the last snapshot.
     Delete(Key),
+    /// The full bucket at one moment: the first event of every stream, possibly empty, and again
+    /// after the backend fell behind. It replaces any state held from earlier events. The NATS
+    /// store is the exception: it sends no initial `Resync` and replays existing keys as `Put`.
     Resync(HashMap<Key, bytes::Bytes>),
 }
 
@@ -129,6 +135,10 @@ pub trait Store: Send + Sync {
     fn connection_id(&self) -> u64;
 
     fn shutdown(&self);
+
+    async fn check_connection(&self) -> Result<(), StoreError> {
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -246,6 +256,15 @@ impl KeyValueStoreEnum {
             File(x) => x.shutdown(),
         }
     }
+
+    async fn check_connection(&self) -> Result<(), StoreError> {
+        use KeyValueStoreEnum::*;
+        match self {
+            Memory(_) | File(_) => Ok(()),
+            Etcd(x) => x.check_connection().await,
+            Nats(x) => x.check_connection().await,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -295,6 +314,10 @@ impl Manager {
         self.0.connection_id()
     }
 
+    pub async fn check_connection(&self) -> Result<(), StoreError> {
+        self.0.check_connection().await
+    }
+
     pub async fn load<T: for<'a> Deserialize<'a>>(
         &self,
         bucket: &str,
@@ -336,7 +359,15 @@ impl Manager {
         }
     }
 
-    /// Returns a receiver for all the existing keys of a bucket, and then for every later change.
+    /// Returns a receiver for one snapshot of a bucket, and then for every later change.
+    ///
+    /// The first event is one [`WatchEvent::Resync`] with every existing key, empty when the
+    /// bucket is empty. The NATS store is the exception: it sends no initial `Resync` and replays
+    /// existing keys as [`WatchEvent::Put`] events.
+    ///
+    /// A non-empty `sub` scopes the watch to the keys under that path, as
+    /// [`Bucket::watch_under`] does: the receiver gets at least those keys, and a backend that
+    /// cannot scope its watch sends the whole bucket. An empty `sub` watches the whole bucket.
     ///
     /// This method establishes the watch before it returns: [`Bucket::watch`] has captured the
     /// initial snapshot, so every change that follows reaches the receiver, as its own event or
@@ -355,6 +386,7 @@ impl Manager {
     pub async fn watch(
         self: Arc<Self>,
         bucket_name: &str,
+        sub: &str,
         bucket_ttl: Option<Duration>,
         cancel_token: CancellationToken,
     ) -> Result<
@@ -365,6 +397,7 @@ impl Manager {
         StoreError,
     > {
         let bucket_name = bucket_name.to_string();
+        let sub = sub.to_string();
         // Backpressure is intentional: discovery state events must never be dropped.
         let (tx, rx) = tokio::sync::mpsc::channel(16384);
         let (established_tx, established_rx) = tokio::sync::oneshot::channel();
@@ -385,7 +418,7 @@ impl Manager {
                 // Bucket::watch atomically establishes its initial snapshot and incremental
                 // stream. A separate entries() read here could replay an older buffered update
                 // after a newer snapshot.
-                let mut stream = match bucket.watch().await {
+                let mut stream = match bucket.watch_under(&sub).await {
                     Ok(stream) => stream,
                     Err(error) => {
                         let _ = established_tx.send(Err(error));
@@ -499,8 +532,12 @@ pub trait Bucket: Send + Sync {
     ///
     /// Implementations must establish the snapshot and incremental watch without a gap and must
     /// never emit an incremental value older than a value already emitted in the initial snapshot.
-    /// Existing entries may be emitted as individual WatchEvent::Put events or as one
-    /// WatchEvent::Resync.
+    /// The first event is exactly one [`WatchEvent::Resync`] with every existing entry, empty for
+    /// an empty bucket. Later events are changes that follow it, or a further `Resync` after the
+    /// backend fell behind.
+    ///
+    /// The NATS store is the exception: it sends no initial `Resync` and replays existing keys as
+    /// [`WatchEvent::Put`] events. Discovery does not select it.
     async fn watch(
         &self,
     ) -> Result<Pin<Box<dyn futures::Stream<Item = WatchEvent> + Send + '_>>, StoreError>;
@@ -509,6 +546,23 @@ pub trait Bucket: Send + Sync {
     /// The Key includes the full path including the bucket name.
     /// That means you cannot directory get a Key from `entries` and pass it to `get` or `delete`.
     async fn entries(&self) -> Result<HashMap<Key, bytes::Bytes>, StoreError>;
+
+    /// [`Bucket::entries`] for the keys under `sub`, a path inside the bucket with no leading
+    /// or trailing `/`. An empty `sub` is the whole bucket.
+    ///
+    /// Returns at least every entry under `sub`, so callers still filter. The default reads the
+    /// whole bucket. A backend whose bucket is a key prefix (etcd) reads only `sub`.
+    async fn entries_under(&self, _sub: &str) -> Result<HashMap<Key, bytes::Bytes>, StoreError> {
+        self.entries().await
+    }
+
+    /// [`Bucket::watch`] for the keys under `sub`, scoped as [`Bucket::entries_under`] is.
+    async fn watch_under(
+        &self,
+        _sub: &str,
+    ) -> Result<Pin<Box<dyn futures::Stream<Item = WatchEvent> + Send + '_>>, StoreError> {
+        self.watch().await
+    }
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -625,7 +679,7 @@ mod tests {
         let cancel_token = CancellationToken::new();
         let (watch_task, mut rx) = manager
             .clone()
-            .watch(BUCKET_NAME, None, cancel_token.clone())
+            .watch(BUCKET_NAME, "", None, cancel_token.clone())
             .await
             .unwrap();
 
@@ -633,10 +687,13 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let WatchEvent::Put(first) = first else {
-            panic!("expected initial put");
+        let WatchEvent::Resync(snapshot) = first else {
+            panic!("expected the initial resync, got {first:?}");
         };
-        assert_eq!(first.value(), b"old");
+        assert_eq!(
+            snapshot.get(&key).map(|value| value.as_ref()),
+            Some(b"old".as_slice())
+        );
 
         bucket.insert(&key, "new".into(), 2).await.unwrap();
         let second = tokio::time::timeout(Duration::from_secs(1), rx.recv())
@@ -669,7 +726,7 @@ mod tests {
         let cancel_token = CancellationToken::new();
         let (watch_task, mut rx) = manager
             .clone()
-            .watch(BUCKET_NAME, None, cancel_token.clone())
+            .watch(BUCKET_NAME, "", None, cancel_token.clone())
             .await
             .unwrap();
         bucket.delete(&key).await.unwrap();
@@ -678,10 +735,13 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let WatchEvent::Put(first) = first else {
+        let WatchEvent::Resync(snapshot) = first else {
             panic!("expected the existing key in the initial snapshot, got {first:?}");
         };
-        assert_eq!(first.key_str(), key.as_ref());
+        assert!(
+            snapshot.contains_key(&key),
+            "snapshot {snapshot:?} lacks {key}"
+        );
 
         let second = tokio::time::timeout(Duration::from_secs(1), rx.recv())
             .await
@@ -705,7 +765,7 @@ mod tests {
         let manager = Arc::new(Manager::file(cancel_token.clone(), root.path()));
 
         let error = manager
-            .watch(BUCKET_NAME, None, cancel_token.clone())
+            .watch(BUCKET_NAME, "", None, cancel_token.clone())
             .await
             .expect_err("a bucket under a file cannot be created");
 
@@ -724,7 +784,7 @@ mod tests {
 
         let error = manager
             .clone()
-            .watch(BUCKET_NAME, None, cancel_token)
+            .watch(BUCKET_NAME, "", None, cancel_token)
             .await
             .expect_err("a cancelled watch establishes no snapshot");
 
@@ -746,7 +806,7 @@ mod tests {
 
         let watch = manager
             .clone()
-            .watch(BUCKET_NAME, None, CancellationToken::new());
+            .watch(BUCKET_NAME, "", None, CancellationToken::new());
         assert!(
             watch.now_or_never().is_none(),
             "the watch completed on its first poll, before its setup task could run"
@@ -763,7 +823,7 @@ mod tests {
     async fn manager_watch_task_ends_when_its_receiver_drops() {
         let manager = Arc::new(Manager::memory());
         let (watch_task, rx) = manager
-            .watch(BUCKET_NAME, None, CancellationToken::new())
+            .watch(BUCKET_NAME, "", None, CancellationToken::new())
             .await
             .unwrap();
 
@@ -788,7 +848,7 @@ mod tests {
         let cancel_token = CancellationToken::new();
         let (watch_task, mut rx) = manager
             .clone()
-            .watch(BUCKET_NAME, None, cancel_token.clone())
+            .watch(BUCKET_NAME, "", None, cancel_token.clone())
             .await
             .unwrap();
 
@@ -796,7 +856,13 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert!(matches!(initial, WatchEvent::Put(_)));
+        let WatchEvent::Resync(snapshot) = initial else {
+            panic!("expected the initial resync, got {initial:?}");
+        };
+        assert_eq!(
+            snapshot.get(&key).map(|value| value.as_ref()),
+            Some(b"value".as_slice())
+        );
 
         drop(rx);
 
@@ -859,7 +925,7 @@ mod tests {
         assert_eq!(res, StoreOutcome::Created(0));
 
         let expected = [
-            WatchEvent::Put(KeyValue::new(Key::new("test1".into()), "value1".into())),
+            WatchEvent::Resync(HashMap::from([(Key::new("test1".into()), "value1".into())])),
             WatchEvent::Put(KeyValue::new(Key::new("test2".into()), "value2".into())),
             WatchEvent::Put(KeyValue::new(
                 Key::new("test2".into()),

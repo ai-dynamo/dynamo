@@ -3,8 +3,9 @@
 
 """Unit tests for schema-aware DynamoGraphDeployment helpers."""
 
+import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, PropertyMock
 
 import aiohttp
 import httpx
@@ -13,6 +14,7 @@ import pytest
 import requests
 import yaml
 
+from tests.deploy import dgd_utils
 from tests.deploy.dgd_utils import DeploymentSpec, ManagedDeployment
 
 pytestmark = [pytest.mark.unit, pytest.mark.pre_merge, pytest.mark.gpu_0]
@@ -125,12 +127,17 @@ async def test_context_enter_preserves_setup_error_when_cleanup_times_out(
         await deployment.__aenter__()
 
 
-async def test_context_exit_reraises_unexpected_cleanup_error(tmp_path) -> None:
+async def test_context_exit_preserves_primary_error_for_cleanup_defect(
+    tmp_path,
+) -> None:
     deployment = managed_deployment(tmp_path)
-    deployment._cleanup = AsyncMock(side_effect=RuntimeError("cleanup defect"))
+    cleanup_error = RuntimeError("cleanup defect")
+    deployment._cleanup = AsyncMock(side_effect=cleanup_error)
 
-    with pytest.raises(RuntimeError, match="cleanup defect"):
-        await deployment.__aexit__(ValueError, ValueError("test failed"), None)
+    result = await deployment.__aexit__(ValueError, ValueError("test failed"), None)
+
+    assert result is False
+    assert deployment.cleanup_errors == [cleanup_error]
 
 
 @pytest.mark.parametrize(
@@ -148,11 +155,11 @@ def test_request_rebuilds_port_forward_after_transport_failure(
     replacement_port_forward = MagicMock(local_port=31002)
     deployment.port_forward = MagicMock(return_value=replacement_port_forward)
     response = MagicMock(spec=requests.Response)
-    request_sender = MagicMock(side_effect=[transport_error, response])
+    request_sender = MagicMock(side_effect=[transport_error, response, response])
     sleep = MagicMock()
     monkeypatch.setattr("tests.deploy.dgd_utils.time.sleep", sleep)
 
-    result = deployment.send_request_with_port_forward_retry(
+    result, active_port_forward = deployment.send_request_with_port_forward_retry(
         pod=MagicMock(),
         remote_port=8000,
         endpoint="/v1/chat/completions",
@@ -169,9 +176,58 @@ def test_request_rebuilds_port_forward_after_transport_failure(
     assert (
         request_sender.call_args_list[1].args[0].startswith("http://localhost:31002/")
     )
+    assert active_port_forward is replacement_port_forward
+    next_result, next_port_forward = deployment.send_request_with_port_forward_retry(
+        pod=MagicMock(),
+        remote_port=8000,
+        endpoint="/v1/chat/completions",
+        payload={"model": "test"},
+        timeout=120,
+        port_forward=active_port_forward,
+        request_sender=request_sender,
+    )
+    assert next_result is response
+    assert next_port_forward is replacement_port_forward
+    assert request_sender.call_count == 3
+    assert (
+        request_sender.call_args_list[2].args[0].startswith("http://localhost:31002/")
+    )
     original_port_forward.stop.assert_called_once_with()
     deployment.port_forward.assert_called_once()
     sleep.assert_called_once_with(5)
+
+
+def test_request_rebuilds_port_forward_after_stream_body_failure(
+    monkeypatch, tmp_path
+) -> None:
+    deployment = managed_deployment(tmp_path)
+    original_port_forward = MagicMock(local_port=31001)
+    replacement_port_forward = MagicMock(local_port=31002)
+    deployment.port_forward = MagicMock(return_value=replacement_port_forward)
+    dropped_response = MagicMock(spec=requests.Response)
+    type(dropped_response).content = PropertyMock(
+        side_effect=requests.ConnectionError("stream dropped after headers")
+    )
+    response = MagicMock(spec=requests.Response)
+    type(response).content = PropertyMock(return_value=b"data: [DONE]\n")
+    request_sender = MagicMock(side_effect=[dropped_response, response])
+    monkeypatch.setattr("tests.deploy.dgd_utils.time.sleep", MagicMock())
+
+    result, active_port_forward = deployment.send_request_with_port_forward_retry(
+        pod=MagicMock(),
+        remote_port=8000,
+        endpoint="/v1/chat/completions",
+        payload={"model": "test", "stream": True},
+        timeout=120,
+        port_forward=original_port_forward,
+        request_sender=request_sender,
+    )
+
+    assert result is response
+    assert active_port_forward is replacement_port_forward
+    dropped_response.close.assert_called_once_with()
+    original_port_forward.stop.assert_called_once_with()
+    deployment.port_forward.assert_called_once()
 
 
 def test_request_reraises_unexpected_port_forward_stop_error(tmp_path) -> None:
@@ -192,7 +248,55 @@ def test_request_reraises_unexpected_port_forward_stop_error(tmp_path) -> None:
         )
 
 
-async def test_in_flight_restart_preserves_bounded_previous_log(tmp_path) -> None:
+@pytest.mark.parametrize("main_started", [True, False])
+async def test_pod_status_includes_native_sidecar(tmp_path, main_started) -> None:
+    """Report sidecar failures even before regular containers have started."""
+    deployment = managed_deployment(tmp_path)
+    runtime = SimpleNamespace(
+        name="runtime",
+        restart_count=3,
+        state=SimpleNamespace(
+            waiting=SimpleNamespace(reason="CrashLoopBackOff", message="backoff"),
+            terminated=None,
+            running=None,
+        ),
+    )
+    main = SimpleNamespace(
+        name="main",
+        restart_count=0,
+        state=SimpleNamespace(waiting=None, terminated=None, running=SimpleNamespace()),
+    )
+    pod = SimpleNamespace(
+        metadata=SimpleNamespace(name="worker-0"),
+        status=SimpleNamespace(
+            phase="Running" if main_started else "Pending",
+            init_container_statuses=[runtime],
+            container_statuses=[main] if main_started else None,
+        ),
+    )
+    deployment._core_api = SimpleNamespace(
+        list_namespaced_pod=AsyncMock(return_value=SimpleNamespace(items=[pod]))
+    )
+
+    details = await deployment._get_pod_status_details()
+
+    assert len(details) == (2 if main_started else 1)
+    sidecar = next(detail for detail in details if detail.container_name == "runtime")
+    assert sidecar.state == "Waiting"
+    assert sidecar.reason == "CrashLoopBackOff"
+    assert sidecar.restart_count == 3
+    if main_started:
+        engine = next(detail for detail in details if detail.container_name == "main")
+        assert engine.state == "Running"
+
+
+@pytest.mark.parametrize(
+    ("container_name", "main_started"),
+    [("main", True), ("runtime", True), ("runtime", False)],
+)
+async def test_in_flight_restart_preserves_bounded_previous_log(
+    tmp_path, container_name, main_started
+) -> None:
     """Keep a bounded previous-instance log before Kubernetes rotates again."""
     deployment = ManagedDeployment(
         log_dir=str(tmp_path),
@@ -201,13 +305,23 @@ async def test_in_flight_restart_preserves_bounded_previous_log(tmp_path) -> Non
     )
     terminated = SimpleNamespace(reason="Error", exit_code=1)
     container_status = SimpleNamespace(
-        name="main",
+        name=container_name,
         restart_count=1,
         last_state=SimpleNamespace(terminated=terminated),
     )
+    main_statuses = (
+        [SimpleNamespace(name="main", restart_count=0)] if main_started else None
+    )
+    if container_name == "main":
+        main_statuses = [container_status]
     pod = SimpleNamespace(
         metadata=SimpleNamespace(name="worker-0"),
-        status=SimpleNamespace(container_statuses=[container_status]),
+        status=SimpleNamespace(
+            init_container_statuses=(
+                [container_status] if container_name == "runtime" else None
+            ),
+            container_statuses=main_statuses,
+        ),
     )
     deployment._core_api = SimpleNamespace(
         list_namespaced_pod=AsyncMock(return_value=SimpleNamespace(items=[pod])),
@@ -222,12 +336,79 @@ async def test_in_flight_restart_preserves_bounded_previous_log(tmp_path) -> Non
     assert "first line" not in warnings[0]
     assert "second line" in warnings[0]
     assert "third line" in warnings[0]
-    preserved = tmp_path / "restarts" / "worker-0.main.restart-1.previous.log"
+    preserved = (
+        tmp_path / "restarts" / f"worker-0.{container_name}.restart-1.previous.log"
+    )
     assert preserved.read_text() == "first line\nsecond line\nthird line\n"
     deployment._core_api.read_namespaced_pod_log.assert_awaited_once_with(
         name="worker-0",
         namespace="default",
-        container="main",
+        container=container_name,
         previous=True,
         tail_lines=50000,
     )
+
+    assert await deployment._dump_in_flight_restart_logs() == []
+    assert deployment._core_api.read_namespaced_pod_log.await_count == 1
+    container_status.restart_count = 2
+    assert len(await deployment._dump_in_flight_restart_logs()) == 1
+    assert deployment._core_api.read_namespaced_pod_log.await_count == 2
+
+
+@pytest.mark.parametrize(
+    ("failed", "capture_behavior", "expected_events"),
+    [
+        (False, "complete", ["service-logs", "delete"]),
+        (
+            True,
+            "complete",
+            ["capture-start", "capture-done", "service-logs", "delete"],
+        ),
+        (True, "timeout", ["capture-start", "service-logs", "delete"]),
+        (True, "cancel", ["capture-start", "service-logs", "delete"]),
+    ],
+    ids=["success", "failure", "capture-timeout", "capture-cancelled"],
+)
+async def test_discovery_capture_and_cleanup(
+    monkeypatch, tmp_path, failed, capture_behavior, expected_events
+):
+    deployment = managed_deployment(tmp_path)
+    events = []
+
+    # Isolate teardown from Kubernetes startup.
+    monkeypatch.setattr(
+        ManagedDeployment, "__aenter__", AsyncMock(return_value=deployment)
+    )
+    deployment._get_service_logs = MagicMock(
+        side_effect=lambda: events.append("service-logs")
+    )
+    snapshot_timeout = 1 if capture_behavior == "cancel" else 0.01
+    monkeypatch.setattr(dgd_utils, "DISCOVERY_SNAPSHOT_TIMEOUT", snapshot_timeout)
+
+    async def capture():
+        events.append("capture-start")
+        if capture_behavior in {"timeout", "cancel"}:
+            await asyncio.Event().wait()
+        await asyncio.sleep(0)
+        events.append("capture-done")
+
+    async def delete(*, fail_on_timeout=True):
+        events.append("delete")
+
+    deployment._capture_discovery_state = capture
+    deployment._delete_deployment = delete
+
+    if capture_behavior == "cancel":
+        with pytest.raises(TimeoutError):
+            async with asyncio.timeout(0.01):
+                async with deployment:
+                    raise ValueError("inference failed")
+    elif failed:
+        with pytest.raises(ValueError, match="inference failed"):
+            async with deployment:
+                raise ValueError("inference failed")
+    else:
+        async with deployment:
+            pass
+
+    assert events == expected_events

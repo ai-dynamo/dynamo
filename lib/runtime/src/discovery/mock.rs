@@ -308,6 +308,7 @@ impl Discovery for MockDiscovery {
             for event in events {
                 yield Ok(event);
             }
+            yield Ok(DiscoveryEvent::Resync(known_instances.values().cloned().collect()));
 
             while let Some(instances) = changes.recv().await {
                 let (events, reconciled) = reconcile_discovery_snapshot(
@@ -329,8 +330,15 @@ impl Discovery for MockDiscovery {
 mod tests {
     use super::*;
     use crate::component::TransportType;
+    use crate::discovery::startup_contract as contract;
     use futures::StreamExt;
     use tokio::time::{Duration, timeout};
+
+    #[tokio::test]
+    async fn mock_backend_keeps_the_startup_contract() {
+        let client = MockDiscovery::new(Some(1), SharedMockRegistry::new());
+        contract::check(&client).await;
+    }
 
     #[tokio::test]
     async fn watch_emits_same_id_endpoint_update() {
@@ -349,6 +357,7 @@ mod tests {
             request_plane_codec: None,
         };
         let mut stream = client.list_and_watch(query.clone(), None).await.unwrap();
+        contract::expect_empty_snapshot(&mut stream).await;
 
         let original = client.register(spec("127.0.0.1:8000")).await.unwrap();
         let event = timeout(Duration::from_secs(1), stream.next())
@@ -396,6 +405,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(added, DiscoveryEvent::Added(instance.clone()));
+        assert_eq!(
+            contract::next(&mut stream).await,
+            DiscoveryEvent::Resync(vec![instance.clone()])
+        );
 
         let removed = timeout(Duration::from_secs(1), stream.next())
             .await
@@ -412,6 +425,7 @@ mod tests {
             .list_and_watch(DiscoveryQuery::AllEndpoints, None)
             .await
             .unwrap();
+        contract::expect_empty_snapshot(&mut stream).await;
 
         let instance = client
             .register(DiscoverySpec::Endpoint {
@@ -627,6 +641,7 @@ mod tests {
 
         // Start watching
         let mut stream = client1.list_and_watch(query.clone(), None).await.unwrap();
+        contract::expect_empty_snapshot(&mut stream).await;
 
         // Add first instance
         let instance1 = client1.register(spec.clone()).await.unwrap();

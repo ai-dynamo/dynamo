@@ -14,22 +14,23 @@
 # limitations under the License.
 
 import asyncio
+import dataclasses
 import logging
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Protocol, Tuple
+from typing import Any, Dict, List, Optional, Protocol, Sequence, Tuple
 from urllib.parse import urlparse
 
-import aiohttp
 import torch
 from safetensors.torch import load as safetensors_load
 from safetensors.torch import load_file as safetensors_load_file
 from tensorrt_llm.inputs.multimodal_data import VideoData
+from tensorrt_llm.inputs.registry import MULTIMODAL_PLACEHOLDER_REGISTRY
 from tensorrt_llm.inputs.utils import async_load_video
 from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
 
-from dynamo.common.http import HttpStatusError, fetch_bytes
+from dynamo.common.http import HttpConfigurationError, HttpStatusError, fetch_bytes
 from dynamo.common.http.url_validator import (
     UrlValidationError,
     UrlValidationPolicy,
@@ -39,13 +40,35 @@ from dynamo.common.multimodal.codec_errors import (
     MissingMediaDecoderError,
     video_decoder_missing,
 )
-from dynamo.common.multimodal.image_loader import ImageLoader
-from dynamo.common.multimodal.media_source import describe_media_source
+from dynamo.common.multimodal.image_loader import (
+    ImageLoader,
+    image_cache_scope_from_request,
+)
+from dynamo.common.multimodal.media_source import decode_data_uri, describe_media_source
 from dynamo.common.multimodal.nvdec_decoder import probe_video_codec, should_use_nvdec
 from dynamo.common.multimodal.video_loader import VideoLoader
+from dynamo.common.utils.token_ids import token_ids_to_list
+from dynamo.llm.exceptions import InvalidArgument
 from dynamo.runtime.logging import configure_dynamo_logging
 
 configure_dynamo_logging()
+
+# Shortest whole-request budget for one embedding download, in seconds.
+_EMBEDDING_FETCH_MIN_TIMEOUT_S = 300.0
+# Above the floor, the budget is the size cap divided by this rate (bytes/s).
+_EMBEDDING_FETCH_MIN_RATE = 64 * 1024
+# A server that sends nothing for this long fails the download, in seconds.
+_EMBEDDING_FETCH_READ_TIMEOUT_S = 300.0
+
+# Model types whose TRT-LLM input processor rescales images and videos with
+# one flag. Next to float video frames, a PIL image would reach such a model
+# unscaled, so image + video requests are refused for them (MiniCPM-V 4.6's
+# processor currently refuses the mix itself as well).
+# TODO: remove once images go to TRT-LLM as float tensors for models without
+# a preferred image format, as trtllm-serve sends them.
+_SHARED_RESCALE_FLAG_MODEL_TYPES = frozenset(
+    {"qwen2_vl", "qwen2_5_vl", "exaone4_5", "minicpmv4_6"}
+)
 
 
 def _nvdec_video_data(content: bytes, num_frames: int) -> VideoData:
@@ -70,6 +93,70 @@ def _nvdec_video_data(content: bytes, num_frames: int) -> VideoData:
         "frames_indices": meta["frames_indices"],
     }
     return VideoData(frames=frames_pt, metadata=metadata, audio=None)
+
+
+def _video_frames_to_uint8(video: VideoData) -> VideoData:
+    """Return ``video`` with its float [0,1] ``(C, H, W)`` tensor frames as one
+    uint8 ``(N, H, W, 3)`` array, TRT-LLM's ``format="np"`` video form.
+
+    Both decode paths scale uint8 frames by 1/255, so rounding back recovers
+    the decoded pixels exactly. Other fields are kept.
+    """
+    stacked = torch.stack(list(video.frames))
+    frames_u8 = stacked.mul(255.0).round_().clamp_(0, 255).to(torch.uint8)
+    return dataclasses.replace(
+        video, frames=frames_u8.permute(0, 2, 3, 1).contiguous().numpy()
+    )
+
+
+def _mm_item_order(
+    multi_modal_order: Any,
+    counts: Dict[str, int],
+    prompt_modality_order: Optional[Sequence[str]] = None,
+) -> List[Dict[str, Any]]:
+    """Prompt-order manifest for TRT-LLM's ``inputs["mm_item_order"]``: one
+    ``{"modality", "index"}`` per item, ``index`` being the item's position in
+    ``multi_modal_data[modality]``.
+
+    Taken from the frontend's ``multi_modal_order``: the media parts in message
+    order, each as ``{"modality": "image_url", "index": i}`` with ``i`` its
+    position in ``multi_modal_data["image_url"]``, the order the items are
+    loaded in here. As trtllm-serve does, the order is then grouped by modality
+    when the model's chat template groups placeholders that way
+    (``prompt_modality_order``); the frontend's order does not include that
+    step. ``counts`` is the number of loaded items per modality, and the order
+    must name each of them once. Otherwise this raises ``InvalidArgument``: a
+    400 whose message reaches the client.
+    """
+    entries = multi_modal_order if isinstance(multi_modal_order, list) else None
+    if entries is None:
+        raise InvalidArgument(
+            "Cannot order the request's media items: the request has no "
+            "multi_modal_order"
+        )
+    order: List[Dict[str, Any]] = []
+    for entry in entries:
+        modality = entry.get("modality") if isinstance(entry, dict) else None
+        index = entry.get("index") if isinstance(entry, dict) else None
+        order.append(
+            {
+                "modality": modality.removesuffix("_url")
+                if isinstance(modality, str)
+                else None,
+                "index": index if type(index) is int else None,
+            }
+        )
+    expected = {(m, i) for m, n in counts.items() for i in range(n)}
+    named = {(e["modality"], e["index"]) for e in order}
+    if len(order) != len(expected) or named != expected:
+        raise InvalidArgument(
+            "Cannot order the request's media items: multi_modal_order does not "
+            f"name each loaded item exactly once (loaded: {counts})"
+        )
+    if prompt_modality_order:
+        rank = {m: i for i, m in enumerate(prompt_modality_order)}
+        order.sort(key=lambda e: (rank.get(e["modality"], len(rank)), e["index"]))
+    return order
 
 
 class TokenizerProtocol(Protocol):
@@ -163,7 +250,8 @@ class MultimodalRequestProcessor:
             self.tokenizer = tokenizer_factory(model_dir)
 
         self.image_loader = ImageLoader(
-            enable_frontend_decoding=enable_frontend_decoding
+            enable_frontend_decoding=enable_frontend_decoding,
+            max_bytes=self.max_file_size_bytes,
         )
 
         # Reuse the shared default so this preprocessor and the vLLM/SGLang
@@ -171,9 +259,11 @@ class MultimodalRequestProcessor:
         self.num_video_frames = max(1, VideoLoader.NUM_FRAMES_DEFAULT)
         self._url_policy = UrlValidationPolicy.from_env()
 
-        # Input processor used only to size an omitted max_tokens (see
-        # _expanded_prompt_len). Optional: unavailable for models without a
-        # registered processor, in which case max_tokens sizing is left to the engine.
+        # Input processor used to size an omitted max_tokens (see
+        # _expanded_prompt_len) and to read the model's preferred video format
+        # (see _prefers_np_video). Optional: unavailable for models without a
+        # registered processor, in which case max_tokens sizing is left to the
+        # engine and videos keep their decoded format.
         self.input_processor = None
         try:
             from tensorrt_llm.inputs import create_input_processor
@@ -205,6 +295,30 @@ class MultimodalRequestProcessor:
         except Exception as e:
             logging.warning("Could not compute expanded prompt length: %s", e)
             return None
+
+    def _prefers_np_video(self) -> bool:
+        """True when the model's input processor asks for uint8 numpy video
+        (``get_preferred_media_io_kwargs``, which trtllm-serve applies).
+
+        Only multimodal input processors define the method; the processor may
+        also be missing (None) or TRT-LLM's text-only DefaultInputProcessor.
+        """
+        get_prefs = getattr(self.input_processor, "get_preferred_media_io_kwargs", None)
+        if get_prefs is None:
+            return False
+        prefs = get_prefs() or {}
+        return prefs.get("video", {}).get("format") == "np"
+
+    def _prompt_modality_order(self) -> Optional[Tuple[str, ...]]:
+        """Modality order the model's chat template groups placeholders in
+        (TRT-LLM's ``prompt_modality_order``), or None when the template keeps
+        the message order. Looked up by the model's ``model_type``, as
+        trtllm-serve does."""
+        config = getattr(self.input_processor, "config", None)
+        model_type = getattr(config, "model_type", None)
+        if not isinstance(model_type, str):
+            return None
+        return MULTIMODAL_PLACEHOLDER_REGISTRY.get_prompt_modality_order(model_type)
 
     def is_url(self, path: str) -> bool:
         """Check if a path is a URL."""
@@ -249,59 +363,32 @@ class MultimodalRequestProcessor:
         if self.is_url(path):
             if parsed.scheme not in ("http", "https"):
                 raise RuntimeError(f"Unsupported URL scheme: {parsed.scheme}")
+            # One budget for the whole download: at least 300 s, and 800 s at
+            # the default 50 MiB cap. A server that sends nothing for 300 s
+            # fails sooner.
+            timeout = max(
+                _EMBEDDING_FETCH_MIN_TIMEOUT_S,
+                self.max_file_size_bytes / _EMBEDDING_FETCH_MIN_RATE,
+            )
             try:
-                # Per-operation budget (connect + per-read), not a single
-                # whole-request cap: a large embedding on a slow link keeps
-                # downloading as long as it makes progress, while a stalled
-                # connect or a read that hangs still fast-fails at 300s.
-                timeout = aiohttp.ClientTimeout(sock_connect=300.0, sock_read=300.0)
-                # trust_env=True honors HTTP_PROXY / HTTPS_PROXY / NO_PROXY, which
-                # aiohttp ignores by default.
-                async with aiohttp.ClientSession(
-                    timeout=timeout, trust_env=True
-                ) as client:
-                    # Do not follow redirects: this path applies no destination
-                    # policy, so following Location would turn one unvalidated
-                    # fetch into an attacker-chained multi-hop one.
-                    async with client.get(path, allow_redirects=False) as resp:
-                        # raise_for_status() only fires at >= 400, so a 3xx would
-                        # otherwise fall through to an empty-body read and surface
-                        # as a cryptic "safetensors: empty buffer". Redirecting
-                        # .safetensors URLs are common (CDN / presigned), so give
-                        # the operator an actionable message. Do not echo Location
-                        # or the path — both are caller-controlled and unbounded.
-                        if 300 <= resp.status < 400:
-                            raise RuntimeError(
-                                f"Embedding URL returned HTTP {resp.status}; this "
-                                "path does not follow redirects because it applies "
-                                "no destination policy. Supply the final URL."
-                            )
-                        resp.raise_for_status()
-                        content_length = resp.headers.get("content-length")
-                        if (
-                            content_length
-                            and int(content_length) > self.max_file_size_bytes
-                        ):
-                            raise RuntimeError(
-                                f"File size exceeds limit: "
-                                f"{int(content_length) // (1024*1024)}MB > "
-                                f"{self.max_file_size_mb}MB"
-                            )
-                        chunks = []
-                        downloaded = 0
-                        async for chunk in resp.content.iter_chunked(1 << 20):
-                            downloaded += len(chunk)
-                            if downloaded > self.max_file_size_bytes:
-                                raise RuntimeError(
-                                    f"File size exceeds limit: "
-                                    f"{downloaded // (1024*1024)}MB > "
-                                    f"{self.max_file_size_mb}MB"
-                                )
-                            chunks.append(chunk)
-                        content = b"".join(chunks)
+                # The shared client checks self._url_policy on the URL and on
+                # each redirect hop, filters blocked addresses again when it
+                # connects, and stops reading past the size cap.
+                content = await fetch_bytes(
+                    path,
+                    timeout,
+                    policy=self._url_policy,
+                    max_bytes=self.max_file_size_bytes,
+                    read_timeout=_EMBEDDING_FETCH_READ_TIMEOUT_S,
+                )
                 data = safetensors_load(content)
                 return self._unwrap_safetensors(data)
             except RuntimeError:
+                raise
+            except (UrlValidationError, HttpStatusError, HttpConfigurationError):
+                # Keep the type, so that the callers can tell a rejected URL
+                # (a client error) from a proxy configuration fault (a server
+                # error).
                 raise
             except Exception as e:
                 logging.error(f"Failed to download or load tensor from URL: {e}")
@@ -516,7 +603,8 @@ class MultimodalRequestProcessor:
                 if image_urls:
                     try:
                         pil_images = await self.image_loader.load_image_batch(
-                            image_urls
+                            image_urls,
+                            cache_scope=image_cache_scope_from_request(request),
                         )
                         if pil_images:
                             processed_mm_data["image"] = pil_images
@@ -554,6 +642,15 @@ class MultimodalRequestProcessor:
                             logging.info(
                                 f"Loaded {len(loaded_embeddings)} embedding file(s) from paths: {embedding_paths}"
                             )
+                    except (
+                        UrlValidationError,
+                        HttpStatusError,
+                        HttpConfigurationError,
+                    ):
+                        # Keep the type: a rejected URL is a client error (4xx)
+                        # and a proxy configuration fault is a server error
+                        # (5xx). A None return makes both a generic 500.
+                        raise
                     except Exception as e:
                         logging.error(f"Failed to load embeddings: {e}")
                         return None
@@ -565,6 +662,22 @@ class MultimodalRequestProcessor:
                 raise HttpStatusError(
                     400, "Malformed video_url field: expected a list", str(video_items)
                 )
+            # Images reach the model as PIL (not rescaled) and both video
+            # decode paths give float [0,1] tensors (rescaled). A processor that
+            # takes one rescale flag for both modalities cannot take that mix:
+            # Qwen3-VL's rejects it, and Qwen2/2.5-VL's would leave the image
+            # unscaled. Next to an image, videos therefore go over as uint8
+            # when the model asks for that format, as Qwen3-VL does. For the
+            # models in _SHARED_RESCALE_FLAG_MODEL_TYPES, which do not, the
+            # request is refused before any video is fetched; other models get
+            # the media as decoded. Video-only requests are unchanged.
+            image_and_video = bool(video_items) and "image" in processed_mm_data
+            if image_and_video and self.model_type in _SHARED_RESCALE_FLAG_MODEL_TYPES:
+                raise InvalidArgument(
+                    "This model cannot take an image and a video in the same "
+                    "request yet; send them in separate requests"
+                )
+            uint8_videos = image_and_video and self._prefers_np_video()
             videos = []
             for item in video_items:
                 url = item.get("Url") if isinstance(item, dict) else item
@@ -586,10 +699,19 @@ class MultimodalRequestProcessor:
                     )
                 try:
                     normalized_url = await validate_media_url(url, self._url_policy)
-                    if urlparse(normalized_url).scheme in ("http", "https"):
-                        content = await fetch_bytes(
-                            normalized_url, 30.0, policy=self._url_policy
-                        )
+                    scheme = urlparse(normalized_url).scheme
+                    if scheme in ("http", "https", "data"):
+                        if scheme == "data":
+                            content = decode_data_uri(
+                                normalized_url, max_bytes=self.max_file_size_bytes
+                            )
+                        else:
+                            content = await fetch_bytes(
+                                normalized_url,
+                                30.0,
+                                policy=self._url_policy,
+                                max_bytes=self.max_file_size_bytes,
+                            )
                         # Dual decode path: H.264/H.265 via NVDEC (hardware); other
                         # codecs via the vendor cv2 loader. NVDEC failure falls back.
                         nvdec_video = None
@@ -650,7 +772,10 @@ class MultimodalRequestProcessor:
                             ) from exc
                 except UrlValidationError as e:
                     raise HttpStatusError(400, str(e), source) from e
-                except HttpStatusError:
+                except (HttpStatusError, HttpConfigurationError):
+                    # An untrusted egress proxy is deployment configuration,
+                    # not a bad request. It carries no status, so the generic
+                    # handler below would make it a 400.
                     raise
                 except MissingMediaDecoderError as e:
                     # A missing decoder is deployment configuration, not a bad
@@ -668,6 +793,15 @@ class MultimodalRequestProcessor:
                         source,
                     ) from e
             if videos:
+                if uint8_videos:
+                    # CPU work that grows with the frame count: run it off the
+                    # event loop, as the decode is.
+                    videos = [
+                        (await asyncio.to_thread(_video_frames_to_uint8, v))
+                        if isinstance(v.frames[0], torch.Tensor)
+                        else v
+                        for v in videos
+                    ]
                 processed_mm_data["video"] = videos
                 logging.info("Loaded %d video(s)", len(videos))
 
@@ -687,6 +821,17 @@ class MultimodalRequestProcessor:
 
             if processed_mm_data:
                 processed_inputs["multi_modal_data"] = processed_mm_data
+                if len(processed_mm_data) > 1:
+                    # With more than one modality, TRT-LLM needs the items'
+                    # prompt order to give each item its own tokens and
+                    # embeddings. Without it, its multimodal hashing counts
+                    # the first modality's tokens only, and the assertion
+                    # that catches this stops the engine.
+                    processed_inputs["mm_item_order"] = _mm_item_order(
+                        request.get("multi_modal_order"),
+                        {m: len(items) for m, items in processed_mm_data.items()},
+                        self._prompt_modality_order(),
+                    )
 
                 # TRT-LLM echoes these UUIDs into its KV-reuse events, so the
                 # router's per-image identity matches what the worker caches.
@@ -700,7 +845,7 @@ class MultimodalRequestProcessor:
                     processed_inputs["multi_modal_uuids"] = {"image": list(mm_hashes)}
 
         # Get token_ids from request (already tokenized by Rust frontend)
-        token_ids = request.get("token_ids")
+        token_ids = token_ids_to_list(request.get("token_ids"))
         if not token_ids:
             logging.warning("No token_ids in request")
             return None
@@ -713,12 +858,15 @@ class MultimodalRequestProcessor:
         # calculator is not override-aware (Qwen2-VL ignores the kwargs while
         # counting) and is not guaranteed non-mutating (Gemma-4 writes them
         # into class-level defaults). Falling back to the engine default beats
-        # a stale or leaked estimate.
+        # a stale or leaked estimate. Also skipped when the request has video:
+        # the estimate counts image tokens only, and would drop the video's.
+        # Video-only requests already get no estimate.
         expanded_len = (
             None
             if processed_inputs.get("mm_processor_kwargs")
             else self._expanded_prompt_len(
-                token_ids, mm_data.get("image") if mm_data else None
+                token_ids,
+                mm_data.get("image") if mm_data and not mm_data.get("video") else None,
             )
         )
         if expanded_len is not None:

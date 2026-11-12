@@ -29,11 +29,8 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	gaiev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 )
@@ -163,31 +160,10 @@ func (r *dgdEPPReconciler) Reconcile(
 // metav1.IsControlledBy first ensures only a ConfigMap this operator actually
 // generated for this DGD is ever removed; a same-named but foreign ConfigMap
 // is left untouched.
-//
-// An already-absent ConfigMap is success, not an error. If the ConfigMap is
-// replaced by an unowned object of the same name in between, the delete
-// fails with a conflict and the reconcile retries against the replacement
-// instead of removing a ConfigMap this DGD does not own.
 func (r *dgdEPPReconciler) deleteOwnedLegacyEPPConfigMap(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 ) error {
-	name := epp.GetConfigMapName(dgd.Name)
-	existing := &corev1.ConfigMap{}
-	err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: dgd.Namespace}, existing)
-	if apierrors.IsNotFound(err) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("failed to get ConfigMap %s: %w", name, err)
-	}
-	if !metav1.IsControlledBy(existing, dgd) {
-		return nil
-	}
-
-	err = r.Delete(ctx, existing, client.Preconditions{UID: &existing.UID})
-	if err != nil && !apierrors.IsNotFound(err) {
-		return fmt.Errorf("failed to delete ConfigMap %s: %w", name, err)
-	}
-	return nil
+	key := types.NamespacedName{Name: epp.GetConfigMapName(dgd.Name), Namespace: dgd.Namespace}
+	return r.deleteIfControlledBy(ctx, dgd, key, &corev1.ConfigMap{}, "ConfigMap")
 }

@@ -17,7 +17,7 @@ Dynamo 拥有 200 多位外部贡献者、220 多个已合并的社区 PR，并�
 - [GitHub Discussions](https://github.com/ai-dynamo/dynamo/discussions)
 - [设计提案](https://github.com/ai-dynamo/dynamo/issues?q=is%3Aissue+label%3A%22dep%3Adraft%22%2C%22dep%3Aproposed%22%2C%22dep%3Aapproved%22%2C%22dep%3Aimplementing%22%2C%22dep%3Acompleted%22%2C%22dep%3Adeferred%22%2C%22dep%3Asuperseeded%22) -- 重大功能的 RFC，以带 `dep:*` 标签的 GitHub issue 形式跟踪
 - [Office Hours](https://www.youtube.com/playlist?list=PL5B692fm6--tgryKu94h2Zb7jTFM3Go4X) -- 双周会议
-- [社区会议](https://docs.google.com/document/d/1uR8xD_hlYGwV6QspvSc36k1H-wo1BUcVmFbHH9xlXd8/view) ([Youtube](https://www.youtube.com/@ai-dynamo-community)) -- 每周（Wed 10:30 AM PT）开发者社区会议
+- [社区会议](https://docs.google.com/document/d/1uR8xD_hlYGwV6QspvSc36k1H-wo1BUcVmFbHH9xlXd8/view) ([Youtube](https://www.youtube.com/@ai-dynamo-community)) -- 每周（Tue 9:00 AM PT）开发者社区会议
 - [Dynamo Day 录像](https://nvevents.nvidia.com/dynamoday) -- 来自生产用户的深入分享
 
 ## TL;DR
@@ -430,7 +430,7 @@ git commit -s -m "fix: your descriptive message"
 - **Discussions**: [GitHub Discussions](https://github.com/ai-dynamo/dynamo/discussions)
 - **设计提案**: [重大功能的 RFC，以带 `dep:*` 标签的 GitHub issue 形式跟踪](https://github.com/ai-dynamo/dynamo/issues?q=is%3Aissue+label%3A%22dep%3Adraft%22%2C%22dep%3Aproposed%22%2C%22dep%3Aapproved%22%2C%22dep%3Aimplementing%22%2C%22dep%3Acompleted%22%2C%22dep%3Adeferred%22%2C%22dep%3Asuperseeded%22)
 - **Office Hours**: [双周会议](https://www.youtube.com/playlist?list=PL5B692fm6--tgryKu94h2Zb7jTFM3Go4X)
-- **社区会议**: [每周（Wed 10:30 AM PT）开发者社区会议](https://docs.google.com/document/d/1uR8xD_hlYGwV6QspvSc36k1H-wo1BUcVmFbHH9xlXd8/view) ([Youtube](https://www.youtube.com/@ai-dynamo-community))
+- **社区会议**: [每周（Tue 9:00 AM PT）开发者社区会议](https://docs.google.com/document/d/1uR8xD_hlYGwV6QspvSc36k1H-wo1BUcVmFbHH9xlXd8/view) ([Youtube](https://www.youtube.com/@ai-dynamo-community))
 - **Dynamo Day 录像**: [来自生产用户的深入分享](https://nvevents.nvidia.com/dynamoday)
 - **Documentation**: [docs.nvidia.com/dynamo](https://docs.nvidia.com/dynamo/)
 

@@ -22,16 +22,24 @@ from sglang.srt.function_call.core_types import ToolCallItem
 from sglang.srt.function_call.function_call_parser import FunctionCallParser
 from sglang.srt.function_call.json_array_parser import JsonArrayParser
 from sglang.srt.function_call.utils import get_json_schema_constraint
-from sglang.srt.parser.jinja_template_utils import (
-    detect_jinja_template_content_format,
-    process_content_for_template_format,
-)
-from sglang.srt.parser.reasoning_parser import ReasoningParser
+from sglang.srt.parser.reasoning_parser import GptOssDetector, ReasoningParser
 
 from dynamo.common.utils.engine_response import trailing_stop_prefix_len
 from dynamo.common.utils.guided_json import admits_only_empty_object
 from dynamo.llm.exceptions import InvalidArgument
 
+from .responses_history import responses_history_recipients, responses_tools_request
+from .sglang_prompt_renderer import (
+    KimiK3PromptRenderer,
+    PromptRenderer,
+    build_prompt_renderer,
+    resolve_prompt_renderer,
+)
+from .structural_tag_policy import (
+    ToolChoiceKind,
+    effective_tool_strict,
+    should_attempt_structural_tag,
+)
 from .thinking import apply_default_thinking_mode_to_template_kwargs
 from .utils import PreprocessError, legacy_guided_decoding, random_call_id
 
@@ -106,7 +114,7 @@ _THINKING_BY_DEFAULT = {
     "kimi_k2",
     "kimi_k3",
 }
-_THINKING_OPT_IN = {"deepseek-v3", "deepseek-v4", "gemma4"}
+_THINKING_OPT_IN = {"deepseek-v3", "deepseek-v4", "deepseek-v41", "gemma4"}
 
 _SGLANG_PARSER_NAME_ALIASES = {
     # Dynamo's Rust parser registry accepts these MiniMax-M3 aliases. SGLang
@@ -151,9 +159,18 @@ def resolve_request_force_reasoning(
     if not reasoning_parser_name:
         return False
 
+    # SGLang forces Harmony reasoning regardless of the template's <think> tags.
+    if reasoning_parser_name == "gpt-oss":
+        return True
+
     kwargs = (
         request.get("chat_template_kwargs") or request.get("chat_template_args") or {}
     )
+
+    if reasoning_parser_name == "hunyuan":
+        # Native Hunyuan serving opens thinking unless explicitly disabled.
+        effort = request.get("reasoning_effort", kwargs.get("reasoning_effort"))
+        return effort not in ("none", "no_think")
 
     if reasoning_parser_name == "minimax-m3":
         return kwargs.get("thinking_mode") != "disabled"
@@ -175,7 +192,7 @@ def resolve_request_force_reasoning(
     if reasoning_parser_name in _THINKING_OPT_IN:
         flag_key = (
             "thinking"
-            if reasoning_parser_name in {"deepseek-v3", "deepseek-v4"}
+            if reasoning_parser_name in {"deepseek-v3", "deepseek-v4", "deepseek-v41"}
             else "enable_thinking"
         )
         return kwargs.get(flag_key) is True
@@ -199,21 +216,39 @@ def _client_wants_separate_reasoning(request: dict[str, Any]) -> bool:
     return bool(value)
 
 
-def convert_tools(tools: list[dict[str, Any]] | None) -> list[SglangTool] | None:
-    """Convert OpenAI tool dicts to SGLang Tool objects."""
+def convert_tools(
+    tools: list[dict[str, Any]] | None,
+    *,
+    structural_tag_schema: str | None = None,
+) -> list[SglangTool] | None:
+    """Convert OpenAI tool dicts to SGLang Tool objects.
+
+    ``structural_tag_schema`` is set only for the guidance copy. Prompt and
+    parser copies retain SGLang's existing omitted-strict representation.
+    """
     if not tools:
         return None
     sglang_tools = []
     for tool in tools:
         func = tool.get("function", {})
+        # Retain the chat extension when rebuilding tools for template rendering.
+        # An explicit function-level false takes precedence over the wrapper alias.
+        defer_loading = func.get("defer_loading")
+        if defer_loading is None:
+            defer_loading = tool.get("defer_loading")
+        strict = func.get("strict", False)
+        if structural_tag_schema is not None:
+            strict = effective_tool_strict(func.get("strict"), structural_tag_schema)
         sglang_tools.append(
             SglangTool(
                 type=tool.get("type", "function"),
+                defer_loading=tool.get("defer_loading"),
                 function=SglangFunction(
                     name=func.get("name", ""),
                     description=func.get("description"),
                     parameters=func.get("parameters"),
-                    strict=func.get("strict", False),
+                    strict=strict,
+                    defer_loading=defer_loading,
                 ),
             )
         )
@@ -280,6 +315,8 @@ def create_parsers(
     reasoning_parser_name: str | None,
     sglang_tools: list[SglangTool] | None = None,
     force_reasoning: bool = False,
+    guided_decoding: dict[str, Any] | None = None,
+    tokenizer: Any | None = None,
 ) -> tuple[ToolCallParserType | None, ReasoningParser | None]:
     """Create tool call and reasoning parsers for a request.
 
@@ -289,10 +326,9 @@ def create_parsers(
     If ``sglang_tools`` is provided, reuses them; otherwise converts from
     the request's ``tools`` field.
 
-    For ``tool_choice="required"`` or a named function, uses
-    :class:`JsonArrayParser` (matching native SGLang) since guided decoding
-    constrains the output to a JSON array.  Otherwise uses the model-specific
-    :class:`FunctionCallParser`.
+    Required and named choices use the model-specific :class:`FunctionCallParser`
+    when the effective guidance is a structural tag. Their JSON fallback keeps
+    :class:`JsonArrayParser`. Automatic choices use :class:`FunctionCallParser`.
     """
     if sglang_tools is None:
         sglang_tools = convert_tools(request.get("tools"))
@@ -300,13 +336,16 @@ def create_parsers(
 
     tool_call_parser: ToolCallParserType | None = None
     if sglang_tools and tool_choice != "none":
-        if tool_choice == "required" or _is_named_tool_choice(tool_choice):
+        if (tool_choice == "required" or _is_named_tool_choice(tool_choice)) and not (
+            guided_decoding is not None and "structural_tag" in guided_decoding
+        ):
             tool_call_parser = JsonArrayParser()
         elif tool_call_parser_name:
             tool_call_parser_name = _normalize_sglang_parser_name(tool_call_parser_name)
             tool_call_parser = FunctionCallParser(
                 tools=sglang_tools,
                 tool_call_parser=tool_call_parser_name,
+                **_parser_tokenizer_kwargs(FunctionCallParser, tokenizer),
             )
 
     reasoning_parser = None
@@ -319,6 +358,7 @@ def create_parsers(
             model_type=reasoning_parser_name,
             stream_reasoning=True,
             force_reasoning=force_reasoning,
+            **_parser_tokenizer_kwargs(ReasoningParser, tokenizer),
         )
 
     return tool_call_parser, reasoning_parser
@@ -347,38 +387,49 @@ def named_closed_zero_arg_tool(request: dict[str, Any]) -> str | None:
     return None
 
 
-def _guided_tool_choice_requires_reasoning(
-    request: dict[str, Any], force_reasoning: bool
-) -> bool:
-    """Return whether SGLang should reason before guided tool-call JSON."""
-    tool_choice = request.get("tool_choice", "auto")
-    return force_reasoning and (
-        tool_choice == "required" or _is_named_tool_choice(tool_choice)
-    )
-
-
-def _normalize_deepseek_v4_hint(value: Any) -> str:
-    return str(value or "").lower().replace("-", "").replace("_", "")
-
-
-def _should_use_deepseek_v4_encoding(
+def _guided_output_requires_reasoning(
     request: dict[str, Any],
-    *,
-    tokenizer,
-    tool_call_parser_name: str | None,
-    reasoning_parser_name: str | None,
+    force_reasoning: bool,
+    reasoning_parser_name: str | None = None,
+    guided_decoding: dict[str, Any] | None = None,
 ) -> bool:
-    if getattr(tokenizer, "chat_template", None) is not None:
+    """Return whether SGLang should reason before guided output."""
+    if not force_reasoning:
         return False
 
-    return any(
-        "deepseekv4" in _normalize_deepseek_v4_hint(value)
-        for value in (
-            request.get("model"),
-            tool_call_parser_name,
-            reasoning_parser_name,
-        )
-    )
+    tool_choice = request.get("tool_choice", "auto")
+    if tool_choice == "required" or _is_named_tool_choice(tool_choice):
+        return True
+
+    # Explicit legacy constraints take precedence over response_format.
+    if legacy_guided_decoding(request):
+        return False
+
+    response_format = request.get("response_format")
+    if isinstance(response_format, dict) and response_format.get("type") != "text":
+        return reasoning_parser_name != "gpt-oss"
+
+    # An auto tool-call grammar forbids the end-of-thinking marker, so it must
+    # also wait for thinking to finish.
+    return guided_decoding is not None and "structural_tag" in guided_decoding
+
+
+def _kimi_k3_named_tool_choice_message(
+    request: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Build the K3 forced-call instruction for a named ``tool_choice``."""
+    tool_choice: Any = request.get("tool_choice")
+    if not _is_named_tool_choice(tool_choice):
+        return None
+
+    return {
+        "role": "system",
+        "content": (
+            "The system is invoked with `tool_choice=specified`.\n"
+            f"You MUST call the tool `{tool_choice['function']['name']}` "
+            "in the next message."
+        ),
+    }
 
 
 def _filter_template_tools(
@@ -386,6 +437,7 @@ def _filter_template_tools(
     *,
     sglang_tools: list[SglangTool] | None,
     exclude_tools_when_tool_choice_none: bool,
+    filter_named_choice: bool = True,
 ) -> list[dict[str, Any]] | None:
     if not sglang_tools:
         return None
@@ -394,43 +446,20 @@ def _filter_template_tools(
     if exclude_tools_when_tool_choice_none and tool_choice == "none":
         return None
 
-    if _is_named_tool_choice(tool_choice):
+    if filter_named_choice and _is_named_tool_choice(tool_choice):
         chosen_name = tool_choice["function"]["name"]
-        return [
+        selected = [
             tool.model_dump()
             for tool in sglang_tools
             if tool.function.name == chosen_name
         ]
+        # The forced function renders eagerly, matching the Rust preprocessor.
+        for tool in selected:
+            tool.pop("defer_loading", None)
+            tool["function"].pop("defer_loading", None)
+        return selected
 
     return [tool.model_dump() for tool in sglang_tools]
-
-
-def _flatten_message_content(content: Any) -> Any:
-    """Flatten an OpenAI content-parts array to a plain string for the DSv4 encoder.
-
-    SGLang's DeepSeek-V4 encoder (``encoding_dsv4.encode_messages``) consumes
-    string content; SGLang's own OpenAI server flattens parts-list content before
-    calling it (``serving_chat._process_messages`` runs the ``"string"`` content
-    format over each message). Dynamo invokes ``encode_messages`` directly, so it
-    must do the same flattening or the standard structured form
-    ``[{"type": "text", "text": "..."}]`` crashes the encoder with
-    ``TypeError: sequence item 0: expected str instance, list found``.
-
-    Replicate SGLang's ``"string"``-format behaviour for byte-parity with native
-    SGLang serving: join the text parts with a single space and drop non-text
-    parts (DSv4 is text-only). Non-list content (``str``/``None``) is returned
-    unchanged.
-    """
-    if not isinstance(content, list):
-        return content
-    text_parts = [
-        part["text"]
-        for part in content
-        if isinstance(part, dict)
-        and part.get("type") == "text"
-        and isinstance(part.get("text"), str)
-    ]
-    return " ".join(text_parts)
 
 
 def _with_thinking_template_kwargs(
@@ -458,79 +487,6 @@ def _with_thinking_template_kwargs(
     if chat_template_kwargs:
         request["chat_template_kwargs"] = chat_template_kwargs
     return request
-
-
-def _render_deepseek_v4_prompt_token_ids(
-    request: dict[str, Any],
-    *,
-    messages: list[dict[str, Any]],
-    tokenizer,
-    template_tools: list[dict[str, Any]] | None,
-) -> list[int]:
-    """Render DeepSeek-V4 prompt token ids via SGLang's ``encoding_dsv4``.
-
-    DeepSeek-V4 ships no HF ``chat_template``; SGLang builds the prompt with
-    ``encode_messages`` instead. Flatten each message's content to plain text,
-    re-serialize tool_call ``arguments`` to the JSON string the V4 encoder
-    expects, attach the tool schemas to the system message, then tokenize the
-    rendered prompt.
-    """
-    try:
-        from sglang.srt.entrypoints.openai.encoding_dsv4 import encode_messages
-    except ImportError as exc:
-        raise ValueError(
-            "DeepSeek-V4 preprocessing requires SGLang's "
-            "sglang.srt.entrypoints.openai.encoding_dsv4 encoder. "
-            "Install an SGLang build that includes the DeepSeek-V4 integration."
-        ) from exc
-
-    encoding_messages = copy.deepcopy(messages)
-    for msg in encoding_messages:
-        content = msg.get("content")
-        if content is None:
-            msg["content"] = ""
-        else:
-            msg["content"] = _flatten_message_content(content)
-
-        # encoding_dsv4.encode_arguments_to_dsml expects tool_call.arguments as
-        # the OpenAI-wire JSON *string* (it json.loads() internally).
-        # _normalize_assistant_tool_call_arguments parses arguments to a dict for
-        # Jinja chat templates, but a dict reaching this V4 encoder trips its
-        # json.loads() fallback into a single name="arguments" parameter wrapping
-        # the whole object — which the model then imitates, emitting a spurious
-        # nested {"arguments": {...}} on its next call. SGLang native keeps this
-        # path string-typed (serving_chat.py only dict-parses for the Jinja
-        # branch); mirror that by re-serializing here.
-        for tc in msg.get("tool_calls") or []:
-            if not isinstance(tc, dict):
-                continue
-            fn = tc.get("function")
-            if isinstance(fn, dict) and isinstance(fn.get("arguments"), (dict, list)):
-                fn["arguments"] = json.dumps(fn["arguments"], ensure_ascii=False)
-
-    if template_tools:
-        if not encoding_messages or encoding_messages[0].get("role") != "system":
-            encoding_messages.insert(0, {"role": "system", "content": ""})
-        encoding_messages[0]["tools"] = template_tools
-
-    chat_template_kwargs = dict(
-        request.get("chat_template_kwargs") or request.get("chat_template_args") or {}
-    )
-    thinking_mode = "thinking" if chat_template_kwargs.get("thinking") else "chat"
-    reasoning_effort = (
-        request.get("reasoning_effort")
-        or chat_template_kwargs.get("reasoning_effort")
-        or None
-    )
-    if reasoning_effort not in ("max", "high", None):
-        reasoning_effort = None
-
-    prompt = encode_messages(
-        encoding_messages,
-        thinking_mode=thinking_mode,
-        reasoning_effort=reasoning_effort,
-    )
-    return _normalize_prompt_token_ids(tokenizer.encode(prompt))
 
 
 @lru_cache(maxsize=64)
@@ -562,24 +518,145 @@ def _call_with_optional_parallel_tool_calls(
     return func(*args)
 
 
+def _call_structure_constraint(
+    func: Any,
+    *args: Any,
+    parallel_tool_calls: Any,
+    thinking_mode: bool,
+) -> Any:
+    """Call SGLang parser APIs across supported signature versions."""
+    kwargs: dict[str, Any] = {}
+    if _callable_accepts_kwarg(func, "parallel_tool_calls"):
+        kwargs["parallel_tool_calls"] = parallel_tool_calls
+    if _callable_accepts_kwarg(func, "thinking_mode"):
+        kwargs["thinking_mode"] = thinking_mode
+    return func(*args, **kwargs)
+
+
+def _enforce_function_strict_level(parser: FunctionCallParser) -> None:
+    """Keep SGLang's native tool envelope active for policy-selected requests."""
+    current_level = getattr(parser, "tool_strict_level", None)
+    function_level = getattr(type(current_level), "FUNCTION", None)
+    if function_level is not None and current_level < function_level:
+        parser.tool_strict_level = function_level
+
+
+def _parser_tokenizer_kwargs(parser: Any, tokenizer: Any) -> dict[str, Any]:
+    if tokenizer is not None and _callable_accepts_kwarg(parser, "tokenizer"):
+        return {"tokenizer": tokenizer}
+    return {}
+
+
 def build_tool_call_guided_decoding(
     request: dict[str, Any],
     *,
     tool_call_parser_name: str | None,
+    tokenizer: Any | None = None,
     sglang_tools: list[SglangTool] | None,
+    structural_tag_mode: str = "off",
+    structural_tag_scope: str = "auto",
+    structural_tag_schema: str = "auto",
 ) -> dict[str, Any] | None:
     """Build native-SGLang-like tool call constraints for guided decoding."""
     if not sglang_tools:
         return None
 
-    tool_choice = request.get("tool_choice", "auto")
+    tool_choice: Any = request.get("tool_choice")
+    if tool_choice is None:
+        # An explicit null means the OpenAI default, same as an omitted field.
+        tool_choice = "auto"
     if tool_choice == "none":
         return None
 
     parallel_tool_calls = request.get("parallel_tool_calls")
+    if parallel_tool_calls is None:
+        # OpenAI defaults parallel tool calls to enabled. SGLang requires this
+        # argument to be a concrete bool rather than None.
+        parallel_tool_calls = True
     constraint: Any = None
 
-    if tool_choice == "required" or _is_named_tool_choice(tool_choice):
+    is_named_choice = _is_named_tool_choice(tool_choice)
+    is_forced_choice = tool_choice == "required" or is_named_choice
+    sglang_tool_choice: Any = tool_choice
+    if is_named_choice:
+        sglang_tool_choice = SglangToolChoice(
+            type="function",
+            function=SglangToolChoiceFuncName(
+                name=tool_choice["function"]["name"],
+            ),
+        )
+    tool_choice_kind: ToolChoiceKind = (
+        "required"
+        if tool_choice == "required"
+        else "named"
+        if is_named_choice
+        else "auto"
+        if tool_choice == "auto"
+        else "other"
+    )
+    raw_tools = request.get("tools") or []
+    attempt_structural_tag = should_attempt_structural_tag(
+        mode=structural_tag_mode,
+        scope=structural_tag_scope,
+        tool_choice_kind=tool_choice_kind,
+        has_tools=bool(raw_tools),
+        any_explicit_strict=any(
+            tool.get("function", {}).get("strict") is True for tool in raw_tools
+        ),
+        parallel_tool_calls_explicitly_false=(
+            "parallel_tool_calls" in request and parallel_tool_calls is False
+        ),
+    )
+
+    if attempt_structural_tag and tool_call_parser_name:
+        guidance_tools = convert_tools(
+            raw_tools,
+            structural_tag_schema=structural_tag_schema,
+        )
+        if is_named_choice:
+            # SGLang's legacy tag builder ignores the name in tool_choice.
+            guidance_tools = [
+                tool
+                for tool in guidance_tools or []
+                if tool.function.name == sglang_tool_choice.function.name
+            ]
+        tool_call_parser_name = _normalize_sglang_parser_name(tool_call_parser_name)
+        try:
+            parser = FunctionCallParser(
+                tools=guidance_tools,
+                tool_call_parser=tool_call_parser_name,
+                **_parser_tokenizer_kwargs(FunctionCallParser, tokenizer),
+            )
+            # SGLang's AUTO level returns no structural tag when every tool is
+            # strict:false. Dynamo's policy still requires the function envelope;
+            # per-tool strict flags continue to control argument enforcement.
+            _enforce_function_strict_level(parser)
+            constraint = _call_structure_constraint(
+                parser.get_structure_constraint,
+                sglang_tool_choice,
+                parallel_tool_calls=parallel_tool_calls,
+                # The backend's reasoning gate consumes the reasoning prefix;
+                # this grammar starts with the tool payload after that boundary.
+                thinking_mode=False,
+            )
+        except (
+            AttributeError,
+            KeyError,
+            NotImplementedError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+        ):
+            # This is a third-party capability probe. Unsupported parser/schema
+            # combinations retain the existing forced-choice JSON fallback or,
+            # for auto, unconstrained generation.
+            constraint = None
+
+    guided_decoding = _serialize_tool_constraint(constraint)
+    if guided_decoding is not None:
+        return guided_decoding
+
+    if is_forced_choice:
         if named_closed_zero_arg_tool(request) is not None:
             return {"regex": r"\{\}"}
 
@@ -587,14 +664,6 @@ def build_tool_call_guided_decoding(
         # ToolChoice) for the named-function case — passing our raw dict
         # would silently fall through and return None, disabling guided
         # decoding and letting the model omit required fields.
-        sglang_tool_choice: Any = tool_choice
-        if _is_named_tool_choice(tool_choice):
-            sglang_tool_choice = SglangToolChoice(
-                type="function",
-                function=SglangToolChoiceFuncName(
-                    name=tool_choice["function"]["name"],
-                ),
-            )
         constraint = (
             "json_schema",
             _call_with_optional_parallel_tool_calls(
@@ -604,42 +673,24 @@ def build_tool_call_guided_decoding(
                 parallel_tool_calls=parallel_tool_calls,
             ),
         )
-    # TODO: this applies a structural-tag constraint for tool_choice="auto"
-    # whenever a tool-call parser is configured, and reads NONE of
-    # structural_tag_mode / structural_tag_scope / structural_tag_schema. Those
-    # knobs are accepted on the CLI and published into the model card by
-    # sglang/register.py, so an operator setting the mode to "off" still gets a
-    # constraint on this path. prepost.py requires structural_tag_mode == "on"
-    # (_should_build_tool_call_guidance) and preprocessor/structural_tag.rs
-    # requires StructuralTagMode != Off, so at the default mode ("off") the same
-    # request is unconstrained on both of those paths and constrained here.
-    # Also unlike them, "auto" is never gated on scope/strict, so this behaves as
-    # scope="always" with no way to narrow it.
-    elif tool_call_parser_name:
-        tool_call_parser_name = _normalize_sglang_parser_name(tool_call_parser_name)
-        parser = FunctionCallParser(
-            tools=sglang_tools,
-            tool_call_parser=tool_call_parser_name,
-        )
-        constraint = _call_with_optional_parallel_tool_calls(
-            parser.get_structure_constraint,
-            tool_choice,
-            parallel_tool_calls=parallel_tool_calls,
-        )
+    return _serialize_tool_constraint(constraint)
 
-    if isinstance(constraint, tuple) and len(constraint) == 2:
-        if constraint[0] == "json_schema":
-            return {"json": constraint[1]}
-        if constraint[0] == "structural_tag":
-            tag_value = constraint[1]
-            # SGLang returns a Pydantic model (LegacyStructuralTagResponseFormat)
-            # here.  Convert to a plain dict before it hits the RPC layer —
-            # msgpack/serde_json cannot serialize BaseModel instances.
-            if hasattr(tag_value, "model_dump"):
-                tag_value = tag_value.model_dump()
-            return {"structural_tag": tag_value}
 
-    return None
+def _serialize_tool_constraint(constraint: Any) -> dict[str, Any] | None:
+    if not (isinstance(constraint, tuple) and len(constraint) == 2):
+        return None
+    if constraint[0] == "json_schema":
+        return {"json": constraint[1]}
+    if constraint[0] != "structural_tag":
+        return None
+
+    tag_value = constraint[1]
+    # SGLang returns a Pydantic model (LegacyStructuralTagResponseFormat)
+    # here. Convert to a plain dict before it hits the RPC layer because
+    # msgpack/serde_json cannot serialize BaseModel instances.
+    if hasattr(tag_value, "model_dump"):
+        tag_value = tag_value.model_dump()
+    return {"structural_tag": tag_value}
 
 
 def build_response_format_guided_decoding(
@@ -682,51 +733,6 @@ def build_response_format_guided_decoding(
     return {"json": schema}
 
 
-def _normalize_prompt_token_ids(prompt_token_ids: Any) -> list[int]:
-    """Flatten ``apply_chat_template`` output to ``list[int]``.
-
-    On transformers v5 the default ``TokenizersBackend`` returns a
-    ``BatchEncoding`` from ``apply_chat_template(..., tokenize=True)``;
-    unwrap to ``.input_ids`` (a flat list for a single conversation).
-    """
-    ids = getattr(prompt_token_ids, "input_ids", prompt_token_ids)
-    if isinstance(ids, dict):
-        ids = ids.get("input_ids", prompt_token_ids)
-    return list(ids)
-
-
-def _normalize_messages_for_template(
-    messages: list[dict[str, Any]], tokenizer: Any
-) -> list[dict[str, Any]]:
-    """Normalize OpenAI media chunks (``image_url``/``video_url``/``audio_url``)
-    to the simple ``image``/``video``/``audio`` types most VLM chat templates
-    branch on. Without this, templates that gate placeholder emission on
-    ``item.type == 'image'`` never fire for raw OpenAI input, and the
-    rendered prompt has no slot for the media bytes that
-    ``extract_mm_urls()`` forwards in parallel. Mirrors the equivalent
-    step in sglang's own OpenAI server and dynamo's Rust default path.
-    """
-    chat_template = getattr(tokenizer, "chat_template", None) or ""
-    content_format = detect_jinja_template_content_format(chat_template)
-    # The media-data side outputs are discarded: dynamo's separate
-    # ``extract_mm_urls()`` channel is the source of truth for the worker.
-    image_sink: list = []
-    video_sink: list = []
-    audio_sink: list = []
-    modality_sink: list = []
-    return [
-        process_content_for_template_format(
-            msg,
-            content_format,
-            image_data=image_sink,
-            video_data=video_sink,
-            audio_data=audio_sink,
-            modalities=modality_sink,
-        )
-        for msg in messages
-    ]
-
-
 def preprocess_chat_request(
     request: dict[str, Any],
     *,
@@ -736,6 +742,10 @@ def preprocess_chat_request(
     exclude_tools_when_tool_choice_none: bool = True,
     template_force_reasoning: bool = False,
     default_thinking_mode: str | None = None,
+    structural_tag_mode: str = "off",
+    structural_tag_scope: str = "auto",
+    structural_tag_schema: str = "auto",
+    prompt_renderer: PromptRenderer | None = None,
 ) -> SglangPreprocessResult:
     """Preprocess a chat request using SGLang tokenizer and parser APIs.
 
@@ -746,9 +756,51 @@ def preprocess_chat_request(
 
     Synchronous -- suitable for both main-process and worker-process execution.
     """
+    resolved_responses_template = None
+    if request.get("responses_native_tools") and not (
+        exclude_tools_when_tool_choice_none and request.get("tool_choice") == "none"
+    ):
+        resolved_responses_template = tokenizer.get_chat_template(
+            chat_template=request.get("chat_template"), tools=request.get("tools")
+        )
+        request = responses_tools_request(request, resolved_responses_template)
     request = _with_thinking_template_kwargs(request, default_thinking_mode)
     legacy_guidance = legacy_guided_decoding(request)
     messages = _materialize_messages(request.get("messages", []))
+    # Materialization copied caller-owned messages. Restore Responses phases by
+    # assistant ordinal, including tool-only messages, before template rendering.
+    recipients = responses_history_recipients(request.get("responses_history_phases"))
+    for index, message in enumerate(
+        m for m in messages if m.get("role") == "assistant"
+    ):
+        if recipient := recipients.get(str(index)):
+            message["recipient"] = recipient
+
+    if prompt_renderer is None:
+        prompt_renderer = build_prompt_renderer(
+            tokenizer,
+            tool_call_parser_name=tool_call_parser_name,
+            reasoning_parser_name=reasoning_parser_name,
+        )
+    prompt_renderer = resolve_prompt_renderer(prompt_renderer, request)
+    kimi_k3_bridge = isinstance(prompt_renderer, KimiK3PromptRenderer)
+    if kimi_k3_bridge and _is_named_tool_choice(request.get("tool_choice")):
+        # K3's encoder cannot express a named choice. Its Rust formatter disables
+        # thinking and emits a typed ``tool-choice`` XTML system message; the
+        # SGLang tokenizer renders only plain system messages, so carry the same
+        # constraint as text.
+        chat_template_kwargs = dict(
+            request.get("chat_template_kwargs")
+            or request.get("chat_template_args")
+            or {}
+        )
+        chat_template_kwargs["thinking"] = False
+        chat_template_kwargs["enable_thinking"] = False
+        request["chat_template_kwargs"] = chat_template_kwargs
+        request.pop("chat_template_args", None)
+        named_tool_message = _kimi_k3_named_tool_choice_message(request)
+        assert named_tool_message is not None
+        messages.append(named_tool_message)
 
     # Generation mode is independent of whether the client wants reasoning
     # separated into reasoning_content or retained in content.
@@ -794,60 +846,25 @@ def preprocess_chat_request(
         request,
         sglang_tools=sglang_tools,
         exclude_tools_when_tool_choice_none=exclude_tools_when_tool_choice_none,
+        filter_named_choice=not kimi_k3_bridge,
     )
 
-    if _should_use_deepseek_v4_encoding(
+    prompt_token_ids = prompt_renderer.render(
         request,
-        tokenizer=tokenizer,
-        tool_call_parser_name=tool_call_parser_name,
-        reasoning_parser_name=reasoning_parser_name,
-    ):
-        prompt_token_ids = _render_deepseek_v4_prompt_token_ids(
-            request,
-            messages=messages,
-            tokenizer=tokenizer,
-            template_tools=template_tools,
-        )
-    else:
-        # Build template kwargs -- single call for rendering + tokenization
-        template_kwargs: dict[str, Any] = {
-            "add_generation_prompt": True,
-            "tokenize": True,
-        }
-        if template_tools:
-            template_kwargs["tools"] = template_tools
-
-        chat_template_kwargs = (
-            request.get("chat_template_kwargs")
-            or request.get("chat_template_args")
-            or {}
-        )
-        if chat_template_kwargs:
-            template_kwargs.update(chat_template_kwargs)
-
-        if (reasoning_effort := request.get("reasoning_effort")) is not None:
-            template_kwargs["reasoning_effort"] = reasoning_effort
-
-        template_messages = _normalize_messages_for_template(messages, tokenizer)
-
-        prompt_token_ids = _normalize_prompt_token_ids(
-            tokenizer.apply_chat_template(template_messages, **template_kwargs)
-        )
-
-    # Build parsers after rendering, so DeepSeek-V4 can use its custom encoder
-    # while still sharing the existing Dynamo parser/guided-decoding behavior.
-    tool_call_parser, reasoning_parser = create_parsers(
-        request,
-        tool_call_parser_name=tool_call_parser_name,
-        reasoning_parser_name=effective_reasoning_parser_name,
-        sglang_tools=sglang_tools,
-        force_reasoning=force_reasoning,
+        messages=messages,
+        template_tools=template_tools,
+        resolved_responses_template=resolved_responses_template,
     )
+
     response_format_guided_decoding = build_response_format_guided_decoding(request)
     tool_call_guided_decoding = build_tool_call_guided_decoding(
         request,
         tool_call_parser_name=tool_call_parser_name,
         sglang_tools=sglang_tools,
+        structural_tag_mode=structural_tag_mode,
+        structural_tag_scope=structural_tag_scope,
+        structural_tag_schema=structural_tag_schema,
+        tokenizer=tokenizer,
     )
     # This path also never reads the legacy guided_json / guided_regex /
     # guided_grammar / guided_choice fields at all, so those are dropped silently
@@ -892,6 +909,17 @@ def preprocess_chat_request(
         else legacy_guidance
         or response_format_guided_decoding
         or tool_call_guided_decoding
+    )
+
+    # Match the parser to the installed format, including forced-choice fallback.
+    tool_call_parser, reasoning_parser = create_parsers(
+        request,
+        tool_call_parser_name=tool_call_parser_name,
+        reasoning_parser_name=effective_reasoning_parser_name,
+        sglang_tools=sglang_tools,
+        force_reasoning=force_reasoning,
+        guided_decoding=guided_decoding,
+        tokenizer=tokenizer,
     )
 
     return SglangPreprocessResult(
@@ -1033,6 +1061,7 @@ class SglangStreamingPostProcessor:
         stop_strings: set[str] | None = None,
         stop_token_ids: set[int] | None = None,
         skip_special_tokens: bool | None = None,
+        guided_json_is_content: bool = False,
     ) -> None:
         self.tokenizer = tokenizer
         self.tool_call_parser = tool_call_parser
@@ -1048,6 +1077,34 @@ class SglangStreamingPostProcessor:
         # reasoning delimiters remain visible during incremental decoding.
         self._skip_special_tokens = resolve_skip_special_tokens(
             skip_special_tokens, has_parser=not self._fast_plain_text
+        )
+        # Bare answer JSON is already structured by generation. Keep the original
+        # decoding policy, and retain the parser for forced tool-call JSON arrays.
+        if guided_json_is_content and not isinstance(tool_call_parser, JsonArrayParser):
+            self.tool_call_parser = tool_call_parser = None
+            # GPT-OSS still uses Harmony channels without the reasoning gate.
+            if reasoning_parser is None or not isinstance(
+                reasoning_parser.detector, GptOssDetector
+            ):
+                self.reasoning_parser = reasoning_parser = None
+            self._fast_plain_text = reasoning_parser is None
+        # Parsers must see their closing delimiters before display trimming.
+        # Prefer the complete declaration over the legacy single-tool closer.
+        if isinstance(tool_call_parser, JsonArrayParser):
+            detector = tool_call_parser
+        elif tool_call_parser is not None:
+            detector = tool_call_parser.detector
+        else:
+            detector = None
+        closers = getattr(detector, "tool_close_literals", None)
+        if closers is None:
+            eot_token = getattr(detector, "eot_token", "")
+            closers = [eot_token] if isinstance(eot_token, str) and eot_token else []
+        self._tool_close_literals = set(closers)
+        # Preserve existing explicit opt-ins, including reasoning-only parsers.
+        self._no_stop_trim = any(
+            getattr(getattr(parser, "detector", None), "no_stop_trim", False) is True
+            for parser in (tool_call_parser, reasoning_parser)
         )
         self._is_json_array_parser = isinstance(tool_call_parser, JsonArrayParser)
         # Required/named guided output may be either bare JSON or
@@ -1065,6 +1122,8 @@ class SglangStreamingPostProcessor:
         self._pending_stop_text = ""
         self._locally_finished = False
         self._local_stop_reason: str | None = None
+        # Decode context, decoded IDs, stop text and hidden stop-token count.
+        self._local_stop_boundary: tuple[list[int], list[int], str, int] | None = None
 
         # Keep a small, known-complete prompt suffix as decode context. Generated
         # tokens are promoted to context only after they decode without a
@@ -1093,7 +1152,7 @@ class SglangStreamingPostProcessor:
         self, token_ids: list[int], stop_reason: Any
     ) -> list[int]:
         """Remove only the engine-reported token-stop suffix from display IDs."""
-        if not token_ids:
+        if not token_ids or self._no_stop_trim:
             return token_ids
 
         known_stop_ids = self._eos_token_ids | self._request_stop_token_ids
@@ -1116,7 +1175,15 @@ class SglangStreamingPostProcessor:
         else:
             matched_ids = []
 
-        if matched_ids and token_ids[-len(matched_ids) :] == matched_ids:
+        if (
+            matched_ids
+            and token_ids[-len(matched_ids) :] == matched_ids
+            and (
+                not self._tool_close_literals
+                or self.tokenizer.decode(matched_ids, skip_special_tokens=False)
+                not in self._tool_close_literals
+            )
+        ):
             del token_ids[-len(matched_ids) :]
         return token_ids
 
@@ -1162,6 +1229,25 @@ class SglangStreamingPostProcessor:
         self._decode_context_ids = self._pending_decode_ids
         self._pending_decode_ids = []
         return delta_text
+
+    def _count_tokens_through(
+        self, context_ids: list[int], token_ids: list[int], text: str
+    ) -> int:
+        """Count leading ``token_ids`` whose incremental decode covers ``text``.
+
+        Once a decoded prefix covers ``text``, every longer one does, so bisect
+        instead of decoding every prefix.
+        """
+        context_text = self._decode_ids(context_ids)
+        low, high = 0, len(token_ids)
+        while low < high:
+            count = (low + high) // 2
+            decoded = self._decode_ids(context_ids + token_ids[:count])
+            if decoded[len(context_text) :].startswith(text):
+                high = count
+            else:
+                low = count + 1
+        return low
 
     def _build_openai_logprobs(
         self,
@@ -1305,6 +1391,18 @@ class SglangStreamingPostProcessor:
     def local_stop_reason(self) -> str | None:
         return self._local_stop_reason
 
+    def post_stop_token_count(self) -> int:
+        """Count the latest generated IDs that follow a local stop string.
+
+        The token completing the stop is kept. The count spans IDs withheld by
+        incremental decoding and is computed on demand by re-decoding them.
+        """
+        if self._local_stop_boundary is None:
+            return 0
+        context_ids, decoded_ids, stop_text, hidden_count = self._local_stop_boundary
+        kept = self._count_tokens_through(context_ids, decoded_ids, stop_text)
+        return len(decoded_ids) - kept + hidden_count
+
     @property
     def has_pending_stop_text(self) -> bool:
         return bool(self._pending_stop_text)
@@ -1349,29 +1447,35 @@ class SglangStreamingPostProcessor:
         text: str,
         finish_reason: str | None,
         stop_reason: Any,
-    ) -> tuple[str, bool]:
-        text = self._pending_stop_text + text
+    ) -> tuple[str, int | None]:
+        """Return visible text and, after a local stop, the stop's end in ``text``."""
+        held_text = self._pending_stop_text
+        text = held_text + text
         self._pending_stop_text = ""
 
         match = self._find_stop_string(text, stop_reason)
         if match is not None:
             match_index, matched_stop_string = match
-            suppressed_text = text[match_index:]
+            retained_end = match_index
+            if self._no_stop_trim or matched_stop_string in self._tool_close_literals:
+                retained_end += len(matched_stop_string)
+            suppressed_text = text[retained_end:]
             suppressed_count = self._trailing_logprobs_count(suppressed_text)
             if suppressed_count:
                 del self._pending_logprobs_content[-suppressed_count:]
             self._locally_finished = True
             self._local_stop_reason = matched_stop_string
-            return text[:match_index], True
+            stop_end = match_index + len(matched_stop_string) - len(held_text)
+            return text[:retained_end], stop_end
 
         if finish_reason or not text or not self._stop_strings:
-            return text, False
+            return text, None
 
         pending_len = trailing_stop_prefix_len(text, self._stop_strings)
         if pending_len:
             self._pending_stop_text = text[-pending_len:]
-            return text[:-pending_len], False
-        return text, False
+            return text[:-pending_len], None
+        return text, None
 
     def _parse_reasoning_delta(
         self, delta_text: str, finish_reason: str | None
@@ -1444,33 +1548,45 @@ class SglangStreamingPostProcessor:
         stop_terminated = engine_response.get(
             "stop_terminated", finish_reason == "stop"
         )
+        generated_ids = token_ids
         if stop_terminated:
-            raw_token_count = len(token_ids)
             token_ids = self._strip_matched_stop_token_ids(list(token_ids), stop_reason)
-            retained_token_count = len(token_ids)
-            if log_probs is not None and len(log_probs) == raw_token_count:
-                log_probs = log_probs[:retained_token_count]
-            if top_logprobs is not None and len(top_logprobs) == raw_token_count:
-                top_logprobs = top_logprobs[:retained_token_count]
 
-        delta_text = (
+        context_ids = self._decode_context_ids
+        held_ids = list(self._pending_decode_ids)
+        decoded_text = (
             self._incremental_decode(token_ids, flush=finish_reason is not None)
             if token_ids or finish_reason is not None
             else ""
         )
-        openai_logprobs = None
+        # A hidden stop token is generated output: score it, but do not display it.
+        stop_logprobs: list[dict[str, Any]] = []
         if log_probs is not None:
+            scored_ids = (
+                generated_ids if len(log_probs) == len(generated_ids) else token_ids
+            )
             openai_logprobs = self._build_openai_logprobs(
-                log_probs, top_logprobs, token_ids
+                log_probs, top_logprobs, scored_ids
             )
             if openai_logprobs is not None:
-                self._pending_logprobs_content.extend(openai_logprobs["content"])
+                content = openai_logprobs["content"]
+                self._pending_logprobs_content.extend(content[: len(token_ids)])
+                stop_logprobs = content[len(token_ids) :]
         self._logprob_context_ids = (self._logprob_context_ids + token_ids)[-4:]
-        delta_text, locally_finished = self._filter_stop_string_delta(
-            delta_text, finish_reason, stop_reason
+        delta_text, stop_end = self._filter_stop_string_delta(
+            decoded_text, finish_reason, stop_reason
         )
-        if locally_finished:
+        if stop_end is None:
+            # Queued after stop-string suppression, which matches display text.
+            self._pending_logprobs_content.extend(stop_logprobs)
+        else:
             finish_reason = "stop"
+            self._local_stop_boundary = (
+                context_ids,
+                held_ids + token_ids,
+                decoded_text[:stop_end],
+                len(generated_ids) - len(token_ids),
+            )
 
         if self._fast_plain_text:
             if delta_text:
@@ -1633,6 +1749,9 @@ class SglangStreamingPostProcessor:
                             fcp = FunctionCallParser(
                                 tools=self._sglang_tools,
                                 tool_call_parser=self._tool_call_parser_name,
+                                **_parser_tokenizer_kwargs(
+                                    FunctionCallParser, self.tokenizer
+                                ),
                             )
                             _, final_calls = fcp.parse_non_stream(full_text)
                         except (

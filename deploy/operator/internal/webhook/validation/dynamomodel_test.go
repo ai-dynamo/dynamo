@@ -267,11 +267,9 @@ func dynamoModelForAdmission(
 	mutate func(*nvidiacomv1alpha1.DynamoModel),
 ) *nvidiacomv1alpha1.DynamoModel {
 	model := &nvidiacomv1alpha1.DynamoModel{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: nvidiacomv1alpha1.GroupVersion.String(),
-			Kind:       "DynamoModel",
-		},
-		ObjectMeta: metav1.ObjectMeta{Name: "test-model", Namespace: "default"},
+		APIVersion: nvidiacomv1alpha1.GroupVersion.String(),
+		Kind:       "DynamoModel",
+		Name:       "test-model", Namespace: "default",
 		Spec: nvidiacomv1alpha1.DynamoModelSpec{
 			ModelName:     "Qwen/Qwen3-0.6B",
 			BaseModelName: "Qwen/Qwen3-0.6B",

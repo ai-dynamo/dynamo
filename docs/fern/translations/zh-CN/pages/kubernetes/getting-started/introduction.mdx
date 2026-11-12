@@ -28,7 +28,7 @@ Dynamo 在推理引擎之上增加系统级优化。为了提供这些优化，D
 
 Dynamo 进行系统级设计的动机之一，是支持分离式服务：在不同设备上运行 prefill 和 decode，使两者能够独立扩展和并行化。分离式服务需要三项能力：(1) 调度，用于在不相互干扰的情况下分配 prefill 和 decode 阶段；(2) 内存管理，用于 KV 缓存卸载和载入；(3) 低延迟数据传输，用于在节点之间以及跨内存层级移动 KV 缓存。
 
-![Dynamo 基础：调度、内存管理和数据传输](../../../../../assets/img/intro-foundations.svg)
+![Dynamo 基础：调度、内存管理和数据传输](../../../assets/img/intro-foundations.svg)
 
 Dynamo 的基础能力最初面向分离式服务，随后扩展到用于多模态的 EPD 分离，现在支持 diffusion、RL 和 agents 等工作负载。
 
@@ -92,7 +92,7 @@ Dynamo 通过组合三项核心技术实现先进的 LLM 性能：分离式服�
 - [分离式服务](../../developer-guide/knowledge-base/concepts/system-architecture/disaggregated-serving.md) 在“设计原则”部分，我们介绍了分离式服务的概念。[InferenceX](https://newsletter.semianalysis.com/p/inferencex-v2-nvidia-blackwell-vs) 展示了它的性能。借助分离式服务和大规模专家并行，DeepSeek V3 可以达到约 7 倍吞吐量/GPU。
 此外，当这三项技术组合在一起时，会产生如下图所示的叠加收益。
 
-![分离式服务、KV 缓存感知路由和 KV 缓存卸载的性能可组合性](../../../../../assets/img/intro-perf.svg)
+![分离式服务、KV 缓存感知路由和 KV 缓存卸载的性能可组合性](../../../assets/img/intro-perf.svg)
 
 - **分离式服务 + KV Cache-Aware Routing** -- KV 缓存感知路由同时针对计算（prefill）和内存（decode）进行负载均衡，从而同时优化延迟和吞吐量。
 - **分离式服务 + KV Cache Offloading** -- KV 缓存卸载带来更快的 TTFT，并且可以减少 prefill worker 数量以降低 TCO。

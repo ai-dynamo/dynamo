@@ -1,13 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import logging
 import sys
 from unittest.mock import AsyncMock
 
 import numpy as np
 import pytest
 
-from dynamo.common.http import HttpStatusError
+from dynamo.common.http import HttpConfigurationError, HttpStatusError
 from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
 from dynamo.common.multimodal import codec_errors
 from dynamo.common.multimodal import video_loader as video_loader_module
@@ -15,11 +16,23 @@ from dynamo.common.multimodal.codec_errors import MissingMediaDecoderError
 from dynamo.common.multimodal.video_loader import VideoLoader
 from dynamo.common.utils.install_media_decoders import VALIDATED_SPECS
 
+from dynamo.common.http.media_reference import DYN_MM_MAX_FILE_SIZE_MB  # isort: skip
+
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.pre_merge,
     pytest.mark.gpu_0,
 ]
+
+
+# A presigned URL is a bearer credential for its lifetime: its signature must
+# reach neither the worker log nor the error body returned to the client.
+_SIGNATURE = "0123456789abcdef" * 16
+_SIGNED_URL = (
+    "https://bucket.s3.amazonaws.com/{name}?X-Amz-Algorithm=AWS4-HMAC-SHA256"
+    "&X-Amz-Credential=AKIAEXAMPLE%2F20260101%2Fus-east-1%2Fs3%2Faws4_request"
+    f"&X-Amz-Expires=900&X-Amz-SignedHeaders=host&X-Amz-Signature={_SIGNATURE}"
+)
 
 
 @pytest.mark.asyncio
@@ -33,6 +46,21 @@ async def test_load_video_rejects_http_by_default():
 
     with pytest.raises(UrlValidationError, match="not allowed"):
         await loader.load_video("http://example.com/x.mp4")
+
+
+@pytest.mark.asyncio
+async def test_load_video_logs_rejected_data_url_bounded(monkeypatch, caplog):
+    monkeypatch.setenv("DYN_MM_MAX_DATA_URL_MB", "1")
+    oversized = "data:video/mp4;base64," + "A" * (1024 * 1024)
+    loader = VideoLoader(url_policy=UrlValidationPolicy())
+
+    with caplog.at_level(logging.ERROR):
+        with pytest.raises(UrlValidationError, match="exceeds"):
+            await loader.load_video(oversized)
+
+    assert "URL rejected loading video" in caplog.text
+    assert "payload elided" in caplog.text
+    assert max(len(record.getMessage()) for record in caplog.records) < 1024
 
 
 @pytest.mark.asyncio
@@ -76,6 +104,25 @@ async def test_load_video_uses_vllm_media_connector():
 
 
 @pytest.mark.asyncio
+async def test_http_fetch_honors_configured_media_limit(monkeypatch):
+    monkeypatch.setenv(DYN_MM_MAX_FILE_SIZE_MB, "1")
+    loader = VideoLoader(
+        url_policy=UrlValidationPolicy(allow_http=True, allow_private_ips=True)
+    )
+    frames = np.zeros((1, 2, 2, 3), dtype=np.uint8)
+    metadata = {"fps": 1.0, "frames_indices": [0], "total_num_frames": 1}
+    mock_fetch = AsyncMock(return_value=b"video")
+    mock_decode = AsyncMock(return_value=(frames, metadata))
+    monkeypatch.setattr(video_loader_module, "fetch_bytes", mock_fetch)
+    monkeypatch.setattr(loader, "_create_vllm_video_io", lambda kwargs=None: object())
+    monkeypatch.setattr(loader, "_decode_video_bytes", mock_decode)
+
+    await loader._load_video_with_vllm("https://example.com/limited.mp4")
+
+    assert mock_fetch.await_args.kwargs["max_bytes"] == 1024 * 1024
+
+
+@pytest.mark.asyncio
 async def test_load_video_batch_uses_url_loader():
     loader = VideoLoader()
     first = (
@@ -107,6 +154,17 @@ async def test_load_video_batch_rejects_decoded_variant_without_frontend_decodin
 
     with pytest.raises(ValueError, match="enable_frontend_decoding=False"):
         await loader.load_video_batch([{"Decoded": {"shape": [1, 2, 2, 3]}}])
+
+
+@pytest.mark.asyncio
+async def test_load_video_batch_rejects_later_malformed_item_before_loading():
+    loader = VideoLoader()
+    loader.load_video = AsyncMock()  # type: ignore[method-assign]
+
+    with pytest.raises(ValueError, match="index 1"):
+        await loader.load_video_batch([{"Url": "https://example.com/one.mp4"}, {}])
+
+    loader.load_video.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -536,3 +594,68 @@ async def test_load_video_preserves_missing_decoder_error(monkeypatch):
         await loader.load_video("https://example.com/x.mp4")
 
     assert exc_info.value is err
+
+
+@pytest.mark.asyncio
+async def test_load_video_preserves_a_configuration_error(monkeypatch):
+    """An operator fault must not reach the client as a 4xx.
+
+    Same reasoning as the audio loader: the generic ``except Exception`` there
+    rewrites unknown errors as ``ValueError``, which maps to ``InvalidArgument``.
+    """
+    from dynamo.common.multimodal.video_loader import VideoLoader
+
+    loader = VideoLoader.__new__(VideoLoader)
+
+    async def _boom(*args, **kwargs):
+        raise HttpConfigurationError("egress proxy is not trusted")
+
+    monkeypatch.setattr(loader, "_load_video_with_vllm", _boom, raising=False)
+
+    with pytest.raises(HttpConfigurationError) as excinfo:
+        await loader.load_video("https://example.com/v.mp4")
+
+    assert not isinstance(excinfo.value, ValueError)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "result",
+    [
+        RuntimeError("Invalid data found when processing input"),
+        (np.empty((0, 2, 2, 3), dtype=np.uint8), {}),
+    ],
+    ids=["decode_error", "empty_clip"],
+)
+async def test_load_video_failure_keeps_signed_url_out(result, caplog):
+    url = _SIGNED_URL.format(name="clip.mp4")
+    loader = VideoLoader()
+    mock = AsyncMock(side_effect=result) if isinstance(result, Exception) else None
+    loader._load_video_with_vllm = mock or AsyncMock(  # type: ignore[method-assign]
+        return_value=result
+    )
+
+    with caplog.at_level(logging.DEBUG), pytest.raises(ValueError) as exc_info:
+        await loader.load_video(url)
+
+    assert _SIGNATURE not in str(exc_info.value)
+    assert _SIGNATURE not in caplog.text
+    assert "bucket.s3.amazonaws.com/clip.mp4" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_load_video_batch_failure_keeps_signed_url_out(caplog):
+    url = _SIGNED_URL.format(name="clip.mp4")
+    loader = VideoLoader()
+    loader._load_video_with_vllm = AsyncMock(  # type: ignore[method-assign]
+        side_effect=RuntimeError("Invalid data found when processing input")
+    )
+
+    with caplog.at_level(logging.DEBUG), pytest.raises(Exception) as exc_info:
+        await loader.load_video_batch([{"Url": url}])
+
+    # The old batch line cut the URL at 80 characters, which kept the start of
+    # the query; the signature itself sits further along.
+    for text in (str(exc_info.value), caplog.text):
+        assert _SIGNATURE not in text
+        assert "X-Amz-" not in text

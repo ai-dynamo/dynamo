@@ -16,6 +16,7 @@ from typing import Any, Optional
 
 from dynamo._core import Context
 from dynamo.common.constants import DisaggregationMode
+from dynamo.common.utils.token_ids import normalize_request_token_ids
 from dynamo.llm import KvEventPublisher
 
 from . import telemetry
@@ -143,7 +144,7 @@ class SampleLLMEngine(LLMEngine):
         parser.add_argument("--request-plane", default="tcp")
         parser.add_argument(
             "--response-plane",
-            choices=["tcp", "quic"],
+            choices=["tcp", "quic", "velo"],
             default=os.environ.get("DYN_RESPONSE_PLANE", "tcp"),
         )
         parser.add_argument("--event-plane", default=None)
@@ -309,6 +310,7 @@ class SampleLLMEngine(LLMEngine):
     async def generate(
         self, request: GenerateRequest, context: Context
     ) -> AsyncGenerator[GenerateChunk, None]:
+        normalize_request_token_ids(request)
         if self.disaggregation_mode == DisaggregationMode.ENCODE:
             prompt_len = len(request.get("token_ids", []))
             if context.is_stopped():

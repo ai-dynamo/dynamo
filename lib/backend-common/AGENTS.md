@@ -83,6 +83,10 @@ opt-out and lets `run.rs` stay non-generic.
   reliable idle signal); SGLang overrides it by counting in-flight prefill
   streams. The mode-gate, poll loop, and SIGTERM/SIGINT ownership live in the
   `Worker`.
+- `engine_lost(&self) -> DynamoError` — optional, default never resolves.
+  Resolves once the engine can no longer serve. The `Worker` then shuts down
+  as on SIGTERM (withdraw, grace period, drain, `cleanup`) and returns this
+  error, so the process exits and its supervisor restarts it.
 - `cleanup(&self) -> Result<(), DynamoError>` — called exactly once.
   Runs after `start()` returns Ok on shutdown (even if registration /
   serve fails), **and** after `start()` raises — so implementations
@@ -365,8 +369,10 @@ producer threads in `cleanup()`.
 
 Pick based on how the engine's KV event API is shaped:
 
-- `Zmq { endpoint, topic, dp_rank }` — engine already publishes to a
-  ZMQ PUB socket. `Worker` subscribes directly.
+- `Zmq { endpoint, topic, dp_rank, image_token_id }` — engine already
+  publishes to a ZMQ PUB socket. `Worker` subscribes directly. Set
+  `image_token_id` to the model's image placeholder token to enable exact
+  multimodal KV routing; `None` keeps text-prefix routing for images.
 - `Push { on_ready, dp_rank }` — engine has a programmatic event
   surface. `Worker` constructs the publisher, then calls
   `on_ready(publisher)` once during setup. The engine stashes the

@@ -36,6 +36,7 @@ RESTORE_RUNTIME_ENV_NAMES = {
     "DYN_TCP_RPC_PORT",
     "DYN_TCP_RESPONSE_STREAM_HOST",
     "DYN_TCP_RESPONSE_STREAM_PORT",
+    "DYN_TCP_LISTEN_BACKLOG",
     "NATS_SERVER",
     "ETCD_ENDPOINTS",
     # Runtime system server/readiness env read after restore.
@@ -49,6 +50,9 @@ RESTORE_RUNTIME_ENV_NAMES = {
     # Kubernetes discovery mode env read when the restored runtime registers.
     "DYN_KUBE_DISCOVERY_MODE",
     "CONTAINER_NAME",
+    # Served model name a restored worker registers under: one snapshot can
+    # back many deployments, each naming its model.
+    "DYN_SERVED_MODEL_NAME",
     # Target identity and failover policy consumed after engine construction.
     "ENGINE_ID",
     "FAILOVER_LOCK_PATH",

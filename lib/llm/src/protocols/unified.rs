@@ -428,6 +428,10 @@ impl OpenAIStopConditionsProvider for UnifiedRequest {
     fn get_common_ignore_eos(&self) -> Option<bool> {
         self.inner.common.ignore_eos
     }
+
+    fn get_thinking_token_budget(&self) -> Option<u32> {
+        OpenAIStopConditionsProvider::get_thinking_token_budget(&self.inner)
+    }
 }
 
 impl OpenAIOutputOptionsProvider for UnifiedRequest {
@@ -461,7 +465,7 @@ impl OAIChatLikeRequest for UnifiedRequest {
     }
 
     fn messages(&self) -> minijinja::value::Value {
-        let messages_json = serde_json::to_value(&self.inner.inner.messages).unwrap();
+        let messages_json = self.inner.template_messages_json();
         minijinja::value::Value::from_serialize(&messages_json)
     }
 
@@ -471,6 +475,10 @@ impl OAIChatLikeRequest for UnifiedRequest {
 
     fn tools(&self) -> Option<minijinja::value::Value> {
         OAIChatLikeRequest::tools(&self.inner)
+    }
+
+    fn template_tools(&self) -> Option<minijinja::value::Value> {
+        OAIChatLikeRequest::template_tools(&self.inner)
     }
 
     fn tool_choice(&self) -> Option<minijinja::value::Value> {
@@ -534,6 +542,7 @@ impl UnifiedRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocols::common::StopConditionsProvider;
 
     #[test]
     fn test_chat_completions_roundtrip() {
@@ -545,16 +554,34 @@ mod tests {
             },
             common: CommonExt::default(),
             nvext: None,
+            responses_tools: None,
             chat_template_args: None,
             thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
+            ..Default::default()
         };
 
         let unified = UnifiedRequest::from(req.clone());
         assert!(matches!(unified.api_context, ApiContext::ChatCompletions));
         assert_eq!(unified.model(), "test-model");
+    }
+
+    #[test]
+    fn test_thinking_token_budget_reaches_unified_stop_conditions() {
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "thinking_token_budget": 32,
+            "nvext": {"max_thinking_tokens": 16}
+        }))
+        .unwrap();
+
+        let unified = UnifiedRequest::from(request);
+        let stop_conditions = unified.extract_stop_conditions().unwrap();
+
+        assert_eq!(stop_conditions.max_thinking_tokens, Some(32));
     }
 
     #[test]
@@ -584,6 +611,7 @@ mod tests {
             thinking: Some(ThinkingConfig {
                 thinking_type: "enabled".to_string(),
                 budget_tokens: Some(4096),
+                display: None,
             }),
             service_tier: None,
             container: None,

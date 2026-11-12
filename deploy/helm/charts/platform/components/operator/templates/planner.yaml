@@ -40,6 +40,9 @@ rules:
   resources: ["dynamographdeployments"]
   verbs: ["get", "list", "create", "update", "patch"]
 - apiGroups: ["nvidia.com"]
+  resources: ["dynamographdeploymentscalingadapters"]
+  verbs: ["get", "patch"]
+- apiGroups: ["nvidia.com"]
   resources: ["dynamographdeploymentscalingadapters/scale"]
   # Read the authoritative target to detect superseded asynchronous requests.
   verbs: ["get", "patch"]
@@ -54,6 +57,24 @@ rules:
 - apiGroups: [""]
   resources: ["pods"]
   verbs: ["list"]
+{{- if and .Values.dgdrV1Beta2.enabled .Values.dgdrV1Beta2.plannerLiveRetune }}
+# EXPERIMENTAL live retune (planner retune.executor: dgdr): sweep through DGDR
+# v1beta2 Requests, read their Runs and list their Candidates, and hold the
+# leadership and state Leases (read, create, replace and delete; never patch).
+# Lease names are per DGD, so the Lease rule covers every Lease in the namespace.
+- apiGroups: ["nvidia.com"]
+  resources: ["dynamographdeploymentrequests"]
+  verbs: ["create", "get", "list", "delete"]
+- apiGroups: ["nvidia.com"]
+  resources: ["dynamographdeploymentruns"]
+  verbs: ["get"]
+- apiGroups: ["nvidia.com"]
+  resources: ["dynamographdeploymentcandidates"]
+  verbs: ["list"]
+- apiGroups: ["coordination.k8s.io"]
+  resources: ["leases"]
+  verbs: ["get", "create", "update", "delete"]
+{{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -75,6 +96,10 @@ roleRef:
 # Even though this is a ClusterRole, the operator binds it via a namespace-scoped
 # RoleBinding (internal/rbac/manager.go EnsureServiceAccountWithRBAC), so all
 # permissions — including pods/list — are effective only in the DGD's namespace.
+# RBAC escalation prevention lets the operator bind only permissions it holds,
+# so every rule here must also be in the operator's role (with
+# dgdrV1Beta2.plannerLiveRetune, the DGDR v1beta2 Run and Candidate rules of
+# the operator's v1beta2 integration).
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -86,6 +111,9 @@ rules:
 - apiGroups: ["nvidia.com"]
   resources: ["dynamographdeployments"]
   verbs: ["get", "list", "create", "update", "patch"]
+- apiGroups: ["nvidia.com"]
+  resources: ["dynamographdeploymentscalingadapters"]
+  verbs: ["get", "patch"]
 - apiGroups: ["nvidia.com"]
   resources: ["dynamographdeploymentscalingadapters/scale"]
   # Read the authoritative target to detect superseded asynchronous requests.
@@ -101,4 +129,22 @@ rules:
 - apiGroups: [""]
   resources: ["pods"]
   verbs: ["list"]
+{{- if and .Values.dgdrV1Beta2.enabled .Values.dgdrV1Beta2.plannerLiveRetune }}
+# EXPERIMENTAL live retune (planner retune.executor: dgdr): sweep through DGDR
+# v1beta2 Requests, read their Runs and list their Candidates, and hold the
+# leadership and state Leases (read, create, replace and delete; never patch).
+# Lease names are per DGD, so the Lease rule covers every Lease in the namespace.
+- apiGroups: ["nvidia.com"]
+  resources: ["dynamographdeploymentrequests"]
+  verbs: ["create", "get", "list", "delete"]
+- apiGroups: ["nvidia.com"]
+  resources: ["dynamographdeploymentruns"]
+  verbs: ["get"]
+- apiGroups: ["nvidia.com"]
+  resources: ["dynamographdeploymentcandidates"]
+  verbs: ["list"]
+- apiGroups: ["coordination.k8s.io"]
+  resources: ["leases"]
+  verbs: ["get", "create", "update", "delete"]
+{{- end }}
 {{- end }}

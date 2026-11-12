@@ -3,6 +3,26 @@
 
 # CI Guidelines
 
+## Fixing a Datadog-tracked flaky test
+
+Datadog moves a flaky test to `Fixed` through its attempt-to-fix flow. It
+needs the test's attempt-to-fix key (the `Datadog attempt-to-fix ID` on the
+DYN ticket, or **Link commit to fix** in Datadog Flaky Test Management):
+
+1. Put `DD_<key>` in the **PR title**, e.g.
+   `fix(test): bound gc freeze-count assertion DD_6IRADO`. Dynamo
+   squash-merges with the PR title as the commit message, so a key only in
+   branch commits is lost on merge.
+2. Put `DD_<key>` in the message of the **latest commit** on the branch.
+   ddtrace reads the head commit message of each CI run; when the key is
+   present, Datadog retries the test (20x by default) in that run.
+3. The test must run in the PR's CI — see the next section for non-`pre_merge`
+   tests.
+
+If every retry passes, Datadog shows the test as fix in progress and marks it
+`Fixed` once the PR merges to `main`. A failing retry leaves the state
+unchanged.
+
 ## Validating test fixes in the same PR
 
 Pre-merge CI only runs tests marked `pre_merge`. A fix to a `post_merge`,

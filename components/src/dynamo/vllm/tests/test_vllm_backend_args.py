@@ -11,6 +11,7 @@ need to add more tests to cover different code paths of DynamoVllmConfig.
 import argparse
 import json
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -48,6 +49,12 @@ def create_config() -> DynamoVllmConfig:
     config.embedding_worker = False
     config.embedding_frontend_tokenization = False
     config.embedding_worker_processes = 1
+    config.transcription_worker = False
+    config.realtime = False
+    config.classify_worker = False
+    config.custom_encoder_class = None
+    config.gms_shadow_mode = False
+    config.enable_rl = False
     config.headless = False
     config.benchmark_mode = None
     config.use_vllm_tokenizer = False
@@ -57,6 +64,39 @@ def create_config() -> DynamoVllmConfig:
     # rules still tolerate its absence, matching a config built by hand.
     config.engine_args = SimpleNamespace(enable_lora=False)
     return config
+
+
+def test_artifact_router_profile_accepts_cli_and_environment(monkeypatch):
+    monkeypatch.setenv("DYNAMO_ARTIFACT_ROUTER_PROFILE", "[[3, 8, 2]]")
+    parser = argparse.ArgumentParser()
+    DynamoVllmArgGroup().add_arguments(parser)
+    assert parser.parse_args([]).artifact_router_profile == "[[3, 8, 2]]"
+    assert (
+        parser.parse_args(
+            ["--artifact-router-profile", "[[9, 16, 2]]"]
+        ).artifact_router_profile
+        == "[[9, 16, 2]]"
+    )
+
+
+@pytest.mark.asyncio
+async def test_invalid_artifact_router_profile_fails_before_metadata_fetch(monkeypatch):
+    from dynamo.vllm import args
+
+    config = SimpleNamespace(model="ngc://example/model", artifact_router_profile="bad")
+    engine_args = SimpleNamespace(model="ngc://example/model", served_model_name=None)
+    fetch = AsyncMock(return_value="/tmp/model")
+    monkeypatch.setattr(
+        args, "_parse_cli_args", Mock(return_value=(config, engine_args))
+    )
+    monkeypatch.setattr(args, "needs_local_model_path", Mock(return_value=True))
+    monkeypatch.setattr(args, "fetch_model", fetch)
+    monkeypatch.setattr(args, "_build_config", Mock())
+
+    with pytest.raises(ValueError, match="invalid --artifact-router-profile"):
+        await args.parse_args_with_model_fetch([])
+
+    fetch.assert_not_awaited()
 
 
 def write_benchmark_points(tmp_path):
@@ -284,6 +324,38 @@ class TestEmbeddingFrontendTokenization:
             DynamoVllmArgGroup().add_arguments(parser)
 
 
+class TestTranscriptionWorkerExclusivity:
+    def test_baseline_aggregated_is_accepted(self):
+        config = create_config()
+        config.transcription_worker = True
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        config._validate_transcription_worker_exclusivity()
+
+    def test_non_aggregated_mode_is_rejected(self):
+        config = create_config()
+        config.transcription_worker = True
+        config.disaggregation_mode = DisaggregationMode.DECODE
+        with pytest.raises(ValueError, match="disaggregation-mode=agg"):
+            config._validate_transcription_worker_exclusivity()
+
+    @pytest.mark.parametrize(
+        ("option", "value"),
+        [
+            ("embedding_worker", True),
+            ("classify_worker", True),
+            ("realtime", True),
+            ("headless", True),
+        ],
+    )
+    def test_standalone_role_combinations_are_rejected(self, option, value):
+        config = create_config()
+        config.transcription_worker = True
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        setattr(config, option, value)
+        with pytest.raises(ValueError, match=option.replace("_", "-")):
+            config._validate_transcription_worker_exclusivity()
+
+
 class TestRealtimeWorkerExclusivity:
     def test_baseline_aggregated_is_accepted(self):
         config = create_config()
@@ -483,7 +555,7 @@ class TestParseArgsLoraExclusivity:
 
     def test_realtime_with_enable_lora_is_rejected(self):
         with pytest.raises(ValueError, match="enable-lora"):
-            self._parse(["--realtime", "--enable-lora"])
+            self._parse(["--endpoint-types", "realtime", "--enable-lora"])
 
     def test_classify_worker_with_enable_lora_is_rejected(self):
         """Kept separate from the --realtime case: the classify rule may be
@@ -497,9 +569,23 @@ class TestParseArgsLoraExclusivity:
         assert config.engine_args.enable_lora is True
 
     def test_realtime_alone_is_accepted(self):
-        config = self._parse(["--realtime"])
+        config = self._parse(["--endpoint-types", "realtime"])
         assert config.realtime is True
         assert not config.engine_args.enable_lora
+
+
+@pytest.mark.usefixtures("vllm_cpu_platform_when_no_accelerator")
+@pytest.mark.parametrize(
+    "flag",
+    [
+        ["--default-chat-template-kwargs", '{"enable_thinking": false}'],
+        ['--default_chat_template_kwargs={"enable_thinking": false}'],
+        ["--default-chat-template-kwargs.enable_thinking", "false"],
+    ],
+)
+def test_default_chat_template_kwargs_points_to_the_frontend(flag):
+    with pytest.raises(ValueError, match="python -m dynamo.frontend"):
+        parse_args(["--model", "Qwen/Qwen3-0.6B", *flag])
 
 
 class TestValidateCustomEncoder:
@@ -662,21 +748,6 @@ class TestEmbeddingWorkerProcesses:
         config.embedding_worker_processes = 3
         config._validate_embedding_worker_processes()
 
-    def test_enabled_nixl_prometheus_collision_is_rejected(self, monkeypatch):
-        monkeypatch.setenv("DYN_SYSTEM_PORT", "19089")
-        monkeypatch.setenv("NIXL_TELEMETRY_ENABLE", "y")
-        monkeypatch.setenv("NIXL_TELEMETRY_EXPORTER", "prometheus")
-        monkeypatch.setenv("NIXL_TELEMETRY_PROMETHEUS_PORT", "19090")
-        config = create_config()
-        config.embedding_worker = True
-        config.embedding_worker_processes = 3
-
-        with pytest.raises(
-            ValueError,
-            match="NIXL_TELEMETRY_PROMETHEUS_PORT reserves 19090",
-        ):
-            config._validate_embedding_worker_processes()
-
     def test_disabled_nixl_prometheus_port_is_not_reserved(self, monkeypatch):
         monkeypatch.setenv("DYN_SYSTEM_PORT", "19089")
         monkeypatch.setenv("NIXL_TELEMETRY_ENABLE", "n")
@@ -703,6 +774,39 @@ class TestEmbeddingWorkerProcesses:
                 "NIXL_TELEMETRY_PROMETHEUS_PORT reserves 19090"
             ),
         ):
+            config._validate_embedding_worker_processes()
+
+    @pytest.mark.parametrize(
+        ("system_port", "nixl_port", "reserved_port"),
+        [("19089", "19090", "19090"), ("9090", None, "9090")],
+    )
+    def test_nixl_port_collision_is_rejected(
+        self, monkeypatch, system_port, nixl_port, reserved_port
+    ):
+        monkeypatch.setenv("DYN_SYSTEM_PORT", system_port)
+        monkeypatch.setenv("NIXL_TELEMETRY_ENABLE", "y")
+        monkeypatch.setenv("NIXL_TELEMETRY_EXPORTER", "prometheus")
+        if nixl_port is not None:
+            monkeypatch.setenv("NIXL_TELEMETRY_PROMETHEUS_PORT", nixl_port)
+        config = create_config()
+        config.embedding_worker = True
+        config.embedding_worker_processes = 3
+
+        with pytest.raises(
+            ValueError,
+            match=f"NIXL_TELEMETRY_PROMETHEUS_PORT reserves {reserved_port}",
+        ):
+            config._validate_embedding_worker_processes()
+
+    def test_invalid_nixl_configuration_is_rejected(self, monkeypatch):
+        monkeypatch.setenv("NIXL_TELEMETRY_ENABLE", "y")
+        monkeypatch.setenv("NIXL_TELEMETRY_EXPORTER", "prometheus")
+        monkeypatch.setenv("NIXL_TELEMETRY_PROMETHEUS_PORT", "not-a-port")
+        config = create_config()
+        config.embedding_worker = True
+        config.embedding_worker_processes = 3
+
+        with pytest.raises(ValueError, match="NIXL_TELEMETRY_PROMETHEUS_PORT"):
             config._validate_embedding_worker_processes()
 
     def test_fixed_tcp_rpc_port_is_rejected(self, monkeypatch):
@@ -791,3 +895,57 @@ class TestEmbeddingWorkerProcesses:
         config.headless = True
         with pytest.raises(ValueError, match="--headless"):
             config._validate_embedding_worker_processes()
+
+
+class TestFreezeGcAfterInit:
+    """--freeze-gc-after-init is opt-in and rejected where it cannot run."""
+
+    def test_is_opt_in(self, monkeypatch):
+        monkeypatch.delenv("DYN_VLLM_FREEZE_GC_AFTER_INIT", raising=False)
+        parser = argparse.ArgumentParser()
+        DynamoVllmArgGroup().add_arguments(parser)
+
+        assert parser.parse_args([]).freeze_gc_after_init is False
+        assert parser.parse_args(["--freeze-gc-after-init"]).freeze_gc_after_init
+        assert DynamoVllmConfig.freeze_gc_after_init is False
+
+    def test_env_enables(self, monkeypatch):
+        monkeypatch.setenv("DYN_VLLM_FREEZE_GC_AFTER_INIT", "true")
+        parser = argparse.ArgumentParser()
+        DynamoVllmArgGroup().add_arguments(parser)
+
+        assert parser.parse_args([]).freeze_gc_after_init is True
+
+    @pytest.mark.parametrize(
+        "mode",
+        [
+            DisaggregationMode.AGGREGATED,
+            DisaggregationMode.DECODE,
+            DisaggregationMode.PREFILL,
+        ],
+    )
+    def test_registering_roles_accepted(self, mode):
+        config = create_config()
+        config.freeze_gc_after_init = True
+        config.disaggregation_mode = mode
+        config._validate_freeze_gc_after_init()
+
+    def test_encode_rejected(self):
+        config = create_config()
+        config.freeze_gc_after_init = True
+        config.disaggregation_mode = DisaggregationMode.ENCODE
+        with pytest.raises(ValueError, match="--freeze-gc-after-init"):
+            config._validate_freeze_gc_after_init()
+
+    def test_headless_rejected(self):
+        config = create_config()
+        config.freeze_gc_after_init = True
+        config.headless = True
+        with pytest.raises(ValueError, match="--headless"):
+            config._validate_freeze_gc_after_init()
+
+    def test_disabled_skips_checks(self):
+        config = create_config()
+        config.headless = True
+        config.disaggregation_mode = DisaggregationMode.ENCODE
+        config._validate_freeze_gc_after_init()

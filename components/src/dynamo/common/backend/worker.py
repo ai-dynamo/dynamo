@@ -131,9 +131,7 @@ class WorkerConfig:
     # Operator override; when set, the Rust Worker uses this instead of
     # `engine.health_check_payload()`. Populated by `from_runtime_config`.
     health_check_payload: Optional[dict] = None
-    structural_tag_mode: str = "off"
-    structural_tag_scope: str = "auto"
-    structural_tag_schema: str = "auto"
+    structural_tag: Optional[dict[str, object]] = None
     # When True, this worker declares an upstream Encode peer in its
     # topology `needs`. Meaningful only on AGGREGATED/PREFILL roles;
     # the Rust validator rejects DECODE/ENCODE + True with InvalidArgument.
@@ -146,6 +144,9 @@ class WorkerConfig:
     kv_state_endpoint: Optional[str] = None
     default_thinking_mode: Optional[str] = None
     response_plane: str = "tcp"
+    # False skips configure_dynamo_logging() in run(), for engines embedded in a
+    # host process that owns its Python logging.
+    configure_logging: bool = True
 
     @classmethod
     def from_runtime_config(
@@ -185,17 +186,7 @@ class WorkerConfig:
             ),
             "enable_local_indexer": getattr(runtime_cfg, "enable_local_indexer", True),
             "enable_kv_routing": getattr(runtime_cfg, "enable_kv_routing", True),
-            "structural_tag_mode": (
-                "on"
-                if getattr(runtime_cfg, "dyn_enable_structural_tag", False)
-                else "off"
-            ),
-            "structural_tag_scope": getattr(
-                runtime_cfg, "dyn_structural_tag_scope", "auto"
-            ),
-            "structural_tag_schema": getattr(
-                runtime_cfg, "dyn_structural_tag_schema", "auto"
-            ),
+            "structural_tag": getattr(runtime_cfg, "structural_tag", None),
             "route_to_encoder": getattr(runtime_cfg, "route_to_encoder", False),
         }
         # Skip the probe when an override is supplied so callers with a foreign
@@ -230,7 +221,8 @@ class Worker:
         self.config = config
 
     async def run(self) -> None:
-        configure_dynamo_logging()
+        if self.config.configure_logging:
+            configure_dynamo_logging()
 
         if self.config.use_kv_events:
             # The runtime auto-detects NATS now; the field is preserved on
@@ -245,8 +237,8 @@ class Worker:
                 stacklevel=2,
             )
 
-        if self.config.response_plane not in {"tcp", "quic"}:
-            raise ValueError("response_plane must be 'tcp' or 'quic'")
+        if self.config.response_plane not in {"tcp", "quic", "velo"}:
+            raise ValueError("response_plane must be 'tcp', 'quic', or 'velo'")
         os.environ["DYN_RESPONSE_PLANE"] = self.config.response_plane
 
         runtime_cfg = _backend.RuntimeConfig(
@@ -277,9 +269,7 @@ class Worker:
                 self.config.disaggregation_mode
             ),
             health_check_payload=self.config.health_check_payload,
-            structural_tag_mode=self.config.structural_tag_mode,
-            structural_tag_scope=self.config.structural_tag_scope,
-            structural_tag_schema=self.config.structural_tag_schema,
+            structural_tag=self.config.structural_tag,
             runtime=runtime_cfg,
             route_to_encoder=self.config.route_to_encoder,
             media_decoder=self.config.media_decoder,

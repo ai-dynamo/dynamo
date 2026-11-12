@@ -111,6 +111,7 @@ fn load_test_data(file_path: &str) -> TestData {
             .expect("Failed to parse choices");
 
             let response = NvCreateChatCompletionStreamResponse {
+                message_boundary: None,
                 inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                     id: id.clone(),
                     choices,
@@ -122,7 +123,10 @@ fn load_test_data(file_path: &str) -> TestData {
                     service_tier: None,
                 },
                 nvext: None,
+                prompt_logprobs: None,
                 llm_metrics: None,
+                tool_call_completion: Vec::new(),
+                model_eos: Vec::new(),
             };
 
             Annotated {
@@ -1420,6 +1424,7 @@ mod tests {
         Annotated {
             id: Some("test-kimi".to_string()),
             data: Some(NvCreateChatCompletionStreamResponse {
+                message_boundary: None,
                 inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                     id: "test-kimi".to_string(),
                     choices: vec![choice],
@@ -1431,7 +1436,10 @@ mod tests {
                     service_tier: None,
                 },
                 nvext: None,
+                prompt_logprobs: None,
                 llm_metrics: None,
+                tool_call_completion: Vec::new(),
+                model_eos: Vec::new(),
             }),
             event: None,
             comment: None,
@@ -2189,6 +2197,7 @@ fn make_glm47_chunk(
     Annotated {
         id: Some("id".to_string()),
         data: Some(NvCreateChatCompletionStreamResponse {
+            message_boundary: None,
             inner: CreateChatCompletionStreamResponse {
                 id: "id".to_string(),
                 object: "chat.completion.chunk".to_string(),
@@ -2200,7 +2209,10 @@ fn make_glm47_chunk(
                 system_fingerprint: None,
             },
             nvext: None,
+            prompt_logprobs: None,
             llm_metrics: None,
+            tool_call_completion: Vec::new(),
+            model_eos: Vec::new(),
         }),
         event: None,
         comment: None,
@@ -2393,6 +2405,7 @@ fn deepseek_v4_partial_invoke_chunk() -> Annotated<NvCreateChatCompletionStreamR
     Annotated {
         id: Some("probe".to_string()),
         data: Some(NvCreateChatCompletionStreamResponse {
+            message_boundary: None,
             inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                 id: "probe".to_string(),
                 object: "chat.completion.chunk".to_string(),
@@ -2422,7 +2435,10 @@ fn deepseek_v4_partial_invoke_chunk() -> Annotated<NvCreateChatCompletionStreamR
                 system_fingerprint: None,
             },
             nvext: None,
+            prompt_logprobs: None,
             llm_metrics: None,
+            tool_call_completion: Vec::new(),
+            model_eos: Vec::new(),
         }),
         event: None,
         comment: None,

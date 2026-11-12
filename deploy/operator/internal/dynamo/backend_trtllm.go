@@ -13,7 +13,8 @@ import (
 )
 
 type TRTLLMBackend struct {
-	MpiRunSecretName string
+	MpiRunSecretName    string
+	roleLaunchOwnership roleLaunchOwnership
 }
 
 // UpdateContainer configures the container for TRT-LLM multinode deployments.
@@ -41,10 +42,8 @@ func (b *TRTLLMBackend) UpdateContainer(container *corev1.Container, numberOfNod
 		container.LivenessProbe = nil
 		container.StartupProbe = nil
 		container.ReadinessProbe = &corev1.Probe{
-			ProbeHandler: corev1.ProbeHandler{
-				TCPSocket: &corev1.TCPSocketAction{
-					Port: intstr.FromInt(commonconsts.MpiRunSshPort),
-				},
+			TCPSocket: &corev1.TCPSocketAction{
+				Port: intstr.FromInt(commonconsts.MpiRunSshPort),
 			},
 			InitialDelaySeconds: 20,
 			PeriodSeconds:       20,
@@ -63,6 +62,11 @@ func (b *TRTLLMBackend) UpdateContainer(container *corev1.Container, numberOfNod
 		Value: "1",
 	}
 	container.Env = append(container.Env, envVar)
+	if b.roleLaunchOwnership == roleLaunchOwnedByPodTemplate {
+		// The worker readiness probe above still targets the MPI SSH port, so
+		// a role-authored worker command must start sshd on that port.
+		return nil
+	}
 
 	// Update container command based on role
 	switch role {
@@ -86,11 +90,9 @@ func (b *TRTLLMBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int
 	if numberOfNodes > 1 {
 		sshVolume := corev1.Volume{
 			Name: b.MpiRunSecretName,
-			VolumeSource: corev1.VolumeSource{
-				Secret: &corev1.SecretVolumeSource{
-					SecretName:  b.MpiRunSecretName,
-					DefaultMode: func() *int32 { mode := int32(0644); return &mode }(),
-				},
+			Secret: &corev1.SecretVolumeSource{
+				SecretName:  b.MpiRunSecretName,
+				DefaultMode: func() *int32 { mode := int32(0644); return &mode }(),
 			},
 		}
 		podSpec.Volumes = append(podSpec.Volumes, sshVolume)
@@ -119,7 +121,7 @@ func (b *TRTLLMBackend) setupLeaderContainer(container *corev1.Container, number
 	if len(container.Command) > 0 && isPythonCommand(container.Command[0]) {
 		// Direct Python command: combine command + args
 		// Shell-quote each part to handle args with spaces (e.g., JSON in --override-engine-args)
-		var quotedParts []string
+		quotedParts := make([]string, 0, len(container.Command)+len(container.Args))
 		for _, part := range container.Command {
 			quotedParts = append(quotedParts, shellQuoteForBashC(part))
 		}

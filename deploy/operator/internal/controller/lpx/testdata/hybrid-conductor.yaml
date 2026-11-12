@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: conductor
+replicas: 1
+podTemplate:
+  spec:
+    initContainers:
+    - name: runtime
+      image: dynamo-sidecar
+      restartPolicy: Always
+    containers:
+    - name: main
+      image: cyborg-runtime
+      resources:
+        limits:
+          nvidia.com/gpu: 1
+      volumeMounts:
+      - {name: config, mountPath: /configs}
+      - {name: model-storage, mountPath: /models}
+    volumes:
+    - {name: model-storage, emptyDir: {}}

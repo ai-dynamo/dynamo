@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 
 from dynamo.llm import KvRouterConfig
-from dynamo.mocker import MockEngineArgs
+from dynamo.mocker.config import normalize_mocker_config
 
 MOONCAKE_TRACE_FIRST20 = """{"timestamp": 0, "input_length": 6755, "output_length": 500, "hash_ids": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]}
 {"timestamp": 0, "input_length": 7319, "output_length": 490, "hash_ids": [0, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27]}
@@ -48,21 +48,17 @@ def _require_aisimulate_distribution(*, allow_module_level: bool = False) -> Non
 
 
 def _vllm_args_payload():
-    return {
-        "block_size": 64,
-        "speedup_ratio": 1000.0,
-    }
+    return {"engine": {"backend": "vllm", "block_size": 64, "speedup_ratio": 1000.0}}
 
 
 def _sglang_args_payload():
     return {
-        "engine_type": "sglang",
-        "num_gpu_blocks": 512,
-        "block_size": 64,
-        "speedup_ratio": 1000.0,
-        "sglang": {
-            "page_size": 64,
-        },
+        "engine": {
+            "backend": "sglang",
+            "num_gpu_blocks": 512,
+            "block_size": 64,
+            "speedup_ratio": 1000.0,
+        }
     }
 
 
@@ -203,7 +199,7 @@ def _write_vllm_args(tmp_path):
 
 
 def _vllm_args():
-    return MockEngineArgs.from_json(json.dumps(_vllm_args_payload()))
+    return normalize_mocker_config(json.dumps(_vllm_args_payload()))
 
 
 def _write_sglang_args(tmp_path):
@@ -216,15 +212,25 @@ def _write_sglang_args(tmp_path):
 
 
 def _sglang_args():
-    return MockEngineArgs.from_json(json.dumps(_sglang_args_payload()))
+    return normalize_mocker_config(json.dumps(_sglang_args_payload()))
 
 
 def _prefill_args():
-    return MockEngineArgs(block_size=64, speedup_ratio=1000.0, worker_type="prefill")
+    return normalize_mocker_config(
+        {
+            "engine": {
+                "block_size": 64,
+                "speedup_ratio": 1000.0,
+                "worker_type": "prefill",
+            }
+        }
+    )
 
 
 def _decode_args():
-    return MockEngineArgs(block_size=64, speedup_ratio=1000.0, worker_type="decode")
+    return normalize_mocker_config(
+        {"engine": {"block_size": 64, "speedup_ratio": 1000.0, "worker_type": "decode"}}
+    )
 
 
 def _write_router_config(tmp_path):

@@ -5,27 +5,23 @@
 //! from router configuration with runtime-backed metrics and, when configured,
 //! a request-plane remote primary.
 
+use dynamo_kv_indexer::host::{
+    ApproximateRetentionConfig, ConcurrentRadixTreeCompressed, KvIndexer, KvIndexerMetrics,
+    LowerTierIndexers, PruneConfig, SessionPrefixIndexer, SessionUpdateSender, ThreadPoolIndexer,
+};
+use dynamo_kv_router::config::{ApproximateCachePolicyKind, KvRouterConfig};
+mod runtime_metrics;
+pub use runtime_metrics::KvIndexerMetricsExt;
 use std::{sync::Arc, time::Duration};
 
 use anyhow::Result;
-use dynamo_kv_router::{
-    ConcurrentRadixTreeCompressed, SessionPrefixIndexer,
-    approx::PruneConfig,
-    config::{ApproximateCachePolicyKind, KvRouterConfig},
-    indexer::{
-        ApproximateRetentionConfig, KvIndexer, KvIndexerMetrics, LowerTierIndexers,
-        ThreadPoolIndexer,
-    },
-};
 
 // Re-export tiered-match types so internal callers (`indexer::TieredMatchDetails`)
 // keep working after these types moved to `dynamo-kv-router`.
-pub(crate) use dynamo_kv_router::indexer::TieredMatchDetails;
 #[allow(unused_imports)]
-pub(crate) use dynamo_kv_router::indexer::WireTieredMatchDetails;
-pub use dynamo_kv_router::services::indexer::backend::{Indexer, RemotePrimary, SideIndexer};
-pub(crate) use dynamo_kv_router::services::indexer::recording::ApproximateRequestLease;
-use dynamo_kv_router::services::indexer::session_updates::SessionUpdateSender;
+pub(crate) use dynamo_kv_indexer::host::WireTieredMatchDetails;
+pub(crate) use dynamo_kv_indexer::host::{ApproximateRequestLease, TieredMatchDetails};
+pub use dynamo_kv_indexer::host::{Indexer, RemotePrimary, SideIndexer};
 use dynamo_runtime::component::Component;
 pub(crate) use ingress::{RuntimeIngress, RuntimeIngressArgs};
 use tokio_util::sync::CancellationToken;
@@ -34,6 +30,7 @@ mod embedding_cache;
 mod ingress;
 mod recovery;
 pub mod remote;
+pub(crate) mod reply;
 
 pub use self::embedding_cache::{
     EmbeddingCacheIndexer, preprocessed_multimodal_cache_keys, try_build_cache_indexer,
@@ -46,15 +43,15 @@ pub(crate) use recovery::{
     DEFAULT_RECOVERY_ATTEMPT_TIMEOUT, KvEventSubscriptionHandle, RecoveryResetReason,
     RecoverySupervisor, RecoveryTarget, TargetFaultDisposition, start_target_subscriber,
 };
+pub(crate) use recovery::{
+    KvStateAgentStatusCell, start_subscriber, start_worker_kv_query_endpoint,
+    start_worker_kv_query_endpoint_with_status,
+};
 #[cfg(test)]
 pub(crate) use recovery::{WorkerQueryClient, WorkerQueryTransport};
-pub(crate) use recovery::{
-    start_subscriber, start_worker_kv_query_endpoint, start_worker_kv_query_endpoint_with_status,
-};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ResolvedApproximatePrimaryPolicy {
-    Disabled,
     Ttl,
     Lru,
     TtlRemoteFallback,
@@ -69,9 +66,6 @@ fn resolve_approximate_primary_policy(
         anyhow::bail!(
             "router_approximate_cache_policy=lru requires use_kv_events=false; the local side indexer is TTL-only"
         );
-    }
-    if config.overlap_score_credit <= 0.0 {
-        return Ok(ResolvedApproximatePrimaryPolicy::Disabled);
     }
     if config.use_kv_events
         || config.router_approximate_cache_policy == ApproximateCachePolicyKind::Ttl
@@ -94,10 +88,6 @@ pub(crate) async fn build(
     session_prefix_index: Option<Arc<SessionPrefixIndexer>>,
 ) -> Result<Indexer> {
     let approximate_policy = resolve_approximate_primary_policy(kv_router_config)?;
-    if approximate_policy == ResolvedApproximatePrimaryPolicy::Disabled {
-        return Ok(Indexer::None);
-    }
-
     if approximate_policy == ResolvedApproximatePrimaryPolicy::TtlRemoteFallback {
         tracing::warn!(
             use_remote_indexer = kv_router_config.use_remote_indexer,
@@ -164,15 +154,17 @@ pub(crate) async fn build(
                     Some(retention),
                 ),
             );
-            let session_updates = session_prefix_index
-                .map(|index| SessionUpdateSender::for_concurrent(index, Arc::clone(&primary)));
+            let lower_tier = LowerTierIndexers::new_with_metrics(
+                kv_router_config.router_event_threads as usize,
+                block_size,
+                Some(kv_indexer_metrics),
+            );
+            let session_updates = session_prefix_index.map(|index| {
+                SessionUpdateSender::for_concurrent(index, Arc::clone(&primary), lower_tier.clone())
+            });
             return Ok(Indexer::Concurrent {
                 primary,
-                lower_tier: LowerTierIndexers::new_with_metrics(
-                    kv_router_config.router_event_threads as usize,
-                    block_size,
-                    Some(kv_indexer_metrics),
-                ),
+                lower_tier,
                 approx: None,
                 primary_records_routing_decisions: true,
                 session_updates,
@@ -185,15 +177,14 @@ pub(crate) async fn build(
             kv_indexer_metrics.clone(),
             Some(retention),
         );
-        let session_updates = session_prefix_index
-            .map(|index| SessionUpdateSender::for_legacy(index, primary.clone()));
+        let lower_tier =
+            LowerTierIndexers::new_with_metrics(1, block_size, Some(kv_indexer_metrics));
+        let session_updates = session_prefix_index.map(|index| {
+            SessionUpdateSender::for_legacy(index, primary.clone(), lower_tier.clone())
+        });
         return Ok(Indexer::Single {
             primary,
-            lower_tier: LowerTierIndexers::new_with_metrics(
-                1,
-                block_size,
-                Some(kv_indexer_metrics),
-            ),
+            lower_tier,
             approx: None,
             primary_records_routing_decisions: true,
             session_updates,
@@ -215,15 +206,17 @@ pub(crate) async fn build(
             block_size,
             Some(kv_indexer_metrics.clone()),
         ));
-        let session_updates = session_prefix_index
-            .map(|index| SessionUpdateSender::for_concurrent(index, Arc::clone(&primary)));
+        let lower_tier = LowerTierIndexers::new_with_metrics(
+            kv_router_config.router_event_threads as usize,
+            block_size,
+            Some(kv_indexer_metrics),
+        );
+        let session_updates = session_prefix_index.map(|index| {
+            SessionUpdateSender::for_concurrent(index, Arc::clone(&primary), lower_tier.clone())
+        });
         return Ok(Indexer::Concurrent {
             primary,
-            lower_tier: LowerTierIndexers::new_with_metrics(
-                kv_router_config.router_event_threads as usize,
-                block_size,
-                Some(kv_indexer_metrics),
-            ),
+            lower_tier,
             approx,
             primary_records_routing_decisions: false,
             session_updates,
@@ -237,11 +230,12 @@ pub(crate) async fn build(
         kv_indexer_metrics.clone(),
         None,
     );
-    let session_updates =
-        session_prefix_index.map(|index| SessionUpdateSender::for_legacy(index, primary.clone()));
+    let lower_tier = LowerTierIndexers::new_with_metrics(1, block_size, Some(kv_indexer_metrics));
+    let session_updates = session_prefix_index
+        .map(|index| SessionUpdateSender::for_legacy(index, primary.clone(), lower_tier.clone()));
     Ok(Indexer::Single {
         primary,
-        lower_tier: LowerTierIndexers::new_with_metrics(1, block_size, Some(kv_indexer_metrics)),
+        lower_tier,
         approx,
         primary_records_routing_decisions: false,
         session_updates,
@@ -272,11 +266,12 @@ fn predict_on_route_side_indexer(
 
 #[cfg(test)]
 pub(super) mod test_util {
-    use dynamo_kv_router::protocols::{
-        ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
-        KvCacheStoredBlockData, LocalBlockHash, RouterEvent, StorageTier,
-        compute_seq_hash_for_block,
+    use dynamo_kv_events::event::{
+        KvCacheEvent, KvCacheEventData, KvCacheStoreData, KvCacheStoredBlockData, RouterEvent,
     };
+    use dynamo_kv_events::residency::StorageTier;
+    use dynamo_kv_hashing::routing::compute_seq_hash_for_block;
+    use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
 
     pub(crate) fn store_event(
         worker_id: u64,

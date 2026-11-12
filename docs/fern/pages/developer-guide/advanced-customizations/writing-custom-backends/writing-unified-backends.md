@@ -1512,7 +1512,7 @@ Before shipping:
   registration).
 - [Conformance kit](https://github.com/ai-dynamo/dynamo/blob/main/lib/backend-common/src/testing.rs) —
   `run_conformance`, `mock_context`, `cancelling_context`.
-- [Mocker backend](../../knowledge-base/modular-components/backends/mocker/rust-backend.md) — example user guide.
+- [Mocker backend](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/mocker/rust-backend.md) — example user guide.
 - [Python sibling](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/README.md)
   — Python ABC layered over this crate.
 
