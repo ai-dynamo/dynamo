@@ -103,6 +103,17 @@ impl<'a> WorkerCandidate<'a> {
             None
         }
     }
+
+    /// Sums over this worker's active prefills, only when this component declared
+    /// ACTIVE_PREFILL_SUMS. None also means the host does not supply them for this selection;
+    /// see [`ActivePrefillSums`].
+    pub fn active_prefill_sums(self) -> Option<ActivePrefillSums> {
+        if self.inputs.contains(WorkerInputs::ACTIVE_PREFILL_SUMS) {
+            self.cache_snapshot.active_prefill_sums(self.data.worker)
+        } else {
+            None
+        }
+    }
 }
 
 /// Borrowed candidate batch restricted to one scorer's declared inputs.
@@ -190,6 +201,10 @@ impl WorkerInputs {
     pub const LOAD: Self = Self(1 << 1);
     /// Request preferred-taint routing metadata.
     pub const PREFERRED_TAINT: Self = Self(1 << 2);
+    /// Request sums over each worker's active prefills, read through
+    /// [`WorkerCandidate::active_prefill_sums`]. Filters and scorers only: a picker that
+    /// declares it receives nothing.
+    pub const ACTIVE_PREFILL_SUMS: Self = Self(1 << 3);
     /// Request each row's active request count, read through
     /// [`WorkerInputView::active_requests`]. Picker only: filters and scorers that declare it
     /// receive nothing.
@@ -231,6 +246,15 @@ impl BitOr for WorkerInputs {
 pub(crate) struct CacheSnapshot<'a> {
     pub(crate) shared_hits: Option<&'a SharedCacheHits>,
     pub(crate) has_tier_matches: bool,
+    /// Every worker's active prefill sums, when the host supplies them for this selection.
+    /// Views look a row up only when its component declared ACTIVE_PREFILL_SUMS.
+    pub(crate) active_prefill_sums: Option<&'a FxHashMap<WorkerWithDpRank, ActivePrefillSums>>,
+}
+
+impl CacheSnapshot<'_> {
+    fn active_prefill_sums(&self, worker: WorkerWithDpRank) -> Option<ActivePrefillSums> {
+        self.active_prefill_sums?.get(&worker).copied()
+    }
 }
 
 /// Rows and request-wide cache facts owned by a reader outside worker selection.
@@ -281,6 +305,7 @@ impl WorkerInputRows {
         let cache_snapshot = CacheSnapshot {
             shared_hits: self.shared_hits.as_ref(),
             has_tier_matches: self.has_tier_matches,
+            active_prefill_sums: None,
         };
         let info = |row: usize| WorkerInfo::new(self.rows[row].worker, self.capacities[row]);
         read(WorkerCandidates::new(
@@ -375,6 +400,64 @@ pub struct WorkerLoadInput {
 const _: () = assert!(size_of::<WorkerLoadInput>() == 40);
 #[cfg(target_pointer_width = "64")]
 const _: () = assert!(size_of::<CandidateData>() == 128);
+
+/// Sums over one worker's active prefills, for cost models that are not linear in tokens.
+/// Filters and scorers read them through [`WorkerCandidate::active_prefill_sums`] after
+/// declaring [`WorkerInputs::ACTIVE_PREFILL_SUMS`].
+///
+/// For each request still in prefill, `q` is the prompt tokens the router counted as prefill
+/// work when it booked the request, the tokens [`WorkerLoadInput::active_prefill_tokens`] adds
+/// for it, and `c` is the rest of the prompt, the tokens the router credited as cached on the
+/// booked worker. `q + c` is the prompt length.
+///
+/// The sums let a policy evaluate any cost of the form `a·q² + b·q·c + d·q` over a worker's
+/// active prefills exactly, with its own coefficients:
+/// `a * uncached_tokens_squared() + b * uncached_times_cached_tokens() + d * uncached_tokens()`.
+///
+/// Each request's terms are fixed when it is booked and removed when its prefill completes or
+/// it is freed. They do not decay with elapsed time, unlike
+/// [`WorkerLoadInput::active_prefill_tokens`] when a prefill load model is configured, so
+/// `uncached_tokens()` can exceed it. A request with no uncached tokens adds nothing. Requests
+/// booked by a peer router replica count once its replica-sync event arrives; a peer that does
+/// not send `c` contributes `c = 0`. Values saturate at `u64::MAX`.
+///
+/// The KV router's scheduling queue supplies the sums, taken in the same actor turn as the
+/// `LOAD` projection. Selections without that queue, such as request classifiers, read `None`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ActivePrefillSums {
+    uncached_tokens: u64,
+    uncached_tokens_squared: u64,
+    uncached_times_cached_tokens: u64,
+}
+
+impl ActivePrefillSums {
+    pub(crate) fn new(
+        uncached_tokens: u64,
+        uncached_tokens_squared: u64,
+        uncached_times_cached_tokens: u64,
+    ) -> Self {
+        Self {
+            uncached_tokens,
+            uncached_tokens_squared,
+            uncached_times_cached_tokens,
+        }
+    }
+
+    /// Sum of `q` over the active prefills.
+    pub fn uncached_tokens(&self) -> u64 {
+        self.uncached_tokens
+    }
+
+    /// Sum of `q * q` over the active prefills.
+    pub fn uncached_tokens_squared(&self) -> u64 {
+        self.uncached_tokens_squared
+    }
+
+    /// Sum of `q * c` over the active prefills.
+    pub fn uncached_times_cached_tokens(&self) -> u64 {
+        self.uncached_times_cached_tokens
+    }
+}
 
 /// Prefill budget assumed for a rank that does not report `max_num_batched_tokens`. Large
 /// enough that a fractional prefill threshold never fires on an unreported budget.

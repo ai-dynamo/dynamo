@@ -1296,6 +1296,10 @@ pub const MAX_REPLICA_BATCH_DURATION: Duration = Duration::from_millis(1);
 pub struct PrefillLoadHint {
     pub initial_effective_prefill_tokens: usize,
     pub expected_prefill_duration: Option<Duration>,
+    /// Prompt tokens credited as cached when the request was booked: the prompt length
+    /// minus `initial_effective_prefill_tokens`. Zero when a peer router omits it.
+    #[serde(default)]
+    pub cached_tokens: usize,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -1973,6 +1977,40 @@ mod tests {
     use super::*;
     use rstest::rstest;
     use serde_json;
+
+    /// Replica sync encodes hints as named msgpack maps, so a router that predates
+    /// `cached_tokens` and one that sends it can read each other's hints.
+    #[test]
+    fn prefill_load_hint_cached_tokens_is_compatible_with_older_routers() {
+        #[derive(Serialize, Deserialize, Debug, PartialEq)]
+        struct OlderPrefillLoadHint {
+            initial_effective_prefill_tokens: usize,
+            expected_prefill_duration: Option<Duration>,
+        }
+
+        let older = OlderPrefillLoadHint {
+            initial_effective_prefill_tokens: 7,
+            expected_prefill_duration: Some(Duration::from_millis(3)),
+        };
+        let from_older: PrefillLoadHint =
+            rmp_serde::from_slice(&rmp_serde::to_vec_named(&older).unwrap()).unwrap();
+        assert_eq!(
+            from_older,
+            PrefillLoadHint {
+                initial_effective_prefill_tokens: 7,
+                expected_prefill_duration: Some(Duration::from_millis(3)),
+                cached_tokens: 0,
+            }
+        );
+
+        let current = PrefillLoadHint {
+            cached_tokens: 9,
+            ..from_older
+        };
+        let to_older: OlderPrefillLoadHint =
+            rmp_serde::from_slice(&rmp_serde::to_vec_named(&current).unwrap()).unwrap();
+        assert_eq!(to_older, older);
+    }
 
     // Temporary N/N-1 fixtures. Remove this module when domainless RouterEvent
     // is outside the supported mixed-version window.

@@ -41,7 +41,7 @@ use super::types::{
 };
 use crate::plugins::request_classifier::ClassifyRequest;
 use crate::plugins::worker_selection::{
-    RuntimePolicyConfig, RuntimePolicyError, RuntimePolicyUpdate,
+    ActivePrefillSums, RuntimePolicyConfig, RuntimePolicyError, RuntimePolicyUpdate,
 };
 use crate::plugins::worker_selection::{
     WorkerCapacity, WorkerInputRows, WorkerInputs, WorkerLoadInput,
@@ -783,6 +783,9 @@ struct SchedulerQueueActor<
     /// Rows prepared for the request enqueued this turn, dropped when the turn ends.
     turn_prepared: Option<Box<PreparedAdmission>>,
     projected_loads: FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
+    /// Every rank's active prefill sums, refilled by `with_projected_loads` only for a selector
+    /// that declares `WorkerInputs::ACTIVE_PREFILL_SUMS`, and empty otherwise.
+    projected_prefill_sums: FxHashMap<WorkerWithDpRank, ActivePrefillSums>,
     /// Ranks the current request's load projection found past the host's reject thresholds,
     /// counted per worker. Refilled by `with_projected_loads`; empty while nothing is full.
     full_ranks: FullRankCounts,
@@ -988,6 +991,7 @@ impl<
             turn: 0,
             turn_prepared: None,
             projected_loads: FxHashMap::default(),
+            projected_prefill_sums: FxHashMap::default(),
             full_ranks: FullRankCounts::default(),
             block_size,
             selector,
@@ -2364,6 +2368,16 @@ impl<
             &mut request.worker_loads,
             full_ranks,
         );
+        if self
+            .selector
+            .required_worker_inputs()
+            .contains(WorkerInputs::ACTIVE_PREFILL_SUMS)
+        {
+            self.slots
+                .project_active_prefill_sums_into(&mut self.projected_prefill_sums);
+        } else if !self.projected_prefill_sums.is_empty() {
+            self.projected_prefill_sums.clear();
+        }
         let result = handle(self, &mut request);
         self.projected_loads = std::mem::take(&mut request.worker_loads);
         result
@@ -2419,17 +2433,15 @@ impl<
             } else {
                 None
             };
+            let input =
+                WorkerSelectionInput::configured(&workers, request, eligibility, self.block_size);
+            let input = if self.projected_prefill_sums.is_empty() {
+                input
+            } else {
+                input.with_active_prefill_sums(&self.projected_prefill_sums)
+            };
             self.selector
-                .select_worker_prepared(
-                    WorkerSelectionInput::configured(
-                        &workers,
-                        request,
-                        eligibility,
-                        self.block_size,
-                    ),
-                    prepared,
-                    trace,
-                )
+                .select_worker_prepared(input, prepared, trace)
                 .map(|(selection, selection_trace)| {
                     let non_max_overlap_selection = if request.mode.is_tracked()
                         && self.non_max_overlap_selection_observer.get().is_some()
@@ -2731,6 +2743,7 @@ impl<
         Some(PrefillLoadHint {
             initial_effective_prefill_tokens: effective_isl,
             expected_prefill_duration,
+            cached_tokens: prefix,
         })
     }
 
@@ -4504,6 +4517,7 @@ policy_classes:
             turn: 0,
             turn_prepared: None,
             projected_loads: FxHashMap::with_capacity_and_hasher(8, Default::default()),
+            projected_prefill_sums: FxHashMap::default(),
             full_ranks: FullRankCounts::default(),
             block_size: 16,
             selector,
@@ -5962,6 +5976,65 @@ policy_classes:
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn queue_supplies_active_prefill_sums_only_to_declaring_selectors() {
+        struct RecordingSelector {
+            inputs: WorkerInputs,
+            seen: Arc<std::sync::Mutex<Vec<Option<ActivePrefillSums>>>>,
+        }
+
+        impl WorkerSelector<SimpleWorkerConfig> for RecordingSelector {
+            fn required_worker_inputs(&self) -> WorkerInputs {
+                self.inputs
+            }
+
+            fn select_worker(
+                &self,
+                input: WorkerSelectionInput<'_, SimpleWorkerConfig>,
+            ) -> Result<WorkerSelectionResult, KvSchedulerError> {
+                self.seen.lock().unwrap().push(
+                    input
+                        .active_prefill_sums()
+                        .map(|sums| sums[&WorkerWithDpRank::new(0, 0)]),
+                );
+                DefaultWorkerSelector::new(None, "test").select_worker(input)
+            }
+        }
+
+        let worker = WorkerWithDpRank::new(0, 0);
+        for (inputs, expected) in [
+            (
+                WorkerInputs::ACTIVE_PREFILL_SUMS,
+                // The first selection sees the idle worker; the second sees the first booking.
+                vec![
+                    Some(ActivePrefillSums::default()),
+                    Some(ActivePrefillSums::new(16, 256, 768)),
+                ],
+            ),
+            (WorkerInputs::NONE, vec![None, None]),
+        ] {
+            let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let (queue, slots) = make_queue_with_selector_and_availability(
+                PolicyProfile::synthetic(None, RouterQueuePolicy::Fcfs),
+                RecordingSelector {
+                    inputs,
+                    seen: Arc::clone(&seen),
+                },
+                Arc::new(|_| None),
+            );
+            for request_id in ["first", "second"] {
+                let (mut request, response_rx) = make_request(request_id, 64);
+                request.overlap.effective_cached_tokens.insert(worker, 48);
+                queue.enqueue(request).await;
+                response_rx.await.unwrap().unwrap();
+            }
+            assert_eq!(*seen.lock().unwrap(), expected);
+            for request_id in ["first", "second"] {
+                slots.free(&request_id.to_string(), decay_now()).unwrap();
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn class_names_select_queues_independent_of_cache_state() {
         let profile = policy_profile(
             r#"
@@ -7194,6 +7267,7 @@ policy_classes:
                     prefill_load_hint: Some(PrefillLoadHint {
                         initial_effective_prefill_tokens: isl,
                         expected_prefill_duration: None,
+                        cached_tokens: 0,
                     }),
                     worker,
                     lora_name: None,

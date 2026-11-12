@@ -453,6 +453,7 @@ If a component needs no optional worker data, return `WorkerInputs::NONE`. Combi
 | `PREFERRED_TAINT` | `preferred_taint_multiplier()` | Optional cost multiplier from matching preferred routing taints |
 | `ACTIVE_REQUESTS` | `WorkerInputView::active_requests(row)` | Picker only. Requests in flight on the row's worker; `None` only when the picker did not declare the group or the row is out of range |
 | `KV_TRANSFER` | `kv_transfer()` | `None` if the host has no transfer data for this request: no worker in the partition consumes router hints, or the indexer cannot retain the matched block chain |
+| `ACTIVE_PREFILL_SUMS` | `active_prefill_sums()` | Filter and scorer only. Sums of `q`, `q * q`, and `q * c` over the worker's active prefills, where `q` and `c` are each request's uncached and cached prompt tokens at booking; see [Active Prefill Sums](#active-prefill-sums) |
 | `KV_TRANSFER` | `source_prefix_blocks()` | Prefix blocks held by the source this worker would fetch from, and so held by the worker after the fetch; `None` when no eligible source holds more than the worker's device-resident plus host-pinned prefix |
 
 The GPU, CPU, and disk overlap accessors return raw tier counts. A missing tier or worker entry is zero; Dynamo does not substitute its weighted effective-overlap estimate. Each custom scorer chooses how to combine the raw counts.
@@ -503,6 +504,28 @@ impl WorkerScorer for UncoveredPromptScorer {
 ```
 
 `WorkerCandidate::preferred_taint_multiplier()` and `ScoredWorkerCandidate::preferred_taint_multiplier()` return the optional cost multiplier from preferred routing constraints. A filter, scorer, or picker must request `WorkerInputs::PREFERRED_TAINT` before reading the multiplier. Without that declaration, the component receives `None`, even when another component requested the multiplier. Exact hard-pinned requests also do not materialize it. Required routing constraints remain host-enforced eligibility rules.
+
+### Active Prefill Sums
+
+`active_prefill_tokens()` counts every active prefill token as equal work. When new tokens attend to a long cached prefix, a prefill's cost depends on both its uncached prompt tokens `q` and its cached prompt tokens `c`: a 2,000-token turn on a 100,000-token cached prefix and a fresh 2,000-token prompt add the same `active_prefill_tokens()`, although the first does far more attention work.
+
+Declare `WorkerInputs::ACTIVE_PREFILL_SUMS` in a filter or scorer to read three sums over the worker's active prefills through `WorkerCandidate::active_prefill_sums()`: `uncached_tokens()` is the sum of `q`, `uncached_tokens_squared()` the sum of `q * q`, and `uncached_times_cached_tokens()` the sum of `q * c`. A cost of the form `a * q * q + b * q * c + d * q` is linear in these terms, so a scorer computes the exact cost of all active prefills with its own coefficients:
+
+```rust
+let sums = candidate
+    .active_prefill_sums()
+    .ok_or_else(|| WorkerSelectionPolicyError::failed("active prefill sums unavailable"))?;
+let active_cost = a * sums.uncached_tokens_squared() as f64
+    + b * sums.uncached_times_cached_tokens() as f64
+    + d * sums.uncached_tokens() as f64;
+```
+
+- `q` is the prompt tokens the router counts as prefill work when it books the request, the tokens `active_prefill_tokens()` adds for it. `c` is the rest of the prompt, the tokens the router credits as cached on the booked worker.
+- Each request's terms are added at booking and removed when its prefill completes or the request is freed. They do not decay with elapsed time, so `uncached_tokens()` can exceed `active_prefill_tokens()` when a prefill load model is configured.
+- Requests that another router replica booked count once their replica-sync events arrive. A router version without this field, and the standalone slot tracker API, record `c = 0`.
+- The KV router's scheduling queue reads the sums only for a policy that declares the group, so other policies pay nothing for them. Request classifiers and selection outside that queue read `None`. Each sum saturates at `u64::MAX`.
+
+The [`prefill-cost-score-pick` example](https://github.com/ai-dynamo/dynamo/tree/main/examples/router/custom-policy-example/prefill-cost-score-pick) reads the three coefficients from its YAML parameters and adds the incoming request's cost on each worker.
 
 ## Link the Policy Into Dynamo
 

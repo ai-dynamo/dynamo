@@ -506,6 +506,7 @@ mod tests {
                 Some(crate::protocols::PrefillLoadHint {
                     initial_effective_prefill_tokens: 12,
                     expected_prefill_duration: None,
+                    cached_tokens: 0,
                 }),
                 Instant::now(),
             );

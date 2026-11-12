@@ -6,6 +6,8 @@ use std::{
     collections::HashMap,
 };
 
+use rustc_hash::FxHashMap;
+
 mod hosted;
 mod policy;
 #[cfg(any(test, feature = "bench"))]
@@ -20,8 +22,8 @@ pub use reference::DefaultWorkerSelector;
 use reference::{DefaultWorkerPicker, DefaultWorkerScorer};
 
 use crate::plugins::worker_selection::{
-    ScoredWorkerCandidate, WorkerCacheInputs, WorkerInputView, WorkerInputs, WorkerLoadInput,
-    WorkerSelectionContext,
+    ActivePrefillSums, ScoredWorkerCandidate, WorkerCacheInputs, WorkerInputView, WorkerInputs,
+    WorkerLoadInput, WorkerSelectionContext,
 };
 
 use crate::kv_hints::{
@@ -126,6 +128,9 @@ pub enum WorkerSelectionInput<'a, C: WorkerConfigLike> {
         request: &'a SchedulingRequest,
         eligibility: RoutingEligibility<'a>,
         block_size: u32,
+        /// Every worker's active prefill sums, supplied only for a selector that declares
+        /// [`WorkerInputs::ACTIVE_PREFILL_SUMS`].
+        active_prefill_sums: Option<&'a FxHashMap<WorkerWithDpRank, ActivePrefillSums>>,
     },
 }
 
@@ -148,7 +153,33 @@ impl<'a, C: WorkerConfigLike> WorkerSelectionInput<'a, C> {
             request,
             eligibility,
             block_size,
+            active_prefill_sums: None,
         }
+    }
+
+    /// Supply every worker's active prefill sums for components that declare
+    /// [`WorkerInputs::ACTIVE_PREFILL_SUMS`].
+    pub(crate) fn with_active_prefill_sums(
+        mut self,
+        sums: &'a FxHashMap<WorkerWithDpRank, ActivePrefillSums>,
+    ) -> Self {
+        let Self::Configured {
+            active_prefill_sums,
+            ..
+        } = &mut self;
+        *active_prefill_sums = Some(sums);
+        self
+    }
+
+    /// The active prefill sums the host supplied for this selection, if any.
+    pub(crate) fn active_prefill_sums(
+        &self,
+    ) -> Option<&'a FxHashMap<WorkerWithDpRank, ActivePrefillSums>> {
+        let Self::Configured {
+            active_prefill_sums,
+            ..
+        } = self;
+        *active_prefill_sums
     }
 
     pub fn into_configured(self) -> ConfiguredSelectionInputs<'a, C> {
@@ -157,6 +188,7 @@ impl<'a, C: WorkerConfigLike> WorkerSelectionInput<'a, C> {
             request,
             eligibility,
             block_size,
+            ..
         } = self;
         (workers, request, eligibility, block_size)
     }
@@ -336,6 +368,7 @@ fn cache_snapshot(request: &SchedulingRequest) -> CacheSnapshot<'_> {
         has_tier_matches: !request.overlap.tier_overlap_blocks.device.is_empty()
             || !request.overlap.tier_overlap_blocks.host_pinned.is_empty()
             || !request.overlap.tier_overlap_blocks.disk.is_empty(),
+        active_prefill_sums: None,
     }
 }
 
@@ -620,6 +653,7 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
     trace: Option<SelectionTraceSpec>,
     prepared: Option<PreparedCandidates>,
 ) -> Result<(WorkerSelectionResult, Option<SelectionTrace>), KvSchedulerError> {
+    let active_prefill_sums = input.active_prefill_sums();
     let (workers, request, eligibility, block_size) = input.into_configured();
     eligibility.validate_pinned_worker_allowed()?;
 
@@ -637,6 +671,7 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
 
     let mut input = MaterializedSelectionInput::new(request, block_size);
     input.context.pinned_worker = eligibility.pinned_worker();
+    input.cache_snapshot.active_prefill_sums = active_prefill_sums;
     let selected = match state {
         #[cfg(any(test, feature = "bench"))]
         WorkerSelectionPolicyStateRef::Reference(kv_router_config, picker) => {

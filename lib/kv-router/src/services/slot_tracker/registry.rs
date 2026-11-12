@@ -288,9 +288,11 @@ impl SlotTrackerRegistry {
         new_isl_tokens: usize,
     ) -> Result<(), ServiceError> {
         let entry = self.entry(key)?;
+        // This API reports only the uncached tokens, so no cached tokens are credited.
         let prefill_load_hint = (new_isl_tokens > 0).then_some(PrefillLoadHint {
             initial_effective_prefill_tokens: new_isl_tokens,
             expected_prefill_duration: None,
+            cached_tokens: 0,
         });
         entry.tracker.add_request_if_registered(
             SequenceRequest {

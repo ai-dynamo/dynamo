@@ -8,12 +8,29 @@ use rustc_hash::FxHashMap;
 use tokio::time::Instant;
 
 use super::single::RequestId;
+use crate::plugins::worker_selection::ActivePrefillSums;
 use crate::protocols::WorkerWithDpRank;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct PrefillLoadState {
     pub(super) initial_effective_prefill_tokens: usize,
     pub(super) expected_prefill_duration: Option<Duration>,
+    /// Prompt tokens credited as cached when the request was booked.
+    pub(super) cached_tokens: usize,
+}
+
+impl PrefillLoadState {
+    /// `q * q`, where `q` is the uncached prompt tokens counted as prefill work. Exact:
+    /// both factors are below `2^64`.
+    fn uncached_tokens_squared(&self) -> u128 {
+        let uncached = self.initial_effective_prefill_tokens as u128;
+        uncached * uncached
+    }
+
+    /// `q * c`, where `c` is the prompt tokens credited as cached. Exact, as above.
+    fn uncached_times_cached_tokens(&self) -> u128 {
+        self.initial_effective_prefill_tokens as u128 * self.cached_tokens as u128
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -221,6 +238,12 @@ pub(super) struct PrefillLoadTracker {
     /// Sum of `duration_millis_u64` over modeled active prefills, so snapshots
     /// need not walk them. Never overflows: each term is below `2^64`.
     modeled_prefill_ms: u128,
+    /// Sums of [`PrefillLoadState::uncached_tokens_squared`] and
+    /// [`PrefillLoadState::uncached_times_cached_tokens`] over active prefills, so
+    /// snapshots need not walk them. Each term is below `2^128`; real token counts keep
+    /// the sums far below it.
+    uncached_tokens_squared_sum: u128,
+    uncached_times_cached_tokens_sum: u128,
 }
 
 impl PrefillLoadTracker {
@@ -241,6 +264,8 @@ impl PrefillLoadTracker {
             },
         );
         self.prefill_full_tokens_sum += prefill.initial_effective_prefill_tokens;
+        self.uncached_tokens_squared_sum += prefill.uncached_tokens_squared();
+        self.uncached_times_cached_tokens_sum += prefill.uncached_times_cached_tokens();
         match prefill.expected_prefill_duration {
             Some(duration) => self.modeled_prefill_ms += u128::from(duration_millis_u64(duration)),
             None => self.unmodeled_prefill_count += 1,
@@ -263,6 +288,14 @@ impl PrefillLoadTracker {
             .prefill_full_tokens_sum
             .checked_sub(prefill.initial_effective_prefill_tokens)
             .expect("prefill_full_tokens_sum underflow");
+        self.uncached_tokens_squared_sum = self
+            .uncached_tokens_squared_sum
+            .checked_sub(prefill.uncached_tokens_squared())
+            .expect("uncached_tokens_squared_sum underflow");
+        self.uncached_times_cached_tokens_sum = self
+            .uncached_times_cached_tokens_sum
+            .checked_sub(prefill.uncached_times_cached_tokens())
+            .expect("uncached_times_cached_tokens_sum underflow");
         match prefill.expected_prefill_duration {
             Some(duration) => {
                 self.modeled_prefill_ms = self
@@ -316,6 +349,17 @@ impl PrefillLoadTracker {
         });
     }
 
+    /// Undecayed sums over the active prefills, as booked. Published apart from
+    /// [`Self::snapshot`] so the per-request load scan does not copy them.
+    pub(super) fn active_prefill_sums(&self) -> ActivePrefillSums {
+        ActivePrefillSums::new(
+            self.prefill_full_tokens_sum as u64,
+            self.uncached_tokens_squared_sum.min(u128::from(u64::MAX)) as u64,
+            self.uncached_times_cached_tokens_sum
+                .min(u128::from(u64::MAX)) as u64,
+        )
+    }
+
     pub(super) fn snapshot(&self) -> PrefillLoadSnapshot {
         let total_modeled_prefill_time_ms = (self.unmodeled_prefill_count == 0)
             .then(|| self.modeled_prefill_ms.min(u128::from(u64::MAX)) as u64);
@@ -356,6 +400,22 @@ impl PrefillLoadTracker {
         assert_eq!(
             self.modeled_prefill_ms, recomputed_modeled_prefill_ms,
             "modeled_prefill_ms drifted from tracker state",
+        );
+        assert_eq!(
+            self.uncached_tokens_squared_sum,
+            self.prefills
+                .values()
+                .map(|prefill| prefill.load.uncached_tokens_squared())
+                .sum::<u128>(),
+            "uncached_tokens_squared_sum drifted from tracker state",
+        );
+        assert_eq!(
+            self.uncached_times_cached_tokens_sum,
+            self.prefills
+                .values()
+                .map(|prefill| prefill.load.uncached_times_cached_tokens())
+                .sum::<u128>(),
+            "uncached_times_cached_tokens_sum drifted from tracker state",
         );
         assert_eq!(
             self.anchored_load,
@@ -419,6 +479,7 @@ mod tests {
         PrefillLoadState {
             initial_effective_prefill_tokens: tokens,
             expected_prefill_duration: Some(Duration::from_secs(duration_secs)),
+            cached_tokens: 0,
         }
     }
 
@@ -426,6 +487,7 @@ mod tests {
         PrefillLoadState {
             initial_effective_prefill_tokens: tokens,
             expected_prefill_duration: Some(Duration::from_millis(duration_ms)),
+            cached_tokens: 0,
         }
     }
 
@@ -433,6 +495,7 @@ mod tests {
         PrefillLoadState {
             initial_effective_prefill_tokens: tokens,
             expected_prefill_duration: None,
+            cached_tokens: 0,
         }
     }
 

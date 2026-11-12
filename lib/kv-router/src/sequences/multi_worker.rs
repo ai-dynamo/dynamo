@@ -33,7 +33,7 @@ use super::single::{
 };
 use super::topology::{WorkerDpRange, WorkerTable, WorkerTopologyChange, WorkerTopologyError};
 use super::{PotentialLoadMaps, PrefillTokenDeltas, WorkerLoadProjection};
-use crate::plugins::worker_selection::WorkerCapacity;
+use crate::plugins::worker_selection::{ActivePrefillSums, WorkerCapacity};
 use crate::protocols::{
     ActiveSequenceEvent, ActiveSequenceEventData, PrefillLoadHint, WorkerId, WorkerWithDpRank,
 };
@@ -1036,9 +1036,10 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             let delta = seq.free(request_id, decay_now);
             let state_changed = delta.is_some();
             let load = delta.map(|delta| {
-                let load = seq.worker_load_snapshot();
+                let update = seq.worker_load_update();
+                let load = update.load;
                 self.prompt_registry
-                    .apply_membership_delta_and_load(worker, delta, load);
+                    .apply_membership_delta_and_load(worker, delta, update);
                 load
             });
             let removed = self
@@ -1095,8 +1096,10 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             if completion == PrefillCompletion::Unchanged {
                 return Ok(LifecycleMutationOutcome::NoChange);
             }
-            let load = seq.worker_load_snapshot();
-            self.prompt_registry.replace_worker_load_state(worker, load);
+            let update = seq.worker_load_update();
+            let load = update.load;
+            self.prompt_registry
+                .replace_worker_load_state(worker, update);
             (completion, load)
         };
         self.settle_prefill_completion(worker, completion, load, decay_now);
@@ -1150,8 +1153,10 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             if completion == PrefillCompletion::Unchanged {
                 return Ok(completion);
             }
-            let load = seq.worker_load_snapshot();
-            self.prompt_registry.replace_worker_load_state(worker, load);
+            let update = seq.worker_load_update();
+            let load = update.load;
+            self.prompt_registry
+                .replace_worker_load_state(worker, update);
             let lora_name = self
                 .replica_sync
                 .then(|| self.request_index.lora_for(request_id))
@@ -1219,8 +1224,10 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                     request_id: request_id.clone(),
                 });
             }
-            let load = seq.worker_load_snapshot();
-            self.prompt_registry.replace_worker_load_state(worker, load);
+            let update = seq.worker_load_update();
+            let load = update.load;
+            self.prompt_registry
+                .replace_worker_load_state(worker, update);
             load
         };
 
@@ -1256,8 +1263,10 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             if !seq.add_output_blocks(request_id, num_blocks, decay_fraction) {
                 return Ok(LifecycleMutationOutcome::NoChange);
             }
-            let load = seq.worker_load_snapshot();
-            self.prompt_registry.replace_worker_load_state(worker, load);
+            let update = seq.worker_load_update();
+            let load = update.load;
+            self.prompt_registry
+                .replace_worker_load_state(worker, update);
             load
         };
 
@@ -1301,6 +1310,15 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 prefill_token_deltas,
                 decay_now,
             )
+    }
+
+    /// Replace `sums` with every registered rank's active prefill sums. Selection supplies them
+    /// only to selectors that declare `WorkerInputs::ACTIVE_PREFILL_SUMS`.
+    pub(crate) fn project_active_prefill_sums_into(
+        &self,
+        sums: &mut FxHashMap<WorkerWithDpRank, ActivePrefillSums>,
+    ) {
+        self.prompt_registry.project_active_prefill_sums_into(sums);
     }
 
     pub fn project_worker_loads(
@@ -1436,11 +1454,12 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             let mut seq = slot.sequences.write();
             let outcome = seq.force_expiry();
             if !outcome.expired_request_ids.is_empty() {
-                let load = seq.worker_load_snapshot();
+                let update = seq.worker_load_update();
+                let load = update.load;
                 self.prompt_registry.apply_membership_delta_and_load(
                     slot.worker,
                     outcome.membership_delta,
-                    load,
+                    update,
                 );
                 removed_request_count += outcome.expired_request_ids.len();
                 self.request_index
@@ -1557,11 +1576,12 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 prefill_load_hint,
                 decay_now,
             );
-            let load = seq.worker_load_snapshot();
+            let update = seq.worker_load_update();
+            let load = update.load;
             self.prompt_registry.apply_membership_delta_and_load(
                 worker,
                 outcome.membership_delta,
-                load,
+                update,
             );
             break (outcome.expired_request_ids, load, attempt_id);
         };
@@ -1624,9 +1644,10 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             let Some(delta) = mutate_fn(&mut seq, request_id, decay_now) else {
                 return Ok(LifecycleMutationOutcome::NoChange);
             };
-            let load = seq.worker_load_snapshot();
+            let update = seq.worker_load_update();
+            let load = update.load;
             self.prompt_registry
-                .apply_membership_delta_and_load(worker, delta, load);
+                .apply_membership_delta_and_load(worker, delta, update);
             load
         };
 
@@ -1773,6 +1794,7 @@ mod tests {
         Some(PrefillLoadHint {
             initial_effective_prefill_tokens: tokens,
             expected_prefill_duration: None,
+            cached_tokens: 0,
         })
     }
 
@@ -1780,6 +1802,7 @@ mod tests {
         Some(PrefillLoadHint {
             initial_effective_prefill_tokens: tokens,
             expected_prefill_duration: Some(Duration::from_secs(duration_secs)),
+            cached_tokens: 0,
         })
     }
 
@@ -3179,6 +3202,82 @@ mod tests {
     }
 
     #[test]
+    fn active_prefill_sums_follow_local_bookings_and_replica_events() {
+        let sequences = ActiveSequencesMultiWorker::new(
+            NoopSequencePublisher,
+            4,
+            HashMap::from([(1_u64, (0_u32, 1_u32)), (2_u64, (0_u32, 1_u32))]),
+            true,
+            0,
+            "test",
+        );
+        let local = WorkerWithDpRank::new(1, 0);
+        let peer_booked = WorkerWithDpRank::new(2, 0);
+        let now = Instant::now();
+        let hint = |uncached_tokens, cached_tokens| {
+            Some(PrefillLoadHint {
+                initial_effective_prefill_tokens: uncached_tokens,
+                expected_prefill_duration: None,
+                cached_tokens,
+            })
+        };
+
+        // A 2,000-token turn on a 100,000-token cached prefix, then a fresh 2,000-token prompt.
+        for (request_id, prefill_load_hint) in
+            [("long", hint(2_000, 100_000)), ("fresh", hint(2_000, 0))]
+        {
+            sequences
+                .add_request(
+                    SequenceRequest {
+                        request_id: request_id.to_string(),
+                        token_sequence: None,
+                        track_prefill_tokens: true,
+                        expected_output_tokens: None,
+                        prefill_load_hint,
+                        worker: local,
+                        lora_name: None,
+                    },
+                    now,
+                )
+                .unwrap();
+        }
+        // Another router replica's booking arrives through replica sync.
+        sequences.apply_replica_batch(vec![ActiveSequenceEvent {
+            request_id: "peer".to_string(),
+            worker: peer_booked,
+            data: ActiveSequenceEventData::AddRequest {
+                token_sequence: None,
+                track_prefill_tokens: true,
+                expected_output_tokens: None,
+                prefill_load_hint: hint(3_000, 50_000),
+            },
+            router_id: 99,
+            lora_name: None,
+        }]);
+
+        let sums = |worker| {
+            let mut sums = FxHashMap::default();
+            sequences.project_active_prefill_sums_into(&mut sums);
+            sums[&worker]
+        };
+        assert_eq!(
+            sums(local),
+            ActivePrefillSums::new(4_000, 8_000_000, 200_000_000)
+        );
+        assert_eq!(
+            sums(peer_booked),
+            ActivePrefillSums::new(3_000, 9_000_000, 150_000_000)
+        );
+
+        sequences
+            .mark_prefill_completed(&"long".to_string(), now)
+            .unwrap();
+        assert_eq!(sums(local), ActivePrefillSums::new(2_000, 4_000_000, 0));
+        sequences.free(&"fresh".to_string(), now).unwrap();
+        assert_eq!(sums(local), ActivePrefillSums::default());
+    }
+
+    #[test]
     fn replica_batches_apply_concurrently_to_independent_workers() {
         let worker_a = WorkerWithDpRank::new(1, 0);
         let worker_b = WorkerWithDpRank::new(2, 0);
@@ -4103,6 +4202,7 @@ mod tests {
                     prefill_load_hint: Some(PrefillLoadHint {
                         initial_effective_prefill_tokens: 100,
                         expected_prefill_duration: Some(Duration::from_secs(10)),
+                        cached_tokens: 0,
                     }),
                     worker,
                     lora_name: None,

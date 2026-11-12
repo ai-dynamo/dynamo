@@ -14,12 +14,12 @@ pub use runtime::{
 };
 
 pub use context::WorkerSelectionContext;
-pub(crate) use inputs::{CacheSnapshot, CandidateData, WorkerCacheData, WorkerInputRows};
 pub use inputs::{
-    ScoredWorkerCandidate, WorkerCacheInput, WorkerCacheInputs, WorkerCandidate, WorkerCandidates,
-    WorkerCapacity, WorkerInfo, WorkerInputView, WorkerInputs, WorkerLoadInput,
+    ActivePrefillSums, ScoredWorkerCandidate, WorkerCacheInput, WorkerCacheInputs, WorkerCandidate,
+    WorkerCandidates, WorkerCapacity, WorkerInfo, WorkerInputView, WorkerInputs, WorkerLoadInput,
     WorkerTransferInput,
 };
+pub(crate) use inputs::{CacheSnapshot, CandidateData, WorkerCacheData, WorkerInputRows};
 
 pub use super::registry::{
     WorkerSelectionPolicyParameters, WorkerSelectionPolicyProvider,

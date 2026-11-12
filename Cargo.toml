@@ -32,6 +32,7 @@ members = [
     "examples/router/custom-policy-example/disagg-filter-score-pick",
     "examples/router/custom-policy-example/epp",
     "examples/router/custom-policy-example/simple-stacked-score-pick",
+    "examples/router/custom-policy-example/prefill-cost-score-pick",
     "lib/memory",
     "lib/bench",
     "lib/backend-common",
