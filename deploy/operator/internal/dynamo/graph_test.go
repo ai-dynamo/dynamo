@@ -5640,9 +5640,8 @@ func TestDetectBackendFrameworkFromArgs(t *testing.T) {
 		expected    BackendFramework
 		expectError bool
 	}{
-		{name: "engine direct command", command: []string{"vllm-rs"}, expected: BackendFrameworkVLLM},
-		{name: "engine absolute executable", command: []string{"/usr/local/bin/vllm-rs"}, expected: BackendFrameworkVLLM},
-		{name: "engine arguments are not other launches", command: []string{"vllm-rs"}, args: []string{"--component", "python3 -m dynamo.sglang"}, expected: BackendFrameworkVLLM},
+		{name: "native engine direct command is not detected", command: []string{"vllm-rs"}, expected: BackendFrameworkNoop},
+		{name: "native engine absolute executable is not detected", command: []string{"/usr/local/bin/vllm-rs"}, expected: BackendFrameworkNoop},
 		{name: "engine args do not identify an image entrypoint", args: []string{"vllm-rs"}, expected: BackendFrameworkNoop},
 		{name: "engine shell wrapper is not interpreted", command: []string{"sh", "-c"}, args: []string{"exec vllm-rs"}, expected: BackendFrameworkNoop},
 		{name: "engine quoted shell path is not interpreted", command: []string{"sh", "-c", `exec "/usr/local/bin/vllm-rs"`}, expected: BackendFrameworkNoop},
