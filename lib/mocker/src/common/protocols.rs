@@ -6,7 +6,8 @@ use std::sync::Arc;
 use uuid::Uuid;
 use validator::Validate;
 
-use dynamo_kv_router::protocols::{KvCacheEvent, StorageTier};
+use dynamo_kv_events::event::KvCacheEvent;
+use dynamo_kv_events::residency::StorageTier;
 use dynamo_tokens::Token;
 
 pub use aisimulate_core::engine::{G2Scope, NativeHostOffloadConfig};
@@ -22,6 +23,17 @@ pub trait KvCacheEventSink: Send + Sync {
         _storage_tier: StorageTier,
     ) -> anyhow::Result<()> {
         self.publish(event)
+    }
+
+    /// Publish session attribution while preserving the batch visibility boundary.
+    /// Sinks that only index physical blocks can use the legacy tier-only path.
+    fn publish_batch_with_metadata(&self, events: Vec<RawKvEvent>) -> anyhow::Result<()> {
+        self.publish_batch_with_storage_tiers(
+            events
+                .into_iter()
+                .map(|event| (event.event, event.storage_tier))
+                .collect(),
+        )
     }
 
     /// Publishes events that share one source visibility boundary.
@@ -49,6 +61,7 @@ pub struct RawKvEvent {
     pub event: KvCacheEvent,
     pub block_token_ids: Option<Vec<Vec<u32>>>,
     pub storage_tier: StorageTier,
+    pub session_id: Option<String>,
 }
 
 /// Trait for publishing transport-specific raw KV event payloads.
@@ -119,6 +132,7 @@ impl KvEventPublishers {
                 event,
                 block_token_ids: block_token_ids.map(|token_ids| token_ids.to_vec()),
                 storage_tier,
+                session_id: None,
             })?;
         }
 
@@ -131,10 +145,10 @@ impl KvEventPublishers {
     /// visibility boundary for normal and raw sinks independently.
     pub(crate) fn publish_event_sink_batch_only(
         &self,
-        events: Vec<(KvCacheEvent, StorageTier)>,
+        events: Vec<RawKvEvent>,
     ) -> anyhow::Result<()> {
         if let Some(sink) = self.event_sink.as_ref() {
-            sink.publish_batch_with_storage_tiers(events)?;
+            sink.publish_batch_with_metadata(events)?;
         }
         Ok(())
     }
@@ -180,7 +194,7 @@ impl FpmPublisher {
 /// Replay-owned request DTO shared by Dynamo's compatibility and Live Mocker
 /// drivers. The type remains provider-neutral; Dynamo-specific metadata is
 /// interpreted only by Dynamo adapters.
-pub use aisimulate_core::replay::DirectRequest;
+pub use aisimulate_core::replay::{DirectRequest, ReplayRequestContext};
 
 /// Signal for output token generation with completion status
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -270,11 +284,12 @@ mod tests {
                     .map(|event_id| RawKvEvent {
                         event: KvCacheEvent {
                             event_id,
-                            data: dynamo_kv_router::protocols::KvCacheEventData::Cleared,
+                            data: dynamo_kv_events::event::KvCacheEventData::Cleared,
                             dp_rank: 0,
                         },
                         block_token_ids: None,
                         storage_tier: StorageTier::Device,
+                        session_id: None,
                     })
                     .collect(),
             )

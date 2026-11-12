@@ -193,7 +193,7 @@ func checkDisaggregatedSetChildLWSReadiness(
 			status.Replicas += roleChild.Status.Replicas
 			readyReplicas += roleChild.Status.ReadyReplicas
 		}
-		status.ReadyReplicas = ptr.To(readyReplicas)
+		status.ReadyReplicas = new(readyReplicas)
 		for slice := range sliceCount {
 			identity := disaggregatedSetChildIdentity{slice: slice, role: roleName}
 			targets := targetByIdentity[identity]

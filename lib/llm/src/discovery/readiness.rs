@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! The serving-readiness contract shared by the request plane and the KV DC Relay.
+//! The serving-readiness contract shared by the request plane and the Pool Relay.
 //!
 //! Equivalent [`ReadinessUnit`] inputs produce the same readiness answer. The frontend
 //! builds units from committed WorkerSet membership; the relay topology projection

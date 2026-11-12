@@ -9,17 +9,13 @@ import json
 import subprocess
 import sys
 import textwrap
+import tomllib
 from importlib import metadata, resources
 from pathlib import Path
 
 import pytest
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
-
-try:
-    import tomllib
-except ModuleNotFoundError:  # Python 3.10
-    import tomli as tomllib
 
 pytestmark = [
     pytest.mark.gpu_0,

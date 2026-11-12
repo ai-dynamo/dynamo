@@ -20,23 +20,33 @@ pytestmark = [
 ]
 
 
-def _make_vllm_config(capacity_gb: float = 1.0) -> MagicMock:
+def _make_vllm_config(
+    capacity_gb: float = 1.0, encoder_output_widths: dict[str, int] | None = None
+) -> MagicMock:
     config = MagicMock()
     config.ec_transfer_config.ec_connector_extra_config = {
         "multimodal_embedding_cache_capacity_gb": capacity_gb,
     }
+    config.ec_transfer_config.mm_encoder_output_widths = encoder_output_widths or {}
     config.model_config.get_hidden_size.return_value = 4096
     config.model_config.dtype = torch.float16
     config.parallel_config.data_parallel_rank = 0
     return config
 
 
-def _make_request(hashes_and_embeds: list[tuple[str, int]]) -> MagicMock:
+# What vLLM measures for a DeepStack model with three levels (e.g. Qwen3-VL).
+_DEEPSTACK_WIDTHS = {"image": 4 * 4096, "video": 4 * 4096}
+
+
+def _make_request(
+    hashes_and_embeds: list[tuple[str, int]], modality: str = "image"
+) -> MagicMock:
     request = MagicMock()
     features = []
     for h, _ in hashes_and_embeds:
         f = MagicMock()
         f.identifier = h
+        f.modality = modality
         features.append(f)
     request.mm_features = features
 
@@ -209,6 +219,64 @@ class TestSchedulerSideLRU:
         assert meta.saves == []
         assert meta.loads == []
         assert "huge_hash" not in conn._cache_order
+
+
+class TestEmbeddingRowSize:
+    def _make_connector(self, encoder_output_widths: dict[str, int]):
+        with patch.object(mod.ECConnectorBase, "__init__", return_value=None):
+            return mod.DynamoMultimodalEmbeddingCacheConnector(
+                vllm_config=_make_vllm_config(
+                    encoder_output_widths=encoder_output_widths
+                ),
+                role=MagicMock(),
+            )
+
+    def _run_worker_step(
+        self,
+        conn,
+        meta: "mod.MultimodalEmbeddingCacheConnectorMetadata",
+        encoder_cache: dict[str, torch.Tensor],
+    ) -> None:
+        # Same order as vLLM's model runner: loads and evicts, then one save
+        # per embedding the encoder computed this step.
+        with patch.object(conn, "_get_connector_metadata", return_value=meta):
+            conn.start_load_caches(encoder_cache=encoder_cache)
+            for mm_hash in encoder_cache:
+                conn.save_caches(encoder_cache=encoder_cache, mm_hash=mm_hash)
+
+    def test_budget_uses_measured_width_per_modality(self):
+        conn = self._make_connector(_DEEPSTACK_WIDTHS)
+        for mm_hash, modality in (("v", "video"), ("a", "audio")):
+            conn.update_state_after_alloc(
+                _make_request([(mm_hash, 10)], modality=modality), 0
+            )
+
+        assert dict(conn._cache_order) == {
+            "v": 10 * 4 * 4096 * 2,
+            "a": 10 * 4096 * 2,
+        }
+
+    def test_deepstack_capacity_bounds_stored_bytes(self):
+        conn = self._make_connector(_DEEPSTACK_WIDTHS)
+        image_bytes = 10 * 4 * 4096 * 2
+        conn._capacity_bytes = 2 * image_bytes
+
+        for mm_hash in ("a", "b", "c"):
+            conn.update_state_after_alloc(_make_request([(mm_hash, 10)]), 0)
+        meta = conn.build_connector_meta(MagicMock())
+
+        assert meta.evicts == ["a"]
+        assert sorted(meta.saves) == ["b", "c"]
+        assert conn._num_used_bytes == 2 * image_bytes
+
+        encoder_cache = {
+            mm_hash: torch.zeros(10, 4 * 4096, dtype=torch.float16)
+            for mm_hash in ("a", "b", "c")
+        }
+        self._run_worker_step(conn, meta, encoder_cache)
+
+        assert set(conn._cpu_store) == {"b", "c"}
+        assert sum(t.nbytes for t in conn._cpu_store.values()) == 2 * image_bytes
 
 
 class TestSchedulerMetrics:

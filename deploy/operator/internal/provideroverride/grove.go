@@ -227,6 +227,13 @@ func validateOverrideIdentity(
 		}
 	}
 
+	// Only the complete component owns a rolling-update budget.
+	if scope != ScopeComponent {
+		if _, exists := GroveMaxUnavailable(override.Value.Raw); exists {
+			return fmt.Errorf("rollingUpdate is supported only at component scope; member cliques use the owning component's rollingUpdate budget")
+		}
+	}
+
 	// Recheck value ownership before the controller mutates provider resources.
 	if valueErrs := ValidateValue(override.Target, override.Value.Raw); len(valueErrs) != 0 {
 		return fmt.Errorf("value is invalid: %s", valueErrs[0].Error())
@@ -252,7 +259,7 @@ func setNamedGroveOverride(
 	}
 
 	// Decode the allowed subtrees without requiring topology for a budget-only override.
-	var value map[string]interface{}
+	var value map[string]any
 	err = sigsjson.UnmarshalCaseSensitivePreserveInts(override.Value.Raw, &value)
 	if err != nil {
 		return err
@@ -260,13 +267,16 @@ func setNamedGroveOverride(
 
 	// Set only the generated entry whose stable name matches the DGD context.
 	for i := range items {
-		item, ok := items[i].(map[string]interface{})
+		item, ok := items[i].(map[string]any)
 		if !ok || item["name"] != name {
 			continue
 		}
 		// Availability is already resolved while rendering; preserve the full PodClique spec.
 		if topology, exists := value["topologyConstraint"]; exists {
 			item["topologyConstraint"] = topology
+		}
+		if rolling, exists := value["rollingUpdate"]; exists {
+			item["rollingUpdate"] = rolling
 		}
 		items[i] = item
 		return unstructured.SetNestedSlice(result.Object, items, path...)
@@ -276,9 +286,9 @@ func setNamedGroveOverride(
 
 // groveTopologyConstraint extracts the raw opaque subtree registered for one
 // Grove target. override must not be nil.
-func groveTopologyConstraint(override *nvidiacomv1beta1.ProviderOverride) (interface{}, error) {
+func groveTopologyConstraint(override *nvidiacomv1beta1.ProviderOverride) (any, error) {
 	// Decode without a provider struct so unknown fields and explicit nulls survive.
-	var value map[string]interface{}
+	var value map[string]any
 	if err := sigsjson.UnmarshalCaseSensitivePreserveInts(override.Value.Raw, &value); err != nil {
 		return nil, fmt.Errorf("decode value: %w", err)
 	}

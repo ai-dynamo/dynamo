@@ -10,8 +10,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"path"
-	"strings"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -272,6 +270,9 @@ func expectedSnapshotCompatibilityHashForPod(pod *corev1.Pod) string {
 	return pod.Annotations[consts.SnapshotCandidateCompatibilityHashAnnotation]
 }
 
+// shapeNativeRestorePod builds a restore Pod, applies Dynamo's restore policy,
+// and removes private candidate annotations before validating the Snapshot contract.
+// pod and resolved must be non-nil.
 func (h *PodCheckpointRestoreMutator) shapeNativeRestorePod(
 	pod *corev1.Pod,
 	snapshotName string,
@@ -310,7 +311,7 @@ func (h *PodCheckpointRestoreMutator) shapeNativeRestorePod(
 
 	// Candidate-only annotations must not survive onto the restore target. The
 	// standalone Snapshot annotations emitted by the builder are the wire API.
-	removeRestoreCandidateAnnotations(shaped.Annotations)
+	checkpoint.RemoveRestoreCandidateMetadata(shaped.Annotations)
 	if err := podcontract.Validate(shaped, request); err != nil {
 		return nil, fmt.Errorf("validate native restore Pod: %w", err)
 	}
@@ -350,9 +351,10 @@ func applyDynamoRestorePolicy(pod *corev1.Pod, mappings []podcontract.ContainerM
 		if container == nil {
 			return fmt.Errorf("restore destination container %q not found", mapping.Destination)
 		}
-		if !usesSupportedDynamoRestoreEntrypoint(container) {
+		if !checkpoint.HasSupportedRestoreEntrypoint(container) {
 			return fmt.Errorf(
-				"restore destination container %q must directly invoke python -m dynamo.vllm, python -m dynamo.sglang, or python -m dynamo.trtllm; command=%q args=%q",
+				"restore destination container %q must directly invoke python -m <module>, "+
+					"and the module must call maybe_run_restore_standby_mode(); command=%q args=%q",
 				mapping.Destination,
 				container.Command,
 				container.Args,
@@ -385,63 +387,4 @@ func applyDynamoRestorePolicy(pod *corev1.Pod, mappings []podcontract.ContainerM
 		checkpoint.EnsureRestoreStartupProbe(container)
 	}
 	return nil
-}
-
-// usesSupportedDynamoRestoreEntrypoint recognizes only direct Python module
-// invocations that are known to consume SNAPSHOT_RESTORE_STANDBY. Shell and
-// custom wrappers are rejected because admission cannot prove they honor it.
-func usesSupportedDynamoRestoreEntrypoint(container *corev1.Container) bool {
-	if len(container.Command) == 0 {
-		return false
-	}
-	python := path.Base(container.Command[0])
-	if python != "python" && python != "python3" && !strings.HasPrefix(python, "python3.") {
-		return false
-	}
-
-	arguments := make([]string, 0, len(container.Command)+len(container.Args))
-	arguments = append(arguments, container.Command...)
-	arguments = append(arguments, container.Args...)
-
-	// Skip only operand-free interpreter options so -m remains unambiguous.
-	moduleFlagIndex := 1
-	for moduleFlagIndex < len(arguments) && isOperandFreePythonInterpreterFlag(arguments[moduleFlagIndex]) {
-		moduleFlagIndex++
-	}
-	if moduleFlagIndex+1 >= len(arguments) || arguments[moduleFlagIndex] != "-m" {
-		return false
-	}
-
-	switch arguments[moduleFlagIndex+1] {
-	case "dynamo.vllm", "dynamo.sglang", "dynamo.trtllm":
-		return true
-	default:
-		return false
-	}
-}
-
-// isOperandFreePythonInterpreterFlag recognizes options that cannot consume
-// the following -m argument. Operand-taking and execution-selector options
-// remain fail-closed.
-func isOperandFreePythonInterpreterFlag(argument string) bool {
-	switch argument {
-	case "-b", "-bb", "-B", "-d", "-E", "-i", "-I", "-O", "-OO", "-P", "-q", "-s", "-S", "-u", "-v", "-vv", "-x":
-		return true
-	default:
-		return false
-	}
-}
-
-func removeRestoreCandidateAnnotations(annotations map[string]string) {
-	delete(annotations, consts.CheckpointRestoreCandidateAnnotation)
-	delete(annotations, consts.CheckpointNameAnnotation)
-	delete(annotations, consts.RestoreCandidateSourceKindAnnotation)
-	delete(annotations, consts.SnapshotJobCandidateUIDAnnotation)
-	delete(annotations, consts.CheckpointStartupPolicyAnnotation)
-	delete(annotations, consts.SnapshotCandidateUIDAnnotation)
-	delete(annotations, consts.SnapshotCandidateContentAnnotation)
-	delete(annotations, consts.SnapshotCandidateGMSModeAnnotation)
-	delete(annotations, consts.SnapshotCandidateVersionAnnotation)
-	delete(annotations, consts.SnapshotCandidateCompatibilityHashAnnotation)
-	delete(annotations, consts.RestoreCandidateTargetContainersAnnotation)
 }

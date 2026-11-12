@@ -22,7 +22,7 @@ import shutil
 import signal
 import time
 from dataclasses import dataclass
-from typing import Any, Generator
+from typing import Any, Generator, Sequence
 
 import psutil
 import pytest
@@ -141,7 +141,15 @@ TOPOLOGIES = ("chat_processor_frontend", "rust_parsers")
 class WorkerProcess(ManagedProcess):
     """backend worker for the tool-calling tests."""
 
-    def __init__(self, request, *, system_port: int, fpm_port: int, topology: str):
+    def __init__(
+        self,
+        request,
+        *,
+        system_port: int,
+        fpm_port: int,
+        topology: str,
+        extra_args: Sequence[str] = (),
+    ):
         env = os.environ.copy()
         env["DYN_LOG"] = "info"
         env["DYN_SYSTEM_PORT"] = str(system_port)
@@ -167,6 +175,7 @@ class WorkerProcess(ManagedProcess):
                 "--dyn-tool-call-parser",
                 "qwen25",
             ]
+        command.extend(extra_args)
         command.extend(build_gpu_mem_args("build_sglang_gpu_mem_args", env=env))
 
         super().__init__(
@@ -944,9 +953,12 @@ class TestToolCallingMultiTurn:
             messages=messages,
             tools=TOOLS_SEARCH + TOOLS_CALCULATOR,
             tool_choice={"type": "function", "function": {"name": "search_web"}},
+            # A named tool_choice still allows parallel calls; without this the
+            # model repeats <tool_call> blocks until max_tokens ('length').
+            parallel_tool_calls=False,
         )
         assert_finish_reason(step1, {"tool_calls"})
-        assert len(step1.tool_calls) >= 1
+        assert len(step1.tool_calls) == 1
         parse_and_validate_tool_call(
             step1.tool_calls[0], schemas, expected_name="search_web"
         )
@@ -972,9 +984,10 @@ class TestToolCallingMultiTurn:
             messages=messages,
             tools=TOOLS_SEARCH + TOOLS_CALCULATOR,
             tool_choice={"type": "function", "function": {"name": "calculate"}},
+            parallel_tool_calls=False,
         )
         assert_finish_reason(step2, {"tool_calls"})
-        assert len(step2.tool_calls) >= 1
+        assert len(step2.tool_calls) == 1
         parse_and_validate_tool_call(
             step2.tool_calls[0], schemas, expected_name="calculate"
         )

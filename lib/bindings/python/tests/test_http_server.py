@@ -24,6 +24,7 @@ from typing import AsyncGenerator, Dict
 import aiohttp
 import pytest
 
+from dynamo.frontend.utils import PromptLogprobsAccumulator
 from dynamo.llm import HttpAsyncEngine, HttpError, HttpService
 from dynamo.runtime import DistributedRuntime
 
@@ -81,9 +82,20 @@ class MockHttpEngine:
         # Stream a mock response
         created = int(time.time())
         response_text = "This is a mock response."
+        prompt_logprobs = PromptLogprobsAccumulator(request)
+        prompt_logprobs.update(
+            {
+                "engine_data": {
+                    "prompt_logprobs": [
+                        None,
+                        {"17": {"logprob": -0.25, "rank": 1}},
+                    ]
+                }
+            }
+        )
         for i, char in enumerate(response_text):
             finish_reason = "stop" if i == len(response_text) - 1 else None
-            yield {
+            chunk = {
                 "id": f"chatcmpl-{context.id()}",
                 "object": "chat.completion.chunk",
                 "created": created,
@@ -96,6 +108,8 @@ class MockHttpEngine:
                     }
                 ],
             }
+            prompt_logprobs.attach(chunk)
+            yield {"_dynamo_annotated": True, "data": chunk}
             await asyncio.sleep(0.01)
 
 

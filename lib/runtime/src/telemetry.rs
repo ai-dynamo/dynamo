@@ -503,6 +503,7 @@ mod tests {
     #[test]
     fn enabled_trace_creates_a_registered_span() {
         let captured = Arc::new(Mutex::new(Vec::new()));
+        let _interest_guard = crate::test_utils::tracing_interest_guard();
         let subscriber = tracing_subscriber::registry().with(CaptureLayer(captured.clone()));
         let _guard = tracing::subscriber::set_default(subscriber);
         let _span = LifecycleTrace::new(true).start(LifecycleStage::RequestPreprocessing);
@@ -520,6 +521,7 @@ mod tests {
     #[test]
     fn disabled_trace_is_a_noop() {
         let captured = Arc::new(Mutex::new(Vec::new()));
+        let _interest_guard = crate::test_utils::tracing_interest_guard();
         let subscriber = tracing_subscriber::registry().with(CaptureLayer(captured.clone()));
         let _guard = tracing::subscriber::set_default(subscriber);
         let trace = LifecycleTrace::new(false);
@@ -541,6 +543,7 @@ mod tests {
     #[test]
     fn worker_stage_selection_emits_expected_spans() {
         let captured = Arc::new(Mutex::new(Vec::new()));
+        let _interest_guard = crate::test_utils::tracing_interest_guard();
         let subscriber = tracing_subscriber::registry().with(CaptureLayer(captured.clone()));
         let _guard = tracing::subscriber::set_default(subscriber);
         for role in [
