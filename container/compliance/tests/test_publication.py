@@ -3,6 +3,7 @@
 """Publication accepts only complete evidence for the immutable images it copies."""
 
 import io
+import os
 import re
 import shlex
 import subprocess
@@ -372,6 +373,125 @@ def test_image_provenance_inputs_reach_the_extractor(workflow_name):
     for step in steps:
         if step.get("uses", "").endswith("actions/docker-remote-build"):
             assert "pushed_image_ref" not in step.get("with", {})
+
+
+@pytest.mark.parametrize(
+    "workflow_name", ["pr.yaml", "post-merge-ci.yml", "nightly-ci.yml"]
+)
+def test_audit_callers_reference_declared_non_secret_build_outputs(workflow_name):
+    root = Path(__file__).resolve().parents[3]
+    jobs = yaml.safe_load((root / ".github/workflows" / workflow_name).read_text())[
+        "jobs"
+    ]
+    for job in jobs.values():
+        if not job.get("uses", "").endswith("/shared-compliance-audit.yml"):
+            continue
+        image_ref = job["with"]["image_ref"]
+        assert image_ref.startswith(
+            "${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:"
+        )
+        for producer, output in re.findall(
+            r"needs\.([a-z-]+)\.outputs\.([a-z_]+)", image_ref
+        ):
+            producer_job = jobs[producer]
+            producer_path = root / producer_job["uses"].removeprefix("$/").removeprefix(
+                "./"
+            )
+            definition = yaml.safe_load(producer_path.read_text())
+            declared = definition.get("on", definition.get(True))["workflow_call"][
+                "outputs"
+            ]
+            assert output in declared, (workflow_name, producer, output)
+            # Full registry URIs contain the masked account secret and GitHub
+            # drops those job outputs. Keep only the tag across the boundary.
+            assert output == "image_tag"
+            assert declared[output]["value"] == "${{ jobs.build.outputs.image_tag }}"
+            assert (
+                definition["jobs"]["build"]["outputs"][output]
+                == "${{ steps.calculate-target-tag.outputs.image_tag }}"
+            )
+
+
+@pytest.mark.timeout(10)
+@pytest.mark.parametrize(
+    "workflow_name,framework,target,cuda,efa,suffix,expected",
+    [
+        (
+            "shared-build-image.yml",
+            "dynamo",
+            "planner",
+            "",
+            "false",
+            "",
+            "dynamo-planner",
+        ),
+        (
+            "shared-build-image.yml",
+            "vllm",
+            "runtime",
+            "13.0",
+            "false",
+            "",
+            "vllm-runtime",
+        ),
+        (
+            "shared-build-image.yml",
+            "sglang",
+            "runtime",
+            "12.9",
+            "true",
+            "-nightly",
+            "sglang-runtime-efa-cuda12-nightly",
+        ),
+        (
+            "shared-build-sidecar.yml",
+            "dynamo",
+            "sidecar",
+            "",
+            "false",
+            "-nightly",
+            "dynamo-sidecar-nightly",
+        ),
+    ],
+)
+def test_build_tag_output_preserves_image_identity_without_registry_secret(
+    tmp_path, workflow_name, framework, target, cuda, efa, suffix, expected
+):
+    root = Path(__file__).resolve().parents[3]
+    workflow = yaml.safe_load((root / ".github/workflows" / workflow_name).read_text())
+    step = next(
+        step
+        for step in workflow["jobs"]["build"]["steps"]
+        if step.get("id") == "calculate-target-tag"
+    )
+    values = {
+        "inputs.framework": framework,
+        "inputs.target": target,
+        "matrix.cuda_version": cuda,
+        "inputs.make_efa": efa,
+        "inputs.image_tag_suffix": suffix,
+        "inputs.source_ref != '' && inputs.source_ref || github.sha": SHA,
+    }
+    script = re.sub(r"\$\{\{\s*(.*?)\s*\}\}", lambda m: values[m[1]], step["run"])
+    destination = tmp_path / "outputs"
+    registry = "123456789012.dkr.ecr.example"
+    subprocess.run(
+        ["bash", "-euo", "pipefail", "-c", script],
+        check=True,
+        timeout=5,
+        env={
+            **os.environ,
+            "GITHUB_OUTPUT": str(destination),
+            "GITHUB_SHA": SHA,
+            "ECR_REGISTRY": registry,
+            "ECR_REPOSITORY": "project/image",
+            "IMAGE_TAG_SUFFIX": suffix,
+        },
+    )
+    outputs = dict(line.split("=", 1) for line in destination.read_text().splitlines())
+    assert outputs["image_tag"] == f"{SHA}-{expected}"
+    assert "123456789012" not in outputs["image_tag"]
+    assert outputs["image_uri"] == f"{registry}/project/image:{outputs['image_tag']}"
 
 
 def test_operator_exports_and_binds_both_architectures():

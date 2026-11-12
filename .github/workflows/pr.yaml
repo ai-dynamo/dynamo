@@ -1145,7 +1145,7 @@ jobs:
     uses: $/.github/workflows/shared-compliance-audit.yml
     with:
       target_tag_plain: vllm-runtime
-      image_ref: ${{ needs.vllm-build.outputs.image_ref }}
+      image_ref: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ needs.vllm-build.outputs.image_tag }}
       source_sha: ${{ github.sha }}
       producer_run_id: ${{ github.run_id }}
 
@@ -1159,7 +1159,7 @@ jobs:
     uses: $/.github/workflows/shared-compliance-audit.yml
     with:
       target_tag_plain: sglang-runtime
-      image_ref: ${{ needs.sglang-build.outputs.image_ref }}
+      image_ref: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ needs.sglang-build.outputs.image_tag }}
       source_sha: ${{ github.sha }}
       producer_run_id: ${{ github.run_id }}
 
@@ -1173,7 +1173,7 @@ jobs:
     uses: $/.github/workflows/shared-compliance-audit.yml
     with:
       target_tag_plain: trtllm-runtime
-      image_ref: ${{ needs.trtllm-build.outputs.image_ref }}
+      image_ref: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ needs.trtllm-build.outputs.image_tag }}
       source_sha: ${{ github.sha }}
       producer_run_id: ${{ github.run_id }}
 
@@ -1187,7 +1187,7 @@ jobs:
     uses: $/.github/workflows/shared-compliance-audit.yml
     with:
       target_tag_plain: dynamo-frontend
-      image_ref: ${{ needs.frontend-build.outputs.image_ref }}
+      image_ref: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ needs.frontend-build.outputs.image_tag }}
       source_sha: ${{ github.sha }}
       producer_run_id: ${{ github.run_id }}
 
@@ -2125,7 +2125,7 @@ jobs:
     uses: $/.github/workflows/shared-compliance-audit.yml
     with:
       target_tag_plain: vllm-runtime-efa
-      image_ref: ${{ needs.vllm-efa-build.outputs.image_ref }}
+      image_ref: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ needs.vllm-efa-build.outputs.image_tag }}
       source_sha: ${{ github.sha }}
       producer_run_id: ${{ github.run_id }}
 
@@ -2140,7 +2140,7 @@ jobs:
     uses: $/.github/workflows/shared-compliance-audit.yml
     with:
       target_tag_plain: sglang-runtime-efa
-      image_ref: ${{ needs.sglang-efa-build.outputs.image_ref }}
+      image_ref: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ needs.sglang-efa-build.outputs.image_tag }}
       source_sha: ${{ github.sha }}
       producer_run_id: ${{ github.run_id }}
 
@@ -2155,7 +2155,7 @@ jobs:
     uses: $/.github/workflows/shared-compliance-audit.yml
     with:
       target_tag_plain: trtllm-runtime-efa
-      image_ref: ${{ needs.trtllm-efa-build.outputs.image_ref }}
+      image_ref: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ needs.trtllm-efa-build.outputs.image_tag }}
       source_sha: ${{ github.sha }}
       producer_run_id: ${{ github.run_id }}
 
@@ -2170,7 +2170,7 @@ jobs:
     uses: $/.github/workflows/shared-compliance-audit.yml
     with:
       target_tag_plain: dynamo-planner
-      image_ref: ${{ needs.planner-build.outputs.image_ref }}
+      image_ref: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ needs.planner-build.outputs.image_tag }}
       source_sha: ${{ github.sha }}
       producer_run_id: ${{ github.run_id }}
 
@@ -2185,7 +2185,7 @@ jobs:
     uses: $/.github/workflows/shared-compliance-audit.yml
     with:
       target_tag_plain: dynamo-sidecar
-      image_ref: ${{ needs.sidecar-build.outputs.image_ref }}
+      image_ref: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ needs.sidecar-build.outputs.image_tag }}
       source_sha: ${{ github.sha }}
       producer_run_id: ${{ github.run_id }}
 

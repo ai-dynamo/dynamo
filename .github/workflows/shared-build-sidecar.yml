@@ -56,9 +56,9 @@ on:
         type: boolean
         default: false
     outputs:
-      image_ref:
-        description: Image reference bound to the compliance inventory
-        value: ${{ jobs.build.outputs.image_ref }}
+      image_tag:
+        description: Non-secret image tag bound to the compliance inventory
+        value: ${{ jobs.build.outputs.image_tag }}
       target_tag_plain:
         description: 'Plain sidecar image tag prefix'
         value: ${{ jobs.build.outputs.target_tag_plain }}
@@ -75,7 +75,7 @@ jobs:
       actions: read
       contents: read
     outputs:
-      image_ref: ${{ steps.calculate-target-tag.outputs.image_uri }}
+      image_tag: ${{ steps.calculate-target-tag.outputs.image_tag }}
       target_tag_plain: ${{ steps.calculate-target-tag.outputs.target_tag_plain }}
       binary_artifact: ${{ steps.binary-artifact.outputs.name }}
     steps:
@@ -99,6 +99,7 @@ jobs:
           set -euo pipefail
           target_tag_plain="dynamo-sidecar"
           echo "target_tag_plain=${target_tag_plain}" >> "${GITHUB_OUTPUT}"
+          echo "image_tag=${GITHUB_SHA}-${target_tag_plain}${IMAGE_TAG_SUFFIX}" >> "${GITHUB_OUTPUT}"
           echo "image_uri=${ECR_REGISTRY}/${ECR_REPOSITORY}:${GITHUB_SHA}-${target_tag_plain}${IMAGE_TAG_SUFFIX}" >> "${GITHUB_OUTPUT}"
 
       - name: Initialize Dynamo Builder

@@ -192,9 +192,9 @@ on:
       HF_TOKEN:
         required: false
     outputs:
-      image_ref:
-        description: Immutable-build tag whose digest is bound to the inventory
-        value: ${{ jobs.build.outputs.image_ref }}
+      image_tag:
+        description: Non-secret image tag whose digest is bound to the inventory
+        value: ${{ jobs.build.outputs.image_tag }}
       target_tag_plain:
         description: 'Plain runtime image tag prefix'
         value: ${{ jobs.build.outputs.target_tag_plain }}
@@ -224,7 +224,7 @@ jobs:
       contents: read
       actions: read
     outputs:
-      image_ref: ${{ steps.calculate-target-tag.outputs.image_uri }}
+      image_tag: ${{ steps.calculate-target-tag.outputs.image_tag }}
       target_tag_plain: ${{ steps.calculate-target-tag.outputs.target_tag_plain }}
       test_tag_plain: ${{ steps.calculate-target-tag.outputs.test_tag_plain }}
       baseline_sbom_file: ${{ steps.gen-dockerfile.outputs.baseline_stem }}
@@ -298,6 +298,7 @@ jobs:
           fi
 
           echo "target_tag_plain=${TARGET_TAG_PLAIN}" >> $GITHUB_OUTPUT
+          echo "image_tag=${IMAGE_TAG}" >> $GITHUB_OUTPUT
           echo "image_uri=${IMAGE_URI}" >> $GITHUB_OUTPUT
           echo "test_image_uri=${TEST_IMAGE_URI}" >> $GITHUB_OUTPUT
           echo "mutable_image_uri=${MUTABLE_IMAGE_URI}" >> $GITHUB_OUTPUT
