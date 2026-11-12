@@ -2036,7 +2036,6 @@ def _seconds_of_pcm(seconds: int) -> list[dict]:
 
 
 async def _drive_qwen_turn(handler) -> list[dict]:
-    """Send 6 s, 6 s and 1 s of audio, each after the previous delta."""
     deltas = asyncio.Queue()
 
     async def request_stream():
