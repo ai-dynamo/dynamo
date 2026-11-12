@@ -304,14 +304,12 @@ func (r *graphReconciler) reconcileWorkloads(
 			deadlineAt = next
 		}
 
-		// A fabric-pod placement reports its own Cyborg capacity changes. The step that
-		// gives a Pod a lower index is part of the placement from here.
-		if cyborgPlacements, err = r.planCyborgRenumbering(ctx, pclqs, cyborgPlacements); err != nil {
+		// A fabric-pod placement reports its own Cyborg capacity changes.
+		placementScaling, err := r.cyborgScalingRequired(ctx, pclqs, cyborgPlacements)
+		if err != nil {
 			return ctrl.Result{}, err
 		}
-		for name, placement := range cyborgPlacements {
-			scalingRequired = scalingRequired || pclqs[name].Spec.Replicas != placement.capacity()
-		}
+		scalingRequired = scalingRequired || placementScaling
 	}
 
 	scalingDeferred := scalingBlocked && scalingRequired

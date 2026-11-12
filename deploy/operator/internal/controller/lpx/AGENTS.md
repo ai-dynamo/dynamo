@@ -321,8 +321,10 @@ SPDX-License-Identifier: Apache-2.0
   takes no more part: the next new Pod would get the route of that Pod. When
   that Pod served while a step added a Pod for it, and the fabric pod thus has
   one bound Pod more than its count, the added Pod gives up its position. It
-  is the Pod with the highest index below the range that is not Ready and has
-  no served record.
+  is the Pod with the highest index below the range, when it is newer than
+  the Pod that keeps its index. It goes also when it is Ready: the Pod that
+  served first keeps its place. After a scale-in no Pod is newer, and the
+  retention order selects the Pod that goes.
 - Add a position only to a complete placement that Grove has synchronized: the
   capacity is the total, `status.observedGeneration` equals the PodClique
   generation, `status.replicas` equals the total, and the PodClique has exactly
@@ -333,12 +335,25 @@ SPDX-License-Identifier: Apache-2.0
   that the capacity already has stays while a Pod above the range needs one,
   so the capacity is the total plus one from the first step to the last. When
   a removed Pod is gone, Grove creates the Pod of the next step.
-- Decide the step one time in each pass, with the scaling state
-  (`planCyborgRenumbering`), and use that decision for the pins of the
-  placement step, the removals, the capacity and the scaling state of the
-  pass. The pin step at the start of a pass uses the placement without the
-  step. It thus does not pin the new Pod in a pass that stops before the
-  placement step, which also does the removal that ends the step.
+- Decide the step in the placement step, from the Pods that this step lists,
+  and use that decision for its pins, its removals and its capacity. With an
+  older decision, the pass can pin the new Pod for a Pod that served in
+  between. The scaling state decides the step again from its own Pod list
+  (`cyborgScalingRequired`); the two can differ in one pass, and the next pass
+  corrects the scaling state. The pin step at the start of a pass uses the
+  placement without the step. It thus does not pin the new Pod in a pass that
+  stops before the placement step, which also does the removal that ends the
+  step.
+- A step does not wait for `Bound` requests: its fabric pod keeps its count
+  of Cyborg Pods that the kubelet started. One loss stays possible: the new
+  Pod can go away between its observation and the removal of the Pod above
+  the range. The fabric pod then has one Cyborg Pod less, and the LPX
+  scheduler releases a `Degraded` plan at once when that was the last one.
+- A PodClique observation that is older than the write of the added position
+  shows neither the start nor the stay condition. Such a pass removes the new
+  Pod when it is pinned and not bound, and Grove creates the next one. This
+  repeats only while the PodClique cache is behind the Pod cache, and no bound
+  Pod goes.
 - Lower the capacity only when the removed Pods are gone, or when their grace
   period is over: never in the pass that removes a Pod, and not while a Pod of
   the PodClique in deletion has a deletion timestamp in the future. Grove

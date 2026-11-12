@@ -777,6 +777,29 @@ func TestLPXCyborgCapacityWaitsForRemovedPods(t *testing.T) {
 	}
 }
 
+func TestLPXCyborgPlacementIgnoresAnEarlierPodClique(t *testing.T) {
+	ctx := t.Context()
+
+	t.Log("Given a Cyborg PodClique that Grove created again with the same name, and two Pods of the earlier one: a bound Pod in a different fabric pod, and a removed Pod in its grace period")
+	clique := &grovev1alpha1.PodClique{Name: "pcs-0-lpx-0-cond", Namespace: "default", UID: "clique-uid", ResourceVersion: "1"}
+	clique.Spec.Replicas = 2
+	earlier := clique.DeepCopy()
+	earlier.UID = "earlier-clique-uid"
+	r := &graphReconciler{Client: newLPXTestClient(t, clique,
+		newTestBoundCyborgPod(clique, 0, "a"), newTestBoundCyborgPod(earlier, 5, "b"), newTestStoppingCyborgPod(earlier, 6, time.Now().Add(time.Hour)),
+	)}
+
+	t.Log("When the controller reconciles a placement of one Pod in fabric pod a")
+	retryAt, err := r.reconcileCyborgPlacement(ctx, clique, cyborgPlacement{fabricPods: []string{"a"}, replicas: 1}, false)
+	require.NoError(t, err)
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(clique), clique))
+
+	t.Log("Then it lowers the capacity at once and keeps the Pod of the earlier PodClique: those Pods are not Pods of this one")
+	require.Zero(t, retryAt)
+	require.Equal(t, int32(1), clique.Spec.Replicas)
+	require.Equal(t, []int{0, 5}, listTestCyborgPodIndexes(t, ctx, r.Client, clique))
+}
+
 func TestLPXCyborgCapacityWaitOfTwoPodCliques(t *testing.T) {
 	ctx := t.Context()
 
@@ -1002,6 +1025,8 @@ func TestCyborgRenumberStep(t *testing.T) {
 		ready   bool
 		served  bool
 		failed  bool
+		// added is a Pod that Grove created after the provision, for a step.
+		added bool
 	}
 
 	for _, tc := range []struct {
@@ -1096,32 +1121,45 @@ func TestCyborgRenumberStep(t *testing.T) {
 		{
 			name:       "the Pod that a step added goes when the Pod above the range served in that time: the two have the same FPGA route",
 			fabricPods: []string{"b"}, replicas: 3,
-			pods:   []pod{{index: 0, fabricPod: "b"}, {index: 1, fabricPod: "b"}, {index: 4, fabricPod: "b", served: true}, {index: 5, fabricPod: "b"}},
+			pods:   []pod{{index: 0, fabricPod: "b", added: true}, {index: 1, fabricPod: "b", added: true}, {index: 4, fabricPod: "b", served: true}, {index: 5, fabricPod: "b"}},
 			added:  1,
 			retire: new(1),
 		},
 		{
 			name:       "the Pod that a step added also goes when the kubelet has not started it",
 			fabricPods: []string{"b"}, replicas: 2,
-			pods:   []pod{{index: 0, fabricPod: "b", waiting: true}, {index: 2, fabricPod: "b", ready: true}, {index: 3, fabricPod: "b"}},
+			pods:   []pod{{index: 0, fabricPod: "b", added: true, waiting: true}, {index: 2, fabricPod: "b", ready: true}, {index: 3, fabricPod: "b"}},
 			added:  1,
 			retire: new(0),
 		},
 		{
-			name:       "the Pod that a step added stays when it served too: the retention order selects the Pod that goes",
+			name:       "the Pod that a step added also goes when it is Ready: the Pod that served first keeps its place",
 			fabricPods: []string{"b"}, replicas: 2,
-			pods:  []pod{{index: 0, fabricPod: "b", ready: true}, {index: 2, fabricPod: "b", served: true}, {index: 3, fabricPod: "b"}},
-			added: 1,
+			pods:   []pod{{index: 0, fabricPod: "b", added: true, ready: true}, {index: 2, fabricPod: "b", served: true}, {index: 3, fabricPod: "b"}},
+			added:  1,
+			retire: new(0),
 		},
 		{
 			name:       "a fabric pod without a Pod too many loses no Pod",
 			fabricPods: []string{"b"}, replicas: 3,
-			pods: []pod{{index: 0, fabricPod: "b"}, {index: 4, fabricPod: "b", served: true}, {index: 5, fabricPod: "b"}},
+			pods: []pod{{index: 0, fabricPod: "b", added: true}, {index: 4, fabricPod: "b", served: true}, {index: 5, fabricPod: "b"}},
 		},
 		{
-			name:       "a scale-in is not a step: the retention order selects the Pods that go",
+			name:       "a scale-in by one Pod is not a step: no Pod is newer than the Pod above the range, and the retention order selects the Pod that goes",
 			fabricPods: []string{"b"}, replicas: 2,
-			pods:  []pod{{index: 0, fabricPod: "b"}, {index: 1, fabricPod: "b"}, {index: 2, fabricPod: "b", served: true}, {index: 3, fabricPod: "b"}},
+			pods:  []pod{{index: 0, fabricPod: "b"}, {index: 1, fabricPod: "b"}, {index: 2, fabricPod: "b", served: true}},
+			added: 1,
+		},
+		{
+			name:       "only the Pod with the highest index below the range can be the Pod that a step added",
+			fabricPods: []string{"b"}, replicas: 3,
+			pods:  []pod{{index: 0, fabricPod: "b", added: true}, {index: 1, fabricPod: "b"}, {index: 4, fabricPod: "b", served: true}, {index: 5, fabricPod: "b"}},
+			added: 1,
+		},
+		{
+			name:       "a scale-in by more Pods is not a step",
+			fabricPods: []string{"b"}, replicas: 2,
+			pods:  []pod{{index: 0, fabricPod: "b", added: true}, {index: 1, fabricPod: "b", added: true}, {index: 2, fabricPod: "b", served: true}, {index: 3, fabricPod: "b"}},
 			added: 2,
 		},
 		{
@@ -1280,6 +1318,9 @@ func TestCyborgRenumberStep(t *testing.T) {
 				}
 				if spec.failed {
 					pod.Status.Phase = corev1.PodFailed
+				}
+				if spec.added {
+					pod.CreationTimestamp = metav1.NewTime(pod.CreationTimestamp.Add(time.Hour))
 				}
 				live = append(live, podcache.Project(pod))
 			}
@@ -1730,8 +1771,8 @@ func newTestStoppingCyborgPod(clique *grovev1alpha1.PodClique, index int, stopsA
 }
 
 // reconcileTestCyborgPlacement runs the placement steps of one complete controller
-// pass for clique: the pin step, the decision about a lower index, and the step
-// that removes Pods and writes the capacity. It refreshes clique afterwards.
+// pass for clique: the pin step, and the step that gives a Pod a lower index,
+// removes Pods and writes the capacity. It refreshes clique afterwards.
 func reconcileTestCyborgPlacement(
 	t *testing.T,
 	ctx context.Context,
@@ -1744,9 +1785,7 @@ func reconcileTestCyborgPlacement(
 	pclqs := map[string]*grovev1alpha1.PodClique{clique.Name: clique}
 	placements := map[string]cyborgPlacement{clique.Name: placement}
 	require.NoError(t, r.pinCyborgPods(ctx, pclqs, placements))
-	placements, err := r.planCyborgRenumbering(ctx, pclqs, placements)
-	require.NoError(t, err)
-	_, err = r.reconcileCyborgPlacements(ctx, pclqs, placements, scalingBlocked)
+	_, err := r.reconcileCyborgPlacements(ctx, pclqs, placements, scalingBlocked)
 	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(clique), clique))
 	return err
 }

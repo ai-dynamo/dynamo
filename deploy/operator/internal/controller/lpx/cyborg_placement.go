@@ -285,22 +285,23 @@ func (r *graphReconciler) pinCyborgPods(ctx context.Context, pclqs map[string]*g
 	return errors.Join(errs...)
 }
 
-// planCyborgRenumbering returns each placement with the step that gives one of its
-// Pods a lower Grove index, when one is due (see cyborgRenumberStep). It reads the
-// Pods and writes nothing. A pass decides the step one time, so that its scaling
-// state, pins, removals and capacity agree. pclqs contains the observation of
-// every placement key.
-func (r *graphReconciler) planCyborgRenumbering(ctx context.Context, pclqs map[string]*grovev1alpha1.PodClique, placements map[string]cyborgPlacement) (map[string]cyborgPlacement, error) {
-	planned := make(map[string]cyborgPlacement, len(placements))
+// cyborgScalingRequired reports whether a placed Cyborg PodClique has a capacity
+// that its placement does not need now, with the step that gives one of its Pods
+// a lower Grove index (see cyborgRenumberStep). It reads the Pods and writes
+// nothing. pclqs contains the observation of every placement key.
+func (r *graphReconciler) cyborgScalingRequired(ctx context.Context, pclqs map[string]*grovev1alpha1.PodClique, placements map[string]cyborgPlacement) (bool, error) {
+	// Compare each capacity with the one that the placement and its step need.
 	for name, placement := range placements {
 		live, _, err := r.liveCyborgPods(ctx, pclqs[name])
 		if err != nil {
-			return nil, err
+			return false, err
 		}
 		placement.surge, placement.retire = cyborgRenumberStep(pclqs[name], live, placement)
-		planned[name] = placement
+		if pclqs[name].Spec.Replicas != placement.capacity() {
+			return true, nil
+		}
 	}
-	return planned, nil
+	return false, nil
 }
 
 // reconcileCyborgPlacements converges every placed Cyborg PodClique in name order.
@@ -329,12 +330,13 @@ func (r *graphReconciler) reconcileCyborgPlacements(
 }
 
 // reconcileCyborgPlacement converges one non-nil, owned Cyborg PodClique on its
-// placement. It pins each unplaced Pod to a fabric pod with an open position and
-// deletes the placed Pods that the placement does not keep. Only when those Pods
-// are gone does it lower the PodClique capacity, so that Grove finds no placed
-// Pod to select by itself. Capacity writes, and the removals that a lower
-// capacity needs, wait while scalingBlocked is true. retryAt is not zero when a
-// lower capacity waits for the end of a grace period.
+// placement, with the step that gives one of its Pods a lower Grove index (see
+// cyborgRenumberStep). It pins each unplaced Pod to a fabric pod with an open
+// position and deletes the placed Pods that the placement does not keep. Only
+// when those Pods are gone does it lower the PodClique capacity, so that Grove
+// finds no placed Pod to select by itself. Capacity writes, and the removals that
+// a lower capacity needs, wait while scalingBlocked is true. retryAt is not zero
+// when a lower capacity waits for the end of a grace period.
 //
 // While a lower capacity is not yet written, Grove replaces each removed Pod. The
 // controller leaves those unplaced Pods to Grove's scale-in, which removes
@@ -352,6 +354,10 @@ func (r *graphReconciler) reconcileCyborgPlacement(
 	if err != nil {
 		return time.Time{}, err
 	}
+
+	// Decide the step from the Pods that this pass pins and removes. With an older
+	// decision, the pass can pin the new Pod for a Pod that served in between.
+	placement.surge, placement.retire = cyborgRenumberStep(clique, live, placement)
 	surplus, err := r.fillCyborgPlacement(ctx, clique, placement, live)
 	if err != nil {
 		return time.Time{}, err
@@ -454,14 +460,13 @@ func cyborgRenumberStep(clique *grovev1alpha1.PodClique, live []*corev1.Pod, pla
 		}
 
 		// That Pod served while a step added a Pod for it. The added Pod has its
-		// route and cannot take the place of a different Pod, so it goes: it is
-		// the Pod with the highest index below the range that did not serve.
-		if len(pods) == int(placement.replicas)+1 {
-			for _, pod := range slices.Backward(pods[:first]) {
-				if !cyborgPodServed(pod) {
-					return "", pod.UID
-				}
-			}
+		// route and cannot take the place of a different Pod, so it goes, also when
+		// it is Ready: the Pod that served first keeps its place. The added Pod has
+		// the highest index below the range and is newer than that Pod. After a
+		// scale-in no Pod is newer, and the retention order selects the Pod that goes.
+		if added := first - 1; added >= 0 && len(pods) == int(placement.replicas)+1 &&
+			pods[added].CreationTimestamp.After(pods[first].CreationTimestamp.Time) {
+			return "", pods[added].UID
 		}
 	}
 	if candidate == nil {
@@ -558,7 +563,7 @@ func (r *graphReconciler) fillCyborgPlacement(
 	// place while it is there. It holds no position, as the Pod that gives its
 	// position to a Pod with a lower index.
 	live = slices.DeleteFunc(slices.Clone(live), func(pod *corev1.Pod) bool {
-		if cyborgPodTerminal(pod) || (placement.retire != "" && pod.UID == placement.retire) {
+		if cyborgPodTerminal(pod) || pod.UID == placement.retire {
 			surplus = append(surplus, pod)
 			return true
 		}
