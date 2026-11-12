@@ -24,3 +24,14 @@ pub(crate) fn invalid_argument(message: impl Into<String>) -> DynamoError {
         .public_message(message)
         .build()
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn overload_status_env_name_matches_runtime_registry() {
+        assert_eq!(
+            dynamo_error::http::DYN_HTTP_OVERLOAD_STATUS_CODE,
+            dynamo_runtime::config::environment_names::llm::DYN_HTTP_OVERLOAD_STATUS_CODE
+        );
+    }
+}
