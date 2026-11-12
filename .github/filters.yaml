@@ -535,3 +535,7 @@ benchmarks:
 
 efa:
   - 'container/templates/aws.Dockerfile'
+  # The same inventory and publication gates must also pass on EFA variants.
+  - 'container/compliance/**'
+  - 'container/Dockerfile.compliance-audit'
+  - '!**/*.md'
