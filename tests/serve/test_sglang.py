@@ -28,6 +28,7 @@ from tests.serve.lora_utils import DEFAULT_LORA_REPO, MinioLoraConfig
 from tests.serve.multimodal_profiles.sglang import (
     SGLANG_MULTIMODAL_PROFILES,
     SGLANG_TOPOLOGY_SCRIPTS,
+    SGLangMmRoutingPayload,
 )
 from tests.utils.constants import DefaultPort, DynamoPortRange
 from tests.utils.engine_process import EngineConfig
@@ -52,7 +53,6 @@ from tests.utils.payload_builder import (
     router_selection_chat_payload_default,
 )
 from tests.utils.payloads import (
-    CachedTokensChatPayload,
     ChatPayload,
     HttpErrorPayload,
     ImageGenerationPayload,
@@ -795,7 +795,7 @@ sglang_configs = {
         timeout=450,
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
-            CachedTokensChatPayload(
+            SGLangMmRoutingPayload(
                 body={
                     "messages": [
                         {
@@ -821,10 +821,7 @@ sglang_configs = {
                 min_cached_tokens=128,
                 require_rust_processor_init=True,
                 min_routing_total_blocks=10,
-                # A text-only hit is at most a small fraction of this video
-                # request. Requiring high router-side overlap proves the media
-                # hashes matched the worker KV events instead of accepting a
-                # cached text prefix as a false positive.
+                # Require exact media overlap only on scalar-ID builds.
                 min_avg_kv_hit_rate=0.9,
             )
         ],

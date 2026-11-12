@@ -8,8 +8,9 @@ use aisimulate_core::replay::{
     ReplayComposition, ReplayDeterminism, ReplayScalingPolicy, ReplaySpec, WorkerTopology,
 };
 use anyhow::{Context, Result, bail};
-use dynamo_kv_router::WorkerType;
-use dynamo_kv_router::config::{KvRouterConfig, RouterPrefillLoadModel};
+use dynamo_kv_router::config::KvRouterConfig;
+use dynamo_router_protocol::WorkerType;
+use dynamo_scheduler::host::RouterPrefillLoadModel;
 use std::collections::HashSet;
 
 use super::{KvReplayMetadata, KvRouterPlacement};
@@ -760,7 +761,7 @@ mod tests {
     /// no-op at the first tick.
     #[test]
     fn registered_router_controls_match_startup_policy_parameters() {
-        use dynamo_custom_policy_builtin::startup_policy_parameters;
+        use dynamo_router_policies::startup_policy_parameters;
 
         let config = retune_router_config();
         let registry = ReplayRouterControls::new();
@@ -785,7 +786,10 @@ mod tests {
             registered_parameters(&registry),
             [(
                 WorkerType::Aggregated,
-                startup_policy_parameters(&config, WorkerType::Aggregated)
+                startup_policy_parameters(
+                    &dynamo_worker_selection::host::SelectionConfig::from(&config),
+                    WorkerType::Aggregated
+                )
             )]
         );
 
@@ -816,11 +820,17 @@ mod tests {
             [
                 (
                     WorkerType::Prefill,
-                    startup_policy_parameters(&config, WorkerType::Prefill)
+                    startup_policy_parameters(
+                        &dynamo_worker_selection::host::SelectionConfig::from(&config),
+                        WorkerType::Prefill
+                    )
                 ),
                 (
                     WorkerType::Decode,
-                    startup_policy_parameters(&config, WorkerType::Decode)
+                    startup_policy_parameters(
+                        &dynamo_worker_selection::host::SelectionConfig::from(&config),
+                        WorkerType::Decode
+                    )
                 ),
             ]
         );

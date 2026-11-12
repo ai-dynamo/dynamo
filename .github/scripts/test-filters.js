@@ -61,6 +61,11 @@ function checkFilter(file, patterns) {
 // expectations: { filterName: expectedValue, ... }
 const testCases = [
   {
+    file: 'lib/llm/tests/data/media/triangle_240p_10.mp4',
+    expect: { sidecar_trtllm_image: true },
+    desc: 'the video fixture triggers the nightly harness checksum tests'
+  },
+  {
     file: 'lib/sidecar/trtllm/ci/resolve_nightly.py',
     expect: { sidecar_trtllm_image: true },
     desc: 'nightly resolver changes run its CPU tests'
@@ -178,6 +183,16 @@ const testCases = [
     file: 'docs/tests/nested/__ci_filter_probe__',
     expect: { core: false, docs: true, examples: true },
     desc: 'any docs/tests descendant triggers recipe check without core'
+  },
+  {
+    file: 'docs/fern/pages/recipes/_catalog/recipes/kimi-k3.yaml',
+    expect: { core: false, docs: true, examples: true },
+    desc: 'recipe catalog entry triggers the catalog validator in recipe check'
+  },
+  {
+    file: 'docs/fern/pages/recipes/feature-benchmarks/_catalog/schema.json',
+    expect: { core: false, docs: true, examples: true },
+    desc: 'benchmark catalog triggers the catalog validator in recipe check'
   },
   {
     file: 'deploy/operator/config/crd/bases/nvidia.com_dynamomodels.yaml',
@@ -535,6 +550,16 @@ const testCases = [
     file: 'deploy/helm/charts/platform/components/operator/templates/deployment.yaml',
     expect: { snapshot: true, deploy: true, operator: true },
     desc: 'Operator Helm changes trigger snapshot integration'
+  },
+  {
+    file: 'lib/router/kv-router/README.md',
+    expect: { rust: false, core: false, frontend: false, ignore: true },
+    desc: 'router crate docs do not run the Rust jobs'
+  },
+  {
+    file: 'lib/router/kv-router/tests/data/router-settings.yaml',
+    expect: { rust: true, core: true, frontend: true },
+    desc: 'router test data compiled in with include_str! runs the Rust jobs'
   },
 ];
 

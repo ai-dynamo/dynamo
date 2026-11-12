@@ -8,10 +8,11 @@ use axum::Json;
 use axum::extract::State;
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::get;
 use dynamo_global_discovery_client::{
-    Capacity, DiscoveryClientError, GlobalDiscoveryClient, Lease, PoolKey, PoolLocation,
-    PoolRegistration, RouterReplica, RouterReplicaId,
+    Capacity, DiscoveryClientError, GlobalDiscoveryClient, Lease, PoolKey, PoolListing,
+    PoolLocation, PoolRegistration, RegistrationStatus, RouterHeartbeat, RouterRegistration,
+    RouterReplica, RouterReplicaId,
 };
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -24,6 +25,8 @@ struct FakeService(Arc<Mutex<FakeState>>);
 struct FakeState {
     routers_status: StatusCode,
     routers_body: String,
+    pools_body: String,
+    registration_status: StatusCode,
     /// Registrations as the JSON the service received.
     registrations: Vec<Value>,
 }
@@ -33,6 +36,8 @@ impl FakeService {
         Self(Arc::new(Mutex::new(FakeState {
             routers_status: StatusCode::OK,
             routers_body: routers_body.to_owned(),
+            registration_status: StatusCode::OK,
+            pools_body: r#"{ "pools": [], "complete": true }"#.to_owned(),
             registrations: Vec::new(),
         })))
     }
@@ -41,8 +46,11 @@ impl FakeService {
     /// keeps the base URL's path.
     async fn client(&self) -> GlobalDiscoveryClient {
         let app = axum::Router::new()
-            .route("/discovery/routers", get(serve_routers))
-            .route("/discovery/pools", post(serve_register))
+            .route(
+                "/discovery/routers",
+                get(serve_routers).post(serve_register),
+            )
+            .route("/discovery/pools", get(serve_pools).post(serve_register))
             .with_state(self.clone());
         let address = serve(app).await;
         let base_url = Url::parse(&format!("http://{address}/discovery")).unwrap();
@@ -69,12 +77,24 @@ async fn serve_routers(State(fake): State<FakeService>) -> Response {
         .into_response()
 }
 
+async fn serve_pools(State(fake): State<FakeService>) -> Response {
+    (
+        [(header::CONTENT_TYPE, "application/json")],
+        fake.0.lock().unwrap().pools_body.clone(),
+    )
+        .into_response()
+}
+
 async fn serve_register(
     State(fake): State<FakeService>,
     Json(registration): Json<Value>,
-) -> Json<Value> {
-    fake.0.lock().unwrap().registrations.push(registration);
-    Json(json!({ "heartbeat_interval_s": 5, "lease_duration_s": 15 }))
+) -> Response {
+    let mut state = fake.0.lock().unwrap();
+    state.registrations.push(registration);
+    if state.registration_status != StatusCode::OK {
+        return (state.registration_status, "registration unavailable").into_response();
+    }
+    Json(json!({ "heartbeat_interval_s": 5, "lease_duration_s": 15 })).into_response()
 }
 
 fn replica(id: &str, url: &str) -> RouterReplica {
@@ -211,6 +231,57 @@ async fn a_cut_off_body_is_a_request_error() {
 }
 
 #[tokio::test]
+async fn lists_pools_and_whether_the_list_is_complete() {
+    let fake = FakeService::new(r#"{ "routers": [] }"#);
+    fake.0.lock().unwrap().pools_body = r#"{
+        "pools": [{
+            "key": { "cluster_id": "aws-west", "namespace": "dynamo", "dgd_name": "mocker-west-1" },
+            "location": { "region": "us-west-2", "availability_zone": "usw2-az1", "datacenter": null },
+            "model": "Qwen/Qwen3-0.6B",
+            "capabilities": ["aggregated"],
+            "frontends": ["http://10.1.22.20:8000/"],
+            "capacity": [{ "sku": "H100", "workers": 8 }],
+            "relay_identities": ["ip:10.1.22.30"]
+        }],
+        "complete": false
+    }"#
+    .to_owned();
+    let client = fake.client().await;
+
+    let listed = client.pools().await.unwrap();
+
+    assert!(!listed.complete);
+    let registered = registration();
+    assert_eq!(
+        listed.pools,
+        [PoolListing {
+            key: registered.key,
+            location: registered.location,
+            model: Some(registered.model),
+            capabilities: registered.capabilities,
+            frontends: registered.frontends,
+            capacity: registered.capacity,
+            relay_identities: vec!["ip:10.1.22.30".into()],
+        }]
+    );
+}
+
+#[tokio::test]
+async fn one_bad_pool_fails_the_whole_list() {
+    let fake = FakeService::new(r#"{ "routers": [] }"#);
+    let mut body = serde_json::from_str::<Value>(&pools_body(&["west-1", "west-2"], true)).unwrap();
+    body["pools"][1]["key"]["dgd_name"] = json!(" ");
+    fake.0.lock().unwrap().pools_body = body.to_string();
+    let client = fake.client().await;
+
+    let error = client.pools().await.unwrap_err();
+    assert!(
+        matches!(error, DiscoveryClientError::Decode { .. }),
+        "{error:?}"
+    );
+}
+
+#[tokio::test]
 async fn registers_a_pool() {
     let fake = FakeService::new(r#"{ "routers": [] }"#);
     let client = fake.client().await;
@@ -256,4 +327,67 @@ async fn a_redirect_is_an_error() {
         matches!(&error, DiscoveryClientError::Status { status, .. } if *status == StatusCode::MOVED_PERMANENTLY),
         "{error:?}"
     );
+}
+
+/// A `GET /pools` body listing each DGD name.
+fn pools_body(dgd_names: &[&str], complete: bool) -> String {
+    let pools = dgd_names
+        .iter()
+        .map(|dgd_name| {
+            json!({
+                "key": { "cluster_id": "aws-west", "namespace": "dynamo", "dgd_name": dgd_name },
+                "location": { "region": "us-west-2", "availability_zone": null, "datacenter": null },
+                "model": "Qwen/Qwen3-0.6B"
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({ "pools": pools, "complete": complete }).to_string()
+}
+
+#[tokio::test]
+async fn router_heartbeat_retries_and_stops_on_cancel_or_drop() {
+    for cancel_instead_of_drop in [false, true] {
+        let fake = FakeService::new(r#"{"routers":[],"complete":true}"#);
+        fake.0.lock().unwrap().registration_status = StatusCode::SERVICE_UNAVAILABLE;
+        let client = fake.client().await;
+        let registration = RouterRegistration {
+            replica: "east/pod-uid".into(),
+            url: "http://127.0.0.1:50051".parse().unwrap(),
+        };
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let heartbeat = RouterHeartbeat::spawn(client, registration.clone(), cancel.clone());
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !matches!(heartbeat.status(), RegistrationStatus::Failing(_)) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        fake.0.lock().unwrap().registration_status = StatusCode::OK;
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::time::resume();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !matches!(heartbeat.status(), RegistrationStatus::Registered(_)) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            fake.0.lock().unwrap().registrations,
+            vec![serde_json::to_value(registration).unwrap(); 2]
+        );
+        tokio::time::pause();
+        if cancel_instead_of_drop {
+            cancel.cancel();
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            drop(heartbeat);
+        } else {
+            drop(heartbeat);
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        }
+        assert_eq!(fake.0.lock().unwrap().registrations.len(), 2);
+        tokio::time::resume();
+    }
 }

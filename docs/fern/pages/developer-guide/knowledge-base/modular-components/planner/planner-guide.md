@@ -69,7 +69,7 @@ spec:
       advisory: true
 ```
 
-Advisory mode is suggestion-only. The Planner computes recommended replica counts, logs them, exports them as diagnostics, and shows them in HTML reports. The recommendations are not applied as scaling decisions: the Planner does not execute scaling actions or change the deployment. Planner-in-the-loop replay honors it too: the replay keeps the simulated deployment fixed, reports the recommendations, and records [retune](#periodic-retune-experimental) decisions, which run only in simulation, without applying them; see [Replay in Advisory Mode](aisimulate-planner-replay.mdx#replay-in-advisory-mode).
+Advisory mode is suggestion-only. The Planner computes recommended replica counts, logs them, exports them as diagnostics, and shows them in HTML reports. The recommendations are not applied as scaling decisions: the Planner does not execute scaling actions or change the deployment. Planner-in-the-loop replay honors it too: the replay keeps the simulated deployment fixed, reports the recommendations, and records [retune](#periodic-retune-experimental) decisions without applying them; see [Replay in Advisory Mode](aisimulate-planner-replay.mdx#replay-in-advisory-mode).
 
 ### Optimization Target
 
@@ -173,7 +173,7 @@ spec:
 | `load_adjustment_interval_seconds` | int | `5` | Seconds between FPM tuning updates and load-based scaling decisions. Even when only throughput scaling is enabled, live FPM observations are fed into the perf model at this interval. Must be shorter than `throughput_adjustment_interval_seconds`. |
 | `max_num_fpm_samples` | int | `64` | Maximum retained FPM observations for online tuning or regression. |
 | `fpm_sample_bucket_size` | int | `16` | Number of buckets for observation retirement (must be a perfect square). |
-| `load_scaling_down_sensitivity` | int | `80` | Scale-down sensitivity 0–100 (0=never, 100=aggressive). |
+| `load_scaling_down_sensitivity` | int | `80` | SLA-mode scale-down sensitivity 0–100 (100=aggressive). 0 blocks model-based scale-down, but a fully idle pool still shrinks one replica at a time to its endpoint floor (minimum 1); see [Unavailable Scaling Inputs](#unavailable-scaling-inputs). Ignored unless `optimization_target` is `sla`. |
 | `load_min_observations` | int | `5` | Minimum observations before making scaling decisions. |
 
 ### General Settings
@@ -328,9 +328,12 @@ spec:
 ## Periodic Retune (Experimental)
 
 > [!WARNING]
-> **Experimental.** In this release, retune runs only in offline simulation:
-> `aisimulate predict --stack dynamo` and `dynamo.replay.run_trace_replay`. A live Planner rejects a
-> configuration that sets `retune` at startup.
+> **Experimental.** `retune.executor` selects where retune runs. With `local`, the default, it runs
+> only in offline simulation: `aisimulate predict --stack dynamo` and
+> `dynamo.replay.run_trace_replay`, and a live Planner rejects it at startup. With `dgdr`, a live
+> Planner on Kubernetes retunes three KV router knobs, and with scaling its own Planner fields,
+> through DGDR v1beta2 Requests; it is for development clusters only. See
+> [Planner Live Retune](../../../../kubernetes/auto-deployment/planner-live-retune.md).
 
 Retune lets the Planner tune its own runtime parameters from the traffic it served. Every
 `retune.interval_seconds`, it takes the window of the request trace that just ended and replays it
@@ -346,12 +349,14 @@ Retune searches parameters a running deployment can change without a restart:
 
 - **Router parameters** of the KV router, in `retune.router`: `overlap_score_credit`,
   `prefill_load_scale`, `temperature`, and four more `/router_policy` parameters.
-- **Planner runtime fields**, in `retune.planner`: load-scaling sensitivity, the load predictor,
-  minimum worker counts, GPU budgets, `max_throughput_scaling_replicas`, and the thresholds of
-  `optimization_target: load`.
+- **Planner runtime fields**, in `retune.planner`: the scaling policy (which scaling modes run, and
+  their intervals), load-scaling sensitivity, the load predictor,
+  `max_throughput_scaling_replicas`, and the thresholds of `optimization_target: load`.
 
-The engine, the topology, the router mode, and Planner settings fixed at startup, such as the
-scaling intervals and `ttft_ms` / `itl_ms`, stay as configured.
+The engine, the topology, the router mode, Planner settings fixed at startup such as
+`scheduling.scale_interval_seconds` and the FPM sampling, and `ttft_ms` / `itl_ms` stay as
+configured. Minimum worker counts and GPU budgets are user constraints: retune never searches
+them, and every candidate replays within them.
 
 Retune supports two scenarios:
 
@@ -375,8 +380,11 @@ A candidate that changes decisions is judged on one replay of one window, so
 This minimal fixed-replica configuration searches the 108-point default router domain every six
 hours. It is a `PlannerConfig` for the `planner_config` argument of `dynamo.replay.run_trace_replay`
 (see [Run Retune from Python](aisimulate-planner-replay.mdx#run-retune-from-python)), not a DGDR
-`spec.features.planner` fragment: a live Planner rejects it. In `aisimulate predict`, the `planner`
-section takes `retune` and the two scaling flags, and `mode` comes from `engine.mode`; see
+`spec.features.planner` fragment: a live Planner rejects it, because it uses the default
+`executor: local`. For a live Planner, see
+[Planner Live Retune](../../../../kubernetes/auto-deployment/planner-live-retune.md).
+In `aisimulate predict`, the `planner` section takes `retune` and the two scaling flags, and `mode`
+comes from `engine.mode`; see
 [Scenario 1](aisimulate-planner-replay.mdx#scenario-1-fixed-replicas-router-only).
 
 ```yaml
@@ -389,11 +397,12 @@ retune:
 ```
 
 To run retune and read its decisions, see
-[Simulate Retune](aisimulate-planner-replay.mdx#simulate-retune-experimental). For windows,
-candidates, scoring, and decision timing, see
-[Planner Design](planner-design.md#retune-experimental-simulation-only). For every field and the
+[Simulate Retune](aisimulate-planner-replay.mdx#simulate-retune-experimental), and to run it on a
+live deployment, see [Planner Live Retune](../../../../kubernetes/auto-deployment/planner-live-retune.md).
+For windows, candidates, scoring, and decision timing, see
+[Planner Design](planner-design.md#retune-experimental). For every field and the
 search-domain syntax, see the
-[`retune` reference](../../../../reference/components/planner-configuration.mdx#retune-experimental-simulation-only).
+[`retune` reference](../../../../reference/components/planner-configuration.mdx#retune-experimental).
 
 ## Integration with Profiler
 
