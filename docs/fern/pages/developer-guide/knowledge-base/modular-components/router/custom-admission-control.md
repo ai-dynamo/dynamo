@@ -55,7 +55,7 @@ cargo init --lib --name acme-admission-catalog "$PLUGIN_DIR/catalog"
 Add the classifier's API, error, configuration, and time dependencies:
 
 ```bash
-cargo add --manifest-path "$PLUGIN_DIR/classifier/Cargo.toml" --path "$DYNAMO_DIR/lib/kv-router" dynamo-kv-router
+cargo add --manifest-path "$PLUGIN_DIR/classifier/Cargo.toml" --path "$DYNAMO_DIR/lib/router/kv-router" dynamo-kv-router
 cargo add --manifest-path "$PLUGIN_DIR/classifier/Cargo.toml" --path "$DYNAMO_DIR/lib/runtime" dynamo-runtime
 cargo add --manifest-path "$PLUGIN_DIR/classifier/Cargo.toml" serde --features derive
 cargo add --manifest-path "$PLUGIN_DIR/classifier/Cargo.toml" tokio --features time
@@ -65,7 +65,7 @@ Add the classifier and registry API to the catalog:
 
 ```bash
 cargo add --manifest-path "$PLUGIN_DIR/catalog/Cargo.toml" --path "$PLUGIN_DIR/classifier" acme-admission
-cargo add --manifest-path "$PLUGIN_DIR/catalog/Cargo.toml" --path "$DYNAMO_DIR/lib/kv-router" dynamo-kv-router
+cargo add --manifest-path "$PLUGIN_DIR/catalog/Cargo.toml" --path "$DYNAMO_DIR/lib/router/kv-router" dynamo-kv-router
 ```
 
 ### Classify Requests
@@ -201,7 +201,7 @@ The policy class enables queueing when every eligible worker's active prefill to
 | Accessor | Meaning |
 |---|---|
 | `request_id()` | Optional request ID, also used in lifecycle events |
-| `session_context()` | Optional session identity, final marker, input trigger, and captured [agent headers](../../../../use-cases/agents/agent-harnesses.mdx#agent-headers) |
+| `session_context()` | Optional session identity, final marker, input trigger, and captured [agent headers](../../../../use-cases/agents/session-ids.mdx#agent-headers) |
 | `isl_tokens()` | Input sequence length in tokens, the size the scheduler uses |
 | `scheduling_cost_tokens()` | Estimated uncached input tokens, or the classifier's override |
 | `policy_class()` | Requested policy class, or the classifier's override |

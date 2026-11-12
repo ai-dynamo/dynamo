@@ -1684,38 +1684,71 @@ def test_build_sampling_params_accepts_productive_recursive_guided_json():
     assert sampling_params.structured_outputs.json == schema
 
 
-def test_build_sampling_params_caps_omitted_max_tokens_to_generation_default():
+@pytest.mark.parametrize(
+    "stop_conditions, defaults, expected",
+    [
+        ({}, {}, 16),
+        ({"max_tokens": None}, {"max_tokens": 32}, 32),
+        ({"max_tokens": 64}, {"max_tokens": 32}, 64),
+    ],
+    ids=["engine-default", "model-default", "explicit-limit"],
+)
+def test_build_sampling_params_completion_defaults(stop_conditions, defaults, expected):
     from dynamo.vllm.handlers import build_sampling_params
 
-    model_max_len = 100
-    defaults = {"max_tokens": 32}
+    request = {
+        "token_ids": [1, 2, 3],
+        "sampling_options": {},
+        "stop_conditions": stop_conditions,
+        "output_options": {},
+        "extra_args": {"request_type": "completions"},
+    }
+    assert build_sampling_params(request, defaults, 100).max_tokens == expected
 
-    def make(stop_conditions):
-        return {
-            "token_ids": [1, 2, 3],
-            "sampling_options": {},
-            "stop_conditions": stop_conditions,
-            "output_options": {},
-        }
 
-    remaining = model_max_len - 3
+@pytest.mark.parametrize("stop_conditions", [{}, {"max_tokens": None}])
+def test_build_sampling_params_chat_and_responses_use_remaining_context(
+    stop_conditions,
+):
+    from dynamo.vllm.handlers import build_sampling_params
 
-    # omitted max_tokens → capped to configured default
-    sp = build_sampling_params(make({}), defaults, model_max_len)
-    assert sp.max_tokens == 32
+    request = {
+        "token_ids": [1, 2, 3],
+        "sampling_options": {},
+        "stop_conditions": stop_conditions,
+        "output_options": {},
+    }
+    assert build_sampling_params(request, {}, 100).max_tokens == 97
+    assert build_sampling_params(request, {"max_tokens": 32}, 100).max_tokens == 32
 
-    # explicit max_tokens == remaining context → treated as explicit, not capped
-    sp = build_sampling_params(make({"max_tokens": remaining}), defaults, model_max_len)
-    assert sp.max_tokens == remaining
 
-    sp = build_sampling_params(make({"max_tokens": 10}), defaults, model_max_len)
-    assert sp.max_tokens == 10
-
-    sp = build_sampling_params(make({"max_tokens": 64}), defaults, model_max_len)
-    assert sp.max_tokens == 64
-
-    sp = build_sampling_params(make({}), {}, model_max_len)
-    assert sp.max_tokens == remaining
+@pytest.mark.parametrize(
+    "extra_args",
+    [
+        {"nvext": {"token_in": True}},
+        {"nvext": {"token_in": True}, "request_type": "completions"},
+    ],
+    ids=["chat", "completions"],
+)
+def test_build_sampling_params_rl_token_in_keeps_existing_limit(extra_args):
+    handlers = importlib.import_module("dynamo.vllm.handlers")
+    request = {
+        "token_ids": [1, 2, 3],
+        "sampling_options": {},
+        "stop_conditions": {},
+        "output_options": {},
+        "extra_args": extra_args,
+    }
+    assert (
+        handlers.build_sampling_params(request, {}, 100, enable_rl=True).max_tokens
+        == 97
+    )
+    assert (
+        handlers.build_sampling_params(
+            request, {"max_tokens": 64}, 100, enable_rl=True
+        ).max_tokens
+        == 64
+    )
 
 
 def _make_dynamo_config(**overrides):
@@ -2319,7 +2352,7 @@ class TestEmbeddingWorkerFlag:
 
 
 class TestRealtimeWorkerFlag:
-    """Parsing for the generic --realtime worker mode."""
+    """Parsing for the generic realtime worker mode."""
 
     def test_default_false(self, mock_vllm_cli):
         mock_vllm_cli("--model", "Qwen/Qwen3-0.6B")
@@ -2327,13 +2360,41 @@ class TestRealtimeWorkerFlag:
         config = parse_args()
 
         assert config.realtime is False
+        assert config.endpoint_types == "chat,completions"
 
-    def test_flag_sets_true(self, mock_vllm_cli):
-        mock_vllm_cli("--model", "Qwen/Qwen3-0.6B", "--realtime")
+    @pytest.mark.parametrize(
+        ("endpoint_types", "openai_types"),
+        [
+            ("realtime", "none"),
+            ("chat,realtime", "chat"),
+            ("realtime, Chat ,completions", "chat,completions"),
+        ],
+    )
+    def test_endpoint_type_sets_true(self, mock_vllm_cli, endpoint_types, openai_types):
+        mock_vllm_cli("--model", "Qwen/Qwen3-0.6B", "--endpoint-types", endpoint_types)
 
         config = parse_args()
 
         assert config.realtime is True
+        assert config.endpoint_types == openai_types
+
+    def test_deprecated_flag_sets_true(self, mock_vllm_cli):
+        mock_vllm_cli("--model", "Qwen/Qwen3-0.6B", "--realtime")
+
+        with pytest.warns(FutureWarning, match="--endpoint-types realtime"):
+            config = parse_args()
+
+        assert config.realtime is True
+        assert config.endpoint_types == "none"
+
+    @pytest.mark.parametrize("endpoint_types", ["realtime,bogus", "realtime,none,chat"])
+    def test_invalid_types_with_realtime_are_rejected(
+        self, mock_vllm_cli, endpoint_types
+    ):
+        mock_vllm_cli("--model", "Qwen/Qwen3-0.6B", "--endpoint-types", endpoint_types)
+
+        with pytest.raises(ValueError, match="(?i)endpoint type"):
+            parse_args()
 
 
 def test_build_sampling_params_openai_maps_max_thinking_tokens():

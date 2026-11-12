@@ -52,7 +52,7 @@ impl RoutingHost {
             )
             .instrument(tracing::info_span!("kv_router.select_worker"));
 
-        await_with_cleanup_policy(
+        let outcome = await_with_cleanup_policy(
             request_context.as_ref(),
             phase,
             staged_kv,
@@ -60,7 +60,11 @@ impl RoutingHost {
             budget,
             selection_future,
         )
-        .await?
+        .await??;
+        if let SelectionOutcome::Routed(selection) = &outcome {
+            self.check_current_kv_candidate(request, selection.worker.worker_id)?;
+        }
+        Ok(outcome)
     }
 
     async fn select_request(
@@ -153,6 +157,7 @@ impl RoutingHost {
                         ));
                     }
                     if crate::migration::is_migratable(error.as_ref())
+                        && crate::routing_policy::execution_requirements(request).allows_replay
                         && let Some(state) = request.migration_state.as_ref()
                     {
                         lifecycle.prepare_retry();
@@ -434,7 +439,7 @@ impl RoutingHost {
                     }
                     let local_hashes = tokens_with_hashes.get_or_compute_block_hashes().to_vec();
                     let sequence_hashes = tokens_with_hashes.get_or_compute_seq_hashes().to_vec();
-                    dynamo_kv_router::indexer::RoutingDecisionHashes {
+                    dynamo_kv_indexer::host::RoutingDecisionHashes {
                         local_hashes,
                         sequence_hashes,
                     }
@@ -520,6 +525,10 @@ impl RoutingHost {
         let staged_kv = StagedKv::for_request(request.content());
         let phase_label = phase.to_string();
         let worker = selection.worker;
+        if let Err(error) = self.check_current_kv_candidate(&request, worker.worker_id) {
+            guard.abort(Some(error.as_ref())).await;
+            return Err(error);
+        }
         self.warn_if_output_replay_annotation_ignored(&request, &selection);
 
         let (mut backend_input, context) = request.into_parts();

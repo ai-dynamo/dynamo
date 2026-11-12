@@ -1,78 +1,17 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_kv_router::selector::HostedSelectionRequest;
+use dynamo_worker_selection::host::HostedSelectionRequest;
 
 /// The request metadata a hosted picker reads. The routing host tracks no KV block size, so
 /// [`request_blocks`](dynamo_kv_router::plugins::worker_selection::WorkerSelectionContext::request_blocks) reads 0.
-pub(super) fn hosted_request(request: &PreprocessedRequest) -> HostedSelectionRequest {
+pub(crate) fn hosted_request(request: &PreprocessedRequest) -> HostedSelectionRequest {
     HostedSelectionRequest::new(request.token_ids.len())
 }
 
 use super::*;
 
 impl RoutingHost {
-    fn select_lora_target(
-        &self,
-        request: &PreprocessedRequest,
-    ) -> Result<Option<LoraSelection>, Error> {
-        let Some(lora) = self.lora.as_ref() else {
-            return Ok(None);
-        };
-        let Some(lora_name) = request
-            .routing
-            .as_ref()
-            .and_then(|routing| routing.lora_name.clone())
-        else {
-            return Ok(None);
-        };
-        let load_guard = LoraLoadGuard::new(Arc::clone(&lora.load_estimator), lora_name.clone());
-        let routable = self.inner.client.instance_ids_avail();
-        let candidates = lora
-            .filter
-            .filter_worker_ids_for_lora(Some(&lora_name), &routable);
-        if candidates.is_empty() {
-            anyhow::bail!("No workers available after LoRA filtering (lora={lora_name})");
-        }
-
-        let free = self
-            .inner
-            .client
-            .instance_ids_free()
-            .into_iter()
-            .collect::<HashSet<_>>();
-        let candidates = candidates
-            .into_iter()
-            .filter(|worker_id| free.contains(worker_id))
-            .collect::<Vec<_>>();
-        if candidates.is_empty() {
-            return Err(anyhow::anyhow!(
-                DynamoError::builder()
-                    .error_type(ErrorType::ResourceExhausted)
-                    .message(format!(
-                        "All eligible LoRA workers are overloaded (lora={lora_name})"
-                    ))
-                    .build()
-            ));
-        }
-        let target = lora
-            .picker
-            .select(&candidates, None, &hosted_request(request))?;
-        tracing::debug!(
-            lora = %lora_name,
-            worker_id = target,
-            candidates = candidates.len(),
-            routable = routable.len(),
-            free = free.len(),
-            "LoRA-filtered router selected worker"
-        );
-        Ok(Some(LoraSelection {
-            target,
-            allowed_fallback: candidates.into_iter().collect(),
-            load_guard,
-        }))
-    }
-
     pub(super) fn select_hosted_worker(
         &self,
         request: &SingleIn<PreprocessedRequest>,
@@ -135,7 +74,9 @@ impl RoutingHost {
                             if let Some(worker_id) = preferred_worker {
                                 Ok(worker_id)
                             } else {
-                                picker.select(ids, None, &hosted_request(request.content()))
+                                picker
+                                    .select(ids, None, &hosted_request(request.content()))
+                                    .map_err(KvSchedulerError::from)
                             }
                         })??,
                     };
@@ -201,20 +142,41 @@ impl RoutingHost {
         // the first stage that can spend it.
         let budget = CleanupBudget::default();
         let staged_kv = StagedKv::for_request(request.content());
-        let (lora_target, lora_fallback, lora_load) =
-            match self.select_lora_target(request.content())? {
-                Some(selection) => (
-                    Some(selection.target),
-                    Some(selection.allowed_fallback),
-                    Some(selection.load_guard),
-                ),
-                None => (None, None, None),
-            };
-        let (selection, mut operation) = if let Some(target) = lora_target {
+        check_candidate_policy(request.content(), self.candidate_policy.is_some())?;
+        let candidate = self
+            .candidate_policy
+            .as_ref()
+            .map(|policy| {
+                policy.select(
+                    request.content(),
+                    explicit.map(|pin| pin.worker_id),
+                    &|| self.inner.client.instance_ids_avail(),
+                    &|| self.inner.client.instance_ids_free(),
+                )
+            })
+            .transpose()?
+            .flatten();
+        let (candidate_target, candidate_fallback, attempt_lease) = match candidate {
+            Some(selection) => (
+                Some(selection.worker),
+                Some(selection.fallback),
+                selection.lease,
+            ),
+            None => (None, None, None),
+        };
+        if let (Some(target), Some(policy)) = (candidate_target, self.candidate_policy.as_ref()) {
+            policy.check_selected(
+                request.content(),
+                target,
+                explicit.map(|pin| pin.worker_id),
+                &|| self.inner.client.instance_ids_avail(),
+            )?;
+        }
+        let (selection, mut operation) = if let Some(target) = candidate_target {
             (
                 HostedSelection {
                     initial_worker: target,
-                    target_constraint: None,
+                    target_constraint: explicit.filter(|pin| pin.worker_id == target),
                     occupancy_reservation: None,
                     candidate_count: 0,
                     selected_occupancy: None,
@@ -266,7 +228,7 @@ impl RoutingHost {
             self.request_metrics.clone(),
             initial_worker,
             occupancy_reservation,
-            lora_load,
+            attempt_lease,
             &request,
         );
         let tracker = request.tracker.clone();
@@ -355,8 +317,16 @@ impl RoutingHost {
                 self.inner.direct_within_prepared(
                     request,
                     initial_worker,
-                    lora_fallback.as_ref(),
+                    candidate_fallback.as_ref(),
                     |request, worker_id| {
+                        if let Some(policy) = self.candidate_policy.as_ref() {
+                            policy.check_selected(
+                                request,
+                                worker_id,
+                                explicit.map(|pin| pin.worker_id),
+                                &|| self.inner.client.instance_ids_avail(),
+                            )?;
+                        }
                         let occupancy = guard.retarget_worker(worker_id);
                         let target = target_for_worker(worker_id);
                         request.routing_mut().dp_rank = target.dp_rank;
@@ -413,6 +383,15 @@ impl RoutingHost {
                 transport_fallback = target.worker_id != initial_worker,
                 "Selected worker"
             );
+        } else if target_constraint.is_some() && (!is_direct || has_affinity_session) {
+            // `dispatch_exact` (session-affinity hits and explicit targets) logs nothing, while
+            // the other non-occupancy paths log from `PushRouter`; keep one line per request.
+            tracing::info!(
+                router_mode = self.inner.router_mode().telemetry_label(),
+                worker_id = target.worker_id,
+                dp_rank = ?target.dp_rank,
+                "Selected worker"
+            );
         }
         if let Some(tracker) = tracker {
             let worker_type = if tracker.phase() == RequestPhase::Prefill {
@@ -435,11 +414,50 @@ impl RoutingHost {
 
 #[cfg(test)]
 mod tests {
-    use dynamo_kv_router::selector::HostedWorkerPicker;
+    use crate::local_model::runtime_config::ModelRuntimeConfig;
     use dynamo_runtime::pipeline::RouterMode;
+    use dynamo_scheduler::host::RoutingConstraints;
+    use dynamo_worker_selection::host::HostedWorkerPicker;
+    use std::collections::{HashMap, HashSet};
 
     use super::super::builder::hosted_picker;
     use super::*;
+
+    fn runtime_config(capability: &str, scheme: &str) -> ModelRuntimeConfig {
+        let mut config = ModelRuntimeConfig::default();
+        config.taints.insert(capability.to_string());
+        config
+            .set_engine_specific("supports_runtime_lora_resolution", true)
+            .unwrap();
+        config
+            .set_engine_specific("runtime_lora_protocol_versions", vec![2_u32])
+            .unwrap();
+        config
+            .set_engine_specific("runtime_lora_schemes", vec![scheme])
+            .unwrap();
+        config
+    }
+
+    #[test]
+    fn runtime_lora_routing_excludes_stale_heterogeneous_worker() {
+        let capability = "dynamo.runtime-lora/v2";
+        let configs = HashMap::from([
+            (1, runtime_config(capability, "custom")),
+            (2, runtime_config(capability, "wandb-artifact")),
+        ]);
+        let constraints = RoutingConstraints {
+            required_taints: HashSet::from([capability.to_string()]),
+            ..Default::default()
+        };
+        let routable = dynamo_lora::runtime::constrain_runtime_lora_workers(
+            true,
+            None,
+            &HashSet::from([2]),
+            &configs,
+            &constraints,
+        );
+        assert_eq!(routable, Some(HashSet::from([2])));
+    }
 
     fn request() -> HostedSelectionRequest {
         HostedSelectionRequest::new(0)

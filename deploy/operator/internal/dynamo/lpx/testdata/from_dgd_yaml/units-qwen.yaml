@@ -1,0 +1,190 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+metadata:
+  annotations:
+    lpx.nvidia.com/deployment-name: units-qwen
+  labels:
+    lpx.nvidia.com/deployment-uid: lpx-render-uid
+    nvidia.com/dynamo-graph-deployment-name: units-qwen
+  name: units-qwen-b1bb
+  namespace: test
+spec:
+  replicas: 1
+  template:
+    cliqueStartupType: CliqueStartupTypeExplicit
+    cliques:
+    - annotations:
+        lpx.nvidia.com/deployment-name: units-qwen
+        scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:a4a6f14895c09d5f0ce5bff8e0f2387b0a9b0f54a84437143f0b73abfe39a322
+        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:c959d9b756db8a2ebc5e65295cf31f892b76032c1bb2a5cb6c4af18ebc206afc
+        scheduling.lpu.nvidia.com/model: default
+        scheduling.lpu.nvidia.com/role: agent
+        scheduling.lpu.nvidia.com/workload-mode: v3HxLpuOnly
+      labels:
+        nvidia.com/dynamo-component: lpu
+        nvidia.com/dynamo-component-type: lpx
+        nvidia.com/dynamo-graph-deployment-name: units-qwen
+        nvidia.com/dynamo-namespace: test-units-qwen
+        nvidia.com/metrics-enabled: "true"
+        nvidia.com/selector: units-qwen-lpu
+      name: agt
+      spec:
+        minAvailable: 2
+        podSpec:
+          containers:
+          - env:
+            - name: LPX_LOCAL_PARTITION_IDS
+            - name: LPX_MODEL_PATH
+              value: /nfs/units-qwen
+            - name: DYN_COMPONENT
+              value: lpx
+            - name: DYN_DISCOVERY_BACKEND
+              value: kubernetes
+            - name: DYN_NAMESPACE
+              value: test-units-qwen
+            - name: DYN_PARENT_DGD_K8S_NAME
+              value: units-qwen
+            - name: DYN_PARENT_DGD_K8S_NAMESPACE
+              value: test
+            - name: ETCD_ENDPOINTS
+              value: etcd-address
+            - name: MODEL_PATH
+              value: $(LPX_MODEL_PATH)
+            - name: NATS_SERVER
+              value: nats-address
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            image: example.invalid/quasar:test
+            name: main
+            resources:
+              limits:
+                lpu.nvidia.com/devices: "1"
+                nvidia.com/lpu: "16"
+              requests:
+                nvidia.com/lpu: "16"
+            volumeMounts:
+            - mountPath: /nfs
+              name: model-storage
+            - mountPath: /dev/shm
+              name: shared-memory
+          restartPolicy: Always
+          schedulerName: lpx-scheduler
+          terminationGracePeriodSeconds: 60
+          volumes:
+          - name: model-storage
+            persistentVolumeClaim:
+              claimName: model-storage
+          - emptyDir:
+              medium: Memory
+              sizeLimit: 8Gi
+            name: shared-memory
+        replicas: 2
+        roleName: agt
+    - annotations:
+        lpx.nvidia.com/deployment-name: units-qwen
+        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:c959d9b756db8a2ebc5e65295cf31f892b76032c1bb2a5cb6c4af18ebc206afc
+        scheduling.lpu.nvidia.com/role: conductor
+      labels:
+        lpx.nvidia.com/serving: "true"
+        nvidia.com/dynamo-component: lpu
+        nvidia.com/dynamo-component-type: lpx
+        nvidia.com/dynamo-graph-deployment-name: units-qwen
+        nvidia.com/dynamo-namespace: test-units-qwen
+        nvidia.com/metrics-enabled: "true"
+        nvidia.com/selector: units-qwen-lpu
+      name: cond
+      spec:
+        minAvailable: 1
+        podSpec:
+          containers:
+          - env:
+            - name: LPX_ALLOCATION
+              value: agt
+            - name: LPX_MODEL_PATH
+              value: /nfs/units-qwen
+            - name: DYN_COMPONENT
+              value: lpx
+            - name: DYN_DISCOVERY_BACKEND
+              value: kubernetes
+            - name: DYN_NAMESPACE
+              value: test-units-qwen
+            - name: DYN_PARENT_DGD_K8S_NAME
+              value: units-qwen
+            - name: DYN_PARENT_DGD_K8S_NAMESPACE
+              value: test
+            - name: ETCD_ENDPOINTS
+              value: etcd-address
+            - name: MODEL_PATH
+              value: $(LPX_MODEL_PATH)
+            - name: NATS_SERVER
+              value: nats-address
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            image: example.invalid/quasar:test
+            name: main
+            resources: {}
+            volumeMounts:
+            - mountPath: /nfs
+              name: model-storage
+            - mountPath: /dev/shm
+              name: shared-memory
+          restartPolicy: Always
+          schedulerName: lpx-scheduler
+          terminationGracePeriodSeconds: 60
+          volumes:
+          - name: model-storage
+            persistentVolumeClaim:
+              claimName: model-storage
+          - emptyDir:
+              medium: Memory
+              sizeLimit: 8Gi
+            name: shared-memory
+        replicas: 1
+        roleName: cond
+        startsAfter:
+        - agt
+    headlessServiceConfig:
+      publishNotReadyAddresses: true
+    podCliqueScalingGroups:
+    - annotations:
+        lpx.nvidia.com/deployment-name: units-qwen
+        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:c959d9b756db8a2ebc5e65295cf31f892b76032c1bb2a5cb6c4af18ebc206afc
+      cliqueNames:
+      - cond
+      - agt
+      minAvailable: 1
+      name: lpx
+      replicas: 1
+    terminationDelay: 15m0s
+status:
+  availableReplicas: 0
+  updatedReplicas: 0

@@ -549,6 +549,7 @@ impl AnthropicStreamConverter {
                         &choice.delta.content,
                         Some(ChatCompletionMessageContent::Text(t)) if !t.is_empty()
                     )
+                    || choice.delta.refusal.as_ref().is_some_and(|r| !r.is_empty())
                     || choice
                         .delta
                         .tool_calls
@@ -619,8 +620,12 @@ impl AnthropicStreamConverter {
                 _ => None,
             };
 
-            if let Some(text) = content_text
-                && !text.is_empty()
+            // Anthropic Messages has no refusal block, so dedicated refusal
+            // text streams as text_delta after this chunk's content text.
+            for text in [content_text, delta.refusal.as_deref()]
+                .into_iter()
+                .flatten()
+                .filter(|text| !text.is_empty())
             {
                 // Close thinking block before text starts (Anthropic spec: thinking → text → tool_use)
                 if self.thinking_block_started && !self.thinking_block_closed {
@@ -992,8 +997,12 @@ impl AnthropicStreamConverter {
                 _ => None,
             };
 
-            if let Some(text) = content_text
-                && !text.is_empty()
+            // Anthropic Messages has no refusal block, so dedicated refusal
+            // text streams as text_delta after this chunk's content text.
+            for text in [content_text, delta.refusal.as_deref()]
+                .into_iter()
+                .flatten()
+                .filter(|text| !text.is_empty())
             {
                 // Close thinking block before text starts
                 if self.thinking_block_started && !self.thinking_block_closed {
@@ -1516,41 +1525,48 @@ mod tests {
 
     #[tokio::test]
     async fn test_stream_stop_sequence_metadata() {
+        // `matched` is the backend's `nvext.stop_reason`; `None` sends no nvext.
         for (finish, matched, expected_reason, expected_sequence) in [
             (
                 FinishReason::Stop,
-                serde_json::json!("</answer>"),
+                Some(serde_json::json!("</answer>")),
                 "stop_sequence",
                 Some("</answer>"),
             ),
             (
                 FinishReason::Stop,
-                serde_json::json!("\n\nHuman:"),
+                Some(serde_json::json!("\n\nHuman:")),
                 "stop_sequence",
                 Some("\n\nHuman:"),
             ),
-            (FinishReason::Stop, serde_json::json!(42), "end_turn", None),
+            (FinishReason::Stop, None, "end_turn", None),
+            (
+                FinishReason::Stop,
+                Some(serde_json::json!(42)),
+                "end_turn",
+                None,
+            ),
             (
                 FinishReason::Length,
-                serde_json::json!("</answer>"),
+                Some(serde_json::json!("</answer>")),
                 "max_tokens",
                 None,
             ),
             (
                 FinishReason::ContentFilter,
-                serde_json::json!("</answer>"),
+                Some(serde_json::json!("</answer>")),
                 "refusal",
                 None,
             ),
             (
                 FinishReason::ToolCalls,
-                serde_json::json!("</answer>"),
+                Some(serde_json::json!("</answer>")),
                 "tool_use",
                 None,
             ),
             (
                 FinishReason::FunctionCall,
-                serde_json::json!("</answer>"),
+                Some(serde_json::json!("</answer>")),
                 "tool_use",
                 None,
             ),
@@ -1564,7 +1580,9 @@ mod tests {
             };
             converter.append_chunk_events(&content, &mut events);
             let mut terminal = finish_chunk(finish);
-            terminal.nvext = Some(serde_json::json!({"stop_reason": matched}));
+            terminal.nvext = matched
+                .clone()
+                .map(|matched| serde_json::json!({"stop_reason": matched}));
             converter.append_chunk_events(&terminal, &mut events);
             converter.append_end_events(&mut events);
             let values = sse_values(events).await;
@@ -1574,20 +1592,25 @@ mod tests {
                 .unwrap();
             assert_eq!(
                 terminal["delta"]["stop_reason"], expected_reason,
-                "{finish:?}: {matched}"
+                "{finish:?}: {matched:?}"
             );
+            // `.get()` tells a missing key from an explicit `null`; the
+            // Anthropic contract always sends the key.
             assert_eq!(
-                terminal["delta"]["stop_sequence"],
-                serde_json::json!(expected_sequence),
-                "{finish:?}: {matched}"
+                terminal["delta"].get("stop_sequence"),
+                Some(&serde_json::json!(expected_sequence)),
+                "{finish:?}: {matched:?}"
             );
-            assert_eq!(
-                values
-                    .iter()
-                    .filter(|event| event["type"] == "message_delta")
-                    .count(),
-                1
-            );
+            for event_type in ["message_delta", "message_stop"] {
+                assert_eq!(
+                    values
+                        .iter()
+                        .filter(|event| event["type"] == event_type)
+                        .count(),
+                    1,
+                    "{finish:?}: {matched:?}: {event_type}"
+                );
+            }
             assert_eq!(values.last().unwrap()["type"], "message_stop");
         }
     }
@@ -2809,6 +2832,54 @@ mod tests {
             AnthropicStreamEvent::ContentBlockStop { index } => assert_eq!(*index, 0),
             other => panic!("expected text stop at index 0, got {other:?}"),
         }
+    }
+
+    /// Dedicated `refusal` fragments stream as `text_delta` events on the text
+    /// block, after the same chunk's content; empty refusals emit nothing.
+    #[tokio::test]
+    async fn test_refusal_streams_as_text_deltas() {
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
+
+        let mut mixed = text_chunk("Pong.");
+        mixed.inner.choices[0].delta.refusal = Some("I cannot ".into());
+        let mut refusal_only = text_chunk("");
+        refusal_only.inner.choices[0].delta.content = None;
+        refusal_only.inner.choices[0].delta.refusal = Some("help with that.".into());
+        let mut empty_refusal = text_chunk("");
+        empty_refusal.inner.choices[0].delta.content = None;
+        empty_refusal.inner.choices[0].delta.refusal = Some(String::new());
+
+        let mut events = conv.process_chunk(&mixed);
+        events.extend(conv.process_chunk(&refusal_only));
+        let before_empty = events.len();
+        events.extend(conv.process_chunk(&empty_refusal));
+        assert_eq!(
+            events.len(),
+            before_empty,
+            "empty refusal must emit nothing"
+        );
+        assert_eq!(conv.usage.output_tokens, 2);
+
+        let values = sse_values(events).await;
+        assert_eq!(values[0]["type"], "content_block_start");
+        assert_eq!(values[0]["index"], 0);
+        assert_eq!(values[0]["content_block"]["type"], "text");
+        let deltas: Vec<(&serde_json::Value, &str)> = values[1..]
+            .iter()
+            .map(|value| {
+                assert_eq!(value["type"], "content_block_delta");
+                assert_eq!(value["delta"]["type"], "text_delta");
+                (&value["index"], value["delta"]["text"].as_str().unwrap())
+            })
+            .collect();
+        assert_eq!(
+            deltas,
+            vec![
+                (&serde_json::json!(0), "Pong."),
+                (&serde_json::json!(0), "I cannot "),
+                (&serde_json::json!(0), "help with that."),
+            ]
+        );
     }
 
     fn reasoning_chunk(text: &str) -> NvCreateChatCompletionStreamResponse {
