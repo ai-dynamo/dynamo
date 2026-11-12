@@ -200,8 +200,7 @@ func (r *graphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 	// revision. A PodClique without a placement must not stop the write that corrects it.
 	var cyborgPlacements map[string]cyborgPlacement
 	cyborgPlacements, placementErr = r.resolveCyborgPlacements(ctx, pcs, pcsgs, pclqs, requests)
-	cyborgPlacements, pinErr := r.pinCyborgPods(ctx, pclqs, cyborgPlacements)
-	placementErr = errors.Join(placementErr, pinErr)
+	placementErr = errors.Join(placementErr, r.pinCyborgPods(ctx, pclqs, cyborgPlacements))
 
 	// A cache miss or delayed handoff is not cleanup authority; owner GC handles deletion.
 	if dgd == nil {
@@ -305,7 +304,11 @@ func (r *graphReconciler) reconcileWorkloads(
 			deadlineAt = next
 		}
 
-		// A fabric-pod placement reports its own Cyborg capacity changes.
+		// A fabric-pod placement reports its own Cyborg capacity changes. The step that
+		// gives a Pod a lower index is part of the placement from here.
+		if cyborgPlacements, err = r.planCyborgRenumbering(ctx, pclqs, cyborgPlacements); err != nil {
+			return ctrl.Result{}, err
+		}
 		for name, placement := range cyborgPlacements {
 			scalingRequired = scalingRequired || pclqs[name].Spec.Replicas != placement.capacity()
 		}
@@ -350,8 +353,15 @@ func (r *graphReconciler) reconcileWorkloads(
 	// Remove Cyborg Pods outside their placement and write its capacity only after
 	// the PCS is synchronized, as for every replica write. The Pod and PodClique
 	// watches deliver each write, and no later step of this pass depends on Cyborg Pods.
-	if err := r.reconcileCyborgPlacements(ctx, pclqs, cyborgPlacements, scalingBlocked); err != nil {
+	placementRetryAt, err := r.reconcileCyborgPlacements(ctx, pclqs, cyborgPlacements, scalingBlocked)
+	if err != nil {
 		return ctrl.Result{}, err
+	}
+
+	// A lower Cyborg capacity that waits for a removed Pod needs a pass when the
+	// grace period of that Pod ends, also when no Pod event arrives then.
+	if !placementRetryAt.IsZero() && (deadlineAt.IsZero() || placementRetryAt.Before(deadlineAt)) {
+		deadlineAt = placementRetryAt
 	}
 
 	// Scale owned groups only when the rollout permits replica writes.

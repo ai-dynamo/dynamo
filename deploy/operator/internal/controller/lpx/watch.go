@@ -256,7 +256,11 @@ func placedCyborgPodPredicate() predicate.Funcs {
 			return newPod.Labels[cyborgFabricPodLabel] == "" ||
 				oldPod.Labels[cyborgFabricPodLabel] != newPod.Labels[cyborgFabricPodLabel] ||
 				oldPod.Spec.NodeName != newPod.Spec.NodeName ||
-				!oldPod.DeletionTimestamp.Equal(newPod.DeletionTimestamp)
+				!oldPod.DeletionTimestamp.Equal(newPod.DeletionTimestamp) ||
+				// The placement removes a Pod when the kubelet started the Pod that takes
+				// its place, and it removes a Pod in a terminal phase.
+				cyborgPodStarted(oldPod) != cyborgPodStarted(newPod) ||
+				cyborgPodTerminal(oldPod) != cyborgPodTerminal(newPod)
 		},
 		GenericFunc: func(event.GenericEvent) bool { return false },
 	}
