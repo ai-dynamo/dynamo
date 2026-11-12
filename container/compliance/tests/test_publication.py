@@ -300,6 +300,20 @@ def test_release_cannot_copy_before_gate_or_read_gate_from_source_commit():
     assert "|| exit 1" in copy
 
 
+def test_release_manifest_path_uses_runner_context_only_after_runner_assignment():
+    root = Path(__file__).resolve().parents[3]
+    workflow = yaml.safe_load((root / ".github/workflows/release.yml").read_text())
+    job = workflow["jobs"]["release-publish"]
+    # GitHub rejects runner.* in jobs.<job_id>.env before any job is created.
+    # The path belongs in step env, where runner.temp is available.
+    assert not any("runner." in str(value) for value in job.get("env", {}).values())
+    copy = next(step for step in job["steps"] if step.get("id") == "copy_images")
+    assert (
+        copy["env"]["PUBLICATION_MANIFEST"]
+        == "${{ runner.temp }}/publication-audit/publication-manifest.json"
+    )
+
+
 @pytest.mark.parametrize(
     "workflow_name,operator_build",
     [

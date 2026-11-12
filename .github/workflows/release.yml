@@ -542,7 +542,6 @@ jobs:
       VLLM_EFA_BUILD_RESULT: ${{ inputs.vllm_efa_build_result }}
       SGLANG_EFA_BUILD_RESULT: ${{ inputs.sglang_efa_build_result }}
       TRTLLM_EFA_BUILD_RESULT: ${{ inputs.trtllm_efa_build_result }}
-      PUBLICATION_MANIFEST: ${{ runner.temp }}/publication-audit/publication-manifest.json
     steps:
       # Re-verify the ops gate in-job (see authorize): blocks re-run bypass.
       - *ops-token
@@ -699,6 +698,7 @@ jobs:
       - name: Copy images to NGC
         id: copy_images
         env:
+          PUBLICATION_MANIFEST: ${{ runner.temp }}/publication-audit/publication-manifest.json
           NGC_REGISTRY: nvcr.io
           NGC_ORG: ${{ secrets.NGC_PUBLISH_ORG }}
           NGC_VERSION_TAG: ${{ needs.prepare-release.outputs.ngc_version_tag }}

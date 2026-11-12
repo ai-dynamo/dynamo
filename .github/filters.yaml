@@ -182,6 +182,7 @@ core:
   - *ci
   - 'container/render.py'
   - 'container/Dockerfile.template'
+  - 'container/Dockerfile.compliance-audit'
   - 'container/context.yaml'
   - 'container/templates/args.Dockerfile'
   - 'container/templates/dynamo_*'

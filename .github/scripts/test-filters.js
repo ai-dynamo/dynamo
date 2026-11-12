@@ -120,6 +120,11 @@ const testCases = [
     expect: { rust: true },
     desc: 'native response schema fixtures trigger Rust checks'
   },
+  {
+    file: 'container/Dockerfile.compliance-audit',
+    expect: { core: true },
+    desc: 'the universal image auditor triggers all runtime pipelines'
+  },
   // dev/local-dev templates build only the dev images -- they must NOT pull in
   // `core` (all runtime builds + the GPU test matrix), and must not be silently
   // uncovered the way they were when they sat in `ignore`.
