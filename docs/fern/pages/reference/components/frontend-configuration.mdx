@@ -115,6 +115,29 @@ The Rust HTTP server also reads these environment variables, which are not expos
   Unset, `0`, invalid, or unrepresentable values disable keep-alive comments.
 </ParamField>
 
+### Backend routes
+
+A worker can serve HTTP APIs of its own through the Frontend, for resources such as sessions that
+keep state on the worker that created them. It declares the base URL of its HTTP server and the
+path prefixes it serves there in its model card's `runtime_data`:
+
+```json
+"http_routes": {"url": "http://10.0.0.5:8081", "prefixes": ["/v1/sessions"]}
+```
+
+A request that no Frontend route matches goes to a worker whose prefix covers it, among the workers
+in the namespaces the Frontend serves. Responses, including SSE, stream back, and WebSocket
+upgrades are tunnelled. Request bodies are limited by `DYN_HTTP_BODY_LIMIT_MB`, and forwarded
+responses count as inflight during graceful shutdown.
+
+- `POST PREFIX` creates a resource on a worker the Frontend picks at random. The JSON body's `id`
+  names the resource (`A-Z a-z 0-9 - . _ ~`); when the body has none, the Frontend adds one.
+- `PREFIX/{id}` and every path under it go to the worker that holds `{id}`. The Frontend binds
+  each resource to its worker in a session affinity table; for a resource it holds no binding for,
+  it asks the workers `GET PREFIX/{id}`, passing on the request's `Authorization` header.
+- The Frontend returns `404` when no worker holds `{id}`, `503` when a worker gives no answer, and
+  `501` for other requests to `PREFIX` itself.
+
 ## Router
 
 This section is the canonical CLI and environment-variable reference for the frontend's embedded

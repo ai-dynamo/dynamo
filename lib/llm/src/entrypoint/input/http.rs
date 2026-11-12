@@ -236,20 +236,22 @@ async fn run_with_router_plugins(
             ref chat_engine_factory,
             ref prefill_load_estimator,
         } => {
-            // Pass the discovery client so the /health endpoint can query active instances
-            http_service_builder =
-                http_service_builder.discovery(Some(distributed_runtime.discovery()));
+            // Create namespace filter from model configuration
+            let namespace_filter = NamespaceFilter::from_namespace_and_prefix(
+                model.namespace(),
+                model.namespace_prefix(),
+            );
+            // Pass the discovery client so the /health endpoint can query active instances,
+            // and backend routes can find the workers that declare them
+            http_service_builder = http_service_builder
+                .discovery(Some(distributed_runtime.discovery()))
+                .namespace_filter(Some(namespace_filter.clone()));
             let http_service = http_service_builder.build()?;
 
             let router_config = model.router_config();
             let migration_limit = model.migration_limit();
             let migration_max_seq_len = model.migration_max_seq_len();
             // Listen for models registering themselves, add them to HTTP service
-            // Create namespace filter from model configuration
-            let namespace_filter = NamespaceFilter::from_namespace_and_prefix(
-                model.namespace(),
-                model.namespace_prefix(),
-            );
             let local_model_path =
                 (!model.path().as_os_str().is_empty()).then(|| model.path().to_path_buf());
             let generate_engine_capabilities = http_service.generate_engine_capabilities();

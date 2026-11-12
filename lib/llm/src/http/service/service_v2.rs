@@ -17,6 +17,7 @@ use axum::response::IntoResponse;
 
 use super::Metrics;
 use super::RouteDoc;
+use super::backend_routes::{BackendRoutes, WorkerDiscovery};
 use super::frontend_extension::{
     FrontendExtensionContext, FrontendRouteExtension, FrontendRouteSet,
 };
@@ -30,6 +31,7 @@ use crate::discovery::ModelManager;
 use crate::endpoint_type::EndpointType;
 use crate::kv_router::metrics::{RoutingOverheadMetrics, register_router_queue_metrics};
 use crate::local_model::runtime_config::SGLANG_GENERATE_CAPABILITY;
+use crate::namespace::NamespaceFilter;
 use crate::reasoning_field::ReasoningField;
 use crate::request_template::RequestTemplate;
 use anyhow::{Context, Result};
@@ -75,23 +77,37 @@ struct UnmatchedRouteState {
     /// Base path of the Anthropic Messages API, or `None` when those endpoints
     /// are disabled and every miss belongs to the OpenAI surface.
     anthropic_path: Option<Arc<str>>,
+    backend_routes: Option<Arc<BackendRoutes>>,
+    /// Counts forwarded responses as inflight, and ends forwarded WebSocket
+    /// tunnels on shutdown.
+    service: Arc<State>,
 }
 
-/// Returns a protocol-compatible JSON `404` error response for an
-/// unmatched route.
+/// Forwards the request when a worker declares a route covering it; otherwise
+/// returns a protocol-compatible JSON `404` error response.
 ///
 /// Requests under the configured Anthropic Messages path receive an Anthropic
 /// error envelope. All other requests receive an OpenAI-compatible envelope.
 async fn unmatched_route_fallback(
     axum::extract::State(state): axum::extract::State<UnmatchedRouteState>,
-    method: axum::http::Method,
-    uri: axum::http::Uri,
+    request: axum::extract::Request,
 ) -> axum::response::Response {
+    if let Some(routes) = &state.backend_routes
+        && let Some(target) = routes.resolve(request.uri())
+    {
+        // Forwarded work is admitted like inference.
+        let Some(permit) = admit_inflight(&state.service) else {
+            return draining_inference_response(request.version());
+        };
+        let cancel = state.service.cancel_token().clone();
+        return routes.forward(request, target, cancel, permit).await;
+    }
+    let (method, uri) = (request.method(), request.uri());
     match state.anthropic_path.as_deref() {
         Some(path) if path_within_namespace(uri.path(), path) => {
-            super::anthropic::unmatched_route_response(&method, &uri)
+            super::anthropic::unmatched_route_response(method, uri)
         }
-        _ => super::openai::unmatched_route_response(&method, &uri).into_response(),
+        _ => super::openai::unmatched_route_response(method, uri).into_response(),
     }
 }
 
@@ -171,17 +187,12 @@ impl InferenceReadinessState {
     }
 }
 
-async fn track_inflight_inference(
-    axum::extract::State(readiness): axum::extract::State<Arc<InferenceReadinessState>>,
-    request: axum::extract::Request,
-    next: axum::middleware::Next,
-) -> axum::response::Response {
-    use futures::StreamExt;
-    let state = &readiness.state;
-
+/// Admits a request whose response counts as inflight until the returned
+/// permit drops, or refuses it (`None`) once the frontend is draining.
+fn admit_inflight(state: &State) -> Option<InflightPermit> {
     // Requests rejected during draining should not extend the drain window.
     if !state.is_ready() {
-        return readiness.rejection(&request);
+        return None;
     }
 
     let permit = state.acquire_inflight();
@@ -189,8 +200,21 @@ async fn track_inflight_inference(
     // before this request is counted as inflight.
     if !state.is_ready() {
         drop(permit);
-        return readiness.rejection(&request);
+        return None;
     }
+    Some(permit)
+}
+
+async fn track_inflight_inference(
+    axum::extract::State(readiness): axum::extract::State<Arc<InferenceReadinessState>>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use futures::StreamExt;
+
+    let Some(permit) = admit_inflight(&readiness.state) else {
+        return readiness.rejection(&request);
+    };
 
     let response = next.run(request).await;
     let (parts, body) = response.into_parts();
@@ -1000,6 +1024,11 @@ pub struct HttpServiceConfig {
     #[builder(default)]
     frontend_route_extensions: Vec<FrontendRouteExtension>,
 
+    /// Namespaces whose workers this frontend serves; backend routes reach
+    /// only those. `None` means every namespace.
+    #[builder(default)]
+    namespace_filter: Option<NamespaceFilter>,
+
     #[builder(default = "false")]
     enable_chat_endpoints: bool,
 
@@ -1613,6 +1642,15 @@ impl HttpServiceConfigBuilder {
 
         let model_manager = Arc::new(ModelManager::new());
         let cancel_token = config.cancel_token.unwrap_or_default().child_token();
+        // Backend routes find workers through real discovery only.
+        let backend_workers = config.discovery.clone().map(|discovery| WorkerDiscovery {
+            discovery,
+            namespaces: config
+                .namespace_filter
+                .clone()
+                .unwrap_or(NamespaceFilter::Global),
+            cancel: cancel_token.child_token(),
+        });
         // Use the provided discovery client, or fall back to a no-op memory-backed one
         // (for in-process modes that don't need discovery)
         let discovery_client = config.discovery.unwrap_or_else(|| {
@@ -1851,7 +1889,8 @@ impl HttpServiceConfigBuilder {
 
         // Return protocol-compatible JSON errors for unmatched routes. Register this router
         // outside `track_inflight_inference` so unmatched requests do not acquire an
-        // inference permit or return `503` while the service is draining.
+        // inference permit or return `503` while the service is draining; requests a
+        // backend route covers do their own admission in `unmatched_route_fallback`.
         let unmatched_router = axum::Router::new()
             .fallback(unmatched_route_fallback)
             .with_state(UnmatchedRouteState {
@@ -1860,6 +1899,11 @@ impl HttpServiceConfigBuilder {
                         .unwrap_or_else(|_| super::anthropic::DEFAULT_MESSAGES_PATH.to_string())
                         .into()
                 }),
+                backend_routes: backend_workers
+                    .map(BackendRoutes::new)
+                    .transpose()?
+                    .map(Arc::new),
+                service: state.clone(),
             })
             .layer(
                 // Use the inference span maker so 404s retain method, URI, and request ID
@@ -3158,6 +3202,194 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(20)).await;
 
         (port, state, handle)
+    }
+
+    /// The discovery through which a frontend finds a worker serving
+    /// `/v1/custom` at `upstream`.
+    async fn custom_route_worker(upstream: std::net::SocketAddr) -> Arc<dyn Discovery> {
+        use dynamo_runtime::discovery::{DiscoverySpec, MockDiscovery, SharedMockRegistry};
+
+        let registry = SharedMockRegistry::new();
+        let card = serde_json::json!({
+            "display_name": "model",
+            "runtime_config": {"runtime_data": {"http_routes": {
+                "url": format!("http://{upstream}"),
+                "prefixes": ["/v1/custom"],
+            }}},
+        });
+        let spec = DiscoverySpec::from_model(
+            "ns".to_string(),
+            "backend".to_string(),
+            "generate".to_string(),
+            &card,
+        )
+        .unwrap();
+        MockDiscovery::new(Some(1), registry.clone())
+            .register(spec)
+            .await
+            .unwrap();
+        Arc::new(MockDiscovery::new(None, registry))
+    }
+
+    /// Serves `router`, plus `GET /v1/custom/s1`, the resource the forwarded
+    /// requests name.
+    async fn custom_route_upstream(router: axum::Router) -> std::net::SocketAddr {
+        let router = router.route("/v1/custom/s1", axum::routing::get(|| async { "s1" }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        addr
+    }
+
+    /// Waits until the frontend on `port` forwards `/v1/custom/s1`, and no
+    /// request is inflight.
+    async fn wait_for_custom_route(port: u16, state: &State) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let url = format!("http://localhost:{port}/v1/custom/s1");
+            while reqwest::get(&url).await.unwrap().status() != reqwest::StatusCode::OK {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the frontend sees the worker's route");
+        assert!(
+            state
+                .wait_inflight_zero_or_timeout(Duration::from_secs(5))
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn test_forwarded_stream_is_tracked_inflight() {
+        use futures::StreamExt;
+
+        let release = Arc::new(Notify::new());
+        let released = release.clone();
+        let upstream = custom_route_upstream(axum::Router::new().route(
+            "/v1/custom/s1/stream",
+            axum::routing::get(move || async move {
+                let first = futures::stream::once(async { Ok::<_, std::io::Error>("first") });
+                let last = futures::stream::once(async move {
+                    released.notified().await;
+                    Ok::<_, std::io::Error>("last")
+                });
+                Body::from_stream(first.chain(last))
+            }),
+        ))
+        .await;
+        let discovery = custom_route_worker(upstream).await;
+        let (port, state, handle) =
+            spawn_service(|builder| builder.discovery(Some(discovery))).await;
+        wait_for_custom_route(port, &state).await;
+
+        let mut resp = reqwest::get(format!("http://localhost:{port}/v1/custom/s1/stream"))
+            .await
+            .expect("request failed");
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        assert_eq!(&resp.chunk().await.unwrap().unwrap()[..], b"first");
+        assert_eq!(
+            state.inflight_count(),
+            1,
+            "open forwarded stream counts as inflight"
+        );
+
+        release.notify_one();
+        assert_eq!(&resp.chunk().await.unwrap().unwrap()[..], b"last");
+        assert!(resp.chunk().await.unwrap().is_none());
+        assert!(
+            state
+                .wait_inflight_zero_or_timeout(Duration::from_secs(5))
+                .await,
+            "finished forwarded stream releases its permit"
+        );
+
+        handle.abort();
+    }
+
+    /// The service shares the runtime's token, as the frontend entrypoint wires
+    /// it, so the stream must outlive that token's cancellation.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_shutdown_drains_forwarded_stream_then_ends_it() {
+        use futures::StreamExt;
+
+        temp_env::async_with_vars(
+            [(env_llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS, Some("2"))],
+            async move {
+                // An event stream that never ends on its own.
+                let upstream = custom_route_upstream(axum::Router::new().route(
+                    "/v1/custom/s1/events",
+                    axum::routing::get(|| async {
+                        let first =
+                            futures::stream::once(async { Ok::<_, std::io::Error>("connected") });
+                        Body::from_stream(first.chain(futures::stream::pending()))
+                    }),
+                ))
+                .await;
+                let discovery = custom_route_worker(upstream).await;
+
+                let runtime = CancellationToken::new();
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let port = listener.local_addr().unwrap().port();
+                let service = HttpService::builder()
+                    .port(port)
+                    .cancel_token(Some(runtime.clone()))
+                    .discovery(Some(discovery))
+                    .build()
+                    .unwrap();
+                let state = service.state_clone();
+                let handle = tokio::spawn({
+                    let runtime = runtime.clone();
+                    async move { service.run_with_listener(runtime, listener).await }
+                });
+                wait_for_custom_route(port, &state).await;
+
+                let mut resp = reqwest::get(format!("http://localhost:{port}/v1/custom/s1/events"))
+                    .await
+                    .expect("request failed");
+                assert_eq!(&resp.chunk().await.unwrap().unwrap()[..], b"connected");
+
+                let started = std::time::Instant::now();
+                runtime.cancel();
+                let ended = tokio::time::timeout(Duration::from_secs(10), resp.chunk()).await;
+                let held = started.elapsed();
+                assert!(ended.is_ok(), "the stream must end after the drain window");
+                assert!(
+                    held >= Duration::from_millis(1500),
+                    "the stream must be held through the drain window, ended after {held:?}"
+                );
+                handle.await.unwrap().unwrap();
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_draining_refuses_new_forwarded_requests() {
+        let upstream = custom_route_upstream(axum::Router::new()).await;
+        let discovery = custom_route_worker(upstream).await;
+        let (port, state, handle) =
+            spawn_service(|builder| builder.discovery(Some(discovery))).await;
+        wait_for_custom_route(port, &state).await;
+        state.start_draining();
+
+        let client = reqwest::Client::new();
+        let forwarded = client
+            .get(format!("http://localhost:{port}/v1/custom/s1"))
+            .send()
+            .await
+            .expect("request failed");
+        assert_eq!(forwarded.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(state.inflight_count(), 0);
+
+        let unmatched = client
+            .get(format!("http://localhost:{port}/v1/unknown"))
+            .send()
+            .await
+            .expect("request failed");
+        assert_eq!(unmatched.status(), reqwest::StatusCode::NOT_FOUND);
+
+        handle.abort();
     }
 
     async fn spawn_default_service() -> (u16, tokio::task::JoinHandle<()>) {

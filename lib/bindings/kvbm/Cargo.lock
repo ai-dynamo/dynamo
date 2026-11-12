@@ -2299,6 +2299,7 @@ dependencies = [
  "half",
  "hf-hub",
  "http-body-util",
+ "hyper",
  "hyper-util",
  "image",
  "ipnet",
