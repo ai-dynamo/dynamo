@@ -22,7 +22,7 @@
 //! Producer events whose `block_hash` is `compute_block_hash(tokens, salt_hash)` therefore
 //! match the router's `compute_block_hash_for_seq(tokens, _, BlockHashOptions { .. })`
 //! byte-for-byte — required for kv-router's indexers (which key on
-//! both `tokens_hash` and the `seq_hash` chain) to find matches against consolidator-emitted
+//! both `tokens_hash` and the `seq_hash` chain) to find matches against producer-emitted
 //! events.
 //!
 //! Multimodal data is **not** part of the salt — it is folded into per-block hashing
