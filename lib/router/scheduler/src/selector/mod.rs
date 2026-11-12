@@ -36,8 +36,8 @@ use crate::kv_hints::{
     KvTransferScope, KvTransferSourceChoice, KvTransferSourceSummary, resolve_transfer_sources,
 };
 use dynamo_worker_selection::{
-    CacheSnapshot, CandidateData, WorkerCacheData, WorkerCapacity, WorkerInputRows,
-    WorkerTransferInput,
+    CacheSnapshot, CandidateData, ResidentBlockSource, WorkerCacheData, WorkerCapacity,
+    WorkerInputRows, WorkerTransferInput,
 };
 pub use dynamo_worker_selection::{
     CandidatePreparer, CandidateRank, CandidateRowSource, PreparedRows, RankVisitor, RowPick,
@@ -48,6 +48,7 @@ use dynamo_worker_selection::{RuntimePolicyConfig, RuntimePolicyError, RuntimePo
 use super::filter::{RoutingEligibility, WorkerEligibilityError};
 use super::types::{KvSchedulerError, SchedulingRequest, SchedulingResponse};
 use crate::protocols::{SelectionLogFields, WorkerConfigLike, WorkerSelectionResult};
+use dynamo_kv_indexer::ResidentBlockCounts;
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 use dynamo_worker_selection::{SelectionTrace, SelectionTraceSpec};
 
@@ -131,6 +132,9 @@ pub enum WorkerSelectionInput<'a, C: WorkerConfigLike> {
         request: &'a SchedulingRequest,
         eligibility: RoutingEligibility<'a>,
         block_size: u32,
+        /// The partition's live resident block counts, lent by the host for a policy that
+        /// declared [`WorkerInputs::RESIDENT_BLOCKS`]; `None` otherwise.
+        resident_blocks: Option<&'a ResidentBlockCounts>,
     },
 }
 
@@ -153,7 +157,36 @@ impl<'a, C: WorkerConfigLike> WorkerSelectionInput<'a, C> {
             request,
             eligibility,
             block_size,
+            resident_blocks: None,
         }
+    }
+
+    /// Lend the partition's live resident block counts to this selection. The host passes them
+    /// only for a policy that declared [`WorkerInputs::RESIDENT_BLOCKS`]; every component's
+    /// snapshot borrows them for this selection alone.
+    pub fn with_resident_blocks(self, resident_blocks: Option<&'a ResidentBlockCounts>) -> Self {
+        let Self::Configured {
+            workers,
+            request,
+            eligibility,
+            block_size,
+            ..
+        } = self;
+        Self::Configured {
+            workers,
+            request,
+            eligibility,
+            block_size,
+            resident_blocks,
+        }
+    }
+
+    /// The resident block counts lent to this selection, if any.
+    pub fn resident_blocks(&self) -> Option<&'a ResidentBlockCounts> {
+        let Self::Configured {
+            resident_blocks, ..
+        } = self;
+        *resident_blocks
     }
 
     pub fn into_configured(self) -> ConfiguredSelectionInputs<'a, C> {
@@ -162,6 +195,7 @@ impl<'a, C: WorkerConfigLike> WorkerSelectionInput<'a, C> {
             request,
             eligibility,
             block_size,
+            ..
         } = self;
         (workers, request, eligibility, block_size)
     }
@@ -217,6 +251,8 @@ pub(super) struct SelectionRowSource<'a, C: WorkerConfigLike> {
     pub(super) workers: &'a HashMap<WorkerId, C>,
     pub(super) eligibility: RoutingEligibility<'a>,
     pub(super) block_size: u32,
+    /// The partition's live resident block counts, when the host lent them for this selection.
+    resident_blocks: Option<&'a ResidentBlockCounts>,
     /// Only tracked requests report cache reuse, so only their rows carry raw cached tokens.
     tracked: bool,
     pub(super) kv_transfer_sources: OnceCell<KvTransferSourceSummary>,
@@ -237,6 +273,7 @@ impl<'a, C: WorkerConfigLike> SelectionRowSource<'a, C> {
             workers,
             eligibility,
             block_size,
+            resident_blocks: None,
             tracked: request.mode.is_tracked(),
             kv_transfer_sources: OnceCell::new(),
             #[cfg(any(test, feature = "testing", feature = "bench"))]
@@ -246,6 +283,7 @@ impl<'a, C: WorkerConfigLike> SelectionRowSource<'a, C> {
 
     /// The source for a host's selection input, once its pinned worker is validated.
     fn from_input(input: WorkerSelectionInput<'a, C>) -> Result<Self, KvSchedulerError> {
+        let resident_blocks = input.resident_blocks();
         let (workers, request, eligibility, block_size) = input.into_configured();
         eligibility.validate_pinned_worker_allowed()?;
         if let Some(worker) = eligibility.pinned_worker() {
@@ -259,13 +297,21 @@ impl<'a, C: WorkerConfigLike> SelectionRowSource<'a, C> {
                 Err(_) => return Err(KvSchedulerError::NoEndpoints),
             }
         }
-        Ok(Self::new(request, workers, eligibility, block_size))
+        let mut source = Self::new(request, workers, eligibility, block_size);
+        source.resident_blocks = resident_blocks;
+        Ok(source)
     }
 
-    /// The policy's view of the request, pinned to what eligibility imposes.
-    pub(super) fn context(&self) -> WorkerSelectionContext<'a> {
+    /// The policy's view of the request, pinned to what eligibility imposes. It borrows this
+    /// source for the resident block counts the host lent, so it lives no longer than the source.
+    pub(super) fn context(&self) -> WorkerSelectionContext<'_> {
         selection_context(self.request, self.block_size)
             .with_pinned_worker(self.eligibility.pinned_worker())
+            .with_resident_blocks(
+                self.resident_blocks
+                    .is_some()
+                    .then_some(self as &dyn ResidentBlockSource),
+            )
     }
 
     /// The request's fetch sources for the targets in `scope`, built on the
@@ -481,6 +527,13 @@ impl<C: WorkerConfigLike> CandidateRowSource for SelectionRowSource<'_, C> {
     }
 }
 
+impl<C: WorkerConfigLike> ResidentBlockSource for SelectionRowSource<'_, C> {
+    #[inline(always)]
+    fn resident_blocks(&self, worker: WorkerWithDpRank) -> Option<u64> {
+        self.resident_blocks.and_then(|counts| counts.get(worker))
+    }
+}
+
 /// The fields of `request` a policy may read, as [`WorkerSelectionContext`] exposes them.
 fn selection_context(request: &SchedulingRequest, block_size: u32) -> WorkerSelectionContext<'_> {
     WorkerSelectionContext::new(request.isl_tokens, block_size)
@@ -506,6 +559,8 @@ fn cache_snapshot(request: &SchedulingRequest) -> CacheSnapshot<'_> {
     CacheSnapshot {
         shared_hits: request.shared_cache_hits.as_ref(),
         has_tier_matches: request.has_tier_matches(),
+        // Classifier rows never carry counts; only worker selection reads them.
+        resident_blocks: None,
     }
 }
 

@@ -10,6 +10,7 @@
 
 mod config;
 
+pub use dynamo_worker_selection::experimental;
 pub use dynamo_worker_selection::selection_config;
 pub use dynamo_worker_selection::{
     CacheSnapshot, CandidateData, CandidatePreparer, CandidateRank, CandidateRowSource,
