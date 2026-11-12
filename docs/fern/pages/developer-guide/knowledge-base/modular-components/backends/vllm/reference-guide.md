@@ -92,7 +92,11 @@ Dynamo supports [vLLM prompt embeddings](https://docs.vllm.ai/en/stable/features
 **Experimental, unreleased.** Aggregated Python vLLM token workers started with
 `--enable-multimodal` accept explicit custom parts in user and tool messages:
 
-Custom content requires the Rust frontend preprocessing path (`--dyn-chat-processor dynamo`, the default). The Python frontend processor (`--dyn-chat-processor vllm`) and worker-side tokenization (`--use-vllm-tokenizer`) are unsupported. Keep tokenization in the Rust frontend when sending custom content.
+Custom content requires the Rust frontend preprocessing path
+(`--dyn-chat-processor dynamo`, the default). The Python frontend processor
+(`--dyn-chat-processor vllm`) and worker-side tokenization
+(`--use-vllm-tokenizer`) are unsupported. Keep tokenization in the Rust frontend
+when sending custom content.
 
 The example combines projected chemistry soft tokens with a standard image URL.
 The model must support both the registered chemistry modality and image inputs.
@@ -140,10 +144,9 @@ text part. Dynamo neither derives a universal marker from `kind` nor changes the
 model's template. Auxiliary messages retain the same payload-free custom parts,
 role metadata, and ordering; payloads travel only in `multi_modal_data`.
 
-For an already rendered prompt, `nvext.use_raw_prompt: true` still requires
-exactly one user message and concatenates its text parts without another template.
-`nvext.token_data` likewise supplies already rendered token IDs. Those bypass modes
-remain responsible for their complete model-specific prompt/token sequence.
+For an already rendered prompt, `nvext.token_data` supplies token IDs directly.
+Clients using it remain responsible for the complete model-specific token
+sequence.
 Engine token IDs/logprobs remain available through `nvext.engine_data`
 independently of parser-rewritten choice text.
 

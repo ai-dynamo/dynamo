@@ -1534,6 +1534,34 @@ async def test_artifact_request_rejects_unsupported_worker_mode(worker_mode, mes
 class TestDecodeWorkerMultimodalBranching:
     """Tests for the mode-aware multimodal branching in _generate_token_mode."""
 
+    @pytest.mark.parametrize("role", ["user", "tool"])
+    async def test_text_mode_rejects_custom_message_before_rendering(self, role):
+        handler = _make_decode_handler(disaggregation_mode="AGGREGATED")
+        handler.use_vllm_tokenizer = True
+        request = {
+            "messages": [
+                {
+                    "role": role,
+                    "content": [
+                        {"type": "text", "text": "inspect this structure"},
+                        {
+                            "type": "custom",
+                            "kind": "chemistry",
+                            "fields": {"data_base64": "opaque"},
+                        },
+                    ],
+                }
+            ]
+        }
+        if role == "tool":
+            request["messages"][0]["tool_call_id"] = "call_1"
+
+        with pytest.raises(mod.InvalidArgument, match="--use-vllm-tokenizer"):
+            async for _ in handler.generate(request, MagicMock()):
+                pass
+
+        handler.input_param_manager.get_input_param.assert_not_called()
+
     @pytest.mark.parametrize(
         "request_payload",
         [
@@ -2019,6 +2047,7 @@ async def test_prefill_delegates_mode_policy_to_shared_processor():
         multi_modal_data,
         log_prefix="Prefill ",
         mm_processor_kwargs=mm_processor_kwargs,
+        backend_owned=False,
     )
 
 

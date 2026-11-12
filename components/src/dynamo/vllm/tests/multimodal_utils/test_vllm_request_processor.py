@@ -131,7 +131,7 @@ async def test_custom_json_disaggregation_is_rejected(model, mode):
         "token_ids": [1, 2, 3],
         "multi_modal_data": {"custom_input": [{"Json": {"payload": "x"}}]},
     }
-    with pytest.raises(ValueError, match="supported only in aggregated"):
+    with pytest.raises(mod.InvalidArgument, match="supported only in aggregated"):
         await processor.prepare_input(request, "request-1", None, mode)
 
 
@@ -2594,7 +2594,27 @@ async def test_json_and_media_engine_key_collision_is_rejected():
             "image": [{"Json": {"data": "opaque"}}],
         },
     }
-    with pytest.raises(ValueError, match="same engine modality"):
+    with pytest.raises(mod.InvalidArgument, match="same engine modality"):
+        await processor.prepare_input(
+            request, "request-1", None, DisaggregationMode.AGGREGATED
+        )
+
+
+@pytest.mark.asyncio
+async def test_custom_json_cannot_merge_with_processed_media():
+    processor = _processor()
+    processor.try_receive_mm_kwargs = AsyncMock(
+        return_value={"type": "multimodal", "prompt_token_ids": [1, 99, 2]}
+    )
+    request = {
+        "token_ids": [1, 2],
+        "multi_modal_data": {
+            "image_url": [{"Url": "https://image"}],
+            "chemistry": [{"Json": {"data": "opaque"}}],
+        },
+    }
+
+    with pytest.raises(mod.InvalidArgument, match="frontend-processed multimodal"):
         await processor.prepare_input(
             request, "request-1", None, DisaggregationMode.AGGREGATED
         )

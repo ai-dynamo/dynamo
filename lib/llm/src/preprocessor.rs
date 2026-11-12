@@ -374,9 +374,6 @@ fn tool_content_part_as_user(
     part: &ChatCompletionRequestToolMessageContentPart,
 ) -> Cow<'_, ChatCompletionRequestUserMessageContentPart> {
     Cow::Owned(match part {
-        ChatCompletionRequestToolMessageContentPart::Custom(part) => {
-            ChatCompletionRequestUserMessageContentPart::Custom(part.clone())
-        }
         ChatCompletionRequestToolMessageContentPart::Text(part) => {
             ChatCompletionRequestUserMessageContentPart::Text(part.clone())
         }
@@ -1864,8 +1861,6 @@ fn template_messages(request: &impl OAIChatLikeRequest) -> Result<serde_json::Va
 /// HuggingFace's unique continue-final-message marker when that flag is set.
 /// Other trait methods delegate to the inner request, except typed_messages:
 /// rendering must use the transformed messages rather than the original slice.
-/// Backend JSON payloads stay out of templates; the original typed content
-/// remains available to multimodal preprocessing.
 struct NormalizedArgsRequest<'a, R> {
     inner: &'a R,
     normalize_tool_call_args: bool,
@@ -1883,7 +1878,7 @@ impl<R: OAIChatLikeRequest> OAIChatLikeRequest for NormalizedArgsRequest<'_, R> 
     }
 
     fn messages(&self) -> minijinja::value::Value {
-        let mut json = template_messages(self.inner).unwrap_or_default();
+        let mut json = serde_json::to_value(self.inner.messages()).unwrap_or_default();
         if self.normalize_tool_call_args
             && let Err(e) = crate::preprocessor::prompt::normalize_tool_call_arguments(&mut json)
         {
@@ -4131,7 +4126,6 @@ impl OpenAIPreprocessor {
         };
         let formatted_prompt = if self.normalize_tool_call_args
             || continue_final
-            || has_custom_content(request)
             || rendering.is_some()
             || named_tool.is_some()
         {
@@ -21406,7 +21400,7 @@ mod custom_content_template_tests {
     // Consumer-owned template; these marker spellings are confined to tests.
     const CUSTOM_TEMPLATE: &str = include_str!("../tests/data/custom_modality_chat_template.jinja");
 
-    fn positional_preprocessor() -> OpenAIPreprocessor {
+    fn custom_preprocessor(template: &str) -> OpenAIPreprocessor {
         let mut card = crate::model_card::ModelDeploymentCard::load_from_disk(
             "tests/data/sample-models/mock-llama-3.1-8b-instruct",
             None,
@@ -21422,8 +21416,7 @@ mod custom_content_template_tests {
             .unwrap_or_else(|_| panic!("test preprocessor unexpectedly shared"));
         let dynamo_renderer::PromptFormatter::OAI(formatter) =
             dynamo_renderer::PromptFormatter::from_parts(
-                serde_json::from_value(serde_json::json!({"chat_template":CUSTOM_TEMPLATE}))
-                    .unwrap(),
+                serde_json::from_value(serde_json::json!({"chat_template":template})).unwrap(),
                 dynamo_renderer::ContextMixins::default(),
                 true,
             )
@@ -21434,7 +21427,7 @@ mod custom_content_template_tests {
 
     #[tokio::test]
     async fn custom_positions_match_rendered_markers_and_ordered_worker_payloads() {
-        let preprocessor = positional_preprocessor();
+        let preprocessor = custom_preprocessor(CUSTOM_TEMPLATE);
         for role in ["user", "tool"] {
             let image = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
             let first =
@@ -21525,6 +21518,68 @@ mod custom_content_template_tests {
                 original["messages"][0]["content"][5]["fields"],
                 chemistry[1]
             );
+        }
+    }
+
+    #[test]
+    fn custom_content_preserves_custom_tool_history_during_rendering() {
+        let template = concat!(
+            "{% for message in messages %}",
+            "{% for call in message.tool_calls or [] %}",
+            "{{ call.function.name }}={{ call.function.arguments.input }};{% endfor %}",
+            "{% if message.content is not string %}{% for part in message.content or [] %}",
+            "{% if part.type == 'custom' %}{% if part.fields is defined %}",
+            "{{ raise_exception('custom payload reached template') }}{% endif %}",
+            "<{{ part.kind }}>{% endif %}{% endfor %}{% endif %}{% endfor %}",
+        );
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model":"test", "messages":[
+                {"role":"assistant", "tool_calls":[{
+                    "id":"call_1", "type":"custom",
+                    "custom":{"name":"patch", "input":"change x"}
+                }]},
+                {"role":"user", "content":[{
+                    "type":"custom", "kind":"chemistry",
+                    "fields":{"data_base64":"SECRET"}
+                }]}
+            ],
+            "tools":[{"type":"custom", "custom":{"name":"patch"}}],
+            "add_generation_prompt":false
+        }))
+        .unwrap();
+        for normalize_tool_call_args in [false, true] {
+            let mut preprocessor = custom_preprocessor(template);
+            preprocessor.normalize_tool_call_args = normalize_tool_call_args;
+            let rendered = preprocessor.apply_template(&request).unwrap().unwrap();
+            assert_eq!(rendered.as_str(), "patch=change x;<chemistry>");
+        }
+    }
+
+    #[test]
+    fn chat_raw_prompt_flag_keeps_template_rendering_with_custom_content() {
+        let preprocessor = custom_preprocessor(CUSTOM_TEMPLATE);
+        for with_system in [false, true] {
+            let mut messages = vec![serde_json::json!({"role":"user", "content":[
+                {"type":"text", "text":"Look"},
+                {"type":"custom", "kind":"chemistry", "fields":{"data_base64":"SECRET"}}
+            ]})];
+            if with_system {
+                messages.insert(0, serde_json::json!({"role":"system", "content":"Rules"}));
+            }
+            let request: NvCreateChatCompletionRequest =
+                serde_json::from_value(serde_json::json!({
+                    "model":"test", "messages":messages,
+                    "nvext":{"use_raw_prompt":true}, "add_generation_prompt":false
+                }))
+                .unwrap();
+            crate::engines::ValidateRequest::validate(&request).unwrap();
+            let expected = if with_system {
+                "<|system|>Rules<|end|><|user|>Look<|chem_projected|><|end|>"
+            } else {
+                "<|user|>Look<|chem_projected|><|end|>"
+            };
+            let rendered = preprocessor.apply_template(&request).unwrap().unwrap();
+            assert_eq!(rendered.as_str(), expected);
         }
     }
 

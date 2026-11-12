@@ -949,13 +949,13 @@ class VllmMultimodalRequestProcessor:
         value only the processor can validate.
         """
         if backend_owned:
-            prompt_kwargs: dict[str, Any] = {
+            backend_prompt_kwargs: dict[str, Any] = {
                 "prompt_token_ids": request["token_ids"],
                 "multi_modal_data": multi_modal_data,
             }
             if mm_processor_kwargs is not None:
-                prompt_kwargs["mm_processor_kwargs"] = mm_processor_kwargs
-            return TokensPrompt(**prompt_kwargs)
+                backend_prompt_kwargs["mm_processor_kwargs"] = mm_processor_kwargs
+            return TokensPrompt(**backend_prompt_kwargs)
 
         extra_args = request.get("extra_args") or {}
         raw_mm_data = request.get("multi_modal_data") or {}
@@ -999,14 +999,14 @@ class VllmMultimodalRequestProcessor:
         self,
         request: dict[str, Any],
         mode: DisaggregationMode,
+        backend_data: dict[str, Any],
     ) -> PreparedMultimodalInput:
         """Prepare JSON for the aggregated engine's modality processor."""
         if mode is not DisaggregationMode.AGGREGATED:
-            raise ValueError(
+            raise InvalidArgument(
                 "Custom JSON content is supported only in aggregated serving; "
                 "disaggregated payload cache identity is not supported"
             )
-        backend_data, _ = _split_multimodal_data(request)
         mm_processor_kwargs = get_mm_processor_kwargs(request)
         request_for_prompt = dict(request)
         request_for_prompt.pop("multi_modal_data")
@@ -1034,8 +1034,7 @@ class VllmMultimodalRequestProcessor:
         """
         json_data, media_data = _split_multimodal_data(request)
         if json_data:
-            opaque = self._prepare_backend_multimodal_input(request, mode)
-            json_data = opaque.multi_modal_data
+            opaque = self._prepare_backend_multimodal_input(request, mode, json_data)
             if not media_data:
                 return opaque
             media_request = dict(request, multi_modal_data=media_data)
@@ -1048,12 +1047,12 @@ class VllmMultimodalRequestProcessor:
                 prepared.mm_processor_kwargs,
             )
             if prompt.get("type") == "multimodal":
-                raise ValueError(
+                raise InvalidArgument(
                     "Custom JSON cannot be merged into frontend-processed multimodal kwargs"
                 )
             engine_media = prompt.get("multi_modal_data") or {}
             if engine_media.keys() & json_data.keys():
-                raise ValueError(
+                raise InvalidArgument(
                     "JSON and media inputs target the same engine modality"
                 )
             merged = {**engine_media, **json_data}

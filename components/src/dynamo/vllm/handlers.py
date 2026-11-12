@@ -4384,13 +4384,16 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
     async def _generate_text_mode(self, request, context, request_id):
         """Generate text using OpenAI-compatible format (text-in-text-out)."""
-        # Text mode registers as ModelInput.Text, so the Rust preprocessor is
-        # bypassed and this path never builds a multimodal prompt. A custom
-        # modality payload would be dropped and the request would answer as if
-        # it had been text-only, so refuse it instead.
-        if request.get("multi_modal_data") is not None:
-            raise ValueError(
-                "multi_modal_data requires a token-in-token-out worker; this "
+        # Text-input models bypass frontend multimodal preprocessing, so Custom
+        # parts can arrive in the original messages instead of multi_modal_data.
+        if request.get("multi_modal_data") is not None or any(
+            isinstance(part, dict) and part.get("type") == "custom"
+            for message in request.get("messages") or []
+            if isinstance(message.get("content"), list)
+            for part in message["content"]
+        ):
+            raise InvalidArgument(
+                "Custom content requires frontend tokenization; this "
                 "worker was started with --use-vllm-tokenizer"
             )
 
