@@ -934,7 +934,7 @@ func TestUpdateVLLMMultinodeArgs(t *testing.T) {
 			gpuCount:    2,
 			annotations: nil,
 			expectedArgs: []string{fmt.Sprintf(
-				`i=0; until python3 -c "import urllib.request; urllib.request.urlopen('http://%s:%d/live', timeout=5)" 2>/dev/null; do i=$((i+1)); [ "$i" -ge 720 ] && { echo "ERROR: leader /live did not become ready within 3h" >&2; exit 1; }; echo 'waiting for leader dynamo.vllm /live to return 200...'; sleep 15; done && ray start --address=%s:%s --block`,
+				`i=0; until python3 -c "import os, urllib.request; urllib.request.urlopen('http://%s:' + os.environ.get('DYN_SYSTEM_PORT', '%d') + '/live', timeout=5)" 2>/dev/null; do i=$((i+1)); [ "$i" -ge 720 ] && { echo "ERROR: leader /live did not become ready within 3h" >&2; exit 1; }; echo 'waiting for leader dynamo.vllm /live to return 200...'; sleep 15; done && ray start --address=%s:%s --block`,
 				"$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE)",
 				commonconsts.DynamoSystemPort,
 				"$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE)",
@@ -969,7 +969,7 @@ func TestUpdateVLLMMultinodeArgs(t *testing.T) {
 			gpuCount:    2,
 			annotations: nil,
 			expectedArgs: []string{fmt.Sprintf(
-				`i=0; until python3 -c "import urllib.request; urllib.request.urlopen('http://%s:%d/live', timeout=5)" 2>/dev/null; do i=$((i+1)); [ "$i" -ge 720 ] && { echo "ERROR: leader /live did not become ready within 3h" >&2; exit 1; }; echo 'waiting for leader dynamo.vllm /live to return 200...'; sleep 15; done && ray start --address=%s:%s --block`,
+				`i=0; until python3 -c "import os, urllib.request; urllib.request.urlopen('http://%s:' + os.environ.get('DYN_SYSTEM_PORT', '%d') + '/live', timeout=5)" 2>/dev/null; do i=$((i+1)); [ "$i" -ge 720 ] && { echo "ERROR: leader /live did not become ready within 3h" >&2; exit 1; }; echo 'waiting for leader dynamo.vllm /live to return 200...'; sleep 15; done && ray start --address=%s:%s --block`,
 				"$(LWS_LEADER_ADDRESS)",
 				commonconsts.DynamoSystemPort,
 				"$(LWS_LEADER_ADDRESS)",

@@ -507,9 +507,9 @@ func injectRayDistributedLaunchFlags(container *corev1.Container, role Role, ser
 // workers join the Ray cluster and expose their GPUs as idle resources.
 //
 // Worker health-gate: the worker deliberately waits until the leader's /live
-// endpoint (DynamoSystemPort 9090) returns HTTP 200 before joining Ray. This is
-// critical for correct DP placement:
-//   - Port 9090 (system status server) opens EARLY in vLLM startup, before
+// endpoint on DYN_SYSTEM_PORT (default 9090) returns HTTP 200 before joining Ray.
+// This is critical for correct DP placement:
+//   - The system status server opens EARLY in vLLM startup, before
 //     create_dp_placement_groups runs.
 //   - GET /live returns 503 during initialization and 200 only after the engine
 //     is fully ready (create_dp_placement_groups done, model loaded).
@@ -594,20 +594,19 @@ func injectElasticEPRayLaunchFlags(container *corev1.Container, role Role, servi
 		)}
 	case RoleWorker:
 		leaderHostname := multinodeDeployer.GetLeaderHostname(serviceName)
-		// Health-gate: poll GET /live on DynamoSystemPort (9090) until HTTP 200.
+		// Health-gate: poll GET /live on the configured system port until HTTP 200.
 		// /live returns 503 during vLLM initialization and 200 when the engine is
 		// fully ready. This ensures the worker joins Ray AFTER create_dp_placement_groups
 		// has run (which requires only the leader's GPUs to be in the cluster).
 		// Uses Python's urllib (always available) instead of curl.
-		// Prerequisite: DYN_SYSTEM_ENABLED=true must be set on the leader pod so
-		// that the Dynamo system server listens on port 9090. The operator injects
-		// this env var unconditionally via component_worker.go.
+		// Read the port at runtime so Kubernetes-resolved environment values work.
+		// Leader and follower inherit the same component system-port setting.
 		// Bounded at 720 × 15s = 3 hours to cover large models with slow disk I/O.
 		// Without a bound, a permanently broken leader leaves the worker looping
 		// forever with no Kubernetes liveness probe to detect it (probes are removed
 		// from vLLM multinode containers in UpdateContainer).
 		healthGate := fmt.Sprintf(
-			`i=0; until python3 -c "import urllib.request; urllib.request.urlopen('http://%s:%d/live', timeout=5)" `+
+			`i=0; until python3 -c "import os, urllib.request; urllib.request.urlopen('http://%s:' + os.environ.get('DYN_SYSTEM_PORT', '%d') + '/live', timeout=5)" `+
 				`2>/dev/null; do `+
 				`i=$((i+1)); [ "$i" -ge 720 ] && { echo "ERROR: leader /live did not become ready within 3h" >&2; exit 1; }; `+
 				`echo 'waiting for leader dynamo.vllm /live to return 200...'; sleep 15; done`,
