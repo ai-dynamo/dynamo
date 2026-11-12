@@ -19,6 +19,7 @@ import asyncio
 import base64
 import contextlib
 import json
+import re
 import time
 from pathlib import Path
 from typing import AsyncGenerator, Dict
@@ -467,6 +468,26 @@ async def test_non_video_data_url_is_unsupported_over_sse(http_server):
         "code": 415,
     }
     assert "This is a mock response." not in raw
+
+
+def test_video_public_message_matches_binding_allowlist():
+    """The Python producer and the Rust allowlist must agree on the video 415 text.
+
+    A reworded sentence on either side would silently fall back to the catalog
+    text, so this checks the literal in both files."""
+    repo = Path(__file__).resolve().parents[4]
+    sentence = "Unsupported video media"
+    loader_src = (
+        repo / "components/src/dynamo/common/multimodal/video_loader.py"
+    ).read_text()
+    errors_src = (repo / "lib/bindings/python/rust/errors.rs").read_text()
+
+    assert f'"{sentence}"' in loader_src
+    allowlist = re.search(
+        r"PUBLIC_HTTP_MESSAGES: &\[&str\] = &\[(.*?)\];", errors_src, re.DOTALL
+    )
+    assert allowlist is not None, "PUBLIC_HTTP_MESSAGES not found in errors.rs"
+    assert f'"{sentence}"' in allowlist.group(1)
 
 
 @pytest.mark.asyncio
