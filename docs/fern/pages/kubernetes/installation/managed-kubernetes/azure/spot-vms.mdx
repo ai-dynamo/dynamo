@@ -39,14 +39,13 @@ az aks nodepool add \
 
 </Step>
 <Step title="Install Dynamo on the Spot pool" id="deploying-dynamo-on-spot-nodes">
-The Dynamo platform Helm chart includes a pre-built values file for Spot VM deployments — [`examples/deployments/AKS/values-aks-spot.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/deployments/AKS/values-aks-spot.yaml) — which adds the required toleration to all Dynamo components:
+The Dynamo platform Helm chart includes a pre-built values file for Spot VM deployments — [`examples/deployments/AKS/values-aks-spot.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/deployments/AKS/values-aks-spot.yaml) — which adds the required toleration to the core Dynamo platform pods:
 
-- Dynamo operator controller manager
-- Webhook CA inject and cert generation jobs
+- Dynamo operator controller manager, and the pre-install and pre-upgrade check jobs that reuse its tolerations
 - etcd
-- NATS
-- MPI SSH key generation job
-- Other core Dynamo platform pods
+- NATS and NATS Box
+
+The operator manages webhook certificates and MPI SSH keys itself, so they need no separate toleration. The file does not cover optional components such as the KAI scheduler or Grove; add the toleration to their values if you install them on Spot nodes.
 
 Install Dynamo with the Spot values file (from `examples/deployments/AKS/`):
 
