@@ -10174,7 +10174,7 @@ mod extra_args_media_copy_tests {
 
     #[tokio::test]
     async fn continue_final_message_rejects_reordered_tool_results() {
-        use crate::engines::ValidateRequest;
+        use crate::protocols::ValidateRequest;
         use dynamo_renderer::deepseek::v41::DeepSeekV41Formatter;
 
         let mut preprocessor = test_preprocessor();

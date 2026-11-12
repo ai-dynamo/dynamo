@@ -30,7 +30,7 @@ use serde_json::Value;
 use super::audios::{NvAudioSpeechResponse, NvCreateAudioSpeechRequest};
 use super::images::{NvCreateImageRequest, NvImagesResponse};
 use super::videos::{NvCreateVideoRequest, NvVideosResponse};
-use crate::engines::ValidateRequest;
+use crate::protocols::ValidateRequest;
 
 fn fixture(file: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

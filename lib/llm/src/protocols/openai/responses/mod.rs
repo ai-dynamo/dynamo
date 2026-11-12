@@ -3856,7 +3856,7 @@ mod tests {
                 }
                 let req: NvCreateResponse = serde_json::from_value(payload).unwrap();
                 let chat = NvCreateChatCompletionRequest::try_from(req).unwrap();
-                let error = crate::engines::ValidateRequest::validate(&chat).unwrap_err();
+                let error = crate::protocols::ValidateRequest::validate(&chat).unwrap_err();
                 assert!(error.to_string().contains("tool_choice"));
                 assert!(error.to_string().contains("tools"));
             }

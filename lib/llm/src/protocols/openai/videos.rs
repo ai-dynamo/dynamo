@@ -7,7 +7,7 @@ use utoipa::ToSchema;
 use validator::Validate;
 
 use super::MediaDelivery;
-use crate::engines::ValidateRequest;
+use crate::protocols::ValidateRequest;
 
 mod aggregator;
 mod nvext;

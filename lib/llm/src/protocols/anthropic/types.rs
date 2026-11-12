@@ -1410,7 +1410,7 @@ mod tests {
         empty_req.stop_sequences = Some(vec![]);
         let empty_chat_req: NvCreateChatCompletionRequest = empty_req.try_into().unwrap();
         assert!(empty_chat_req.inner.stop.is_none());
-        crate::engines::ValidateRequest::validate(&empty_chat_req).unwrap();
+        crate::protocols::ValidateRequest::validate(&empty_chat_req).unwrap();
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
         assert!(chat_req.inner.stop.is_some());

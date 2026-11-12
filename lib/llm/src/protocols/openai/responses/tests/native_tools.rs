@@ -273,17 +273,17 @@ fn responses_and_chat_accept_qualified_functions_but_reject_invalid_namespaces()
     let chat: NvCreateChatCompletionRequest = request(namespace(false), json!("Read."))
         .try_into()
         .unwrap();
-    crate::engines::ValidateRequest::validate(&chat).unwrap();
+    crate::protocols::ValidateRequest::validate(&chat).unwrap();
     let wire_chat: NvCreateChatCompletionRequest = serde_json::from_value(json!({"model":"/model",
         "messages":[{"role":"user","content":"Read."}],
         "tools":[{"type":"function","function":{"name":"fs.read"}}]
     }))
     .unwrap();
-    crate::engines::ValidateRequest::validate(&wire_chat).unwrap();
+    crate::protocols::ValidateRequest::validate(&wire_chat).unwrap();
     let mut invalid = namespace(false);
     invalid[0]["name"] = json!("bad namespace");
     let chat: NvCreateChatCompletionRequest = request(invalid, json!("Read.")).try_into().unwrap();
-    assert!(crate::engines::ValidateRequest::validate(&chat).is_err());
+    assert!(crate::protocols::ValidateRequest::validate(&chat).is_err());
 }
 
 #[test]
