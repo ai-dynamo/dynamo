@@ -6,9 +6,20 @@
 //! Run with: `cargo bench -p dynamo-kv-router --bench worker_selection`
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use dynamo_kv_events::event::{
+    KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData,
+    RouterEvent,
+};
+use dynamo_kv_hashing::routing::compute_seq_hash_for_block;
+use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
+use dynamo_kv_indexer::ResidentBlockCountsHandle;
+use dynamo_kv_indexer::host::{
+    ConcurrentRadixTreeCompressed, KvIndexerInterface, ThreadPoolIndexer,
+};
 use dynamo_router_protocol::columns::WorkerInputs;
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 use dynamo_scheduler::ScheduleMode;
@@ -17,6 +28,7 @@ use dynamo_scheduler::overlap::OverlapSignals;
 use dynamo_scheduler::protocols::{RoutingConstraints, WorkerConfigLike};
 use dynamo_scheduler::selector::{DefaultWorkerSelector, WorkerSelectionInput, WorkerSelector};
 use dynamo_slot_tracker::WorkerLoadProjection;
+use dynamo_worker_selection::experimental::resident_blocks::{RESIDENT_BLOCKS, ResidentBlocks};
 use dynamo_worker_selection::{
     SelectionConfig, WorkerCandidate, WorkerCandidates, WorkerFilter, WorkerInputView,
     WorkerPicker, WorkerScorer, WorkerSelectionContext, WorkerSelectionPolicy,
@@ -138,6 +150,42 @@ impl WorkerScorer for IgnoringPreferenceScorer {
                 + load.decode_cost_blocks()
                 + load.active_requests() as f64;
             *cost = uncached_blocks + load_blocks;
+        }
+        Ok(())
+    }
+}
+
+/// `IgnoringPreferenceScorer` plus each candidate's resident block count.
+struct ResidentBlocksScorer;
+
+impl WorkerScorer for ResidentBlocksScorer {
+    fn required_worker_inputs(&self) -> WorkerInputs {
+        WorkerInputs::CACHE | WorkerInputs::LOAD | RESIDENT_BLOCKS
+    }
+
+    fn score(
+        &self,
+        context: &WorkerSelectionContext<'_>,
+        candidates: WorkerCandidates<'_>,
+        costs: &mut [f64],
+    ) -> Result<(), WorkerSelectionPolicyError> {
+        for (candidate, cost) in candidates.iter().zip(costs) {
+            let cache = candidate
+                .cache()
+                .ok_or_else(|| WorkerSelectionPolicyError::failed("cache input unavailable"))?;
+            let load = candidate
+                .load()
+                .ok_or_else(|| WorkerSelectionPolicyError::failed("load input unavailable"))?;
+            // Real policies should treat None (no fresh counts) as neutral; failing keeps the bench honest.
+            let resident_blocks = candidate.resident_blocks().ok_or_else(|| {
+                WorkerSelectionPolicyError::failed("resident blocks input unavailable")
+            })?;
+            let uncached_blocks =
+                (context.request_blocks() as f64 - cache.device_overlap_blocks()).max(0.0);
+            let load_blocks = load.active_prefill_tokens() as f64 / context.block_size() as f64
+                + load.decode_cost_blocks()
+                + load.active_requests() as f64;
+            *cost = uncached_blocks + load_blocks + resident_blocks as f64;
         }
         Ok(())
     }
@@ -411,6 +459,166 @@ fn unused_preferred_taint_metadata(c: &mut Criterion) {
     group.finish();
 }
 
+fn resident_blocks_read(c: &mut Criterion) {
+    let config = SelectionConfig {
+        router_temperature: 0.0,
+        ..Default::default()
+    };
+    let mut group = c.benchmark_group("resident_blocks_read");
+    group.warm_up_time(Duration::from_secs(2));
+    group.measurement_time(Duration::from_secs(5));
+    group.sample_size(50);
+
+    for worker_count in [2, 32, 1_024, 10_000] {
+        let (workers, request) = fixture(worker_count);
+        group.throughput(Throughput::Elements(worker_count as u64));
+        let without = WorkerSelectionPolicy::new(
+            config.clone(),
+            "prefill",
+            vec![Box::new(IgnoringPreferenceScorer)],
+            Box::new(LowestCostPicker),
+        );
+        let with = WorkerSelectionPolicy::new(
+            config.clone(),
+            "prefill",
+            vec![Box::new(ResidentBlocksScorer)],
+            Box::new(LowestCostPicker),
+        );
+        // Fixed counts for every worker, lent to each selection the way the queue actor lends
+        // the indexer's live counters: one load per selection.
+        let counts = ResidentBlockCountsHandle::fixed(
+            workers
+                .keys()
+                .map(|&worker_id| (WorkerWithDpRank::from_worker_id(worker_id), 4_096)),
+        );
+        for (name, policy, lend_counts, writing) in [
+            ("without", &without, false, false),
+            ("with", &with, true, false),
+            // Another thread storing to every counter in a loop: the worst case for the
+            // cross-core misses event-thread writes cause readers.
+            ("with_writer", &with, true, true),
+        ] {
+            let stop = AtomicBool::new(false);
+            std::thread::scope(|scope| {
+                if writing {
+                    scope.spawn(|| {
+                        let mut blocks = 0;
+                        while !stop.load(Ordering::Relaxed) {
+                            counts.store_all(blocks);
+                            blocks += 1;
+                        }
+                    });
+                }
+                group.bench_with_input(
+                    BenchmarkId::new(name, worker_count),
+                    &worker_count,
+                    |b, _| {
+                        b.iter(|| {
+                            let counts = lend_counts.then(|| counts.load());
+                            black_box(
+                                policy
+                                    .select_worker(
+                                        WorkerSelectionInput::configured(
+                                            black_box(&workers),
+                                            black_box(&request),
+                                            request.eligibility(),
+                                            black_box(16),
+                                        )
+                                        .with_resident_blocks(
+                                            counts.as_deref().map(|counts| &**counts),
+                                        ),
+                                    )
+                                    .unwrap(),
+                            )
+                        })
+                    },
+                );
+                stop.store(true, Ordering::Relaxed);
+            });
+        }
+    }
+    group.finish();
+}
+
+fn kv_event(worker: WorkerId, event_id: u64, data: KvCacheEventData) -> RouterEvent {
+    RouterEvent::new(
+        worker,
+        KvCacheEvent {
+            event_id,
+            dp_rank: 0,
+            data,
+        },
+    )
+}
+
+/// Event-thread cost of keeping resident block counts, untracked and tracked: 128 workers on 8
+/// event threads each store a 16-block chain one block per event, then remove it the same way.
+/// Single-block events are the cheapest to apply, so the per-event tracking cost is the largest
+/// share of them. Nothing reads the counters here; unpinned, a busy reader thread skews this
+/// bench. The pinned Mooncake replay's `--resident-blocks-reader-cpu` covers a reader, at that
+/// trace's larger events.
+fn resident_blocks_write(c: &mut Criterion) {
+    const WORKERS: u64 = 128;
+    const BLOCKS: u64 = 16;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let events: Vec<_> = (0..WORKERS)
+        .flat_map(|worker| {
+            let local: Vec<_> = (0..BLOCKS)
+                .map(|i| LocalBlockHash(worker * BLOCKS + i))
+                .collect();
+            let hashes: Vec<_> = compute_seq_hash_for_block(&local)
+                .into_iter()
+                .map(ExternalSequenceBlockHash)
+                .collect();
+            let stores = (0..hashes.len()).map(|i| {
+                let store = KvCacheStoreData {
+                    parent_hash: i.checked_sub(1).map(|parent| hashes[parent]),
+                    start_position: None,
+                    blocks: vec![KvCacheStoredBlockData {
+                        block_hash: hashes[i],
+                        tokens_hash: local[i],
+                        mm_extra_info: None,
+                    }],
+                };
+                kv_event(worker, i as u64, KvCacheEventData::Stored(store))
+            });
+            let removes = (0..hashes.len()).rev().map(|i| {
+                let remove = KvCacheRemoveData {
+                    block_hashes: vec![hashes[i]],
+                };
+                kv_event(worker, BLOCKS + i as u64, KvCacheEventData::Removed(remove))
+            });
+            stores.chain(removes).collect::<Vec<_>>()
+        })
+        .collect();
+    let mut group = c.benchmark_group("resident_blocks_write");
+    group.sample_size(20);
+    group.warm_up_time(Duration::from_secs(1));
+    group.measurement_time(Duration::from_secs(3));
+    group.throughput(Throughput::Elements(events.len() as u64));
+    for (name, tracked) in [("untracked", false), ("tracked", true)] {
+        let indexer = ThreadPoolIndexer::new(ConcurrentRadixTreeCompressed::new(), 8, 32);
+        if tracked {
+            indexer.bench_track_resident_blocks();
+        }
+        group.bench_function(name, |b| {
+            b.iter(|| {
+                runtime.block_on(async {
+                    for event in &events {
+                        indexer.apply_event(event.clone()).await;
+                    }
+                    indexer.flush().await;
+                })
+            })
+        });
+        indexer.shutdown();
+    }
+    group.finish();
+}
+
 fn default_policy_wrapper(c: &mut Criterion) {
     let config = SelectionConfig {
         router_temperature: 0.0,
@@ -504,12 +712,78 @@ fn worker_projection(c: &mut Criterion) {
     group.finish();
 }
 
+/// Load projection with active prompts: every rank holds requests behind one fleet-wide
+/// shared prefix, as a common system prompt leaves it. `overlap` passes the request's blocks,
+/// so the pass also finds each rank's overlap with its active prompts, which only `LOAD` rows
+/// read; `no_overlap` reads each rank's load alone, as the scheduler does when no policy
+/// component declares `LOAD`.
+fn worker_projection_active_prompts(c: &mut Criterion) {
+    const SHARED_BLOCKS: u64 = 64;
+    const SUFFIX_BLOCKS: u64 = 64;
+    const REQUESTS_PER_RANK: u64 = 8;
+
+    let mut group = c.benchmark_group("worker_projection_active_prompts");
+    group.warm_up_time(Duration::from_secs(2));
+    group.measurement_time(Duration::from_secs(5));
+    group.sample_size(50);
+    for count in [2_048, 8_192] {
+        let slots = dynamo_slot_tracker::ActiveSequencesMultiWorker::new(
+            dynamo_slot_tracker::NoopSequencePublisher,
+            16,
+            (0..count).map(|id| (id, (0, 1))).collect(),
+            false,
+            0,
+            "bench",
+        );
+        let now = tokio::time::Instant::now();
+        let shared: Vec<u64> = (0..SHARED_BLOCKS).collect();
+        let mut next_hash = SHARED_BLOCKS;
+        let mut prompt = || {
+            let suffix = next_hash..next_hash + SUFFIX_BLOCKS;
+            next_hash += SUFFIX_BLOCKS;
+            shared.iter().copied().chain(suffix).collect::<Vec<_>>()
+        };
+        for worker_id in 0..count {
+            for request in 0..REQUESTS_PER_RANK {
+                slots
+                    .add_request(
+                        dynamo_slot_tracker::SequenceRequest {
+                            request_id: format!("{worker_id}-{request}"),
+                            token_sequence: Some(prompt()),
+                            track_prefill_tokens: true,
+                            expected_output_tokens: None,
+                            prefill_load_hint: None,
+                            worker: WorkerWithDpRank::from_worker_id(worker_id),
+                            lora_name: None,
+                        },
+                        now,
+                    )
+                    .unwrap();
+            }
+        }
+        let query = prompt();
+        let mut projections = FxHashMap::default();
+        for (name, token_sequence) in [("overlap", Some(query.as_slice())), ("no_overlap", None)] {
+            group.bench_function(BenchmarkId::new(name, count), |b| {
+                b.iter(|| {
+                    slots.project_worker_loads_into(token_sequence, now, &mut projections, None);
+                    black_box(&projections);
+                })
+            });
+        }
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     worker_selection,
     custom_worker_selection,
     unused_preferred_taint_metadata,
+    resident_blocks_read,
+    resident_blocks_write,
     default_policy_wrapper,
-    worker_projection
+    worker_projection,
+    worker_projection_active_prompts
 );
 criterion_main!(benches);

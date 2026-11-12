@@ -1344,6 +1344,17 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             .record_full_worker_ranks_at(decay_now, full_ranks);
     }
 
+    /// `worker`'s `additional_active_blocks` in a projection of `token_sequence`, computed
+    /// for that rank alone.
+    pub fn additional_active_blocks(
+        &self,
+        token_sequence: &[SequenceHash],
+        worker: WorkerWithDpRank,
+    ) -> usize {
+        self.prompt_registry
+            .additional_active_blocks(token_sequence, worker)
+    }
+
     /// Read ranks' loads one at a time at `decay_now`, without projecting every rank.
     pub fn worker_load_reader(&self, decay_now: Instant) -> WorkerLoadReader<'_> {
         self.prompt_registry.worker_load_reader(decay_now)
