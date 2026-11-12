@@ -634,7 +634,7 @@ impl
                 })
                 .await?;
             if let (Some(state), Some(booking)) = (req.migration_state.as_ref(), booking) {
-                state.store_prefill_release(booking);
+                state.store_prefill_release(Box::new(booking));
             }
             let topology_constraints = prepared.topology_constraints;
             let outcome = if let Some(bootstrap_info) = prepared.bootstrap_info {

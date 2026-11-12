@@ -23,7 +23,6 @@ use super::extensions::{AgentContext, RouterParams};
 use super::llm_backend::DecoderCheckpoint;
 use super::timing::{RequestPhase, RequestTracker};
 use super::{OutputOptions, SamplingOptions, StopConditions};
-use crate::kv_router::RequestAttemptRelease;
 use crate::preprocessor::media::RdmaMediaDataDescriptor;
 use crate::protocols::TokenIdType;
 
@@ -137,6 +136,14 @@ pub struct TraceLink {
     pub span_id: String,
 }
 
+/// One attempt's remote prefill booking, releasable before the attempt that
+/// made it completes. The router that made the booking implements this;
+/// [`MigrationState`] only parks the handle for a committed retry to run.
+pub(crate) trait PrefillBookingRelease: std::fmt::Debug + Send + Sync {
+    /// Release the booking. The booking is gone when the future resolves.
+    fn release(&self) -> futures::future::BoxFuture<'_, ()>;
+}
+
 /// Frontend-local state shared by every attempt from one migration manager.
 /// The selected router records a failed worker before the error is exposed;
 /// later attempts use the accumulated set as an attempt-local exclusion.
@@ -150,7 +157,7 @@ struct MigrationStateInner {
     excluded_worker_ids: Vec<WorkerId>,
     last_error: Option<DynamoError>,
     request_lifecycle: Option<Box<RequestLifecycle>>,
-    prefill_release: Option<RequestAttemptRelease>,
+    prefill_release: Option<Box<dyn PrefillBookingRelease>>,
 }
 
 impl MigrationState {
@@ -244,7 +251,7 @@ impl MigrationState {
     /// Park the latest attempt's remote prefill booking. Its prefill can
     /// outlive a failed decode to serve an in-flight KV transfer, so only a
     /// committed retry, which re-books the same request ID, releases it early.
-    pub(crate) fn store_prefill_release(&self, release: RequestAttemptRelease) {
+    pub(crate) fn store_prefill_release(&self, release: Box<dyn PrefillBookingRelease>) {
         self.inner
             .get_or_init(Default::default)
             .lock()
@@ -252,7 +259,7 @@ impl MigrationState {
             .prefill_release = Some(release);
     }
 
-    pub(crate) fn take_prefill_release(&self) -> Option<RequestAttemptRelease> {
+    pub(crate) fn take_prefill_release(&self) -> Option<Box<dyn PrefillBookingRelease>> {
         self.inner
             .get()?
             .lock()
