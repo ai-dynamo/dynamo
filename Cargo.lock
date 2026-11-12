@@ -3088,9 +3088,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-renderer"
-version = "10.1.0"
+version = "10.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "496579bc389ec35a495c9eb64f2d61cd0ec5a322f5aa7e09115b026c0d30eb8a"
+checksum = "59af10814eee0cdfff02328287bb4fd6e16b4f43265f9c0dd714ae457c77f0ec"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3375,15 +3375,16 @@ dependencies = [
 
 [[package]]
 name = "dynamo-tokenizers"
-version = "4.1.2"
+version = "4.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "24dd8e85a6aea1079e33bd1e82ed0e53127751e472539682edc5a4066f360179"
+checksum = "e739aa01c02ecd4c2fdea59eb4b3367bd5da6e35f82c1cd36854ce886f543b62"
 dependencies = [
  "aho-corasick",
  "anyhow",
  "base64 0.22.1",
  "basetenkenizer",
  "blake3",
+ "fancy-regex 0.13.0",
  "fastokens",
  "moka",
  "rayon",
