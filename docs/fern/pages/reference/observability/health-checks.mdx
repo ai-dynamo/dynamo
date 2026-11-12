@@ -155,7 +155,7 @@ selection in the current runtime.
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `DYN_HEALTH_CHECK_ENABLED` | `false` | Enables active checks for registered worker endpoints |
-| `DYN_CANARY_WAIT_TIME` | `10` | Seconds without successful endpoint activity before sending a canary |
+| `DYN_CANARY_WAIT_TIME` | `10` | Seconds without successful endpoint activity before sending a canary. Does not delay the first canary, which is sent when the endpoint registers |
 | `DYN_HEALTH_CHECK_REQUEST_TIMEOUT` | `3` | Seconds to wait for the canary response |
 | `DYN_HEALTH_CHECK_PAYLOAD` | Backend default | Optional JSON object or `@/path/to/file.json` canary payload override |
 

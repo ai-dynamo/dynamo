@@ -14,6 +14,10 @@ use std::time::Duration;
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
+/// Retry interval for a failed canary before the endpoint is first ready,
+/// capped at the canary wait time.
+const STARTUP_CANARY_RETRY_INTERVAL: Duration = Duration::from_secs(1);
+
 /// Configuration for health check behavior
 pub struct HealthCheckConfig {
     /// Wait time before sending canary health checks (when no activity)
@@ -94,10 +98,17 @@ impl HealthCheckManager {
             let endpoint_subject = endpoint_subject_clone;
             info!("Health check task started for: {}", endpoint_subject);
 
+            // The first canary is the endpoint's readiness gate, so send it at
+            // registration and retry quickly until the endpoint is first ready.
+            // After that the canary only probes idle endpoints.
+            let startup_retry = STARTUP_CANARY_RETRY_INTERVAL.min(canary_wait);
+            let mut wait = Duration::ZERO;
+            let mut ever_ready = false;
+
             loop {
                 // Wait for either timeout or activity notification
                 tokio::select! {
-                    _ = tokio::time::sleep(canary_wait) => {
+                    _ = tokio::time::sleep(wait) => {
                         // Timeout - send health check for this specific endpoint
                         debug!("Canary timer expired for {}, sending health check", endpoint_subject);
 
@@ -130,6 +141,19 @@ impl HealthCheckManager {
                         );
                     }
                 }
+
+                ever_ready = ever_ready
+                    || manager
+                        .drt
+                        .system_health()
+                        .lock()
+                        .get_endpoint_health_status(&endpoint_subject)
+                        == Some(HealthStatus::Ready);
+                wait = if ever_ready {
+                    canary_wait
+                } else {
+                    startup_retry
+                };
             }
 
             info!("Health check task for {} exiting", endpoint_subject);
@@ -225,8 +249,10 @@ impl HealthCheckManager {
         let payload = payload.clone();
         let timeout = self.config.request_timeout;
 
-        // Spawn task to send health check and wait for response
-        tokio::spawn(async move {
+        // Send the health check on its own task and wait for it, so the next
+        // canary is only scheduled after this one finishes and canaries never
+        // overlap.
+        let check = tokio::spawn(async move {
             let result = tokio::time::timeout(timeout, async {
                 let request = SingleIn::new(payload);
                 match engine.generate(request).await {
@@ -291,6 +317,7 @@ impl HealthCheckManager {
 
             debug!("Health check completed for {}", endpoint_subject_owned);
         });
+        check.await?;
 
         Ok(())
     }
@@ -698,6 +725,94 @@ mod push_handler_notify_tests {
             endpoint,
             HealthStatus::Ready,
             "successful chunks should set Ready despite trailing error",
+        );
+    }
+
+    /// A mock engine whose first `failures` calls return an error chunk and
+    /// whose later calls succeed.
+    struct FailFirstEngine {
+        failures: usize,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl AsyncEngine<SingleIn<TestRequest>, ManyOut<TestResponse>, anyhow::Error> for FailFirstEngine {
+        async fn generate(
+            &self,
+            input: SingleIn<TestRequest>,
+        ) -> anyhow::Result<ManyOut<TestResponse>> {
+            let (_data, ctx) = input.into_parts();
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let chunk = if call < self.failures {
+                Annotated::from_error(format!("mock error on call {call}"))
+            } else {
+                Annotated::from_data(serde_json::json!({"token": 0}))
+            };
+            Ok(ResponseStream::new(
+                Box::pin(stream::iter(vec![chunk])),
+                ctx.context(),
+            ))
+        }
+    }
+
+    // =================================================================
+    // Test 6: First canary fires at registration, not after the idle wait
+    // =================================================================
+    #[tokio::test]
+    async fn test_first_canary_fires_without_idle_wait() {
+        let drt = create_test_drt_async().await;
+        let endpoint = "test.first_canary_immediate";
+
+        let _notifier = register_endpoint(&drt, endpoint, MockStreamingEngine::success(1));
+        assert_status(&drt, endpoint, HealthStatus::NotReady, "initial");
+
+        // Idle wait far longer than the test
+        start_manager(&drt, 60_000).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        assert_status(
+            &drt,
+            endpoint,
+            HealthStatus::Ready,
+            "first canary should fire at registration and set Ready",
+        );
+    }
+
+    // =================================================================
+    // Test 7: Failed startup canary is retried quickly, not after the idle wait
+    // =================================================================
+    #[tokio::test]
+    async fn test_failed_startup_canary_retries_quickly() {
+        let drt = create_test_drt_async().await;
+        let endpoint = "test.startup_canary_retry";
+
+        let engine = Arc::new(FailFirstEngine {
+            failures: 1,
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let _notifier = register_endpoint(&drt, endpoint, engine.clone());
+
+        // Idle wait far longer than the test; startup retry is 1s
+        start_manager(&drt, 60_000).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_status(
+            &drt,
+            endpoint,
+            HealthStatus::NotReady,
+            "first canary failed, endpoint stays NotReady",
+        );
+
+        tokio::time::sleep(Duration::from_millis(1_200)).await;
+        assert_status(
+            &drt,
+            endpoint,
+            HealthStatus::Ready,
+            "failed startup canary should be retried within the startup interval",
+        );
+        assert_eq!(
+            engine.calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "one failed canary and one successful retry; no idle canary yet",
         );
     }
 }
