@@ -407,7 +407,7 @@ func TestLowerIncludesPublicEngineRoleUnderlay(t *testing.T) {
 	}
 }
 
-// TestLowerEngineRolesFollowConcreteMode (DYN-5575): a concrete engine.mode keeps only its active
+// TestLowerEngineRolesFollowConcreteMode: a concrete engine.mode keeps only its active
 // roles, whether or not the stored Request kept the caller's null deletions.
 func TestLowerEngineRolesFollowConcreteMode(t *testing.T) {
 	for _, tc := range []struct {
