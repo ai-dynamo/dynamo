@@ -1339,8 +1339,6 @@ navigation:
             path: pages/reference/components/planner-configuration.mdx
           - page: Profiler Configuration
             path: pages/reference/components/profiler-configuration.mdx
-          - page: KVBM Configuration
-            path: pages/reference/components/kvbm-configuration.mdx
           - page: Mocker CLI Reference
             path: pages/reference/components/mocker-cli-reference.mdx
           - page: DynoSim Replay CLI Reference

@@ -59,13 +59,6 @@ scrape_configs:
     static_configs:
       - targets: ['host.docker.internal:19090']
 
-
-  # KVBM leader related metrics
-  - job_name: 'kvbm-metrics'
-    scrape_interval: 2s
-    static_configs:
-      - targets: ['host.docker.internal:6880']
-
   # Uncomment to see its own Prometheus metrics
   # - job_name: 'prometheus'
   #   scrape_interval: 5s

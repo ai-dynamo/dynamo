@@ -5,7 +5,7 @@
 # Why this configuration looks the way it does (intentional, not a default):
 #
 #   * Disagg requires a vLLM KV connector. The only one available without
-#     a separate KV cache service (KVBM, LMCache, FlexKV) is ``NixlConnector``
+#     a separate KV cache service (LMCache, FlexKV) is ``NixlConnector``
 #     -- see components/src/dynamo/vllm/args.py:_validate_disagg_args. We
 #     therefore use NIXL, but configure it for the most boring transport
 #     path possible.

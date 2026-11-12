@@ -22,7 +22,7 @@ from dynamo.vllm import envs
 from dynamo.vllm.args import (
     _connector_to_kv_transfer_json,
     _is_routable,
-    _uses_dynamo_connector,
+    _reject_dynamo_connector,
     _uses_nixl_connector,
     configure_rl_logprobs_mode,
     ensure_side_channel_host,
@@ -312,6 +312,18 @@ def test_env_var_dyn_connector_raises_error(monkeypatch, mock_vllm_cli):
         parse_args()
 
 
+def test_connector_kvbm_raises_removed_error(monkeypatch, mock_vllm_cli):
+    """Removed KVBM configuration fails with its own message, not a migration hint."""
+    mock_vllm_cli("--model", "Qwen/Qwen3-0.6B", "--connector", "kvbm", "nixl")
+    with pytest.raises(ValueError, match="KVBM integration has been removed"):
+        parse_args()
+
+    monkeypatch.setenv("DYN_CONNECTOR", "kvbm")
+    mock_vllm_cli("--model", "Qwen/Qwen3-0.6B")
+    with pytest.raises(ValueError, match="KVBM integration has been removed"):
+        parse_args()
+
+
 def test_model_express_url_is_accepted_for_compatibility(mock_vllm_cli):
     """Test that legacy ModelExpress manifests still parse."""
     mock_vllm_cli(
@@ -353,13 +365,15 @@ def test_connector_to_kv_transfer_json_single():
 
 def test_connector_to_kv_transfer_json_multi():
     """Test _connector_to_kv_transfer_json wraps multiple connectors in PdConnector."""
-    result = json.loads(_connector_to_kv_transfer_json(["kvbm", "nixl"], "kv_consumer"))
+    result = json.loads(
+        _connector_to_kv_transfer_json(["lmcache", "nixl"], "kv_consumer")
+    )
     assert result["kv_connector"] == "PdConnector"
     assert result["kv_role"] == "kv_both"
     assert result["kv_connector_module_path"] == "dynamo.vllm.pd_connector"
     nested = result["kv_connector_extra_config"]["connectors"]
     assert {c["kv_connector"]: c["kv_role"] for c in nested} == {
-        "DynamoConnector": "kv_both",
+        "LMCacheConnectorV1": "kv_both",
         "NixlConnector": "kv_consumer",
     }
 
@@ -372,7 +386,7 @@ def test_pd_connector_importable_from_module_path():
 
 @pytest.mark.parametrize("offload", ["_LMCacheConnectorV1", "_FlexKVConnectorV1"])
 def test_pd_connector_checks_connector_order(monkeypatch, offload):
-    """Test PdConnector takes LMCache or FlexKV first and NIXL second, without KVBM."""
+    """Test PdConnector takes LMCache or FlexKV first and NIXL second."""
     pd = importlib.import_module("dynamo.vllm.pd_connector")
     offload_cls = getattr(pd, offload)
     if offload_cls is None:
@@ -396,7 +410,7 @@ def test_pd_connector_checks_connector_order(monkeypatch, offload):
         pd.PdConnector(vllm_config=None, role=None, kv_cache_config=None)
 
 
-# _uses_nixl_connector / _uses_dynamo_connector tests
+# _uses_nixl_connector / _reject_dynamo_connector tests
 
 
 def _make_engine_cfg(kv_connector=None, extra_config=None):
@@ -411,9 +425,9 @@ def _make_engine_cfg(kv_connector=None, extra_config=None):
     )
 
 
-_PD_KVBM_NIXL = {
+_PD_LMCACHE_NIXL = {
     "connectors": [
-        {"kv_connector": "DynamoConnector", "kv_role": "kv_both"},
+        {"kv_connector": "LMCacheConnectorV1", "kv_role": "kv_both"},
         {"kv_connector": "NixlConnector", "kv_role": "kv_producer"},
     ]
 }
@@ -422,7 +436,9 @@ _PD_KVBM_NIXL = {
 def test_uses_nixl_connector_direct_and_nested():
     """Test _uses_nixl_connector for direct, nested-in-PdConnector, and absent cases."""
     assert _uses_nixl_connector(_make_engine_cfg("NixlConnector")) is True
-    assert _uses_nixl_connector(_make_engine_cfg("PdConnector", _PD_KVBM_NIXL)) is True
+    assert (
+        _uses_nixl_connector(_make_engine_cfg("PdConnector", _PD_LMCACHE_NIXL)) is True
+    )
     assert _uses_nixl_connector(_make_engine_cfg("LMCacheConnectorV1")) is False
     assert _uses_nixl_connector(_make_engine_cfg("LMCacheMPConnector")) is False
     assert _uses_nixl_connector(_make_engine_cfg("FlexKVConnectorV1")) is False
@@ -442,14 +458,28 @@ def test_uses_nixl_connector_multi(connector_names, expected):
     assert _uses_nixl_connector(_make_engine_cfg("MultiConnector", extra)) is expected
 
 
-def test_uses_dynamo_connector_direct_and_nested():
-    """Test _uses_dynamo_connector for direct, nested-in-PdConnector, and absent cases."""
-    assert _uses_dynamo_connector(_make_engine_cfg("DynamoConnector")) is True
-    assert (
-        _uses_dynamo_connector(_make_engine_cfg("PdConnector", _PD_KVBM_NIXL)) is True
-    )
-    assert _uses_dynamo_connector(_make_engine_cfg("NixlConnector")) is False
-    assert _uses_dynamo_connector(_make_engine_cfg()) is False
+@pytest.mark.parametrize("wrapper", [None, "PdConnector", "MultiConnector"])
+def test_reject_dynamo_connector_direct_and_nested(wrapper):
+    """The removed KVBM DynamoConnector fails directly and inside a wrapper."""
+    if wrapper is None:
+        cfg = _make_engine_cfg("DynamoConnector")
+    else:
+        extra = {
+            "connectors": [
+                {"kv_connector": "DynamoConnector", "kv_role": "kv_both"},
+                {"kv_connector": "NixlConnector", "kv_role": "kv_producer"},
+            ]
+        }
+        cfg = _make_engine_cfg(wrapper, extra)
+    with pytest.raises(ValueError, match="KVBM integration has been removed"):
+        _reject_dynamo_connector(cfg)
+
+
+def test_reject_dynamo_connector_accepts_other_connectors():
+    """Connectors other than DynamoConnector pass the removed-KVBM check."""
+    _reject_dynamo_connector(_make_engine_cfg("NixlConnector"))
+    _reject_dynamo_connector(_make_engine_cfg("PdConnector", _PD_LMCACHE_NIXL))
+    _reject_dynamo_connector(_make_engine_cfg())
 
 
 def test_headless_namespace_has_required_fields(mock_vllm_cli):
@@ -750,7 +780,6 @@ def test_setup_vllm_engine_reuses_engine_config_model_config(monkeypatch):
 
     monkeypatch.setattr(vllm_main, "setup_multiprocess_prometheus", lambda: None)
     monkeypatch.setattr(vllm_main, "LLMBackendMetrics", FakeMetrics)
-    monkeypatch.setattr(vllm_main, "_uses_dynamo_connector", lambda _args: False)
     monkeypatch.setattr(vllm_main, "AsyncLLM", FakeAsyncLLM)
     monkeypatch.setattr(
         vllm_main,

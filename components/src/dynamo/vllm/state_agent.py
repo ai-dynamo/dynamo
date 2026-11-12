@@ -153,10 +153,6 @@ async def start_attachment_owner(
             "dynamo_state_agent CacheOwner mapping must exactly cover this worker's "
             f"global DP ranks (missing={missing}, extra={extra})"
         )
-    if vllm_config.additional_config.get("consolidator_endpoints"):
-        raise ValueError(
-            "dynamo_state_agent does not support the KV event consolidator"
-        )
 
     events = config.engine_args.kv_events_config
     # Every rank of this worker publishes one topic, set at startup from its

@@ -93,10 +93,6 @@
 //! ```bash
 //! cargo build --profile profiling --features dynamo-runtime/nvtx
 //! ```
-//!
-//! Prefer `dynamo-runtime/nvtx` over a bare `--features nvtx` at the workspace root:
-//! the latter also selects the `nvtx` feature of `kvbm-engine`, whose markers have no
-//! `DYN_NVTX` runtime switch and would fire unconditionally.
 
 use anyhow::Context as _;
 

@@ -46,11 +46,6 @@ scrape_configs:
     static_configs:
       - targets: ['host.docker.internal:8081']
 
-  - job_name: 'kvbm-metrics'
-    scrape_interval: 2s
-    static_configs:
-      - targets: ['host.docker.internal:6880']
-
   - job_name: 'xpu-smi-exporter'
     scrape_interval: 5s
     scrape_timeout: 5s

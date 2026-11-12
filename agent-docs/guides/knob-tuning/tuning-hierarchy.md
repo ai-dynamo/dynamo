@@ -89,12 +89,12 @@ configuration family whose condition is visible in the evidence.
 | KV-cache dtype and capacity | long context or high concurrency is KV-bound and additional cache capacity can admit useful work | KV capacity is not limiting or the selected attention path does not support the dtype |
 | Engine backend or autotuner selection | logs prove an unsuitable path, or same-version and same-hardware evidence predicts a gain at the target parallelism and concurrency | support, engagement, or version-specific behavior is uncertain |
 | Dynamo routing and prefix reuse | worker load is skewed or the real workload has reusable prefixes that the current routing or cache policy misses | reuse exists only because synthetic inputs repeat, or cache bookkeeping costs dominate at the target load |
-| KVBM or engine KV offload | repeated long prefixes make prefill or TTFT dominant and host or disk capacity can retain useful KV | decode latency is primary, prefixes do not repeat, or transfer and host-memory costs are unmeasured |
+| Engine KV offload | repeated long prefixes make prefill or TTFT dominant and host or disk capacity can retain useful KV | decode latency is primary, prefixes do not repeat, or transfer and host-memory costs are unmeasured |
 | Frontend, transport, and pod resources | CPU or memory throttling, request-plane overhead, connection handling, or KV-transfer fallback limits the request path | engine execution or admission remains the measured limit |
 
 Use the exact engine catalog for engine-owned fields:
 [vLLM](vllm.md), [SGLang](sglang.md), or [TensorRT-LLM](tensorrt-llm.md). Use the
-[Dynamo catalog](dynamo.md) for DGD shape, routing, transport, KVBM, and other Dynamo-owned controls.
+[Dynamo catalog](dynamo.md) for DGD shape, routing, transport, and other Dynamo-owned controls.
 
 
 ## Concurrency and Workload Overrides

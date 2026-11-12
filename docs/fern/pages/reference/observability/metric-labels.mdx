@@ -203,7 +203,7 @@ Values you will see in the `dynamo_component` label on `dynamo_component_*` seri
 | `encode` | The encode worker for vLLM, SGLang, and TRT-LLM. |
 | `diffusion` | The diffusion worker for TRT-LLM. |
 
-Internal subsystems (e.g. `kvbm` from the block manager, `sequences` from the KV router) also create components and may appear in `dynamo_component_*` series. The default for vLLM/SGLang can be overridden by passing `--endpoint dyn://<ns>.<component>.<endpoint>` on the worker command line.
+Internal subsystems (e.g. `sequences` from the KV router) also create components and may appear in `dynamo_component_*` series. The default for vLLM/SGLang can be overridden by passing `--endpoint dyn://<ns>.<component>.<endpoint>` on the worker command line.
 
 <Note>
   The name `backend` for the decode worker is historical. The runtime has a TODO to introduce a `decode` constant and migrate to it (see `lib/runtime/src/metrics/prometheus_names.rs::component_names`).

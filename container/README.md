@@ -484,7 +484,7 @@ container/run.sh --image dynamo:latest-sglang-xpu-local-dev --device=xpu \
 # The conda env at /opt/miniforge3/envs/sglang is root-owned, so chown it once
 # to the dynamo user (the image grants NOPASSWD sudo) before installing.
 sudo chown -R dynamo:0 /opt/miniforge3/envs/sglang
-cargo build --locked --features dynamo-llm/block-manager --workspace
+cargo build --locked --workspace
 # 3a. ai_dynamo_runtime (Rust bindings: dynamo._core)
 # Add `--features request-trace-s3` to enable the S3 request-trace sink
 # (DYN_REQUEST_TRACE_SINKS=s3); it is off by default to keep the local build lean.
@@ -547,7 +547,7 @@ nats-server -js &
 etcd --listen-client-urls http://0.0.0.0:2379 --advertise-client-urls http://0.0.0.0:2379 --data-dir /tmp/etcd &
 
 # 4. Compile code
-cargo build --locked --features dynamo-llm/block-manager --workspace
+cargo build --locked --workspace
 # Add `--features request-trace-s3` to enable the S3 request-trace sink
 # (DYN_REQUEST_TRACE_SINKS=s3); it is off by default to keep the local build lean.
 cd lib/bindings/python && maturin develop --uv && cd -

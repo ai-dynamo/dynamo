@@ -1774,17 +1774,12 @@ class WorkerFactory:
         config: Config,
         generate_endpoint: Endpoint,
         vllm_config: VllmConfig,
-        *,
-        consolidator_enabled: bool,
-        consolidator_port: int | None,
     ) -> Optional[Any]:
         if state_agent_settings(config) is None:
             return self.setup_kv_event_publisher(
                 config,
                 generate_endpoint,
                 vllm_config,
-                consolidator_enabled=consolidator_enabled,
-                consolidator_port=consolidator_port,
             )
 
         # NOTE: Source mode is immutable for one worker lifecycle. An opted-in
@@ -2608,26 +2603,11 @@ class WorkerFactory:
         lifecycle.handler = handler
         handler.add_temp_dir(prometheus_temp_dir)
 
-        # Check if kv event consolidator is enabled (port was allocated in setup_vllm_engine)
-        consolidator_enabled = False
-        consolidator_port = None
-
-        _consolidator_eps = vllm_config.additional_config.get("consolidator_endpoints")
-        if _consolidator_eps:
-            # Extract connect endpoint (third element) for clients to subscribe
-            # consolidator_endpoints = (vllm_endpoint, bind_endpoint, connect_endpoint)
-            consolidator_output_endpoint = _consolidator_eps[2]
-            consolidator_port = int(consolidator_output_endpoint.split(":")[-1])
-            consolidator_enabled = True
-
         # Set up KV event publisher for prefix caching if enabled
-        # If kv event consolidator is enabled, publisher will subscribe to kv event consolidator's output
         kv_publishers = await self._setup_kv_routing(
             config,
             generate_endpoint,
             vllm_config,
-            consolidator_enabled=consolidator_enabled,
-            consolidator_port=consolidator_port,
         )
         if kv_publishers:
             handler.kv_publishers = kv_publishers
@@ -2908,26 +2888,11 @@ class WorkerFactory:
         lifecycle.handler = handler
         handler.add_temp_dir(prometheus_temp_dir)
 
-        # Check if kv event consolidator is enabled (port was allocated in setup_vllm_engine)
-        consolidator_enabled = False
-        consolidator_port = None
-
-        _consolidator_eps = vllm_config.additional_config.get("consolidator_endpoints")
-        if _consolidator_eps:
-            # Extract connect endpoint (third element) for clients to subscribe
-            # consolidator_endpoints = (vllm_endpoint, bind_endpoint, connect_endpoint)
-            consolidator_output_endpoint = _consolidator_eps[2]
-            consolidator_port = int(consolidator_output_endpoint.split(":")[-1])
-            consolidator_enabled = True
-
         # Set up KV event publishers for prefix caching if enabled (one per dp_rank)
-        # If kv event consolidator is enabled, publisher will subscribe to kv event consolidator's output
         kv_publishers = await self._setup_kv_routing(
             config,
             generate_endpoint,
             vllm_config,
-            consolidator_enabled=consolidator_enabled,
-            consolidator_port=consolidator_port,
         )
         if kv_publishers:
             handler.kv_publishers = kv_publishers

@@ -310,7 +310,7 @@ fn block_has_mm(block_offset: usize, len: usize, mm_runs: &[TokenBlockMmInfo]) -
 /// 1. **Legacy / zero-MM** — when no run in `mm_runs` overlaps this block, the buffer is
 ///    `bytemuck::cast_slice(tokens)` (4 bytes per slot, LE u32). This matches the existing
 ///    `compute_hash_v2(cast_slice(&tokens), salt_hash)` path used by every existing
-///    [`TokenBlock`] in `dynamo_tokens` and kvbm — preserving cache identity for any block
+///    [`TokenBlock`] in `dynamo_tokens` — preserving cache identity for any block
 ///    that is not itself MM-affected.
 ///
 /// 2. **Tagged / MM-affected** — when at least one run overlaps this block, every slot

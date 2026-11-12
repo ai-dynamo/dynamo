@@ -44,11 +44,6 @@ on:
         required: false
         type: string
         default: '/workspace'
-      kvbm_mla_backend:
-        description: 'KVBM MLA attention backend exported for KVBM tests'
-        required: false
-        type: string
-        default: ''
       enable_coverage:
         description: 'Enable coverage collection (true/false)'
         required: false
@@ -284,13 +279,6 @@ jobs:
               cp -r "${GITHUB_WORKSPACE}/${path}" "${CONTAINER_WORKSPACE}/${path}"
             done
           fi
-      - name: Export KVBM MLA backend
-        if: ${{ inputs.kvbm_mla_backend != '' }}
-        shell: bash
-        env:
-          KVBM_MLA_BACKEND: ${{ inputs.kvbm_mla_backend }}
-        run: |
-          echo "KVBM_MLA_BACKEND=${KVBM_MLA_BACKEND}" >> "$GITHUB_ENV"
       # Datadog takes ci.job.name from $GITHUB_JOB, which in a reusable workflow
       # is the inner job id — "test" for every caller — so every test session
       # lands under one job name and cannot be attributed to a CI lane.

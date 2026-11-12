@@ -30,7 +30,6 @@ LEGACY_DISTRIBUTIONS = {"aiconfigurator", "aiconfigurator-core"}
 CARGO_LOCKFILES = (
     ROOT / "Cargo.lock",
     ROOT / "lib/bindings/python/Cargo.lock",
-    ROOT / "lib/bindings/kvbm/Cargo.lock",
 )
 
 

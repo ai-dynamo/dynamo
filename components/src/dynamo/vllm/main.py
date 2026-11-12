@@ -62,12 +62,7 @@ from dynamo.vllm.nixl_telemetry import allow_nixl_telemetry_capture
 from dynamo.vllm.worker_factory import WorkerFactory
 
 from . import envs
-from .args import (
-    Config,
-    _uses_dynamo_connector,
-    configure_rl_logprobs_mode,
-    parse_args_with_model_fetch,
-)
+from .args import Config, configure_rl_logprobs_mode, parse_args_with_model_fetch
 from .backend_args import _configured_artifact_router_profile
 from .cache_info import get_configured_kv_event_block_size
 from .capacity import (
@@ -519,8 +514,6 @@ def setup_kv_event_publisher(
     config: Config,
     generate_endpoint: Endpoint,
     vllm_config: VllmConfig,
-    consolidator_enabled: bool = False,
-    consolidator_port: Optional[int] = 5558,
 ) -> Optional[list[KvEventPublisher]]:
     """
     list[KvEventPublisher] | None
@@ -530,8 +523,6 @@ def setup_kv_event_publisher(
         config: Worker configuration
         generate_endpoint: Endpoint for worker ID
         vllm_config: vLLM configuration
-        consolidator_enabled: If True, subscribe to kv eventconsolidator's ZMQ endpoint
-        consolidator_port: Port where kv event consolidator publishes (default: 5558)
 
     Returns:
         List of KvEventPublisher instances (one per dp_rank) if prefix caching is enabled, None otherwise.
@@ -562,21 +553,14 @@ def setup_kv_event_publisher(
     video_token_id = _resolve_video_token_id(vllm_config)
 
     for dp_rank in range(dp_start, dp_start + dp_size):
-        if consolidator_enabled:
-            # TODO: Use different port for each dp_rank once KVBM supports DP
-            zmq_endpoint = f"tcp://127.0.0.1:{consolidator_port}"
-            logger.info(
-                f"KV event publisher for dp_rank={dp_rank} subscribing to consolidator at {zmq_endpoint}"
-            )
-        else:
-            # Each dp_rank publishes to a different port
-            zmq_endpoint = ZmqEventPublisher.offset_endpoint_port(
-                config.engine_args.kv_events_config.endpoint,
-                data_parallel_rank=dp_rank,
-            ).replace("*", "127.0.0.1")
-            logger.info(
-                f"KV event publisher for dp_rank={dp_rank} subscribing to vLLM at {zmq_endpoint}"
-            )
+        # Each dp_rank publishes to a different port
+        zmq_endpoint = ZmqEventPublisher.offset_endpoint_port(
+            config.engine_args.kv_events_config.endpoint,
+            data_parallel_rank=dp_rank,
+        ).replace("*", "127.0.0.1")
+        logger.info(
+            f"KV event publisher for dp_rank={dp_rank} subscribing to vLLM at {zmq_endpoint}"
+        )
 
         kv_publisher = KvEventPublisher(
             endpoint=generate_endpoint,
@@ -763,25 +747,6 @@ def setup_vllm_engine(
     configure_muse_structural_tag_reasoning(config, vllm_config)
     disable_hybrid_kv_cache_manager_for_incompatible_pd_connector(vllm_config)
     default_sampling_params = vllm_config.model_config.get_diff_sampling_param()
-
-    # Set up consolidator endpoints if KVBM (DynamoConnector) is enabled
-    consolidator_endpoints = None
-    if _uses_dynamo_connector(config.engine_args):
-        try:
-            from kvbm.vllm_integration.consolidator_config import (
-                get_consolidator_endpoints,
-            )
-
-            consolidator_endpoints = get_consolidator_endpoints(vllm_config)
-        except Exception as e:
-            logger.warning(
-                f"KVBM connector is enabled but failed to get consolidator endpoints: {e}. "
-                "Continuing without KV event consolidation. "
-                "Ensure 'kvbm' package is installed if this feature is needed."
-            )
-    # Store consolidator endpoints in additional_config (vLLM 0.16+ uses strict
-    # dataclass fields; monkey-patching attributes onto VllmConfig is no longer safe).
-    vllm_config.additional_config["consolidator_endpoints"] = consolidator_endpoints
 
     # Pass runtime-only worker identity to InstrumentedScheduler via the
     # environment so it does not perturb vLLM's config hash.

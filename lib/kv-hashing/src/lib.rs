@@ -7,14 +7,14 @@
 //!
 //! See `README.md` for the design rationale (the three-representation problem, why PLH
 //! wins, the multimodal gap, and the extension-vs-PLH-alone caveat). This crate is the
-//! single contract that the router, consolidator, kvbm, and framework workers should
-//! converge on for block hashing.
+//! single contract that the router and framework workers should converge on for
+//! block hashing.
 //!
 //! # Pure-computation contract
 //!
 //! This crate is intentionally a library, not a service. It contains no async, no
 //! transports, no traits over runtime/scheduler config, and no event types. Those
-//! belong in higher layers (kvbm-connector, consolidator, kv-router).
+//! belong in higher layers (kv-router).
 //!
 //! The block hash identities the router and engines exchange, [`LocalBlockHash`] and
 //! [`ExternalSequenceBlockHash`], live here beside the functions that compute them.

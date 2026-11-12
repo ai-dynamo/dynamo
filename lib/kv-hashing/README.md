@@ -1,6 +1,6 @@
 # `dynamo-kv-hashing`
 
-Universal `Request → Vec<PositionalLineageHash>` contract for KV cache identity across the Dynamo stack (router, consolidator, kvbm, framework workers).
+Universal `Request → Vec<PositionalLineageHash>` contract for KV cache identity across the Dynamo stack (router, framework workers).
 
 This crate is **pure computation**: a library, not a service. No async, no transports, no traits over runtime/scheduler config, no event types. Those concerns belong in higher layers.
 

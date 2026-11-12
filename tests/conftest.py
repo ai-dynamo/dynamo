@@ -695,7 +695,6 @@ def pytest_collection_modifyitems(config, items):
         "trtllm": "tensorrt_llm",
         "vllm": "vllm",
         "sglang": "sglang",
-        "kvbm": "kvbm",
         "lmcache": "lmcache",
     }
     for marker_name, module_name in framework_markers.items():

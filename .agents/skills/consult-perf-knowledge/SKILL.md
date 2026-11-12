@@ -151,7 +151,7 @@ budget consumption (wall clock from `manifest.yaml`'s session start; failed depl
    serving, disaggregated rate matching, GPU allocation, and placement or fabric constraints;
 2. every Category 2 family in `tuning-hierarchy.md`: CUDA graphs; admission, batching, prefill scheduling, and
    workspace; speculative decoding; KV-cache dtype and capacity; engine backend or autotuner selection; Dynamo
-   routing and prefix reuse; KVBM or engine KV offload; and frontend, transport, and pod resources; and
+   routing and prefix reuse; engine KV offload; and frontend, transport, and pod resources; and
 3. Local Planner only when its conditional lane applies.
 
 For each family, record its coverage as `tested`, `ruled-out`, `not-applicable`, `untested-promising`, `deferred`,

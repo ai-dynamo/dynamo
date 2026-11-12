@@ -52,7 +52,7 @@ OpenTelemetry Collector, which routes them to Tempo and Loki. Grafana queries al
 | [`dev/observability/loki-datasource.yml`](https://github.com/ai-dynamo/dynamo/blob/main/dev/observability/loki-datasource.yml) | Provisions the Loki data source and trace links |
 | [`dev/observability/otel-collector.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/dev/observability/otel-collector.yaml) | Routes OTLP traces to Tempo and logs to Loki |
 | [`dev/observability/loki.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/dev/observability/loki.yaml) | Configures local Loki storage |
-| [`dev/observability/grafana_dashboards/`](https://github.com/ai-dynamo/dynamo/tree/main/dev/observability/grafana_dashboards) | Contains the provisioned Dynamo, GPU, and KVBM dashboards |
+| [`dev/observability/grafana_dashboards/`](https://github.com/ai-dynamo/dynamo/tree/main/dev/observability/grafana_dashboards) | Contains the provisioned Dynamo and GPU dashboards |
 
 ## Optional Profiles
 
