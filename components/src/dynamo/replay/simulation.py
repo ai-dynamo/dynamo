@@ -96,7 +96,12 @@ class DynamoReplayRunnerFactory:
             supports_agentic_speculative_decoding=True,
             supports_agentic_snapshots=engine_capabilities.supports_agentic_snapshots,
             supports_agentic_warmup=engine_capabilities.supports_agentic_warmup,
+            supports_agentic_live_warmup=(
+                engine_capabilities.supports_agentic_live_warmup
+            ),
             supports_agentic_profile=engine_capabilities.supports_agentic_profile,
+            # Engine args, state cache included, reach AISimulate's engine config.
+            supports_state_cache=engine_capabilities.supports_state_cache,
             # Full AgentX runtime conformance remains a separate checkpoint.
             # Keep the public runner honest about the narrower integration here.
             supported_agentic_topologies=tuple(
@@ -429,7 +434,12 @@ class DynamoReplayRunner:
         agentic_lanes = spec.workload.get("agentic_lanes")
         agentic_options = {
             name: spec.workload[name]
-            for name in ("agentic_snapshot", "agentic_warmup", "agentic_profile")
+            for name in (
+                "agentic_snapshot",
+                "agentic_warmup",
+                "agentic_warmup_policy",
+                "agentic_profile",
+            )
             if name in spec.workload
         }
         trace_block_size = spec.workload.get("trace_block_size")
