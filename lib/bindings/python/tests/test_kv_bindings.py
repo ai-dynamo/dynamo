@@ -14,15 +14,28 @@
 # limitations under the License.
 
 
+import asyncio
 import inspect
 import json
 import subprocess
 import sys
 import threading
+import types
+import uuid
 
 import pytest
 
-from dynamo.llm import RadixTree
+from dynamo._core import _convert_preprocessed_request
+from dynamo.llm import (
+    KvRouter,
+    KvRouterConfig,
+    ModelInput,
+    ModelType,
+    RadixTree,
+    WorkerType,
+    register_model,
+)
+from dynamo.runtime import DistributedRuntime
 
 try:
     from dynamo.llm import SelectionService
@@ -31,14 +44,15 @@ except ImportError:
 
 from dynamo.llm.exceptions import SelectionServiceError
 
+# `unit` and `parallel` are set per test: the KvRouter tests below start a runtime.
 pytestmark = [
     pytest.mark.gpu_0,
-    pytest.mark.parallel,
     pytest.mark.pre_merge,
-    pytest.mark.unit,
 ]
 
 
+@pytest.mark.unit
+@pytest.mark.parallel
 @pytest.mark.timeout(5)  # Expected: ~1s, timeout set to 5x for safety
 def test_radix_tree_binding():
     """Test RadixTree binding directly with store event and find matches"""
@@ -105,6 +119,8 @@ def test_radix_tree_binding():
     )
 
 
+@pytest.mark.unit
+@pytest.mark.parallel
 @pytest.mark.timeout(5)  # Expected: ~1s, timeout set to 5x for safety
 @pytest.mark.parametrize("num_threads", [2, 3, 5, 128])
 @pytest.mark.parametrize("prepopulate_worker_ids", [True, False])
@@ -204,6 +220,8 @@ def test_radix_tree_thread_safety(
     ), f"Expected {expected_blocks_after_removal} block events after removal, got {len(blocks_after_removal)}"
 
 
+@pytest.mark.unit
+@pytest.mark.parallel
 @pytest.mark.skipif(
     SelectionService is None,
     reason="SelectionService requires the select-service Cargo feature",
@@ -217,6 +235,8 @@ def test_selection_service_rejects_invalid_affinity_ttl(ttl):
         SelectionService(session_affinity_ttl_secs=ttl)
 
 
+@pytest.mark.unit
+@pytest.mark.parallel
 @pytest.mark.skipif(
     SelectionService is None,
     reason="SelectionService requires the select-service Cargo feature",
@@ -240,6 +260,8 @@ def test_selection_service_cli_rejects_invalid_affinity_ttl(ttl):
     assert "panicked" not in result.stderr
 
 
+@pytest.mark.unit
+@pytest.mark.parallel
 @pytest.mark.skipif(
     SelectionService is None,
     reason="SelectionService requires the select-service Cargo feature",
@@ -251,6 +273,8 @@ def test_selection_service_accepts_valid_affinity_ttl(ttl):
     service.shutdown()
 
 
+@pytest.mark.unit
+@pytest.mark.parallel
 @pytest.mark.skipif(
     SelectionService is None,
     reason="SelectionService requires the select-service Cargo feature",
@@ -331,6 +355,8 @@ async def session_binding_services(monkeypatch):
         await peer.shutdown_async()
 
 
+@pytest.mark.unit
+@pytest.mark.parallel
 @pytest.mark.skipif(
     SelectionService is None,
     reason="SelectionService requires the select-service Cargo feature",
@@ -390,6 +416,8 @@ async def test_selection_service_session_binding_stream(session_binding_services
         source.apply_session_binding(binding)
 
 
+@pytest.mark.unit
+@pytest.mark.parallel
 @pytest.mark.skipif(
     SelectionService is None,
     reason="SelectionService requires the select-service Cargo feature",
@@ -416,6 +444,8 @@ async def test_selection_service_session_binding_stream_drains_queue(
     assert [binding["session_id"] for binding in batch] == ["a", "b", "c"]
 
 
+@pytest.mark.unit
+@pytest.mark.parallel
 @pytest.mark.skipif(
     SelectionService is None,
     reason="SelectionService requires the select-service Cargo feature",
@@ -469,6 +499,8 @@ async def test_selection_service_malformed_payload_raises_value_error(
         service.shutdown()
 
 
+@pytest.mark.unit
+@pytest.mark.parallel
 @pytest.mark.skipif(
     SelectionService is None,
     reason="SelectionService requires the select-service Cargo feature",
@@ -487,3 +519,165 @@ async def test_selection_service_not_ready_carries_status(monkeypatch):
         assert exc_info.value.status_code == 503
     finally:
         service.shutdown()
+
+
+# KvRouter.generate and generate_from_request read `token_ids` and `extra_args` directly
+# when they are exact builtins and fall back to pythonize otherwise. Either way the
+# worker must receive what pythonize alone produced, or the call must raise its error.
+
+
+def _preprocessed(token_ids=(1, 2, 3), **fields):
+    return {"model": "m", "token_ids": list(token_ids), **fields}
+
+
+class _TokenList(list):
+    pass
+
+
+class _ExtraArgs(dict):
+    pass
+
+
+_EXTRA_ARGS_DIRECT = [
+    None,
+    {
+        "nemo_rl": {
+            "template_token_ids": [7, 8, 9],
+            "request": {"max_tokens": None, "tools": [{"type": "function"}]},
+            "verify": False,
+        }
+    },
+    {"ints": [0, -1, -(2**63), 2**63 - 1, 2**63, 2**64 - 1]},
+    {"floats": [1.5, -0.0, float("nan"), float("inf")]},
+    {"z": (1, "x"), "a": [], "m": {}, "s": "héllo", "b": True},
+]
+
+_EXTRA_ARGS_FALLBACK = [
+    {"s": {1, 2}},
+    {1: "x"},
+    {"big": 2**64},
+    _ExtraArgs(ints=[1, 2]),
+]
+
+_REQUESTS_DIRECT = [
+    _preprocessed(),
+    _preprocessed(token_ids=[]),
+    _preprocessed(
+        stop_conditions={"max_tokens": 8},
+        sampling_options={"temperature": 0.5},
+        annotations=["nemo_gym:rollout"],
+    ),
+    *(_preprocessed(extra_args=extra_args) for extra_args in _EXTRA_ARGS_DIRECT),
+]
+
+_REQUESTS_FALLBACK = [
+    {"model": "m", "token_ids": _TokenList([1, 2])},
+    _preprocessed(token_ids=[1, -1]),
+    {"model": "m"},
+    types.MappingProxyType(_preprocessed()),
+    *(_preprocessed(extra_args=extra_args) for extra_args in _EXTRA_ARGS_FALLBACK),
+]
+
+
+def _pythonized(preprocessed):
+    """pythonize's request, or the exception it raises."""
+    try:
+        return _convert_preprocessed_request(preprocessed, fast_path=False)
+    except Exception as e:
+        return e
+
+
+@pytest.fixture
+async def echo_router(temp_file_store, monkeypatch):
+    """A KvRouter in front of one worker that records each request it receives."""
+    monkeypatch.setenv("DYN_ROUTER_MIN_INITIAL_WORKERS", "1")
+    received = []
+
+    async def echo(request, _context=None):
+        received.append(request)
+        yield {"token_ids": [], "finish_reason": "stop"}
+
+    loop = asyncio.get_running_loop()
+    endpoint_path = f"echo-router-{uuid.uuid4().hex}.worker.generate"
+    worker_runtime = DistributedRuntime(loop, "file", "tcp")
+    router_runtime = DistributedRuntime(loop, "file", "tcp")
+    server_task = None
+    try:
+        endpoint = worker_runtime.endpoint(endpoint_path)
+        await register_model(
+            ModelInput.Tensor,
+            ModelType.TensorBased,
+            endpoint,
+            "echo-router-worker",
+            worker_type=WorkerType.Aggregated,
+            tensor_model_config={
+                "name": "echo-router-worker",
+                "inputs": [],
+                "outputs": [],
+            },
+        )
+        server_task = asyncio.ensure_future(endpoint.serve_endpoint(echo))
+        router_endpoint = router_runtime.endpoint(endpoint_path)
+        client = await router_endpoint.client()
+        assert len(await client.wait_for_instances()) == 1
+        router = KvRouter(router_endpoint, 4, KvRouterConfig(use_kv_events=False))
+        yield router, received
+    finally:
+        router_runtime.shutdown()
+        worker_runtime.shutdown()
+        if server_task is not None:
+            await asyncio.wait_for(server_task, timeout=10)
+
+
+async def _received_or_error(received, call):
+    """The request the worker received for `call`, or the exception `call` raised."""
+    try:
+        stream = await call()
+    except Exception as e:
+        return e
+    responses = [response async for response in stream]
+    assert [response["finish_reason"] for response in responses] == ["stop"]
+    return received[-1]
+
+
+def _assert_same(actual, expected):
+    if isinstance(expected, Exception):
+        assert isinstance(actual, Exception), actual
+        assert (type(actual), str(actual)) == (type(expected), str(expected))
+    else:
+        assert not isinstance(actual, Exception), actual
+        # JSON text also pins key order and NaN -> null.
+        assert json.dumps(actual) == json.dumps(expected)
+
+
+@pytest.mark.integration
+@pytest.mark.timeout(30)
+@pytest.mark.parametrize("preprocessed", _REQUESTS_DIRECT + _REQUESTS_FALLBACK)
+async def test_kv_router_generate_from_request_matches_pythonize(
+    echo_router, preprocessed
+):
+    router, received = echo_router
+    expected = _pythonized(preprocessed)
+    actual = await _received_or_error(
+        received, lambda: router.generate_from_request(preprocessed)
+    )
+    if isinstance(actual, dict):
+        # The router adds its routing hints on the way to the worker.
+        actual.pop("routing")
+    _assert_same(actual, expected)
+
+
+@pytest.mark.integration
+@pytest.mark.timeout(30)
+@pytest.mark.parametrize("extra_args", _EXTRA_ARGS_DIRECT + _EXTRA_ARGS_FALLBACK)
+async def test_kv_router_generate_extra_args_matches_pythonize(echo_router, extra_args):
+    router, received = echo_router
+    expected = _pythonized(_preprocessed(extra_args=extra_args))
+    if not isinstance(expected, Exception):
+        expected = expected.get("extra_args")
+    actual = await _received_or_error(
+        received, lambda: router.generate([1, 2, 3], "m", extra_args=extra_args)
+    )
+    if isinstance(actual, dict):
+        actual = actual.get("extra_args")
+    _assert_same(actual, expected)

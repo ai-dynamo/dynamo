@@ -34,7 +34,7 @@ impl RoutedEngine {
 
 /// The request with `token_ids` and `extra_args` read by [`py_convert`] and the rest by
 /// pythonize; `None` unless it is an exact `dict` whose two fields both read.
-fn fast_preprocessed_request(obj: &Bound<'_, PyAny>) -> Option<PreprocessedRequest> {
+pub(crate) fn fast_preprocessed_request(obj: &Bound<'_, PyAny>) -> Option<PreprocessedRequest> {
     let py = obj.py();
     let token_ids_key = pyo3::intern!(py, "token_ids");
     let extra_args_key = pyo3::intern!(py, "extra_args");
