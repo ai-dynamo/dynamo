@@ -2109,7 +2109,7 @@ mod tests {
         assert!(error.downcast_ref::<UnknownPolicyClassRefusal>().is_some());
         assert_eq!(error.to_string(), dynamo_error.to_string());
         assert_eq!(
-            crate::http::service::error::find_canonical_error_in_chain(error.as_ref()),
+            dynamo_error::http::find_canonical_error_in_chain(error.as_ref()),
             Some(dynamo_error)
         );
     }

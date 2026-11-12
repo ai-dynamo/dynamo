@@ -77,6 +77,7 @@ dynamo-global-discovery-client = { workspace = true }
 dynamo-admission = { workspace = true }
 dynamo-global-common = { workspace = true, features = ["grpc"] }
 dynamo-global-view-broadcaster = { path = "../global-view-broadcaster" }
+dynamo-error = { workspace = true, features = ["http"] }
 dynamo-kv-events = { workspace = true }
 dynamo-kv-hashing = { workspace = true }
 dynamo-kv-hints = { workspace = true }

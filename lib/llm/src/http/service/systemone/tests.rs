@@ -226,7 +226,7 @@ fn impossible_admission_is_not_retryable_but_busy_capacity_is() {
             .unwrap_err();
     assert_eq!(
         response.status(),
-        super::super::error::overload_status_code()
+        dynamo_error::http::overload_status_code()
     );
     assert_eq!(response.headers()["retry-after"], "1");
     assert!(

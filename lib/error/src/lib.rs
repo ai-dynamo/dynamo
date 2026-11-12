@@ -101,6 +101,9 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::sync::{Arc, LazyLock};
 
+#[cfg(feature = "http")]
+pub mod http;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum ErrorClass {
     /// The request contains invalid input (e.g., prompt exceeds context length).

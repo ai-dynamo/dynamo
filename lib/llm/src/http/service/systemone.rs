@@ -169,7 +169,7 @@ fn acquire_admission(
             ),
             decision_lifecycle::AdmissionError::CapacityExhausted => response::capacity_error(
                 dialect,
-                super::error::overload_status_code(),
+                dynamo_error::http::overload_status_code(),
                 "System One request capacity is exhausted",
             ),
         };
@@ -274,7 +274,7 @@ async fn handle_request(
         Err(_) => {
             return response::capacity_error(
                 dialect,
-                super::error::overload_status_code(),
+                dynamo_error::http::overload_status_code(),
                 "System One preprocessing capacity is exhausted",
             );
         }
@@ -431,7 +431,7 @@ fn prepare_branches(
                     cause.downcast_ref::<crate::preprocessor::SystemOneModelIncompatible>()
                 {
                     incompatible.0
-                } else if super::error::find_canonical_error_in_chain(cause.as_ref())
+                } else if dynamo_error::http::find_canonical_error_in_chain(cause.as_ref())
                     .is_some_and(|error| {
                         error.class() == dynamo_runtime::error::ErrorClass::InvalidRequest
                     })

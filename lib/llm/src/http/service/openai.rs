@@ -128,7 +128,7 @@ const BATCH_OUTPUT_RETRIEVAL_NOT_IMPLEMENTED: &str =
 static FORCE_INCLUDE_USAGE: LazyLock<bool> =
     LazyLock::new(|| env_is_truthy(env_llm::DYN_ENABLE_FORCE_INCLUDE_USAGE));
 
-use super::error::{
+use dynamo_error::http::{
     BackendStatusAction, ClientErrorAction, SanitizedError, find_canonical_error_in_chain,
     http_action_for_error, overload_status_code,
 };

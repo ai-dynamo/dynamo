@@ -17,7 +17,7 @@ async fn backend_overload_preserves_retry_status_and_releases_admission() {
             dispatch_request(TestEngine::new(behavior), 2, "request").await;
         assert_eq!(
             response.status(),
-            super::super::super::error::overload_status_code()
+            dynamo_error::http::overload_status_code()
         );
         assert_eq!(response.headers()["retry-after"], "1");
         assert!(

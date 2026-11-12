@@ -12,7 +12,7 @@ pub(super) fn classify(finish: &Value) -> Option<DispatchError> {
     let status = finish.get("status_code").and_then(Value::as_u64);
     Some(if status == Some(429) {
         DispatchError {
-            status: super::super::error::overload_status_code(),
+            status: dynamo_error::http::overload_status_code(),
             public_message: "SGLang scoring worker capacity is exhausted",
             detail: "native scoring worker capacity exhausted".to_string(),
             retry_after: true,

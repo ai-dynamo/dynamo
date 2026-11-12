@@ -2092,8 +2092,8 @@ mod tests {
                         let error = output.error.expect("missing IDs must be rejected");
                         assert_eq!(error.class(), ErrorClass::BackendProtocol);
                         assert!(matches!(
-                            crate::http::service::error::http_action_for_error(&error),
-                            crate::http::service::error::ClientErrorAction::Respond {
+                            dynamo_error::http::http_action_for_error(&error),
+                            dynamo_error::http::ClientErrorAction::Respond {
                                 status: axum::http::StatusCode::BAD_GATEWAY,
                                 ..
                             }

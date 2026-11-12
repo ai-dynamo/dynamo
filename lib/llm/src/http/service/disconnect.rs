@@ -39,8 +39,8 @@ use std::sync::{
 use std::time::Duration;
 use tokio::sync::mpsc;
 
-use crate::http::service::error::{ClientErrorAction, SanitizedError, http_action_for_error};
 use crate::http::service::metrics::{CancellationLabels, ErrorType, InflightGuard, Metrics};
+use dynamo_error::http::{ClientErrorAction, SanitizedError, http_action_for_error};
 use dynamo_runtime::error::{DynamoError, ErrorClass};
 
 use dynamo_runtime::config::environment_names::llm::DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS as BACKEND_STREAM_TIMEOUT_ENV;
@@ -399,7 +399,7 @@ fn openai_semantic_stream_error(error: &DynamoError) -> (ErrorType, String) {
         ),
     };
     let message = error.public_message().unwrap_or(message);
-    let error_type = if status == crate::http::service::error::overload_status_code() {
+    let error_type = if status == dynamo_error::http::overload_status_code() {
         "service_unavailable"
     } else {
         match status {
@@ -1331,7 +1331,7 @@ mod tests {
         assert_eq!(body["error"]["type"], "service_unavailable");
         assert_eq!(
             body["error"]["code"],
-            crate::http::service::error::overload_status_code().as_u16()
+            dynamo_error::http::overload_status_code().as_u16()
         );
     }
 
