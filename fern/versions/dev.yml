@@ -508,6 +508,8 @@ navigation:
                         path: ../pages-dev/developer-guide/knowledge-base/modular-components/router/custom-worker-selection.mdx
                       - page: Write an Admission Control Plugin
                         path: ../pages-dev/developer-guide/knowledge-base/modular-components/router/custom-admission-control.md
+                      - page: Write a KV Hint Plugin
+                        path: ../pages-dev/developer-guide/knowledge-base/modular-components/router/hint-policies.md
                       - page: Router Examples
                         path: ../pages-dev/developer-guide/knowledge-base/modular-components/router/router-examples.md
                       - page: Router Testing
