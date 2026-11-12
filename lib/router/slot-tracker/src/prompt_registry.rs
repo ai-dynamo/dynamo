@@ -503,12 +503,22 @@ impl PromptRegistry {
         if loads.version != version {
             return false;
         }
-        for (&worker, additional_active_blocks) in workers.iter().zip(additional_active_blocks) {
+        // NOTE(perf): read every rank before writing any. A slot read ends in a memory
+        // barrier, and `projections` was filled on another thread, so written in the same
+        // loop each cache miss on it would wait for the one before.
+        let reread: Vec<Option<WorkerLoadProjection>> = workers
+            .iter()
+            .zip(additional_active_blocks)
+            .map(|(&worker, additional_active_blocks)| {
+                let load = loads.get(worker)?;
+                Some(load.projection(decay_now, additional_active_blocks))
+            })
+            .collect();
+        drop(loads);
+        for (worker, reread) in workers.iter().zip(reread) {
             // The ranks are those of the pass, so one it did not project is not registered.
-            if let (Some(load), Some(projection)) =
-                (loads.get(worker), projections.get_mut(&worker))
-            {
-                *projection = load.projection(decay_now, additional_active_blocks);
+            if let (Some(reread), Some(projection)) = (reread, projections.get_mut(worker)) {
+                *projection = reread;
             }
         }
         true
