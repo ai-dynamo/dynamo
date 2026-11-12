@@ -64,6 +64,8 @@ mod capacity;
 /// it waits, in order, for a slot.
 const ADMISSION_CHANNEL_CAPACITY: usize = 256;
 
+pub type RouterQueueWaitObserver = Arc<dyn Fn(usize, Duration) + Send + Sync>;
+
 /// Commands the actor takes from the channel in one receive. A receive spends one unit of
 /// the task's cooperative budget whatever it returns, so a backlog costs the actor a yield
 /// to the runtime every 128 batches, not every 128 commands. The size also sets how long the
@@ -935,6 +937,7 @@ struct SchedulerQueueActor<
     overlap_refresh_after: Option<Duration>,
     overloaded_worker_provider: Option<OverloadedWorkerProvider>,
     available_worker_ids: Option<Arc<AvailableWorkerIds>>,
+    queue_wait_observer: Arc<OnceLock<RouterQueueWaitObserver>>,
     non_max_overlap_selection_observer: Arc<OnceLock<NonMaxOverlapSelectionObserver>>,
     /// Per-candidate cost capture for admitted selections, installed once by the host.
     selection_trace: Arc<OnceLock<SelectionTraceSpec>>,
@@ -976,6 +979,7 @@ pub struct SchedulerQueue<
     available_worker_ids: Option<Arc<AvailableWorkerIds>>,
     overloaded_worker_provider: Option<OverloadedWorkerProvider>,
     supports_overlap_refresh: bool,
+    queue_wait_observer: Arc<OnceLock<RouterQueueWaitObserver>>,
     non_max_overlap_selection_observer: Arc<OnceLock<NonMaxOverlapSelectionObserver>>,
     /// Per-candidate cost capture for admitted selections, installed once by the host.
     selection_trace: Arc<OnceLock<SelectionTraceSpec>>,
@@ -1110,6 +1114,7 @@ impl<
             tx: admission_tx.downgrade(),
         });
         let cleanup = Arc::new(AdmissionCleanup::default());
+        let queue_wait_observer = Arc::new(OnceLock::new());
         let non_max_overlap_selection_observer = Arc::new(OnceLock::new());
         let selection_trace = Arc::new(OnceLock::new());
         let resident_blocks = Arc::new(OnceLock::new());
@@ -1171,6 +1176,7 @@ impl<
             overlap_refresh_after,
             overloaded_worker_provider: overloaded_worker_provider.clone(),
             available_worker_ids: available_worker_ids.clone(),
+            queue_wait_observer: Arc::clone(&queue_wait_observer),
             non_max_overlap_selection_observer: Arc::clone(&non_max_overlap_selection_observer),
             selection_trace: Arc::clone(&selection_trace),
             resident_blocks: Arc::clone(&resident_blocks),
@@ -1196,6 +1202,7 @@ impl<
             available_worker_ids,
             overloaded_worker_provider,
             supports_overlap_refresh: overlap_refresh_after.is_some(),
+            queue_wait_observer,
             non_max_overlap_selection_observer,
             selection_trace,
             resident_blocks,
@@ -1225,6 +1232,13 @@ impl<
         self.non_max_overlap_selection_observer
             .set(observer)
             .is_ok()
+    }
+
+    /// Install the observer for time spent pending in the scheduler queue.
+    ///
+    /// Returns `false` when an observer is already installed.
+    pub fn set_queue_wait_observer(&self, observer: RouterQueueWaitObserver) -> bool {
+        self.queue_wait_observer.set(observer).is_ok()
     }
 
     /// Install per-candidate cost capture for admitted selections.
@@ -1965,6 +1979,9 @@ impl<
                     )
                 });
             if !should_queue {
+                if let Some(observer) = self.queue_wait_observer.get() {
+                    observer(class_index, Duration::ZERO);
+                }
                 return self.admit_one(context, request, decay_now, prepared) == Admission::Booked;
             }
             // The availability check and load projection can take time. Judge this request's
@@ -2451,6 +2468,13 @@ impl<
                 self.reject_due_time_passed(class_index, &mut request);
                 Admission::Refused
             } else {
+                let admit_now = Instant::now();
+                if let Some(observer) = self.queue_wait_observer.get() {
+                    observer(
+                        class_index,
+                        admit_now.saturating_duration_since(queued.enqueue_at),
+                    );
+                }
                 tracing::trace!(
                     policy_class = self.profile.class(class_index).name,
                     "scheduling request from pending queue"
@@ -2461,7 +2485,7 @@ impl<
                     attempt_tx: queued.attempt_tx,
                     lifecycle_transfer: queued.lifecycle_transfer,
                 };
-                self.admit_one(context, queued.request, Instant::now(), prepared)
+                self.admit_one(context, queued.request, admit_now, prepared)
             };
             self.pending.settle(charge, admission != Admission::Refused);
             self.rearm_class_timer(class_index);
@@ -4754,6 +4778,7 @@ mod tests {
             overlap_refresh_after: None,
             overloaded_worker_provider: None,
             available_worker_ids: None,
+            queue_wait_observer: Arc::clone(&queue.queue_wait_observer),
             non_max_overlap_selection_observer: Arc::clone(
                 &queue.non_max_overlap_selection_observer,
             ),
@@ -5974,6 +5999,13 @@ mod tests {
         let num_requests = 10;
 
         let (queue, slots) = make_queue(num_workers, block_size, isl, Some(0.0));
+        let observations = Arc::new(StdMutex::new(Vec::new()));
+        assert!(queue.set_queue_wait_observer({
+            let observations = Arc::clone(&observations);
+            Arc::new(move |class_index, wait| {
+                observations.lock().unwrap().push((class_index, wait));
+            })
+        }));
 
         let mut receivers = Vec::new();
         let mut req_ids = Vec::new();
@@ -6005,6 +6037,13 @@ mod tests {
             }
         }
         assert_eq!(ok_count, num_requests, "not all requests were scheduled");
+        let observations = observations.lock().unwrap();
+        assert_eq!(observations.len(), num_requests);
+        assert!(
+            observations
+                .iter()
+                .all(|(class_index, _)| *class_index == 0)
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
