@@ -22,6 +22,7 @@ from gpu_memory_service.snapshot.backends.nixl_common import (
     run_bounded_nixl_transfers,
 )
 from gpu_memory_service.snapshot.transfer import (
+    FileIntegrity,
     FileTransferSource,
     GMSSnapshotConfig,
     GMSTransferTarget,
@@ -29,6 +30,7 @@ from gpu_memory_service.snapshot.transfer import (
     TransferSession,
     group_sources_by_path,
     validate_transfer_targets,
+    verify_file_source_digests,
 )
 
 logger = logging.getLogger(__name__)
@@ -53,13 +55,18 @@ class NixlGDSTransferBackend:
             self._max_workers,
         )
 
-    def start_restore(self, sources: Sequence[FileTransferSource]) -> TransferSession:
+    def start_restore(
+        self,
+        sources: Sequence[FileTransferSource],
+        integrity_by_path: Mapping[str, FileIntegrity] | None = None,
+    ) -> TransferSession:
         return _NixlGDSTransferSession(
             agent=self._agent,
             agent_name=self._agent_name,
             device=self._device,
             max_workers=self._max_workers,
             sources=sources,
+            integrity_by_path=integrity_by_path,
         )
 
     def close(self) -> None:
@@ -75,15 +82,39 @@ class _NixlGDSTransferSession:
         device: int,
         max_workers: int,
         sources: Sequence[FileTransferSource],
+        integrity_by_path: Mapping[str, FileIntegrity] | None = None,
     ) -> None:
         self._agent = agent
         self._agent_name = agent_name
         self._device = device
         self._max_workers = max(1, int(max_workers))
         self._sources = list(sources)
+        self._integrity_by_path = dict(integrity_by_path or {})
 
     def restore(self, targets: Mapping[str, GMSTransferTarget]) -> None:
         validate_transfer_targets(self._sources, targets, device=self._device)
+        verification_t0 = time.monotonic()
+        verified_files, verified_bytes = verify_file_source_digests(
+            self._sources,
+            self._integrity_by_path,
+            max_workers=self._max_workers,
+        )
+        if verified_files:
+            verification_elapsed = time.monotonic() - verification_t0
+            throughput = (
+                verified_bytes / verification_elapsed / (1024**3)
+                if verification_elapsed > 0
+                else 0.0
+            )
+            logger.info(
+                "NIXL GDS pre-transfer integrity verification succeeded: "
+                "%.2f GiB in %.3fs (%.2f GiB/s, files=%d, workers=%d)",
+                verified_bytes / (1024**3),
+                verification_elapsed,
+                throughput,
+                verified_files,
+                min(self._max_workers, verified_files),
+            )
         file_groups = list(group_sources_by_path(self._sources).items())
         total_bytes = sum(source.byte_count for source in self._sources)
         t0 = time.monotonic()
@@ -101,7 +132,6 @@ class _NixlGDSTransferSession:
             prepare_transfer=prepare_transfer,
             logger=logger,
         )
-
         elapsed = time.monotonic() - t0
         throughput = total_bytes / elapsed / (1024**3) if elapsed > 0 else 0
         logger.info(

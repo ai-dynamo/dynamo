@@ -5,15 +5,14 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use derive_builder::Builder;
-pub use dynamo_kv_router::kv_hints::{
+use dynamo_admission::host::AbortCause;
+use dynamo_kv_hashing::multimodal::BlockExtraInfo;
+pub use dynamo_kv_hints::{
     KV_HINT_TRANSFER_CAPABILITY_KEY, KvHint, KvHintAction, KvSourceLocationsPayload,
 };
-use dynamo_kv_router::{
-    config::RouterConfigOverride,
-    protocols::{BlockExtraInfo, RoutingConstraints, WorkerId},
-    scheduling::{AbortCause, RequestLifecycle},
-};
+use dynamo_router_protocol::worker::WorkerId;
 use dynamo_runtime::error::{DynamoError, ErrorType, match_error_chain};
+use dynamo_scheduler::host::{RequestLifecycle, RouterConfigOverride, RoutingConstraints};
 use serde::{Deserialize, Serialize};
 
 use uuid::Uuid;
@@ -22,6 +21,8 @@ use super::extensions::{AgentContext, RouterParams};
 use super::llm_backend::DecoderCheckpoint;
 use super::timing::{RequestPhase, RequestTracker};
 use super::{OutputOptions, SamplingOptions, StopConditions};
+use crate::kv_router::RequestAttemptRelease;
+use crate::lora::runtime::RuntimeLoraSourceUri;
 use crate::preprocessor::media::RdmaMediaDataDescriptor;
 use crate::protocols::TokenIdType;
 
@@ -60,6 +61,18 @@ pub struct RoutingHints {
     /// Used for LORA-aware routing and tracking.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lora_name: Option<String>,
+
+    /// Canonical base model for a request-time LoRA adapter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_model_name: Option<String>,
+
+    /// Opaque source URI sent only to the selected worker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lora_source_uri: Option<RuntimeLoraSourceUri>,
+
+    /// Request-time LoRA resolver protocol version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lora_resolution_version: Option<u16>,
 
     /// Cache namespace for request-scoped KV cache isolation.
     #[serde(
@@ -136,6 +149,7 @@ struct MigrationStateInner {
     excluded_worker_ids: Vec<WorkerId>,
     last_error: Option<DynamoError>,
     request_lifecycle: Option<Box<RequestLifecycle>>,
+    prefill_release: Option<RequestAttemptRelease>,
 }
 
 impl MigrationState {
@@ -224,6 +238,26 @@ impl MigrationState {
             return;
         };
         lifecycle.abort(error.map(owned_abort_error));
+    }
+
+    /// Park the latest attempt's remote prefill booking. Its prefill can
+    /// outlive a failed decode to serve an in-flight KV transfer, so only a
+    /// committed retry, which re-books the same request ID, releases it early.
+    pub(crate) fn store_prefill_release(&self, release: RequestAttemptRelease) {
+        self.inner
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .prefill_release = Some(release);
+    }
+
+    pub(crate) fn take_prefill_release(&self) -> Option<RequestAttemptRelease> {
+        self.inner
+            .get()?
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .prefill_release
+            .take()
     }
 }
 
@@ -362,6 +396,13 @@ pub type MultimodalDataMap = std::collections::HashMap<String, Vec<MultimodalDat
 /// Backend cache UUIDs aligned positionally with multimodal data slots.
 pub type MultimodalUuidMap = std::collections::HashMap<String, Vec<Option<String>>>;
 
+/// A reference into [`MultimodalDataMap`] preserving the media traversal order.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct MultimodalItemRef {
+    pub modality: String,
+    pub index: usize,
+}
+
 /// [`PreprocessedRequest`] is the internal representation of an LLM request. The `dynamo.llm-preprocessor`
 /// crate is responsible for converting request from the public APIs to this internal representation.
 #[derive(Serialize, Deserialize, Clone, Builder)]
@@ -420,6 +461,13 @@ pub struct PreprocessedRequest {
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub multi_modal_uuids: Option<MultimodalUuidMap>,
+
+    /// Media references in gather order: content parts, after the formatter's
+    /// message ordering. A chat template that regroups media by modality
+    /// renders a different placeholder order.
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multi_modal_order: Option<Vec<MultimodalItemRef>>,
 
     /// Optional multimodal routing-only fields (separate from execution payload).
     #[builder(default)]
@@ -1043,6 +1091,34 @@ mod tests {
                     .unwrap();
                 assert_eq!(request.dp_rank(), expected, "{body}");
             }
+        }
+    }
+
+    #[test]
+    fn worker_extension_numbers_remain_native_for_independent_receivers() {
+        use dynamo_runtime::pipeline::network::RequestPlanePayloadCodec;
+        #[derive(Deserialize)]
+        struct BackendSettings {
+            temperature: f64,
+            ranks: Vec<u64>,
+        }
+        #[derive(Deserialize)]
+        struct BackendRequest {
+            extra_args: BackendSettings,
+        }
+        let request: PreprocessedRequest = serde_json::from_value(serde_json::json!({
+            "model": "m", "token_ids": [1, 2, 3], "stop_conditions": {},
+            "sampling_options": {}, "output_options": {},
+            "extra_args": {"temperature": 0.7, "ranks": [0, 5]}
+        }))
+        .unwrap();
+        for codec in [
+            RequestPlanePayloadCodec::Json,
+            RequestPlanePayloadCodec::Msgpack,
+        ] {
+            let received: BackendRequest = codec.decode(&codec.encode(&request).unwrap()).unwrap();
+            assert_eq!(received.extra_args.temperature, 0.7);
+            assert_eq!(received.extra_args.ranks, vec![0, 5]);
         }
     }
 

@@ -15,17 +15,14 @@ use std::{
 
 use anyhow::{Context, Result};
 use dashmap::DashMap;
-use dynamo_kv_router::{
-    identity::CacheOwnerId,
-    indexer::{
-        KvStateAgentIdentity, KvStateAgentStatus, KvStateProtocolVersion, WorkerKvQueryResponse,
-    },
-    protocols::{
-        KvCacheEvent, KvCacheEventData, ResetScope, ResidencyDomain, ResidencyProjection,
-        ResidencyRoutingSnapshot, RouterEvent, RouterHintSourceMetadata, StorageTier,
-        WorkerWithDpRank,
-    },
+use dynamo_kv_events::event::{KvCacheEvent, KvCacheEventData, RouterEvent};
+use dynamo_kv_events::residency::{ResetScope, ResidencyDomain, StorageTier};
+use dynamo_kv_indexer::host::{
+    KvStateAgentIdentity, KvStateAgentStatus, KvStateProtocolVersion, ResidencyProjection,
+    ResidencyRoutingSnapshot, RouterHintSourceMetadata, WorkerKvQueryResponse,
 };
+use dynamo_router_protocol::identity::CacheOwnerId;
+use dynamo_router_protocol::worker::WorkerWithDpRank;
 use dynamo_runtime::{
     component::Component,
     discovery::{
@@ -1424,6 +1421,23 @@ fn update_advertisements<T: Advertisement>(
     }
 }
 
+fn compatible_state_source(
+    discovery_id: u64,
+    source: &KvStateSourceAdvertisement,
+    endpoint: &dynamo_runtime::protocols::EndpointId,
+    block_size: u32,
+) -> bool {
+    source.publisher_id == discovery_id
+        && source.protocol_version == KvStateProtocolVersion::V2
+        && source.event_topic == KV_STATE_EVENT_TOPIC_V2
+        && source.kv_state_endpoint == *endpoint
+        && source.kv_block_size == block_size
+        // The router consumes canonical V2 residency, not either engine's raw
+        // ingress. Source/attachment protocol equality is checked separately.
+        && source.ingress_protocol.supports_owned_residency()
+        && source.cache_owner_id.pool().indexer_domain() == source.indexer_domain_id
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn schedule_state_sources(
     indexer: &Indexer,
@@ -1454,17 +1468,8 @@ async fn schedule_state_sources(
     let mut source_by_owner: HashMap<CacheOwnerId, Vec<&KvStateSourceAdvertisement>> =
         HashMap::new();
     for (discovery_id, source) in sources {
-        let expected_ingress_protocol =
-            crate::discovery::kv_state_agent::KvStateIngressProtocol::VllmResidencyV1;
         let expected_domain = source.cache_owner_id.pool().indexer_domain();
-        if source.publisher_id != *discovery_id
-            || source.protocol_version != KvStateProtocolVersion::V2
-            || source.event_topic != KV_STATE_EVENT_TOPIC_V2
-            || source.kv_state_endpoint != *endpoint
-            || source.kv_block_size != expected_block_size
-            || source.ingress_protocol != expected_ingress_protocol
-            || expected_domain != source.indexer_domain_id
-        {
+        if !compatible_state_source(*discovery_id, source, endpoint, expected_block_size) {
             tracing::warn!(
                 discovery_id = *discovery_id,
                 advertised_publisher_id = source.publisher_id,
@@ -1477,7 +1482,7 @@ async fn schedule_state_sources(
                 advertised_block_size = source.kv_block_size,
                 expected_block_size,
                 advertised_ingress_protocol = ?source.ingress_protocol,
-                expected_ingress_protocol = ?expected_ingress_protocol,
+                expected_ingress_protocol = "owned-residency",
                 advertised_domain = %source.indexer_domain_id,
                 expected_domain = %expected_domain,
                 owner = %source.cache_owner_id,
@@ -2396,22 +2401,23 @@ async fn clear_cache_owner(indexer: &Indexer, owner: CacheOwnerId, event_id: u64
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, sync::Arc};
-
-    use dynamo_kv_router::identity::{
-        CacheSemanticsId, DcId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
-        StableDpSlotId,
-    };
-    use dynamo_kv_router::indexer::{
+    use dynamo_kv_events::event::{KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData};
+    use dynamo_kv_events::residency::ResidencyOwner;
+    use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
+    use dynamo_kv_hints::KvTransferCandidateSource;
+    use dynamo_kv_indexer::host::RouterHintSourceMetadata;
+    use dynamo_kv_indexer::host::{
         KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvStateAttachmentStatus,
         KvStateRecoveryReceipt, LowerTierIndexers, LowerTierQueryOptions, MatchDetails,
-        query_lower_tiers_with_options,
+        ResidencyOwnerKeyExt, query_lower_tiers_with_options,
     };
-    use dynamo_kv_router::kv_hints::KvTransferCandidateSource;
-    use dynamo_kv_router::protocols::{
-        ExternalSequenceBlockHash, KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData,
-        LocalBlockHash, ResidencyOwner, RouterHintSourceMetadata, WorkerWithDpRank,
+    use dynamo_router_protocol::identity::{
+        CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
+        StableDpSlotId,
     };
+    use dynamo_router_protocol::worker::WorkerWithDpRank;
+    use std::{collections::HashMap, sync::Arc};
+
     use dynamo_runtime::{component::TransportType, protocols::EndpointId};
     use tokio_util::sync::CancellationToken;
 
@@ -2431,7 +2437,7 @@ mod tests {
                     CacheSemanticsId::new([1; 16], IdentitySource::Explicit),
                     RoutingScopeId::new([2; 16], IdentitySource::Explicit),
                 ),
-                DcId::new(3),
+                ClusterId::new(3),
             ),
             StableDpSlotId::new([slot; 16], IdentitySource::Explicit),
         )
@@ -2480,6 +2486,25 @@ mod tests {
             event_topic: KV_STATE_EVENT_TOPIC_V2.to_string(),
             recovery_control_target: instance(17),
             router_hint_source: None,
+        }
+    }
+
+    #[test]
+    fn source_compatibility_accepts_owned_ingress_contracts() {
+        let mut source = source_advertisement(owner(4));
+        let endpoint = source.kv_state_endpoint.clone();
+        for protocol in [
+            KvStateIngressProtocol::VllmResidencyV1,
+            KvStateIngressProtocol::SglangHiCacheV1,
+            KvStateIngressProtocol::FrameworkV1,
+        ] {
+            source.ingress_protocol = protocol;
+            assert_eq!(
+                compatible_state_source(41, &source, &endpoint, 4),
+                protocol.supports_owned_residency()
+            );
+            assert!(!compatible_state_source(42, &source, &endpoint, 4));
+            assert!(!compatible_state_source(41, &source, &endpoint, 8));
         }
     }
 

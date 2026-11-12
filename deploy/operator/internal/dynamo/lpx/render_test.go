@@ -12,6 +12,7 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	deploymentcapnpv1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/deployment/v1"
 	manifestcapnp "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/v2"
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
@@ -37,12 +38,17 @@ func renderSelectedForTest(pcs *grovev1alpha1.PodCliqueSet, projections []*Model
 	if err != nil {
 		return nil, err
 	}
+
+	// Projection-only fixtures model a workload with an authored conductor.
+	serving := &v1beta1.DynamoComponentDeploymentSharedSpec{
+		Roles: []v1beta1.ComponentRoleSpec{{Name: v1beta1.ComponentRoleLPXConductor}},
+	}
 	workload := &Workload{
 		modelProjections:     projections,
 		digest:               digest,
 		scalingGroupReplicas: 1,
 	}
-	plan, err := workload.PlanNodeLocalMaterialization(pcs.Name)
+	plan, err := workload.PlanNodeLocalMaterialization(pcs.Name, serving)
 	if err != nil {
 		return nil, err
 	}
@@ -319,20 +325,31 @@ func TestRenderSpecDecodeRoleOwnershipAndTemplateSettings(t *testing.T) {
 	})
 	require.NoError(t, err)
 	pcs := renderTestPCS(false)
-	plan, err := selected.PlanNodeLocalMaterialization(pcs.Name)
+	plan, err := selected.PlanNodeLocalMaterialization(pcs.Name, source.GetComponentByName(selected.ServingComponentName()))
 	require.NoError(t, err)
 	templates, err := RenderNodeLocal(selected, plan, RenderInput{
 		Stages: stages, Conductor: conductorTemplate.DeepCopy(),
 	})
 	require.NoError(t, err)
 
+	t.Log("Preserve companion containers with the workload's model paths before authored references")
+	companions := conductorTemplate.Spec.DeepCopy()
+	for _, containers := range [][]corev1.Container{companions.Containers[1:], companions.InitContainers} {
+		for i := range containers {
+			containers[i].Env = append([]corev1.EnvVar{
+				{Name: "LPX_DRAFT_MODEL_PATH", Value: "/models/draft-build"},
+				{Name: "LPX_TARGET_MODEL_PATH", Value: "/models/target-build"},
+			}, containers[i].Env...)
+		}
+	}
+
 	t.Log("Preserve container identity and references while materializing distinct Pod roles")
 	for _, clique := range templates.Cliques {
 		spec := &clique.Spec.PodSpec
 		require.Equal(t, "main", spec.Containers[0].Name)
 		require.Equal(t, "main", testContainerEnvValue(spec.Containers[0].Env, "CONTAINER_NAME"))
-		require.Equal(t, conductorTemplate.Spec.Containers[1:], spec.Containers[1:])
-		require.Equal(t, conductorTemplate.Spec.InitContainers, spec.InitContainers)
+		require.Equal(t, companions.Containers[1:], spec.Containers[1:])
+		require.Equal(t, companions.InitContainers, spec.InitContainers)
 		require.Contains(t, spec.Volumes, conductorTemplate.Spec.Volumes[len(conductorTemplate.Spec.Volumes)-1])
 		require.Contains(t, []string{lpxv1alpha1.PodRoleAgent, lpxv1alpha1.PodRoleConductor}, clique.Annotations[lpxv1alpha1.PodRoleAnnotation])
 	}
@@ -472,4 +489,96 @@ func namedClique(t *testing.T, pcs *grovev1alpha1.PodCliqueSet, name string) *gr
 	}
 	t.Fatalf("clique %q not found", name)
 	return nil
+}
+
+func TestRenderUnitsHaveNoLegacyConfig(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name                        string
+		hybrid, mount, volume, init bool
+		allLocal                    bool
+		mountName, mountPath        string
+		ioFPGACount                 uint32
+	}{
+		{name: "Quasar"}, {name: "Cyborg and Hydra", hybrid: true},
+		{name: "all-local units render only Cyborg", hybrid: true, allLocal: true},
+		{name: "two compiler I/O endpoints", hybrid: true, ioFPGACount: 2},
+		{name: "config name at another path", mount: true, mountName: "config", mountPath: "/other"},
+		{name: "other name at configs path", mount: true, mountName: "other", mountPath: "/configs"}, {name: "authored volume and mount", mount: true, volume: true},
+		{name: "other name at equivalent configs path", mount: true, mountName: "other", mountPath: "/configs/"},
+		{name: "native init mount", mount: true, volume: true, init: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Log("Resolve a units artifact and prepare fresh runtime templates")
+			bundle := testUnitBundle{architecture: deploymentcapnpv1.LpuArchitecture_lp20, devicesPerNode: 8, hybrid: tc.hybrid, ioFPGACount: tc.ioFPGACount,
+				partitions: testUnitPartitions(8, nil, 0), units: testSingleUnits(testNodesReservation(1, 0))}
+			build, err := acquireTestUnitBundle(t, bundle)
+			require.NoError(t, err)
+			var local *v1beta1.LPXLocalPartitions
+			if tc.allLocal {
+				local = &v1beta1.LPXLocalPartitions{Mode: v1beta1.LPXLocalPartitionsModeAll}
+			}
+			projections, err := projectTestUnits(build, local)
+			require.NoError(t, err)
+			projections[0].stage = testRenderComponentName
+			workload := &Workload{modelProjections: projections, scalingGroupReplicas: 1}
+			serving := &v1beta1.DynamoComponentDeploymentSharedSpec{Roles: []v1beta1.ComponentRoleSpec{{Name: v1beta1.ComponentRoleLPXConductor}}}
+			plan, err := workload.PlanNodeLocalMaterialization("test-pcs", serving)
+			require.NoError(t, err)
+			spec := renderTestPodSpec()
+			spec.Containers[0].VolumeMounts = slices.DeleteFunc(spec.Containers[0].VolumeMounts, func(m corev1.VolumeMount) bool { return m.Name == lpuConfigVolumeName })
+			if tc.mount {
+				if tc.mountName == "" {
+					tc.mountName = lpuConfigVolumeName
+				}
+				if tc.mountPath == "" {
+					tc.mountPath = "/configs"
+				}
+				spec.Containers[0].VolumeMounts = append(spec.Containers[0].VolumeMounts, corev1.VolumeMount{Name: tc.mountName, MountPath: tc.mountPath})
+			}
+			if tc.volume {
+				spec.Volumes = append(spec.Volumes, corev1.Volume{Name: lpuConfigVolumeName, EmptyDir: &corev1.EmptyDirVolumeSource{}})
+			}
+			if tc.init {
+				spec.InitContainers = []corev1.Container{*spec.Containers[0].DeepCopy()}
+				spec.InitContainers[0].Name = "setup"
+				spec.Containers[0].VolumeMounts = slices.DeleteFunc(spec.Containers[0].VolumeMounts, func(m corev1.VolumeMount) bool { return m.Name == lpuConfigVolumeName })
+			}
+			input := RenderInput{Stages: map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: spec}}}
+			if tc.hybrid {
+				input.Cyborg = renderTestPCS(true).Spec.Template.Cliques[0]
+				input.Cyborg.Spec.Replicas, err = workload.MinimumCyborgReplicas()
+				require.NoError(t, err)
+				input.Cyborg.Spec.PodSpec.Containers[0].VolumeMounts = slices.DeleteFunc(input.Cyborg.Spec.PodSpec.Containers[0].VolumeMounts, func(m corev1.VolumeMount) bool { return m.Name == lpuConfigVolumeName })
+			} else {
+				input.Conductor = &corev1.PodTemplateSpec{Spec: *spec.DeepCopy()}
+			}
+			got, err := RenderNodeLocal(workload, plan, input)
+			if tc.mount {
+				require.ErrorContains(t, err, "mounts legacy config")
+				return
+			}
+			require.NoError(t, err)
+			require.Empty(t, got.Resources)
+			if tc.allLocal {
+				t.Log("Render no Agent and give the local Cyborg an empty allocation")
+				require.Len(t, got.Cliques, 1)
+				require.Equal(t, plan.CyborgTemplate, got.Cliques[0].Name)
+				require.Empty(t, got.Cliques[0].Spec.StartsAfter)
+				require.Contains(t, got.Cliques[0].Spec.PodSpec.Containers[0].Env, corev1.EnvVar{Name: allocationEnvVar, Value: ""})
+			}
+			for _, clique := range got.Cliques {
+				if tc.hybrid && clique.Name == plan.CyborgTemplate {
+					require.EqualValues(t, max(1, tc.ioFPGACount), clique.Spec.Replicas)
+				}
+				require.NotContains(t, clique.Annotations, v1alpha1.AnnotationExtraResourcesHash)
+				for _, volume := range clique.Spec.PodSpec.Volumes {
+					require.NotEqual(t, lpuConfigVolumeName, volume.Name)
+				}
+				if !tc.allLocal && clique.Name == plan.Agents[0].TemplateName {
+					require.Contains(t, clique.Spec.PodSpec.Containers[0].Env, corev1.EnvVar{Name: localPartitionIDsEnv, Value: ""})
+				}
+			}
+		})
+	}
 }

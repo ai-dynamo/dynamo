@@ -19,7 +19,14 @@ ignored = ["prost", "prost-types"]
 name = "dynamo-sglang-sidecar"
 path = "src/main.rs"
 
+[features]
+# On for the sidecar image's SBOM (its shared build links vLLM's mm-routing here).
+# The Python bindings turn it off so the default wheel stays lean.
+default = ["mm-routing"]
+mm-routing = ["dynamo-llm/mm-routing"]
+
 [dependencies]
+dynamo-sglang-generate = { workspace = true }
 dynamo-backend-common = { workspace = true }
 dynamo-llm = { workspace = true }
 dynamo-runtime = { workspace = true }
@@ -28,7 +35,7 @@ dynamo-sidecar-common = { workspace = true }
 anyhow = { workspace = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
-clap = { version = "4", features = ["derive", "env", "string"] }
+clap = { version = "4", features = ["derive", "env"] }
 futures = { workspace = true }
 rand = { workspace = true }
 reqwest = { workspace = true }
@@ -48,7 +55,7 @@ tonic-build = { workspace = true }
 
 [dev-dependencies]
 dynamo-backend-common = { workspace = true, features = ["testing"] }
-dynamo-kv-router = { workspace = true }
+dynamo-kv-events = { workspace = true }
 rmp-serde = { workspace = true }
 tempfile = { workspace = true }
 tmq = { workspace = true }

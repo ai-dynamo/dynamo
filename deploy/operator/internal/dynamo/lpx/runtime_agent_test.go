@@ -226,15 +226,29 @@ func TestModelPathsPrecedeAuthoredReferences(t *testing.T) {
 				container.Env = append(container.Env, corev1.EnvVar{Name: name, Value: "stale"}, corev1.EnvVar{Name: name, Value: "duplicate"})
 			}
 			wantContainer := container.DeepCopy()
-			wantContainer.Env = append(want, authored...)
+			wantContainer.Env = append(slices.Clone(want), authored...)
 
-			t.Log("Publish only the first draft and final target once, before all authored references")
-			require.NoError(t, applyModelPaths(&container, projections, "/custom/models"))
-			require.Equal(t, *wantContainer, container)
+			t.Log("Include regular and init containers across Pods, including containers without model-path references")
+			containerLists := [][]corev1.Container{
+				{container},
+				{{Name: "prepare", Env: []corev1.EnvVar{{Name: "KEEP", Value: "unchanged"}}}},
+				{{Name: "metrics"}},
+				{*container.DeepCopy()},
+			}
+			wantLists := [][]corev1.Container{
+				{*wantContainer},
+				{{Name: "prepare", Env: append(slices.Clone(want), corev1.EnvVar{Name: "KEEP", Value: "unchanged"})}},
+				{{Name: "metrics", Env: slices.Clone(want)}},
+				{*wantContainer.DeepCopy()},
+			}
+
+			t.Log("Publish only the first draft and final target once in every container, before all authored references")
+			require.NoError(t, applyModelPaths(containerLists, projections, "/custom/models"))
+			require.Equal(t, wantLists, containerLists)
 
 			t.Log("Repeated rendering keeps environment order, startup and authoritative values unchanged")
-			require.NoError(t, applyModelPaths(&container, projections, "/custom/models"))
-			require.Equal(t, *wantContainer, container)
+			require.NoError(t, applyModelPaths(containerLists, projections, "/custom/models"))
+			require.Equal(t, wantLists, containerLists)
 		})
 	}
 }
@@ -255,14 +269,17 @@ func TestModelPathsRejectInvalidReferences(t *testing.T) {
 				projections = append(projections, &ModelProjection{pipeline: test.pipeline})
 			}
 			projections[len(projections)-1].configuredBuild.path = "gs://registry/../outside"
-			container := corev1.Container{Env: []corev1.EnvVar{{Name: "KEEP", Value: "unchanged"}}}
-			before := container.DeepCopy()
+			containerLists := [][]corev1.Container{
+				{{Env: []corev1.EnvVar{{Name: "KEEP", Value: "unchanged"}}}},
+				{{Env: []corev1.EnvVar{{Name: "INIT", Value: "unchanged"}}}},
+			}
+			before := [][]corev1.Container{{*containerLists[0][0].DeepCopy()}, {*containerLists[1][0].DeepCopy()}}
 
-			t.Log("Report the failing binding without publishing a partial environment")
-			err := applyModelPaths(&container, projections, "/custom/models")
+			t.Log("Report the failing binding without changing any container's environment")
+			err := applyModelPaths(containerLists, projections, "/custom/models")
 			require.ErrorContains(t, err, "resolve "+test.name)
 			require.ErrorContains(t, err, "bad path segment")
-			require.Equal(t, *before, container)
+			require.Equal(t, before, containerLists)
 		})
 	}
 }
