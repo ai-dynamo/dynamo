@@ -186,10 +186,21 @@ Dynamo parses and resolves the complete route list during worker startup. Startu
 
 ## Experimental Worker Drain
 
-**Experimental.** Enable `DYN_SYSTEM_PORT` on a SGLang aggregated worker to expose
-the worker lifecycle API. Use the selected worker's system listener directly
-and restrict access to trusted administrators. Workers that share an engine
-across multiple Dynamo gateway processes do not expose these controls.
+**Experimental.** Manual drain currently supports standalone aggregated SGLang
+workers using the TCP response plane. Workers that share an engine across
+multiple Dynamo gateway processes do not expose these controls.
+
+There is no separate drain enable flag. On a supported worker, enabling the
+system listener with `DYN_SYSTEM_PORT` also exposes the lifecycle API below.
+`Experimental` describes the support and validation scope, not an additional
+opt-in requirement. Setting `DYN_SYSTEM_PORT=-1` disables the entire system
+listener, including its health and metrics endpoints; this is the default when
+no system port is configured. Normal SIGTERM shutdown still works without the
+listener.
+
+Use the selected worker's system listener directly and restrict access to
+trusted administrators. The frontend HTTP address does not expose these
+worker-local routes.
 
 | Method | Worker system path | Behavior |
 | --- | --- | --- |
@@ -198,8 +209,87 @@ across multiple Dynamo gateway processes do not expose these controls.
 | `POST` | `/engine/resume` | Cancel drain and restore admission and discovery |
 
 Send no body or an empty JSON object. Drain returns 202 while completion is
-pending. Status and a successful resume return 200. Conflicts return 409.
+pending. Status and a successful resume return 200. Conflicts return 409,
+and discovery RPC failures return 503.
 Manual drain requires the TCP response plane. Other response planes return 409.
+
+
+### Drain and resume a worker
+
+Start discovery services and the frontend as described in the
+[SGLang launch scripts](../../../../../recipes/cli-templates/sglang.mdx).
+For a standalone aggregated worker, enable its system listener before startup:
+
+```bash
+DYN_SYSTEM_PORT=8081 python3 -m dynamo.sglang \
+  --model-path Qwen/Qwen3-0.6B \
+  --request-plane tcp \
+  --response-plane tcp
+```
+
+When the worker runs locally, set its control address:
+
+```bash
+WORKER_URL=http://127.0.0.1:8081
+```
+
+For Kubernetes, select one worker Pod. Replace `default` and
+`my-sglang-worker` with its namespace and Pod name, and run this command in a
+separate terminal. The worker must already have `DYN_SYSTEM_PORT=8081` in its
+container environment.
+
+```bash
+kubectl -n default port-forward pod/my-sglang-worker 18081:8081
+```
+
+Use `WORKER_URL=http://127.0.0.1:18081` for that forwarded worker. Send the drain
+request:
+
+```bash
+curl --fail-with-body -sS -i -X POST "$WORKER_URL/engine/drain" \
+  -H 'Content-Type: application/json' -d '{}'
+```
+
+With the default routing grace, the response is HTTP 202. Example body:
+
+```json
+{"worker_id":"1234","state":"draining","reason":"routing_grace"}
+```
+
+Poll the same worker's status until `state` is `drained`:
+
+```bash
+curl --fail-with-body -sS "$WORKER_URL/engine/status"
+```
+
+Example completion response:
+
+```json
+{"worker_id":"1234","state":"drained","reason":null}
+```
+
+To cancel an administrative drain or restore the worker after it drains, send:
+
+```bash
+curl --fail-with-body -sS -i -X POST "$WORKER_URL/engine/resume" \
+  -H 'Content-Type: application/json' -d '{}'
+```
+
+A successful resume returns HTTP 200 with `state="serving"`. After discovery
+converges, verify inference through your frontend. For the model above and a
+frontend listening on port 8000:
+
+```bash
+FRONTEND_URL=http://127.0.0.1:8000
+curl --fail-with-body -sS "$FRONTEND_URL/v1/chat/completions" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"Qwen/Qwen3-0.6B","messages":[{"role":"user","content":"Hello"}],"max_tokens":8}'
+```
+
+Expect a successful Chat Completions response with a `choices` array. Polling or
+resuming a different worker does not complete the selected worker's operation.
+
+### Admission and completion semantics
 
 Drain lets previously admitted requests run and keeps internal health probes
 available. During routing convergence the worker can still accept requests.
@@ -231,6 +321,14 @@ admission closes, worker ingress requests and their response streams finish,
 and the SGLang tokenizer manager has no remaining request IDs. While draining,
 `reason` indicates whether the worker is waiting for routing grace, Dynamo
 ingress, SGLang requests, or an available completion check.
+
+| Reason | Meaning |
+| --- | --- |
+| `routing_grace` | Discovery withdrawal is confirmed; routing convergence is in progress |
+| `discovery_unregister_pending` | Withdrawal is unconfirmed; retry drain |
+| `dynamo_inflight` | Admitted worker requests or their response streams remain |
+| `sglang_inflight` | The tokenizer manager still tracks requests |
+| `completion_check_unavailable` | Completion cannot be confirmed; this does not count as `drained` |
 
 > [!NOTE]
 > `drained` confirms request-level completion. Background scheduler and KV
