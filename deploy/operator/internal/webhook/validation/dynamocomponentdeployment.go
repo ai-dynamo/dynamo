@@ -167,16 +167,14 @@ func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeployment(
 		oldMeta = &oldDCD.ObjectMeta
 	}
 	allErrs := v.validateObjectMeta(&dcd.ObjectMeta, oldMeta, field.NewPath("metadata"))
-	return append(allErrs, v.validateDynamoComponentDeploymentSpec(&dcd.Spec, oldSpec, field.NewPath("spec"), dynamo.OriginAnnotationsForDCD(dcd))...)
+	return append(allErrs, v.validateDynamoComponentDeploymentSpec(&dcd.Spec, oldSpec, field.NewPath("spec"))...)
 }
 
 // validateDynamoComponentDeploymentSpec validates spec. spec and fldPath must not be nil.
-// originAnnotations carry the DCD's immutable operator origin for origin-gated resolution.
 func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeploymentSpec(
 	spec *nvidiacomv1beta1.DynamoComponentDeploymentSpec,
 	oldSpec *nvidiacomv1beta1.DynamoComponentDeploymentSpec,
 	fldPath *field.Path,
-	originAnnotations map[string]string,
 ) field.ErrorList {
 	// Standalone DCDs use neither Grove nor live InferencePool discovery.
 	const (
@@ -188,7 +186,7 @@ func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeploymentS
 		oldSharedSpec = &oldSpec.DynamoComponentDeploymentSharedSpec
 	}
 	allErrs := validateElasticEPRequiresCommand(spec.BackendFramework, &spec.DynamoComponentDeploymentSharedSpec, fldPath)
-	allErrs = append(allErrs, dynamo.ValidateSnapshotFailover(&spec.DynamoComponentDeploymentSharedSpec, fldPath, spec.BackendFramework, originAnnotations)...)
+	allErrs = append(allErrs, dynamo.ValidateSnapshotFailover(&spec.DynamoComponentDeploymentSharedSpec, fldPath, spec.BackendFramework)...)
 	allErrs = append(allErrs, v.validateDynamoComponentDeploymentSharedSpec(
 		&spec.DynamoComponentDeploymentSharedSpec,
 		fldPath,

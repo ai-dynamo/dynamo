@@ -253,40 +253,33 @@ func renderedWorkerEnv(t *testing.T, dgd *v1beta1.DynamoGraphDeployment) map[str
 	return nil
 }
 
-func TestNativeEngineBackendInferenceByOrigin(t *testing.T) {
-	tests := []struct {
-		name            string
-		origin          string
-		explicitBackend string
-		wantBackend     BackendFramework
-		wantDCDBackend  string
-	}{
-		{name: "legacy origin resolves the undetected backend the 1.6.0 operator used", origin: legacyOrigin, wantBackend: BackendFrameworkNoop, wantDCDBackend: ""},
-		{name: "absent origin resolves the undetected backend", origin: "", wantBackend: BackendFrameworkNoop, wantDCDBackend: ""},
-		{name: "current origin infers vLLM from the native engine command", origin: currentOrigin, wantBackend: BackendFrameworkVLLM, wantDCDBackend: "vllm"},
-		{name: "explicit backendFramework wins under a legacy origin", origin: legacyOrigin, explicitBackend: "vllm", wantBackend: BackendFrameworkVLLM, wantDCDBackend: "vllm"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Log("Resolve the backend for the graph component exactly as DCD generation does")
-			dgd := nativeEngineDGD(tt.origin, false, tt.explicitBackend)
+func TestNativeEngineCommandIsNotInferredForWorkloads(t *testing.T) {
+	for _, origin := range []string{legacyOrigin, currentOrigin, ""} {
+		t.Run("origin="+origin, func(t *testing.T) {
+			t.Log("Resolve the backend of a native vllm-rs sidecar worker exactly as DCD generation does")
+			dgd := nativeEngineDGD(origin, true, "")
 			backend, err := BackendFrameworkForComponent(&dgd.Spec.Components[0], dgd)
 			require.NoError(t, err)
-			assert.Equal(t, tt.wantBackend, backend)
+			assert.Equal(t, BackendFrameworkNoop, backend)
 
-			t.Log("Verify the generated worker DCD persists the same backend; an undetected backend stays empty")
+			t.Log("Verify the generated worker DCD records no backend and the engine gets no vLLM cache default")
 			dcds, err := GenerateDynamoComponentsDeployments(dgd, nil, nil, RollingUpdateContext{NewWorkerHash: "hash"})
 			require.NoError(t, err)
 			require.Len(t, dcds, 1)
 			for _, dcd := range dcds {
-				assert.Equal(t, tt.wantDCDBackend, dcd.Spec.BackendFramework)
+				assert.Empty(t, dcd.Spec.BackendFramework)
 			}
+			assert.NotContains(t, renderedWorkerEnv(t, dgd), "VLLM_CACHE_ROOT")
+
+			t.Log("Opt in through an explicit backendFramework and receive the vLLM cache default")
+			explicit := nativeEngineDGD(origin, true, "vllm")
+			assert.Equal(t, "/root/.cache/vllm", renderedWorkerEnv(t, explicit)["VLLM_CACHE_ROOT"])
 		})
 	}
 }
 
-func TestNativeEngineBackendInferencePreservesLegacyWorkerHash(t *testing.T) {
-	t.Log("Hash a legacy-origin native engine worker with and without a compilation cache")
+func TestNativeEngineWorkerHashMatchesLegacyOperator(t *testing.T) {
+	t.Log("Hash a 1.6.0-origin native vllm-rs sidecar worker with and without a compilation cache")
 	legacyHash, err := ComputeDGDWorkersSpecHash(nativeEngineDGD(legacyOrigin, false, ""))
 	require.NoError(t, err)
 	legacyCacheHash, err := ComputeDGDWorkersSpecHash(nativeEngineDGD(legacyOrigin, true, ""))
@@ -296,96 +289,22 @@ func TestNativeEngineBackendInferencePreservesLegacyWorkerHash(t *testing.T) {
 	assert.Equal(t, "8312f8aa", legacyHash)
 	assert.Equal(t, "66eaf1eb", legacyCacheHash)
 
-	t.Log("Verify a current-origin workload adopts inference and hashes like an explicit vLLM backend")
-	currentHash, err := ComputeDGDWorkersSpecHash(nativeEngineDGD(currentOrigin, true, ""))
+	t.Log("Match the hash the 1.6.0 operator computed with an explicit vLLM backend")
+	explicitHash, err := ComputeDGDWorkersSpecHash(nativeEngineDGD(legacyOrigin, true, "vllm"))
 	require.NoError(t, err)
-	explicitHash, err := ComputeDGDWorkersSpecHash(nativeEngineDGD(currentOrigin, true, "vllm"))
-	require.NoError(t, err)
-	assert.Equal(t, explicitHash, currentHash)
-	assert.NotEqual(t, legacyCacheHash, currentHash)
-}
-
-func TestNativeEngineBackendInferenceCacheEnvByOrigin(t *testing.T) {
-	t.Log("Render a legacy-origin native engine with a compilation cache and keep the 1.6.0 environment")
-	legacyEnv := renderedWorkerEnv(t, nativeEngineDGD(legacyOrigin, true, ""))
-	assert.NotContains(t, legacyEnv, "VLLM_CACHE_ROOT")
-
-	t.Log("Render the same workload under a current origin and receive the vLLM cache default")
-	currentEnv := renderedWorkerEnv(t, nativeEngineDGD(currentOrigin, true, ""))
-	assert.Equal(t, "/root/.cache/vllm", currentEnv["VLLM_CACHE_ROOT"])
-
-	t.Log("Opt a legacy-origin workload in through an explicit backendFramework")
-	explicitEnv := renderedWorkerEnv(t, nativeEngineDGD(legacyOrigin, true, "vllm"))
-	assert.Equal(t, "/root/.cache/vllm", explicitEnv["VLLM_CACHE_ROOT"])
+	assert.Equal(t, "4a915483", explicitHash)
 }
 
 func TestDetectBackendFrameworkFromArgsKeepsNativeEngineClassification(t *testing.T) {
-	t.Log("Classify a running native engine command independently of any workload origin")
-	backend, err := DetectBackendFrameworkFromArgs([]string{"/usr/local/bin/vllm-rs"}, []string{"--model", "m"})
+	command, args := []string{"/usr/local/bin/vllm-rs"}, []string{"--model", "m"}
+
+	t.Log("Classify a running native engine command for Pod-level consumers such as LoRA fallback")
+	backend, err := DetectBackendFrameworkFromArgs(command, args)
 	require.NoError(t, err)
 	assert.Equal(t, BackendFrameworkVLLM, backend)
 
-	t.Log("Confirm only the origin-gated resolver disables that inference")
-	backend, err = detectBackendFrameworkFromArgs([]string{"/usr/local/bin/vllm-rs"}, []string{"--model", "m"}, false)
+	t.Log("Confirm workload resolution leaves the same command undetected")
+	backend, err = determineBackendFramework(string(v1beta1.ComponentTypeWorker), command, args, "")
 	require.NoError(t, err)
 	assert.Equal(t, BackendFrameworkNoop, backend)
-}
-
-func TestGetBackendFrameworkFromDynamoComponentByOrigin(t *testing.T) {
-	originKey := commonconsts.KubeAnnotationDynamoOperatorOriginVersion
-	tests := []struct {
-		name                string
-		templateAnnotations map[string]string
-		metadataAnnotations map[string]string
-		wantOrigin          map[string]string
-		wantBackend         BackendFramework
-	}{
-		{
-			name:                "graph child reads its inherited template origin",
-			templateAnnotations: map[string]string{originKey: currentOrigin},
-			metadataAnnotations: nil,
-			wantOrigin:          map[string]string{originKey: currentOrigin},
-			wantBackend:         BackendFrameworkVLLM,
-		},
-		{
-			name:                "standalone DCD reads its metadata origin",
-			templateAnnotations: nil,
-			metadataAnnotations: map[string]string{originKey: currentOrigin},
-			wantOrigin:          map[string]string{originKey: currentOrigin},
-			wantBackend:         BackendFrameworkVLLM,
-		},
-		{
-			name:                "template origin takes precedence over metadata",
-			templateAnnotations: map[string]string{originKey: legacyOrigin},
-			metadataAnnotations: map[string]string{originKey: currentOrigin},
-			wantOrigin:          map[string]string{originKey: legacyOrigin},
-			wantBackend:         BackendFrameworkNoop,
-		},
-		{
-			name:                "no recorded origin disables inference",
-			templateAnnotations: map[string]string{"other": "value"},
-			metadataAnnotations: map[string]string{"other": "value"},
-			wantOrigin:          nil,
-			wantBackend:         BackendFrameworkNoop,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Log("Build a standalone native engine DCD with the given origin placement")
-			dgd := nativeEngineDGD("", false, "")
-			dcd := &v1beta1.DynamoComponentDeployment{
-				Name: "worker", Namespace: "demo", Annotations: tt.metadataAnnotations,
-				Spec: v1beta1.DynamoComponentDeploymentSpec{
-					DynamoComponentDeploymentSharedSpec: dgd.Spec.Components[0],
-				},
-			}
-			dcd.Spec.PodTemplate.Annotations = tt.templateAnnotations
-
-			t.Log("Resolve the origin annotations and the backend from the DCD alone")
-			assert.Equal(t, tt.wantOrigin, OriginAnnotationsForDCD(dcd))
-			backend, err := GetBackendFrameworkFromDynamoComponent(dcd)
-			require.NoError(t, err)
-			assert.Equal(t, tt.wantBackend, backend)
-		})
-	}
 }

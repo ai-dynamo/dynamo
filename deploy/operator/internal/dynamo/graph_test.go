@@ -5790,7 +5790,6 @@ func TestDetermineBackendFramework(t *testing.T) {
 				tt.command,
 				tt.args,
 				tt.explicitBackendFramework,
-				true,
 			)
 
 			if tt.expectError {
