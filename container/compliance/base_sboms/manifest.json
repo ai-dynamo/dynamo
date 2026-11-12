@@ -150,23 +150,23 @@
       "platform": "linux/arm64"
     },
     {
-      "baseline_digest": "sha256:db1ffc70654716bd5c95da51a849fde4cfefb05c5bbb6f3d990aa67f87a69add",
-      "baseline_image": "nvcr.io/nim/nvidia/vllm-enterprise-base",
-      "baseline_sbom": "vllm-enterprise-base@db1ffc70-amd64.cdx.json",
-      "baseline_tag": "1.7.0-cuda13",
-      "from_digest": "sha256:db1ffc70654716bd5c95da51a849fde4cfefb05c5bbb6f3d990aa67f87a69add",
-      "from_image": "nvcr.io/nim/nvidia/vllm-enterprise-base",
-      "from_tag": "1.7.0-cuda13",
+      "baseline_digest": "sha256:6622ab1d265c0c08cddd68899ebbf2c2363aac64fc3bc947ba0dcc4a78ac7ba8",
+      "baseline_image": "nvcr.io/nvidia/vllm-base-enterprise-nightly",
+      "baseline_sbom": "vllm-base-enterprise-nightly@6622ab1d-amd64.cdx.json",
+      "baseline_tag": "20261110-90f0ff8",
+      "from_digest": "sha256:6622ab1d265c0c08cddd68899ebbf2c2363aac64fc3bc947ba0dcc4a78ac7ba8",
+      "from_image": "nvcr.io/nvidia/vllm-base-enterprise-nightly",
+      "from_tag": "20261110-90f0ff8",
       "platform": "linux/amd64"
     },
     {
-      "baseline_digest": "sha256:db1ffc70654716bd5c95da51a849fde4cfefb05c5bbb6f3d990aa67f87a69add",
-      "baseline_image": "nvcr.io/nim/nvidia/vllm-enterprise-base",
-      "baseline_sbom": "vllm-enterprise-base@db1ffc70-arm64.cdx.json",
-      "baseline_tag": "1.7.0-cuda13",
-      "from_digest": "sha256:db1ffc70654716bd5c95da51a849fde4cfefb05c5bbb6f3d990aa67f87a69add",
-      "from_image": "nvcr.io/nim/nvidia/vllm-enterprise-base",
-      "from_tag": "1.7.0-cuda13",
+      "baseline_digest": "sha256:6622ab1d265c0c08cddd68899ebbf2c2363aac64fc3bc947ba0dcc4a78ac7ba8",
+      "baseline_image": "nvcr.io/nvidia/vllm-base-enterprise-nightly",
+      "baseline_sbom": "vllm-base-enterprise-nightly@6622ab1d-arm64.cdx.json",
+      "baseline_tag": "20261110-90f0ff8",
+      "from_digest": "sha256:6622ab1d265c0c08cddd68899ebbf2c2363aac64fc3bc947ba0dcc4a78ac7ba8",
+      "from_image": "nvcr.io/nvidia/vllm-base-enterprise-nightly",
+      "from_tag": "20261110-90f0ff8",
       "platform": "linux/arm64"
     }
   ],
@@ -182,6 +182,6 @@
     "platform": "platform pinned for layer-prefix verification, e.g. linux/amd64"
   },
   "format": "CycloneDX 1.6 JSON, slim filter (drop properties/hashes/dependencies; keep evidence). Hard cap 5 MB per file.",
-  "generated_at": "2026-11-03T04:29:35+00:00",
+  "generated_at": "2026-11-12T15:21:51+00:00",
   "schema_version": 2
 }
