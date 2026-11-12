@@ -4,8 +4,8 @@
 //! The Global Router's policies as router core plugins. The core makes one
 //! picker per model.
 
+use dynamo_kv_router::plugins::WorkerSelectionPolicyRegistryError;
 use dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicyFactory;
-use dynamo_kv_router::services::selection::WorkerSelectionPolicyRegistryError;
 use dynamo_router_policies::router_modes;
 
 use super::SelectionCorePolicy;

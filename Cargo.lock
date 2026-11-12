@@ -2659,6 +2659,7 @@ dependencies = [
  "dynamo-global-common",
  "dynamo-kv-router",
  "dynamo-router-policies",
+ "dynamo-scheduler",
  "futures",
  "parking_lot",
  "thiserror 2.0.18",

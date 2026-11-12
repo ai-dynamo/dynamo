@@ -13,7 +13,9 @@ repository.workspace = true
 [dependencies]
 dynamo-global-common = { workspace = true }
 # The embedded router core: pools register as its workers (see `selection_core`).
-dynamo-kv-router = { workspace = true, features = ["standalone-selection"] }
+dynamo-kv-router = { workspace = true }
+# The core's selection types and catalog reconciler.
+dynamo-scheduler = { workspace = true }
 # The router's builtin plugins, such as `round-robin`.
 dynamo-router-policies = { workspace = true }
 
