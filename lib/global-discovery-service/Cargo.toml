@@ -27,6 +27,7 @@ axum = { workspace = true }
 blake3 = { workspace = true }
 clap = { version = "4.5.49", features = ["derive"] }
 futures = { workspace = true }
+hyper-util = { workspace = true, features = ["server-auto", "service", "tokio"] }
 k8s-openapi = { workspace = true }
 kube = { workspace = true }
 rustls = { workspace = true }

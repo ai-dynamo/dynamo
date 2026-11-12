@@ -2601,6 +2601,7 @@ dependencies = [
  "dynamo-global-discovery-client",
  "dynamo-runtime",
  "futures",
+ "hyper-util",
  "k8s-openapi",
  "kube",
  "rcgen",

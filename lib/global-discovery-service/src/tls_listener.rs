@@ -1,13 +1,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! A TLS listener for `axum::serve`.
+//! A TLS listener for the discovery service.
 //!
 //! A background task accepts TCP connections and runs each TLS handshake on
 //! its own task, so a client that stalls its handshake holds up nobody else.
-//! Finished handshakes are handed to axum. Dropping the listener, which
-//! `axum::serve` does when it stops taking connections, stops the task and
-//! every handshake still running.
+//! Finished handshakes are handed to the HTTP server. Dropping the listener
+//! stops the task and every handshake still running.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -64,7 +63,7 @@ impl Listener for TlsListener {
         match self.accepted.recv().await {
             Some(accepted) => accepted,
             // The accept loop only ends when the listener is dropped, and
-            // axum does not call `accept` after that.
+            // the server does not call `accept` after that.
             None => std::future::pending().await,
         }
     }

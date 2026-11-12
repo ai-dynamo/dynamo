@@ -28,13 +28,12 @@
 //!   the pool list is complete: `GET /pools` says that in `complete`.
 //!
 //! The service reads and writes only through the [`crate::pool_discovery`]
-//! traits. It serves with `axum::serve`. TLS uses the runtime's certificate
+//! traits. It serves axum routes over Hyper. TLS uses the runtime's certificate
 //! loading, which picks up a rotated certificate without a restart. mTLS
 //! waits until `dynamo-global-discovery-client` can present a client
 //! certificate.
 
 use std::fmt;
-use std::future::IntoFuture;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -55,7 +54,11 @@ use axum::serve::Listener;
 use axum::{Json, Router};
 use dynamo_global_common::{PoolsResponse, RouterRegistration, RoutersResponse};
 use dynamo_runtime::tls_utils::server_tls_config;
+use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::server::conn::auto::Builder;
+use hyper_util::service::TowerToHyperService;
 use tokio::net::TcpListener;
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 /// The backend behind the API: where the pool and router lists come from,
@@ -113,7 +116,8 @@ pub fn routes(backend: PoolDiscoveryBackend) -> Router {
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 
 /// Serves until `shutdown` is cancelled. Then it stops taking connections and
-/// gives requests in flight up to 5 s to finish.
+/// gives requests in flight up to 5 s to finish, then aborts those still open.
+/// Dropping this future also aborts its connection tasks.
 ///
 /// A certificate or key that cannot be loaded fails here, before serving.
 pub async fn serve(
@@ -135,29 +139,61 @@ pub async fn serve(
 }
 
 async fn serve_on<L>(
-    listener: L,
+    mut listener: L,
     app: Router,
     shutdown: CancellationToken,
     grace: Duration,
 ) -> anyhow::Result<()>
 where
     L: Listener,
-    L::Addr: fmt::Debug,
 {
-    let server = axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown.clone().cancelled_owned())
-        .into_future();
-    tokio::pin!(server);
-    tokio::select! {
-        result = &mut server => return Ok(result?),
-        () = shutdown.cancelled() => {}
+    let app = app.with_state(());
+    let graceful = CancellationToken::new();
+    // Own the tasks so dropping this future also closes their connections.
+    let mut connections = JoinSet::new();
+    loop {
+        tokio::select! {
+            biased;
+            () = shutdown.cancelled() => break,
+            Some(result) = connections.join_next(), if !connections.is_empty() => {
+                if let Err(error) = result {
+                    tracing::warn!(%error, "HTTP connection task failed");
+                }
+            }
+            (io, _) = listener.accept() => {
+                let service = TowerToHyperService::new(app.clone());
+                let shutdown = graceful.child_token();
+                connections.spawn(async move {
+                    let builder = Builder::new(TokioExecutor::new());
+                    let connection = builder.serve_connection_with_upgrades(TokioIo::new(io), service);
+                    tokio::pin!(connection);
+                    let result = tokio::select! {
+                        result = &mut connection => result,
+                        () = shutdown.cancelled() => {
+                            connection.as_mut().graceful_shutdown();
+                            connection.await
+                        }
+                    };
+                    if let Err(error) = result {
+                        tracing::debug!(%error, "HTTP connection failed");
+                    }
+                });
+            }
+        }
     }
-    // axum waits for every open request; bound that wait.
-    if tokio::time::timeout(grace, server).await.is_err() {
+    drop(listener);
+    graceful.cancel();
+    if tokio::time::timeout(grace, async {
+        while connections.join_next().await.is_some() {}
+    })
+    .await
+    .is_err()
+    {
         tracing::warn!(
             grace_ms = grace.as_millis(),
             "requests were still open when the shutdown grace period ended"
         );
+        connections.shutdown().await;
     }
     Ok(())
 }
@@ -629,11 +665,16 @@ mod tests {
     }
 
     /// A directory whose answer never comes.
-    struct Hangs;
+    struct Hangs {
+        entered: CancellationToken,
+        dropped: CancellationToken,
+    }
 
     #[async_trait]
     impl<T: Send + 'static, K: Send + Sync + 'static> Directory<T, K> for Hangs {
         async fn list(&self) -> Result<Snapshot<T>, DiscoveryError> {
+            let _on_drop = self.dropped.clone().drop_guard();
+            self.entered.cancel();
             std::future::pending().await
         }
 
@@ -647,28 +688,138 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_does_not_wait_past_the_grace_period() {
+        for tls in [false, true] {
+            assert_hung_request_closed(tls, false).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn dropping_serve_closes_connections() {
+        for tls in [false, true] {
+            assert_hung_request_closed(tls, true).await;
+        }
+    }
+
+    async fn assert_hung_request_closed(tls: bool, abort: bool) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let pools = format!("http://{}/pools", listener.local_addr().unwrap());
+        let port = listener.local_addr().unwrap().port();
+        let cert = tls.then(test_cert);
+        let client = cert
+            .as_ref()
+            .map_or_else(reqwest::Client::new, |cert| https_client(&cert.pem));
+        let scheme = if tls { "https" } else { "http" };
+        let pools = format!("{scheme}://localhost:{port}/pools");
+        let entered = CancellationToken::new();
+        let dropped = CancellationToken::new();
+        let hangs = Arc::new(Hangs {
+            entered: entered.clone(),
+            dropped: dropped.clone(),
+        });
         let app = routes(PoolDiscoveryBackend {
-            pools: Arc::new(Hangs),
-            routers: Arc::new(Hangs),
+            pools: hangs.clone(),
+            routers: hangs,
             registrar: None,
             router_registrar: None,
         });
         let shutdown = CancellationToken::new();
+        let cancel = shutdown.clone();
         let grace = Duration::from_millis(200);
-        let server = tokio::spawn(serve_on(listener, app, shutdown.clone(), grace));
-        let stuck = tokio::spawn(reqwest::get(pools));
-        // Let the request reach the handler.
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
-        shutdown.cancel();
-        tokio::time::timeout(Duration::from_secs(5), server)
+        let config = cert
+            .as_ref()
+            .map(|cert| server_tls_config(&cert.tls.cert, &cert.tls.key, None).unwrap());
+        let server = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+            match config {
+                Some(config) => {
+                    serve_on(
+                        TlsListener::new(listener, config).unwrap(),
+                        app,
+                        cancel,
+                        grace,
+                    )
+                    .await
+                }
+                None => serve_on(listener, app, cancel, grace).await,
+            }
+        }));
+        let stuck = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+            client.get(pools).send().await
+        }));
+        tokio::time::timeout(Duration::from_secs(5), entered.cancelled())
             .await
-            .expect("serve returns once the grace period ends")
-            .unwrap()
+            .expect("request reaches the handler");
+
+        if abort {
+            server.abort();
+        } else {
+            shutdown.cancel();
+        }
+        let result = tokio::time::timeout(Duration::from_secs(5), server)
+            .await
+            .expect("serve stops");
+        if abort {
+            assert!(result.unwrap_err().is_cancelled());
+        } else {
+            result.unwrap().unwrap();
+        }
+        tokio::time::timeout(Duration::from_secs(1), dropped.cancelled())
+            .await
+            .expect("shutdown drops the pending handler");
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), stuck)
+                .await
+                .expect("shutdown closes the client connection")
+                .unwrap()
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_allows_inflight_requests_to_finish() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let entered = CancellationToken::new();
+        let release = CancellationToken::new();
+        let app = Router::new().route(
+            "/",
+            get({
+                let entered = entered.clone();
+                let release = release.clone();
+                move || {
+                    let entered = entered.clone();
+                    let release = release.clone();
+                    async move {
+                        entered.cancel();
+                        release.cancelled().await;
+                        "finished"
+                    }
+                }
+            }),
+        );
+        let shutdown = CancellationToken::new();
+        let mut server = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(serve_on(
+            listener,
+            app,
+            shutdown.clone(),
+            Duration::from_secs(5),
+        )));
+        let request = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(reqwest::get(url)));
+        tokio::time::timeout(Duration::from_secs(5), entered.cancelled())
+            .await
             .unwrap();
-        stuck.abort();
+        shutdown.cancel();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut server)
+                .await
+                .is_err()
+        );
+        release.cancel();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let response = request.await.unwrap().unwrap();
+            assert_eq!(response.text().await.unwrap(), "finished");
+            server.await.unwrap().unwrap();
+        })
+        .await
+        .expect("request finishes within the grace period");
     }
 
     /// A self-signed certificate for `localhost`, written where `serve` can
