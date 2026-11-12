@@ -977,7 +977,12 @@ pub mod response_plane {
     /// `DYN_RUNTIME_INHIBITED_DURATION_SECS`. Routers without fault detection
     /// and bidirectional (streaming-input) requests do not apply this bound.
     ///
-    /// Set to `0` or leave unset to disable the timeout (default: disabled).
+    /// Unset, a tcp frontend applies no timeout, and a quic or velo frontend
+    /// applies 30 seconds: a worker that predates the frontend's response
+    /// transport accepts the request and never answers. Raise it when a
+    /// backend admission queue lets a request wait longer than that before
+    /// the worker starts it. Set to `0` to disable the timeout on every
+    /// transport.
     pub const DYN_RESPONSE_STREAM_ESTABLISH_TIMEOUT_SECS: &str =
         "DYN_RESPONSE_STREAM_ESTABLISH_TIMEOUT_SECS";
     /// Messenger transport for Velo responses: tcp (default) or ucx. A ucx

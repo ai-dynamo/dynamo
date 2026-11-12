@@ -116,14 +116,49 @@ fn response_inactivity_timeout() -> Option<std::time::Duration> {
         .map(std::time::Duration::from_secs)
 }
 
+/// Establish bound a quic or velo frontend applies when the environment sets none.
+///
+/// A worker that cannot speak the frontend's response transport (a v1.5 or v1.6 worker behind
+/// a frontend configured for velo) ACKs the request, fails to open a stream, and sends
+/// nothing back. Unbounded, that request waits forever and the worker stays routable.
+const DEFAULT_NON_TCP_ESTABLISH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Read the response-stream establish timeout from the environment.
-fn response_stream_establish_timeout() -> Option<std::time::Duration> {
+fn response_stream_establish_timeout(
+    response_plane: crate::pipeline::network::ResponsePlaneMode,
+) -> Option<std::time::Duration> {
     use crate::config::environment_names::response_plane::DYN_RESPONSE_STREAM_ESTABLISH_TIMEOUT_SECS;
-    std::env::var(DYN_RESPONSE_STREAM_ESTABLISH_TIMEOUT_SECS)
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .filter(|&secs| secs > 0)
-        .map(std::time::Duration::from_secs)
+    resolve_establish_timeout(
+        std::env::var(DYN_RESPONSE_STREAM_ESTABLISH_TIMEOUT_SECS)
+            .ok()
+            .as_deref(),
+        response_plane,
+    )
+}
+
+/// An explicit value wins, and `0` disables the bound. Unset, only tcp stays unbounded.
+fn resolve_establish_timeout(
+    configured: Option<&str>,
+    response_plane: crate::pipeline::network::ResponsePlaneMode,
+) -> Option<std::time::Duration> {
+    use crate::config::environment_names::response_plane::DYN_RESPONSE_STREAM_ESTABLISH_TIMEOUT_SECS;
+    let default = (response_plane != crate::pipeline::network::ResponsePlaneMode::Tcp)
+        .then_some(DEFAULT_NON_TCP_ESTABLISH_TIMEOUT);
+    let Some(value) = configured else {
+        return default;
+    };
+    match value.parse::<u64>() {
+        Ok(0) => None,
+        Ok(secs) => Some(std::time::Duration::from_secs(secs)),
+        Err(_) => {
+            tracing::warn!(
+                value,
+                ?default,
+                "Ignoring {DYN_RESPONSE_STREAM_ESTABLISH_TIMEOUT_SECS}: expected whole seconds"
+            );
+            default
+        }
+    }
 }
 
 /// RAII handle for one in-flight unit of work charged against
@@ -800,6 +835,8 @@ where
                 client.endpoint.drt().primary_token(),
             );
         }
+        let establish_timeout =
+            response_stream_establish_timeout(client.endpoint.drt().response_plane());
         Ok(PushRouter {
             client,
             addressed,
@@ -807,7 +844,7 @@ where
             selectors,
             fault_detection_enabled: fault_detection,
             response_timeout: response_inactivity_timeout(),
-            establish_timeout: response_stream_establish_timeout(),
+            establish_timeout,
             occupancy_state,
             multimodal_cache_indexer,
             multimodal_cache_key_extractor,
@@ -3949,6 +3986,33 @@ mod tests {
         rt.shutdown();
         assert_eq!(seen.len(), 1, "expected exactly one unary dispatch");
         seen[0]
+    }
+
+    #[test]
+    fn establish_timeout_defaults_only_for_non_tcp_response_planes() {
+        use crate::pipeline::network::ResponsePlaneMode::{Quic, Tcp, Velo};
+        let secs = std::time::Duration::from_secs;
+
+        assert_eq!(resolve_establish_timeout(None, Tcp), None);
+        assert_eq!(
+            resolve_establish_timeout(None, Velo),
+            Some(DEFAULT_NON_TCP_ESTABLISH_TIMEOUT)
+        );
+        assert_eq!(
+            resolve_establish_timeout(None, Quic),
+            Some(DEFAULT_NON_TCP_ESTABLISH_TIMEOUT)
+        );
+        // An explicit value wins on every plane, and 0 turns the bound off.
+        for plane in [Tcp, Quic, Velo] {
+            assert_eq!(resolve_establish_timeout(Some("7"), plane), Some(secs(7)));
+            assert_eq!(resolve_establish_timeout(Some("0"), plane), None);
+        }
+        // A value that does not parse leaves the plane's default in place.
+        assert_eq!(resolve_establish_timeout(Some("30s"), Tcp), None);
+        assert_eq!(
+            resolve_establish_timeout(Some("30s"), Velo),
+            Some(DEFAULT_NON_TCP_ESTABLISH_TIMEOUT)
+        );
     }
 
     /// The deadline rides on the addressed request so the transport can start
