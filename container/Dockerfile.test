@@ -136,6 +136,7 @@ COPY --chmod=775 --chown=dynamo:0 \
     components/src/dynamo/replay/tests/test_ais_perf_model_keywords.py \
     components/src/dynamo/replay/tests/test_retune_replay.py /workspace/components/src/dynamo/replay/tests/
 COPY --chmod=775 --chown=dynamo:0 \
+    components/src/dynamo/router/tests/ais_perf_model_helpers.py \
     components/src/dynamo/router/tests/test_router_ais_perf_model_key.py \
     components/src/dynamo/router/tests/test_router_retune_config.py /workspace/components/src/dynamo/router/tests/
 

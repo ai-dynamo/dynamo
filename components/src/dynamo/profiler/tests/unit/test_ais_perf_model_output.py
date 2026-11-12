@@ -4,6 +4,7 @@
 """What the profiler writes for AIS: mocker worker arguments and the Planner value."""
 
 import copy
+import functools
 import json
 import logging
 import re
@@ -27,9 +28,6 @@ try:
         PlannerConfig,
         PlannerPreDeploymentSweepMode,
     )
-    from dynamo.planner.core.perf_model import ais_adapter
-    from dynamo.planner.core.perf_model.ais_adapter import PlannerEnginePerfModel
-    from dynamo.planner.core.types import EngineCapabilities
     from dynamo.profiler import __main__ as profiler_main
     from dynamo.profiler.utils import dgd_generation
     from dynamo.profiler.utils.dgdr_v1beta1_types import (
@@ -41,6 +39,9 @@ try:
     from dynamo.profiler.utils.profile_common import ProfilerOperationalConfig
 except ImportError:
     pytest.skip("dynamo.llm bindings not available", allow_module_level=True)
+
+# Outside the guard: a missing test helper is an error, not a skip.
+from dynamo.planner.tests.ais_engine_stubs import adapter_builder
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -136,6 +137,15 @@ def database_version(monkeypatch):
     monkeypatch.setattr(
         dgd_generation, "get_latest_database_version", lambda **kwargs: "0.24.0"
     )
+
+
+@pytest.fixture(scope="module")
+def installed_database_version():
+    """Return the version lookup of the installed timing data, with a cache.
+
+    One lookup reads every installed data set and takes about a second.
+    """
+    return functools.cache(dgd_generation.get_latest_database_version)
 
 
 @pytest.mark.parametrize(
@@ -293,16 +303,17 @@ def test_injection_twice_gives_one_pair(database_version):
     ],
 )
 def test_old_and_new_arguments_give_same_engine_args(
-    monkeypatch, backend, pick, with_version, worker
+    monkeypatch, installed_database_version, backend, pick, with_version, worker
 ):
     # A value set in the shell that runs the tests would reach the parser.
     monkeypatch.delenv(ENV_VAR, raising=False)
-    if not with_version:
-        monkeypatch.setattr(
-            dgd_generation, "get_latest_database_version", lambda **kwargs: None
-        )
-    # Otherwise the version is looked up in the installed timing data, which
-    # the mocker checks the config against.
+    # The version comes from the installed timing data, which the mocker
+    # checks the config against.
+    monkeypatch.setattr(
+        dgd_generation,
+        "get_latest_database_version",
+        installed_database_version if with_version else lambda **kwargs: None,
+    )
     interpolation = _interpolation(backend, pick)
     start = _worker_arguments() + ["--disaggregation-mode", worker]
     start += ["--num-gpu-blocks-override", "1024"]
@@ -374,30 +385,10 @@ def test_profiler_built_planner_value_is_a_list(database_version):
     assert agg == [_generated_entry("aggregated", DENSE)]
 
 
-class _ReadyEngine:
-    """Stands in for the native engine model, which these tests do not use."""
-
-    @classmethod
-    def best_available(cls, **kwargs):
-        return cls()
-
-    def diagnostics(self):
-        return {"readiness": "ready"}
-
-
-def _adapter_config(planner_config, worker_type):
-    limits = EngineCapabilities(
-        max_num_batched_tokens=1024, max_num_seqs=128, max_kv_tokens=100_000
-    )
-    return PlannerEnginePerfModel(
-        worker_type=worker_type, config=planner_config, capabilities=limits
-    )._build_ais_config()
-
-
 def test_profiler_built_value_round_trips_and_equals_old_form(
     database_version, monkeypatch
 ):
-    monkeypatch.setattr(ais_adapter, "AISCoreEnginePerfModel", _ReadyEngine)
+    adapter = adapter_builder(monkeypatch)
     request = _request(_planner("disagg"))
     prefill_pick = PickedParallelConfig(tp=1)
     value = _planner_value(request, prefill_pick, DENSE)
@@ -416,8 +407,9 @@ def test_profiler_built_value_round_trips_and_equals_old_form(
         }
     )
     for worker_type in WORKERS:
-        assert _adapter_config(read_back, worker_type) == _adapter_config(
-            old_form, worker_type
+        assert (
+            adapter(read_back, worker_type)._build_ais_config()
+            == adapter(old_form, worker_type)._build_ais_config()
         )
 
 
@@ -534,7 +526,23 @@ OVERRIDE_SHAPES = [
 PERF_MODEL_VALUE = json.dumps({"model": MODEL, "system": SYSTEM, "backend": "vllm"})
 
 
-@pytest.mark.parametrize("shape", OVERRIDE_SHAPES)
+def _assert_old_arguments_kept(caplog, override, names):
+    """Check that ``override`` makes every worker keep the old arguments.
+
+    One warning is logged, and it names ``names``.
+    """
+    with caplog.at_level(logging.WARNING):
+        workers = _generated_workers(_request(override=override), _interpolation())
+
+    assert workers == _workers_with(dgd_generation._inject_mocker_ais_args_old_form)
+    assert [record.getMessage() for record in caplog.records] == [
+        f"overrides.dgd sets {names}: the generated mocker workers keep the old AIS "
+        "arguments (--ais-perf-model without a value plus --ais-* flags), which are "
+        "deprecated and will be removed in v1.9; to end this, write --ais-perf-model "
+        "VALUE in the override and remove its old --ais-* arguments"
+    ]
+
+
 @pytest.mark.parametrize(
     "arguments,names",
     [
@@ -567,20 +575,18 @@ PERF_MODEL_VALUE = json.dumps({"model": MODEL, "system": SYSTEM, "backend": "vll
     ],
 )
 def test_override_with_trigger_keeps_old_arguments(
-    database_version, caplog, arguments, names, shape
+    database_version, caplog, arguments, names
 ):
-    request = _request(override=_override(shape, arguments))
+    _assert_old_arguments_kept(caplog, _override("v1alpha1", arguments), names)
 
-    with caplog.at_level(logging.WARNING):
-        workers = _generated_workers(request, _interpolation())
 
-    assert workers == _workers_with(dgd_generation._inject_mocker_ais_args_old_form)
-    assert [record.getMessage() for record in caplog.records] == [
-        f"overrides.dgd sets {names}: the generated mocker workers keep the old AIS "
-        "arguments (--ais-perf-model without a value plus --ais-* flags), which are "
-        "deprecated and will be removed in v1.9; to end this, write --ais-perf-model "
-        "VALUE in the override and remove its old --ais-* arguments"
-    ]
+# Which arguments trigger does not depend on where the override holds them, so
+# one trigger per shape is enough.
+@pytest.mark.parametrize("shape", OVERRIDE_SHAPES)
+def test_override_trigger_is_read_in_every_shape(database_version, caplog, shape):
+    override = _override(shape, ["--ais-system", "s"])
+
+    _assert_old_arguments_kept(caplog, override, "--ais-system")
 
 
 @pytest.mark.parametrize(

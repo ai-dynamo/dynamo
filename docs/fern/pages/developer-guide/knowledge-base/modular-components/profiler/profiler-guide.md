@@ -166,7 +166,7 @@ An override that gives `--ais-perf-model` a value in the `args` of any service o
 
 Write the value in `args`, not in `command`. A generated worker's `args` come after its `command`, so the worker would use the generated value; the profiler fails with an error instead when an override gives `--ais-perf-model` a value in a `command` list.
 
-An override that changes the `image` of the Planner or of a generated mocker worker must name an image that reads the list form of `ais_perf_model` and `--ais-perf-model` with a value.
+An override that changes the `image` of the Planner or of a generated mocker worker must name an image of v1.8 or newer: older images do not read the list form of `ais_perf_model` or `--ais-perf-model` with a value.
 
 ## Gate Checks and Constraints
 

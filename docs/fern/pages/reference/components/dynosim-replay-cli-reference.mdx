@@ -227,9 +227,10 @@ for an unlimited scheduler limit; omit the field to use the engine default.
 ### AIS perf model inputs of the Python replay API
 
 `run_trace_replay(...)` and `run_synthetic_trace_replay(...)` take an AIS perf model through two
-keywords, `ais_perf_model` for the engines and `router_ais_perf_model` for the KV router. Each
-value is one perf model config, a list of configs with one `worker_type` each, a path to a YAML or
-JSON file, or inline JSON (text that starts with `{` or `[`). For the keys of a config, see
+keywords, `ais_perf_model` for the engines and `router_ais_perf_model` for the KV router.
+Available since v1.8. Each value is one perf model config, a list of configs with one
+`worker_type` each, a path to a YAML or JSON file, or inline JSON (text that starts with `{` or
+`[`). For the keys of a config, see
 [Unified perf-model input](https://github.com/ai-dynamo/aisimulate/blob/main/docs/perf-model/configuration.md#unified-perf-model-input)
 in the AISimulate documentation.
 
@@ -421,13 +422,13 @@ hardware offload recipe.
 - `router.policy: kv_router` supports one or more routable workers. Set
   `router.prefill_load_model.type` to `none` or `ais`.
 - With `router.prefill_load_model.type: ais`, `router.ais_perf_model` names the AIS perf model the
-  router predicts prefill durations with. Write `{use: engine}` to read the perf model of the
-  engine the router routes to, or write one perf model config or a list of configs with one
-  `worker_type` each under the key. The router takes the `prefill` config in disaggregated mode
-  and the `aggregated` config otherwise. A string is not accepted, and `null` is the same as
-  leaving the key out. `from`, the items of `systems_paths`, and the path fields under
-  `estimator_config` must be absolute paths. The key without `router.prefill_load_model.type: ais`
-  is an error, and `retune.router` does not accept the key.
+  router predicts prefill durations with. Available since v1.8. Write `{use: engine}` to read the
+  perf model of the engine the router routes to, or write one perf model config or a list of
+  configs with one `worker_type` each under the key. The router takes the `prefill` config in
+  disaggregated mode and the `aggregated` config otherwise. A string is not accepted, and `null`
+  is the same as leaving the key out. `from`, the items of `systems_paths`, and the path fields
+  under `estimator_config` must be absolute paths. The key without
+  `router.prefill_load_model.type: ais` is an error, and `retune.router` does not accept the key.
 - `router.ais_perf_model: {use: engine}` needs an engine with an AIS perf model. With `fixed` or
   `polynomial` engine timing a prediction fails with
   `router.ais_perf_model: {use: engine} needs an AIS perf model on the aggregated engine; it has none`;

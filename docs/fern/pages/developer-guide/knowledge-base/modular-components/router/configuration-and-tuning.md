@@ -591,9 +591,9 @@ Required when `--router-prefill-load-model=ais` is enabled:
 - `--ais-perf-model`
 
 `--ais-perf-model` names the AIS perf model that Router predicts prefill durations with.
-The value is one perf model config, or a list of configs with one `worker_type` each.
-Write it as a path to a YAML or JSON file, or as inline JSON (text that starts with `{`
-or `[`):
+Available since v1.8. The value is one perf model config, or a list of configs with one
+`worker_type` each. Write it as a path to a YAML or JSON file, or as inline JSON (text
+that starts with `{` or `[`):
 
 ```bash
 --ais-perf-model perf-model.yaml

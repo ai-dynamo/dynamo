@@ -419,8 +419,12 @@ def test_missing_worker_type_entry_reports_loader_text(tmp_path):
 
 
 def test_unknown_key_in_value_is_a_value_error(tmp_path):
-    unknown_key = "^ais_perf_model: .* got an unexpected keyword argument 'tp_size'$"
-    value = json.dumps({**ENTRY, "tp_size": 3})
+    # A name that is close to no real key: for a near miss Python 3.13 ends
+    # the message with a "Did you mean" suggestion.
+    unknown_key = (
+        "^ais_perf_model: .* got an unexpected keyword argument 'not_a_field'$"
+    )
+    value = json.dumps({**ENTRY, "not_a_field": 3})
 
     args = parse_args(["--ais-perf-model", value])
     with pytest.raises(ValueError, match=unknown_key) as error:
@@ -787,13 +791,11 @@ def test_relative_file_value_starts_at_working_directory(tmp_path, monkeypatch):
 
 def test_relative_paths_inside_file_start_at_file_folder(tmp_path, monkeypatch):
     conf = tmp_path / "conf"
-    conf.mkdir()
-    # The mocker looks for timing data in the folder a config names, so "sys"
-    # is a link to the installed data, which a config without the key uses.
-    default = CONFIG.performance_config(build(["--ais-perf-model", json.dumps(ENTRY)]))
-    (installed,) = default["systems_paths"]
-    (conf / "sys").symlink_to(installed, target_is_directory=True)
+    (conf / "sys").mkdir(parents=True)
     (conf / "cfg.yaml").write_text(yaml.safe_dump({**ENTRY, "systems_paths": ["sys"]}))
+    # The folder holds no timing data, so the mocker's own check of the config
+    # is skipped: the test only needs the folder the mocker would load from.
+    monkeypatch.setattr(CONFIG, "normalize_mocker_config", lambda config: config)
 
     # Not the file's folder: "sys" does not exist here.
     monkeypatch.chdir(tmp_path)

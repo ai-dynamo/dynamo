@@ -11,6 +11,9 @@ import sys
 import pytest
 
 from dynamo.common.configuration.utils import env_or_default
+from dynamo.common.tests.configuration.ais_perf_inputs_helpers import (  # noqa: F401 -- no_ais_environment is a fixture
+    no_ais_environment,
+)
 from dynamo.frontend import main as frontend_main
 from dynamo.frontend.frontend_args import build_frontend_parser
 
@@ -125,12 +128,10 @@ def test_env_mode_parser_leaves_new_flags_unknown() -> None:
     assert not hasattr(namespace, "router_prefill_load_worker_type")
 
 
+@pytest.mark.usefixtures("no_ais_environment")
 def test_frontend_start_warns_once_for_old_ais_inputs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    for name in os.environ:
-        if name.startswith(("DYN_AIS_", "DYN_AIC_", "DYN_ROUTER_PREFILL_LOAD_")):
-            monkeypatch.delenv(name)
     monkeypatch.setattr(
         sys,
         "argv",

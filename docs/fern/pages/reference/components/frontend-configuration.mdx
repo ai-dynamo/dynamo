@@ -415,9 +415,9 @@ These options apply only when `--router-mode kv` is combined with `--router-pref
 When enabled, the frontend's embedded KV router predicts one expected prefill duration per admitted request, using the selected worker's overlap-derived cached prefix, then decays only the oldest active prefill request on each worker for prompt-side load accounting.
 
 <ParamField path="--ais-perf-model" type="JSON/YAML file or inline JSON" default="null">
-  AIS perf model that the router predicts prefill durations with. The value is one perf model
-  config, or a list of configs with one `worker_type` each. Write it as a path to a YAML or JSON
-  file, or as inline JSON (text that starts with `{` or `[`):
+  AIS perf model that the router predicts prefill durations with. Available since v1.8. The value
+  is one perf model config, or a list of configs with one `worker_type` each. Write it as a path
+  to a YAML or JSON file, or as inline JSON (text that starts with `{` or `[`):
 
   ```bash
   --ais-perf-model perf-model.yaml
@@ -440,10 +440,10 @@ When enabled, the frontend's embedded KV router predicts one expected prefill du
 </ParamField>
 
 <ParamField path="--router-prefill-load-worker-type" type="string" default="null">
-  Worker type whose config the router takes from `--ais-perf-model`. Set it when the value is one
-  config without `worker_type`, or a list with both a `prefill` and an `aggregated` config. Like
-  `--ais-perf-model`, the flag is an error without `--router-prefill-load-model ais`, and the
-  environment variable alone is ignored then.
+  Worker type whose config the router takes from `--ais-perf-model`. Available since v1.8. Set it
+  when the value is one config without `worker_type`, or a list with both a `prefill` and an
+  `aggregated` config. Like `--ais-perf-model`, the flag is an error without
+  `--router-prefill-load-model ais`, and the environment variable alone is ignored then.
 
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>prefill</Badge> <Badge intent="note" minimal>aggregated</Badge></span>
 

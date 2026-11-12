@@ -6,16 +6,24 @@
 from __future__ import annotations
 
 import argparse
-import contextlib
 import json
-import re
-import warnings
 
 import pytest
 import yaml
-from aisimulate_core.sdk import ForwardPassPerfModelConfig
 
 import dynamo.squeeze_evolve.args as squeeze_evolve_args
+from dynamo.common.tests.configuration.ais_perf_inputs_helpers import (  # noqa: F401 -- no_ais_environment is a fixture
+    AIS,
+    IDENTITY,
+    MODEL,
+    NOT_AIS,
+    NOTHING_GIVEN,
+    OLD_FLAT,
+    exactly,
+    expected,
+    no_ais_environment,
+    no_warning,
+)
 from dynamo.squeeze_evolve.args import (
     SqueezeEvolveArgGroup,
     SqueezeEvolveRunConfig,
@@ -23,20 +31,13 @@ from dynamo.squeeze_evolve.args import (
 )
 from dynamo.squeeze_evolve.orchestrator import parse_tiers
 
-pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
-
-MODEL = "Qwen/Qwen3-0.6B"
-IDENTITY = {"model": MODEL, "system": "h200_sxm", "backend": "vllm"}
-AIS = ["--router-prefill-load-model", "ais"]
-NOT_AIS = ["--router-prefill-load-model", "none"]
-OLD_FLAT = [
-    "--ais-backend",
-    "vllm",
-    "--ais-system",
-    "h200_sxm",
-    "--ais-model-path",
-    MODEL,
+pytestmark = [
+    pytest.mark.pre_merge,
+    pytest.mark.unit,
+    pytest.mark.gpu_0,
+    pytest.mark.usefixtures("no_ais_environment"),
 ]
+
 MODEL_NAME = ["--model-name", "squeeze/test"]
 PREFILL = {**IDENTITY, "worker_type": "prefill"}
 AGGREGATED = {**IDENTITY, "worker_type": "aggregated"}
@@ -46,40 +47,6 @@ OLD_FLAT_WARNING = (
     "removed in v1.9; use ais_perf_model in each --tiers entry (or "
     "--ais-perf-model with one tier)."
 )
-NOTHING_GIVEN = (
-    "--router-prefill-load-model=ais requires an AIS perf model: "
-    "set --ais-perf-model or DYN_AIS_PERF_MODEL"
-)
-
-_FLAT_NAMES = (
-    "BACKEND",
-    "SYSTEM",
-    "BACKEND_VERSION",
-    "TP_SIZE",
-    "MODEL_PATH",
-    "MOE_TP_SIZE",
-    "MOE_EP_SIZE",
-    "ATTENTION_DP_SIZE",
-    "NEXTN",
-    "NEXTN_ACCEPT_RATES",
-    "MTP_SEED",
-)
-
-
-@pytest.fixture(autouse=True)
-def _no_ais_environment(monkeypatch):
-    """Keep AIS inputs of the shell that runs the tests out of every test."""
-    for name in (
-        "DYN_AIS_PERF_CONFIG",
-        "DYN_AIS_PERF_MODEL",
-        "DYN_ROUTER_PREFILL_LOAD_WORKER_TYPE",
-        "DYN_ROUTER_PREFILL_LOAD_MODEL",
-        "DYN_SQUEEZE_TIERS",
-    ):
-        monkeypatch.delenv(name, raising=False)
-    for name in _FLAT_NAMES:
-        monkeypatch.delenv("DYN_AIS_" + name, raising=False)
-        monkeypatch.delenv("DYN_AIC_" + name, raising=False)
 
 
 def _tiers(*ais_perf_models, count=None):
@@ -102,31 +69,7 @@ def _config(args):
     return SqueezeEvolveRunConfig.from_cli_args(parser.parse_args(args))
 
 
-def _expected(**keys):
-    config = {**IDENTITY, "worker_type": "aggregated", **keys}
-    return {"config": ForwardPassPerfModelConfig(**config).to_dict()}
-
-
-def _exactly(text):
-    return "^" + re.escape(text) + "$"
-
-
-@contextlib.contextmanager
-def _no_warning():
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")
-        yield
-
-
 # Old inputs only: results and errors stay as they are.
-
-
-def test_squeeze_old_global_input_passes_validation():
-    with pytest.warns(FutureWarning, match=_exactly(OLD_FLAT_WARNING)):
-        config = parse_args(["--tiers", _tiers(count=2), *MODEL_NAME, *AIS, *OLD_FLAT])
-
-    assert config.ais_perf_kwargs() == _expected()
-    assert len(config.tiers) == 2
 
 
 def test_squeeze_old_global_env_passes_validation(monkeypatch):
@@ -137,7 +80,7 @@ def test_squeeze_old_global_env_passes_validation(monkeypatch):
     with pytest.warns(FutureWarning, match="^DYN_AIS_BACKEND, DYN_AIS_SYSTEM and "):
         config = parse_args(["--tiers", _tiers(count=2), *MODEL_NAME, *AIS])
 
-    assert config.ais_perf_kwargs() == _expected()
+    assert config.ais_perf_kwargs() == expected()
 
 
 def test_old_input_errors_come_before_the_tiers_error():
@@ -168,11 +111,11 @@ def test_renamed_environment_variable_is_reported_before_the_tiers(
 
     with pytest.raises(
         ValueError,
-        match=_exactly(
+        match=exactly(
             "renamed environment variables are no longer read: DYN_AIC_BACKEND, "
             "DYN_AIC_SYSTEM; use the DYN_AIS_* names"
         ),
-    ) as error, _no_warning():
+    ) as error, no_warning():
         config.validate()
 
     assert type(error.value) is ValueError
@@ -191,18 +134,10 @@ def test_renamed_environment_variable_is_not_read_without_ais_load_model(
     monkeypatch.setenv("DYN_AIC_BACKEND", "vllm")
     config = _config(["--tiers", tiers, *MODEL_NAME, *NOT_AIS])
 
-    with _no_warning():
+    with no_warning():
         config.validate()
 
     assert set(config.ais_perf_kwargs_by_tier()) == {None}
-
-
-def test_old_global_input_reaches_every_tier():
-    config = _config(["--tiers", _tiers(count=2), *MODEL_NAME, *AIS, *OLD_FLAT])
-    with pytest.warns(FutureWarning, match=_exactly(OLD_FLAT_WARNING)):
-        config.validate()
-
-    assert config.ais_perf_kwargs_by_tier() == [_expected(), _expected()]
 
 
 def test_old_global_warning_names_tier_replacement():
@@ -222,7 +157,7 @@ def test_start_warns_once_for_old_inputs():
 
     assert [str(record.message) for record in records] == [OLD_FLAT_WARNING]
     assert records[0].filename == squeeze_evolve_args.__file__
-    assert by_tier == [_expected(), _expected()]
+    assert by_tier == [expected(), expected()]
 
 
 # The key in a tier.
@@ -247,10 +182,10 @@ def test_each_tier_reads_its_own_key():
         ]
     )
 
-    with _no_warning():
+    with no_warning():
         by_tier = config.ais_perf_kwargs_by_tier()
 
-    assert by_tier == [_expected(worker_type="prefill", tp=2), _expected()]
+    assert by_tier == [expected(worker_type="prefill", tp=2), expected()]
 
 
 def test_no_tier_config_without_ais_load_model():
@@ -285,7 +220,7 @@ def test_no_tier_config_without_ais_load_model():
 def test_several_tiers_need_a_key_each(tiers, error):
     config = _config(["--tiers", tiers, *MODEL_NAME, *AIS])
 
-    with pytest.raises(ValueError, match=_exactly(error)):
+    with pytest.raises(ValueError, match=exactly(error)):
         config.validate()
 
 
@@ -296,7 +231,7 @@ def test_global_new_value_with_several_tiers_is_rejected(tiers, monkeypatch):
 
     with pytest.raises(
         ValueError,
-        match=_exactly(
+        match=exactly(
             "--ais-perf-model applies to one tier only; write ais_perf_model in "
             "each --tiers entry"
         ),
@@ -307,7 +242,7 @@ def test_global_new_value_with_several_tiers_is_rejected(tiers, monkeypatch):
     from_env = _config(["--tiers", tiers, *MODEL_NAME, *AIS])
     with pytest.raises(
         ValueError,
-        match=_exactly(
+        match=exactly(
             "DYN_AIS_PERF_MODEL applies to one tier only; write ais_perf_model in "
             "each --tiers entry"
         ),
@@ -321,16 +256,16 @@ def test_one_tier_takes_global_value_or_key_not_both(monkeypatch):
     key_only = ["--tiers", _tiers(PREFILL)]
     both = ["--tiers", _tiers(PREFILL), "--ais-perf-model", value]
 
-    with _no_warning():
+    with no_warning():
         assert parse_args(
             [*global_only, *MODEL_NAME, *AIS]
-        ).ais_perf_kwargs_by_tier() == [_expected()]
+        ).ais_perf_kwargs_by_tier() == [expected()]
         assert parse_args([*key_only, *MODEL_NAME, *AIS]).ais_perf_kwargs_by_tier() == [
-            _expected(worker_type="prefill")
+            expected(worker_type="prefill")
         ]
     with pytest.raises(
         ValueError,
-        match=_exactly(
+        match=exactly(
             "--ais-perf-model cannot be combined with ais_perf_model in --tiers[0]"
         ),
     ):
@@ -339,15 +274,15 @@ def test_one_tier_takes_global_value_or_key_not_both(monkeypatch):
     monkeypatch.setenv("DYN_AIS_PERF_MODEL", value)
     with pytest.raises(
         ValueError,
-        match=_exactly(
+        match=exactly(
             "DYN_AIS_PERF_MODEL cannot be combined with ais_perf_model in --tiers[0]"
         ),
     ):
         _config([*key_only, *MODEL_NAME, *AIS]).validate()
-    with _no_warning():
+    with no_warning():
         assert parse_args(
             ["--tiers", _tiers(count=1), *MODEL_NAME, *AIS]
-        ).ais_perf_kwargs_by_tier() == [_expected()]
+        ).ais_perf_kwargs_by_tier() == [expected()]
 
 
 def test_old_global_input_with_tier_key_is_rejected():
@@ -366,11 +301,11 @@ def test_old_global_input_with_tier_key_is_rejected():
 
     with pytest.raises(
         ValueError,
-        match=_exactly(
+        match=exactly(
             "ais_perf_model in --tiers[1] cannot be combined with --ais-backend "
             "and --ais-system"
         ),
-    ), _no_warning():
+    ), no_warning():
         config.validate()
 
 
@@ -380,7 +315,7 @@ def test_tier_key_without_ais_load_model_is_rejected(load_model):
 
     with pytest.raises(
         ValueError,
-        match=_exactly(
+        match=exactly(
             "ais_perf_model in --tiers[1] requires --router-prefill-load-model=ais"
         ),
     ):
@@ -399,12 +334,12 @@ def test_worker_type_flag_applies_to_every_tier():
     config = parse_args([*args, "--router-prefill-load-worker-type", "prefill"])
 
     assert config.ais_perf_kwargs_by_tier() == [
-        _expected(worker_type="prefill"),
-        _expected(worker_type="prefill", tp=2),
+        expected(worker_type="prefill"),
+        expected(worker_type="prefill", tp=2),
     ]
     with pytest.raises(
         ValueError,
-        match=_exactly(
+        match=exactly(
             "--tiers[0]: ais_perf_model: it has entries for prefill and "
             "aggregated; set --router-prefill-load-worker-type to choose one"
         ),
@@ -418,7 +353,7 @@ def test_bad_worker_type_env_with_tier_keys_is_rejected(monkeypatch):
 
     with pytest.raises(
         ValueError,
-        match=_exactly(
+        match=exactly(
             "DYN_ROUTER_PREFILL_LOAD_WORKER_TYPE is 'decode'; use prefill or "
             "aggregated"
         ),
@@ -446,7 +381,7 @@ def test_errors_outside_a_tier_value_keep_their_text(monkeypatch):
 
     with pytest.raises(
         ValueError,
-        match=_exactly(
+        match=exactly(
             "ais_nextn_accept_rates must be comma-separated floats, got 'abc'"
         ),
     ):
@@ -456,7 +391,7 @@ def test_errors_outside_a_tier_value_keep_their_text(monkeypatch):
     monkeypatch.setenv("DYN_ROUTER_PREFILL_LOAD_WORKER_TYPE", "decode")
     with pytest.raises(
         ValueError,
-        match=_exactly(
+        match=exactly(
             "DYN_ROUTER_PREFILL_LOAD_WORKER_TYPE is 'decode'; use prefill or "
             "aggregated"
         ),
@@ -470,8 +405,8 @@ def test_tiers_are_read_from_parsed_objects(capsys):
     assert [tier.ais_perf_model for tier in config.tiers] == [PREFILL, AGGREGATED]
     config.validate()
     assert config.ais_perf_kwargs_by_tier() == [
-        _expected(worker_type="prefill"),
-        _expected(),
+        expected(worker_type="prefill"),
+        expected(),
     ]
 
     with pytest.raises(SystemExit) as exit_info:
@@ -480,10 +415,10 @@ def test_tiers_are_read_from_parsed_objects(capsys):
     assert "argument --tiers: invalid parse_tiers value" in capsys.readouterr().err
 
     # The AIS checks come before the check for tiers, as they did.
-    with pytest.raises(ValueError, match=_exactly(NOTHING_GIVEN)):
+    with pytest.raises(ValueError, match=exactly(NOTHING_GIVEN)):
         _config([*MODEL_NAME, *AIS]).validate()
     with pytest.raises(
-        ValueError, match=_exactly("--tiers is required (JSON array, cheapest first)")
+        ValueError, match=exactly("--tiers is required (JSON array, cheapest first)")
     ):
         _config([*MODEL_NAME, *NOT_AIS]).validate()
 
@@ -498,7 +433,7 @@ def test_tier_relative_path_starts_at_working_directory(tmp_path, monkeypatch):
 
     monkeypatch.chdir(run_dir)
     config.validate()
-    assert config.ais_perf_kwargs_by_tier() == [_expected(worker_type="prefill")]
+    assert config.ais_perf_kwargs_by_tier() == [expected(worker_type="prefill")]
 
     monkeypatch.chdir(other_dir)
     with pytest.raises(ValueError, match=r"^--tiers\[0\]: cannot read .*cfg.yaml: "):

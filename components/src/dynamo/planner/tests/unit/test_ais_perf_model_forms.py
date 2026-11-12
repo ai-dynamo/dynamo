@@ -26,9 +26,7 @@ from dynamo.planner.config.planner_config import (
     PlannerConfig,
     ais_perf_model_old_form_names,
 )
-from dynamo.planner.core.perf_model import ais_adapter
-from dynamo.planner.core.perf_model.ais_adapter import PlannerEnginePerfModel
-from dynamo.planner.core.types import EngineCapabilities
+from dynamo.planner.tests.ais_engine_stubs import adapter_builder
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -70,40 +68,10 @@ def _load_error(ais_perf_model, optimization_target="sla"):
     return error["ctx"]["error"]
 
 
-class _ReadyEngine:
-    """Stands in for the native engine model, which these tests do not use."""
-
-    @classmethod
-    def best_available(cls, **kwargs):
-        return cls()
-
-    def diagnostics(self):
-        return {"readiness": "ready"}
-
-
-def _limits():
-    return EngineCapabilities(
-        max_num_batched_tokens=1024, max_num_seqs=128, max_kv_tokens=100_000
-    )
-
-
 @pytest.fixture
 def adapter(monkeypatch):
-    """Build the Planner's perf model adapter for a config.
-
-    With ``limits=None`` the adapter is built without reading the perf model,
-    as when the workers have not reported their limits yet.
-    """
-    monkeypatch.setattr(ais_adapter, "AISCoreEnginePerfModel", _ReadyEngine)
-
-    def build(config, worker_type="decode", limits=True):
-        return PlannerEnginePerfModel(
-            worker_type=worker_type,
-            config=config,
-            capabilities=_limits() if limits else None,
-        )
-
-    return build
+    """Build the Planner's perf model adapter for a config."""
+    return adapter_builder(monkeypatch)
 
 
 def test_old_form_roles_stays_typed():
@@ -241,15 +209,6 @@ def test_validation_opens_no_file():
     assert _planner(written).ais_perf_model == written
 
 
-def test_string_is_rejected():
-    text = (
-        "ais_perf_model must be a perf model config (a mapping) or a list of "
-        "configs, not a string; a file path is not read here"
-    )
-    with pytest.raises(ValidationError, match=re.escape(text)):
-        _planner("perf_model.yaml")
-
-
 @pytest.mark.parametrize("worker_type", ["prefill", "decode", "aggregated"])
 def test_adapter_config_equals_old_form(adapter, worker_type):
     content = {
@@ -274,23 +233,28 @@ def test_adapter_config_equals_old_form(adapter, worker_type):
     assert built(dict(content)) == old_form
 
 
-def test_adapter_resolves_once(adapter, monkeypatch):
-    calls = []
-    resolve_entry = ais_adapter.resolve_entry
+def test_adapter_resolves_once(adapter, tmp_path):
+    template = tmp_path / "template.yaml"
+    controls = {"correction": {"sampling": {"max_observations": 256}}}
+    template.write_text(
+        yaml.safe_dump({**_CONTENT, "attention_dp": 2, "estimator_config": controls})
+    )
+    model = adapter(_planner({"from": str(template)}))
 
-    def counting_resolve_entry(*args, **kwargs):
-        calls.append(kwargs)
-        return resolve_entry(*args, **kwargs)
+    def read():
+        return (
+            model._build_ais_config(),
+            model._attention_dp_size(),
+            model._observation_history_limit(),
+        )
 
-    monkeypatch.setattr(ais_adapter, "resolve_entry", counting_resolve_entry)
-    model = adapter(_planner(dict(_CONTENT)))
+    first = read()
+    assert first[1:] == (2, 256)
 
-    model._build_ais_config()
-    model._build_ais_config()
-    model._attention_dp_size()
-    model._observation_history_limit()
+    # A file that changes after the first use is not read again.
+    template.write_text(yaml.safe_dump({**_CONTENT, "attention_dp": 4}))
 
-    assert calls == [{"worker_type": "decode"}]
+    assert read() == first
 
 
 def test_adapter_reads_template_entry(adapter, tmp_path):

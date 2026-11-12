@@ -120,7 +120,7 @@ When `optimization_target` is `throughput`, `latency`, or `load`, the Planner fo
 <ParamField path="ais_perf_model" type="object or list of objects" default="null">
   AISimulate perf model of the workers the Planner scales. The value is one perf model
   config, or a list of configs with one `worker_type` each (`prefill`, `decode`, or
-  `aggregated`):
+  `aggregated`). Available since v1.8.
 
   ```yaml
   ais_perf_model:

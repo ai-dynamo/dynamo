@@ -3,7 +3,10 @@
 
 """Unit tests for Planner's AISimulate performance-model adapter."""
 
+from dataclasses import asdict
+
 import pytest
+from aisimulate_core.sdk import ForwardPassPerfModelConfig
 
 try:
     from dynamo.common.forward_pass_metrics import (
@@ -177,82 +180,69 @@ def _decode_fpm(
     )
 
 
-def test_old_form_adapter_config_unchanged(fake_engine_factory):
+def _leaves(value, path=()):
+    """Flatten nested mappings to ``{path: leaf}``."""
+    if not isinstance(value, dict):
+        return {path: value}
+    leaves = {}
+    for key, item in value.items():
+        leaves.update(_leaves(item, (*path, key)))
+    return leaves
+
+
+def test_old_form_adapter_config_adds_only_runtime_values(fake_engine_factory):
     _install_fake_engine(
         fake_engine_factory, _FakeEngineModel(diagnostics={"readiness": "ready"})
     )
+    # Planner settings that differ from AISimulate's defaults, so each one shows.
+    config = _config(min_observations=7)
+    config.fpm_sample_bucket_size = 36
     model = PlannerEnginePerfModel(
         worker_type="decode",
-        config=_config(),
+        config=config,
         capabilities=_caps(),
     )
 
-    sampling = {"bins_per_axis": [4, 4], "max_observations": 16}
-    assert model._build_ais_config() == {
-        "attention_backend": None,
-        "attention_dp": 1,
-        "backend": "vllm",
-        "backend_version": None,
-        "comm_quant_mode": None,
-        "cp_size": None,
-        "database_mode": "SILICON",
-        "dcp": None,
-        "decoder_replay": False,
-        "enable_eplb": False,
-        "enable_shared_layer": None,
-        "encoder_parallel": None,
-        "estimation_mode": "auto",
-        "estimator_config": {
-            "correction": {
-                "enabled": True,
-                "factor_bounds": {"max": 2.0, "min": 0.5},
-                "feature_space": "legacy_workload",
-                "max_batch_size": 128,
-                "max_kv_tokens": 100000,
-                "max_num_tokens": 1024,
-                "min_observations": 5,
-                "sampling": sampling,
-            },
-            "features": {
-                "attention_kv_weight": 1.0,
-                "ffn_token_weight": 1.0,
-                "prefill_attention_pair_weight": 1.0,
-            },
-            "fpm_interpolation": {"method": "auto"},
-            "fpm_regression": {
-                "fit": {
-                    "kind": "standardized_nnls",
-                    "rebuild_interval": None,
-                    "singular_ridge_scale": 1e-09,
-                },
-                "min_observations": 5,
-                "sampling": sampling,
-            },
-            "op_level": {},
+    built = model._build_ais_config()
+    estimator_config = built.pop("estimator_config")
+
+    # Every other key and its default are AISimulate's.
+    role = asdict(
+        ForwardPassPerfModelConfig(
+            model="Qwen/Qwen3-0.6B",
+            system="h200_sxm",
+            backend="vllm",
+            worker_type="decode",
+        )
+    )
+    del role["estimator_config"]
+    assert built == {**role, "kv_block_size": 16}
+
+    untuned = ForwardPassPerfModelConfig.from_legacy_engine_config(
+        {
+            "schema_version": 1,
+            "model_name": "Qwen/Qwen3-0.6B",
+            "system_name": "h200_sxm",
+            "backend": "vllm",
+            "tp_size": built["tp"],
+            "pp_size": built["pp"],
         },
-        "fallback_policy": "deny",
-        "fmha_quant_mode": None,
-        "fpm_fmha_quant_mode": None,
-        "fpm_profile": None,
-        "gemm_quant_mode": None,
-        "kv_block_size": 16,
-        "kvcache_quant_mode": None,
-        "model": "Qwen/Qwen3-0.6B",
-        "moe_backend": None,
-        "moe_ep_size": None,
-        "moe_kernel_source": None,
-        "moe_quant_mode": None,
-        "moe_tp_size": None,
-        "nextn": 0,
-        "pp": 1,
-        "speculation": None,
-        "strict_provenance": False,
-        "system": "h200_sxm",
-        "systems_paths": (),
-        "tp": 1,
-        "transfer_policy": None,
-        "wideep_num_slots": None,
-        "worker_type": "decode",
+        "decode",
+        {},
+    ).estimator_config
+    got, base = _leaves(estimator_config), _leaves(untuned)
+    assert set(got) == set(base)
+    assert {path: value for path, value in got.items() if value != base[path]} == {
+        ("correction", "max_num_tokens"): 1024,
+        ("correction", "max_batch_size"): 128,
+        ("correction", "max_kv_tokens"): 100_000,
+        ("correction", "min_observations"): 7,
+        ("correction", "sampling", "max_observations"): 16,
+        # 36 buckets are a 6 by 6 grid.
+        ("correction", "sampling", "bins_per_axis"): [6, 6],
+        ("fpm_regression", "min_observations"): 7,
+        ("fpm_regression", "sampling", "max_observations"): 16,
+        ("fpm_regression", "sampling", "bins_per_axis"): [6, 6],
     }
 
 
