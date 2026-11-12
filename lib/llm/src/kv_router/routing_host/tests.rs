@@ -10,7 +10,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use super::builder::hosted_picker;
+use super::builder::{check_hint_policies_route_on_kv_path, hosted_picker};
 use crate::kv_router::SelectionPolicySource;
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::plugins::request_classifier::{
@@ -6120,4 +6120,55 @@ async fn disagg_decode_wait_limit_gates_the_prefill_hop_and_never_the_decode_hop
     drop(prefill);
     drop(decode);
     runtime.shutdown();
+}
+
+#[test]
+fn listed_hints_reject_every_non_kv_mode() {
+    use dynamo_kv_router::WorkerType;
+
+    let policy_file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(
+        policy_file.path(),
+        r#"
+worker_selection:
+  aggregated:
+    type: dynamo-default-cost-fn
+    hints:
+      - type: some_hint
+  prefill:
+    type: dynamo-default-cost-fn
+    hints: []
+  decode: dynamo-default-cost-fn
+"#,
+    )
+    .unwrap();
+    let config = KvRouterConfig {
+        router_policy_config: Some(policy_file.path().display().to_string()),
+        ..Default::default()
+    };
+    for mode in [
+        RouterMode::RoundRobin,
+        RouterMode::Random,
+        RouterMode::LeastLoaded,
+        RouterMode::Direct,
+        RouterMode::DeviceAwareWeighted,
+    ] {
+        let error = check_hint_policies_route_on_kv_path(mode, &config, &[WorkerType::Aggregated])
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("the hints in worker_selection.aggregated run only on the KV path"),
+            "{mode:?}: {error}"
+        );
+    }
+    check_hint_policies_route_on_kv_path(RouterMode::KV, &config, &[WorkerType::Aggregated])
+        .unwrap();
+    // An empty list, a bare entry and an unlisted role run only the passive defaults.
+    check_hint_policies_route_on_kv_path(
+        RouterMode::RoundRobin,
+        &config,
+        &[WorkerType::Prefill, WorkerType::Decode, WorkerType::Encode],
+    )
+    .unwrap();
 }

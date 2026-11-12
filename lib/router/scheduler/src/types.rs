@@ -13,7 +13,7 @@ use super::config::RouterConfigOverride;
 use super::filter::RoutingEligibility;
 use super::overlap::{OverlapSignals, SelectedWorkerTierSnapshot};
 use super::prefill_load::effective_prefill_tokens;
-use crate::kv_hints::{KvTransferCandidates, KvTransferSourceChoice};
+use crate::kv_hints::{KvCopySource, KvTransferCandidates, KvTransferSourceChoice};
 pub use crate::protocols::PotentialLoad;
 use crate::protocols::{RoutingConstraints, SelectionLogFields, WorkerConfigLike};
 use dynamo_admission::queue::QueueRejection;
@@ -201,9 +201,10 @@ pub struct SchedulingResponse {
     /// Raw prefix overlap for the selected worker and DP rank, in tokens.
     pub selected_raw_cached_tokens: Option<usize>,
     pub selected_worker_tiers: SelectedWorkerTierSnapshot,
-    /// The source `best_worker` fetches its KV prefix from; see
-    /// [`crate::protocols::WorkerSelectionResult::kv_transfer_source`].
-    pub kv_transfer_source: Option<KvTransferSourceChoice>,
+    /// The copy source of `best_worker`: the source selection chose (see
+    /// [`crate::protocols::WorkerSelectionResult::kv_transfer_source`]) with `best_worker`'s
+    /// local prefix.
+    pub kv_copy_source: Option<KvCopySource>,
     pub kv_transfer_candidates: Option<KvTransferCandidates>,
     pub potential_decode_blocks: usize,
     /// Per-candidate costs, present only when the scheduler has a selection
@@ -501,6 +502,21 @@ impl<'a, C: WorkerConfigLike> SchedulingContext<'a, C> {
 }
 
 impl SchedulingRequest {
+    /// `worker`'s copy from `source`, with the local prefix the source was chosen against.
+    pub(crate) fn kv_copy_source(
+        &self,
+        worker: WorkerWithDpRank,
+        source: Option<KvTransferSourceChoice>,
+    ) -> Option<KvCopySource> {
+        source.map(|choice| {
+            KvCopySource::new(
+                worker,
+                choice,
+                self.transfer_local_prefix_blocks_for(worker),
+            )
+        })
+    }
+
     #[inline]
     pub fn eligibility(&self) -> RoutingEligibility<'_> {
         self.eligibility_with_overloaded(None)

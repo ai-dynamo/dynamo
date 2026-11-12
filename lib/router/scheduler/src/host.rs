@@ -24,9 +24,9 @@ pub use crate::replication::{
 };
 pub use crate::selection::SelectionError;
 pub use crate::selection::core::{
-    HostCache, HostEligibility, HostLoad, HostReplication, HostTelemetry, KvIndexSource, Selected,
-    SelectionAdmission, SelectionCore, SelectionHost, SelectionOperation, SelectionOutcome,
-    SelectionPartition, SelectionRun, SelectionScheduler, SessionBinding,
+    HostCache, HostEligibility, HostHints, HostLoad, HostReplication, HostTelemetry, KvIndexSource,
+    Selected, SelectionAdmission, SelectionCore, SelectionHost, SelectionOperation,
+    SelectionOutcome, SelectionPartition, SelectionRun, SelectionScheduler, SessionBinding,
 };
 pub use crate::selection::ingress::{KvEventIngress, LocalIndexIngress};
 pub use crate::selection::input::{PromptRequest, PromptView};
