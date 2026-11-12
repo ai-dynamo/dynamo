@@ -409,7 +409,7 @@ lint-api: kube-api-linter ## Check the CRD API types against Kubernetes API conv
 
 .PHONY: build
 build: manifests generate fmt vet ## Build manager binary.
-	go build -o bin/manager cmd/main.go
+	go build -o bin/manager ./cmd
 
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.

@@ -4,6 +4,7 @@
 
 import io
 import re
+import shlex
 import subprocess
 from pathlib import Path
 from zipfile import ZipFile
@@ -394,6 +395,23 @@ def test_operator_exports_and_binds_both_architectures():
     assert "success()" in upload["if"]
     sources = steps["Upload /sources/ archive (opt-in via archive_sources)"]
     assert sources["with"]["path"] == "/tmp/sources/"
+
+
+def test_operator_main_binaries_keep_their_first_party_package_identity():
+    root = Path(__file__).resolve().parents[3]
+    for relative in ("deploy/operator/Dockerfile", "deploy/operator/Makefile"):
+        commands = re.findall(r"go build[^\n]+", (root / relative).read_text())
+        assert commands
+        for command in commands:
+            arguments = shlex.split(command.rstrip("\\").strip())
+            targets = [arg for arg in arguments if arg.startswith(("./cmd", "cmd/"))]
+            assert targets, (relative, command)
+            # Loose-file compilation embeds command-line-arguments instead of
+            # the module's first-party package path, hiding binary ownership.
+            assert not any(target.endswith(".go") for target in targets), (
+                relative,
+                targets,
+            )
 
 
 @pytest.mark.parametrize("workflow_name", ["pr.yaml", "post-merge-ci.yml"])
