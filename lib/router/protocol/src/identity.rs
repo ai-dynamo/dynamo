@@ -229,6 +229,10 @@ impl FromStr for ClusterId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct PoolId {
     indexer_domain: IndexerDomainId,
+    // v1.5 and v1.6 state agents and routers read and write this field as `dc_id`. Keep that
+    // name on the wire so either side can be upgraded first, and accept `cluster_id` too.
+    // TODO(v1.9): Write `cluster_id` once v1.6 falls outside the N-2 compatibility window.
+    #[serde(rename = "dc_id", alias = "cluster_id")]
     cluster_id: ClusterId,
 }
 

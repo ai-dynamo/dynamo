@@ -361,7 +361,7 @@ mod tests {
     }
 
     #[test]
-    fn pool_id_json_uses_cluster_id() {
+    fn pool_id_json_stays_readable_across_the_compatibility_window() {
         let pool = PoolId::new(
             IndexerDomainId::new(
                 CacheSemanticsId::new([0xab; 16], IdentitySource::Explicit),
@@ -369,21 +369,35 @@ mod tests {
             ),
             ClusterId::new(7),
         );
+        // v1.5 and v1.6 peers only know `dc_id`, so that is what goes on the wire.
         let json = serde_json::to_value(pool).unwrap();
-        assert_eq!(json["cluster_id"], 7);
-        assert!(json.get("dc_id").is_none());
+        assert_eq!(json["dc_id"], 7);
+        assert!(json.get("cluster_id").is_none());
         assert_eq!(
             serde_json::from_value::<PoolId>(json.clone()).unwrap(),
             pool
         );
-        let mut old_json = json;
-        let old_cluster_id = old_json
+        // A writer that uses `cluster_id` is read the same way.
+        let mut renamed_json = json;
+        let cluster_id = renamed_json
             .as_object_mut()
             .unwrap()
-            .remove("cluster_id")
+            .remove("dc_id")
             .unwrap();
-        old_json["dc_id"] = old_cluster_id;
-        assert!(serde_json::from_value::<PoolId>(old_json).is_err());
+        renamed_json["cluster_id"] = cluster_id;
+        assert_eq!(
+            serde_json::from_value::<PoolId>(renamed_json.clone()).unwrap(),
+            pool
+        );
+
+        // Event state sources travel as named MessagePack; both names decode there too.
+        let packed = rmp_serde::to_vec_named(&pool).unwrap();
+        assert_eq!(rmp_serde::from_slice::<PoolId>(&packed).unwrap(), pool);
+        let renamed_packed = rmp_serde::to_vec_named(&renamed_json).unwrap();
+        assert_eq!(
+            rmp_serde::from_slice::<PoolId>(&renamed_packed).unwrap(),
+            pool
+        );
     }
 
     #[test]
