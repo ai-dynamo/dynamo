@@ -1,0 +1,288 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""`/metrics` and OTLP must show the same metrics in a real run.
+
+The two surfaces are fed by independent callbacks -- the scrape appends the
+engine's exposition text, the export takes the same metrics typed -- so nothing
+in the type system stops them drifting apart. A metric that reaches one and not
+the other is the failure this pins: it looks fine on a dashboard scraping
+Prometheus while silently missing from the collector, or the reverse.
+
+Runs against a real worker process rather than a constructed registry, because
+drift shows up in wiring (a callback registered on one path only, an exporter
+gated behind something that is off by default), not in the mapper.
+"""
+
+import contextlib
+import logging
+import os
+import random
+import socket
+import threading
+import time
+from concurrent import futures
+from typing import Optional
+
+import pytest
+import requests
+
+from tests.utils.managed_process import ManagedProcess
+
+# Imported through importorskip so that an environment without the OTLP
+# receiver dependencies skips this module instead of failing collection for
+# every test in the suite.
+_OTLP = "opentelemetry.proto.collector.metrics.v1"
+grpc = pytest.importorskip("grpc", reason="OTLP receiver needs grpcio")
+metrics_service_pb2 = pytest.importorskip(
+    f"{_OTLP}.metrics_service_pb2", reason="OTLP receiver needs opentelemetry-proto"
+)
+metrics_service_pb2_grpc = pytest.importorskip(
+    f"{_OTLP}.metrics_service_pb2_grpc",
+    reason="OTLP receiver needs opentelemetry-proto",
+)
+
+logger = logging.getLogger(__name__)
+
+WORKER = os.path.join(os.path.dirname(__file__), "parity_worker.py")
+
+# Families that legitimately exist on only one surface. Keep this list short and
+# justified: every entry is a place the two surfaces genuinely disagree, and a
+# growing list means the contract is eroding.
+#
+# `target_info` is synthesised by OTLP consumers from resource attributes, not
+# collected, so it has no Prometheus counterpart.
+OTLP_ONLY = {"target_info"}
+
+
+def _reserved_port() -> tuple[int, socket.socket]:
+    """A port plus the socket still holding it.
+
+    Closing the socket before the real listener binds leaves a window another
+    process can claim, which shows up as an intermittent failure under parallel
+    runs. The caller keeps the reservation open until the moment it binds.
+
+    `DYN_SYSTEM_PORT` is parsed as an i16, so the kernel's ephemeral range is
+    often too high and the runtime rejects the config.
+    """
+    for _ in range(200):
+        candidate = random.randint(20000, 32000)
+        sock = socket.socket()
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind(("127.0.0.1", candidate))
+        except OSError:
+            sock.close()
+            continue
+        return candidate, sock
+    raise RuntimeError("no free port below the i16 ceiling")
+
+
+class _OtlpReceiver(metrics_service_pb2_grpc.MetricsServiceServicer):
+    """Minimal OTLP/gRPC metrics collector that records what it is sent."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._names: set[str] = set()
+        self._exports = 0
+
+    def Export(self, request, context):  # noqa: N802 - gRPC method name
+        with self._lock:
+            self._exports += 1
+            for resource in request.resource_metrics:
+                for scope in resource.scope_metrics:
+                    for metric in scope.metrics:
+                        self._names.add(metric.name)
+        return metrics_service_pb2.ExportMetricsServiceResponse()
+
+    @property
+    def exports(self) -> int:
+        with self._lock:
+            return self._exports
+
+    def names(self) -> set[str]:
+        with self._lock:
+            return set(self._names)
+
+    def wait_for_export(self, timeout: float) -> bool:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if self.exports > 0:
+                return True
+            time.sleep(0.25)
+        return False
+
+
+@contextlib.contextmanager
+def _running_receiver(port: int, reservation: socket.socket):
+    receiver = _OtlpReceiver()
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
+    metrics_service_pb2_grpc.add_MetricsServiceServicer_to_server(receiver, server)
+    # Release the reservation only as the real listener takes the port.
+    reservation.close()
+    server.add_insecure_port(f"127.0.0.1:{port}")
+    server.start()
+    try:
+        yield receiver
+    finally:
+        server.stop(grace=None)
+
+
+def _prometheus_families(text: str) -> dict[str, str]:
+    """Family name -> type, as declared by ``# TYPE``.
+
+    Compares families, not sample lines: a histogram renders as ``_bucket`` /
+    ``_sum`` / ``_count`` on the scrape but is one metric in OTLP, so sample
+    names would report drift that is only a representation difference.
+    """
+    out = {}
+    for line in text.splitlines():
+        parts = line.split()
+        if line.startswith("# TYPE ") and len(parts) >= 4:
+            out[parts[2]] = parts[3]
+    return out
+
+
+def _comparable(name: str) -> str:
+    """A form both surfaces can be compared in.
+
+    The two producers name a counter family differently, and neither is wrong:
+    `prometheus_client.collect()` reports the OpenMetrics family name (`foo`)
+    while its legacy text output writes `# TYPE foo_total counter`. Dynamo's own
+    Rust counters are registered literally as `foo_total`, so they agree with the
+    text form. Comparing with a trailing `_total` removed accepts both.
+
+    This normalises for *comparison* only. The exporter itself does not rewrite
+    names: *"The Prometheus Metric Name MUST be added as the Name of the OTLP
+    metric. The name SHOULD NOT be altered."* The `_total` and unit suffixes are
+    added when converting OTLP -> Prometheus, not stripped coming back.
+    """
+    return name[: -len("_total")] if name.endswith("_total") else name
+
+
+def _expected_otlp_name(name: str, kind: str) -> str | None:
+    """The comparable OTLP name for a scraped family, or None if it must not
+    be exported at all."""
+    if name.endswith("_created"):
+        # The Created timestamp: it becomes the parent's start_time_unix_nano
+        # rather than a metric of its own.
+        return None
+    return _comparable(name)
+
+
+class _Worker(ManagedProcess):
+    def __init__(self, request, system_port: int, otlp_port: int):
+        env = os.environ.copy()
+        env["DYN_SYSTEM_PORT"] = str(system_port)
+        env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
+        # Export far more often than the 60s default so the test does not have
+        # to wait a minute for the first payload.
+        env["OTEL_METRICS_EXPORTER"] = "otlp"
+        env["OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"] = f"http://127.0.0.1:{otlp_port}"
+        env["OTEL_METRIC_EXPORT_INTERVAL"] = "1000"
+
+        super().__init__(
+            command=["python3", WORKER],
+            env=env,
+            health_check_urls=[
+                (f"http://localhost:{system_port}/health", self._is_ready)
+            ],
+            timeout=300,
+            display_output=True,
+            terminate_all_matching_process_names=False,
+            straggler_commands=["parity_worker.py"],
+            log_dir=f"{request.node.name}_otlp_parity",
+        )
+
+    @staticmethod
+    def _is_ready(response) -> bool:
+        try:
+            return (response.json() or {}).get("status") == "ready"
+        except ValueError:
+            return False
+
+
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+@pytest.mark.e2e
+# Runs in ~4s; this bounds the whole item, where ManagedProcess's own timeout
+# only bounds worker startup.
+@pytest.mark.timeout(120)
+def test_otlp_and_prometheus_expose_the_same_metrics(request, runtime_services):
+    system_port, system_reservation = _reserved_port()
+    otlp_port, otlp_reservation = _reserved_port()
+
+    with _running_receiver(otlp_port, otlp_reservation) as receiver:
+        # The worker binds this one itself; hold it until it starts.
+        system_reservation.close()
+        with _Worker(request, system_port, otlp_port):
+            assert receiver.wait_for_export(
+                timeout=60
+            ), "worker never exported over OTLP; is export still wired to runtime startup?"
+
+            # Scrape after an export so both surfaces describe the same process
+            # at roughly the same point in its life. A family registered
+            # between the two reads shows up as drift, so allow one retry.
+            drift: Optional[str] = None
+            for _ in range(3):
+                scrape = requests.get(
+                    f"http://localhost:{system_port}/metrics", timeout=10
+                )
+                scrape.raise_for_status()
+                declared = _prometheus_families(scrape.text)
+                exported = {_comparable(n) for n in receiver.names()} - OTLP_ONLY
+
+                assert declared, "no families on /metrics; the scrape path is broken"
+
+                # The scrape must keep Prometheus conventions even though OTLP
+                # transforms them. Only the export changes shape; if a spec
+                # transformation ever leaks into /metrics, dashboards and
+                # recording rules built on it break silently.
+                rendered_counters = [
+                    n
+                    for n, k in declared.items()
+                    if k == "counter" and n.endswith("_total")
+                ]
+                assert rendered_counters, (
+                    "/metrics no longer renders counters with _total; an OTLP-side "
+                    "transformation has leaked into the scrape path"
+                )
+                assert any(n.endswith("_created") for n in declared), (
+                    "/metrics no longer renders _created; it is dropped from OTLP "
+                    "by design, but the scrape must still carry it"
+                )
+
+                # Each scraped family maps to the name the spec requires, or to
+                # nothing when the spec says it must not be exported.
+                prometheus = {
+                    expected
+                    for name, kind in declared.items()
+                    if (expected := _expected_otlp_name(name, kind)) is not None
+                }
+                must_not_export = {
+                    name for name in declared if name.endswith("_created")
+                }
+
+                wrongly_exported = must_not_export & receiver.names()
+                assert not wrongly_exported, (
+                    "_created is a client artifact, not a metric; the spec says "
+                    f"it becomes the parent's start time: {sorted(wrongly_exported)}"
+                )
+
+                missing_from_otlp = prometheus - exported
+                missing_from_prometheus = exported - prometheus
+                if not missing_from_otlp and not missing_from_prometheus:
+                    drift = None
+                    break
+
+                drift = (
+                    f"on /metrics but not exported: {sorted(missing_from_otlp)}\n"
+                    f"exported but not on /metrics: {sorted(missing_from_prometheus)}"
+                )
+                time.sleep(2)
+
+            assert drift is None, (
+                "OTLP and /metrics disagree about which metrics exist.\n"
+                "One surface is silently missing metrics the other reports.\n"
+                f"{drift}"
+            )

@@ -92,7 +92,7 @@ spec:
             - /bin/sh
             - -c
           args:
-            - >-
+            - |-
               ulimit -l unlimited
               TRANSFER_LOCAL=0 \
               python -m dynamo.vllm \
@@ -109,7 +109,7 @@ spec:
           resources:
             claims:
               - name: intel-gpu-rdma-resource
-    VllmDecodeWorker:
+    decode:
       componentType: worker
       envFromSecret: hf-token-secret
       replicas: 1
@@ -167,7 +167,7 @@ spec:
             - /bin/sh
             - -c
           args:
-            - >-
+            - |-
               ulimit -l unlimited
               TRANSFER_LOCAL=0 CUDA_VISIBLE_DEVICES=0 \
               python -m dynamo.vllm \
@@ -181,7 +181,7 @@ spec:
               --dtype bfloat16 \
               --max-num-seqs 40 \
               --kv-cache-dtype fp8 \
-              --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device":"cuda","kv_connector_extra_config":{"enforce_handshake_compat":false}}'
+              --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_buffer_device":"cuda","kv_connector_extra_config":{"enforce_handshake_compat":false}}'
           resources:
             claims:
               - name: gpu-rdma-resource

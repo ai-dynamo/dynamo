@@ -1,0 +1,31 @@
+{
+  "requiredScenarios": [
+    "vllm/aggregated/single/component",
+    "vllm/aggregated/single/grove",
+    "vllm/aggregated/multi/component",
+    "vllm/aggregated/multi/grove",
+    "vllm/disaggregated/single/component",
+    "vllm/disaggregated/single/grove",
+    "vllm/disaggregated/multi/component",
+    "vllm/disaggregated/multi/grove",
+    "sglang/aggregated/single/component",
+    "sglang/aggregated/single/grove",
+    "sglang/aggregated/multi/component",
+    "sglang/aggregated/multi/grove",
+    "sglang/disaggregated/single/component",
+    "sglang/disaggregated/single/grove",
+    "sglang/disaggregated/multi/component",
+    "sglang/disaggregated/multi/grove",
+    "trtllm/aggregated/single/component",
+    "trtllm/aggregated/single/grove",
+    "trtllm/aggregated/multi/component",
+    "trtllm/aggregated/multi/grove",
+    "trtllm/disaggregated/single/component",
+    "trtllm/disaggregated/single/grove",
+    "trtllm/disaggregated/multi/component",
+    "trtllm/disaggregated/multi/grove",
+    "vllm/disaggregated/multi/disaggregatedset",
+    "sglang/disaggregated/multi/disaggregatedset",
+    "trtllm/disaggregated/multi/disaggregatedset"
+  ]
+}

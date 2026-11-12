@@ -16,22 +16,22 @@ Basic deployment pattern with frontend and a single decode worker.
 
 **Architecture:**
 - `Frontend`: OpenAI-compatible API server (with kv router mode disabled)
-- `VLLMDecodeWorker`: Single worker handling both prefill and decode
+- `worker`: Single worker handling both prefill and decode
 
 ### 2. **Aggregated Router Deployment** (`agg_router.yaml`)
 Enhanced aggregated deployment with KV cache routing capabilities.
 
 **Architecture:**
 - `Frontend`: OpenAI-compatible API server (with kv router mode enabled)
-- `VLLMDecodeWorker`: Single worker handling both prefill and decode
+- `worker`: Single worker handling both prefill and decode
 
 ### 3. **Disaggregated Deployment** (`disagg.yaml`)
 High-performance deployment with separated prefill and decode workers.
 
 **Architecture:**
 - `Frontend`: HTTP API server coordinating between workers
-- `VLLMDecodeWorker`: Specialized decode-only worker
-- `VLLMPrefillWorker`: Specialized prefill-only worker (`--disaggregation-mode prefill`)
+- `decode`: Specialized decode-only worker
+- `prefill`: Specialized prefill-only worker (`--disaggregation-mode prefill`)
 - Communication via NIXL transfer backend
 
 ### 4. **Disaggregated Router Deployment** (`disagg_router.yaml`)
@@ -39,8 +39,8 @@ Advanced disaggregated deployment with KV cache routing capabilities.
 
 **Architecture:**
 - `Frontend`: HTTP API server with KV-aware routing
-- `VLLMDecodeWorker`: Specialized decode-only worker
-- `VLLMPrefillWorker`: Specialized prefill-only worker (`--disaggregation-mode prefill`)
+- `decode`: Specialized decode-only worker
+- `prefill`: Specialized prefill-only worker (`--disaggregation-mode prefill`)
 
 ### 5. **Global Planner Deployments** (see [`examples/global_planner/`](../../../global_planner/))
 Centralized scaling across multiple DGDs via GlobalPlanner. Examples include single-endpoint multi-pool and multi-model GPU budget patterns. See the [global planner examples](../../../global_planner/) for details.
@@ -56,8 +56,28 @@ Aggregated deployment that offloads KV cache to a per-node LMCache MP DaemonSet,
 
 **Architecture:**
 - `Frontend`: OpenAI-compatible API server
-- `VllmDecodeWorker`: Single worker, `hostIPC: true` + `runAsUser: 0` (required for cross-Pod CUDA IPC with the LMCache server)
+- `worker`: Single worker, `hostIPC: true` + `runAsUser: 0` (required for cross-Pod CUDA IPC with the LMCache server)
 - `LMCacheEngine` (separate CR): per-node DaemonSet that imports the worker's KV-cache IPC handles and serves cache hits over ZMQ
+
+### 8. **Aggregated KVCR Deployments** (`kvcr/`)
+
+Two-node aggregated deployments with a process-local KVCR tier or a resilient
+KVCR memory-service sidecar. See [`kvcr/README.md`](./kvcr/README.md) for image,
+RDMA, and lifecycle requirements.
+
+### 9. **Aggregated Speech Recognition** (`agg_asr.yaml`)
+Serves Qwen3-ASR through `/v1/chat/completions` with `audio_url` content parts. See [Speech Recognition on Kubernetes](../../../../docs/fern/pages/use-cases/speech/voice-pipelines.md#speech-recognition-on-kubernetes) for audio transfer and image requirements, and the [vLLM multimodal guide](../../../../docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/vllm/multimodal.md#speech-recognition-asr) for request and output format.
+
+**Architecture:**
+- `Frontend`: OpenAI-compatible API server with the vLLM chat processor (`--dyn-chat-processor vllm`), because the original Qwen3-ASR checkpoints ship no `tokenizer.json`. `DYNAMO_DISABLE_NIXL_MM=1` makes the worker load the audio, because shared-memory handoff does not cross pods.
+- `worker`: Single worker with `--enable-multimodal`
+
+### 10. **Aggregated Streaming Speech Recognition** (`agg_asr_realtime.yaml`)
+Streams Qwen3-ASR transcription over the `/v1/realtime` WebSocket. See the [vLLM multimodal guide](../../../../docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/vllm/multimodal.md#streaming-transcription) for the client and session format.
+
+**Architecture:**
+- `Frontend`: OpenAI-compatible API server. Realtime models do not tokenize in the frontend, so it needs no chat processor.
+- `worker`: Single worker with `--realtime` and the `Qwen3ASRRealtimeGeneration` architecture selected through `--hf-overrides`. A realtime worker cannot also serve `/v1/chat/completions`; deploy `agg_asr.yaml` for that. The worker resamples audio with `scipy`, which the vLLM runtime image does not include, so run it from an image with `scipy` installed; see [Image Requirements](../../../../docs/fern/pages/use-cases/speech/voice-pipelines.md#image-requirements).
 
 ## CRD Structure
 
@@ -119,7 +139,7 @@ podTemplate:
 - `--enable-prompt-embeds`: Enable prompt embeddings feature
 - `--enable-multimodal`: Enable multimodal (vision) support
 - `--disaggregation-mode prefill`: Prefill-only mode for disaggregated serving
-- `--kv-transfer-config '<json>'`: KV transfer backend configuration (e.g., `'{"kv_connector":"NixlConnector","kv_role":"kv_both"}'`)
+- `--kv-transfer-config '<json>'`: KV transfer backend configuration (e.g., `'{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'` on prefill and `'{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'` on decode)
 
 ## Prerequisites
 
@@ -235,7 +255,7 @@ The operator enables the worker system server on port `9090`. Select one vLLM wo
 
 ```bash
 export WORKER_POD=$(kubectl get pods -n "$NAMESPACE" \
-  -l nvidia.com/dynamo-component=VllmDecodeWorker \
+  -l nvidia.com/dynamo-component=decode \
   -o jsonpath='{.items[0].metadata.name}')
 kubectl port-forward -n "$NAMESPACE" pod/"$WORKER_POD" 9090:9090
 ```

@@ -10,10 +10,13 @@ coalescing, engine adaptation, and the lifecycle — via ``ThreadedMicroBatcher`
 (the generic cross-request batcher) and ``AsyncVisionEncoder`` (the async
 request-API glue). This module defines only the contract those drivers call.
 
-The encoder runs in the **same process** as the aggregated vLLM worker (no
-separate encode worker, no NIXL transfer): it turns image inputs into ordered,
-producer-defined artifacts. The resolved downstream decoder selects an adapter
-that validates those artifacts and constructs the final engine prompt.
+The backend runs in the same process as Dynamo's encoder driver and turns image
+inputs into ordered, producer-defined artifacts. Inline mode hosts that driver
+inside the aggregated vLLM worker. ``ExternalEncoderHandoff`` hosts the same
+driver in an application worker, packages linear tensor artifacts for the
+request plane, and lets stock aggregated vLLM reconstruct the same prompt. The
+resolved downstream decoder adapter validates the artifacts and constructs the
+final engine prompt in either placement.
 
 Division of labour (author vs. Dynamo):
 

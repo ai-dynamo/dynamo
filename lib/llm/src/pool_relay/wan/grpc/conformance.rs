@@ -1,0 +1,1010 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+use std::collections::{HashMap, HashSet};
+use std::net::SocketAddr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
+
+use dynamo_kv_events::event::{
+    KvCacheEvent, KvCacheEventData, KvCacheStoreData, KvCacheStoredBlockData, RouterEvent,
+};
+use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
+use dynamo_router_protocol::identity::{
+    CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
+};
+use dynamo_runtime::protocols::EndpointId;
+use dynamo_runtime::{
+    DistributedRuntime, Runtime, distributed::DistributedConfig, traits::DistributedRuntimeProvider,
+};
+use tokio::net::TcpStream;
+use tokio::sync::{Semaphore, watch};
+use tokio_util::sync::CancellationToken;
+use tonic::Streaming;
+use tonic::transport::{Channel, Endpoint};
+
+use super::config::PoolRelayGrpcConfig;
+use super::protocol as proto;
+use super::protocol::wire::images::{self, FilterFormat, ImagesFrame, SnapshotAssembly};
+use super::server::GrpcTransport;
+use crate::kv_router::ActiveLoad;
+use crate::local_model::runtime_config::ModelRuntimeConfig;
+use crate::pool_relay::actor::PoolRelayHandle;
+use crate::pool_relay::discovery::{
+    DcMembershipView, DomainWorkerTopology, EndpointMembership, KvCacheDomainKey,
+};
+use crate::pool_relay::identity::{
+    CanonicalModelId, CanonicalModelRegistration, KvQueryHashFormat, KvQuerySemantics, ModelAlias,
+    PoolRelayIdentity, WorkerRole,
+};
+use crate::pool_relay::pool_registry::{
+    PoolActorConfig, PoolAttachRequest, PoolAttachment, PoolRegistry, PoolServingFacts,
+};
+use crate::pool_relay::publication::RegistryPublicationSource;
+use crate::pool_relay::serving_load::ServingLoadSnapshot;
+use crate::pool_relay::topology::TopologyPublisher;
+
+const IO_TIMEOUT: Duration = Duration::from_secs(5);
+const WORKER_ID: u64 = 7;
+
+#[derive(Clone)]
+struct GlobalReceiverProbe(
+    tokio::sync::mpsc::UnboundedSender<Option<dynamo_global_common::grpc::PoolViewFrame>>,
+);
+
+struct ProbeClosed(GlobalReceiverProbe);
+
+impl Drop for ProbeClosed {
+    fn drop(&mut self) {
+        let _ = self.0.0.send(None);
+    }
+}
+
+#[tonic::async_trait]
+impl dynamo_global_common::grpc::pool_view_receiver_server::PoolViewReceiver
+    for GlobalReceiverProbe
+{
+    async fn publish(
+        &self,
+        request: tonic::Request<Streaming<dynamo_global_common::grpc::PoolViewFrame>>,
+    ) -> Result<tonic::Response<dynamo_global_common::grpc::PublishResult>, tonic::Status> {
+        let _closed = ProbeClosed(self.clone());
+        let mut stream = request.into_inner();
+        while let Some(frame) = stream.message().await? {
+            if self.0.send(Some(frame)).is_err() {
+                return Err(tonic::Status::cancelled("test ended"));
+            }
+        }
+        Ok(tonic::Response::new(
+            dynamo_global_common::grpc::PublishResult {
+                accepted_revision: 0,
+            },
+        ))
+    }
+}
+
+async fn global_receiver_probe() -> (
+    dynamo_global_common::RouterReplica,
+    tokio::sync::mpsc::UnboundedReceiver<Option<dynamo_global_common::grpc::PoolViewFrame>>,
+    tokio_util::task::AbortOnDropHandle<()>,
+) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+    let server = tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(
+                dynamo_global_common::grpc::pool_view_receiver_server::PoolViewReceiverServer::new(
+                    GlobalReceiverProbe(sender),
+                ),
+            )
+            .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+            .await
+            .unwrap();
+    });
+    (
+        dynamo_global_common::RouterReplica {
+            replica: dynamo_global_common::RouterReplicaId(address.to_string()),
+            url: format!("http://{address}").parse().unwrap(),
+        },
+        receiver,
+        tokio_util::task::AbortOnDropHandle::new(server),
+    )
+}
+
+async fn captured_state(
+    receiver: &mut tokio::sync::mpsc::UnboundedReceiver<
+        Option<dynamo_global_common::grpc::PoolViewFrame>,
+    >,
+    snapshot: bool,
+    mut matches: impl FnMut(&dynamo_global_common::grpc::PoolState) -> bool,
+) -> dynamo_global_common::grpc::PoolState {
+    tokio::time::timeout(IO_TIMEOUT, async {
+        loop {
+            use dynamo_global_common::grpc::pool_view_frame::Event;
+            let frame = receiver.recv().await.unwrap().unwrap();
+            let state = match frame.event.unwrap() {
+                Event::Snapshot(frame) => frame.state,
+                Event::Upsert(frame) if !snapshot => frame.state,
+                _ => None,
+            };
+            if let Some(state) = state
+                && matches(&state)
+            {
+                return state;
+            }
+        }
+    })
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn global_view_sender_follows_directory_and_reconnects_with_live_state() {
+    use dynamo_global_common::PoolKey as RoutingPoolKey;
+    use prost::Message;
+
+    let mut fixture = RelayFixture::start(|config| config.load_window_ms = 10).await;
+    let (first, mut first_frames, _first_server) = global_receiver_probe().await;
+    let (second, mut second_frames, _second_server) = global_receiver_probe().await;
+    let (directory, routers) = watch::channel(HashSet::from([first.clone(), second.clone()]));
+    fixture.transport.broadcast_global_views(
+        RoutingPoolKey::new("east", "dynamo", "blue").unwrap(),
+        routers,
+    );
+    for frames in [&mut first_frames, &mut second_frames] {
+        let initial = captured_state(frames, true, |_| true).await;
+        let catalog = proto::KvPoolCatalogUpdate::decode(initial.catalog).unwrap();
+        let readiness = proto::ServingReadinessUpdate::decode(initial.readiness).unwrap();
+        assert_eq!(catalog.snapshot.unwrap().pools.len(), 1);
+        assert!(!readiness.entries.is_empty());
+    }
+    // Dropping one directory endpoint closes its receiving stream, without
+    // affecting the other router.
+    directory.send_replace(HashSet::from([second.clone()]));
+    tokio::time::timeout(IO_TIMEOUT, async {
+        while first_frames.recv().await.unwrap().is_some() {}
+    })
+    .await
+    .unwrap();
+    fixture.replace_pool().await;
+    let revision = fixture.registry.catalog().revision();
+    fixture
+        .serving_load
+        .send_replace(Some(Arc::new(ServingLoadSnapshot {
+            pools: fixture
+                .registry
+                .serving_pool_loads(&HashMap::new(), std::time::Instant::now()),
+            models: Vec::new(),
+        })));
+    let state = captured_state(&mut second_frames, false, |state| {
+        proto::KvPoolCatalogUpdate::decode(state.catalog.clone())
+            .unwrap()
+            .revision
+            == revision
+            && !state.serving_load.is_empty()
+            && !state.kv_load.is_empty()
+    })
+    .await;
+    let serving = proto::ServingLoadUpdate::decode(state.serving_load).unwrap();
+    let kv = proto::KvPoolLoadUpdate::decode(state.kv_load).unwrap();
+    assert_eq!(serving.relay, kv.relay);
+    assert_eq!(serving.pools.len(), 1);
+    directory.send_replace(HashSet::from([first, second]));
+    let fresh = captured_state(&mut first_frames, true, |state| {
+        proto::KvPoolCatalogUpdate::decode(state.catalog.clone())
+            .unwrap()
+            .revision
+            == revision
+    })
+    .await;
+    assert_eq!(
+        proto::KvPoolCatalogUpdate::decode(fresh.catalog)
+            .unwrap()
+            .revision,
+        revision
+    );
+    drop(directory);
+    tokio::time::timeout(IO_TIMEOUT, async {
+        while second_frames.recv().await.unwrap().is_some() {}
+    })
+    .await
+    .unwrap();
+    fixture.shutdown().await;
+}
+
+static NEXT_FIXTURE_ID: AtomicU64 = AtomicU64::new(1);
+
+struct RelayFixture {
+    address: SocketAddr,
+    transport: GrpcTransport,
+    registry: Arc<PoolRegistry>,
+    topology: Arc<TopologyPublisher>,
+    attachment: Option<PoolAttachment>,
+    pool_id: PoolId,
+    serving_load: watch::Sender<Option<Arc<ServingLoadSnapshot>>>,
+}
+
+impl RelayFixture {
+    async fn start(configure: impl FnOnce(&mut PoolRelayGrpcConfig)) -> Self {
+        Self::start_with_pool_capacity(32, configure).await
+    }
+
+    async fn start_with_pool_capacity(
+        expected_unique_blocks: usize,
+        configure: impl FnOnce(&mut PoolRelayGrpcConfig),
+    ) -> Self {
+        let fixture_id = NEXT_FIXTURE_ID.fetch_add(1, Ordering::Relaxed);
+        let runtime = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(runtime, DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let namespace = format!("pool-relay-conformance-{fixture_id}");
+        let component = drt
+            .namespace(&namespace)
+            .unwrap()
+            .component("relay")
+            .unwrap();
+        let relay_identity =
+            PoolRelayIdentity::new(component.drt().connection_id(), fixture_id + 100);
+        let registry = Arc::new(PoolRegistry::new(
+            relay_identity,
+            PoolActorConfig {
+                expected_unique_blocks,
+                publication_threshold: 1,
+                publication_delay: Duration::from_millis(1),
+            },
+        ));
+        let pool_id = pool_id(fixture_id as u8);
+        let attachment = attach_pool(&registry, pool_id).await;
+        let endpoint = EndpointId::from("backend.generate");
+        let topology = Arc::new(TopologyPublisher::new(
+            membership_view(endpoint.clone(), pool_id.indexer_domain()),
+            &registry.catalog(),
+        ));
+        topology.claim_availability(endpoint.clone(), 1);
+        topology.replace_availability(endpoint, 1, Some(HashSet::from([WORKER_ID])));
+        assert!(registry.observe_load(
+            pool_id,
+            attachment.layout_generation,
+            ActiveLoad {
+                worker_id: WORKER_ID,
+                dp_rank: 0,
+                kv_used_blocks: Some(40),
+                ..ActiveLoad::default()
+            },
+        ));
+
+        let lifecycle = CancellationToken::new();
+        let mut config = PoolRelayGrpcConfig::new("127.0.0.1:0".parse().unwrap());
+        configure(&mut config);
+        let publication = Arc::new(RegistryPublicationSource::new(
+            registry.clone(),
+            topology.clone(),
+            relay_identity,
+            lifecycle.child_token(),
+            Arc::new(Semaphore::new(config.publication_encoding_concurrency)),
+            config.max_pool_streams_total,
+            Duration::from_millis(config.snapshot_progress_timeout_ms),
+        ));
+        let (serving_load, serving_load_rx) = watch::channel(None);
+        let transport = GrpcTransport::start(publication, serving_load_rx, lifecycle, config)
+            .await
+            .unwrap();
+        let address = transport
+            .health()
+            .bound_address
+            .expect("transport must expose its bound address");
+        Self {
+            address,
+            transport,
+            registry,
+            topology,
+            attachment: Some(attachment),
+            pool_id,
+            serving_load,
+        }
+    }
+
+    async fn client(&self) -> proto::KvEventRelayClient<Channel> {
+        proto::KvEventRelayClient::new(connect(self.address).await.unwrap())
+            .max_decoding_message_size(8 * 1024 * 1024)
+    }
+
+    fn actor(&self) -> &PoolRelayHandle {
+        &self
+            .attachment
+            .as_ref()
+            .expect("pool attachment must be active")
+            .handle
+    }
+
+    async fn replace_pool(&mut self) {
+        let old = self
+            .attachment
+            .take()
+            .expect("pool attachment must be active");
+        self.registry.detach(old).await.unwrap();
+        self.attachment = Some(attach_pool(&self.registry, self.pool_id).await);
+        self.topology.replace_catalog(&self.registry.catalog());
+    }
+
+    async fn shutdown(mut self) {
+        self.transport.shutdown().await;
+        if let Some(attachment) = self.attachment.take() {
+            self.registry.detach(attachment).await.unwrap();
+        }
+        self.registry.shutdown().await;
+    }
+}
+
+fn pool_id(seed: u8) -> PoolId {
+    PoolId::new(
+        IndexerDomainId::new(
+            CacheSemanticsId::new([seed; 16], IdentitySource::Explicit),
+            RoutingScopeId::new([seed.wrapping_add(1); 16], IdentitySource::Explicit),
+        ),
+        ClusterId::new(3),
+    )
+}
+
+async fn attach_pool(registry: &PoolRegistry, pool_id: PoolId) -> PoolAttachment {
+    let runtime_config = ModelRuntimeConfig {
+        total_kv_blocks: Some(100),
+        max_num_batched_tokens: Some(2_048),
+        ..ModelRuntimeConfig::default()
+    };
+    registry
+        .attach(PoolAttachRequest {
+            pool_id,
+            endpoint: EndpointId::from("backend.generate"),
+            registrations: vec![CanonicalModelRegistration::new(
+                CanonicalModelId::new("llama").unwrap(),
+                vec![ModelAlias::new("chat").unwrap()],
+            )],
+            query_semantics: KvQuerySemantics::new(64, KvQueryHashFormat::DynamoStandardV1)
+                .unwrap(),
+            roles: vec![WorkerRole::Legacy],
+            serving_facts: Some(PoolServingFacts {
+                runtime_configs: HashMap::from([(WORKER_ID, runtime_config)]),
+            }),
+        })
+        .await
+        .unwrap()
+}
+
+fn membership_view(endpoint: EndpointId, indexer_domain: IndexerDomainId) -> DcMembershipView {
+    let registration = CanonicalModelRegistration::new(
+        CanonicalModelId::new("llama").unwrap(),
+        vec![ModelAlias::new("chat").unwrap()],
+    );
+    let query_semantics = KvQuerySemantics::new(64, KvQueryHashFormat::DynamoStandardV1).unwrap();
+    let domain = KvCacheDomainKey {
+        id: indexer_domain,
+        diagnostic_model_artifact: "llama".to_string(),
+        query_semantics,
+    };
+    let membership = EndpointMembership {
+        endpoint: endpoint.clone(),
+        generation: 1,
+        domain: Some(domain),
+        namespace: endpoint.namespace.clone(),
+        registrations: vec![registration],
+        models: vec!["llama".to_string()],
+        aliases: vec!["chat".to_string()],
+        roles: vec![WorkerRole::Legacy],
+        runtime_configs: HashMap::new(),
+        worker_topology: HashMap::from([(
+            WORKER_ID,
+            DomainWorkerTopology {
+                worker_type: None,
+                model_type: crate::model_type::ModelType::Chat,
+                needs: Vec::new(),
+            },
+        )]),
+        adapters: HashMap::new(),
+        conflicts: Vec::new(),
+    };
+    DcMembershipView {
+        endpoints: Arc::new(HashMap::from([(endpoint, membership)])),
+    }
+}
+
+fn stored(event_id: u64, hash: u64) -> RouterEvent {
+    const EXTERNAL_MASK: u64 = 0xC0F0_4A11_5EED_2026;
+    RouterEvent::new(
+        WORKER_ID,
+        KvCacheEvent {
+            event_id,
+            data: KvCacheEventData::Stored(KvCacheStoreData {
+                parent_hash: None,
+                start_position: None,
+                blocks: vec![KvCacheStoredBlockData {
+                    block_hash: ExternalSequenceBlockHash(hash ^ EXTERNAL_MASK),
+                    tokens_hash: LocalBlockHash(hash),
+                    mm_extra_info: None,
+                }],
+            }),
+            dp_rank: 0,
+        },
+    )
+}
+
+async fn connect(address: SocketAddr) -> anyhow::Result<Channel> {
+    Ok(Endpoint::from_shared(format!("http://{address}"))?
+        .connect_timeout(IO_TIMEOUT)
+        .timeout(IO_TIMEOUT)
+        .connect()
+        .await?)
+}
+
+fn relay_info_request() -> proto::RelayInfoRequest {
+    proto::RelayInfoRequest {
+        contract_marker: proto::RELAY_CONTRACT_MARKER,
+    }
+}
+
+async fn relay_info(address: SocketAddr) -> anyhow::Result<proto::RelayInfo> {
+    let channel = connect(address).await?;
+    let mut client = proto::KvEventRelayClient::new(channel);
+    Ok(client
+        .get_relay_info(relay_info_request())
+        .await?
+        .into_inner())
+}
+
+async fn next_filter_update(stream: &mut Streaming<proto::FilterUpdate>) -> proto::FilterUpdate {
+    let update = tokio::time::timeout(IO_TIMEOUT, stream.message())
+        .await
+        .expect("pool stream timed out")
+        .expect("pool stream failed")
+        .expect("pool stream ended");
+    proto::validate_protocol_envelope(update.protocol_version, update.contract_marker)
+        .expect("valid pool update envelope");
+    update
+}
+
+fn filter_format(producer: &proto::ProducerIdentity) -> FilterFormat {
+    let format = producer
+        .ckf_format
+        .as_ref()
+        .expect("producer must declare CKF format");
+    FilterFormat::new(
+        format.seed,
+        usize::try_from(format.bucket_count).expect("bucket count must fit usize"),
+    )
+    .expect("catalog must contain a valid CBI1 format")
+}
+
+async fn receive_snapshot(
+    stream: &mut Streaming<proto::FilterUpdate>,
+    producer: &proto::ProducerIdentity,
+) -> (u64, Vec<u64>) {
+    let format = filter_format(producer);
+    let mut assembly = SnapshotAssembly::new(format);
+    loop {
+        let update = next_filter_update(stream).await;
+        assert_eq!(update.producer.as_ref(), Some(producer));
+        assert_eq!(
+            proto::FilterUpdateKind::try_from(update.kind).unwrap(),
+            proto::FilterUpdateKind::SnapshotChunk
+        );
+        assert_eq!(update.base_sequence, update.sequence);
+        let frame = images::decode(format, &update.payload).expect("valid CBI1 snapshot chunk");
+        if let Some((epoch, images)) = assembly.absorb(&frame).expect("ordered snapshot chunks") {
+            assert_eq!(epoch, update.sequence);
+            let mut mirror = vec![0; format.bucket_count];
+            for image in images {
+                mirror[image.bucket as usize] = image.value;
+            }
+            return (epoch, mirror);
+        }
+    }
+}
+
+async fn receive_delta(
+    stream: &mut Streaming<proto::FilterUpdate>,
+    producer: &proto::ProducerIdentity,
+    mirror: &mut [u64],
+) -> proto::FilterUpdate {
+    let update = next_filter_update(stream).await;
+    assert_eq!(update.producer.as_ref(), Some(producer));
+    assert_eq!(
+        proto::FilterUpdateKind::try_from(update.kind).unwrap(),
+        proto::FilterUpdateKind::Delta
+    );
+    let frame = images::decode(filter_format(producer), &update.payload).expect("valid CBI1 delta");
+    let ImagesFrame::Delta {
+        header,
+        base_epoch,
+        images,
+    } = frame
+    else {
+        panic!("delta envelope must carry a CBI1 delta");
+    };
+    assert_eq!(header.epoch, update.sequence);
+    assert_eq!(base_epoch, update.base_sequence);
+    for image in images {
+        mirror[image.bucket as usize] = image.value;
+    }
+    update
+}
+
+async fn initial_catalog(
+    client: &mut proto::KvEventRelayClient<Channel>,
+) -> (
+    Streaming<proto::KvPoolCatalogUpdate>,
+    proto::ProducerIdentity,
+) {
+    let mut stream = client
+        .watch_kv_pool_catalog(proto::WatchKvPoolCatalogRequest {
+            subscriber_id: "catalog-test".to_string(),
+            contract_marker: proto::RELAY_CONTRACT_MARKER,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    let catalog = tokio::time::timeout(IO_TIMEOUT, stream.message())
+        .await
+        .expect("catalog stream timed out")
+        .unwrap()
+        .expect("catalog stream ended");
+    proto::validate_protocol_envelope(catalog.protocol_version, catalog.contract_marker)
+        .expect("valid catalog envelope");
+    let pools = &catalog.snapshot.expect("catalog snapshot").pools;
+    assert_eq!(pools.len(), 1);
+    let descriptor = &pools[0];
+    proto::validate_pool_descriptor(descriptor).expect("valid pool descriptor");
+    assert_eq!(descriptor.registrations[0].canonical_model_id, "llama");
+    assert_eq!(descriptor.registrations[0].aliases, ["chat"]);
+    assert_eq!(descriptor.pool_roles, [proto::WorkerRole::Legacy as i32]);
+    assert_eq!(
+        descriptor
+            .query_semantics
+            .as_ref()
+            .expect("query semantics")
+            .kv_block_size,
+        64
+    );
+    (
+        stream,
+        descriptor.producer.clone().expect("catalog producer"),
+    )
+}
+
+async fn subscribe_pool(
+    client: &mut proto::KvEventRelayClient<Channel>,
+    producer: proto::ProducerIdentity,
+) -> Result<Streaming<proto::FilterUpdate>, tonic::Status> {
+    client
+        .subscribe_kv_pool(proto::SubscribeKvPoolRequest {
+            subscriber_id: "pool-test".to_string(),
+            expected_producer: Some(producer),
+            contract_marker: proto::RELAY_CONTRACT_MARKER,
+        })
+        .await
+        .map(tonic::Response::into_inner)
+}
+
+#[tokio::test]
+async fn actual_relay_transport_accepts_plaintext_grpc() {
+    let fixture = RelayFixture::start(|_| {}).await;
+
+    let info = tokio::time::timeout(IO_TIMEOUT, relay_info(fixture.address))
+        .await
+        .expect("plaintext Relay request timed out")
+        .expect("plaintext Relay request failed");
+    assert_eq!(info.protocol_version, proto::RELAY_PROTOCOL_VERSION);
+    assert_eq!(info.contract_marker, proto::RELAY_CONTRACT_MARKER);
+
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn heartbeat_follows_complete_chunked_snapshot_without_advancing_sequence() {
+    let fixture =
+        RelayFixture::start_with_pool_capacity(4 * images::SNAPSHOT_CHUNK_BUCKETS, |config| {
+            config.pool_heartbeat_interval_ms = 1
+        })
+        .await;
+    let mut client = fixture.client().await;
+    let (_catalog, producer) = initial_catalog(&mut client).await;
+    assert!(filter_format(&producer).bucket_count > images::SNAPSHOT_CHUNK_BUCKETS);
+    let mut stream = subscribe_pool(&mut client, producer.clone()).await.unwrap();
+    // receive_snapshot rejects heartbeats interleaved with any snapshot chunk.
+    let (sequence, _) = receive_snapshot(&mut stream, &producer).await;
+    let heartbeat = next_filter_update(&mut stream).await;
+    assert_eq!(heartbeat.kind, proto::FilterUpdateKind::Heartbeat as i32);
+    assert_eq!(heartbeat.producer.as_ref(), Some(&producer));
+    assert_eq!(heartbeat.base_sequence, sequence);
+    assert_eq!(heartbeat.sequence, sequence);
+    assert!(heartbeat.payload.is_empty());
+
+    drop((client, stream));
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn accepted_relay_connections_disable_nagle() {
+    let fixture = RelayFixture::start(|_| {}).await;
+    let connection = TcpStream::connect(fixture.address).await.unwrap();
+    let nodelay =
+        tokio::time::timeout(IO_TIMEOUT, fixture.transport.wait_for_accepted_connection())
+            .await
+            .expect("Relay did not accept the connection");
+    assert!(nodelay, "accepted Relay connection kept Nagle enabled");
+
+    drop(connection);
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn shutdown_force_closes_connections_with_an_unread_grpc_stream() {
+    let fixture = RelayFixture::start(|_| {}).await;
+    let connection = TcpStream::connect(fixture.address).await.unwrap();
+    let nodelay =
+        tokio::time::timeout(IO_TIMEOUT, fixture.transport.wait_for_accepted_connection())
+            .await
+            .expect("Relay did not accept the idle connection");
+    assert!(nodelay, "accepted idle connection kept Nagle enabled");
+
+    let mut client = fixture.client().await;
+    let (catalog_stream, producer) = initial_catalog(&mut client).await;
+    let pool_stream = subscribe_pool(&mut client, producer).await.unwrap();
+
+    tokio::time::timeout(IO_TIMEOUT, fixture.transport.shutdown())
+        .await
+        .expect("Relay shutdown hung on an accepted idle connection");
+
+    assert!(!fixture.transport.health().serving);
+    drop((client, catalog_stream, pool_stream, connection));
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn actual_relay_transport_serves_all_rpc_surfaces_and_contiguous_cbi1() {
+    let fixture = RelayFixture::start(|_| {}).await;
+    let mut client = fixture.client().await;
+
+    client.get_relay_info(relay_info_request()).await.unwrap();
+    let (_catalog_stream, producer) = initial_catalog(&mut client).await;
+    let mut pool_stream = subscribe_pool(&mut client, producer.clone()).await.unwrap();
+    let (snapshot_sequence, mut mirror) = receive_snapshot(&mut pool_stream, &producer).await;
+    assert!(mirror.iter().all(|&bucket| bucket == 0));
+
+    let mut readiness = client
+        .subscribe_serving_readiness(proto::SubscribeServingReadinessRequest {
+            subscriber_id: "readiness-test".to_string(),
+            contract_marker: proto::RELAY_CONTRACT_MARKER,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    let readiness = tokio::time::timeout(IO_TIMEOUT, readiness.message())
+        .await
+        .expect("readiness stream timed out")
+        .unwrap()
+        .expect("readiness stream ended");
+    proto::validate_protocol_envelope(readiness.protocol_version, readiness.contract_marker)
+        .expect("valid readiness envelope");
+    assert_eq!(readiness.entries.len(), 1);
+    proto::validate_topology_entry(&readiness.entries[0]).expect("valid topology entry");
+    assert_eq!(readiness.entries[0].canonical_model_id, "llama");
+    assert_eq!(
+        readiness.entries[0].state,
+        proto::ServingReadinessState::Ready as i32
+    );
+    assert!(readiness.entries[0].legacy_fallback_active);
+    assert_eq!(readiness.entries[0].members.len(), 1);
+    assert_eq!(
+        readiness.entries[0].members[0].roles,
+        [proto::WorkerRole::Legacy as i32]
+    );
+    assert!(readiness.entries[0].members[0].pool_id.is_some());
+
+    let mut load = client
+        .subscribe_kv_pool_load(proto::SubscribeKvPoolLoadRequest {
+            subscriber_id: "load-test".to_string(),
+            contract_marker: proto::RELAY_CONTRACT_MARKER,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    let load = tokio::time::timeout(IO_TIMEOUT, load.message())
+        .await
+        .expect("load stream timed out")
+        .unwrap()
+        .expect("load stream ended");
+    proto::validate_protocol_envelope(load.protocol_version, load.contract_marker)
+        .expect("valid load envelope");
+    // The hub has no seed window: the first one a subscriber sees is published.
+    assert!(load.window_sequence > 0);
+    assert_eq!(load.pools.len(), 1);
+    assert_eq!(load.pools[0].producer.as_ref(), Some(&producer));
+    assert_eq!(load.pools[0].kv_used_blocks, 40);
+    assert_eq!(load.pools[0].total_kv_blocks, 100);
+
+    fixture.actor().admit_event(1, stored(1, 99)).await.unwrap();
+    fixture.actor().flush().await.unwrap();
+    let delta = receive_delta(&mut pool_stream, &producer, &mut mirror).await;
+    assert_eq!(delta.base_sequence, snapshot_sequence);
+    assert_eq!(delta.sequence, snapshot_sequence + 1);
+    assert!(mirror.iter().any(|&bucket| bucket != 0));
+
+    drop((client, pool_stream));
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn replacement_generation_rejects_stale_subscribe_and_requires_a_new_snapshot() {
+    let mut fixture = RelayFixture::start(|_| {}).await;
+    let mut client = fixture.client().await;
+    let (mut catalog_stream, first_producer) = initial_catalog(&mut client).await;
+    let mut first_stream = subscribe_pool(&mut client, first_producer.clone())
+        .await
+        .unwrap();
+    let (_, mut first_mirror) = receive_snapshot(&mut first_stream, &first_producer).await;
+    fixture
+        .actor()
+        .admit_event(1, stored(1, 123))
+        .await
+        .unwrap();
+    fixture.actor().flush().await.unwrap();
+    let old_delta = receive_delta(&mut first_stream, &first_producer, &mut first_mirror).await;
+
+    fixture.replace_pool().await;
+    let second_producer = loop {
+        let catalog = tokio::time::timeout(IO_TIMEOUT, catalog_stream.message())
+            .await
+            .expect("replacement catalog timed out")
+            .unwrap()
+            .expect("catalog stream ended during replacement");
+        let pools = catalog.snapshot.expect("catalog snapshot").pools;
+        if let Some(producer) = pools.into_iter().find_map(|descriptor| descriptor.producer) {
+            break producer;
+        }
+    };
+    assert_ne!(first_producer, second_producer);
+    assert_ne!(old_delta.producer.as_ref(), Some(&second_producer));
+
+    let stale = subscribe_pool(&mut client, first_producer.clone())
+        .await
+        .unwrap_err();
+    assert_eq!(stale.code(), tonic::Code::FailedPrecondition);
+    assert_eq!(
+        proto::relay_error_reason(&stale),
+        Some(proto::RelayErrorReason::ProducerChanged)
+    );
+
+    let mut second_stream = subscribe_pool(&mut client, second_producer.clone())
+        .await
+        .unwrap();
+    let (second_sequence, second_mirror) =
+        receive_snapshot(&mut second_stream, &second_producer).await;
+    assert_eq!(second_sequence, 0);
+    assert!(second_mirror.iter().all(|&bucket| bucket == 0));
+
+    tokio::time::timeout(IO_TIMEOUT, async {
+        while let Ok(Some(update)) = first_stream.message().await {
+            assert_eq!(update.producer.as_ref(), Some(&first_producer));
+            assert_ne!(update.producer.as_ref(), Some(&second_producer));
+        }
+    })
+    .await
+    .expect("retired stream did not terminate");
+
+    drop((client, first_stream, second_stream));
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn pool_stream_limit_returns_resource_exhausted_and_allows_resubscribe() {
+    let fixture = RelayFixture::start(|config| config.max_pool_streams_total = 1).await;
+    let mut client = fixture.client().await;
+    let (_catalog_stream, producer) = initial_catalog(&mut client).await;
+    let mut first_stream = subscribe_pool(&mut client, producer.clone()).await.unwrap();
+    receive_snapshot(&mut first_stream, &producer).await;
+
+    let rejected = subscribe_pool(&mut client, producer.clone())
+        .await
+        .unwrap_err();
+    assert_eq!(rejected.code(), tonic::Code::ResourceExhausted);
+    assert_eq!(
+        proto::relay_error_reason(&rejected),
+        Some(proto::RelayErrorReason::ResourceLimit)
+    );
+
+    drop(first_stream);
+    let mut replacement_stream = tokio::time::timeout(IO_TIMEOUT, async {
+        loop {
+            match subscribe_pool(&mut client, producer.clone()).await {
+                Ok(stream) => break stream,
+                Err(status) if status.code() == tonic::Code::ResourceExhausted => {
+                    tokio::task::yield_now().await;
+                }
+                Err(status) => panic!("resubscribe failed: {status}"),
+            }
+        }
+    })
+    .await
+    .expect("pool stream permit was not released");
+    receive_snapshot(&mut replacement_stream, &producer).await;
+
+    drop((client, replacement_stream));
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn application_error_reasons_cross_the_grpc_boundary() {
+    let fixture = RelayFixture::start(|_| {}).await;
+    let mut client = fixture.client().await;
+    let status = client
+        .get_relay_info(proto::RelayInfoRequest { contract_marker: 0 })
+        .await
+        .unwrap_err();
+    assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+    assert_eq!(
+        proto::relay_error_reason(&status),
+        Some(proto::RelayErrorReason::ContractMismatch)
+    );
+    let (_catalog, producer) = initial_catalog(&mut client).await;
+
+    let mut unsupported = producer.clone();
+    unsupported.pool_id.as_mut().unwrap().identity_version += 1;
+    let mut invalid = producer.clone();
+    invalid.layout_generation = 0;
+    let mut missing = producer.clone();
+    missing.pool_id.as_mut().unwrap().dc_id += 1;
+    for (request, reason, code) in [
+        (
+            unsupported,
+            proto::RelayErrorReason::UnsupportedFeature,
+            tonic::Code::FailedPrecondition,
+        ),
+        (
+            invalid,
+            proto::RelayErrorReason::InvalidRequest,
+            tonic::Code::InvalidArgument,
+        ),
+        (
+            missing,
+            proto::RelayErrorReason::PoolNotFound,
+            tonic::Code::NotFound,
+        ),
+    ] {
+        let status = subscribe_pool(&mut client, request).await.unwrap_err();
+        assert_eq!(status.code(), code);
+        assert_eq!(proto::relay_error_reason(&status), Some(reason));
+    }
+    let mut stream = subscribe_pool(&mut client, producer.clone()).await.unwrap();
+    receive_snapshot(&mut stream, &producer).await;
+    drop((stream, client));
+    fixture.shutdown().await;
+}
+
+fn serving_load_request(contract_marker: u32) -> proto::SubscribeServingLoadRequest {
+    proto::SubscribeServingLoadRequest {
+        subscriber_id: "serving-load-test".to_string(),
+        contract_marker,
+    }
+}
+
+async fn next_serving_load(
+    stream: &mut Streaming<proto::ServingLoadUpdate>,
+) -> proto::ServingLoadUpdate {
+    let update = tokio::time::timeout(IO_TIMEOUT, stream.message())
+        .await
+        .expect("serving-load stream timed out")
+        .expect("serving-load stream failed")
+        .expect("serving-load stream ended");
+    proto::validate_serving_load_update(&update).expect("valid serving-load window");
+    for pool in &update.pools {
+        proto::validate_pool_serving_load(pool).expect("valid pool serving load");
+    }
+    for model in &update.models {
+        proto::validate_model_serving_load(model).expect("valid model serving load");
+    }
+    update
+}
+
+#[tokio::test]
+async fn serving_load_streams_complete_windows_from_the_aggregate() {
+    let fixture = RelayFixture::start(|config| config.load_window_ms = 10).await;
+    let mut client = fixture.client().await;
+    let (_catalog, producer) = initial_catalog(&mut client).await;
+
+    let status = client
+        .subscribe_serving_load(serving_load_request(0))
+        .await
+        .unwrap_err();
+    assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+    assert_eq!(
+        proto::relay_error_reason(&status),
+        Some(proto::RelayErrorReason::ContractMismatch)
+    );
+    let status = client
+        .subscribe_serving_load(proto::SubscribeServingLoadRequest {
+            subscriber_id: String::new(),
+            contract_marker: proto::RELAY_CONTRACT_MARKER,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(
+        proto::relay_error_reason(&status),
+        Some(proto::RelayErrorReason::InvalidRequest)
+    );
+
+    let mut stream = client
+        .subscribe_serving_load(serving_load_request(proto::RELAY_CONTRACT_MARKER))
+        .await
+        .unwrap()
+        .into_inner();
+    // No window before the aggregate's first snapshot: an empty one would
+    // read as every pool gone.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), stream.message())
+            .await
+            .is_err()
+    );
+
+    fixture
+        .serving_load
+        .send_replace(Some(Arc::new(ServingLoadSnapshot {
+            pools: fixture
+                .registry
+                .serving_pool_loads(&HashMap::new(), std::time::Instant::now()),
+            models: Vec::new(),
+        })));
+    let window = next_serving_load(&mut stream).await;
+    assert_eq!(window.window_sequence, 1);
+    assert_eq!(window.window_ms, 10);
+    assert_eq!(window.pools.len(), 1);
+    let pool = &window.pools[0];
+    assert_eq!(pool.producer.as_ref(), Some(&producer));
+    // No router reported, so the pool is listed without scheduler load.
+    let load = pool.load.as_ref().unwrap();
+    assert_eq!(load.status, proto::DataStatus::Unavailable as i32);
+    assert_eq!(load.tokens.as_ref().unwrap().active_decode_blocks, None);
+    assert_eq!(
+        pool.deployment,
+        Some(proto::PoolDeploymentStatus {
+            live_workers: Some(1),
+            max_concurrency: None,
+        })
+    );
+
+    drop((client, stream));
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn serving_load_has_an_independent_subscriber_limit() {
+    let fixture = RelayFixture::start(|config| config.max_serving_load_subscribers = 1).await;
+    let mut client = fixture.client().await;
+    let request = || serving_load_request(proto::RELAY_CONTRACT_MARKER);
+    // The permit is taken when the stream is admitted, before any window.
+    let first = client
+        .subscribe_serving_load(request())
+        .await
+        .unwrap()
+        .into_inner();
+
+    let rejected = client.subscribe_serving_load(request()).await.unwrap_err();
+    assert_eq!(rejected.code(), tonic::Code::ResourceExhausted);
+    assert_eq!(
+        proto::relay_error_reason(&rejected),
+        Some(proto::RelayErrorReason::ResourceLimit)
+    );
+    // Pool-load streams are admitted separately.
+    client
+        .subscribe_kv_pool_load(proto::SubscribeKvPoolLoadRequest {
+            subscriber_id: "load-test".to_string(),
+            contract_marker: proto::RELAY_CONTRACT_MARKER,
+        })
+        .await
+        .unwrap();
+
+    drop((client, first));
+    fixture.shutdown().await;
+}

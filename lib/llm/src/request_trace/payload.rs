@@ -55,6 +55,8 @@ fn capture_http_headers_with_list(
     (!out.is_empty()).then_some(out)
 }
 
+const DROP_UNSPECIFIED: &str = "unspecified";
+
 pub struct RequestPayloadHandle {
     requested_streaming: bool,
     request_id: String,
@@ -73,11 +75,19 @@ impl RequestPayloadHandle {
         &self.request_id
     }
 
-    /// Publish one request trace payload record. Consumes the handle to enforce
-    /// exactly one payload record per request. `response` is `None` on client
-    /// cancel / gateway timeout / aggregation failure; the record still carries
-    /// the request so those cases remain inspectable.
-    pub fn emit(self, response: Option<Arc<NvCreateChatCompletionResponse>>) {
+    /// Consume the handle to publish one request payload record.
+    /// Pass a `drop_reason` for a missing or partial response.
+    pub fn emit(
+        self,
+        response: Option<Arc<NvCreateChatCompletionResponse>>,
+        drop_reason: Option<String>,
+    ) {
+        let payload_complete = response.is_some() && drop_reason.is_none();
+        let drop_reason = match (payload_complete, drop_reason) {
+            (true, reason) => reason,
+            (false, Some(reason)) => Some(reason),
+            (false, None) => Some(DROP_UNSPECIFIED.to_string()),
+        };
         super::record::emit_request_payload(
             super::RequestTracePayload {
                 request_id: self.request_id,
@@ -86,8 +96,8 @@ impl RequestPayloadHandle {
                 request: Some(self.request),
                 response,
                 http_request_headers: self.http_request_headers,
-                payload_complete: true,
-                payload_drop_reason: None,
+                payload_complete,
+                payload_drop_reason: drop_reason,
             },
             unix_time_ms(self.event_time),
         );
@@ -130,16 +140,20 @@ fn create_handle_with_config(
     }
     let requested_streaming = req.inner.stream.unwrap_or(false);
     let model = req.inner.model.clone();
+    let mut trace_request = req.clone();
+    if let Some(nvext) = trace_request.nvext.as_mut() {
+        // Upload destinations contain capabilities and signed header values.
+        nvext.metadata_upload = None;
+    }
 
     Some(RequestPayloadHandle {
         requested_streaming,
         request_id: request_id.to_string(),
         model,
-        // Snapshot the pristine inbound request (before the preprocessor
-        // overrides stream/usage) and stamp arrival time on the producing
-        // thread, so the record reflects what the client sent and when.
+        // Snapshot ingress fields without upload capabilities, before stream/
+        // usage overrides, and stamp arrival time on the producing thread.
         event_time: SystemTime::now(),
-        request: Arc::new(req.clone()),
+        request: Arc::new(trace_request),
         http_request_headers,
     })
 }
@@ -185,6 +199,24 @@ mod tests {
         assert!(
             handle.is_some(),
             "request_payload records should create a handle even with store=false"
+        );
+    }
+
+    #[test]
+    fn request_payload_omits_upload_capabilities_without_changing_request() {
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test", "messages": [{"role": "user", "content": "hello"}],
+            "nvext": {"extra_fields": ["timing"], "metadata_upload": {"kind": "generation_artifact", "contents": [], "mode": "object_store", "destination": {"kind": "presigned_http_put", "url": "https://storage.example/object?sig=secret", "required_headers": {"x-token": "private-token"}, "expires_at": "2030-01-01T00:00:00Z", "max_bytes": 1024, "object_id": "object-1"}}}
+        })).unwrap();
+        let handle = create_handle_with_config(&request, "test-id", true, true, None).unwrap();
+        assert!(request.nvext.as_ref().unwrap().metadata_upload.is_some());
+        let trace = serde_json::to_string(&handle.request).unwrap();
+        assert!(!trace.contains("metadata_upload"));
+        assert!(!trace.contains("secret"));
+        assert!(!trace.contains("private-token"));
+        assert_eq!(
+            handle.request.nvext.as_ref().unwrap().extra_fields,
+            Some(vec!["timing".into()])
         );
     }
 
@@ -300,8 +332,9 @@ mod tests {
         let mut rx = crate::request_trace::subscribe();
 
         RequestPayloadHandle::for_test("payload-test-req-ok", "test-model", true)
-            .emit(Some(Arc::new(create_test_response("hello"))));
-        RequestPayloadHandle::for_test("payload-test-req-cancel", "test-model", true).emit(None);
+            .emit(Some(Arc::new(create_test_response("hello"))), None);
+        RequestPayloadHandle::for_test("payload-test-req-dropped", "test-model", true)
+            .emit(None, Some("response_stream_dropped".to_string()));
 
         let mut records = HashMap::new();
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -316,7 +349,7 @@ mod tests {
                 };
                 if matches!(
                     payload.request_id.as_str(),
-                    "payload-test-req-ok" | "payload-test-req-cancel"
+                    "payload-test-req-ok" | "payload-test-req-dropped"
                 ) {
                     records.insert(payload.request_id.clone(), record);
                 }
@@ -329,8 +362,8 @@ mod tests {
             .remove("payload-test-req-ok")
             .expect("payload-test-req-ok record");
         let second = records
-            .remove("payload-test-req-cancel")
-            .expect("payload-test-req-cancel record");
+            .remove("payload-test-req-dropped")
+            .expect("payload-test-req-dropped record");
 
         assert_eq!(
             first.event_type,
@@ -340,14 +373,62 @@ mod tests {
         assert_eq!(first_payload.request_id, "payload-test-req-ok");
         assert!(first_payload.request.is_some());
         assert!(first_payload.response.is_some());
+        assert!(first_payload.payload_complete);
+        assert!(first_payload.payload_drop_reason.is_none());
 
         assert_eq!(
             second.event_type,
             crate::request_trace::RequestTraceEventType::RequestPayload
         );
         let second_payload = second.payload.as_ref().expect("second payload");
-        assert_eq!(second_payload.request_id, "payload-test-req-cancel");
+        assert_eq!(second_payload.request_id, "payload-test-req-dropped");
         assert!(second_payload.request.is_some());
         assert!(second_payload.response.is_none());
+        assert!(
+            !second_payload.payload_complete,
+            "a record with no response must not claim to be complete"
+        );
+        assert_eq!(
+            second_payload.payload_drop_reason.as_deref(),
+            Some("response_stream_dropped")
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn emit_without_response_or_reason_still_marks_the_record_incomplete() {
+        // Guards a future call site that drops the response without saying why:
+        // the record must be labelled, not left indistinguishable from a good one.
+        crate::request_trace::init_bus_for_test(8);
+        let mut rx = crate::request_trace::subscribe();
+
+        RequestPayloadHandle::for_test("payload-test-req-unspecified", "test-model", true)
+            .emit(None, None);
+
+        let record = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let record = rx.recv().await.expect("record receives ok");
+                if record.event_type != crate::request_trace::RequestTraceEventType::RequestPayload
+                {
+                    continue;
+                }
+                let Some(payload) = record.payload.as_ref() else {
+                    continue;
+                };
+                if payload.request_id == "payload-test-req-unspecified" {
+                    return record;
+                }
+            }
+        })
+        .await
+        .expect("expected request payload record before timeout");
+
+        let payload = record.payload.as_ref().expect("payload");
+        assert!(payload.response.is_none());
+        assert!(
+            !payload.payload_complete,
+            "a record with no response must not claim to be complete"
+        );
+        assert_eq!(payload.payload_drop_reason.as_deref(), Some("unspecified"));
     }
 }

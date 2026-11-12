@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.10.0-labs
-# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 {% include "templates/args.Dockerfile" %}
@@ -52,6 +52,13 @@
     {% include "templates/trtllm_runtime.Dockerfile" %}
 {% else %}
 # --- No TRTLLM stages included
+{% endif %}
+
+# --- Triton Stages
+{% if framework == "triton" %}
+    {% include "templates/triton_runtime.Dockerfile" %}
+{% else %}
+# --- No Triton stages included
 {% endif %}
 
 {% if make_efa == true and target == "runtime" %}

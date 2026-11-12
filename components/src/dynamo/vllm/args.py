@@ -9,8 +9,13 @@ import os
 import socket
 from typing import Any, Dict, Optional
 
+from vllm.config import SpeculativeConfig
 from vllm.distributed.kv_events import KVEventsConfig
-from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.engine.arg_utils import (
+    AsyncEngineArgs,
+    is_cloud_storage,
+    maybe_override_with_speculators,
+)
 
 try:
     from vllm.utils import FlexibleArgumentParser
@@ -28,15 +33,32 @@ from dynamo.common.configuration.groups.runtime_args import (
     DynamoRuntimeConfig,
 )
 from dynamo.common.configuration.utils import split_served_model_names
+from dynamo.common.model_fetch import fetch_model, needs_local_model_path
+from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.runtime import parse_endpoint
-from dynamo.vllm.backend_args import DynamoVllmArgGroup, DynamoVllmConfig
+from dynamo.vllm.backend_args import (
+    DynamoVllmArgGroup,
+    DynamoVllmConfig,
+    _configured_artifact_router_profile,
+)
+from dynamo.vllm.benchmark_points import RANDOM_KDA_WORKER
 from dynamo.vllm.constants import DisaggregationMode
+from dynamo.vllm.kv_connector_protocols import MULTI_CONNECTOR_WRAPPERS
 
 from . import envs
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "Qwen/Qwen3-0.6B"
+
+# The worker extension classes Dynamo installs: the launcher calls their methods
+# by name in the model workers after a self-benchmark. Class path literals, not
+# imports: importing dynamo.vllm.gc_policy auto-starts the GC policy in the
+# importing process, and this launcher process must stay untouched.
+BENCHMARK_WORKER_EXTENSION = (
+    "dynamo.vllm.benchmark_worker_extension.FpmBenchmarkWorkerExtension"
+)
+GC_WORKER_EXTENSION = "dynamo.vllm.gc_policy.FpmGcWorkerExtension"
 
 
 class Config(DynamoRuntimeConfig, DynamoVllmConfig):
@@ -64,9 +86,33 @@ class Config(DynamoRuntimeConfig, DynamoVllmConfig):
     # rest vLLM args
     engine_args: AsyncEngineArgs
 
+    @property
+    def model_source_path(self) -> str:
+        return (
+            self.engine_args.model if needs_local_model_path(self.model) else self.model
+        )
+
     def validate(self) -> None:
         DynamoRuntimeConfig.validate(self)
+        self._resolve_realtime_endpoint_type()
         DynamoVllmConfig.validate(self)
+
+    def _resolve_realtime_endpoint_type(self) -> None:
+        """Move the vLLM-only ``realtime`` endpoint type onto ``realtime``.
+
+        The remaining endpoint types, or ``none``, are served by the same
+        engine. The deprecated ``--realtime`` flag serves realtime alone.
+        """
+        types = [t.strip().lower() for t in self.endpoint_types.split(",")]
+        if "realtime" in types:
+            self.realtime = True
+            types = [t for t in types if t and t != "realtime"]
+        elif self.realtime:
+            types = []
+        else:
+            return
+        self.endpoint_types = ",".join(types) or "none"
+        parse_endpoint_types(self.endpoint_types)
 
 
 @register_encoder(Config)
@@ -76,13 +122,40 @@ def _preprocess_for_encode_config(config: Config) -> Dict[str, Any]:
 
 
 def parse_args(argv: list[str] | None = None) -> Config:
-    """Parse command-line arguments for the vLLM backend.
+    """Parse vLLM arguments without fetching; workers use parse_args_with_model_fetch.
 
     Args:
         argv: Command-line arguments.  ``None`` means ``sys.argv[1:]``.
     Returns:
         Config: Parsed configuration object.
     """
+    return _build_config(*_parse_cli_args(argv))
+
+
+async def parse_args_with_model_fetch(argv: list[str] | None = None) -> Config:
+    """Parse worker arguments, resolving NGC sources before engine validation.
+
+    Only metadata is fetched here; worker startup fetches weights after
+    validation. Hugging Face sources retain their existing acquisition path.
+
+    Args:
+        argv: Command-line arguments. ``None`` means ``sys.argv[1:]``.
+
+    Returns:
+        The validated configuration, retaining the original source in ``model``.
+    """
+    dynamo_config, vllm_args = _parse_cli_args(argv)
+    if dynamo_config.artifact_router_profile is not None:
+        _configured_artifact_router_profile(dynamo_config.artifact_router_profile)
+    if needs_local_model_path(dynamo_config.model):
+        vllm_args.model = await fetch_model(dynamo_config.model, ignore_weights=True)
+        if not vllm_args.served_model_name:
+            vllm_args.served_model_name = [dynamo_config.model]
+    return _build_config(dynamo_config, vllm_args)
+
+
+def _parse_cli_args(argv: list[str] | None) -> tuple[Config, argparse.Namespace]:
+    """Split Dynamo and vLLM arguments while preserving the original model source."""
     dynamo_runtime_argspec = DynamoRuntimeArgGroup()
     dynamo_vllm_argspec = DynamoVllmArgGroup()
 
@@ -120,8 +193,17 @@ def parse_args(argv: list[str] | None = None) -> Config:
     # Consume the router flags before the engine parser sees the remainder.
     dynamo_config.router_advertisement, unknown = parse_worker_router_config(unknown)
 
-    # Validate arguments
-    dynamo_config.validate()
+    # Name the frontend flag instead of failing with vLLM's generic parse error.
+    if any(
+        arg.split("=", 1)[0].split(".", 1)[0]
+        in ("--default-chat-template-kwargs", "--default_chat_template_kwargs")
+        for arg in unknown
+    ):
+        raise ValueError(
+            "--default-chat-template-kwargs has no effect on a Dynamo worker, because "
+            "the Dynamo frontend renders the chat template. Set "
+            "--default-chat-template-kwargs on the frontend (python -m dynamo.frontend)."
+        )
 
     vllm_args = vllm_parser.parse_args(unknown)
     # Set the model name from the command line arguments
@@ -129,14 +211,25 @@ def parse_args(argv: list[str] | None = None) -> Config:
     # vllm will update the model name to the full path of the model, which will break the dynamo logic,
     # as we use the model name as served_model_name (if served_model_name is not set)
     dynamo_config.model = vllm_args.model
+    return dynamo_config, vllm_args
 
+
+def _build_config(dynamo_config: Config, vllm_args: argparse.Namespace) -> Config:
     engine_config = AsyncEngineArgs.from_cli_args(vllm_args)
 
+    # Attach engine_args before validate(): the --enable-lora exclusivity rules
+    # in DynamoVllmConfig.validate() read it, and are dead code without it.
+    dynamo_config.engine_args = engine_config
+
+    # Validate arguments
+    dynamo_config.validate()
+
+    # These run after validate() because they consume what it resolves --
+    # notably the DisaggregationMode enum and the benchmark sampling fields.
     cross_validate_config(dynamo_config, engine_config)
     update_dynamo_config_with_engine(dynamo_config, engine_config)
     update_engine_config_with_dynamo(dynamo_config, engine_config)
 
-    dynamo_config.engine_args = engine_config
     from .state_agent import validate_state_agent_worker
 
     validate_state_agent_worker(dynamo_config)
@@ -255,7 +348,7 @@ def update_dynamo_config_with_engine(
             "When using --disaggregation-mode prefill, you must explicitly "
             "provide --kv-transfer-config. Example:\n"
             "  --kv-transfer-config "
-            '\'{"kv_connector":"NixlConnector","kv_role":"kv_both"}\''
+            '\'{"kv_connector":"NixlConnector","kv_role":"kv_producer"}\''
         )
 
     # Clear connector list (no longer used for vLLM)
@@ -268,6 +361,8 @@ def _unsupported_fpm_trace_role(dynamo_config: Config) -> Optional[str]:
         return "embedding"
     if dynamo_config.classify_worker:
         return "classify"
+    if dynamo_config.transcription_worker:
+        return "transcription"
     if dynamo_config.headless:
         return "headless"
     if dynamo_config.disaggregation_mode == DisaggregationMode.ENCODE:
@@ -311,6 +406,14 @@ def update_engine_config_with_dynamo(
                 "Pooling-family worker: defaulting --enable-prefix-caching to False"
             )
             engine_config.enable_prefix_caching = False
+        elif dynamo_config.transcription_worker:
+            # Whisper is an encoder-decoder model. vLLM does not support
+            # prefix caching for cross-attention KV caches, and enabling it
+            # causes the first transcription request to terminate EngineCore.
+            logger.debug(
+                "Transcription worker: defaulting --enable-prefix-caching to False"
+            )
+            engine_config.enable_prefix_caching = False
         else:
             logger.debug(
                 "--enable-prefix-caching or --no-enable-prefix-caching not specified. "
@@ -327,11 +430,6 @@ def update_engine_config_with_dynamo(
         ensure_side_channel_host()
 
     defaults: Dict[str, Any] = {
-        # As of vLLM >=0.10.0 the engine unconditionally calls
-        # `sampling_params.update_from_tokenizer(...)`, so we can no longer
-        # skip tokenizer initialisation.  Setting this to **False** avoids
-        # a NoneType error when the processor accesses the tokenizer.
-        "skip_tokenizer_init": False,
         "enable_log_requests": False,
         "disable_log_stats": False,
     }
@@ -342,6 +440,8 @@ def update_engine_config_with_dynamo(
     kv_cfg = create_kv_events_config(engine_config)
     defaults["kv_events_config"] = kv_cfg
     dynamo_config.use_kv_events = kv_cfg is not None and kv_cfg.enable_kv_cache_events
+    if dynamo_config.use_kv_events:
+        _keep_legacy_block_hashes(engine_config)
 
     logger.info(
         f"Using kv_events_config for publishing vLLM kv events over zmq: {kv_cfg} "
@@ -373,6 +473,17 @@ def update_engine_config_with_dynamo(
             )
 
     if dynamo_config.benchmark_mode is not None:
+        # vLLM attaches the observed dispatch to ModelRunnerOutput without GPU
+        # timing or synchronization. Enable it before model workers are created,
+        # unless the user already did: the launcher turns only an option Dynamo
+        # enabled back off before serving (worker_factory._restore_cudagraph_metrics).
+        # A vLLM without the option has nothing to enable or restore.
+        cudagraph_metrics_auto_enabled = (
+            hasattr(engine_config, "cudagraph_metrics")
+            and not engine_config.cudagraph_metrics
+        )
+        if cudagraph_metrics_auto_enabled:
+            defaults["cudagraph_metrics"] = True
         if dynamo_config.enable_multimodal:
             logger.warning(
                 "--benchmark-mode is not supported for multimodal workers. "
@@ -393,10 +504,7 @@ def update_engine_config_with_dynamo(
                 f"--scheduler-cls or use a subclass of InstrumentedScheduler."
             )
         if os.environ.get("DYN_FPM_GC_POLICY", "").strip().lower() == "freeze":
-            # Class path as a literal, not an import: importing
-            # dynamo.vllm.gc_policy auto-starts the policy in the importing
-            # process, and this launcher process must stay untouched.
-            worker_extension_cls = "dynamo.vllm.gc_policy.FpmGcWorkerExtension"
+            worker_extension_cls = GC_WORKER_EXTENSION
             existing_ext = getattr(engine_config, "worker_extension_cls", None)
             if not existing_ext:
                 defaults["worker_extension_cls"] = worker_extension_cls
@@ -413,13 +521,61 @@ def update_engine_config_with_dynamo(
                     f"is set to '{existing_ext}'. Remove it or unset "
                     f"DYN_FPM_GC_POLICY."
                 )
+        if not (
+            defaults.get("worker_extension_cls")
+            or getattr(engine_config, "worker_extension_cls", None)
+        ):
+            # After the benchmark the launcher calls this class's methods in
+            # every model worker by name (the engine probe and the
+            # cudagraph_metrics restore): vLLM's engine-core client cannot carry
+            # a callable. The GC extension above inherits them; another user
+            # class is kept, and the launcher then skips those calls.
+            defaults["worker_extension_cls"] = BENCHMARK_WORKER_EXTENSION
+            logger.info(
+                "Benchmark mode: injecting worker_extension_cls=%s",
+                BENCHMARK_WORKER_EXTENSION,
+            )
+        if dynamo_config.benchmark_randomize_kda_state:
+            if engine_config.worker_cls not in ("auto", RANDOM_KDA_WORKER):
+                raise ValueError(
+                    "Random KDA benchmarking requires the standard --worker-cls auto"
+                )
+            if (
+                engine_config.load_format == "gms"
+                or os.environ.get("DYN_GMS_USE_V1") == "true"
+            ):
+                raise ValueError(
+                    "Random KDA benchmarking does not support the GMS worker"
+                )
+            defaults["worker_cls"] = RANDOM_KDA_WORKER
+        configured_extension = defaults.get("worker_extension_cls") or getattr(
+            engine_config, "worker_extension_cls", None
+        )
+        worker_extension_installed = configured_extension in (
+            BENCHMARK_WORKER_EXTENSION,
+            GC_WORKER_EXTENSION,
+        )
         benchmark_config: Dict[str, Any] = {
             "mode": dynamo_config.benchmark_mode,
+            "randomize_kda_state": dynamo_config.benchmark_randomize_kda_state,
+            "hybrid_live_state": dynamo_config.benchmark_hybrid_live_state,
             "warmup_iterations": dynamo_config.benchmark_warmup_iterations,
             "output_path": dynamo_config.benchmark_output_path,
             "timeout": dynamo_config.benchmark_timeout,
+            "max_batch_size": dynamo_config.benchmark_max_batch_size,
             "collect_imbalanced": dynamo_config.benchmark_collect_imbalanced,
+            # Not a BenchmarkConfig field (the scheduler drops unknown keys): it
+            # tells the launcher whether the model workers load a Dynamo
+            # extension class, the only kind it can call by name.
+            "worker_extension_installed": worker_extension_installed,
         }
+        if configured_extension and not worker_extension_installed:
+            # So the launcher can name the user's class when it skips the call.
+            benchmark_config["user_worker_extension_cls"] = configured_extension
+        if cudagraph_metrics_auto_enabled:
+            # Not a BenchmarkConfig field (the scheduler drops unknown keys): it
+            # tells the launcher to turn the option back off before serving.
+            benchmark_config["cudagraph_metrics_auto_enabled"] = True
         explicit_points = dynamo_config._benchmark_points
         if explicit_points is not None:
             # exclude_none so a v1 manifest round-trips as itself: the v3
@@ -495,16 +651,72 @@ def create_kv_events_config(
                 "To publish events, explicitly set enable_kv_cache_events to True."
             )
         logger.info(f"Using user-provided kv_events_config {c}")
+        _set_state_agent_topic(engine_config, c)
         return c
 
     return None
+
+
+def _keep_legacy_block_hashes(engine_config: AsyncEngineArgs) -> None:
+    """Default vLLM's EAGLE/MTP lookahead block hashes off for KV event publishers:
+    Dynamo's KV indexers hash only each block's own tokens."""
+    # vLLM 0.32 (CPU and XPU images); remove once they ship 0.33.
+    if "disable_lookahead_block_hashes" not in SpeculativeConfig.__dataclass_fields__:
+        return
+    spec = engine_config.speculative_config
+    if (
+        spec is None
+        and engine_config.spec_method is None
+        and not _is_speculators_checkpoint(engine_config)
+    ):
+        return
+    engine_config.speculative_config = {
+        "disable_lookahead_block_hashes": True,
+        **(spec or {}),
+    }
+
+
+def _is_speculators_checkpoint(engine_config: AsyncEngineArgs) -> bool:
+    """Whether vLLM will derive a speculative config from the model checkpoint."""
+    if is_cloud_storage(engine_config.model):
+        return False
+    _, _, spec = maybe_override_with_speculators(
+        model=engine_config.model,
+        tokenizer=engine_config.tokenizer,
+        trust_remote_code=engine_config.trust_remote_code,
+        revision=engine_config.revision,
+        hf_token=engine_config.hf_token,
+    )
+    return spec is not None
+
+
+def _set_state_agent_topic(
+    engine_config: AsyncEngineArgs, events: KVEventsConfig
+) -> None:
+    """Publish on this worker's KV state-agent topic, which its attachment
+    descriptors advertise, so the agent can route its raw streams by topic."""
+    from dynamo.common.kv_state_agent import worker_raw_topic
+
+    from .state_agent import state_agent_settings_from_engine_args
+
+    settings = state_agent_settings_from_engine_args(engine_config)
+    if settings is None:
+        return
+    topic = worker_raw_topic(settings.cache_owner_ids.values())
+    if events.topic != topic:
+        logger.info(
+            "Publishing KV events on the KV state-agent worker topic %r instead of %r",
+            topic,
+            events.topic,
+        )
+        events.topic = topic
 
 
 def _uses_nixl_connector(engine_config: AsyncEngineArgs) -> bool:
     """Check if the user-provided --kv-transfer-config uses NixlConnector.
 
     Handles both direct usage (kv_connector="NixlConnector") and nested usage
-    inside PdConnector (kv_connector_extra_config.connectors contains
+    inside MultiConnector or PdConnector (kv_connector_extra_config.connectors contains
     "NixlConnector").
     """
     kv_cfg = getattr(engine_config, "kv_transfer_config", None)
@@ -512,9 +724,8 @@ def _uses_nixl_connector(engine_config: AsyncEngineArgs) -> bool:
         return False
     if kv_cfg.kv_connector == "NixlConnector":
         return True
-    # PdConnector wraps multiple connectors in kv_connector_extra_config.
     # Each entry is a dict like {"kv_connector": "NixlConnector", ...}.
-    if kv_cfg.kv_connector == "PdConnector":
+    if kv_cfg.kv_connector in MULTI_CONNECTOR_WRAPPERS:
         extra = kv_cfg.kv_connector_extra_config or {}
         for entry in extra.get("connectors", []):
             if isinstance(entry, dict) and entry.get("kv_connector") == "NixlConnector":
@@ -543,7 +754,7 @@ def _uses_dynamo_connector(engine_config: AsyncEngineArgs) -> bool:
     return False
 
 
-def _connector_to_kv_transfer_json(connectors: list[str]) -> str:
+def _connector_to_kv_transfer_json(connectors: list[str], nixl_role: str) -> str:
     """Convert a legacy --connector list to the equivalent --kv-transfer-config JSON.
 
     Used in error messages to help users migrate.
@@ -561,7 +772,7 @@ def _connector_to_kv_transfer_json(connectors: list[str]) -> str:
             )
         elif c == "nixl":
             multi_connectors.append(
-                {"kv_connector": "NixlConnector", "kv_role": "kv_both"}
+                {"kv_connector": "NixlConnector", "kv_role": nixl_role}
             )
         elif c == "kvbm":
             multi_connectors.append(
@@ -580,7 +791,7 @@ def _connector_to_kv_transfer_json(connectors: list[str]) -> str:
             "kv_connector": "PdConnector",
             "kv_role": "kv_both",
             "kv_connector_extra_config": {"connectors": multi_connectors},
-            "kv_connector_module_path": "kvbm.vllm_integration.connector",
+            "kv_connector_module_path": "dynamo.vllm.pd_connector",
         }
     )
 
@@ -610,9 +821,16 @@ def _reject_connector_flag(dynamo_config: Config) -> None:
             "no connector. Simply remove the --connector flag."
         )
 
+    if dynamo_config.disaggregation_mode == DisaggregationMode.PREFILL:
+        nixl_role = "kv_producer"
+    elif dynamo_config.disaggregation_mode == DisaggregationMode.DECODE:
+        nixl_role = "kv_consumer"
+    else:
+        nixl_role = "kv_both"
+
     # Active connectors: show migration path
     if normalized:
-        equiv = _connector_to_kv_transfer_json(normalized)
+        equiv = _connector_to_kv_transfer_json(normalized, nixl_role)
         raise ValueError(
             "--connector is no longer supported for the vLLM backend. "
             "Use --kv-transfer-config instead.\n"
@@ -623,7 +841,7 @@ def _reject_connector_flag(dynamo_config: Config) -> None:
     if env_connector is not None:
         env_values = [v.strip().lower() for v in env_connector.split() if v.strip()]
         if env_values and not all(v in ("none", "null") for v in env_values):
-            equiv = _connector_to_kv_transfer_json(env_values)
+            equiv = _connector_to_kv_transfer_json(env_values, nixl_role)
             raise ValueError(
                 "The DYN_CONNECTOR environment variable is no longer supported "
                 "for the vLLM backend. Use --kv-transfer-config instead.\n"

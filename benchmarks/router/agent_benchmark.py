@@ -11,11 +11,15 @@ in parallel while maintaining sequential ordering within each session.
 Expected input JSON format (JSONL - one JSON object per line):
 {
     "session_id": "conv_0",           # Groups turns into conversations (required for multi-turn)
-    "input_length": 9176,             # Number of input tokens (required)
+    "input_length": 9176,             # New input tokens for this turn (required)
     "output_length": 152,             # Number of output tokens (required)
-    "hash_ids": [0, 1, 2, ...],       # List of hash IDs for prefix caching (optional)
+    "hash_ids": [0, 1, 2, ...],       # Hash IDs for blocks in this turn's input (optional)
     "delay": 500                      # Delay in ms before this turn (optional, applied after previous turn completes)
 }
+
+AIPerf accumulates earlier turns and live assistant responses for entries that
+share a session_id. Do not include that existing context again in input_length
+or hash_ids on later turns.
 """
 
 import argparse

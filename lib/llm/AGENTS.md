@@ -1,3 +1,10 @@
+# Protocol Field Handling
+
+Before changing request or response fields, validation, preprocessing, backend translation, or
+response projection, read the
+[protocol field handling contract](../../docs/fern/pages/developer-guide/knowledge-base/modular-components/frontend/protocol-field-handling.md).
+Identify every semantic owner and preserve the field's documented end-to-end behavior.
+
 # N-2 Worker / Frontend Compatibility
 
 Assume N-2 mixed-version operation between workers and frontends during rolling
@@ -6,8 +13,15 @@ previous releases may coexist in any combination and must interoperate across
 the worker/frontend boundary. This includes a single frontend concurrently
 discovering worker cards from multiple supported releases for the same logical
 deployment or worker set. Differences caused only by supported wire evolution
-must not split otherwise compatible workers, fail discovery closed, or remove
-healthy serving state. N-3 and older combinations are unsupported unless a
+must remain decodable through the supported boundary normalization and
+compatibility shims. Within one WorkerSet, admission requires equal MDC
+checksums after that normalization and tokenizer overrides. The first accepted
+configuration retains the set while any of its workers remain; a mismatched
+newcomer receives no traffic and must not remove healthy serving state.
+Equivalent serving behavior or supported wire representations do not grant a
+separate exemption from checksum equality. See
+[`src/discovery/AGENTS.md`](src/discovery/AGENTS.md) for the admission and
+succession contract. N-3 and older combinations are unsupported unless a
 narrower temporary exception is explicitly documented.
 
 Treat model deployment cards, discovery metadata, and worker/frontend wire
@@ -54,3 +68,31 @@ example:
 
 Remove the shim when the corresponding version leaves the supported window;
 do not carry compatibility branches forward indefinitely.
+
+# Frontend Serving-Load Metrics
+
+The frontend's request metrics (`http/service/metrics.rs`) also feed the frame
+it publishes for the Pool Relay's `SubscribeServingLoad` (`frontend_load.rs`),
+so `/metrics` and the Relay report the same numbers. Three are specific to that
+use and are experimental (see the Metrics Catalog):
+
+- `dynamo_frontend_awaiting_first_token_requests{model}` (gauge): admitted
+  requests with no output token yet. Requests producing output are
+  `clamp_min(dynamo_frontend_active_requests - dynamo_frontend_awaiting_first_token_requests, 0)`;
+  the frame derives that value (saturating) rather than exporting a second gauge.
+- `dynamo_frontend_inflight_input_tokens{model, state}` (gauge, `state` is
+  `awaiting_first_token` or `generating`): known prompt tokens of in-flight
+  requests. Sum over `state` for the total.
+- `dynamo_frontend_input_tokens_total{model}` (counter): prompt tokens of every
+  admitted request, counted at tokenization. Use `rate()`.
+
+Keep them consistent: one request transition updates every family through the
+request's shared `RequestMetrics` handle. Create a model's series when it
+registers, never from the publish path, which only reads. Before adding or
+changing a frontend metric, name its reader, check it is not a query over
+existing metrics or a sibling that should be a label, write its series count in
+the pull request, and add it to the Metrics Catalog.
+
+## Decision Cleanup Diagnostics
+
+Report decision cleanup overruns through the request-correlated warning, not a separate metric until a continuous consumer is identified. Preserve the current tracing span when spawning cleanup, and retain admission until local work finishes. Use the warning to investigate overdue cleanup; it does not prove physical GPU settlement. This diagnostic adds no Prometheus series.

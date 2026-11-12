@@ -8,7 +8,7 @@ use std::{
 };
 
 use anyhow::Result;
-use dynamo_kv_router::protocols::{KV_EVENT_SUBJECT, RouterEvent};
+use dynamo_kv_events::event::{KV_EVENT_SUBJECT, RouterEvent};
 use dynamo_runtime::{
     component::Component,
     discovery::{
@@ -467,7 +467,8 @@ async fn consume_scope(
                     }
                     Ok(DiscoveryEvent::Added(_))
                     | Ok(DiscoveryEvent::ModelTaintsUpdated(_))
-                    | Ok(DiscoveryEvent::Removed(_)) => {}
+                    | Ok(DiscoveryEvent::Removed(_))
+                    | Ok(DiscoveryEvent::Resync(_)) => {}
                     Err(error) => {
                         tracing::error!(%error, %kv_state_endpoint, "Direct-ZMQ event-channel discovery failed");
                         break;

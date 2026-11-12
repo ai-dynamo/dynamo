@@ -35,11 +35,24 @@ import (
 type Scope string
 
 const (
-	ScopeRoot            Scope = "root"
-	ScopeComponent       Scope = "component"
-	ScopeMultinodeLeader Scope = "multinode.leader"
-	ScopeMultinodeWorker Scope = "multinode.worker"
+	ScopeRoot       Scope = "root"
+	ScopeComponent  Scope = "component"
+	ScopeRoleLeader Scope = "roles.leader"
+	ScopeRoleWorker Scope = "roles.worker"
 )
+
+// ScopeForComponentRole resolves a public component role name to its stable
+// provider context. Unknown roles are rejected by component-type validation.
+func ScopeForComponentRole(name string) (Scope, bool) {
+	switch name {
+	case nvidiacomv1beta1.ComponentRoleLeader:
+		return ScopeRoleLeader, true
+	case nvidiacomv1beta1.ComponentRoleWorker:
+		return ScopeRoleWorker, true
+	default:
+		return "", false
+	}
+}
 
 const (
 	// TargetPodCliqueSet identifies the Grove root resource schema.
@@ -93,11 +106,11 @@ func ExpectedTarget(
 		if component == nil {
 			return "", fmt.Errorf("component context is required for scope %q", scope)
 		}
-		if component.UsesPCSG() {
+		if component.UsesPCSG() || component.IsLPX() {
 			return TargetPodCliqueScalingGroupConfig, nil
 		}
 		return TargetPodCliqueTemplateSpec, nil
-	case ScopeMultinodeLeader, ScopeMultinodeWorker:
+	case ScopeRoleLeader, ScopeRoleWorker:
 		if component == nil || !component.IsMultinode() {
 			return "", fmt.Errorf("scope %q requires a multinode component", scope)
 		}
@@ -150,7 +163,7 @@ func ValidateValue(target string, raw []byte) []ValueError {
 	case TargetPodCliqueSet:
 		return validatePodCliqueSetValue(root)
 	case TargetPodCliqueTemplateSpec, TargetPodCliqueScalingGroupConfig:
-		return validateTopologyOwner(root, "")
+		return validateComponentValue(root, target)
 	default:
 		return []ValueError{{Detail: fmt.Sprintf("target %q has no registered ownership policy", target)}}
 	}
@@ -305,4 +318,68 @@ func joinPath(parent, child string) string {
 		return child
 	}
 	return parent + "." + child
+}
+
+// validateComponentValue permits topology and the component's native availability field.
+func validateComponentValue(root map[string]json.RawMessage, target string) []ValueError {
+	// Standalone cliques own availability inside spec; scaling groups own it directly.
+	availabilityKey := "minAvailable"
+	availability := root
+	availabilityPath := "minAvailable"
+	if target == TargetPodCliqueTemplateSpec {
+		availabilityKey = "spec"
+		availabilityPath = "spec.minAvailable"
+	}
+	errs := rejectUnknown(root, "", "topologyConstraint", availabilityKey, "rollingUpdate")
+	if _, exists := root["topologyConstraint"]; exists {
+		_, valueErr := requiredObject(root, "topologyConstraint", "topologyConstraint")
+		if valueErr != nil {
+			errs = append(errs, *valueErr)
+		}
+	}
+
+	// Keep sparse topology-only fragments valid, but reject empty fragments.
+	_, hasAvailability := root[availabilityKey]
+	_, hasRollingUpdate := root["rollingUpdate"]
+	if _, topology := root["topologyConstraint"]; !topology && !hasAvailability && !hasRollingUpdate {
+		errs = append(errs, ValueError{Path: "topologyConstraint", Detail: "topologyConstraint, minAvailable or rollingUpdate is required"})
+	}
+	// Validate maxUnavailable independently from the optional minimum and topology.
+	if _, exists := root["rollingUpdate"]; exists {
+		rolling, valueErr := requiredObject(root, "rollingUpdate", "rollingUpdate")
+		if valueErr != nil {
+			errs = append(errs, *valueErr)
+		} else {
+			errs = append(errs, rejectUnknown(rolling, "rollingUpdate", "maxUnavailable")...)
+			var budget int32
+			raw, exists := rolling["maxUnavailable"]
+			if !exists || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+				errs = append(errs, ValueError{Path: "rollingUpdate.maxUnavailable", Detail: "is required"})
+			} else if err := json.Unmarshal(raw, &budget); err != nil || budget <= 0 {
+				errs = append(errs, ValueError{Path: "rollingUpdate.maxUnavailable", Detail: "must be a positive 32-bit integer"})
+			}
+		}
+	}
+
+	if !hasAvailability {
+		return errs
+	}
+	if target == TargetPodCliqueTemplateSpec {
+		var valueErr *ValueError
+		availability, valueErr = requiredObject(root, "spec", "spec")
+		if valueErr != nil {
+			return append(errs, *valueErr)
+		}
+		errs = append(errs, rejectUnknown(availability, "spec", "minAvailable")...)
+	}
+
+	// Validate the native field before any effective default can hide malformed intent.
+	var minimum int32
+	raw, exists := availability["minAvailable"]
+	if !exists || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		errs = append(errs, ValueError{Path: availabilityPath, Detail: "is required"})
+	} else if err := json.Unmarshal(raw, &minimum); err != nil || minimum < 1 {
+		errs = append(errs, ValueError{Path: availabilityPath, Detail: "must be a positive 32-bit integer"})
+	}
+	return errs
 }

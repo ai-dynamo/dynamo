@@ -62,6 +62,11 @@ bitflags! {
         /// mounts its `/pooling` alongside those surfaces for every
         /// pooling-runner model.
         const Pooling = 1 << 10;
+        /// Cross-encoder relevance scoring served on `/v1/rerank`.
+        const Rerank = 1 << 11;
+        /// Batch speech-to-text through the OpenAI `/v1/audio/transcriptions`
+        /// endpoint.
+        const Transcriptions = 1 << 12;
     }
 }
 
@@ -101,11 +106,17 @@ impl ModelType {
     pub fn supports_realtime(&self) -> bool {
         self.contains(ModelType::Realtime)
     }
+    pub fn supports_transcriptions(&self) -> bool {
+        self.contains(ModelType::Transcriptions)
+    }
     pub fn supports_classify(&self) -> bool {
         self.contains(ModelType::Classify)
     }
     pub fn supports_pooling(&self) -> bool {
         self.contains(ModelType::Pooling)
+    }
+    pub fn supports_rerank(&self) -> bool {
+        self.contains(ModelType::Rerank)
     }
 
     pub fn as_vec(&self) -> Vec<&'static str> {
@@ -131,6 +142,9 @@ impl ModelType {
         if self.supports_audios() {
             result.push("audios");
         }
+        if self.supports_transcriptions() {
+            result.push("transcriptions");
+        }
         if self.supports_videos() {
             result.push("videos");
         }
@@ -142,6 +156,9 @@ impl ModelType {
         }
         if self.supports_pooling() {
             result.push("pooling");
+        }
+        if self.supports_rerank() {
+            result.push("rerank");
         }
         result
     }
@@ -171,6 +188,9 @@ impl ModelType {
         if self.supports_audios() {
             result.push(ModelType::Audios);
         }
+        if self.supports_transcriptions() {
+            result.push(ModelType::Transcriptions);
+        }
         if self.supports_videos() {
             result.push(ModelType::Videos);
         }
@@ -182,6 +202,9 @@ impl ModelType {
         }
         if self.supports_pooling() {
             result.push(ModelType::Pooling);
+        }
+        if self.supports_rerank() {
+            result.push(ModelType::Rerank);
         }
         result
     }
@@ -221,6 +244,9 @@ impl ModelType {
         if self.contains(Self::Audios) {
             endpoint_types.push(crate::endpoint_type::EndpointType::Audios);
         }
+        if self.contains(Self::Transcriptions) {
+            endpoint_types.push(crate::endpoint_type::EndpointType::Transcriptions);
+        }
         if self.contains(Self::Videos) {
             endpoint_types.push(crate::endpoint_type::EndpointType::Videos);
         }
@@ -232,6 +258,9 @@ impl ModelType {
         }
         if self.contains(Self::Pooling) {
             endpoint_types.push(crate::endpoint_type::EndpointType::Pooling);
+        }
+        if self.contains(Self::Rerank) {
+            endpoint_types.push(crate::endpoint_type::EndpointType::Rerank);
         }
         // [gluo NOTE] ModelType::Tensor doesn't map to any endpoint type,
         // current use of endpoint type is LLM specific and so does the HTTP
@@ -271,6 +300,35 @@ impl ModelInput {
 mod tests {
     use super::*;
     use crate::endpoint_type::EndpointType;
+
+    #[test]
+    fn dedicated_rerank_does_not_change_legacy_embedding_cards() {
+        bitflags! {
+            #[derive(Debug, Deserialize, PartialEq)]
+            struct LegacyModelType: u16 {
+                const Embedding = 1 << 2;
+            }
+        }
+        #[derive(Debug, Deserialize)]
+        struct LegacyCard {
+            model_type: LegacyModelType,
+        }
+
+        let mut card = crate::model_card::ModelDeploymentCard::with_name_only("embedding");
+        card.model_type = ModelType::Embedding;
+        let wire = serde_json::to_value(&card).unwrap();
+        let legacy: LegacyCard = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(legacy.model_type, LegacyModelType::Embedding);
+
+        // Publishing a separate rerank card must leave the embedding card intact.
+        card.model_type = ModelType::Rerank;
+        let rerank_wire = serde_json::to_value(&card).unwrap();
+        assert!(serde_json::from_value::<LegacyCard>(rerank_wire).is_err());
+        assert!(serde_json::from_value::<LegacyCard>(wire).is_ok());
+
+        card.model_type = ModelType::Embedding | ModelType::Rerank;
+        assert!(serde_json::from_value::<LegacyCard>(serde_json::to_value(card).unwrap()).is_err());
+    }
 
     #[test]
     fn realtime_bit_position() {
@@ -349,6 +407,16 @@ mod tests {
     }
 
     #[test]
+    fn transcriptions_capability_and_endpoint_mapping() {
+        assert_eq!(ModelType::Transcriptions.bits(), 1 << 12);
+        assert!(ModelType::Transcriptions.supports_transcriptions());
+        assert_eq!(
+            ModelType::Transcriptions.as_endpoint_types(),
+            vec![EndpointType::Transcriptions]
+        );
+    }
+
+    #[test]
     fn realtime_combines_with_other_endpoints() {
         let endpoints = (ModelType::Chat | ModelType::Realtime).as_endpoint_types();
         assert!(endpoints.contains(&EndpointType::Chat));
@@ -411,6 +479,18 @@ mod tests {
         assert_eq!(
             combined.as_endpoint_types(),
             vec![EndpointType::Classify, EndpointType::Pooling]
+        );
+    }
+
+    #[test]
+    fn rerank_capability_maps_to_endpoint() {
+        assert_eq!(ModelType::Rerank.bits(), 1 << 11);
+        assert!(ModelType::Rerank.supports_rerank());
+        assert_eq!(ModelType::Rerank.as_vec(), vec!["rerank"]);
+        assert_eq!(ModelType::Rerank.units(), vec![ModelType::Rerank]);
+        assert_eq!(
+            ModelType::Rerank.as_endpoint_types(),
+            vec![EndpointType::Rerank]
         );
     }
 

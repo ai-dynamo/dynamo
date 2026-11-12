@@ -89,8 +89,8 @@ The following Kubernetes and local workflows use vLLM. For the aggregated SGLang
             containers:
             - name: main
               image: ${RUNTIME_IMAGE}
-      - name: VllmDecodeWorker
-        type: decode
+      - name: worker
+        type: worker
         replicas: 1
         podTemplate:
           spec:
@@ -153,6 +153,7 @@ The following Kubernetes and local workflows use vLLM. For the aggregated SGLang
     | `AWS_REGION` | AWS region | `us-east-1` |
     | `AWS_ALLOW_HTTP` | Allow HTTP (non-TLS) connections | `false` |
     | `AWS_VIRTUAL_HOSTED_STYLE_REQUEST` | Use bucket-qualified virtual-hosted requests | `false` |
+    | `DYN_LORA_S3_TLS_INSECURE` | Skip TLS certificate verification for S3 LoRA downloads. Use only on trusted internal networks, such as S3-compatible storage with a private-CA or self-signed certificate | `false` |
 
     For `s3://` sources, Dynamo uses the standard AWS credential provider chain, including environment variables, shared configuration and credentials files, web identity, container credentials, and Amazon EC2 instance metadata. Endpoint precedence is `AWS_ENDPOINT_URL_S3`, the active profile's S3 service endpoint, `AWS_ENDPOINT_URL`, the active profile's generic `endpoint_url`, then the legacy `AWS_ENDPOINT` fallback.
 
@@ -228,7 +229,7 @@ The following Kubernetes and local workflows use vLLM. For the aggregated SGLang
         Port-forward the worker system port and POST to `/v1/loras`:
 
         ```bash
-        kubectl port-forward svc/vllm-agg-lora-vllmdecodeworker 9090:9090 -n ${NAMESPACE}
+        kubectl port-forward svc/vllm-agg-lora-worker 9090:9090 -n ${NAMESPACE}
         ```
 
         ```bash

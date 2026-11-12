@@ -39,6 +39,27 @@ TensorRT-LLM can also leverage **UCX** (Unified Communication X) directly for KV
 
 The precedence above matches TensorRT-LLM 1.3.0rc22; check `CacheTransceiverConfig._resolve_default_backend` in `tensorrt_llm/llmapi/llm_args.py`.
 
+### Transceiver Runtime
+
+Starting with TensorRT-LLM 1.4.0rc1, `cache_transceiver_config.transceiver_runtime` defaults to `PYTHON`, which supports only NIXL. A worker that resolves to UCX, MOONCAKE, or MPI fails at startup unless it uses the C++ transceiver, whether the backend is set directly or through `DEFAULT` and the environment variables above. The C++ transceiver requires KV cache manager v1:
+
+```yaml
+cache_transceiver_config:
+  backend: UCX
+  transceiver_runtime: CPP
+kv_cache_config:
+  use_kv_cache_manager_v2: false
+```
+
+Starting with TensorRT-LLM 1.4.0rc2, the pairing is strict in both directions: the `PYTHON` transceiver requires KV cache manager v2, and the `CPP` transceiver requires v1. Any other combination fails at startup. TensorRT-LLM creates a transceiver whenever `cache_transceiver_config.backend` is set, including on aggregated workers. Dynamo applies these rules to a worker with a transceiver:
+
+- When `use_kv_cache_manager_v2` is unset and the runtime is `CPP`, Dynamo selects KV cache manager v1.
+- Multimodal workers that publish polled KV events (`--enable-multimodal --publish-kv-events`) and workers that sleep their KV cache (`--load-format gms`, snapshot) use KV cache manager v1. They therefore require `transceiver_runtime: CPP`; Dynamo refuses to start them otherwise.
+
+Dynamo never changes `transceiver_runtime` itself. Set it identically on the prefill and decode workers: a mismatched pair starts cleanly but fails every disaggregated request.
+
+The two paths produce different transceivers, which is how you tell them apart at runtime: direct UCX logs `UcxConnectionManager`, while NIXL with UCX underneath logs `NixlTransferAgent ... using NIXL backend: UCX`. Read the worker's startup log for the transceiver class rather than inferring it from the configuration.
+
 ## AWS EFA
 
 On AWS, UCX uses the **SRD (Scalable Reliable Datagram)** transport over EFA devices. NIXL discovers EFA `rdmap*` devices automatically through UCX — no NIXL-level configuration changes are needed.
@@ -55,7 +76,7 @@ On 1.2.1 the same image is tagged `1.2.1-efa-amd64`. Despite the suffix that tag
 
 See [Release Artifacts](../../../reference/general/release-artifacts.mdx) for all available EFA images.
 
-- **Host-mount approach (ARM64 / GB200):** Instead of the pre-built image, you can run the standard `tensorrtllm-runtime` image and mount the EFA SDK from the host node, which keeps the SDK in step with the host driver. This is what we tested on GB200 NVL72:
+- **Host-mount approach (ARM64 / GB200):** Instead of the pre-built image, you can run the standard `tensorrtllm-runtime` image and mount the EFA SDK from the host node, which keeps the SDK in step with the host driver:
 
 ```yaml
 volumeMounts:
@@ -66,6 +87,11 @@ volumes:
     hostPath:
       path: /opt/amazon/efa
 ```
+
+> [!WARNING]
+> Do not use this host mount with the LIBFABRIC backend on ARM64 / GB200. With `cache_transceiver_config.backend: NIXL` and `TRTLLM_NIXL_KVCACHE_BACKEND=LIBFABRIC`, mounting the host `/opt/amazon/efa` makes NIXL fail to register CUDA VRAM with `fi_mr_reg failed: Bad address`. TensorRT-LLM asserts immediately after, and both the prefill and decode workers enter `CrashLoopBackOff`.
+>
+> Use the pre-built `-efa` image instead. Removing the mount and relying on the EFA SDK shipped in that image makes an otherwise identical deployment serve inference on the same pair of nodes.
 
 **EFA resource requests:**
 

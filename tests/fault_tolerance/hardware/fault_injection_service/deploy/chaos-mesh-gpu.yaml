@@ -81,7 +81,7 @@ data:
       selector:
         namespaces: ["dynamo-oviya"]
         labelSelectors:
-          app: vllm-worker
+          app: worker
         nodeSelectors:
           kubernetes.io/hostname: <gpu-node-name>
       duration: 60s

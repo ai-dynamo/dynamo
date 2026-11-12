@@ -45,11 +45,6 @@ pub static WORK_HANDLER_TIME_TO_FIRST_RESPONSE_SECONDS: Lazy<Histogram> = Lazy::
 /// Guards idempotency for the `MetricsRegistry` registration path.
 static METRICS_REGISTERED: OnceCell<()> = OnceCell::new();
 
-/// Guards idempotency for the raw `prometheus::Registry` registration path.
-/// Kept separate from `METRICS_REGISTERED` so that calling `ensure_work_handler_perf_metrics_registered`
-/// first does not silently prevent the metrics from being registered in the prometheus registry.
-static PROMETHEUS_REGISTERED: OnceCell<Result<(), String>> = OnceCell::new();
-
 /// Register work handler transport breakdown metrics with the given registry. Idempotent.
 pub fn ensure_work_handler_perf_metrics_registered(registry: &MetricsRegistry) {
     let _ = METRICS_REGISTERED.get_or_init(|| {
@@ -62,24 +57,4 @@ pub fn ensure_work_handler_perf_metrics_registered(registry: &MetricsRegistry) {
             "work_handler_time_to_first_response_seconds",
         );
     });
-}
-
-/// Register with a raw Prometheus registry. Idempotent.
-pub fn ensure_work_handler_perf_metrics_registered_prometheus(
-    registry: &prometheus::Registry,
-) -> Result<(), prometheus::Error> {
-    PROMETHEUS_REGISTERED
-        .get_or_init(|| {
-            (|| -> Result<(), prometheus::Error> {
-                registry.register(Box::new(WORK_HANDLER_NETWORK_TRANSIT_SECONDS.clone()))?;
-                registry.register(Box::new(
-                    WORK_HANDLER_TIME_TO_FIRST_RESPONSE_SECONDS.clone(),
-                ))?;
-                Ok(())
-            })()
-            .map_err(|e| e.to_string())
-        })
-        .as_ref()
-        .map(|_| ())
-        .map_err(|e| prometheus::Error::Msg(e.clone()))
 }

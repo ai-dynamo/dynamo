@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+model: openai/gpt-oss-120b
+backend: trtllm
+image: nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.3.0
+searchStrategy: rapid
+workload:
+  isl: 128
+  osl: 1000
+  requestRate: 16
+sla:
+  ttft: 2000
+  itl: 25
+  optimizationType: throughput
+autoApply: false

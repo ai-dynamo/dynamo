@@ -24,8 +24,8 @@ import pytest
 import requests
 
 from tests.utils.gpu_args import build_gpu_mem_args
+from tests.utils.output_paths import resolve_test_output_path
 from tests.utils.port_utils import allocate_port, deallocate_port
-from tests.utils.test_output import resolve_test_output_path
 
 # ============================================================================
 # Module Availability Checks
@@ -252,7 +252,6 @@ class ApiTester:
 
 class ServerType(str, Enum):
     vllm = "vllm"
-    trtllm = "trtllm"
 
 
 class DeterminismTester(ApiTester):
@@ -341,8 +340,6 @@ class DeterminismTester(ApiTester):
             seed = int(os.environ.get("KVBM_SEED", "42"))
 
         top_k = -1
-        if check_module_available("tensorrt_llm"):
-            top_k = 1  # TensorRT-LLM requires top_k>=0 and dynamo frontend does not support top_k=0
         # For determinism: use temperature=0 which should trigger greedy decoding in vLLM
         # Setting top_p=1.0 and top_k=-1 to avoid any sampling/filtering
         return super().make_request(
@@ -541,10 +538,8 @@ def llm_server_kvbm(request, runtime_services_dynamic_ports):
         if env_max_model_len is not None:
             max_model_len = int(env_max_model_len)
         elif gpu_blocks is not None:
-            # Since ver 0.20.1 vLLM validates max_model_len against explicit KV block
-            # overrides during engine init. These tests intentionally use tiny
-            # GPU caches, so default the sequence limit to that cache budget.
-            max_model_len = int(gpu_blocks) * block_size
+            # vLLM reserves one null block from the GPU cache budget.
+            max_model_len = (int(gpu_blocks) - 1) * block_size
         else:
             max_model_len = 8000
     model = params.get(
@@ -558,13 +553,8 @@ def llm_server_kvbm(request, runtime_services_dynamic_ports):
     # Detect available server type
     if check_module_available("vllm"):
         server_type = ServerType.vllm
-    elif check_module_available("tensorrt_llm"):
-        server_type = ServerType.trtllm
-        pytest.skip("TensorRT-LLM tests are disabled for this test")
     else:
-        pytest.skip(
-            "Neither vllm nor tensorrt_llm module is available in the current environment."
-        )
+        pytest.skip("The vllm module is not available in the current environment.")
 
     # Use dynamic port allocation to avoid conflicts (pytest-xdist safe)
     # Note: ZMQ ports are allocated in lower range due to i16 limit (max 32767) in port_utils

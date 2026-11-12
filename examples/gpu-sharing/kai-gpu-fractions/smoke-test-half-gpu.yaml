@@ -1,0 +1,62 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Smoke test for KAI-Scheduler + kai-gpu-fractioning (sm-sharing forks): two idle
+# pods, each requesting gpu-fraction "0.5" with sm-sharing compute mode. Expect both
+# on the same physical GPU, each with a 50% MPS namespace and a 19,968 MiB memory
+# cap on an A100 40GB. Check from inside each pod with:
+#   kubectl exec fraction-smoke-a -- env | grep -E 'CUDA_MPS|NVIDIA_GPU_MEMORY|NVIDIA_VISIBLE_DEVICES'
+# Delete both pods before deploying the 16 DGDs.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: fraction-smoke-a
+  labels:
+    app: nvfractions-smoke
+    kai.scheduler/queue: default-queue
+  annotations:
+    gpu-fraction: "0.5"
+    nvidia.com/container.main.gpu-compute.mode: sm-sharing
+spec:
+  schedulerName: kai-scheduler
+  runtimeClassName: nvidia
+  restartPolicy: Never
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+  containers:
+    - name: main
+      image: nvidia/cuda:13.3.1-base-ubuntu24.04
+      imagePullPolicy: IfNotPresent
+      command: ["sleep", "3600"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: fraction-smoke-b
+  labels:
+    app: nvfractions-smoke
+    kai.scheduler/queue: default-queue
+  annotations:
+    gpu-fraction: "0.5"
+    nvidia.com/container.main.gpu-compute.mode: sm-sharing
+spec:
+  schedulerName: kai-scheduler
+  runtimeClassName: nvidia
+  restartPolicy: Never
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+  containers:
+    - name: main
+      image: nvidia/cuda:13.3.1-base-ubuntu24.04
+      imagePullPolicy: IfNotPresent
+      command: ["sleep", "3600"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]

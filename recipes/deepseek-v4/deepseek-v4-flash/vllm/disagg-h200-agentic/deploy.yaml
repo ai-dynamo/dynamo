@@ -37,7 +37,7 @@ spec:
           persistentVolumeClaim:
             claimName: model-cache
             readOnly: true
-  - name: VllmPrefillWorker
+  - name: prefill
     type: prefill
     replicas: 4
     podTemplate:
@@ -129,7 +129,7 @@ spec:
               --dyn-reasoning-parser deepseek_v4 \
               --kv-transfer-config '{
                   "kv_connector": "NixlConnector",
-                  "kv_role": "kv_both",
+                  "kv_role": "kv_producer",
                   "kv_buffer_device": "cuda"
                 }' \
               --disaggregation-mode prefill \
@@ -155,7 +155,7 @@ spec:
         - key: nvidia.com/gpu
           operator: Exists
           effect: NoSchedule
-  - name: VllmDecodeWorker
+  - name: decode
     type: decode
     replicas: 3
     podTemplate:
@@ -255,7 +255,7 @@ spec:
               --attention-backend FLASHINFER_MLA \
               --kv-transfer-config '{
                   "kv_connector": "NixlConnector",
-                  "kv_role": "kv_both",
+                  "kv_role": "kv_consumer",
                   "kv_buffer_device": "cuda",
                   "kv_connector_extra_config": {
                     "num_threads": 8

@@ -8,6 +8,7 @@
 //! requiring actual GPU resources or a full distributed runtime.
 
 pub mod common;
+pub mod config;
 pub mod engine;
 pub(crate) mod engine_adapter;
 pub(crate) mod engine_observations;
@@ -18,3 +19,4 @@ pub mod loadgen;
 pub mod replay;
 pub mod scheduler;
 pub mod services;
+pub mod sglang;

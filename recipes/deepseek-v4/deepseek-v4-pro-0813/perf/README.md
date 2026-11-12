@@ -93,7 +93,7 @@ kubectl wait --for=condition=Complete job/dsv4-pro-0813-bench \
 ```
 
 The Job runs on `python:3.12-slim` and installs AIPerf at startup, pinned
-by the `AIPERF_VERSION` environment variable (default `0.10.0`).
+by the `AIPERF_VERSION` environment variable (default `0.12.0`).
 
 ### 4. Fetch artifacts
 

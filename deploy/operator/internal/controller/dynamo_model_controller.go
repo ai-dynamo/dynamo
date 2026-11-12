@@ -43,7 +43,6 @@ import (
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/modelendpoint"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
 )
 
 const (
@@ -248,6 +247,8 @@ func countServingEndpoints(endpoints []v1alpha1.EndpointInfo) int {
 	return countReadyEndpoints(endpoints) + countLoRAFallbackCoveredEndpoints(endpoints)
 }
 
+// withPodIdentity adds workload identity and prefill LoRA classification without
+// mutating the candidate or Pod. The Pod must be non-nil.
 func withPodIdentity(candidate modelendpoint.Candidate, pod *corev1.Pod) modelendpoint.Candidate {
 	identified := candidate
 	identified.KubernetesReady = false
@@ -279,23 +280,24 @@ func withPodIdentity(candidate modelendpoint.Candidate, pod *corev1.Pod) modelen
 	if componentType != consts.ComponentTypePrefill {
 		return identified
 	}
-	for i := range pod.Spec.Containers {
-		container := &pod.Spec.Containers[i]
-		if container.Name != consts.MainContainerName {
-			continue
-		}
-		backend, err := dynamo.DetectBackendFrameworkFromArgs(container.Command, container.Args)
-		if err != nil || backend != dynamo.BackendFrameworkVLLM {
-			return identified
-		}
-		if identified.GraphDeploymentName != "" {
-			identified.LoRAFallbackGroup = "graph:" + identified.GraphDeploymentName
-		} else if identified.WorkloadName != "" {
-			identified.LoRAFallbackGroup = "workload:" + identified.WorkloadName
-		}
-		identified.AllowLoRAManagementUnavailable = identified.LoRAFallbackGroup != ""
+
+	// Classify the engine backend independently of the runtime launch.
+	container := dynamo.GetMainContainerFromPodSpec(&pod.Spec)
+	if container == nil {
 		return identified
 	}
+	backend, err := dynamo.DetectBackendFrameworkFromArgs(container.Command, container.Args)
+	if err != nil || backend != dynamo.BackendFrameworkVLLM {
+		return identified
+	}
+
+	// Scope fallback coverage to the same graph or standalone workload.
+	if identified.GraphDeploymentName != "" {
+		identified.LoRAFallbackGroup = "graph:" + identified.GraphDeploymentName
+	} else if identified.WorkloadName != "" {
+		identified.LoRAFallbackGroup = "workload:" + identified.WorkloadName
+	}
+	identified.AllowLoRAManagementUnavailable = identified.LoRAFallbackGroup != ""
 	return identified
 }
 
@@ -343,7 +345,7 @@ func (r *DynamoModelReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			}),
 		).
 		WithEventFilter(commoncontroller.EphemeralDeploymentEventFilter(r.Config, r.RuntimeConfig)). // set the event filter to ignore resources handled by other controllers in namespace-restricted mode
-		Complete(observability.NewObservedReconciler(r, consts.ResourceTypeDynamoModel))
+		Complete(r)
 }
 
 // findModelsForEndpointSlice maps an EndpointSlice to DynamoModels

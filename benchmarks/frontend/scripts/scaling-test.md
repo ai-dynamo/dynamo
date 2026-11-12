@@ -147,7 +147,7 @@ spec:
             persistentVolumeClaim:
               claimName: model-cache
 
-    VllmWorker:
+    worker:
       componentType: worker
       replicas: 4                    # <-- number of backend replicas
       extraPodSpec:

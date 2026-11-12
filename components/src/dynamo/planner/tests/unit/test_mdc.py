@@ -41,6 +41,23 @@ class TestIsModelCard:
     def test_missing_type_rejected(self):
         assert not is_model_card({})
 
+    @pytest.mark.parametrize(
+        "wrapper",
+        [
+            {"type": "Model", "model_suffix": "adapter"},
+            {"type": "Model", "model_suffix": ""},
+            {"type": "Model", "card_json": {"lora": {"name": "adapter"}}},
+            {"type": "Model", "card_json": {"lora": {}}},
+        ],
+    )
+    def test_runtime_adapter_registration_rejected(self, wrapper):
+        assert not is_model_card(wrapper)
+
+    def test_null_adapter_fields_are_base_model(self):
+        assert is_model_card(
+            {"type": "Model", "model_suffix": None, "card_json": {"lora": None}}
+        )
+
 
 # ── is_prefill_card ────────────────────────────────────────────────
 
@@ -144,13 +161,13 @@ class TestWorkerInfoFromMdc:
         # From VllmComponentName
         assert info.component_name == "backend"
         assert info.endpoint == "generate"
-        assert info.k8s_name == "VllmDecodeWorker"
+        assert info.k8s_name == "decode"
 
     def test_prefill_defaults(self):
         entry = MdcEntry(card_json=_card(worker_type="prefill"))
         info = worker_info_from_mdc(entry, SubComponentType.PREFILL, backend="vllm")
         assert info.component_name == "prefill"
-        assert info.k8s_name == "VllmPrefillWorker"
+        assert info.k8s_name == "prefill"
 
     def test_model_name_fallback_invoked_when_card_missing(self):
         card = _card()

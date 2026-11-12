@@ -1,0 +1,66 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Merged commits sync their referenced issues to the corresponding Linear
+# release, keeping the Release view a live feature list without a manual step.
+#
+# Main only for the rollout: the action keeps per-pipeline scan state, so
+# release/* branches join once the dry run confirms how that state behaves
+# across concurrently active branches (they may need their own pipeline and
+# access key per stream).
+
+name: Linear Release Sync (main)
+
+on:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: linear-release-sync-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Sync issues to the Linear release
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout with history
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          fetch-depth: 0
+      # The release in development and its first commit come from the newest
+      # release/X.Y.0 branch, so the cut needs no edit here. Patch lines and
+      # model-launch branches never move it.
+      - name: Resolve the release in development
+        id: line
+        run: python3 .github/workflows/release_line.py
+      - name: Sync release
+        uses: linear/linear-release-action@53ad0f863963e7f8e270fba18426bbb55ef55384  # v0.17.2
+        with:
+          access_key: ${{ secrets.LINEAR_ACCESS_KEY }}
+          command: sync
+          version: ${{ steps.line.outputs.version }}
+          name: Dynamo v${{ steps.line.outputs.version }}
+          base_ref: ${{ steps.line.outputs.base }}
+          # Live. The version is bare (no v prefix), matching
+          # linear-release.yml, and the action matches an existing release by
+          # that exact string, so each run updates the release instead of
+          # creating one. The action echoes its JSON result, including the
+          # tracker release URL, into this public job log (run.sh line 95 at
+          # the pinned SHA); that disclosure was accepted when this was turned on.
+          dry_run: false

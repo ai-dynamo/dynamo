@@ -20,15 +20,23 @@ import os
 import sys
 
 import uvloop
+from packaging.version import Version
 from vllm import SamplingParams
+from vllm import __version__ as vllm_version
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.entrypoints.openai.api_server import (
-    build_async_engine_client_from_engine_args,
-)
 from vllm.inputs import TokensPrompt
 
 from dynamo.llm import ModelInput, ModelType, WorkerType, register_model
 from dynamo.runtime import DistributedRuntime, dynamo_worker
+
+if Version(vllm_version).release >= (0, 29):
+    from vllm.entrypoints.launchers.api_server.entry import (
+        build_async_engine_client_from_engine_args,
+    )
+else:
+    from vllm.entrypoints.openai.api_server import (
+        build_async_engine_client_from_engine_args,
+    )
 
 DYN_NAMESPACE = os.environ.get("DYN_NAMESPACE", "dynamo")
 DEFAULT_ENDPOINT = f"dyn://{DYN_NAMESPACE}.backend.generate"

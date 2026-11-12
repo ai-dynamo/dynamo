@@ -35,8 +35,9 @@ def _check_gms_usable() -> bool:
 
 HAS_GMS = _check_gms_usable()
 
-# CUDA availability requires a full torch import
+# CUDA / XPU availability requires a full torch import
 HAS_CUDA = False
+HAS_XPU = False
 if HAS_TORCH:
     import torch
 
@@ -44,3 +45,19 @@ if HAS_TORCH:
         HAS_CUDA = torch.cuda.is_available()
     except Exception:
         HAS_CUDA = False
+
+    try:
+        HAS_XPU = torch.xpu.is_available()
+    except Exception:
+        HAS_XPU = False
+
+HAS_GPU = HAS_CUDA or HAS_XPU
+
+# _sycl_vmm native extension availability (XPU VMM backend)
+HAS_SYCL_VMM = False
+try:
+    from gpu_memory_service.common.vmm import _sycl_vmm  # noqa: F401
+
+    HAS_SYCL_VMM = True
+except Exception:
+    pass

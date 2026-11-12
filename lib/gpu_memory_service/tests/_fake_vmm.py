@@ -52,6 +52,9 @@ class FakeVMM(VMMDevice):
     def device_memory_info(self, device):
         return (8 * 1024**3, 16 * 1024**3)
 
+    def total_memory(self, device):
+        return 16 * 1024**3
+
     def get_allocation_granularity(self, device):
         return self._granularity
 
@@ -71,7 +74,7 @@ class FakeVMM(VMMDevice):
         os.close(write_fd)
         return read_fd
 
-    def import_shareable_handle_close_fd(self, fd):
+    def import_shareable_handle_close_fd(self, fd, import_size=0):
         os.close(fd)
         handle = next(self._handles)
         self.imports.add(handle)

@@ -57,7 +57,6 @@ spec:
             - --ep-size
             - "16"
             - --trust-remote-code
-            - --skip-tokenizer-init
             - --disaggregation-mode
             - decode
             - --disaggregation-bootstrap-port
@@ -66,7 +65,6 @@ spec:
             - "0.75"
             - --host
             - 0.0.0.0
-            - --prefill-round-robin-balance
             - --watchdog-timeout
             - "3600"
     prefill:
@@ -101,7 +99,6 @@ spec:
             - --ep-size
             - "16"
             - --trust-remote-code
-            - --skip-tokenizer-init
             - --disaggregation-mode
             - prefill
             - --disaggregation-bootstrap-port
