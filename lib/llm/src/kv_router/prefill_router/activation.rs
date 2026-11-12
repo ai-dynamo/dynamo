@@ -1,16 +1,15 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use dynamo_kv_router::config::KvRouterConfig;
+use dynamo_scheduler::host::PrefillLoadEstimator;
+use dynamo_worker_selection::host::{ConditionalDisaggConfig, make_conditional_disagg_policy};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use anyhow::{Context as _, Result};
 use tokio::sync::{oneshot, watch};
 
-use dynamo_kv_router::{
-    PrefillLoadEstimator, conditional_disagg::make_conditional_disagg_policy,
-    config::KvRouterConfig,
-};
 use dynamo_runtime::{
     component::Endpoint, discovery::DiscoveryQuery, pipeline::RouterMode,
     prelude::DistributedRuntimeProvider,
@@ -207,7 +206,12 @@ impl PrefillRouter {
     ) -> Arc<Self> {
         let cancel_token = parent_token.child_token();
         let (target_tx, target_rx) = watch::channel(None);
-        let conditional_disagg_policy = make_conditional_disagg_policy(kv_router_config.as_ref());
+        let conditional_disagg_policy = make_conditional_disagg_policy(
+            kv_router_config
+                .as_ref()
+                .map(ConditionalDisaggConfig::from)
+                .as_ref(),
+        );
         let conditional_disagg_prefill_busy_threshold = kv_router_config.as_ref().and_then(|c| {
             c.conditional_disagg_prefill_busy_threshold
                 .or(c.router_queue_threshold)
@@ -398,6 +402,11 @@ impl PrefillRouter {
                     .await?,
             )
         } else {
+            crate::kv_router::check_hint_policies_route_on_kv_path(
+                prefill_router_mode,
+                &prefill_kv_config.clone().unwrap_or_default(),
+                &[crate::worker_type::WorkerType::Prefill],
+            )?;
             let affinity = create_affinity_coordinator(
                 prefill_session_affinity_ttl,
                 context.session_affinity_mode,
@@ -669,7 +678,6 @@ mod tests {
     use crate::kv_router::prefill_router::PrefillRouterLifecycle;
     use crate::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
     use dynamo_kv_router::config::KvRouterConfig;
-    use dynamo_kv_router::protocols::RoutingConstraints;
     use dynamo_runtime::protocols::annotated::Annotated;
     use dynamo_runtime::{
         DistributedRuntime, Runtime,
@@ -682,6 +690,7 @@ mod tests {
         },
         storage::kv,
     };
+    use dynamo_scheduler::host::RoutingConstraints;
     use futures::StreamExt;
     use std::collections::HashSet;
 
@@ -1122,9 +1131,9 @@ mod tests {
             let cancelled = self.0.clone();
             let response = async_stream::stream! {
                 yield Annotated::from_data(LLMEngineOutput {
-                    disaggregated_params: Some(serde_json::json!({
+                    disaggregated_params: Some(Box::new(serde_json::json!({
                         "bootstrap_host": "127.0.0.1", "bootstrap_port": 1, "bootstrap_room": 7,
-                    })),
+                    }))),
                     ..Default::default()
                 });
                 worker_context.stopped().await;
@@ -1352,9 +1361,9 @@ mod tests {
             let held = self.held.clone();
             let response = async_stream::stream! {
                 yield Annotated::from_data(LLMEngineOutput {
-                    disaggregated_params: Some(serde_json::json!({
+                    disaggregated_params: Some(Box::new(serde_json::json!({
                         "bootstrap_host": "127.0.0.1", "bootstrap_port": 1, "bootstrap_room": 7,
-                    })),
+                    }))),
                     ..Default::default()
                 });
                 tokio::select! {

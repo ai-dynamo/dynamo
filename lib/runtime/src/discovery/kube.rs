@@ -42,8 +42,23 @@ fn validate_kubernetes_publisher_id(publisher_id: u64) -> Result<()> {
     Ok(())
 }
 
+/// Applies one queued update to the batch's candidate. On success it returns the step that
+/// reports the persisted result to that update's caller; on failure it has already reported the
+/// error, and the candidate is unchanged.
+type PendingUpdate = Box<dyn FnOnce(&mut DiscoveryMetadata) -> Option<ReportPersisted> + Send>;
+type ReportPersisted = Box<dyn FnOnce(Result<()>) + Send>;
+type PendingUpdates = Arc<parking_lot::Mutex<Vec<PendingUpdate>>>;
+
+/// Applies `update` to the local metadata, persists the result, and commits it locally only
+/// after the persist succeeds.
+///
+/// Updates that queue while a persist is in flight share the next one: whichever task holds
+/// the metadata lock applies every queued update, in order, and persists once with its own
+/// `persist`, so every caller must pass an equivalent one. A lone update persists at once, as
+/// before; nothing waits for a batch to fill.
 async fn update_metadata_and_persist<T, U, F, Fut>(
     metadata: &Arc<RwLock<DiscoveryMetadata>>,
+    pending: &PendingUpdates,
     update: U,
     persist: F,
 ) -> Result<T>
@@ -53,23 +68,71 @@ where
     F: FnOnce(DiscoveryMetadata) -> Fut + Send + 'static,
     Fut: Future<Output = Result<DiscoveryMetadata>> + Send + 'static,
 {
+    let (result_tx, result_rx) = tokio::sync::oneshot::channel::<Result<T>>();
+    pending
+        .lock()
+        .push(Box::new(move |candidate: &mut DiscoveryMetadata| {
+            // A failed update must not leave half of its changes in the shared candidate.
+            let mut updated = candidate.clone();
+            match update(&mut updated) {
+                Ok(value) => {
+                    *candidate = updated;
+                    Some(Box::new(move |persisted: Result<()>| {
+                        let _ = result_tx.send(persisted.map(|()| value));
+                    }) as ReportPersisted)
+                }
+                Err(error) => {
+                    let _ = result_tx.send(Err(error));
+                    None
+                }
+            }
+        }));
+
     let metadata = Arc::clone(metadata);
-    // Once started, persistence and the matching local commit must outlive request cancellation.
-    // Dropping the JoinHandle detaches this task instead of cancelling the remote-commit/local-
-    // state critical section.
+    let pending = Arc::clone(pending);
+    // Once started, persistence and the matching local commit must outlive request cancellation,
+    // so they run in a detached task: a cancelled caller drops only its result receiver.
     tokio::spawn(async move {
         let mut metadata = metadata.write().await;
+        let batch = std::mem::take(&mut *pending.lock());
+        // An earlier task's batch already carried this update.
+        if batch.is_empty() {
+            return;
+        }
         let mut candidate = metadata.clone();
-        let result = update(&mut candidate)?;
+        let reports: Vec<ReportPersisted> = batch
+            .into_iter()
+            .filter_map(|apply| apply(&mut candidate))
+            .collect();
+        if reports.is_empty() {
+            return;
+        }
 
         // Persist even a local no-op. This repairs an authoritative CR that may differ after an
         // earlier commit/ack ambiguity instead of trusting potentially stale local metadata.
-        let persisted = persist(candidate).await?;
-        *metadata = persisted;
-        Ok(result)
-    })
-    .await
-    .map_err(|error| anyhow::anyhow!("discovery persistence task failed: {error}"))?
+        match persist(candidate).await {
+            Ok(persisted) => {
+                *metadata = persisted;
+                for report in reports {
+                    report(Ok(()));
+                }
+            }
+            Err(error) => match <[ReportPersisted; 1]>::try_from(reports) {
+                // A lone update keeps the original error; a shared one reaches each caller as
+                // its message.
+                Ok([report]) => report(Err(error)),
+                Err(reports) => {
+                    for report in reports {
+                        report(Err(anyhow::anyhow!("{error:#}")));
+                    }
+                }
+            },
+        }
+    });
+
+    result_rx
+        .await
+        .map_err(|_| anyhow::anyhow!("discovery persistence task ended without a result"))?
 }
 
 /// Kubernetes-based discovery client
@@ -77,6 +140,8 @@ where
 pub struct KubeDiscoveryClient {
     instance_id: u64,
     metadata: Arc<RwLock<DiscoveryMetadata>>,
+    /// Updates waiting for the next CR write (see [`update_metadata_and_persist`]).
+    pending: PendingUpdates,
     list_state: ListState,
     event_tx: broadcast::Sender<DiscoveryEvent>,
     /// The daemon's readiness; `list` and `list_and_watch` wait for `Ready` on it.
@@ -93,16 +158,21 @@ impl KubeDiscoveryClient {
     {
         let kube_client = self.kube_client.clone();
         let pod_info = self.pod_info.clone();
-        update_metadata_and_persist(&self.metadata, update, move |candidate| async move {
-            let cr = build_cr(
-                &pod_info.target.cr_name(),
-                &pod_info.pod_name,
-                &pod_info.pod_uid,
-                &candidate,
-            )?;
-            apply_cr(&kube_client, &pod_info.pod_namespace, &cr).await?;
-            Ok(candidate)
-        })
+        update_metadata_and_persist(
+            &self.metadata,
+            &self.pending,
+            update,
+            move |candidate| async move {
+                let cr = build_cr(
+                    &pod_info.target.cr_name(),
+                    &pod_info.pod_name,
+                    &pod_info.pod_uid,
+                    &candidate,
+                )?;
+                apply_cr(&kube_client, &pod_info.pod_namespace, &cr).await?;
+                Ok(candidate)
+            },
+        )
         .await
     }
 
@@ -197,6 +267,7 @@ impl KubeDiscoveryClient {
         Ok(Self {
             instance_id,
             metadata,
+            pending: PendingUpdates::default(),
             list_state,
             event_tx,
             daemon_state,
@@ -610,6 +681,7 @@ mod tests {
         KubeDiscoveryClient {
             instance_id: 1,
             metadata: Arc::new(RwLock::new(DiscoveryMetadata::new())),
+            pending: PendingUpdates::default(),
             list_state: Arc::new(RwLock::new(HashMap::new())),
             event_tx: broadcast::channel(1).0,
             daemon_state: watch::channel(DaemonState::Pending).1,
@@ -735,6 +807,7 @@ mod tests {
         let client = KubeDiscoveryClient {
             instance_id: 1,
             metadata: Arc::new(RwLock::new(DiscoveryMetadata::new())),
+            pending: PendingUpdates::default(),
             list_state: Arc::new(RwLock::new(list_state)),
             event_tx,
             daemon_state,
@@ -967,6 +1040,7 @@ mod tests {
         let task = tokio::spawn(async move {
             update_metadata_and_persist(
                 &task_metadata,
+                &PendingUpdates::default(),
                 move |candidate| {
                     candidate.update_model_taints(&id, HashSet::from(["new".to_string()]))
                 },
@@ -1030,6 +1104,7 @@ mod tests {
 
         let changed = update_metadata_and_persist(
             &metadata,
+            &PendingUpdates::default(),
             move |candidate| candidate.update_model_taints(&id, HashSet::from(["old".to_string()])),
             move |candidate| async move {
                 *task_persisted.write().await = Some(candidate.clone());
@@ -1054,5 +1129,120 @@ mod tests {
             card_json["runtime_config"]["taints"],
             serde_json::json!(["old"])
         );
+    }
+
+    fn queued_endpoint(name: &str) -> DiscoveryInstance {
+        DiscoverySpec::Endpoint {
+            namespace: "ns".into(),
+            component: "component".into(),
+            endpoint: name.into(),
+            transport: TransportType::Tcp("127.0.0.1:1234".into()),
+            device_type: None,
+            request_plane_codec: None,
+        }
+        .into_instance(1)
+    }
+
+    /// Queues `count` endpoint registrations while the test holds the metadata lock, so they
+    /// all share the persist that follows. Update `reject` fails after registering its endpoint,
+    /// and the persist fails when `fail` is set. Returns each caller's result, the endpoint count
+    /// of every persist, and the number of endpoints committed locally.
+    async fn run_one_batch(
+        count: usize,
+        reject: Option<usize>,
+        fail: bool,
+    ) -> (Vec<Result<()>>, Vec<usize>, usize) {
+        let metadata = Arc::new(RwLock::new(DiscoveryMetadata::new()));
+        let pending = PendingUpdates::default();
+        let persisted = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let held = metadata.write().await;
+        let tasks: Vec<_> = (0..count)
+            .map(|i| {
+                let (metadata, pending, persisted) =
+                    (metadata.clone(), pending.clone(), persisted.clone());
+                tokio::spawn(async move {
+                    update_metadata_and_persist(
+                        &metadata,
+                        &pending,
+                        move |candidate| {
+                            candidate.register_endpoint(queued_endpoint(&format!("queued-{i}")))?;
+                            anyhow::ensure!(Some(i) != reject, "rejected update {i}");
+                            Ok(())
+                        },
+                        move |candidate| async move {
+                            persisted
+                                .lock()
+                                .unwrap()
+                                .push(candidate.get_all_endpoints().len());
+                            anyhow::ensure!(!fail, "injected persist failure");
+                            Ok(candidate)
+                        },
+                    )
+                    .await
+                })
+            })
+            .collect();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while pending.lock().len() < count {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("updates did not queue");
+        drop(held);
+
+        let mut results = Vec::new();
+        for task in tasks {
+            results.push(task.await.unwrap());
+        }
+        let persisted = persisted.lock().unwrap().clone();
+        let committed = metadata.read().await.get_all_endpoints().len();
+        (results, persisted, committed)
+    }
+
+    #[tokio::test]
+    async fn updates_queued_behind_a_persist_share_one_write() {
+        let (results, persisted, committed) = run_one_batch(7, Some(3), false).await;
+        for (i, result) in results.iter().enumerate() {
+            assert_eq!(result.is_ok(), i != 3, "update {i}: {result:?}");
+        }
+        assert_eq!(persisted, vec![6]);
+        assert_eq!(committed, 6);
+    }
+
+    #[tokio::test]
+    async fn a_failed_shared_persist_fails_and_commits_none_of_its_updates() {
+        let (results, persisted, committed) = run_one_batch(3, None, true).await;
+        for result in results {
+            let error = result.unwrap_err();
+            assert!(
+                error.to_string().contains("injected persist failure"),
+                "{error:#}"
+            );
+        }
+        assert_eq!(persisted, vec![3]);
+        assert_eq!(committed, 0);
+    }
+
+    #[tokio::test]
+    async fn an_unshared_failed_persist_keeps_the_original_error() {
+        let metadata = Arc::new(RwLock::new(DiscoveryMetadata::new()));
+        let error = update_metadata_and_persist(
+            &metadata,
+            &PendingUpdates::default(),
+            |candidate| candidate.register_endpoint(queued_endpoint("alone")),
+            |_candidate| async {
+                Err::<DiscoveryMetadata, _>(
+                    std::io::Error::new(std::io::ErrorKind::TimedOut, "write timed out").into(),
+                )
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error.downcast_ref::<std::io::Error>().is_some(),
+            "{error:#}"
+        );
+        assert!(metadata.read().await.get_all_endpoints().is_empty());
     }
 }
