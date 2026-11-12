@@ -79,7 +79,7 @@ func testUpgradeCompatibility(t *testing.T, input string) {
 	namespace := objects[0].GetNamespace()
 	env := clusterTestEnv.RunTInNamespace(t, namespace)
 	env.BlockWorkloads()
-	before := captureUpgrade(t, env)
+	before := snapshotBaseline(t, objects, captureUpgrade(t, env))
 	dgd := getOnlyClusterDGD(t, t.Context(), env.Client(), namespace)
 	rollout := newDGDWorkerRolloutReconciler(env.Client(), nil)
 	transition, err := rollout.planUnsupportedWorkerHashTransition(dgd)

@@ -132,6 +132,18 @@ func TestFrontendSidecarProbeMergeByOrigin(t *testing.T) {
 			authored: &corev1.Probe{ProbeHandler: health, InitialDelaySeconds: 30},
 			want:     &corev1.Probe{ProbeHandler: health, InitialDelaySeconds: 30},
 		},
+		{
+			name:     "legacy origin fills an explicit zero delay from the frontend default",
+			origin:   "1.6.0",
+			authored: &corev1.Probe{ProbeHandler: health, InitialDelaySeconds: 0, PeriodSeconds: 10, TimeoutSeconds: 3, FailureThreshold: 3},
+			want:     &corev1.Probe{ProbeHandler: health, InitialDelaySeconds: 10, PeriodSeconds: 10, TimeoutSeconds: 3, FailureThreshold: 3},
+		},
+		{
+			name:     "current origin keeps an explicit zero delay",
+			origin:   "1.7.0",
+			authored: &corev1.Probe{ProbeHandler: health, InitialDelaySeconds: 0, PeriodSeconds: 10, TimeoutSeconds: 3, FailureThreshold: 3},
+			want:     &corev1.Probe{ProbeHandler: health, InitialDelaySeconds: 0, PeriodSeconds: 10, TimeoutSeconds: 3, FailureThreshold: 3},
+		},
 	}
 
 	for _, tt := range tests {

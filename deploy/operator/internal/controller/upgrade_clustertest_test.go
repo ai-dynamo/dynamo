@@ -119,6 +119,27 @@ func captureUpgrade(t *testing.T, env *clusterenv.TestEnv) []unstructured.Unstru
 	return objects
 }
 
+// snapshotBaseline returns the seeded snapshot objects with the live UID and
+// generation, so safety comparisons keep historical fields even if the
+// candidate API schema normalizes them on its first read.
+func snapshotBaseline(t *testing.T, snapshot, live []unstructured.Unstructured) []unstructured.Unstructured {
+	t.Helper()
+	ids := map[string]unstructured.Unstructured{}
+	for _, object := range live {
+		ids[object.GetKind()+"/"+object.GetName()] = object
+	}
+	before := make([]unstructured.Unstructured, 0, len(snapshot))
+	for _, object := range snapshot {
+		old := object.DeepCopy()
+		restored, ok := ids[old.GetKind()+"/"+old.GetName()]
+		require.True(t, ok, "seeded object %s/%s missing from the live graph", old.GetKind(), old.GetName())
+		old.SetUID(restored.GetUID())
+		old.SetGeneration(restored.GetGeneration())
+		before = append(before, *old)
+	}
+	return before
+}
+
 // Capture a graph only if no candidate child call overlapped the API reads.
 func captureUpgradeComponent(t *testing.T, env *clusterenv.TestEnv, completed *upgradeComponentReconciles, components int) ([]unstructured.Unstructured, error) {
 	t.Helper()
@@ -239,21 +260,7 @@ func TestClusterOperatorUpgrade(t *testing.T) {
 				}
 				before := captureUpgrade(t, env)
 				if isHistory {
-					// Preserve historical fields for safety comparisons even if the
-					// candidate API schema normalizes them on its first read.
-					ids := map[string]unstructured.Unstructured{}
-					for _, object := range before {
-						ids[object.GetKind()+"/"+object.GetName()] = object
-					}
-					before = nil
-					for _, object := range objects {
-						old := object.DeepCopy()
-						restored, ok := ids[old.GetKind()+"/"+old.GetName()]
-						require.True(t, ok)
-						old.SetUID(restored.GetUID())
-						old.SetGeneration(restored.GetGeneration())
-						before = append(before, *old)
-					}
+					before = snapshotBaseline(t, objects, before)
 				}
 				dgd := getOnlyClusterDGD(t, ctx, env.Client(), namespace)
 				rollout := newDGDWorkerRolloutReconciler(env.Client(), nil)
