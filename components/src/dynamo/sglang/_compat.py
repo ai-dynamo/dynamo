@@ -23,6 +23,7 @@ Runtime data-contract notes (not code-level shims):
 import argparse
 import importlib
 import inspect
+import json
 import logging
 import uuid
 from collections.abc import Mapping
@@ -312,7 +313,7 @@ def override_server_args(server_args: Any, source: str, **fields: Any) -> None:
 def resolved_server_args(server_args: Any) -> Any:
     """Return SGLang's effective configuration for one initialized engine.
 
-    SGLang 0.5.20 and 0.5.21 keep ``ServerArgs`` raw and expose the effective
+    Supported CUDA releases keep ``ServerArgs`` raw and expose the effective
     projection through ``resolved_view()``. The separately pinned XPU release
     and Dynamo's non-LLM argument stubs retain effective values on the object
     itself.
@@ -379,6 +380,31 @@ def filter_supported_async_generate_kwargs(
     return {key: value for key, value in kwargs.items() if key in supported_kwarg_names}
 
 
+def sglang_has_wide_mm_pad_values() -> bool:
+    """Detect the wide event-token format introduced by sglang#43043.
+
+    Both caller hashes and engine-owned identities produce wide values.
+    """
+    # Compatibility with SGLang <= 0.5.22. Remove the probe once the minimum
+    # supported CUDA and XPU SGLang versions are both 0.5.23+.
+    try:
+        # Deferred: schedule_batch imports torch and other SGLang runtime modules.
+        from sglang.srt.managers.schedule_batch import MultimodalDataItem
+    except ImportError:
+        return False
+    return "pad_values" in MultimodalDataItem.__struct_fields__
+
+
+def sglang_uses_engine_owned_mm_identity(mm_processor: Any = None) -> bool:
+    """Whether the active processor rejects caller-supplied image identities."""
+    if not sglang_has_wide_mm_pad_values():
+        return False
+    # Unknown processors on wide-pad builds must not receive identity overrides.
+    return mm_processor is None or bool(
+        getattr(mm_processor, "uses_wide_image_identity", False)
+    )
+
+
 def supports_external_mm_hashes(engine: Any) -> bool:
     """Enable safe caller-provided MM hashes when this SGLang accepts them.
 
@@ -386,21 +412,31 @@ def supports_external_mm_hashes(engine: Any) -> bool:
     already built ``padded_input_ids``. Rebuild that derived field after
     tokenization so the external hash, item pad value, and padded IDs remain
     consistent. The repair is idempotent if upstream already rebuilt them.
+
+    Builds that own multimodal identity never get caller hashes.
     """
+    tokenizer_manager = getattr(engine, "tokenizer_manager", None)
+    mm_proc = getattr(tokenizer_manager, "mm_processor", None)
+    if sglang_uses_engine_owned_mm_identity(mm_proc):
+        return False
     if "mm_hashes" not in filter_supported_async_generate_kwargs(
         engine, {"mm_hashes": None}
     ):
         return False
 
-    tokenizer_manager = getattr(engine, "tokenizer_manager", None)
     tokenize_one = getattr(tokenizer_manager, "_tokenize_one_request", None)
     if tokenize_one is None or getattr(
         tokenize_one, "_dynamo_rebuilds_external_mm_padding", False
     ):
         return True
 
-    # Deferred: schedule_batch imports torch and other SGLang runtime modules.
-    from sglang.srt.managers.schedule_batch import MultimodalProcessorOutput
+    # Deferred: these modules import torch and other SGLang runtime modules.
+    # SGLang moved this class to req_types and dropped the schedule_batch
+    # re-export (sglang#48087); keep the old location for older releases.
+    try:
+        from sglang.srt.managers.req_types import MultimodalProcessorOutput
+    except ImportError:
+        from sglang.srt.managers.schedule_batch import MultimodalProcessorOutput
 
     async def tokenize_with_consistent_mm_padding(obj):
         tokenized = await tokenize_one(obj)
@@ -435,6 +471,37 @@ def cache_salt_kwargs(engine: Any, cache_salt: str | None) -> dict[str, Any]:
     if "cache_salt" not in kwargs:
         raise ValueError("cache_salt is not supported by the installed SGLang engine")
     return kwargs
+
+
+@lru_cache(maxsize=1)
+def _kv_events_config_has_format() -> bool:
+    from sglang.srt.disaggregation.kv_events import KVEventsConfig
+
+    return "format" in KVEventsConfig.model_fields
+
+
+def kv_events_config_with_dynamo_format(kv_events_config: str | None) -> str | None:
+    """Publish enabled KV events in the "dynamo" format unless one is set.
+
+    The format carries the LoRA adapter name that the router hashes adapter
+    blocks by. SGLang 0.5.19 in the XPU image has no format option; remove the
+    check when the XPU pin is upgraded to 0.5.22+.
+    """
+    if not kv_events_config:
+        return kv_events_config
+    try:
+        config = json.loads(kv_events_config)
+    except json.JSONDecodeError:
+        return kv_events_config
+    if (
+        not isinstance(config, dict)
+        or config.get("publisher", "null") == "null"
+        or "format" in config
+        or not _kv_events_config_has_format()
+    ):
+        return kv_events_config
+    config["format"] = "dynamo"
+    return json.dumps(config)
 
 
 def prefill_dp_rank_kwargs(engine: Any, prefill_dp_rank: Any) -> dict[str, Any]:
@@ -503,4 +570,6 @@ __all__ = [
     "sglang_uses_mla_backend",
     "supports_require_reasoning",
     "supports_external_mm_hashes",
+    "sglang_uses_engine_owned_mm_identity",
+    "sglang_has_wide_mm_pad_values",
 ]

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import itertools
 import math
+import os
 import warnings
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
@@ -39,10 +40,17 @@ from pydantic import (
 )
 from tqdm import tqdm  # type: ignore[import-untyped]
 
+from dynamo.aisimulate.domains import stepped_numeric_values
 from dynamo.planner.config.defaults import SLAPlannerDefaults
 from dynamo.planner.config.planner_config import PlannerConfig
 
-from .config import PlannerRecommendationConfig, Policy
+from .config import (
+    PLANNER_PASSTHROUGH,
+    PLANNER_PUBLIC_TO_CONFIG,
+    PlannerRecommendationConfig,
+    Policy,
+    inner_planner_config,
+)
 from .load_predictor import (
     LOAD_PREDICTOR_PRESETS,
     complete_predictor_preset,
@@ -81,33 +89,21 @@ _PREDICTOR_KEYS = frozenset(
 )
 _PROVIDER_API_VERSION = 1
 _PLANNER_HOOK_API_VERSION = 1
-_PLANNER_PASSTHROUGH = (
-    "enable_throughput_scaling",
-    "enable_load_scaling",
-    "throughput_adjustment_interval_seconds",
-    "load_adjustment_interval_seconds",
-    "max_throughput_scaling_replicas",
-    "max_num_fpm_samples",
-    "fpm_sample_bucket_size",
-    "load_scaling_down_sensitivity",
-    "load_min_observations",
-    "load_predictor",
-    "load_predictor_log1p",
-    "prophet_window_size",
-    "kalman_q_level",
-    "kalman_q_trend",
-    "kalman_r",
-    "kalman_min_points",
-)
-_PUBLIC_CONFIG_FIELDS = {
-    **{name: name for name in _PLANNER_PASSTHROUGH},
-    "target": "optimization_target",
-    "max_num_gpus": "max_gpu_budget",
-    "min_num_gpus": "min_gpu_budget",
-    "min_workers": "min_endpoint",
-    "prefill_min_workers": "prefill_min_endpoint",
-    "decode_min_workers": "decode_min_endpoint",
-}
+# Accepted by ``aisimulate predict`` only. ``retune`` is an opaque mapping that
+# ``PlannerConfig`` validates; ``advisory`` replays with the deployment held
+# fixed and records the recommendations. A recommendation sweep has no use for
+# any of them.
+_RETUNE = "retune"
+_WARMUP_TRACE = "load_predictor_warmup_trace"
+_ADVISORY = "advisory"
+_PREDICTION_ONLY_FIELDS = (_WARMUP_TRACE, _RETUNE, _ADVISORY)
+# Alone in the planner section: a live retune sweep's candidates
+# (``RetuneSweepSpec``). Each candidate replays the live Planner's
+# configuration with one point's fields applied. ``aisimulate recommend``
+# searches its points; each candidate's concrete config is the section with
+# its one point, which ``aisimulate predict`` replays as that candidate.
+RETUNE_SWEEP = "retune_sweep"
+RETUNE_POINT = "retune_point"
 
 
 _HOOK = RuntimeHookSpec(
@@ -175,12 +171,11 @@ def _public_values(value: Any, defaults: list[Any]) -> list[Any]:
             or step <= 0
         ):
             raise ValueError("Planner independent numeric ranges require step")
-        values = []
-        current = minimum
-        while current <= maximum:
-            values.append(current)
-            current += step
-        return values
+        if all(isinstance(bound, int) for bound in (minimum, maximum, step)):
+            return list(range(minimum, maximum + 1, step))
+        # In Decimal, so float drift cannot drop the endpoint (0.0..0.3 step
+        # 0.1 ends at 0.3); every value is a float.
+        return stepped_numeric_values(minimum, maximum, step)
     if isinstance(value, Mapping):
         raise ValueError("Planner domains must contain exactly choices or range")
     return [value]
@@ -191,6 +186,36 @@ def _independent_preset_mappings(
     control: Mapping[str, Any],
     planner: Mapping[str, Any],
 ) -> list[dict[str, Any]]:
+    """Expand ``preset: false`` of one group into every knob combination.
+
+    Each knob uses its domain in ``planner`` (``type`` in ``control`` for the
+    predictor family), or the group's default domain when omitted.
+    """
+    names, dimensions = independent_preset_dimensions(group, control, planner)
+    mappings = [
+        dict(zip(names, combination, strict=True))
+        for combination in itertools.product(*dimensions)
+    ]
+    if group == "fpm_sampling":
+        mappings = [
+            mapping
+            for mapping in mappings
+            if math.isqrt(mapping["fpm_sample_bucket_size"]) ** 2
+            == mapping["fpm_sample_bucket_size"]
+        ]
+    return mappings
+
+
+def independent_preset_dimensions(
+    group: str,
+    control: Mapping[str, Any],
+    planner: Mapping[str, Any],
+) -> tuple[list[str], list[list[Any]]]:
+    """The knob names and value lists whose product ``preset: false`` expands.
+
+    Lets a caller bound the number of combinations before building them.
+    Arguments as for ``_independent_preset_mappings``.
+    """
     specifications: dict[str, tuple[dict[str, Any], list[Any]]] = {
         "scaling_policy": (
             {
@@ -248,18 +273,7 @@ def _independent_preset_mappings(
         _public_values(values[name], defaults[index])
         for index, name in enumerate(names)
     ]
-    mappings = [
-        dict(zip(names, combination, strict=True))
-        for combination in itertools.product(*dimensions)
-    ]
-    if group == "fpm_sampling":
-        mappings = [
-            mapping
-            for mapping in mappings
-            if math.isqrt(mapping["fpm_sample_bucket_size"]) ** 2
-            == mapping["fpm_sample_bucket_size"]
-        ]
-    return mappings
+    return names, dimensions
 
 
 def _validate_preset_entries(
@@ -395,6 +409,167 @@ class LoadPredictorSearch(BaseModel):
             _PREDICTOR_KEYS,
         )
         return self
+
+
+class RetuneSweepSpec(BaseModel):
+    """``planner.retune_sweep``: the candidates of a live retune sweep.
+
+    ``base`` is the live Planner configuration (only
+    ``PLANNER_RETUNE_SWEEP_BASE_FIELDS``), ``points`` the Planner fields each
+    candidate sets (the searchable runtime fields), and ``warmup`` the
+    recorded history before the window, keyed by throughput interval in
+    seconds, as ``TrafficObservation`` rows in field order: the load
+    predictor warmup of a candidate that scales on throughput at that
+    interval.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    base: dict[str, Any]
+    points: list[dict[str, Any]] = Field(min_length=1)
+    warmup: dict[str, list[list[float | None]]] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _validate_fields(self) -> RetuneSweepSpec:
+        from dynamo.planner.reconfiguration import (
+            PREDICTOR_FIELDS,
+            SCALING_POLICY_FIELDS,
+        )
+
+        from .config import (
+            PLANNER_RETUNE_KNOBS,
+            PLANNER_RETUNE_SWEEP_BASE_FIELDS,
+            PLANNER_RETUNE_SWEEP_SCHEDULING_FIELDS,
+        )
+
+        extra = sorted(set(self.base) - PLANNER_RETUNE_SWEEP_BASE_FIELDS)
+        if extra:
+            raise ValueError(f"retune_sweep.base cannot set {extra}")
+        scheduling = self.base.get("scheduling", {})
+        if not isinstance(scheduling, dict) or set(scheduling) - (
+            PLANNER_RETUNE_SWEEP_SCHEDULING_FIELDS
+        ):
+            raise ValueError(
+                "retune_sweep.base.scheduling may set only "
+                f"{sorted(PLANNER_RETUNE_SWEEP_SCHEDULING_FIELDS)}"
+            )
+        searchable = (
+            set(PLANNER_RETUNE_KNOBS.values())
+            | {"load_scaling_down_sensitivity"}
+            | PREDICTOR_FIELDS
+            | SCALING_POLICY_FIELDS
+        )
+        for point in self.points:
+            unknown = sorted(set(point) - searchable)
+            if unknown:
+                raise ValueError(f"retune_sweep point {point} sets {unknown}")
+        for interval, rows in self.warmup.items():
+            if not interval.isdigit() or int(interval) < 1:
+                raise ValueError(
+                    f"retune_sweep.warmup keys are intervals in seconds, got {interval!r}"
+                )
+            if any(len(row) != len(_OBSERVATION_FIELDS) for row in rows):
+                raise ValueError(
+                    f"retune_sweep.warmup rows have {len(_OBSERVATION_FIELDS)} "
+                    f"values ({', '.join(_OBSERVATION_FIELDS)})"
+                )
+        return self
+
+
+_OBSERVATION_FIELDS = (
+    "duration_s",
+    "num_req",
+    "isl",
+    "osl",
+    "kv_hit_rate",
+    "accept_length",
+)
+
+
+def _retune_sweep_planner_config(
+    spec: RetuneSweepSpec,
+    point: Mapping[str, JSONValue],
+    sample: Mapping[str, JSONValue] | None,
+) -> dict[str, JSONValue]:
+    """The inner planner configuration of one retune sweep candidate.
+
+    ``base`` with ``point`` applied, retune off, not advisory (a candidate is
+    scored on the replicas it would drive), without reports or listeners,
+    and with the GPUs per worker of the candidate's pinned engine
+    (``sample``), validated as a whole. Only the fields it sets are
+    serialized, never environment-derived connection settings.
+    """
+
+    payload: dict[str, Any] = inner_planner_config(spec.base, point)
+    if sample is not None:
+        mode = str(sample["deployment_mode"])
+        if mode == "disagg":
+            payload["prefill_engine_num_gpu"] = _int_value(
+                sample, "prefill_tp"
+            ) * _int_value(sample, "prefill_attention_dp")
+            payload["decode_engine_num_gpu"] = _int_value(
+                sample, "decode_tp"
+            ) * _int_value(sample, "decode_attention_dp")
+        else:
+            payload["decode_engine_num_gpu"] = _int_value(sample, "tp") * _int_value(
+                sample, "attention_dp"
+            )
+    resolved = PlannerConfig.model_validate(
+        {
+            **payload,
+            "metric_pulling_prometheus_endpoint": "",
+            "metric_pulling_prometheus_token": None,
+            "metric_pulling_prometheus_token_file": None,
+            "metric_pulling_prometheus_ssl_verify": False,
+            "metric_pulling_prometheus_ca_bundle": None,
+            "metric_pulling_prometheus_request_timeout_seconds": (
+                SLAPlannerDefaults.metric_pulling_prometheus_request_timeout_seconds
+            ),
+        }
+    )
+    # Retune is off, so PlannerConfig requires a scaling mode: a candidate
+    # always replays a planner that scales.
+    return resolved.model_dump(mode="json", include=set(payload))
+
+
+def _retune_sweep_warmup(
+    spec: RetuneSweepSpec, planner_config: Mapping[str, JSONValue]
+) -> tuple[str, list[list[float | None]]] | None:
+    """The candidate's throughput interval and its warmup rows, if any."""
+
+    if not planner_config.get("enable_throughput_scaling"):
+        return None
+    interval = str(planner_config.get("throughput_adjustment_interval_seconds"))
+    rows = spec.warmup.get(interval)
+    return None if rows is None else (interval, rows)
+
+
+def _retune_sweep_replay(
+    spec: RetuneSweepSpec,
+    point: Mapping[str, JSONValue],
+    sample: Mapping[str, JSONValue],
+) -> AdapterReplaySpec:
+    """The replay of one retune sweep candidate.
+
+    Its config is the section narrowed to the point and its own warmup: a
+    Candidate's ``adapters["dynamo.planner"]`` names the point, and the
+    config alone replays it again.
+    """
+
+    planner_config = _retune_sweep_planner_config(spec, point, sample)
+    hook_config: dict[str, JSONValue] = {"planner_config": planner_config}
+    warmup = _retune_sweep_warmup(spec, planner_config)
+    if warmup is not None:
+        hook_config["warmup_observations"] = cast(JSONValue, warmup[1])
+    section = {
+        "base": deepcopy(spec.base),
+        "points": [deepcopy(dict(point))],
+        "warmup": {} if warmup is None else {warmup[0]: deepcopy(warmup[1])},
+    }
+    return AdapterReplaySpec(
+        config={RETUNE_SWEEP: cast(JSONValue, section)},
+        runtime_hooks=(replace(_HOOK, config=hook_config),),
+    )
 
 
 _LEGACY_PRESET_REMOVAL_NOTE = (
@@ -663,22 +838,47 @@ class DynamoPlannerSweepConfigProvider:
         config: Mapping[str, JSONValue],
         context: PredictionAdapterContext,
     ) -> AdapterReplaySpec:
-        unknown = set(config) - _PUBLIC_CONFIG_FIELDS.keys() - {"policy"}
+        if RETUNE_SWEEP in config:
+            return self._compile_retune_sweep_point(config, context)
+        unknown = (
+            set(config)
+            - PLANNER_PUBLIC_TO_CONFIG.keys()
+            - {"policy", *_PREDICTION_ONLY_FIELDS}
+        )
         if unknown:
             raise ValueError(f"Extra inputs are not permitted: {sorted(unknown)}")
         policy: Policy = TypeAdapter(Policy).validate_python(
             config.get("policy", "disabled")
         )
         if policy == "disabled":
+            if config.get(_RETUNE) is not None:
+                raise ValueError(
+                    "planner.retune requires planner.policy: enabled; for retune "
+                    "with fixed replicas also set enable_load_scaling: false and "
+                    "enable_throughput_scaling: false"
+                )
+            if config.get(_ADVISORY):
+                raise ValueError(
+                    "planner.advisory requires planner.policy: enabled: a "
+                    "disabled planner makes no recommendations"
+                )
             return AdapterReplaySpec(config={"policy": "disabled"})
         raw_sla = context.evaluation.get("sla")
+        sla = raw_sla if isinstance(raw_sla, Mapping) else None
+        candidate_config = dict(config)
+        if config.get(_WARMUP_TRACE) is not None:
+            candidate_config[_WARMUP_TRACE] = _warmup_trace_path(config[_WARMUP_TRACE])
+        if config.get(_RETUNE) is not None:
+            candidate_config[_RETUNE] = _retune_with_evaluation_sla(
+                config[_RETUNE], sla
+            )
         planner_config = _planner_config_payload(
-            config,
+            candidate_config,
             sample=_prediction_sample(context.engine),
             optimization_target=config.get(
                 "target", PlannerConfig.model_fields["optimization_target"].default
             ),
-            sla=raw_sla if isinstance(raw_sla, Mapping) else None,
+            sla=sla,
             min_endpoint=None,
             prefill_min_endpoint=None,
             decode_min_endpoint=None,
@@ -693,6 +893,20 @@ class DynamoPlannerSweepConfigProvider:
         config: Mapping[str, JSONValue],
         context: RecommendationAdapterContext,
     ) -> AdapterSearchPlan:
+        if RETUNE_SWEEP in config:
+            return self._compile_retune_sweep(config, context)
+        if _RETUNE in config:
+            raise ValueError(
+                "planner.retune is not supported by aisimulate recommend: each "
+                "candidate replays a static planner configuration. Measure retune "
+                "with aisimulate predict instead"
+            )
+        if _ADVISORY in config:
+            raise ValueError(
+                "planner.advisory is not supported by aisimulate recommend: an "
+                "advisory candidate never scales, so it is scored on its starting "
+                "replicas. Replay recommendations with aisimulate predict instead"
+            )
         public = PlannerRecommendationConfig.model_validate(config)
         policies = (
             set(public.policy.choices)
@@ -763,12 +977,87 @@ class DynamoPlannerSweepConfigProvider:
             state=state,
         )
 
+    def _compile_retune_sweep(
+        self,
+        config: Mapping[str, JSONValue],
+        context: RecommendationAdapterContext,
+    ) -> AdapterSearchPlan:
+        """A live retune sweep: one choice per candidate point.
+
+        Every point is validated on the base before any candidate runs, so a
+        Request the live Planner built wrong fails as a whole instead of
+        publishing no candidates.
+        """
+
+        extra = sorted(set(config) - {RETUNE_SWEEP})
+        if extra:
+            raise ValueError(f"planner.{RETUNE_SWEEP} cannot be combined with {extra}")
+        spec = RetuneSweepSpec.model_validate(config[RETUNE_SWEEP])
+        for point in spec.points:
+            try:
+                _retune_sweep_planner_config(spec, point, None)
+            except ValueError as error:
+                raise ValueError(
+                    f"planner.{RETUNE_SWEEP} point {point} is invalid: {error}"
+                ) from None
+        points = cast(list[JSONValue], deepcopy(spec.points))
+        return AdapterSearchPlan(
+            fragment=SearchSpaceFragment(
+                choices_by_branch={
+                    mode: {RETUNE_POINT: list(points)}
+                    for mode in _deployment_modes(context.sweep.core_search_space)
+                }
+            ),
+            state={RETUNE_SWEEP: spec.model_dump(mode="json")},
+            potential_runtime_hooks=(_HOOK,),
+        )
+
+    @staticmethod
+    def _compile_retune_sweep_point(
+        config: Mapping[str, JSONValue],
+        context: PredictionAdapterContext,
+    ) -> AdapterReplaySpec:
+        """One live retune sweep candidate (``retune_sweep`` with one point),
+        as a recommendation emits it."""
+
+        extra = sorted(set(config) - {RETUNE_SWEEP})
+        if extra:
+            raise ValueError(f"planner.{RETUNE_SWEEP} cannot be combined with {extra}")
+        spec = RetuneSweepSpec.model_validate(config[RETUNE_SWEEP])
+        if len(spec.points) != 1:
+            raise ValueError(
+                f"aisimulate predict replays one planner.{RETUNE_SWEEP} point, got "
+                f"{len(spec.points)}"
+            )
+        return _retune_sweep_replay(
+            spec, spec.points[0], _prediction_sample(context.engine)
+        )
+
+    @staticmethod
+    def _materialize_retune_sweep(
+        raw: JSONValue,
+        selection: Mapping[str, JSONValue],
+        context: CandidateContext,
+    ) -> AdapterReplaySpec:
+        spec = RetuneSweepSpec.model_validate(raw)
+        point = selection.get(RETUNE_POINT)
+        if not isinstance(point, dict):
+            raise TypeError(f"Planner {RETUNE_POINT} selection must be a mapping")
+        try:
+            return _retune_sweep_replay(spec, point, context.sample)
+        except ValueError as error:
+            raise InfeasibleCandidate(f"Planner candidate: {error}") from error
+
     def materialize_candidate(
         self,
         plan: AdapterSearchPlan,
         selection: Mapping[str, JSONValue],
         context: CandidateContext,
     ) -> AdapterReplaySpec:
+        if isinstance(plan.state, dict) and RETUNE_SWEEP in plan.state:
+            return self._materialize_retune_sweep(
+                plan.state[RETUNE_SWEEP], selection, context
+            )
         if isinstance(plan.state, dict) and plan.state.get("forced_disabled") is True:
             return AdapterReplaySpec(config={"policy": "disabled"})
         materialized = dict(selection)
@@ -1028,10 +1317,46 @@ def _public_planner_config(
         "policy": "enabled",
         **{
             public: planner_config[runtime]
-            for public, runtime in _PUBLIC_CONFIG_FIELDS.items()
+            for public, runtime in PLANNER_PUBLIC_TO_CONFIG.items()
             if planner_config.get(runtime) is not None
         },
+        **{
+            name: deepcopy(planner_config[name])
+            for name in _PREDICTION_ONLY_FIELDS
+            if planner_config.get(name) is not None
+        },
     }
+
+
+def _warmup_trace_path(value: JSONValue) -> JSONValue:
+    """Make the warmup trace absolute against the working directory, like
+    ``traffic.source.paths``, so every process of the run reads the same
+    files. A file, a directory of shards or a glob; the replay reports one
+    that matches nothing."""
+
+    if not isinstance(value, str):
+        return value  # PlannerConfig reports the type error.
+    return os.path.abspath(os.path.expanduser(value))
+
+
+def _retune_with_evaluation_sla(
+    retune: JSONValue, sla: Mapping[str, JSONValue] | None
+) -> JSONValue:
+    """Score retune against ``evaluation.sla`` unless it sets its own SLA.
+
+    The Planner's own ``ttft_ms``/``itl_ms`` follow ``evaluation.sla`` only for
+    ``target: sla``; without this default, other targets would score retune
+    against Planner defaults while AISimulate reports goodput against
+    ``evaluation.sla``.
+    """
+
+    if not isinstance(retune, Mapping):
+        return retune  # PlannerConfig reports the type error.
+    merged = deepcopy(dict(retune))
+    for public, field in (("ttft_ms", "sla_ttft_ms"), ("itl_ms", "sla_itl_ms")):
+        if sla is not None and sla.get(public) is not None and field not in merged:
+            merged[field] = _float_value(sla, public)
+    return cast(JSONValue, merged)
 
 
 def _prediction_sample(engine: Mapping[str, JSONValue]) -> dict[str, JSONValue]:
@@ -1074,10 +1399,13 @@ def _planner_config_payload(
         "live_dashboard_port": 0,
         "metric_pulling_prometheus_extra_query_params": None,
     }
-    for key in _PLANNER_PASSTHROUGH:
+    for key in PLANNER_PASSTHROUGH:
         if key in candidate_config and not (
             key.endswith("_interval_seconds") and candidate_config[key] is None
         ):
+            payload[key] = candidate_config[key]
+    for key in _PREDICTION_ONLY_FIELDS:
+        if candidate_config.get(key) is not None:
             payload[key] = candidate_config[key]
     if max_num_gpus is not None:
         payload["max_gpu_budget"] = max_num_gpus
@@ -1104,7 +1432,7 @@ def _planner_config_payload(
             sample, "attention_dp"
         )
 
-    for public, runtime in _PUBLIC_CONFIG_FIELDS.items():
+    for public, runtime in PLANNER_PUBLIC_TO_CONFIG.items():
         if public != runtime and public in candidate_config:
             payload[runtime] = candidate_config[public]
 
@@ -1154,9 +1482,14 @@ def _planner_config_payload(
             "Planner throughput scaling requires evaluation.sla.ttft_ms and evaluation.sla.itl_ms"
         )
     # Serialize only adapter-owned fields, never environment-derived connection credentials.
-    return resolved.model_dump(
-        mode="json", include=set(payload) | set(_PUBLIC_CONFIG_FIELDS.values())
+    dumped = resolved.model_dump(
+        mode="json", include=set(payload) | set(PLANNER_PUBLIC_TO_CONFIG.values())
     )
+    if _RETUNE in payload:
+        # Hand the replay host the validated mapping as written, not the dump
+        # with every RetuneConfig default filled in.
+        dumped[_RETUNE] = deepcopy(payload[_RETUNE])
+    return dumped
 
 
 def create_provider() -> DynamoPlannerSweepConfigProvider:

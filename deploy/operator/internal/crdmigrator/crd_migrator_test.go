@@ -20,7 +20,6 @@ import (
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -110,10 +109,8 @@ func TestReconcileEmptyCRDConvergesStoredVersionsAndAnnotation(t *testing.T) {
 
 	t.Log("Arrange an empty CRD that still records the old storage version")
 	crd := &apiextensionsv1.CustomResourceDefinition{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:       "dynamocomponentdeployments.nvidia.com",
-			Generation: 7,
-		},
+		Name:       "dynamocomponentdeployments.nvidia.com",
+		Generation: 7,
 		Spec: apiextensionsv1.CustomResourceDefinitionSpec{
 			Group: "nvidia.com",
 			Names: apiextensionsv1.CustomResourceDefinitionNames{
@@ -142,7 +139,7 @@ func TestReconcileEmptyCRDConvergesStoredVersionsAndAnnotation(t *testing.T) {
 	}
 
 	t.Log("Reconcile the CRD storage version")
-	if _, err := migrator.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: crd.Name}}); err != nil {
+	if _, err := migrator.Reconcile(context.Background(), ctrl.Request{Name: crd.Name}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -200,7 +197,7 @@ func TestFilterManagedFields(t *testing.T) {
 				managedFields = append(managedFields, metav1.ManagedFieldsEntry{APIVersion: version})
 			}
 			obj := &operatorv1beta1.DynamoComponentDeployment{
-				ObjectMeta: metav1.ObjectMeta{ManagedFields: managedFields},
+				ManagedFields: managedFields,
 			}
 
 			t.Log("Filter managed fields for unserved API versions")

@@ -19,6 +19,7 @@ import asyncio
 import http.server
 import threading
 import time
+import traceback
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -186,6 +187,61 @@ async def test_fetch_bytes_maps_connection_error() -> None:
     client = _make_client_with_session(session)
     with pytest.raises(mm_http.HttpConnectionError):
         await client.fetch_bytes("https://h/x", 30.0)
+
+
+def _response_error(
+    url: str, message: str = "Forbidden"
+) -> aiohttp.ClientResponseError:
+    return aiohttp.ClientResponseError(
+        # Any headers mapping works at runtime; multidict isn't importable in
+        # every environment that collects these tests.
+        request_info=aiohttp.RequestInfo(URL(url), "GET", {}),  # type: ignore[arg-type]
+        history=(),
+        status=403,
+        message=message,
+    )
+
+
+@pytest.mark.parametrize(
+    ("exc_factory", "raised"),
+    [
+        (lambda url: aiohttp.InvalidURL(url), mm_http.HttpConnectionError),
+        (
+            lambda url: aiohttp.ClientConnectionError(f"Cannot connect to {url}"),
+            mm_http.HttpConnectionError,
+        ),
+        (_response_error, mm_http.HttpStatusError),
+        # The reason phrase is the server's, and can echo the request URL.
+        (
+            lambda url: _response_error(url, message=f"Denied: {url}"),
+            mm_http.HttpStatusError,
+        ),
+    ],
+    ids=["client_error", "connection_error", "response_error", "response_reason"],
+)
+async def test_fetch_bytes_error_keeps_a_presigned_url_out(exc_factory, raised) -> None:
+    """aiohttp errors can quote the request URL; its signature must reach
+    neither the error that is logged and returned to the client nor a formatted
+    traceback of it (handlers log with exc_info)."""
+    signature = "0123456789abcdef" * 16
+    url = (
+        "https://bucket.s3.amazonaws.com/img.png?X-Amz-Algorithm=AWS4-HMAC-SHA256"
+        f"&X-Amz-Expires=900&X-Amz-Signature={signature}"
+    )
+    session = MagicMock(spec=aiohttp.ClientSession)
+    session.closed = False
+    original = exc_factory(url)
+    session.get = _cm_raising(lambda: original)
+    client = _make_client_with_session(session)
+    with pytest.raises(raised) as exc:
+        await client.fetch_bytes(url, 30.0)
+    # What aiohttp raised stays visible to callers, as a bounded copy.
+    assert type(exc.value.__cause__) is type(original)
+    # The bounded error text keeps both of its ends, so check for any fragment
+    # of the signature, not only the whole of it.
+    for text in (str(exc.value), "".join(traceback.format_exception(exc.value))):
+        assert "0123456789abcdef" not in text
+        assert "X-Amz-Signature" not in text
 
 
 async def test_redirect_resolved_through_policy_path() -> None:

@@ -21,8 +21,6 @@ import (
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -34,10 +32,8 @@ import (
 func TestLPXGraphDeploymentPredicate(t *testing.T) {
 	t.Log("Build one current private handoff and its primary-resource predicate")
 	deployment := &v1alpha1.LPXGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "graph", Namespace: "workloads", Generation: 1,
-			OwnerReferences: []metav1.OwnerReference{{Name: "graph", UID: "source-uid", Controller: ptr.To(true)}},
-		},
+		Name: "graph", Namespace: "workloads", Generation: 1,
+		OwnerReferences: []metav1.OwnerReference{{Name: "graph", UID: "source-uid", Controller: new(true)}},
 	}
 	filter := lpxGraphDeploymentPredicate()
 
@@ -54,11 +50,10 @@ func TestLPXGraphDeploymentPredicate(t *testing.T) {
 
 func TestDGDWatchMapsControllerOwnedDeployments(t *testing.T) {
 	t.Log("Index children by their controller owner using the shared test client")
-	dgd := &v1beta1.DynamoGraphDeployment{ObjectMeta: metav1.ObjectMeta{Name: "source", Namespace: "workloads", UID: "source-uid"}}
-	owned := &v1alpha1.LPXGraphDeployment{ObjectMeta: metav1.ObjectMeta{
+	dgd := &v1beta1.DynamoGraphDeployment{Name: "source", Namespace: "workloads", UID: "source-uid"}
+	owned := &v1alpha1.LPXGraphDeployment{
 		Name: "materialization", Namespace: dgd.Namespace,
-		OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(dgd, v1beta1.DynamoGraphDeploymentGVK)},
-	}}
+		OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(dgd, v1beta1.DynamoGraphDeploymentGVK)}}
 	unrelated := owned.DeepCopy()
 	unrelated.Name = "unrelated"
 	unrelated.OwnerReferences[0].UID = "other-source-uid"
@@ -102,13 +97,13 @@ func TestGroveEventPredicates(t *testing.T) {
 		{
 			"clique", &grovev1alpha1.PodClique{ObjectMeta: metadata, Status: grovev1alpha1.PodCliqueStatus{UpdateProgress: &grovev1alpha1.PodCliqueUpdateProgress{}}},
 			&grovev1alpha1.PodClique{ObjectMeta: metadata, Status: grovev1alpha1.PodCliqueStatus{ReadyReplicas: 1}},
-			&grovev1alpha1.PodClique{ObjectMeta: metadata, Status: grovev1alpha1.PodCliqueStatus{UpdateProgress: &grovev1alpha1.PodCliqueUpdateProgress{UpdateEndedAt: ptr.To(metav1.Now())}}},
+			&grovev1alpha1.PodClique{ObjectMeta: metadata, Status: grovev1alpha1.PodCliqueStatus{UpdateProgress: &grovev1alpha1.PodCliqueUpdateProgress{UpdateEndedAt: new(metav1.Now())}}},
 			podCliquePredicate(),
 		},
 		{
 			"scaling group", &grovev1alpha1.PodCliqueScalingGroup{ObjectMeta: metadata, Status: grovev1alpha1.PodCliqueScalingGroupStatus{UpdateProgress: &grovev1alpha1.PodCliqueScalingGroupUpdateProgress{}}},
-			&grovev1alpha1.PodCliqueScalingGroup{ObjectMeta: metadata, Status: grovev1alpha1.PodCliqueScalingGroupStatus{ObservedGeneration: ptr.To(int64(2))}},
-			&grovev1alpha1.PodCliqueScalingGroup{ObjectMeta: metadata, Status: grovev1alpha1.PodCliqueScalingGroupStatus{UpdateProgress: &grovev1alpha1.PodCliqueScalingGroupUpdateProgress{UpdateEndedAt: ptr.To(metav1.Now())}}},
+			&grovev1alpha1.PodCliqueScalingGroup{ObjectMeta: metadata, Status: grovev1alpha1.PodCliqueScalingGroupStatus{ObservedGeneration: new(int64(2))}},
+			&grovev1alpha1.PodCliqueScalingGroup{ObjectMeta: metadata, Status: grovev1alpha1.PodCliqueScalingGroupStatus{UpdateProgress: &grovev1alpha1.PodCliqueScalingGroupUpdateProgress{UpdateEndedAt: new(metav1.Now())}}},
 			podCliqueScalingGroupPredicate(),
 		},
 	} {
@@ -118,7 +113,7 @@ func TestGroveEventPredicates(t *testing.T) {
 			require.True(t, test.predicate.Delete(event.DeleteEvent{Object: test.object}))
 			require.False(t, test.predicate.Generic(event.GenericEvent{Object: test.object}))
 			require.True(t, test.predicate.Update(event.UpdateEvent{ObjectOld: test.object, ObjectNew: test.observed}))
-			require.Equal(t, []ctrl.Request{{NamespacedName: types.NamespacedName{Namespace: "workloads", Name: "materialization"}}},
+			require.Equal(t, []ctrl.Request{{Namespace: "workloads", Name: "materialization"}},
 				mapChildToLPXGraphDeployment(t.Context(), test.object), "Grove children need no DGD label for routing")
 
 			t.Log("Observe clique completion for namespace cutover; scaling-group progress remains unused")
@@ -147,7 +142,7 @@ func TestGroveEventPredicates(t *testing.T) {
 				{"workload", metav1.ObjectMeta{Annotations: workloadAnnotations}, true},
 				{"labels", metav1.ObjectMeta{Annotations: metadata.Annotations, Labels: map[string]string{"changed": "true"}}, true},
 				{"owner", metav1.ObjectMeta{Annotations: metadata.Annotations, OwnerReferences: []metav1.OwnerReference{{UID: "new-owner"}}}, true},
-				{"deleting", metav1.ObjectMeta{Annotations: metadata.Annotations, DeletionTimestamp: ptr.To(metav1.Now())}, true},
+				{"deleting", metav1.ObjectMeta{Annotations: metadata.Annotations, DeletionTimestamp: new(metav1.Now())}, true},
 				{"generation", metav1.ObjectMeta{Annotations: metadata.Annotations, Generation: 1}, true},
 			} {
 				t.Run(change.name, func(t *testing.T) {
@@ -179,13 +174,13 @@ func TestPodCliquePredicateRoles(t *testing.T) {
 		{"ordinary", false},
 	} {
 		t.Run(test.role, func(t *testing.T) {
-			clique := &grovev1alpha1.PodClique{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+			clique := &grovev1alpha1.PodClique{Annotations: map[string]string{
 				lpx.WorkloadDigestAnnotation:  "sha256:workload",
 				lpxv1alpha1.PodRoleAnnotation: test.role,
-			}}}
+			}}
 			require.Equal(t, test.want, filter.Create(event.CreateEvent{Object: clique}))
 			current := clique.DeepCopy()
-			current.Status.CurrentPodTemplateHash = ptr.To("current-template")
+			current.Status.CurrentPodTemplateHash = new("current-template")
 			require.False(t, filter.Update(event.UpdateEvent{ObjectOld: clique, ObjectNew: current}))
 		})
 	}
@@ -194,7 +189,7 @@ func TestPodCliquePredicateRoles(t *testing.T) {
 func TestDGDPredicate(t *testing.T) {
 	t.Log("Observe LPX input changes, not ordinary capacity and status churn")
 	dgd := loadTestDGD(t, lpx.PipelineSingle, "build-v2")
-	dgd.Spec.Components = append(dgd.Spec.Components, v1beta1.DynamoComponentDeploymentSharedSpec{ComponentName: "prefill", Replicas: ptr.To(int32(1))})
+	dgd.Spec.Components = append(dgd.Spec.Components, v1beta1.DynamoComponentDeploymentSharedSpec{ComponentName: "prefill", Replicas: new(int32(1))})
 	filter := dgdPredicate()
 
 	ordinary := dgd.DeepCopy()
@@ -209,7 +204,7 @@ func TestDGDPredicate(t *testing.T) {
 	statusOnly.Status.State = v1beta1.DGDStatePending
 	capacity := dgd.DeepCopy()
 	capacity.Generation++
-	capacity.Spec.Components[1].Replicas = ptr.To(int32(4))
+	capacity.Spec.Components[1].Replicas = new(int32(4))
 	capacity.Status.State = v1beta1.DGDStatePending
 	image := dgd.DeepCopy()
 	image.Generation++
