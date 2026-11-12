@@ -7,6 +7,7 @@
 //! owned by `aisimulate_core::engine`; this module only implements external NPZ and
 //! AI Configurator providers.
 
+use aisimulate_core::ForwardPassPerfModel;
 use anyhow::{Context, Result};
 use ndarray::{Array1, Array2};
 use ndarray_interp::InterpolateError;
@@ -44,6 +45,12 @@ pub trait AisCallback: Send + Sync {
     /// Predict decode (generation) latency in ms.
     /// Parameters: (batch_size, isl, osl)
     fn predict_decode(&self, batch_size: usize, isl: usize, osl: usize) -> Result<f64>;
+
+    /// The canonical AIS model this callback queries, if any. Offline replay
+    /// prices a fitted estimator's passes with it.
+    fn forward_pass_model(&self) -> Option<Arc<ForwardPassPerfModel>> {
+        None
+    }
 }
 
 /// Wrapper to implement PrefillInterpolator for the concrete Interp1D type

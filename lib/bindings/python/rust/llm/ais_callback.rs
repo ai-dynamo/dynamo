@@ -16,7 +16,7 @@ use std::time::Duration;
 
 #[cfg(feature = "ais-forward-pass")]
 pub(super) struct RustAisCallback {
-    model: ForwardPassPerfModel,
+    model: Arc<ForwardPassPerfModel>,
     nextn: u32,
 }
 
@@ -116,6 +116,10 @@ impl AisCallback for RustAisCallback {
         }
         Ok(total)
     }
+
+    fn forward_pass_model(&self) -> Option<Arc<ForwardPassPerfModel>> {
+        Some(Arc::clone(&self.model))
+    }
 }
 
 #[cfg(feature = "ais-forward-pass")]
@@ -173,7 +177,10 @@ fn build_model(config: &serde_json::Value) -> PyResult<RustAisCallback> {
             "AIS canonical FPM queries do not yet support speculative FPM interpolation; use op_level",
         ));
     }
-    Ok(RustAisCallback { model, nextn })
+    Ok(RustAisCallback {
+        model: Arc::new(model),
+        nextn,
+    })
 }
 
 #[cfg_attr(not(feature = "ais-forward-pass"), allow(unused_variables))]
