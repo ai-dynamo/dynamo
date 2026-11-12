@@ -41,6 +41,11 @@ ROLE_LABEL = "dynamo.nvidia.com/slime-role"
 FRONTEND_ROLE = "frontend"
 REQUIRED_CRDS = ("dynamographdeployments.nvidia.com", "rayjobs.ray.io")
 
+# Marks every object that this test creates. In an existing namespace, the test
+# deletes only leftovers that carry it, never a reader's own tutorial objects.
+OWNER_LABEL = "dynamo.nvidia.com/slime-e2e-test"
+OWNER_LABEL_VALUE = "true"
+
 GPU_RESOURCE = "nvidia.com/gpu"
 KUBECTL_TIMEOUT = 120
 LOGS_TIMEOUT = 300
@@ -116,7 +121,7 @@ class SlimeTutorialManifests:
             pvc = None
         else:
             pvc["spec"]["storageClassName"] = options.storage_class
-        return cls(
+        manifests = cls(
             pvc=pvc,
             setup_job=setup_job,
             engine_services=engine_services,
@@ -124,6 +129,11 @@ class SlimeTutorialManifests:
             functions=functions,
             rayjob=rayjob,
         )
+        for documents in manifests.creation_order():
+            for document in documents:
+                labels = document["metadata"].setdefault("labels", {})
+                labels[OWNER_LABEL] = OWNER_LABEL_VALUE
+        return manifests
 
     def creation_order(self) -> list[list[dict[str, Any]]]:
         """The tutorial's objects in the order that its pages create them."""
@@ -548,14 +558,43 @@ def _describe(documents: list[dict[str, Any]]) -> str:
     )
 
 
+def _owned_or_absent(kubectl: Kubectl, document: dict[str, Any]) -> bool:
+    """Whether the namespace lacks the document's object, or has it with
+    OWNER_LABEL."""
+    kind, name = document["kind"], document["metadata"]["name"]
+    result = kubectl.run("get", kind, name, "--output=json", check=False)
+    if result.returncode != 0:
+        if "NotFound" not in result.stderr:
+            raise KubectlError(f"could not read {kind}/{name}: {result.stderr.strip()}")
+        return True
+    labels = json.loads(result.stdout)["metadata"].get("labels") or {}
+    return labels.get(OWNER_LABEL) == OWNER_LABEL_VALUE
+
+
 def delete_leftovers(kubectl: Kubectl, manifests: SlimeTutorialManifests) -> None:
     """Delete the tutorial's objects that an interrupted run left behind.
 
-    Goes in reverse creation order, so the RayJob and the DGD release the
-    volume before its claim is deleted. Without this, a finished RayJob or Job
-    from an earlier run would satisfy this run's waits.
+    Fails before deleting anything if an object with one of the tutorial's
+    names lacks OWNER_LABEL, such as a reader's own tutorial deployment or its
+    claim. Goes in reverse creation order, so the RayJob and the DGD release
+    the volume before its claim is deleted. Without this, a finished RayJob or
+    Job from an earlier run would satisfy this run's waits.
     """
-    for documents in reversed(manifests.creation_order()):
+    groups = list(reversed(manifests.creation_order()))
+    unowned = [
+        document
+        for documents in groups
+        for document in documents
+        if not _owned_or_absent(kubectl, document)
+    ]
+    if unowned:
+        raise AssertionError(
+            f"Namespace {kubectl.namespace} already has {_describe(unowned)} "
+            f"without the {OWNER_LABEL} label, so this test did not create "
+            "them and will not delete them. Use another namespace, or delete "
+            "them yourself."
+        )
+    for documents in groups:
         result = kubectl.delete(yaml.safe_dump_all(documents, sort_keys=False))
         if result.returncode != 0:
             raise KubectlError(

@@ -82,7 +82,10 @@ python -m pytest tests/deploy/test_slime_kuberay.py \
 
 If the namespace does not exist, the test creates it and deletes it at the end.
 In an existing namespace, the test first deletes any of the tutorial's objects
-that an earlier run left behind, and it keeps the namespace. The setup Job,
+that an earlier run left behind, and it keeps the namespace. The test labels
+each object it creates with `dynamo.nvidia.com/slime-e2e-test`. If an object
+with one of the tutorial's names lacks that label, such as one from your own
+run of the tutorial, the test fails before deleting anything. The setup Job,
 driver, and DGD logs go to `test_slime_tutorial/` under `DYN_TEST_OUTPUT_PATH`,
 which defaults to `dynamo_tests/` in the system temporary directory. Other
 options:

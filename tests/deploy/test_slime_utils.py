@@ -5,21 +5,27 @@
 and for the wiring of the tutorial's manifests in tests/deploy/slime/."""
 
 import ast
+import json
 import math
 import shlex
+import subprocess
 from urllib.parse import urlsplit
 
 import pytest
 import yaml
 
 from tests.deploy.slime_utils import (
+    OWNER_LABEL,
+    OWNER_LABEL_VALUE,
     ROLE_LABEL,
     TUTORIAL_CLAIM,
+    Kubectl,
     SlimeTrainingPlan,
     SlimeTutorialManifests,
     SlimeTutorialOptions,
     command_flags,
     count_weight_reloads,
+    delete_leftovers,
     missing_paths,
     parse_ls_listing,
     routed_requests,
@@ -309,3 +315,66 @@ def test_staged_data_comes_from_the_setup_jobs_listing() -> None:
         "/data/models/Qwen3-0.6B_torch_dist",
         "/data/datasets/gsm8k",
     ]
+
+
+class _FakeKubectl(Kubectl):
+    """Answers ``kubectl get KIND NAME`` from a namespace's live objects, each
+    a "Kind/name" mapped to its labels, and records what it deletes."""
+
+    def __init__(self, live: dict[str, dict[str, str]]) -> None:
+        super().__init__("slime-e2e")
+        self.live = live
+        self.deleted: list[str] = []
+
+    def run(self, *args: str, **_: object) -> subprocess.CompletedProcess[str]:
+        assert args[0] == "get", args
+        kind, name = args[1], args[2]
+        labels = self.live.get(f"{kind}/{name}")
+        if labels is None:
+            stderr = f'Error from server (NotFound): {kind} "{name}" not found'
+            return subprocess.CompletedProcess(args, 1, "", stderr)
+        stdout = json.dumps({"metadata": {"name": name, "labels": labels}})
+        return subprocess.CompletedProcess(args, 0, stdout, "")
+
+    def delete(self, manifest: str) -> subprocess.CompletedProcess[str]:
+        self.deleted.extend(
+            f"{document['kind']}/{document['metadata']['name']}"
+            for document in yaml.safe_load_all(manifest)
+        )
+        return subprocess.CompletedProcess([], 0, "", "")
+
+
+def test_every_object_that_the_test_creates_carries_the_owner_label() -> None:
+    for options in ({"storage_class": "rwx-class"}, {"existing_claim": "lustre"}):
+        for documents in _load(**options).creation_order():
+            for document in documents:
+                labels = document["metadata"]["labels"]
+                assert labels[OWNER_LABEL] == OWNER_LABEL_VALUE, document["kind"]
+
+
+def test_delete_leftovers_deletes_an_earlier_runs_objects_in_reverse() -> None:
+    manifests = _load(storage_class="rwx-class")
+    owned = {OWNER_LABEL: OWNER_LABEL_VALUE}
+    kubectl = _FakeKubectl(
+        {"RayJob/slime-grpo": owned, f"PersistentVolumeClaim/{TUTORIAL_CLAIM}": owned}
+    )
+
+    delete_leftovers(kubectl, manifests)
+
+    assert kubectl.deleted[0] == "RayJob/slime-grpo"
+    assert kubectl.deleted[-1] == f"PersistentVolumeClaim/{TUTORIAL_CLAIM}"
+
+
+def test_delete_leftovers_deletes_nothing_if_an_object_is_not_the_tests() -> None:
+    manifests = _load(storage_class="rwx-class")
+    kubectl = _FakeKubectl(
+        {
+            "RayJob/slime-grpo": {OWNER_LABEL: OWNER_LABEL_VALUE},
+            f"PersistentVolumeClaim/{TUTORIAL_CLAIM}": {},
+        }
+    )
+
+    with pytest.raises(AssertionError, match=f"PersistentVolumeClaim/{TUTORIAL_CLAIM}"):
+        delete_leftovers(kubectl, manifests)
+
+    assert kubectl.deleted == []
