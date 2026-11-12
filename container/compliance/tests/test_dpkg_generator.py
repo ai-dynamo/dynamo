@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 from compliance.generators import dpkg
+from compliance.policy.validate import Policy, validate_row
 
 # CPU-only unit tests; markers are required by .ai/pytest-guidelines.md
 # (lifecycle / test-type / hardware categories).
@@ -228,3 +229,25 @@ def test_real_dpkg_query_reports_conffiles_in_the_parsed_shape() -> None:
     assert lines, "no conffiles reported; cannot tell whether the field resolved"
     unparsed = [line for line in lines if not dpkg._CONFFILE_LINE.match(line)]
     assert not unparsed, f"conffile lines the pattern does not match: {unparsed[:5]}"
+
+
+def test_dep5_file_sets_preserve_or_grouping_before_policy_validation():
+    text = (
+        "Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/\n\n"
+        "Files: permissive-or-gpl/*\nLicense: Apache-2.0 or GPL-2\n\n"
+        "Files: gpl-only/*\nLicense: GPL-3\n"
+    )
+    policy = Policy(
+        frozenset({"Apache-2.0"}),
+        frozenset({"GPL-2.0-only", "GPL-3.0-only"}),
+        "deny",
+        "deny",
+        (),
+    )
+    expression = dpkg._parse_dep5(text)
+    assert expression == "(Apache-2.0 OR GPL-2.0-only) AND GPL-3.0-only"
+    assert validate_row(policy, "dpkg", "example", "1", expression) is not None
+    assert (
+        validate_row(policy, "dpkg", "example", "1", "Apache-2.0 OR GPL-2.0-only")
+        is None
+    )

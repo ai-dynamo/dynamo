@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "scope": "Published nightly images; other release lines and optional backends are not proven unused by this audit",
+  "images": [
+    {"prefix": "operator", "cuda": "", "architectures": ["amd64", "arm64"]},
+    {"prefix": "dynamo-frontend", "cuda": "", "architectures": ["amd64", "arm64"]},
+    {"prefix": "dynamo-planner", "cuda": "", "architectures": ["amd64", "arm64"]},
+    {"prefix": "dynamo-sidecar", "cuda": "", "architectures": ["amd64", "arm64"]},
+    {"prefix": "vllm-runtime", "cuda": "13.0", "architectures": ["amd64", "arm64"]},
+    {"prefix": "vllm-runtime-efa", "cuda": "13.0", "architectures": ["amd64", "arm64"]},
+    {"prefix": "sglang-runtime", "cuda": "13.0", "architectures": ["amd64", "arm64"]},
+    {"prefix": "sglang-runtime-efa", "cuda": "13.0", "architectures": ["amd64", "arm64"]},
+    {"prefix": "trtllm-runtime", "cuda": "13.1", "architectures": ["amd64", "arm64"]},
+    {"prefix": "trtllm-runtime-efa", "cuda": "13.1", "architectures": ["amd64", "arm64"]}
+  ]
+}

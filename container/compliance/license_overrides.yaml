@@ -2,13 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Hand-curated license overrides for packages whose upstream metadata is empty,
-# malformed, or otherwise unhelpful. Consulted by
-# container/compliance/overrides.py via license_overrides.lookup(), which every
-# NOTICES generator calls before falling back to UNKNOWN.
+# malformed, or otherwise unhelpful. Dpkg resolution and Python/Rust fallback
+# paths consult container/compliance/overrides.py via lookup(). Go/native
+# generators report observed matches without applying these corrections.
 #
-# Match is by (ecosystem, name) — version-agnostic. If a package legitimately
-# changes license across versions, add separate entries with the version baked
-# into the name (e.g. cuda-nvcc-12-9 vs cuda-nvcc-13-0).
+# Exact (ecosystem, name, version) entries take priority. Existing entries without
+# version remain legacy review debt; new corrections require an exact version,
+# usage, evidence, and reason. Metadata corrections do not grant distribution rights.
 #
 # Schema:
 #   ecosystem: rust | go | python | dpkg | native
@@ -19,9 +19,8 @@
 #              overriding upstream (e.g. "PyPI metadata empty; verified at <URL>")
 #
 # Add a new entry: confirm the upstream license, paste the URL into source:,
-# pick the SPDX ID, and (if it's a LicenseRef-*) make sure it appears in
-# container/compliance/policy/licenses.toml's [licenses].allow list — otherwise
-# the policy gate will reject it.
+# pick the SPDX expression, and document the exact version, usage, evidence and
+# reason. Restricted terms require a scoped policy exception, not a new global grant.
 
 overrides:
   # --- NVIDIA CUDA Python wheels ---
@@ -341,9 +340,9 @@ overrides:
 
   # --- Sglang cuda12.9 — dpkg additions on top of cuda:12.9.1-cudnn-devel ---
   # X11 / libdrm / common system libs whose syft DEP-5 parse came back UNKNOWN.
-  - { ecosystem: dpkg, name: libdrm-amdgpu1,    license: "MIT",              source: "freedesktop libdrm — https://gitlab.freedesktop.org/mesa/drm/-/blob/main/LICENSE" }
-  - { ecosystem: dpkg, name: libdrm-common,     license: "MIT",              source: "freedesktop libdrm" }
-  - { ecosystem: dpkg, name: libdrm2,           license: "MIT",              source: "freedesktop libdrm" }
+  - {"ecosystem": "dpkg", "name": "libdrm-amdgpu1", "license": "MIT", "source": "freedesktop libdrm — https://gitlab.freedesktop.org/mesa/drm/-/blob/main/LICENSE; X.Org libdrm (MIT); AMDGPU DRM component"}
+  - {"ecosystem": "dpkg", "name": "libdrm-common", "license": "MIT", "source": "freedesktop libdrm; X.Org libdrm (MIT); common data"}
+  - {"ecosystem": "dpkg", "name": "libdrm2", "license": "MIT", "source": "freedesktop libdrm; X.Org libdrm (MIT)"}
   - { ecosystem: dpkg, name: libxau6,           license: "MIT",              source: "X.Org libXau — MIT/X11 style" }
   - { ecosystem: dpkg, name: libxcb1,           license: "MIT",              source: "X.Org libxcb — MIT/X11 style" }
   - { ecosystem: dpkg, name: libxdmcp6,         license: "MIT",              source: "X.Org libXdmcp — MIT/X11 style" }
@@ -1034,11 +1033,8 @@ overrides:
   # --- libdrm family (X.Org DRM; MIT; syft/DEP-5 leaves the per-GPU subpackages
   #     UNKNOWN — libdrm-intel1 is amd64-only so it missed the arm64-derived pass) ---
   - { ecosystem: dpkg, name: libdrm-intel1,   license: "MIT", source: "X.Org libdrm (MIT); Intel DRM component" }
-  - { ecosystem: dpkg, name: libdrm-amdgpu1,  license: "MIT", source: "X.Org libdrm (MIT); AMDGPU DRM component" }
   - { ecosystem: dpkg, name: libdrm-nouveau2, license: "MIT", source: "X.Org libdrm (MIT); Nouveau DRM component" }
   - { ecosystem: dpkg, name: libdrm-radeon1,  license: "MIT", source: "X.Org libdrm (MIT); Radeon DRM component" }
-  - { ecosystem: dpkg, name: libdrm2,         license: "MIT", source: "X.Org libdrm (MIT)" }
-  - { ecosystem: dpkg, name: libdrm-common,   license: "MIT", source: "X.Org libdrm (MIT); common data" }
 
   # --- Plotly Kaleido image-export stack (dynamo-planner; PyPI metadata has
   #     empty license_expression + no classifiers, so the generator reports

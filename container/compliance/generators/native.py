@@ -39,6 +39,7 @@ from pathlib import Path
 
 import yaml
 
+from .. import overrides as license_overrides
 from . import common
 from .common import UNKNOWN, Component, spdx_license_text
 
@@ -105,6 +106,7 @@ def collect_components(
             license_text = spdx_license_text(spdx_value)
             is_canonical = license_text is not None
 
+        license_overrides.observe(ECOSYSTEM, name, str(version), spdx_value, spdx_value)
         out.append(
             Component(
                 ecosystem=ECOSYSTEM,
@@ -118,7 +120,7 @@ def collect_components(
         )
 
     logger.info(
-        "Native generator: %d components match image_filter=%r " "(out of %d in YAML)",
+        "Native generator: %d components match image_filter=%r (out of %d in YAML)",
         len(out),
         image_filter,
         len(packages),

@@ -224,7 +224,9 @@ def _parse_dep5(text: str) -> str | None:
         return None
     if len(licenses) == 1:
         return next(iter(licenses))
-    return " AND ".join(sorted(licenses))
+    return " AND ".join(
+        f"({term})" if " OR " in term else term for term in sorted(licenses)
+    )
 
 
 # Map Debian common-licenses filenames to SPDX IDs. Most legacy Debian/Ubuntu
@@ -396,10 +398,14 @@ def _resolve_license(pkg_name: str, version: str = "", root: Path = Path("/")) -
          "GPL Version 3" boilerplate, etc.
       4. UNKNOWN — surfaces in the policy gate.
     """
-    overridden = license_overrides.lookup(ECOSYSTEM, pkg_name, version)
-    if overridden:
-        return overridden
+    raw = _read_package_license(pkg_name, root)
+    overridden = license_overrides.lookup(ECOSYSTEM, pkg_name, version, raw_license=raw)
+    resolved = overridden or raw
+    license_overrides.observe(ECOSYSTEM, pkg_name, version, raw, resolved)
+    return resolved
 
+
+def _read_package_license(pkg_name: str, root: Path) -> str:
     copyright_path = root / _COPYRIGHT_DIR / pkg_name / "copyright"
     if not copyright_path.is_file():
         return UNKNOWN

@@ -7,6 +7,9 @@ inputs:
     required: true
 
 outputs:
+  compliance_policy:
+    description: 'Whether compliance policy, generators, or their review gate changed'
+    value: ${{ steps.filter.outputs.compliance_policy_any_modified }}
   api_docs:
     description: 'Whether generated API documentation inputs changed'
     value: ${{ steps.filter.outputs.api_docs_any_modified }}

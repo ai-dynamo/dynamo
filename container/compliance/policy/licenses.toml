@@ -2,9 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # License-policy file for Python / Go / dpkg / native ecosystems.
-# Rust uses cargo-deny's deny.toml at the repo root (same allow list,
-# enforced via `cargo deny check licenses`). This file is consumed by
-# container/compliance/policy/validate.py.
+# Also applies to Rust inventory rows in shipped containers; root cargo-deny
+# checks are an additional source-level gate. This file is consumed by
+# container/compliance/policy/validate.py. Existing global grants and unscoped
+# exceptions remain legacy review debt, not evidence of blanket permission.
+# New grants are checked against the PR base by policy/review.py.
 #
 # Policy semantics (mirrors cargo-deny):
 #   - allow: SPDX IDs that are always permitted.
@@ -73,9 +75,9 @@ allow = [
   "Info-ZIP",           # `unzip` package upstream license
 
   # --- LGPL family ---
-  # LGPL is permissive for our use because we link against these libraries
-  # dynamically (LGPL's linking exception). Listed for every version we may
-  # encounter in a Debian/Ubuntu base image.
+  # Legacy global grants; LGPL is reciprocal, not permissive. Actual version,
+  # linkage, source delivery, and distribution terms need package/use review.
+  # These existing values are retained pending that review, not newly approved.
   # NOTE: LGPL-2.x is ALSO in the deny list below, which the validator checks
   # first — so deny currently wins and an LGPL package passes only via a
   # per-package [[exceptions]] entry. This overlap is intentional defense-in-
@@ -2379,7 +2381,9 @@ reason = "System Python bindings for apt; mere aggregation"
 type = "python"
 name = "pycountry"
 allow = ["LGPL-2.1-only"]
-reason = "Data-only ISO country/currency tables; LGPL applies to data files; mere aggregation"
+reason = "Legacy exception pending package/use review: pycountry includes an executable Python API, ISO data and translations, and Outlines imports its country API. This is not data-only; existing permission is retained without new approval."
+usage = "Python library imported by Outlines country types; reviewed artifacts were pycountry 26.2.16 and Outlines 0.1.11"
+evidence = "https://pypi.org/project/pycountry/26.2.16/ and https://pypi.org/project/outlines/0.1.11/; inspect pycountry/db.py and outlines/types/countries.py"
 
 [[exceptions]]
 type = "python"

@@ -86,14 +86,18 @@ def _component_from_sbom_entry(
         return None
 
     spdx = _normalize_license(entry.get("licenses"))
+    raw_spdx = spdx
     if spdx == UNKNOWN:
         # Fall back to license_overrides.yaml when the SBOM didn't carry
         # a license field (sgl-model-gateway and other sglang-internal
         # crates ship with no License in Cargo.toml).
-        overridden = license_overrides.lookup(ECOSYSTEM, name, str(version))
+        overridden = license_overrides.lookup(
+            ECOSYSTEM, name, str(version), raw_license=raw_spdx
+        )
         if overridden:
             spdx = overridden
 
+    license_overrides.observe(ECOSYSTEM, name, str(version), raw_spdx, spdx)
     purl = entry.get("purl")
     source_url: str | None = None
     if purl and purl.startswith("pkg:cargo/"):

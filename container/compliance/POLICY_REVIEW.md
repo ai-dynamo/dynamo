@@ -1,0 +1,16 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
+# Policy changes and override review
+
+The reusable `Compliance Policy Review` job feeds the required `pre-merge-status-check` aggregate on compliance-related PR changes and compares the exact base policy with the proposed policy. New global reciprocal or unclassified license grants are rejected. New or expanded package permissions require `version`, `usage`, `evidence`, and `reason`; `version` is an exact resolved artifact version, not a range. These fields make the review concrete; a passing schema check is not legal approval or proof of the claimed runtime use. Existing global grants and unscoped exceptions remain visible as legacy review debt without silently approving or deleting them. Factual rationale or evidence corrections that preserve the permission tuple are permitted and remain review debt; for example, pycountry is an executable Python library used by Outlines, not only data.
+
+`license_overrides.yaml` corrects license metadata and does not grant distribution rights. New corrections use the same exact-version and evidence fields. An exact `(ecosystem, name, version)` correction wins over an existing versionless fallback. Duplicate YAML keys and duplicate identities fail loading. The three duplicate libdrm records were consolidated without changing their MIT corrections; both source descriptions remain.
+
+The generator writes `override-usage.json` before base subtraction, recording the resolved package version, raw license metadata, resolved license, and whether an override lookup was actually applied. Finding a package in a CSV is not counted as applying its override. A pinned base inventory used for subtraction is bundled as `override-base.cdx.json` with its hash so a later report never substitutes the current branch's base inventory for a historical build's.
+
+The scheduled and manually dispatched `Compliance Override Usage` workflow inspects the latest scheduled nightly with compliance artifacts, including red workflows whose artifact production succeeded. It verifies artifact/run/source identity, artifact digest, architecture and CUDA inventory identity, the historical override-catalog hash, and bundled base hashes against the declared `usage_matrix.json`. Missing artifacts or telemetry, expired evidence, or mismatched hashes make coverage incomplete and suppress cleanup candidates. Reports distinguish actual applications, matching but unused corrections, unobserved entries, metadata conflicts, and incomplete evidence. Candidates are for human review only: no records are deleted or approved, and nightly coverage does not establish that a correction is unused on retained releases or optional images.
+
+The policy report evaluates SPDX expression structure. `MIT OR GPL-3.0-only` has a permissive alternative; `MIT AND GPL-3.0-only` does not. Separate DEP5 file sets are joined with parentheses around their alternatives so a permissive choice for one file set cannot bypass another file set's GPL requirements. This parser correction can expose existing policy violations, which require evidence-based review rather than blanket exceptions.
