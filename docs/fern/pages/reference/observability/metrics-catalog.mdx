@@ -501,6 +501,12 @@ Sum across all `dp_rank` values for worker totals.
   Requests the gate could neither admit nor queue. Label: `dp_rank`.
 </ParamField>
 
+<ParamField path="dynamo_backend_admission_request_queue_timeout_total" type="counter">
+  Requests rejected after waiting in a gate queue for the whole request queue timeout
+  (`DYN_BACKEND_ADMISSION_REQUEST_QUEUE_TIMEOUT_MS`). Not included in
+  `dynamo_backend_admission_rejection_total`. Label: `dp_rank`.
+</ParamField>
+
 <ParamField path="dynamo_backend_admission_cancellation_total" type="counter">
   Requests cancelled before engine admission. Label: `dp_rank`.
 </ParamField>

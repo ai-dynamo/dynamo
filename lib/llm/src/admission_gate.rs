@@ -87,14 +87,26 @@
 //! request at the head of any queue that now has all the room it needs is
 //! admitted, so a rank at its own limit never blocks another queue and no
 //! eligible queue starves. When its queue is full the request is rejected before
-//! it reaches the engine; a queue limit of zero disables queueing. Queue
-//! residence has no age limit: a request leaves the queue only by admission or
-//! cancellation.
+//! it reaches the engine; a queue limit of zero disables queueing.
+//!
+//! By default queue residence has no age limit: a request leaves the queue
+//! only by admission or cancellation. With a **request queue timeout**, a
+//! request still queued that long after it joined its queue is removed and
+//! rejected as an overload, so its caller can migrate or retry it rather than
+//! keep waiting. Each queued request then carries one timer, and one that
+//! leaves its queue any other way drops it. The timeout bounds the time spent
+//! in this queue and nothing else: it knows nothing about work done for the
+//! request before it arrived, such as a remote prefill whose KV blocks are
+//! held under a lease, nor about the engine's own delay after admission. An
+//! offer of capacity that reaches the request first admits it, even when its
+//! timeout has run out by the time it is polled.
 //!
 //! A rejection is [`ErrorType::WorkerRankOverloaded`] with the request's rank
 //! when it is limited to that rank and the worker could still admit or queue
 //! other work. Otherwise it is [`ErrorType::WorkerOverloaded`]. A rank-local
-//! rejection does not make routing back off from the whole worker.
+//! rejection does not make routing back off from the whole worker. A queue
+//! timeout is scoped the same way, from the gate's state as the request is
+//! removed.
 //!
 //! Every queue operation is O(1) in the queue's length: the queues are doubly
 //! linked lists threaded through one preallocated pool of slots, and a queued
@@ -120,12 +132,15 @@
 //! | Engine request limit | `DYN_BACKEND_ADMISSION_ENGINE_REQUEST_LIMIT`, `DYN_ENGINE_REQUEST_LIMIT` | unlimited |
 //! | Engine request waiting limit | `DYN_BACKEND_ADMISSION_ENGINE_REQUEST_WAITING_LIMIT`, `DYN_BACKEND_ADMISSION_ENGINE_WAIT_LIMIT` | unlimited |
 //! | Request queue limit | `DYN_BACKEND_ADMISSION_REQUEST_QUEUE_LIMIT`, `DYN_DYNAMO_REQUEST_QUEUE_LIMIT` | `0` |
+//! | Request queue timeout, in milliseconds | `DYN_BACKEND_ADMISSION_REQUEST_QUEUE_TIMEOUT_MS` | unlimited |
 //!
 //! Engine limits must be positive integers, and the queue limit a non-negative
-//! one. A value that is set but invalid is warned about and passed over. A
-//! Python worker that accepts `--engine-request-limit` applies its value to the
-//! canonical engine request limit name before the gate is created, so an
-//! explicit flag takes precedence over both environment names.
+//! one. The queue timeout must be a positive integer; it applies to every
+//! queued request whatever its rank, and without a queue it is warned about
+//! and has no effect. A value that is set but invalid is warned about and
+//! passed over. A Python worker that accepts `--engine-request-limit` applies
+//! its value to the canonical engine request limit name before the gate is
+//! created, so an explicit flag takes precedence over both environment names.
 //!
 //! Setting either engine limit enables admission control, and an engine limit
 //! left unset stays unlimited. With both unset, the default, admission control
@@ -155,6 +170,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
 use std::task::Poll;
+use std::time::Duration;
 
 use dynamo_runtime::component::Component;
 use dynamo_runtime::engine::{
@@ -197,6 +213,11 @@ const DYN_BACKEND_ADMISSION_REQUEST_QUEUE_LIMIT: &str = "DYN_BACKEND_ADMISSION_R
 /// Legacy alias of [`DYN_BACKEND_ADMISSION_REQUEST_QUEUE_LIMIT`].
 const DYN_DYNAMO_REQUEST_QUEUE_LIMIT: &str = "DYN_DYNAMO_REQUEST_QUEUE_LIMIT";
 
+/// Longest a request may wait in a gate queue, in milliseconds, before the
+/// gate rejects it as an overload.
+const DYN_BACKEND_ADMISSION_REQUEST_QUEUE_TIMEOUT_MS: &str =
+    "DYN_BACKEND_ADMISSION_REQUEST_QUEUE_TIMEOUT_MS";
+
 const DEFAULT_REQUEST_QUEUE_LIMIT: usize = 0;
 
 /// How far a limit may exceed the engine's reported capacity before the gate
@@ -235,6 +256,13 @@ const REQUEST_QUEUE_LIMIT: Setting = Setting {
     min: 0,
 };
 
+/// Unset, the default, leaves queue residence without an age limit. Zero is
+/// invalid: it would reject every request that had to queue at all.
+const REQUEST_QUEUE_TIMEOUT_MS: Setting = Setting {
+    names: &[DYN_BACKEND_ADMISSION_REQUEST_QUEUE_TIMEOUT_MS],
+    min: 1,
+};
+
 impl Setting {
     /// The first name `lookup` finds valid, with its value, or `None` when the
     /// setting is left at its default.
@@ -268,6 +296,9 @@ struct ExplicitLimits {
     engine_request_limit: Option<usize>,
     engine_request_waiting_limit: Option<usize>,
     request_queue_limit: Option<usize>,
+    /// How long any one request may stay queued, whatever its rank. `None`,
+    /// the default, is no age limit.
+    request_queue_timeout: Option<Duration>,
 }
 
 impl ExplicitLimits {
@@ -286,10 +317,14 @@ impl ExplicitLimits {
         let engine_request_limit = value(&ENGINE_REQUEST_LIMIT);
         let engine_request_waiting_limit = value(&ENGINE_REQUEST_WAITING_LIMIT);
         let request_queue_limit = REQUEST_QUEUE_LIMIT.resolve(&lookup);
+        let request_queue_timeout = REQUEST_QUEUE_TIMEOUT_MS.resolve(&lookup);
         let explicit = Self {
             engine_request_limit,
             engine_request_waiting_limit,
             request_queue_limit: request_queue_limit.map(|(_, limit)| limit),
+            request_queue_timeout: request_queue_timeout.map(|(_, milliseconds)| {
+                Duration::from_millis(u64::try_from(milliseconds).unwrap_or(u64::MAX))
+            }),
         };
         if let Some((name, limit)) = request_queue_limit
             && limit > 0
@@ -304,6 +339,19 @@ impl ExplicitLimits {
                      or set {name} to 0"
                 ))
                 .build());
+        }
+        if let Some((name, milliseconds)) = request_queue_timeout
+            && explicit
+                .request_queue_limit
+                .unwrap_or(DEFAULT_REQUEST_QUEUE_LIMIT)
+                == 0
+        {
+            tracing::warn!(
+                env = name,
+                value = milliseconds,
+                "Backend admission request queue timeout has no effect without a queue: set \
+                 {DYN_BACKEND_ADMISSION_REQUEST_QUEUE_LIMIT} above 0"
+            );
         }
         Ok(explicit)
     }
@@ -395,13 +443,14 @@ struct DetectedCapacity {
 #[derive(Clone, Copy, Debug)]
 struct LimitsSnapshot {
     limits: AdmissionLimits,
+    request_queue_timeout: Option<Duration>,
     detected: DetectedCapacity,
 }
 
 impl LimitsSnapshot {
-    /// Log it at INFO: each per-rank limit, an unset engine limit as
-    /// `unlimited`, and the engine's detected DP ranks and `max_num_seqs`,
-    /// each still unreported as `unavailable`.
+    /// Log it at INFO: each per-rank limit, an unset engine limit or queue
+    /// timeout as `unlimited`, and the engine's detected DP ranks and
+    /// `max_num_seqs`, each still unreported as `unavailable`.
     fn log(&self) {
         fn shown(value: Option<impl std::fmt::Display>, missing: &str) -> String {
             value.map_or_else(|| missing.to_string(), |value| value.to_string())
@@ -411,6 +460,10 @@ impl LimitsSnapshot {
             engine_request_limit = %shown(limits.engine_request_limit, "unlimited"),
             engine_request_waiting_limit = %shown(limits.engine_request_waiting_limit, "unlimited"),
             request_queue_limit = limits.request_queue_limit,
+            request_queue_timeout_ms = %shown(
+                self.request_queue_timeout.map(|timeout| timeout.as_millis()),
+                "unlimited",
+            ),
             detected_dp_ranks = %shown(self.detected.served, "unavailable"),
             detected_max_num_seqs = %shown(self.detected.max_num_seqs, "unavailable"),
             "Backend admission configuration"
@@ -480,6 +533,11 @@ const OVERLOADED_MESSAGE: &str = "Server overloaded: worker at capacity";
 
 /// The message a shed request is refused with when only its DP rank is full.
 const RANK_OVERLOADED_MESSAGE: &str = "Server overloaded: DP rank at capacity";
+
+/// The message a request is refused with when it waited in its queue for the
+/// whole queue timeout. It keeps the overload prefix the request plane
+/// recognizes a worker's rejection by.
+const QUEUE_TIMEOUT_MESSAGE: &str = "Server overloaded: timed out waiting for backend admission";
 
 /// The message a request cancelled while queued is refused with. It is
 /// deliberately not an overload: the caller went away, which is not
@@ -661,6 +719,10 @@ enum Rejection {
     /// `dp_rank` is its DP rank when the worker could still take other work
     /// (see [`GateState::refusal_rank`]), or `None` for the whole worker.
     QueueFull { dp_rank: Option<u32> },
+    /// The request waited in its queue for the whole queue timeout without
+    /// being admitted. `dp_rank` scopes the refusal as it does for
+    /// [`Rejection::QueueFull`].
+    QueueTimeout { dp_rank: Option<u32> },
     /// The request was cancelled before it was admitted.
     Cancelled,
 }
@@ -670,7 +732,9 @@ enum Rejection {
 ///
 /// Shedding is backpressure on this one worker, so it carries
 /// [`ErrorType::WorkerOverloaded`], or [`ErrorType::WorkerRankOverloaded`] when
-/// it is limited to the request's DP rank. A cancellation is not backpressure: the
+/// it is limited to the request's DP rank. A queue timeout is the same
+/// backpressure, applied to a request the worker accepted into its queue and
+/// then could not admit in time. A cancellation is not backpressure: the
 /// caller went away, so classifying it as an overload would misreport a worker
 /// that never refused anything.
 fn reject(rejection: Rejection, context: Option<&Arc<dyn AsyncEngineContext>>) -> DynamoError {
@@ -697,6 +761,19 @@ fn reject(rejection: Rejection, context: Option<&Arc<dyn AsyncEngineContext>>) -
                 ErrorType::WorkerRankOverloaded(dp_rank),
                 RANK_OVERLOADED_MESSAGE,
             )
+        }
+        Rejection::QueueTimeout { dp_rank } => {
+            tracing::warn!(
+                request_id,
+                dp_rank,
+                "Request waited in the backend admission queue for the whole queue timeout, \
+                 rejecting request"
+            );
+            let error_type = match dp_rank {
+                Some(dp_rank) => ErrorType::WorkerRankOverloaded(dp_rank),
+                None => ErrorType::WorkerOverloaded,
+            };
+            (error_type, QUEUE_TIMEOUT_MESSAGE)
         }
         Rejection::Cancelled => {
             tracing::debug!(request_id, "{CANCELLED_MESSAGE}");
@@ -1224,6 +1301,7 @@ impl GateState {
     fn snapshot(&self) -> LimitsSnapshot {
         LimitsSnapshot {
             limits: self.limits,
+            request_queue_timeout: self.explicit.request_queue_timeout,
             detected: self.detected,
         }
     }
@@ -1641,8 +1719,9 @@ impl BackendAdmissionGate {
     /// gate is full, or [`ErrorType::WorkerRankOverloaded`] while the worker
     /// could still take other work — before any response stream exists. The gate watches
     /// `context` while the request is queued, and refuses it as
-    /// [`ErrorType::Cancelled`] once stopped. An engine failure keeps its own
-    /// error untouched.
+    /// [`ErrorType::Cancelled`] once stopped. A request still queued when a
+    /// configured queue timeout runs out is refused as the same overload. An
+    /// engine failure keeps its own error untouched.
     ///
     /// While admission control is disabled, with neither engine limit set,
     /// this is `generate` alone: the request is neither counted, queued nor
@@ -1747,7 +1826,7 @@ impl BackendAdmissionGate {
         enum Decision {
             Cancelled,
             Admitted,
-            Queued(QueueHandle, oneshot::Receiver<()>),
+            Queued(QueueHandle, oneshot::Receiver<()>, Option<Duration>),
             Rejected(Option<u32>),
         }
 
@@ -1774,7 +1853,7 @@ impl BackendAdmissionGate {
                 .then(|| state.enqueue(rank, context.cloned()))
                 .flatten()
             {
-                Decision::Queued(handle, granted)
+                Decision::Queued(handle, granted, state.explicit.request_queue_timeout)
             } else {
                 series.rejected();
                 // Scoped under the same lock, from the state that refused it.
@@ -1793,7 +1872,7 @@ impl BackendAdmissionGate {
                 AdmissionSource::Direct,
             )),
             Decision::Rejected(dp_rank) => Err(reject(Rejection::QueueFull { dp_rank }, context)),
-            Decision::Queued(handle, granted) => {
+            Decision::Queued(handle, granted, timeout) => {
                 let permit = AdmissionTicket {
                     gate: Arc::clone(self),
                     rank,
@@ -1802,7 +1881,7 @@ impl BackendAdmissionGate {
                     granted,
                     settled: false,
                 }
-                .wait(context)
+                .wait(context, timeout)
                 .await?;
                 Ok((permit, AdmissionSource::Queue))
             }
@@ -1835,6 +1914,32 @@ impl BackendAdmissionGate {
         });
         // Its context and grant are dropped outside the lock.
         removed.is_some()
+    }
+
+    /// Remove a request whose queue timeout ran out from its queue in O(1)
+    /// through its handle, freeing its queue place at once and counting the
+    /// timeout, if it is still queued. Returns the rejection to refuse it
+    /// with, scoped under the same lock from the state that timed it out, or
+    /// `None` when the gate dequeued it first.
+    fn expire_queued(
+        &self,
+        rank: AdmissionRank,
+        handle: QueueHandle,
+        series: &RankSeries,
+    ) -> Option<Rejection> {
+        let (removed, rejection) = self.transition(|state| {
+            let removed = state.remove_queued(rank, handle);
+            let rejection = removed.is_some().then(|| {
+                series.queue_timed_out();
+                Rejection::QueueTimeout {
+                    dp_rank: state.refusal_rank(rank),
+                }
+            });
+            (removed, rejection)
+        });
+        // Its context and grant are dropped outside the lock.
+        drop(removed);
+        rejection
     }
 
     /// Accept the capacity and DP ranks this worker's engine reports:
@@ -1987,7 +2092,8 @@ impl<R: Data> std::fmt::Debug for AdmittedStream<R> {
 /// dropped — the ticket settles it exactly once: still queued, it is removed
 /// through its handle and counted as cancelled; already offered capacity, the
 /// offer is refunded and counted; already discarded at its dequeue, the gate
-/// has counted it.
+/// has counted it. A request whose queue timeout runs out is settled exactly
+/// once too, by [`AdmissionTicket::expire`].
 struct AdmissionTicket {
     gate: Arc<BackendAdmissionGate>,
     rank: AdmissionRank,
@@ -2008,12 +2114,19 @@ enum WaitOutcome {
     Discarded,
     /// Its caller's context stopped.
     Stopped,
+    /// It stayed queued for the whole queue timeout.
+    TimedOut,
 }
 
 impl AdmissionTicket {
+    /// Wait for the gate's offer, for the caller's cancellation, or, when a
+    /// queue `timeout` is configured, for that long, counted from here: the
+    /// request is queued and this future first polled without an await
+    /// between them.
     async fn wait(
         mut self,
         context: Option<&Arc<dyn AsyncEngineContext>>,
+        timeout: Option<Duration>,
     ) -> Result<EnginePermit, DynamoError> {
         // Cancellation while queued must be prompt, and it must win a
         // simultaneous offer: one can be sent to this request after its context
@@ -2021,20 +2134,34 @@ impl AdmissionTicket {
         // would run a request the caller already abandoned. The precheck plus
         // the biased ordering give the stop strictly higher priority; an offer
         // that had already arrived is then refused in `leave`.
-        let outcome = match context {
-            Some(context) if context.is_stopped() => WaitOutcome::Stopped,
-            Some(context) => tokio::select! {
+        //
+        // The timeout has the lowest priority: its caller is still there, so an
+        // offer that is ready together with it admits the request rather than
+        // being refunded.
+        let outcome = if context.is_some_and(|context| context.is_stopped()) {
+            WaitOutcome::Stopped
+        } else {
+            let stopped = async {
+                match context {
+                    Some(context) => context.stopped().await,
+                    None => std::future::pending().await,
+                }
+            };
+            let timed_out = async {
+                match timeout {
+                    Some(timeout) => tokio::time::sleep(timeout).await,
+                    None => std::future::pending().await,
+                }
+            };
+            tokio::select! {
                 biased;
-                _ = context.stopped() => WaitOutcome::Stopped,
+                _ = stopped => WaitOutcome::Stopped,
                 granted = &mut self.granted => match granted {
                     Ok(()) => WaitOutcome::Granted,
                     Err(_) => WaitOutcome::Discarded,
                 },
-            },
-            None => match (&mut self.granted).await {
-                Ok(()) => WaitOutcome::Granted,
-                Err(_) => WaitOutcome::Discarded,
-            },
+                _ = timed_out => WaitOutcome::TimedOut,
+            }
         };
         match outcome {
             // The one place a queued request takes the capacity it was offered:
@@ -2042,11 +2169,7 @@ impl AdmissionTicket {
             // engine.
             WaitOutcome::Granted => {
                 self.settled = true;
-                Ok(EnginePermit::new(
-                    Arc::clone(&self.gate),
-                    self.rank,
-                    Arc::clone(&self.series),
-                ))
+                Ok(self.permit())
             }
             WaitOutcome::Discarded => {
                 self.settled = true;
@@ -2058,6 +2181,43 @@ impl AdmissionTicket {
                 self.leave();
                 Err(reject(Rejection::Cancelled, context))
             }
+            // The worker could not admit it in time: an overload, unless the
+            // gate got to it first.
+            WaitOutcome::TimedOut => match self.expire() {
+                Ok(()) => Ok(self.permit()),
+                Err(rejection) => Err(reject(rejection, context)),
+            },
+        }
+    }
+
+    /// The engine capacity the gate reserved for this request, under the rank
+    /// it queued as.
+    fn permit(&self) -> EnginePermit {
+        EnginePermit::new(Arc::clone(&self.gate), self.rank, Arc::clone(&self.series))
+    }
+
+    /// Settle a request whose queue timeout ran out, exactly once: `Ok` when
+    /// the gate admitted it first, or the rejection to refuse it with.
+    ///
+    /// Removal and dequeue both run under the gate lock, so exactly one of them
+    /// takes the request off its queue. If the removal wins, it frees the queue
+    /// place and counts the timeout, and the request is refused as an overload.
+    /// Otherwise the gate already dequeued it. Unlike a cancelled caller, this
+    /// one is still there, so capacity the gate sent is the request's to keep:
+    /// an offer that beat the timeout to the lock admits it. A request the gate
+    /// instead discarded as cancelled was counted there, leaving nothing here.
+    fn expire(&mut self) -> Result<(), Rejection> {
+        self.settled = true;
+        if let Some(rejection) = self
+            .gate
+            .expire_queued(self.rank, self.handle, &self.series)
+        {
+            return Err(rejection);
+        }
+        self.granted.close();
+        match self.granted.try_recv() {
+            Ok(()) => Ok(()),
+            Err(_) => Err(Rejection::Cancelled),
         }
     }
 
@@ -2118,6 +2278,7 @@ mod tests {
             engine_request_limit: Some(engine_request_limit),
             engine_request_waiting_limit: Some(engine_request_waiting_limit),
             request_queue_limit: Some(request_queue_limit),
+            request_queue_timeout: None,
         })
     }
 
@@ -2131,6 +2292,24 @@ mod tests {
         gate.record_engine_capacity(None, start, count);
         gate
     }
+
+    /// [`gate`] whose queued requests are rejected after [`QUEUE_TIMEOUT`].
+    fn timed_gate(
+        engine_request_limit: usize,
+        engine_request_waiting_limit: usize,
+        request_queue_limit: usize,
+    ) -> Arc<BackendAdmissionGate> {
+        BackendAdmissionGate::new(ExplicitLimits {
+            engine_request_limit: Some(engine_request_limit),
+            engine_request_waiting_limit: Some(engine_request_waiting_limit),
+            request_queue_limit: Some(request_queue_limit),
+            request_queue_timeout: Some(QUEUE_TIMEOUT),
+        })
+    }
+
+    /// The queue timeout of a [`timed_gate`]. Its tests run on a paused clock,
+    /// so none of them waits this long.
+    const QUEUE_TIMEOUT: Duration = Duration::from_millis(250);
 
     const UNSPECIFIED: AdmissionRank = AdmissionRank::Unspecified;
 
@@ -2194,6 +2373,22 @@ mod tests {
 
     fn cancellations(gate: &Arc<BackendAdmissionGate>) -> u64 {
         outcomes(gate).4
+    }
+
+    /// Requests rejected at their queue timeout, summed over every `dp_rank`
+    /// series.
+    fn queue_timeouts(gate: &Arc<BackendAdmissionGate>) -> u64 {
+        let state = gate.state.lock();
+        state
+            .series
+            .values()
+            .map(|metrics| metrics.series.queue_timeouts())
+            .sum()
+    }
+
+    /// Requests of one `dp_rank` series rejected at their queue timeout.
+    fn queue_timeouts_at(gate: &Arc<BackendAdmissionGate>, at: AdmissionRank) -> u64 {
+        gate.state.lock().series(at).queue_timeouts()
     }
 
     /// Requests queued process-wide.
@@ -2311,6 +2506,20 @@ mod tests {
 
     fn is_cancelled(acquired: &Acquired) -> bool {
         refusal(acquired) == Some((ErrorType::Cancelled, CANCELLED_MESSAGE))
+    }
+
+    /// Refused at its queue timeout, as an overload of the whole worker.
+    fn is_queue_timeout(acquired: &Acquired) -> bool {
+        refusal(acquired) == Some((ErrorType::WorkerOverloaded, QUEUE_TIMEOUT_MESSAGE))
+    }
+
+    /// Refused at its queue timeout, as an overload of DP rank `dp_rank` alone.
+    fn is_rank_queue_timeout(acquired: &Acquired, dp_rank: u32) -> bool {
+        refusal(acquired)
+            == Some((
+                ErrorType::WorkerRankOverloaded(dp_rank),
+                QUEUE_TIMEOUT_MESSAGE,
+            ))
     }
 
     fn stoppable() -> (Arc<Controller>, Arc<dyn AsyncEngineContext>) {
@@ -2447,6 +2656,60 @@ mod tests {
         }
     }
 
+    /// The queue timeout is a positive number of milliseconds under its one
+    /// name. Zero and anything that is not such an integer are passed over,
+    /// leaving queue residence without an age limit, and it changes no other
+    /// setting. Set without a queue it is kept, to no effect, and does not
+    /// enable admission control.
+    #[test]
+    fn the_queue_timeout_reads_positive_milliseconds() {
+        const TIMEOUT: &str = DYN_BACKEND_ADMISSION_REQUEST_QUEUE_TIMEOUT_MS;
+        for (value, expected) in [
+            ("250", Some(250)),
+            (" 250 ", Some(250)),
+            ("1", Some(1)),
+            ("0", None),
+            ("-1", None),
+            ("2.5", None),
+            ("250ms", None),
+            ("invalid", None),
+            ("", None),
+        ] {
+            let resolved = explicit_from(&[
+                (DYN_BACKEND_ADMISSION_ENGINE_REQUEST_LIMIT, "1"),
+                (DYN_BACKEND_ADMISSION_REQUEST_QUEUE_LIMIT, "4"),
+                (TIMEOUT, value),
+            ]);
+            assert_eq!(
+                resolved.request_queue_timeout,
+                expected.map(Duration::from_millis),
+                "{value:?}"
+            );
+            assert_eq!(
+                (
+                    resolved.engine_request_limit,
+                    resolved.engine_request_waiting_limit,
+                    resolved.request_queue_limit
+                ),
+                (Some(1), None, Some(4)),
+                "{value:?} configures the queue timeout alone"
+            );
+        }
+
+        assert_eq!(
+            explicit_from(&[(DYN_BACKEND_ADMISSION_ENGINE_REQUEST_LIMIT, "1")])
+                .request_queue_timeout,
+            None,
+            "unset is no age limit"
+        );
+        let alone = explicit_from(&[(TIMEOUT, "250")]);
+        assert_eq!(
+            alone.request_queue_timeout,
+            Some(Duration::from_millis(250))
+        );
+        assert!(!alone.admission_enabled());
+    }
+
     /// A positive queue limit with neither engine limit set fails, naming the
     /// setting that supplied it and how to set an engine limit. Zero stays
     /// valid alone, and any queue limit is valid beside either engine limit.
@@ -2531,6 +2794,7 @@ mod tests {
                 engine_request_limit: Some(7),
                 engine_request_waiting_limit: Some(3),
                 request_queue_limit: Some(0),
+                request_queue_timeout: None,
             }
         );
         assert_eq!(
@@ -2539,6 +2803,8 @@ mod tests {
                 DYN_BACKEND_ADMISSION_ENGINE_REQUEST_LIMIT,
                 DYN_BACKEND_ADMISSION_ENGINE_REQUEST_WAITING_LIMIT,
                 DYN_BACKEND_ADMISSION_REQUEST_QUEUE_LIMIT,
+                // Unset here, and it has no alias to fall back to.
+                DYN_BACKEND_ADMISSION_REQUEST_QUEUE_TIMEOUT_MS,
             ]
         );
     }
@@ -2581,6 +2847,7 @@ mod tests {
             engine_request_limit: Some(5),
             engine_request_waiting_limit: Some(3),
             request_queue_limit: Some(7),
+            request_queue_timeout: None,
         });
         for (max_num_seqs, start, count) in reports {
             configured.record_engine_capacity(max_num_seqs, start, count);
@@ -2791,8 +3058,8 @@ mod tests {
     }
 
     /// Assert that `line` is the configuration record at INFO, ending in
-    /// exactly its message and fields: the three per-rank limits, then the
-    /// detected DP ranks and `max_num_seqs`.
+    /// exactly its message and fields: the three per-rank limits, the queue
+    /// timeout left unset, then the detected DP ranks and `max_num_seqs`.
     fn assert_configuration(
         line: &str,
         [request, waiting, queue]: [&str; 3],
@@ -2801,7 +3068,8 @@ mod tests {
         let expected = format!(
             "Backend admission configuration engine_request_limit={request} \
              engine_request_waiting_limit={waiting} request_queue_limit={queue} \
-             detected_dp_ranks={dp_ranks} detected_max_num_seqs={max_num_seqs}"
+             request_queue_timeout_ms=unlimited detected_dp_ranks={dp_ranks} \
+             detected_max_num_seqs={max_num_seqs}"
         );
         assert!(
             line.contains("INFO") && line.ends_with(&expected),
@@ -2841,6 +3109,58 @@ mod tests {
             let lines: Vec<_> = logged.lines().collect();
             assert_eq!(lines.len(), 1, "{env:?}: {logged}");
             assert_configuration(lines[0], limits, ["unavailable"; 2]);
+        }
+    }
+
+    /// A configured queue timeout is logged with the limits, in milliseconds,
+    /// at INFO and with nothing at WARN while there is a queue for it to apply
+    /// to. Without one it is warned about once, naming the variable and how to
+    /// make it take effect, and the gate is still created.
+    #[test]
+    fn a_queue_timeout_is_logged_and_warned_about_without_a_queue() {
+        const TIMEOUT: &str = DYN_BACKEND_ADMISSION_REQUEST_QUEUE_TIMEOUT_MS;
+        let with_queue = [
+            (DYN_BACKEND_ADMISSION_ENGINE_REQUEST_LIMIT, "4"),
+            (DYN_BACKEND_ADMISSION_REQUEST_QUEUE_LIMIT, "8"),
+            (TIMEOUT, "250"),
+        ];
+        let (_, logged_with_queue) = logged(tracing::Level::INFO, || {
+            BackendAdmissionGate::new(explicit_from(&with_queue))
+        });
+        let lines: Vec<_> = logged_with_queue.lines().collect();
+        assert_eq!(lines.len(), 1, "{logged_with_queue}");
+        assert!(
+            lines[0].contains("INFO")
+                && lines[0].contains("request_queue_limit=8 request_queue_timeout_ms=250 "),
+            "{logged_with_queue}"
+        );
+
+        for without_queue in [
+            vec![
+                (DYN_BACKEND_ADMISSION_ENGINE_REQUEST_LIMIT, "4"),
+                (TIMEOUT, "250"),
+            ],
+            vec![
+                (DYN_BACKEND_ADMISSION_ENGINE_REQUEST_LIMIT, "4"),
+                (DYN_BACKEND_ADMISSION_REQUEST_QUEUE_LIMIT, "0"),
+                (TIMEOUT, "250"),
+            ],
+            vec![(TIMEOUT, "250")],
+        ] {
+            let (resolved, warned) = logged(tracing::Level::WARN, || explicit_from(&without_queue));
+            assert_eq!(
+                resolved.request_queue_timeout,
+                Some(Duration::from_millis(250)),
+                "{without_queue:?}"
+            );
+            let lines: Vec<_> = warned.lines().collect();
+            assert_eq!(lines.len(), 1, "{without_queue:?}: {warned}");
+            assert!(
+                lines[0].contains("WARN")
+                    && lines[0].contains(TIMEOUT)
+                    && lines[0].contains(DYN_BACKEND_ADMISSION_REQUEST_QUEUE_LIMIT),
+                "{warned}"
+            );
         }
     }
 
@@ -3624,6 +3944,7 @@ mod tests {
                 engine_request_limit: request_limit,
                 engine_request_waiting_limit: waiting_limit,
                 request_queue_limit: Some(0),
+                request_queue_timeout: None,
             });
             let held = permit(gate.acquire(None, None).await);
             let overflow = gate
@@ -4409,6 +4730,7 @@ mod tests {
                 engine_request_limit: request_limit,
                 engine_request_waiting_limit: waiting_limit,
                 request_queue_limit: Some(2),
+                request_queue_timeout: None,
             });
             // The driver polls every request itself, all within this one task
             // poll, so Tokio's cooperative budget must not apply: spent, it
@@ -4788,6 +5110,270 @@ mod tests {
         let error = reject(Rejection::Cancelled, None);
         assert_eq!(error.error_type(), ErrorType::Cancelled);
         assert_eq!(error.message(), CANCELLED_MESSAGE);
+    }
+
+    ///////////////////// QUEUE TIMEOUT /////////////////////
+
+    /// A request still queued when the queue timeout runs out is removed at
+    /// once and refused as an overload, never admitted: its place is free for
+    /// the next arrival, the gauge drops, and it counts once as a queue
+    /// timeout — not as a rejection, which is a request that never queued, nor
+    /// as a cancellation. Capacity released later goes to the live queue as
+    /// before.
+    #[tokio::test(start_paused = true)]
+    async fn a_request_queued_for_the_whole_timeout_is_rejected_as_an_overload() {
+        let gate = timed_gate(1, 1, 1);
+        let held = permit(handoff(&gate, None, None).await);
+        let queued_at = tokio::time::Instant::now();
+        let waiting = spawn_queued_admit(&gate).await;
+        assert_eq!(published(&gate), (1, 1, 1));
+
+        let refused = outcome(waiting).await;
+        assert!(is_queue_timeout(&refused), "{:?}", refusal(&refused));
+        let waited = queued_at.elapsed();
+        assert!(
+            waited >= QUEUE_TIMEOUT && waited < QUEUE_TIMEOUT * 2,
+            "refused after {waited:?}"
+        );
+        assert_eq!(published(&gate), (1, 1, 0), "removed at once");
+        assert_eq!(queue_timeouts(&gate), 1);
+        assert_eq!(outcomes(&gate), (2, 1, 0, 0, 0));
+
+        // The one queue place is reusable straight away, and the capacity the
+        // timed-out request never held goes to its successor.
+        let next = spawn_queued_admit(&gate).await;
+        drop(held);
+        drop(permit(outcome(next).await));
+        assert_eq!(published(&gate), (0, 0, 0));
+        assert_eq!(queue_timeouts(&gate), 1);
+        assert_eq!(outcomes(&gate), (3, 1, 1, 0, 0));
+        assert_eq!(
+            Arc::strong_count(&gate),
+            1,
+            "tickets and permits must not retain the gate"
+        );
+    }
+
+    /// A request admitted from the queue before its timeout is an ordinary
+    /// admission: its timer is gone with its wait, so nothing refuses it later,
+    /// however long it then runs.
+    #[tokio::test(start_paused = true)]
+    async fn a_request_admitted_before_its_timeout_is_never_refused_by_it() {
+        let gate = timed_gate(1, 1, 4);
+        let held = permit(handoff(&gate, None, None).await);
+        let waiting = spawn_queued_admit(&gate).await;
+
+        tokio::time::advance(QUEUE_TIMEOUT / 2).await;
+        drop(held);
+        let (admitted, source) = outcome(waiting).await.expect("admitted");
+        assert_eq!(source, AdmissionSource::Queue);
+
+        tokio::time::advance(QUEUE_TIMEOUT * 4).await;
+        assert_eq!(published(&gate), (1, 1, 0));
+        assert_eq!(queue_timeouts(&gate), 0);
+        drop(admitted);
+        assert_eq!(published(&gate), (0, 0, 0));
+        assert_eq!(outcomes(&gate), (2, 1, 1, 0, 0));
+    }
+
+    /// Without a queue timeout, the default, queue residence has no age limit:
+    /// a request waits however long capacity takes to come.
+    #[tokio::test(start_paused = true)]
+    async fn without_a_queue_timeout_a_request_waits_however_long() {
+        let gate = gate(1, 1, 4);
+        let held = permit(handoff(&gate, None, None).await);
+        let waiting = spawn_queued_admit(&gate).await;
+
+        tokio::time::advance(Duration::from_secs(24 * 60 * 60)).await;
+        assert!(!waiting.is_finished());
+        assert_eq!(published(&gate), (1, 1, 1));
+
+        drop(held);
+        drop(permit(outcome(waiting).await));
+        assert_eq!(queue_timeouts(&gate), 0);
+        assert_eq!(outcomes(&gate), (2, 1, 1, 0, 0));
+    }
+
+    /// Every queued request runs its own clock from the moment it queued. An
+    /// older one timing out leaves a younger one queued, at the head now, and
+    /// admitted when capacity comes within its own timeout.
+    #[tokio::test(start_paused = true)]
+    async fn each_queued_request_times_out_on_its_own_clock() {
+        let gate = timed_gate(1, 1, 4);
+        let held = permit(handoff(&gate, None, None).await);
+        let older = spawn_queued_admit(&gate).await;
+        tokio::time::advance(QUEUE_TIMEOUT / 2).await;
+        let younger = spawn_queued_admit(&gate).await;
+
+        assert!(is_queue_timeout(&outcome(older).await));
+        assert!(!younger.is_finished());
+        assert_eq!(published(&gate), (1, 1, 1));
+
+        drop(held);
+        let (admitted, source) = outcome(younger).await.expect("admitted");
+        assert_eq!(source, AdmissionSource::Queue);
+        drop(admitted);
+        assert_eq!(queue_timeouts(&gate), 1);
+        assert_eq!(outcomes(&gate), (3, 1, 1, 0, 0));
+        assert_eq!(published(&gate), (0, 0, 0));
+    }
+
+    /// A queue timeout is scoped as any other refusal is. A ranked request
+    /// names its rank, since removing it leaves the worker able to queue other
+    /// work; an unspecified one is the whole worker's. Each counts under the
+    /// rank it queued as.
+    #[tokio::test(start_paused = true)]
+    async fn a_queue_timeout_names_its_rank_like_any_other_overload() {
+        let gate = timed_gate(1, 1, 4);
+        gate.record_engine_capacity(None, 0, 2);
+        let zero = permit(handoff(&gate, None, Some(0)).await);
+        let one = permit(handoff(&gate, None, Some(1)).await);
+        let ranked = spawn_queued_at(&gate, Some(0), None).await;
+        let unspecified = spawn_queued_at(&gate, None, None).await;
+
+        let ranked = outcome(ranked).await;
+        assert!(is_rank_queue_timeout(&ranked, 0), "{:?}", refusal(&ranked));
+        let unspecified = outcome(unspecified).await;
+        assert!(
+            is_queue_timeout(&unspecified),
+            "{:?}",
+            refusal(&unspecified)
+        );
+
+        assert_eq!(queue_timeouts_at(&gate, rank(0)), 1);
+        assert_eq!(queue_timeouts_at(&gate, rank(1)), 0);
+        assert_eq!(queue_timeouts_at(&gate, UNSPECIFIED), 1);
+        assert_eq!(outcomes_at(&gate, rank(0)), (2, 1, 0, 0, 0));
+        assert_eq!(outcomes_at(&gate, UNSPECIFIED), (1, 0, 0, 0, 0));
+        drop((zero, one));
+        assert_eq!(published(&gate), (0, 0, 0));
+    }
+
+    /// The caller leaving outranks the timeout: when both are ready as the
+    /// request is next polled, it is a cancellation, counted as one, and never
+    /// reported as an overload of a worker its caller already abandoned.
+    #[tokio::test(start_paused = true)]
+    async fn cancellation_beats_a_simultaneous_queue_timeout() {
+        let gate = timed_gate(1, 1, 4);
+        let held = permit(handoff(&gate, None, None).await);
+        let (controller, context) = stoppable();
+        // Polled exactly once, so it queues and starts its clock, and then
+        // stops being polled.
+        let mut doomed = Box::pin(gate.acquire(Some(&context), None));
+        assert!(futures::poll!(&mut doomed).is_pending());
+
+        tokio::time::advance(QUEUE_TIMEOUT * 2).await;
+        controller.stop_generating();
+        assert!(is_cancelled(&doomed.await));
+        assert_eq!(cancellations(&gate), 1);
+        assert_eq!(queue_timeouts(&gate), 0);
+        assert_eq!(published(&gate), (1, 1, 0));
+        drop(held);
+        assert_eq!(published(&gate), (0, 0, 0));
+    }
+
+    /// The opposite of a cancellation's race: this caller is still there. When
+    /// capacity is offered and the timeout runs out before the request is
+    /// polled again, the offer admits it rather than being refunded.
+    #[tokio::test(start_paused = true)]
+    async fn an_offer_ready_with_the_queue_timeout_admits_the_request() {
+        let gate = timed_gate(1, 1, 4);
+        let held = permit(handoff(&gate, None, None).await);
+        let mut waiting = queue_at(&gate, None, None);
+
+        tokio::time::advance(QUEUE_TIMEOUT * 2).await;
+        drop(held);
+        assert_eq!(
+            published(&gate),
+            (1, 1, 0),
+            "the capacity was offered to the live head"
+        );
+        let (admitted, source) = decided(&mut waiting)
+            .expect("the gate decided")
+            .expect("admitted");
+        assert_eq!(source, AdmissionSource::Queue);
+        assert_eq!(queue_timeouts(&gate), 0);
+        drop(admitted);
+        assert_eq!(published(&gate), (0, 0, 0));
+    }
+
+    /// A ticket queued directly, for the two races its expiry can lose to the
+    /// gate between its timeout firing and its reaching the gate lock.
+    fn queued_ticket(
+        gate: &Arc<BackendAdmissionGate>,
+        context: Option<Arc<dyn AsyncEngineContext>>,
+    ) -> AdmissionTicket {
+        let (handle, granted) = gate
+            .transition(|state| state.enqueue(UNSPECIFIED, context))
+            .expect("the queue has room");
+        let series = gate.state.lock().series(UNSPECIFIED);
+        AdmissionTicket {
+            gate: Arc::clone(gate),
+            rank: UNSPECIFIED,
+            series,
+            handle,
+            granted,
+            settled: false,
+        }
+    }
+
+    /// The timeout fires, and before the ticket reaches the gate lock the gate
+    /// dequeues the request and sends it capacity. The request keeps it: one
+    /// admission's worth of capacity, no timeout, nothing refunded twice.
+    #[tokio::test]
+    async fn an_offer_that_beats_the_queue_timeout_to_the_lock_is_kept() {
+        let gate = timed_gate(1, 1, 4);
+        let held = permit(handoff(&gate, None, None).await);
+        let mut ticket = queued_ticket(&gate, None);
+
+        drop(held);
+        assert_eq!(published(&gate), (1, 1, 0));
+        assert!(ticket.expire().is_ok(), "the offer admits it");
+        let admitted = ticket.permit();
+        drop(ticket);
+        assert_eq!(published(&gate), (1, 1, 0), "held once, by its permit");
+        assert_eq!(queue_timeouts(&gate), 0);
+        assert_eq!(cancellations(&gate), 0);
+
+        drop(admitted);
+        assert_eq!(published(&gate), (0, 0, 0));
+    }
+
+    /// The timeout fires on a request whose caller has gone, and the gate
+    /// discards it at its dequeue before the ticket reaches the lock. The gate
+    /// counted that cancellation; the expiry adds no timeout to it.
+    #[tokio::test]
+    async fn a_queue_timeout_on_a_request_discarded_as_cancelled_counts_nothing() {
+        let gate = timed_gate(1, 1, 4);
+        let held = permit(handoff(&gate, None, None).await);
+        let (controller, context) = stoppable();
+        let mut ticket = queued_ticket(&gate, Some(context));
+
+        controller.stop_generating();
+        drop(held);
+        assert_eq!(cancellations(&gate), 1, "counted at the dequeue");
+        assert!(matches!(ticket.expire(), Err(Rejection::Cancelled)));
+        drop(ticket);
+        assert_eq!(cancellations(&gate), 1, "without counting again");
+        assert_eq!(queue_timeouts(&gate), 0);
+        assert_eq!(published(&gate), (0, 0, 0));
+    }
+
+    #[test]
+    fn a_queue_timeout_is_a_worker_scoped_overload() {
+        // The worker accepted the request into its queue and could not admit
+        // it in time: backpressure on this worker, which the caller may migrate
+        // away from, exactly as when the queue has no room.
+        let error = reject(Rejection::QueueTimeout { dp_rank: None }, None);
+        assert_eq!(error.error_type(), ErrorType::WorkerOverloaded);
+        assert_eq!(error.message(), QUEUE_TIMEOUT_MESSAGE);
+
+        let error = reject(Rejection::QueueTimeout { dp_rank: Some(4) }, None);
+        assert_eq!(error.error_type(), ErrorType::WorkerRankOverloaded(4));
+        assert_eq!(error.message(), QUEUE_TIMEOUT_MESSAGE);
+
+        // The request plane recognizes a worker's rejection by this prefix.
+        assert!(QUEUE_TIMEOUT_MESSAGE.starts_with("Server overloaded:"));
     }
 
     ///////////////////// THE ADMITTED STREAM /////////////////////

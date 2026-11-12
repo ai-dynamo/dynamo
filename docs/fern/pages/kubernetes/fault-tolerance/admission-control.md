@@ -27,6 +27,12 @@ Setting either engine limit enables admission control; an engine limit left unse
 When either engine limit is reached, new requests wait in the gate queue. If the queue is full, the
 worker rejects them; overload reaches the client as HTTP 529 by default.
 
+Queued requests wait without a time limit by default. To reject a request that has been queued for too
+long, set `DYN_BACKEND_ADMISSION_REQUEST_QUEUE_TIMEOUT_MS` to a positive number of milliseconds. The
+worker then rejects it as the same overload. See
+[Best Practices](../../developer-guide/knowledge-base/concepts/fault-tolerance/admission-control-architecture.md#best-practices)
+for when to set it on a disaggregated decode worker.
+
 The following `nvidia.com/v1beta1` fragment enables admission control with the recommended starting
 limits for an engine whose `max_num_seqs` is 256: each engine limit at `max_num_seqs`, and a queue of
 twice that. Add these entries to your worker container's existing `env` list.
@@ -59,7 +65,7 @@ for tuning from the starting limits.
 ## Verify the Configuration
 
 Check the worker logs for the effective limits. Under load, use the `dynamo_backend_admission_*`
-metrics to observe engine occupancy, queued requests, rejections, and cancellations. These metrics
+metrics to observe engine occupancy, queued requests, rejections, queue timeouts, and cancellations. These metrics
 stay at zero while admission control is disabled. The `dp_rank` label identifies the rank;
 `unspecified` covers unranked requests. Sum over `dp_rank` for worker totals.
 
