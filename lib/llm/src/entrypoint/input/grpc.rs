@@ -23,8 +23,14 @@ pub async fn run(
     distributed_runtime: DistributedRuntime,
     engine_config: EngineConfig,
 ) -> anyhow::Result<()> {
+    let router_config = engine_config.local_model().router_config();
     crate::kv_router::plugins::RouterPluginBuilder::default()
-        .validate_config(&engine_config.local_model().router_config().kv_router_config)?;
+        .validate_config(&router_config.kv_router_config)?;
+    crate::kv_router::check_hint_policies_route_on_kv_path(
+        router_config.router_mode,
+        &router_config.kv_router_config,
+        &crate::kv_router::EVERY_ROLE,
+    )?;
 
     let mut grpc_service_builder = kserve::KserveService::builder()
         .port(engine_config.local_model().http_port()) // [WIP] generalize port..
@@ -167,7 +173,7 @@ async fn run_watcher(
     let discovery = runtime.discovery();
     let discovery_stream = discovery
         .list_and_watch(
-            dynamo_runtime::discovery::DiscoveryQuery::AllModels,
+            namespace_filter.model_query(),
             Some(runtime.primary_token()),
         )
         .await?;

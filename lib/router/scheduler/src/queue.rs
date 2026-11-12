@@ -40,6 +40,7 @@ use dynamo_admission::placement::WorkerPlacement;
 use dynamo_admission::queue::{PolicyQueue, QueueMetadata, QueueSnapshot};
 use dynamo_admission::{PolicyClassConfig, PolicyProfile};
 use dynamo_kv_hashing::LocalBlockHash;
+use dynamo_kv_indexer::ResidentBlockCountsHandle;
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 use dynamo_slot_tracker::busy::{BusyThresholds, FullRankCounts};
 use dynamo_slot_tracker::wire::PrefillLoadHint;
@@ -60,6 +61,13 @@ mod capacity;
 /// bounds the rows in flight: ranks x ~120 B each, about 60 MiB at 2048 ranks. A
 /// backlog past it waits, in order, for a slot.
 const ADMISSION_CHANNEL_CAPACITY: usize = 256;
+
+/// Commands the actor takes from the channel in one receive. A receive spends one unit of
+/// the task's cooperative budget whatever it returns, so a backlog costs the actor a yield
+/// to the runtime every 128 batches, not every 128 commands. The size also sets how long the
+/// actor holds its thread under a backlog: at 32 its longest polls reached 0.33 to 0.66 s.
+/// A taken batch has freed its channel slots, so its rows add to those the capacity bounds.
+const ADMISSION_BATCH: usize = 8;
 
 struct ClassQueueCounters {
     pending_count: AtomicUsize,
@@ -774,13 +782,45 @@ impl Drop for RequestLifecycleLease {
     }
 }
 
+/// The actor's end of the admission channel. Commands leave the channel a batch at a time
+/// and are handed out in arrival order.
+struct CommandInbox {
+    rx: mpsc::Receiver<AdmissionCommand>,
+    /// Taken from `rx` and not yet handed out, newest first.
+    batch: Vec<AdmissionCommand>,
+}
+
+impl CommandInbox {
+    fn new(rx: mpsc::Receiver<AdmissionCommand>) -> Self {
+        Self {
+            rx,
+            batch: Vec::with_capacity(ADMISSION_BATCH),
+        }
+    }
+
+    /// `None` once the channel is closed and drained. Cancel safe: a batch is only taken by
+    /// a receive that completes.
+    async fn next(&mut self) -> Option<AdmissionCommand> {
+        if self.batch.is_empty() {
+            self.rx.recv_many(&mut self.batch, ADMISSION_BATCH).await;
+            self.batch.reverse();
+        }
+        self.batch.pop()
+    }
+
+    /// No command is waiting, taken or still in the channel.
+    fn is_empty(&self) -> bool {
+        self.batch.is_empty() && self.rx.is_empty()
+    }
+}
+
 struct SchedulerQueueActor<
     P: SequencePublisher,
     C: WorkerConfigLike,
     Sel: WorkerSelector<C>,
     RF: OverlapScoresRefresh,
 > {
-    commands: mpsc::Receiver<AdmissionCommand>,
+    commands: CommandInbox,
     pending: PolicyQueue<QueuedRequest>,
     class_timers: ClassTimers,
     cleanup: Arc<AdmissionCleanup>,
@@ -814,6 +854,9 @@ struct SchedulerQueueActor<
     non_max_overlap_selection_observer: Arc<OnceLock<NonMaxOverlapSelectionObserver>>,
     /// Per-candidate cost capture for admitted selections, installed once by the host.
     selection_trace: Arc<OnceLock<SelectionTraceSpec>>,
+    /// The partition's live resident block counts, installed once by the host for a policy
+    /// that declared RESIDENT_BLOCKS.
+    resident_blocks: Arc<OnceLock<ResidentBlockCountsHandle>>,
     reject_thresholds: Option<RejectThresholdsProvider>,
 }
 
@@ -852,6 +895,9 @@ pub struct SchedulerQueue<
     non_max_overlap_selection_observer: Arc<OnceLock<NonMaxOverlapSelectionObserver>>,
     /// Per-candidate cost capture for admitted selections, installed once by the host.
     selection_trace: Arc<OnceLock<SelectionTraceSpec>>,
+    /// The partition's live resident block counts, installed once by the host for a policy
+    /// that declared RESIDENT_BLOCKS.
+    resident_blocks: Arc<OnceLock<ResidentBlockCountsHandle>>,
     reject_thresholds: Option<RejectThresholdsProvider>,
     #[allow(clippy::type_complexity)]
     // Covariant type markers, without ownership or auto-trait bounds.
@@ -977,6 +1023,7 @@ impl<
         let cleanup = Arc::new(AdmissionCleanup::default());
         let non_max_overlap_selection_observer = Arc::new(OnceLock::new());
         let selection_trace = Arc::new(OnceLock::new());
+        let resident_blocks = Arc::new(OnceLock::new());
         let start_time = Instant::now();
         let capacity_updates = queueing_enabled.then(|| Arc::new(CapacityUpdates::new()));
         let direct_release: DirectBookingRelease = {
@@ -1005,7 +1052,7 @@ impl<
         ));
         let exclusive_affinity = selector.uses_exclusive_affinity_target();
         let actor = SchedulerQueueActor {
-            commands: admission_rx,
+            commands: CommandInbox::new(admission_rx),
             pending,
             class_timers: ClassTimers::new(profile.classes().len()),
             cleanup: Arc::clone(&cleanup),
@@ -1032,6 +1079,7 @@ impl<
             available_worker_ids: available_worker_ids.clone(),
             non_max_overlap_selection_observer: Arc::clone(&non_max_overlap_selection_observer),
             selection_trace: Arc::clone(&selection_trace),
+            resident_blocks: Arc::clone(&resident_blocks),
             reject_thresholds: reject_thresholds.clone(),
         };
         tokio::spawn(actor.run());
@@ -1056,6 +1104,7 @@ impl<
             supports_overlap_refresh: overlap_refresh_after.is_some(),
             non_max_overlap_selection_observer,
             selection_trace,
+            resident_blocks,
             reject_thresholds,
             _marker: PhantomData,
         }
@@ -1086,6 +1135,14 @@ impl<
     /// Returns `false` when a spec is already installed.
     pub fn set_selection_trace(&self, spec: SelectionTraceSpec) -> bool {
         self.selection_trace.set(spec).is_ok()
+    }
+
+    /// Lend the partition's live resident block counts to every selection, for a policy that
+    /// declared `WorkerInputs::RESIDENT_BLOCKS`.
+    ///
+    /// Returns `false` when counts are already installed.
+    pub fn set_resident_block_counts(&self, counts: ResidentBlockCountsHandle) -> bool {
+        self.resident_blocks.set(counts).is_ok()
     }
 
     /// Enqueue a new request through the router-owned policy queue.
@@ -1554,6 +1611,7 @@ impl<
     RF: OverlapScoresRefresh + Send + Sync + 'static,
 > SchedulerQueueActor<P, C, Sel, RF>
 {
+    /// Runs one turn per command, capacity wake, or class timer until every sender is gone.
     async fn run(mut self) {
         let mut commands_since_cleanup = 0usize;
         let capacity_updates = self.capacity_updates.clone();
@@ -1561,10 +1619,10 @@ impl<
             self.begin_turn();
             let due_at = self.class_timers.next_deadline();
             let command = if capacity_updates.is_none() && due_at.is_none() {
-                self.commands.recv().await
+                self.commands.next().await
             } else {
                 tokio::select! {
-                    command = self.commands.recv() => command,
+                    command = self.commands.next() => command,
                     _ = async {
                         if let Some(updates) = &capacity_updates {
                             updates.notified().await;
@@ -2328,7 +2386,7 @@ impl<
                         updates.notified().await;
                     }
                 }, if capacity_updates.is_some() => RefreshEvent::Capacity,
-                command = self.commands.recv() => match command {
+                command = self.commands.next() => match command {
                     Some(command) => RefreshEvent::Command(command),
                     None => return RefreshEnd::Shutdown,
                 },
@@ -2366,6 +2424,15 @@ impl<
         }
     }
 
+    /// Whether a load projection counts each rank's overlap with the request's active prompts.
+    /// Finding it walks the prompt trie, and only `LOAD` rows read it; without them, only the
+    /// selected rank's is computed.
+    fn projects_overlap(&self) -> bool {
+        self.selector
+            .required_worker_inputs()
+            .contains(WorkerInputs::LOAD)
+    }
+
     /// Refresh derived load for every request, retaining the allocation through
     /// selection, booking, and response-field capture, including error paths.
     fn with_projected_loads<R>(
@@ -2375,6 +2442,7 @@ impl<
         handle: impl FnOnce(&Self, &mut SchedulingRequest) -> R,
     ) -> R {
         request.worker_loads = std::mem::take(&mut self.projected_loads);
+        let project_overlap = self.projects_overlap();
         // The host's reject thresholds are judged in the same pass that projects each rank's
         // load, so selection only consults the ranks found full: no second read per rank.
         let full_ranks = match self
@@ -2393,7 +2461,7 @@ impl<
             }
         };
         self.slots.project_worker_loads_into(
-            request.token_seq.as_deref(),
+            request.token_seq.as_deref().filter(|_| project_overlap),
             decay_now,
             &mut request.worker_loads,
             full_ranks,
@@ -2453,6 +2521,11 @@ impl<
             } else {
                 None
             };
+            // Held for this selection, so the snapshot the policy reads borrows live counters.
+            let resident_blocks = self
+                .resident_blocks
+                .get()
+                .map(ResidentBlockCountsHandle::load);
             self.selector
                 .select_worker_prepared(
                     WorkerSelectionInput::configured(
@@ -2460,11 +2533,22 @@ impl<
                         request,
                         eligibility,
                         self.block_size,
-                    ),
+                    )
+                    .with_resident_blocks(resident_blocks.as_deref().map(|counts| &**counts)),
                     prepared,
                     trace,
                 )
                 .map(|(mut selection, selection_trace)| {
+                    // A projection without overlap counts none of the request's blocks as
+                    // new on any rank. Count them for the selected rank alone.
+                    if !self.projects_overlap()
+                        && let Some(token_seq) = request.token_seq.as_deref()
+                        && request.worker_loads.contains_key(&selection.worker)
+                    {
+                        selection.potential_decode_blocks += self
+                            .slots
+                            .additional_active_blocks(token_seq, selection.worker);
+                    }
                     // Measure affinity selections against every eligible worker so cache
                     // metrics still mean "best eligible worker". Explicit pins are not
                     // widened, nor are selectors whose own filters may reject workers.
@@ -2552,7 +2636,10 @@ impl<
                     max_raw_cached_tokens: selected.selection.max_raw_cached_tokens,
                     selected_raw_cached_tokens: selected.selection.selected_raw_cached_tokens,
                     selected_worker_tiers: selected.selected_worker_tiers,
-                    kv_transfer_source: selected.selection.kv_transfer_source,
+                    kv_copy_source: request.kv_copy_source(
+                        selected.selection.worker,
+                        selected.selection.kv_transfer_source,
+                    ),
                     kv_transfer_candidates: request.kv_transfer_candidates.take(),
                     potential_decode_blocks: selected.selection.potential_decode_blocks,
                     selection_trace: selected.selection_trace,
@@ -2621,7 +2708,10 @@ impl<
             max_raw_cached_tokens: selected.selection.max_raw_cached_tokens,
             selected_raw_cached_tokens: selected.selection.selected_raw_cached_tokens,
             selected_worker_tiers: selected.selected_worker_tiers,
-            kv_transfer_source: selected.selection.kv_transfer_source,
+            kv_copy_source: request.kv_copy_source(
+                selected.selection.worker,
+                selected.selection.kv_transfer_source,
+            ),
             kv_transfer_candidates: request.kv_transfer_candidates.take(),
             potential_decode_blocks: selected.selection.potential_decode_blocks,
             selection_trace: selected.selection_trace,
@@ -3796,6 +3886,71 @@ mod tests {
         }
     }
 
+    struct PickWorker {
+        inputs: WorkerInputs,
+        target: WorkerWithDpRank,
+    }
+
+    impl dynamo_worker_selection::WorkerPicker for PickWorker {
+        fn required_worker_inputs(&self) -> WorkerInputs {
+            self.inputs
+        }
+
+        fn pick(
+            &self,
+            _context: &dynamo_worker_selection::WorkerSelectionContext<'_>,
+            input: dynamo_worker_selection::WorkerInputView<'_>,
+        ) -> Result<usize, dynamo_worker_selection::WorkerSelectionPolicyError> {
+            Ok(input
+                .candidates()
+                .iter()
+                .position(|candidate| candidate.worker() == self.target)
+                .unwrap())
+        }
+    }
+
+    #[tokio::test]
+    async fn selected_worker_decode_blocks_count_active_overlap_without_load_rows() {
+        let block_size = 16;
+        let target = WorkerWithDpRank::new(0, 0);
+        let mut decode_blocks = Vec::new();
+        for inputs in [WorkerInputs::LOAD, WorkerInputs::ACTIVE_REQUESTS] {
+            let policy = dynamo_worker_selection::WorkerSelectionPolicy::new(
+                dynamo_worker_selection::SelectionConfig::default(),
+                "test",
+                vec![],
+                Box::new(PickWorker { inputs, target }),
+            );
+            let (queue, slots) = make_queue_with_custom_selector(2, block_size, 64, None, policy);
+            // Four active blocks on the target, the first three shared with the probe.
+            slots
+                .add_request(
+                    dynamo_slot_tracker::SequenceRequest {
+                        request_id: "active".to_string(),
+                        token_sequence: Some(vec![1, 2, 3, 9]),
+                        track_prefill_tokens: true,
+                        expected_output_tokens: None,
+                        prefill_load_hint: None,
+                        worker: target,
+                        lora_name: None,
+                    },
+                    decay_now(),
+                )
+                .unwrap();
+            let (mut probe, _rx) = make_request("probe", 4 * block_size as usize);
+            probe.token_seq = Some(vec![1, 2, 3, 4]);
+            let response = queue
+                .select_without_admission(probe)
+                .await
+                .unwrap()
+                .response;
+            assert_eq!(response.best_worker, target);
+            decode_blocks.push(response.potential_decode_blocks);
+        }
+        // Four active blocks plus the probe's one block not active on the target.
+        assert_eq!(decode_blocks, [5, 5]);
+    }
+
     fn counting_policy(
         prepared_selections: &Arc<AtomicUsize>,
         exclusive_affinity: bool,
@@ -4336,7 +4491,7 @@ mod tests {
     {
         SchedulerQueueActor {
             // Commands go to the queue's own actor; this one sees a closed channel.
-            commands: mpsc::channel(1).1,
+            commands: CommandInbox::new(mpsc::channel(1).1),
             pending: PolicyQueue::with_class_budget_expiry(&queue.profile),
             class_timers: ClassTimers::new(queue.profile.classes().len()),
             cleanup: Arc::clone(&queue.cleanup),
@@ -4365,6 +4520,7 @@ mod tests {
                 &queue.non_max_overlap_selection_observer,
             ),
             selection_trace: Arc::clone(&queue.selection_trace),
+            resident_blocks: Arc::clone(&queue.resident_blocks),
             reject_thresholds: queue.reject_thresholds.clone(),
         }
     }
@@ -5288,6 +5444,31 @@ mod tests {
                 "worker {worker:?} still has {tokens} active tokens"
             );
         }
+    }
+
+    /// A backlog comes out in arrival order within one poll. A receive spends one unit of the
+    /// task's cooperative budget, which runs out after 128: one command per receive would yield.
+    #[tokio::test]
+    async fn inbox_hands_out_a_backlog_in_order_without_yielding() {
+        const BACKLOG: usize = 200;
+        let (tx, rx) = mpsc::channel(BACKLOG);
+        let mut acks = Vec::new();
+        for _ in 0..BACKLOG {
+            let (ack_tx, ack_rx) = oneshot::channel();
+            tx.try_send(AdmissionCommand::Update { ack_tx }).unwrap();
+            acks.push(ack_rx);
+        }
+        let mut inbox = CommandInbox::new(rx);
+        let drain = std::pin::pin!(async {
+            for ack in &mut acks {
+                let Some(AdmissionCommand::Update { ack_tx }) = inbox.next().await else {
+                    panic!("expected a queued update");
+                };
+                ack_tx.send(()).unwrap();
+                ack.try_recv().unwrap();
+            }
+        });
+        assert!(futures_util::poll!(drain).is_ready());
     }
 
     #[tokio::test(flavor = "multi_thread")]
