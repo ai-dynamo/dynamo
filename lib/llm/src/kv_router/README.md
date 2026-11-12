@@ -1,6 +1,6 @@
 # Router Host Layer
 
-This module is the router's host layer. It embeds the selection core from `lib/kv-router`
+This module is the router's host layer. It embeds the selection core from `lib/router/kv-router`
 (scoring, queues, load tracking) and adds what a running request needs around it: session
 affinity, booking ownership, dispatch, cancellation, and the optional encode and prefill hops.
 For which processes embed it and where their boundaries are, see
@@ -38,7 +38,7 @@ RoutingHost
  │   ├─ Kv(KvRouter)                 KV candidate state; selects and books, never dispatches
  │   │   ├─ Indexer                  which blocks each worker holds
  │   │   ├─ RequestLeaseManager      booking leases, reaper
- │   │   └─ EmbeddedSelection → SelectionService / SelectionCore (lib/kv-router)
+ │   │   └─ EmbeddedSelection → SelectionService / SelectionCore (lib/router/kv-router)
  │   │                               classify, queue, score, admit, account load
  │   ├─ Builtin                      round-robin, random, least-loaded
  │   ├─ Direct                       the worker the request names
@@ -150,9 +150,13 @@ errors, which return to the client.
 | Tokens, multimodal block info | `PreprocessedRequest::block_mm_routing_info` |
 | Pins, DP ranks, priority, LoRA, cache namespace, constraints, allowed workers | `PreprocessedRequest::routing` (`RoutingHints`), from `nvext` and `x-dynamo-*` headers |
 | Scoring and accounting overrides | `PreprocessedRequest::router_config_override` |
+| Aggregated prompt-logprob cache credit | `output_options.prompt_logprobs`: when present, including zero, selection conservatively counts the full prompt without cache credit |
 | Excluded workers, parked classifier lifecycle | `PreprocessedRequest::migration_state` |
 | Staged KV that only this decode can release | `PreprocessedRequest::staged_kv_cleanup` |
 | Query-only selection (KV plane) | annotation `query_instance_id` in `PreprocessedRequest::annotations` |
+
+The token-only Runtime EPP selection API has no output options and retains its existing cache
+behavior. Worker sampling options are unaffected by this conservative accounting rule.
 
 ## Admission modes
 

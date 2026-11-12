@@ -7,7 +7,20 @@ SPDX-License-Identifier: Apache-2.0
 
 This experiment compares upstream `2141a9690d670440d729e99771afb2fb53e79284` (B) with the native-tracker revision `80fa97214acd789460baf93a07daaceb31c7f3b4` (P). P enables observation and the experimental `progress_group` picker together; its complete costs are included.
 
-These GPU measurements describe those historical revisions. Subsequent adaptations to main change the selection and stream-processing integration. Its validation is tracked separately; these results do not establish GPU performance for the adapted source.
+These GPU measurements describe those historical revisions. Subsequent adaptations to main change the selection and stream-processing integration. Their validation is tracked separately; these results do not establish GPU performance for the adapted source.
+
+### Modular Router Port: CPU Check
+
+The modular port retains slot-tracker ownership and captures the borrowed view in worker selection immediately before the picker. The ordinary two-tier policy keeps `CACHE | ACTIVE_REQUESTS`; the configured progress experiment additionally requests `LOAD | DECODE_PROGRESS`. Missing native observations still fall back to ordinary selection.
+
+One release Criterion invocation of the existing `progress_group_selection/off,on` cases observed approximately 100 ns and 151 ns per selection, respectively, with 0 and 1 allocation per selection after warmup. These labels disable or enable the policy parameter; both fixtures already contain static native observations and prepopulated loads. They do not toggle or measure frontend collection.
+
+This is descriptive selection-only CPU evidence, with no comparison to an independently built main. It excludes producer mutation, actor projection, queueing, contention and GPU work. It does not establish default-off equivalence or validate current-main GPU performance.
+
+```bash
+cargo bench --locked --offline -p dynamo-router-policies --bench default_selection -- \
+  '^progress_group_selection/(off|on)$' --noplot
+```
 
 ### Fixed experiment
 

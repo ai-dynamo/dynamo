@@ -8,12 +8,10 @@ use std::{
     time::Duration,
 };
 
-use dynamo_kv_router::{
-    plugins::{request_classifier::AbortCause, worker_selection::WorkerInputs},
-    protocols::{TokensWithHashes, WorkerConfigLike, WorkerWithDpRank},
-    scheduling::KvSchedulerError,
-    selector::{HostedSelectionRequest, HostedWorkerPicker},
-};
+use dynamo_admission::host::AbortCause;
+use dynamo_kv_hashing::routing::TokensWithHashes;
+use dynamo_kv_router::plugins::worker_selection::WorkerInputs;
+use dynamo_router_protocol::worker::WorkerWithDpRank;
 use dynamo_runtime::{
     error::{DynamoError, ErrorType, match_error_chain},
     metrics::frontend_perf::{STAGE_ROUTE, StageGuard},
@@ -26,6 +24,8 @@ use dynamo_runtime::{
     },
     protocols::annotated::Annotated,
 };
+use dynamo_scheduler::host::{KvSchedulerError, WorkerConfigLike};
+use dynamo_worker_selection::host::{HostedSelectionRequest, HostedWorkerPicker};
 use futures::stream::{self, StreamExt};
 use tracing::Instrument;
 
@@ -57,7 +57,7 @@ mod kv_selection;
 mod occupancy;
 mod request_guard;
 
-pub(crate) use builder::hosted_picker;
+pub(crate) use builder::{EVERY_ROLE, check_hint_policies_route_on_kv_path, hosted_picker};
 pub use builder::{LlmDispatch, MultimodalCache, RoutingHostBuilder};
 use cancellation::{CleanupBudget, DispatchCancellation, StagedKv, await_with_cleanup_policy};
 pub(crate) use hosted::hosted_request;

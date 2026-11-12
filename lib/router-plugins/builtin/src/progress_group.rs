@@ -4,8 +4,9 @@
 //! Explicitly configured two-worker progress/affinity experiment.
 //! Thresholds are workload calibration, not a completion-time predictor.
 
-use dynamo_kv_router::plugins::WorkerSelectionPolicyProviderError;
-use dynamo_kv_router::plugins::worker_selection::{WorkerInputView, WorkerSelectionContext};
+use dynamo_kv_router::plugins::prelude::{
+    WorkerInputView, WorkerSelectionContext, WorkerSelectionPolicyProviderError,
+};
 use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, serde::Deserialize)]

@@ -3,19 +3,15 @@
 
 use super::*;
 use crate::progress_group::ProgressGroupParameters;
-use dynamo_kv_router::protocols::{RoutingConstraints, WorkerConfigLike, WorkerWithDpRank};
-use dynamo_kv_router::scheduling::{
-    OverlapSignals, ScheduleMode, SessionContext, decode_progress::DecodeProgressUpdate,
-    queue::SchedulerBookingDescriptor,
-};
-use dynamo_kv_router::{
-    ActiveSequencesMultiWorker, NoopSequencePublisher, SchedulingRequest, SequenceRequest,
-    WorkerLoadProjection, WorkerSelectionInput, WorkerSelector,
+use dynamo_scheduler::host::{WorkerSelectionInput, WorkerSelector};
+use dynamo_slot_tracker::host::{
+    ActiveSequencesMultiWorker, DecodeProgressUpdate, NoopSequencePublisher,
+    SchedulerBookingDescriptor, SequenceRequest, WorkerLoadProjection,
 };
 use std::collections::HashMap;
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicU64, AtomicUsize, Ordering},
 };
 use std::time::Duration;
 
@@ -194,7 +190,7 @@ impl Frame {
         slots: &NativeSlots,
     ) -> WorkerWithDpRank {
         let policy = WorkerSelectionPolicy::new(
-            KvRouterConfig::default(),
+            SelectionConfig::default(),
             "prefill",
             Vec::new(),
             Box::new(TwoTierCostFnPicker {
@@ -225,6 +221,13 @@ impl Frame {
 
 #[test]
 fn progress_group_disabled_preserves_original_cache_choice() {
+    let disabled = TwoTierCostFnPicker {
+        parameters: Parameters::default(),
+    };
+    assert_eq!(
+        disabled.required_worker_inputs(),
+        WorkerInputs::CACHE | WorkerInputs::ACTIVE_REQUESTS
+    );
     let frame = Frame::new(Some(128), true);
     assert_eq!(frame.select(None), frame.source);
     assert_eq!(frame.select(Some(parameters())), frame.other);
@@ -422,7 +425,7 @@ fn progress_group_factory_uses_legacy_selection_for_disaggregated_roles() {
         (dynamo_kv_router::WorkerType::Decode, frame.source),
     ] {
         let policy = factory(
-            &config,
+            &SelectionConfig::from(&config),
             role,
             dynamo_kv_router::RoutingPartitionRef::new("model", "default"),
         );
@@ -449,16 +452,12 @@ fn progress_group_factory_uses_legacy_selection_for_disaggregated_roles() {
 }
 
 struct Probe {
-    declare: bool,
+    inputs: WorkerInputs,
     seen: Arc<Mutex<Option<usize>>>,
 }
 impl WorkerPicker for Probe {
     fn required_worker_inputs(&self) -> WorkerInputs {
-        if self.declare {
-            WorkerInputs::DECODE_PROGRESS
-        } else {
-            WorkerInputs::NONE
-        }
+        self.inputs
     }
     fn pick(
         &self,
@@ -473,15 +472,23 @@ impl WorkerPicker for Probe {
 #[test]
 fn progress_group_public_picker_contract_requires_explicit_input_group() {
     let frame = Frame::new(Some(128), true);
-    for declare in [false, true] {
+    for (inputs, declare) in [
+        (WorkerInputs::NONE, false),
+        (WorkerInputs::CACHE | WorkerInputs::RESIDENT_BLOCKS, false),
+        (WorkerInputs::DECODE_PROGRESS, true),
+    ] {
         let seen = Arc::new(Mutex::new(None));
-        let provider = |worker| frame.slots.decode_progress_for_benchmark(worker);
+        let lookups = AtomicUsize::new(0);
+        let provider = |worker| {
+            lookups.fetch_add(1, Ordering::Relaxed);
+            frame.slots.decode_progress_for_benchmark(worker)
+        };
         WorkerSelectionPolicy::new(
-            KvRouterConfig::default(),
+            SelectionConfig::default(),
             "prefill",
             Vec::new(),
             Box::new(Probe {
-                declare,
+                inputs,
                 seen: Arc::clone(&seen),
             }),
         )
@@ -498,6 +505,7 @@ fn progress_group_public_picker_contract_requires_explicit_input_group() {
         )
         .unwrap();
         assert_eq!(*seen.lock().unwrap(), declare.then_some(1));
+        assert_eq!(lookups.load(Ordering::Relaxed), if declare { 2 } else { 0 });
     }
 }
 

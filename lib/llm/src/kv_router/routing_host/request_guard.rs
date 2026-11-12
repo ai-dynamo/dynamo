@@ -24,22 +24,22 @@ use crate::{
     },
     routing_policy::AttemptLease,
 };
-use dynamo_kv_router::{
-    indexer::{ApproximateAcquireMode, ApproximateLruBlock, RoutingDecisionHashes},
-    plugins::request_classifier::AbortCause,
-    protocols::{
-        BlockExtraInfo, BlockHashOptions, WorkerWithDpRank, compute_block_hash_for_seq,
-        compute_next_seq_hash,
-    },
-    scheduling::{RequestLifecycle, decode_progress::DecodeProgressUpdate, queue::BookingHandle},
-    services::selection::affinity::AffinityLease,
+use dynamo_admission::host::AbortCause;
+use dynamo_kv_hashing::multimodal::BlockExtraInfo;
+use dynamo_kv_hashing::routing::{
+    BlockHashOptions, compute_block_hash_for_seq, compute_next_seq_hash,
 };
+use dynamo_kv_indexer::host::{ApproximateAcquireMode, ApproximateLruBlock, RoutingDecisionHashes};
+use dynamo_router_protocol::worker::WorkerWithDpRank;
 use dynamo_runtime::{
     error::DynamoError,
     metrics::frontend_perf::{STAGE_DISPATCH, StageGuard},
     pipeline::OccupancyReservation,
     protocols::annotated::Annotated,
 };
+use dynamo_scheduler::host::{BookingHandle, RequestLifecycle};
+use dynamo_session_affinity::host::AffinityLease;
+use dynamo_slot_tracker::host::DecodeProgressUpdate;
 
 fn decode_progress_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
@@ -833,7 +833,7 @@ impl RequestGuard {
     pub(super) async fn acquire_approximate_lru(
         &mut self,
         hashes: RoutingDecisionHashes,
-    ) -> Result<(), dynamo_kv_router::indexer::KvRouterError> {
+    ) -> Result<(), dynamo_kv_indexer::host::KvRouterError> {
         let parent_hash = hashes.sequence_hashes.last().copied();
         let private_blocks = self
             .output_hashes
@@ -1147,7 +1147,8 @@ mod output_block_tests {
 #[cfg(test)]
 mod output_hash_tests {
     use super::*;
-    use dynamo_kv_router::protocols::{BlockMmObjectInfo, compute_seq_hash_for_block};
+    use dynamo_kv_hashing::multimodal::BlockMmObjectInfo;
+    use dynamo_kv_hashing::routing::compute_seq_hash_for_block;
 
     fn direct_blocks(
         tokens: &[u32],

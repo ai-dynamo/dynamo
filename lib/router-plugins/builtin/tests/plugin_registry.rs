@@ -3,21 +3,12 @@
 
 use std::sync::Arc;
 
-use dynamo_kv_router::plugins::RouterPlugins;
-use dynamo_kv_router::plugins::request_classifier::{
-    ClassifyFuture, ClassifyRequest, RequestClassifier,
-};
-use dynamo_kv_router::plugins::worker_selection::WorkerCandidates;
-use dynamo_kv_router::{KvRouterConfig, RoutingPartitionRef, WorkerType};
+use dynamo_kv_router::plugins::prelude::*;
 
 struct PassThrough;
 
 impl RequestClassifier for PassThrough {
-    fn classify(
-        &mut self,
-        request: ClassifyRequest,
-        _workers: WorkerCandidates<'_>,
-    ) -> ClassifyFuture {
+    fn classify(&mut self, request: ClassifyRequest, _workers: &dyn WorkerView) -> ClassifyFuture {
         Box::pin(async move { Ok(request) })
     }
 }
@@ -83,7 +74,11 @@ worker_selection:
             WorkerType::Decode,
             WorkerType::Encode,
         ] {
-            factory(&config, role, RoutingPartitionRef::new("model", "default"));
+            factory(
+                &SelectionConfig::from(&config),
+                role,
+                RoutingPartitionRef::new("model", "default"),
+            );
         }
     }
 }
@@ -107,4 +102,25 @@ fn registering_named_policies_does_not_replace_the_hosts_default() {
         .unwrap()
         .unwrap();
     assert!(Arc::ptr_eq(&fallback, &resolved));
+}
+
+#[test]
+fn progress_group_resolves_canonical_yaml_and_rejects_missing_fields() {
+    let yaml = include_str!("../../../../examples/router/progress-group.yaml");
+    let (_file, valid) = config(yaml);
+    let mut registry = dynamo_router_policies::default_registry();
+    dynamo_router_policies::register(&mut registry).unwrap();
+    let factory = registry.resolve(&valid).unwrap().unwrap();
+    factory(
+        &SelectionConfig::from(&valid),
+        WorkerType::Aggregated,
+        RoutingPartitionRef::new("model", "default"),
+    );
+    let malformed = yaml.replace("          max_progress_age_ms: 100\n", "");
+    let (_missing_file, missing) = config(&malformed);
+    let error = registry
+        .resolve(&missing)
+        .err()
+        .expect("missing age must fail");
+    assert!(error.to_string().contains("max_progress_age_ms"));
 }
