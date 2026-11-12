@@ -860,6 +860,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn open_watch_reports_reflector_failure_after_readiness() {
+        use crate::discovery::{Discovery, DiscoveryQuery, startup_contract};
+
+        let (client, state_tx) = super::super::tests::client_with(&[]);
+        let (readiness, readiness_sender, _) = fake_watch();
+        let (cr_watch, _cr_sender, _) = fake_watch();
+        let cancel = CancellationToken::new();
+        let task = tokio::spawn(DiscoveryDaemon::run_daemon(
+            ReadinessWatch::EndpointSlice(readiness),
+            cr_watch,
+            cancel.clone(),
+            DaemonOutputs {
+                list_state: client.list_state.clone(),
+                event_tx: client.event_tx.clone(),
+                state_tx,
+            },
+        ));
+        let mut events = tokio::time::timeout(
+            Duration::from_secs(5),
+            client.list_and_watch(DiscoveryQuery::AllEndpoints, None),
+        )
+        .await
+        .expect("both reflectors must initialize")
+        .unwrap();
+        startup_contract::expect_empty_snapshot(&mut events).await;
+
+        drop(readiness_sender);
+        let error = tokio::time::timeout(Duration::from_secs(5), events.next())
+            .await
+            .expect("an open watch must report daemon failure")
+            .expect("the failure must be sent before the watch ends")
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "the Kubernetes discovery daemon failed: Readiness reflector stream stopped"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), events.next())
+                .await
+                .expect("the failed watch must terminate")
+                .is_none()
+        );
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("daemon must join the remaining reflector")
+            .unwrap();
+        assert!(!cancel.is_cancelled());
+    }
+
+    #[tokio::test]
     async fn metadata_stream_end_joins_pending_readiness_reflector() {
         assert_reflectors_stop(KubeDiscoveryMode::Container, Some(false)).await;
     }
