@@ -82,7 +82,7 @@ spec:
             limits:
               cpu: '16'
               memory: 32Gi
-  - name: VllmWorker
+  - name: worker
     type: worker
     runtimeVersionOverride: 1.7.0
     replicas: 1
