@@ -3,13 +3,17 @@
 
 use anyhow::{Context, Result, ensure};
 
-use crate::loadgen::{AgenticProfileOptions, AgenticSnapshotOptions, AgenticTrace, WorkloadDriver};
+use crate::loadgen::{
+    AgenticProfileOptions, AgenticSnapshotOptions, AgenticTrace, AgenticWarmupPolicy,
+    WorkloadDriver,
+};
 
 /// Optional AgentX phases for the existing typed workload replay API.
 #[derive(Clone, Debug)]
 pub struct AgenticReplayOptions {
     pub snapshot: Option<AgenticSnapshotOptions>,
     pub warmup: bool,
+    pub warmup_policy: AgenticWarmupPolicy,
     pub profile: Option<AgenticProfileOptions>,
     pub arrival_speedup_ratio: f64,
 }
@@ -19,6 +23,7 @@ impl Default for AgenticReplayOptions {
         Self {
             snapshot: None,
             warmup: false,
+            warmup_policy: AgenticWarmupPolicy::default(),
             profile: None,
             arrival_speedup_ratio: 1.0,
         }
@@ -49,6 +54,11 @@ impl AgenticReplayOptions {
         ensure!(
             !self.warmup || self.snapshot.is_some(),
             "agentic_warmup requires agentic_snapshot"
+        );
+        ensure!(
+            self.warmup_policy != AgenticWarmupPolicy::LiveTrajectoryV1
+                || (self.warmup && self.profile.is_some()),
+            "live_trajectory_v1 requires agentic_warmup and agentic_profile"
         );
         ensure!(
             self.snapshot.is_none() || lanes.is_some_and(|lanes| lanes > 0),
@@ -85,11 +95,18 @@ impl AgenticReplayOptions {
             snapshot,
         )?;
         let mut driver = if self.warmup {
-            WorkloadDriver::new_agentic_warmup(
+            // Primer idle cap as AISimulate's engine runner sets it.
+            let primer_idle_cap_ms = self
+                .profile
+                .as_ref()
+                .map_or(10_000.0, |profile| profile.global_idle_cap_seconds * 1000.0);
+            WorkloadDriver::new_agentic_warmup_with_policy(
                 prepared,
                 block_size,
                 include_replay_hashes,
                 self.arrival_speedup_ratio,
+                self.warmup_policy,
+                primer_idle_cap_ms,
             )?
         } else {
             WorkloadDriver::new_agentic_snapshots(
@@ -286,6 +303,17 @@ mod tests {
                 None,
                 None,
                 "arrival_speedup_ratio must be finite and greater than zero",
+            ),
+            (
+                AgenticReplayOptions {
+                    snapshot: Some(serde_json::from_value(json!({"seed": 7})).unwrap()),
+                    warmup: true,
+                    warmup_policy: AgenticWarmupPolicy::LiveTrajectoryV1,
+                    ..Default::default()
+                },
+                Some(1),
+                None,
+                "live_trajectory_v1 requires agentic_warmup and agentic_profile",
             ),
         ];
         for (options, lanes, time_limit, expected) in cases {
