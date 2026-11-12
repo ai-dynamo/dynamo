@@ -12,9 +12,11 @@ use dynamo_protocols::types::{
     ChatCompletionMessageToolCallChunk, CustomToolCall, CustomToolCallStream, FinishReason,
     FunctionType,
 };
+use dynamo_runtime::pipeline::AsyncEngineContext;
 use dynamo_runtime::protocols::annotated::Annotated;
 use futures::{Stream, StreamExt};
 use std::collections::{BTreeMap, HashSet};
+use std::sync::Arc;
 
 #[derive(Default)]
 pub(crate) struct ChatCustomToolAdapter {
@@ -200,9 +202,13 @@ impl ChatCustomToolAdapter {
         Ok(())
     }
 
+    /// `source` with each custom tool call projected. A call still open when `source` ends
+    /// is an error, unless `context`, the request's, was killed: a killed stream ends quietly,
+    /// and its response parsers do not close an open call (see `preprocessor::cut`).
     pub(crate) fn stream<S>(
         mut self,
         source: S,
+        context: Arc<dyn AsyncEngineContext>,
     ) -> impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send
     where
         S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send,
@@ -218,7 +224,7 @@ impl ChatCustomToolAdapter {
                     }
                 yield response;
             }
-            if !self.pending.is_empty() {
+            if !self.pending.is_empty() && !context.is_killed() {
                 yield Annotated::from_error("Custom tool stream ended before its completion boundary");
             }
         }
@@ -228,6 +234,12 @@ impl ChatCustomToolAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A request's context that is neither stopped nor killed.
+    fn live() -> Arc<dyn AsyncEngineContext> {
+        use dynamo_runtime::pipeline::AsyncEngineContextProvider;
+        dynamo_runtime::pipeline::Context::new(()).context()
+    }
     use crate::engines::ValidateRequest;
     use serde_json::{Value, json};
 
@@ -332,9 +344,10 @@ mod tests {
                     chunk(1, json!(null), json!("tool_calls")),
                 ];
                 let out: Vec<_> = adapter
-                    .stream(futures::stream::iter(
-                        source.into_iter().map(Annotated::from_data),
-                    ))
+                    .stream(
+                        futures::stream::iter(source.into_iter().map(Annotated::from_data)),
+                        live(),
+                    )
                     .collect()
                     .await;
                 assert!(out.iter().all(|item| !item.is_error()));
@@ -439,7 +452,7 @@ mod tests {
                     {"index":1,"id":"c2","type":"function","function":{"name":"lookup","arguments":"}"}}
                 ]), json!(null))),
                 Annotated::from_data(terminal),
-            ])).collect().await;
+            ]), live()).collect().await;
             assert!(out.iter().all(|item| !item.is_error()), "{arguments:?}");
             let value = serde_json::to_value(out[0].data.as_ref().unwrap()).unwrap();
             assert!(value["choices"][0]["delta"]["tool_calls"].is_null());
@@ -474,7 +487,7 @@ mod tests {
         let adapter = ChatCustomToolAdapter::prepare(&mut request()).unwrap();
         let out: Vec<_> = adapter.stream(futures::stream::iter([Annotated::from_data(chunk(0,
             json!([{"index":0,"id":"c1","type":"function","function":{"name":"run_python","arguments":"{\"input\":\"x\"}"}}]),
-            json!(null)))])).collect().await;
+            json!(null)))]), live()).collect().await;
         assert!(out.last().unwrap().is_error());
     }
 
@@ -493,9 +506,10 @@ mod tests {
             chunk(0, json!(null), json!("tool_calls")),
         ];
         let response = super::super::DeltaAggregator::apply(
-            adapter.stream(futures::stream::iter(
-                source.into_iter().map(Annotated::from_data),
-            )),
+            adapter.stream(
+                futures::stream::iter(source.into_iter().map(Annotated::from_data)),
+                live(),
+            ),
             crate::protocols::openai::ParsingOptions::default(),
         )
         .await
@@ -517,7 +531,7 @@ mod tests {
         let out: Vec<_> = adapter.stream(futures::stream::iter([Annotated::from_data(chunk(0,json!([
             {"index":0,"id":"c1","type":"function","function":{"name":"run_python","arguments":"{\"input\":\"print(1)\"}"}},
             {"index":1,"id":"c2","type":"function","function":{"name":"run_python","arguments":"invalid"}}
-        ]),json!("tool_calls")))])).collect().await;
+        ]),json!("tool_calls")))]), live()).collect().await;
         assert!(out.iter().all(|item| !item.is_error()));
         let value = serde_json::to_value(out[0].data.as_ref().unwrap()).unwrap();
         assert!(
@@ -541,7 +555,7 @@ mod tests {
             let out: Vec<_> = adapter.stream(futures::stream::iter([Annotated::from_data(chunk(
                 0, json!([{"index":0,"id":"c1","type":"function","function":{"name":"run_python","arguments":arguments}}]),
                 json!("length"),
-            ))])).collect().await;
+            ))]), live()).collect().await;
             assert!(out.iter().all(|item| !item.is_error()));
             let value = serde_json::to_value(out[0].data.as_ref().unwrap()).unwrap();
             assert_eq!(value["choices"][0]["finish_reason"], "length");
@@ -582,7 +596,7 @@ mod tests {
                             json!([{"index":0,"id":"c1","type":"function","function":{"name":"run_python"}}]),
                             json!(null))),
                         Annotated::from_data(chunk(0, json!(null), json!(finish))),
-                    ]))
+                    ]), live())
                     .collect()
                     .await;
                 // No earlier chunk may advertise an executable empty custom call either.
@@ -607,7 +621,7 @@ mod tests {
                 0,
                 json!([{"index":0,"id":"c1","type":"function","function":{"name":"run_python","arguments":"{\"input\":\"print(1)\"}"}}]),
                 json!("tool_calls"),
-            ))]))
+            ))]), live())
             .collect()
             .await;
         let value = serde_json::to_value(out[0].data.as_ref().unwrap()).unwrap();

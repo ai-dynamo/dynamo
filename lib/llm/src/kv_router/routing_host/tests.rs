@@ -5917,3 +5917,80 @@ async fn committed_session_lease_lives_as_long_as_the_response_stream() {
     drop(router);
     runtime.shutdown();
 }
+
+/// How the classifier sees a request whose worker sends one token and then ends its stream
+/// cleanly, after `at_end` is done to the request's context.
+async fn classified_after(at_end: fn(&dyn AsyncEngineContext)) -> ClassifierObservation {
+    let (observations_tx, mut observations_rx) = mpsc::unbounded_channel();
+    let (router, runtime) = router_with_classifier(
+        RecordingClassifier {
+            calls: Arc::new(AtomicUsize::new(0)),
+            observations: observations_tx,
+        },
+        None,
+    )
+    .await;
+    let request = Context::new(request());
+    let (mut selection, operation) = router
+        .select_with_affinity(
+            &request,
+            RequestPhase::Aggregated,
+            false,
+            &CleanupBudget::default(),
+        )
+        .await
+        .unwrap();
+    let context = request.context();
+    let signalled = Arc::clone(&context);
+    let source = ResponseStream::new(
+        Box::pin(async_stream::stream! {
+            yield Annotated::from_data(LLMEngineOutput {
+                token_ids: vec![2],
+                ..Default::default()
+            });
+            at_end(signalled.as_ref());
+        }),
+        Arc::clone(&context),
+    );
+    let guard = RequestGuard::new_kv_with_cleanup(
+        Arc::clone(&router.request_metrics),
+        KvRequestCleanup::new(
+            Arc::clone(router.kv_router()),
+            request.id().to_string(),
+            selection.worker,
+            None,
+        ),
+        &request,
+        RequestPhase::Aggregated,
+        None,
+        selection.request_lifecycle.take(),
+    );
+    let monitored: Vec<_> = monitor_response_stream(source, context, guard)
+        .collect()
+        .await;
+    assert!(!monitored.is_empty(), "the token reaches the caller");
+    let observation = tokio::time::timeout(Duration::from_secs(5), observations_rx.recv())
+        .await
+        .expect("the classifier hears how the request ended")
+        .expect("the classifier is open");
+
+    drop(operation);
+    drop(router);
+    runtime.shutdown();
+    observation
+}
+
+/// A kill before the worker's stream ends cleanly: the request is aborted, never reported
+/// complete. A request with no signal is the control.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_kill_before_a_clean_end_aborts_rather_than_completes() {
+    assert!(matches!(
+        classified_after(|_| {}).await,
+        ClassifierObservation::Completed(_)
+    ));
+    assert_eq!(
+        classified_after(|context| context.kill()).await,
+        ClassifierObservation::Aborted { cause: None }
+    );
+}

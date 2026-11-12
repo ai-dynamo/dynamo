@@ -11,6 +11,7 @@
 //!
 //! The Preprocessor will accept any IngressRequest and transform it to a BackendRequest.
 
+mod cut;
 mod edit;
 pub mod media;
 #[cfg(feature = "mm-routing")]
@@ -5879,7 +5880,11 @@ impl OpenAIPreprocessor {
         guided_tool_constraint: crate::protocols::openai::GuidedToolConstraint,
         tool_processing_route: ToolProcessingRoute,
     ) -> anyhow::Result<
-        impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
+        Pin<
+            Box<
+                dyn Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
+            >,
+        >,
     >
     where
         S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
@@ -6220,6 +6225,7 @@ impl OpenAIPreprocessor {
             trace_finish_reason_metadata,
             mm_counts,
             None,
+            cut::OnKill::Ignore,
         )
     }
 
@@ -6234,6 +6240,7 @@ impl OpenAIPreprocessor {
         trace_finish_reason_metadata: Option<crate::request_trace::SharedFinishReasonMetadata>,
         mm_counts: MultimodalCounts,
         image_tokens: Option<usize>,
+        on_kill: cut::OnKill,
     ) -> impl Stream<Item = Annotated<Resp>> + Send
     where
         S: Stream<Item = Annotated<BackendOutput>> + Send + Unpin + 'static,
@@ -6283,6 +6290,7 @@ impl OpenAIPreprocessor {
             trace_finish_reason_metadata: Option<crate::request_trace::SharedFinishReasonMetadata>,
             mm_counts: MultimodalCounts,
             image_tokens: Option<usize>,
+            on_kill: cut::OnKill,
         }
 
         let tracker = generator.tracker();
@@ -6302,6 +6310,7 @@ impl OpenAIPreprocessor {
             trace_finish_reason_metadata,
             mm_counts,
             image_tokens,
+            on_kill,
         };
 
         /// The response stream. `state` is `None` once the stream has ended, so the state,
@@ -6475,6 +6484,17 @@ impl OpenAIPreprocessor {
                     // The stream has ended. Set `finished` so the exhausted `response_stream`
                     // is not polled again.
                     self.finished = true;
+
+                    // A killed request ends its stream cleanly too, and its answer is not
+                    // whole: write nothing more. Checked once, here.
+                    if let cut::OnKill::End(cut) = &self.on_kill
+                        && self.context.is_killed()
+                    {
+                        if let Some(cut) = cut {
+                            cut.set();
+                        }
+                        return Poll::Ready(None);
+                    }
 
                     if self.finish_reason_sent && !self.usage_chunk_sent {
                         self.usage_chunk_sent = true;
@@ -8770,6 +8790,16 @@ impl
         // Extract context once
         let context = response_stream.context();
 
+        // Whether the request was killed is decided once, where the response stream ends (see
+        // `transform_postprocessor_stream_with_image_tokens`). The response parsers and the
+        // payload capture write on that end too, so they read the decision through a shared
+        // flag: allocated only when one of them runs, never on the default path. Every parser
+        // that writes on end runs only with a reasoning parser or a tool-call route (see
+        // `postprocessor_parsing_stream_with_constraint`).
+        let parsers_write_on_end = self.runtime_config.reasoning_parser.is_some()
+            || !matches!(tool_processing_route, ToolProcessingRoute::PassThrough);
+        let cut = (parsers_write_on_end || payload_handle.is_some()).then(cut::CutFlag::default);
+
         // transform the postprocessor stream (no boxing yet) - detokenize
         let stream = Self::transform_postprocessor_stream_with_image_tokens(
             response_stream,
@@ -8780,6 +8810,7 @@ impl
             trace_finish_reason_metadata,
             mm_counts,
             image_tokens,
+            cut::OnKill::End(cut.clone()),
         );
 
         let transformed_stream = self.postprocessor_parsing_stream_with_constraint(
@@ -8789,6 +8820,12 @@ impl
             guided_tool_constraint,
             tool_processing_route,
         )?;
+        // The parsers' closing output, such as a tool call closed at the end, ends with them.
+        // Their stream is already a box, so the default path adds no allocation here.
+        let transformed_stream = match cut.as_ref().filter(|_| parsers_write_on_end) {
+            Some(cut) => Box::pin(cut::UntilCut::new(transformed_stream, cut.clone())),
+            None => transformed_stream,
+        };
         let transformed_stream = Self::normalize_chat_stream_roles(transformed_stream);
 
         // Request payload capture is a pass-through: every chunk reaches the HTTP
@@ -8805,8 +8842,12 @@ impl
 
             // Spawn the payload emit off the request path. The outcome carries a drop
             // reason and any recovered partial response, so emit the record either way.
+            let cut = cut.expect("payload capture shares the cut flag");
             tokio::spawn(async move {
-                let outcome = agg_fut.await;
+                let mut outcome = agg_fut.await;
+                if cut.is_set() {
+                    outcome.drop_reason = Some(cut::DROP_CUT_SHORT.to_string());
+                }
                 if let Some(reason) = outcome.drop_reason.as_deref() {
                     tracing::debug!(
                         request_id = %payload.request_id(),
@@ -8998,6 +9039,7 @@ impl
             trace_finish_reason_metadata,
             MultimodalCounts::default(),
             None,
+            cut::OnKill::End(None),
         );
 
         let stream =
