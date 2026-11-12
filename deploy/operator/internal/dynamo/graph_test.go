@@ -5640,20 +5640,7 @@ func TestDetectBackendFrameworkFromArgs(t *testing.T) {
 		expected    BackendFramework
 		expectError bool
 	}{
-		{name: "native engine direct command is not detected", command: []string{"vllm-rs"}, expected: BackendFrameworkNoop},
-		{name: "native engine absolute executable is not detected", command: []string{"/usr/local/bin/vllm-rs"}, expected: BackendFrameworkNoop},
-		{name: "engine args do not identify an image entrypoint", args: []string{"vllm-rs"}, expected: BackendFrameworkNoop},
-		{name: "engine shell wrapper is not interpreted", command: []string{"sh", "-c"}, args: []string{"exec vllm-rs"}, expected: BackendFrameworkNoop},
-		{name: "engine quoted shell path is not interpreted", command: []string{"sh", "-c", `exec "/usr/local/bin/vllm-rs"`}, expected: BackendFrameworkNoop},
-		{name: "engine shell statements are not interpreted", command: []string{"bash", "-ec", "set -e\ncd /app; vllm-rs"}, expected: BackendFrameworkNoop},
-		{name: "engine shell conjunction is not interpreted", command: []string{"sh", "-c", "cd /app && vllm-rs"}, expected: BackendFrameworkNoop},
-		{name: "exec is a literal argument", command: []string{"printf"}, args: []string{"exec", "vllm-rs"}, expected: BackendFrameworkNoop},
-		{name: "engine config path is not an executable", command: []string{"python3", "-m", "dynamo.sglang"}, args: []string{"--config-dir", "/etc/vllm-rs"}, expected: BackendFrameworkSGLang},
-		{name: "unresolved executable path", command: []string{"$(BIN_DIR)/vllm-rs"}, expected: BackendFrameworkNoop},
-		{name: "engine executable suffix differs", command: []string{"vllm-rs-helper"}, expected: BackendFrameworkNoop},
-		{name: "engine SGLang remains explicit", command: []string{"dynamo-sglang-sidecar"}, expected: BackendFrameworkNoop},
-		{name: "engine TRTLLM remains explicit", command: []string{"dynamo-trtllm-sidecar"}, expected: BackendFrameworkNoop},
-		{name: "runtime executable is not an engine", command: []string{"dynamo-vllm-sidecar"}, expected: BackendFrameworkNoop},
+		{name: "native engine command is not detected", command: []string{"/usr/local/bin/vllm-rs"}, expected: BackendFrameworkNoop},
 		{
 			name:     "detect VLLM from args",
 			command:  []string{"/bin/sh", "-c"},

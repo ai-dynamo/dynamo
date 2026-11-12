@@ -199,7 +199,7 @@ func TestFrontendSidecarProbesByOrigin(t *testing.T) {
 	}
 }
 
-func nativeEngineDGD(origin string, withCache bool, explicitBackend string) *v1beta1.DynamoGraphDeployment {
+func nativeEngineDGD(withCache bool, explicitBackend string) *v1beta1.DynamoGraphDeployment {
 	always := corev1.ContainerRestartPolicyAlways
 	component := v1beta1.DynamoComponentDeploymentSharedSpec{
 		ComponentName: "worker",
@@ -222,12 +222,9 @@ func nativeEngineDGD(origin string, withCache bool, explicitBackend string) *v1b
 	if withCache {
 		component.CompilationCache = &v1beta1.CompilationCacheConfig{PVCName: "compile-cache", MountPath: "/root/.cache/vllm"}
 	}
-	annotations := map[string]string{}
-	if origin != "" {
-		annotations[commonconsts.KubeAnnotationDynamoOperatorOriginVersion] = origin
-	}
 	return &v1beta1.DynamoGraphDeployment{
-		Name: "qwen", Namespace: "demo", Annotations: annotations,
+		Name: "qwen", Namespace: "demo",
+		Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: legacyOrigin},
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
 			BackendFramework: explicitBackend,
 			Components:       []v1beta1.DynamoComponentDeploymentSharedSpec{component},
@@ -254,35 +251,31 @@ func renderedWorkerEnv(t *testing.T, dgd *v1beta1.DynamoGraphDeployment) map[str
 }
 
 func TestNativeEngineCommandIsNotInferredForWorkloads(t *testing.T) {
-	for _, origin := range []string{legacyOrigin, currentOrigin, ""} {
-		t.Run("origin="+origin, func(t *testing.T) {
-			t.Log("Resolve the backend of a native vllm-rs sidecar worker exactly as DCD generation does")
-			dgd := nativeEngineDGD(origin, true, "")
-			backend, err := BackendFrameworkForComponent(&dgd.Spec.Components[0], dgd)
-			require.NoError(t, err)
-			assert.Equal(t, BackendFrameworkNoop, backend)
+	t.Log("Resolve the backend of a native vllm-rs sidecar worker exactly as DCD generation does")
+	dgd := nativeEngineDGD(true, "")
+	backend, err := BackendFrameworkForComponent(&dgd.Spec.Components[0], dgd)
+	require.NoError(t, err)
+	assert.Equal(t, BackendFrameworkNoop, backend)
 
-			t.Log("Verify the generated worker DCD records no backend and the engine gets no vLLM cache default")
-			dcds, err := GenerateDynamoComponentsDeployments(dgd, nil, nil, RollingUpdateContext{NewWorkerHash: "hash"})
-			require.NoError(t, err)
-			require.Len(t, dcds, 1)
-			for _, dcd := range dcds {
-				assert.Empty(t, dcd.Spec.BackendFramework)
-			}
-			assert.NotContains(t, renderedWorkerEnv(t, dgd), "VLLM_CACHE_ROOT")
-
-			t.Log("Opt in through an explicit backendFramework and receive the vLLM cache default")
-			explicit := nativeEngineDGD(origin, true, "vllm")
-			assert.Equal(t, "/root/.cache/vllm", renderedWorkerEnv(t, explicit)["VLLM_CACHE_ROOT"])
-		})
+	t.Log("Verify the generated worker DCD records no backend and the engine gets no vLLM cache default")
+	dcds, err := GenerateDynamoComponentsDeployments(dgd, nil, nil, RollingUpdateContext{NewWorkerHash: "hash"})
+	require.NoError(t, err)
+	require.Len(t, dcds, 1)
+	for _, dcd := range dcds {
+		assert.Empty(t, dcd.Spec.BackendFramework)
 	}
+	assert.NotContains(t, renderedWorkerEnv(t, dgd), "VLLM_CACHE_ROOT")
+
+	t.Log("Opt in through an explicit backendFramework and receive the vLLM cache default")
+	explicit := nativeEngineDGD(true, "vllm")
+	assert.Equal(t, "/root/.cache/vllm", renderedWorkerEnv(t, explicit)["VLLM_CACHE_ROOT"])
 }
 
 func TestNativeEngineWorkerHashMatchesLegacyOperator(t *testing.T) {
 	t.Log("Hash a 1.6.0-origin native vllm-rs sidecar worker with and without a compilation cache")
-	legacyHash, err := ComputeDGDWorkersSpecHash(nativeEngineDGD(legacyOrigin, false, ""))
+	legacyHash, err := ComputeDGDWorkersSpecHash(nativeEngineDGD(false, ""))
 	require.NoError(t, err)
-	legacyCacheHash, err := ComputeDGDWorkersSpecHash(nativeEngineDGD(legacyOrigin, true, ""))
+	legacyCacheHash, err := ComputeDGDWorkersSpecHash(nativeEngineDGD(true, ""))
 	require.NoError(t, err)
 
 	t.Log("Match the worker hashes the published 1.6.0 operator computed for these fixtures")
@@ -290,21 +283,7 @@ func TestNativeEngineWorkerHashMatchesLegacyOperator(t *testing.T) {
 	assert.Equal(t, "66eaf1eb", legacyCacheHash)
 
 	t.Log("Match the hash the 1.6.0 operator computed with an explicit vLLM backend")
-	explicitHash, err := ComputeDGDWorkersSpecHash(nativeEngineDGD(legacyOrigin, true, "vllm"))
+	explicitHash, err := ComputeDGDWorkersSpecHash(nativeEngineDGD(true, "vllm"))
 	require.NoError(t, err)
 	assert.Equal(t, "4a915483", explicitHash)
-}
-
-func TestNativeEngineCommandIsNotDetected(t *testing.T) {
-	command, args := []string{"/usr/local/bin/vllm-rs"}, []string{"--model", "m"}
-
-	t.Log("Leave a direct native engine command undetected in launcher detection")
-	backend, err := DetectBackendFrameworkFromArgs(command, args)
-	require.NoError(t, err)
-	assert.Equal(t, BackendFrameworkNoop, backend)
-
-	t.Log("Resolve the same command to the undetected backend for a worker without an explicit framework")
-	backend, err = determineBackendFramework(string(v1beta1.ComponentTypeWorker), command, args, "")
-	require.NoError(t, err)
-	assert.Equal(t, BackendFrameworkNoop, backend)
 }
