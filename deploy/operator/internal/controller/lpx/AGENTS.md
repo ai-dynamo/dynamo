@@ -288,6 +288,12 @@ SPDX-License-Identifier: Apache-2.0
   owes exactly one replacement, and a fabric pod with two or more positions
   always keeps a bound Cyborg Pod. With one position, the fabric pod has no
   bound Cyborg Pod until the replacement binds.
+- Wait for Grove before each removal: `status.observedGeneration` must equal
+  the PodClique generation, and `status.replicas` must equal the placement
+  total. Between the surplus deletion and the lower capacity, Grove creates
+  Pods for the removed ones, and it removes them when it observes the capacity.
+  A removal in that time lets one of them stay with an index that is not the
+  lowest one, and the step then needs one more replacement.
 - Never remove a Ready Pod to renumber it: it serves with the index that it
   has. The Pods that stay after a prune are not Ready, because a Cyborg starts
   after its Agents, and a pipeline-parallel Cyborg with an index out of range

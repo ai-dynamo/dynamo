@@ -353,7 +353,7 @@ func (r *graphReconciler) reconcileCyborgPlacement(
 	if !placement.renumber {
 		return changed, nil
 	}
-	pod := cyborgPodToRenumber(live, placement)
+	pod := cyborgPodToRenumber(clique, live, placement)
 	if pod == nil {
 		return changed, nil
 	}
@@ -366,7 +366,8 @@ func (r *graphReconciler) reconcileCyborgPlacement(
 
 // cyborgPodToRenumber returns the Pod that the controller removes next so that the
 // Pods of a placement get the Grove indexes below its total, or nil when it
-// removes none now. live holds every live Pod of the PodClique in index order.
+// removes none now. clique is the non-nil PodClique, whose capacity is the total,
+// and live holds every live Pod of it in index order.
 //
 // Grove gives a new Pod the lowest free index of its PodClique, and the placement
 // gate holds that Pod until the controller pins it to the one open position. So
@@ -379,9 +380,15 @@ func (r *graphReconciler) reconcileCyborgPlacement(
 // Ready Pod stays, because it serves with the index that it has. The first fabric
 // pod in name order that has such a Pod goes first, lowest index first, so one
 // fabric pod is complete before the next one starts and takes consecutive indexes.
-func cyborgPodToRenumber(live []*corev1.Pod, placement cyborgPlacement) *corev1.Pod {
+func cyborgPodToRenumber(clique *grovev1alpha1.PodClique, live []*corev1.Pod, placement cyborgPlacement) *corev1.Pod {
 	total := int(placement.total())
-	if len(live) != total {
+
+	// Grove must have synchronized the PodClique at this capacity and must count the
+	// same Pods. After a prune it can still hold Pods that it created for the removed
+	// ones before it observed the lower capacity. A removal in that time lets one of
+	// them stay, with an index that is not the lowest one.
+	observed := clique.Status.ObservedGeneration
+	if observed == nil || *observed != clique.Generation || int(clique.Status.Replicas) != total || len(live) != total {
 		return nil
 	}
 
