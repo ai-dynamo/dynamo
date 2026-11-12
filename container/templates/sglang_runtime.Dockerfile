@@ -458,6 +458,59 @@ RUN set -eux; \
     python3 -c 'import soundfile, torchaudio; from PIL import Image'
 {% endif %}
 
+{% if device == "cuda" and target == "runtime" %}
+# Dynamo does not use the inherited legacy router. Keep the current gateway,
+# and fail if a future base makes the removed distribution a required dependency.
+RUN python3 - <<'PYTHON'
+import importlib.metadata as metadata
+import subprocess
+import sys
+
+from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
+
+removed = "sglang-router"
+distributions = list(metadata.distributions())
+legacy = [d for d in distributions if canonicalize_name(d.metadata["Name"]) == removed]
+for dist in distributions:
+    name = dist.metadata["Name"]
+    if canonicalize_name(name) == removed:
+        continue
+    for requirement in map(Requirement, dist.requires or ()):
+        if canonicalize_name(requirement.name) == removed and (
+            requirement.marker is None or requirement.marker.evaluate({"extra": ""})
+        ):
+            raise SystemExit(f"Cannot remove {removed}: {name} requires {requirement}")
+    if canonicalize_name(name) == "sglang-gateway":
+        gateway_files = {dist.locate_file(path).resolve() for path in dist.files or ()}
+        for old in legacy:
+            shared = gateway_files & {
+                old.locate_file(path).resolve() for path in old.files or ()
+            }
+            if shared:
+                raise SystemExit(
+                    f"Cannot remove {removed}: files shared with {name}: {sorted(map(str, shared))}"
+                )
+if legacy:
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "uninstall",
+            "--yes",
+            "--break-system-packages",
+            removed,
+        ],
+        check=True,
+    )
+if any(
+    canonicalize_name(d.metadata["Name"]) == removed for d in metadata.distributions()
+):
+    raise SystemExit(f"{removed} remains installed")
+PYTHON
+{% endif %}
+
 USER dynamo
 ARG DYNAMO_COMMIT_SHA
 ENV DYNAMO_COMMIT_SHA=${DYNAMO_COMMIT_SHA}
