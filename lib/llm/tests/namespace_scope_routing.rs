@@ -8,7 +8,6 @@ use std::time::Duration;
 
 use anyhow::Result;
 use dynamo_llm::discovery::{ModelManager, ModelWatcher};
-use dynamo_llm::entrypoint::RouterConfig;
 use dynamo_llm::http::service::service_v2::HttpService;
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::model_type::{ModelInput, ModelType};
@@ -17,6 +16,7 @@ use dynamo_llm::protocols::Annotated;
 use dynamo_llm::protocols::openai::chat_completions::{
     NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
 };
+use dynamo_llm::router_config::RouterConfig;
 use dynamo_llm::worker_type::WorkerType;
 use dynamo_runtime::component::StartedEndpoint;
 use dynamo_runtime::discovery::{

@@ -12,15 +12,12 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use dynamo_kv_router::config::KvRouterConfig;
-use dynamo_runtime::{discovery::ModelCardInstanceId, pipeline::RouterMode};
+use dynamo_runtime::discovery::ModelCardInstanceId;
 use dynamo_scheduler::host::PrefillLoadEstimator;
-use serde::{Deserialize, Serialize};
 
 use crate::{
-    admission_gate::WorkerAdmissionGate, backend::ExecutionContext, discovery::LoadThresholdConfig,
-    engines::StreamingEngine, local_model::LocalModel, model_card::ModelDeploymentCard,
-    session_affinity::SessionAffinityMode,
+    admission_gate::WorkerAdmissionGate, backend::ExecutionContext, engines::StreamingEngine,
+    local_model::LocalModel, model_card::ModelDeploymentCard,
     types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine,
 };
 
@@ -42,52 +39,6 @@ pub type ChatEngineFactoryCallback = Arc<
         > + Send
         + Sync,
 >;
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct RouterConfig {
-    pub router_mode: RouterMode,
-    pub kv_router_config: KvRouterConfig,
-    /// Load threshold configuration for overload detection
-    pub load_threshold_config: LoadThresholdConfig,
-    /// Deprecated compatibility field. Routing and readiness ignore this value.
-    #[serde(default)]
-    pub enforce_disagg: bool,
-    #[serde(default)]
-    pub session_affinity_ttl_secs: Option<u64>,
-    #[serde(default)]
-    pub session_affinity_mode: SessionAffinityMode,
-}
-
-impl RouterConfig {
-    pub fn new(router_mode: RouterMode, kv_router_config: KvRouterConfig) -> Self {
-        Self {
-            router_mode,
-            kv_router_config,
-            load_threshold_config: LoadThresholdConfig::default(),
-            enforce_disagg: false,
-            session_affinity_ttl_secs: None,
-            session_affinity_mode: SessionAffinityMode::Hard,
-        }
-    }
-
-    pub fn with_load_threshold_config(mut self, config: LoadThresholdConfig) -> Self {
-        self.load_threshold_config = config;
-        self
-    }
-
-    #[deprecated(
-        note = "enforce_disagg is ignored; topology and readiness come from registered worker types"
-    )]
-    pub fn with_enforce_disagg(mut self, enforce_disagg: bool) -> Self {
-        self.enforce_disagg = enforce_disagg;
-        self
-    }
-
-    pub fn with_session_affinity_ttl_secs(mut self, ttl_secs: u64) -> Self {
-        self.session_affinity_ttl_secs = Some(ttl_secs);
-        self
-    }
-}
 
 #[derive(Clone)]
 pub enum EngineConfig {

@@ -58,8 +58,8 @@ use rs::pipeline::{AsyncEngine, SingleIn};
 use rs::protocols::annotated::Annotated as RsAnnotated;
 use tracing::Instrument;
 
-use llm_rs::discovery::LoadThresholdConfig as RsLoadThresholdConfig;
 use llm_rs::kv_router::RoutingHost;
+use llm_rs::router_config::LoadThresholdConfig as RsLoadThresholdConfig;
 type RsRoutingHost = RoutingHost;
 type RsManagedKvRouter = llm_rs::kv_router::ManagedKvRouter;
 use llm_rs::kv_router::publisher::{KvEventSourceConfig, create_stored_blocks};

@@ -17,13 +17,13 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use crate::common::checked_file::CheckedFile;
-use crate::entrypoint::RouterConfig;
 use crate::local_model::runtime_config::{
     ModelRuntimeConfig, SGLANG_GENERATE_CAPABILITY, SGLANG_SYSTEMONE_SERIAL_V1,
     SPEC_DECODE_RUNTIME_KEY, TokenizerBackend, VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
 };
 use crate::model_type::{ModelInput, ModelType};
 use crate::protocols::tensor::TensorModelConfig;
+use crate::router_config::RouterConfig;
 use crate::utils::json::canonicalize_json_object_keys;
 use anyhow::{Context, Result};
 use derive_builder::Builder;
@@ -3979,7 +3979,7 @@ mod ownership_tests {
 
     #[test]
     fn prefill_load_model_wire_aliases_preserve_card_and_mdcsum() {
-        use crate::entrypoint::RouterConfig;
+        use crate::router_config::RouterConfig;
         use dynamo_runtime::pipeline::RouterMode;
         use dynamo_scheduler::host::RouterPrefillLoadModel;
 

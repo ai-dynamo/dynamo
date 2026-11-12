@@ -14,7 +14,7 @@ use std::time::Duration;
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_runtime::pipeline::RouterMode;
 
-use crate::entrypoint::RouterConfig;
+use crate::router_config::RouterConfig;
 use crate::session_affinity::SessionAffinityMode;
 use crate::worker_type::WorkerType;
 

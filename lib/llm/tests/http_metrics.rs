@@ -1236,7 +1236,7 @@ mod integration_tests {
         let model_watcher = ModelWatcher::new(
             distributed_runtime.clone(),
             service.state().manager_clone(),
-            dynamo_llm::entrypoint::RouterConfig::default(),
+            dynamo_llm::router_config::RouterConfig::default(),
             0,    // migration_limit
             None, // migration_max_seq_len
             None,
@@ -1415,7 +1415,7 @@ mod integration_tests {
             let watcher = ModelWatcher::new(
                 distributed_runtime.clone(),
                 service.state().manager_clone(),
-                dynamo_llm::entrypoint::RouterConfig::default(),
+                dynamo_llm::router_config::RouterConfig::default(),
                 0, // migration_limit
                 None,
                 service.state().metrics_clone(),

@@ -14,12 +14,12 @@ use rand::Rng;
 use serde::Serialize;
 
 use super::ModelManagerError;
-use super::worker_monitor::LoadThresholdConfig;
 use super::worker_set::WorkerSet;
 use crate::local_model::runtime_config::VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY;
 use crate::model_card::ModelDeploymentCard;
 use crate::preprocessor::OpenAIPreprocessor;
 use crate::protocols::openai::ParsingOptions;
+use crate::router_config::LoadThresholdConfig;
 
 use crate::types::{
     RealtimeBidirectionalEngine,
