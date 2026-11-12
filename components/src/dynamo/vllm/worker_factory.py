@@ -2094,6 +2094,7 @@ class WorkerFactory:
             engine=engine_client,
             config=config,
             shutdown_event=shutdown_event,
+            generate_endpoint=generate_endpoint,
         )
 
         embedding_health_check_payload = VllmEmbeddingHealthCheckPayload(
