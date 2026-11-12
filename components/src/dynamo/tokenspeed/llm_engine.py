@@ -43,6 +43,7 @@ from dynamo.common.backend.engine import (
 from dynamo.common.backend.publisher import KvEventSource, ZmqSource
 from dynamo.common.backend.worker import WorkerConfig
 from dynamo.common.constants import DisaggregationMode
+from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.common.utils.structural_tag import serialize_structural_tag
 from dynamo.common.utils.token_ids import normalize_request_token_ids
@@ -54,7 +55,6 @@ from dynamo.tokenspeed.disagg import (
     bootstrap_kwargs,
     resolve_disaggregation_mode,
     runtime_disaggregated_endpoint,
-    validate_disagg_compatibility,
 )
 from dynamo.tokenspeed.kv_events import (
     kv_event_source,
@@ -74,12 +74,13 @@ _SEND_TIMEOUT_S = 60.0
 _SHUTDOWN_GRACE_S = 60.0
 # The status code TokenSpeed puts on an abort that refuses a client error.
 _CLIENT_ERROR_STATUS = 400
-# How long an aborted request waits for the engine's final chunk. The pinned
-# TokenSpeed client sends none for a request aborted while still queued
-# (lightseekorg/tokenspeed#3227), so the stream ends on its own after this.
-_ABORT_GRACE_S = 5.0
-# Put on a request's stream when its abort went unanswered for the grace period.
-_ABORT_UNANSWERED = object()
+# Temporary, until the TokenSpeed pin includes lightseekorg/tokenspeed#3227
+# (ai-dynamo/dynamo#18571): the pinned client sends no final chunk for a
+# request aborted while still queued, so abort() ends the stream itself if the
+# engine has not within this grace. The Rust EngineAdapter gives abort() 5 s.
+_ABORT_GRACE_S = 3.0
+# Per-token NVTX ranges are guarded on this so they cost one branch when off.
+_NVTX = _nvtx.ENABLED
 
 
 class TokenspeedLLMEngine(LLMEngine):
@@ -103,9 +104,11 @@ class TokenspeedLLMEngine(LLMEngine):
         self.frontend: Any = None
         self._process: subprocess.Popen | None = None
         self._encoder: Any = None
-        # Each in-flight request's outputs, by request id.
-        self._streams: dict[str, asyncio.Queue] = {}
-        self._cancelled: set[str] = set()
+        self._request_cls: Any = None
+        self._sampling_params_cls: Any = None
+        # Each in-flight request's state, by request id: the one place a
+        # request lives in the worker, removed when its generate() ends.
+        self._requests: dict[str, _Request] = {}
         self._background: set[asyncio.Task] = set()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._dispatcher: asyncio.Task | None = None
@@ -137,13 +140,6 @@ class TokenspeedLLMEngine(LLMEngine):
 
     async def start(self, worker_id: int) -> EngineConfig:
         del worker_id
-        validate_disagg_compatibility(self.disaggregation_mode, self.server_args)
-        if is_follower_node(self.server_args):
-            raise ValueError(
-                "A TokenSpeed node other than the first runs its engine ranks "
-                "only; start it through `python -m dynamo.tokenspeed`, which "
-                "launches them without registering a worker"
-            )
         bootstrap_host, bootstrap_port = None, None
         if self.disaggregation_mode == DisaggregationMode.PREFILL:
             self._bootstrap_endpoint = runtime_disaggregated_endpoint(self.server_args)
@@ -152,7 +148,10 @@ class TokenspeedLLMEngine(LLMEngine):
 
         native = _tokenspeed_engine_module()
         self._loop = asyncio.get_running_loop()
-        self._encoder = _io_struct_module().MsgpackEncoder()
+        io_struct = _io_struct_module()
+        self._encoder = io_struct.MsgpackEncoder()
+        self._request_cls = io_struct.TokenizedGenerateReqInput
+        self._sampling_params_cls = _sampling_params_cls()
         host, port = handshake_endpoint(self.server_args)
         listener = native.FrontendListener.bind(
             handshake_address=_tcp_address(host, port),
@@ -186,16 +185,9 @@ class TokenspeedLLMEngine(LLMEngine):
         if not engines:
             raise RuntimeError("TokenSpeed registered no engines")
         self._model_max_len = _optional_int(engines[0].get("max_model_len"))
-        block_size = self._registered_block_size(engines[0])
-        if self._bootstrap_endpoint is not None:
-            reported_port = engines[0].get("bootstrap_port")
-            if reported_port is not None and int(reported_port) != bootstrap_port:
-                logger.warning(
-                    "TokenSpeed prefill bootstrap server listens on port %s, but "
-                    "Dynamo advertises port %s",
-                    reported_port,
-                    bootstrap_port,
-                )
+        # TokenSpeed reports its prefix granularity only in a handshake field
+        # tokenspeed_engine does not pass on, so it comes from --kv-block-size.
+        block_size = self.kv_block_size
 
         cache_tokens = [
             int(engine["kv_cache_size_tokens"])
@@ -241,42 +233,14 @@ class TokenspeedLLMEngine(LLMEngine):
             ),
         )
 
-    def _registered_block_size(self, engine: dict[str, Any]) -> int | None:
-        # tokenspeed_engine does not report the prefix granularity at the
-        # pinned versions; prefer it, should a later one start to.
-        reported = _optional_int(engine.get("prefix_granularity"))
-        if reported:
-            if self.kv_block_size is not None and self.kv_block_size != reported:
-                raise ValueError(
-                    f"--kv-block-size {self.kv_block_size} does not match "
-                    f"TokenSpeed's prefix granularity {reported}"
-                )
-            return reported
-        return self.kv_block_size
-
     def _configure_kv_events(self) -> list[str]:
-        """Validate the KV event config; return the launcher's overrides."""
+        """Set up the KV event source (args.py validated the config) and
+        return the launcher's override that points the engine at it."""
         config = kv_events_config_dict(
             getattr(self.server_args, "kv_events_config", None)
         )
         if not kv_events_enabled(config):
             return []
-        if not getattr(self.server_args, "enable_prefix_caching", True):
-            # Native publisher construction is independent of prefix caching.
-            config["enable_kv_cache_events"] = False
-            config["publisher"] = "null"
-            self.server_args.kv_events_config = json.dumps(config)
-            logger.warning(
-                "TokenSpeed KV events were requested but enable_prefix_caching=False "
-                "(--disable-prefix-caching); no KV events will be published"
-            )
-            return ["--kv-events-config", self.server_args.kv_events_config]
-        validate_kv_events_topology(self.server_args)
-        if self.kv_block_size is None:
-            raise ValueError(
-                "TokenSpeed KV events require --kv-block-size, the engine's prefix "
-                "granularity (TokenSpeed logs prefix_granularity=N at startup)"
-            )
         if not config.get("endpoint"):
             self._kv_event_dir = tempfile.TemporaryDirectory(
                 prefix="dynamo-tokenspeed-"
@@ -346,24 +310,33 @@ class TokenspeedLLMEngine(LLMEngine):
                 )
 
     async def _dispatch_outputs(self) -> None:
-        """Route every output chunk to its request's stream."""
+        """Route every output chunk to its request."""
+        requests = self._requests
+        frontend = self.frontend
         try:
             while True:
-                for rid, chunk in await self.frontend.next_outputs():
-                    stream = self._streams.get(rid)
-                    if stream is not None:
-                        stream.put_nowait(chunk)
+                batch = await frontend.next_outputs()
+                rng = _nvtx.start_range("ts:dispatch", "blue") if _NVTX else None
+                for rid, chunk in batch:
+                    if isinstance(chunk, BaseException):
+                        # The native client fails a stream only once it has
+                        # closed for good (an engine shut down, or its output
+                        # socket failed), so every request is lost with it.
+                        self._engine_lost(f"TokenSpeed engines unavailable: {chunk}")
+                        return
+                    request = requests.get(rid)
+                    if request is not None:
+                        # _Request.push, inlined: this runs once per token.
+                        request.chunks.append(chunk)
+                        waiter = request.waiter
+                        if waiter is not None and not waiter.done():
+                            waiter.set_result(None)
+                if rng is not None:
+                    _nvtx.end_range(rng)
         except asyncio.CancelledError:
             raise
         except Exception as error:
-            message = f"TokenSpeed output stream failed: {error}"
-            self._fail_streams(message)
-            if self._stopping:
-                return
-            # Every later request would fail too; stop so the worker leaves
-            # the routing pool instead of staying registered.
-            logger.error("%s; shutting down the worker", message)
-            os.kill(os.getpid(), signal.SIGTERM)
+            self._engine_lost(f"TokenSpeed output stream failed: {error}")
 
     async def _watch_launcher(self) -> None:
         """Shut the worker down if the engine launcher exits on its own."""
@@ -371,17 +344,20 @@ class TokenspeedLLMEngine(LLMEngine):
         if process is None:
             return
         returncode = await asyncio.to_thread(process.wait)
-        if self._stopping:
-            return
-        message = f"TokenSpeed engine launcher exited with code {returncode}"
-        logger.error("%s; shutting down the worker", message)
-        self._fail_streams(message)
-        os.kill(os.getpid(), signal.SIGTERM)
+        self._engine_lost(f"TokenSpeed engine launcher exited with code {returncode}")
 
-    def _fail_streams(self, message: str) -> None:
-        self._failure = self._failure or message
-        for stream in self._streams.values():
-            stream.put_nowait(RuntimeError(message))
+    def _engine_lost(self, message: str) -> None:
+        """Fail every request, and unless the worker is already stopping, stop
+        it: every later request would fail too, so it must leave the routing
+        pool rather than stay registered."""
+        if self._failure is not None:
+            return
+        self._failure = message
+        for request in self._requests.values():
+            request.push(RuntimeError(message))
+        if not self._stopping:
+            logger.error("%s; shutting down the worker", message)
+            os.kill(os.getpid(), signal.SIGTERM)
 
     async def generate(
         self, request: GenerateRequest, context: Context
@@ -400,21 +376,22 @@ class TokenspeedLLMEngine(LLMEngine):
             dp_rank=dp_rank,
             dp_size=self._dp_size,
         )
-        if self.disaggregation_mode == DisaggregationMode.PREFILL:
-            dp_rank = self._prefill_pin(dp_rank, bootstrap["bootstrap_room"])
         _validate_single_choice_sampling(request)
         sampling_params = build_sampling_params(request, self._model_max_len)
         if self.disaggregation_mode == DisaggregationMode.PREFILL:
             sampling_params["max_new_tokens"] = 1
             sampling_params.pop("min_new_tokens", None)
+            # TokenSpeed runs a prefill request on rank room % dp_size, where
+            # decode looks for its KV cache; the room already carries the rank.
+            dp_rank = None
+        rid = context.id() or uuid.uuid4().hex
         frames = self._encode_request(
-            request.get("token_ids", []), sampling_params, bootstrap, context, dp_rank
+            rid, request.get("token_ids", []), sampling_params, bootstrap, dp_rank
         )
-        rid = frames.rid
 
-        stream: asyncio.Queue = asyncio.Queue()
-        self._streams[rid] = stream
-        submitted = finished = False
+        state = _Request()
+        self._requests[rid] = state
+        finished = False
         try:
             if self.disaggregation_mode == DisaggregationMode.PREFILL:
                 # The router needs a handoff even when it supplied the bootstrap
@@ -427,30 +404,45 @@ class TokenspeedLLMEngine(LLMEngine):
                 }
             # An abort while the handoff was yielded must prevent submission:
             # the engine cannot abort a request it does not hold yet.
-            if rid in self._cancelled:
+            if state.cancelled:
                 finished = True
                 yield {"index": 0, "token_ids": [], "finish_reason": "cancelled"}
                 return
-            await self.frontend.generate(frames.frames)
-            submitted = True
-            if rid in self._cancelled:
+            rng = _nvtx.start_range("ts:submit", "green") if _NVTX else None
+            try:
+                await self.frontend.generate(frames)
+            except Exception as error:
+                # ts-client's Error::Unavailable: the client closed for good.
+                if str(error).startswith("engines unavailable"):
+                    self._engine_lost(f"TokenSpeed {error}")
+                raise
+            finally:
+                if rng is not None:
+                    _nvtx.end_range(rng)
+            state.submitted = True
+            if state.cancelled:
                 # abort() ran while the submission was in flight.
-                await self._abort_and_end(rid)
+                await self._abort_native(rid)
+            loop = asyncio.get_running_loop()
             while not finished:
-                item = await stream.get()
-                if item is _ABORT_UNANSWERED:
-                    finished = True
-                    yield {"index": 0, "token_ids": [], "finish_reason": "cancelled"}
-                    break
-                if isinstance(item, BaseException):
-                    raise RuntimeError(str(item)) from item
-                chunk = convert_output_to_chunk(item, cancelled=rid in self._cancelled)
-                finished = "finish_reason" in chunk
-                yield chunk
+                if not state.chunks:
+                    state.waiter = waiter = loop.create_future()
+                    try:
+                        await waiter
+                    finally:
+                        state.waiter = None
+                    continue
+                items, state.chunks = state.chunks, []
+                chunk = _coalesce(items, state.cancelled)
+                if chunk is not None:
+                    finished = "finish_reason" in chunk
+                    yield chunk
         finally:
-            self._streams.pop(rid, None)
-            self._cancelled.discard(rid)
-            if submitted and not finished and self._failure is None:
+            if self._requests.get(rid) is state:
+                del self._requests[rid]
+            if state.ended is not None and not state.ended.done():
+                state.ended.set_result(None)
+            if state.submitted and not finished and self._failure is None:
                 # The caller stopped reading before the request finished; the
                 # engine must not keep generating for nobody.
                 self._schedule_abort(rid)
@@ -466,68 +458,52 @@ class TokenspeedLLMEngine(LLMEngine):
             rank = None if prefill_rank is None else int(prefill_rank)
         return validate_global_dp_rank(rank, 0, self._dp_size, "TokenSpeed")
 
-    def _prefill_pin(self, dp_rank: int | None, room: int) -> int | None:
-        """A prefill request runs on rank ``room % dp_size``: decode locates
-        its KV cache by that residue, and TokenSpeed rejects a prefill pin
-        that disagrees. Keep the router's pin only when it agrees."""
-        if dp_rank is None or room % self._dp_size == dp_rank:
-            return dp_rank
-        logger.warning(
-            "Ignoring prefill DP rank %d: bootstrap room %d places the request "
-            "on rank %d of %d",
-            dp_rank,
-            room,
-            room % self._dp_size,
-            self._dp_size,
-        )
-        return None
-
     def _encode_request(
         self,
+        rid: str,
         token_ids: list[int],
         sampling_params: dict[str, Any],
         bootstrap: dict[str, Any],
-        context: Context,
         dp_rank: int | None = None,
-    ) -> _EncodedRequest:
-        io_struct = _io_struct_module()
-        rid = context.id() or uuid.uuid4().hex
+    ) -> list[bytes]:
         pin = {} if dp_rank is None else {"data_parallel_rank": dp_rank}
-        native_request = io_struct.TokenizedGenerateReqInput(
+        # The encoder serializes token_ids as they are, so they are not copied:
+        # normalize_request_token_ids already made them a list, and the
+        # encoder returns bytes frames the native client takes as they are.
+        native_request = self._request_cls(
             rid=rid,
-            input_ids=list(token_ids),
-            sampling_params=_sampling_params_cls()(**sampling_params),
+            input_ids=token_ids,
+            sampling_params=self._sampling_params_cls(**sampling_params),
             stream=True,
             **bootstrap,
             **pin,
         )
-        frames = [bytes(frame) for frame in self._encoder.encode(native_request)]
-        return _EncodedRequest(rid, frames)
+        return self._encoder.encode(native_request)
 
     async def abort(self, context: Context) -> None:
+        """Forward the cancellation to the engine, whose final chunk then ends
+        the request's stream, as vLLM's and TRT-LLM's handlers do. A request
+        that already finished is left alone."""
         rid = context.id()
-        if self.frontend is None or rid is None or rid not in self._streams:
+        state = self._requests.get(rid) if rid is not None else None
+        if state is None or state.cancelled:
             return
-        self._cancelled.add(rid)
-        await self._abort_and_end(rid)
+        state.cancelled = True
+        # Before submission the engine does not hold the request yet;
+        # generate() then aborts it, or skips submitting it, itself.
+        if state.submitted:
+            await self._abort_native(rid)
         logger.debug("Aborted TokenSpeed request %s", rid)
-
-    async def _abort_and_end(self, rid: str) -> None:
-        """Abort a request and make sure its stream ends. The engine's final
-        chunk normally ends it; if none arrives within the grace period, end it
-        here so the request does not stay in flight in the worker."""
-        await self._abort_native(rid)
-        stream = self._streams.get(rid)
-        if stream is None:
-            return
-
-        def end_unanswered() -> None:
-            # The stream may have finished, or its id been reused, meanwhile.
-            if self._streams.get(rid) is stream:
-                logger.debug("TokenSpeed sent no final chunk for aborted %s", rid)
-                stream.put_nowait(_ABORT_UNANSWERED)
-
-        asyncio.get_running_loop().call_later(self._abort_grace_s, end_unanswered)
+        # Temporary (tokenspeed#3227): stand in for the final chunk the pinned
+        # engine never sends for a request aborted while queued.
+        state.ended = asyncio.get_running_loop().create_future()
+        try:
+            async with asyncio.timeout(self._abort_grace_s):
+                await state.ended
+        except TimeoutError:
+            logger.debug("TokenSpeed sent no final chunk for aborted %s", rid)
+            # The final chunk the engine sends for an aborted request.
+            state.push({"output_ids": [], "finish_reason": "abort"})
 
     async def _abort_native(self, rid: str) -> None:
         frontend = self.frontend
@@ -563,7 +539,7 @@ class TokenspeedLLMEngine(LLMEngine):
                 if task is not None:
                     task.cancel()
             self._dispatcher = self._monitor = None
-            self._fail_streams("TokenSpeed engine shut down")
+            self._engine_lost("TokenSpeed engine shut down")
             process, self._process = self._process, None
             if process is not None:
                 await asyncio.to_thread(_stop_launcher, process)
@@ -577,12 +553,53 @@ class TokenspeedLLMEngine(LLMEngine):
                 self._kv_event_dir = None
 
 
-class _EncodedRequest:
-    __slots__ = ("rid", "frames")
+class _Request:
+    """An in-flight request: the chunks the dispatcher delivered and the
+    caller has not taken yet, and the future its generate() sleeps on."""
 
-    def __init__(self, rid: str, frames: list[bytes]):
-        self.rid = rid
-        self.frames = frames
+    __slots__ = ("chunks", "waiter", "cancelled", "submitted", "ended")
+
+    def __init__(self) -> None:
+        self.chunks: list[Any] = []
+        self.waiter: asyncio.Future | None = None
+        self.cancelled = False
+        self.submitted = False
+        # Set by abort(), resolved when generate() ends (tokenspeed#3227).
+        self.ended: asyncio.Future | None = None
+
+    def push(self, item: Any) -> None:
+        self.chunks.append(item)
+        waiter = self.waiter
+        if waiter is not None and not waiter.done():
+            waiter.set_result(None)
+
+
+def _coalesce(items: list[Any], cancelled: bool) -> GenerateChunk | None:
+    """The wire chunks a request received since it last ran, as one Dynamo
+    chunk: their new tokens, and the final chunk's finish reason and usage.
+    None when they carry no tokens and no finish."""
+    rng = _nvtx.start_range("ts:emit", "cyan") if _NVTX else None
+    try:
+        token_ids: list[int] | None = None
+        for item in items:
+            if isinstance(item, BaseException):
+                raise RuntimeError(str(item)) from item
+            if item.get("finish_reason") is not None:
+                chunk = convert_output_to_chunk(item, cancelled=cancelled)
+                if token_ids:
+                    token_ids.extend(chunk["token_ids"])
+                    chunk["token_ids"] = token_ids
+                return chunk
+            ids = item.get("output_ids")
+            if ids:
+                if token_ids is None:
+                    token_ids = ids if isinstance(ids, list) else list(ids)
+                else:
+                    token_ids.extend(ids)
+        return {"index": 0, "token_ids": token_ids} if token_ids else None
+    finally:
+        if rng is not None:
+            _nvtx.end_range(rng)
 
 
 def build_sampling_params(
@@ -651,9 +668,10 @@ def convert_output_to_chunk(
 ) -> GenerateChunk:
     """One wire output chunk (``tokenspeed_engine.Frontend.next_outputs``) as
     a Dynamo chunk. Its ``output_ids`` are the tokens new in this chunk."""
+    ids = out.get("output_ids") or []
     chunk: GenerateChunk = {
         "index": 0,
-        "token_ids": list(out.get("output_ids") or []),
+        "token_ids": ids if isinstance(ids, list) else list(ids),
     }
 
     finish_reason = out.get("finish_reason")
@@ -734,14 +752,7 @@ def _guided_decoding_params(guided_decoding: dict[str, Any]) -> dict[str, Any]:
 
 
 def _merge_stop_token_ids(*token_id_lists: Any) -> list[int]:
-    merged: list[int] = []
-    seen: set[int] = set()
-    for token_ids in token_id_lists:
-        for token_id in token_ids or []:
-            if token_id not in seen:
-                seen.add(token_id)
-                merged.append(token_id)
-    return merged
+    return list(dict.fromkeys(t for ids in token_id_lists for t in ids or ()))
 
 
 def _validate_single_choice_sampling(request: GenerateRequest) -> None:
@@ -760,10 +771,7 @@ def _optional_int(value: Any) -> int | None:
 
 
 def _num_nodes(server_args: Any) -> int:
-    mapping = getattr(server_args, "mapping", None)
-    return int(
-        getattr(mapping, "nnodes", None) or getattr(server_args, "nnodes", None) or 1
-    )
+    return int(server_args.mapping.nnodes)
 
 
 def is_follower_node(server_args: Any) -> bool:
@@ -795,16 +803,6 @@ def handshake_endpoint(server_args: Any) -> tuple[str, int]:
     return host, int(server_args.data_parallel_rpc_port)
 
 
-def validate_kv_events_topology(server_args: Any) -> None:
-    if attention_dp_size(server_args) != 1:
-        # Each rank publishes its own KV events (on its own node); the worker
-        # subscribes to one publisher and tags no DP rank.
-        raise ValueError(
-            "TokenSpeed KV events currently require attention DP=1; with "
-            "attention DP > 1, route without --router-kv-events"
-        )
-
-
 def run_follower_node(config: Any) -> None:
     """Run a follower node's engine ranks in place of this process.
 
@@ -813,11 +811,6 @@ def run_follower_node(config: Any) -> None:
     TokenSpeed's launcher, so a shutdown signal reaches it directly.
     """
     server_args = config.server_args
-    validate_disagg_compatibility(resolve_disaggregation_mode(server_args), server_args)
-    if kv_events_enabled(
-        kv_events_config_dict(getattr(server_args, "kv_events_config", None))
-    ):
-        validate_kv_events_topology(server_args)
     host, port = handshake_endpoint(server_args)
     argv = [
         sys.executable,

@@ -28,14 +28,7 @@ def resolve_disaggregation_mode(server_args: Any) -> DisaggregationMode:
 
 
 def attention_dp_size(server_args: Any) -> int:
-    mapping = getattr(server_args, "mapping", None)
-    attention = getattr(mapping, "attn", None)
-    return int(
-        getattr(attention, "dp_size", None)
-        or getattr(server_args, "data_parallel_size", None)
-        or getattr(server_args, "dp_size", None)
-        or 1
-    )
+    return int(server_args.mapping.attn.dp_size)
 
 
 def validate_disagg_compatibility(mode: DisaggregationMode, server_args: Any) -> None:

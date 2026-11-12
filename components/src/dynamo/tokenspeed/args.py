@@ -23,6 +23,7 @@ from dynamo.tokenspeed.disagg import (
     resolve_disaggregation_mode,
     validate_disagg_compatibility,
 )
+from dynamo.tokenspeed.kv_events import validate_kv_events
 
 DEFAULT_ENDPOINT_COMPONENT = "backend"
 DEFAULT_ENDPOINT_NAME = "generate"
@@ -51,6 +52,7 @@ class Config(DynamoRuntimeConfig):
         validate_disagg_compatibility(self.disaggregation_mode, self.server_args)
         if self.kv_block_size is not None and self.kv_block_size <= 0:
             raise ValueError("--kv-block-size must be positive")
+        validate_kv_events(self.server_args, self.kv_block_size)
 
 
 @register_encoder(Config)

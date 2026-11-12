@@ -9,6 +9,7 @@ import json
 from typing import Any
 
 from dynamo.common.backend.publisher import ZmqSource
+from dynamo.tokenspeed.disagg import attention_dp_size
 
 
 def kv_events_config_dict(raw: Any) -> dict[str, Any]:
@@ -25,6 +26,31 @@ def kv_events_enabled(config: dict[str, Any]) -> bool:
     if not isinstance(enabled, bool):
         raise ValueError("TokenSpeed enable_kv_cache_events must be a JSON boolean")
     return enabled and config.get("publisher", "zmq") != "null"
+
+
+def validate_kv_events(server_args: Any, kv_block_size: int | None) -> None:
+    """Reject, at startup on every node, a KV-event setup the worker cannot
+    serve."""
+    config = kv_events_config_dict(getattr(server_args, "kv_events_config", None))
+    if not kv_events_enabled(config):
+        return
+    if not server_args.enable_prefix_caching:
+        raise ValueError(
+            "TokenSpeed KV events need prefix caching; remove "
+            "--disable-prefix-caching or disable KV events"
+        )
+    if attention_dp_size(server_args) != 1:
+        # Each rank publishes its own KV events (on its own node); the worker
+        # subscribes to one publisher and tags no DP rank.
+        raise ValueError(
+            "TokenSpeed KV events currently require attention DP=1; with "
+            "attention DP > 1, route without --router-kv-events"
+        )
+    if kv_block_size is None:
+        raise ValueError(
+            "TokenSpeed KV events require --kv-block-size, the engine's prefix "
+            "granularity (TokenSpeed logs prefix_granularity=N at startup)"
+        )
 
 
 def kv_event_source(config: dict[str, Any]) -> ZmqSource:

@@ -231,16 +231,21 @@ def native(monkeypatch):
     monkeypatch.setattr(llm_engine, "_sampling_params_cls", lambda: dict)
     monkeypatch.setattr(llm_engine, "_start_launcher", fake.start_launcher)
     monkeypatch.setattr(llm_engine, "_stop_launcher", fake.stop_launcher)
+    # A lost engine stops the worker with SIGTERM; never signal the test run.
+    monkeypatch.setattr(llm_engine.os, "kill", Mock())
     yield fake
     fake.release()
 
 
 def make_engine(kv_block_size=None, **overrides):
-    return TokenspeedLLMEngine(
+    engine = TokenspeedLLMEngine(
         server_args(**overrides),
         engine_argv=["--model", "test-model"],
         kv_block_size=kv_block_size,
     )
+    # abort() waits this long for the engine's final chunk (tokenspeed#3227).
+    engine._abort_grace_s = 0
+    return engine
 
 
 def context(rid):
@@ -377,14 +382,6 @@ async def test_multi_node_binds_the_configured_handshake_port(native):
         await engine.cleanup()
 
 
-async def test_follower_node_engine_refuses_to_register(native):
-    engine = make_engine(node_rank=1)
-    with pytest.raises(ValueError, match="engine ranks only"):
-        await engine.start(worker_id=1)
-    assert native.launches == []
-    await engine.cleanup()
-
-
 @pytest.mark.parametrize(
     "address,dist_init_addr,expected",
     [
@@ -468,7 +465,21 @@ def test_follower_node_runs_its_ranks_against_the_leader(monkeypatch):
 @pytest.mark.parametrize(
     "overrides,message",
     [
-        ({"kv_events_config": '{"enable_kv_cache_events":true}'}, "attention DP=1"),
+        (
+            {
+                "kv_events_config": '{"enable_kv_cache_events":true}',
+                "mapping": SimpleNamespace(attn=SimpleNamespace(dp_size=2), nnodes=1),
+            },
+            "attention DP=1",
+        ),
+        ({"kv_events_config": '{"enable_kv_cache_events":true}'}, "--kv-block-size"),
+        (
+            {
+                "kv_events_config": '{"enable_kv_cache_events":true}',
+                "enable_prefix_caching": False,
+            },
+            "prefix caching",
+        ),
         (
             {
                 "disaggregation_mode": "decode",
@@ -478,11 +489,24 @@ def test_follower_node_runs_its_ranks_against_the_leader(monkeypatch):
         ),
     ],
 )
-def test_follower_node_rejects_what_the_leader_rejects(monkeypatch, overrides, message):
-    monkeypatch.setattr(llm_engine.os, "execv", Mock())
+@pytest.mark.parametrize("node_rank", [0, 1])
+def test_every_node_rejects_an_unservable_config(
+    monkeypatch, overrides, message, node_rank
+):
+    # Validation runs once, at argument parsing, before a node either
+    # registers a worker or launches its ranks.
+    class NativeArgs:
+        @staticmethod
+        def add_cli_args(parser):
+            parser.add_argument("--model")
+
+        @staticmethod
+        def from_cli_args(parsed):
+            return server_args(**vars(parsed), node_rank=node_rank, **overrides)
+
+    monkeypatch.setattr(args, "_server_args_cls", lambda: NativeArgs)
     with pytest.raises(ValueError, match=message):
-        llm_engine.run_follower_node(follower_config(**overrides))
-    llm_engine.os.execv.assert_not_called()
+        args.parse_args(["--model", "m"])
 
 
 @pytest.mark.parametrize("node_rank", [0, 1])
@@ -506,28 +530,6 @@ async def test_registration_without_block_size_leaves_kv_geometry_unset(native):
         registration = await engine.start(worker_id=1)
         assert registration.llm.kv_cache_block_size is None
         assert registration.llm.total_kv_blocks is None
-    finally:
-        await engine.cleanup()
-
-
-@pytest.mark.parametrize("flag", [None, 128])
-async def test_engine_reported_prefix_granularity_is_preferred(native, flag):
-    native.engines[0]["prefix_granularity"] = 128
-    engine = make_engine(kv_block_size=flag)
-    try:
-        registration = await engine.start(worker_id=1)
-        assert registration.llm.kv_cache_block_size == 128
-        assert registration.llm.total_kv_blocks == 64
-    finally:
-        await engine.cleanup()
-
-
-async def test_block_size_flag_must_match_engine_report(native):
-    native.engines[0]["prefix_granularity"] = 128
-    engine = make_engine(kv_block_size=64)
-    try:
-        with pytest.raises(ValueError, match="does not match"):
-            await engine.start(worker_id=1)
     finally:
         await engine.cleanup()
 
@@ -557,11 +559,14 @@ async def test_generate_forwards_handoff_and_preserves_decode_budget(native, mod
                 "disaggregated_params": request["bootstrap_info"],
             }
             tokens = tokens[1:]
-        assert tokens == [[20], [21]]
+        # Both wire chunks arrived before the caller read, so they go out as one.
+        assert tokens == [[20, 21]]
         assert chunks[-1]["finish_reason"] == "length"
         [submitted] = native.submitted
         assert submitted.rid == "request-1"
         assert submitted.input_ids == [10, 11]
+        # The prompt goes to the encoder as it is, without a copy.
+        assert submitted.input_ids is request["token_ids"]
         assert submitted.stream is True
         assert submitted.bootstrap_host == "selected-prefill.example"
         assert submitted.bootstrap_port == 9010
@@ -573,7 +578,7 @@ async def test_generate_forwards_handoff_and_preserves_decode_budget(native, mod
         else:
             assert submitted.sampling_params["max_new_tokens"] == 30
             assert submitted.sampling_params["min_new_tokens"] == 10
-        assert engine._streams == {}
+        assert engine._requests == {}
     finally:
         await engine.cleanup()
 
@@ -601,19 +606,9 @@ async def test_bad_handoff_rejected_before_native_request(native, bootstrap):
                 )
             )
         assert native.submitted == []
-        assert engine._streams == {}
+        assert engine._requests == {}
     finally:
         await engine.cleanup()
-
-
-async def test_unsupported_disagg_fails_before_start(native):
-    engine = make_engine(
-        disaggregation_mode="decode", disaggregation_transfer_backend="fake"
-    )
-    with pytest.raises(ValueError, match="Mooncake"):
-        await engine.start(worker_id=1)
-    assert native.launches == []
-    await engine.cleanup()
 
 
 def dp_mapping(dp_size, nnodes=1):
@@ -704,33 +699,24 @@ async def test_missing_or_invalid_dp_rank_leaves_placement_to_tokenspeed(
         await engine.cleanup()
 
 
-@pytest.mark.parametrize(
-    "routing,room,expected",
-    [
-        # The router mints room % dp_size == its rank: the pin agrees.
-        ({"dp_rank": 2}, 4 * 1000 + 2, 2),
-        ({"prefill_dp_rank": 3}, 4 * 7 + 3, 3),
-        # A disagreeing pin would be rejected by TokenSpeed, and decode looks
-        # for the KV cache on rank room % dp_size: the room wins.
-        ({"dp_rank": 1}, 4 * 1000 + 2, None),
-        ({}, 4 * 1000 + 2, None),
-    ],
-)
-async def test_prefill_pin_must_agree_with_the_room(
-    monkeypatch, native, caplog, routing, room, expected
-):
+@pytest.mark.parametrize("routing", [{"dp_rank": 2}, {"dp_rank": 1}, {}])
+async def test_prefill_is_placed_by_its_room(monkeypatch, native, routing):
+    # TokenSpeed runs a prefill request on rank room % dp_size, where decode
+    # looks for its KV cache, so the worker never pins one.
     monkeypatch.setenv(BOOTSTRAP_HOST_ENV, "prefill.example")
     with_dp_engines(native, 4)
     engine = make_engine(disaggregation_mode="prefill", mapping=dp_mapping(4))
     await engine.start(worker_id=1)
-    request = {"token_ids": [1], "routing": routing, "bootstrap_info": handoff(room)}
+    request = {
+        "token_ids": [1],
+        "routing": routing,
+        "bootstrap_info": handoff(4 * 1000 + 2),
+    }
     try:
         await drain(engine.generate(request, context("prefill")))
         [submitted] = native.submitted
-        assert submitted.bootstrap_room == room
-        assert getattr(submitted, "data_parallel_rank", None) == expected
-        ignored = "Ignoring prefill DP rank" in caplog.text
-        assert ignored == (routing.get("dp_rank") not in (None, expected))
+        assert submitted.bootstrap_room == 4 * 1000 + 2
+        assert not hasattr(submitted, "data_parallel_rank")
     finally:
         await engine.cleanup()
 
@@ -751,7 +737,7 @@ async def test_prefill_fallback_room_lands_on_the_routed_rank(
         )
         [submitted] = native.submitted
         assert submitted.bootstrap_room % 8 == rank
-        assert submitted.data_parallel_rank == rank
+        assert not hasattr(submitted, "data_parallel_rank")
         assert chunks[0]["disaggregated_params"]["bootstrap_room"] == (
             submitted.bootstrap_room
         )
@@ -766,26 +752,6 @@ def test_bootstrap_room_residue_and_range(dp_size, rank):
         assert 0 <= room <= 2**63 - 1
         if rank is not None:
             assert room % dp_size == rank
-
-
-async def test_kv_events_with_attention_dp_fail_before_start(native):
-    engine = make_engine(
-        kv_block_size=64,
-        kv_events_config='{"enable_kv_cache_events":true}',
-        mapping=dp_mapping(2),
-    )
-    with pytest.raises(ValueError, match="attention DP=1"):
-        await engine.start(worker_id=1)
-    assert native.launches == []
-    await engine.cleanup()
-
-
-async def test_kv_events_require_block_size(native):
-    engine = make_engine(kv_events_config='{"enable_kv_cache_events":true}')
-    with pytest.raises(ValueError, match="--kv-block-size"):
-        await engine.start(worker_id=1)
-    assert native.launches == []
-    await engine.cleanup()
 
 
 async def test_kv_sources_use_unique_ipc_endpoints_and_cleanup(native):
@@ -844,26 +810,15 @@ async def test_kv_source_matches_native_bind_and_topic(native, native_config, ex
         {"kv_events_config": None},
         {"kv_events_config": '{"enable_kv_cache_events":false}'},
         {"kv_events_config": '{"enable_kv_cache_events":true,"publisher":"null"}'},
-        {
-            "kv_events_config": '{"enable_kv_cache_events":true}',
-            "enable_prefix_caching": False,
-        },
     ],
 )
-async def test_disabled_kv_events_have_no_source(native, overrides, caplog):
+async def test_disabled_kv_events_have_no_source(native, overrides):
     engine = make_engine(**overrides)
     try:
         await engine.start(worker_id=1)
         assert await engine.kv_event_sources() == []
         [launch] = native.launches
-        if overrides.get("enable_prefix_caching") is False:
-            flag = launch.argv.index("--kv-events-config")
-            native_config = json.loads(launch.argv[flag + 1])
-            assert native_config["enable_kv_cache_events"] is False
-            assert native_config["publisher"] == "null"
-            assert "enable_prefix_caching=False" in caplog.text
-        else:
-            assert "--kv-events-config" not in launch.argv
+        assert "--kv-events-config" not in launch.argv
     finally:
         await engine.cleanup()
 
@@ -1001,7 +956,7 @@ async def test_prefill_creates_handoff_when_router_has_no_bootstrap_endpoint(
                     )
                     == handoff
                 )
-                assert engine._streams == {}
+                assert engine._requests == {}
             finally:
                 await stream.aclose()
         assert rooms.call_count == 2
@@ -1039,7 +994,7 @@ async def test_prefill_cancellation_after_handoff_prevents_submission(
             [] if cancel else ["handoff-cancel"]
         )
         assert chunks[-1]["finish_reason"] == ("cancelled" if cancel else "length")
-        assert engine._streams == {}
+        assert engine._requests == {}
         # Reusing the context must not inherit cancellation from the old stream.
         chunks = await drain(engine.generate(request, ctx))
         assert chunks[-1]["finish_reason"] == "length"
@@ -1061,8 +1016,7 @@ async def test_abort_mid_stream_ends_with_cancelled(native):
         chunks = await drain(stream)
         assert chunks[-1]["finish_reason"] == "cancelled"
         assert native.aborted == ["stream-cancel"]
-        assert engine._streams == {}
-        assert engine._cancelled == set()
+        assert engine._requests == {}
     finally:
         await stream.aclose()
         await engine.cleanup()
@@ -1072,7 +1026,6 @@ async def test_unanswered_abort_still_ends_the_stream(native):
     native.respond = lambda request: [wire_output([20])]
     native.abort_answers = False
     engine = make_engine()
-    engine._abort_grace_s = 0
     await engine.start(worker_id=1)
     ctx = context("queued-cancel")
     stream = engine.generate({"token_ids": [10]}, ctx)
@@ -1082,8 +1035,49 @@ async def test_unanswered_abort_still_ends_the_stream(native):
         chunks = await drain(stream)
         assert chunks[-1]["finish_reason"] == "cancelled"
         assert native.aborted == ["queued-cancel"]
-        assert engine._streams == {}
-        assert engine._cancelled == set()
+        assert engine._requests == {}
+    finally:
+        await stream.aclose()
+        await engine.cleanup()
+
+
+async def test_answered_abort_leaves_nothing_behind(native):
+    # The engine's final chunk ends the stream; once abort() returns, nothing
+    # scheduled for the request is left.
+    native.respond = lambda request: [wire_output([20])]
+    engine = make_engine()
+    engine._abort_grace_s = 0.05
+    await engine.start(worker_id=1)
+    ctx = context("answered-cancel")
+    stream = engine.generate({"token_ids": [10]}, ctx)
+    try:
+        assert (await anext(stream))["token_ids"] == [20]
+        # The Rust EngineAdapter runs abort() as its own task.
+        abort = asyncio.ensure_future(engine.abort(ctx))
+        chunks = await drain(stream)
+        assert chunks[-1]["finish_reason"] == "cancelled"
+        await abort
+        loop = asyncio.get_running_loop()
+        pending = [h for h in loop._scheduled if not h.cancelled()]
+        assert pending == []
+        assert engine._requests == {}
+    finally:
+        await stream.aclose()
+        await engine.cleanup()
+
+
+async def test_output_stream_failure_ends_a_partly_read_batch(native):
+    native.respond = lambda request: [wire_output([20])]
+    engine = make_engine()
+    await engine.start(worker_id=1)
+    stream = engine.generate({"token_ids": [10]}, context("failing"))
+    try:
+        assert (await anext(stream))["token_ids"] == [20]
+        engine._requests["failing"].push(wire_output([21]))
+        engine._engine_lost("boom")
+        with pytest.raises(RuntimeError, match="boom"):
+            await anext(stream)
+        assert engine._requests == {}
     finally:
         await stream.aclose()
         await engine.cleanup()
@@ -1099,13 +1093,15 @@ async def test_abort_racing_submission_still_aborts_native_request(native):
     first = asyncio.ensure_future(anext(stream))
     try:
         await asyncio.sleep(0)
-        # The engine does not hold the request yet: its abort is a no-op.
+        # The engine does not hold the request yet, so abort() leaves the
+        # native abort to generate(), which sends it once submission lands.
         await engine.abort(ctx)
         assert native.submitted == []
+        assert native.aborted == []
         native.submit_gate.set()
         chunks = [await first] + await drain(stream)
         assert chunks[-1]["finish_reason"] == "cancelled"
-        assert native.aborted == ["racing-cancel", "racing-cancel"]
+        assert native.aborted == ["racing-cancel"]
     finally:
         await stream.aclose()
         await engine.cleanup()
@@ -1122,7 +1118,7 @@ async def test_closing_stream_early_aborts_native_request(native):
         for _ in range(3):
             await asyncio.sleep(0)
         assert native.aborted == ["abandoned"]
-        assert engine._streams == {}
+        assert engine._requests == {}
     finally:
         await engine.cleanup()
 
@@ -1176,17 +1172,68 @@ async def test_prefill_is_quiescent_once_its_handoffs_resolve(monkeypatch, nativ
     assert await engine.is_quiescent() is True
 
 
-async def test_stream_ended_by_engines_raises(native):
-    native.respond = lambda request: [
-        wire_output([20]),
-        RuntimeError("the engines ended the stream"),
-    ]
+async def test_engine_error_in_a_batch_fails_every_request_and_stops_worker(native):
+    # tokenspeed_engine delivers a closed client's end of each stream as an
+    # EngineError inside a successful next_outputs() batch, not by raising.
+    native.respond = lambda request: [wire_output([20])]
     engine = make_engine()
     await engine.start(worker_id=1)
+    stream = engine.generate({"token_ids": [10]}, context("in-flight"))
     try:
-        with pytest.raises(RuntimeError, match="ended the stream"):
-            await drain(engine.generate({"token_ids": [10]}, context("dropped")))
-        assert engine._streams == {}
+        assert (await anext(stream))["token_ids"] == [20]
+        # The error names a request the worker no longer tracks.
+        native.frontend.deliver("gone", RuntimeError("an engine shut down"))
+        with pytest.raises(RuntimeError, match="an engine shut down"):
+            await drain(stream)
+        with pytest.raises(RuntimeError, match="an engine shut down"):
+            await drain(engine.generate({"token_ids": [10]}, context("late")))
+        llm_engine.os.kill.assert_called_once_with(
+            llm_engine.os.getpid(), signal.SIGTERM
+        )
+        assert engine._requests == {}
+    finally:
+        await stream.aclose()
+        await engine.cleanup()
+
+
+async def test_unavailable_engines_on_submit_stop_worker(native):
+    # An engine that died with nothing in flight shows only on the next
+    # submission: ts-client refuses it as Error::Unavailable.
+    engine = make_engine()
+    await engine.start(worker_id=1)
+
+    async def unavailable(frames):
+        raise RuntimeError("engines unavailable: an engine shut down")
+
+    native.frontend.generate = unavailable
+    try:
+        with pytest.raises(RuntimeError, match="engines unavailable"):
+            await drain(engine.generate({"token_ids": [10]}, context("r")))
+        llm_engine.os.kill.assert_called_once_with(
+            llm_engine.os.getpid(), signal.SIGTERM
+        )
+        with pytest.raises(RuntimeError, match="engines unavailable"):
+            await drain(engine.generate({"token_ids": [10]}, context("r2")))
+    finally:
+        await engine.cleanup()
+
+
+async def test_rejected_submission_fails_only_that_request(native):
+    engine = make_engine()
+    await engine.start(worker_id=1)
+    real_generate = native.frontend.generate
+
+    async def rejected(frames):
+        raise RuntimeError("invalid request: data_parallel_rank 9 is outside 0..1")
+
+    native.frontend.generate = rejected
+    try:
+        with pytest.raises(RuntimeError, match="invalid request"):
+            await drain(engine.generate({"token_ids": [10]}, context("bad")))
+        llm_engine.os.kill.assert_not_called()
+        native.frontend.generate = real_generate
+        chunks = await drain(engine.generate({"token_ids": [10]}, context("ok")))
+        assert chunks[-1]["finish_reason"] == "length"
     finally:
         await engine.cleanup()
 
