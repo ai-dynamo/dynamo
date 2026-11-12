@@ -1,0 +1,148 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+package controller
+
+import (
+	"context"
+	"encoding/json"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"sync"
+	"testing"
+	"time"
+
+	config "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
+	api "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	common "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/podcache"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/testing/operatorenv"
+	grove "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	"github.com/stretchr/testify/require"
+	"k8s.io/client-go/tools/clientcmd"
+	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
+	"k8s.io/utils/ptr"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
+	"sigs.k8s.io/yaml"
+)
+
+func captureWrite(t *testing.T, path string, value any) {
+	t.Helper()
+	data, err := json.MarshalIndent(value, "", "  ")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, data, 0600))
+}
+
+func captureStartManager(t *testing.T, env *operatorenv.TestEnv, namespace string) func() {
+	t.Helper()
+	cfg := env.OperatorConfig().DeepCopy()
+	cfg.Namespace.Restricted = namespace
+	cacheOpts := cache.Options{DefaultNamespaces: map[string]cache.Config{namespace: {}}}
+	require.NoError(t, podcache.Configure(&cacheOpts))
+	mgr, err := ctrl.NewManager(env.RESTConfig(), ctrl.Options{Scheme: env.Client().Scheme(), Metrics: metricsserver.Options{BindAddress: "0"}, Cache: cacheOpts})
+	require.NoError(t, err)
+	opts := SetupOptions{Config: cfg, RuntimeConfig: env.RuntimeConfig()}
+	dgdOpts := DynamoGraphDeploymentSetupOptions{SetupOptions: opts}
+	// SCALE_CLIENT
+	require.NoError(t, SetupDynamoGraphDeployment(mgr, dgdOpts))
+	require.NoError(t, SetupDynamoComponentDeployment(mgr, DynamoComponentDeploymentSetupOptions{SetupOptions: opts}))
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- mgr.Start(ctx) }()
+	var once sync.Once
+	stop := func() { once.Do(func() { cancel(); require.NoError(t, <-done) }) }
+	t.Cleanup(stop)
+	timeout, cancelWait := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancelWait()
+	require.True(t, mgr.GetCache().WaitForCacheSync(timeout))
+	return stop
+}
+
+// TestCaptureUpgradeBaseline runs released production admission and controllers.
+// The optional 1.5 child attaches to the same API server after 1.4 stops.
+func TestCaptureUpgradeBaseline(t *testing.T) {
+	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
+	root := os.Getenv("UPGRADE_CAPTURE_ROOT")
+	version := os.Getenv("UPGRADE_CAPTURE_VERSION")
+	target := os.Getenv("UPGRADE_CAPTURE_TARGET") == "true"
+	cfg := &config.OperatorConfiguration{}
+	config.SetDefaultsOperatorConfiguration(cfg)
+	cfg.GPU.DiscoveryEnabled = ptr.To(false)
+	env := operatorenv.New(operatorenv.Options{
+		Admission:     operatorenv.AdmissionWebhooks{Mutating: true, Validating: true},
+		SetupWebhooks: setupProductionWebhooks, OperatorVersion: version, Config: cfg,
+		RuntimeConfig:     &common.RuntimeConfig{Gate: features.Gates{Grove: true}},
+		EventuallyTimeout: 30 * time.Second,
+	}).RunT(t)
+	c := env.Client()
+	ctx := context.Background()
+	var dgd api.DynamoGraphDeployment
+	data, err := os.ReadFile(os.Getenv("UPGRADE_CAPTURE_INPUT"))
+	require.NoError(t, err)
+	require.NoError(t, yaml.UnmarshalStrict(data, &dgd))
+	if !target {
+		require.NoError(t, c.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: dgd.Namespace}}))
+		require.NoError(t, c.Create(ctx, &dgd))
+	} else {
+		require.NoError(t, c.Get(ctx, client.ObjectKeyFromObject(&dgd), &dgd))
+	}
+	originalSpec := dgd.Spec.DeepCopy()
+	stop := captureStartManager(t, env, dgd.Namespace)
+	var observed api.DynamoGraphDeployment
+	var pcs grove.PodCliqueSet
+	require.Eventually(t, func() bool {
+		if c.Get(ctx, client.ObjectKeyFromObject(&dgd), &observed) != nil {
+			return false
+		}
+		expected, err := dynamo.ComputeDGDWorkersSpecHash(&observed)
+		if err != nil {
+			return false
+		}
+		if observed.Annotations[consts.AnnotationCurrentWorkerHashV2] != expected {
+			return false
+		}
+		if observed.Status.ObservedGeneration != observed.Generation {
+			return false
+		}
+		key := client.ObjectKey{Namespace: dgd.Namespace, Name: dynamo.PCSNameForDGD(observed.Name, observed.Spec.Components)}
+		if c.Get(ctx, key, &pcs) != nil || len(pcs.Spec.Template.Cliques) != 2 {
+			return false
+		}
+		return true
+	}, 90*time.Second, 200*time.Millisecond, "production controller did not persist the workload")
+	require.Equal(t, originalSpec, &observed.Spec)
+	stop()
+	objects, err := CaptureOwned(ctx, env.RESTConfig(), c, &observed)
+	require.NoError(t, err)
+	captureWrite(t, filepath.Join(root, version+".json"), objects)
+	if version == "1.4.0" {
+		rest := env.RESTConfig()
+		kubeconfig := clientcmdapi.Config{
+			Clusters:  map[string]*clientcmdapi.Cluster{"capture": {Server: rest.Host, CertificateAuthorityData: rest.CAData}},
+			AuthInfos: map[string]*clientcmdapi.AuthInfo{"capture": {ClientCertificateData: rest.CertData, ClientKeyData: rest.KeyData}},
+			Contexts:  map[string]*clientcmdapi.Context{"capture": {Cluster: "capture", AuthInfo: "capture"}}, CurrentContext: "capture",
+		}
+		path := filepath.Join(root, "private-kubeconfig")
+		require.NoError(t, clientcmd.WriteToFile(kubeconfig, path))
+		defer os.Remove(path)
+		cmd := exec.Command("go", "test", "-p", "2", "./internal/controller", "-run", "^TestCaptureUpgradeBaseline$", "-count=1", "-v", "-timeout", "5m")
+		cmd.Dir = os.Getenv("UPGRADE_CAPTURE_15_OPERATOR")
+		cmd.Env = append(os.Environ(), "UPGRADE_CAPTURE_TARGET=true", "UPGRADE_CAPTURE_VERSION=1.5.0", "USE_EXISTING_CLUSTER=true", "KUBECONFIG="+path)
+		logFile, err := os.Create(filepath.Join(root, "1.5.log"))
+		require.NoError(t, err)
+		defer logFile.Close()
+		cmd.Stdout = logFile
+		cmd.Stderr = logFile
+		require.NoError(t, cmd.Run(), "see 1.5.log")
+	}
+}

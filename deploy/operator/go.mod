@@ -1,13 +1,13 @@
 module github.com/ai-dynamo/dynamo/deploy/operator
 
-go 1.27.2
+go 1.27.3
 
 require (
 	capnproto.org/go/capnp/v3 v3.1.0-alpha.2
 	emperror.dev/errors v0.8.1
 	github.com/Masterminds/semver/v3 v3.4.0
-	github.com/ai-dynamo/grove/operator/api v0.1.0-alpha.15
-	github.com/ai-dynamo/modelexpress/modelexpress_client/go v0.0.0-20260428070018-96d409e6f37f
+	github.com/ai-dynamo/grove/operator/api v0.2.0-beta1
+	github.com/ai-dynamo/modelexpress/modelexpress_client/go v0.0.0-20261002171923-ac6d03a87a55
 	github.com/ai-dynamo/snapshot/api v0.2.0
 	github.com/bsm/gomega v1.27.10
 	github.com/evanphx/json-patch/v5 v5.9.11
@@ -23,6 +23,7 @@ require (
 	github.com/prometheus/client_golang v1.23.2
 	github.com/prometheus/client_model v0.6.2
 	github.com/prometheus/common v0.67.5
+	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2
 	github.com/stretchr/testify v1.12.1
 	go.uber.org/zap v1.27.1
 	go.yaml.in/yaml/v3 v3.0.5
@@ -102,7 +103,6 @@ require (
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/prometheus/procfs v0.19.2 // indirect
-	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2 // indirect
 	github.com/shopspring/decimal v1.4.0 // indirect
 	github.com/spf13/cast v1.7.0 // indirect
 	github.com/spf13/cobra v1.10.2 // indirect

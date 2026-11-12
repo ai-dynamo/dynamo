@@ -99,7 +99,7 @@ The KV router is not required for load-based scaling. The Planner receives engin
 
 ## Validate Before Applying Changes
 
-Set `advisory: true` to calculate, log, and export recommendations without changing replica counts. Use advisory mode when introducing an SLA, changing targets, or validating a new workload.
+Set `advisory: true` to calculate, log, and export recommendations without changing the deployment; a planner-in-the-loop replay of the same configuration keeps the simulated deployment fixed too. Use advisory mode when introducing an SLA, changing targets, or validating a new workload.
 
 ```yaml
 features:

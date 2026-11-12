@@ -66,12 +66,28 @@ type ModelProjection struct {
 	partitions []buildPartition
 	connectors []lpxv1alpha1.PropSyncConnectorRequest
 	// propSyncEdges lists each position in partitions whose successor continues
-	// a selected prop-sync chain. Only unpacked HX projections set it; XT
-	// collapses selected chains in configuredBuild instead.
+	// a selected prop-sync chain, for the legacy Cyborg Agent addresses. Only
+	// unpacked HX projections without units set it; XT collapses selected chains
+	// in configuredBuild instead.
 	propSyncEdges []int
 	agentReplicas int
 	// localPartitionIDs lists the runtime partitions that run on the Cyborg GPU, in build order.
 	localPartitionIDs []int
+	// checkpoint is the build checkpoint projected into the Cyborg conductor, or nil.
+	// Projecting or dropping it leaves the digest unchanged. The build's
+	// contentID still hashes the whole deployment contract, so a rebuild whose
+	// recorded checkpoint differs has a new digest and rolls the workload.
+	checkpoint *Checkpoint
+}
+
+// placesLPUUnits reports whether the projection placed the compiler-owned LPU
+// units of its build rather than deriving placement from partitions and chains.
+func (p *ModelProjection) placesLPUUnits() bool {
+	return p.configuredBuild.lpuUnits.Len() != 0
+}
+
+func (p *ModelProjection) Checkpoint() *Checkpoint {
+	return p.checkpoint
 }
 
 // AgentReplicas returns the number of LPU Agent Pods that the projection requires.

@@ -22,6 +22,9 @@ compares requests and responses separately. The guide explains the temporary
 [async-openai annotation gap and removal condition](../../docs/fern/pages/developer-guide/knowledge-base/modular-components/frontend/openapi-request-contract-comparison.md#schema-inputs-and-provenance).
 Composition does not modify the running frontend's `/openapi.json` or `/docs`.
 
+For the current source pin and SSE adapter recipe, see the
+[upstream vLLM response assessment](../../lib/llm/docs/dynamo-vllm-response-assessment.md).
+
 ## Installation
 
 From the repository root on a Linux validation host, install the pinned Python requirements and
