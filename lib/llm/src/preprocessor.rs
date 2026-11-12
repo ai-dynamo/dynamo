@@ -9466,7 +9466,7 @@ impl
 #[cfg(test)]
 mod token_data_tests {
     use super::*;
-    use crate::common::checked_file::CheckedFile;
+    use crate::checked_file::CheckedFile;
     use crate::model_card::{ModelDeploymentCard, ModelInfoType, TokenizerKind};
 
     /// `config.json` has `vocab_size` 128256; the mock tokenizer is smaller.
@@ -10102,7 +10102,7 @@ mod extra_args_media_copy_tests {
 
     #[tokio::test]
     async fn deepseek_v41_display_name_fallback_orders_tool_media() {
-        use crate::common::checked_file::CheckedFile;
+        use crate::checked_file::CheckedFile;
         use crate::model_card::ModelInfoType;
 
         let mut mdc = ModelDeploymentCard::load_from_disk(

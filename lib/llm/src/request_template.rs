@@ -15,8 +15,9 @@ pub struct RequestTemplate {
 impl RequestTemplate {
     pub fn load(path: &Path) -> Result<Self> {
         let template = std::fs::read_to_string(path)?;
-        let template: Self = serde_json::from_str(&template)
-            .inspect_err(|err| crate::log_json_err(&path.display().to_string(), &template, err))?;
+        let template: Self = serde_json::from_str(&template).inspect_err(|err| {
+            dynamo_tokenizers::log_json_err(&path.display().to_string(), &template, err)
+        })?;
         Ok(template)
     }
 }

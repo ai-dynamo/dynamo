@@ -9,6 +9,7 @@
 pub mod admission_gate;
 pub mod backend;
 mod chat_input;
+pub mod checked_file;
 pub mod common;
 mod direct_zmq_fan_in;
 mod direct_zmq_sub_pool;
@@ -26,6 +27,7 @@ pub mod http;
 pub mod hub;
 // pub mod key_value_store;
 pub mod generate_format;
+pub mod json;
 pub mod kv_router;
 pub mod local_model;
 pub mod lora;

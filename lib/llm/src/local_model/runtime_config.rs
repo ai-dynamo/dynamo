@@ -473,7 +473,7 @@ const fn default_local_indexer() -> bool {
     true
 }
 
-pub(crate) const fn default_exclude_tools_when_tool_choice_none() -> bool {
+pub const fn default_exclude_tools_when_tool_choice_none() -> bool {
     true
 }
 
@@ -531,7 +531,7 @@ impl ModelRuntimeConfig {
     }
 
     /// Normalize older wire fields into the current policy and project it back for older readers
-    pub(crate) fn normalize_structural_tag_compatibility(&mut self) {
+    pub fn normalize_structural_tag_compatibility(&mut self) {
         if self.structural_tag.is_none() && self.structural_tag_mode == StructuralTagMode::On {
             self.structural_tag = Some(StructuralTagConfig {
                 scope: self.structural_tag_scope,
@@ -556,7 +556,7 @@ impl ModelRuntimeConfig {
     /// Rust callers commonly store booleans, while compatibility cards may
     /// carry string-encoded flags. Both representations use Dynamo's canonical
     /// truthy vocabulary.
-    pub(crate) fn runtime_flag_enabled(&self, key: &str) -> bool {
+    pub fn runtime_flag_enabled(&self, key: &str) -> bool {
         match self.runtime_data.get(key) {
             Some(serde_json::Value::Bool(true)) => true,
             Some(serde_json::Value::String(value)) => is_truthy(value),
@@ -565,7 +565,7 @@ impl ModelRuntimeConfig {
     }
 
     /// Check whether a runtime capability is explicitly enabled.
-    pub(crate) fn supports_runtime_capability(&self, capability: &str) -> bool {
+    pub fn supports_runtime_capability(&self, capability: &str) -> bool {
         self.runtime_flag_enabled(capability)
     }
 
@@ -578,6 +578,12 @@ impl ModelRuntimeConfig {
             .get(&dp_rank)?
             .as_str()?;
         (!endpoint.is_empty()).then_some(endpoint)
+    }
+}
+
+impl dynamo_lora::runtime::RuntimeLoraWorkerFacts for ModelRuntimeConfig {
+    fn runtime_value(&self, key: &str) -> Option<&serde_json::Value> {
+        self.runtime_data.get(key)
     }
 }
 

@@ -67,7 +67,7 @@ fn model_card_tokenizer_cache_reuses_only_matching_identities() -> anyhow::Resul
         {
             use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
 
-            use dynamo_llm::{common::checked_file::CheckedFile, model_card::TokenizerKind};
+            use dynamo_llm::{checked_file::CheckedFile, model_card::TokenizerKind};
 
             // HF accepts a Path; the alternate backends require UTF-8 paths.
             let temp = tempfile::tempdir()?;
