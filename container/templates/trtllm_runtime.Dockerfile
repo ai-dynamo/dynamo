@@ -524,6 +524,24 @@ RUN /usr/bin/python3 -m pip install --break-system-packages --upgrade \
 RUN /opt/dynamo/venv/bin/python3 -c 'import importlib.metadata as m, sys; from packaging.version import Version; bounds = {"jupyter-server": ("2.21.0", "3"), "jupyterlab": ("4.6.4", "5"), "notebook": ("7.6.3", "8"), "urllib3": ("2.8.0", "3")}; versions = {n: m.version(n) for n in bounds}; print("runtime interpreter versions:", versions); assert all(Version(lo) <= Version(versions[n]) < Version(hi) for n, (lo, hi) in bounds.items()); from jupyter_server.serverapp import ServerApp; from jupyterlab.labapp import LabApp; from notebook.app import JupyterNotebookApp; import urllib3; print("runtime import paths:", sys.modules[ServerApp.__module__].__file__, sys.modules[LabApp.__module__].__file__, sys.modules[JupyterNotebookApp.__module__].__file__, urllib3.__file__)'
 {% endif %}
 
+# Raise the base image's datasets, fsspec, filelock and pyasn1 in system site, for
+# the inventory reason given for aiohttp above. requirements.trtllm.txt reaches
+# only the venv, and none of the four are in it. datasets 4.7.0 caps fsspec at
+# 2026.2.0, so datasets moves to 5.1.0, whose cap admits fsspec 2026.7.0.
+# tensorrt-llm declares datasets without a version. torchtitan in the base caps
+# datasets below 4.8.0, and tensorrt_llm does not import torchtitan. The filelock
+# floor matches the one upstream TensorRT-LLM sets for Python 3.11 and newer, and
+# the pyasn1 cap stays inside the range that pyasn1-modules declares.
+# Fail if the solve changes another distribution: its package paths must be added
+# to the pre_runtime whiteout first. Mirrored by that whiteout, and checked again
+# after the overlay.
+RUN /usr/bin/python3 -m pip install --break-system-packages --upgrade \
+        --report /tmp/system-site-refresh.json \
+        "datasets==5.1.0" "fsspec[http]==2026.7.0" "filelock>=4.2.1,<5" "pyasn1>=0.6.5,<0.7" && \
+    /usr/bin/python3 -c 'import json; d = json.load(open("/tmp/system-site-refresh.json")); changed = {p["metadata"]["name"].lower().replace("_", "-") for p in d["install"]}; print("upgraded system distributions:", sorted(changed)); assert changed <= {"datasets", "fsspec", "filelock", "pyasn1"}, "Add whiteouts for upgraded transitive distributions"' && \
+    rm /tmp/system-site-refresh.json && \
+    /usr/bin/python3 -c 'import glob, importlib.metadata as m; from packaging.version import Version; bounds = {"datasets": ("5.1.0", "5.1.1"), "fsspec": ("2026.7.0", "2026.7.1"), "filelock": ("4.2.1", "5"), "pyasn1": ("0.6.5", "0.7")}; versions = {n: m.version(n) for n in bounds}; print("system-site versions:", versions); assert all(len(glob.glob("/usr/local/lib/python3.12/dist-packages/" + n + "-*.dist-info")) == 1 and Version(lo) <= Version(versions[n]) < Version(hi) for n, (lo, hi) in bounds.items()); import datasets, fsspec, filelock, pyasn1'
+
 # Pull /workspace_src (incl. LICENSE) from the transport stage and
 # wire up the launch screen in a single RUN — saves the standalone workspace COPY layer.
 RUN --mount=type=bind,from=workspace_files,source=/workspace_src,target=/tmp/workspace_src \
@@ -585,6 +603,10 @@ RUN apt-get purge -y git-lfs && rm -rf /var/lib/apt/lists/*
 # has the same doubling problem. Dropping them here is free: the overlay restores
 # whatever runtime_full holds, so listing one that did not move costs nothing and
 # omitting one that did would leave stale metadata behind.
+# datasets, fsspec, filelock and pyasn1 are here for the aiohttp reason: runtime_full
+# raises them in system site, and each upgrade renames a version-stamped dist-info
+# directory. The pyasn1 pattern names the dist-info suffix so it cannot match
+# pyasn1_modules.
 # Remove old trust-store files and Python metadata before restoring the updated overlay.
 RUN rm -rf /workspace /home/ubuntu \
     /etc/ssl/certs \
@@ -635,7 +657,15 @@ RUN rm -rf /workspace /home/ubuntu \
     /usr/local/lib/python3.12/dist-packages/certifi-* \
     /usr/local/lib/python3.12/dist-packages/PIL \
     /usr/local/lib/python3.12/dist-packages/pillow-* \
-    /usr/local/lib/python3.12/dist-packages/pillow.libs && \
+    /usr/local/lib/python3.12/dist-packages/pillow.libs \
+    /usr/local/lib/python3.12/dist-packages/datasets \
+    /usr/local/lib/python3.12/dist-packages/datasets-*.dist-info \
+    /usr/local/lib/python3.12/dist-packages/fsspec \
+    /usr/local/lib/python3.12/dist-packages/fsspec-*.dist-info \
+    /usr/local/lib/python3.12/dist-packages/filelock \
+    /usr/local/lib/python3.12/dist-packages/filelock-*.dist-info \
+    /usr/local/lib/python3.12/dist-packages/pyasn1 \
+    /usr/local/lib/python3.12/dist-packages/pyasn1-*.dist-info && \
     ! /usr/bin/python3 -c "import cv2" 2>/dev/null && \
     ! /usr/bin/python3 -c "import wandb" 2>/dev/null
 COPY --from=runtime_full / /
@@ -645,9 +675,11 @@ COPY --from=runtime_full / /
 RUN /usr/bin/python3 -c 'import glob, importlib.metadata as m; from packaging.version import Version; bounds = {"jupyter-server": ("2.21.0", "3"), "jupyterlab": ("4.6.4", "5"), "notebook": ("7.6.3", "8"), "urllib3": ("2.8.0", "3")}; versions = {n: m.version(n) for n in bounds}; print("system-site versions:", versions); assert all(len(glob.glob("/usr/local/lib/python3.12/dist-packages/" + n.replace("-", "_") + "-*.dist-info")) == 1 and Version(lo) <= Version(versions[n]) < Version(hi) for n, (lo, hi) in bounds.items()); from jupyter_server.serverapp import ServerApp; from jupyterlab.labapp import LabApp; from notebook.app import JupyterNotebookApp; import urllib3'
 RUN /usr/bin/python3 -c 'import glob, os, sys; d = glob.glob("/usr/local/lib/python3.12/dist-packages/certifi-*.dist-info"); vs = [os.path.basename(p)[8:-10] for p in d]; print("certifi dist-info after overlay:", vs); tv = lambda s: tuple(int(x) for x in s.split(".")[:3]); sys.exit(0 if len(vs) == 1 and tv(vs[0]) >= (2026, 10, 23) else 1)'
 RUN /usr/bin/python3 -c 'import glob, os, sys; d = glob.glob("/usr/local/lib/python3.12/dist-packages/pillow-*.dist-info"); vs = [os.path.basename(p)[7:-10] for p in d]; print("pillow dist-info after overlay:", vs); tv = lambda s: tuple(int(x) for x in s.split(".")[:3]); sys.exit(0 if len(vs) == 1 and (13, 0, 0) <= tv(vs[0]) < (14, 0, 0) else 1)'
+RUN /usr/bin/python3 -c 'import glob, importlib.metadata as m; from packaging.version import Version; bounds = {"datasets": ("5.1.0", "5.1.1"), "fsspec": ("2026.7.0", "2026.7.1"), "filelock": ("4.2.1", "5"), "pyasn1": ("0.6.5", "0.7")}; versions = {n: m.version(n) for n in bounds}; print("system-site versions after overlay:", versions); assert all(len(glob.glob("/usr/local/lib/python3.12/dist-packages/" + n + "-*.dist-info")) == 1 and Version(lo) <= Version(versions[n]) < Version(hi) for n, (lo, hi) in bounds.items())'
 
 {% if target not in ("dev", "local-dev") %}
 RUN /opt/dynamo/venv/bin/python3 -c 'import importlib.metadata as m, sys; from packaging.version import Version; bounds = {"jupyter-server": ("2.21.0", "3"), "jupyterlab": ("4.6.4", "5"), "notebook": ("7.6.3", "8"), "urllib3": ("2.8.0", "3")}; versions = {n: m.version(n) for n in bounds}; print("runtime interpreter versions:", versions); assert all(Version(lo) <= Version(versions[n]) < Version(hi) for n, (lo, hi) in bounds.items()); from jupyter_server.serverapp import ServerApp; from jupyterlab.labapp import LabApp; from notebook.app import JupyterNotebookApp; import urllib3; print("runtime import paths:", sys.modules[ServerApp.__module__].__file__, sys.modules[LabApp.__module__].__file__, sys.modules[JupyterNotebookApp.__module__].__file__, urllib3.__file__)'
+RUN /opt/dynamo/venv/bin/python3 -c 'import importlib.metadata as m; from packaging.version import Version; bounds = {"datasets": ("5.1.0", "5.1.1"), "fsspec": ("2026.7.0", "2026.7.1"), "filelock": ("4.2.1", "5"), "pyasn1": ("0.6.5", "0.7")}; versions = {n: m.version(n) for n in bounds}; print("runtime interpreter versions:", versions); assert all(Version(lo) <= Version(versions[n]) < Version(hi) for n, (lo, hi) in bounds.items()); import datasets, fsspec, filelock, pyasn1; print("runtime import paths:", datasets.__file__, fsspec.__file__, filelock.__file__, pyasn1.__file__)'
 {% endif %}
 
 # Check the merged filesystem: both base stages must purge package-owned paths.
