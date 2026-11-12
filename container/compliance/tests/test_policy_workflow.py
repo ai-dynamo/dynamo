@@ -66,7 +66,8 @@ def test_required_policy_job_executes_full_checkout_compliance_regressions():
     regression = regression_steps[0]
     command = regression["run"]
     assert "container/compliance/tests\n" in command
-    assert "-o addopts=''" in command and "-o filterwarnings=''" in command
+    assert "-o addopts" not in command  # Preserve strict marker/config validation.
+    assert "-o filterwarnings=''" in command
     assert " -m " not in command.replace("python3 -m pytest", "pytest")
     assert "if" not in regression and "continue-on-error" not in regression
     regression_index = steps.index(regression)

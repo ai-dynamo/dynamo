@@ -35,7 +35,7 @@ jobs:
             pytest-asyncio==1.3.0 pytest-timeout==2.4.0 Jinja2==3.1.6
       - name: Run CPU compliance regressions from the checkout
         run: |
-          python3 -m pytest -o addopts='' -o filterwarnings='' -q \
+          python3 -m pytest -o filterwarnings='' -q \
             container/compliance/tests
       - name: Check new grants and report legacy review debt
         run: |
