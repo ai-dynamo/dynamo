@@ -3,7 +3,7 @@
 
 name: Release Pipeline
 
-# workflow_dispatch is capped at 10 inputs by GitHub (this block has 9).
+# workflow_dispatch is capped at 10 inputs by GitHub (this block has 10).
 # on_demand/release_version are workflow_call-only: the sole on-demand entry
 # point is stage-release-rc.yml. The ops gate lives HERE (authorize job), so it
 # binds every caller; stage-release-rc.yml repeats it as a fast-fail before its
@@ -11,6 +11,11 @@ name: Release Pipeline
 on:
   workflow_dispatch:
     inputs:
+      compliance_run_id:
+        description: 'Exact image-producing workflow run. Empty resolves a trusted run only when every image digest matches its evidence.'
+        required: false
+        type: string
+        default: ''
       commit_sha:
         description: 'Git commit SHA whose post-merge CI images to publish (full 40-char SHA).'
         required: true
@@ -56,6 +61,11 @@ on:
         default: all
   workflow_call:
     inputs:
+      compliance_run_id:
+        description: 'Exact image-producing workflow run. Empty resolves a trusted run only when every image digest matches its evidence.'
+        required: false
+        type: string
+        default: ''
       commit_sha:
         required: true
         type: string
@@ -499,8 +509,12 @@ jobs:
     # Skip only when neither containers nor helm are selected; nightly/rc default
     # to 'all' for both, so they always run unless explicitly narrowed.
     if: ${{ needs.prepare-release.result == 'success' && !(inputs.containers == 'none' && inputs.helm == 'none') }}
-    runs-on: prod-builder-amd-v1 # TODO: needs to identify the correct runner here, definitely should not be prod-builder-amd-v1
+    runs-on: prod-builder-v3 # Registry copy plus native remote BuildKit audits.
     environment: automated-release
+    timeout-minutes: 240
+    permissions:
+      contents: read
+      actions: read
     outputs:
       # Comma-separated NGC image refs (repo:tag, no registry prefix) actually copied
       # to NGC — primary version tags + -efa variants only (the -cuda13 digest aliases
@@ -528,6 +542,7 @@ jobs:
       VLLM_EFA_BUILD_RESULT: ${{ inputs.vllm_efa_build_result }}
       SGLANG_EFA_BUILD_RESULT: ${{ inputs.sglang_efa_build_result }}
       TRTLLM_EFA_BUILD_RESULT: ${{ inputs.trtllm_efa_build_result }}
+      PUBLICATION_MANIFEST: ${{ runner.temp }}/publication-audit/publication-manifest.json
     steps:
       # Re-verify the ops gate in-job (see authorize): blocks re-run bypass.
       - *ops-token
@@ -552,6 +567,56 @@ jobs:
       - name: Login to ECR
         run: |
           aws ecr get-login-password --region ${AWS_DEFAULT_REGION} | docker login --username AWS --password-stdin "${ECR_REGISTRY}"
+
+      - name: Checkout trusted compliance gate
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .compliance-tools
+          persist-credentials: false
+          sparse-checkout: |
+            container/compliance
+            container/Dockerfile.compliance-audit
+          sparse-checkout-cone-mode: false
+
+      - name: Initialize publication audit builder
+        id: audit-builder
+        if: inputs.containers != 'none'
+        uses: $/.github/actions/init-dynamo-builder
+        with:
+          builder_name: publication-audit-${{ github.run_id }}-${{ github.run_attempt }}
+          flavor: general
+          arch: linux/amd64
+          namespace: ${{ vars.BUILDKIT_NAMESPACE }}
+
+      - name: Require independent audits for every selected image
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRODUCER_RUN_ID: ${{ inputs.compliance_run_id }}
+          AUDIT_BUILDER: publication-audit-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          NIGHTLY_ARG=()
+          if [ "${NIGHTLY}" = 'true' ]; then NIGHTLY_ARG=(--nightly); fi
+          PYTHONPATH="${GITHUB_WORKSPACE}/.compliance-tools/container" python3 -m compliance.publication preflight \
+            --repo "${GITHUB_REPOSITORY}" --run-id "${PRODUCER_RUN_ID}" --sha "${COMMIT_SHA}" \
+            --registry-repo "${ECR_REGISTRY}/${ECR_REPOSITORY}" --containers "${CONTAINER_SUBSET}" \
+            "${NIGHTLY_ARG[@]}" --builder "${AUDIT_BUILDER}" --output "${RUNNER_TEMP}/publication-audit"
+
+      - name: Retain publication audit evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: publication-compliance-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/publication-audit/
+          retention-days: 90
+          if-no-files-found: ignore
+
+      - name: Remove this publication audit builder
+        if: ${{ always() && inputs.containers != 'none' && steps.audit-builder.outcome != 'skipped' }}
+        env:
+          AUDIT_BUILDER: publication-audit-${{ github.run_id }}-${{ github.run_attempt }}
+        run: docker buildx rm --force "${AUDIT_BUILDER}" || true
 
       - name: Login to NGC
         env:
@@ -660,6 +725,10 @@ jobs:
 
           copy_image() {
             local SRC="$1" DST="$2" LABEL="$3"
+            # The complete preflight runs before the first copy. Never resolve
+            # a mutable source tag again after its platform digests passed.
+            SRC=$(PYTHONPATH="${GITHUB_WORKSPACE}/.compliance-tools/container" python3 -m compliance.publication source \
+              --manifest "${PUBLICATION_MANIFEST}" --image-ref "${SRC}") || exit 1
             echo "----------------------------------------"
             echo "Copying: ${LABEL}"
             # crane copy preserves multi-arch manifest lists by default (no --platform needed).
@@ -839,10 +908,10 @@ jobs:
                 echo "::warning::Skipped ${LABEL} — build result in this run: '${RESULT}'"
                 FAILED_COPIES+=("${LABEL} (build ${RESULT})")
                 return 1
-              elif ! crane manifest "${SRC}" > /dev/null 2>&1; then
-                echo "::warning::Skipped ${LABEL} — ${SRC} not found (no nightly build exists for this SHA)"
-                FAILED_COPIES+=("${LABEL} (source missing)")
-                return 1
+              elif ! PYTHONPATH="${GITHUB_WORKSPACE}/.compliance-tools/container" python3 -m compliance.publication source \
+                  --manifest "${PUBLICATION_MANIFEST}" --image-ref "${SRC}" > /dev/null; then
+                echo "::error::Selected image ${LABEL} has no accepted publication digest"
+                exit 1
               elif copy_image "${SRC}" "${DST}" "${LABEL}"; then
                 if [ -n "${FLOAT_DST}" ]; then
                   if ! copy_image "${SRC}" "${FLOAT_DST}" "${FLOAT_LABEL}"; then

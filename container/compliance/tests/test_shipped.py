@@ -575,7 +575,7 @@ def test_cli_merges_supplement_and_reports_scoped_license_exception(tmp_path):
         ("vllm", "runtime", True),
         ("sglang", "runtime", True),
         ("trtllm", "runtime", True),
-        ("dynamo", "planner", False),
+        ("dynamo", "planner", True),
         ("triton", "runtime", False),
     ],
 )
@@ -600,6 +600,12 @@ def test_compliance_template_keeps_shell_valid_and_builder_scans_out(
     assert ("--shipped-sbom" in rendered) == enabled
     assert ("COPY --from=compliance_cataloger" in rendered) == enabled
     assert ("COPY --from=licenses /sboms/supplemental-sources" in rendered) == enabled
+    if target == "planner":
+        assert "COPY --from=pre_planner / /opt/shipped-root/" in rendered
+        assert "syft dir:/opt/shipped-root" in rendered
+        assert "--venv /opt/shipped-root/opt/dynamo/venv" in rendered
+        assert "--shipped-root /opt/shipped-root" in rendered
+        assert "for site in /opt/shipped-root/usr/local/" in rendered
     assert "\\\n\n" not in rendered
     lines = rendered.splitlines()
     for index, line in enumerate(lines):

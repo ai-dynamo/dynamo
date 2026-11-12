@@ -192,6 +192,9 @@ on:
       HF_TOKEN:
         required: false
     outputs:
+      image_ref:
+        description: Immutable-build tag whose digest is bound to the inventory
+        value: ${{ jobs.build.outputs.image_ref }}
       target_tag_plain:
         description: 'Plain runtime image tag prefix'
         value: ${{ jobs.build.outputs.target_tag_plain }}
@@ -221,6 +224,7 @@ jobs:
       contents: read
       actions: read
     outputs:
+      image_ref: ${{ steps.calculate-target-tag.outputs.image_uri }}
       target_tag_plain: ${{ steps.calculate-target-tag.outputs.target_tag_plain }}
       test_tag_plain: ${{ steps.calculate-target-tag.outputs.test_tag_plain }}
       baseline_sbom_file: ${{ steps.gen-dockerfile.outputs.baseline_stem }}
@@ -589,6 +593,9 @@ jobs:
           diff_base_artifact_id: ${{ steps.resolve-diff-base.outputs.base_artifact_id }}
           diff_base_run_id: ${{ steps.resolve-diff-base.outputs.base_run_id }}
           gh_token: ${{ secrets.GITHUB_TOKEN }}
+          pushed_image_ref: ${{ steps.calculate-target-tag.outputs.image_uri }}
+          baseline_sbom_file: ${{ steps.gen-dockerfile.outputs.baseline_stem }}
+          allow_baseline_bootstrap: ${{ steps.resolve-diff-base.outputs.base_bootstrap }}
           framework: ${{ inputs.framework }}
           target: ${{ inputs.target }}
           platform: ${{ inputs.platform }}

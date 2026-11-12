@@ -61,7 +61,7 @@
 #     UCX, NIXL, gdrcopy, libfabric, etcd, nats-server) per native_packages.yaml's
 #     per-image `images:` lists; make_efa adds the EFA-only entries.
 
-{% set shipped_inventory = target == "frontend" or (target == "runtime" and framework in ["vllm", "sglang", "trtllm"]) %}
+{% set shipped_inventory = target in ["frontend", "planner"] or (target == "runtime" and framework in ["vllm", "sglang", "trtllm"]) %}
 {% if shipped_inventory %}
 # Pinned scanner is a build helper only. The final image copies /legal, never
 # this stage's tools. One discovery pass supplements ecosystem generators;
@@ -75,12 +75,17 @@ USER root
 RUN mkdir -p /legal /sboms
 COPY --chown=root:0 container/compliance /opt/compliance
 ENV PYTHONPATH=/opt
+{% if target == "planner" %}
+# The planner uses a separate distroless runtime base. Inspect that assembled
+# filesystem without executing it or attributing the builder's compiler/tools.
+COPY --from=pre_planner / /opt/shipped-root/
+{% endif %}
 {% if shipped_inventory %}
 COPY --from=compliance_cataloger /syft /opt/compliance/bin/syft
 # Retain actual upstream license contents. Go binaries expose module versions
 # but do not embed their dependency licenses; resolve those exact versions.
 RUN SYFT_GOLANG_SEARCH_REMOTE_LICENSES=true SYFT_LICENSE_CONTENT=all \
-    /opt/compliance/bin/syft dir:/ \
+    /opt/compliance/bin/syft dir:/{% if target == "planner" %}opt/shipped-root{% endif %} \
       --select-catalogers 'installed,+rust-cargo-lock-cataloger' \
       --exclude './proc/**' --exclude './sys/**' --exclude './dev/**' \
       --exclude './tmp/**' --exclude './run/**' --exclude './home/runner/**' \
@@ -129,14 +134,15 @@ ARG TARGETARCH
 # `pip --system`, sglang via `pip --break-system-packages`). Pick the matching
 # generator flag so it always finds the deps — passing an empty
 # `--venv ${VIRTUAL_ENV}` is what broke system-Python images.
-RUN {% if framework == "sglang" %}PKG_ARG="--site-packages $(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"{% else %}if [ -n "${VIRTUAL_ENV:-}" ]; then PKG_ARG="--venv ${VIRTUAL_ENV}"; else PKG_ARG="--site-packages $(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"; fi{% endif %} && \
+RUN {% if target == "planner" %}PKG_ARG="--venv /opt/shipped-root/opt/dynamo/venv"{% elif framework == "sglang" %}PKG_ARG="--site-packages $(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"{% else %}if [ -n "${VIRTUAL_ENV:-}" ]; then PKG_ARG="--venv ${VIRTUAL_ENV}"; else PKG_ARG="--site-packages $(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"; fi{% endif %} && \
     set -- && \
-{% if shipped_inventory %}    for site in /usr/local/lib/python*/dist-packages /usr/local/lib/python*/site-packages /usr/lib/python*/dist-packages; do \
+{% if shipped_inventory %}    for site in {% if target == "planner" %}/opt/shipped-root{% endif %}/usr/local/lib/python*/dist-packages {% if target == "planner" %}/opt/shipped-root{% endif %}/usr/local/lib/python*/site-packages {% if target == "planner" %}/opt/shipped-root{% endif %}/usr/lib/python*/dist-packages; do \
         if [ -d "$site" ]; then set -- "$@" --site-packages "$site"; fi; \
     done && \
 {% endif %}    python3 -m compliance.generators \
 {% if shipped_inventory %}    --shipped-sbom /tmp/shipped.syft.json \
-    --supplemental-sources /sboms/supplemental-sources \
+{% if target == "planner" %}    --shipped-root /opt/shipped-root \
+{% endif %}    --supplemental-sources /sboms/supplemental-sources \
 {% endif %}    --ecosystem {{ compliance_ecosystems }} \
     ${PKG_ARG} "$@" \
 {% if target == "frontend" %}    --rust-sbom /tmp/sbom-rust-epp.cdx.json \
@@ -168,7 +174,7 @@ RUN python3 -m compliance.policy.validate \
 # stack. Enable both together if that changes.
 {% if device == "cuda" %}
 RUN python3 -m compliance.scan_codecs \
-        --root / \
+        --root /{% if target == "planner" %}opt/shipped-root{% endif %} \
         --policy /opt/compliance/policy/codec_policy.yaml \
         --sbom /legal/osrb.cdx.json \
         --image {{ framework }}-{{ target }} \

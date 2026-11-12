@@ -56,6 +56,9 @@ on:
         type: boolean
         default: false
     outputs:
+      image_ref:
+        description: Image reference bound to the compliance inventory
+        value: ${{ jobs.build.outputs.image_ref }}
       target_tag_plain:
         description: 'Plain sidecar image tag prefix'
         value: ${{ jobs.build.outputs.target_tag_plain }}
@@ -72,6 +75,7 @@ jobs:
       actions: read
       contents: read
     outputs:
+      image_ref: ${{ steps.calculate-target-tag.outputs.image_uri }}
       target_tag_plain: ${{ steps.calculate-target-tag.outputs.target_tag_plain }}
       binary_artifact: ${{ steps.binary-artifact.outputs.name }}
     steps:
@@ -244,6 +248,9 @@ jobs:
       - name: Compliance extract
         uses: $/.github/actions/compliance-extract
         with:
+          pushed_image_ref: ${{ steps.calculate-target-tag.outputs.image_uri }}
+          baseline_sbom_file: ubuntu@7291df36
+          allow_baseline_bootstrap: ${{ steps.resolve-diff-base.outputs.base_bootstrap }}
           diff_base_sha: ${{ steps.resolve-diff-base.outputs.base_sha }}
           diff_base_label: ${{ steps.resolve-diff-base.outputs.base_label }}
           diff_base_artifact_id: ${{ steps.resolve-diff-base.outputs.base_artifact_id }}

@@ -166,6 +166,12 @@ jobs:
       - frontend-compliance-audit
       - frontend-test
       - frontend-copy-to-acr
+      - vllm-efa-compliance-audit
+      - sglang-efa-compliance-audit
+      - trtllm-efa-compliance-audit
+      - planner-compliance-audit
+      - sidecar-compliance-audit
+      - operator-compliance-audit
     if: always()
     steps:
       - name: Check all dependent jobs
@@ -1130,68 +1136,61 @@ jobs:
   # (same caller pattern).
 
   vllm-compliance-audit:
-    name: vllm-runtime # grouped in the UI with other vllm jobs
-    needs: [changed-files, vllm-build]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
+    name: vllm-runtime compliance
+    needs: [vllm-build]
+    if: ${{ !cancelled() && needs.vllm-build.result == 'success' }}
+    permissions:
+      contents: read
+      actions: read
     uses: $/.github/workflows/shared-compliance-audit.yml
     with:
-      framework: vllm
-      target: runtime
-      cuda_version: '13.0'
-      target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
-      baseline_sbom_file: ${{ needs.vllm-build.outputs.baseline_sbom_file }}
-    # No secrets: the audit scans the container's own filesystem (no registry
-    # auth / aws) — don't inherit repo secrets into the audit job.
+      target_tag_plain: vllm-runtime
+      image_ref: ${{ needs.vllm-build.outputs.image_ref }}
+      source_sha: ${{ github.sha }}
+      producer_run_id: ${{ github.run_id }}
 
   sglang-compliance-audit:
-    name: sglang-runtime # grouped in the UI with other sglang jobs
-    needs: [changed-files, sglang-build]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true'
+    name: sglang-runtime compliance
+    needs: [sglang-build]
+    if: ${{ !cancelled() && needs.sglang-build.result == 'success' }}
+    permissions:
+      contents: read
+      actions: read
     uses: $/.github/workflows/shared-compliance-audit.yml
     with:
-      framework: sglang
-      target: runtime
-      cuda_version: '13.0'
-      target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
-      baseline_sbom_file: ${{ needs.sglang-build.outputs.baseline_sbom_file }}
+      target_tag_plain: sglang-runtime
+      image_ref: ${{ needs.sglang-build.outputs.image_ref }}
+      source_sha: ${{ github.sha }}
+      producer_run_id: ${{ github.run_id }}
 
   trtllm-compliance-audit:
-    name: trtllm-runtime # grouped in the UI with other trtllm jobs
-    needs: [changed-files, trtllm-build]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true'
+    name: trtllm-runtime compliance
+    needs: [trtllm-build]
+    if: ${{ !cancelled() && needs.trtllm-build.result == 'success' }}
+    permissions:
+      contents: read
+      actions: read
     uses: $/.github/workflows/shared-compliance-audit.yml
     with:
-      framework: trtllm
-      target: runtime
-      cuda_version: '13.1'
-      target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
-      baseline_sbom_file: ${{ needs.trtllm-build.outputs.baseline_sbom_file }}
+      target_tag_plain: trtllm-runtime
+      image_ref: ${{ needs.trtllm-build.outputs.image_ref }}
+      source_sha: ${{ github.sha }}
+      producer_run_id: ${{ github.run_id }}
 
   frontend-compliance-audit:
-    name: frontend # grouped in the UI with other frontend jobs
-    needs: [changed-files, frontend-build]
-    # Mirror frontend-build's trigger so every rebuilt frontend image gets an
-    # audit report, including operator/snapshot/deploy-driven rebuilds.
-    if: |
-      needs.changed-files.outputs.frontend == 'true' ||
-      needs.changed-files.outputs.operator == 'true' ||
-      needs.changed-files.outputs.snapshot == 'true' ||
-      needs.changed-files.outputs.snapshot_vllm == 'true' ||
-      needs.changed-files.outputs.snapshot_sglang == 'true' ||
-      needs.changed-files.outputs.snapshot_trtllm == 'true' ||
-      needs.changed-files.outputs.deploy == 'true'
+    name: dynamo-frontend compliance
+    needs: [frontend-build]
+    if: ${{ !cancelled() && needs.frontend-build.result == 'success' }}
+    permissions:
+      contents: read
+      actions: read
     uses: $/.github/workflows/shared-compliance-audit.yml
     with:
-      framework: dynamo
-      target: frontend
-      # frontend ships amd64+arm64; the audit scans the amd64 image only,
-      # matching the single-arch framework audits above.
-      cuda_version: ''
-      target_tag_plain: ${{ needs.frontend-build.outputs.target_tag_plain }}
-      baseline_sbom_file: ${{ needs.frontend-build.outputs.baseline_sbom_file }}
+      target_tag_plain: dynamo-frontend
+      image_ref: ${{ needs.frontend-build.outputs.image_ref }}
+      source_sha: ${{ github.sha }}
+      producer_run_id: ${{ github.run_id }}
 
-  # planner stays on the legacy shared-compliance scan until it migrates to
-  # the inline system that vllm/sglang/trtllm/frontend use above.
   planner-compliance:
     name: planner # This name overlaps with other planner jobs to group them in the UI
     needs: [changed-files, planner-build]
@@ -1211,7 +1210,7 @@ jobs:
 
   vllm-copy-to-acr:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
-    needs: [changed-files, vllm-build]
+    needs: [changed-files, vllm-build, vllm-compliance-audit]
     if: |
       always() && !cancelled() &&
       (needs.changed-files.outputs.core == 'true' ||
@@ -1220,7 +1219,8 @@ jobs:
        needs.changed-files.outputs.operator == 'true' ||
        needs.changed-files.outputs.snapshot == 'true' ||
        needs.changed-files.outputs.snapshot_vllm == 'true') &&
-      needs.vllm-build.result == 'success'
+      needs.vllm-build.result == 'success' &&
+      needs.vllm-compliance-audit.result == 'success'
     uses: $/.github/workflows/shared-copy.yml
     with:
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
@@ -1230,7 +1230,7 @@ jobs:
 
   frontend-copy-to-acr:
     name: frontend
-    needs: [changed-files, frontend-build]
+    needs: [changed-files, frontend-build, frontend-compliance-audit]
     if: |
       always() && !cancelled() &&
       (needs.changed-files.outputs.frontend == 'true' ||
@@ -1243,7 +1243,8 @@ jobs:
       needs.changed-files.outputs.snapshot_vllm == 'true' ||
       needs.changed-files.outputs.snapshot_sglang == 'true' ||
       needs.changed-files.outputs.snapshot_trtllm == 'true') &&
-      needs.frontend-build.result == 'success'
+      needs.frontend-build.result == 'success' &&
+      needs.frontend-compliance-audit.result == 'success'
     uses: $/.github/workflows/shared-copy.yml
     with:
       target_tag_plain: ${{ needs.frontend-build.outputs.target_tag_plain }}
@@ -1254,12 +1255,13 @@ jobs:
 
   planner-copy-to-acr:
     name: planner
-    needs: [changed-files, planner-build]
+    needs: [changed-files, planner-build, planner-compliance-audit]
     if: |
       always() && !cancelled() &&
       (needs.changed-files.outputs.operator == 'true' ||
        needs.changed-files.outputs.dgdr == 'true') &&
-      needs.planner-build.result == 'success'
+      needs.planner-build.result == 'success' &&
+      needs.planner-compliance-audit.result == 'success'
     uses: $/.github/workflows/shared-copy.yml
     with:
       target_tag_plain: ${{ needs.planner-build.outputs.target_tag_plain }}
@@ -1276,7 +1278,7 @@ jobs:
 
   sglang-copy-to-acr:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
-    needs: [changed-files, sglang-build]
+    needs: [changed-files, sglang-build, sglang-compliance-audit]
     if: |
       always() && !cancelled() &&
       (needs.changed-files.outputs.core == 'true' ||
@@ -1285,7 +1287,8 @@ jobs:
        needs.changed-files.outputs.operator == 'true' ||
        needs.changed-files.outputs.snapshot == 'true' ||
        needs.changed-files.outputs.snapshot_sglang == 'true') &&
-      needs.sglang-build.result == 'success'
+      needs.sglang-build.result == 'success' &&
+      needs.sglang-compliance-audit.result == 'success'
     uses: $/.github/workflows/shared-copy.yml
     with:
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
@@ -1295,7 +1298,7 @@ jobs:
 
   trtllm-copy-to-acr:
     name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
-    needs: [changed-files, trtllm-build]
+    needs: [changed-files, trtllm-build, trtllm-compliance-audit]
     if: |
       always() && !cancelled() &&
       (needs.changed-files.outputs.core == 'true' ||
@@ -1304,7 +1307,8 @@ jobs:
        needs.changed-files.outputs.operator == 'true' ||
        needs.changed-files.outputs.snapshot == 'true' ||
        needs.changed-files.outputs.snapshot_trtllm == 'true') &&
-      needs.trtllm-build.result == 'success'
+      needs.trtllm-build.result == 'success' &&
+      needs.trtllm-compliance-audit.result == 'success'
     uses: $/.github/workflows/shared-copy.yml
     with:
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
@@ -2110,3 +2114,92 @@ jobs:
     permissions:
       contents: write
       actions: read
+
+  vllm-efa-compliance-audit:
+    name: vllm-runtime-efa compliance
+    needs: [vllm-efa-build]
+    if: ${{ !cancelled() && needs.vllm-efa-build.result == 'success' }}
+    permissions:
+      contents: read
+      actions: read
+    uses: $/.github/workflows/shared-compliance-audit.yml
+    with:
+      target_tag_plain: vllm-runtime-efa
+      image_ref: ${{ needs.vllm-efa-build.outputs.image_ref }}
+      source_sha: ${{ github.sha }}
+      producer_run_id: ${{ github.run_id }}
+
+
+  sglang-efa-compliance-audit:
+    name: sglang-runtime-efa compliance
+    needs: [sglang-efa-build]
+    if: ${{ !cancelled() && needs.sglang-efa-build.result == 'success' }}
+    permissions:
+      contents: read
+      actions: read
+    uses: $/.github/workflows/shared-compliance-audit.yml
+    with:
+      target_tag_plain: sglang-runtime-efa
+      image_ref: ${{ needs.sglang-efa-build.outputs.image_ref }}
+      source_sha: ${{ github.sha }}
+      producer_run_id: ${{ github.run_id }}
+
+
+  trtllm-efa-compliance-audit:
+    name: trtllm-runtime-efa compliance
+    needs: [trtllm-efa-build]
+    if: ${{ !cancelled() && needs.trtllm-efa-build.result == 'success' }}
+    permissions:
+      contents: read
+      actions: read
+    uses: $/.github/workflows/shared-compliance-audit.yml
+    with:
+      target_tag_plain: trtllm-runtime-efa
+      image_ref: ${{ needs.trtllm-efa-build.outputs.image_ref }}
+      source_sha: ${{ github.sha }}
+      producer_run_id: ${{ github.run_id }}
+
+
+  planner-compliance-audit:
+    name: dynamo-planner compliance
+    needs: [planner-build]
+    if: ${{ !cancelled() && needs.planner-build.result == 'success' }}
+    permissions:
+      contents: read
+      actions: read
+    uses: $/.github/workflows/shared-compliance-audit.yml
+    with:
+      target_tag_plain: dynamo-planner
+      image_ref: ${{ needs.planner-build.outputs.image_ref }}
+      source_sha: ${{ github.sha }}
+      producer_run_id: ${{ github.run_id }}
+
+
+  sidecar-compliance-audit:
+    name: dynamo-sidecar compliance
+    needs: [sidecar-build]
+    if: ${{ !cancelled() && needs.sidecar-build.result == 'success' }}
+    permissions:
+      contents: read
+      actions: read
+    uses: $/.github/workflows/shared-compliance-audit.yml
+    with:
+      target_tag_plain: dynamo-sidecar
+      image_ref: ${{ needs.sidecar-build.outputs.image_ref }}
+      source_sha: ${{ github.sha }}
+      producer_run_id: ${{ github.run_id }}
+
+
+  operator-compliance-audit:
+    name: operator compliance
+    needs: [operator]
+    if: ${{ !cancelled() && needs.operator.result == 'success' }}
+    permissions:
+      contents: read
+      actions: read
+    uses: $/.github/workflows/shared-compliance-audit.yml
+    with:
+      target_tag_plain: operator
+      image_ref: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ github.sha }}-operator
+      source_sha: ${{ github.sha }}
+      producer_run_id: ${{ github.run_id }}

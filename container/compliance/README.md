@@ -101,14 +101,11 @@ The baseline (resolved by `resolve_diff_base.py`) depends on where the build run
   `1.3.0` beats `1.2.5` for a `1.3.1` build regardless of publish date). Among
   tags sharing an `X.Y.Z` base (e.g. `v1.2.3-nemo-3` vs `v1.2.3-minimax`), the
   one published later wins.
-- **Nightly** → the previous successful scheduled run of the nightly workflow
-  (found via the Actions API); manual runs are excluded and the selected run's
-  commit names the baseline artifact.
+- **Nightly** → the previous completed scheduled run of the same workflow and branch with this container's retained compliance artifact. Unrelated test failures do not invalidate an available inventory; manual runs are excluded.
 
-The baseline CSV is fetched by downloading the baseline commit's
-`compliance-<baseSHA>-<container>` artifact (needs `actions: read`). Baselines
-live only as Actions artifacts, so an expired/absent one is not fatal: the diff
-then contains a single `baseline_unavailable` row and the build stays green.
+The baseline CSV is downloaded from the exact selected producer run (needs `actions: read`), with repository, source SHA, artifact ID and archive digest checks. Main and release comparisons use matching post-merge producers. Inventory selection requires the exact image variant, CUDA version, architecture and source SHA; historical folders and diff CSVs cannot substitute for the full inventory.
+
+Missing, expired, ambiguous or unreadable evidence fails the comparison and prevents a successful compliance artifact upload. Explicit first-of-kind bootstrapping produces a distinct `baseline_bootstrap` marker. The operator has a narrow migration flag for historical AMD64-only artifacts: its first ARM64 comparison is marked as a bootstrap only when the validated legacy artifact has the expected AMD64 inventory and no new provenance manifest or ARM64 inventory. A missing architecture in a new-format artifact remains an error.
 
 Each arch also gets a self-describing `baseline/` folder next to the diff so the
 archive records exactly what was compared against:
@@ -118,8 +115,15 @@ linux_<arch>/
   osrb-<container>-<arch>-<sha8>.diff.csv
   baseline/
     BASELINE.md                              # selection rules + baseline SHA, commit link, generating-run link, label
-    osrb-<container>-<arch>-<baseSHA8>.csv   # a copy of the baseline CSV (absent when the baseline was unavailable)
+    baseline.json                         # exact generating run, artifact, SHA and comparison/bootstrap status
+    osrb-<container>-<arch>-<baseSHA8>.csv   # baseline CSV; absent only for explicit bootstrap
 ```
+
+### Final-image publication gate
+
+Each producer artifact includes `build-provenance.json`, binding the repository, source SHA, run and attempt, image index digest, platform digests, current inventory hashes and exact base SBOM bytes. The independent audit copies each immutable platform's filesystem into a native scanner stage without executing the target image, so the same gate covers distroless and ARM64 images. It verifies that the image's own `/legal/osrb-deps.csv` matches the producer artifact, validates its resolved licenses, and matches discovered packages by ecosystem, name and version. The planner's build-time collector likewise inspects its assembled distroless filesystem rather than its build environment.
+
+PR, post-merge and nightly workflows audit the ten shipped image variants on both architectures. Release publication repeats the gate for every selected image before the first NGC copy, including direct manual release dispatches, then copies only the accepted immutable digests. It uses the gate implementation from the workflow revision, independently of the artifact source checkout. Internal producer pushes necessarily precede scanning; they are not evidence that promotion passed. Old artifacts without digest-bound provenance must be rebuilt before promotion. An optional nightly image omitted after its build fails is not published; a selected image with missing or failed audit evidence blocks publication.
 
 ## License detection
 

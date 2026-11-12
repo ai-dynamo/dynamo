@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# The inspected image is a copy-only source. Nothing from it is executed, so
+# AMD64 workers can inspect ARM64 and distroless images without emulation.
+ARG AUDIT_IMAGE=scratch
+ARG AUDIT_PLATFORM=linux/amd64
+FROM --platform=${AUDIT_PLATFORM} ${AUDIT_IMAGE} AS shipped
+FROM --platform=$BUILDPLATFORM anchore/syft:v1.54.1@sha256:3eb5379ba7b409c3f4069b686110527af0c47df993fa5c10d13e7cf34f49b1aa AS cataloger
+FROM --platform=$BUILDPLATFORM python:3.12-slim@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b AS scan
+ARG AUDIT_PLATFORM
+COPY --from=cataloger /syft /usr/local/bin/syft
+COPY --from=shipped / /rootfs/
+COPY compliance /opt/compliance
+COPY input /audit-input
+ENV PYTHONPATH=/opt
+RUN python3 -m compliance.image_provenance scan-rootfs \
+    --rootfs /rootfs --artifact-root /audit-input \
+    --platform "${AUDIT_PLATFORM}" --output /audit-output
+
+FROM scratch AS result
+COPY --from=scan /audit-output/ /
