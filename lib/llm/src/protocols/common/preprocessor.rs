@@ -11,6 +11,7 @@ use dynamo_kv_hashing::multimodal::BlockExtraInfo;
 pub use dynamo_kv_hints::{
     KV_HINT_TRANSFER_CAPABILITY_KEY, KvHint, KvHintAction, KvSourceLocationsPayload,
 };
+use dynamo_lora::runtime::RuntimeLoraSourceUri;
 use dynamo_router_protocol::worker::WorkerId;
 use dynamo_runtime::error::{DynamoError, ErrorType, match_error_chain};
 use dynamo_scheduler::host::{RequestLifecycle, RouterConfigOverride, RoutingConstraints};
@@ -23,7 +24,6 @@ use super::llm_backend::DecoderCheckpoint;
 use super::timing::{RequestPhase, RequestTracker};
 use super::{OutputOptions, SamplingOptions, StopConditions};
 use crate::kv_router::RequestAttemptRelease;
-use crate::lora::runtime::RuntimeLoraSourceUri;
 use crate::preprocessor::media::RdmaMediaDataDescriptor;
 use crate::protocols::TokenIdType;
 
