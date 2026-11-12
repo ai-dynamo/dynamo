@@ -167,6 +167,7 @@ func (r *graphReconciler) renderPodCliqueSet(
 			}
 			delete(clique.Labels, lpx.CyborgPlacementLabel)
 			delete(clique.Labels, cyborgFabricPodLabel)
+			delete(clique.Labels, cyborgServedLabel)
 			if placed && clique.Name == plan.CyborgTemplate {
 				clique.Labels[lpx.CyborgPlacementLabel] = lpx.CyborgPlacementPerFabricPod
 			}

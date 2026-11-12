@@ -1701,7 +1701,7 @@ func TestLPXCyborgPlacementLabel(t *testing.T) {
 		},
 		{
 			name:   "an authored label does not mark Pods that this controller does not place",
-			labels: map[string]string{lpx.CyborgPlacementLabel: lpx.CyborgPlacementPerFabricPod, cyborgFabricPodLabel: "a", "authored": "kept"},
+			labels: map[string]string{lpx.CyborgPlacementLabel: lpx.CyborgPlacementPerFabricPod, cyborgFabricPodLabel: "a", cyborgServedLabel: "true", "authored": "kept"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1728,6 +1728,7 @@ func TestLPXCyborgPlacementLabel(t *testing.T) {
 				}
 				require.Equal(t, want, clique.Labels[lpx.CyborgPlacementLabel], clique.Name)
 				require.NotContains(t, clique.Labels, cyborgFabricPodLabel, "an authored fabric pod would make a new Pod look placed")
+				require.NotContains(t, clique.Labels, cyborgServedLabel, "an authored record would keep each Pod at its index")
 			}
 		})
 	}

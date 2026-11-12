@@ -38,6 +38,10 @@ const (
 	fabricPodLabel = "network.topology.nvidia.com/lpu-fabric-pod"
 	// cyborgFabricPodLabel records the fabric pod in which this controller placed a Cyborg Pod.
 	cyborgFabricPodLabel = "lpx.nvidia.com/fabric-pod"
+	// cyborgServedLabel records that this controller observed a Cyborg Pod Ready with
+	// a Grove index at or above its placement total. The Pod then keeps that index
+	// for its life, also while it is not Ready.
+	cyborgServedLabel = "lpx.nvidia.com/served"
 	// grovePodGangGate is the scheduling gate that Grove sets on each Pod it creates
 	// and removes when the Pod's PodGang permits scheduling.
 	grovePodGangGate = "grove.io/podgang-pending-creation"
@@ -49,9 +53,9 @@ type cyborgPlacement struct {
 	fabricPods []string
 	replicas   int32
 	// renumber permits the replacement of a Pod to give it a lower Grove index. It is
-	// true when every LPU request of the workload replica is Bound: only then does
-	// the LPX scheduler wait for the replacement of a Cyborg Pod, where it otherwise
-	// releases the plan of a fabric pod that has no bound Cyborg Pod.
+	// true when every LPU request of the workload replica is Bound: the placement is
+	// then final, and the LPX scheduler waits for a replacement if the other Cyborg
+	// Pods of the fabric pod are lost in that time.
 	renumber bool
 }
 
@@ -305,6 +309,7 @@ func (r *graphReconciler) reconcileCyborgPlacements(
 // When the capacity is correct and the placement permits it, the pass removes the
 // one Pod that cyborgPodToRenumber selects. Grove then creates the replacement with
 // a lower index, and a later pass pins it to the position that the removal opened.
+// This removal also waits while scalingBlocked is true.
 func (r *graphReconciler) reconcileCyborgPlacement(
 	ctx context.Context,
 	clique *grovev1alpha1.PodClique,
@@ -357,7 +362,9 @@ func (r *graphReconciler) reconcileCyborgPlacement(
 	if pod == nil {
 		return changed, nil
 	}
-	if err := client.IgnoreNotFound(r.Delete(ctx, pod, client.Preconditions{UID: &pod.UID})); err != nil {
+	// The observed version fences the decision: a Pod that changed since then, for
+	// example one that became Ready, stays, and the error starts a new pass.
+	if err := client.IgnoreNotFound(r.Delete(ctx, pod, client.Preconditions{UID: &pod.UID, ResourceVersion: &pod.ResourceVersion})); err != nil {
 		return changed, fmt.Errorf("delete Cyborg Pod %q to give it a lower index: %w", pod.Name, err)
 	}
 	logger.Info("Deleted Cyborg Pod to give it a lower index", "pod", pod.Name, "index", podCliquePodIndex(pod), "fabricPod", pod.Labels[cyborgFabricPodLabel], "replicas", total)
@@ -375,13 +382,22 @@ func (r *graphReconciler) reconcileCyborgPlacement(
 // below the total, in the same fabric pod. The Pods of a provision have higher
 // indexes when their fabric pods are not the first ones in name order.
 //
-// One Pod goes at a time, and only when every position holds a bound Pod: a
-// fabric pod with two or more positions then always keeps a bound Cyborg Pod. A
-// Ready Pod stays, because it serves with the index that it has. The first fabric
-// pod in name order that has such a Pod goes first, lowest index first, so one
-// fabric pod is complete before the next one starts and takes consecutive indexes.
+// One Pod goes at a time, and only when every position holds a bound Pod, so the
+// fabric pod always keeps a bound Cyborg Pod. A Pod that is Ready, or that this
+// controller recorded as Ready before, stays: it serves with the index that it
+// has. The first fabric pod in name order that has such a Pod goes first, lowest
+// index first, so one fabric pod is complete before the next one starts and takes
+// consecutive indexes.
 func cyborgPodToRenumber(clique *grovev1alpha1.PodClique, live []*corev1.Pod, placement cyborgPlacement) *corev1.Pod {
 	total := int(placement.total())
+
+	// With one position, the removal takes the last bound Cyborg Pod of a fabric pod
+	// that holds LPUs. The LPX scheduler waits only while that Pod or its replacement
+	// exists, and Grove can create the replacement only after the Pod is gone. In the
+	// time between, the scheduler releases the plan.
+	if placement.replicas < 2 {
+		return nil
+	}
 
 	// Grove must have synchronized the PodClique at this capacity and must count the
 	// same Pods. After a prune it can still hold Pods that it created for the removed
@@ -406,10 +422,10 @@ func cyborgPodToRenumber(clique *grovev1alpha1.PodClique, live []*corev1.Pod, pl
 		}
 	}
 
-	// Select the Pod above the range, in fabric pod order, that does not serve.
+	// Select the Pod above the range, in fabric pod order, that did not serve.
 	var selected *corev1.Pod
 	for _, pod := range live {
-		if podCliquePodIndex(pod) < total || cyborgPodReady(pod) {
+		if podCliquePodIndex(pod) < total || cyborgPodReady(pod) || pod.Labels[cyborgServedLabel] != "" {
 			continue
 		}
 		if selected == nil || pod.Labels[cyborgFabricPodLabel] < selected.Labels[cyborgFabricPodLabel] {
@@ -421,9 +437,11 @@ func cyborgPodToRenumber(clique *grovev1alpha1.PodClique, live []*corev1.Pod, pl
 
 // fillCyborgPlacement observes the live Pods of one non-nil, owned Cyborg PodClique
 // and pins each unplaced Pod to a fabric pod of the placement that has an open
-// position. It returns the live Pods in Grove index order, the Pods among them
-// that hold a GPU outside the placement, which the caller can remove, and whether
-// it wrote a pin. It writes no capacity and removes no Pod.
+// position. It also records each Ready Pod whose index is at or above the placement
+// total, so that the Pod keeps its index. It returns the live Pods in Grove index
+// order, the Pods among them that hold a GPU outside the placement, which the
+// caller can remove, and whether it wrote to a Pod. It writes no capacity and
+// removes no Pod.
 func (r *graphReconciler) fillCyborgPlacement(
 	ctx context.Context,
 	clique *grovev1alpha1.PodClique,
@@ -452,7 +470,7 @@ func (r *graphReconciler) fillCyborgPlacement(
 		open[fabricPod] = placement.replicas
 	}
 
-	// Placed Pods keep their positions; bound, ready and older Pods go first.
+	// Placed Pods keep their positions; bound, Ready and lower-index Pods go first.
 	placed := slices.DeleteFunc(slices.Clone(live), func(pod *corev1.Pod) bool { return pod.Labels[cyborgFabricPodLabel] == "" })
 	slices.SortStableFunc(placed, compareCyborgRetention)
 	for _, pod := range placed {
@@ -511,6 +529,19 @@ func (r *graphReconciler) fillCyborgPlacement(
 			changed = true
 			logger.Info("Placed Cyborg Pod in fabric pod", "pod", pod.Name, "fabricPod", fabricPod, "bound", pod.Spec.NodeName != "")
 		}
+	}
+
+	// A Pod that serves with an index above the range keeps it. The record must be
+	// durable: the Pod can lose Ready for a time, and it must not go then.
+	for _, pod := range live {
+		if podCliquePodIndex(pod) < int(placement.total()) || !cyborgPodReady(pod) || pod.Labels[cyborgServedLabel] != "" {
+			continue
+		}
+		patch := client.RawPatch(types.MergePatchType, fmt.Appendf(nil, `{"metadata":{"labels":{%q:"true"}}}`, cyborgServedLabel))
+		if err := client.IgnoreNotFound(r.Patch(ctx, pod, patch)); err != nil {
+			return live, surplus, changed, fmt.Errorf("record that Cyborg Pod %q served: %w", pod.Name, err)
+		}
+		changed = true
 	}
 
 	return live, surplus, changed, nil
