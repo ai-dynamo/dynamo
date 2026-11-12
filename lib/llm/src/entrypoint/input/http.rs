@@ -1,7 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::path::PathBuf;
+use dynamo_kv_router::plugins::RouterPlugins;
+use dynamo_kv_router::plugins::request_classifier::RequestClassifierFactory;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::{
@@ -13,33 +15,37 @@ use crate::{
         FrontendRouteExtension,
         service_v2::{self, HttpService},
     },
-    kv_router::WorkerSelectorFactory,
-    local_model::runtime_config::{ModelRuntimeConfig, TokenizerBackend},
+    kv_router::plugins::RouterPluginBuilder,
+    local_model::runtime_config::TokenizerBackend,
     model_type::ModelType,
     namespace::NamespaceFilter,
-    types::openai::{
-        chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
-        completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
+    types::openai::chat_completions::{
+        NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
     },
-};
-use dynamo_kv_router::{
-    KvRouterConfig, RoutingPartitionRef, WorkerSelectionPolicy, WorkerType,
-    selector::{DefaultWorkerSelector, WorkerSelector},
 };
 use dynamo_runtime::DistributedRuntime;
 use dynamo_runtime::metrics::MetricsHierarchy;
 
 /// Dynamo's complete discovery-backed HTTP frontend.
 ///
-/// The default frontend uses [`DefaultWorkerSelector`]. A statically linked external crate can
-/// replace only worker selection with [`Self::worker_selection_policy_factory`].
+/// The default frontend resolves worker selection from its configuration.
+/// Statically linked plugins install together through [`Self::plugins`].
 #[derive(Default)]
 pub struct HttpFrontend {
     frontend_route_extensions: Vec<FrontendRouteExtension>,
-    worker_selection_policy_factory: Option<WorkerSelectorFactory<WorkerSelectionPolicy>>,
+    plugins: RouterPlugins,
 }
 
 impl HttpFrontend {
+    /// Install a resolved plugin bundle for all routers created by this frontend.
+    ///
+    /// This replaces all previously configured plugins. Call this before
+    /// [`Self::request_classifier_factory`] to retain the override made by that setter.
+    pub fn plugins(mut self, plugins: RouterPlugins) -> Self {
+        self.plugins = plugins;
+        self
+    }
+
     /// Add system route extensions to the frontend.
     pub fn frontend_route_extensions(
         mut self,
@@ -49,24 +55,9 @@ impl HttpFrontend {
         self
     }
 
-    /// Replace the default worker selector with a statically linked native policy.
-    ///
-    /// The factory is called when each decode or prefill worker set is constructed, not per
-    /// request. Workers must advertise an explicit typed role; legacy untyped cards are rejected
-    /// because decode and aggregated workers cannot be distinguished. Dynamo continues to own
-    /// discovery, scheduling, validation, and accounting.
-    pub fn worker_selection_policy_factory<F>(mut self, factory: F) -> Self
-    where
-        F: for<'a> Fn(
-                &KvRouterConfig,
-                WorkerType,
-                RoutingPartitionRef<'a>,
-            ) -> WorkerSelectionPolicy
-            + Send
-            + Sync
-            + 'static,
-    {
-        self.worker_selection_policy_factory = Some(Arc::new(factory));
+    /// Install one catalog-created request classifier per routed decode or aggregated model.
+    pub fn request_classifier_factory(mut self, factory: RequestClassifierFactory) -> Self {
+        self.plugins = self.plugins.with_request_classifier(factory);
         self
     }
 
@@ -76,41 +67,71 @@ impl HttpFrontend {
         distributed_runtime: DistributedRuntime,
         engine_config: EngineConfig,
     ) -> anyhow::Result<()> {
-        if self.worker_selection_policy_factory.is_some()
+        if self.plugins.request_classifier().is_some()
+            && !engine_config
+                .local_model()
+                .router_config()
+                .router_mode
+                .is_kv_routing()
+        {
+            anyhow::bail!("request classifiers require --router-mode kv");
+        }
+        if self.plugins.has_custom_plugins()
             && !matches!(&engine_config, EngineConfig::Dynamic { .. })
         {
-            anyhow::bail!("custom worker-selection policies require a dynamic engine");
+            anyhow::bail!("custom router plugins require a dynamic engine");
         }
+
+        // Hosts that pass no resolved plugins resolve the policy file later, so read its
+        // selection from the config as well.
+        let router_config = engine_config.local_model().router_config();
+        if router_config.router_mode.is_kv_routing()
+            && !self.plugins.has_custom_worker_selection()
+            && matches!(
+                router_config
+                    .kv_router_config
+                    .selected_worker_selection_policy_instance(),
+                Ok(None)
+            )
+        {
+            tracing::warn!(
+                "Starting with Dynamo 1.8, --router-mode kv will default to the two-tier cost \
+                 function (dynamo-two-tier-cost-fn). To keep the current cost function, select a \
+                 dynamo-default-cost-fn instance in --router-policy-config."
+            );
+        }
+
+        let plugins = RouterPluginBuilder::new(self.plugins);
+        let router_config = engine_config.local_model().router_config();
+        plugins.validate_config(&router_config.kv_router_config)?;
+        crate::kv_router::check_hint_policies_route_on_kv_path(
+            router_config.router_mode,
+            &router_config.kv_router_config,
+            &crate::kv_router::EVERY_ROLE,
+        )?;
+
+        // Callers that reach the frontend without going through `run_input`
+        // still have to drain the trace sinks before the process exits. The
+        // registration is reference counted, so arriving through `run_input`
+        // simply nests inside its guard and drains once, at the outer one. It
+        // is taken before initialization because `spawn_workers` reads the
+        // registration count to decide whether the process-wide sinks follow
+        // this runtime's token.
+        let active_input = crate::request_trace::ActiveInput::register();
 
         super::initialize_input(&distributed_runtime, &engine_config).await;
 
-        match self.worker_selection_policy_factory {
-            Some(factory) => {
-                run_with_worker_selector_factory(
-                    distributed_runtime,
-                    engine_config,
-                    self.frontend_route_extensions,
-                    true,
-                    factory,
-                )
-                .await
-            }
-            None => {
-                run_with_worker_selector_factory(
-                    distributed_runtime,
-                    engine_config,
-                    self.frontend_route_extensions,
-                    false,
-                    Arc::new(|config, worker_type, _partition| {
-                        DefaultWorkerSelector::new(
-                            Some(config.clone()),
-                            worker_type.default_selector_label(),
-                        )
-                    }),
-                )
-                .await
-            }
-        }
+        let result = run_with_router_plugins(
+            distributed_runtime,
+            engine_config,
+            self.frontend_route_extensions,
+            plugins,
+        )
+        .await;
+
+        active_input.release_and_drain().await;
+
+        result
     }
 }
 
@@ -136,33 +157,45 @@ pub async fn run_with_frontend_route_extensions(
         .await
 }
 
-async fn run_with_worker_selector_factory<Sel>(
+async fn run_with_router_plugins(
     distributed_runtime: DistributedRuntime,
     engine_config: EngineConfig,
     frontend_route_extensions: Vec<FrontendRouteExtension>,
-    require_typed_worker_role: bool,
-    worker_selector_factory: WorkerSelectorFactory<Sel>,
-) -> anyhow::Result<()>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
+    plugins: RouterPluginBuilder,
+) -> anyhow::Result<()> {
     let local_model = engine_config.local_model();
-    let mut http_service_builder = match (local_model.tls_cert_path(), local_model.tls_key_path()) {
-        (Some(tls_cert_path), Some(tls_key_path)) => {
+    let mut http_service_builder = match (
+        local_model.tls_cert_path(),
+        local_model.tls_key_path(),
+        local_model.tls_client_ca_cert_path(),
+    ) {
+        (Some(tls_cert_path), Some(tls_key_path), tls_client_ca_cert_path) => {
             if !tls_cert_path.exists() {
                 anyhow::bail!("TLS certificate not found: {}", tls_cert_path.display());
             }
             if !tls_key_path.exists() {
                 anyhow::bail!("TLS key not found: {}", tls_key_path.display());
             }
+            if let Some(client_ca_cert_path) = tls_client_ca_cert_path
+                && !client_ca_cert_path.exists()
+            {
+                anyhow::bail!(
+                    "TLS client CA certificate not found: {}",
+                    client_ca_cert_path.display()
+                );
+            }
             service_v2::HttpService::builder()
                 .enable_tls(true)
                 .tls_cert_path(Some(tls_cert_path.to_path_buf()))
                 .tls_key_path(Some(tls_key_path.to_path_buf()))
+                .tls_client_ca_cert_path(tls_client_ca_cert_path.map(Path::to_path_buf))
                 .port(local_model.http_port())
         }
-        (None, None) => service_v2::HttpService::builder().port(local_model.http_port()),
-        (_, _) => {
+        (None, None, None) => service_v2::HttpService::builder().port(local_model.http_port()),
+        (None, None, Some(_)) => {
+            anyhow::bail!("--tls-client-ca-cert-path requires --tls-cert-path and --tls-key-path");
+        }
+        (_, _, _) => {
             // CLI should prevent us ever getting here
             anyhow::bail!(
                 "Both --tls-cert-path and --tls-key-path must be provided together to enable TLS"
@@ -178,6 +211,8 @@ where
         http_service_builder.with_request_template(engine_config.local_model().request_template());
     http_service_builder = http_service_builder
         .metrics_config(local_model.metrics_config().clone())
+        .migration_limit(local_model.migration_limit())
+        .batch_gateway_url(local_model.batch_gateway_url().map(str::to_owned))
         .frontend_api_config(local_model.frontend_api_config().clone());
     // Inject the DRT's metrics registry so that component-scoped metrics
     // (e.g. KvIndexerMetrics) are exposed (default port 8000 if not overridden).
@@ -188,8 +223,9 @@ where
     // with the instance_id as the router_id label.
     http_service_builder =
         http_service_builder.drt_discovery(Some(distributed_runtime.discovery()));
-    http_service_builder =
-        http_service_builder.runtime(Some(Arc::new(distributed_runtime.clone())));
+    http_service_builder = http_service_builder
+        .runtime(Some(distributed_runtime.clone()))
+        .namespace(local_model.namespace().map(str::to_owned));
     for extension in frontend_route_extensions {
         http_service_builder = http_service_builder.add_frontend_route_extension_arc(extension);
     }
@@ -217,6 +253,7 @@ where
             let local_model_path =
                 (!model.path().as_os_str().is_empty()).then(|| model.path().to_path_buf());
             let generate_engine_capabilities = http_service.generate_engine_capabilities();
+            let systemone_enabled = http_service.state().systemone_enabled();
             run_watcher(
                 distributed_runtime.clone(),
                 http_service.state().manager_clone(),
@@ -232,8 +269,8 @@ where
                 model.runtime_config().tokenizer_backend,
                 model.runtime_config().tokenizer_fallback_enabled,
                 generate_engine_capabilities,
-                require_typed_worker_role,
-                worker_selector_factory.clone(),
+                systemone_enabled,
+                plugins,
             )
             .await?;
             http_service
@@ -266,11 +303,8 @@ where
             .await?;
             manager.add_chat_completions_model(model.display_name(), checksum, chat_pipeline)?;
 
-            let cmpl_pipeline = common::build_pipeline::<
-                NvCreateCompletionRequest,
-                NvCreateCompletionResponse,
-            >(model.card(), inner_engine, tokenizer)
-            .await?;
+            let cmpl_pipeline =
+                common::build_completions_pipeline(model.card(), inner_engine, tokenizer)?;
             manager.add_completions_model(model.display_name(), checksum, cmpl_pipeline)?;
             enable_in_process_model_endpoints(&http_service)?;
             http_service
@@ -285,17 +319,20 @@ where
             .collect::<Vec<String>>()
     );
 
-    http_service
-        .run(distributed_runtime.primary_token())
-        .await?;
+    let _graceful_task = distributed_runtime.register_graceful_task();
+    let run_result = http_service.run(distributed_runtime.child_token()).await;
 
-    distributed_runtime.shutdown(); // Cancel primary token
+    // Initiate runtime shutdown whenever the server exits, including bind
+    // failures, for both discovery-backed and in-process engines.
+    distributed_runtime.shutdown();
+
+    run_result?;
     Ok(())
 }
 
 fn enable_in_process_model_endpoints(http_service: &HttpService) -> anyhow::Result<()> {
     for endpoint_type in EndpointType::all() {
-        if endpoint_type != EndpointType::Batch {
+        if !matches!(endpoint_type, EndpointType::Batch | EndpointType::SystemOne) {
             http_service.enable_model_endpoint(endpoint_type, true)?;
         }
     }
@@ -305,7 +342,7 @@ fn enable_in_process_model_endpoints(http_service: &HttpService) -> anyhow::Resu
 /// Spawns a task that watches for new models in store,
 /// and registers them with the ModelManager so that the HTTP service can use them.
 #[allow(clippy::too_many_arguments)]
-async fn run_watcher<Sel>(
+async fn run_watcher(
     runtime: DistributedRuntime,
     model_manager: Arc<ModelManager>,
     router_config: RouterConfig,
@@ -315,17 +352,14 @@ async fn run_watcher<Sel>(
     http_service: Arc<HttpService>,
     metrics: Arc<crate::http::service::metrics::Metrics>,
     chat_engine_factory: Option<ChatEngineFactoryCallback>,
-    prefill_load_estimator: Option<Arc<dyn dynamo_kv_router::PrefillLoadEstimator>>,
+    prefill_load_estimator: Option<Arc<dyn dynamo_scheduler::host::PrefillLoadEstimator>>,
     local_model_path: Option<PathBuf>,
     tokenizer_backend: Option<TokenizerBackend>,
     tokenizer_fallback_enabled: Option<bool>,
     generate_engine_capabilities: Vec<&'static str>,
-    require_typed_worker_role: bool,
-    worker_selector_factory: WorkerSelectorFactory<Sel>,
-) -> anyhow::Result<()>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
+    systemone_enabled: bool,
+    plugins: RouterPluginBuilder,
+) -> anyhow::Result<()> {
     // Start the LoRA allocation controller when LoRA serving is enabled. The
     // controller itself is additionally gated on the allocation config
     // (DYN_LORA_ALLOCATION_ENABLED) inside `start_lora_controller`.
@@ -334,7 +368,7 @@ where
         let _controller_handle = model_manager.start_lora_controller(cancel_token);
     }
 
-    let mut watch_obj = ModelWatcher::new_with_worker_selector_factory(
+    let mut watch_obj = ModelWatcher::new_with_plugins(
         runtime.clone(),
         model_manager,
         router_config,
@@ -343,18 +377,18 @@ where
         chat_engine_factory,
         prefill_load_estimator,
         metrics.clone(),
-        require_typed_worker_role,
-        worker_selector_factory,
+        plugins,
     );
     watch_obj.set_local_model_path(local_model_path);
     watch_obj.set_tokenizer_backend(tokenizer_backend);
     watch_obj.set_tokenizer_fallback_enabled(tokenizer_fallback_enabled);
     watch_obj.set_generate_engine_capabilities(generate_engine_capabilities);
+    watch_obj.set_systemone_enabled(systemone_enabled);
     tracing::debug!("Waiting for remote model");
     let discovery = runtime.discovery();
     let discovery_stream = discovery
         .list_and_watch(
-            dynamo_runtime::discovery::DiscoveryQuery::AllModels,
+            namespace_filter.model_query(),
             Some(runtime.primary_token()),
         )
         .await?;
@@ -444,6 +478,117 @@ mod tests {
     use crate::engines::make_echo_engine;
     use crate::model_card::{LoraInfo, ModelDeploymentCard};
     use crate::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine;
+    use dynamo_kv_router::config::KvRouterConfig;
+
+    #[tokio::test]
+    async fn configured_classifier_requires_installed_plugin() {
+        use crate::{entrypoint::RouterMode, local_model::LocalModelBuilder};
+        use dynamo_runtime::{Runtime, distributed::DistributedConfig};
+
+        let policy_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(policy_file.path(), "request_classifier:\n  type: test\n").unwrap();
+        let model = LocalModelBuilder::default()
+            .router_config(Some(RouterConfig::new(
+                RouterMode::KV,
+                KvRouterConfig {
+                    router_policy_config: Some(policy_file.path().display().to_string()),
+                    ..Default::default()
+                },
+            )))
+            .build()
+            .await
+            .unwrap();
+        let runtime = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            HttpFrontend::default().run(
+                drt.clone(),
+                EngineConfig::Dynamic {
+                    model: Box::new(model.clone()),
+                    chat_engine_factory: None,
+                    prefill_load_estimator: None,
+                },
+            ),
+        )
+        .await
+        .expect("must reject missing classifier before serving")
+        .unwrap_err();
+        assert!(error.to_string().contains("configured but not installed"));
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            super::super::grpc::run(
+                drt,
+                EngineConfig::Dynamic {
+                    model: Box::new(model),
+                    chat_engine_factory: None,
+                    prefill_load_estimator: None,
+                },
+            ),
+        )
+        .await
+        .expect("gRPC must also reject the missing classifier before serving")
+        .unwrap_err();
+        assert!(error.to_string().contains("configured but not installed"));
+        runtime.shutdown();
+    }
+
+    // `run` takes a `request_trace::ActiveInput` registration, which is
+    // process-wide, so this shares a serialization group with the request-trace
+    // lifecycle test rather than racing it for the last release.
+    #[tokio::test]
+    #[serial_test::serial(request_trace_lifecycle)]
+    async fn http_bind_failure_shuts_down_dynamic_and_in_process_runtimes() {
+        use crate::local_model::LocalModelBuilder;
+        use dynamo_runtime::{Runtime, distributed::DistributedConfig};
+        use std::time::Duration;
+
+        for dynamic in [true, false] {
+            let occupied = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let model = Box::new(
+                LocalModelBuilder::default()
+                    .model_name(Some("bind-failure".to_string()))
+                    .http_host(Some("127.0.0.1".to_string()))
+                    .http_port(occupied.local_addr().unwrap().port())
+                    .build()
+                    .await
+                    .unwrap(),
+            );
+            let engine_config = if dynamic {
+                EngineConfig::Dynamic {
+                    model,
+                    chat_engine_factory: None,
+                    prefill_load_estimator: None,
+                }
+            } else {
+                EngineConfig::InProcessText {
+                    engine: make_echo_engine(),
+                    model,
+                }
+            };
+            let drt = DistributedRuntime::new(
+                Runtime::from_current().unwrap(),
+                DistributedConfig::process_local(),
+            )
+            .await
+            .unwrap();
+            let shutdown = drt.primary_token();
+
+            let error = tokio::time::timeout(Duration::from_secs(5), run(drt, engine_config))
+                .await
+                .expect("HTTP run must return after an occupied-port bind failure")
+                .expect_err("the occupied HTTP port must prevent server startup");
+            assert!(
+                error.to_string().contains("already in use"),
+                "expected an HTTP bind error (dynamic={dynamic}), got {error:#}"
+            );
+            tokio::time::timeout(Duration::from_secs(5), shutdown.cancelled())
+                .await
+                .expect("HTTP bind failure must initiate runtime shutdown");
+        }
+    }
 
     fn chat_engine() -> OpenAIChatCompletionsStreamingEngine {
         Arc::new(StreamingEngineAdapter::new(make_echo_engine()))

@@ -12,17 +12,122 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from typing import Optional
 
 import aiohttp
+from aiohttp.helpers import get_env_proxy_for_url
 from yarl import URL
 
-from .base import HttpClient, HttpConnectionError, HttpStatusError, HttpTimeoutError
+from ._ssrf_resolver import BlocklistResolver
+from .base import (
+    HttpClient,
+    HttpConfigurationError,
+    HttpConnectionError,
+    HttpStatusError,
+    HttpTimeoutError,
+    collect_capped,
+)
+from .url_validator import (
+    UrlValidationPolicy,
+    describe_error_detail,
+    describe_media_source,
+    mentions_url,
+)
 
 logger = logging.getLogger(__name__)
 
 
 _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+
+# Read granularity for the capped reader. Chunks are joined, so this only
+# bounds how far past the limit a single read can carry.
+_READ_CHUNK = 64 * 1024
+
+# aiohttp's default ``max_redirects``, kept for a fetch without a URL policy.
+_MAX_SIMPLE_REDIRECTS = 10
+
+# The redirect targets that aiohttp follows: http(s), or a relative reference.
+_REDIRECT_SCHEMES = frozenset({"http", "https", ""})
+
+# Set to "1" to assert that the configured egress proxy enforces destination
+# policy itself. Spelled like DYN_MM_ALLOW_INTERNAL, which it sits beside.
+DYN_MM_TRUST_EGRESS_PROXY = "DYN_MM_TRUST_EGRESS_PROXY"
+
+
+def _bounded_cause(exc: BaseException) -> BaseException | None:
+    """A copy of an aiohttp error with the URL it carries bounded, to chain as ``__cause__``.
+
+    The bounded errors this client raises keep what aiohttp raised (its type,
+    status and description) for callers and tests, but a formatted traceback
+    renders the cause's text, and aiohttp's text quotes the request URL: for a
+    presigned URL that is its signature. Rebuild the error around the bounded
+    label instead; an error whose text names no URL is chained as it is, and
+    one this cannot rebuild is not chained at all.
+    """
+    try:
+        if isinstance(exc, aiohttp.InvalidURL):
+            return type(exc)(describe_media_source(str(exc.url)), exc.description)
+        if isinstance(exc, aiohttp.NonHttpUrlClientError):
+            return type(exc)(describe_error_detail(str(exc)))
+        if isinstance(exc, aiohttp.ClientResponseError):
+            info = exc.request_info
+            if info is not None:
+                info = aiohttp.RequestInfo(
+                    URL(describe_media_source(str(info.url)), encoded=True),
+                    info.method,
+                    info.headers,
+                    URL(describe_media_source(str(info.real_url)), encoded=True),
+                )
+            # The message is the server's reason phrase, so it can echo the URL too.
+            return type(exc)(
+                info,
+                exc.history,
+                status=exc.status,
+                message=describe_error_detail(exc.message),
+                headers=exc.headers,
+            )
+        if not mentions_url(str(exc)):
+            return exc
+        # A plain message error (ClientConnectionError and the like): same type,
+        # bounded text. One whose constructor takes more than a message is not
+        # chained.
+        return type(exc)(describe_error_detail(str(exc)))
+    except Exception:  # an aiohttp change must not leak the original instead
+        return None
+
+
+def _redirect_target(base: URL, location: str, previous: str) -> str:
+    """The next hop of a redirect without a URL policy, checked like aiohttp.
+
+    aiohttp followed these redirects before the client did. A target that it
+    refused raises the same client error here, so the fetch reports it as
+    HttpConnectionError, as before. Like aiohttp, a redirect to the same origin
+    keeps the credentials of the previous URL, and a redirect to another origin
+    drops them.
+    """
+    try:
+        target = URL(location)
+    except ValueError as e:
+        raise aiohttp.InvalidUrlRedirectClientError(
+            location,
+            "Server attempted redirecting to a location that does not look like a URL",
+        ) from e
+    if target.scheme not in _REDIRECT_SCHEMES:
+        raise aiohttp.NonHttpUrlRedirectClientError(location)
+    target = base.join(target)
+    try:
+        origin = target.origin()
+    except ValueError as e:
+        raise aiohttp.InvalidUrlRedirectClientError(
+            target, "Invalid redirect URL origin"
+        ) from e
+    # aiohttp strips the credentials from ``base``, the URL of the response,
+    # so take them from the URL that the previous hop requested.
+    prior = URL(previous)
+    if prior.user is not None and target.user is None and origin == prior.origin():
+        target = target.with_user(prior.user).with_password(prior.password)
+    return str(target)
 
 
 class AiohttpClient(HttpClient):
@@ -30,24 +135,105 @@ class AiohttpClient(HttpClient):
 
     def __init__(self, config=None) -> None:
         super().__init__(config)
-        self._session: Optional[aiohttp.ClientSession] = None
+        # Keyed by (whether the connector may return private addresses, whether
+        # it dials an egress proxy). A request that asks for a stricter policy
+        # than the deployment baseline gets a connector that actually enforces
+        # it, and only a proxied fetch gets the connector that resolves the
+        # proxy unfiltered. At most three entries: a permissive connector
+        # filters nothing, so it is never split by proxy.
+        self._sessions: dict[tuple[bool, bool], aiohttp.ClientSession] = {}
+        # aiohttp marks an injected resolver as externally owned, so closing a
+        # session never closes it. Hold each one and close it ourselves.
+        self._resolvers: dict[tuple[bool, bool], BlocklistResolver] = {}
+        # One cookie jar per connect policy, shared by its direct and proxied
+        # sessions. A redirect between them then keeps its cookies, as it did
+        # when one session served both.
+        self._cookie_jars: dict[bool, aiohttp.CookieJar] = {}
 
-    def _effective_timeout(self, timeout: float) -> aiohttp.ClientTimeout:
+    def _effective_timeout(
+        self, timeout: float, read_timeout: Optional[float] = None
+    ) -> aiohttp.ClientTimeout:
         # The override caps ``total`` (whole request). ``sock_connect``
-        # bounds the TCP+TLS handshake independently — without it a
-        # stuck origin would burn the full ``total`` budget before any
-        # byte arrives, matching what httpx's ``Timeout.connect`` gives
-        # us on the other backend.
+        # bounds just the TCP+TLS handshake, so a stuck origin fast-fails at
+        # the connect budget instead of burning the full ``total`` before any
+        # byte arrives. ``sock_read`` fails a server that stops sending, and
+        # the override does not change it.
         total = (
             self._config.per_call_timeout_override
             if self._config.per_call_timeout_override is not None
             else timeout
         )
         return aiohttp.ClientTimeout(
-            total=total, sock_connect=self._config.connect_timeout
+            total=total,
+            sock_connect=self._config.connect_timeout,
+            sock_read=read_timeout,
         )
 
-    def _build_session(self) -> aiohttp.ClientSession:
+    @staticmethod
+    def _connect_allows_private(policy: Optional[UrlValidationPolicy]) -> bool:
+        """Whether the connector may return private addresses for this fetch.
+
+        The intersection of the deployment baseline and the request policy.
+        Taking the baseline alone lets ``DYN_MM_ALLOW_INTERNAL=1`` override a
+        caller that explicitly asked for ``allow_private_ips=False``, and
+        taking the request alone lets any caller opt out of the deployment
+        setting. Only when both allow it does the backstop stand down.
+        """
+        env_allows = UrlValidationPolicy.from_env().allow_private_ips
+        if policy is None:
+            return env_allows
+        return env_allows and policy.allow_private_ips
+
+    @staticmethod
+    async def _require_trusted_egress_proxy(url: str) -> bool:
+        """Refuse a protected fetch that a proxy would put out of our reach.
+
+        When a proxy applies, the connector dials the proxy and the proxy
+        resolves the origin, so the origin hostname never reaches the
+        connect-time check. Measured: the resolver sees only the proxy host,
+        while the proxy receives the absolute URI. Documenting that boundary
+        does not enforce it, so fail closed unless an operator asserts that
+        the proxy enforces destination policy itself.
+
+        Asks aiohttp which proxy applies to *this* URL rather than whether any
+        proxy variable is set, so ``NO_PROXY`` is honored and a fetch that
+        would go direct is not refused.
+
+        Returns whether a trusted proxy carries the fetch, so the caller can
+        give only that fetch the connector that resolves the proxy unfiltered.
+        """
+        try:
+            target = URL(url)
+        except ValueError:
+            # No proxy carries a URL that does not parse. aiohttp refuses it
+            # before it picks a proxy, and the fetch reports that refusal as
+            # HttpConnectionError.
+            return False
+        try:
+            # aiohttp runs this same helper through asyncio.to_thread because
+            # it does proxy-bypass discovery and .netrc file reads. Match that
+            # rather than repeating the blocking work on the event loop.
+            await asyncio.to_thread(get_env_proxy_for_url, target)
+        except LookupError:
+            # No proxy for this URL, so aiohttp dials the origin and the
+            # connect-time check governs it.
+            return False
+        if os.getenv(DYN_MM_TRUST_EGRESS_PROXY, "").strip() == "1":
+            return True
+        raise HttpConfigurationError(
+            f"{describe_media_source(url)} would be fetched through an egress "
+            "proxy, so the connect-time address check cannot govern the "
+            f"origin; set {DYN_MM_TRUST_EGRESS_PROXY}=1 to assert that the "
+            "proxy enforces destination policy, or unset the proxy"
+        )
+
+    def _build_session(
+        self, allow_private_ips: bool, via_proxy: bool
+    ) -> aiohttp.ClientSession:
+        resolver = BlocklistResolver(
+            allow_private_ips=allow_private_ips, via_proxy=via_proxy
+        )
+        self._resolvers[(allow_private_ips, via_proxy)] = resolver
         connector = aiohttp.TCPConnector(
             limit=self._config.max_connections,
             # Single-origin fan-out is the whole point; capping per-host
@@ -55,13 +241,27 @@ class AiohttpClient(HttpClient):
             limit_per_host=0,
             keepalive_timeout=self._config.keepalive_timeout,
             enable_cleanup_closed=True,
+            # Connect-time SSRF backstop against DNS rebinding (see
+            # _ssrf_resolver). See _connect_allows_private for how the flag is
+            # derived. DYN_MM_ALLOW_INTERNAL is the deployment knob.
+            resolver=resolver,
         )
-        return aiohttp.ClientSession(connector=connector, trust_env=True)
+        cookie_jar = self._cookie_jars.get(allow_private_ips)
+        if cookie_jar is None:
+            cookie_jar = self._cookie_jars[allow_private_ips] = aiohttp.CookieJar()
+        return aiohttp.ClientSession(
+            connector=connector, trust_env=True, cookie_jar=cookie_jar
+        )
 
-    async def _get_session(self) -> aiohttp.ClientSession:
+    async def _get_session(
+        self, allow_private_ips: bool, via_proxy: bool = False
+    ) -> aiohttp.ClientSession:
+        key = (allow_private_ips, via_proxy)
         async with self._lock:
-            if self._session is None or self._session.closed:
-                self._session = self._build_session()
+            session = self._sessions.get(key)
+            if session is None or session.closed:
+                session = self._build_session(allow_private_ips, via_proxy)
+                self._sessions[key] = session
                 logger.info(
                     "aiohttp backend initialized: limit=%d, limit_per_host=0, "
                     "keepalive_timeout=%.1fs%s",
@@ -71,35 +271,106 @@ class AiohttpClient(HttpClient):
                     if self._config.per_call_timeout_override is not None
                     else "; total timeout set per-request",
                 )
-        return self._session
+        return session
 
-    async def _fetch_simple(self, url: str, timeout: float) -> bytes:
-        session = await self._get_session()
-        client_timeout = self._effective_timeout(timeout)
+    async def _fetch_simple(
+        self,
+        url: str,
+        timeout: float,
+        *,
+        max_bytes: Optional[int] = None,
+        policy: Optional[UrlValidationPolicy] = None,
+        read_timeout: Optional[float] = None,
+    ) -> bytes:
+        allow_private = self._connect_allows_private(policy)
+        client_timeout = self._effective_timeout(timeout, read_timeout)
+        # Follow redirects here, not in aiohttp. aiohttp keeps the first hop's
+        # session for every hop, so a hop that NO_PROXY sends direct could use
+        # the resolver that exempts the proxy. Each hop runs the proxy gate and
+        # picks its own session, and one deadline covers all hops.
+        loop = asyncio.get_running_loop()
+        started: Optional[float] = None
+        current = url
+        redirects = 0
         try:
-            async with session.get(
-                url, timeout=client_timeout, allow_redirects=True
-            ) as response:
-                response.raise_for_status()
-                return await response.read()
+            while True:
+                via_proxy = False
+                # Only when the check is meant to bite. If private destinations
+                # are already permitted for this fetch, the gate protects nothing.
+                if not allow_private:
+                    via_proxy = await self._require_trusted_egress_proxy(current)
+                session = await self._get_session(allow_private, via_proxy)
+                hop_timeout = client_timeout
+                if started is None:
+                    # The budget starts with the first request, as it did when
+                    # aiohttp followed the redirects.
+                    started = loop.time()
+                elif client_timeout.total is not None:
+                    remaining = client_timeout.total - (loop.time() - started)
+                    if remaining <= 0:
+                        raise asyncio.TimeoutError()
+                    hop_timeout = aiohttp.ClientTimeout(
+                        total=remaining,
+                        sock_connect=client_timeout.sock_connect,
+                        sock_read=client_timeout.sock_read,
+                    )
+                async with session.get(
+                    current, timeout=hop_timeout, allow_redirects=False
+                ) as response:
+                    # aiohttp also took the obsolete URI header.
+                    headers = response.headers
+                    location = headers.get("Location") or headers.get("URI")
+                    if response.status in _REDIRECT_STATUSES and location:
+                        redirects += 1
+                        if redirects >= _MAX_SIMPLE_REDIRECTS:
+                            # What aiohttp raised when it followed redirects.
+                            raise aiohttp.TooManyRedirects(
+                                response.request_info, (response,)
+                            )
+                        current = _redirect_target(response.url, location, current)
+                        continue
+                    response.raise_for_status()
+                    return await collect_capped(
+                        response.content.iter_chunked(_READ_CHUNK), url, max_bytes
+                    )
         except aiohttp.ClientResponseError as e:
-            raise HttpStatusError(e.status, e.message or "", url) from e
-        except (asyncio.TimeoutError, aiohttp.ServerTimeoutError) as e:
-            raise HttpTimeoutError(f"Timeout loading {url}") from e
+            raise HttpStatusError(e.status, e.message or "", url) from _bounded_cause(e)
+        except (asyncio.TimeoutError, aiohttp.ServerTimeoutError) as exc:
+            raise HttpTimeoutError(
+                f"Timeout loading {describe_media_source(url)}"
+            ) from _bounded_cause(exc)
         except (
             aiohttp.ClientConnectionError,
             aiohttp.ClientConnectorError,
             aiohttp.ServerDisconnectedError,
         ) as e:
-            raise HttpConnectionError(f"Connection error loading {url}: {e}") from e
+            raise HttpConnectionError(
+                f"Connection error loading {describe_media_source(url)}: "
+                f"{type(e).__name__}: {describe_error_detail(str(e))}"
+            ) from _bounded_cause(e)
         except aiohttp.ClientError as e:
-            raise HttpConnectionError(f"HTTP error loading {url}: {e}") from e
+            raise HttpConnectionError(
+                f"HTTP error loading {describe_media_source(url)}: "
+                f"{type(e).__name__}: {describe_error_detail(str(e))}"
+            ) from _bounded_cause(e)
 
     async def _fetch_body_or_redirect(
-        self, url: str, timeout: float
+        self,
+        url: str,
+        timeout: float,
+        *,
+        max_bytes: Optional[int] = None,
+        policy: Optional[UrlValidationPolicy] = None,
+        read_timeout: Optional[float] = None,
     ) -> tuple[bytes | None, str | None]:
-        session = await self._get_session()
-        client_timeout = self._effective_timeout(timeout)
+        allow_private = self._connect_allows_private(policy)
+        via_proxy = False
+        # Only when the check is meant to bite. If private destinations are
+        # already permitted for this fetch, the proxy gate protects nothing.
+        if not allow_private:
+            via_proxy = await self._require_trusted_egress_proxy(url)
+        session = await self._get_session(allow_private, via_proxy)
+        client_timeout = self._effective_timeout(timeout, read_timeout)
         try:
             async with session.get(
                 url, timeout=client_timeout, allow_redirects=False
@@ -109,26 +380,54 @@ class AiohttpClient(HttpClient):
                     if location:
                         next_url = str(response.url.join(URL(location)))
                         return None, next_url
-                    return await response.read(), None
+                    return (
+                        await collect_capped(
+                            response.content.iter_chunked(_READ_CHUNK), url, max_bytes
+                        ),
+                        None,
+                    )
 
                 try:
                     response.raise_for_status()
                 except aiohttp.ClientResponseError as e:
-                    raise HttpStatusError(e.status, e.message or "", url) from e
-                return await response.read(), None
-        except (asyncio.TimeoutError, aiohttp.ServerTimeoutError) as e:
-            raise HttpTimeoutError(f"Timeout loading {url}") from e
+                    raise HttpStatusError(
+                        e.status, e.message or "", url
+                    ) from _bounded_cause(e)
+                return (
+                    await collect_capped(
+                        response.content.iter_chunked(_READ_CHUNK), url, max_bytes
+                    ),
+                    None,
+                )
+        except (asyncio.TimeoutError, aiohttp.ServerTimeoutError) as exc:
+            raise HttpTimeoutError(
+                f"Timeout loading {describe_media_source(url)}"
+            ) from _bounded_cause(exc)
         except (
             aiohttp.ClientConnectionError,
             aiohttp.ClientConnectorError,
             aiohttp.ServerDisconnectedError,
         ) as e:
-            raise HttpConnectionError(f"Connection error loading {url}: {e}") from e
+            raise HttpConnectionError(
+                f"Connection error loading {describe_media_source(url)}: "
+                f"{type(e).__name__}: {describe_error_detail(str(e))}"
+            ) from _bounded_cause(e)
         except aiohttp.ClientError as e:
-            raise HttpConnectionError(f"HTTP error loading {url}: {e}") from e
+            raise HttpConnectionError(
+                f"HTTP error loading {describe_media_source(url)}: "
+                f"{type(e).__name__}: {describe_error_detail(str(e))}"
+            ) from _bounded_cause(e)
 
     async def close(self) -> None:
         async with self._lock:
-            if self._session is not None and not self._session.closed:
-                await self._session.close()
-            self._session = None
+            for session in self._sessions.values():
+                if not session.closed:
+                    await session.close()
+            self._sessions = {}
+            # TCPConnector sets _resolver_owner=False for an injected resolver
+            # and only closes the one it made itself, so closing the session
+            # above leaves ours open.
+            for resolver in self._resolvers.values():
+                await resolver.close()
+            self._resolvers = {}
+            self._cookie_jars = {}

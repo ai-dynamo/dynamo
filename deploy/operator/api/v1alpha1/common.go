@@ -32,13 +32,15 @@ import (
 //   - target is `PodCliqueSet`, `PodCliqueTemplateSpec`, or
 //     `PodCliqueScalingGroupConfig`, according to the field location and
 //     component shape.
-//   - value may set only the target's topologyConstraint subtree.
+//   - value may set topologyConstraint, and component contexts may set the
+//     native minAvailable field and rollingUpdate.maxUnavailable. Availability
+//     and rollout budgets are not supported at root or role scope.
 //
 // All other providers, versions, targets, and fields are rejected.
 type ProviderOverride struct {
 	// apiVersion is the Kubernetes API group and version of the provider schema.
 	// Grove requires `grove.io/v1alpha1`.
-	// +kubebuilder:validation:Required
+	// +required
 	// +kubebuilder:validation:MinLength=1
 	APIVersion string `json:"apiVersion"`
 
@@ -50,9 +52,12 @@ type ProviderOverride struct {
 
 	// value is a sparse fragment of the selected provider schema. For Grove,
 	// PodCliqueSet accepts only `spec.template.topologyConstraint`; embedded
-	// PodCliqueTemplateSpec and PodCliqueScalingGroupConfig targets accept only
-	// `topologyConstraint`.
-	// +kubebuilder:validation:Required
+	// targets accept `topologyConstraint`. Component contexts also accept
+	// `spec.minAvailable` on PodCliqueTemplateSpec or `minAvailable` on
+	// PodCliqueScalingGroupConfig. The minimum is immutable; migrating from the
+	// deprecated component field preserves its value and leaves the update strategy unchanged.
+	// Component contexts also accept rollingUpdate.maxUnavailable.
+	// +required
 	// +kubebuilder:pruning:PreserveUnknownFields
 	// +kubebuilder:validation:Type=object
 	Value apiextensionsv1.JSON `json:"value"`
@@ -63,6 +68,10 @@ const (
 	ComponentRoleLeader = "leader"
 	// ComponentRoleWorker identifies the worker Pod-producing role of a multinode component.
 	ComponentRoleWorker = "worker"
+	// ComponentRoleLPXConductor identifies the launcher role of an LPX component.
+	ComponentRoleLPXConductor = "conductor"
+	// ComponentRoleLPXAgent identifies the LPU-serving role of an LPX component.
+	ComponentRoleLPXAgent = "agent"
 )
 
 // ComponentRoleSpec configures one named Pod-producing role inside a compound component.
@@ -70,45 +79,67 @@ const (
 type ComponentRoleSpec struct {
 	// Name identifies the role within the enclosing component independently of
 	// generated provider resource names.
-	// +kubebuilder:validation:Required
+	// +required
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	Name string `json:"name"`
 
+	// Replicas is the logical cardinality of this role in one complete component
+	// instance. The enclosing component type defines the cardinality. For
+	// multinode components, admission defaults and persists omitted values from
+	// Multinode.NodeCount; leader must be 1 and worker must be
+	// Multinode.NodeCount minus 1.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	Replicas *int32 `json:"replicas,omitempty"`
+
 	// ProviderOverride configures the provider workload unit generated for this
 	// role. It is supported only for components embedded in a DGD.
 	// +optional
 	ProviderOverride *ProviderOverride `json:"providerOverride,omitempty"`
+
+	// PodTemplate defines the complete Pod configuration for this role. Admission
+	// permits it only when the enclosing component type supports role-specific Pod
+	// templates. For multinode components, every required role must supply one and
+	// the role templates own backend-specific leader and worker launch commands.
+	// +optional
+	PodTemplate *corev1.PodTemplateSpec `json:"podTemplate,omitempty"`
 }
 
 // +kubebuilder:validation:XValidation:rule="!has(self.create) || self.create == false || (has(self.size) && has(self.storageClass) && has(self.volumeAccessMode))",message="When create is true, size, storageClass, and volumeAccessMode are required"
 type PVC struct {
 	// Create indicates to create a new PVC
+	// +optional
 	Create *bool `json:"create,omitempty"`
 	// Name is the name of the PVC
-	// +kubebuilder:validation:Required
+	// +required
 	Name *string `json:"name,omitempty"`
 	// StorageClass to be used for PVC creation. Required when create is true.
+	// +optional
 	StorageClass string `json:"storageClass,omitempty"`
 	// Size of the volume in Gi, used during PVC creation. Required when create is true.
+	// +optional
 	Size resource.Quantity `json:"size,omitempty"`
 	// VolumeAccessMode is the volume access mode of the PVC. Required when create is true.
+	// +optional
 	VolumeAccessMode corev1.PersistentVolumeAccessMode `json:"volumeAccessMode,omitempty"`
 }
 
 // VolumeMount references a PVC defined at the top level for volumes to be mounted by the component
 type VolumeMount struct {
 	// Name references a PVC name defined in the top-level PVCs map
-	// +kubebuilder:validation:Required
+	// +required
 	Name string `json:"name,omitempty"`
 	// MountPoint specifies where to mount the volume.
 	// If useAsCompilationCache is true and mountPoint is not specified,
 	// a backend-specific default will be used.
+	// +optional
 	MountPoint string `json:"mountPoint,omitempty"`
 	// UseAsCompilationCache indicates this volume should be used as a compilation cache.
 	// When true, backend-specific environment variables will be set and default mount points may be used.
 	// +kubebuilder:default=false
+	// +optional
 	UseAsCompilationCache bool `json:"useAsCompilationCache,omitempty"`
 }
 
@@ -117,14 +148,19 @@ type VolumeMount struct {
 // for migration guidance. This field will be removed in a future API version.
 type Autoscaling struct {
 	// Deprecated: This field is ignored.
+	// +optional
 	Enabled bool `json:"enabled,omitempty"`
 	// Deprecated: This field is ignored.
+	// +optional
 	MinReplicas int `json:"minReplicas,omitempty"`
 	// Deprecated: This field is ignored.
+	// +optional
 	MaxReplicas int `json:"maxReplicas,omitempty"`
 	// Deprecated: This field is ignored.
+	// +optional
 	Behavior *autoscalingv2.HorizontalPodAutoscalerBehavior `json:"behavior,omitempty"`
 	// Deprecated: This field is ignored.
+	// +optional
 	Metrics []autoscalingv2.MetricSpec `json:"metrics,omitempty"`
 }
 
@@ -134,22 +170,29 @@ type SharedMemorySpec struct {
 	// component. When false (or unset), shared memory is enabled and Size is
 	// required (enforced by the validating webhook). Size is ignored when
 	// Disabled is true.
-	Disabled bool              `json:"disabled,omitempty"`
-	Size     resource.Quantity `json:"size,omitempty"`
+	// +optional
+	Disabled bool `json:"disabled,omitempty"`
+	// +optional
+	Size resource.Quantity `json:"size,omitempty"`
 }
 
 type ResourceItem struct {
 	// CPU specifies the CPU resource request/limit (e.g., "1000m", "2")
+	// +optional
 	CPU string `json:"cpu,omitempty"`
 	// Memory specifies the memory resource request/limit (e.g., "4Gi", "8Gi")
+	// +optional
 	Memory string `json:"memory,omitempty"`
 	// GPU indicates the number of GPUs to request.
 	// Total number of GPUs is NumberOfNodes * GPU in case of multinode deployment.
+	// +optional
 	GPU string `json:"gpu,omitempty"`
 	// GPUType can specify a custom GPU type, e.g. "gpu.intel.com/xe"
 	// By default if not specified, the GPU type is "nvidia.com/gpu"
+	// +optional
 	GPUType string `json:"gpuType,omitempty"`
 	// Custom specifies additional custom resource requests/limits
+	// +optional
 	Custom map[string]string `json:"custom,omitempty"`
 }
 
@@ -157,35 +200,49 @@ type ResourceItem struct {
 // GPUs/devices, and any runtime-specific resources.
 type Resources struct {
 	// Requests specifies the minimum resources required by the component
+	// +optional
 	Requests *ResourceItem `json:"requests,omitempty"`
 	// Limits specifies the maximum resources allowed for the component
+	// +optional
 	Limits *ResourceItem `json:"limits,omitempty"`
 	// Claims specifies resource claims for dynamic resource allocation
+	// +optional
 	Claims []corev1.ResourceClaim `json:"claims,omitempty"`
 }
 
 type DeploymentTargetHPAConf struct {
-	CPU         *int32  `json:"cpu,omitempty"`
-	GPU         *int32  `json:"gpu,omitempty"`
-	Memory      *string `json:"memory,omitempty"`
-	QPS         *int64  `json:"qps,omitempty"`
-	MinReplicas *int32  `json:"min_replicas,omitempty"`
-	MaxReplicas *int32  `json:"max_replicas,omitempty"`
+	// +optional
+	CPU *int32 `json:"cpu,omitempty"`
+	// +optional
+	GPU *int32 `json:"gpu,omitempty"`
+	// +optional
+	Memory *string `json:"memory,omitempty"`
+	// +optional
+	QPS *int64 `json:"qps,omitempty"`
+	// +optional
+	MinReplicas *int32 `json:"min_replicas,omitempty"`
+	// +optional
+	MaxReplicas *int32 `json:"max_replicas,omitempty"`
 }
 
 type LabelItemSchema struct {
-	Key   string `json:"key"`
+	// +required
+	Key string `json:"key"`
+	// +required
 	Value string `json:"value"`
 }
 
 type ExtraPodMetadata struct {
+	// +optional
 	Annotations map[string]string `json:"annotations,omitempty"`
-	Labels      map[string]string `json:"labels,omitempty"`
+	// +optional
+	Labels map[string]string `json:"labels,omitempty"`
 }
 
 type ExtraPodSpec struct {
 	*corev1.PodSpec `json:",inline"`
-	MainContainer   *corev1.Container `json:"mainContainer,omitempty"`
+	// +optional
+	MainContainer *corev1.Container `json:"mainContainer,omitempty"`
 }
 
 // MarshalJSON implements json.Marshaler for ExtraPodSpec.
@@ -237,6 +294,7 @@ const (
 type GPUMemoryServiceSpec struct {
 	// Enabled activates GMS wiring. GPU resources on client containers are
 	// replaced with a DRA ResourceClaim for shared GPU access.
+	// +required
 	Enabled bool `json:"enabled"`
 	// Mode selects the GMS deployment topology.
 	// +kubebuilder:default=intraPod
@@ -274,6 +332,7 @@ type GMSClientPodSpec struct {
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	// +required
 	Name string `json:"name"`
 
 	// PodTemplate configures the pod to run as a GMS client.
@@ -290,6 +349,7 @@ type GMSClientPodSpec struct {
 // multiple engine pods per rank that share GPUs via DRA resource claims.
 type FailoverSpec struct {
 	// Enabled activates failover mode.
+	// +required
 	Enabled bool `json:"enabled"`
 	// Mode selects the failover deployment topology.
 	// intraPod: engine containers run within the same pod (requires gpuMemoryService.enabled).
@@ -454,12 +514,12 @@ type ServiceCheckpointJobConfig struct {
 type DynamoCheckpointIdentity struct {
 	// Model is the model identifier (e.g., "meta-llama/Llama-3-70B").
 	// Deprecated: legacy identity only.
-	// +kubebuilder:validation:Required
+	// +required
 	Model string `json:"model"`
 
 	// BackendFramework is the runtime framework (vllm, sglang, trtllm).
 	// Deprecated: legacy identity only.
-	// +kubebuilder:validation:Required
+	// +required
 	// +kubebuilder:validation:Enum=vllm;sglang;trtllm
 	BackendFramework string `json:"backendFramework"`
 

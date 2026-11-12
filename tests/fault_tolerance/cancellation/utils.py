@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 import logging
 import re
 import socket
@@ -73,6 +74,7 @@ class CancellableRequest:
         self.session = requests.Session()
         self.response = None
         self.exception = None
+        self._response_ready = threading.Event()
         self._cancelled = False
         self._request_thread = None
         self._lock = threading.Lock()
@@ -105,6 +107,7 @@ class CancellableRequest:
                         and socket.socket == self.__class__._global_tracked_socket
                     ):
                         socket.socket = self.__class__._original_socket  # type: ignore[assignment,misc]
+                self._response_ready.set()
 
         with self._lock:
             if self._request_thread is not None:
@@ -179,8 +182,26 @@ class CancellableRequest:
                 f"HTTP {status_code}: {response_body}"
             )
 
-    def get_response(self):
-        """Get the response or raise exception if there was one"""
+    def wait(self, timeout_s: float = 60.0) -> None:
+        """Block until a non-streaming request finishes.
+
+        Raises:
+            AssertionError: If the request does not finish before timeout_s.
+        """
+        thread = self._request_thread
+        if thread is None:
+            raise RuntimeError("wait() called before post()")
+        thread.join(timeout_s)
+        if thread.is_alive():
+            self.cancel()
+            raise AssertionError(f"Request did not complete within {timeout_s}s")
+
+    def get_response(self, timeout: float = 30.0):
+        """Wait for the request to produce a response or raise an exception."""
+        if not self._response_ready.wait(timeout):
+            raise requests.exceptions.Timeout(
+                f"Timed out after {timeout}s waiting for the HTTP response"
+            )
         if self._cancelled:
             raise requests.exceptions.RequestException("Request was cancelled")
         if self.exception:
@@ -281,17 +302,20 @@ def read_streaming_responses(
     cancellable_req: CancellableRequest,
     expected_count: int = 5,
     deadline_s: float | None = None,
+    drain: bool = False,
+    require_content: bool = False,
 ) -> None:
     """Read a specific number of responses from a streaming request.
 
     Args:
         cancellable_req: The CancellableRequest object with an active stream
         expected_count: Number of responses to read before returning
-        deadline_s: Budget for waiting on the next chunk, checked after each
-            arrival while the goal is unmet. A late chunk that completes
-            expected_count still counts, so this does not cap total read
-            time. The `timeout` passed to requests bounds a single read; this
-            bounds the sequence of them.
+        deadline_s: Absolute wall-clock budget for reading the required stream.
+        drain: Continue reading after expected_count until a successful terminal
+            response and ``[DONE]`` marker are received.
+        require_content: Require at least one nonempty generated-text fragment.
+            This is useful for drained health probes that must prove generation,
+            not merely a syntactically complete metadata-only response.
 
     Raises:
         pytest.fail if stream ends before expected_count responses
@@ -305,29 +329,115 @@ def read_streaming_responses(
         )
 
     response = cast(requests.Response, response_raw)  # Type narrowing after checks
-    deadline = None if deadline_s is None else time.monotonic() + deadline_s
     response_count = 0
-    for line in response.iter_lines():
-        response_count += 1
-        logger.info(
-            f"Received streaming response {response_count}: {line.decode()[:100]}"
-        )
-        if response_count >= expected_count:
-            logger.info(f"Successfully read {response_count} responses")
-            return
-        # Checked only while the goal is unmet. Moving this above the return
-        # would fail runs that received every chunk they needed.
-        if deadline is not None and time.monotonic() > deadline:
+    saw_finish_reason = False
+    saw_done = False
+    saw_content = False
+    deadline = None if deadline_s is None else time.monotonic() + deadline_s
+    deadline_expired = threading.Event()
+    deadline_timer = None
+
+    if deadline_s is not None:
+
+        def expire_stream() -> None:
+            deadline_expired.set()
+            cancellable_req.cancel()
+
+        deadline_timer = threading.Timer(deadline_s, expire_stream)
+        deadline_timer.daemon = True
+        deadline_timer.start()
+
+    def fail_if_deadline_expired() -> None:
+        if deadline_expired.is_set() or (
+            deadline is not None and time.monotonic() >= deadline
+        ):
             cancellable_req.cancel()
             pytest.fail(
-                f"Read only {response_count} of {expected_count} streaming responses "
-                f"within {deadline_s}s"
+                "Streaming response did not reach the required count and terminal "
+                f"state within {deadline_s}s; count={response_count}, "
+                f"expected={expected_count}"
             )
 
-    # If we get here, stream ended too early
-    pytest.fail(
-        f"Stream ended after only {response_count} lines - expected to read at least {expected_count}"
-    )
+    try:
+        try:
+            for line in response.iter_lines():
+                fail_if_deadline_expired()
+                if not line:
+                    continue
+                if not line.startswith(b"data:"):
+                    logger.debug("Ignoring non-data SSE line: %s", line[:100])
+                    continue
+
+                payload = line.removeprefix(b"data:").strip()
+                if payload == b"[DONE]":
+                    saw_done = True
+                    break
+
+                try:
+                    event = json.loads(payload)
+                except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                    cancellable_req.cancel()
+                    pytest.fail(f"Invalid JSON in streaming response: {error}")
+
+                if not isinstance(event, dict):
+                    cancellable_req.cancel()
+                    pytest.fail(
+                        "Streaming response event must be a JSON object, "
+                        f"got {type(event).__name__}"
+                    )
+
+                if event.get("error") is not None:
+                    cancellable_req.cancel()
+                    pytest.fail(
+                        f"Streaming response ended with an error: {event['error']}"
+                    )
+
+                response_count += 1
+                saw_finish_reason = saw_finish_reason or any(
+                    choice.get("finish_reason") is not None
+                    for choice in event.get("choices", [])
+                )
+                saw_content = saw_content or any(
+                    isinstance(fragment, str) and bool(fragment)
+                    for choice in event.get("choices", [])
+                    for fragment in (
+                        (choice.get("delta") or {}).get("content"),
+                        choice.get("text"),
+                    )
+                )
+                logger.info(
+                    "Received streaming response %s: %.100s", response_count, event
+                )
+                if (
+                    response_count >= expected_count
+                    and not drain
+                    and (not require_content or saw_content)
+                ):
+                    fail_if_deadline_expired()
+                    logger.info("Successfully read %s responses", response_count)
+                    return
+        except Exception:
+            fail_if_deadline_expired()
+            raise
+
+        fail_if_deadline_expired()
+        if drain and not saw_done:
+            pytest.fail("Streaming response ended without a [DONE] marker")
+        if drain and not saw_finish_reason:
+            pytest.fail("Streaming response ended without a successful finish reason")
+        if require_content and not saw_content:
+            pytest.fail("Streaming response ended without generated content")
+        if response_count >= expected_count:
+            logger.info("Successfully drained %s responses", response_count)
+            return
+
+        pytest.fail(
+            "Stream ended after only "
+            f"{response_count} lines - expected to read at least {expected_count}"
+        )
+    finally:
+        if deadline_timer is not None:
+            deadline_timer.cancel()
 
 
 def _parse_frontend_cancellation_metric(
@@ -465,7 +575,7 @@ def verify_frontend_cancellation_metrics(
 
 def verify_runtime_cancellation_metrics(
     worker_system_port: int,
-    expected_count: int = 0,
+    expected_count: int | tuple[int, ...] = 0,
     component: str = "backend",
     max_wait_ms: int = 0,
     poll_interval_ms: int = 100,
@@ -475,7 +585,7 @@ def verify_runtime_cancellation_metrics(
 
     Args:
         worker_system_port: Port where the worker /metrics is served
-        expected_count: Expected cumulative cancellation count
+        expected_count: Expected cumulative cancellation count or accepted counts
         component: The dynamo_component label value (e.g. "backend", "prefill")
         max_wait_ms: If > 0, retry the scrape until the metric matches
             expected_count or the timeout expires. Use this when the counter
@@ -483,6 +593,9 @@ def verify_runtime_cancellation_metrics(
         poll_interval_ms: Interval between retries when max_wait_ms > 0.
     """
     worker_metrics_url = f"http://localhost:{worker_system_port}/metrics"
+    expected_counts = (
+        (expected_count,) if isinstance(expected_count, int) else expected_count
+    )
 
     deadline = time.monotonic() + max_wait_ms / 1000.0
     count = -1
@@ -497,14 +610,14 @@ def verify_runtime_cancellation_metrics(
 
         worker_text = response.text
         count = _parse_runtime_cancellation_metric(worker_text, component=component)
-        if count == expected_count or time.monotonic() >= deadline:
+        if count in expected_counts or time.monotonic() >= deadline:
             break
         time.sleep(poll_interval_ms / 1000.0)
 
     logger.info(f"Runtime cancellation metrics (component={component}): {count}")
 
-    assert count == expected_count, (
-        f"Runtime (component={component}): expected {expected_count} cancellations, "
+    assert count in expected_counts, (
+        f"Runtime (component={component}): expected one of {expected_counts} cancellations, "
         f"but got {count}"
     )
 

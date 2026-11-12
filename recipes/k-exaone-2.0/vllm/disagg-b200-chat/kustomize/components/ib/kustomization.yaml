@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# `spec.env` below merges by name, which relies on the merge key in the generated
+# Kustomize OpenAPI document (recipes/kustomize/components/dynamo-openapi). Without that
+# schema kustomize treats `spec.env` as an atomic list and this patch would REPLACE the
+# base environment instead of adding to it, dropping MODEL_NAME and HF_HOME.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+patches:
+  - target:
+      group: nvidia.com
+      version: v1beta1
+      kind: DynamoGraphDeployment
+      name: k-exaone-2-vllm-b200-disagg-chat
+    path: patch-dgd.yaml

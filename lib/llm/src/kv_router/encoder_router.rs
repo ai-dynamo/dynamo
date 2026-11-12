@@ -19,7 +19,7 @@ use dynamo_runtime::{
         Context, ManyOut, Operator, PushRouter, RouterMode, ServerStreamingEngine, SingleIn,
         async_trait,
     },
-    protocols::{annotated::Annotated, maybe_error::MaybeError},
+    protocols::{EndpointId, annotated::Annotated, maybe_error::MaybeError},
 };
 
 use crate::discovery::{WorkerSetTarget, WorkerSetTargetId};
@@ -77,6 +77,56 @@ impl Drop for EncoderRouter {
 }
 
 impl EncoderRouter {
+    /// Returns `None` when this router does not target the group, and an empty
+    /// set when it targets the endpoint but its binding is not yet available.
+    pub(crate) fn available_worker_ids_for(
+        &self,
+        group_id: &str,
+        endpoint: &EndpointId,
+    ) -> Option<std::collections::HashSet<u64>> {
+        // Target changes and activation publish binding/lifecycle under this same lock.
+        let target_id = self.target.lock();
+        let binding = self.binding.load();
+        let binding_matches = binding.as_ref().is_some_and(|binding| {
+            &binding.router.client.endpoint.id() == endpoint
+                && binding.target_id.matches_group(group_id, endpoint)
+        });
+        let target_matches = self.target_tx.as_ref().map(|target_tx| {
+            target_tx.borrow().as_ref().is_some_and(|target| {
+                &target.endpoint().id() == endpoint
+                    && target_id
+                        .as_ref()
+                        .is_some_and(|id| id.matches_group(group_id, endpoint))
+            })
+        });
+        if !target_matches.unwrap_or(binding_matches) {
+            return None;
+        }
+        Some(
+            if self.cancel_token.is_cancelled()
+                || self.lifecycle_state() != EncoderLifecycleState::Active
+            {
+                std::collections::HashSet::new()
+            } else {
+                binding
+                    .as_ref()
+                    .filter(|binding| {
+                        &binding.router.client.endpoint.id() == endpoint
+                            && binding.target_id.matches_group(group_id, endpoint)
+                    })
+                    .map(|binding| {
+                        binding
+                            .router
+                            .client
+                            .available_instance_ids()
+                            .map(|ids| ids.as_ref().clone())
+                            .unwrap_or_default()
+                    })
+                    .unwrap_or_default()
+            },
+        )
+    }
+
     /// Create a permanently-disabled passthrough router.
     pub fn disabled() -> Arc<Self> {
         Arc::new(Self {
@@ -135,9 +185,12 @@ impl EncoderRouter {
     ) -> Result<EncoderBinding> {
         let target_id = target.id();
         let client = target.client(cancel_token).await?;
-        let router =
-            EncodePushRouter::from_client_with_monitor(client, RouterMode::RoundRobin, None)
-                .await?;
+        let router = EncodePushRouter::from_client_with_options(
+            client,
+            RouterMode::RoundRobin,
+            crate::kv_router::plugins::push_router_options(),
+        )
+        .await?;
         Ok(EncoderBinding {
             target_id,
             router: Arc::new(router),
@@ -339,6 +392,10 @@ impl
         {
             return next.generate(context.map(|_| request)).await;
         }
+        crate::routing_policy::check_stage(
+            &request,
+            crate::routing_policy::ExecutionStage::Encoder,
+        )?;
 
         let encode_context = Context::with_id_and_metadata(
             request.clone(),
@@ -380,7 +437,7 @@ impl
 mod tests {
     use std::{
         collections::{HashMap, HashSet},
-        sync::Mutex,
+        sync::{Mutex, atomic::AtomicUsize},
         time::Duration,
     };
 
@@ -451,7 +508,7 @@ mod tests {
             .unwrap()
     }
 
-    struct EncodeWorker(u64);
+    struct EncodeWorker(u64, Arc<AtomicUsize>);
 
     #[async_trait]
     impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
@@ -461,6 +518,7 @@ mod tests {
             &self,
             request: SingleIn<PreprocessedRequest>,
         ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+            self.1.fetch_add(1, Ordering::SeqCst);
             let output = LLMEngineOutput::encode_terminal(
                 json!({"worker_id": self.0}).as_object().unwrap().clone(),
             );
@@ -530,6 +588,7 @@ mod tests {
         let namespace = format!("encoder-admission-{}", uuid::Uuid::new_v4());
         let mut workers = Vec::new();
         let mut runtimes = Vec::new();
+        let encode_calls = Arc::new(AtomicUsize::new(0));
         for _ in 0..3 {
             let drt = DistributedRuntime::new(runtime.clone(), config())
                 .await
@@ -542,7 +601,13 @@ mod tests {
                 .endpoint("encode");
             let worker = endpoint
                 .endpoint_builder()
-                .handler(Ingress::for_engine(Arc::new(EncodeWorker(drt.connection_id()))).unwrap())
+                .handler(
+                    Ingress::for_engine(Arc::new(EncodeWorker(
+                        drt.connection_id(),
+                        encode_calls.clone(),
+                    )))
+                    .unwrap(),
+                )
                 .start_with_registration()
                 .await
                 .unwrap();
@@ -573,6 +638,7 @@ mod tests {
             .collect();
         let (admissions, admitted_ids) = watch::channel(vec![ids[0]]);
         let card = Arc::new(ModelDeploymentCard::with_name_only("model"));
+        let group_id = endpoint.id().to_string();
         let target = |generation, admitted_ids| {
             WorkerSetTarget::Committed(CommittedWorkerSetTarget {
                 endpoint: endpoint.clone(),
@@ -595,6 +661,54 @@ mod tests {
         })
         .await
         .expect("committed encoder must activate");
+        assert_eq!(
+            router.available_worker_ids_for(&group_id, &endpoint.id()),
+            Some(HashSet::from([ids[0]]))
+        );
+        assert!(
+            router
+                .available_worker_ids_for("other-group", &endpoint.id())
+                .is_none()
+        );
+        let calls_before = encode_calls.load(Ordering::SeqCst);
+        let downstream = Arc::new(CaptureEngine::default());
+        let mut runtime_request = multimodal_request();
+        runtime_request.routing_mut().lora_resolution_version =
+            Some(crate::lora::runtime::RUNTIME_LORA_PROTOCOL_VERSION);
+        let result = router
+            .generate(SingleIn::new(runtime_request.clone()), downstream.clone())
+            .await;
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("runtime LoRA must not dispatch to an encoder"),
+        };
+        assert!(dynamo_runtime::error::match_error_chain(
+            error.as_ref(),
+            &[dynamo_runtime::error::ErrorType::InvalidArgument],
+            &[]
+        ));
+        assert!(
+            error
+                .to_string()
+                .contains("runtime_lora_encoder_unsupported")
+        );
+        assert_eq!(encode_calls.load(Ordering::SeqCst), calls_before);
+        assert!(downstream.request.lock().unwrap().is_none());
+
+        runtime_request.multi_modal_data = None;
+        router
+            .generate(SingleIn::new(runtime_request), downstream.clone())
+            .await
+            .unwrap();
+        assert_eq!(encode_calls.load(Ordering::SeqCst), calls_before);
+        let text_request = downstream.request.lock().unwrap().take().unwrap();
+        assert_eq!(
+            text_request.routing.unwrap().lora_resolution_version,
+            Some(crate::lora::runtime::RUNTIME_LORA_PROTOCOL_VERSION)
+        );
+        assert!(text_request.encoder_result.is_none());
+        assert_eq!(encoded_worker(&router).await, Some(ids[0]));
+        assert_eq!(encode_calls.load(Ordering::SeqCst), calls_before + 1);
         for _ in 0..6 {
             assert_eq!(encoded_worker(&router).await, Some(ids[0]));
         }
@@ -618,8 +732,22 @@ mod tests {
         admissions.send_replace(Vec::new());
         drop(admissions);
         router.set_target(None);
+        assert!(
+            router
+                .available_worker_ids_for(&group_id, &endpoint.id())
+                .is_none()
+        );
         let (_successor_admissions, successor_ids) = watch::channel(vec![ids[2]]);
         router.set_target(Some(target(2, successor_ids)));
+        assert_eq!(
+            router.available_worker_ids_for(&group_id, &endpoint.id()),
+            Some(HashSet::new())
+        );
+        assert!(
+            router
+                .available_worker_ids_for("other-group", &endpoint.id())
+                .is_none()
+        );
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 if let Some(worker) = encoded_worker(&router).await {
@@ -631,6 +759,10 @@ mod tests {
         })
         .await
         .expect("same-endpoint successor must activate with its own admission");
+        assert_eq!(
+            router.available_worker_ids_for(&group_id, &endpoint.id()),
+            Some(HashSet::from([ids[2]]))
+        );
         for _ in 0..6 {
             assert_eq!(encoded_worker(&router).await, Some(ids[2]));
         }
@@ -650,6 +782,132 @@ mod tests {
         for worker in workers {
             worker.shutdown().await.unwrap();
         }
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
+    async fn binding_availability_tracks_local_inhibition_and_cancellation() {
+        use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
+        use std::collections::HashSet;
+
+        let runtime = Runtime::from_current().unwrap();
+        let distributed =
+            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+                .await
+                .unwrap();
+        let endpoint = distributed
+            .namespace("encoder-availability")
+            .unwrap()
+            .component("workers")
+            .unwrap()
+            .endpoint("generate");
+        let router = EncoderRouter::disabled();
+        assert!(
+            router
+                .available_worker_ids_for("legacy", &endpoint.id())
+                .is_none()
+        );
+        let binding = Arc::new(
+            EncoderRouter::build(
+                WorkerSetTarget::Legacy(endpoint.clone()),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap(),
+        );
+        binding
+            .router
+            .client
+            .override_discovered_instances(vec![1, 2]);
+        router.binding.store(Some(binding.clone()));
+        router
+            .lifecycle
+            .store(EncoderLifecycleState::Active as u8, Ordering::Release);
+        assert_eq!(
+            router.available_worker_ids_for("legacy", &endpoint.id()),
+            Some(HashSet::from([1, 2]))
+        );
+        binding.router.client.report_instance_down(1);
+        assert_eq!(
+            router.available_worker_ids_for("legacy", &endpoint.id()),
+            Some(HashSet::from([2]))
+        );
+        let mut other = endpoint.id();
+        other.name = "other".into();
+        assert!(router.available_worker_ids_for("legacy", &other).is_none());
+        router.cancel_token.cancel();
+        assert_eq!(
+            router.available_worker_ids_for("legacy", &endpoint.id()),
+            Some(HashSet::new())
+        );
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
+    async fn binding_availability_waits_for_rebind_publication() {
+        use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
+        use std::{sync::mpsc, time::Duration};
+
+        let runtime = Runtime::from_current().unwrap();
+        let distributed =
+            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+                .await
+                .unwrap();
+        let component = distributed
+            .namespace("encoder-rebind")
+            .unwrap()
+            .component("workers")
+            .unwrap();
+        let original = component.endpoint("original");
+        let replacement = Arc::new(
+            EncoderRouter::build(
+                WorkerSetTarget::Legacy(component.endpoint("replacement")),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap(),
+        );
+        let router = EncoderRouter::disabled();
+        let binding = Arc::new(
+            EncoderRouter::build(
+                WorkerSetTarget::Legacy(original.clone()),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap(),
+        );
+        binding.router.client.override_discovered_instances(vec![1]);
+        router.binding.store(Some(binding));
+        router
+            .lifecycle
+            .store(EncoderLifecycleState::Active as u8, Ordering::Release);
+        let mut target = router.target.lock();
+        *target = Some(WorkerSetTargetId::Legacy(original.id()));
+        let (started_tx, started_rx) = mpsc::channel();
+        let (result_tx, result_rx) = mpsc::channel();
+        let reader_router = router.clone();
+        let reader = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            result_tx
+                .send(reader_router.available_worker_ids_for("legacy", &original.id()))
+                .unwrap();
+        });
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(matches!(
+            result_rx.recv_timeout(Duration::from_millis(100)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        *target = Some(replacement.target_id.clone());
+        router.binding.store(Some(replacement));
+        router
+            .lifecycle
+            .store(EncoderLifecycleState::Active as u8, Ordering::Release);
+        drop(target);
+        assert_eq!(
+            result_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            None
+        );
+        reader.join().unwrap();
         runtime.shutdown();
     }
 

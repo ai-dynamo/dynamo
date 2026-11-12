@@ -4,16 +4,15 @@
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result};
 use dashmap::DashMap;
-use dynamo_kv_router::{
-    indexer::WorkerKvQueryResponse,
-    protocols::{ResetScope, RouterEvent},
-    recovery::CursorState,
-};
+use dynamo_kv_events::cursor::CursorState;
+use dynamo_kv_events::event::RouterEvent;
+use dynamo_kv_events::residency::ResetScope;
+use dynamo_kv_indexer::host::WorkerKvQueryResponse;
 use dynamo_runtime::component::{Component, Instance};
 use rand::Rng;
 use tokio::sync::{Mutex, Semaphore, watch};
@@ -32,7 +31,7 @@ const RECOVERY_MAX_RETRIES: u32 = 8;
 const RECOVERY_INITIAL_BACKOFF_MS: u64 = 200;
 pub(crate) const DEFAULT_RECOVERY_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
 #[cfg(test)]
-const KV_EVENT_TOPIC: &str = dynamo_kv_router::protocols::KV_EVENT_SUBJECT;
+const KV_EVENT_TOPIC: &str = dynamo_kv_events::event::KV_EVENT_SUBJECT;
 
 #[derive(Debug, thiserror::Error)]
 #[error("{message}")]
@@ -111,6 +110,8 @@ pub(crate) struct WorkerQueryClient<T = IndexerRecoveryTarget> {
     recovery_lane: RecoveryLane<RecoveryKey>,
     recovery_attempt_timeout: Duration,
     cancellation_token: CancellationToken,
+    /// Batches dropped per publisher with no active binding; throttles that publisher's warning.
+    unbound_batches_dropped: DashMap<PublisherId, u64>,
 }
 
 impl<T: RecoveryTarget> WorkerQueryClient<T> {
@@ -152,6 +153,7 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
             recovery_lane: RecoveryLane::with_semaphore(recovery_semaphore),
             recovery_attempt_timeout,
             cancellation_token,
+            unbound_batches_dropped: DashMap::new(),
         });
 
         Ok(client)
@@ -191,6 +193,7 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
             recovery_lane: RecoveryLane::with_semaphore(recovery_semaphore),
             recovery_attempt_timeout,
             cancellation_token: CancellationToken::new(),
+            unbound_batches_dropped: DashMap::new(),
         })
     }
 
@@ -307,6 +310,15 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
                 slot: slot_handle.clone(),
             },
         );
+        self.unbound_batches_dropped
+            .remove(&binding.source_id.publisher_id);
+        tracing::info!(
+            worker_id = key.0,
+            dp_rank = key.1,
+            publisher_id = binding.source_id.publisher_id,
+            recoverable = binding.recovery_target().is_some(),
+            "Activated KV event source"
+        );
         if binding.recovery_target().is_some() {
             self.spawn_recovery(key, binding, None, None).await;
         } else {
@@ -330,6 +342,14 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
             .remove_if(&binding.source_id.publisher_id, |_, current| {
                 Arc::ptr_eq(&current.binding, &binding)
             });
+        if !self.cancellation_token.is_cancelled() {
+            tracing::info!(
+                worker_id = key.0,
+                dp_rank = key.1,
+                publisher_id = binding.source_id.publisher_id,
+                "Deactivated KV event source"
+            );
+        }
         binding.lifetime.cancel();
         self.cancel_recovery(key).await;
         Some(binding.source_id.clone())
@@ -578,10 +598,28 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
             .get(&publisher_id)
             .map(|entry| entry.clone())
         else {
-            tracing::debug!(
-                publisher_id,
-                "Dropping KV event batch from an inactive or ambiguous source"
-            );
+            // Logs the 1st, 2nd, 4th, ... drop so a source that never activates stays visible.
+            let dropped = {
+                let mut count = self
+                    .unbound_batches_dropped
+                    .entry(publisher_id)
+                    .or_insert(0);
+                *count += 1;
+                *count
+            };
+            if dropped.is_power_of_two() {
+                tracing::warn!(
+                    publisher_id,
+                    dropped,
+                    "Dropping KV event batch from an inactive or ambiguous source"
+                );
+            } else {
+                tracing::debug!(
+                    publisher_id,
+                    dropped,
+                    "Dropping KV event batch from an inactive or ambiguous source"
+                );
+            }
             return;
         };
         let binding = active.binding;
@@ -984,6 +1022,7 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
         start_event_id: Option<u64>,
         end_event_id: Option<u64>,
     ) -> Result<WorkerKvQueryResponse> {
+        let started = Instant::now();
         let mut last_error = None;
         let mut saw_non_authoritative_failure = false;
         for attempt in 0..RECOVERY_MAX_RETRIES {
@@ -1033,10 +1072,29 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
                     ));
                     saw_non_authoritative_failure = true;
                 }
-                Ok(response) => return Ok(response),
+                Ok(response) => {
+                    tracing::info!(
+                        worker_id = key.0,
+                        dp_rank = key.1,
+                        attempts = attempt + 1,
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        "KV recovery query answered"
+                    );
+                    return Ok(response);
+                }
                 Err(error) => {
                     last_error = Some(error);
                 }
+            }
+            if let Some(error) = &last_error {
+                tracing::warn!(
+                    %error,
+                    worker_id = key.0,
+                    dp_rank = key.1,
+                    attempt = attempt + 1,
+                    max_attempts = RECOVERY_MAX_RETRIES,
+                    "KV recovery attempt failed"
+                );
             }
             if attempt + 1 < RECOVERY_MAX_RETRIES {
                 let backoff_ms = RECOVERY_INITIAL_BACKOFF_MS * 2_u64.pow(attempt);
@@ -1080,18 +1138,19 @@ fn recovery_events_match_source(key: RecoveryKey, events: &[RouterEvent]) -> boo
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use dynamo_kv_router::{
-        identity::{
-            CacheOwnerId, CacheSemanticsId, DcId, IdentitySource, IndexerDomainId, PoolId,
-            RoutingScopeId, StableDpSlotId,
-        },
-        indexer::{KvIndexer, KvIndexerInterface, KvIndexerMetrics, LocalKvIndexer},
-        protocols::{
-            DpRank, ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheRemoveData,
-            KvCacheStoreData, KvCacheStoredBlockData, LocalBlockHash, ResidencyDomain, StorageTier,
-            WorkerId, WorkerWithDpRank,
-        },
+    use dynamo_kv_events::event::{
+        KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData,
     };
+    use dynamo_kv_events::residency::{ResidencyDomain, StorageTier};
+    use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
+    use dynamo_kv_indexer::host::{
+        KvIndexer, KvIndexerInterface, KvIndexerMetrics, LocalKvIndexer,
+    };
+    use dynamo_router_protocol::identity::{
+        CacheOwnerId, CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId,
+        RoutingScopeId, StableDpSlotId,
+    };
+    use dynamo_router_protocol::worker::{DpRank, WorkerId, WorkerWithDpRank};
     use dynamo_runtime::{
         DistributedRuntime, Runtime,
         component::TransportType,
@@ -1449,11 +1508,12 @@ mod tests {
         let indexer = KvIndexer::new(CancellationToken::new(), 4, metrics);
         (
             indexer.clone(),
-            Indexer::KvIndexer {
+            Indexer::Single {
                 primary: indexer,
                 lower_tier: LowerTierIndexers::new(1, 4),
                 approx: None,
                 primary_records_routing_decisions: false,
+                session_updates: None,
             },
         )
     }
@@ -1465,7 +1525,7 @@ mod tests {
                     CacheSemanticsId::new([1; 16], IdentitySource::Explicit),
                     RoutingScopeId::new([2; 16], IdentitySource::Explicit),
                 ),
-                DcId::new(3),
+                ClusterId::new(3),
             ),
             StableDpSlotId::new([4; 16], IdentitySource::Explicit),
         )
@@ -1913,7 +1973,7 @@ mod tests {
         let (_tx, rx) = watch::channel(initial.clone());
         let (_primary, indexer) = indexer();
         let lower_tier = match &indexer {
-            Indexer::KvIndexer { lower_tier, .. } => lower_tier.clone(),
+            Indexer::Single { lower_tier, .. } => lower_tier.clone(),
             _ => unreachable!(),
         };
         let client =
@@ -1968,7 +2028,7 @@ mod tests {
         assert_eq!(retained.len(), 1);
         assert_eq!(
             retained[0].residency_domain,
-            dynamo_kv_router::protocols::WireResidencyDomain::explicit(ResidencyDomain::CacheOwner)
+            dynamo_kv_events::residency::WireResidencyDomain::explicit(ResidencyDomain::CacheOwner)
         );
         assert_eq!(retained[0].state_source, Some(cache_owner_id()));
     }
@@ -2615,6 +2675,7 @@ mod tests {
     async fn local_catchup_warns_through_gaps_without_rpc() {
         let logs = CapturedLogs::default();
         let writer = logs.clone();
+        let _interest_guard = crate::test_utils::tracing_interest_guard();
         let _guard = tracing::subscriber::set_default(
             tracing_subscriber::fmt()
                 .without_time()

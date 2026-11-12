@@ -13,6 +13,10 @@
 //! export DYN_SOAK_RUN_DURATION=60s
 //! cargo test --test soak integration::main --features integration -- --nocapture
 #[cfg(feature = "integration")]
+#[path = "common/selector.rs"]
+mod selector;
+
+#[cfg(feature = "integration")]
 mod integration {
 
     pub const DEFAULT_NAMESPACE: &str = "dynamo";
@@ -150,9 +154,12 @@ mod integration {
             .await?;
 
         client.wait_for_instances().await?;
-        let router =
-            PushRouter::<String, Annotated<String>>::from_client(client, Default::default())
-                .await?;
+        let router = PushRouter::<String, Annotated<String>>::from_client_with_options(
+            client,
+            Default::default(),
+            super::selector::options(),
+        )
+        .await?;
         let router = Arc::new(router);
 
         let start = Instant::now();

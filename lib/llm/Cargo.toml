@@ -71,8 +71,23 @@ harness = false
 required-features = ["media-ffmpeg"]
 
 [dependencies]
+dynamo-router-policies = { workspace = true }
 # repo
-dynamo-kv-router = { workspace = true, features = ["metrics", "runtime-protocols"] }
+dynamo-global-discovery-client = { workspace = true }
+dynamo-admission = { workspace = true }
+dynamo-global-common = { workspace = true, features = ["grpc"] }
+dynamo-global-view-broadcaster = { path = "../global-view-broadcaster" }
+dynamo-kv-events = { workspace = true }
+dynamo-kv-hashing = { workspace = true }
+dynamo-kv-hints = { workspace = true }
+dynamo-kv-indexer = { workspace = true, features = ["export"] }
+dynamo-kv-router = { workspace = true, features = ["metrics"] }
+dynamo-lora = { workspace = true }
+dynamo-router-protocol = { workspace = true }
+dynamo-scheduler = { workspace = true }
+dynamo-session-affinity = { workspace = true }
+dynamo-slot-tracker = { workspace = true }
+dynamo-worker-selection = { workspace = true }
 dynamo-memory = { workspace = true }
 dynamo-mocker = { workspace = true, features = ["zmq-events"] }
 dynamo-rl = { workspace = true }
@@ -84,7 +99,8 @@ dynamo-tokens = { workspace = true }
 # workspace
 anyhow = { workspace = true }
 arc-swap = "1.9.1"
-dynamo-protocols = { workspace = true }
+dynamo-protocols = { workspace = true, features = ["protocol-schema"] }
+dynamo-decisions = { workspace = true }
 dynamo-parsers = { workspace = true }
 dynamo-parsers-v2 = { workspace = true }
 async-stream = { workspace = true }
@@ -97,6 +113,7 @@ derive_builder = { workspace = true }
 either = { workspace = true }
 futures = { workspace = true }
 futures-util = { workspace = true }
+half = { version = "2", features = ["serde", "num-traits"] }
 hf-hub = { workspace = true, features = ["tokio", "rustls-tls", "ureq"] }
 http-body-util = "0.1"
 ipnet = { workspace = true }
@@ -105,10 +122,11 @@ lru = { workspace = true }
 moka = { workspace = true }
 oneshot = { workspace = true }
 parking_lot = { workspace = true }
+percent-encoding = "2.3.2"
 prometheus = { workspace = true }
 rand = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
+serde_json = { workspace = true, features = ["raw_value"] }
 sha2 = "0.10"
 strum = { workspace = true }
 tempfile = { workspace = true }
@@ -125,6 +143,7 @@ validator = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true }
 xxhash-rust = { workspace = true }
+zmq = { workspace = true }
 modelexpress-client = { workspace = true }
 modelexpress-common = { workspace = true }
 
@@ -138,9 +157,6 @@ rayon = "1"
 bincode = { version = "2.0.1", features = ["serde", "derive"] }
 
 # lora
-aws-config = "1.8.11"
-aws-credential-types = "1.2.12"
-aws-types = "1.3.12"
 object_store = { version = "0.12.4", features = ["aws", "gcp", "azure", "http"] }
 
 # input/text
@@ -163,12 +179,15 @@ clap = { version = "4.5.49", features = ["derive"], optional = true }
 indicatif = { version = "0.18.0", optional = true }
 
 # http-service
-axum = { workspace = true }
-axum-server = { version = "0.7", features = ["tls-rustls"] }
+axum = { workspace = true, features = ["multipart"] }
+mime = "0.3"
+hyper-util = { version = "0.1.17", features = ["server-auto", "service", "tokio"] }
+tokio-rustls = { workspace = true }
 tower-http = { workspace = true }
-rustls = { version = "0.23" }
-utoipa = { version = "5.3", features = ["axum_extras"] }
-utoipa-swagger-ui = { version = "9.0", features = ["axum"] }
+tower = { workspace = true }
+utoipa = { version = "5.3", features = ["axum_extras", "rc_schema", "preserve_order"] }
+# Depends on utoipa 6; openapi_docs.rs passes it only the spec URL, so utoipa 5 above is unaffected.
+utoipa-swagger-ui = { version = "10.0.2", features = ["axum"] }
 
 
 # grpc-service
@@ -181,7 +200,7 @@ tonic-reflection = { version = "0.13.1" }
 prost = { version = "0.13.5" }
 
 # tokenizers
-tokenizers = { version = "0.21.4", default-features = false, features = [
+tokenizers = { version = "0.23.2", default-features = false, features = [
   "onig",
   "esaxx_fast",
   "rustls-tls",
@@ -206,8 +225,10 @@ reqwest = { workspace = true }
 base64 = { version = "0.22" }
 image = { version = "0.25", features = ["serde"] }
 libloading = "0.8"
-video-rs = { version = "0.11.0", optional = true }
-ffmpeg-next = { version = "8.1.0", optional = true }
+# Track the in-tree FFmpeg major (container/context.yaml ffmpeg_version): these
+# bind the system libraries, and video-rs 0.12 requires ffmpeg-next =9.0.0.
+video-rs = { version = "0.12.0", optional = true }
+ffmpeg-next = { version = "9.0.0", optional = true }
 memfile = { version = "0.3.2", optional = true }
 tokio-rayon = {version = "2" }
 ndarray = { version = "0.16" }
@@ -228,7 +249,12 @@ llm-multimodal = { version = "=1.9.0", optional = true }
 # `ModelRegistry::lookup` for image-placeholder token-id resolution.
 llm-tokenizer = { version = "=1.6.0", optional = true }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+sysinfo = { workspace = true }
+
 [dev-dependencies]
+dynamo-lora = { workspace = true, features = ["testing"] }
+dynamo-kv-router = { workspace = true, features = ["testing"] }
 dynamo-runtime = { workspace = true, features = ["testing"] }
 tokio = { workspace = true, features = ["test-util"] }
 approx = "0.5"
@@ -237,7 +263,9 @@ criterion = { version = "0.5", features = ["html_reports"] }
 hf-hub = { workspace = true }
 modelexpress-client = { workspace = true }
 modelexpress-common = { workspace = true }
-reqwest = { workspace = true }
+reqwest = { workspace = true, features = ["http2"] }
+rcgen = { workspace = true }
+rustls = { workspace = true }
 rstest = "0.18.2"
 serial_test = "3"
 temp-env = { version = "0.3.6", features = ["async_closure"] }
@@ -249,6 +277,7 @@ insta = { version = "1.41", features = [
   "redactions",
   "filters",
 ] }
+proptest = "1.5"
 
 lazy_static = "1.4"
 mockito = "1.7.0"
@@ -256,10 +285,6 @@ dynamo-bench = { path = "../bench", default-features = false, features = [
   "kv-router-stress-support",
 ] }
 tokio-tungstenite = "0.26"
-
-[[test]]
-name = "lora_simulation"
-path = "tests/lora_simulation/main.rs"
 
 [[bin]]
 name = "generate-frontend-openapi"

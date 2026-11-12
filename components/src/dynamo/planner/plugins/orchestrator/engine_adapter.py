@@ -34,7 +34,9 @@ Internal responsibilities
    Extracts ``traffic`` into ``TrafficMetrics``, ``worker_counts``
    (counts + scaling-in-progress flags) into ``WorkerState``, and
    per-engine FPM observations into ``FpmData`` (msgspec/msgpack-
-   encoded, keyed by ``"<worker_id>/<dp_rank>"``) on ``ObservationData``.
+   encoded, keyed by ``"<worker_id>/<dp_rank>"``), plus generic batch
+   scheduling observations into ``BatchSchedulingData`` on
+   ``ObservationData``.
    External plugins declaring ``needs=["observations.fpm"]`` receive
    the FPM map; an empty/absent submap means "no FPM this tick".
 3. **FPM regression observation**:
@@ -60,14 +62,22 @@ adapter so callers (mode subclasses) have a single entry point.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable, Iterable
+from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Optional, Sequence
 
 from dynamo.common.forward_pass_metrics import encode as _encode_fpm_record
-from dynamo.planner.config.planner_config import resolve_min_endpoint
+from dynamo.planner.config.planner_config import PlannerConfig, resolve_min_endpoint
+from dynamo.planner.monitoring.signal_health import PlannerSignalHealth
 
 if TYPE_CHECKING:
     import grpc.aio
 
+    from dynamo.planner.retune.controller import RetuneController
+    from dynamo.planner.retune.live.contracts import HarvestAllowed, LaunchGate
+
+from dynamo.planner.core.batch_policy import plan_batch_schedule
 from dynamo.planner.core.budget import (
     apply_power_budget,
     bounds_for_total,
@@ -77,8 +87,11 @@ from dynamo.planner.core.budget import (
 )
 from dynamo.planner.core.state_machine import PlannerScalingState
 from dynamo.planner.core.types import (
+    BatchDrainLimitDecision,
+    BatchSchedulingObservation,
     FpmObservations,
     PlannerEffects,
+    RetuneInputs,
     ScalingDecision,
     ScheduledTick,
     TickInput,
@@ -96,8 +109,10 @@ from dynamo.planner.plugins.builtins.observe import (
     ObserveStageRequest,
 )
 from dynamo.planner.plugins.clock import Clock, VirtualClock, WallClock
+from dynamo.planner.plugins.merge import type_aware_merge
 from dynamo.planner.plugins.merge.types import ComponentKey
 from dynamo.planner.plugins.orchestrator.orchestrator import LocalPlannerOrchestrator
+from dynamo.planner.plugins.orchestrator.pipeline import PipelineOutcome
 from dynamo.planner.plugins.registry.auth import AllowUnauthenticatedAuth
 from dynamo.planner.plugins.registry.circuit_breaker import CircuitBreaker
 from dynamo.planner.plugins.registry.config import build_auth_validator
@@ -105,14 +120,46 @@ from dynamo.planner.plugins.registry.server import PluginRegistryServer
 from dynamo.planner.plugins.scheduler import PluginScheduler
 from dynamo.planner.plugins.transport.config import make_transport_for_endpoint
 from dynamo.planner.plugins.types import (
+    BatchDispatcherFeedback as BatchDispatcherFeedbackData,
+)
+from dynamo.planner.plugins.types import BatchJobDemand as BatchJobDemandData
+from dynamo.planner.plugins.types import (
+    BatchSchedulingData,
+    ComponentTarget,
     FpmData,
     ObservationData,
+    OverrideResult,
+    OverrideType,
     PipelineContext,
-    TrafficMetrics,
-    WorkerState,
+)
+from dynamo.planner.plugins.types import PoolTrafficDemand as PoolTrafficDemandData
+from dynamo.planner.plugins.types import TrafficMetrics, WorkerState
+from dynamo.planner.reconfiguration import (
+    SCALING_POLICY_FIELDS,
+    predictor_rebuild_required,
 )
 
 log = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class RetuneHooks:
+    """Live retune hooks a planner host hands every retune controller.
+
+    ``sweep_fn(request, *, cancel, abort)`` runs one sweep (the DGDR
+    executor); ``launch_gate`` and ``harvest_allowed`` are the live
+    supervisor's predicates (see ``retune.controller``); ``phase_s`` is the
+    epoch phase the window schedule is anchored at. Replay passes no hooks.
+    """
+
+    sweep_fn: Callable[..., Any]
+    launch_gate: LaunchGate
+    harvest_allowed: HarvestAllowed
+    phase_s: float = 0.0
+
+
+def _no_sweep() -> None:
+    """Queued behind the live sweeps by ``retune_sweeps_done``."""
 
 
 class OrchestratorEngineAdapter:
@@ -129,15 +176,29 @@ class OrchestratorEngineAdapter:
     4. ``initial_tick(start_s)`` — get the first scheduled tick.
     5. ``await tick(scheduled_tick, tick_input)`` — repeatedly.
     6. ``await shutdown()`` — release plugin transports.
+
+    When ``config.retune`` is set, the adapter also owns a
+    ``RetuneController`` built from ``retune_inputs``: ``initial_tick``
+    anchors its window schedule, every ``tick`` runs it after the plugin
+    pipeline, and ``shutdown`` closes it.
+
+    A live host also passes ``retune_hooks``. Live, missing
+    ``retune_inputs`` (the frontend's startup router config does not satisfy
+    the retune premises) or a controller that fails construction leaves the
+    adapter in a disabled state, retune configured but no controller,
+    instead of failing the planner; ``replace_retune`` later installs or
+    removes a controller without rebuilding the engine.
     """
 
     def __init__(
         self,
-        config,  # PlannerConfig
+        config: PlannerConfig,
         capabilities: WorkerCapabilities,
         *,
         observe_plugin: Optional[EnvironmentObserver] = None,
         clock: Optional[Clock] = None,
+        retune_inputs: Optional[RetuneInputs] = None,
+        retune_hooks: Optional[RetuneHooks] = None,
     ) -> None:
         self._config = config
         self._capabilities = capabilities
@@ -153,6 +214,14 @@ class OrchestratorEngineAdapter:
         # time) would leave plugins with execution_interval >> 10s
         # never re-firing after the first tick.
         self._clock: Clock = clock if clock is not None else WallClock()
+        self._startup_down_candidate: Optional[
+            tuple[Optional[int], Optional[int]]
+        ] = None
+        self._startup_down_inventory: Optional[
+            tuple[Optional[int], Optional[int], int, int]
+        ] = None
+        self._startup_down_since = 0.0
+        self._startup_down_sources: frozenset[str] = frozenset()
 
         # Scale_interval cadence model — pipeline fires once per
         # ``scale_interval_seconds`` regardless of individual plugin
@@ -177,6 +246,10 @@ class OrchestratorEngineAdapter:
         self._last_tick_monotonic: float = 0.0
         self._last_load_loop_monotonic: float = 0.0
         self._last_throughput_loop_monotonic: float = 0.0
+
+        # Batch scheduling is a native planner decision made on every pipeline
+        # tick when enabled, independent of whether any plugin is due.
+        self._batch_scheduling_enabled = config.batch_scheduling.enabled
         # Emit one rollout-hold warning per continuous mid-rollout stretch;
         # reset when the deployment is stable again so the next rollout warns.
         self._power_rollout_hold_warned: bool = False
@@ -202,6 +275,10 @@ class OrchestratorEngineAdapter:
             # the adapter still runs normally.
             self._plugin_framework_metrics = None
 
+        self._signal_health = PlannerSignalHealth(
+            config, self._plugin_framework_metrics
+        )
+
         # Build orchestrator + scheduler + circuit_breaker + registry.
         # All transport-shaped knobs (timeouts + wire security) live under
         # ``plugin_registration.transport``; we hand that subtree to the
@@ -209,6 +286,16 @@ class OrchestratorEngineAdapter:
         # knobs (``tick_max_duration_seconds`` etc).
         cb = CircuitBreaker(self._clock)
         transport_config = config.plugin_registration.transport
+        # Live ticks run under wall-clock budgets: the whole-tick deadline
+        # and the per-call timeout of in-process plugins. Under a
+        # ``VirtualClock`` (replay) a tick takes no simulated time, so it runs
+        # to completion: a wall-clock budget would make the simulated
+        # decisions depend on host speed and load. No looser replay guard
+        # replaces them, since a loaded host can outlast any bound; a retune
+        # sweep still kills its candidate replays at its own timeout. gRPC
+        # plugins keep their call timeout; they are remote services, outside
+        # the simulation.
+        wall_clock_budgets = not isinstance(self._clock, VirtualClock)
 
         def _factory(plugin_id, endpoint, *, in_process_instance=None):
             return make_transport_for_endpoint(
@@ -216,6 +303,7 @@ class OrchestratorEngineAdapter:
                 endpoint,
                 transport_config,
                 in_process_instance=in_process_instance,
+                in_process_timeout=wall_clock_budgets,
             )
 
         # Build the auth validator from config when ``trusted_sources`` is
@@ -261,7 +349,11 @@ class OrchestratorEngineAdapter:
             scheduler=scheduler,
             circuit_breaker=cb,
             clock=self._clock,
-            tick_max_duration_seconds=config.scheduling.tick_max_duration_seconds,
+            tick_max_duration_seconds=(
+                config.scheduling.tick_max_duration_seconds
+                if wall_clock_budgets
+                else None
+            ),
             capabilities=capabilities,
             metrics=self._plugin_framework_metrics,
         )
@@ -277,60 +369,281 @@ class OrchestratorEngineAdapter:
         self._plugins_bootstrapped = False
         self._in_process_plugins_loaded = False
         self._register_builtin_plugins()
+        self._retune_hooks = retune_hooks
+        self._retune: Optional[RetuneController] = None
+        # Live: the one sweep thread every controller generation submits to,
+        # so a rebuilt controller's sweep queues behind a dropped one and two
+        # generations never sweep at once.
+        self._retune_executor: Optional[ThreadPoolExecutor] = None
+        if retune_hooks is None or self._config.retune is None:
+            self._retune = self._build_retune_controller(retune_inputs)
+        elif retune_inputs is None:
+            log.warning(
+                "planner.retune is configured but its live premises do not "
+                "hold; retune stays disabled until they do"
+            )
+        else:
+            try:
+                self._retune = self._build_retune_controller(
+                    retune_inputs, generation=0
+                )
+            except ValueError as exc:
+                # A live planner never exits on a retune premise: the
+                # supervisor keeps running (to roll routers back) and may
+                # install a controller later through replace_retune.
+                log.error(
+                    "planner.retune controller construction failed; retune "
+                    "stays disabled: %s",
+                    exc,
+                )
+
+    def _build_retune_controller(
+        self,
+        retune_inputs: Optional[RetuneInputs],
+        *,
+        generation: int = 0,
+    ) -> Optional[RetuneController]:
+        """Build the retune controller iff ``config.retune`` is set.
+
+        The controller validates the retune setup in its constructor, so an
+        invalid one fails here, at engine construction. With live hooks the
+        controller gets them, ``generation`` and the adapter's shared sweep
+        executor; without (replay) it is built exactly as before.
+        """
+        if self._config.retune is None:
+            return None
+        if retune_inputs is None:
+            raise ValueError(
+                "planner.retune requires retune inputs (the trace and pinned "
+                "engine to replay); this host did not provide them"
+            )
+        # Local import keeps the retune stack (sweep workers, replay API) out
+        # of the import chain of planners that never enable retune, and avoids
+        # an import cycle through dynamo.replay, whose planner host imports
+        # this module.
+        from dynamo.planner.retune.controller import RetuneController
+
+        hooks = self._retune_hooks
+        if hooks is None:
+            return RetuneController(
+                self._config,
+                retune_inputs,
+                self._capabilities,
+                self._clock,
+                self._scale_interval,
+            )
+        if self._retune_executor is None:
+            self._retune_executor = ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="planner-retune"
+            )
+        return RetuneController(
+            self._config,
+            retune_inputs,
+            self._capabilities,
+            self._clock,
+            self._scale_interval,
+            sweep_fn=hooks.sweep_fn,
+            launch_gate=hooks.launch_gate,
+            harvest_allowed=hooks.harvest_allowed,
+            generation=generation,
+            executor=self._retune_executor,
+        )
+
+    @property
+    def retune_controller(self) -> Optional[RetuneController]:
+        """The installed retune controller; ``None`` without retune or when
+        a live retune is disabled."""
+
+        return self._retune
+
+    def replace_retune(
+        self,
+        retune_inputs: Optional[RetuneInputs],
+        *,
+        generation: int,
+        now_s: float,
+    ) -> None:
+        """Swap the live retune controller without rebuilding the engine.
+
+        The old controller's sweep is aborted (``drop_pending``) and the
+        controller closed. With ``retune_inputs`` a new controller of
+        ``generation`` is built with the same hooks and anchored at ``now_s``
+        and the hooks' phase; with ``None`` the adapter stays disabled. Every
+        generation submits to the adapter's one sweep thread, so the new
+        controller's first sweep queues behind the old one while that still
+        runs. A construction error is raised after the old controller is
+        gone, leaving the adapter disabled. Callers serialize this with
+        ticks (the planner's config lock).
+        """
+        hooks = self._retune_hooks
+        if self._config.retune is None or hooks is None:
+            raise RuntimeError("replace_retune requires a live retune configuration")
+        old = self._retune
+        self._retune = None
+        if old is not None:
+            try:
+                old.drop_pending()
+            except Exception:
+                log.exception("retune controller drop_pending failed")
+            try:
+                old.close()
+            except Exception:
+                log.exception("retune controller close failed")
+        if retune_inputs is None:
+            log.info(
+                "retune controller generation %d: disabled (premises do not hold)",
+                generation,
+            )
+            return
+        controller = self._build_retune_controller(retune_inputs, generation=generation)
+        if controller is None:
+            raise RuntimeError("replace_retune requires a live retune configuration")
+        controller.start(now_s, hooks.phase_s)
+        self._retune = controller
+        log.info("retune controller generation %d installed", generation)
+
+    def retune_sweeps_done(self) -> Optional[Future[None]]:
+        """A future done once every live sweep submitted so far returned.
+
+        The sweep thread runs one sweep at a time in submission order, so a
+        no-op queued behind them completes after the last one. ``None``
+        without live retune or once the engine is shut down.
+        """
+        executor = self._retune_executor
+        if executor is None:
+            return None
+        try:
+            return executor.submit(_no_sweep)
+        except RuntimeError:  # shut down
+            return None
 
     @property
     def plugins_bootstrapped(self) -> bool:
         return self._plugins_bootstrapped
 
-    def _register_builtin_plugins(self) -> None:
-        """Register the in-process builtins that implement local planning."""
+    def _builtin_registrations(self) -> dict[str, dict[str, Any]]:
+        """``register_internal`` arguments (without the instance) of every
+        builtin the current scaling policy runs, keyed by builtin name."""
         cfg = self._config
         throughput_interval = float(cfg.throughput_adjustment_interval_seconds)
         load_interval = float(cfg.load_adjustment_interval_seconds)
-
+        registrations: dict[str, dict[str, Any]] = {}
         if cfg.enable_throughput_scaling:
-            predict = BuiltinLoadPredict(cfg, self._capabilities)
-            self._builtins["load_predict"] = predict
-            self._orchestrator.register_internal(
-                plugin_id=predict.plugin_id,
-                plugin_type="predict",
-                priority=0,
-                instance=predict,
-                execution_interval_seconds=throughput_interval,
-                needs=["observations.traffic"],
-                observation_window_seconds=throughput_interval,
-            )
-
-            throughput = BuiltinThroughputPropose(cfg, self._scaling_state)
-            self._builtins["throughput_propose"] = throughput
-            self._orchestrator.register_internal(
-                plugin_id=throughput.plugin_id,
-                plugin_type="propose",
-                priority=20,
-                instance=throughput,
-                execution_interval_seconds=throughput_interval,
-                needs=["observations.traffic", "predictions"],
-                requires_produced_fields=["predictions"],
-                observation_window_seconds=throughput_interval,
-            )
-
+            registrations["load_predict"] = {
+                "plugin_type": "predict",
+                "priority": 0,
+                "execution_interval_seconds": throughput_interval,
+                "needs": ["observations.traffic"],
+                "requires_produced_fields": [],
+                "observation_window_seconds": throughput_interval,
+            }
+            registrations["throughput_propose"] = {
+                "plugin_type": "propose",
+                "priority": 20,
+                "execution_interval_seconds": throughput_interval,
+                "needs": ["observations.traffic", "predictions"],
+                "requires_produced_fields": ["predictions"],
+                "observation_window_seconds": throughput_interval,
+            }
         if cfg.enable_load_scaling:
-            load = BuiltinLoadPropose(cfg, self._scaling_state)
-            self._builtins["load_propose"] = load
             needs = ["observations.fpm", "observations.workers"]
             observation_window = 0.0
             if cfg.optimization_target == "sla" and not cfg.enable_throughput_scaling:
                 needs.append("observations.traffic")
                 observation_window = load_interval
+            registrations["load_propose"] = {
+                "plugin_type": "propose",
+                "priority": 10,
+                "execution_interval_seconds": load_interval,
+                "needs": needs,
+                "requires_produced_fields": [],
+                "observation_window_seconds": observation_window,
+            }
+        return registrations
+
+    def _new_builtin(self, name: str) -> Any:
+        if name == "load_predict":
+            return BuiltinLoadPredict(self._config, self._capabilities)
+        if name == "throughput_propose":
+            return BuiltinThroughputPropose(self._config, self._scaling_state)
+        return BuiltinLoadPropose(self._config, self._scaling_state)
+
+    def _register_builtin_plugins(self) -> None:
+        """Register the in-process builtins that implement local planning."""
+        for name, registration in self._builtin_registrations().items():
+            instance = self._new_builtin(name)
+            self._builtins[name] = instance
             self._orchestrator.register_internal(
-                plugin_id=load.plugin_id,
-                plugin_type="propose",
-                priority=10,
-                instance=load,
-                execution_interval_seconds=load_interval,
-                needs=needs,
-                observation_window_seconds=observation_window,
+                plugin_id=instance.plugin_id, instance=instance, **registration
             )
+
+    def _reconcile_builtin_plugins(
+        self, predictor: Optional[BuiltinLoadPredict]
+    ) -> None:
+        """Make the registered builtins match the current scaling policy.
+
+        A builtin the policy no longer runs is unregistered; one it newly
+        runs is registered as at startup, so it first fires one interval
+        after the last tick, and its loop restarts with it; one it keeps is
+        updated in place (interval, observation window and needs), keeping
+        its state, its phase and its loop's phase. A new or kept load
+        predictor takes ``predictor``'s prepared forecasts when given.
+
+        The throughput lower bounds are dropped when throughput scaling
+        turns off, and when load scaling turns on: the throughput loop sets
+        them only while load scaling runs, so a bound left from before load
+        scaling went off would floor its first decisions at a stale target.
+        """
+        load_was_running = "load_propose" in self._builtins
+        throughput_was_running = "throughput_propose" in self._builtins
+        desired = self._builtin_registrations()
+        for name in [name for name in self._builtins if name not in desired]:
+            removed: Any = self._builtins.pop(name)
+            self._orchestrator.unregister_internal(
+                removed.plugin_id, reason="scaling_policy"
+            )
+        for name, registration in desired.items():
+            instance: Any = self._builtins.get(name)
+            if instance is None:
+                instance = self._new_builtin(name)
+                if name == "load_predict" and predictor is not None:
+                    instance.install_prepared_predictors(predictor)
+                self._builtins[name] = instance
+                self._orchestrator.register_internal(
+                    plugin_id=instance.plugin_id, instance=instance, **registration
+                )
+                # Anchored at the last tick, as initial_tick anchors the
+                # startup builtins, so it fires on the tick its loop is due
+                # (register_internal aligns to the scale interval instead,
+                # which a wall-clock tick is not).
+                plugin = self._orchestrator._registry.get_plugin(instance.plugin_id)
+                if plugin is not None:
+                    plugin.registered_at = self._last_tick_monotonic
+                continue
+            if name == "load_predict" and predictor is not None:
+                instance.install_prepared_predictors(predictor)
+            plugin = self._orchestrator._registry.get_plugin(instance.plugin_id)
+            if plugin is None:  # pragma: no cover - registered above or at startup
+                raise RuntimeError(f"builtin {name} is not registered")
+            plugin.execution_interval_seconds = registration[
+                "execution_interval_seconds"
+            ]
+            plugin.observation_window_seconds = registration[
+                "observation_window_seconds"
+            ]
+            plugin.needs = list(registration["needs"])
+            plugin.requires_produced_fields = list(
+                registration["requires_produced_fields"]
+            )
+        load_started = self._config.enable_load_scaling and not load_was_running
+        if not self._config.enable_throughput_scaling or load_started:
+            self._scaling_state.reset_throughput_lower_bounds()
+        # A loop restarts with its newly registered builtins, as at startup;
+        # a kept loop keeps the phase its kept builtins fire at.
+        if load_started:
+            self._last_load_loop_monotonic = self._last_tick_monotonic
+        if self._config.enable_throughput_scaling and not throughput_was_running:
+            self._last_throughput_loop_monotonic = self._last_tick_monotonic
 
     # ------------------------------------------------------------------
     # Bootstrap API (delegates to orchestrator)
@@ -521,7 +834,78 @@ class OrchestratorEngineAdapter:
         for plugin in self._orchestrator._registry.all_plugins():
             if plugin.is_builtin and plugin.last_call_at == float("-inf"):
                 plugin.registered_at = self._last_tick_monotonic
+        if self._retune is not None:
+            if self._retune_hooks is None:
+                # Anchors the retune window schedule (s0) at the planner start.
+                self._retune.start(start_s)
+            else:
+                # Live: anchored at the configured epoch phase instead.
+                self._retune.start(start_s, self._retune_hooks.phase_s)
         return self._compute_next_scheduled_tick()
+
+    def next_scheduled_tick(self) -> ScheduledTick:
+        """The pending tick recomputed under the active configuration.
+
+        The host's pending tick was planned under the configuration of the
+        tick before it: an activation in between can change which loops and
+        plugins it runs and whether it pulls traffic. Its time is unchanged,
+        because the scale interval is fixed.
+        """
+        return self._compute_next_scheduled_tick()
+
+    def apply_runtime_configuration(
+        self,
+        candidate: PlannerConfig,
+        fields: Iterable[str],
+        predictor: BuiltinLoadPredict | None,
+    ) -> None:
+        """Activate ``candidate``'s ``fields`` in the running engine.
+
+        A scaling-policy change re-registers the builtins
+        (``_reconcile_builtin_plugins``). ``predictor`` is the prepared load
+        predictor; it is required when the candidate needs a new one
+        (``reconfiguration.predictor_rebuild_required``: throughput scaling
+        turning on, or a predictor field or the throughput interval
+        changing). Everything is checked before anything changes. The host
+        then replaces its pending tick with ``next_scheduled_tick()``.
+        """
+        fields = list(fields)
+        if predictor is not None:
+            if not isinstance(predictor, BuiltinLoadPredict):
+                raise TypeError(
+                    "runtime prediction updates require the builtin load predictor"
+                )
+            if not candidate.enable_throughput_scaling:
+                raise ValueError(
+                    "a prepared load predictor requires throughput scaling"
+                )
+        elif predictor_rebuild_required(self._config, candidate):
+            raise ValueError(
+                "this configuration change needs a new load predictor "
+                "(throughput scaling turned on, or a predictor field or "
+                "throughput_adjustment_interval_seconds changed); prepare one"
+            )
+        active = self._builtins.get("load_predict")
+        if active is not None and not isinstance(active, BuiltinLoadPredict):
+            raise TypeError(
+                "runtime prediction updates require the builtin load predictor"
+            )
+        changed = {
+            field
+            for field in fields
+            if getattr(self._config, field) != getattr(candidate, field)
+        }
+        for field in changed:
+            setattr(self._config, field, getattr(candidate, field))
+        if changed & SCALING_POLICY_FIELDS:
+            self._reconcile_builtin_plugins(predictor)
+        elif active is not None and predictor is not None:
+            active.install_prepared_predictors(predictor)
+        if changed or predictor is not None:
+            self._orchestrator.invalidate_runtime_configuration()
+            self._startup_down_candidate = None
+            self._startup_down_inventory = None
+            self._startup_down_sources = frozenset()
 
     async def tick(
         self,
@@ -590,8 +974,41 @@ class OrchestratorEngineAdapter:
         )
 
         # 4. Project PipelineOutcome onto PlannerEffects.
-        scale_to = self._project_scale_to(
-            outcome, tick_input.worker_counts or WorkerCounts()
+        batch_plan = None
+        if scheduled_tick.need_batch_scheduling:
+            # Evaluate after the potentially slow plugin pipeline. The floor,
+            # drain cap, diagnostics, and lease therefore share one decision
+            # timestamp, and stale observations fail closed before projection.
+            publication_now_s = max(tick_input.now_s, self._clock.now())
+            batch_plan = plan_batch_schedule(
+                replace(tick_input, now_s=publication_now_s),
+                self._config.batch_scheduling.to_policy_config(),
+                decision_id=ctx.decision_id,
+            )
+        worker_counts = tick_input.worker_counts or WorkerCounts()
+        # A retune-only planner (retune with both scaling modes off) keeps
+        # the deployment's replicas: no GPU-budget, min-endpoint, or
+        # batch-floor repair. Decided by config, so a disabled live retune
+        # (no controller) keeps them too.
+        retune_only = (
+            self._config.retune is not None and not self._config.scaling_enabled()
+        )
+        scale_to = (
+            None
+            if retune_only
+            else self._project_scale_to(
+                outcome,
+                worker_counts,
+                batch_replica_floor=(
+                    batch_plan.replica_floor if batch_plan is not None else None
+                ),
+                batch_idle_replica_target=(
+                    batch_plan.idle_replica_target if batch_plan is not None else None
+                ),
+            )
+        )
+        batch_drain_limits, batch_audit_event = self._project_batch_drain_limits(
+            outcome, batch_plan, scale_to, worker_counts
         )
 
         # 5. Populate diagnostics from the shared scaling state. Consumed by
@@ -630,12 +1047,35 @@ class OrchestratorEngineAdapter:
         diagnostics.execute_action = outcome.execute_action
         diagnostics.short_circuit_reason = outcome.short_circuit_reason
         diagnostics.audit_events = list(outcome.audit_events)
+        if batch_audit_event is not None:
+            diagnostics.audit_events.append(batch_audit_event)
 
-        return PlannerEffects(
+        self._signal_health.observe(
+            scheduled_tick, tick_input, self._capabilities, diagnostics
+        )
+
+        effects = PlannerEffects(
             scale_to=scale_to,
             next_tick=self._compute_next_scheduled_tick(),
             diagnostics=diagnostics,
+            batch_drain_limits=batch_drain_limits,
         )
+
+        # 6. Retune runs after the plugin pipeline, outside the
+        #    orchestrator's per-tick deadline. It launches a sweep or turns a
+        #    finished one into a decision; the replays and the preparation of
+        #    a new predictor run in the sweep's worker processes (under a
+        #    VirtualClock the tick awaits a launched sweep inline). Its audit
+        #    strings force diagnostics emission in both hosts.
+        if self._retune is not None:
+            retune = await self._retune.on_tick(
+                tick_input.now_s, tick_input.worker_counts
+            )
+            effects.router_parameters = retune.router_parameters
+            effects.retune_decisions = list(retune.decisions)
+            diagnostics.audit_events.extend(retune.audit_events)
+
+        return effects
 
     async def observe(self, scheduled_tick: ScheduledTick, now_s: float) -> TickInput:
         """Run the in-process OBSERVE plugin for native planner execution.
@@ -665,6 +1105,20 @@ class OrchestratorEngineAdapter:
                     exc,
                 )
             self._gateway_server = None
+        if self._retune is not None:
+            try:
+                # Kills in-flight sweep workers and stops the sweep thread.
+                self._retune.close()
+            except Exception as exc:
+                # Don't let a retune teardown error mask the plugin shutdown
+                # that follows.
+                log.warning(
+                    "retune controller close raised %s: %s — continuing shutdown",
+                    type(exc).__name__,
+                    exc,
+                )
+        if self._retune_executor is not None:
+            self._retune_executor.shutdown(wait=False, cancel_futures=True)
         await self._orchestrator.shutdown()
 
     # ------------------------------------------------------------------
@@ -695,7 +1149,11 @@ class OrchestratorEngineAdapter:
         # ``RegisteredPlugin.last_call_at`` lives in — NOT wall-epoch.
         # ``at_s`` (wall-epoch) is for ``ScheduledTick.at_s`` only.
         at_monotonic = self._last_tick_monotonic + self._scale_interval
-        load_loop_due = self._interval_due(
+        # A retune-only planner (both scaling modes off) runs no load loop:
+        # no load-loop diagnostics and no FPM pull (``internal_fpm_due``
+        # below). Gate on any scaling, not ``enable_load_scaling``, because
+        # throughput-only SLA planners still need the load loop for FPM.
+        load_loop_due = self._config.scaling_enabled() and self._interval_due(
             self._last_load_loop_monotonic,
             float(self._config.load_adjustment_interval_seconds),
             at_monotonic,
@@ -708,6 +1166,7 @@ class OrchestratorEngineAdapter:
                 at_monotonic,
             )
         )
+        batch_loop_due = self._batch_scheduling_enabled
 
         # Lazy traffic pull: only when some currently-registered,
         # currently-due plugin actually consumes
@@ -774,6 +1233,7 @@ class OrchestratorEngineAdapter:
             at_monotonic_s=at_monotonic,
             run_load_scaling=load_loop_due,
             run_throughput_scaling=throughput_loop_due,
+            need_batch_scheduling=batch_loop_due,
             need_worker_states=True,
             need_worker_fpm=bool(fpm_consumers_due) or internal_fpm_due,
             need_traffic_metrics=need_traffic,
@@ -842,10 +1302,63 @@ class OrchestratorEngineAdapter:
         # and could not implement load-based decisions through
         # the public PipelineContext API.
         fpm = self._encode_fpm(ti.fpm_observations)
+        batch = self._encode_batch(ti.batch)
         return PipelineContext(
             request_id=f"tick-{ti.now_s}",
             decision_id=f"d-{ti.now_s}",
-            observations=ObservationData(traffic=traffic, fpm=fpm, workers=workers),
+            observations=ObservationData(
+                traffic=traffic,
+                fpm=fpm,
+                workers=workers,
+                batch=batch,
+            ),
+        )
+
+    @staticmethod
+    def _encode_batch(
+        obs: Optional[BatchSchedulingObservation],
+    ) -> Optional[BatchSchedulingData]:
+        """Project generic core batch observations onto the plugin contract."""
+
+        if obs is None:
+            return None
+        return BatchSchedulingData(
+            job_demands=[
+                BatchJobDemandData(
+                    observed_at_s=job.observed_at_s,
+                    pool_id=job.pool_id,
+                    job_id=job.job_id,
+                    status=job.status,
+                    total_requests=job.total_requests,
+                    completed_requests=job.completed_requests,
+                    failed_requests=job.failed_requests,
+                    deadline_at_s=job.deadline_at_s,
+                    work_class=job.work_class,
+                    remaining_requests=job.remaining_requests,
+                )
+                for job in obs.job_demands
+            ],
+            pool_traffic=[
+                PoolTrafficDemandData(
+                    observed_at_s=pool.observed_at_s,
+                    pool_id=pool.pool_id,
+                    online_offered_rps=pool.online_offered_rps,
+                    frontend_active_requests=pool.frontend_active_requests,
+                )
+                for pool in obs.pool_traffic
+            ],
+            dispatcher_feedback=[
+                BatchDispatcherFeedbackData(
+                    observed_at_s=feedback.observed_at_s,
+                    pool_id=feedback.pool_id,
+                    observation_window_s=feedback.observation_window_s,
+                    queued_requests=feedback.queued_requests,
+                    inflight_requests=feedback.inflight_requests,
+                    actual_dispatch_rps=feedback.actual_dispatch_rps,
+                    applied_max_admission_rps=feedback.applied_max_admission_rps,
+                )
+                for feedback in obs.dispatcher_feedback
+            ],
         )
 
     @staticmethod
@@ -911,23 +1424,424 @@ class OrchestratorEngineAdapter:
             out[ComponentKey(sub_component_type="decode")] = counts.ready_num_decode
         return out
 
-    def _project_scale_to(self, outcome, worker_counts: WorkerCounts):
+    @staticmethod
+    def _startup_reduction_sources(
+        outcome: PipelineOutcome, role: str, ready: int
+    ) -> frozenset[str]:
+        # Hand-authored outcomes predating provenance metadata retain their
+        # explicit-component contract. Production pipelines always supply it.
+        if outcome.propose_results is None:
+            return (
+                frozenset({"explicit_proposal"})
+                if ComponentKey(sub_component_type=role) in outcome.proposed_components
+                else frozenset()
+            )
+        sources: set[str] = set()
+        for merged, results in (
+            (outcome.propose_outcome, outcome.propose_results),
+            (outcome.reconcile_outcome, outcome.reconcile_results or []),
+        ):
+            if merged is None or merged.proposal is None:
+                continue
+            merged_target = next(
+                (
+                    t.replicas
+                    for t in merged.proposal.targets
+                    if t.sub_component_type == role
+                ),
+                None,
+            )
+            if merged_target is None or merged_target > ready:
+                continue
+            for result in results:
+                if not isinstance(result.result, OverrideResult):
+                    continue
+                if any(
+                    t.sub_component_type == role
+                    and t.replicas is not None
+                    and t.replicas <= ready
+                    and t.type in (OverrideType.SET, OverrideType.AT_MOST)
+                    for t in result.result.targets
+                ):
+                    sources.add(result.plugin_id)
+        return frozenset(sources)
+
+    def _project_startup_scale_down(
+        self,
+        outcome: PipelineOutcome,
+        counts: WorkerCounts,
+        *,
+        batch_replica_floor: Optional[int] = None,
+    ) -> Optional[ScalingDecision]:
+        """Only explicit, sustained reductions may interrupt a verified startup.
+
+        Keep all pending capacity in budget accounting. A merged ready-count
+        baseline is not a request to cancel that capacity. No up-proposal is
+        clamped into a down-proposal, and drain/rollout snapshots never enter
+        this path. The connector rechecks that invariant before writing.
+        """
+        assert outcome.final_proposal is not None
+        proposed = {
+            t.sub_component_type: t.replicas for t in outcome.final_proposal.targets
+        }
+        targets: dict[str, int] = {}
+        sources: set[str] = set()
+        gpu_total = 0
+        power_total = 0
+        mode = self._config.mode
+        roles = (
+            ("prefill", "decode")
+            if mode == "disagg"
+            else (("prefill",) if mode == "prefill" else ("decode",))
+        )
+        for role, ready, pending, caps in (
+            (
+                "prefill",
+                counts.ready_num_prefill,
+                counts.pending_num_prefill,
+                self._capabilities.prefill,
+            ),
+            (
+                "decode",
+                counts.ready_num_decode,
+                counts.pending_num_decode,
+                self._capabilities.decode,
+            ),
+        ):
+            if role not in roles:
+                continue
+            if ready is None:
+                self._startup_down_candidate = None
+                return None
+            desired = ready + pending
+            target = proposed.get(role)
+            role_sources = self._startup_reduction_sources(outcome, role, ready)
+            if not role_sources:
+                target = None
+            if target is not None:
+                target = max(
+                    target,
+                    resolve_min_endpoint(
+                        self._config, "prefill" if role == "prefill" else "decode"
+                    ),
+                )
+                if role == "decode" and batch_replica_floor is not None:
+                    target = max(target, batch_replica_floor)
+                if target <= ready and target < desired:
+                    targets[role] = target
+                    sources.update(role_sources)
+            effective = targets.get(role, desired)
+            gpu_cost = caps.resolved_gpu_cost_per_replica if caps else None
+            if gpu_cost is None and (
+                self._config.min_gpu_budget >= 0 or self._config.max_gpu_budget >= 0
+            ):
+                self._startup_down_candidate = None
+                return None
+            gpu_total += effective * (gpu_cost or 0)
+            watts = caps.power_watts_per_replica if caps else None
+            if self._config.enable_power_awareness and watts is None:
+                self._startup_down_candidate = None
+                return None
+            power_total += effective * (watts or 0)
+
+        inventory = (
+            counts.ready_num_prefill,
+            counts.ready_num_decode,
+            counts.pending_num_prefill,
+            counts.pending_num_decode,
+        )
+        if not targets:
+            evaluated = outcome.evaluated_proposal_plugins
+            saved_targets = dict(
+                zip(("prefill", "decode"), self._startup_down_candidate or (None, None))
+            )
+
+            def conflicts(target: ComponentTarget) -> bool:
+                saved = saved_targets.get(target.sub_component_type)
+                return (
+                    saved is not None
+                    and target.replicas is not None
+                    and target.replicas > saved
+                    and target.type in (OverrideType.SET, OverrideType.AT_LEAST)
+                )
+
+            conflicts_with_candidate = any(
+                conflicts(target)
+                for result in (outcome.propose_results or [])
+                + (outcome.reconcile_results or [])
+                + (outcome.constrain_results or [])
+                if isinstance(result.result, OverrideResult)
+                for target in result.result.targets
+            )
+            saved_decode_target = saved_targets.get("decode")
+            if (
+                batch_replica_floor is not None
+                and saved_decode_target is not None
+                and batch_replica_floor > saved_decode_target
+            ):
+                conflicts_with_candidate = True
+            # A plugin throttled between observations has made no new claim.
+            # Preserve its timer, but never execute without a fresh proposal.
+            # A fresh ACCEPT (including missing FPM), error, or up signal
+            # invalidates the previous recommendation.
+            if (
+                evaluated is None
+                or self._startup_down_sources.intersection(evaluated)
+                or conflicts_with_candidate
+                or inventory != self._startup_down_inventory
+            ):
+                self._startup_down_candidate = None
+            return None
+
+        min_gpu, max_gpu = self._config.min_gpu_budget, self._config.max_gpu_budget
+        power_limit = self._config.total_gpu_power_limit
+        if (
+            (min_gpu >= 0 and gpu_total < min_gpu)
+            or (max_gpu >= 0 and gpu_total > max_gpu)
+            or (
+                self._config.enable_power_awareness
+                and power_limit is not None
+                and power_total > power_limit
+            )
+        ):
+            self._startup_down_candidate = None
+            return None
+        candidate = (targets.get("prefill"), targets.get("decode"))
+        now = self._clock.monotonic()
+        # HOLD_LAST cache replay cannot count as a second observation.
+        if outcome.evaluated_proposal_plugins is not None and not sources.issubset(
+            outcome.evaluated_proposal_plugins
+        ):
+            if (
+                candidate != self._startup_down_candidate
+                or inventory != self._startup_down_inventory
+                or sources != self._startup_down_sources
+            ):
+                self._startup_down_candidate = None
+            return None
+        if (
+            candidate != self._startup_down_candidate
+            or inventory != self._startup_down_inventory
+            or sources != self._startup_down_sources
+        ):
+            self._startup_down_candidate = candidate
+            self._startup_down_inventory = inventory
+            self._startup_down_since = now
+            self._startup_down_sources = frozenset(sources)
+            return None
+        # Require a full load observation interval with the same recommendation
+        # before reversing a scale-up. Faster plugin ticks cannot bypass this.
+        if (
+            now - self._startup_down_since
+            < self._config.load_adjustment_interval_seconds
+        ):
+            return None
+        return ScalingDecision(num_prefill=candidate[0], num_decode=candidate[1])
+
+    def _project_batch_drain_limits(
+        self, outcome, batch_plan, scale_to, worker_counts: WorkerCounts
+    ):
+        """Project one batch plan to a leased dispatcher decision.
+
+        A rejected/timed-out plugin pipeline must not leave a positive prior
+        lease live until expiry. The policy was still evaluated on this tick,
+        so reuse its newly computed lease identity/expiry while forcing
+        admission to zero. ``skip_no_targets`` is not a rejection: it means
+        the plugin pipeline had no scaling opinion, while the native batch
+        decision remains valid.
+        """
+
+        if batch_plan is None:
+            return [], None
+
+        drain_limit = batch_plan.drain_limit
+        verified_desired_decode = worker_counts.expected_num_decode
+        if verified_desired_decode is None:
+            if (
+                worker_counts.ready_num_decode is not None
+                and worker_counts.pending_num_decode > 0
+            ):
+                # During verified startup the Kubernetes connector deliberately
+                # leaves ``expected`` unknown, but ``ready + pending`` is the
+                # authoritative desired count. Pending capacity may preserve a
+                # replica floor; the policy still computes admission from ready
+                # capacity only.
+                verified_desired_decode = (
+                    worker_counts.ready_num_decode + worker_counts.pending_num_decode
+                )
+            elif not worker_counts.decode_scaling_in_progress:
+                verified_desired_decode = worker_counts.ready_num_decode
+        effective_decode = (
+            scale_to.num_decode
+            if scale_to is not None and scale_to.num_decode is not None
+            else verified_desired_decode
+        )
+        floor_blocked = batch_plan.replica_floor is not None and (
+            effective_decode is None or effective_decode < batch_plan.replica_floor
+        )
+        if outcome.execute_action in ("skip_short_circuit", "skip_tick_timeout"):
+            drain_limit = BatchDrainLimitDecision(
+                pool_id=drain_limit.pool_id,
+                max_admission_rps=0.0,
+                valid_until_s=drain_limit.valid_until_s,
+                decision_id=drain_limit.decision_id,
+            )
+            audit_event = (
+                "batch_drain_limit_safety_pause:"
+                f"pipeline_action={outcome.execute_action}:"
+                f"pool_id={drain_limit.pool_id}:"
+                f"decision_id={drain_limit.decision_id}"
+            )
+            log.warning(
+                "Batch scheduling safety pause: pipeline_action=%s "
+                "pool_id=%s decision_id=%s valid_until_s=%s",
+                outcome.execute_action,
+                drain_limit.pool_id,
+                drain_limit.decision_id,
+                drain_limit.valid_until_s,
+            )
+        elif floor_blocked:
+            # GPU/power caps are the final scaling boundary and are allowed to
+            # make the requested floor infeasible. Never pair that reduced
+            # capacity target with a positive drain lease.
+            drain_limit = BatchDrainLimitDecision(
+                pool_id=drain_limit.pool_id,
+                max_admission_rps=0.0,
+                valid_until_s=drain_limit.valid_until_s,
+                decision_id=drain_limit.decision_id,
+            )
+            audit_event = (
+                "batch_floor_blocked_by_final_budget:"
+                f"pool_id={drain_limit.pool_id}:"
+                f"replica_floor={batch_plan.replica_floor}:"
+                f"effective_decode={effective_decode}:"
+                f"decision_id={drain_limit.decision_id}"
+            )
+            log.warning(
+                "Batch scheduling drain paused because final budget blocked "
+                "the replica floor: pool_id=%s replica_floor=%s "
+                "effective_decode=%s decision_id=%s valid_until_s=%s",
+                drain_limit.pool_id,
+                batch_plan.replica_floor,
+                effective_decode,
+                drain_limit.decision_id,
+                drain_limit.valid_until_s,
+            )
+        elif batch_plan.diagnostics.safety_paused:
+            policy_reasons = ",".join(batch_plan.diagnostics.infeasible_reasons)
+            audit_event = (
+                "batch_drain_limit_safety_pause:"
+                "reason=policy_safety_pause:"
+                f"policy_reasons={policy_reasons}:"
+                f"pool_id={drain_limit.pool_id}:"
+                f"decision_id={drain_limit.decision_id}"
+            )
+            log.warning(
+                "Batch scheduling policy safety pause: pipeline_action=%s "
+                "policy_reasons=%s pool_id=%s decision_id=%s valid_until_s=%s",
+                outcome.execute_action,
+                policy_reasons,
+                drain_limit.pool_id,
+                drain_limit.decision_id,
+                drain_limit.valid_until_s,
+            )
+        else:
+            audit_event = (
+                "batch_drain_limit_decision:"
+                f"pipeline_action={outcome.execute_action}:"
+                f"pool_id={drain_limit.pool_id}:"
+                f"max_admission_rps={drain_limit.max_admission_rps}:"
+                f"replica_floor={batch_plan.replica_floor}:"
+                f"idle_replica_target={batch_plan.idle_replica_target}:"
+                f"decision_id={drain_limit.decision_id}"
+            )
+            log.info(
+                "Batch scheduling decision: pipeline_action=%s pool_id=%s "
+                "replica_floor=%s max_admission_rps=%s decision_id=%s "
+                "valid_until_s=%s idle_replica_target=%s",
+                outcome.execute_action,
+                drain_limit.pool_id,
+                batch_plan.replica_floor,
+                drain_limit.max_admission_rps,
+                drain_limit.decision_id,
+                drain_limit.valid_until_s,
+                batch_plan.idle_replica_target,
+            )
+
+        return [drain_limit], audit_event
+
+    def _project_scale_to(
+        self,
+        outcome,
+        worker_counts: WorkerCounts,
+        *,
+        batch_replica_floor: Optional[int] = None,
+        batch_idle_replica_target: Optional[int] = None,
+    ):
         """Project the pipeline outcome onto ``PlannerEffects.scale_to``
-        with planner "no change -> None" detection.
+        with planner "no change -> None" detection for local execution.
+
+        Global Planner also receives explicit stable same-count recommendations
+        so they can replace older retained demand.
 
         ``type_aware_merge`` fills omitted roles from the ready-count baseline.
         ``PipelineOutcome.proposed_components`` preserves which roles PROPOSE
         actually targeted before that merge, so the power path can charge
         baseline peers without treating them as adjustable targets.
         """
-        if outcome.execute_action != "apply" or outcome.final_proposal is None:
+        if batch_replica_floor is not None and (
+            isinstance(batch_replica_floor, bool)
+            or not isinstance(batch_replica_floor, int)
+            or batch_replica_floor < 0
+        ):
+            raise ValueError("batch_replica_floor must be a non-negative integer")
+        if batch_idle_replica_target is not None and (
+            isinstance(batch_idle_replica_target, bool)
+            or not isinstance(batch_idle_replica_target, int)
+            or batch_idle_replica_target < 0
+        ):
+            raise ValueError("batch_idle_replica_target must be a non-negative integer")
+
+        pipeline_has_proposal = (
+            outcome.execute_action == "apply" and outcome.final_proposal is not None
+        )
+        batch_floor_allowed = batch_replica_floor is not None and (
+            outcome.execute_action in ("apply", "skip_no_targets")
+        )
+        batch_idle_target_allowed = batch_idle_replica_target is not None and (
+            outcome.execute_action in ("apply", "skip_no_targets")
+        )
+        if worker_counts.startup_in_progress:
+            if not pipeline_has_proposal:
+                self._startup_down_candidate = None
+                return None
+            return self._project_startup_scale_down(
+                outcome,
+                worker_counts,
+                batch_replica_floor=(
+                    batch_replica_floor if batch_floor_allowed else None
+                ),
+            )
+        self._startup_down_candidate = None
+        if (
+            not pipeline_has_proposal
+            and not batch_floor_allowed
+            and not batch_idle_target_allowed
+        ):
             return None
 
-        by_comp = {
-            t.sub_component_type: t.replicas for t in outcome.final_proposal.targets
-        }
+        by_comp = (
+            {t.sub_component_type: t.replicas for t in outcome.final_proposal.targets}
+            if pipeline_has_proposal
+            else {}
+        )
         num_p = by_comp.get("prefill")
         num_d = by_comp.get("decode")
+
+        prefill_key = ComponentKey(sub_component_type="prefill")
+        decode_key = ComponentKey(sub_component_type="decode")
+        prefill_proposed = prefill_key in outcome.proposed_components
+        decode_proposed = decode_key in outcome.proposed_components
 
         current_p = worker_counts.ready_num_prefill
         current_d = worker_counts.ready_num_decode
@@ -951,6 +1865,12 @@ class OrchestratorEngineAdapter:
             worker_counts.expected_num_decode,
             worker_counts.decode_scaling_in_progress,
         )
+        # A stable ready-equal recommendation can cancel older retained demand
+        # at Global Planner. Only explicit proposals carry demand: merged
+        # baseline echoes and observation-only ticks must leave it unchanged.
+        publish_unchanged_demand = (
+            self._config.global_planner_managed_allocation and not deployment_scaling
+        )
         gpu_budget_reconcile = (
             not deployment_scaling and self._gpu_budget_reconcile_needed(worker_counts)
         )
@@ -966,19 +1886,121 @@ class OrchestratorEngineAdapter:
             and current_d is not None
             and current_d < decode_min_endpoint
         )
-        floor_reconcile = mode == "disagg" and (
-            prefill_floor_needed or decode_floor_needed
-        )
         if prefill_floor_needed:
             num_p = max(num_p or 0, prefill_min_endpoint)
         if decode_floor_needed:
             num_d = max(num_d or 0, decode_min_endpoint)
 
-        prefill_key = ComponentKey(sub_component_type="prefill")
-        decode_key = ComponentKey(sub_component_type="decode")
-        prefill_proposed = prefill_key in outcome.proposed_components
-        decode_proposed = decode_key in outcome.proposed_components
-        if self._config.enable_power_awareness:
+        # The batch policy floor is a native, dynamic final invariant. It can
+        # raise an explicit plugin target or synthesize a decode target when
+        # the plugin pipeline has no opinion. Do not echo the ready baseline
+        # when it already satisfies the floor: that remains a true no-op.
+        # Any explicit decode override counts as plugin intent, whether it came
+        # from PROPOSE or from a custom RECONCILE plugin: checking only PROPOSE
+        # provenance would compare the floor against the stale desired count
+        # and let a RECONCILE-only SET below the floor through unrepaired.
+        batch_floor_needed = False
+        if (
+            batch_replica_floor is not None
+            and batch_floor_allowed
+            and mode in ("disagg", "decode", "agg")
+        ):
+            decode_targeted = (
+                decode_proposed or decode_key in outcome.targeted_components
+            )
+            batch_floor_baseline = (
+                num_d
+                if decode_targeted
+                else (
+                    worker_counts.expected_num_decode
+                    if worker_counts.expected_num_decode is not None
+                    else current_d
+                )
+            )
+            if batch_floor_baseline is None:
+                if batch_replica_floor > 0:
+                    num_d = batch_replica_floor
+                    batch_floor_needed = True
+            elif batch_floor_baseline < batch_replica_floor:
+                num_d = batch_replica_floor
+                batch_floor_needed = True
+
+        # An authoritative idle plan is a native decode recommendation: it can
+        # scale a stable pool down after the last batch completes. Compose it
+        # with explicit PROPOSE/RECONCILE targets, then replay the exact
+        # CONSTRAIN inputs so external AT_LEAST/AT_MOST bounds retain their
+        # normal final-stage semantics. GPU/power budgets remain the last
+        # invariant below. Never synthesize this downscale while any role is
+        # rolling because the settled desired inventory is not trustworthy.
+        batch_idle_target_needed = False
+        if (
+            batch_idle_target_allowed
+            and batch_idle_replica_target is not None
+            and not deployment_scaling
+            and current_d is not None
+            and mode in ("disagg", "decode", "agg")
+        ):
+            idle_decode_target = max(
+                batch_idle_replica_target,
+                decode_min_endpoint,
+            )
+            if decode_key in outcome.targeted_components:
+                upstream_decode_target = None
+                for stage_outcome in (
+                    outcome.reconcile_outcome,
+                    outcome.propose_outcome,
+                ):
+                    if stage_outcome is None or stage_outcome.proposal is None:
+                        continue
+                    upstream_decode_target = next(
+                        (
+                            target.replicas
+                            for target in stage_outcome.proposal.targets
+                            if target.sub_component_type == "decode"
+                        ),
+                        None,
+                    )
+                    if upstream_decode_target is not None:
+                        break
+                # Hand-authored/legacy outcomes may not carry intermediate
+                # merge records; their explicit-component mask still makes the
+                # final target authoritative.
+                if upstream_decode_target is None:
+                    upstream_decode_target = num_d
+                if upstream_decode_target is not None:
+                    idle_decode_target = max(
+                        idle_decode_target,
+                        upstream_decode_target,
+                    )
+            if outcome.constrain_results is not None:
+                constrained_idle = type_aware_merge(
+                    outcome.constrain_results,
+                    {decode_key: idle_decode_target},
+                    set_allowed=False,
+                )
+                if constrained_idle.short_circuited:
+                    # Production would already have returned a short-circuit
+                    # outcome. Treat inconsistent provenance as no safe scale.
+                    return None
+                if constrained_idle.proposal is not None:
+                    constrained_decode_target = next(
+                        (
+                            target.replicas
+                            for target in constrained_idle.proposal.targets
+                            if target.sub_component_type == "decode"
+                        ),
+                        None,
+                    )
+                    if constrained_decode_target is not None:
+                        idle_decode_target = constrained_decode_target
+            num_d = idle_decode_target
+            batch_idle_target_needed = True
+
+        floor_reconcile = mode == "disagg" and (
+            prefill_floor_needed or decode_floor_needed or batch_floor_needed
+        )
+
+        if self._config.enable_power_awareness or publish_unchanged_demand:
             # Restore the explicit PROPOSE-stage mask before the final budget
             # boundary. Omitted roles are still charged via ``current_*`` inside
             # the clamps, but can never become emitted targets. A disaggregated
@@ -994,6 +2016,8 @@ class OrchestratorEngineAdapter:
             if (
                 not decode_proposed
                 and not decode_floor_needed
+                and not batch_floor_needed
+                and not batch_idle_target_needed
                 and not floor_reconcile
                 and not gpu_budget_reconcile
             ):
@@ -1024,10 +2048,11 @@ class OrchestratorEngineAdapter:
                 and num_d == current_d
                 and not decode_proposed
                 and not decode_floor_needed
+                and not batch_floor_needed
             ):
                 num_d = None
 
-        if self._config.enable_power_awareness:
+        if self._config.enable_power_awareness and not publish_unchanged_demand:
             # Suppress only a proven stable no-op. During a rollout ``expected``
             # is unknown, so an explicit target equal to transient ready may be
             # intentional cancellation of the in-flight desired count.
@@ -1037,12 +2062,14 @@ class OrchestratorEngineAdapter:
                 num_p = None
             if num_d is not None and expected_d is not None and num_d == expected_d:
                 num_d = None
+            if batch_idle_target_needed and num_d is not None and num_d == current_d:
+                num_d = None
             if num_p is None and num_d is None:
                 return None
         else:
             p_unchanged = (num_p is None) or (num_p == current_p)
             d_unchanged = (num_d is None) or (num_d == current_d)
-            if p_unchanged and d_unchanged:
+            if p_unchanged and d_unchanged and not publish_unchanged_demand:
                 return None
 
         return ScalingDecision(num_prefill=num_p, num_decode=num_d)

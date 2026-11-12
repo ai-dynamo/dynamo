@@ -28,6 +28,7 @@ from gpu_memory_service.client.torch.allocator import (
 )
 from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.common.utils import GMS_TAGS, get_socket_path
+from gpu_memory_service.common.vmm import get_vmm_device_type
 from gpu_memory_service.integrations.common.utils import finalize_gms_write
 
 logger = logging.getLogger(__name__)
@@ -69,7 +70,7 @@ class GMSMemorySaverImpl:
         mode=None,
         ro_connect_timeout_ms=None,
     ):
-        self._device = torch.device("cuda", device_index)
+        self._device = torch.device(get_vmm_device_type().value, device_index)
         self.imported_weights_bytes = 0
         self.preloaded_weights_bytes = 0
         self.ro_connect_timeout_ms = ro_connect_timeout_ms
@@ -96,11 +97,24 @@ class GMSMemorySaverImpl:
         )
 
     @contextmanager
-    def region(self, tag: str, enable_cpu_backup: bool):
-        """Use the tag's RW pool and publish pending weights after clean exit."""
-        if enable_cpu_backup:
+    def region(
+        self,
+        tag: str,
+        **backup_options: object,
+    ):
+        """Use the tag's RW pool and publish pending weights after clean exit.
+
+        GMS owns the allocation itself, so none of torch_memory_saver's
+        ``enable_*_backup`` offload paths can be honoured. ``**backup_options``
+        absorbs every such flag (the ``region`` signature has grown over time)
+        so that a torch_memory_saver bump does not raise ``TypeError`` from the
+        entrypoint; any option actually turned on is rejected loudly below.
+        """
+        requested = [name for name, enabled in backup_options.items() if enabled]
+        if requested:
             raise ValueError(
-                "SGLang with GMS does not support CPU backup for allocations."
+                "SGLang with GMS does not support backing up allocations; "
+                f"unsupported option(s) enabled: {', '.join(sorted(requested))}."
             )
 
         if tag not in _TAG_LOCK_TYPES:
@@ -158,7 +172,7 @@ class GMSMemorySaverImpl:
         stream,
         capture_error_mode,
         tag: str,
-        enable_cpu_backup: bool,
+        **backup_options: object,
     ):
         # The old hybrid path could delegate this to torch_memory_saver, but
         # strict GMS mode has no compatible pauseable CUDA-graph allocator hook.
@@ -178,7 +192,10 @@ class GMSMemorySaverImpl:
             # the VA reservation alive for the next resume().
             self.allocators[target_tag].abort()
         gc.collect()
-        torch.cuda.empty_cache()
+        if self._device.type == "xpu":
+            torch.xpu.empty_cache()
+        else:
+            torch.cuda.empty_cache()
 
     def resume(self, tag: Optional[str] = None) -> None:
         for target_tag in _pause_resume_tags(tag):

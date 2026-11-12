@@ -24,7 +24,7 @@ RUN_PREFIX=
 # dependencies are specified in the /container/deps folder and
 # installed within framework specific sections of the Dockerfile.
 
-declare -A FRAMEWORKS=(["VLLM"]=1 ["TRTLLM"]=2 ["NONE"]=3 ["SGLANG"]=4)
+declare -A FRAMEWORKS=(["VLLM"]=1 ["TRTLLM"]=2 ["NONE"]=3 ["SGLANG"]=4 ["TRITON"]=5)
 
 DEFAULT_FRAMEWORK=VLLM
 
@@ -286,7 +286,7 @@ get_options() {
 
     if [ -n "$HF_HOME" ]; then
         mkdir -p "$HF_HOME"
-        if [[ ${USER} == "root" ]] || [[ ${USER} == "0" ]]; then
+        if [[ ${USER%%:*} == "root" ]] || [[ ${USER%%:*} == "0" ]]; then
             HF_HOME_TARGET="/root/.cache/huggingface"
         else
             HF_HOME_TARGET="/home/dynamo/.cache/huggingface"

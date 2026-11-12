@@ -22,10 +22,16 @@ metadata:
     app.kubernetes.io/name: qwen35-122b-disagg-h200-agentic
     app.kubernetes.io/part-of: dynamo
 data:
-  kv-transfer-config: |-
+  kv-transfer-config-prefill: |-
     {
       "kv_connector": "NixlConnector",
-      "kv_role": "kv_both",
+      "kv_role": "kv_producer",
+      "kv_connector_extra_config": { "num_threads": 8 }
+    }
+  kv-transfer-config-decode: |-
+    {
+      "kv_connector": "NixlConnector",
+      "kv_role": "kv_consumer",
       "kv_connector_extra_config": { "num_threads": 8 }
     }
 ---
@@ -154,7 +160,7 @@ spec:
                   valueFrom:
                     configMapKeyRef:
                       name: qwen35-122b-disagg-h200-agentic-config
-                      key: kv-transfer-config
+                      key: kv-transfer-config-prefill
               envFrom:
                 - secretRef:
                     name: hf-token-secret
@@ -290,7 +296,7 @@ spec:
                   valueFrom:
                     configMapKeyRef:
                       name: qwen35-122b-disagg-h200-agentic-config
-                      key: kv-transfer-config
+                      key: kv-transfer-config-decode
               envFrom:
                 - secretRef:
                     name: hf-token-secret

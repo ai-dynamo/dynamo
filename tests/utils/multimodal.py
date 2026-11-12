@@ -102,6 +102,7 @@ def make_image_payload_cached_tokens(
     min_routing_total_blocks: int = 0,
     min_avg_kv_hit_rate: float = 0.0,
     prompt_filler_repeats: int = 0,
+    payload_cls: type[CachedTokensChatPayload] = CachedTokensChatPayload,
 ) -> CachedTokensChatPayload:
     """Image payload that asserts MM-aware KV cache reuse on repeats.
 
@@ -113,11 +114,13 @@ def make_image_payload_cached_tokens(
     ``prompt_filler_repeats`` prepends N copies of a topic-aligned filler so
     the routing-token sequence spans multiple blocks on specs that use a
     coarse routing-block size (e.g. qwen3_5 family at block_size=544).
+    ``payload_cls`` lets a backend substitute a subclass that adjusts the
+    checks at run time (e.g. SGLang's wide-pad gate).
     """
     prompt = _MULTIMODAL_COLOR_PROMPT
     if prompt_filler_repeats > 0:
         prompt = (_COLOR_PROMPT_FILLER * prompt_filler_repeats).strip() + " " + prompt
-    return CachedTokensChatPayload(
+    return payload_cls(
         body={
             "messages": [
                 {
@@ -564,6 +567,8 @@ class TopologyConfig:
     gpu_marker: Optional[str] = None  # override profile-level gpu_marker
     single_gpu: bool = False  # append --single-gpu to script_args
     two_gpu: bool = False  # append --two-gpu to script_args (epd only)
+    health_check_workers: bool = False
+    health_check_worker_count: int = 2
     env: dict[str, str] = field(default_factory=dict)  # extra env vars for subprocess
     tests: list[MmCase] = field(default_factory=list)
 
@@ -673,6 +678,8 @@ def make_multimodal_configs(
                 script_args=list(base_script_args) + list(case.extra_script_args),
                 marks=marks,
                 delayed_start=topo_cfg.delayed_start,
+                health_check_workers=topo_cfg.health_check_workers,
+                health_check_worker_count=topo_cfg.health_check_worker_count,
                 request_payloads=[case.payload, *case.followup_payloads],
                 env={**topo_env, **case.env},
             )

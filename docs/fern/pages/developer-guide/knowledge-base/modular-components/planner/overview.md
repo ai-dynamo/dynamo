@@ -159,12 +159,19 @@ Load-based scaling has the following known limitations. Throughput-based scaling
 **Requires ForwardPassMetrics (FPM).** Load-based scaling uses per-engine per-iteration metrics delivered via the Dynamo event plane (ForwardPassMetrics). The KV Router is **not** required for load-based scaling. FPM availability by backend:
 
 - **vLLM** — supported. Automatically enabled when the engine uses `InstrumentedScheduler` and `DYN_FORWARDPASS_METRIC_PORT` is set.
-- **TensorRT-LLM** — supported, including attention-DP when the runtime emits the required iteration statistics. Dynamo publishes one FPM channel per attention-DP rank and disables FPM emission if the runtime schema is missing required fields.
+- **TensorRT-LLM** — supported, including attention-DP. Enabled with `--fpm-trace`, `DYN_FORWARDPASS_METRIC_PORT` or `--publish-metrics`, each of which also turns on the engine's `enable_iter_perf_stats`; `--publish-kv-events` does not enable it. Dynamo publishes one FPM channel per attention-DP rank and disables FPM emission if the runtime schema is missing required fields.
 - **SGLang** — supported. Enabled when `DYN_FORWARDPASS_METRIC_PORT` is set; requires the upstream FPM module, which ships in the SGLang runtime as of `sglang==0.5.13.post1` (SGLang >= v0.5.13). See the [SGLang FPM section](../backends/sglang/observability.md#forward-pass-metrics-fpm).
+
+FPM delivery alone does not establish decode scaling support: KV-utilization
+decisions also require the worker's KV capacity metadata. TensorRT-LLM
+deployments that omit `total_kv_blocks` or `kv_cache_block_size` cannot use that
+decode scaling path. When the scaling decision reports `missing_engine_metadata`,
+`dynamo_planner_signal_unavailable{component="decode",signal="load_inputs"}`
+is set. The decision logs identify the missing capacity metadata.
 
 ### General
 
-**In-flight requests during scale-down.** When the Planner scales down a worker, the worker is terminated without waiting for in-flight requests to complete. Requests that were mid-prefill on the terminated worker will fail. In disaggregated deployments, this can also affect decode workers that were waiting on KV cache transfers from the terminated prefill worker. **Workaround:** For an aggregated deployment, set `min_endpoint`. For a disaggregated deployment, set `min_endpoint` to apply the same floor to prefill and decode, or set `prefill_min_endpoint` and `decode_min_endpoint` when the components need different floors. For a single-component deployment, set the active role's field; when that field is unset, `min_endpoint` supplies the active role. Use a lower `load_scaling_down_sensitivity` value to reduce the frequency of scale-down events.
+**In-flight requests during scale-down.** When the Planner scales down a worker, the worker is terminated without waiting for in-flight requests to complete. Requests that were mid-prefill on the terminated worker will fail. In disaggregated deployments, this can also affect decode workers that were waiting on KV cache transfers from the terminated prefill worker. **Workaround:** For an aggregated deployment, set `min_endpoint`. For a disaggregated deployment, set `min_endpoint` to apply the same floor to prefill and decode, or set `prefill_min_endpoint` and `decode_min_endpoint` when the components need different floors. For a single-component deployment, set the active role's field; when that field is unset, `min_endpoint` supplies the active role. With `optimization_target: sla`, a lower `load_scaling_down_sensitivity` value reduces model-based scale-down events; the endpoint floors are what keep capacity on an idle pool.
 
 ## Documentation
 
@@ -174,6 +181,7 @@ Load-based scaling has the following known limitations. Throughput-based scaling
 | [Planner Guide](planner-guide.md) | Deployment, configuration, integration |
 | [Planner Design](planner-design.md) | Architecture and algorithm internals |
 | [Planner Examples](planner-examples.md) | Planner-specific configuration examples |
+| [Simulate Planner Decisions with AISimulate](aisimulate-planner-replay.mdx) | Replay a trace through the Planner offline, including the experimental retune |
 | [DGDR Templates](../../../../recipes/kubernetes-templates/dgdr.mdx) | DGDR YAML examples, sample configurations, advanced patterns |
 | [Global Planner Guide](global-planner-guide.md) | Multi-DGD coordination, shared GPU budgets, single-endpoint multi-pool deployments |
 
@@ -201,7 +209,7 @@ DGDR planner features and generated ConfigMaps are materialized into these
 | `decode_min_endpoint` | `null` | Decode replica floor; replaces the decode value from `min_endpoint` when set |
 | `decode_engine_num_gpu` | `null` | GPUs per decode engine; auto-detected from the deployment when unset |
 | `prefill_engine_num_gpu` | `null` | GPUs per prefill engine; auto-detected from the deployment when unset |
-| `advisory` | `false` | Suggestion-only mode. The Planner computes and reports recommended replica counts, but does not execute scaling actions or change the deployment. |
+| `advisory` | `false` | Suggestion-only mode. The Planner computes and reports recommended replica counts, but does not execute scaling actions or change the deployment. Planner-in-the-loop replay honors it too. |
 | **Throughput-based scaling** | | |
 | `enable_throughput_scaling` | `true` | Enable throughput-based scaling |
 | `throughput_adjustment_interval_seconds` | `180` | Seconds between throughput-based scaling decisions |
@@ -212,7 +220,7 @@ DGDR planner features and generated ConfigMaps are materialized into these
 | `load_adjustment_interval_seconds` | `5` | Seconds between FPM tuning updates and load-based scaling decisions |
 | `max_num_fpm_samples` | `64` | Maximum retained FPM observations for online tuning or regression |
 | `fpm_sample_bucket_size` | `16` | Number of buckets for observation retirement (must be perfect square) |
-| `load_scaling_down_sensitivity` | `80` | Scale-down sensitivity 0-100 (0=never, 100=aggressive) |
+| `load_scaling_down_sensitivity` | `80` | SLA-mode scale-down sensitivity 0-100 (100=aggressive). 0 blocks model-based scale-down, but a fully idle pool still shrinks one replica at a time to its endpoint floor (minimum 1); see [Unavailable Scaling Inputs](planner-guide.md#unavailable-scaling-inputs). Ignored unless `optimization_target` is `sla` |
 | `load_min_observations` | `5` | Minimum observations before regression activates |
 | `prefill_scale_up_queue_tokens` / `prefill_scale_down_queue_tokens` | `null` | Queue token thresholds for `optimization_target: load` prefill scaling. |
 | `decode_scale_up_kv_rate` / `decode_scale_down_kv_rate` | `null` | Decode KV utilization thresholds for `optimization_target: load` decode scaling. |
@@ -286,7 +294,7 @@ Throughput prediction gauges `dynamo_planner_predicted_requests_per_second`, `dy
 
 Set `advisory: true` to run the local Planner in suggestion-only mode. This is recommended when you are evaluating a new Planner configuration, validating SLA targets, or reviewing how the Planner would react to production traffic before allowing it to scale workers.
 
-In advisory mode, the Planner still observes traffic and FPM data, computes recommended prefill and decode replica counts, logs recommendation summaries, exports predicted replica metrics, and includes recommendations in diagnostics reports. The recommendations are not applied as scaling decisions: the Planner does not execute scaling actions, send replica changes to Kubernetes or GlobalPlanner, or mutate the deployment.
+In advisory mode, the Planner still observes traffic and FPM data, computes recommended prefill and decode replica counts, logs recommendation summaries, exports predicted replica metrics, and includes recommendations in diagnostics reports. The recommendations are not applied as scaling decisions: the Planner does not execute scaling actions, send replica changes to Kubernetes or GlobalPlanner, or mutate the deployment. A planner-in-the-loop replay of an advisory configuration keeps the simulated deployment fixed, reports the recommendations, and records [retune](planner-guide.md#periodic-retune-experimental) decisions, which run only in simulation, without applying them; see [Replay in Advisory Mode](aisimulate-planner-replay.mdx#replay-in-advisory-mode).
 
 #### Diagnostics metrics
 

@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+schema_version: 1
+name: controlled-comparison
+cases:
+  - id: combined
+    config: match.controlled.example.yaml
+    labels: {layout: aggregated}
+  - id: split
+    config: match.controlled-disagg.example.yaml
+    labels: {layout: disaggregated}

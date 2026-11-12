@@ -160,7 +160,10 @@ class GMSEngineProcess(EngineProcess, ABC):
             health_check_urls=[
                 (f"http://localhost:{system_port}/health", check_health_ready),
                 (f"http://localhost:{frontend_port}/v1/models", check_models_api),
-                (f"http://localhost:{frontend_port}/health", check_health_generate),
+                (
+                    f"http://localhost:{frontend_port}/health?instances=true",
+                    check_health_generate,
+                ),
             ],
             timeout=300,
             display_output=True,
@@ -196,8 +199,22 @@ class GMSEngineProcess(EngineProcess, ABC):
         timeout: int,
         action: str,
     ) -> dict:
+        return self._post_engine(
+            f"control/{route}",
+            payload,
+            timeout,
+            action,
+        )
+
+    def _post_engine(
+        self,
+        route: str,
+        payload: dict,
+        timeout: int,
+        action: str,
+    ) -> dict:
         response = requests.post(
-            f"http://localhost:{self.system_port}/engine/control/{route}",
+            f"http://localhost:{self.system_port}/engine/{route}",
             json=payload,
             timeout=timeout,
         )
@@ -393,9 +410,6 @@ class TRTLLMWithGMSProcess(GMSEngineProcess):
 
 
 class SGLangWithGMSProcess(GMSEngineProcess):
-    pause_route = "release_memory_occupation"
-    resume_route = "resume_memory_occupation"
-
     def __init__(
         self,
         request,
@@ -451,3 +465,32 @@ class SGLangWithGMSProcess(GMSEngineProcess):
 
     def pause_payload(self) -> dict:
         return {}
+
+    def pause(self) -> dict:
+        result = self._post_engine(
+            "pause_generation",
+            {"mode": "retract"},
+            30,
+            "pause generation",
+        )
+        self._post_engine(
+            "release_memory_occupation",
+            self.pause_payload(),
+            30,
+            "release memory occupation",
+        )
+        return result
+
+    def resume(self, timeout: int = 30) -> dict:
+        self._post_engine(
+            "resume_memory_occupation",
+            self.resume_payload(),
+            timeout,
+            "resume memory occupation",
+        )
+        return self._post_engine(
+            "continue_generation",
+            {},
+            timeout,
+            "continue generation",
+        )

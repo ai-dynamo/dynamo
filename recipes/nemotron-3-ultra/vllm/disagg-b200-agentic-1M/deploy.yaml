@@ -81,7 +81,7 @@ spec:
   - name: NCCL_DEBUG
     value: WARN
   - name: DYN_LOG
-    value: info,dynamo_kv_router=debug,dynamo_llm::kv_router=debug
+    value: info,dynamo_kv_router=debug,dynamo_scheduler=debug,dynamo_kv_indexer=debug,dynamo_slot_tracker=debug,dynamo_session_affinity=debug,dynamo_admission=debug,dynamo_worker_selection=debug,dynamo_kv_hints=debug,dynamo_kv_events=debug,dynamo_llm::kv_router=debug
   components:
   - name: Frontend
     type: frontend
@@ -207,7 +207,7 @@ spec:
               --enable-prefix-caching \
               --no-disable-hybrid-kv-cache-manager \
               --async-scheduling \
-              --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
+              --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}' \
               --disaggregation-mode prefill \
               --dyn-tool-call-parser qwen3_coder \
               --dyn-reasoning-parser nemotron3 \
@@ -350,7 +350,7 @@ spec:
               --enable-prefix-caching \
               --no-disable-hybrid-kv-cache-manager \
               --async-scheduling \
-              --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
+              --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}' \
               --disaggregation-mode decode \
               --dyn-tool-call-parser qwen3_coder \
               --dyn-reasoning-parser nemotron3 \

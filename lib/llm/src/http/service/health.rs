@@ -4,6 +4,7 @@
 use super::{RouteDoc, service_v2};
 use axum::{Json, Router, http::Method, http::StatusCode, response::IntoResponse, routing::get};
 use dynamo_runtime::instances::list_all_instances;
+use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
 
@@ -60,8 +61,15 @@ async fn live_handler(
     )
 }
 
+#[derive(Debug, Deserialize)]
+struct HealthQuery {
+    #[serde(default)]
+    instances: bool,
+}
+
 async fn health_handler(
     axum::extract::State(state): axum::extract::State<Arc<service_v2::State>>,
+    axum::extract::Query(query): axum::extract::Query<HealthQuery>,
 ) -> impl IntoResponse {
     if !state.is_ready() {
         return (
@@ -70,6 +78,19 @@ async fn health_handler(
                 "status": "not_ready",
                 "stage": state.service_stage().to_string(),
                 "message": "Service is not ready"
+            })),
+        );
+    }
+
+    let stage = state.service_stage().to_string();
+    // Opt-in: listing serializes every discovered instance on the async runtime, which costs
+    // tens of milliseconds per probe on large deployments.
+    if !query.instances {
+        return (
+            StatusCode::OK,
+            Json(json!({
+                "status": "healthy",
+                "stage": stage
             })),
         );
     }
@@ -91,6 +112,7 @@ async fn health_handler(
         StatusCode::OK,
         Json(json!({
             "status": "healthy",
+            "stage": stage,
             "endpoints": endpoints,
             "instances": instances
         })),

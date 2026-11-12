@@ -20,19 +20,21 @@ func TestApplyRestoreCandidateMetadataAutomaticCaptureIsStable(t *testing.T) {
 	t.Log("Given pending and Ready states for the same automatic SnapshotJob candidate")
 	job := &SnapshotJobReference{Name: "checkpoint-worker", UID: types.UID("job-uid")}
 	pending := &CheckpointInfo{
-		Enabled:              true,
-		AutomaticCapture:     true,
-		StartupPolicy:        nvidiacomv1alpha1.CheckpointStartupPolicyImmediate,
-		AutomaticSnapshotJob: job,
+		Enabled:                   true,
+		AutomaticCapture:          true,
+		StartupPolicy:             nvidiacomv1alpha1.CheckpointStartupPolicyImmediate,
+		SnapshotCompatibilityHash: "compatibility-v1",
+		AutomaticSnapshotJob:      job,
 	}
 	ready := &CheckpointInfo{
-		Enabled:              true,
-		Exists:               true,
-		Ready:                true,
-		AutomaticCapture:     true,
-		CheckpointName:       "worker-snapshot",
-		StartupPolicy:        nvidiacomv1alpha1.CheckpointStartupPolicyImmediate,
-		AutomaticSnapshotJob: job,
+		Enabled:                   true,
+		Exists:                    true,
+		Ready:                     true,
+		AutomaticCapture:          true,
+		CheckpointName:            "worker-snapshot",
+		StartupPolicy:             nvidiacomv1alpha1.CheckpointStartupPolicyImmediate,
+		SnapshotCompatibilityHash: "compatibility-v1",
+		AutomaticSnapshotJob:      job,
 		NativeSnapshot: &ResolvedPodSnapshot{
 			UID:                  types.UID("snapshot-uid"),
 			BoundContentName:     "content-a",
@@ -55,6 +57,7 @@ func TestApplyRestoreCandidateMetadataAutomaticCaptureIsStable(t *testing.T) {
 		pendingAnnotations[consts.RestoreCandidateSourceKindAnnotation])
 	assert.Equal(t, job.Name, pendingAnnotations[consts.CheckpointNameAnnotation])
 	assert.Equal(t, string(job.UID), pendingAnnotations[consts.SnapshotJobCandidateUIDAnnotation])
+	assert.Equal(t, "compatibility-v1", pendingAnnotations[consts.SnapshotCandidateCompatibilityHashAnnotation])
 	assert.NotContains(t, pendingAnnotations, consts.SnapshotCandidateUIDAnnotation)
 }
 

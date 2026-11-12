@@ -12,16 +12,18 @@ use std::collections::VecDeque;
 use std::convert::Infallible;
 
 use anyhow::{Context, Result, anyhow, bail};
-use dynamo_kv_router::identity::{
-    CacheSemanticsId, DcId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
-};
-use dynamo_kv_router::indexer::cuckoo::{CkfConfig, PrefixSearchConfig};
-use dynamo_kv_router::indexer::cuckoo::{
+use dynamo_kv_events::event::RouterEvent;
+use dynamo_kv_indexer::cuckoo::{CkfConfig, PrefixSearchConfig};
+use dynamo_kv_indexer::cuckoo::{
     ConsumerInstanceId, DcCkfDelta, DcCkfDeltaSink, DcCkfPublicationBatch, DcCkfPublishError,
     DcCkfPublisher, DcCkfState, GlobalCkfIndexer, GlobalCkfIngestOutcome, GlobalCkfLaneIngestor,
     GlobalCkfManifest, LaneLease, ProducerIdentity,
 };
-use dynamo_kv_router::protocols::{OverlapScores, RouterEvent, WorkerWithDpRank};
+use dynamo_kv_indexer::host::OverlapScores;
+use dynamo_router_protocol::identity::{
+    CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
+};
+use dynamo_router_protocol::worker::WorkerWithDpRank;
 use rustc_hash::FxHashMap;
 
 const MAX_LANES: usize = 16;
@@ -183,7 +185,7 @@ impl DirectCkfParityIndexer {
         );
         let mut pools = [None; MAX_LANES];
         for (lane, pool) in pools.iter_mut().enumerate().take(configured_workers.len()) {
-            *pool = Some(PoolId::new(domain, DcId::new(lane as u64)));
+            *pool = Some(PoolId::new(domain, ClusterId::new(lane as u64)));
         }
         let manifest = GlobalCkfManifest::new(PARITY_CONSUMER, domain, format, pools)?;
         let indexer = GlobalCkfIndexer::new(manifest, PrefixSearchConfig::default())?;
@@ -192,7 +194,7 @@ impl DirectCkfParityIndexer {
         for (lane, (owner, mut state)) in configured_workers.iter().copied().zip(states).enumerate()
         {
             let identity = ProducerIdentity::new(
-                PoolId::new(domain, DcId::new(lane as u64)),
+                PoolId::new(domain, ClusterId::new(lane as u64)),
                 lane as u64 + 1,
                 PARITY_LAYOUT_GENERATION,
                 format,
@@ -249,14 +251,14 @@ impl DirectCkfParityIndexer {
 
     pub fn find_matches(
         &mut self,
-        sequence: &[dynamo_kv_router::LocalBlockHash],
+        sequence: &[dynamo_kv_hashing::LocalBlockHash],
     ) -> Result<OverlapScores> {
         self.find_matches_with_mode(sequence, DirectCkfParityMatchMode::FullMap)
     }
 
     pub fn find_matches_with_mode(
         &mut self,
-        sequence: &[dynamo_kv_router::LocalBlockHash],
+        sequence: &[dynamo_kv_hashing::LocalBlockHash],
         mode: DirectCkfParityMatchMode,
     ) -> Result<OverlapScores> {
         self.exact_drain()?;
@@ -292,7 +294,7 @@ impl DirectCkfParityIndexer {
 
 fn map_publish_result(
     result: std::result::Result<
-        dynamo_kv_router::indexer::cuckoo::PublisherEmitOutcome,
+        dynamo_kv_indexer::cuckoo::PublisherEmitOutcome,
         DcCkfPublishError<Infallible>,
     >,
 ) -> Result<()> {
@@ -307,11 +309,10 @@ fn map_publish_result(
 
 #[cfg(test)]
 mod tests {
-    use dynamo_kv_router::LocalBlockHash;
-    use dynamo_kv_router::protocols::{
-        ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheRemoveData,
-        KvCacheStoreData, KvCacheStoredBlockData,
+    use dynamo_kv_events::event::{
+        KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData,
     };
+    use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
 
     use super::*;
 

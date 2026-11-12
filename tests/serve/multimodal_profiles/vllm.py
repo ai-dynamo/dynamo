@@ -195,6 +195,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             # Post_merge MM-routing coverage for the Qwen3-VL family — the
             # smaller Qwen3.5-0.8B (`agg_router` below) is the pre_merge gater.
             "agg_router": TopologyConfig(
+                health_check_workers=True,
                 marks=[pytest.mark.post_merge],
                 timeout_s=400,
                 profiled_vram_gib=13.0,
@@ -220,6 +221,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             # SINGLE_GPU=true packs both workers onto GPU 0 to match the
             # single-GPU CI environment.
             "agg_router_chat_processor": TopologyConfig(
+                health_check_workers=True,
                 marks=[pytest.mark.post_merge],
                 timeout_s=400,
                 profiled_vram_gib=13.0,
@@ -265,13 +267,18 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 ],
             ),
             "epd": TopologyConfig(
+                health_check_workers=True,
+                health_check_worker_count=3,
                 marks=[pytest.mark.post_merge],
                 timeout_s=300,
                 single_gpu=True,
                 profiled_vram_gib=18.7,
                 requested_vllm_kv_cache_bytes=536_870_912,
                 tests=[
-                    MmCase(payload=make_image_payload(["green"])),
+                    MmCase(
+                        payload=make_image_payload(["green"]),
+                        marks=[pytest.mark.pre_merge],
+                    ),
                     # Rust frontend decode -> NIXL RGB transfer -> Encode ->
                     # Prefill embedding handoff -> Decode generation.
                     MmCase(
@@ -282,6 +289,8 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 ],
             ),
             "epd_video": TopologyConfig(
+                health_check_workers=True,
+                health_check_worker_count=3,
                 # E/P/D regression gate: the decode handoff must retain both
                 # the reconstructed image placeholder and reloaded video.
                 marks=[
@@ -320,6 +329,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 ],
             ),
             "p_d": TopologyConfig(
+                health_check_workers=True,
                 marks=[pytest.mark.post_merge],
                 timeout_s=300,
                 single_gpu=True,
@@ -342,6 +352,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
         short_name="qwen2.5-vl-3b",
         topologies={
             "agg_router": TopologyConfig(
+                health_check_workers=True,
                 marks=[pytest.mark.post_merge],
                 timeout_s=500,
                 profiled_vram_gib=19.0,
@@ -371,6 +382,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
         short_name="qwen2-vl-2b",
         topologies={
             "agg_router": TopologyConfig(
+                health_check_workers=True,
                 marks=[pytest.mark.post_merge],
                 timeout_s=500,
                 profiled_vram_gib=16.0,
@@ -421,6 +433,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             # hit-rate ceiling (N-1)/N. Filler 120 → ~6 blocks → ceiling ≈0.83;
             # threshold 0.7 fires on real degradation, tolerates variance.
             "agg_router": TopologyConfig(
+                health_check_workers=True,
                 marks=[pytest.mark.pre_merge],
                 timeout_s=400,
                 profiled_vram_gib=8.0,
@@ -506,13 +519,13 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                             "4",
                             "--multimodal-embedding-cache-capacity-gb",
                             "1",
-                            # Gemma 4 budgets 280 embeddings per image; the
-                            # 512x512 fixture emits 256. A 280-slot GPU cache can
-                            # retain only one, so the second fill evicts the first.
+                            # Cap every modality budget to force image eviction.
                             "--max-num-batched-tokens",
                             "280",
+                            "--mm-processor-kwargs",
+                            '{"audio_seq_length": 280}',
                             "--limit-mm-per-prompt",
-                            '{"image": 1, "video": 0, "audio": 0}',
+                            '{"image": 1, "video": {"count": 0, "num_frames": 1}, "audio": 0}',
                         ],
                         # The connector runs in vLLM's spawned EngineCore, so
                         # its debug hit diagnostic uses vLLM's logger level.

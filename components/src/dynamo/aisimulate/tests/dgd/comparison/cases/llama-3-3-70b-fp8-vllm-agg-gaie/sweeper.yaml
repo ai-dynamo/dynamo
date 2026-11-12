@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+search_space:
+  model_name: RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic
+  deployment_mode: [agg]
+  backend: [vllm]
+workload:
+  isl: 1024
+  osl: 1024
+  request_rate: 10
+  num_request_ratio: 10
+goal:
+  target: goodput_per_gpu
+  sla:
+    ttft_ms: 2000
+    itl_ms: 25
+sweep:
+  max_rounds: 1
+  candidates_per_round: 2
+  parallel_evals: 1
+  max_eval_seconds: 120

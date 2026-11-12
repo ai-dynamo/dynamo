@@ -12,8 +12,12 @@ use ndarray::{Array1, Array2};
 use ndarray_interp::InterpolateError;
 use ndarray_interp::interp1d::{Interp1DBuilder, Linear};
 use ndarray_interp::interp2d::{Bilinear, Interp2DBuilder};
+use ndarray_npy::ReadNpyExt;
+use std::io::{Read, Seek};
 use std::path::Path;
 use std::sync::Arc;
+use zip::result::ZipError;
+use zip::{ZipArchive, ZipReadOptions};
 
 /// Trait to abstract over 1D interpolation for prefill timing
 pub trait PrefillInterpolator: Send + Sync {
@@ -25,9 +29,9 @@ pub trait DecodeInterpolator: Send + Sync {
     fn interp(&self, x: f64, y: f64) -> Result<f64, InterpolateError>;
 }
 
-/// Callback trait for direct AIC SDK calls.
-/// Implementors call the Rust AIC core API.
-pub trait AicCallback: Send + Sync {
+/// Callback trait for direct AIS SDK calls.
+/// Implementors call the Rust AIS core API.
+pub trait AisCallback: Send + Sync {
     /// Predict prefill latency in ms.
     /// Parameters: (batch_size, effective_isl, prefix)
     fn predict_prefill(
@@ -91,7 +95,7 @@ pub enum PerfModel {
     },
     /// AI Configurator SDK calls through the configured callback.
     /// Passes the reduced prefill inputs (batch_size, effective_isl, prefix).
-    Aiconfigurator { callback: Arc<dyn AicCallback> },
+    Ais { callback: Arc<dyn AisCallback> },
 }
 
 impl Clone for PerfModel {
@@ -112,7 +116,7 @@ impl Clone for PerfModel {
                 prefill_interp: Arc::clone(prefill_interp),
                 decode_interp: Arc::clone(decode_interp),
             },
-            PerfModel::Aiconfigurator { callback } => PerfModel::Aiconfigurator {
+            PerfModel::Ais { callback } => PerfModel::Ais {
                 callback: Arc::clone(callback),
             },
         }
@@ -131,8 +135,48 @@ impl std::fmt::Debug for PerfModel {
                 "PerfModel::Fixed {{ prefill_ms: {prefill_ms}, decode_ms: {decode_ms} }}"
             ),
             PerfModel::Interpolated { .. } => write!(f, "PerfModel::Interpolated {{ .. }}"),
-            PerfModel::Aiconfigurator { .. } => write!(f, "PerfModel::Aiconfigurator"),
+            PerfModel::Ais { .. } => write!(f, "PerfModel::Ais"),
         }
+    }
+}
+
+/// Reads arrays from a NumPy `.npz` archive. `ndarray_npy::NpzReader` needs zip 2.x, so this
+/// opens the archive with `zip` and parses each entry with `ReadNpyExt`.
+struct NpzReader<R>(ZipArchive<R>);
+
+impl<R: Read + Seek> NpzReader<R> {
+    fn new(reader: R) -> Result<Self> {
+        Ok(Self(ZipArchive::new(reader)?))
+    }
+
+    /// Lists the entry names with one `.npy` suffix removed, as `numpy.load` lists them.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "#17086 checks for the optional prefill2d_* arrays with it"
+        )
+    )]
+    fn names(&self) -> Result<Vec<String>> {
+        self.0
+            .file_names()
+            .map(|name| -> Result<String> {
+                let name = name?;
+                Ok(name.strip_suffix(".npy").unwrap_or(&name).to_owned())
+            })
+            .collect()
+    }
+
+    /// Reads entry `name`, else `{name}.npy`, the name that `numpy.savez` writes. It refuses an
+    /// entry whose local header disagrees with the central directory.
+    fn by_name<A: ReadNpyExt>(&mut self, name: &str) -> Result<A> {
+        let index = self
+            .0
+            .index_for_name(name)
+            .or_else(|| self.0.index_for_name(&format!("{name}.npy")))
+            .ok_or(ZipError::FileNotFound)?;
+        let options = ZipReadOptions::new().enforce_header_consistency(true);
+        Ok(A::read_npy(self.0.by_index_with_options(index, options)?)?)
     }
 }
 
@@ -146,7 +190,6 @@ impl PerfModel {
     /// - decode_context_length: 1D array of context lengths
     /// - decode_itl: 2D array of inter-token latencies in milliseconds
     pub fn from_npz(path: &Path) -> Result<Self> {
-        use ndarray_npy::NpzReader;
         use std::fs::File;
 
         tracing::info!("Loading performance model from NPZ file: {:?}", path);
@@ -228,9 +271,9 @@ impl PerfModel {
         })
     }
 
-    /// Create an Aiconfigurator perf model from a callback.
-    pub fn from_aic_callback(callback: Arc<dyn AicCallback>) -> Self {
-        PerfModel::Aiconfigurator { callback }
+    /// Create an Ais perf model from a callback.
+    pub fn from_ais_callback(callback: Arc<dyn AisCallback>) -> Self {
+        PerfModel::Ais { callback }
     }
 
     /// Predict prefill time in milliseconds.
@@ -238,7 +281,7 @@ impl PerfModel {
     /// Callers always pass all parameters; each external variant uses what it needs:
     /// - Interpolated uses total new tokens across the batch
     ///   (`batch_size * (isl - prefix)`).
-    /// - Aiconfigurator: passes (batch_size, isl - prefix, prefix) to the AIC SDK
+    /// - Ais: passes (batch_size, isl - prefix, prefix) to the AIS SDK
     pub fn predict_prefill_time(
         &self,
         batch_size: usize,
@@ -259,9 +302,9 @@ impl PerfModel {
                 let tokens = (batch_size * new_tokens_per_req) as f64;
                 prefill_interp.interp(tokens).unwrap_or(0.0)
             }
-            PerfModel::Aiconfigurator { callback } => callback
+            PerfModel::Ais { callback } => callback
                 .predict_prefill(batch_size, new_tokens_per_req, prefix)
-                .context("AIC prefill prediction failed")?,
+                .context("AIS prefill prediction failed")?,
         };
         Ok(time.max(0.0))
     }
@@ -273,7 +316,7 @@ impl PerfModel {
     ///
     /// Callers always pass all parameters; each variant uses what it needs:
     /// - Interpolated: uses (active_kv_tokens, context_length)
-    /// - Aiconfigurator: uses (batch_size, context_length)
+    /// - Ais: uses (batch_size, context_length)
     pub fn predict_decode_time(
         &self,
         batch_size: usize,
@@ -293,9 +336,9 @@ impl PerfModel {
             PerfModel::Interpolated { decode_interp, .. } => decode_interp
                 .interp(active_kv_tokens as f64, context_length as f64)
                 .unwrap_or(0.0),
-            PerfModel::Aiconfigurator { callback } => callback
+            PerfModel::Ais { callback } => callback
                 .predict_decode(batch_size, context_length, 2)
-                .context("AIC decode prediction failed")?,
+                .context("AIS decode prediction failed")?,
         };
         // Token-emitting decode steps should not collapse onto the same timestamp.
         let result = time.max(1.0);
@@ -308,12 +351,40 @@ impl PerfModel {
 
 #[cfg(test)]
 mod tests {
-    use super::{AicCallback, PerfModel};
+    use super::{AisCallback, NpzReader, PerfModel};
+    use ndarray::{Array1, array};
+    use ndarray_npy::WriteNpyExt;
+    use std::io::{Cursor, Seek, Write};
     use std::sync::Arc;
+    use zip::CompressionMethod;
+    use zip::result::ZipError;
+    use zip::write::SimpleFileOptions;
+
+    fn npy(array: &impl WriteNpyExt) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        array.write_npy(&mut bytes).unwrap();
+        bytes
+    }
+
+    /// Writes entries with the compression of `numpy.savez` (stored) or `numpy.savez_compressed`
+    /// (deflated).
+    fn write_npz(
+        writer: impl Write + Seek,
+        method: CompressionMethod,
+        entries: &[(&str, Vec<u8>)],
+    ) {
+        let mut npz = zip::ZipWriter::new(writer);
+        let options = SimpleFileOptions::default().compression_method(method);
+        for (name, bytes) in entries {
+            npz.start_file(*name, options).unwrap();
+            npz.write_all(bytes).unwrap();
+        }
+        npz.finish().unwrap();
+    }
 
     struct EchoBatchCallback;
 
-    impl AicCallback for EchoBatchCallback {
+    impl AisCallback for EchoBatchCallback {
         fn predict_prefill(
             &self,
             batch_size: usize,
@@ -335,14 +406,14 @@ mod tests {
 
     struct FailingCallback;
 
-    impl AicCallback for FailingCallback {
+    impl AisCallback for FailingCallback {
         fn predict_prefill(
             &self,
             _batch_size: usize,
             _effective_isl: usize,
             _prefix: usize,
         ) -> anyhow::Result<f64> {
-            anyhow::bail!("missing AIC prefill point")
+            anyhow::bail!("missing AIS prefill point")
         }
 
         fn predict_decode(
@@ -351,7 +422,7 @@ mod tests {
             _isl: usize,
             _osl: usize,
         ) -> anyhow::Result<f64> {
-            anyhow::bail!("missing AIC decode point")
+            anyhow::bail!("missing AIS decode point")
         }
     }
 
@@ -364,30 +435,98 @@ mod tests {
     }
 
     #[test]
-    fn aic_forwards_scheduler_local_batch() {
-        let model = PerfModel::from_aic_callback(Arc::new(EchoBatchCallback));
+    fn ais_forwards_scheduler_local_batch() {
+        let model = PerfModel::from_ais_callback(Arc::new(EchoBatchCallback));
 
         assert_eq!(model.predict_prefill_time(7, 128, 0).unwrap(), 7.0);
         assert_eq!(model.predict_decode_time(9, 0, 128, 0).unwrap(), 9.0);
     }
 
     #[test]
-    fn aic_prefill_prediction_errors_propagate() {
-        let error = PerfModel::from_aic_callback(Arc::new(FailingCallback))
+    fn ais_prefill_prediction_errors_propagate() {
+        let error = PerfModel::from_ais_callback(Arc::new(FailingCallback))
             .predict_prefill_time(2, 128, 32)
             .unwrap_err();
 
-        assert_eq!(error.to_string(), "AIC prefill prediction failed");
-        assert_eq!(error.root_cause().to_string(), "missing AIC prefill point");
+        assert_eq!(error.to_string(), "AIS prefill prediction failed");
+        assert_eq!(error.root_cause().to_string(), "missing AIS prefill point");
     }
 
     #[test]
-    fn aic_decode_prediction_errors_propagate() {
-        let error = PerfModel::from_aic_callback(Arc::new(FailingCallback))
+    fn ais_decode_prediction_errors_propagate() {
+        let error = PerfModel::from_ais_callback(Arc::new(FailingCallback))
             .predict_decode_time(2, 64, 128, 1024)
             .unwrap_err();
 
-        assert_eq!(error.to_string(), "AIC decode prediction failed");
-        assert_eq!(error.root_cause().to_string(), "missing AIC decode point");
+        assert_eq!(error.to_string(), "AIS decode prediction failed");
+        assert_eq!(error.root_cause().to_string(), "missing AIS decode point");
+    }
+
+    #[test]
+    fn npz_profile_loads_numpy_entry_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("profile.npz");
+        write_npz(
+            std::fs::File::create(&path).unwrap(),
+            CompressionMethod::Deflated,
+            &[
+                ("prefill_isl.npy", npy(&array![0.0, 128.0])),
+                ("prefill_ttft_ms.npy", npy(&array![0.0, 64.0])),
+                ("decode_active_kv_tokens.npy", npy(&array![0.0, 128.0])),
+                ("decode_context_length.npy", npy(&array![0.0, 128.0])),
+                ("decode_itl.npy", npy(&array![[2.0, 4.0], [6.0, 8.0]])),
+            ],
+        );
+
+        let model = PerfModel::from_npz(&path).unwrap();
+        assert_eq!(model.predict_prefill_time(1, 100, 0).unwrap(), 50.0);
+        assert_eq!(model.predict_decode_time(1, 128, 0, 0).unwrap(), 6.0);
+        assert_eq!(model.predict_decode_time(1, 0, 128, 0).unwrap(), 4.0);
+        assert_eq!(model.predict_decode_time(1, 64, 64, 0).unwrap(), 5.0);
+    }
+
+    #[test]
+    fn npz_lookup_prefers_the_exact_name_over_the_npy_suffix() {
+        let mut bytes = Cursor::new(Vec::new());
+        write_npz(
+            &mut bytes,
+            CompressionMethod::Stored,
+            &[
+                ("a", npy(&array![1.0])),
+                ("a.npy", npy(&array![2.0])),
+                ("b.npy", npy(&array![3.0])),
+            ],
+        );
+
+        let mut npz = NpzReader::new(bytes).unwrap();
+        assert_eq!(npz.names().unwrap(), ["a", "a", "b"]);
+        assert_eq!(npz.by_name::<Array1<f64>>("a").unwrap(), array![1.0]);
+        assert_eq!(npz.by_name::<Array1<f64>>("b").unwrap(), array![3.0]);
+        let missing = npz.by_name::<Array1<f64>>("c").unwrap_err();
+        assert!(matches!(
+            missing.downcast_ref(),
+            Some(ZipError::FileNotFound)
+        ));
+    }
+
+    #[test]
+    fn npz_lookup_rejects_a_local_header_with_another_name() {
+        let mut bytes = Cursor::new(Vec::new());
+        write_npz(
+            &mut bytes,
+            CompressionMethod::Stored,
+            &[("x.npy", npy(&array![1.0]))],
+        );
+        let mut bytes = bytes.into_inner();
+        // Rename the entry in the central directory only, so the two headers disagree.
+        let central = bytes.windows(4).position(|s| s == b"PK\x01\x02").unwrap();
+        bytes[central + 46..central + 51].copy_from_slice(b"a.npy");
+
+        let mut npz = NpzReader::new(Cursor::new(bytes)).unwrap();
+        let error = npz.by_name::<Array1<f64>>("a").unwrap_err();
+        assert!(
+            matches!(error.downcast_ref(), Some(ZipError::InvalidArchive(_))),
+            "{error:#}"
+        );
     }
 }

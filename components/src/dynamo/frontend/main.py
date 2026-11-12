@@ -31,7 +31,7 @@ import uvloop
 from dynamo.common.config_dump import dump_config
 from dynamo.common.configuration.groups.router_args import build_router_config
 from dynamo.llm import (
-    AicPerfConfig,
+    AisPerfConfig,
     EngineType,
     EntrypointArgs,
     FrontendRoute,
@@ -41,6 +41,7 @@ from dynamo.llm import (
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 
+from .cpu_affinity import warn_if_frontend_cpu_affinity_spans_numa_nodes
 from .frontend_args import FrontendArgGroup, FrontendConfig
 
 if TYPE_CHECKING:
@@ -50,6 +51,7 @@ configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
 MIN_INITIAL_WORKERS_ENV = "DYN_ROUTER_MIN_INITIAL_WORKERS"
+SESSION_AFFINITY_MAX_ENTRIES_ENV = "DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES"
 FRONTEND_ROUTE_ENTRYPOINT_GROUP = "dynamo.frontend.routes"
 
 # The frontend's TCP listener can exhaust the default soft RLIMIT_NOFILE (1024 on
@@ -240,6 +242,20 @@ def load_frontend_route_extensions(extension_names: list[str]) -> list[FrontendR
     return routes
 
 
+def _fold_vllm_default_chat_template_kwargs(
+    config: FrontendConfig, vllm_flags: Namespace
+) -> None:
+    # vLLM's parser also takes the underscore and dotted spellings. Its value always comes
+    # from the command line, so it wins over DYN_DEFAULT_CHAT_TEMPLATE_KWARGS.
+    vllm_defaults = getattr(vllm_flags, "default_chat_template_kwargs", None) or {}
+    if vllm_defaults:
+        config.default_chat_template_kwargs = {
+            **(config.default_chat_template_kwargs or {}),
+            **vllm_defaults,
+        }
+        config.validate_default_chat_template_kwargs()
+
+
 def parse_args() -> tuple[FrontendConfig, Optional[Namespace], Optional[Namespace]]:
     """Parse command-line arguments for the Dynamo frontend.
 
@@ -258,6 +274,15 @@ def parse_args() -> tuple[FrontendConfig, Optional[Namespace], Optional[Namespac
 
     config = FrontendConfig.from_cli_args(args)
     config.validate()
+
+    if config.chat_processor != "dynamo" and (
+        config.interactive or config.kserve_grpc_server
+    ):
+        mode_flag = "--interactive" if config.interactive else "--kserve-grpc-server"
+        parser.error(
+            f"--dyn-chat-processor {config.chat_processor} is only supported by the "
+            f"HTTP frontend, so it cannot be combined with {mode_flag}"
+        )
 
     vllm_flags = None
     sglang_flags = None
@@ -291,7 +316,14 @@ def parse_args() -> tuple[FrontendConfig, Optional[Namespace], Optional[Namespac
 
         try:
             from vllm.engine.arg_utils import AsyncEngineArgs
-            from vllm.entrypoints.openai.cli_args import FrontendArgs
+
+            try:
+                from vllm.entrypoints.common.cli_args import FrontendArgs
+            except ModuleNotFoundError as exc:
+                if exc.name != "vllm.entrypoints.common.cli_args":
+                    raise
+                # vLLM 0.32 (CPU and XPU images); remove once they ship 0.33.
+                from vllm.entrypoints.launchers.cli_args import FrontendArgs
         except ModuleNotFoundError:
             logger.exception("Flag '--chat-processor vllm' requires vllm be installed.")
             sys.exit(1)
@@ -301,6 +333,7 @@ def parse_args() -> tuple[FrontendConfig, Optional[Namespace], Optional[Namespac
         vllm_parser = AsyncEngineArgs.add_cli_args(vllm_parser)
         # the result is returned as Namespace object rather than AsyncEngineArgs object to avoid import error for non-vllm users.
         vllm_flags = vllm_parser.parse_args(unknown)
+        _fold_vllm_default_chat_template_kwargs(config, vllm_flags)
     elif config.chat_processor == "sglang":
         sglang_parser = argparse.ArgumentParser(add_help=False)
         sglang_parser.add_argument("--tool-call-parser", default=None)
@@ -391,6 +424,7 @@ async def async_main():
     # it connects to NATS eagerly, so NATS (m)TLS env vars must already be set or
     # the CLI flags are silently ignored (unlike the lazily-dialed TCP planes).
     _export_transport_tls_env(config)
+    warn_if_frontend_cpu_affinity_spans_numa_nodes(logger)
     runtime = DistributedRuntime(
         loop,
         config.discovery_backend,
@@ -406,6 +440,9 @@ async def async_main():
         loop.add_signal_handler(sig, signal_handler)
 
     os.environ[MIN_INITIAL_WORKERS_ENV] = str(config.min_initial_workers)
+    os.environ[SESSION_AFFINITY_MAX_ENTRIES_ENV] = str(
+        config.session_affinity_max_entries
+    )
     # Shared with the backends so a worker's advertised config is built from the
     # same flags and semantics. --router-mode always has a default here, so this
     # never returns None.
@@ -419,17 +456,22 @@ async def async_main():
     kwargs: dict[str, Any] = {
         "http_host": config.http_host,
         "http_port": config.http_port,
+        "batch_gateway_url": config.batch_gateway_url,
         "kv_cache_block_size": config.kv_cache_block_size,
         "router_config": router_config,
         "migration_limit": config.migration_limit,
         "metrics_prefix": metrics_prefix,
         "enable_anthropic_api": config.enable_anthropic_api,
+        "enable_systemone_api": config.enable_systemone_api,
         "strip_anthropic_preamble": config.strip_anthropic_preamble,
+        "reject_media": config.reject_media,
+        "reject_media_status_code": config.reject_media_status_code,
         "enable_streaming_tool_dispatch": config.enable_streaming_tool_dispatch,
         "enable_streaming_reasoning_dispatch": config.enable_streaming_reasoning_dispatch,
         "reasoning_field_name": config.reasoning_field_name,
         "tokenizer_backend": config.tokenizer_backend,
         "tokenizer_fallback": config.tokenizer_fallback,
+        "default_chat_template_kwargs": config.default_chat_template_kwargs,
     }
     if config.migration_max_seq_len is not None:
         kwargs["migration_max_seq_len"] = config.migration_max_seq_len
@@ -442,6 +484,8 @@ async def async_main():
         kwargs["tls_cert_path"] = config.tls_cert_path
     if config.tls_key_path:
         kwargs["tls_key_path"] = config.tls_key_path
+    if config.tls_client_ca_cert_path:
+        kwargs["tls_client_ca_cert_path"] = config.tls_client_ca_cert_path
     if config.namespace:
         kwargs["namespace"] = config.namespace
     if config.namespace_prefix:
@@ -463,8 +507,8 @@ async def async_main():
         ).chat_engine_factory
         kwargs["chat_engine_factory"] = chat_engine_factory
 
-    if config.router_prefill_load_model == "aic":
-        kwargs["aic_perf_config"] = AicPerfConfig(**config.aic_perf_kwargs())
+    if config.router_prefill_load_model == "ais":
+        kwargs["ais_perf_config"] = AisPerfConfig(**config.ais_perf_kwargs())
 
     e = EntrypointArgs(EngineType.Dynamic, **kwargs)
     engine = await make_engine(runtime, e)

@@ -22,7 +22,7 @@ In both cases, the frontend cancels the request's `AsyncEngineContext`, which pr
 
 ### Worker Cancellation Detection
 
-On the worker side, the runtime monitors the TCP connection from the frontend for cancellation signals. The worker detects cancellation in three scenarios:
+On the worker side, the runtime monitors the TCP connection from the frontend for cancellation signals. The worker detects cancellation in two scenarios:
 
 1. **Control message received** — The frontend explicitly sent a cancellation control message.
 2. **TCP connection dropped** — The frontend disconnected without sending a control message (e.g., frontend crash or network failure).

@@ -9,9 +9,11 @@
 #   deploy   -> deploy tests
 #   dgdr     -> DGDR deploy tests
 #   planner  -> dynamo build-test
+#   planner_gym -> Planner Gym CPU tests and packaging
 #   vllm     -> vllm build and test
 #   sglang   -> sglang build and test
 #   trtllm   -> trtllm build and test
+#   triton   -> triton build and test
 #   frontend -> frontend EPP image build, dynamo build-test
 #   benchmarks -> dynamo build-test (runs tests/benchmarks/** pytest suite)
 #   efa      -> all framework EFA runtime image builds (changes to container/templates/aws.Dockerfile)
@@ -78,6 +80,7 @@ api_docs:
   - '**/Cargo.toml'
 
 examples:
+  - '.github/workflows/pre-merge.yml'
   - 'recipes/**'
   - 'recipes/**/.kustomize-matrix.yaml'
   - 'examples/**'
@@ -93,6 +96,8 @@ examples:
   - 'tests/test_generate_kustomize_openapi.py'
   - 'tests/test_kustomize_matrix.py'
   - 'docs/tests/**'
+  # Recipe and benchmark catalogs: docs/tests runs validate.py over them.
+  - 'docs/fern/pages/recipes/**/_catalog/**'
   - 'deploy/operator/config/crd/bases/**'
 
 ignore:
@@ -120,6 +125,8 @@ ignore:
   # pipeline (it is excluded from the `deploy` filter below).
   - 'deploy/utils/convert_api_version.py'
   - 'deploy/utils/tests/**'
+  # The path-triggered protocol tooling workflow owns these CPU tooling tests.
+  - 'scripts/protocol_compatibility/**'
   - 'dev/*'
   - '.github/scripts/**'
   - '.github/ISSUE_TEMPLATE/**'
@@ -132,6 +139,10 @@ ignore:
   - '.github/allurerc.mjs'
   - '.github/actionlint.yaml'
   - 'container/Dockerfile.docs'
+  # The Global Discovery Service's image and example manifest have no CI
+  # image-build or deploy job yet.
+  - 'container/Dockerfile.global-discovery-service'
+  - 'container/global-discovery-service.yaml'
   - 'container/run.sh'
   - 'container/use-sccache.sh'
   - 'container/dev/**'
@@ -143,6 +154,13 @@ ignore:
   - 'scripts/validate_agent_instructions.py'
   - 'scripts/validate_skills.py'
   - 'scripts/check_action_pins.py'
+  # Developer tooling for the router crate split (proves a move is a move);
+  # no CI job consumes it.
+  - 'scripts/router_move_diff.py'
+  # Pre-commit generator for the Python media protocol models. Its outputs are
+  # covered by `core` and `frontend`; the generate-media-protocols hook
+  # validates the script itself.
+  - 'scripts/generate_media_protocols.py'
   # CODEOWNERS generation tooling (data + scripts). Validated by its own
   # codeowners.yml workflow (triggers on '**'); no backend CI needed here.
   - '.github/codeowners/**'
@@ -151,10 +169,12 @@ ignore:
   - 'lib/sidecar/**/*.rst'
 
 ci: &ci
+  - '.github/ci/**'
   - '.github/workflows/**'
   - '.github/filters.yaml'
   - '.github/actions/**'
   - '.github/scripts/parse_buildkit_output.py'
+  - '.github/scripts/pytest-local.sh'
   - '.github/scripts/route_buildkit.sh'
   - 'container/Dockerfile.test'
 
@@ -167,13 +187,14 @@ core:
   - 'container/templates/dynamo_*'
   - 'container/templates/wheel_builder.Dockerfile'
   - 'container/templates/compliance.Dockerfile'
+  - 'container/templates/verify_ca_certificates.Dockerfile'
   - '.dockerignore'
   - 'container/deps/*'
   - 'container/compliance/**'
   - '.cargo/config.toml'
   - 'lib/**'
   - 'tests/**'
-  - 'components/src/dynamo/kv_dc_relay/**'
+  - 'components/src/dynamo/pool_relay/**'
   - 'components/src/dynamo/kv_state_agent/**'
   - 'components/src/dynamo/router/**'
   - 'components/src/dynamo/thunderagent_router/**'
@@ -181,10 +202,13 @@ core:
   - 'components/src/dynamo/replay/**'
   - 'components/src/dynamo/frontend/**'
   - 'components/src/dynamo/common/**'
+  - 'components/src/dynamo/artifacts/**'
+  - 'components/src/dynamo/experimental/**'
   - 'components/src/dynamo/gpu_memory_service/**'
   # TODO(will): Move TokenSpeed to a dedicated framework filter once CI has
   # TokenSpeed Docker images and backend-specific build/test jobs.
   - 'components/src/dynamo/tokenspeed/**'
+  - 'examples/backends/tokenspeed/**'
   - 'components/src/dynamo/squeeze_evolve/**'
   - '*.toml'
   - '*.lock'
@@ -197,6 +221,7 @@ core:
   # Rust sidecars have their own classification and do not use the framework
   # container or E2E pipelines triggered by `core`.
   - '!lib/sidecar/**'
+  - '!components/src/dynamo/artifacts/vllm/**'
   - '!tests/test_generate_kustomize_openapi.py'
   - '!tests/test_kustomize_matrix.py'
   - '!**/*.md'
@@ -219,12 +244,17 @@ operator:
   - *ci
   - 'deploy/operator/**'
   - 'deploy/operator/.*'
+  # An AISimulate pin bump must refresh the schema used by operator admission.
+  - 'pyproject.toml'
+  - 'container/deps/requirements.aisimulate.txt'
   - 'docs/fern/pages/reference/kubernetes-api/additional-resources/api-reference-k8s.md'
   - 'deploy/helm/charts/platform/**'
   # The operator check owns the real Go/Python DGD override contract test.
   - 'components/src/dynamo/profiler/utils/dgd_override.py'
   - 'components/src/dynamo/profiler/tests/integration/test_dgd_override_go_integration.py'
   - 'components/src/dynamo/profiler/utils/dgdr_*'
+  # The operator check also owns the Go/Python snapshot environment contract test.
+  - 'components/src/dynamo/common/snapshot/**'
 
 snapshot:
   - 'deploy/checkpoint-placeholder/**'
@@ -268,6 +298,10 @@ snapshot:
   - 'tests/deploy/test_dynamocheckpoint.py'
   - '.github/actions/setup-dynamo-operator/action.yml'
   - '.github/actions/setup-snapshot-agent/action.yml'
+  # Exercise the full checkpoint lifecycle when its scheduling or cleanup changes.
+  - '.github/actions/teardown-dynamo-operator/action.yml'
+  - '.github/workflows/pr.yaml'
+  - '.github/workflows/post-merge-ci.yml'
   # Where the pinned github.com/ai-dynamo/snapshot chart version/values live --
   # a version bump or install-config change must trigger the deploy-snapshot-
   # agent-checkpoint-*/deploy-test-checkpoint-* jobs, not just 'operator'.
@@ -319,20 +353,34 @@ deploy:
 
 dgdr:
   - '.github/workflows/shared-dgdr-deploy-test.yml'
+  - 'components/src/dynamo/aisimulate/output/dgdr_run/**'
   - 'tests/conftest.py'
   - 'tests/deploy/conftest.py'
   - 'tests/deploy/dgdr_utils.py'
   - 'tests/deploy/test_dgdr.py'
+  - 'tests/deploy/test_dgdr_v1beta2.py'
   - 'tests/deploy/test_dgdr_h100.py'
   - 'tests/deploy/test_dgdr_utils.py'
   - 'tests/deploy/dgd_utils.py'
+
+
+planner_gym:
+  - 'gyms/planner-gym/**'
+  - '.github/workflows/pre-merge.yml'
+  - '.github/actions/changed-files/**'
+  - '.github/filters.yaml'
 
 planner:
   - 'container/templates/planner.Dockerfile'
   - 'components/src/dynamo/planner/**'
   - 'components/src/dynamo/global_planner/**'
   - 'components/src/dynamo/profiler/**'
+  - 'components/src/dynamo/aisimulate/**'
   - 'components/src/dynamo/global_router/**'
+  # Re-run the SKU contract when either compared operator input changes.
+  - 'deploy/operator/hack/test_aisimulate_hardware_catalog.py'
+  - 'deploy/operator/internal/aisimulate/hardware_skus.txt'
+  - 'deploy/operator/api/v1beta2/dynamographdeploymentrequest_types.go'
   # Keep this tombstone until the vendored-tree deletion has merged so the
   # deleted paths in that PR remain covered by the Planner CI filter.
   - 'aisimulate/**'
@@ -342,11 +390,32 @@ planner:
   - '!**/*.md'
   - '!**/*.rst'
 
+sidecar_trtllm_image:
+  # PR CI runs nightly resolver/harness CPU tests; GPU cases run in nightly CI.
+  - 'lib/sidecar/trtllm/ci/**'
+  - 'lib/llm/tests/data/media/triangle_240p_10.mp4'
+  - '.github/actions/changed-files/**'
+  - '.github/filters.yaml'
+  - '.github/workflows/pr.yaml'
+  - '!**/*.md'
+  - '!**/*.rst'
+
 sidecar:
   # TODO: Expand this to every Dockerfile and composite-action input after the
   # acceptable CI fan-out is agreed. Keep the remaining scope narrow for now.
   - 'lib/sidecar/**'
   - '.github/workflows/shared-build-sidecar.yml'
+  - '.github/workflows/shared-test-trtllm-nightly-image.yml'
+  - 'tests/serve/test_sidecar.py'
+  - 'tests/router/common.py'
+  - 'tests/router/helper.py'
+  - 'tests/router/router_process.py'
+  - 'tests/utils/gpu_args.py'
+  - 'tests/utils/payloads.py'
+  - 'tests/utils/prometheus.py'
+  - 'tests/utils/router_logs.py'
+  - 'tests/utils/router_nvext.py'
+  - 'tests/utils/payloads.py'
   - 'Cargo.toml'
   - 'Cargo.lock'
   # Compliance policy and baseline changes can fail the sidecar image build.
@@ -359,7 +428,9 @@ vllm:
   - 'container/deps/vllm/**'
   - 'examples/backends/vllm/**'
   - 'components/src/dynamo/vllm/**'
+  - 'components/src/dynamo/artifacts/vllm/**'
   - 'container/templates/vllm_*'
+  - 'container/templates/ffmpeg_encoder_guard.Dockerfile'
   - '!**/*.md'
   - '!**/*.rst'
 
@@ -368,6 +439,7 @@ sglang:
   - 'examples/backends/sglang/**'
   - 'components/src/dynamo/sglang*/**'
   - 'container/templates/sglang_*'
+  - 'container/templates/ffmpeg_encoder_guard.Dockerfile'
   - 'container/deps/sglang/**'
   - '!**/*.md'
   - '!**/*.rst'
@@ -377,6 +449,13 @@ trtllm:
   - 'examples/backends/trtllm/**'
   - 'components/src/dynamo/trtllm/**'
   - 'container/templates/trtllm_*'
+  - 'container/templates/ffmpeg_encoder_guard.Dockerfile'
+  - '!**/*.md'
+  - '!**/*.rst'
+
+triton:
+  - 'components/src/dynamo/triton/**'
+  - 'container/templates/triton_*'
   - '!**/*.md'
   - '!**/*.rst'
 
@@ -398,7 +477,7 @@ frontend:
   - '*.lock'
   - 'container/deps/*'
   - 'container/compliance/**'
-  - 'components/src/dynamo/kv_dc_relay/**'
+  - 'components/src/dynamo/pool_relay/**'
   - 'components/src/dynamo/kv_state_agent/**'
   - 'components/src/dynamo/router/**'
   - 'components/src/dynamo/thunderagent_router/**'
@@ -406,9 +485,11 @@ frontend:
   - 'components/src/dynamo/replay/**'
   - 'components/src/dynamo/frontend/**'
   - 'components/src/dynamo/common/**'
-  - 'tests/frontend/router_aic_image_smoke.py'
+  - 'components/src/dynamo/artifacts/**'
+  - 'tests/frontend/router_ais_image_smoke.py'
   - 'deploy/inference-gateway/**'
   - 'container/templates/frontend.Dockerfile'
+  - 'container/templates/verify_ca_certificates.Dockerfile'
   # The frontend image is rendered from these two: render.py generates its
   # Dockerfile, and context.yaml supplies EPP_IMAGE -- the `FROM` that the
   # compliance stages read /sbom-rust-epp.cdx.json and /rust-licenses out of.
@@ -419,15 +500,19 @@ frontend:
   # Sidecars are standalone Rust binaries and are not part of the frontend
   # image or its E2E test pipeline.
   - '!lib/sidecar/**'
+  - '!components/src/dynamo/artifacts/vllm/**'
   - '!**/*.md'
   - '!**/*.rst'
 
 rust:
   - '.github/workflows/pre-merge.yml'
+  - '.github/actions/setup-rust-ci/**'
   - '**/*.rs'
   - '**/Cargo.toml'
   - '**/Cargo.lock'
   - 'deny.toml'
+  # Compiled into the native OpenAPI serializer/deserializer tests.
+  - 'lib/llm/tests/fixtures/openapi/*.json'
   # Sidecar protobuf contracts are compiled by crate build scripts and need the
   # same workspace checks as sidecar Rust sources.
   - 'lib/sidecar/**/*.proto'
@@ -436,6 +521,11 @@ rust:
   # changes.
   - 'lib/bindings/python/codegen/templates/prometheus_names.py.template'
   - 'lib/bindings/python/src/dynamo/prometheus_names.py'
+  # The rust-clippy job runs the router crate layering check.
+  - 'scripts/router_layering_check.sh'
+  # Router crate files. Their markdown docs do not need the Rust jobs.
+  - 'lib/router/**'
+  - '!lib/router/**/*.md'
 
 benchmarks:
   - 'benchmarks/**'

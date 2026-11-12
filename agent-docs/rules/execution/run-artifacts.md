@@ -35,7 +35,8 @@ runs/<EXP_ID>/
 |   |-- performance_findings.jsonl
 |   |-- asks.jsonl
 |   |-- search-calibration.md
-|   `-- recipe-dossier/                # find-serving-recipe snapshots + index.md
+|   |-- recipe-dossier/                # find-serving-recipe snapshots + index.md
+|   `-- skillpack-defects.md          # report-skillpack-issue unfiled drafts
 |-- final/
 |   |-- recommended_config.md
 |   |-- reproduced_commands.sh
@@ -126,6 +127,9 @@ runs/<EXP_ID>/
   `find-serving-recipe` (`<NNN>-<UTC timestamp>.md`, never modified after writing) plus an `index.md` listing every
   snapshot with its SHA256. Callers (the interviewer's baseline evidence record, `consult-perf-knowledge`) cite a
   snapshot path and SHA256, never the directory.
+- `skillpack-defects.md` (under `EXP_ROOT/analysis/`): append-only record of skillpack defect reports drafted by
+  `report-skillpack-issue` that could not be filed (no GitHub access or no operator approval), one dated section per
+  draft with status `unfiled`; written by whichever role invoked the skill. Never placed under `final/`.
 
 ## Deployment Directories
 
