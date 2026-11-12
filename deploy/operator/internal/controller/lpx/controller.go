@@ -200,7 +200,8 @@ func (r *graphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 	// revision. A PodClique without a placement must not stop the write that corrects it.
 	var cyborgPlacements map[string]cyborgPlacement
 	cyborgPlacements, placementErr = r.resolveCyborgPlacements(ctx, pcs, pcsgs, pclqs, requests)
-	placementErr = errors.Join(placementErr, r.pinCyborgPods(ctx, pclqs, cyborgPlacements))
+	cyborgPlacements, pinErr := r.pinCyborgPods(ctx, pclqs, cyborgPlacements)
+	placementErr = errors.Join(placementErr, pinErr)
 
 	// A cache miss or delayed handoff is not cleanup authority; owner GC handles deletion.
 	if dgd == nil {
@@ -306,7 +307,7 @@ func (r *graphReconciler) reconcileWorkloads(
 
 		// A fabric-pod placement reports its own Cyborg capacity changes.
 		for name, placement := range cyborgPlacements {
-			scalingRequired = scalingRequired || pclqs[name].Spec.Replicas != placement.total()
+			scalingRequired = scalingRequired || pclqs[name].Spec.Replicas != placement.capacity()
 		}
 	}
 
@@ -349,7 +350,7 @@ func (r *graphReconciler) reconcileWorkloads(
 	// Remove Cyborg Pods outside their placement and write its capacity only after
 	// the PCS is synchronized, as for every replica write. The Pod and PodClique
 	// watches deliver each write, and no later step of this pass depends on Cyborg Pods.
-	if _, err := r.reconcileCyborgPlacements(ctx, pclqs, cyborgPlacements, scalingBlocked); err != nil {
+	if err := r.reconcileCyborgPlacements(ctx, pclqs, cyborgPlacements, scalingBlocked); err != nil {
 		return ctrl.Result{}, err
 	}
 

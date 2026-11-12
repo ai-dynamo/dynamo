@@ -16,8 +16,10 @@ import (
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	v1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx"
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/podcache"
 	grovecommon "github.com/ai-dynamo/grove/operator/api/common"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/stretchr/testify/require"
@@ -42,27 +44,18 @@ func TestCommittedFabricPods(t *testing.T) {
 		requests []*lpxv1alpha1.LPUPipelineRequest
 		want     []string
 		settled  bool
-		bound    bool
 	}{
 		{name: "a replica without requests is not settled"},
 		{
 			name:     "one bound plan lists its fabric pods one time, sorted",
 			requests: []*lpxv1alpha1.LPUPipelineRequest{newTestPlacedPipelineRequest("target", group, 0, bound, "b", "a", "a")},
-			want:     []string{"a", "b"}, settled: true, bound: true,
+			want:     []string{"a", "b"}, settled: true,
 		},
 		{
 			name: "all models of the replica contribute their fabric pods",
 			requests: []*lpxv1alpha1.LPUPipelineRequest{
 				newTestPlacedPipelineRequest("draft", group, 0, bound, "a"),
-				newTestPlacedPipelineRequest("target", group, 0, bound, "c"),
-			},
-			want: []string{"a", "c"}, settled: true, bound: true,
-		},
-		{
-			name: "one degraded model keeps the fabric pods, but the replica is not bound",
-			requests: []*lpxv1alpha1.LPUPipelineRequest{
-				newTestPlacedPipelineRequest("draft", group, 0, degraded, "a"),
-				newTestPlacedPipelineRequest("target", group, 0, bound, "c"),
+				newTestPlacedPipelineRequest("target", group, 0, degraded, "c"),
 			},
 			want: []string{"a", "c"}, settled: true,
 		},
@@ -82,9 +75,9 @@ func TestCommittedFabricPods(t *testing.T) {
 			requests: []*lpxv1alpha1.LPUPipelineRequest{
 				newTestPlacedPipelineRequest("target", group, 0, bound, "a"),
 				newTestPlacedPipelineRequest("target-1", group, 1, lpxv1alpha1.RequestPhasePending),
-				newTestPlacedPipelineRequest("other", "pcs-0-other", 0, degraded, "z"),
+				newTestPlacedPipelineRequest("other", "pcs-0-other", 0, bound, "z"),
 			},
-			want: []string{"a"}, settled: true, bound: true,
+			want: []string{"a"}, settled: true,
 		},
 		{
 			name:     "a bound plan without rows gives no fabric pod",
@@ -96,22 +89,17 @@ func TestCommittedFabricPods(t *testing.T) {
 			for _, request := range tc.requests {
 				requests[request.Name] = request
 			}
-			// The result must not depend on the order in which the map gives its requests.
-			for range 64 {
-				fabricPods, settled, allBound := committedFabricPods(requests, group, 0)
-				require.Equal(t, tc.settled, settled)
-				require.Equal(t, tc.bound, allBound)
-				require.Equal(t, tc.want, fabricPods)
-			}
+			fabricPods, settled := committedFabricPods(requests, group, 0)
+			require.Equal(t, tc.settled, settled)
+			require.Equal(t, tc.want, fabricPods)
 		})
 	}
 
 	t.Log("A request that is being deleted no longer fixes the fabric pods")
 	deleting := newTestPlacedPipelineRequest("target", group, 0, bound, "a")
 	deleting.DeletionTimestamp = &metav1.Time{Time: time.Now()}
-	_, settled, allBound := committedFabricPods(map[string]*lpxv1alpha1.LPUPipelineRequest{deleting.Name: deleting}, group, 0)
+	_, settled := committedFabricPods(map[string]*lpxv1alpha1.LPUPipelineRequest{deleting.Name: deleting}, group, 0)
 	require.False(t, settled)
-	require.False(t, allBound)
 }
 
 func TestLPXCyborgFabricPodPlacement(t *testing.T) {
@@ -188,11 +176,59 @@ func TestLPXCyborgFabricPodPlacement(t *testing.T) {
 	require.NoError(t, r.Get(ctx, cliqueKey, clique))
 	require.Equal(t, int32(1), clique.Spec.Replicas)
 
-	t.Log("The Pod that stays has index 1 and the new total is one. With one Cyborg Pod for each fabric pod it keeps this index: its removal would take the last bound Cyborg Pod of fabric pod b")
+	t.Log("The Pod that stays has index 1 and the new total is one. The controller waits until Grove has synchronized the lower capacity: Grove can still hold Pods that it created for the removed ones")
+	_, err = r.Reconcile(ctx, key)
+	require.NoError(t, err)
+	require.NoError(t, r.Get(ctx, cliqueKey, clique))
+	require.Equal(t, int32(1), clique.Spec.Replicas)
+
+	t.Log("Renumber: fabric pod b gets one more position, so the capacity is two, and the Pod with index 1 stays")
+	settleTestCyborgClique(t, ctx, r.Client, clique)
+	_, err = r.Reconcile(ctx, key)
+	require.NoError(t, err)
+	require.NoError(t, r.Get(ctx, cliqueKey, clique))
+	require.Equal(t, int32(2), clique.Spec.Replicas)
+	require.Equal(t, []int{1}, listTestCyborgPodIndexes(t, ctx, r.Client, clique))
+
+	t.Log("Grove gives the new Pod its lowest free index, and the controller pins it to fabric pod b; the old Pod stays until the new one is bound")
+	createLPXTestObjects(t, ctx, r.Client, newTestReleasedCyborgPod(clique, 0))
+	for range 2 {
+		_, err = r.Reconcile(ctx, key)
+		require.NoError(t, err)
+	}
+	pods = listTestCyborgPods(t, ctx, r.Client, clique)
+	require.Equal(t, []int{0, 1}, testCyborgPodIndexes(pods))
+	require.Equal(t, []string{"b", "b"}, testCyborgFabricPods(pods))
+	require.NoError(t, r.Get(ctx, cliqueKey, clique))
+	require.Equal(t, int32(2), clique.Spec.Replicas)
+
+	t.Log("The added position is not a capacity change that waits: a PodCliqueSet write in this time reports no deferred scaling")
+	require.NoError(t, r.Get(ctx, key.NamespacedName, child))
+	metav1.SetMetaDataAnnotation(&child.ObjectMeta, dynamo.LPXRestartAnnotation, "during-renumber")
+	require.NoError(t, r.Update(ctx, child))
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(dgd), dgd))
+	updateTestDGD(t, r, child, dgd)
+	_, err = r.Reconcile(ctx, key)
+	require.NoError(t, err)
+	require.NoError(t, r.Get(ctx, key.NamespacedName, child))
+	require.False(t, meta.IsStatusConditionTrue(child.Status.Conditions, "ScalingDeferred"))
+
+	t.Log("When the new Pod is bound, the controller removes the Pod with index 1 and then lowers the capacity")
+	bindTestCyborgPod(t, ctx, r.Client, clique, 0, "gpu-b")
+	_, err = r.Reconcile(ctx, key)
+	require.NoError(t, err)
+	pods = listTestCyborgPods(t, ctx, r.Client, clique)
+	require.Equal(t, []int{0}, testCyborgPodIndexes(pods))
+	require.NoError(t, r.Get(ctx, cliqueKey, clique))
+	require.Equal(t, int32(1), clique.Spec.Replicas)
+
+	t.Log("A Pod with an index below the total stays")
 	settleTestCyborgClique(t, ctx, r.Client, clique)
 	_, err = r.Reconcile(ctx, key)
 	require.NoError(t, err)
 	require.Equal(t, pods, listTestCyborgPods(t, ctx, r.Client, clique))
+	require.NoError(t, r.Get(ctx, cliqueKey, clique))
+	require.Equal(t, int32(1), clique.Spec.Replicas)
 
 	t.Log("Scale: two replicas mean two Cyborg Pods in each occupied fabric pod")
 	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(dgd), dgd))
@@ -204,7 +240,7 @@ func TestLPXCyborgFabricPodPlacement(t *testing.T) {
 	}
 	require.NoError(t, r.Get(ctx, cliqueKey, clique))
 	require.Equal(t, int32(2), clique.Spec.Replicas)
-	createLPXTestObjects(t, ctx, r.Client, newTestReleasedCyborgPod(clique, 0))
+	createLPXTestObjects(t, ctx, r.Client, newTestReleasedCyborgPod(clique, 1))
 	_, err = r.Reconcile(ctx, key)
 	require.NoError(t, err)
 	require.Equal(t, []string{"b", "b"}, testCyborgFabricPods(listTestCyborgPods(t, ctx, r.Client, clique)))
@@ -224,54 +260,7 @@ func TestLPXCyborgFabricPodPlacement(t *testing.T) {
 		newTestReleasedCyborgPod(clique, 2), newTestReleasedCyborgPod(clique, 3), newTestReleasedCyborgPod(clique, 4), newTestReleasedCyborgPod(clique, 5))
 	_, err = r.Reconcile(ctx, key)
 	require.NoError(t, err)
-	pods = listTestCyborgPods(t, ctx, r.Client, clique)
-	require.Equal(t, []string{"b", "b", "a", "a", "c", "c"}, testCyborgFabricPods(pods))
-
-	t.Log("Prune again: the scheduler binds the LPUs in fabric pod c, whose Pods have the indexes 4 and 5")
-	for _, pod := range pods {
-		pod.Spec.NodeName = "gpu-" + pod.Labels[cyborgFabricPodLabel]
-		require.NoError(t, r.Update(ctx, pod))
-	}
-	for _, request := range requests {
-		request.Status = newTestPlacedPipelineRequest(request.Name, plans["lpx"].LPXScalingGroup, 0, lpxv1alpha1.RequestPhaseBound, "c").Status
-		require.NoError(t, r.Update(ctx, request))
-	}
-	_, err = r.Reconcile(ctx, key)
-	require.NoError(t, err)
-	require.Equal(t, []int{4, 5}, listTestCyborgPodIndexes(t, ctx, r.Client, clique))
-
-	t.Log("Renumber waits until Grove has synchronized the lower capacity: Grove can still hold Pods that it created for the removed ones")
-	_, err = r.Reconcile(ctx, key)
-	require.NoError(t, err)
-	require.Equal(t, []int{4, 5}, listTestCyborgPodIndexes(t, ctx, r.Client, clique))
-
-	t.Log("It also waits while a request is Degraded: the placement is then not final")
-	settleTestCyborgClique(t, ctx, r.Client, clique)
-	for _, request := range requests {
-		request.Status.Phase = lpxv1alpha1.RequestPhaseDegraded
-		require.NoError(t, r.Update(ctx, request))
-	}
-	_, err = r.Reconcile(ctx, key)
-	require.NoError(t, err)
-	require.Equal(t, []int{4, 5}, listTestCyborgPodIndexes(t, ctx, r.Client, clique))
-
-	t.Log("Renumber: when every request is Bound and Grove is settled, the controller removes one Pod above the new total of two")
-	for _, request := range requests {
-		request.Status.Phase = lpxv1alpha1.RequestPhaseBound
-		require.NoError(t, r.Update(ctx, request))
-	}
-	_, err = r.Reconcile(ctx, key)
-	require.NoError(t, err)
-	require.Equal(t, []int{5}, listTestCyborgPodIndexes(t, ctx, r.Client, clique))
-
-	t.Log("Grove gives the replacement its lowest free index, and the controller pins it to fabric pod c")
-	createLPXTestObjects(t, ctx, r.Client, newTestReleasedCyborgPod(clique, 0))
-	settleTestCyborgClique(t, ctx, r.Client, clique)
-	_, err = r.Reconcile(ctx, key)
-	require.NoError(t, err)
-	pods = listTestCyborgPods(t, ctx, r.Client, clique)
-	require.Equal(t, []int{0, 5}, testCyborgPodIndexes(pods))
-	require.Equal(t, []string{"c", "c"}, testCyborgFabricPods(pods))
+	require.Equal(t, []string{"b", "b", "a", "a", "c", "c"}, testCyborgFabricPods(listTestCyborgPods(t, ctx, r.Client, clique)))
 }
 
 func TestLPXCyborgPinDoesNotWaitForDesiredState(t *testing.T) {
@@ -419,7 +408,8 @@ func TestLPXCyborgPlacementContinuesPastOnePodClique(t *testing.T) {
 	require.Equal(t, map[string]cyborgPlacement{selectable.Name: {fabricPods: []string{"a"}, replicas: 1}}, placements)
 
 	t.Log("Pin the Pod of the PodClique that has a placement")
-	require.NoError(t, r.pinCyborgPods(ctx, pclqs, placements))
+	_, err = r.pinCyborgPods(ctx, pclqs, placements)
+	require.NoError(t, err)
 	require.Equal(t, []string{"a"}, testCyborgFabricPods(listTestCyborgPods(t, ctx, r.Client, selectable)))
 }
 
@@ -444,11 +434,12 @@ func TestLPXCyborgRefusedPinKeepsItsPosition(t *testing.T) {
 	})}
 
 	t.Log("The refused pin keeps the position: the second Pod does not take it")
-	live, surplus, changed, err := r.fillCyborgPlacement(ctx, clique, cyborgPlacement{fabricPods: []string{"a"}, replicas: 1})
+	live, err := r.liveCyborgPods(ctx, clique)
+	require.NoError(t, err)
+	surplus, changed, err := r.fillCyborgPlacement(ctx, clique, cyborgPlacement{fabricPods: []string{"a"}, replicas: 1}, live)
 	require.NoError(t, err)
 	require.False(t, changed)
 	require.Empty(t, surplus)
-	require.Len(t, live, 2)
 	require.Equal(t, []string{"", ""}, testCyborgFabricPods(listTestCyborgPods(t, ctx, r.Client, clique)))
 }
 
@@ -551,154 +542,143 @@ func TestLPXCyborgPlacementRenumbersAfterPrune(t *testing.T) {
 	for index, fabricPod := range []string{"a", "a", "b", "b", "c", "c"} {
 		require.NoError(t, r.Create(ctx, newTestBoundCyborgPod(clique, index, fabricPod)))
 	}
-	placement := cyborgPlacement{fabricPods: []string{"c"}, replicas: 2, renumber: true}
+	placement := cyborgPlacement{fabricPods: []string{"c"}, replicas: 2, settled: true}
 
 	t.Log("Prune first: the Pods of fabric pod c keep the indexes 4 and 5 in the pass that removes the other Pods and lowers the capacity")
-	changed, err := r.reconcileCyborgPlacement(ctx, clique, placement, false)
-	require.NoError(t, err)
-	require.True(t, changed)
+	require.NoError(t, reconcileTestCyborgPlacement(t, ctx, r, clique, placement, false))
 	require.Equal(t, []int{4, 5}, listTestCyborgPodIndexes(t, ctx, r.Client, clique))
-	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(clique), clique))
 	require.Equal(t, int32(2), clique.Spec.Replicas)
 
-	t.Log("Keep both Pods until Grove has synchronized the lower capacity: Grove can still hold Pods that it created for the removed ones")
-	changed, err = r.reconcileCyborgPlacement(ctx, clique, placement, false)
-	require.NoError(t, err)
-	require.False(t, changed)
+	t.Log("Wait until Grove has synchronized the lower capacity: Grove can still hold Pods that it created for the removed ones")
+	require.NoError(t, reconcileTestCyborgPlacement(t, ctx, r, clique, placement, false))
+	require.Equal(t, int32(2), clique.Spec.Replicas)
+
+	t.Log("Then give fabric pod c one more position: the capacity is three, and no Pod goes")
+	settleTestCyborgClique(t, ctx, r.Client, clique)
+	require.NoError(t, reconcileTestCyborgPlacement(t, ctx, r, clique, placement, false))
+	require.Equal(t, int32(3), clique.Spec.Replicas)
 	require.Equal(t, []int{4, 5}, listTestCyborgPodIndexes(t, ctx, r.Client, clique))
 
-	t.Log("Then remove one Pod above the new total, the lowest index first; the removed Pod terminates for some time")
-	settleTestCyborgClique(t, ctx, r.Client, clique)
-	holdTestCyborgPod(t, ctx, r.Client, clique, 4, true)
-	changed, err = r.reconcileCyborgPlacement(ctx, clique, placement, false)
-	require.NoError(t, err)
-	require.True(t, changed)
-	require.Equal(t, []int{5}, listTestCyborgPodIndexes(t, ctx, r.Client, clique))
-
-	t.Log("Keep the other Pod until the replacement is there: fabric pod c must keep a bound Cyborg Pod")
-	changed, err = r.reconcileCyborgPlacement(ctx, clique, placement, false)
-	require.NoError(t, err)
-	require.False(t, changed)
-	require.Equal(t, []int{5}, listTestCyborgPodIndexes(t, ctx, r.Client, clique))
-
-	t.Log("Grove gives the replacement its lowest free index, and the controller pins it to the position that the removal opened, while the removed Pod still terminates")
+	t.Log("Grove gives the new Pod its lowest free index, and the controller pins it to the added position")
 	first := newTestReleasedCyborgPod(clique, 0)
 	first.CreationTimestamp = metav1.NewTime(first.CreationTimestamp.Add(time.Hour))
 	require.NoError(t, r.Create(ctx, first))
-	settleTestCyborgClique(t, ctx, r.Client, clique)
-	changed, err = r.reconcileCyborgPlacement(ctx, clique, placement, false)
-	require.NoError(t, err)
-	require.True(t, changed)
-	require.Equal(t, []int{0, 5}, listTestCyborgPodIndexes(t, ctx, r.Client, clique))
-	require.Equal(t, []string{"c", "c"}, testCyborgFabricPods(listTestCyborgPods(t, ctx, r.Client, clique)))
-	holdTestCyborgPod(t, ctx, r.Client, clique, 4, false)
+	require.NoError(t, reconcileTestCyborgPlacement(t, ctx, r, clique, placement, false))
+	require.Equal(t, []int{0, 4, 5}, listTestCyborgPodIndexes(t, ctx, r.Client, clique))
+	require.Equal(t, []string{"c", "c", "c"}, testCyborgFabricPods(listTestCyborgPods(t, ctx, r.Client, clique)))
 
-	t.Log("Keep the other Pod until the replacement is bound")
-	changed, err = r.reconcileCyborgPlacement(ctx, clique, placement, false)
-	require.NoError(t, err)
-	require.False(t, changed)
-	require.Equal(t, []int{0, 5}, listTestCyborgPodIndexes(t, ctx, r.Client, clique))
+	t.Log("The old Pods stay while the new Pod is not bound: fabric pod c keeps its two bound Cyborg Pods, also when the new Pod gets no GPU")
+	for range 2 {
+		require.NoError(t, reconcileTestCyborgPlacement(t, ctx, r, clique, placement, false))
+	}
+	require.Equal(t, []int{0, 4, 5}, listTestCyborgPodIndexes(t, ctx, r.Client, clique))
+	require.Equal(t, int32(3), clique.Spec.Replicas)
 
-	t.Log("Then replace the second Pod in the same way")
+	t.Log("When the new Pod is bound, remove one Pod above the total, and then lower the capacity; the removed Pod terminates for some time")
+	holdTestCyborgPod(t, ctx, r.Client, clique, 5, true)
 	bindTestCyborgPod(t, ctx, r.Client, clique, 0, "gpu-c")
-	changed, err = r.reconcileCyborgPlacement(ctx, clique, placement, false)
-	require.NoError(t, err)
-	require.True(t, changed)
-	require.Equal(t, []int{0}, listTestCyborgPodIndexes(t, ctx, r.Client, clique))
-	require.NoError(t, r.Create(ctx, newTestReleasedCyborgPod(clique, 1)))
-	settleTestCyborgClique(t, ctx, r.Client, clique)
-	changed, err = r.reconcileCyborgPlacement(ctx, clique, placement, false)
-	require.NoError(t, err)
-	require.True(t, changed)
-	bindTestCyborgPod(t, ctx, r.Client, clique, 1, "gpu-c")
+	require.NoError(t, reconcileTestCyborgPlacement(t, ctx, r, clique, placement, false))
+	require.Equal(t, []int{0, 4}, listTestCyborgPodIndexes(t, ctx, r.Client, clique))
+	require.Equal(t, int32(2), clique.Spec.Replicas)
 
-	t.Log("The Pods of fabric pod c now have the indexes 0 and 1, and the controller removes no more Pods")
-	changed, err = r.reconcileCyborgPlacement(ctx, clique, placement, false)
-	require.NoError(t, err)
-	require.False(t, changed)
+	t.Log("Wait again for Grove, and then give the second Pod a lower index in the same way")
+	require.NoError(t, reconcileTestCyborgPlacement(t, ctx, r, clique, placement, false))
+	require.Equal(t, int32(2), clique.Spec.Replicas)
+	settleTestCyborgClique(t, ctx, r.Client, clique)
+	require.NoError(t, reconcileTestCyborgPlacement(t, ctx, r, clique, placement, false))
+	require.Equal(t, int32(3), clique.Spec.Replicas)
+	holdTestCyborgPod(t, ctx, r.Client, clique, 5, false)
+	require.NoError(t, r.Create(ctx, newTestReleasedCyborgPod(clique, 1)))
+	require.NoError(t, reconcileTestCyborgPlacement(t, ctx, r, clique, placement, false))
+	bindTestCyborgPod(t, ctx, r.Client, clique, 1, "gpu-c")
+	require.NoError(t, reconcileTestCyborgPlacement(t, ctx, r, clique, placement, false))
+
+	t.Log("The Pods of fabric pod c now have the indexes 0 and 1: the capacity stays, and the controller removes no more Pods")
+	settleTestCyborgClique(t, ctx, r.Client, clique)
+	require.NoError(t, reconcileTestCyborgPlacement(t, ctx, r, clique, placement, false))
 	require.Equal(t, []int{0, 1}, listTestCyborgPodIndexes(t, ctx, r.Client, clique))
 	require.Equal(t, []string{"c", "c"}, testCyborgFabricPods(listTestCyborgPods(t, ctx, r.Client, clique)))
+	require.Equal(t, int32(2), clique.Spec.Replicas)
 
 	t.Log("Scale in to one Pod: the Pod with the lowest index stays, although it is the newer one, so its index stays below the total")
 	placement.replicas = 1
 	for range 2 {
-		_, err = r.reconcileCyborgPlacement(ctx, clique, placement, false)
-		require.NoError(t, err)
-		require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(clique), clique))
+		require.NoError(t, reconcileTestCyborgPlacement(t, ctx, r, clique, placement, false))
 	}
 	require.Equal(t, int32(1), clique.Spec.Replicas)
 	require.Equal(t, []int{0}, listTestCyborgPodIndexes(t, ctx, r.Client, clique))
 }
 
-func TestLPXCyborgRenumberConditions(t *testing.T) {
+func TestLPXCyborgSurgeConditions(t *testing.T) {
 	for _, tc := range []struct {
 		name           string
-		renumber       bool
+		settled        bool
 		scalingBlocked bool
-		capacity       int32
-		want           []int
+		want           int32
 	}{
-		{name: "a Pod above the total goes when every request is Bound", renumber: true, capacity: 2, want: []int{0}},
-		{name: "the Pod stays while a request is not Bound: the placement is then not final", capacity: 2, want: []int{0, 2}},
-		{name: "the Pod stays while Grove defers replica writes", renumber: true, scalingBlocked: true, capacity: 2, want: []int{0, 2}},
-		{name: "the capacity write goes first", renumber: true, capacity: 3, want: []int{0, 2}},
+		{name: "a settled placement gets one more position for a Pod above the total", settled: true, want: 3},
+		{name: "a placement that is not settled gets none: its fabric pods can still change", want: 2},
+		{name: "the capacity write waits while Grove defers replica writes", settled: true, scalingBlocked: true, want: 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := t.Context()
 
 			t.Log("Given two bound Cyborg Pods with the indexes 0 and 2 in a placement of two Pods, and a PodClique that Grove has synchronized")
 			clique := &grovev1alpha1.PodClique{Name: "pcs-0-lpx-0-cond", Namespace: "default", UID: "clique-uid", ResourceVersion: "1"}
-			clique.Spec.Replicas = tc.capacity
+			clique.Spec.Replicas = 2
 			r := &graphReconciler{Client: newLPXTestClient(t, clique, newTestBoundCyborgPod(clique, 0, "a"), newTestBoundCyborgPod(clique, 2, "a"))}
 			settleTestCyborgClique(t, ctx, r.Client, clique)
 
 			t.Log("When the controller reconciles the placement")
-			_, err := r.reconcileCyborgPlacement(ctx, clique, cyborgPlacement{fabricPods: []string{"a"}, replicas: 2, renumber: tc.renumber}, tc.scalingBlocked)
-			require.NoError(t, err)
+			placement := cyborgPlacement{fabricPods: []string{"a"}, replicas: 2, settled: tc.settled}
+			require.NoError(t, reconcileTestCyborgPlacement(t, ctx, r, clique, placement, tc.scalingBlocked))
 
-			t.Log("Then the Pod with index 2 is removed, or stays")
-			require.Equal(t, tc.want, listTestCyborgPodIndexes(t, ctx, r.Client, clique))
+			t.Log("Then the capacity has the added position, or not, and each Pod stays")
+			require.Equal(t, tc.want, clique.Spec.Replicas)
+			require.Equal(t, []int{0, 2}, listTestCyborgPodIndexes(t, ctx, r.Client, clique))
 		})
 	}
 }
 
-func TestLPXCyborgRenumberRemoval(t *testing.T) {
+func TestLPXCyborgSurgeRemoval(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		// refusal is the answer of the API server to the removal; nil accepts it.
-		refusal error
-		// changedPod gives the Pod a newer version than the one that the controller observed.
-		changedPod bool
-		wantErr    string
-		want       []int
+		refusal      error
+		wantErr      string
+		wantPods     []int
+		wantCapacity int32
 	}{
-		{name: "a removal that the API server accepts", want: []int{0}},
-		{name: "a refused removal is an error", refusal: apierrors.NewForbidden(schema.GroupResource{Resource: "pods"}, "pod", fmt.Errorf("denied")), wantErr: "to give it a lower index", want: []int{0, 2}},
-		{name: "a Pod that is already gone is not an error", refusal: apierrors.NewNotFound(schema.GroupResource{Resource: "pods"}, "pod"), want: []int{0, 2}},
-		{name: "a Pod that changed after the observation stays, and the error starts a new pass", changedPod: true, wantErr: "to give it a lower index", want: []int{0, 2}},
+		{name: "a removal that the API server accepts", wantPods: []int{0, 1}, wantCapacity: 2},
+		{
+			name:    "a refused removal is an error, and the capacity stays",
+			refusal: apierrors.NewForbidden(schema.GroupResource{Resource: "pods"}, "pod", fmt.Errorf("denied")),
+			wantErr: "outside its placement", wantPods: []int{0, 1, 2}, wantCapacity: 3,
+		},
+		{
+			name:     "a Pod that is already gone is not an error",
+			refusal:  apierrors.NewNotFound(schema.GroupResource{Resource: "pods"}, "pod"),
+			wantPods: []int{0, 1, 2}, wantCapacity: 2,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := t.Context()
 
-			t.Log("Given a settled placement of two Pods whose Pod with index 2 the controller must remove")
+			t.Log("Given a placement of two Pods with one more position, whose new Pod with index 1 is bound")
 			clique := &grovev1alpha1.PodClique{Name: "pcs-0-lpx-0-cond", Namespace: "default", UID: "clique-uid", ResourceVersion: "1"}
-			clique.Spec.Replicas = 2
-			base := newLPXTestClient(t, clique, newTestBoundCyborgPod(clique, 0, "a"), newTestBoundCyborgPod(clique, 2, "a"))
+			clique.Spec.Replicas = 3
+			base := newLPXTestClient(t, clique, newTestBoundCyborgPod(clique, 0, "a"), newTestBoundCyborgPod(clique, 1, "a"), newTestBoundCyborgPod(clique, 2, "a"))
 			r := &graphReconciler{Client: interceptor.NewClient(base, interceptor.Funcs{
 				Delete: func(ctx context.Context, delegated client.WithWatch, object client.Object, opts ...client.DeleteOption) error {
 					if tc.refusal != nil {
 						return tc.refusal
 					}
-					if tc.changedPod {
-						bindTestCyborgPod(t, ctx, delegated, clique, 2, "gpu-a-2")
-					}
 					return delegated.Delete(ctx, object, opts...)
 				},
 			})}
-			settleTestCyborgClique(t, ctx, r.Client, clique)
 
-			t.Log("When the controller reconciles the placement")
-			_, err := r.reconcileCyborgPlacement(ctx, clique, cyborgPlacement{fabricPods: []string{"a"}, replicas: 2, renumber: true}, false)
+			t.Log("When the controller reconciles the placement, it removes the Pod with index 2")
+			err := reconcileTestCyborgPlacement(t, ctx, r, clique, cyborgPlacement{fabricPods: []string{"a"}, replicas: 2, settled: true}, false)
 
 			t.Log("Then the result follows the answer of the API server")
 			if tc.wantErr != "" {
@@ -706,54 +686,161 @@ func TestLPXCyborgRenumberRemoval(t *testing.T) {
 			} else {
 				require.NoError(t, err)
 			}
-			require.Equal(t, tc.want, listTestCyborgPodIndexes(t, ctx, r.Client, clique))
+			require.Equal(t, tc.wantPods, listTestCyborgPodIndexes(t, ctx, r.Client, clique))
+			require.Equal(t, tc.wantCapacity, clique.Spec.Replicas)
 		})
 	}
 }
 
-func TestLPXCyborgServedPodKeepsItsIndex(t *testing.T) {
+func TestLPXCyborgServedRecord(t *testing.T) {
 	ctx := t.Context()
 
-	t.Log("After a scale-in, two fabric pods have two Ready Cyborg Pods each, and the Pods of fabric pod d have indexes above the total of four")
+	t.Log("After a scale-in, two fabric pods have two Cyborg Pods each; the Pods of fabric pod d have indexes above the total of four, and one Pod of fabric pod b is not Ready")
 	clique := &grovev1alpha1.PodClique{Name: "pcs-0-lpx-0-cond", Namespace: "default", UID: "clique-uid", ResourceVersion: "1"}
 	clique.Spec.Replicas = 4
-	r := &graphReconciler{Client: newLPXTestClient(t, clique)}
-	for index, fabricPod := range map[int]string{0: "b", 1: "b", 4: "d", 5: "d"} {
-		pod := newTestBoundCyborgPod(clique, index, fabricPod)
-		pod.Status.Conditions = newTestCyborgPodConditions(true)
+	var (
+		records int
+		refused error
+	)
+	r := &graphReconciler{Client: interceptor.NewClient(newLPXTestClient(t, clique), interceptor.Funcs{
+		Patch: func(ctx context.Context, delegated client.WithWatch, object client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			if refused != nil {
+				return refused
+			}
+			records++
+			return delegated.Patch(ctx, object, patch, opts...)
+		},
+	})}
+	for index, ready := range map[int]bool{2: true, 3: false, 6: true, 7: true} {
+		pod := newTestBoundCyborgPod(clique, index, []string{"b", "d"}[index/4])
+		pod.Status.Conditions = newTestCyborgPodConditions(ready)
 		require.NoError(t, r.Create(ctx, pod))
 	}
 	settleTestCyborgClique(t, ctx, r.Client, clique)
-	placement := cyborgPlacement{fabricPods: []string{"b", "d"}, replicas: 2, renumber: true}
+	placement := cyborgPlacement{fabricPods: []string{"b", "d"}, replicas: 2, settled: true}
 
-	t.Log("The controller records on each Pod above the total that it served, and on no other Pod")
-	changed, err := r.reconcileCyborgPlacement(ctx, clique, placement, false)
-	require.NoError(t, err)
-	require.True(t, changed)
+	t.Log("The controller records on each Ready Pod that it served, also below the total; a Pod that serves gets no new Pod")
+	require.NoError(t, reconcileTestCyborgPlacement(t, ctx, r, clique, placement, false))
 	served := map[int]string{}
 	for _, pod := range listTestCyborgPods(t, ctx, r.Client, clique) {
 		served[podCliquePodIndex(pod)] = pod.Labels[cyborgServedLabel]
 	}
-	require.Equal(t, map[int]string{0: "", 1: "", 4: "true", 5: "true"}, served)
+	require.Equal(t, map[int]string{2: "true", 3: "", 6: "true", 7: "true"}, served)
+	require.Equal(t, 3, records)
+	require.Equal(t, int32(4), clique.Spec.Replicas)
 
-	t.Log("A Pod that served loses Ready: it keeps its index, because a removal would stop a Pod of a workload in service")
+	t.Log("A second pass writes no record again")
+	require.NoError(t, reconcileTestCyborgPlacement(t, ctx, r, clique, placement, false))
+	require.Equal(t, 3, records)
+
+	t.Log("The Pods lose Ready: a Pod that served keeps its index, because a new Pod in its place would stop a Pod of a workload in service")
 	for _, pod := range listTestCyborgPods(t, ctx, r.Client, clique) {
 		pod.Status.Conditions = newTestCyborgPodConditions(false)
 		require.NoError(t, r.Status().Update(ctx, pod))
 	}
-	changed, err = r.reconcileCyborgPlacement(ctx, clique, placement, false)
-	require.NoError(t, err)
-	require.False(t, changed)
-	require.Equal(t, []int{0, 1, 4, 5}, listTestCyborgPodIndexes(t, ctx, r.Client, clique))
+	require.NoError(t, reconcileTestCyborgPlacement(t, ctx, r, clique, placement, false))
+	require.Equal(t, int32(4), clique.Spec.Replicas)
+	require.Equal(t, []int{2, 3, 6, 7}, listTestCyborgPodIndexes(t, ctx, r.Client, clique))
+
+	t.Log("A record that the API server refuses is an error")
+	bindTestCyborgPod(t, ctx, r.Client, clique, 3, "gpu-b")
+	for _, pod := range listTestCyborgPods(t, ctx, r.Client, clique) {
+		pod.Status.Conditions = newTestCyborgPodConditions(true)
+		require.NoError(t, r.Status().Update(ctx, pod))
+	}
+	refused = apierrors.NewForbidden(schema.GroupResource{Resource: "pods"}, "pod", fmt.Errorf("denied"))
+	_, err := r.pinCyborgPods(ctx, map[string]*grovev1alpha1.PodClique{clique.Name: clique}, map[string]cyborgPlacement{clique.Name: placement})
+	require.ErrorContains(t, err, "record that Cyborg Pod")
 }
 
-func TestCyborgPodToRenumber(t *testing.T) {
+func TestLPXCyborgTerminalPodHoldsNoPosition(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		phase corev1.PodPhase
+	}{
+		{name: "a Failed Pod, for example after an eviction", phase: corev1.PodFailed},
+		{name: "a Succeeded Pod", phase: corev1.PodSucceeded},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+
+			t.Log("Given two Cyborg Pods in fabric pod a, one of them in a terminal phase")
+			clique := &grovev1alpha1.PodClique{Name: "pcs-0-lpx-0-cond", Namespace: "default", UID: "clique-uid", ResourceVersion: "1", Labels: map[string]string{
+				lpx.CyborgPlacementLabel: lpx.CyborgPlacementPerFabricPod,
+			}}
+			clique.Spec.Replicas = 2
+			terminal := newTestBoundCyborgPod(clique, 1, "a")
+			terminal.Status.Phase = tc.phase
+			r := &graphReconciler{Client: newLPXTestClient(t, clique, newTestBoundCyborgPod(clique, 0, "a"), terminal)}
+			placement := cyborgPlacement{fabricPods: []string{"a"}, replicas: 2}
+
+			t.Log("When the controller reconciles the placement, it removes that Pod: it cannot run again, and Grove creates no Pod in its place while it is there")
+			require.NoError(t, reconcileTestCyborgPlacement(t, ctx, r, clique, placement, false))
+			require.Equal(t, []int{0}, listTestCyborgPodIndexes(t, ctx, r.Client, clique))
+			require.Equal(t, int32(2), clique.Spec.Replicas)
+
+			t.Log("Then the Pod that Grove creates takes the position")
+			require.NoError(t, r.Create(ctx, newTestReleasedCyborgPod(clique, 1)))
+			require.NoError(t, reconcileTestCyborgPlacement(t, ctx, r, clique, placement, false))
+			require.Equal(t, []string{"a", "a"}, testCyborgFabricPods(listTestCyborgPods(t, ctx, r.Client, clique)))
+		})
+	}
+}
+func TestLPXCyborgScaleInRetention(t *testing.T) {
+	type pod struct {
+		unbound bool
+		ready   bool
+		served  bool
+	}
+
+	for _, tc := range []struct {
+		name string
+		// pods are the Pods with the indexes 0 and 1 of one fabric pod.
+		pods [2]pod
+		want []int
+	}{
+		{name: "a bound Pod stays before an unbound Pod", pods: [2]pod{{unbound: true}, {}}, want: []int{1}},
+		{name: "a Ready Pod stays before a Pod that is not Ready", pods: [2]pod{{}, {ready: true}}, want: []int{1}},
+		{name: "a Pod that served stays before a Pod that did not", pods: [2]pod{{}, {served: true}}, want: []int{1}},
+		{name: "the lower index stays among equal Pods", pods: [2]pod{{}, {}}, want: []int{0}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+
+			t.Log("Given two placed Cyborg Pods in one fabric pod whose count goes from two to one")
+			clique := &grovev1alpha1.PodClique{Name: "pcs-0-lpx-0-cond", Namespace: "default", UID: "clique-uid", ResourceVersion: "1"}
+			clique.Spec.Replicas = 2
+			r := &graphReconciler{Client: newLPXTestClient(t, clique)}
+			for index, spec := range tc.pods {
+				pod := newTestBoundCyborgPod(clique, index, "a")
+				pod.Status.Conditions = newTestCyborgPodConditions(spec.ready)
+				if spec.unbound {
+					pod.Spec.NodeName = ""
+				}
+				if spec.served {
+					pod.Labels[cyborgServedLabel] = "true"
+				}
+				require.NoError(t, r.Create(ctx, pod))
+			}
+
+			t.Log("When the controller reconciles the placement")
+			require.NoError(t, reconcileTestCyborgPlacement(t, ctx, r, clique, cyborgPlacement{fabricPods: []string{"a"}, replicas: 1}, false))
+
+			t.Log("Then the Pod that the placement loses least with stays, and the capacity is one")
+			require.Equal(t, tc.want, listTestCyborgPodIndexes(t, ctx, r.Client, clique))
+			require.Equal(t, int32(1), clique.Spec.Replicas)
+		})
+	}
+}
+
+func TestCyborgSurgeFabricPod(t *testing.T) {
 	type pod struct {
 		index     int
 		fabricPod string
 		unbound   bool
 		ready     bool
 		served    bool
+		failed    bool
 	}
 
 	for _, tc := range []struct {
@@ -761,136 +848,176 @@ func TestCyborgPodToRenumber(t *testing.T) {
 		fabricPods []string
 		replicas   int32
 		pods       []pod
+		// unsettled is a placement whose fabric pods are not those of committed plans.
+		unsettled bool
+		// added is the capacity above the placement total.
+		added int32
 		// notObserved leaves Grove's observed generation behind the PodClique generation.
 		notObserved bool
 		// neverObserved leaves the PodClique without an observed generation.
 		neverObserved bool
 		// uncounted is the number of Pods that Grove counts above the placement total.
 		uncounted int32
-		want      int
+		want      string
 	}{
 		{
-			name:       "the lowest index above the total goes first",
+			name:       "a Pod above the total gets one more position in its fabric pod",
 			fabricPods: []string{"b"}, replicas: 2,
-			pods: []pod{{index: 3, fabricPod: "b"}, {index: 2, fabricPod: "b"}},
-			want: 2,
+			pods: []pod{{index: 2, fabricPod: "b"}, {index: 3, fabricPod: "b"}},
+			want: "b",
 		},
 		{
-			name:       "Pods below the total stay",
+			name:       "Pods below the total need no position",
 			fabricPods: []string{"b"}, replicas: 2,
 			pods: []pod{{index: 0, fabricPod: "b"}, {index: 1, fabricPod: "b"}},
-			want: -1,
 		},
 		{
 			name:       "an index equal to the total is above the range",
-			fabricPods: []string{"b"}, replicas: 2,
-			pods: []pod{{index: 0, fabricPod: "b"}, {index: 2, fabricPod: "b"}},
-			want: 2,
+			fabricPods: []string{"b", "d"}, replicas: 1,
+			pods: []pod{{index: 0, fabricPod: "b"}, {index: 2, fabricPod: "d"}},
+			want: "d",
 		},
 		{
 			name:       "the total counts every fabric pod: the indexes of the first block of two fabric pods are in the range",
 			fabricPods: []string{"b", "d"}, replicas: 2,
 			pods: []pod{{index: 2, fabricPod: "b"}, {index: 3, fabricPod: "b"}, {index: 6, fabricPod: "d"}, {index: 7, fabricPod: "d"}},
-			want: 6,
+			want: "d",
 		},
 		{
 			name:       "the first fabric pod in name order is complete before the next one starts",
 			fabricPods: []string{"b", "d"}, replicas: 2,
 			pods: []pod{{index: 1, fabricPod: "b"}, {index: 5, fabricPod: "d"}, {index: 6, fabricPod: "d"}, {index: 7, fabricPod: "b"}},
-			want: 7,
+			want: "b",
 		},
 		{
-			name:       "one Cyborg Pod for each fabric pod keeps its index: its removal would take the last bound Cyborg Pod of the fabric pod",
+			name:       "one Cyborg Pod for each fabric pod also gets a position: the old Pod stays until the new one is bound",
 			fabricPods: []string{"b", "d"}, replicas: 1,
 			pods: []pod{{index: 1, fabricPod: "b"}, {index: 3, fabricPod: "d"}},
-			want: -1,
+			want: "d",
 		},
 		{
-			name:       "a Ready Pod serves with the index that it has",
-			fabricPods: []string{"b"}, replicas: 2,
-			pods: []pod{{index: 2, fabricPod: "b", ready: true}, {index: 3, fabricPod: "b"}},
-			want: 3,
+			name:       "a Ready Pod uses the index that it has",
+			fabricPods: []string{"b", "d"}, replicas: 1,
+			pods: []pod{{index: 2, fabricPod: "b", ready: true}, {index: 3, fabricPod: "d"}},
+			want: "d",
 		},
 		{
 			name:       "a Ready Pod below the total does not stop the step",
 			fabricPods: []string{"b"}, replicas: 2,
 			pods: []pod{{index: 0, fabricPod: "b", ready: true}, {index: 3, fabricPod: "b"}},
-			want: 3,
+			want: "b",
 		},
 		{
-			name:       "no Pod goes when each Pod above the total is Ready",
+			name:       "no position when each Pod above the total is Ready",
 			fabricPods: []string{"b"}, replicas: 2,
 			pods: []pod{{index: 2, fabricPod: "b", ready: true}, {index: 3, fabricPod: "b", ready: true}},
-			want: -1,
 		},
 		{
 			name:       "a Pod that served keeps its index while it is not Ready",
-			fabricPods: []string{"b"}, replicas: 2,
-			pods: []pod{{index: 2, fabricPod: "b", served: true}, {index: 3, fabricPod: "b"}},
-			want: 3,
+			fabricPods: []string{"b", "d"}, replicas: 1,
+			pods: []pod{{index: 2, fabricPod: "b", served: true}, {index: 3, fabricPod: "d"}},
+			want: "d",
 		},
 		{
-			name:       "wait for a replacement that is not bound",
+			name:       "a placement that is not settled gets no position",
+			fabricPods: []string{"b"}, replicas: 2,
+			pods:      []pod{{index: 2, fabricPod: "b"}, {index: 3, fabricPod: "b"}},
+			unsettled: true,
+		},
+		{
+			name:       "wait while a Pod of the placement is not bound",
 			fabricPods: []string{"b"}, replicas: 2,
 			pods: []pod{{index: 0, fabricPod: "b", unbound: true}, {index: 3, fabricPod: "b"}},
-			want: -1,
 		},
 		{
 			name:       "wait while the PodClique has too few Pods",
-			fabricPods: []string{"b"}, replicas: 2,
-			pods: []pod{{index: 3, fabricPod: "b"}},
-			want: -1,
+			fabricPods: []string{"b", "d"}, replicas: 1,
+			pods: []pod{{index: 3, fabricPod: "d"}},
 		},
 		{
-			name:       "wait while one fabric pod has too many Pods",
-			fabricPods: []string{"b", "d"}, replicas: 2,
-			pods: []pod{{index: 0, fabricPod: "b"}, {index: 1, fabricPod: "b"}, {index: 2, fabricPod: "b"}, {index: 7, fabricPod: "d"}},
-			want: -1,
-		},
-		{
-			name:       "wait while a Pod that the placement does not keep is still there: Grove then owes no replacement",
+			name:       "wait while a Pod that the placement does not keep is still there",
 			fabricPods: []string{"b"}, replicas: 2,
 			pods: []pod{{index: 0, fabricPod: "c"}, {index: 1, fabricPod: "b"}, {index: 3, fabricPod: "b"}},
-			want: -1,
 		},
 		{
 			name:       "wait while a Pod has no position",
 			fabricPods: []string{"b"}, replicas: 2,
-			pods: []pod{{index: 2, fabricPod: "b"}, {index: 3}},
-			want: -1,
+			pods: []pod{{index: 0}, {index: 1, fabricPod: "b"}, {index: 3, fabricPod: "b"}},
 		},
 		{
-			name:       "a Pod without a Grove index stops the step",
-			fabricPods: []string{"b"}, replicas: 2,
-			pods: []pod{{index: -1, fabricPod: "b"}, {index: 3, fabricPod: "b"}},
-			want: -1,
+			name:       "a Pod above the total outside the placement gets no position",
+			fabricPods: []string{"b"}, replicas: 1,
+			pods:  []pod{{index: 0, fabricPod: "b"}, {index: 3, fabricPod: "c"}},
+			added: 1,
 		},
 		{
 			name:       "wait until Grove has synchronized the capacity",
 			fabricPods: []string{"b"}, replicas: 2,
 			pods:        []pod{{index: 2, fabricPod: "b"}, {index: 3, fabricPod: "b"}},
 			notObserved: true,
-			want:        -1,
 		},
 		{
 			name:       "wait until Grove has synchronized the PodClique one time",
 			fabricPods: []string{"b"}, replicas: 2,
 			pods:          []pod{{index: 2, fabricPod: "b"}, {index: 3, fabricPod: "b"}},
 			neverObserved: true,
-			want:          -1,
 		},
 		{
 			name:       "wait while Grove counts a Pod that the controller does not observe",
 			fabricPods: []string{"b"}, replicas: 2,
 			pods:      []pod{{index: 2, fabricPod: "b"}, {index: 3, fabricPod: "b"}},
 			uncounted: 1,
-			want:      -1,
+		},
+		{
+			name:       "wait while a different capacity is in effect, for example during a prune",
+			fabricPods: []string{"b"}, replicas: 2,
+			pods:  []pod{{index: 2, fabricPod: "b"}, {index: 3, fabricPod: "b"}},
+			added: 4,
+		},
+		{
+			name:       "the added position stays while Grove has not created the new Pod, also before its status follows",
+			fabricPods: []string{"b"}, replicas: 2,
+			pods:  []pod{{index: 2, fabricPod: "b"}, {index: 3, fabricPod: "b"}},
+			added: 1, notObserved: true,
+			want: "b",
+		},
+		{
+			name:       "the added position stays while the new Pod is not bound",
+			fabricPods: []string{"b"}, replicas: 2,
+			pods:  []pod{{index: 0, fabricPod: "b", unbound: true}, {index: 2, fabricPod: "b"}, {index: 3, fabricPod: "b"}},
+			added: 1, uncounted: 1,
+			want: "b",
+		},
+		{
+			name:       "a Pod in phase Failed above the total gets no position: the controller removes it",
+			fabricPods: []string{"b", "d"}, replicas: 1,
+			pods: []pod{{index: 0, fabricPod: "b"}, {index: 3, fabricPod: "d", failed: true}},
+		},
+		{
+			name:       "wait while a Pod of the placement is in phase Failed",
+			fabricPods: []string{"b"}, replicas: 2,
+			pods: []pod{{index: 0, fabricPod: "b", failed: true}, {index: 3, fabricPod: "b"}},
+		},
+		{
+			name:       "the added position stays when the new Pod fails after its bind: the scheduler does not accept a Pod in phase Failed",
+			fabricPods: []string{"b"}, replicas: 2,
+			pods:  []pod{{index: 0, fabricPod: "b", failed: true}, {index: 2, fabricPod: "b"}, {index: 3, fabricPod: "b"}},
+			added: 1, uncounted: 1,
+			want: "b",
+		},
+		{
+			name:       "the added position goes away when the new Pod is bound",
+			fabricPods: []string{"b"}, replicas: 2,
+			pods:  []pod{{index: 0, fabricPod: "b"}, {index: 2, fabricPod: "b"}, {index: 3, fabricPod: "b"}},
+			added: 1, uncounted: 1,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Log("Given the live Pods of one Cyborg PodClique in Grove index order, and Grove's status of that PodClique")
+			t.Log("Given the live Pods of one Cyborg PodClique in Grove index order, its capacity, and Grove's status of it")
+			total := tc.replicas * int32(len(tc.fabricPods))
 			clique := &grovev1alpha1.PodClique{Name: "pcs-0-lpx-0-cond", Namespace: "default", UID: "clique-uid", Generation: 2}
-			clique.Status.ObservedGeneration, clique.Status.Replicas = new(clique.Generation), tc.replicas*int32(len(tc.fabricPods))+tc.uncounted
+			clique.Spec.Replicas = total + tc.added
+			clique.Status.ObservedGeneration, clique.Status.Replicas = new(clique.Generation), total+tc.uncounted
 			if tc.notObserved {
 				clique.Status.ObservedGeneration = new(clique.Generation - 1)
 			}
@@ -899,27 +1026,26 @@ func TestCyborgPodToRenumber(t *testing.T) {
 			}
 			var live []*corev1.Pod
 			for _, spec := range tc.pods {
-				live = append(live, newTestBoundCyborgPod(clique, spec.index, spec.fabricPod))
-				live[len(live)-1].Status.Conditions = newTestCyborgPodConditions(spec.ready)
+				pod := newTestBoundCyborgPod(clique, spec.index, spec.fabricPod)
+				pod.Status.Conditions = newTestCyborgPodConditions(spec.ready)
 				if spec.unbound {
-					live[len(live)-1].Spec.NodeName = ""
+					pod.Spec.NodeName = ""
 				}
 				if spec.served {
-					live[len(live)-1].Labels[cyborgServedLabel] = "true"
+					pod.Labels[cyborgServedLabel] = "true"
 				}
+				if spec.failed {
+					pod.Status.Phase = corev1.PodFailed
+				}
+				live = append(live, podcache.Project(pod))
 			}
 			slices.SortFunc(live, func(a, b *corev1.Pod) int { return podCliquePodIndex(a) - podCliquePodIndex(b) })
 
-			t.Log("When the controller selects the Pod to replace")
-			selected := cyborgPodToRenumber(clique, live, cyborgPlacement{fabricPods: tc.fabricPods, replicas: tc.replicas})
+			t.Log("When the controller selects the fabric pod that gets one more position")
+			surge := cyborgSurgeFabricPod(clique, live, cyborgPlacement{fabricPods: tc.fabricPods, replicas: tc.replicas, settled: !tc.unsettled})
 
-			t.Log("Then it selects the Pod with this index, or no Pod")
-			if tc.want < 0 {
-				require.Nil(t, selected)
-				return
-			}
-			require.NotNil(t, selected)
-			require.Equal(t, tc.want, podCliquePodIndex(selected))
+			t.Log("Then it selects this fabric pod, or none")
+			require.Equal(t, tc.want, surge)
 		})
 	}
 }
@@ -929,6 +1055,7 @@ func TestCompareCyborgRetention(t *testing.T) {
 		index   int
 		unbound bool
 		ready   bool
+		served  bool
 	}
 
 	for _, tc := range []struct {
@@ -938,6 +1065,9 @@ func TestCompareCyborgRetention(t *testing.T) {
 	}{
 		{name: "a bound Pod goes before an unbound Pod", pods: []pod{{index: 0, unbound: true}, {index: 1}}, want: []int{1, 0}},
 		{name: "a Ready Pod goes before a Pod that is not Ready", pods: []pod{{index: 0}, {index: 1, ready: true}}, want: []int{1, 0}},
+		{name: "a Ready Pod goes before a Pod that served and is not Ready", pods: []pod{{index: 0, served: true}, {index: 1, ready: true}}, want: []int{1, 0}},
+		{name: "a Pod that served goes before a Pod that did not", pods: []pod{{index: 0}, {index: 5, served: true}}, want: []int{5, 0}},
+		{name: "an unbound Pod is last, also with the served record", pods: []pod{{index: 0, unbound: true, served: true}, {index: 1}}, want: []int{1, 0}},
 		{name: "the lower index goes first, also when its Pod is newer", pods: []pod{{index: 3, ready: true}, {index: 1, ready: true}}, want: []int{1, 3}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -945,12 +1075,16 @@ func TestCompareCyborgRetention(t *testing.T) {
 			clique := &grovev1alpha1.PodClique{Name: "pcs-0-lpx-0-cond", Namespace: "default", UID: "clique-uid"}
 			var pods []*corev1.Pod
 			for _, spec := range tc.pods {
-				pods = append(pods, newTestBoundCyborgPod(clique, spec.index, "a"))
-				pods[len(pods)-1].CreationTimestamp = metav1.NewTime(pods[len(pods)-1].CreationTimestamp.Add(-2 * time.Duration(spec.index) * time.Second))
-				pods[len(pods)-1].Status.Conditions = newTestCyborgPodConditions(spec.ready)
+				pod := newTestBoundCyborgPod(clique, spec.index, "a")
+				pod.CreationTimestamp = metav1.NewTime(pod.CreationTimestamp.Add(-2 * time.Duration(spec.index) * time.Second))
+				pod.Status.Conditions = newTestCyborgPodConditions(spec.ready)
 				if spec.unbound {
-					pods[len(pods)-1].Spec.NodeName = ""
+					pod.Spec.NodeName = ""
 				}
+				if spec.served {
+					pod.Labels[cyborgServedLabel] = "true"
+				}
+				pods = append(pods, podcache.Project(pod))
 			}
 
 			t.Log("When the controller orders them by retention")
@@ -1297,6 +1431,26 @@ func newTestBoundCyborgPod(clique *grovev1alpha1.PodClique, index int, fabricPod
 	return pod
 }
 
+// reconcileTestCyborgPlacement runs the two placement steps of one controller pass
+// for clique: the pin step, which decides the added position, and the step that
+// removes Pods and writes the capacity. It refreshes clique afterwards.
+func reconcileTestCyborgPlacement(
+	t *testing.T,
+	ctx context.Context,
+	r *graphReconciler,
+	clique *grovev1alpha1.PodClique,
+	placement cyborgPlacement,
+	scalingBlocked bool,
+) error {
+	t.Helper()
+	pclqs := map[string]*grovev1alpha1.PodClique{clique.Name: clique}
+	placements, err := r.pinCyborgPods(ctx, pclqs, map[string]cyborgPlacement{clique.Name: placement})
+	require.NoError(t, err)
+	err = r.reconcileCyborgPlacements(ctx, pclqs, placements, scalingBlocked)
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(clique), clique))
+	return err
+}
+
 // settleTestCyborgClique plays the part of Grove after it synchronized the
 // PodClique: the status records the current generation and the number of Pods
 // that are not being deleted. It refreshes clique.
@@ -1372,7 +1526,8 @@ func listTestCyborgPodIndexes(t *testing.T, ctx context.Context, reader client.R
 }
 
 // newTestCyborgPodConditions returns the conditions that the kubelet reports for a
-// bound Pod, in its order.
+// bound Pod, in its order. The operator Pod cache keeps only the Ready condition:
+// a test that gives Pods to a function directly projects them with podcache.Project.
 func newTestCyborgPodConditions(ready bool) []corev1.PodCondition {
 	status := corev1.ConditionFalse
 	if ready {

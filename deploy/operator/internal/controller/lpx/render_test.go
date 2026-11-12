@@ -1700,6 +1700,12 @@ func TestLPXCyborgPlacementLabel(t *testing.T) {
 			want:        lpx.CyborgPlacementPerFabricPod,
 		},
 		{
+			name:        "a placed workload loses the authored labels that only this controller sets",
+			annotations: map[string]string{cyborgPlacementAnnotation: lpx.CyborgPlacementPerFabricPod},
+			labels:      map[string]string{cyborgFabricPodLabel: "a", cyborgServedLabel: "true", "authored": "kept"},
+			want:        lpx.CyborgPlacementPerFabricPod,
+		},
+		{
 			name:   "an authored label does not mark Pods that this controller does not place",
 			labels: map[string]string{lpx.CyborgPlacementLabel: lpx.CyborgPlacementPerFabricPod, cyborgFabricPodLabel: "a", cyborgServedLabel: "true", "authored": "kept"},
 		},

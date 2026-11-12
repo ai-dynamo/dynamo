@@ -198,9 +198,10 @@ SPDX-License-Identifier: Apache-2.0
   the observed label, so the two must not disagree.
 - Pin from these placements directly after the DGD identity check and the Grove
   observations: before the input handoff check, release cleanup, downloads and
-  desired workload resolution. The pin is the only workload write that does not
-  wait for the handoff. Remove Pods and write capacity only after PCS
-  synchronization, as for every replica write. Join placement errors into the
+  desired workload resolution. The pin and the served record are the only
+  workload writes that do not wait for the handoff. Remove Pods and write
+  capacity only after PCS synchronization, as for every replica write. Join
+  placement errors into the
   final error, as for release cleanup: a PodClique that selects no Node must
   not stop the PCS write that corrects it, or the placement of other PodCliques.
 - The count for each fabric pod follows the template of the observed
@@ -273,61 +274,71 @@ SPDX-License-Identifier: Apache-2.0
   fabric pod `k` the index block `[k * replicas, (k + 1) * replicas)`, in
   whatever order the Pods appear. A Pod keeps its index for its life, so the
   Pods that stay after a prune can have indexes at or above the new total.
-- Renumber when the capacity is correct: remove a placed Pod whose index is at
-  or above the placement total. Grove gives the replacement the lowest free
-  index of the PodClique, the placement gate holds it, and the pin puts it in
-  the position that the removal opened. Cyborg pipeline-parallel mode needs
-  exactly the indexes `0..TOTAL_REPLICAS-1` in one PodClique. With one fabric
-  pod in use, this step gives it those indexes. With two or more, that mode
-  needs a Cyborg change.
-- Renumber only with two or more Cyborg Pods for each fabric pod. A removal
-  must never take the last bound Cyborg Pod of a fabric pod that holds LPUs.
-  The LPX scheduler waits for a replacement only while the removed Pod or its
-  replacement exists. Grove creates the replacement while the removed Pod
-  terminates only when a different event makes it reconcile the PodClique and
-  its process has an expectations record for it; since Kubernetes 1.33 the
-  deletion mark changes the Pod generation, and Grove ignores that update. So
-  there can be an instant with no such Pod, and the scheduler then releases the
-  plan. With one Cyborg Pod for each fabric pod, the Pods keep their indexes.
-- Renumber only while every LPR of the PCSG replica is `Bound`. The placement
-  is then final. Only for a `Bound` plan does the LPX scheduler wait, for the
-  PCS `terminationDelay`, if the other Cyborg Pods of the fabric pod are lost
-  during the step.
-- Remove one Pod at a time, and only when the PodClique has exactly the
-  placement total of live Pods and each of them is placed and bound. Grove then
-  owes exactly one replacement, and the fabric pod keeps a bound Cyborg Pod.
-- The GPU of the removed Pod is not reserved for the replacement. A different
-  Pending Pod that can use the Node can take it. The replacement then stays
-  Pending, the fabric pod has one Cyborg Pod less, and the step waits.
-- Wait for Grove before each removal: `status.observedGeneration` must equal
-  the PodClique generation, and `status.replicas` must equal the placement
-  total. Between the surplus deletion and the lower capacity, Grove creates
-  Pods for the removed ones, and it removes them when it observes the capacity.
-  A removal in that time lets one of them stay with an index that is not the
-  lowest one, and the step then needs one more replacement.
-- Remove a Pod with its observed resource version. A Pod that changed since the
-  observation stays, and the conflict is an ordinary error: the Pod watch does
-  not pass a status change of a placed Pod, so only the error starts a new pass.
-- Never remove a Pod that serves, or that served, to renumber it: it uses the
-  index that it has. A Pod serves when it is Ready. Record each Ready Pod with
-  an index at or above the total in Pod label `lpx.nvidia.com/served`, and keep
-  a Pod with that label also while it is not Ready. Only this controller sets
-  the label; remove an authored one when rendering. A Pod that stays after a
-  prune is not Ready while it waits for its Agents, and a pipeline-parallel
-  Cyborg with an index out of range does not become Ready, so the step removes
-  those. A Pod above the total that becomes Ready before the step removes it
-  keeps its index. So does a Pod that stays after a scale-in: with two or more
-  fabric pods in use, or when a Pod with a lower index had a worse rank. A
-  later replacement in its fabric pod then gets a lower index, and two Pods of
-  that fabric pod can have the same `index % ioFpgaCount`.
-- Take the first fabric pod in name order that has such a Pod, lowest index
-  first. One fabric pod is then complete before the next one starts and gets
-  consecutive free indexes: one index block again when the provision gave
+- Renumber a settled placement: give the Pods that stay the Grove indexes below
+  the placement total. Cyborg pipeline-parallel mode needs exactly the indexes
+  `0..TOTAL_REPLICAS-1` in one PodClique. With one fabric pod in use, this step
+  gives it those indexes. With two or more, that mode needs a Cyborg change.
+- Add first, then remove. Give the fabric pod of a Pod above the range one more
+  position, so that the capacity is the total plus one. Grove creates one Pod
+  with the lowest free index of the PodClique, the placement gate holds it, and
+  the pin puts it in the added position. When the new Pod is bound, take the
+  position away. The retention order then makes a Pod above the range surplus,
+  and the prune steps remove it and write the total.
+- Never remove a Pod above the range first. The fabric pod would have one bound
+  Cyborg Pod less, and its GPU can go to a different Pending Pod. When it was
+  the last bound Cyborg Pod of the fabric pod, the LPX scheduler can release
+  the plan: it waits only while the removed Pod or its replacement exists, and
+  since Kubernetes 1.33 Grove can create the replacement only after the removed
+  Pod is gone (the deletion mark changes the Pod generation, and Grove ignores
+  an update with a changed generation).
+- The new Pod needs one free GPU in the fabric pod. Without one it stays
+  Pending, the capacity stays at the total plus one, and no Pod goes. When the
+  Pod above the range becomes Ready in that time, the position goes away and
+  the new Pod is removed.
+- Give a position only for a Pod above the range that is bound, is not Ready,
+  and has no served record. Take the first fabric pod in name order that has
+  such a Pod. One fabric pod is then complete before the next one starts and
+  gets consecutive free indexes: one index block again when the provision gave
   blocks. The blocks of two or more fabric pods are then not in name order.
-- Keep bound Pods before unbound, ready before not ready, and then the lower
-  Grove index. A fabric pod that holds LPUs therefore keeps a bound Cyborg Pod.
-  With one fabric pod in use, the Pods that stay after a scale-in need no
-  replacement when no Pod with a lower index has a worse rank.
+- Add a position only to a complete placement that Grove has synchronized: the
+  capacity is the total, `status.observedGeneration` equals the PodClique
+  generation, `status.replicas` equals the total, and the PodClique has exactly
+  the total of live Pods, each placed and bound. Between the surplus deletion
+  and the lower capacity of a prune, Grove creates Pods for the removed ones,
+  and it removes them when it observes the capacity. More capacity at that time
+  lets one of them stay with an index that is not the lowest one. A position
+  that the capacity already has stays until the new Pod is bound.
+- Decide the position one time in each pass, in the pin step, and use that
+  decision for the pins, the removals, the capacity and the scaling state of
+  the pass.
+- Remove a surplus Pod with its UID as the only precondition. A pass can read
+  a Pod before the cache has its deletion mark, and a second removal must
+  change nothing. A removal can thus use an old Ready condition: a Pod that
+  became Ready in the cache delay can go. In a renumber, its fabric pod then
+  already has the bound Pod that takes its place.
+- A Pod in phase Failed or Succeeded holds no position: remove it. It cannot
+  run again, the LPX scheduler does not accept it as the Cyborg Pod of its
+  fabric pod, and Grove creates no Pod in its place while it is there. Never
+  count it as a bound Pod: a new Pod that fails after its bind must not end
+  the added position.
+- Never replace a Pod that serves, or that served: it uses the index that it
+  has. A Pod serves when it is Ready. Record each Ready Pod in Pod label
+  `lpx.nvidia.com/served`, in the pin step, and keep a Pod with that label
+  also while it is not Ready. Only this controller sets the label; remove an
+  authored one when rendering. A Pod that stays after a prune is not
+  Ready while it waits for its Agents, and a pipeline-parallel Cyborg with an
+  index out of range does not become Ready, so those get new Pods. A Pod above
+  the total that becomes Ready before then keeps its index. So does a Pod that
+  stays after a scale-in: with two or more fabric pods in use, or when a Pod
+  with a lower index had a worse rank. A later replacement in its fabric pod
+  then gets a lower index, and two Pods of that fabric pod can have the same
+  `index % ioFpgaCount`.
+- Keep bound Pods before unbound; then a Ready Pod, a Pod with the served
+  record, and the other Pods; then the lower Grove index. A fabric pod that
+  holds LPUs therefore keeps a bound Cyborg Pod, a fabric pod with a Pod too
+  many loses first a Pod above the range that did not serve, and with one
+  fabric pod in use, the Pods that stay after a scale-in have the lowest
+  indexes when no Pod with a lower index has a worse rank.
 - Delete surplus placed Pods before lowering the PodClique capacity. Grove
   excludes terminating Pods from its scale-in selection; with the lower capacity
   first, Grove selects its own victims and can remove the last Cyborg Pod of a
@@ -339,8 +350,9 @@ SPDX-License-Identifier: Apache-2.0
 - Write the placement capacity without a resource-version precondition. The
   placement is its only owner, and a conflict only delays the write that stops
   the replacements.
-- Capacity writes, the removals that a lower capacity needs, and the renumber
-  removal follow the shared scaling predicate. Pinning does not.
+- Capacity writes, and the removals that a lower capacity needs, follow the
+  shared scaling predicate. Pinning does not. The added position of a renumber
+  is a capacity write.
 - Placement does not delay request publication: the LPX scheduler waits for
   bound Cyborg Pods by itself.
 - Placement needs a scheduler that places each pinned Pod independently, such as
