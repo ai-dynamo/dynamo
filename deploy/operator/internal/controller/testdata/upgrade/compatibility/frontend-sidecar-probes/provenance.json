@@ -1,0 +1,48 @@
+{
+  "captureSources": {
+    "hack/capture_frontend_sidecar_probes.py": "64c7386590bf86294c7bc0becee5ea9cd28a60b71e485b5cfad0d068634cb64d",
+    "hack/capture_missing_origin.py": "6b4ffb46cbed9520f1556201dca3105adb5fced2dc86f3955e314d7f157c6a8a",
+    "hack/normalize_upgrade_snapshot/main.go": "5e8f3247947b384c93c79b4681d6389ca3d00c63aa0b85054a254f4d1ea1192b",
+    "hack/upgrade_capture_test.go.tmpl": "6d2e0b9bcb266ad0b72d719434f06b3686d230423486491493fb52c78e242206",
+    "internal/testing/golden/capture.go": "73425c5e21c3f3da45cb79549f0e1d23ef43eee21a85981c0b4f3703b5d845cd",
+    "internal/testing/golden/snapshot.go": "f63c723b093b2bf6b8fe760e043e09e471cc7e1da80077da3b75b9e636b1db35"
+  },
+  "creation": "1.6.0 CREATE with mutating admission; origin stamped by the released operator",
+  "harness": {
+    "1.6.0": "f840ca9aa5362ee2ba12ae980828f61f0b48db75f07c169b8958654d5d77fcae"
+  },
+  "inputSHA256": "94326811beeb21e0567107264b6ae329a4ac34b0633fae87630b7faa4658145b",
+  "observations": {
+    "1.6.0": {
+      "sha256": "041affa43b007323b44568c5e125456ee991f3ad7d0b5e51bb4c1667f9adade6",
+      "sidecarProbes": {
+        "livenessProbe": {
+          "failureThreshold": 3,
+          "httpGet": {
+            "path": "/live",
+            "port": "http"
+          },
+          "initialDelaySeconds": 15,
+          "periodSeconds": 30,
+          "timeoutSeconds": 1
+        },
+        "readinessProbe": {
+          "failureThreshold": 3,
+          "httpGet": {
+            "path": "/health",
+            "port": "http"
+          },
+          "initialDelaySeconds": 30,
+          "periodSeconds": 10,
+          "timeoutSeconds": 3
+        }
+      },
+      "workerHash": "2840f95b"
+    }
+  },
+  "reconcileBarrierSHA256": "5a2ce05158262546c9950a9a35cdf64b19131dfc7187f29c52c59361efbb6183",
+  "releases": {
+    "1.6.0": "701da25292ecca8f64d770cc0b17d389200019a1"
+  },
+  "scope": "frontendSidecar container with partially authored probes, field-merged by 1.6.0"
+}
