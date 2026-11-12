@@ -391,7 +391,7 @@ status:
       servedModelName: Qwen/Qwen3-0.6B
       updatedReplicas: 0
   conditions:
-    - lastTransitionTime: "2026-11-12T07:14:51Z"
+    - lastTransitionTime: "2026-11-12T07:56:22Z"
       message: 'Resources not ready: workers: frontend: resource not found; worker: resource not found'
       observedGeneration: 1
       reason: some_resources_are_not_ready
@@ -506,9 +506,9 @@ metadata:
   resourceVersion: "1"
   uid: 00000000-0000-0000-0000-000000000000
 spec:
-  clusterIP: 10.0.0.106
+  clusterIP: 10.0.0.26
   clusterIPs:
-    - 10.0.0.106
+    - 10.0.0.26
   internalTrafficPolicy: Cluster
   ipFamilies:
     - IPv4
@@ -550,9 +550,9 @@ metadata:
   resourceVersion: "1"
   uid: 00000000-0000-0000-0000-000000000000
 spec:
-  clusterIP: 10.0.0.168
+  clusterIP: 10.0.0.233
   clusterIPs:
-    - 10.0.0.168
+    - 10.0.0.233
   internalTrafficPolicy: Cluster
   ipFamilies:
     - IPv4

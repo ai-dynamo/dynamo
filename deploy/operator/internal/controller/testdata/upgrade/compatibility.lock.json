@@ -1,6 +1,6 @@
 {
   "inputs": {
-    "compatibility/frontend-sidecar-probes/input.yaml": "94326811beeb21e0567107264b6ae329a4ac34b0633fae87630b7faa4658145b",
+    "compatibility/frontend-sidecar-probes/input.yaml": "decc42f683598a5ad129f0755ee0de24f1177e3ce31f24145ae796ede543ef46",
     "compatibility/missing-origin/input.yaml": "cb1ffc0f6529e1d3535a62917ec560f1868fbd8f1563c19d95902a1e5397c193"
   },
   "reconciledVersion": "1.6.0",

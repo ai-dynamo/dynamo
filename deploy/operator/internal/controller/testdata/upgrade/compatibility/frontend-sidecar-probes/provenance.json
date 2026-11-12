@@ -1,7 +1,6 @@
 {
   "captureSources": {
-    "hack/capture_frontend_sidecar_probes.py": "64c7386590bf86294c7bc0becee5ea9cd28a60b71e485b5cfad0d068634cb64d",
-    "hack/capture_missing_origin.py": "6b4ffb46cbed9520f1556201dca3105adb5fced2dc86f3955e314d7f157c6a8a",
+    "hack/capture_compatibility.py": "f9cfbbac28ba385ec33ae8a15acab1526da1d79620af65199cb6e0004510e08f",
     "hack/normalize_upgrade_snapshot/main.go": "5e8f3247947b384c93c79b4681d6389ca3d00c63aa0b85054a254f4d1ea1192b",
     "hack/upgrade_capture_test.go.tmpl": "6d2e0b9bcb266ad0b72d719434f06b3686d230423486491493fb52c78e242206",
     "internal/testing/golden/capture.go": "73425c5e21c3f3da45cb79549f0e1d23ef43eee21a85981c0b4f3703b5d845cd",
@@ -9,12 +8,12 @@
   },
   "creation": "1.6.0 CREATE with mutating admission; origin stamped by the released operator",
   "harness": {
-    "1.6.0": "f840ca9aa5362ee2ba12ae980828f61f0b48db75f07c169b8958654d5d77fcae"
+    "1.6.0": "ffcabe655bffda731682208e01a0d6d6963f01f277e2a122cc1da69e6b083ba4"
   },
-  "inputSHA256": "94326811beeb21e0567107264b6ae329a4ac34b0633fae87630b7faa4658145b",
+  "inputSHA256": "decc42f683598a5ad129f0755ee0de24f1177e3ce31f24145ae796ede543ef46",
   "observations": {
     "1.6.0": {
-      "sha256": "041affa43b007323b44568c5e125456ee991f3ad7d0b5e51bb4c1667f9adade6",
+      "sha256": "041898e917de7fc1a1e755cb3d2e6adb85ddcee55a97a43c4d91047b9e7f678e",
       "sidecarProbes": {
         "livenessProbe": {
           "failureThreshold": 3,

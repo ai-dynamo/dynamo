@@ -60,7 +60,12 @@ func prepareUpgradeHistory(ctx context.Context, c client.Client) (func(context.C
 	if len(inputs) == 0 {
 		return nil, fmt.Errorf("no historical inputs")
 	}
-	inputs = append(inputs, upgradeMissingOriginInput, upgradeFrontendSidecarProbesInput)
+	// Compatibility snapshots are seeded with history, before current admission starts.
+	compatibility, err := upgradeInputs("compatibility")
+	if err != nil {
+		return nil, err
+	}
+	inputs = append(inputs, compatibility...)
 	snapshots := map[string][]unstructured.Unstructured{}
 	for _, input := range inputs {
 		objects, err := golden.ReadManifests(input)
@@ -389,8 +394,7 @@ func TestClusterOperatorUpgrade(t *testing.T) {
 
 	t.Run("component-history-barrier", testUpgradeComponentHistoryBarrier)
 	t.Run("disaggregatedset-replay", testUpgradeDisaggregatedSetReplay)
-	t.Run("missing-origin", testUpgradeMissingOrigin)
-	t.Run("frontend-sidecar-probes", testUpgradeFrontendSidecarProbes)
+	runUpgradeCompatibilityScenarios(t)
 }
 
 // Upgrade capture and replay use the same version source as production admission.

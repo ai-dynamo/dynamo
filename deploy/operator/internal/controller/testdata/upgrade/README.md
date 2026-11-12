@@ -263,11 +263,18 @@ remain concrete and unchanged during replay.
 The released 1.6 operator also field-merged an authored `frontendSidecar` probe
 with its frontend defaults, where main replaces it as a complete value. The
 `compatibility/frontend-sidecar-probes` snapshot holds such a workload as 1.6.0
-rendered it, captured with `hack/capture_frontend_sidecar_probes.py`. Its replay
-fails unless the `FrontendSidecarProbeReplacement` origin gate keeps the merge for
-1.6-origin workloads. Feature-specific shapes like this one live under
-`compatibility/` with their own provenance; the canonical matrix under `history/`
-covers topologies.
+rendered it. Its replay fails unless the `FrontendSidecarProbeReplacement` origin
+gate keeps the merge for 1.6-origin workloads.
+
+Feature-specific shapes like this one live under `compatibility/` with their own
+provenance; the canonical matrix under `history/` covers topologies. Each
+compatibility scenario is declared in `hack/capture_compatibility.py`, which runs
+the pinned released operators on the authored DGD and records the result, and is
+replayed by `TestClusterOperatorUpgrade/<scenario>` through the shared takeover
+and safety assertion plus any scenario-specific checks registered in
+`upgrade_compatibility_clustertest_test.go`. To add a scenario, add its entry to
+the capture script, run the capture, commit the directory, and add its input
+digest to `compatibility.lock.json`.
 
 Main already reports operator 1.7.0. The complete released-1.6 history replaces the
 one-time 1.7-on-1.5 history exception from #17153; subsequent minor transitions
