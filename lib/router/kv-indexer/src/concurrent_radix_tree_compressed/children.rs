@@ -41,9 +41,8 @@ pub(super) struct NodeChildren {
     /// place under the exclusive lock. A sharded map changes under the shared lock, so
     /// writers to a high-fanout node never block its readers.
     ///
-    /// NOTE(perf): This was an `ArcSwap` of immutable snapshots. Each swap or drop of
-    /// one walks every thread's `arc_swap` debt list, and with over a hundred reader
-    /// threads those walks were half of the event threads' time.
+    /// NOTE(perf): Not an `ArcSwap` of immutable snapshots, because each swap or drop of
+    /// one walks every thread's `arc_swap` debt list.
     state: RwLock<Option<Box<ChildrenState>>>,
 }
 
@@ -127,13 +126,7 @@ impl NodeChildren {
     }
 
     pub(super) fn insert(&self, key: LocalBlockHash, child: SharedNode) -> Option<SharedNode> {
-        {
-            let state = self.state.read();
-            if let Some(ChildrenState::Sharded(children)) = state.as_deref() {
-                return children.insert(key, child);
-            }
-        }
-        Self::upsert(&mut self.state.write(), key, &child, true)
+        self.put(key, child, true)
     }
 
     pub(super) fn insert_if_absent(
@@ -141,45 +134,60 @@ impl NodeChildren {
         key: LocalBlockHash,
         child: SharedNode,
     ) -> ChildInsertResult {
-        {
-            let state = self.state.read();
-            if let Some(ChildrenState::Sharded(children)) = state.as_deref() {
-                return match children.entry(key) {
-                    Entry::Occupied(entry) => ChildInsertResult::Existing(entry.get().clone()),
-                    Entry::Vacant(entry) => {
-                        entry.insert(child.clone());
-                        ChildInsertResult::Inserted(child)
-                    }
-                };
-            }
-        }
-        match Self::upsert(&mut self.state.write(), key, &child, false) {
+        match self.put(key, child.clone(), false) {
             Some(existing) => ChildInsertResult::Existing(existing),
             None => ChildInsertResult::Inserted(child),
         }
     }
 
-    /// Stores `key -> child` under the exclusive lock, promoting to a sharded map past
-    /// `SMALL_CHILD_LIMIT`. If `key` already has a child, returns it: replaced by
+    /// Stores `key -> child`. If `key` already has a child, returns it: replaced by
     /// `child` when `replace` is set, left in place otherwise.
-    fn upsert(
-        state: &mut Option<Box<ChildrenState>>,
+    fn put(&self, key: LocalBlockHash, child: SharedNode, replace: bool) -> Option<SharedNode> {
+        {
+            let state = self.state.read();
+            if let Some(ChildrenState::Sharded(children)) = state.as_deref() {
+                return Self::put_sharded(children, key, child, replace);
+            }
+        }
+        Self::put_locked(&mut self.state.write(), key, child, replace)
+    }
+
+    fn put_sharded(
+        children: &ShardedChildren,
         key: LocalBlockHash,
-        child: &SharedNode,
+        child: SharedNode,
         replace: bool,
     ) -> Option<SharedNode> {
-        let new_entry = || ChildEntry {
+        match children.entry(key) {
+            Entry::Occupied(mut entry) if replace => Some(entry.insert(child)),
+            Entry::Occupied(entry) => Some(entry.get().clone()),
+            Entry::Vacant(entry) => {
+                entry.insert(child);
+                None
+            }
+        }
+    }
+
+    /// `put` under the exclusive lock: a compact list changes in place and becomes a
+    /// sharded map past `SMALL_CHILD_LIMIT`.
+    fn put_locked(
+        state: &mut Option<Box<ChildrenState>>,
+        key: LocalBlockHash,
+        child: SharedNode,
+        replace: bool,
+    ) -> Option<SharedNode> {
+        let new = ChildEntry {
             hash: key,
-            node: child.clone(),
+            node: child,
         };
         let Some(current) = state.as_deref_mut() else {
-            *state = Some(Box::new(ChildrenState::Singleton(new_entry())));
+            *state = Some(Box::new(ChildrenState::Singleton(new)));
             return None;
         };
         let existing = match current {
             ChildrenState::Singleton(only) if only.hash == key => &mut only.node,
             ChildrenState::Singleton(only) => {
-                let mut entries = vec![only.clone(), new_entry()];
+                let mut entries = vec![only.clone(), new];
                 if key < only.hash {
                     entries.swap(0, 1);
                 }
@@ -190,8 +198,9 @@ impl NodeChildren {
                 match entries.binary_search_by_key(&key, |entry| entry.hash) {
                     Ok(index) => &mut entries[index].node,
                     Err(index) if entries.len() < SMALL_CHILD_LIMIT => {
+                        // Exact fit: `Vec`'s own growth would give a third child room for four.
                         entries.reserve_exact(1);
-                        entries.insert(index, new_entry());
+                        entries.insert(index, new);
                         return None;
                     }
                     Err(_) => {
@@ -199,7 +208,7 @@ impl NodeChildren {
                         for entry in entries.drain(..) {
                             sharded.insert(entry.hash, entry.node);
                         }
-                        sharded.insert(key, child.clone());
+                        sharded.insert(key, new.node);
                         *current = ChildrenState::Sharded(sharded);
                         return None;
                     }
@@ -207,18 +216,11 @@ impl NodeChildren {
             }
             // Promoted between the caller's shared look and this exclusive lock.
             ChildrenState::Sharded(children) => {
-                return match children.entry(key) {
-                    Entry::Occupied(mut entry) if replace => Some(entry.insert(child.clone())),
-                    Entry::Occupied(entry) => Some(entry.get().clone()),
-                    Entry::Vacant(entry) => {
-                        entry.insert(child.clone());
-                        None
-                    }
-                };
+                return Self::put_sharded(children, key, new.node, replace);
             }
         };
         Some(if replace {
-            std::mem::replace(existing, child.clone())
+            std::mem::replace(existing, new.node)
         } else {
             existing.clone()
         })
@@ -234,15 +236,12 @@ impl NodeChildren {
         let mut state = self.state.write();
         let current = state.as_deref_mut()?;
         match current {
-            ChildrenState::Singleton(only) => {
-                if only.hash != *key {
-                    return None;
-                }
-                match state.take().map(|only| *only) {
-                    Some(ChildrenState::Singleton(only)) => Some(only.node),
-                    _ => unreachable!("matched a singleton under this lock"),
-                }
+            ChildrenState::Singleton(only) if only.hash == *key => {
+                let node = only.node.clone();
+                *state = None;
+                Some(node)
             }
+            ChildrenState::Singleton(_) => None,
             ChildrenState::Small(entries) => {
                 let index = entries.binary_search_by_key(key, |entry| entry.hash).ok()?;
                 let removed = entries.remove(index);
@@ -335,7 +334,9 @@ mod tests {
             &nodes[0]
         ));
 
-        children.remove(&LocalBlockHash(0)).unwrap();
+        assert!(children.remove(&LocalBlockHash(1)).is_none());
+        let last = children.remove(&LocalBlockHash(0)).unwrap();
+        assert!(Arc::ptr_eq(&last, &nodes[0]));
         assert_eq!(children.kind(), ChildrenKind::Empty);
         assert!(children.is_empty());
     }
@@ -433,23 +434,26 @@ mod tests {
     }
 
     /// An insert looks under the shared lock first. If another thread promotes the
-    /// storage before it takes the exclusive lock, `upsert` meets a sharded map.
+    /// storage before it takes the exclusive lock, `put_locked` meets a sharded map.
     #[test]
-    fn upsert_handles_storage_promoted_before_the_exclusive_lock() {
+    fn put_locked_handles_storage_promoted_before_the_exclusive_lock() {
         let sharded = ShardedChildren::with_hasher(FxBuildHasher);
         let first = child();
         sharded.insert(LocalBlockHash(1), first.clone());
         let mut state = Some(Box::new(ChildrenState::Sharded(sharded)));
 
-        let kept = NodeChildren::upsert(&mut state, LocalBlockHash(1), &child(), false).unwrap();
+        let kept = NodeChildren::put_locked(&mut state, LocalBlockHash(1), child(), false).unwrap();
         assert!(Arc::ptr_eq(&kept, &first));
 
         let second = child();
-        let replaced = NodeChildren::upsert(&mut state, LocalBlockHash(1), &second, true).unwrap();
+        let replaced =
+            NodeChildren::put_locked(&mut state, LocalBlockHash(1), second.clone(), true).unwrap();
         assert!(Arc::ptr_eq(&replaced, &first));
 
         let third = child();
-        assert!(NodeChildren::upsert(&mut state, LocalBlockHash(2), &third, false).is_none());
+        assert!(
+            NodeChildren::put_locked(&mut state, LocalBlockHash(2), third.clone(), false).is_none()
+        );
 
         let children = NodeChildren::from_state(state);
         assert_eq!(children.kind(), ChildrenKind::Sharded);
