@@ -46,7 +46,7 @@ The B200 variants fill 4 of 8 GPUs on a B200 node; the GB200 variants fill all 4
 
 ## Performance
 
-Floor-picks (max system tok/s/GPU at user_p50 ≥ 50), default temperature. Agentic variants only; Day-0 recipes are functional (unbenchmarked). Workload definitions: [Optimization targets](../README.md#optimization-targets).
+Floor-picks (max system tok/s/GPU at user_p50 ≥ 50), default temperature. Agentic variants only; Day-0 recipes are functional (unbenchmarked). Workload definitions: [Optimization targets](../README.md#optimization-targets). The `disagg-h200-agentic` numbers were measured with MTP-1 on decode only, before prefill also ran MTP-1, and have not been re-measured.
 
 > **Disaggregated floor-picks require the per-rank NIC mapping (GDR).** These disagg numbers were measured with GDR (per-rank affine NIC); to reproduce them, set **both** NIC env vars per [Per-rank NIC mapping](../README.md#per-rank-nic-mapping-b200--h200-disaggregated). Without them, KV transfer falls back to host-staging and won't reach these figures (see §Per-rank NIC mapping).
 
