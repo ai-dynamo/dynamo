@@ -1,9 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for VllmEngineMonitor._periodic_log_stats."""
+"""Tests for vLLM engine health monitoring, shutdown, and periodic stats."""
 
 import asyncio
+import multiprocessing
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -27,6 +29,8 @@ def mock_engine():
     engine.log_stats = True
     engine.do_log_stats = AsyncMock()
     engine.check_health = AsyncMock()
+    engine.collective_rpc = AsyncMock()
+    engine.shutdown = MagicMock()
     return engine
 
 
@@ -197,7 +201,144 @@ async def test_run_health_check_times_out(mock_engine):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("health_error", [EngineDeadError, asyncio.TimeoutError])
+async def test_run_health_check_reaches_workers(mock_engine):
+    monitor = _make_monitor(mock_engine)
+
+    await monitor._run_health_check()
+
+    mock_engine.check_health.assert_awaited_once_with()
+    mock_engine.collective_rpc.assert_awaited_once_with("check_health", timeout=0.01)
+
+
+@pytest.mark.asyncio
+async def test_run_health_check_local_failure_skips_worker_rpc(mock_engine):
+    mock_engine.check_health.side_effect = EngineDeadError()
+    monitor = _make_monitor(mock_engine)
+
+    with pytest.raises(EngineDeadError):
+        await monitor._run_health_check()
+
+    mock_engine.collective_rpc.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_run_health_check_worker_rpc_times_out(mock_engine):
+    async def blocked_worker_rpc(*args, **kwargs):
+        await asyncio.sleep(1.0)
+
+    mock_engine.collective_rpc.side_effect = blocked_worker_rpc
+    monitor = _make_monitor(mock_engine)
+
+    with pytest.raises(asyncio.TimeoutError):
+        await monitor._run_health_check()
+
+
+@pytest.mark.asyncio
+async def test_run_health_check_timeout_disabled(mock_engine):
+    monitor = _make_monitor(mock_engine)
+    monitor.health_config = EngineHealthMonitorConfig(0.01, 0, 0)
+
+    await monitor._run_health_check()
+
+    mock_engine.collective_rpc.assert_awaited_once_with("check_health", timeout=None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "health_error", [EngineDeadError, asyncio.TimeoutError, RuntimeError]
+)
+async def test_worker_health_failure_terminates_parent(mock_engine, health_error):
+    mock_engine.collective_rpc.side_effect = health_error()
+    monitor = _make_monitor(mock_engine)
+    monitor._shutdown_worker = MagicMock(side_effect=RuntimeError("parent terminated"))
+
+    with pytest.raises(RuntimeError, match="parent terminated"):
+        await asyncio.wait_for(monitor._check_engine_health(), timeout=1.0)
+
+    monitor._shutdown_worker.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failed_cleanup", ["engine", "runtime", None])
+async def test_fatal_shutdown_exits_even_if_cleanup_fails(mock_engine, failed_cleanup):
+    monitor = _make_monitor(mock_engine)
+    if failed_cleanup == "engine":
+        mock_engine.shutdown.side_effect = RuntimeError("engine cleanup failed")
+    elif failed_cleanup == "runtime":
+        monitor.runtime.shutdown.side_effect = RuntimeError("runtime cleanup failed")
+
+    with (
+        patch("dynamo.vllm.engine_monitor.threading.Timer") as timer,
+        patch(
+            "dynamo.vllm.engine_monitor.os._exit", side_effect=SystemExit(1)
+        ) as exit_process,
+        pytest.raises(SystemExit),
+    ):
+        monitor._shutdown_worker()
+
+    mock_engine.shutdown.assert_called_once_with()
+    monitor.runtime.shutdown.assert_called_once_with()
+    timer.assert_called_once_with(0.01, exit_process, args=(1,))
+    assert timer.return_value.daemon is True
+    timer.return_value.start.assert_called_once_with()
+    timer.return_value.cancel.assert_called_once_with()
+    exit_process.assert_called_once_with(1)
+
+
+@pytest.mark.asyncio
+async def test_fatal_shutdown_deadline_disabled(mock_engine):
+    monitor = _make_monitor(mock_engine)
+    monitor.health_config = EngineHealthMonitorConfig(0.01, 0.01, 0)
+
+    with (
+        patch("dynamo.vllm.engine_monitor.threading.Timer") as timer,
+        patch(
+            "dynamo.vllm.engine_monitor.os._exit", side_effect=SystemExit(1)
+        ) as exit_process,
+        pytest.raises(SystemExit),
+    ):
+        monitor._shutdown_worker()
+
+    timer.assert_not_called()
+    exit_process.assert_called_once_with(1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    "fork" not in multiprocessing.get_all_start_methods(), reason="requires fork"
+)
+@pytest.mark.parametrize("blocked_cleanup", ["engine", "runtime"])
+async def test_fatal_shutdown_deadline_exits_real_process(mock_engine, blocked_cleanup):
+    monitor = _make_monitor(mock_engine)
+    monitor.health_config = EngineHealthMonitorConfig(0.01, 0.01, 0.05)
+
+    def block_cleanup():
+        time.sleep(10)
+
+    if blocked_cleanup == "engine":
+        mock_engine.shutdown.side_effect = block_cleanup
+    else:
+        monitor.runtime.shutdown.side_effect = block_cleanup
+
+    process = multiprocessing.get_context("fork").Process(
+        target=monitor._shutdown_worker
+    )
+    try:
+        process.start()
+        process.join(timeout=3.0)
+        assert not process.is_alive(), "Fatal shutdown exceeded its deadline"
+        assert process.exitcode == 1
+    finally:
+        if process.is_alive():
+            process.kill()
+            process.join(timeout=3.0)
+        process.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "health_error", [EngineDeadError, asyncio.TimeoutError, RuntimeError]
+)
 async def test_health_failure_during_worker_shutdown_stops_monitor(
     mock_engine, health_error
 ):

@@ -3,13 +3,11 @@
 
 import asyncio
 import logging
-import math
 import os
-import signal
+import threading
 import traceback
 
 from vllm.v1.engine.async_llm import AsyncLLM
-from vllm.v1.engine.exceptions import EngineDeadError
 
 from dynamo.common.engine_monitor import EngineHealthMonitorConfig
 from dynamo.runtime import DistributedRuntime
@@ -59,29 +57,35 @@ class VllmEngineMonitor:
         Shutdown the vLLM engine on crash scenarios to free resources.
         """
 
-        # Has timeout protection via SIGALRM
-        def timeout_handler(signum, frame):
-            raise TimeoutError("Engine shutdown timed out")
-
-        previous_handler = None
-        if self.health_config.shutdown_timeout > 0:
-            previous_handler = signal.getsignal(signal.SIGALRM)
-            signal.signal(signal.SIGALRM, timeout_handler)
-            signal.alarm(math.ceil(self.health_config.shutdown_timeout))
-
         try:
             self.engine_client.shutdown()
         except Exception as e:
             logger.warning(f"vLLM engine shutdown failed: {e}")
+
+    def _shutdown_worker(self):
+        """Exit after fatal failure, even if engine or runtime cleanup blocks."""
+        watchdog = None
+        if self.health_config.shutdown_timeout > 0:
+            watchdog = threading.Timer(
+                self.health_config.shutdown_timeout, os._exit, args=(1,)
+            )
+            watchdog.daemon = True
+            watchdog.start()
+
+        try:
+            self._shutdown_engine()
+            self.runtime.shutdown()
+        except Exception:
+            logger.exception("Dynamo Runtime shutdown failed")
         finally:
-            if self.health_config.shutdown_timeout > 0:
-                signal.alarm(0)
-                signal.signal(signal.SIGALRM, previous_handler)
+            if watchdog is not None:
+                watchdog.cancel()
+            os._exit(1)
 
     async def _check_engine_health(self):
         """
         Continuously check engine health until:
-        1. Engine dies (EngineDeadError) - initiate shutdown
+        1. Engine or worker health check fails or times out - initiate shutdown
         2. Shutdown event is triggered - stop monitoring gracefully
         3. Task is cancelled - cleanup
         """
@@ -115,7 +119,7 @@ class VllmEngineMonitor:
                     # No shutdown event, just sleep normally
                     await asyncio.sleep(self.health_config.interval)
 
-            except (EngineDeadError, asyncio.TimeoutError) as e:
+            except Exception as e:
                 if self.shutdown_event and self.shutdown_event.is_set():
                     logger.warning(
                         "%s: %s while worker shutdown is in progress; "
@@ -127,15 +131,19 @@ class VllmEngineMonitor:
                 logger.error(f"Traceback: {traceback.format_exc()}")
                 logger.error(f"vLLM AsyncLLM health check failed: {e}")
                 logger.warning("Initiating Dynamo Runtime shutdown.")
-                self._shutdown_engine()
-                self.runtime.shutdown()
-                os._exit(1)
+                self._shutdown_worker()
             except asyncio.CancelledError:
                 logger.debug(f"{self.__class__.__name__}: Health check task cancelled.")
                 break
 
     async def _run_health_check(self):
-        health_check = self.engine_client.check_health()
+        async def check_engine_and_workers():
+            await self.engine_client.check_health()
+            await self.engine_client.collective_rpc(
+                "check_health", timeout=self.health_config.check_timeout or None
+            )
+
+        health_check = check_engine_and_workers()
         if self.health_config.check_timeout > 0:
             return await asyncio.wait_for(
                 health_check, timeout=self.health_config.check_timeout
