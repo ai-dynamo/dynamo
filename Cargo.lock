@@ -2700,6 +2700,8 @@ dependencies = [
  "axum 0.8.4",
  "dynamo-runtime",
  "futures",
+ "http-body 1.0.1",
+ "http-body-util",
  "hyper-util",
  "parking_lot",
  "prometheus",
