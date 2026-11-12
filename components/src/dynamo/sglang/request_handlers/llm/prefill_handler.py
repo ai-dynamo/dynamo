@@ -32,6 +32,7 @@ from dynamo.sglang.request_handlers.llm.decode_handler import (
     _ordered_cancellation_request_id,
     _raise_if_sglang_error,
     _sampling_option_params,
+    _validate_stop_token_ids,
 )
 from dynamo.sglang.request_handlers.llm.mm_disagg_utils import (
     build_disagg_mm_kwargs,
@@ -197,6 +198,9 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         }
 
         input_param = self._get_input_param(inner_request)
+        # Native requests forward client stop IDs to the prefill engine; rejecting here
+        # also avoids staging KV for a decode leg that would refuse the request.
+        _validate_stop_token_ids(self, inner_request)
 
         # Prefill encodes the media so the KV it transfers carries the vision
         # context; decode extracts the same URLs to match the token layout.

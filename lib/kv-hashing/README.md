@@ -4,13 +4,15 @@ Universal `Request → Vec<PositionalLineageHash>` contract for KV cache identit
 
 This crate is **pure computation**: a library, not a service. No async, no transports, no traits over runtime/scheduler config, no event types. Those concerns belong in higher layers.
 
+The `multimodal` module is the multimodal identity both ends of the wire compute: the per-block and per-request metadata (`BlockMmObjectInfo`, `BlockExtraInfo`, `RequestExtraInfo` and its `to_block_level` split), the pad and identifier rules (`hash_mm_identifier`, `pad_value_for_mm_hash`, `MM_PAD_SHIFT_VALUE`, `MM_PAD_HASH_MASK`, pinned to SGLang's `MultimodalItem._compute_pad_value`), and the vLLM `extra_keys` marker (`mark_mm_hash_for_extra_key`, `parse_mm_hash_from_extra_key`); `routing` folds `BlockExtraInfo` into the block hash, `dynamo-kv-events` parses the marker back out of vLLM extra keys, and consumers name the module in full (`dynamo_kv_hashing::multimodal::BlockExtraInfo`) since the crate root re-exports none of it.
+
 ---
 
 ## 1. The three-representation problem
 
 Today three different "block hash" representations coexist in Dynamo and don't agree on what a block is hashed *over* nor on the encoding of position/lineage:
 
-1. **`lib/kv-router`** computes `LocalBlockHash(u64)` (`lib/kv-router/src/protocols.rs`) via XXH3 with **LoRA encoded as a seed mutation** (`XXH3_SEED.wrapping_add(xxh3_64(lora_name))`) and **multimodal hashes appended to per-block bytes** before XXH3. The router *also* computes a parent-chained `SequenceHash(u64)` (`compute_seq_hash_for_block`) for active-block tracking — so it already uses **a form of positional encoding via chain depth**, just not the bit-packed `(position | parent_fragment | current_fragment)` layout that PLH uses. Radix tree edges are keyed on `LocalBlockHash`; nodes also carry `ExternalSequenceBlockHash(u64)` for eviction lookup.
+1. **`lib/router/kv-router`** computes `LocalBlockHash(u64)` (`lib/kv-hashing/src/block_hash.rs`) via XXH3 with **LoRA encoded as a seed mutation** (`XXH3_SEED.wrapping_add(xxh3_64(lora_name))`) and **multimodal hashes appended to per-block bytes** before XXH3. The router *also* computes a parent-chained `SequenceHash(u64)` (`compute_seq_hash_for_block`) for active-block tracking — so it already uses **a form of positional encoding via chain depth**, just not the bit-packed `(position | parent_fragment | current_fragment)` layout that PLH uses. Radix tree edges are keyed on `LocalBlockHash`; nodes also carry `ExternalSequenceBlockHash(u64)` for eviction lookup.
 
 2. **`lib/tokens` + kvbm** share one representation. `TokenBlock` (`lib/tokens/src/lib.rs`) computes `BlockHash(u64)` seeded by `SaltHash`, where `SaltHash = compute_hash_v2(json(SaltPayload{salt, lora_name}), 0)` — a canonical pre-mixed salt. `PositionalLineageHash` is a 128-bit identifier with mode-selected layout `(mode | position | parent_fragment | current_fragment)` and is already aliased as `kvbm_common::SequenceHash` — every kvbm crate keys on it.
 
@@ -94,7 +96,7 @@ This crate intentionally does NOT contain — and should NOT grow:
 
 - Async / tokio / runtime — block hashing is pure CPU; let callers schedule.
 - Traits over worker, scheduler, or transport configs (`WorkerConfigLike`, `RouterEventSink`) — the consolidator-v2 mistake. Hardening event/transport abstractions before the Request → hash mapping was stable led to repeated refactoring there.
-- `KvCacheEvent` / `KvCacheStoredBlockData` / wire formats — they belong in `lib/kv-router` or a protocols crate.
+- `KvCacheEvent` / `KvCacheStoredBlockData` / wire formats — they belong in `lib/kv-events`.
 - ZMQ / NATS / any networking — out of scope for a hashing library.
 - Observability / metrics — instrumentation is a caller concern.
 

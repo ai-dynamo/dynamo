@@ -22,7 +22,7 @@ export interface DynamoEvent {
 }
 
 /** Generation date in Pacific, YYYY-MM-DD. The calendar grid treats this as "today". */
-export const GENERATED_ON = "2026-11-05";
+export const GENERATED_ON = "2026-11-12";
 
 export const UPCOMING_EVENTS: DynamoEvent[] = [
   {
@@ -67,6 +67,19 @@ export const UPCOMING_EVENTS: DynamoEvent[] = [
 ];
 
 export const PAST_EVENTS: DynamoEvent[] = [
+  {
+    "title": "Dynamo SIG RL",
+    "start": "2026-11-06T02:00:00.000Z",
+    "month": "Nov",
+    "day": "5",
+    "year": "2026",
+    "dateLabel": "Thu, Nov 5, 2026",
+    "timeLabel": "6:00 PM",
+    "isPast": true,
+    "location": null,
+    "locationUrl": null,
+    "addUrl": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=Dynamo+SIG+RL&dates=20261106T020000Z%2F20261106T023000Z&details=Join+with+Google+Meet%3A+https%3A%2F%2Fmeet.google.com%2Fzcd-qdkb-jvg%0AOr+dial%3A+%28US%29+%2B1+216-755-4682+PIN%3A+144011069%23%0AMore+phone+numbers%3A+https%3A%2F%2Ftel.meet%2Fzcd-qdkb-jvg%3Fpin%3D7388412058326%26hs%3D7%0A%0ALearn+more+about+Meet+at%3A+https%3A%2F%2Fsupport.google.com%2Fa%2Fusers%2Fanswer%2F9282720"
+  },
   {
     "title": "SIG Router",
     "start": "2026-11-05T16:30:00.000Z",
@@ -131,18 +144,5 @@ export const PAST_EVENTS: DynamoEvent[] = [
     "location": "Online",
     "locationUrl": "https://meet.google.com/heb-demu-qok",
     "addUrl": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=Dynamo+community+meeting&dates=20260923T173000Z%2F20260923T181500Z&location=https%3A%2F%2Fmeet.google.com%2Fheb-demu-qok"
-  },
-  {
-    "title": "Baseten x Dynamo x SGLang RL post training meetup",
-    "start": "2026-09-11T01:00:00.000Z",
-    "month": "Sep",
-    "day": "10",
-    "year": "2026",
-    "dateLabel": "Thu, Sep 10, 2026",
-    "timeLabel": "6:00 PM",
-    "isPast": true,
-    "location": "Luma",
-    "locationUrl": "https://luma.com/BaseDynSGL",
-    "addUrl": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=Baseten+x+Dynamo+x+SGLang+RL+post+training+meetup&dates=20260911T010000Z%2F20260911T040000Z&location=https%3A%2F%2Fluma.com%2FBaseDynSGL"
   }
 ];
