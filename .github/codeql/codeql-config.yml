@@ -1,9 +1,0 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-
-name: dynamo-codeql-config
-
-# Vendored third-party sources, copied unchanged from upstream. Findings here
-# are not ours to fix; see the README.dynamo.md next to each for provenance.
-paths-ignore:
-  - lib/runtime/third_party/**

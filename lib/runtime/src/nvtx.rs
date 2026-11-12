@@ -97,11 +97,11 @@
 //!   for ordering and sanitizing). Several may exist per request; readers merge them.
 //!
 //! [`rid_key`] is FNV-1a-64 of the UTF-8 request id with the top bit cleared so it stays
-//! positive in SQLite's signed INTEGER. The Python layer pins the same test vectors.
+//! positive in SQLite's signed INTEGER. Any other implementation (such as a Python one) must
+//! reproduce the same values; the test vectors in this module pin them.
 //!
 //! **Explicit markers** — [`dynamo_nvtx_request_mark!`] / [`dynamo_nvtx_request_range!`]
-//! (and the `dynamo._core.nvtx_request_*` Python bindings) produce them. They test
-//! [`enabled()`] first, so nothing is formatted or allocated while annotations are off. A
+//! produce them. They test [`enabled()`] first, so nothing is formatted or allocated while annotations are off. A
 //! non-empty `attrs` also emits an identity mark carrying those attributes. Where one
 //! request opens several ranges (the worker's ingress and per-chunk egress ranges, the
 //! router's selection ranges), [`request_key`] hashes the id once and
@@ -610,7 +610,7 @@ pub const IDENTITY_STAGE: &str = "dynamo.request";
 /// The 64-bit NVTX payload that identifies a request: FNV-1a-64 of the UTF-8 request id
 /// with the top bit cleared, so the value stays positive in SQLite's signed INTEGER.
 ///
-/// Stable across processes and languages (the Python tests pin the same vectors), which is
+/// Stable across processes and languages (the test vectors below pin it), which is
 /// what lets the frontend's and the workers' events for one request be joined.
 #[must_use]
 pub const fn rid_key(rid: &str) -> u64 {
@@ -1121,7 +1121,7 @@ mod tests {
 
     #[test]
     fn rid_key_is_fnv1a_with_top_bit_cleared() {
-        // Pinned; the Python tests assert the same vectors.
+        // Pinned: other implementations must reproduce these vectors.
         assert_eq!(super::rid_key(""), 5_472_609_002_491_880_229);
         assert_eq!(super::rid_key("a"), PIN_A);
         assert_eq!(
