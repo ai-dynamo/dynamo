@@ -264,7 +264,9 @@ The released 1.6 operator also field-merged an authored `frontendSidecar` probe
 with its frontend defaults, where main replaces it as a complete value. The
 `compatibility/frontend-sidecar-probes` snapshot holds such a workload as 1.6.0
 rendered it. Its replay fails unless the `FrontendSidecarProbeReplacement` origin
-gate keeps the merge for 1.6-origin workloads.
+gate keeps the merge for 1.6-origin workloads. `latest/frontend-sidecar-probes`
+is the same authored workload created by the development operator; its golden
+shows the complete-value replacement that origin 1.7 workloads receive.
 
 Feature-specific shapes like this one live under `compatibility/` with their own
 provenance; the canonical matrix under `history/` covers topologies. Each
