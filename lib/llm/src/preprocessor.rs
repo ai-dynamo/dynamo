@@ -752,6 +752,12 @@ struct ChoiceReasoningState {
 struct ReasoningUsageEstimator {
     total: u32,
     active_choices: HashSet<u32>,
+    // Tokens of chunks that showed nothing for a choice still in reasoning. The
+    // parser was holding text back, and what it releases next says what that
+    // text was: reasoning or content means a partial reasoning marker, a tool
+    // call means the call itself (a parser such as `glm47` emits a call only
+    // once it is complete).
+    held: HashMap<u32, u32>,
 }
 
 impl ReasoningUsageEstimator {
@@ -768,31 +774,60 @@ impl ReasoningUsageEstimator {
             .choices
             .iter()
             .any(|choice| choice.delta.reasoning_content.is_some());
-        let active_without_visible_output = chunk.inner.choices.iter().any(|choice| {
-            self.active_choices.contains(&choice.index) && !choice_has_visible_output(choice)
-        });
+        let held_choice = chunk
+            .inner
+            .choices
+            .iter()
+            .find(|choice| {
+                self.active_choices.contains(&choice.index) && !choice_has_visible_output(choice)
+            })
+            .map(|choice| choice.index);
         let usage_chunk_while_reasoning =
             chunk.inner.choices.is_empty() && !self.active_choices.is_empty();
 
-        if token_count > 0
-            && (has_reasoning || active_without_visible_output || usage_chunk_while_reasoning)
-        {
-            self.total = self.total.saturating_add(token_count);
+        if token_count > 0 {
+            if has_reasoning || usage_chunk_while_reasoning {
+                self.total = self.total.saturating_add(token_count);
+            } else if let Some(index) = held_choice {
+                let held = self.held.entry(index).or_default();
+                *held = held.saturating_add(token_count);
+            }
         }
 
         for choice in &chunk.inner.choices {
             if choice.delta.reasoning_content.is_some() {
+                self.settle_held(choice.index, true);
                 self.active_choices.insert(choice.index);
             } else if choice_has_visible_output(choice) {
+                let released_tool_call = choice
+                    .delta
+                    .tool_calls
+                    .as_ref()
+                    .is_some_and(|calls| !calls.is_empty());
+                self.settle_held(choice.index, !released_tool_call);
                 self.active_choices.remove(&choice.index);
             }
+        }
+    }
+
+    fn settle_held(&mut self, index: u32, was_reasoning: bool) {
+        if let Some(held) = self.held.remove(&index)
+            && was_reasoning
+        {
+            self.total = self.total.saturating_add(held);
         }
     }
 
     fn annotate(&self, usage: &mut dynamo_protocols::types::CompletionUsage) {
         let details = usage.completion_tokens_details.get_or_insert_default();
         if details.reasoning_tokens.unwrap_or(0) == 0 {
-            details.reasoning_tokens = Some(self.total);
+            // Text still held when usage arrives was never released as anything
+            // else, so it stays reasoning.
+            let unsettled = self
+                .held
+                .values()
+                .fold(0u32, |sum, held| sum.saturating_add(*held));
+            details.reasoning_tokens = Some(self.total.saturating_add(unsettled));
         }
     }
 }
