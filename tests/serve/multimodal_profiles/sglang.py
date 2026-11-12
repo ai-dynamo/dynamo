@@ -30,7 +30,9 @@ SGLANG_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             "agg_router": TopologyConfig(
                 marks=[pytest.mark.pre_merge],
                 timeout_s=400,
-                profiled_vram_gib=8.0,
+                # Provisional budget: capped servers alone peak at 10.7 GiB;
+                # the full routing test still needs profiling.
+                profiled_vram_gib=12.0,
                 requested_sglang_kv_tokens=8192,
                 env={"SINGLE_GPU": "true"},
                 tests=[

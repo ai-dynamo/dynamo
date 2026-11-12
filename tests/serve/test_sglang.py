@@ -630,10 +630,6 @@ sglang_configs = {
             "--page-size",
             "1",
             "--frontend-decoding",
-            # SGLang sizes the Qwen3.5 mamba cache from free VRAM, not
-            # --max-total-tokens; without a cap it starves co-scheduled tests.
-            "--max-mamba-cache-size",
-            "64",
         ],
         delayed_start=0,
         timeout=360,
