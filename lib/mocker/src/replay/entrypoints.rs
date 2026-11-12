@@ -2682,6 +2682,50 @@ mod tests {
         );
     }
 
+    /// A hybrid engine with an explicit `prefix_match_unit` cannot export engine KV events, so it
+    /// replays behind a KV router that does not read them.
+    #[test]
+    fn hybrid_prefix_match_unit_replays_behind_a_router_without_kv_events() {
+        let args = MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "block_size": 64,
+                "num_gpu_blocks": 64,
+                "kv_cache_bytes_per_token": 16,
+                "state_cache": {"bytes_per_request": 1500},
+                "prefix_match_unit": 64,
+                "max_num_seqs": 4,
+                "max_num_batched_tokens": 256,
+            },
+        }))
+        .unwrap();
+        let request = |uuid| DirectRequest {
+            tokens: (0..128).collect(),
+            max_output_tokens: 2,
+            uuid: Some(Uuid::from_u128(uuid)),
+            arrival_timestamp_ms: Some(0.0),
+            ..DirectRequest::default()
+        };
+        let report = crate::replay::offline::simulate_trace_with_scaling_policy(
+            args,
+            Some(KvRouterConfig {
+                use_kv_events: false,
+                ..KvRouterConfig::default()
+            }),
+            None,
+            vec![request(1), request(2)],
+            2,
+            1.0,
+            ReplayRouterMode::KvRouter,
+            true,
+            None,
+            SlaThresholds::default(),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(report.per_request.len(), 2);
+    }
+
     #[test]
     fn kv_event_lag_reaches_offline_kv_router_replay() {
         let args = MockerConfig::from_value(serde_json::json!({

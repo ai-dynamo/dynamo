@@ -235,20 +235,28 @@ fn run_aggregated_with_capture_options(
             Ok(with_telemetry(replayer, telemetry)?.run()?)
         }
         ReplayRouterMode::KvRouter => {
-            let replayer = Replayer::with_composition(
-                spec,
-                factory,
-                KvReplayComposition::aggregated(
-                    args,
-                    num_workers,
-                    router_config,
-                    prefill_load_estimator,
-                    scaling_policy,
-                ),
-            )?
-            .with_capture_options(capture_options)
-            .with_runtime_input(input);
-            Ok(with_telemetry(replayer, telemetry)?.run()?)
+            let composition = KvReplayComposition::aggregated(
+                args,
+                num_workers,
+                router_config,
+                prefill_load_estimator,
+                scaling_policy,
+            );
+            if composition.reads_engine_kv_events() {
+                let replayer = Replayer::with_composition(spec, factory, composition)?
+                    .with_capture_options(capture_options)
+                    .with_runtime_input(input);
+                Ok(with_telemetry(replayer, telemetry)?.run()?)
+            } else {
+                let replayer = Replayer::with_composition(
+                    spec,
+                    factory,
+                    composition.without_engine_kv_events(),
+                )?
+                .with_capture_options(capture_options)
+                .with_runtime_input(input);
+                Ok(with_telemetry(replayer, telemetry)?.run()?)
+            }
         }
     }
 }

@@ -39,7 +39,7 @@ pub use crate::observation::{
 };
 pub use crate::overlap::OverlapScores;
 pub use crate::positional::PositionalIndexer;
-pub use crate::pruning::PruneConfig;
+pub use crate::pruning::{BlockEntry, PruneConfig, PruneManager};
 pub use crate::radix_tree::RadixTree;
 pub use crate::recording::ApproximateRequestLease;
 pub use crate::registry::IndexRegistry;
