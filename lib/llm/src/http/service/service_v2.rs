@@ -1362,6 +1362,7 @@ impl HttpService {
         };
         super::server::serve(listener, tls, router, write_idle_timeout(), shutdown).await;
         state.start_stopping();
+        cancel_token.cancel();
         state_cancel.cancel();
         Ok(())
     }
