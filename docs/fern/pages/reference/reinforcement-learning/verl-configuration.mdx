@@ -20,7 +20,7 @@ These overrides select the recipe's Dynamo backend and configure the frontend an
 | `rollout.calculate_log_probs` | `True` | Returns the engines' token log-probabilities, which verl compares with the trainer's. |
 | `++dynamo.router_mode` | `kv` | Routes requests with Dynamo's KV router. The recipe also accepts `round-robin`, `random`, and `least-loaded`. |
 | `++dynamo.thunderagent.enabled` | `false` | Routes with the router that `router_mode` selects instead of ThunderAgent. |
-| `++dynamo.request_engine_data`, `++dynamo.request_completion_token_ids` | `true` | Returns the token IDs that the engines generated, so verl trains on the exact tokens. Because `rollout.calculate_log_probs` is `True`, the recipe fails the job with a `RuntimeError` on a response without token IDs instead of training on re-encoded text. |
+| `++dynamo.request_engine_data`, `++dynamo.request_completion_token_ids` | `true` | Returns the token IDs that the engines generated, so verl trains on the exact tokens. Because `rollout.calculate_log_probs` is `True`, the recipe never trains on re-encoded text: a finished response without token IDs raises a `RuntimeError`, and an aborted one returns no tokens. The startup probe fails the job if its finished response has no token IDs. During training, the error fails only its request and can leave the trainer waiting instead of ending the job. |
 | `++dynamo.request_timeout_s` | `1800` | Allows each rollout request up to 30 minutes. |
 | `++dynamo.free_engine_on_train` | `true` | Puts the engines to sleep while FSDP trains. It must match `rollout.free_cache_engine`, which the preset sets to `true`. |
 
