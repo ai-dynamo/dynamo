@@ -10,15 +10,11 @@ use std::sync::Arc;
 
 /// Whether to use write-combined pinned allocations.
 ///
-/// Probed once at first use: returns `false` if `DYN_KVBM_DISABLE_WRITE_COMBINED`
-/// is set, or if a test allocation reveals the hardware does not support it
+/// Probed once at first use: returns `false` if a test allocation reveals the
+/// hardware does not support it
 /// (e.g. Grace Hopper / Blackwell with NVLink-C2C). Must be accessed only after
 /// a CUDA context has been bound to the current thread.
 static USE_WRITE_COMBINED: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
-    if crate::env_is_truthy("DYN_KVBM_DISABLE_WRITE_COMBINED") {
-        tracing::debug!("DYN_KVBM_DISABLE_WRITE_COMBINED set; write-combined disabled");
-        return false;
-    }
     // Probe hardware support with a 1-byte test allocation.
     // SAFETY: called from an allocation path that has already bound a CUDA context.
     unsafe {
