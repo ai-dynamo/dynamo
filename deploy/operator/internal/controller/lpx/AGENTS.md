@@ -282,8 +282,9 @@ SPDX-License-Identifier: Apache-2.0
   position, so that the capacity is the total plus one. Grove creates one Pod
   with the lowest free index of the PodClique, the placement gate holds it, and
   the pin puts it in the added position. When the fabric pod then has its count
-  of other Pods that the kubelet started, the Pod above the range gives up its
-  position, and the prune steps remove it.
+  of other Pods that the kubelet started, and every request of the workload
+  replica is `Bound`, the Pod above the range gives up its position, and the
+  prune steps remove it.
 - Never remove a Pod above the range first. The fabric pod would have one bound
   Cyborg Pod less, and its GPU can go to a different Pending Pod. When it was
   the last bound Cyborg Pod of the fabric pod, the LPX scheduler can release
@@ -295,9 +296,10 @@ SPDX-License-Identifier: Apache-2.0
   bound. The kubelet can refuse a bound Pod, which then has phase Failed, and
   the LPX scheduler does not accept such a Pod as the Cyborg Pod of its fabric
   pod. The kubelet started a Pod when one of its containers or init containers
-  has no waiting state or has a last termination; the operator Pod cache keeps
-  those fields. A Cyborg Pod that waits for its Agents runs the Grove init
-  container, so the kubelet started it.
+  has no waiting state; the operator Pod cache keeps the waiting and the
+  terminated state. A Cyborg Pod that waits for its Agents runs its init
+  containers, so the kubelet started it, and those containers keep that state
+  while its other containers wait for a restart.
 - The new Pod needs one free GPU in the fabric pod. Without one it stays
   Pending, the capacity stays at the total plus one, and no Pod goes. When the
   Pod above the range becomes Ready in that time, the position goes away and
@@ -319,12 +321,14 @@ SPDX-License-Identifier: Apache-2.0
   the same route.
 - Never skip a Pod above the range that keeps its index. Its fabric pod then
   takes no more part: the next new Pod would get the route of that Pod. When
-  that Pod served while a step added a Pod for it, and the fabric pod thus has
-  one bound Pod more than its count, the added Pod gives up its position. It
-  is the Pod with the highest index below the range, when it is newer than
-  the Pod that keeps its index. It goes also when it is Ready: the Pod that
-  served first keeps its place. After a scale-in no Pod is newer, and the
-  retention order selects the Pod that goes.
+  that Pod served while a step added a Pod for it, the fabric pod has one
+  bound Pod more than its count, and two Pods with one route. The added Pod is
+  the Pod with the highest index below the range. It gives up its position
+  when it is not Ready and has no served record. When it served too, the
+  retention order selects the Pod that goes, as in a scale-in: the Pod with
+  the lower index stays, which is the added Pod. Do not find the added Pod by
+  its age: a Pod that Grove created for a failed Pod is also newer, and the
+  rule would then remove a Ready Pod in a scale-in.
 - Add a position only to a complete placement that Grove has synchronized: the
   capacity is the total, `status.observedGeneration` equals the PodClique
   generation, `status.replicas` equals the total, and the PodClique has exactly
@@ -338,36 +342,41 @@ SPDX-License-Identifier: Apache-2.0
 - Decide the step in the placement step, from the Pods that this step lists,
   and use that decision for its pins, its removals and its capacity. With an
   older decision, the pass can pin the new Pod for a Pod that served in
-  between. The scaling state decides the step again from its own Pod list
-  (`cyborgScalingRequired`); the two can differ in one pass, and the next pass
-  corrects the scaling state. The pin step at the start of a pass uses the
-  placement without the step. It thus does not pin the new Pod in a pass that
-  stops before the placement step, which also does the removal that ends the
-  step.
-- A step does not wait for `Bound` requests: its fabric pod keeps its count
-  of Cyborg Pods that the kubelet started. One loss stays possible: the new
-  Pod can go away between its observation and the removal of the Pod above
-  the range. The fabric pod then has one Cyborg Pod less, and the LPX
-  scheduler releases a `Degraded` plan at once when that was the last one.
+  between. The pin step at the start of a pass uses the placement without the
+  step. It thus does not pin the new Pod in a pass that stops before the
+  placement step, which also does the removal that ends the step.
+- The scaling state needs no Pod list (`capacityPending`): a capacity other
+  than the total is a change that waits, but one Pod more than the total of a
+  settled placement is the added position. So a step that waits to start, and
+  a scale-in by one Pod of a settled placement, are not in the scaling state.
+- The added position does not wait for `Bound` requests, and the removal of
+  the Pod above the range does. The new Pod can go away between its
+  observation and that removal. The fabric pod then has one Cyborg Pod less.
+  For a `Bound` request the LPX scheduler waits for the next Pod, and for a
+  `Degraded` request it releases the plan at once when that was the last one.
 - A PodClique observation that is older than the write of the added position
   shows neither the start nor the stay condition. Such a pass removes the new
-  Pod when it is pinned and not bound, and Grove creates the next one. This
-  repeats only while the PodClique cache is behind the Pod cache, and no bound
-  Pod goes.
-- Lower the capacity only when the removed Pods are gone, or when their grace
-  period is over: never in the pass that removes a Pod, and not while a Pod of
-  the PodClique in deletion has a deletion timestamp in the future. Grove
-  reads Pods and PodCliques through different watches, and the deletion mark
-  starts no Grove reconcile. When Grove observes the lower capacity before the
-  mark, it removes a Pod that it selects by itself: a Pod without a Node, then
-  a Pod that is not Running, then a Pod that is not Ready. That can be the new
-  Pod of a step, and the fabric pod then has no Cyborg Pod. Ask for a pass at
-  the end of the grace period: a Pod on a Node that is gone stays in deletion,
-  and no Pod event arrives then. A higher capacity does not wait.
+  Pod while the kubelet has not started it, and Grove creates the next one.
+  This repeats only while the PodClique cache is behind the Pod cache, and no
+  Pod that the kubelet started goes.
+- Lower the capacity only when Grove has observed each removal: in a pass
+  that removes no Pod and that finds as many live Pods of the PodClique as
+  its capacity. Grove reads Pods and PodCliques through different watches, and
+  the deletion mark starts no Grove reconcile. When Grove observes the lower
+  capacity before the mark, it removes a Pod that it selects by itself: a Pod
+  without a Node, then a Pod that is not Running, then a Pod that is not
+  Ready. That can be the new Pod of a step, and the fabric pod then has no
+  Cyborg Pod. Grove creates a Pod for a removed one only when its Pod cache
+  shows the removal, so the full count is the proof. Do not wait for the end
+  of the removed Pods in its place: a Pod without a Node is gone at once. The
+  Pods that Grove created have no position and no Node, and Grove's scale-in
+  removes them first. A higher capacity does not wait.
 - The Pod watch passes these changes of a placed Pod: its fabric pod label,
   its Node, its deletion mark, whether the kubelet started it, and whether its
-  phase is terminal. Each one can change a step or a position. A change of
-  Ready arrives through the PodClique status.
+  phase is terminal. Each one can change a step or a position. It also passes
+  each version of a Ready Pod that has no served record; the pass that writes
+  the record ends these events. Do not depend on the PodClique status for
+  that record: its ready count can stay the same when a Pod becomes Ready.
 - Remove a surplus Pod with its UID as the only precondition. A pass can read
   a Pod before the cache has its deletion mark, and a second removal must
   change nothing. A removal can thus use an old Ready condition: a Pod that
@@ -391,10 +400,11 @@ SPDX-License-Identifier: Apache-2.0
   then gets a lower index, and two Pods of that fabric pod can have the same
   `index % ioFpgaCount`.
 - Keep bound Pods before unbound; then a Ready Pod, a Pod with the served
-  record, and the other Pods; then the lower Grove index. A fabric pod that
-  holds LPUs therefore keeps a bound Cyborg Pod, and with one fabric pod in
-  use, the Pods that stay after a scale-in have the lowest indexes when no Pod
-  with a lower index has a worse rank.
+  record, a Pod that the kubelet started, and the other Pods; then the lower
+  Grove index. A fabric pod that holds LPUs therefore keeps a bound Cyborg
+  Pod, and a Pod that runs before a Pod that the kubelet can still refuse.
+  With one fabric pod in use, the Pods that stay after a scale-in have the
+  lowest indexes when no Pod with a lower index has a worse rank.
 - Delete surplus placed Pods before lowering the PodClique capacity. Grove
   excludes terminating Pods from its scale-in selection; with the lower capacity
   first, Grove selects its own victims and can remove the last Cyborg Pod of a

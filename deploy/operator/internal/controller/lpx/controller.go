@@ -305,11 +305,9 @@ func (r *graphReconciler) reconcileWorkloads(
 		}
 
 		// A fabric-pod placement reports its own Cyborg capacity changes.
-		placementScaling, err := r.cyborgScalingRequired(ctx, pclqs, cyborgPlacements)
-		if err != nil {
-			return ctrl.Result{}, err
+		for name, placement := range cyborgPlacements {
+			scalingRequired = scalingRequired || placement.capacityPending(pclqs[name].Spec.Replicas)
 		}
-		scalingRequired = scalingRequired || placementScaling
 	}
 
 	scalingDeferred := scalingBlocked && scalingRequired
@@ -351,15 +349,8 @@ func (r *graphReconciler) reconcileWorkloads(
 	// Remove Cyborg Pods outside their placement and write its capacity only after
 	// the PCS is synchronized, as for every replica write. The Pod and PodClique
 	// watches deliver each write, and no later step of this pass depends on Cyborg Pods.
-	placementRetryAt, err := r.reconcileCyborgPlacements(ctx, pclqs, cyborgPlacements, scalingBlocked)
-	if err != nil {
+	if err := r.reconcileCyborgPlacements(ctx, pclqs, cyborgPlacements, scalingBlocked); err != nil {
 		return ctrl.Result{}, err
-	}
-
-	// A lower Cyborg capacity that waits for a removed Pod needs a pass when the
-	// grace period of that Pod ends, also when no Pod event arrives then.
-	if !placementRetryAt.IsZero() && (deadlineAt.IsZero() || placementRetryAt.Before(deadlineAt)) {
-		deadlineAt = placementRetryAt
 	}
 
 	// Scale owned groups only when the rollout permits replica writes.

@@ -12,7 +12,6 @@ import (
 	"maps"
 	"slices"
 	"strconv"
-	"time"
 
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx"
@@ -55,6 +54,9 @@ type cyborgPlacement struct {
 	// settled is true when the fabric pods are those of the committed LPU plans. The
 	// placement is then final, and its Pods can get the lowest Grove indexes.
 	settled bool
+	// bound is true when the placement is settled and every request of the workload
+	// replica is Bound. Only then does a Pod above the range give up its position.
+	bound bool
 	// surge is the fabric pod that has one more position while one of its Pods gets
 	// a lower Grove index, or empty. See cyborgRenumberStep.
 	surge string
@@ -76,6 +78,14 @@ func (p cyborgPlacement) capacity() int32 {
 		return p.total() + 1
 	}
 	return p.total()
+}
+
+// capacityPending reports whether a PodClique with this capacity needs a capacity
+// write that the scaling state must report. One Pod more than the total of a
+// settled placement is the added position of a step (see cyborgRenumberStep),
+// which is not a change that waits.
+func (p cyborgPlacement) capacityPending(replicas int32) bool {
+	return replicas != p.total() && (!p.settled || replicas != p.total()+1)
 }
 
 // openFabricPod selects the fabric pod for an unbound Pod with Grove index podIndex,
@@ -173,7 +183,7 @@ func (r *graphReconciler) resolveCyborgPlacements(
 					continue
 				}
 
-				fabricPods, settled := committedFabricPods(requests, pcsg.Name, index)
+				fabricPods, settled, bound := committedFabricPods(requests, pcsg.Name, index)
 				if !settled {
 					// Read only Node metadata, one time for the PodCliques that still need it;
 					// the cache holds no complete Node objects.
@@ -192,7 +202,7 @@ func (r *graphReconciler) resolveCyborgPlacements(
 						continue
 					}
 				}
-				placements[name] = cyborgPlacement{fabricPods: fabricPods, replicas: template.Spec.Replicas, settled: settled}
+				placements[name] = cyborgPlacement{fabricPods: fabricPods, replicas: template.Spec.Replicas, settled: settled, bound: bound}
 			}
 		}
 	}
@@ -203,9 +213,11 @@ func (r *graphReconciler) resolveCyborgPlacements(
 // committedFabricPods returns the sorted fabric pods that hold the LPUs of one
 // workload replica. settled is false until every request of that replica is
 // Bound or Degraded on a committed NodeLocal plan; a replica without requests
-// is never settled. requests may be nil.
-func committedFabricPods(requests map[string]*lpxv1alpha1.LPUPipelineRequest, scalingGroup string, replica int32) (fabricPods []string, settled bool) {
+// is never settled. bound is true when the replica is settled and every request
+// is Bound. requests may be nil.
+func committedFabricPods(requests map[string]*lpxv1alpha1.LPUPipelineRequest, scalingGroup string, replica int32) (fabricPods []string, settled, bound bool) {
 	selected := make(map[string]struct{})
+	bound = true
 
 	for _, request := range requests {
 		target := request.Spec.MaterializationTarget.PodCliqueScalingGroupRef
@@ -217,12 +229,13 @@ func committedFabricPods(requests map[string]*lpxv1alpha1.LPUPipelineRequest, sc
 		status := request.Status
 		if !request.DeletionTimestamp.IsZero() || status == nil || status.Committed == nil ||
 			(status.Phase != lpxv1alpha1.RequestPhaseBound && status.Phase != lpxv1alpha1.RequestPhaseDegraded) {
-			return nil, false
+			return nil, false, false
 		}
 		placement := status.Committed.Plan.Placement.NodeLocal
 		if placement == nil {
-			return nil, false
+			return nil, false, false
 		}
+		bound = bound && status.Phase == lpxv1alpha1.RequestPhaseBound
 
 		for _, partition := range placement.PartitionSelections {
 			for _, row := range partition.SelectedRows {
@@ -232,9 +245,9 @@ func committedFabricPods(requests map[string]*lpxv1alpha1.LPUPipelineRequest, sc
 	}
 
 	if len(selected) == 0 {
-		return nil, false
+		return nil, false, false
 	}
-	return slices.Sorted(maps.Keys(selected)), true
+	return slices.Sorted(maps.Keys(selected)), true, bound
 }
 
 // eligibleFabricPods lists the fabric pods that contain one of nodes which the node
@@ -274,7 +287,7 @@ func eligibleFabricPods(nodes []metav1.PartialObjectMetadata, clique *grovev1alp
 func (r *graphReconciler) pinCyborgPods(ctx context.Context, pclqs map[string]*grovev1alpha1.PodClique, placements map[string]cyborgPlacement) error {
 	var errs []error
 	for _, name := range slices.Sorted(maps.Keys(placements)) {
-		live, _, err := r.liveCyborgPods(ctx, pclqs[name])
+		live, err := r.liveCyborgPods(ctx, pclqs[name])
 		if err == nil {
 			_, err = r.fillCyborgPlacement(ctx, pclqs[name], placements[name], live)
 		}
@@ -285,58 +298,32 @@ func (r *graphReconciler) pinCyborgPods(ctx context.Context, pclqs map[string]*g
 	return errors.Join(errs...)
 }
 
-// cyborgScalingRequired reports whether a placed Cyborg PodClique has a capacity
-// that its placement does not need now, with the step that gives one of its Pods
-// a lower Grove index (see cyborgRenumberStep). It reads the Pods and writes
-// nothing. pclqs contains the observation of every placement key.
-func (r *graphReconciler) cyborgScalingRequired(ctx context.Context, pclqs map[string]*grovev1alpha1.PodClique, placements map[string]cyborgPlacement) (bool, error) {
-	// Compare each capacity with the one that the placement and its step need.
-	for name, placement := range placements {
-		live, _, err := r.liveCyborgPods(ctx, pclqs[name])
-		if err != nil {
-			return false, err
-		}
-		placement.surge, placement.retire = cyborgRenumberStep(pclqs[name], live, placement)
-		if pclqs[name].Spec.Replicas != placement.capacity() {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
 // reconcileCyborgPlacements converges every placed Cyborg PodClique in name order.
 // pclqs contains the observation of every placement key. The Pod and PodClique
 // watches deliver each write as the next observation. One PodClique that fails
-// does not stop the others. A capacity write that waits for a removed Pod needs
-// a pass at retryAt, which is the earliest such time, or zero.
+// does not stop the others.
 func (r *graphReconciler) reconcileCyborgPlacements(
 	ctx context.Context,
 	pclqs map[string]*grovev1alpha1.PodClique,
 	placements map[string]cyborgPlacement,
 	scalingBlocked bool,
-) (retryAt time.Time, err error) {
-	// Keep each error, and the earliest time at which a PodClique needs a pass.
+) error {
 	var errs []error
 	for _, name := range slices.Sorted(maps.Keys(placements)) {
-		at, err := r.reconcileCyborgPlacement(ctx, pclqs[name], placements[name], scalingBlocked)
-		if err != nil {
+		if err := r.reconcileCyborgPlacement(ctx, pclqs[name], placements[name], scalingBlocked); err != nil {
 			errs = append(errs, err)
 		}
-		if !at.IsZero() && (retryAt.IsZero() || at.Before(retryAt)) {
-			retryAt = at
-		}
 	}
-	return retryAt, errors.Join(errs...)
+	return errors.Join(errs...)
 }
 
 // reconcileCyborgPlacement converges one non-nil, owned Cyborg PodClique on its
 // placement, with the step that gives one of its Pods a lower Grove index (see
 // cyborgRenumberStep). It pins each unplaced Pod to a fabric pod with an open
-// position and deletes the placed Pods that the placement does not keep. Only
-// when those Pods are gone does it lower the PodClique capacity, so that Grove
-// finds no placed Pod to select by itself. Capacity writes, and the removals that
-// a lower capacity needs, wait while scalingBlocked is true. retryAt is not zero
-// when a lower capacity waits for the end of a grace period.
+// position and deletes the placed Pods that the placement does not keep. It
+// lowers the PodClique capacity only when Grove has observed those removals, so
+// that Grove finds no placed Pod to select by itself. Capacity writes, and the
+// removals that a lower capacity needs, wait while scalingBlocked is true.
 //
 // While a lower capacity is not yet written, Grove replaces each removed Pod. The
 // controller leaves those unplaced Pods to Grove's scale-in, which removes
@@ -347,12 +334,12 @@ func (r *graphReconciler) reconcileCyborgPlacement(
 	clique *grovev1alpha1.PodClique,
 	placement cyborgPlacement,
 	scalingBlocked bool,
-) (retryAt time.Time, err error) {
+) error {
 	logger := log.FromContext(ctx).WithValues("podClique", clique.Name)
 
-	live, stopsAt, err := r.liveCyborgPods(ctx, clique)
+	live, err := r.liveCyborgPods(ctx, clique)
 	if err != nil {
-		return time.Time{}, err
+		return err
 	}
 
 	// Decide the step from the Pods that this pass pins and removes. With an older
@@ -360,40 +347,37 @@ func (r *graphReconciler) reconcileCyborgPlacement(
 	placement.surge, placement.retire = cyborgRenumberStep(clique, live, placement)
 	surplus, err := r.fillCyborgPlacement(ctx, clique, placement, live)
 	if err != nil {
-		return time.Time{}, err
+		return err
 	}
 
 	// A lower capacity needs its removals first, and both wait while Grove defers replica writes.
 	capacity := placement.capacity()
 	if clique.Spec.Replicas > capacity && scalingBlocked {
-		return time.Time{}, nil
+		return nil
 	}
 
 	// A second removal of the same Pod changes nothing: a pass can observe a Pod
 	// before the cache has its deletion mark.
 	for _, pod := range surplus {
 		if err := client.IgnoreNotFound(r.Delete(ctx, pod, client.Preconditions{UID: &pod.UID})); err != nil {
-			return time.Time{}, fmt.Errorf("delete Cyborg Pod %q outside its placement: %w", pod.Name, err)
+			return fmt.Errorf("delete Cyborg Pod %q outside its placement: %w", pod.Name, err)
 		}
 		logger.Info("Deleted surplus Cyborg Pod", "pod", pod.Name, "index", podCliquePodIndex(pod), "fabricPod", pod.Labels[cyborgFabricPodLabel], "node", pod.Spec.NodeName, "fabricPods", placement.fabricPods)
 	}
 
 	if clique.Spec.Replicas == capacity || scalingBlocked {
-		return time.Time{}, nil
+		return nil
 	}
 
 	// Grove reads Pods and PodCliques through different watches, so it can observe a
-	// lower capacity before the deletion mark of a Pod. It then selects a Pod to
-	// remove by itself: a Pod that is not Ready, which can be the only other Cyborg
-	// Pod of the fabric pod. Lower the capacity only when the removed Pods are gone,
-	// or when their grace period is over. The Pod watch delivers each removal.
-	if capacity < clique.Spec.Replicas {
-		if len(surplus) > 0 {
-			return time.Time{}, nil
-		}
-		if stopsAt.After(time.Now()) {
-			return stopsAt, nil
-		}
+	// lower capacity before the removal of a Pod. It then selects a Pod to remove by
+	// itself: a Pod that is not Ready, which can be the only other Cyborg Pod of the
+	// fabric pod. Grove creates a Pod for a removed one only when its Pod cache shows
+	// the removal. So lower the capacity only when the PodClique has its capacity of
+	// live Pods again, in a pass that removes no Pod. Grove's scale-in then removes
+	// the Pods that it created, which have no Node.
+	if capacity < clique.Spec.Replicas && (len(surplus) > 0 || int32(len(live)) != clique.Spec.Replicas) {
+		return nil
 	}
 
 	// The placement is the only owner of this capacity. A version precondition would
@@ -403,10 +387,10 @@ func (r *graphReconciler) reconcileCyborgPlacement(
 		Spec: autoscalingv1.ScaleSpec{Replicas: capacity},
 	}
 	if err := r.SubResource("scale").Update(ctx, clique, client.WithSubResourceBody(scale)); err != nil {
-		return time.Time{}, fmt.Errorf("scale Cyborg PodClique %q: %w", clique.Name, err)
+		return fmt.Errorf("scale Cyborg PodClique %q: %w", clique.Name, err)
 	}
 	logger.Info("Scaled Cyborg PodClique for its placement", "replicas", capacity, "fabricPods", placement.fabricPods, "surge", placement.surge)
-	return time.Time{}, nil
+	return nil
 }
 
 // cyborgRenumberStep returns the step that gives one Pod of the placement a lower
@@ -459,13 +443,13 @@ func cyborgRenumberStep(clique *grovev1alpha1.PodClique, live []*corev1.Pod, pla
 			break
 		}
 
-		// That Pod served while a step added a Pod for it. The added Pod has its
-		// route and cannot take the place of a different Pod, so it goes, also when
-		// it is Ready: the Pod that served first keeps its place. The added Pod has
-		// the highest index below the range and is newer than that Pod. After a
-		// scale-in no Pod is newer, and the retention order selects the Pod that goes.
-		if added := first - 1; added >= 0 && len(pods) == int(placement.replicas)+1 &&
-			pods[added].CreationTimestamp.After(pods[first].CreationTimestamp.Time) {
+		// That Pod keeps its index. When it served while a step added a Pod for it,
+		// the fabric pod has one Pod more than its count. The added Pod is the Pod with
+		// the highest index below the range. It has the route of the Pod above the
+		// range and cannot take the place of a different Pod, so it goes when it did
+		// not serve. When it served too, the retention order selects the Pod that goes,
+		// as in a scale-in.
+		if added := first - 1; added >= 0 && len(pods) == int(placement.replicas)+1 && !cyborgPodServed(pods[added]) {
 			return "", pods[added].UID
 		}
 	}
@@ -477,14 +461,15 @@ func cyborgRenumberStep(clique *grovev1alpha1.PodClique, live []*corev1.Pod, pla
 	// The fabric pod keeps its count of Pods that the kubelet started, so the new Pod
 	// is one of them: the kubelet accepted it and prepared its devices. A Pod that is
 	// only bound can still fail there, and it must not be the last Cyborg Pod of the
-	// fabric pod then.
+	// fabric pod then. The new Pod can also go away after this observation, and the
+	// LPX scheduler waits for the next Pod only when its requests are Bound.
 	others := int32(0)
 	for _, pod := range bound[fabricPod] {
 		if pod != candidate && cyborgPodStarted(pod) {
 			others++
 		}
 	}
-	if others >= placement.replicas {
+	if others >= placement.replicas && placement.bound {
 		return "", candidate.UID
 	}
 
@@ -511,28 +496,24 @@ func cyborgRenumberStep(clique *grovev1alpha1.PodClique, live []*corev1.Pod, pla
 }
 
 // liveCyborgPods lists the Pods of one non-nil, owned Cyborg PodClique incarnation
-// that are not in deletion, in Grove index order. stopsAt is the latest end of
-// the grace period of its Pods in deletion, or zero when it has no such Pod.
-func (r *graphReconciler) liveCyborgPods(ctx context.Context, clique *grovev1alpha1.PodClique) (live []*corev1.Pod, stopsAt time.Time, err error) {
+// that are not in deletion, in Grove index order.
+func (r *graphReconciler) liveCyborgPods(ctx context.Context, clique *grovev1alpha1.PodClique) ([]*corev1.Pod, error) {
 	pods := &corev1.PodList{}
 	if err := r.List(ctx, pods, client.InNamespace(clique.Namespace), client.MatchingLabels{grovecommon.LabelPodClique: clique.Name}); err != nil {
-		return nil, time.Time{}, fmt.Errorf("list the Cyborg Pods of PodClique %q: %w", clique.Name, err)
+		return nil, fmt.Errorf("list the Cyborg Pods of PodClique %q: %w", clique.Name, err)
 	}
+
 	// A Pod of an earlier PodClique with the same name is not a Pod of this one.
+	var live []*corev1.Pod
 	for i := range pods.Items {
-		pod := &pods.Items[i]
-		switch {
-		case !metav1.IsControlledBy(pod, clique):
-		case pod.DeletionTimestamp.IsZero():
+		if pod := &pods.Items[i]; metav1.IsControlledBy(pod, clique) && pod.DeletionTimestamp.IsZero() {
 			live = append(live, pod)
-		case pod.DeletionTimestamp.After(stopsAt):
-			stopsAt = pod.DeletionTimestamp.Time
 		}
 	}
 	slices.SortFunc(live, func(a, b *corev1.Pod) int {
 		return cmp.Or(cmp.Compare(podCliquePodIndex(a), podCliquePodIndex(b)), cmp.Compare(a.Name, b.Name))
 	})
-	return live, stopsAt, nil
+	return live, nil
 }
 
 // fillCyborgPlacement pins each unplaced Pod of one non-nil, owned Cyborg PodClique
@@ -570,7 +551,7 @@ func (r *graphReconciler) fillCyborgPlacement(
 		return false
 	})
 
-	// Placed Pods keep their positions; bound Pods, and then Pods that serve, go first.
+	// Placed Pods keep their positions; bound Pods, then Pods that serve, then Pods that run, go first.
 	placed := slices.DeleteFunc(slices.Clone(live), func(pod *corev1.Pod) bool { return pod.Labels[cyborgFabricPodLabel] == "" })
 	slices.SortStableFunc(placed, compareCyborgRetention)
 	for _, pod := range placed {
@@ -704,21 +685,25 @@ func hasSchedulingGate(pod *corev1.Pod, name string) bool {
 }
 
 // compareCyborgRetention orders Pods by how much a placement loses with them:
-// bound before unbound; then a Ready Pod, a Pod with the served record, and the
-// other Pods; then the lower Grove index. The Pods that stay after a scale-in
-// thus have the lowest indexes among equal Pods. cyborgRenumberStep, not this
-// order, selects the Pod that goes for a Pod with a lower index.
+// bound before unbound; then a Ready Pod, a Pod with the served record, a Pod that
+// the kubelet started, and the other Pods; then the lower Grove index. The Pods
+// that stay after a scale-in thus have the lowest indexes among equal Pods, and a
+// Pod that runs stays before a Pod that the kubelet can still refuse.
+// cyborgRenumberStep, not this order, selects the Pod that goes for a Pod with a
+// lower index.
 func compareCyborgRetention(a, b *corev1.Pod) int {
 	rank := func(pod *corev1.Pod) int {
 		switch {
 		case pod.Spec.NodeName == "":
-			return 3
+			return 4
 		case cyborgPodReady(pod):
 			return 0
 		case pod.Labels[cyborgServedLabel] != "":
 			return 1
-		default:
+		case cyborgPodStarted(pod):
 			return 2
+		default:
+			return 3
 		}
 	}
 	return cmp.Or(cmp.Compare(rank(a), rank(b)), cmp.Compare(podCliquePodIndex(a), podCliquePodIndex(b)))
@@ -730,14 +715,12 @@ func cyborgPodBound(pod *corev1.Pod) bool {
 }
 
 // cyborgPodStarted reports whether the kubelet started a container of the non-nil
-// Pod at some time: it then accepted the Pod and prepared its devices. The Pod
-// cache keeps only the waiting and the terminated state of a container, so a
-// status without a waiting state is of a container that started. A container that
-// waits for a restart has its last termination.
+// Pod: it then accepted the Pod and prepared its devices. The Pod cache keeps only
+// the waiting and the terminated state of a container, so a status without a
+// waiting state is of a container that started. The init containers of a Cyborg
+// Pod keep that state while its other containers wait for a restart.
 func cyborgPodStarted(pod *corev1.Pod) bool {
-	started := func(status corev1.ContainerStatus) bool {
-		return status.State.Waiting == nil || status.LastTerminationState.Terminated != nil
-	}
+	started := func(status corev1.ContainerStatus) bool { return status.State.Waiting == nil }
 	return slices.ContainsFunc(pod.Status.InitContainerStatuses, started) || slices.ContainsFunc(pod.Status.ContainerStatuses, started)
 }
 

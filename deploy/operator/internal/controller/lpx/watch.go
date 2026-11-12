@@ -260,7 +260,9 @@ func placedCyborgPodPredicate() predicate.Funcs {
 				// The placement removes a Pod when the kubelet started the Pod that takes
 				// its place, and it removes a Pod in a terminal phase.
 				cyborgPodStarted(oldPod) != cyborgPodStarted(newPod) ||
-				cyborgPodTerminal(oldPod) != cyborgPodTerminal(newPod)
+				cyborgPodTerminal(oldPod) != cyborgPodTerminal(newPod) ||
+				// A Ready Pod needs its served record. The pass that writes it ends these events.
+				(cyborgPodReady(newPod) && newPod.Labels[cyborgServedLabel] == "")
 		},
 		GenericFunc: func(event.GenericEvent) bool { return false },
 	}
