@@ -1363,7 +1363,12 @@ mod tests {
 
         assert_eq!(body["error"]["message"], "Unsupported media type");
         assert_eq!(body["error"]["code"], 415);
-        assert!(!body["error"]["message"].as_str().unwrap().contains("secret"));
+        assert!(
+            !body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("secret")
+        );
     }
 
     #[tokio::test]

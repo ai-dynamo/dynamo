@@ -24,13 +24,12 @@ from pathlib import Path
 from typing import AsyncGenerator, Dict
 
 import aiohttp
+import numpy as np
 import pytest
 
-import numpy as np
-
+from dynamo.common.multimodal import video_loader as video_loader_module
 from dynamo.common.multimodal.media_source import decode_data_uri
 from dynamo.common.multimodal.video_loader import VideoLoader
-from dynamo.common.multimodal import video_loader as video_loader_module
 from dynamo.frontend.utils import PromptLogprobsAccumulator
 from dynamo.llm import HttpAsyncEngine, HttpError, HttpService
 from dynamo.runtime import DistributedRuntime
@@ -460,9 +459,9 @@ async def test_streaming_chat_completion_http_error_default_commits_200(http_ser
     # The frame carries the sanitized stream error, not the backend's own
     # message: HTTP 200 is already committed, so there is no status left to
     # carry the 400, and the stream formatter does not forward backend text.
-    assert '"error"' in body, (
-        f"the pre-yield failure must arrive as an SSE error frame; got: {body}"
-    )
+    assert (
+        '"error"' in body
+    ), f"the pre-yield failure must arrive as an SSE error frame; got: {body}"
     assert "mock response" not in body, (
         f"the generator raised before its first yield, so the stream must "
         f"carry no content; got: {body}"
