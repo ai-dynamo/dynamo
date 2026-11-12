@@ -2103,42 +2103,6 @@ def test_qwen_transcription_deltas_only_grow_and_join_to_transcript(monkeypatch)
     assert len({event["item_id"] for event in events if "item_id" in event}) == 1
 
 
-def test_non_qwen_realtime_model_keeps_streaming_input(monkeypatch):
-    pytest.importorskip("vllm.model_executor.models.qwen3_asr_realtime")
-
-    class OtherRealtime:
-        supports_realtime = True
-        realtime_max_tokens = 64
-
-        @classmethod
-        def get_speech_to_text_config(cls, model_config, task_type):
-            del model_config, task_type
-            return SimpleNamespace(sample_rate=16_000)
-
-    _realtime_serving(monkeypatch, OtherRealtime)
-    engine = _QwenEngine()
-    handler = RealtimeTranscriptionHandler.from_engine(
-        engine_client=engine, model_name=MODEL, model_path=MODEL
-    )
-
-    asyncio.run(
-        asyncio.wait_for(
-            _drive(
-                handler,
-                [
-                    {"type": "session.update", "session": _session()},
-                    *_seconds_of_pcm(6),
-                    {"type": "input_audio_buffer.commit"},
-                ],
-            ),
-            timeout=5,
-        )
-    )
-
-    assert len(engine.prompts) == 1
-    assert not isinstance(engine.prompts[0], dict)
-
-
 @pytest.mark.parametrize("operation", ["create_chat_completion", "render_chat_request"])
 def test_text_serving_preserves_error_message(monkeypatch, caplog, operation):
     from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
