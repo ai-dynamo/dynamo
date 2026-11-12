@@ -28,16 +28,15 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
         with:
           python-version: '3.12'
-      - name: Install policy parser
-        run: python3 -m pip install PyYAML==6.0.3 pytest==8.4.2
-      - name: Test policy and merge-gate contracts
+      - name: Install policy parser and CPU test dependencies
+        # Match the existing common/test requirement pins without installing GPU dependencies.
+        run: |
+          python3 -m pip install PyYAML==6.0.3 pytest==9.0.3 \
+            pytest-asyncio==1.3.0 pytest-timeout==2.4.0 Jinja2==3.1.6
+      - name: Run CPU compliance regressions from the checkout
         run: |
           python3 -m pytest -o addopts='' -o filterwarnings='' -q \
-            container/compliance/tests/test_policy_review.py \
-            container/compliance/tests/test_policy_workflow.py \
-            container/compliance/tests/test_override_usage.py \
-            container/compliance/tests/test_audit_override_usage.py \
-            container/compliance/tests/test_dpkg_generator.py
+            container/compliance/tests
       - name: Check new grants and report legacy review debt
         run: |
           PYTHONPATH=container python3 -m compliance.policy.review \

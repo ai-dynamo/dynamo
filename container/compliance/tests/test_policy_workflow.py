@@ -54,3 +54,37 @@ def test_policy_inputs_and_gate_changes_activate_the_required_job(path):
         workflow["jobs"]["changed-files"]["outputs"]["compliance_policy"]
         == "${{ steps.changes.outputs.compliance_policy }}"
     )
+
+
+def test_required_policy_job_executes_full_checkout_compliance_regressions():
+    called = read_yaml(".github/workflows/compliance-policy-review.yml")
+    steps = called["jobs"]["policy-review"]["steps"]
+    regression_steps = [
+        step for step in steps if "python3 -m pytest" in step.get("run", "")
+    ]
+    assert len(regression_steps) == 1
+    regression = regression_steps[0]
+    command = regression["run"]
+    assert "container/compliance/tests\n" in command
+    assert "-o addopts=''" in command and "-o filterwarnings=''" in command
+    assert " -m " not in command.replace("python3 -m pytest", "pytest")
+    assert "if" not in regression and "continue-on-error" not in regression
+    regression_index = steps.index(regression)
+    install_index = next(
+        i for i, step in enumerate(steps) if "pip install" in step.get("run", "")
+    )
+    policy_index = next(
+        i
+        for i, step in enumerate(steps)
+        if "-m compliance.policy.review" in step.get("run", "")
+    )
+    assert install_index < regression_index < policy_index
+    install = steps[install_index]["run"].lower()
+    for dependency in (
+        "pytest==",
+        "pytest-asyncio==",
+        "pytest-timeout==",
+        "jinja2==",
+        "pyyaml==",
+    ):
+        assert dependency in install
