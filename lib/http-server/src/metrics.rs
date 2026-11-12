@@ -1030,7 +1030,9 @@ impl Metrics {
     /// MDC metrics (from ModelDeploymentCard):
     /// - `{prefix}_model_context_length` - IntGaugeVec for maximum context length for a worker serving the model
     /// - `{prefix}_model_kv_cache_block_size` - IntGaugeVec for KV cache block size for a worker serving the model
-    /// - `{prefix}_model_migration_limit` - IntGaugeVec for request migration limit for a worker serving the model
+    ///
+    /// Frontend config metrics (set alongside the MDC metrics):
+    /// - `{prefix}_model_migration_limit` - IntGaugeVec for the frontend's `--migration-limit` for the model
     ///
     /// ## Runtime Config Polling Configuration
     ///
@@ -1414,7 +1416,7 @@ impl Metrics {
         let model_migration_total = IntCounterVec::new(
             Opts::new(
                 frontend_metric_name(frontend_service::MODEL_MIGRATION_TOTAL),
-                "Total number of request migrations due to worker unavailability",
+                "Total number of permitted request migration attempts after a worker failure",
             ),
             &["model", frontend_service::MIGRATION_TYPE_LABEL],
         )
@@ -1774,17 +1776,11 @@ impl Metrics {
             .set(migration_limit as i64);
     }
 
-    /// Increment the migration counter for a new request migration
-    pub fn inc_migration_new_request(&self, model: &str) {
+    /// Increment the migration counter when a permitted retry begins.
+    /// `migration_type` names the failure that caused the replacement.
+    pub fn inc_migration(&self, model: &str, migration_type: &str) {
         self.model_migration_total
-            .with_label_values(&[model, frontend_service::migration_type::NEW_REQUEST])
-            .inc();
-    }
-
-    /// Increment the migration counter for an ongoing request migration
-    pub fn inc_migration_ongoing_request(&self, model: &str) {
-        self.model_migration_total
-            .with_label_values(&[model, frontend_service::migration_type::ONGOING_REQUEST])
+            .with_label_values(&[model, migration_type])
             .inc();
     }
 

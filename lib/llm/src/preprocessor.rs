@@ -61,7 +61,6 @@ use std::{
 use tokio_util::sync::CancellationToken;
 use tracing::{self, Instrument};
 
-use crate::http::service::metrics::RequestMetrics;
 #[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
 use crate::local_model::runtime_config::{
     ModelRuntimeConfig, SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
@@ -81,8 +80,8 @@ use crate::protocols::common::preprocessor::{
     MultimodalData, MultimodalDataMap, MultimodalItemRef, MultimodalUuidMap,
     PreprocessedRequestBuilder, RoutingHints,
 };
-use crate::protocols::common::timing::RequestTracker;
-use crate::tokenizers::Encoding;
+use crate::{protocols::common::timing::RequestTracker, tokenizers::Encoding};
+use dynamo_http_server::metrics::RequestMetrics;
 
 use dynamo_parsers::{
     ReasoningParser, ReasoningParserType, reasoning::ParserResult,
@@ -16987,10 +16986,10 @@ mod tests {
             "model": "test-model", "input": [[1, 2, 3], [4, 5]],
         }))
         .unwrap();
-        let metrics = Arc::new(crate::http::service::metrics::Metrics::new());
+        let metrics = Arc::new(dynamo_http_server::metrics::Metrics::new());
         let inflight = metrics.clone().create_inflight_guard(
             "test-model",
-            crate::http::service::metrics::Endpoint::Embeddings,
+            dynamo_http_server::metrics::Endpoint::Embeddings,
             false,
             "",
         );
@@ -17008,8 +17007,8 @@ mod tests {
         assert_eq!(awaiting_first_token_input_tokens(&metrics), 0);
     }
 
-    fn awaiting_first_token_input_tokens(metrics: &crate::http::service::metrics::Metrics) -> u64 {
-        let view = crate::discovery::CommittedModelView {
+    fn awaiting_first_token_input_tokens(metrics: &dynamo_http_server::metrics::Metrics) -> u64 {
+        let view = dynamo_http_server::load::ModelLoadView {
             name: "test-model".to_string(),
             is_ready: true,
             aliases: Vec::new(),
@@ -17036,10 +17035,10 @@ mod tests {
             "messages": [{"role": "user", "content": "What is the weather?"}],
         }))
         .unwrap();
-        let metrics = Arc::new(crate::http::service::metrics::Metrics::new());
+        let metrics = Arc::new(dynamo_http_server::metrics::Metrics::new());
         let inflight = metrics.clone().create_inflight_guard(
             "test-model",
-            crate::http::service::metrics::Endpoint::ChatCompletions,
+            dynamo_http_server::metrics::Endpoint::ChatCompletions,
             false,
             "",
         );

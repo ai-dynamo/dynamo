@@ -156,6 +156,16 @@ pub(crate) struct CommittedModelView {
     pub(crate) aliases: Vec<String>,
 }
 
+impl From<CommittedModelView> for dynamo_http_server::load::ModelLoadView {
+    fn from(view: CommittedModelView) -> Self {
+        Self {
+            name: view.name,
+            is_ready: view.is_ready,
+            aliases: view.aliases,
+        }
+    }
+}
+
 /// Central manager for model engines, routing, and configuration.
 ///
 /// Models are stored hierarchically: ModelManager → Model → WorkerSet.
@@ -3759,7 +3769,7 @@ mod tests {
 
     #[test]
     fn alias_requests_publish_frontend_load_under_the_primary_model() {
-        use crate::http::service::metrics::{Endpoint, Metrics};
+        use dynamo_http_server::metrics::{Endpoint, Metrics};
 
         let mm = ModelManager::new();
         let worker_set = Arc::new(make_worker_set("ns1", "abc"));
@@ -3780,7 +3790,14 @@ mod tests {
             metrics
                 .clone()
                 .create_inflight_guard("llama", Endpoint::Embeddings, false, "");
-        let frame = metrics.frontend_load(0, true, mm.committed_model_views());
+        let frame = metrics.frontend_load(
+            0,
+            true,
+            mm.committed_model_views()
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+        );
         assert_eq!(frame.models.len(), 1);
         assert_eq!(frame.models[0].model, "llama");
         assert_eq!(frame.models[0].totals.requests_started, 2);

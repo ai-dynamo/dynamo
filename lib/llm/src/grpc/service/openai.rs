@@ -22,10 +22,10 @@ use super::kserve;
 use super::kserve::inference;
 
 // [gluo NOTE] These are common utilities that should be shared between frontends
-use crate::http::service::{
-    disconnect::create_connection_monitor,
-    metrics::{CancellationLabels, Endpoint, process_response_and_observe_metrics},
-};
+use crate::http::service::metrics::process_response_and_observe_metrics;
+use dynamo_http_server::disconnect::create_connection_monitor;
+use dynamo_http_server::metrics::CancellationLabels;
+use dynamo_http_server::metrics::Endpoint;
 use dynamo_protocols::types::{CompletionFinishReason, CreateCompletionRequest, Prompt};
 
 use tonic::{Status, metadata::MetadataMap};
@@ -118,15 +118,15 @@ pub async fn completion_response_stream(
         // keeps the deadline outcome. RESOURCE_EXHAUSTED mirrors the HTTP
         // surfaces' 429: the deadline elapsed waiting for capacity, so it is
         // backpressure rather than a gateway timeout. No rejection accounting.
-        if crate::http::service::metrics::request_deadline_exceeded(e.as_ref()) {
+        if dynamo_http_server::metrics::request_deadline_exceeded(e.as_ref()) {
             return Status::resource_exhausted(
-                crate::http::service::metrics::REQUEST_DEADLINE_EXCEEDED_MESSAGE,
+                dynamo_http_server::metrics::REQUEST_DEADLINE_EXCEEDED_MESSAGE,
             );
         }
-        if crate::http::service::metrics::request_was_rejected(e.as_ref()) {
+        if dynamo_http_server::metrics::request_was_rejected(e.as_ref()) {
             state.metrics_clone().inc_rejection(
                 &model_name,
-                crate::http::service::metrics::Endpoint::Completions,
+                dynamo_http_server::metrics::Endpoint::Completions,
             );
             return Status::resource_exhausted(e.to_string());
         }

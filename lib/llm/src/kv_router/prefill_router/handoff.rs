@@ -15,12 +15,12 @@ use tokio::task::JoinHandle;
 use tracing::Instrument;
 
 use super::PrefillError;
-use crate::http::service::metrics::request_deadline_exceeded;
 use crate::kv_router::UnknownPolicyClassRefusal;
 use crate::protocols::{
     common::llm_backend::{FinishReason, LLMEngineOutput},
     response_merge::{PREFILL_OUTPUT_ANNOTATION, PrefillNeed},
 };
+use dynamo_http_server::metrics::request_deadline_exceeded;
 
 /// Prefill's last `engine_data`.
 pub(super) type PrefillOutput = Option<Box<serde_json::Value>>;

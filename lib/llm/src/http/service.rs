@@ -24,9 +24,7 @@ mod decision_lifecycle;
 mod image_edits;
 pub mod metadata;
 mod openai;
-mod server;
 mod transcriptions;
-mod write_timeout;
 
 pub mod busy_threshold;
 pub mod disconnect;
@@ -43,13 +41,14 @@ pub mod router_policy;
 pub mod service_v2;
 pub mod systemone;
 mod worker_metrics;
+#[cfg(test)]
+mod write_timeout_tests;
 
 pub use axum;
 pub use frontend_extension::{
     FrontendExtensionContext, FrontendRouteExtension, FrontendRouteSet,
     validate_extension_route_method, validate_extension_route_path,
 };
-pub use metrics::Metrics;
 
 use crate::{
     preprocessor::OpenAIPreprocessor,
