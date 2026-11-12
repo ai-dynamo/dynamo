@@ -317,7 +317,7 @@ get_options() {
     if [ -n "$USE_NIXL_GDS" ]; then
         VOLUME_MOUNTS+=" -v /run/udev:/run/udev:ro "
         NIXL_GDS_CAPS="--cap-add=IPC_LOCK"
-        # NOTE(jthomson04): In the KVBM disk pools, we currently allocate our files in /tmp.
+        # NOTE(jthomson04): Disk-backed NIXL storage currently allocates its files in /tmp.
         # For some arcane reason, GDS requires that /tmp be mounted.
         # This is already handled for us if we set --mount-workspace
         # If we aren't mounting our workspace but need GDS, we need to mount /tmp.

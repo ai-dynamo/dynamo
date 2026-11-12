@@ -228,7 +228,7 @@ jobs:
           python3 "${RUNNER_TEMP}/apply_dev_version.py" "" . --set-version "${RELEASE_VERSION}" \
             --containers all --helm all --image-refs
 
-          # Sync EVERY Cargo.lock (root + nested workspaces: bindings/python, kvbm,
+          # Sync EVERY Cargo.lock (root + nested workspaces: bindings/python,
           # runtime/examples): a root-only `cargo update` leaves their pins stale and
           # fails the `--locked` checks. Discovered from git so a newly added nested
           # workspace can't silently regress.

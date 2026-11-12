@@ -514,7 +514,6 @@ requirements.txt                                                                
 /tests/fault_tolerance/                                                                                 @ai-dynamo/dynamo-fault-tolerance-codeowners
 /lib/llm/src/entrypoint/                                                                                @ai-dynamo/dynamo-frontend-codeowners
 /lib/llm/src/pool_relay/                                                                                @ai-dynamo/dynamo-global-router-codeowners
-/tests/kvbm_integration/                                                                                @ai-dynamo/dynamo-kv-memory-codeowners
 /lib/llm/src/grpc/protos/                                                                               @ai-dynamo/dynamo-frontend-codeowners
 /lib/llm/src/kv_router.rs                                                                               @ai-dynamo/dynamo-router-codeowners
 /lib/llm/src/protocols.rs                                                                               @ai-dynamo/dynamo-frontend-codeowners
@@ -815,7 +814,6 @@ requirements.txt                                                                
 /components/src/dynamo/trtllm/engine_monitor.py                                                         @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-observability-codeowners
 /components/src/dynamo/trtllm/tests/*diffusion*                                                         @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-diffusion-codeowners
 /components/src/dynamo/trtllm/tests/multimodal/                                                         @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-multimodal-codeowners
-/dev/observability/grafana_dashboards/kvbm.json                                                         @ai-dynamo/dynamo-observability-codeowners @ai-dynamo/dynamo-kv-memory-codeowners
 /lib/backend-common/examples/mocker/Dockerfile*                                                         @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-ops-codeowners
 /lib/bindings/python/tests/test_mm_kv_router.py                                                         @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-router-codeowners @ai-dynamo/dynamo-multimodal-codeowners
 /.github/actions/setup-snapshot-agent/action.yml                                                        @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-gms-codeowners

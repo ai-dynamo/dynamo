@@ -11,7 +11,7 @@ the queue.
 
 Applies only to tests that **load or reference a real model** — typically e2e
 and integration tests under `tests/serve/`, `tests/router/`, `tests/mm_router/`,
-`tests/fault_tolerance/`, `tests/kvbm_integration/`, `tests/basic/`, and
+`tests/fault_tolerance/`, `tests/basic/`, and
 similar. Skip this rule when a test mocks the model or never references a
 Hugging Face model id, `--model` arg, or framework-specific model path.
 

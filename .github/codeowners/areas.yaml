@@ -220,7 +220,6 @@ areas:
   - lib/memory/src/pool/
   - lib/tokens/
   - lib/tokens/docs/
-  - tests/kvbm_integration/
   - tests/lmcache/
 - label: multimodal
   github_team: '@ai-dynamo/dynamo-multimodal-codeowners'
@@ -1060,10 +1059,6 @@ shared:
   owners:
   - ops
   - runtime
-- glob: dev/observability/grafana_dashboards/kvbm.json
-  owners:
-  - observability
-  - kv-memory
 - glob: examples/router/custom-policy-example/epp/
   owners:
   - router
