@@ -9582,7 +9582,8 @@ spec:
                         snake_case names. Values here take precedence, and null deletes a lowered
                         field. Client-side kubectl apply (seen with kubectl 1.34) removes null
                         values before it sends the object, so create a Request that uses them with
-                        kubectl create or kubectl apply --server-side. The dgdr_run member must remain an object, and its operator-owned
+                        kubectl create or kubectl apply --server-side. The dgdr_run member must
+                        remain an object, and its operator-owned
                         transport, identity, and runtime fields name, max_candidates, snapshot_dir,
                         runtime_image, runtime_version_override, derive_runtime_images,
                         num_gpus_per_node, and namespace are operator-owned. Request and Run admission
