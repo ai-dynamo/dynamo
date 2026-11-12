@@ -120,11 +120,6 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 {% endif %}
 
-{% if variant == "enterprise" %}
-# The NIM base assigns UID 1000 to `nim`. Remove the account but keep its
-# /opt/nim home, which holds the NIM venv.
-RUN userdel nim
-{% endif %}
 # Create dynamo user with group 0 for OpenShift compatibility.
 # Pin -u 1000 explicitly: the vllm/vllm-openai >=0.22 image ships a `vllm` user at
 # UID 2000, so after freeing 1000 (ubuntu) useradd would otherwise auto-assign the
