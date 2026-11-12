@@ -491,7 +491,8 @@ pub mod llm {
 
     /// Render control-token spellings in chat request text as ordinary text
     /// under every chat template, so only the template's own markers encode as
-    /// control tokens. Harmony templates render this way without it.
+    /// control tokens. On by default; set this to a falsy value (`0`/`false`)
+    /// to turn it off. Harmony templates render this way regardless.
     pub const DYN_REQUEST_CONTROL_TOKENS_AS_TEXT: &str = "DYN_REQUEST_CONTROL_TOKENS_AS_TEXT";
 
     /// Master switch for the frontend's HTTP admin API surface.

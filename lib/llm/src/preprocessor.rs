@@ -9146,8 +9146,8 @@ mod token_data_tests {
     #[test]
     fn added_tokens_in_tokenizer_json_encode_as_ordinary_text() {
         // Only tokenizer.json lists `<x>`, as `special: false` like DeepSeek-R1's
-        // `<｜User｜>`, and the template writes it. With the setting on, the
-        // user's `<x>` is text; with it off, the prompt is one piece as before.
+        // `<｜User｜>`, and the template writes it. With the setting off, the
+        // prompt is one piece; with it on, the default, the user's `<x>` is text.
         let (mut mdc, dir) = tinyllama_card(NO_VOCAB_SIZE, Some(ADDED_TOKEN_TOKENIZER));
         let path = dir.path().join("chat_template.jinja");
         std::fs::write(
