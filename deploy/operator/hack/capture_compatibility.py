@@ -191,7 +191,11 @@ def prepare_release_tree(scenario, version, revision, work, provenance):
     checkout = work / version
     checkout.mkdir()
     with tarfile.open(fileobj=io.BytesIO(archive_release(revision, paths))) as archive:
-        archive.extractall(checkout, filter="data")
+        # The data filter exists from Python 3.11.4; older 3.11 patch releases reject the keyword.
+        if hasattr(tarfile, "data_filter"):
+            archive.extractall(checkout, filter="data")
+        else:
+            archive.extractall(checkout)
     operator = checkout / "deploy/operator"
     rendered, barrier = render_harness(scenario, version)
     (operator / "internal/controller/zz_capture_upgrade_test.go").write_text(rendered)

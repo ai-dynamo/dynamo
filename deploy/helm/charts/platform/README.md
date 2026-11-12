@@ -176,16 +176,18 @@ timing-only probes; every other rejected shape already failed at Pod creation.
 
 **Action:** Before upgrading, supply a complete handler with any custom timing settings, or
 omit the probe to use the applicable operator default. A frontend-sidecar probe that relied on
-merged defaults keeps rendering as before on an existing workload. To adopt complete-value
-semantics there, author the full probe; this is an intentional Pod-template update.
+merged defaults keeps rendering as before on an existing workload. Authoring a complete probe
+does not change the merge policy of an existing workload. Complete-value replacement applies
+only to workloads whose immutable operator origin is 1.7.0 or later.
 
 **Existing deployments:** An operator-only upgrade does not change rendered probes. Workloads
 created by operator 1.6.x or earlier keep the field-merged frontend-sidecar probes they run
 today, including timing-only probes that the 1.6.x operator completed from its defaults.
 Installing the CRDs does not rewrite stored probes. The rules are CRD validation rules, and
-Kubernetes 1.30 and later ratchet them: an update that leaves a stored timing-only probe
-unchanged is accepted. An update that edits that probe, or re-creation of the resource, must
-supply a complete probe.
+Kubernetes 1.30 and later ratchet these container-scoped rules while the container
+remains unchanged. Editing that container, including only its image or environment,
+requires each supplied probe to define exactly one handler. Resource re-creation
+also requires complete probes.
 
 #### Operator behavior breaking changes
 
