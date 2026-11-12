@@ -46,6 +46,7 @@ use dynamo_admission::queue::{
 };
 use dynamo_admission::{PolicyClassConfig, PolicyProfile};
 use dynamo_kv_hashing::LocalBlockHash;
+use dynamo_kv_indexer::ResidentBlockCountsHandle;
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 use dynamo_slot_tracker::busy::{BusyThresholds, FullRankCounts};
 use dynamo_slot_tracker::wire::PrefillLoadHint;
@@ -874,6 +875,9 @@ struct SchedulerQueueActor<
     non_max_overlap_selection_observer: Arc<OnceLock<NonMaxOverlapSelectionObserver>>,
     /// Per-candidate cost capture for admitted selections, installed once by the host.
     selection_trace: Arc<OnceLock<SelectionTraceSpec>>,
+    /// The partition's live resident block counts, installed once by the host for a policy
+    /// that declared RESIDENT_BLOCKS.
+    resident_blocks: Arc<OnceLock<ResidentBlockCountsHandle>>,
     reject_thresholds: Option<RejectThresholdsProvider>,
     /// The request classifier's dispatch gate, installed once by the host.
     dispatch_gate: Arc<OnceLock<Arc<dyn DispatchGate>>>,
@@ -916,6 +920,9 @@ pub struct SchedulerQueue<
     non_max_overlap_selection_observer: Arc<OnceLock<NonMaxOverlapSelectionObserver>>,
     /// Per-candidate cost capture for admitted selections, installed once by the host.
     selection_trace: Arc<OnceLock<SelectionTraceSpec>>,
+    /// The partition's live resident block counts, installed once by the host for a policy
+    /// that declared RESIDENT_BLOCKS.
+    resident_blocks: Arc<OnceLock<ResidentBlockCountsHandle>>,
     reject_thresholds: Option<RejectThresholdsProvider>,
     dispatch_gate: Arc<OnceLock<Arc<dyn DispatchGate>>>,
     /// Wakes the actor for a full lane recheck, whether or not any class queues.
@@ -1045,6 +1052,7 @@ impl<
         let non_max_overlap_selection_observer = Arc::new(OnceLock::new());
         let selection_trace = Arc::new(OnceLock::new());
         let dispatch_gate = Arc::new(OnceLock::new());
+        let resident_blocks = Arc::new(OnceLock::new());
         let start_time = Instant::now();
         // The actor always listens for wakes: a dispatch gate installed later holds heads even
         // when no class queues on capacity, and its rechecks arrive here. Capacity changes
@@ -1107,6 +1115,7 @@ impl<
             available_worker_ids: available_worker_ids.clone(),
             non_max_overlap_selection_observer: Arc::clone(&non_max_overlap_selection_observer),
             selection_trace: Arc::clone(&selection_trace),
+            resident_blocks: Arc::clone(&resident_blocks),
             reject_thresholds: reject_thresholds.clone(),
             dispatch_gate: Arc::clone(&dispatch_gate),
             gate_recheck_at: None,
@@ -1133,6 +1142,7 @@ impl<
             supports_overlap_refresh: overlap_refresh_after.is_some(),
             non_max_overlap_selection_observer,
             selection_trace,
+            resident_blocks,
             reject_thresholds,
             dispatch_gate,
             actor_wake,
@@ -1179,6 +1189,14 @@ impl<
     /// Returns `false` when a spec is already installed.
     pub fn set_selection_trace(&self, spec: SelectionTraceSpec) -> bool {
         self.selection_trace.set(spec).is_ok()
+    }
+
+    /// Lend the partition's live resident block counts to every selection, for a policy that
+    /// declared `WorkerInputs::RESIDENT_BLOCKS`.
+    ///
+    /// Returns `false` when counts are already installed.
+    pub fn set_resident_block_counts(&self, counts: ResidentBlockCountsHandle) -> bool {
+        self.resident_blocks.set(counts).is_ok()
     }
 
     /// Enqueue a new request through the router-owned policy queue.
@@ -2591,6 +2609,11 @@ impl<
             } else {
                 None
             };
+            // Held for this selection, so the snapshot the policy reads borrows live counters.
+            let resident_blocks = self
+                .resident_blocks
+                .get()
+                .map(ResidentBlockCountsHandle::load);
             self.selector
                 .select_worker_prepared(
                     WorkerSelectionInput::configured(
@@ -2598,7 +2621,8 @@ impl<
                         request,
                         eligibility,
                         self.block_size,
-                    ),
+                    )
+                    .with_resident_blocks(resident_blocks.as_deref().map(|counts| &**counts)),
                     prepared,
                     trace,
                 )
@@ -4525,6 +4549,7 @@ mod tests {
                 &queue.non_max_overlap_selection_observer,
             ),
             selection_trace: Arc::clone(&queue.selection_trace),
+            resident_blocks: Arc::clone(&queue.resident_blocks),
             reject_thresholds: queue.reject_thresholds.clone(),
             dispatch_gate: Arc::clone(&queue.dispatch_gate),
             gate_recheck_at: None,
