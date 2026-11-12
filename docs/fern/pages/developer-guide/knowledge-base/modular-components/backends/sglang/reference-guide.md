@@ -209,6 +209,18 @@ error. Frontend pipelines that support migration can reselect using the existing
 `--migration-limit` and ordinary routing and replay rules. A zero limit disables
 reselection.
 
+The grace period starts after discovery confirms withdrawal. Admission checks
+its deadline at request ingress, even while an engine-control operation holds
+the lifecycle lock. Repeated drain calls do not extend the deadline.
+
+Discovery RPC errors leave the write outcome unconfirmed. A failed drain keeps
+admission open and reports `discovery_unregister_pending`; retry drain to
+confirm withdrawal. Every resume call reasserts discovery registration, including
+when admission is already open. Resume opens admission before registration so
+requests can arrive as soon as the endpoint becomes visible. If registration
+fails, the call returns an error and admission stays open unless shutdown
+supersedes resume. Retry resume to confirm registration.
+
 SGLang's `pause_generation` and drain are mutually exclusive. Continue
 generation before draining a paused worker. Resume a draining or drained worker
 before pausing it. SIGTERM moves the worker to `stopping`, prevents resume, and

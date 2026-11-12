@@ -67,8 +67,8 @@ async def test_control_methods_and_withdrawal_failure(controls):
     )
     response = await call(runtime, "drain", "POST", {})
     assert response["status"] == 503
-    assert (await drain.status({}))["state"] == "serving"
-    assert not drain.withdrawn
+    assert (await drain.status({}))["reason"] == "discovery_unregister_pending"
+    assert drain.withdrawn
 
 
 @pytest.mark.asyncio

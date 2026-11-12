@@ -3,12 +3,13 @@
 
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
 from dynamo._core import WorkerDraining
 from dynamo.health_check import HEALTH_CHECK_KEY
+from dynamo.sglang import drain as drain_module
 from dynamo.sglang.drain import DrainConflict, WorkerDrain
 
 pytestmark = [pytest.mark.unit, pytest.mark.gpu_0, pytest.mark.pre_merge]
@@ -29,10 +30,17 @@ def endpoint():
     )
 
 
+@pytest.fixture
+def clock(monkeypatch):
+    now = Mock(return_value=100.0)
+    monkeypatch.setattr(drain_module, "monotonic", now, raising=False)
+    return now
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("grace_period", [0, 0.001])
 async def test_drain_preserves_admitted_stream_and_rejects_late_work(
-    endpoint, ready, grace_period
+    endpoint, ready, grace_period, clock
 ):
     release = asyncio.Event()
 
@@ -58,7 +66,7 @@ async def test_drain_preserves_admitted_stream_and_rejects_late_work(
     if grace_period:
         assert status["state"] == "withdrawing"
         assert status["accepting_requests"]
-        await asyncio.wait_for(drain._grace_task, 1)
+        clock.return_value += grace_period
         status = await drain.status({})
     assert status["state"] == "withdrawn"
     assert not status["accepting_requests"]
@@ -115,19 +123,38 @@ async def test_discovery_failures_are_observable_and_resume_can_retry(endpoint, 
         is_paused=lambda: False,
         grace_period=0,
     )
-    endpoint.unregister_endpoint_instance.side_effect = RuntimeError("discovery down")
+    endpoint.published = True
+
+    async def committed_unregister():
+        endpoint.published = False
+        raise RuntimeError("discovery down")
+
+    async def register():
+        endpoint.published = True
+
+    endpoint.unregister_endpoint_instance.side_effect = committed_unregister
+    endpoint.register_endpoint_instance.side_effect = register
     with pytest.raises(RuntimeError, match="discovery down"):
         await drain.drain({})
-    assert (await drain.status({}))["state"] == "serving"
-    assert not drain.withdrawn
+    assert (await drain.status({}))["state"] == "withdrawing"
+    assert drain.withdrawn
+    assert not endpoint.published
+    await drain.resume({})
+    endpoint.register_endpoint_instance.assert_awaited_once()
+    assert endpoint.published
+    with pytest.raises(RuntimeError, match="discovery down"):
+        await drain.drain({})
     endpoint.unregister_endpoint_instance.side_effect = None
-    await drain.drain({})
+    status = await drain.drain({})
+    assert endpoint.unregister_endpoint_instance.await_count == 3
+    assert status["state"] == "withdrawn"
+    assert not status["accepting_requests"]
     endpoint.register_endpoint_instance.side_effect = RuntimeError("register failed")
     with pytest.raises(RuntimeError, match="register failed"):
         await drain.resume({})
     status = await drain.status({})
-    assert status["state"] == "withdrawn"
-    assert not status["accepting_requests"]
+    assert status["state"] == "serving"
+    assert status["accepting_requests"]
     assert status["last_error"] == "register failed"
     endpoint.register_endpoint_instance.side_effect = None
     assert (await drain.resume({}))["state"] == "serving"
@@ -154,7 +181,10 @@ async def test_shutdown_supersedes_drain_during_discovery_withdrawal(endpoint, r
 
 
 @pytest.mark.asyncio
-async def test_shutdown_during_resume_undoes_registration(endpoint, ready):
+@pytest.mark.parametrize("registration_error", [False, True])
+async def test_shutdown_during_resume_undoes_registration(
+    endpoint, ready, registration_error
+):
     entered = asyncio.Event()
     release = asyncio.Event()
     shutdown = asyncio.Event()
@@ -162,6 +192,8 @@ async def test_shutdown_during_resume_undoes_registration(endpoint, ready):
     async def register():
         entered.set()
         await release.wait()
+        if registration_error:
+            raise RuntimeError("registration reply lost")
 
     drain = WorkerDrain(
         endpoint,
@@ -176,10 +208,12 @@ async def test_shutdown_during_resume_undoes_registration(endpoint, ready):
     endpoint.register_endpoint_instance.side_effect = register
     request = asyncio.create_task(drain.resume({}))
     await asyncio.wait_for(entered.wait(), 1)
-    assert not (await drain.status({}))["accepting_requests"]
+    assert (await drain.status({}))["accepting_requests"]
     shutdown.set()
     release.set()
-    with pytest.raises(DrainConflict, match="superseded"):
+    error_type = RuntimeError if registration_error else DrainConflict
+    message = "registration reply lost" if registration_error else "superseded"
+    with pytest.raises(error_type, match=message):
         await asyncio.wait_for(request, 1)
     status = await drain.status({})
     assert status["state"] == "stopping"
@@ -191,7 +225,7 @@ async def test_shutdown_during_resume_undoes_registration(endpoint, ready):
 
 
 @pytest.mark.asyncio
-async def test_resume_cancels_pending_router_grace(endpoint, ready):
+async def test_resume_clears_previous_deadline(endpoint, ready, clock):
     drain = WorkerDrain(
         endpoint,
         lock=asyncio.Lock(),
@@ -204,12 +238,19 @@ async def test_resume_cancels_pending_router_grace(endpoint, ready):
     status = await drain.drain({})
     assert status["accepting_requests"]
     assert status["state"] == "withdrawing"
-    grace = drain._grace_task
+    clock.return_value += 30
+    await drain.drain({})
+    clock.return_value += 30
+    assert not (await drain.status({}))["accepting_requests"]
     assert (await drain.resume({}))["accepting_requests"]
-    with pytest.raises(asyncio.CancelledError):
-        await grace
+    clock.return_value += 60
+
+    async def generate(request):
+        yield "accepted"
+
+    assert [item async for item in drain.wrap(generate)({})] == ["accepted"]
     await drain.resume({})
-    endpoint.register_endpoint_instance.assert_awaited_once()
+    assert endpoint.register_endpoint_instance.await_count == 2
 
 
 @pytest.mark.asyncio
@@ -376,3 +417,67 @@ async def test_close_joins_cancelled_http_resume_before_final_unregister(
 
     with pytest.raises(WorkerDraining):
         await anext(drain.wrap(health)({HEALTH_CHECK_KEY: True}))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("registration_error", [False, True])
+async def test_resume_accepts_requests_before_registration_reply(
+    endpoint, ready, registration_error
+):
+    drain = WorkerDrain(
+        endpoint,
+        lock=asyncio.Lock(),
+        shutdown_event=asyncio.Event(),
+        terminal_event=asyncio.Event(),
+        ready_event=ready,
+        is_paused=lambda: False,
+        grace_period=0,
+    )
+    await drain.drain({})
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def register():
+        entered.set()
+        await release.wait()
+        if registration_error:
+            raise RuntimeError("registration reply lost")
+
+    async def generate(request):
+        yield "accepted"
+
+    endpoint.register_endpoint_instance.side_effect = register
+    resume = asyncio.create_task(drain.resume({}))
+    try:
+        await asyncio.wait_for(entered.wait(), 1)
+        assert [item async for item in drain.wrap(generate)({})] == ["accepted"]
+    finally:
+        release.set()
+        if registration_error:
+            with pytest.raises(RuntimeError, match="registration reply lost"):
+                await asyncio.wait_for(resume, 1)
+        else:
+            await asyncio.wait_for(resume, 1)
+    assert [item async for item in drain.wrap(generate)({})] == ["accepted"]
+
+
+@pytest.mark.asyncio
+async def test_admission_deadline_does_not_wait_for_engine_lock(endpoint, ready, clock):
+    lock = asyncio.Lock()
+    drain = WorkerDrain(
+        endpoint,
+        lock=lock,
+        shutdown_event=asyncio.Event(),
+        terminal_event=asyncio.Event(),
+        ready_event=ready,
+        is_paused=lambda: False,
+        grace_period=10,
+    )
+    await drain.drain({})
+
+    async def generate(request):
+        yield "accepted"
+
+    async with lock:
+        clock.return_value += 10
+        with pytest.raises(WorkerDraining):
+            await anext(drain.wrap(generate)({}))

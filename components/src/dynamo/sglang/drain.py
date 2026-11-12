@@ -8,6 +8,7 @@ import math
 from collections.abc import Callable, Mapping
 from contextlib import aclosing
 from functools import wraps
+from time import monotonic
 
 from dynamo._core import WorkerDraining
 from dynamo.health_check import HEALTH_CHECK_KEY
@@ -40,20 +41,19 @@ class WorkerDrain:
         self._is_paused = is_paused
         self._grace_period = grace_period
         self._pending_engine_requests = pending_engine_requests
-        self._state = "starting"
-        self._accepting = True
-        self._withdrawn = False
+        # None resumes admission; infinity keeps it open until withdrawal is confirmed.
+        self._admission_deadline: float | None = None
         self._last_error: str | None = None
-        self._grace_task: asyncio.Task | None = None
         self._operations: set[asyncio.Task] = set()
         self._close_task: asyncio.Task | None = None
 
     def _is_stopping(self) -> bool:
-        if self._terminal_event.is_set() or self._shutdown_event.is_set():
-            self.stop()
-        elif self._state == "starting" and self._ready_event.is_set():
-            self._state = "serving"
-        return self._state == "stopping"
+        return self._terminal_event.is_set() or self._shutdown_event.is_set()
+
+    def _accepts_requests(self) -> bool:
+        return not self._shutdown_event.is_set() and (
+            self._admission_deadline is None or monotonic() < self._admission_deadline
+        )
 
     def check_generation_control(self) -> None:
         """Check the generation transition while the lifecycle lock is held."""
@@ -61,21 +61,17 @@ class WorkerDrain:
             raise DrainConflict("worker shutdown has started")
         if not self._ready_event.is_set():
             raise DrainConflict("worker registration is not ready")
-        if self._state in ("withdrawing", "withdrawn", "drained"):
+        if self._admission_deadline is not None:
             raise DrainConflict(
                 "resume worker routing before changing generation state"
             )
 
     @property
     def withdrawn(self) -> bool:
-        return self._is_stopping() or self._withdrawn
+        return self._is_stopping() or self._admission_deadline is not None
 
     def stop(self) -> None:
-        self._state = "stopping"
         self._terminal_event.set()
-        if self._shutdown_event.is_set():
-            self._accepting = False
-        self._cancel_grace()
 
     async def close(self) -> None:
         if self._close_task is None:
@@ -88,13 +84,9 @@ class WorkerDrain:
             raise
 
     async def _close(self) -> None:
-        grace = self._grace_task
         self._shutdown_event.set()
         self.stop()
-        self._accepting = False
         tasks = set(self._operations)
-        if grace is not None:
-            tasks.add(grace)
         for task in tasks:
             task.cancel()
         if tasks:
@@ -107,42 +99,45 @@ class WorkerDrain:
         except Exception as error:
             self._last_error = str(error)
             raise
-        self._withdrawn = True
-
-    def _cancel_grace(self) -> None:
-        if self._grace_task is not None:
-            self._grace_task.cancel()
-            self._grace_task = None
 
     async def status(self, body: dict) -> dict:
         self._validate_body(body)
-        self._is_stopping()
+        deadline = self._admission_deadline
+        accepting = self._ready_event.is_set() and self._accepts_requests()
         reason = None
-        if self._state == "withdrawing":
-            reason = "routing_grace"
-        elif (
-            self._state == "withdrawn"
-            and not self._accepting
-            and self._pending_engine_requests is not None
-        ):
-            inflight = self._endpoint.inflight_requests()
-            if inflight is None:
+        if self._is_stopping():
+            state = "stopping"
+        elif not self._ready_event.is_set():
+            state = "starting"
+        elif deadline is None:
+            state = "serving"
+        elif deadline == math.inf:
+            state, reason = "withdrawing", "discovery_unregister_pending"
+        elif accepting:
+            state, reason = "withdrawing", "routing_grace"
+        else:
+            state = "withdrawn"
+            if self._pending_engine_requests is None:
                 reason = "completion_check_unavailable"
-            elif inflight != 0:
-                reason = "dynamo_inflight"
             else:
-                pending = self._pending_engine_requests()
-                if pending is None:
+                inflight = self._endpoint.inflight_requests()
+                if inflight is None:
                     reason = "completion_check_unavailable"
-                elif pending:
-                    reason = "sglang_inflight"
+                elif inflight != 0:
+                    reason = "dynamo_inflight"
                 else:
-                    self._state = "drained"
+                    pending = self._pending_engine_requests()
+                    if pending is None:
+                        reason = "completion_check_unavailable"
+                    elif pending:
+                        reason = "sglang_inflight"
+                    else:
+                        state = "drained"
         return {
-            "state": self._state,
+            "state": state,
             "reason": reason,
-            "admin_withdrawn": self._withdrawn,
-            "accepting_requests": self._ready_event.is_set() and self._accepting,
+            "admin_withdrawn": self.withdrawn,
+            "accepting_requests": accepting,
             "last_error": self._last_error,
         }
 
@@ -172,37 +167,25 @@ class WorkerDrain:
                 raise DrainConflict("worker shutdown has started")
             if not self._ready_event.is_set():
                 raise DrainConflict("worker registration is not ready")
-            if self._state in ("withdrawing", "withdrawn", "drained"):
+            if self._admission_deadline is not None and math.isfinite(
+                self._admission_deadline
+            ):
                 return await self.status({})
             if self._is_paused():
                 raise DrainConflict(
                     "continue engine generation before draining the worker"
                 )
-            self._state = "withdrawing"
+            self._admission_deadline = math.inf
             self._last_error = None
             try:
                 await self._endpoint.unregister_endpoint_instance()
             except Exception as error:
                 self._last_error = str(error)
-                if not self._is_stopping():
-                    self._state = "serving"
                 raise
-            self._withdrawn = True
             if self._is_stopping():
                 raise DrainConflict("worker shutdown superseded drain")
-            if self._grace_period == 0:
-                self._accepting = False
-                self._state = "withdrawn"
-            else:
-                self._grace_task = asyncio.create_task(self._close_after_grace())
+            self._admission_deadline = monotonic() + self._grace_period
             return await self.status({})
-
-    async def _close_after_grace(self) -> None:
-        await asyncio.sleep(self._grace_period)
-        async with self._lock:
-            if self._state == "withdrawing":
-                self._accepting = False
-                self._state = "withdrawn"
 
     async def resume(self, body: dict) -> dict:
         self._validate_body(body)
@@ -218,29 +201,22 @@ class WorkerDrain:
                 raise DrainConflict(
                     "continue engine generation before resuming worker routing"
                 )
-            if self._state == "serving":
-                return await self.status({})
-            self._cancel_grace()
+            self._admission_deadline = None
+            self._last_error = None
             try:
                 await self._endpoint.register_endpoint_instance()
             except Exception as error:
-                self._accepting = False
-                if not self._is_stopping():
-                    self._state = "withdrawn"
                 self._last_error = str(error)
+                if self._is_stopping():
+                    await self._endpoint.unregister_endpoint_instance()
                 raise
-            self._withdrawn = False
             if self._is_stopping():
                 try:
                     await self._endpoint.unregister_endpoint_instance()
                 except Exception as error:
                     self._last_error = str(error)
                     raise
-                self._withdrawn = True
                 raise DrainConflict("worker shutdown superseded resume")
-            self._accepting = True
-            self._state = "serving"
-            self._last_error = None
             return await self.status({})
 
     def wrap(self, handler):
@@ -253,10 +229,9 @@ class WorkerDrain:
                 health_check = bool(request.get(HEALTH_CHECK_KEY)) or (
                     isinstance(inner, Mapping) and bool(inner.get(HEALTH_CHECK_KEY))
                 )
-            self._is_stopping()
             if self._shutdown_event.is_set() or (
                 not health_check
-                and (not self._ready_event.is_set() or not self._accepting)
+                and (not self._ready_event.is_set() or not self._accepts_requests())
             ):
                 raise WorkerDraining("worker is not accepting new requests")
             async with aclosing(handler(*args, **kwargs)) as stream:
