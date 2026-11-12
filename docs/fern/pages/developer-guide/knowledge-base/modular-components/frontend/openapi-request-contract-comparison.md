@@ -53,12 +53,19 @@ instructions in the framework's recipe.
 Use `generate-frontend-openapi` as the default Dynamo source. It builds the frontend router
 without a listener and writes `docs/frontends/openapi.json`; no model, GPU, or deployment is
 required. File export includes all standard endpoints and optional chat dispatch events.
-The production HTTP export includes system and extension routes, currently enabled inference
-endpoint families, and enabled dispatch events. It reflects endpoint availability changes after
-worker discovery; the offline export remains independent of live model availability.
+Use it for client generation and full-contract snapshots.
+
+The production `/openapi.json` includes system and extension routes, currently enabled inference
+endpoint families, and enabled dispatch events. Its scope follows startup configuration and
+worker discovery, so a startup capture can omit inference operations. Responses use
+`Cache-Control: no-store` to prevent reuse of an outdated document. Component definitions remain
+complete even when their operations are hidden; their presence does not establish endpoint or
+model support.
+
 A file captured from that endpoint is a valid input, but its configured scope may omit
 variants. Record that scope; comparison cannot recover missing variants or establish that
-the input covers the full contract. Capturing a schema does not test inference.
+the input covers the full contract. Endpoint visibility does not establish model readiness or
+request compatibility. Capturing a schema does not test inference.
 
 Dynamo's pinned `async-openai` 0.42.1 dependency lacks the annotations needed to generate
 complete schemas. The tool fills missing definitions from a checksum-pinned OpenAI

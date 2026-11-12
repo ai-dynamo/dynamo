@@ -2911,6 +2911,7 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(response.status(), axum::http::StatusCode::OK);
+        assert_eq!(response.headers()["cache-control"], "no-store");
         let body = axum::body::to_bytes(response.into_body(), 32 * 1024 * 1024)
             .await
             .unwrap();
@@ -2926,6 +2927,17 @@ mod tests {
             .unwrap();
         let independent = HttpService::builder().build().unwrap();
         let full = super::super::openapi_docs::generate_openapi_spec(service.route_docs()).unwrap();
+        for path in ["/v1/chat/completions", "/v1/completions"] {
+            assert!(full["paths"][path]["post"].is_object());
+        }
+        for path in [
+            "/v1/embeddings",
+            "/v1/images/generations",
+            "/v1/audio/speech",
+            "/v1/realtime",
+        ] {
+            assert!(full["paths"].get(path).is_some(), "{path}");
+        }
 
         for enabled in [false, true, false] {
             for endpoint in [EndpointType::Chat, EndpointType::Completion] {
@@ -2934,7 +2946,6 @@ mod tests {
             let spec = read_openapi(&service).await;
             for path in ["/v1/chat/completions", "/v1/completions"] {
                 assert_eq!(spec["paths"].get(path).is_some(), enabled, "{path}");
-                assert!(full["paths"][path]["post"].is_object());
             }
             for path in [
                 "/v1/embeddings",
@@ -2943,7 +2954,6 @@ mod tests {
                 "/v1/realtime",
             ] {
                 assert!(spec["paths"].get(path).is_none(), "{path}");
-                assert!(full["paths"].get(path).is_some(), "{path}");
             }
             for path in ["/health", "/live", "/v1/models"] {
                 assert!(spec["paths"][path]["get"].is_object(), "{path}");
