@@ -886,10 +886,21 @@ pub fn openapi_router(
     route_docs: Vec<RouteDoc>,
     options: OpenApiOptions,
 ) -> (Vec<RouteDoc>, Router) {
+    openapi_router_with_visibility(route_docs, options, None)
+}
+
+pub(super) type RouteVisibility = Arc<dyn Fn(&axum::http::Method, &str) -> bool + Send + Sync>;
+
+pub(super) fn openapi_router_with_visibility(
+    route_docs: Vec<RouteDoc>,
+    options: OpenApiOptions,
+    is_visible: Option<RouteVisibility>,
+) -> (Vec<RouteDoc>, Router) {
     let document = Arc::new(CachedOpenApi {
         routes: route_docs,
         options,
         bytes: OnceCell::new(),
+        is_visible,
     });
     let router = documentation_router(document);
 
@@ -906,9 +917,48 @@ struct CachedOpenApi {
     routes: Vec<RouteDoc>,
     options: OpenApiOptions,
     bytes: OnceCell<Result<Bytes, String>>,
+    is_visible: Option<RouteVisibility>,
 }
 
 impl CachedOpenApi {
+    async fn visible_bytes(self: &Arc<Self>) -> Result<Bytes, String> {
+        let bytes = self.bytes().await?;
+        let Some(is_visible) = &self.is_visible else {
+            return Ok(bytes);
+        };
+        let disabled: Vec<_> = self
+            .routes
+            .iter()
+            .filter(|route| !is_visible(route.method(), route.path()))
+            .collect();
+        if disabled.is_empty() {
+            return Ok(bytes);
+        }
+
+        // Project the cached native JSON, not Utoipa's model, to retain OpenAPI 3.2 fields.
+        let mut spec: serde_json::Value =
+            serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+        if let Some(paths) = spec
+            .get_mut("paths")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            for route in disabled {
+                if let Some(item) = paths
+                    .get_mut(route.path())
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    item.remove(&route.method().as_str().to_ascii_lowercase());
+                    if item.is_empty() {
+                        paths.remove(route.path());
+                    }
+                }
+            }
+        }
+        serde_json::to_vec(&spec)
+            .map(Bytes::from)
+            .map_err(|error| error.to_string())
+    }
+
     /// Return shared serialized bytes, generating on an 8 MiB thread on first access.
     /// Await its channel without parking a blocking-pool thread. Cache generation
     /// failures, but allow later requests to retry after a thread-launch failure.
@@ -972,11 +1022,11 @@ fn documentation_router(document: Arc<CachedOpenApi>) -> Router {
         .merge(SwaggerUi::new("/docs").config(Config::new(["/openapi.json"])))
 }
 
-/// Serve cached JSON bytes, or a generic 500 when generation failed; never expose diagnostics.
+/// Serve currently visible operations, or a generic 500; never expose diagnostics.
 async fn serve_openapi(
     axum::extract::State(document): axum::extract::State<Arc<CachedOpenApi>>,
 ) -> axum::response::Response {
-    match document.bytes().await {
+    match document.visible_bytes().await {
         Ok(bytes) => (
             [(axum::http::header::CONTENT_TYPE, "application/json")],
             bytes,
@@ -1121,6 +1171,7 @@ mod tests {
                     ..Default::default()
                 },
                 bytes: OnceCell::new(),
+                is_visible: None,
             });
             let router = documentation_router(document.clone());
             assert!(
@@ -1171,6 +1222,7 @@ mod tests {
             routes: vec![],
             options: OpenApiOptions::default(),
             bytes: OnceCell::new(),
+            is_visible: None,
         });
         let failed = document
             .bytes_with_spawn(|_| Err(std::io::Error::from(std::io::ErrorKind::WouldBlock)))
@@ -1215,6 +1267,7 @@ mod tests {
             routes: vec![],
             options: OpenApiOptions::default(),
             bytes: OnceCell::new(),
+            is_visible: None,
         });
         let error = document
             .bytes_with_spawn(|task| {
@@ -1240,6 +1293,7 @@ mod tests {
             routes: vec![],
             options: OpenApiOptions::default(),
             bytes: OnceCell::new_with(Some(Err("internal schema invariant diagnostic".into()))),
+            is_visible: None,
         });
         let router = documentation_router(document.clone())
             .route("/inference", axum::routing::get(|| async { "available" }));

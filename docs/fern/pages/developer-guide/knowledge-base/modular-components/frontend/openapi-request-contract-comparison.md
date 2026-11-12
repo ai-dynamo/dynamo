@@ -53,7 +53,9 @@ instructions in the framework's recipe.
 Use `generate-frontend-openapi` as the default Dynamo source. It builds the frontend router
 without a listener and writes `docs/frontends/openapi.json`; no model, GPU, or deployment is
 required. File export includes all standard endpoints and optional chat dispatch events.
-The production HTTP export includes only registered endpoints and enabled dispatch events.
+The production HTTP export includes system and extension routes, currently enabled inference
+endpoint families, and enabled dispatch events. It reflects endpoint availability changes after
+worker discovery; the offline export remains independent of live model availability.
 A file captured from that endpoint is a valid input, but its configured scope may omit
 variants. Record that scope; comparison cannot recover missing variants or establish that
 the input covers the full contract. Capturing a schema does not test inference.
