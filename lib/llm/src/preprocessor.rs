@@ -752,11 +752,8 @@ struct ChoiceReasoningState {
 struct ReasoningUsageEstimator {
     total: u32,
     active_choices: HashSet<u32>,
-    // Tokens of chunks that showed nothing for a choice still in reasoning. The
-    // parser was holding text back, and what it releases next says what that
-    // text was: reasoning or content means a partial reasoning marker, a tool
-    // call means the call itself (a parser such as `glm47` emits a call only
-    // once it is complete).
+    // Tokens of empty chunks for a choice still in reasoning, settled by its next
+    // release: a tool call drops them, since `glm47` emits a call only once complete.
     held: HashMap<u32, u32>,
 }
 
@@ -12643,6 +12640,53 @@ responses_tools: None,
                 .and_then(|details| details.reasoning_tokens),
             Some(thought.len() as u32),
             "only the thought chunks are reasoning, not the chunks of the held call"
+        );
+    }
+
+    #[tokio::test]
+    async fn reasoning_usage_settles_held_tokens_per_choice() {
+        let on_choice = |index: u32, mut chunk: Annotated<NvCreateChatCompletionStreamResponse>| {
+            chunk.data.as_mut().unwrap().inner.choices[0].index = index;
+            chunk
+        };
+        let mut tool_call = on_choice(1, reasoning_usage_chunk(None, None, 1));
+        tool_call.data.as_mut().unwrap().inner.choices[0]
+            .delta
+            .tool_calls = Some(vec![
+            dynamo_protocols::types::ChatCompletionMessageToolCallChunk {
+                index: 0,
+                id: Some("call-1".to_string()),
+                r#type: None,
+                function: Some(dynamo_protocols::types::FunctionCallStream {
+                    name: Some("write".to_string()),
+                    arguments: Some("{}".to_string()),
+                }),
+                custom: None,
+            },
+        ]);
+        let output = annotate_reasoning_usage(stream::iter(vec![
+            on_choice(0, reasoning_usage_chunk(Some("a"), None, 1)),
+            on_choice(1, reasoning_usage_chunk(Some("b"), None, 1)),
+            on_choice(0, reasoning_usage_chunk(None, None, 1)),
+            on_choice(1, reasoning_usage_chunk(None, None, 1)),
+            tool_call,
+            reasoning_usage_trailer(5, None),
+        ]))
+        .collect::<Vec<_>>()
+        .await;
+
+        let usage = output
+            .last()
+            .and_then(|response| response.data.as_ref())
+            .and_then(|chunk| chunk.inner.usage.as_ref())
+            .unwrap();
+        assert_eq!(
+            usage
+                .completion_tokens_details
+                .as_ref()
+                .and_then(|details| details.reasoning_tokens),
+            Some(3),
+            "choice 0's unreleased token stays reasoning; choice 1's call drops only its own"
         );
     }
 
