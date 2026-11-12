@@ -995,6 +995,7 @@ class VllmProcessor:
                 structural_tag_scope=self.structural_tag_scope,
                 structural_tag_schema=self.structural_tag_schema,
                 structural_tag_excludes_reasoning=self.structural_tag_excludes_reasoning,
+                request_id=context.id() if context is not None else request_id,
             )
 
         request_for_sampling = pre.request_for_sampling

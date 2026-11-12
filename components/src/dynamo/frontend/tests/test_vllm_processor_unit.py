@@ -3028,6 +3028,10 @@ class _FakeStructuralTagReasoningParser:
     structural tag its model actually speaks.
     """
 
+    # ReasoningParser's defaults: no markers.
+    reasoning_start_str = None
+    reasoning_end_str = None
+
     def __init__(self, tokenizer, chat_template_kwargs=None, model_config=None):
         del tokenizer, chat_template_kwargs
         self._model_config = model_config
@@ -5402,6 +5406,7 @@ class _ReasoningRecordingToolParser(_FakeStructuralTagParser):
 def _prompt_reasoning_parser(start: str | None = "<think>"):
     class PromptReasoningParser:
         reasoning_start_str = start
+        reasoning_end_str = None
 
         def __init__(self, tokenizer, chat_template_kwargs=None, model_config=None):
             del tokenizer, chat_template_kwargs, model_config
@@ -5663,6 +5668,7 @@ class TestResponseFormatReasoningStart:
         structural_tag_excludes_reasoning=False,
         response_format=None,
         extra=None,
+        extra_kwargs=None,
     ):
         """Preprocess a JSON request whose rendered prompt is ``prompt_text``.
 
@@ -5692,6 +5698,7 @@ class TestResponseFormatReasoningStart:
             tool_parser_class=None,
             reasoning_parser_class=reasoning_parser_class,
             structural_tag_excludes_reasoning=structural_tag_excludes_reasoning,
+            **(extra_kwargs or {}),
         )
         return result.guided_decoding
 
@@ -5879,6 +5886,20 @@ class TestResponseFormatReasoningStart:
             },
         )
         assert guided == {"json": schema}
+
+    @pytest.mark.asyncio
+    async def test_missing_end_marker_warning_names_the_request(
+        self, tokenizer, caplog
+    ):
+        with caplog.at_level("WARNING"):
+            guided = await self._guided(
+                tokenizer,
+                prompt_text="<|im_start|>assistant\n<think>",
+                reasoning_parser_class=_prompt_reasoning_parser_with_end(end=None),
+                extra_kwargs={"request_id": "req-123"},
+            )
+        assert guided == {"json": {"type": "object"}}
+        assert "request req-123: reasoning parser" in caplog.text
 
     @pytest.mark.asyncio
     async def test_thinking_disabled_by_request_is_not_wrapped(self, tokenizer):

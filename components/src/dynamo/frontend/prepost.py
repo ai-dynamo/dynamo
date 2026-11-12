@@ -615,6 +615,7 @@ def _response_format_after_reasoning(
     reasoning_parser_class: type[ReasoningParser] | None,
     chat_template_kwargs: dict[str, Any],
     model_config: ModelConfig | None,
+    request_id: str | None = None,
 ) -> dict[str, Any] | None:
     """A ``response_format`` JSON constraint that starts after the reasoning block.
 
@@ -645,7 +646,7 @@ def _response_format_after_reasoning(
         chat_template_kwargs=chat_template_kwargs,
         model_config=model_config,
     )
-    start = getattr(parser, "reasoning_start_str", None)
+    start = parser.reasoning_start_str
     if not isinstance(start, str) or not start:
         return None
     tail = tokenizer.decode(
@@ -654,12 +655,14 @@ def _response_format_after_reasoning(
     )
     if not tail.rstrip().endswith(start):
         return None
-    end = getattr(parser, "reasoning_end_str", None)
+    end = parser.reasoning_end_str
     if not isinstance(end, str) or not end:
         logger.warning(
-            "reasoning parser %s has no reasoning end marker: response_format is "
-            "constrained from the first token, inside the reasoning block. Give "
-            "the worker's engine the same reasoning parser (--reasoning-parser).",
+            "request %s: reasoning parser %s has no reasoning end marker: "
+            "response_format is constrained from the first token, inside the "
+            "reasoning block. Give the worker's engine the same reasoning parser "
+            "(--reasoning-parser).",
+            request_id,
             reasoning_parser_class.__name__,
         )
         return None
@@ -886,6 +889,7 @@ async def preprocess_chat_request(
     structural_tag_scope: str = "auto",
     structural_tag_schema: str = "auto",
     structural_tag_excludes_reasoning: bool = False,
+    request_id: str | None = None,
 ) -> PreprocessResult:
     validated_request = _validate_chat_completion_request(request)
     assistant_guided_decoding = _build_assistant_guided_decoding(validated_request)
@@ -1045,6 +1049,7 @@ async def preprocess_chat_request(
                     reasoning_parser_class=reasoning_parser_class,
                     chat_template_kwargs=chat_template_kwargs,
                     model_config=model_config,
+                    request_id=request_id,
                 )
                 or guided_decoding
             )
