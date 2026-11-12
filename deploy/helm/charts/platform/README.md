@@ -200,37 +200,18 @@ and Volcano PodGroups created by Dynamo v1.1.x and earlier.
 **Existing deployments:** Unmigrated legacy resources remain after
 upgrading, and excess LWS objects can continue consuming cluster resources.
 
-##### Native sidecar backend inference
+##### Planner Pod access for native sidecar identity
 
-**Change:** Backend inference recognizes a direct `vllm-rs` engine command in `main`,
-including a literal absolute path, for workloads whose operator origin is 1.7.0 or later.
-It continues to inspect the engine for backend validation and compilation-cache defaults,
-independently of the runtime sidecar launch. The inferred framework participates in the
-graph-wide worker-generation hash, so inference is pinned to the workload origin instead of
-being applied to existing workloads. vLLM prefill LoRA fallback classification inspects the
-running engine command and is not origin-gated.
+**Change:** Registration-based native sidecar identity requires `list` on `pods` in addition
+to worker metadata access.
 
-**Affected:** Workloads created by operator 1.7.0 or later with this engine command and no
-explicit `backendFramework`. The vLLM reference manifests already set
-`backendFramework: vllm` and are unaffected by this inference change.
+**Affected:** Planner service accounts granted before v1.7.0 without Pod list access.
 
-**Action:** None for existing workloads. To give an existing native-sidecar workload the vLLM
-backend defaults, set `spec.backendFramework: vllm`; this is a manifest-driven worker rollout.
-Explicit frameworks must match the engine launch. Opaque engine commands, including shell
-wrappers and image entrypoints, still require an explicit framework.
+**Action:** Grant Pod-list access to enable registered native names, models, and capabilities.
 
-**Existing deployments:** Workloads created by operator 1.6.x or earlier keep the undetected
-backend they were created with, their worker hash, and their rendered pod template during an
-operator-only upgrade. Without an explicit `backendFramework`, they do not receive
-`VLLM_CACHE_ROOT` or vLLM provider startup ordering. Standalone DCDs read their own immutable
-origin. Runtime registration used by Planner does not affect the desired worker hash or engine
-configuration.
-
-**Planner permissions:** Registration-based native identity requires `list` on `pods`
-in addition to worker metadata access. If an older Planner service account receives
-HTTP 403 when listing Pods, Planner warns and uses existing status/default fallbacks.
-Grant Pod-list access to enable registered native names, models, and capabilities;
-other API errors still propagate.
+**Existing deployments:** If an older Planner service account receives HTTP 403 when listing
+Pods, Planner warns and uses existing status/default fallbacks; other API errors still
+propagate. Runtime registration does not affect the desired worker hash or engine configuration.
 
 ##### LPX model paths in every container
 

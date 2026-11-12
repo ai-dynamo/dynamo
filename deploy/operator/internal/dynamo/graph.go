@@ -3323,15 +3323,17 @@ func GetDGDPreservedAlphaPVCs(dgd *v1beta1.DynamoGraphDeployment) []v1alpha1.PVC
 	return append([]v1alpha1.PVC(nil), alpha.Spec.PVCs...)
 }
 
-// DetectBackendFrameworkFromArgs detects the backend framework from command/args.
+// DetectBackendFrameworkFromArgs classifies a running engine launch for Pod-level
+// consumers such as LoRA fallback, including a direct native engine command.
 func DetectBackendFrameworkFromArgs(command []string, args []string) (BackendFramework, error) {
 	return detectBackendFrameworkFromArgs(command, args, true)
 }
 
 // detectBackendFrameworkFromArgs classifies the engine launch. inferNativeEngine
 // selects whether a direct native engine command such as vllm-rs resolves its
-// backend; workload rendering disables it for workloads created before operator
-// 1.7.0, which resolved those launches as undetected.
+// backend. Workload resolution passes false: the resolved backend is persisted on
+// the child DCD and hashed into the worker generation, so a launcher heuristic
+// must not change it (#17543). Native engines set backendFramework explicitly.
 func detectBackendFrameworkFromArgs(command []string, args []string, inferNativeEngine bool) (BackendFramework, error) {
 	// Kubernetes command is argv, not shell source. Wrapped native launches
 	// require an explicit backendFramework rather than shell interpretation.
@@ -3374,7 +3376,6 @@ func determineBackendFramework(
 	command []string,
 	args []string,
 	explicitBackendFramework string,
-	inferNativeEngine bool,
 ) (BackendFramework, error) {
 	// Check if this is a worker component - if not, use noop backend
 	if !IsWorkerComponent(componentType) {
@@ -3385,9 +3386,9 @@ func determineBackendFramework(
 	var detectedFramework BackendFramework
 	var detectionError error
 
-	// Try to detect from command/args
+	// Detect Dynamo launchers only; native engine commands need an explicit backend.
 	if len(command) > 0 || len(args) > 0 {
-		detected, err := detectBackendFrameworkFromArgs(command, args, inferNativeEngine)
+		detected, err := detectBackendFrameworkFromArgs(command, args, false)
 		if err == nil {
 			detectedFramework = detected
 		} else {
@@ -3427,22 +3428,18 @@ func determineBackendFramework(
 
 // determineBackendFrameworkForComponent inspects every complete authored
 // PodTemplate source. Role-template mode may omit the component-level template,
-// so backend detection must not depend on that legacy location. originAnnotations
-// carry the owning workload's immutable operator origin; a direct native engine
-// command is inferred only for origins that enable NativeEngineBackendInference.
+// so backend detection must not depend on that legacy location.
 func determineBackendFrameworkForComponent(
 	component *v1beta1.DynamoComponentDeploymentSharedSpec,
 	explicitBackendFramework string,
-	originAnnotations map[string]string,
 ) (BackendFramework, error) {
 	if component == nil {
 		return BackendFrameworkNoop, nil
 	}
-	inferNativeEngine := compatibility.NativeEngineBackendInference.Enabled(originAnnotations)
 
 	templates := ComponentPodTemplates(component)
 	if len(templates) == 0 {
-		return determineBackendFramework(string(component.ComponentType), nil, nil, explicitBackendFramework, inferNativeEngine)
+		return determineBackendFramework(string(component.ComponentType), nil, nil, explicitBackendFramework)
 	}
 
 	var selected BackendFramework
@@ -3461,7 +3458,6 @@ func determineBackendFrameworkForComponent(
 			command,
 			args,
 			explicitBackendFramework,
-			inferNativeEngine,
 		)
 		if err != nil {
 			return "", err
@@ -3477,7 +3473,7 @@ func determineBackendFrameworkForComponent(
 	if selected != "" {
 		return selected, nil
 	}
-	return determineBackendFramework(string(component.ComponentType), nil, nil, explicitBackendFramework, inferNativeEngine)
+	return determineBackendFramework(string(component.ComponentType), nil, nil, explicitBackendFramework)
 }
 
 // getBackendFrameworkFromComponent attempts to determine backend framework using hybrid approach:
@@ -3489,7 +3485,7 @@ func getBackendFrameworkFromComponent(
 	component *v1beta1.DynamoComponentDeploymentSharedSpec,
 	dynamoDeployment *v1beta1.DynamoGraphDeployment,
 ) (BackendFramework, error) {
-	return determineBackendFrameworkForComponent(component, dynamoDeployment.Spec.BackendFramework, dynamoDeployment.Annotations)
+	return determineBackendFrameworkForComponent(component, dynamoDeployment.Spec.BackendFramework)
 }
 
 // ConvertDynamoComponentDeploymentToSpec converts a DynamoComponentDeployment to our component spec interface
@@ -3498,29 +3494,11 @@ func ConvertDynamoComponentDeploymentToSpec(dynComponent *v1beta1.DynamoComponen
 	return dynComponent.Spec.DynamoComponentDeploymentSharedSpec.DeepCopy()
 }
 
-// OriginAnnotationsForDCD returns the annotations carrying a DCD's immutable
-// operator origin: the origin inherited by graph children in their pod templates,
-// or the origin stamped on a standalone DCD at CREATE. The result holds at most
-// that one key and is nil when no origin is recorded. dcd must not be nil.
-func OriginAnnotationsForDCD(dcd *v1beta1.DynamoComponentDeployment) map[string]string {
-	key := commonconsts.KubeAnnotationDynamoOperatorOriginVersion
-	for _, podTemplate := range ComponentPodTemplates(&dcd.Spec.DynamoComponentDeploymentSharedSpec) {
-		if origin, exists := podTemplate.Annotations[key]; exists {
-			return map[string]string{key: origin}
-		}
-	}
-	if origin, exists := dcd.Annotations[key]; exists {
-		return map[string]string{key: origin}
-	}
-	return nil
-}
-
 // GetBackendFrameworkFromDynamoComponent determines backend framework for a DynamoComponentDeployment
 func GetBackendFrameworkFromDynamoComponent(dynComponent *v1beta1.DynamoComponentDeployment) (BackendFramework, error) {
 	return determineBackendFrameworkForComponent(
 		&dynComponent.Spec.DynamoComponentDeploymentSharedSpec,
 		dynComponent.Spec.BackendFramework,
-		OriginAnnotationsForDCD(dynComponent),
 	)
 }
 
@@ -3566,7 +3544,6 @@ func GenerateBasePodSpecForController(
 		command,
 		args,
 		dynComponent.Spec.BackendFramework,
-		compatibility.NativeEngineBackendInference.Enabled(OriginAnnotationsForDCD(dynComponent)),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to determine backend framework: %w", err)
