@@ -320,10 +320,15 @@ per-worker `CACHE` rows. Cached tokens also set each request's default
 scheduling cost and queue accounting, and prefix overlap still guides worker
 selection.
 
-Each class owns a shared heap plus one heap for each exact-worker lane, all
-ordered by the class's queue policy, along with its busy thresholds, queue
-limits, quantum, deficit, and counters. Arbitration compares the shared head with the currently dispatchable
-exact-worker lane heads. Absolute and fractional busy thresholds use OR
+Each class owns a shared heap plus one heap per session lane, all ordered by
+the class's queue policy, along with its busy thresholds, queue limits, quantum,
+deficit, and counters. Every request with a session context waits in its
+session's lane, so a session bound to a busy rank, whether by hard session
+affinity or by a dispatch gate's hold, delays only its own later turns.
+Arbitration compares the shared head with the currently dispatchable session
+lane heads. A pinned request without a session, such as one with an explicit
+worker target, waits in the shared lane: while its worker is full it holds
+every later request in that lane until that worker frees. Absolute and fractional busy thresholds use OR
 semantics. The absolute `prefill_busy_threshold` is deprecated and will be
 removed in v1.7; use `prefill_busy_threshold_frac`.
 `decode_busy_threshold_frac` also marks a worker busy when the KV
@@ -332,8 +337,8 @@ so a worker filled by long-running decodes stops taking new work even after
 their prefill completes. Held blocks come from the router's active-block tracking: with `--no-router-track-active-blocks` the router tracks no held blocks and the decode threshold never fires, and the prefill KV router always runs that way. By default held blocks cover each request's prompt; `--router-track-output-blocks` (experimental, off by default) also counts the blocks generation adds, which a threshold aimed at long decodes needs. A worker that does
 not report `total_kv_blocks` skips the decode threshold. Some adapters advertise an aggregate or representative-rank value rather than each rank's own capacity; vLLM with data parallelism publishes the process total divided by the rank count, so on those workers the decode threshold is approximate. A class queues only
 when at least one threshold is configured and every eligible worker is busy
-for that class, but a new arrival cannot bypass an existing backlog in the
-same class.
+for that class, or when an installed dispatch gate holds the request, but a
+new arrival cannot bypass an existing backlog in the same class.
 
 Queue limits are configured per discovered worker endpoint with
 `request_queue_limit_per_worker`, `raw_isl_token_queue_limit_per_worker`, and
@@ -503,7 +508,7 @@ The first successfully dispatched request binds the session ID to its selected w
 
 | Mode | Behavior |
 |---|---|
-| `hard` | Default. Exact-dispatch to the stored target. If the worker or rank is no longer valid, invalidate the binding and retry normal selection once |
+| `hard` | Default. Exact-dispatch to the stored target. If the worker or rank is no longer valid, invalidate the binding and retry normal selection once. When the class queues, no dispatch gate is installed, and the target is full, the request holds its class's shared lane until the target frees |
 | `soft` | Pass the stored target through the normal selection pipeline as an advisory target. The built-in selector retains it while eligible; a custom policy can choose another worker |
 
 **Experimental.** Available since v1.6. When session affinity is enabled (`--router-session-affinity-ttl-secs`), a request that carries a parent session id binds under an internal key derived from that parent id instead of its own session, so the subagents of one parent share a binding while the parent keeps its own. Dynamo's affinity coordinator owns that binding: it commits only after a successful dispatch, is version-checked against concurrent updates, expires on the same TTL, and counts against the same global entry limit as any session binding. A request that carries an explicit worker target stays on its own session, so it is neither rejected against the group nor able to move it. Under the default `hard` mode the group is pinned to its first worker and does not migrate because of load; the binding resets only when the target becomes unusable or dispatch fails.

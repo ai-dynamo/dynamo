@@ -11,9 +11,7 @@ use ordered_float::OrderedFloat;
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 
-use dynamo_router_protocol::worker::WorkerWithDpRank;
-
-use crate::placement::WorkerPlacement;
+use crate::placement::SessionLane;
 use crate::profile::{PolicyClassConfig, PolicyProfile, RouterQueuePolicy};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -277,30 +275,68 @@ impl<T> PartialOrd for PolicyQueueEntry<T> {
     }
 }
 
+/// Why a lane head could not dispatch. A recheck skips the lanes the change that caused it
+/// cannot free: a capacity change re-asks capacity-blocked lanes only, the gate's own wake or
+/// timer re-asks every lane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockReason {
+    /// Every eligible worker is past the class's busy thresholds.
+    Capacity,
+    /// The dispatch gate holds the head.
+    Gate,
+}
+
+/// A dispatch predicate's answer for one head.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaneCheck {
+    Dispatch,
+    Blocked(BlockReason),
+}
+
+impl From<bool> for LaneCheck {
+    /// A predicate that only knows capacity: `true` dispatches, `false` blocks on capacity.
+    fn from(dispatchable: bool) -> Self {
+        if dispatchable {
+            Self::Dispatch
+        } else {
+            Self::Blocked(BlockReason::Capacity)
+        }
+    }
+}
+
+/// Which blocked lanes the next dispatch asks again. `All` includes `Capacity`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RecheckScope {
+    /// Lanes blocked on capacity: a worker freed or the eligible workers changed.
+    Capacity,
+    /// Every blocked lane: the gate woke the queue or its hold timer fired.
+    All,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct DispatchCandidate {
-    placement: WorkerPlacement,
+    lane: Option<SessionLane>,
     cost: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct WorkerLaneHead {
-    worker: WorkerWithDpRank,
+struct LaneHead {
+    lane: SessionLane,
     priority: QueuePriority,
     enqueue_seq: u64,
 }
 
-impl WorkerLaneHead {
-    fn new<T>(worker: WorkerWithDpRank, entry: &PolicyQueueEntry<T>) -> Self {
+impl LaneHead {
+    fn new<T>(lane: SessionLane, entry: &PolicyQueueEntry<T>) -> Self {
         Self {
-            worker,
+            lane,
             priority: entry.priority,
             enqueue_seq: entry.enqueue_seq,
         }
     }
 }
 
-impl Ord for WorkerLaneHead {
+impl Ord for LaneHead {
     fn cmp(&self, other: &Self) -> Ordering {
         cmp_queue_order(
             self.priority,
@@ -308,23 +344,23 @@ impl Ord for WorkerLaneHead {
             other.priority,
             other.enqueue_seq,
         )
-        .then_with(|| self.worker.cmp(&other.worker))
+        .then_with(|| self.lane.cmp(&other.lane))
     }
 }
 
-impl PartialOrd for WorkerLaneHead {
+impl PartialOrd for LaneHead {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
 /// The root of one lane of a class with head expiry, when its due time is finite: the shared
-/// heap (`lane: None`) or one exact-worker lane. Orders by due time, then enqueue sequence.
+/// heap (`lane: None`) or one session lane. Orders by due time, then enqueue sequence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct LaneRoot {
     due: DueKey,
     enqueue_seq: u64,
-    lane: Option<WorkerWithDpRank>,
+    lane: Option<SessionLane>,
 }
 
 struct PolicyClassQueue<T> {
@@ -332,10 +368,11 @@ struct PolicyClassQueue<T> {
     pending: BinaryHeap<PolicyQueueEntry<T>>,
     stats: PolicyQueueStats,
     deficit: usize,
-    ready_by_worker: FxHashMap<WorkerWithDpRank, BinaryHeap<PolicyQueueEntry<T>>>,
-    blocked_workers: FxHashSet<WorkerWithDpRank>,
-    candidate_worker_heads: BTreeSet<WorkerLaneHead>,
-    needs_blocked_worker_recheck: bool,
+    ready_by_lane: FxHashMap<SessionLane, BinaryHeap<PolicyQueueEntry<T>>>,
+    /// Lanes whose head could not dispatch, with the reason the last check gave.
+    blocked_lanes: FxHashMap<SessionLane, BlockReason>,
+    candidate_lane_heads: BTreeSet<LaneHead>,
+    needs_blocked_lane_recheck: Option<RecheckScope>,
     /// Every finite due time expires, found at the lane roots: an EDF class that enables
     /// controlled delay, in a queue built by [`PolicyQueue::with_class_budget_expiry`]. Each
     /// EDF lane's root carries its earliest due time, so the class's overdue entries are the
@@ -352,25 +389,25 @@ struct PolicyClassQueue<T> {
 
 impl<T> PolicyClassQueue<T> {
     fn ready_is_empty(&self) -> bool {
-        self.pending.is_empty() && self.ready_by_worker.is_empty()
+        self.pending.is_empty() && self.ready_by_lane.is_empty()
     }
 
     fn entries(&self) -> impl Iterator<Item = &PolicyQueueEntry<T>> {
         self.pending
             .iter()
-            .chain(self.ready_by_worker.values().flat_map(|ready| ready.iter()))
+            .chain(self.ready_by_lane.values().flat_map(|ready| ready.iter()))
     }
 
-    fn lane(&self, lane: Option<WorkerWithDpRank>) -> Option<&BinaryHeap<PolicyQueueEntry<T>>> {
+    fn lane(&self, lane: Option<SessionLane>) -> Option<&BinaryHeap<PolicyQueueEntry<T>>> {
         match lane {
             None => Some(&self.pending),
-            Some(worker) => self.ready_by_worker.get(&worker),
+            Some(key) => self.ready_by_lane.get(&key),
         }
     }
 
     /// The lane's root, when head expiry tracks it: a finite due time in a class with head
     /// expiry.
-    fn expiring_root(&self, lane: Option<WorkerWithDpRank>) -> Option<LaneRoot> {
+    fn expiring_root(&self, lane: Option<SessionLane>) -> Option<LaneRoot> {
         if !self.head_expiry {
             return None;
         }
@@ -384,7 +421,7 @@ impl<T> PolicyClassQueue<T> {
     }
 
     /// Records the lane's root after a change to the lane, given its root before the change.
-    fn replace_expiring_root(&mut self, lane: Option<WorkerWithDpRank>, before: Option<LaneRoot>) {
+    fn replace_expiring_root(&mut self, lane: Option<SessionLane>, before: Option<LaneRoot>) {
         let after = self.expiring_root(lane);
         if before != after {
             if let Some(before) = before {
@@ -402,45 +439,39 @@ impl<T> PolicyClassQueue<T> {
             return;
         }
         let roots = std::iter::once(None)
-            .chain(self.ready_by_worker.keys().copied().map(Some))
+            .chain(self.ready_by_lane.keys().copied().map(Some))
             .filter_map(|lane| self.expiring_root(lane))
             .collect::<Vec<_>>();
         self.expiring_roots.clear();
         self.expiring_roots.extend(roots);
     }
 
-    fn push_ready(&mut self, placement: WorkerPlacement, entry: PolicyQueueEntry<T>) {
-        let lane = match placement {
-            WorkerPlacement::Any => None,
-            WorkerPlacement::Exact(worker) => Some(worker),
-        };
+    fn push_ready(&mut self, lane: Option<SessionLane>, entry: PolicyQueueEntry<T>) {
         let root_before = self.expiring_root(lane);
-        self.push_lane(placement, entry);
+        self.push_lane(lane, entry);
         if self.head_expiry {
             self.replace_expiring_root(lane, root_before);
         }
     }
 
-    fn push_lane(&mut self, placement: WorkerPlacement, entry: PolicyQueueEntry<T>) {
-        match placement {
-            WorkerPlacement::Any => self.pending.push(entry),
-            WorkerPlacement::Exact(worker) => {
-                let ready = self.ready_by_worker.entry(worker).or_default();
-                let old_head = (!self.blocked_workers.contains(&worker))
-                    .then(|| ready.peek().map(|entry| WorkerLaneHead::new(worker, entry)))
+    fn push_lane(&mut self, lane: Option<SessionLane>, entry: PolicyQueueEntry<T>) {
+        match lane {
+            None => self.pending.push(entry),
+            Some(key) => {
+                let ready = self.ready_by_lane.entry(key).or_default();
+                let old_head = (!self.blocked_lanes.contains_key(&key))
+                    .then(|| ready.peek().map(|entry| LaneHead::new(key, entry)))
                     .flatten();
                 ready.push(entry);
-                if !self.blocked_workers.contains(&worker) {
-                    let new_head = WorkerLaneHead::new(
-                        worker,
-                        ready.peek().expect("worker lane was just populated"),
-                    );
+                if !self.blocked_lanes.contains_key(&key) {
+                    let new_head =
+                        LaneHead::new(key, ready.peek().expect("lane was just populated"));
                     if old_head != Some(new_head) {
                         if let Some(old_head) = old_head {
-                            let removed = self.candidate_worker_heads.remove(&old_head);
+                            let removed = self.candidate_lane_heads.remove(&old_head);
                             debug_assert!(removed);
                         }
-                        self.candidate_worker_heads.insert(new_head);
+                        self.candidate_lane_heads.insert(new_head);
                     }
                 }
             }
@@ -448,56 +479,63 @@ impl<T> PolicyClassQueue<T> {
     }
 
     #[inline]
-    fn next_dispatchable(
+    fn next_dispatchable<V: Into<LaneCheck>>(
         &mut self,
         class_index: usize,
-        is_dispatchable: &mut impl FnMut(usize, &PolicyClassConfig, &T) -> bool,
+        is_dispatchable: &mut impl FnMut(usize, &PolicyClassConfig, &T) -> V,
     ) -> Option<DispatchCandidate> {
-        if self.ready_by_worker.is_empty() {
+        if self.ready_by_lane.is_empty() {
             debug_assert!(
-                self.blocked_workers.is_empty(),
-                "blocked workers must have a ready lane"
+                self.blocked_lanes.is_empty(),
+                "blocked lanes must have a ready lane"
             );
             return self
                 .pending
                 .peek()
-                .filter(|entry| is_dispatchable(class_index, &self.config, entry.payload()))
+                .filter(|entry| {
+                    is_dispatchable(class_index, &self.config, entry.payload()).into()
+                        == LaneCheck::Dispatch
+                })
                 .map(|entry| DispatchCandidate {
-                    placement: WorkerPlacement::Any,
+                    lane: None,
                     cost: entry.snapshot.scheduling_cost_tokens,
                 });
         }
 
-        self.next_dispatchable_worker(class_index, is_dispatchable)
+        self.next_dispatchable_lane(class_index, is_dispatchable)
     }
 
     #[inline(never)]
-    fn next_dispatchable_worker(
+    fn next_dispatchable_lane<V: Into<LaneCheck>>(
         &mut self,
         class_index: usize,
-        is_dispatchable: &mut impl FnMut(usize, &PolicyClassConfig, &T) -> bool,
+        is_dispatchable: &mut impl FnMut(usize, &PolicyClassConfig, &T) -> V,
     ) -> Option<DispatchCandidate> {
-        if self.needs_blocked_worker_recheck {
-            self.needs_blocked_worker_recheck = false;
+        if let Some(scope) = self.needs_blocked_lane_recheck.take() {
             // Defer the scan until dispatch, when `is_dispatchable` is meaningful.
             // Re-peeking here also observes head changes from intervening `push_ready` calls.
             let Self {
                 config,
-                ready_by_worker,
-                blocked_workers,
-                candidate_worker_heads,
+                ready_by_lane,
+                blocked_lanes,
+                candidate_lane_heads,
                 ..
             } = self;
-            blocked_workers.retain(|worker| {
-                let ready = ready_by_worker
-                    .get(worker)
-                    .expect("blocked worker lane vanished");
-                let head = ready.peek().expect("blocked worker lane is empty");
-                if is_dispatchable(class_index, config, head.payload()) {
-                    candidate_worker_heads.insert(WorkerLaneHead::new(*worker, head));
-                    false
-                } else {
-                    true
+            blocked_lanes.retain(|lane, reason| {
+                if scope == RecheckScope::Capacity && *reason == BlockReason::Gate {
+                    return true;
+                }
+                let ready = ready_by_lane.get(lane).expect("blocked lane vanished");
+                let head = ready.peek().expect("blocked lane is empty");
+                match is_dispatchable(class_index, config, head.payload()).into() {
+                    LaneCheck::Dispatch => {
+                        candidate_lane_heads.insert(LaneHead::new(*lane, head));
+                        false
+                    }
+                    LaneCheck::Blocked(now) => {
+                        *reason = now;
+                        true
+                    }
                 }
             });
         }
@@ -505,7 +543,10 @@ impl<T> PolicyClassQueue<T> {
         let shared = self
             .pending
             .peek()
-            .filter(|entry| is_dispatchable(class_index, &self.config, entry.payload()))
+            .filter(|entry| {
+                is_dispatchable(class_index, &self.config, entry.payload()).into()
+                    == LaneCheck::Dispatch
+            })
             .map(|entry| {
                 (
                     entry.priority,
@@ -515,36 +556,31 @@ impl<T> PolicyClassQueue<T> {
             });
 
         loop {
-            let Some(head) = self.candidate_worker_heads.last().copied() else {
-                return shared.map(|(_, _, cost)| DispatchCandidate {
-                    placement: WorkerPlacement::Any,
-                    cost,
-                });
+            let Some(head) = self.candidate_lane_heads.last().copied() else {
+                return shared.map(|(_, _, cost)| DispatchCandidate { lane: None, cost });
             };
-            let dispatchable = {
+            let check = {
                 let ready = self
-                    .ready_by_worker
-                    .get(&head.worker)
-                    .expect("indexed worker lane vanished");
+                    .ready_by_lane
+                    .get(&head.lane)
+                    .expect("indexed lane vanished");
                 is_dispatchable(
                     class_index,
                     &self.config,
-                    ready
-                        .peek()
-                        .expect("indexed worker lane is empty")
-                        .payload(),
+                    ready.peek().expect("indexed lane is empty").payload(),
                 )
+                .into()
             };
-            if !dispatchable {
-                let removed = self.candidate_worker_heads.pop_last();
+            if let LaneCheck::Blocked(reason) = check {
+                let removed = self.candidate_lane_heads.pop_last();
                 debug_assert_eq!(removed, Some(head));
-                self.blocked_workers.insert(head.worker);
+                self.blocked_lanes.insert(head.lane, reason);
                 continue;
             }
 
-            let exact_cost = self.ready_by_worker[&head.worker]
+            let lane_cost = self.ready_by_lane[&head.lane]
                 .peek()
-                .expect("indexed worker lane is empty")
+                .expect("indexed lane is empty")
                 .snapshot
                 .scheduling_cost_tokens;
             return match shared {
@@ -552,59 +588,49 @@ impl<T> PolicyClassQueue<T> {
                     if cmp_queue_order(priority, enqueue_seq, head.priority, head.enqueue_seq)
                         == Ordering::Greater =>
                 {
-                    Some(DispatchCandidate {
-                        placement: WorkerPlacement::Any,
-                        cost,
-                    })
+                    Some(DispatchCandidate { lane: None, cost })
                 }
                 _ => Some(DispatchCandidate {
-                    placement: WorkerPlacement::Exact(head.worker),
-                    cost: exact_cost,
+                    lane: Some(head.lane),
+                    cost: lane_cost,
                 }),
             };
         }
     }
 
-    fn pop_lane(&mut self, placement: WorkerPlacement) -> PolicyQueueEntry<T> {
+    fn pop_lane(&mut self, lane: Option<SessionLane>) -> PolicyQueueEntry<T> {
         if !self.head_expiry {
-            return self.pop_lane_head(placement);
+            return self.pop_lane_head(lane);
         }
-        let lane = match placement {
-            WorkerPlacement::Any => None,
-            WorkerPlacement::Exact(worker) => Some(worker),
-        };
         let root_before = self.expiring_root(lane);
-        let entry = self.pop_lane_head(placement);
+        let entry = self.pop_lane_head(lane);
         self.replace_expiring_root(lane, root_before);
         entry
     }
 
     /// Removes an expired lane root, whether or not its lane is blocked. A blocked lane is
     /// unblocked, so its next head is checked again at the next dispatch.
-    fn pop_expiring_root(&mut self, lane: Option<WorkerWithDpRank>) -> PolicyQueueEntry<T> {
+    fn pop_expiring_root(&mut self, lane: Option<SessionLane>) -> PolicyQueueEntry<T> {
         let root_before = self.expiring_root(lane);
         let entry = match lane {
             None => self.pending.pop().expect("expiring shared root vanished"),
-            Some(worker) => {
-                let blocked = self.blocked_workers.remove(&worker);
+            Some(key) => {
+                let blocked = self.blocked_lanes.remove(&key).is_some();
                 let ready = self
-                    .ready_by_worker
-                    .get_mut(&worker)
-                    .expect("expiring worker lane vanished");
+                    .ready_by_lane
+                    .get_mut(&key)
+                    .expect("expiring lane vanished");
                 if !blocked {
-                    let head = WorkerLaneHead::new(
-                        worker,
-                        ready.peek().expect("expiring worker root vanished"),
-                    );
-                    let removed = self.candidate_worker_heads.remove(&head);
+                    let head = LaneHead::new(key, ready.peek().expect("expiring root vanished"));
+                    let removed = self.candidate_lane_heads.remove(&head);
                     debug_assert!(removed);
                 }
-                let entry = ready.pop().expect("expiring worker root vanished");
-                let next_head = ready.peek().map(|entry| WorkerLaneHead::new(worker, entry));
+                let entry = ready.pop().expect("expiring root vanished");
+                let next_head = ready.peek().map(|entry| LaneHead::new(key, entry));
                 if let Some(next_head) = next_head {
-                    self.candidate_worker_heads.insert(next_head);
+                    self.candidate_lane_heads.insert(next_head);
                 } else {
-                    self.ready_by_worker.remove(&worker);
+                    self.ready_by_lane.remove(&key);
                 }
                 entry
             }
@@ -613,60 +639,47 @@ impl<T> PolicyClassQueue<T> {
         entry
     }
 
-    fn pop_lane_head(&mut self, placement: WorkerPlacement) -> PolicyQueueEntry<T> {
-        match placement {
-            WorkerPlacement::Any => self.pending.pop().expect("policy class front vanished"),
-            WorkerPlacement::Exact(worker) => {
+    fn pop_lane_head(&mut self, lane: Option<SessionLane>) -> PolicyQueueEntry<T> {
+        match lane {
+            None => self.pending.pop().expect("policy class front vanished"),
+            Some(key) => {
                 let ready = self
-                    .ready_by_worker
-                    .get_mut(&worker)
-                    .expect("queue admission worker lane vanished");
-                debug_assert!(!self.blocked_workers.contains(&worker));
-                let head = WorkerLaneHead::new(
-                    worker,
-                    ready.peek().expect("queue admission worker head vanished"),
-                );
-                let removed = self.candidate_worker_heads.remove(&head);
+                    .ready_by_lane
+                    .get_mut(&key)
+                    .expect("queue admission lane vanished");
+                debug_assert!(!self.blocked_lanes.contains_key(&key));
+                let head = LaneHead::new(key, ready.peek().expect("queue admission head vanished"));
+                let removed = self.candidate_lane_heads.remove(&head);
                 debug_assert!(removed);
-                let entry = ready.pop().expect("queue admission worker head vanished");
-                let next_head = ready.peek().map(|entry| WorkerLaneHead::new(worker, entry));
+                let entry = ready.pop().expect("queue admission head vanished");
+                let next_head = ready.peek().map(|entry| LaneHead::new(key, entry));
                 if let Some(next_head) = next_head {
-                    self.candidate_worker_heads.insert(next_head);
+                    self.candidate_lane_heads.insert(next_head);
                 } else {
-                    self.ready_by_worker.remove(&worker);
+                    self.ready_by_lane.remove(&key);
                 }
                 entry
             }
         }
     }
 
-    fn recheck_worker(&mut self, worker: WorkerWithDpRank) {
-        if self.blocked_workers.remove(&worker) {
-            let ready = self
-                .ready_by_worker
-                .get(&worker)
-                .expect("blocked worker lane vanished");
-            self.candidate_worker_heads.insert(WorkerLaneHead::new(
-                worker,
-                ready.peek().expect("blocked worker lane is empty"),
-            ));
-        }
+    /// Marks the blocked lanes in `scope` for a recheck at the next dispatch. A wider scope
+    /// already pending stays.
+    fn recheck_blocked_lanes(&mut self, scope: RecheckScope) {
+        self.needs_blocked_lane_recheck = Some(
+            self.needs_blocked_lane_recheck
+                .map_or(scope, |pending| pending.max(scope)),
+        );
     }
 
-    fn recheck_all_workers(&mut self) {
-        self.needs_blocked_worker_recheck = true;
-    }
-
-    fn rebuild_worker_heads(&mut self) {
-        self.candidate_worker_heads.clear();
-        self.blocked_workers
-            .retain(|worker| self.ready_by_worker.contains_key(worker));
-        for (&worker, ready) in &self.ready_by_worker {
-            if !self.blocked_workers.contains(&worker) {
-                self.candidate_worker_heads.insert(WorkerLaneHead::new(
-                    worker,
-                    ready.peek().expect("worker lane is empty"),
-                ));
+    fn rebuild_lane_heads(&mut self) {
+        self.candidate_lane_heads.clear();
+        self.blocked_lanes
+            .retain(|lane, _| self.ready_by_lane.contains_key(lane));
+        for (&lane, ready) in &self.ready_by_lane {
+            if !self.blocked_lanes.contains_key(&lane) {
+                self.candidate_lane_heads
+                    .insert(LaneHead::new(lane, ready.peek().expect("lane is empty")));
             }
         }
     }
@@ -720,10 +733,10 @@ impl<T> PolicyQueue<T> {
                     head_expiry: class_budget_expiry && config.expires_class_budget(),
                     config,
                     pending: BinaryHeap::new(),
-                    ready_by_worker: FxHashMap::default(),
-                    blocked_workers: FxHashSet::default(),
-                    candidate_worker_heads: BTreeSet::new(),
-                    needs_blocked_worker_recheck: false,
+                    ready_by_lane: FxHashMap::default(),
+                    blocked_lanes: FxHashMap::default(),
+                    candidate_lane_heads: BTreeSet::new(),
+                    needs_blocked_lane_recheck: None,
                     stats: PolicyQueueStats::default(),
                     deficit: 0,
                     due_entries: BTreeSet::new(),
@@ -747,19 +760,22 @@ impl<T> PolicyQueue<T> {
         self.classes.iter().any(|class| !class.ready_is_empty())
     }
 
-    pub fn any_ready_head(
+    pub fn any_ready_head<V: Into<LaneCheck>>(
         &self,
-        mut predicate: impl FnMut(usize, &PolicyClassConfig, &T) -> bool,
+        mut predicate: impl FnMut(usize, &PolicyClassConfig, &T) -> V,
     ) -> bool {
+        let mut dispatches = |class_index: usize, class: &PolicyClassQueue<T>, entry: &T| {
+            predicate(class_index, &class.config, entry).into() == LaneCheck::Dispatch
+        };
         self.classes.iter().enumerate().any(|(class_index, class)| {
             class
                 .pending
                 .peek()
-                .is_some_and(|entry| predicate(class_index, &class.config, entry.payload()))
-                || class.ready_by_worker.values().any(|ready| {
+                .is_some_and(|entry| dispatches(class_index, class, entry.payload()))
+                || class.ready_by_lane.values().any(|ready| {
                     ready
                         .peek()
-                        .is_some_and(|entry| predicate(class_index, &class.config, entry.payload()))
+                        .is_some_and(|entry| dispatches(class_index, class, entry.payload()))
                 })
         })
     }
@@ -796,19 +812,14 @@ impl<T> PolicyQueue<T> {
         self.classes[class_index].stats
     }
 
-    pub fn recheck_worker(&mut self, worker: WorkerWithDpRank) {
-        for class in &mut self.classes {
-            class.recheck_worker(worker);
-        }
-    }
-
-    /// Reconsider blocked worker lanes after host-owned capacity or eligibility changes.
+    /// Reconsider blocked session lanes after a capacity, eligibility, or dispatch-gate change.
     ///
     /// Call before draining with `pop_next` or `extract_next`; request priorities and queue ordering
-    /// remain unchanged. The next drain checks each lane's current availability.
-    pub fn recheck_all_workers(&mut self) {
+    /// remain unchanged. The next drain asks the head of each blocked lane in `scope` again:
+    /// `Capacity` skips the lanes the gate holds, which only its wake or timer can free.
+    pub fn recheck_blocked_lanes(&mut self, scope: RecheckScope) {
         for class in &mut self.classes {
-            class.recheck_all_workers();
+            class.recheck_blocked_lanes(scope);
         }
     }
 
@@ -839,7 +850,7 @@ impl<T> PolicyQueue<T> {
         arrival_offset_secs: f64,
         priority_jump: f64,
         strict_priority: u32,
-        placement: WorkerPlacement,
+        lane: Option<SessionLane>,
         payload: T,
     ) -> Result<(), (QueueRejection, T)> {
         self.enqueue_with_due_at(
@@ -853,20 +864,20 @@ impl<T> PolicyQueue<T> {
             worker_count,
             priority_jump,
             strict_priority,
-            placement,
+            lane,
             payload,
         )
     }
 
     /// [`enqueue`](Self::enqueue) with resolved metadata, including explicit and class due
-    /// times.
+    /// times. `lane` is `None` for the class's shared lane.
     pub fn enqueue_with_due_at(
         &mut self,
         metadata: QueueMetadata,
         worker_count: usize,
         priority_jump: f64,
         strict_priority: u32,
-        placement: WorkerPlacement,
+        lane: Option<SessionLane>,
         payload: T,
     ) -> Result<(), (QueueRejection, T)> {
         let QueueMetadata {
@@ -909,7 +920,7 @@ impl<T> PolicyQueue<T> {
         }
         self.next_enqueue_seq = self.next_enqueue_seq.wrapping_add(1);
         add_stats(&mut class.stats, snapshot);
-        class.push_ready(placement, entry);
+        class.push_ready(lane, entry);
         self.pending_count += 1;
         Ok(())
     }
@@ -980,7 +991,7 @@ impl<T> PolicyQueue<T> {
             .pending
             .peek()
             .is_some_and(|entry| remove_sequences.contains(&entry.enqueue_seq))
-            || class.ready_by_worker.values().any(|ready| {
+            || class.ready_by_lane.values().any(|ready| {
                 ready
                     .peek()
                     .is_some_and(|entry| remove_sequences.contains(&entry.enqueue_seq))
@@ -988,10 +999,10 @@ impl<T> PolicyQueue<T> {
         // A lane is blocked when its root could not dispatch. Once that root leaves, nothing has
         // checked the lane's next head: unblock the lane, as head expiry does, so the next
         // dispatch checks it.
-        let ready_by_worker = &class.ready_by_worker;
-        class.blocked_workers.retain(|worker| {
-            !ready_by_worker
-                .get(worker)
+        let ready_by_lane = &class.ready_by_lane;
+        class.blocked_lanes.retain(|lane, _| {
+            !ready_by_lane
+                .get(lane)
                 .and_then(BinaryHeap::peek)
                 .is_some_and(|root| remove_sequences.contains(&root.enqueue_seq))
         });
@@ -1007,7 +1018,7 @@ impl<T> PolicyQueue<T> {
         }
         class.pending = BinaryHeap::from(retained);
 
-        class.ready_by_worker.retain(|_, ready| {
+        class.ready_by_lane.retain(|_, ready| {
             let mut retained = Vec::with_capacity(ready.len());
             for entry in ready.drain() {
                 if remove_sequences.contains(&entry.enqueue_seq) {
@@ -1019,7 +1030,7 @@ impl<T> PolicyQueue<T> {
             *ready = BinaryHeap::from(retained);
             !ready.is_empty()
         });
-        class.rebuild_worker_heads();
+        class.rebuild_lane_heads();
         class.rebuild_expiring_roots();
 
         for entry in &removed {
@@ -1035,9 +1046,9 @@ impl<T> PolicyQueue<T> {
 
     /// Runs one DRR ring pass over dispatchable class heads, as [`Self::extract_next`]
     /// does, and charges the dispatched entry's cost at once.
-    pub fn pop_next(
+    pub fn pop_next<V: Into<LaneCheck>>(
         &mut self,
-        is_dispatchable: impl FnMut(usize, &PolicyClassConfig, &T) -> bool,
+        is_dispatchable: impl FnMut(usize, &PolicyClassConfig, &T) -> V,
     ) -> Option<PolicyQueueEntry<T>> {
         let (entry, charge) = self.extract_next(is_dispatchable)?;
         self.settle(charge, true);
@@ -1047,12 +1058,13 @@ impl<T> PolicyQueue<T> {
     /// Runs one DRR ring pass over dispatchable class heads. If no head has
     /// enough credit, bulk-adds the minimum complete rounds needed for progress.
     /// `is_dispatchable` may be evaluated more than once for the same entry
-    /// during one call; callers must not rely on an exact invocation count.
+    /// during one call; callers must not rely on an exact invocation count. Its
+    /// answer for a blocked session lane head is kept as the lane's block reason.
     /// Returns the chosen head with its cost still unpaid: pass the charge to
     /// [`Self::settle`] once the admission outcome is known.
-    pub fn extract_next(
+    pub fn extract_next<V: Into<LaneCheck>>(
         &mut self,
-        mut is_dispatchable: impl FnMut(usize, &PolicyClassConfig, &T) -> bool,
+        mut is_dispatchable: impl FnMut(usize, &PolicyClassConfig, &T) -> V,
     ) -> Option<(PolicyQueueEntry<T>, DispatchCharge)> {
         if self.pending_count == 0 {
             self.carry_class = None;
@@ -1151,7 +1163,7 @@ impl<T> PolicyQueue<T> {
             class
                 .pending
                 .into_iter()
-                .chain(class.ready_by_worker.into_values().flatten())
+                .chain(class.ready_by_lane.into_values().flatten())
         })
     }
 
@@ -1178,7 +1190,7 @@ impl<T> PolicyQueue<T> {
     ) -> (PolicyQueueEntry<T>, DispatchCharge) {
         self.round_cursor = (class_index + 1) % self.classes.len();
         let class = &mut self.classes[class_index];
-        let entry = class.pop_lane(candidate.placement);
+        let entry = class.pop_lane(candidate.lane);
         subtract_stats(&mut class.stats, entry.snapshot());
         self.pending_count -= 1;
         remove_due_time(&mut class.due_entries, &entry);
@@ -1317,9 +1329,23 @@ impl<T> PolicyQueue<T> {
         self.classes[class_index].deficit
     }
 
-    /// Whether a class currently holds entries blocked on `worker`, for tests of rechecks.
-    pub fn class_blocks_worker(&self, class_index: usize, worker: WorkerWithDpRank) -> bool {
-        self.classes[class_index].blocked_workers.contains(&worker)
+    /// Why a class's lane is blocked, or `None` while its head is a dispatch candidate.
+    pub fn class_lane_block_reason(
+        &self,
+        class_index: usize,
+        lane: SessionLane,
+    ) -> Option<BlockReason> {
+        self.classes[class_index].blocked_lanes.get(&lane).copied()
+    }
+
+    /// How many of the class's lanes are blocked.
+    pub fn class_blocked_lane_count(&self, class_index: usize) -> usize {
+        self.classes[class_index].blocked_lanes.len()
+    }
+
+    /// The recheck the class's next dispatch will run over its blocked lanes, if one is pending.
+    pub fn class_pending_recheck(&self, class_index: usize) -> Option<RecheckScope> {
+        self.classes[class_index].needs_blocked_lane_recheck
     }
 
     /// The origin every due-time key counts from.
@@ -1342,7 +1368,7 @@ impl<T> PolicyQueue<T> {
             assert_eq!(indexed, class.due_entries);
             assert!(!class.head_expiry || class.due_entries.is_empty());
             let roots = std::iter::once(None)
-                .chain(class.ready_by_worker.keys().copied().map(Some))
+                .chain(class.ready_by_lane.keys().copied().map(Some))
                 .filter_map(|lane| class.expiring_root(lane))
                 .collect::<BTreeSet<_>>();
             assert_eq!(roots, class.expiring_roots);
@@ -1362,7 +1388,7 @@ mod tests {
         // The due key's two words are stored flat: a nested pair would pad the priority to 32.
         assert_eq!(std::mem::size_of::<QueuePriority>(), 24);
         assert!(std::mem::size_of::<PolicyQueueEntry<()>>() <= 64);
-        assert!(std::mem::size_of::<WorkerLaneHead>() <= 48);
+        assert!(std::mem::size_of::<LaneHead>() <= 48);
     }
 
     #[test]

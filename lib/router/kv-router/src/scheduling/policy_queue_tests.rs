@@ -6,11 +6,19 @@
 
 use tokio::time::Instant;
 
-use crate::scheduling::policy_config::RouterPolicyConfig;
-use crate::scheduling::policy_config::RouterQueuePolicy;
+use crate::scheduling::policy_config::{RouterPolicyConfig, RouterQueuePolicy};
 use dynamo_admission::queue::*;
-use dynamo_admission::{PolicyClassConfig, PolicyProfile, WorkerPlacement};
+use dynamo_admission::{PolicyClassConfig, PolicyProfile, SessionLane};
 use dynamo_router_protocol::worker::WorkerWithDpRank;
+
+/// A session lane named after a number, where a test wants several distinct lanes.
+fn lane_of(id: u64) -> Option<SessionLane> {
+    Some(lane_key(id))
+}
+
+fn lane_key(id: u64) -> SessionLane {
+    SessionLane::new(&format!("lane-{id}"))
+}
 
 fn profile(yaml: &str) -> PolicyProfile {
     RouterPolicyConfig::from_yaml(yaml)
@@ -42,16 +50,7 @@ policy_classes:
 "#,
     ));
     queue
-        .enqueue(
-            0,
-            2,
-            QueueSnapshot::new(8, 4),
-            0.0,
-            0.0,
-            0,
-            WorkerPlacement::Any,
-            "first",
-        )
+        .enqueue(0, 2, QueueSnapshot::new(8, 4), 0.0, 0.0, 0, None, "first")
         .unwrap();
     queue
         .enqueue(
@@ -61,7 +60,7 @@ policy_classes:
             1.0,
             0.0,
             0,
-            WorkerPlacement::Any,
+            None,
             "overshoot",
         )
         .unwrap();
@@ -73,7 +72,7 @@ policy_classes:
             2.0,
             0.0,
             0,
-            WorkerPlacement::Any,
+            None,
             "rejected",
         )
         .unwrap_err();
@@ -101,7 +100,7 @@ fn earliest_due_request_precedes_fcfs_arrival_within_a_class() {
             1,
             0.0,
             0,
-            WorkerPlacement::Any,
+            None,
             "later-due",
         )
         .unwrap();
@@ -117,7 +116,7 @@ fn earliest_due_request_precedes_fcfs_arrival_within_a_class() {
             1,
             0.0,
             0,
-            WorkerPlacement::Any,
+            None,
             "earlier-due",
         )
         .unwrap();
@@ -139,7 +138,7 @@ fn earliest_due_request_precedes_fcfs_arrival_within_a_class() {
         queue.pop_next(|_, _, _| true).unwrap().into_payload(),
         "later-due"
     );
-    assert_eq!(queue.due_entry_count(0), 0);
+    assert!((queue.due_entry_count(0) == 0));
     assert_eq!(queue.next_due_at(0), None);
 }
 
@@ -159,7 +158,7 @@ fn due_time_order_preserves_sub_millisecond_precision() {
             1,
             0.0,
             0,
-            WorkerPlacement::Exact(WorkerWithDpRank::new(1, 0)),
+            lane_of(1),
             "later-due-better-fcfs",
         )
         .unwrap();
@@ -175,7 +174,7 @@ fn due_time_order_preserves_sub_millisecond_precision() {
             1,
             0.0,
             0,
-            WorkerPlacement::Exact(WorkerWithDpRank::new(2, 0)),
+            lane_of(2),
             "earlier-due-worse-fcfs",
         )
         .unwrap();
@@ -198,7 +197,7 @@ fn deadline_count_restores_the_no_deadline_fast_path_after_removal() {
             0.0,
             0.0,
             0,
-            WorkerPlacement::Any,
+            None,
             "no-deadline",
         )
         .unwrap();
@@ -214,14 +213,14 @@ fn deadline_count_restores_the_no_deadline_fast_path_after_removal() {
             2,
             0.0,
             0,
-            WorkerPlacement::Exact(WorkerWithDpRank::new(1, 0)),
+            lane_of(1),
             "deadline",
         )
         .unwrap();
 
     assert_eq!(queue.next_due_at(0), Some(due_at));
     queue.retain(|payload| *payload != "deadline");
-    assert_eq!(queue.due_entry_count(0), 0);
+    assert!((queue.due_entry_count(0) == 0));
     assert_eq!(queue.next_due_at(0), None);
     assert_eq!(queue.pending_count(), 1);
 }
@@ -243,13 +242,17 @@ fn deadline_timer_removes_an_expired_blocked_worker_lane() {
             1,
             0.0,
             0,
-            WorkerPlacement::Exact(worker),
+            lane_of(worker.worker_id),
             "blocked",
         )
         .unwrap();
 
     assert!(queue.pop_next(|_, _, _| false).is_none());
-    assert!(queue.class_blocks_worker(0, worker));
+    assert!(
+        queue
+            .class_lane_block_reason(0, lane_key(worker.worker_id))
+            .is_some()
+    );
     assert_eq!(queue.next_due_at(0), Some(due_at));
 
     let expired = queue.take_expired(0, due_at);
@@ -261,7 +264,7 @@ fn deadline_timer_removes_an_expired_blocked_worker_lane() {
     assert_eq!(queue.next_due_at(0), None);
     assert!(
         queue
-            .pop_next(|_, _, _| panic!("expired lane revisited"))
+            .pop_next(|_, _, _| -> bool { panic!("expired lane revisited") })
             .is_none()
     );
 }
@@ -282,7 +285,7 @@ fn strict_priority_precedes_earlier_due_request_within_a_class() {
             1,
             0.0,
             10,
-            WorkerPlacement::Any,
+            None,
             "high-priority-later-due",
         )
         .unwrap();
@@ -298,7 +301,7 @@ fn strict_priority_precedes_earlier_due_request_within_a_class() {
             1,
             0.0,
             0,
-            WorkerPlacement::Any,
+            None,
             "low-priority-earlier-due",
         )
         .unwrap();
@@ -324,7 +327,7 @@ fn enqueue_due(
     queue: &mut PolicyQueue<&'static str>,
     due_at: Option<Instant>,
     class_due_at: Option<Instant>,
-    placement: WorkerPlacement,
+    lane: Option<SessionLane>,
     payload: &'static str,
 ) {
     queue
@@ -339,7 +342,7 @@ fn enqueue_due(
             2,
             0.0,
             0,
-            placement,
+            lane,
             payload,
         )
         .unwrap();
@@ -381,7 +384,7 @@ fn edf_orders_by_due_time_then_enqueue_order_and_ignores_priority_modifiers() {
                 1,
                 priority_jump,
                 strict_priority,
-                WorkerPlacement::Any,
+                None,
                 payload,
             )
             .unwrap();
@@ -404,7 +407,7 @@ fn edf_orders_by_due_time_then_enqueue_order_and_ignores_priority_modifiers() {
             "absent-boosted",
         ]
     );
-    assert_eq!(queue.due_entry_count(0), 0);
+    assert!((queue.due_entry_count(0) == 0));
 }
 
 #[test]
@@ -412,12 +415,12 @@ fn edf_lanes_compare_due_times_and_a_blocked_lane_holds_only_itself() {
     let mut queue = PolicyQueue::new(&edf_profile());
     let now = Instant::now();
     let at = |secs| Some(now + std::time::Duration::from_secs(secs));
-    let worker = |id| WorkerPlacement::Exact(WorkerWithDpRank::new(id, 0));
+    let worker = |id: u64| lane_of(id);
     for (payload, class_due_at, placement) in [
-        ("shared-30", at(30), WorkerPlacement::Any),
+        ("shared-30", at(30), None),
         ("full-worker-10", at(10), worker(1)),
         ("idle-worker-20", at(20), worker(2)),
-        ("shared-25", at(25), WorkerPlacement::Any),
+        ("shared-25", at(25), None),
         ("full-worker-15", at(15), worker(1)),
     ] {
         enqueue_due(&mut queue, None, class_due_at, placement, payload);
@@ -431,7 +434,7 @@ fn edf_lanes_compare_due_times_and_a_blocked_lane_holds_only_itself() {
         ["idle-worker-20", "shared-25", "shared-30"]
     );
     assert_eq!(queue.pending_count(), 2);
-    queue.recheck_all_workers();
+    queue.recheck_blocked_lanes(RecheckScope::All);
     assert_eq!(
         drain_payloads(&mut queue, |_, _, _| true),
         ["full-worker-10", "full-worker-15"]
@@ -439,22 +442,73 @@ fn edf_lanes_compare_due_times_and_a_blocked_lane_holds_only_itself() {
 }
 
 #[test]
+fn capacity_recheck_skips_gate_held_lanes() {
+    let mut queue = PolicyQueue::new(&edf_profile());
+    enqueue_due(&mut queue, None, None, lane_of(1), "gate-held");
+    enqueue_due(&mut queue, None, None, lane_of(2), "capacity-blocked");
+    enqueue_due(&mut queue, None, None, None, "shared");
+    let asked = std::cell::RefCell::new(Vec::new());
+    let predicate = |_: usize, _: &PolicyClassConfig, payload: &&'static str| {
+        asked.borrow_mut().push(*payload);
+        match *payload {
+            "gate-held" => LaneCheck::Blocked(BlockReason::Gate),
+            "capacity-blocked" => LaneCheck::Blocked(BlockReason::Capacity),
+            _ => LaneCheck::Dispatch,
+        }
+    };
+
+    // Each blocked lane keeps the reason its head was refused for.
+    assert_eq!(
+        queue
+            .pop_next(predicate)
+            .map(PolicyQueueEntry::into_payload),
+        Some("shared")
+    );
+    assert_eq!(
+        queue.class_lane_block_reason(0, lane_key(1)).unwrap(),
+        BlockReason::Gate
+    );
+    assert_eq!(
+        queue.class_lane_block_reason(0, lane_key(2)).unwrap(),
+        BlockReason::Capacity
+    );
+    asked.borrow_mut().clear();
+    assert!(queue.pop_next(predicate).is_none());
+    assert!(
+        asked.borrow().is_empty(),
+        "blocked lanes are not re-asked per pop"
+    );
+
+    // A capacity change asks only the lane blocked on capacity.
+    queue.recheck_blocked_lanes(RecheckScope::Capacity);
+    assert!(queue.pop_next(predicate).is_none());
+    assert_eq!(asked.borrow().as_slice(), ["capacity-blocked"]);
+    asked.borrow_mut().clear();
+
+    // The gate's own wake asks every blocked lane.
+    queue.recheck_blocked_lanes(RecheckScope::All);
+    assert!(queue.pop_next(predicate).is_none());
+    let mut all = asked.borrow().clone();
+    all.sort_unstable();
+    assert_eq!(all, ["capacity-blocked", "gate-held"]);
+
+    // A narrower request never shrinks a wider pending scope.
+    queue.recheck_blocked_lanes(RecheckScope::All);
+    queue.recheck_blocked_lanes(RecheckScope::Capacity);
+    assert_eq!(queue.class_pending_recheck(0), Some(RecheckScope::All));
+}
+
+#[test]
 fn edf_class_due_times_order_but_never_expire() {
     let mut queue = PolicyQueue::new(&edf_profile());
     let now = Instant::now();
     let after = |secs| now + std::time::Duration::from_secs(secs);
-    enqueue_due(
-        &mut queue,
-        None,
-        Some(after(1)),
-        WorkerPlacement::Any,
-        "class-1",
-    );
+    enqueue_due(&mut queue, None, Some(after(1)), None, "class-1");
     enqueue_due(
         &mut queue,
         Some(after(5)),
         Some(after(2)),
-        WorkerPlacement::Any,
+        None,
         "explicit-5",
     );
     assert_eq!(queue.next_due_at(0), Some(after(5)));
@@ -466,7 +520,7 @@ fn edf_class_due_times_order_but_never_expire() {
         .map(PolicyQueueEntry::into_payload)
         .collect::<Vec<_>>();
     assert_eq!(expired, ["explicit-5"]);
-    assert_eq!(queue.due_entry_count(0), 0);
+    assert!((queue.due_entry_count(0) == 0));
     assert_eq!(queue.next_due_at(0), None);
     assert_eq!(drain_payloads(&mut queue, |_, _, _| true), ["class-1"]);
 }
@@ -476,31 +530,13 @@ async fn due_time_order_survives_the_expiry_index_emptying() {
     let mut queue = PolicyQueue::new(&edf_profile());
     let start = Instant::now();
     let after = |secs| start + std::time::Duration::from_secs(secs);
-    enqueue_due(
-        &mut queue,
-        None,
-        Some(after(10)),
-        WorkerPlacement::Any,
-        "class-10",
-    );
+    enqueue_due(&mut queue, None, Some(after(10)), None, "class-10");
     // The expiry index is empty when this deadline arrives 20 s later; due-time keys
     // keep one origin regardless.
     tokio::time::advance(std::time::Duration::from_secs(20)).await;
-    enqueue_due(
-        &mut queue,
-        Some(after(120)),
-        None,
-        WorkerPlacement::Any,
-        "explicit-120",
-    );
+    enqueue_due(&mut queue, Some(after(120)), None, None, "explicit-120");
     // This class due time has already passed, and still orders after the earlier one.
-    enqueue_due(
-        &mut queue,
-        None,
-        Some(after(12)),
-        WorkerPlacement::Any,
-        "class-12",
-    );
+    enqueue_due(&mut queue, None, Some(after(12)), None, "class-12");
     assert_eq!(
         drain_payloads(&mut queue, |_, _, _| true),
         ["class-10", "class-12", "explicit-120"]
@@ -516,34 +552,10 @@ async fn due_times_before_the_queue_origin_clamp_to_it() {
     tokio::time::advance(std::time::Duration::from_secs(60)).await;
     let mut queue = PolicyQueue::new(&edf_profile());
     let at = |secs| early + std::time::Duration::from_secs(secs);
-    enqueue_due(
-        &mut queue,
-        None,
-        Some(at(3)),
-        WorkerPlacement::Any,
-        "class-3",
-    );
-    enqueue_due(
-        &mut queue,
-        None,
-        Some(at(120)),
-        WorkerPlacement::Any,
-        "class-120",
-    );
-    enqueue_due(
-        &mut queue,
-        None,
-        Some(at(1)),
-        WorkerPlacement::Any,
-        "class-1",
-    );
-    enqueue_due(
-        &mut queue,
-        Some(at(2)),
-        None,
-        WorkerPlacement::Any,
-        "explicit-2",
-    );
+    enqueue_due(&mut queue, None, Some(at(3)), None, "class-3");
+    enqueue_due(&mut queue, None, Some(at(120)), None, "class-120");
+    enqueue_due(&mut queue, None, Some(at(1)), None, "class-1");
+    enqueue_due(&mut queue, Some(at(2)), None, None, "explicit-2");
 
     // The explicit deadline's timer wakes at the origin.
     assert_eq!(queue.next_due_at(0), Some(queue.deadline_origin()));
@@ -551,7 +563,7 @@ async fn due_times_before_the_queue_origin_clamp_to_it() {
         drain_payloads(&mut queue, |_, _, _| true),
         ["class-3", "class-1", "explicit-2", "class-120"]
     );
-    assert_eq!(queue.due_entry_count(0), 0);
+    assert!((queue.due_entry_count(0) == 0));
 }
 
 #[test]
@@ -581,12 +593,12 @@ fn fcfs_and_wspt_do_not_order_by_class_due_times() {
             1,
             0.0,
             0,
-            WorkerPlacement::Any,
+            None,
             payload,
         )
         .unwrap();
     }
-    assert_eq!(fcfs.due_entry_count(0), 0);
+    assert!((fcfs.due_entry_count(0) == 0));
     assert_eq!(
         drain_payloads(&mut fcfs, |_, _, _| true),
         ["first", "second"]
@@ -605,7 +617,7 @@ fn fcfs_and_wspt_do_not_order_by_class_due_times() {
             1,
             0.0,
             0,
-            WorkerPlacement::Any,
+            None,
             payload,
         )
         .unwrap();
@@ -643,18 +655,18 @@ fn timed(cost: usize, due_at: Option<Instant>, class_due_at: Option<Instant>) ->
 fn push_to<T>(
     queue: &mut PolicyQueue<T>,
     metadata: QueueMetadata,
-    placement: WorkerPlacement,
+    lane: Option<SessionLane>,
     payload: T,
 ) {
     assert!(
         queue
-            .enqueue_with_due_at(metadata, 1, 0.0, 0, placement, payload)
+            .enqueue_with_due_at(metadata, 1, 0.0, 0, lane, payload)
             .is_ok()
     );
 }
 
 fn push<T>(queue: &mut PolicyQueue<T>, metadata: QueueMetadata, payload: T) {
-    push_to(queue, metadata, WorkerPlacement::Any, payload);
+    push_to(queue, metadata, None, payload);
 }
 
 /// Every entry of the class that expires by `now`, earliest first with head expiry.
@@ -762,7 +774,7 @@ fn class_budget_expiry_takes_the_overdue_edf_prefix_without_spending_credit() {
     );
     assert_eq!(queue.class_deficit(0), 600);
     // No deadline is indexed: a blocked root still carries its lane's earliest due time.
-    assert_eq!(queue.due_entry_count(0), 0);
+    assert!((queue.due_entry_count(0) == 0));
     assert!(queue.pop_next(|_, _, _| false).is_none());
     assert_eq!(queue.next_due_at(0), at(100));
 
@@ -785,24 +797,74 @@ fn class_budget_expiry_takes_the_overdue_edf_prefix_without_spending_credit() {
 }
 
 #[test]
+fn session_lane_holds_only_its_session_until_rechecked() {
+    let mut queue = PolicyQueue::with_class_budget_expiry(&controlled_delay_profile());
+    let now = Instant::now();
+    let at = |millis| Some(now + std::time::Duration::from_millis(millis));
+    let session = |id: &str| Some(SessionLane::new(id));
+    for (payload, millis, placement) in [
+        ("a-10", 10, session("a")),
+        ("a-40", 40, session("a")),
+        ("b-20", 20, session("b")),
+        ("shared-30", 30, None),
+    ] {
+        push_to(&mut queue, timed(1, None, at(millis)), placement, payload);
+    }
+    queue.assert_indexes_match_entries();
+
+    // Session a's head is held: the gate says no. The best other head dispatches, in
+    // class order, and a's second turn stays behind its held first turn.
+    let hold_a = |_: usize, _: &PolicyClassConfig, payload: &&str| !payload.starts_with("a-");
+    assert_eq!(queue.pop_next(hold_a).unwrap().into_payload(), "b-20");
+    assert!(
+        queue
+            .class_lane_block_reason(0, SessionLane::new("a"))
+            .is_some()
+    );
+    assert_eq!(queue.pop_next(hold_a).unwrap().into_payload(), "shared-30");
+    assert!(queue.pop_next(hold_a).is_none());
+    assert_eq!(queue.pending_count(), 2);
+    // A blocked lane is not re-asked until a recheck.
+    assert!(queue.pop_next(|_, _, _| true).is_none());
+
+    // A gate recheck unblocks every lane; the held head then dispatches in order.
+    queue.recheck_blocked_lanes(RecheckScope::All);
+    assert_eq!(
+        queue.pop_next(|_, _, _| true).unwrap().into_payload(),
+        "a-10"
+    );
+    assert!((queue.class_blocked_lane_count(0) == 0));
+    queue.assert_indexes_match_entries();
+
+    // A lane blocked again waits for the next recheck, then dispatches in order.
+    assert!(queue.pop_next(hold_a).is_none());
+    queue.recheck_blocked_lanes(RecheckScope::All);
+    assert_eq!(
+        queue.pop_next(|_, _, _| true).unwrap().into_payload(),
+        "a-40"
+    );
+    assert_eq!(queue.pending_count(), 0);
+}
+
+#[test]
 fn class_budget_expiry_reaches_every_lane_root_including_blocked_lanes() {
     let mut queue = PolicyQueue::with_class_budget_expiry(&controlled_delay_profile());
     let now = Instant::now();
     let at = |millis| Some(now + std::time::Duration::from_millis(millis));
-    let worker = |id| WorkerPlacement::Exact(WorkerWithDpRank::new(id, 0));
+    let worker = |id: u64| lane_of(id);
     for (payload, millis, placement) in [
-        ("shared-30", 30, WorkerPlacement::Any),
+        ("shared-30", 30, None),
         ("full-10", 10, worker(1)),
         ("full-40", 40, worker(1)),
         ("idle-20", 20, worker(2)),
-        ("shared-50", 50, WorkerPlacement::Any),
+        ("shared-50", 50, None),
     ] {
         push_to(&mut queue, timed(1, None, at(millis)), placement, payload);
     }
     // Worker 1 is full: its lane is blocked, and its root still sets the class due time.
     let full = |_: usize, _: &PolicyClassConfig, payload: &&str| !payload.starts_with("full");
     assert_eq!(queue.pop_next(full).unwrap().into_payload(), "idle-20");
-    assert!(queue.class_blocks_worker(0, WorkerWithDpRank::new(1, 0)));
+    assert!(queue.class_lane_block_reason(0, lane_key(1)).is_some());
     assert_eq!(queue.next_due_at(0), at(10));
     queue.assert_indexes_match_entries();
 
@@ -813,10 +875,10 @@ fn class_budget_expiry_reaches_every_lane_root_including_blocked_lanes() {
     );
     assert_eq!(queue.next_due_at(0), at(40));
     // The blocked lane is checked again at the next dispatch, with its next head.
-    assert!(!queue.class_blocks_worker(0, WorkerWithDpRank::new(1, 0)));
+    assert!(queue.class_lane_block_reason(0, lane_key(1)).is_none());
     queue.assert_indexes_match_entries();
     assert_eq!(drain_all(&mut queue), ["full-40", "shared-50"]);
-    assert_eq!(queue.expiring_root_count(0), 0);
+    assert!((queue.expiring_root_count(0) == 0));
 }
 
 /// A removal that takes a blocked lane's root, by explicit-deadline expiry or cancellation,
@@ -827,7 +889,7 @@ fn removing_a_blocked_lanes_root_unblocks_the_lane() {
     let now = Instant::now();
     let at = |millis| Some(now + std::time::Duration::from_millis(millis));
     let worker = WorkerWithDpRank::new(1, 0);
-    let lane = WorkerPlacement::Exact(worker);
+    let lane = lane_of(worker.worker_id);
     let full = |_: usize, _: &PolicyClassConfig, payload: &&str| !payload.starts_with("full");
     for policy in [
         RouterQueuePolicy::Edf,
@@ -859,11 +921,21 @@ fn removing_a_blocked_lanes_root_unblocks_the_lane() {
                 "shared",
                 "{case}"
             );
-            assert!(queue.class_blocks_worker(0, worker), "{case}");
+            assert!(
+                queue
+                    .class_lane_block_reason(0, lane_key(worker.worker_id))
+                    .is_some(),
+                "{case}"
+            );
 
             // Cancelling behind the root leaves the lane blocked.
             queue.retain(|payload| *payload != "full-30");
-            assert!(queue.class_blocks_worker(0, worker), "{case}");
+            assert!(
+                queue
+                    .class_lane_block_reason(0, lane_key(worker.worker_id))
+                    .is_some(),
+                "{case}"
+            );
 
             // Expiry takes the root: the next dispatch checks the lane's next head.
             let expiry = now + std::time::Duration::from_millis(10);
@@ -872,14 +944,29 @@ fn removing_a_blocked_lanes_root_unblocks_the_lane() {
                 ["full-10"],
                 "{case}"
             );
-            assert!(!queue.class_blocks_worker(0, worker), "{case}");
+            assert!(
+                queue
+                    .class_lane_block_reason(0, lane_key(worker.worker_id))
+                    .is_none(),
+                "{case}"
+            );
             queue.assert_indexes_match_entries();
             assert!(queue.pop_next(full).is_none(), "{case}");
-            assert!(queue.class_blocks_worker(0, worker), "{case}");
+            assert!(
+                queue
+                    .class_lane_block_reason(0, lane_key(worker.worker_id))
+                    .is_some(),
+                "{case}"
+            );
 
             // So does cancelling the root.
             queue.retain(|payload| *payload != "full-20");
-            assert!(!queue.class_blocks_worker(0, worker), "{case}");
+            assert!(
+                queue
+                    .class_lane_block_reason(0, lane_key(worker.worker_id))
+                    .is_none(),
+                "{case}"
+            );
             queue.assert_indexes_match_entries();
             assert_eq!(drain_all(&mut queue), ["full-40"], "{case}");
         }
@@ -891,7 +978,7 @@ fn cancellation_keeps_the_lane_root_index_exact() {
     let mut queue = PolicyQueue::with_class_budget_expiry(&controlled_delay_profile());
     let now = Instant::now();
     let at = |millis| Some(now + std::time::Duration::from_millis(millis));
-    let worker = WorkerPlacement::Exact(WorkerWithDpRank::new(3, 0));
+    let worker = lane_of(3);
     push_to(&mut queue, timed(1, None, at(10)), worker, "pinned-10");
     push_to(&mut queue, timed(1, None, at(20)), worker, "pinned-20");
     push(&mut queue, timed(1, None, at(15)), "shared-15");
@@ -922,14 +1009,7 @@ fn class_budget_expiry_leaves_other_orders_to_explicit_deadlines() {
         // A strict-priority root hides the explicit deadline behind it.
         assert!(
             queue
-                .enqueue_with_due_at(
-                    timed(1, None, at(1)),
-                    1,
-                    0.0,
-                    1,
-                    WorkerPlacement::Any,
-                    "strict-head"
-                )
+                .enqueue_with_due_at(timed(1, None, at(1)), 1, 0.0, 1, None, "strict-head")
                 .is_ok()
         );
         push(&mut queue, timed(1, at(100), None), "hidden-explicit");
@@ -1061,16 +1141,7 @@ fn drr_charges_cost_when_the_queue_was_empty() {
     let mut snapshot = QueueSnapshot::new(100, 0);
     snapshot.scheduling_cost_tokens = 7;
     queue
-        .enqueue(
-            0,
-            1,
-            snapshot,
-            0.0,
-            0.0,
-            0,
-            WorkerPlacement::Any,
-            "idle-arrival",
-        )
+        .enqueue(0, 1, snapshot, 0.0, 0.0, 0, None, "idle-arrival")
         .unwrap();
     queue
         .enqueue(
@@ -1080,7 +1151,7 @@ fn drr_charges_cost_when_the_queue_was_empty() {
             1.0,
             0.0,
             0,
-            WorkerPlacement::Any,
+            None,
             "following-arrival",
         )
         .unwrap();
@@ -1102,28 +1173,10 @@ policy_classes:
 "#,
     ));
     queue
-        .enqueue(
-            0,
-            1,
-            QueueSnapshot::new(8, 4),
-            0.0,
-            0.0,
-            0,
-            WorkerPlacement::Any,
-            "keep",
-        )
+        .enqueue(0, 1, QueueSnapshot::new(8, 4), 0.0, 0.0, 0, None, "keep")
         .unwrap();
     queue
-        .enqueue(
-            0,
-            1,
-            QueueSnapshot::new(16, 6),
-            1.0,
-            0.0,
-            0,
-            WorkerPlacement::Any,
-            "remove",
-        )
+        .enqueue(0, 1, QueueSnapshot::new(16, 6), 1.0, 0.0, 0, None, "remove")
         .unwrap();
 
     queue.retain(|payload| *payload != "remove");
@@ -1139,7 +1192,7 @@ policy_classes:
 }
 
 #[test]
-fn blocked_worker_lane_does_not_block_another_lane() {
+fn blocked_lane_does_not_block_another_lane() {
     let mut queue = PolicyQueue::new(&admission_profile());
     for (worker, payload) in [(1, "blocked"), (2, "ready")] {
         queue
@@ -1150,7 +1203,7 @@ fn blocked_worker_lane_does_not_block_another_lane() {
                 worker as f64,
                 0.0,
                 0,
-                WorkerPlacement::Exact(WorkerWithDpRank::new(worker, 0)),
+                lane_of(worker),
                 payload,
             )
             .unwrap();
@@ -1164,7 +1217,7 @@ fn blocked_worker_lane_does_not_block_another_lane() {
 }
 
 #[test]
-fn worker_update_rechecks_only_that_blocked_lane() {
+fn a_recheck_reasks_every_blocked_lane_in_order() {
     let mut queue = PolicyQueue::new(&admission_profile());
     let worker_1 = WorkerWithDpRank::new(1, 0);
     let worker_2 = WorkerWithDpRank::new(2, 0);
@@ -1177,20 +1230,20 @@ fn worker_update_rechecks_only_that_blocked_lane() {
                 worker.worker_id as f64,
                 0.0,
                 0,
-                WorkerPlacement::Exact(worker),
+                lane_of(worker.worker_id),
                 payload,
             )
             .unwrap();
     }
 
     assert!(queue.pop_next(|_, _, _| false).is_none());
-    queue.recheck_worker(worker_1);
+    // Blocked lanes stay blocked until a recheck, whatever the predicate says now.
+    assert!(queue.pop_next(|_, _, _| true).is_none());
+    queue.recheck_blocked_lanes(RecheckScope::All);
     assert_eq!(
         queue.pop_next(|_, _, _| true).unwrap().into_payload(),
         "worker-1"
     );
-    assert!(queue.pop_next(|_, _, _| true).is_none());
-    queue.recheck_worker(worker_2);
     assert_eq!(
         queue.pop_next(|_, _, _| true).unwrap().into_payload(),
         "worker-2"
@@ -1198,7 +1251,7 @@ fn worker_update_rechecks_only_that_blocked_lane() {
 }
 
 #[test]
-fn exact_lane_index_tracks_a_new_higher_priority_head() {
+fn lane_index_tracks_a_new_higher_priority_head() {
     let mut queue = PolicyQueue::new(&admission_profile());
     let worker = WorkerWithDpRank::new(1, 0);
     queue
@@ -1209,7 +1262,7 @@ fn exact_lane_index_tracks_a_new_higher_priority_head() {
             0.0,
             0.0,
             0,
-            WorkerPlacement::Exact(worker),
+            lane_of(worker.worker_id),
             "old",
         )
         .unwrap();
@@ -1221,7 +1274,7 @@ fn exact_lane_index_tracks_a_new_higher_priority_head() {
             1.0,
             10.0,
             0,
-            WorkerPlacement::Exact(worker),
+            lane_of(worker.worker_id),
             "boosted",
         )
         .unwrap();
@@ -1249,7 +1302,7 @@ fn exact_lane_head_index_checks_each_blocked_lane_once() {
                 lane as f64,
                 0.0,
                 0,
-                WorkerPlacement::Exact(WorkerWithDpRank::new(lane as u64, 0)),
+                lane_of(lane as u64),
                 lane,
             )
             .unwrap();
@@ -1284,7 +1337,7 @@ fn global_recheck_dispatches_workers_as_they_become_available() {
                 lane as f64,
                 0.0,
                 0,
-                WorkerPlacement::Exact(WorkerWithDpRank::new(lane, 0)),
+                lane_of(lane),
                 lane,
             )
             .unwrap();
@@ -1293,7 +1346,7 @@ fn global_recheck_dispatches_workers_as_they_become_available() {
     assert!(queue.pop_next(|_, _, _| false).is_none());
 
     let mut available = [false, true, false];
-    queue.recheck_all_workers();
+    queue.recheck_blocked_lanes(RecheckScope::All);
     let entry = queue
         .pop_next(|_, _, lane| available[*lane as usize])
         .expect("newly available worker should dispatch");
@@ -1305,7 +1358,7 @@ fn global_recheck_dispatches_workers_as_they_become_available() {
     );
 
     available[2] = true;
-    queue.recheck_all_workers();
+    queue.recheck_blocked_lanes(RecheckScope::All);
     let entry = queue
         .pop_next(|_, _, lane| available[*lane as usize])
         .expect("later worker availability should dispatch on the next recheck");
@@ -1325,7 +1378,7 @@ fn global_recheck_preserves_priority_for_multiple_available_workers() {
                 0.0,
                 0.0,
                 strict_priority,
-                WorkerPlacement::Exact(WorkerWithDpRank::new(worker, 0)),
+                lane_of(worker),
                 payload,
             )
             .unwrap();
@@ -1333,7 +1386,7 @@ fn global_recheck_preserves_priority_for_multiple_available_workers() {
 
     assert!(queue.pop_next(|_, _, _| false).is_none());
 
-    queue.recheck_all_workers();
+    queue.recheck_blocked_lanes(RecheckScope::All);
     assert_eq!(
         queue.pop_next(|_, _, _| true).unwrap().into_payload(),
         "high"
@@ -1356,14 +1409,14 @@ fn pending_global_recheck_survives_retain_removing_blocked_lane() {
                 0.0,
                 0.0,
                 0,
-                WorkerPlacement::Exact(WorkerWithDpRank::new(worker, 0)),
+                lane_of(worker),
                 payload,
             )
             .unwrap();
     }
 
     assert!(queue.pop_next(|_, _, _| false).is_none());
-    queue.recheck_all_workers();
+    queue.recheck_blocked_lanes(RecheckScope::All);
     queue.retain(|payload| *payload == "keep");
 
     assert_eq!(queue.pending_count(), 1);
@@ -1402,7 +1455,7 @@ policy_classes:
             0.0,
             0.0,
             0,
-            WorkerPlacement::Any,
+            None,
             "raw-queued",
         )
         .unwrap();
@@ -1414,7 +1467,7 @@ policy_classes:
             1.0,
             0.0,
             0,
-            WorkerPlacement::Any,
+            None,
             "raw-rejected",
         )
         .unwrap_err();
@@ -1431,7 +1484,7 @@ policy_classes:
             2.0,
             0.0,
             0,
-            WorkerPlacement::Any,
+            None,
             "raw-after-growth",
         )
         .unwrap();
@@ -1443,7 +1496,7 @@ policy_classes:
             3.0,
             0.0,
             0,
-            WorkerPlacement::Any,
+            None,
             "raw-at-grown-cap",
         )
         .unwrap_err();
@@ -1458,7 +1511,7 @@ policy_classes:
             0.0,
             0.0,
             0,
-            WorkerPlacement::Any,
+            None,
             "cached-queued",
         )
         .unwrap();
@@ -1470,7 +1523,7 @@ policy_classes:
             1.0,
             0.0,
             0,
-            WorkerPlacement::Any,
+            None,
             "cached-rejected",
         )
         .unwrap_err();
@@ -1479,16 +1532,7 @@ policy_classes:
     assert_eq!(cached_rejection.limit, 5);
 
     let (zero_rejection, _) = queue
-        .enqueue(
-            2,
-            4,
-            QueueSnapshot::new(1, 0),
-            0.0,
-            0.0,
-            0,
-            WorkerPlacement::Any,
-            "zero",
-        )
+        .enqueue(2, 4, QueueSnapshot::new(1, 0), 0.0, 0.0, 0, None, "zero")
         .unwrap_err();
     assert_eq!(zero_rejection.limit_kind, QueueLimitKind::Requests);
     assert_eq!(zero_rejection.limit, 0);
@@ -1501,7 +1545,7 @@ policy_classes:
             0.0,
             0.0,
             0,
-            WorkerPlacement::Any,
+            None,
             "no-workers",
         )
         .unwrap_err();
@@ -1521,16 +1565,7 @@ policy_classes:
         usize::MAX
     )));
     queue
-        .enqueue(
-            0,
-            2,
-            QueueSnapshot::new(1, 0),
-            0.0,
-            0.0,
-            0,
-            WorkerPlacement::Any,
-            "queued",
-        )
+        .enqueue(0, 2, QueueSnapshot::new(1, 0), 0.0, 0.0, 0, None, "queued")
         .unwrap();
 }
 
@@ -1556,7 +1591,7 @@ policy_classes:
             0.0,
             0.0,
             0,
-            WorkerPlacement::Any,
+            None,
             "fcfs-long",
         )
         .unwrap();
@@ -1568,7 +1603,7 @@ policy_classes:
             1.0,
             0.0,
             0,
-            WorkerPlacement::Any,
+            None,
             "fcfs-short",
         )
         .unwrap();
@@ -1580,7 +1615,7 @@ policy_classes:
             0.0,
             0.0,
             0,
-            WorkerPlacement::Any,
+            None,
             "wspt-long",
         )
         .unwrap();
@@ -1592,7 +1627,7 @@ policy_classes:
             1.0,
             0.0,
             0,
-            WorkerPlacement::Any,
+            None,
             "wspt-short",
         )
         .unwrap();
@@ -1624,7 +1659,7 @@ policy_classes:
                 index as f64,
                 0.0,
                 0,
-                WorkerPlacement::Any,
+                None,
                 "slow",
             )
             .unwrap();
@@ -1636,7 +1671,7 @@ policy_classes:
                 index as f64,
                 0.0,
                 0,
-                WorkerPlacement::Any,
+                None,
                 "fast",
             )
             .unwrap();
@@ -1674,7 +1709,7 @@ policy_classes:
             0.0,
             0.0,
             0,
-            WorkerPlacement::Any,
+            None,
             "agents-first",
         )
         .unwrap();
@@ -1686,7 +1721,7 @@ policy_classes:
             1.0,
             0.0,
             0,
-            WorkerPlacement::Exact(WorkerWithDpRank::new(1, 0)),
+            lane_of(1),
             "agents-blocked",
         )
         .unwrap();
@@ -1698,21 +1733,12 @@ policy_classes:
             2.0,
             0.0,
             0,
-            WorkerPlacement::Exact(WorkerWithDpRank::new(2, 0)),
+            lane_of(2),
             "agents-ready",
         )
         .unwrap();
     queue
-        .enqueue(
-            1,
-            2,
-            QueueSnapshot::new(1, 0),
-            0.0,
-            0.0,
-            0,
-            WorkerPlacement::Any,
-            "batch",
-        )
+        .enqueue(1, 2, QueueSnapshot::new(1, 0), 0.0, 0.0, 0, None, "batch")
         .unwrap();
 
     let is_dispatchable =
@@ -1750,7 +1776,7 @@ policy_classes:
                 index as f64,
                 0.0,
                 0,
-                WorkerPlacement::Any,
+                None,
                 "one",
             )
             .unwrap();
@@ -1764,7 +1790,7 @@ policy_classes:
                 index as f64,
                 0.0,
                 0,
-                WorkerPlacement::Any,
+                None,
                 "three",
             )
             .unwrap();
@@ -1806,7 +1832,7 @@ policy_classes:
                     round as f64,
                     0.0,
                     0,
-                    WorkerPlacement::Any,
+                    None,
                     (),
                 )
                 .unwrap();
@@ -1821,7 +1847,7 @@ policy_classes:
                 round as f64,
                 0.0,
                 0,
-                WorkerPlacement::Any,
+                None,
                 (),
             )
             .unwrap();
@@ -1858,16 +1884,7 @@ policy_classes:
 "#,
     ));
     queue
-        .enqueue(
-            0,
-            1,
-            QueueSnapshot::new(100, 0),
-            0.0,
-            0.0,
-            0,
-            WorkerPlacement::Any,
-            "first",
-        )
+        .enqueue(0, 1, QueueSnapshot::new(100, 0), 0.0, 0.0, 0, None, "first")
         .unwrap();
     queue
         .enqueue(
@@ -1877,7 +1894,7 @@ policy_classes:
             0.0,
             0.0,
             0,
-            WorkerPlacement::Any,
+            None,
             "second",
         )
         .unwrap();
@@ -1902,28 +1919,10 @@ policy_classes:
 "#,
     ));
     queue
-        .enqueue(
-            0,
-            1,
-            QueueSnapshot::new(101, 0),
-            0.0,
-            0.0,
-            0,
-            WorkerPlacement::Any,
-            "large",
-        )
+        .enqueue(0, 1, QueueSnapshot::new(101, 0), 0.0, 0.0, 0, None, "large")
         .unwrap();
     queue
-        .enqueue(
-            1,
-            1,
-            QueueSnapshot::new(1, 0),
-            0.0,
-            0.0,
-            0,
-            WorkerPlacement::Any,
-            "blocked",
-        )
+        .enqueue(1, 1, QueueSnapshot::new(1, 0), 0.0, 0.0, 0, None, "blocked")
         .unwrap();
 
     let popped = queue

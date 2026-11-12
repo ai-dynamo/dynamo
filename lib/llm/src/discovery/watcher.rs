@@ -2365,7 +2365,7 @@ mod tests {
             return;
         }
         use dynamo_kv_router::plugins::request_classifier::{
-            ClassifyEvent, ClassifyFuture, ClassifyRequest, RequestClassifier, WorkerView,
+            ClassifierError, ClassifyEvent, ClassifyRequest, RequestClassifier, WorkerView,
         };
         use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -2380,12 +2380,12 @@ mod tests {
                 &mut self,
                 _request: ClassifyRequest,
                 _workers: &dyn WorkerView,
-            ) -> ClassifyFuture {
+            ) -> Result<ClassifyRequest, Box<ClassifierError>> {
                 self.calls += 1;
                 self.events
                     .send((self.instance, "classify", self.calls))
                     .unwrap();
-                Box::pin(async { Err(Box::new(std::io::Error::other("catalog rejection")) as _) })
+                Err(Box::new(std::io::Error::other("catalog rejection")) as _)
             }
 
             async fn on_event(&mut self, event: ClassifyEvent) {

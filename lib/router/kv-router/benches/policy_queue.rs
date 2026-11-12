@@ -23,10 +23,13 @@ use criterion::{
     BatchSize, BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main,
 };
 use dynamo_admission::RouterQueuePolicy;
-use dynamo_admission::{PolicyProfile, PolicyQueue, QueueMetadata, QueueSnapshot, WorkerPlacement};
+use dynamo_admission::{PolicyProfile, PolicyQueue, QueueMetadata, QueueSnapshot, SessionLane};
 use dynamo_kv_router::scheduling::policy_config::RouterPolicyConfig;
-use dynamo_router_protocol::worker::WorkerWithDpRank;
 use tokio::time::Instant;
+
+fn session_lane(lane: usize) -> SessionLane {
+    SessionLane::new(&format!("session-{lane}"))
+}
 
 #[derive(Debug, Clone, Copy)]
 struct BenchRequest {
@@ -102,12 +105,9 @@ fn edf_queue(
         let (lane, placement) = match lanes {
             Some(lanes) => {
                 let lane = request_index % lanes;
-                (
-                    lane,
-                    WorkerPlacement::Exact(WorkerWithDpRank::new(lane as u64, 0)),
-                )
+                (lane, Some(session_lane(lane)))
             }
-            None => (0, WorkerPlacement::Any),
+            None => (0, None),
         };
         let class_due_at =
             class.slo_ttft_due_at(ingress_origin + Duration::from_micros(request_index as u64));
@@ -149,7 +149,7 @@ fn exact_queue(
                 request_index as f64,
                 0.0,
                 0,
-                WorkerPlacement::Exact(WorkerWithDpRank::new(lane as u64, 0)),
+                Some(session_lane(lane)),
                 BenchRequest {
                     dispatchable: is_dispatchable(lane),
                 },
@@ -170,7 +170,7 @@ fn shared_queue(requests: usize) -> PolicyQueue<BenchRequest> {
                 request_index as f64,
                 0.0,
                 0,
-                WorkerPlacement::Any,
+                None,
                 BenchRequest { dispatchable: true },
             )
             .unwrap();

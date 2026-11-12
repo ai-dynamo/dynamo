@@ -69,13 +69,28 @@ impl WorkerPicker for PreludePolicy {
 struct PreludeClassifier;
 
 impl RequestClassifier for PreludeClassifier {
-    fn classify(&mut self, request: ClassifyRequest, _workers: &dyn WorkerView) -> ClassifyFuture {
+    fn classify(
+        &mut self,
+        request: ClassifyRequest,
+        _workers: &dyn WorkerView,
+    ) -> Result<ClassifyRequest, Box<ClassifierError>> {
         let _: Option<&str> = request.request_id();
         let _: usize = request.isl_tokens();
         let _: Option<&[u64]> = request.sequence_hashes();
         let _: &RequestProgress = request.progress();
         let _: Option<tokio::time::Instant> = request.due_at();
-        Box::pin(async move { Ok(request) })
+        Ok(request)
+    }
+
+    fn dispatch_gate(&self) -> Option<Arc<dyn DispatchGate>> {
+        struct Open;
+        impl DispatchGate for Open {
+            fn check(&self, head: &DispatchHead<'_>) -> DispatchDecision {
+                let _: Option<&str> = head.request_id();
+                DispatchDecision::Go { target: None }
+            }
+        }
+        Some(Arc::new(Open))
     }
 }
 

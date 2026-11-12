@@ -15,12 +15,12 @@ pub use crate::compat::scheduling::{
     OverloadedWorkerProvider, PolicyQueue, PolicyQueueEntry, PotentialLoad, PrefillLoadEstimator,
     QueueLimitKind, QueueMetadata, QueueRejection, QueueSnapshot, RefreshedOverlap,
     RequestLifecycle, RoutingEligibility, ScheduleMode, ScheduleRequest, SchedulingContext,
-    SchedulingRequest, SchedulingResponse, SelectedWorkerTierSnapshot, SessionContext,
+    SchedulingRequest, SchedulingResponse, SelectedWorkerTierSnapshot, SessionContext, SessionLane,
     SharedCacheOverlapScore, TierOverlapBlocks, TieredOverlapRefresher, WorkerAvailabilityProvider,
-    WorkerEligibilityError, WorkerIdSet, WorkerOverlapScore, WorkerPlacement,
-    WorkerSelectionInputTrigger, WorkerSelectionPolicyError, effective_prefill_tokens, overlap,
-    overlap_refresh, policy, policy_queue, prefill_load, prefill_load_hint_from_effective_tokens,
-    queue, request_classifier, selector,
+    WorkerEligibilityError, WorkerIdSet, WorkerOverlapScore, WorkerSelectionInputTrigger,
+    WorkerSelectionPolicyError, effective_prefill_tokens, overlap, overlap_refresh, policy,
+    policy_queue, prefill_load, prefill_load_hint_from_effective_tokens, queue, request_classifier,
+    selector,
 };
 #[cfg(test)]
 mod policy_queue_tests;

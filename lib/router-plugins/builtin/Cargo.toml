@@ -23,7 +23,8 @@ tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt", "time"] }
+tokio = { workspace = true, features = ["macros", "rt", "test-util", "time"] }
+tokio-util = { workspace = true }
 dynamo-kv-router = { workspace = true, features = ["ingest-zmq", "replica-sync-zmq", "peer-recovery", "bench"] }
 dynamo-scheduler = { workspace = true, features = ["bench"] }
 rustc-hash = "2.1.1"
@@ -36,4 +37,8 @@ harness = false
 
 [[bench]]
 name = "default_lifecycle"
+harness = false
+
+[[bench]]
+name = "thunderagent_ledger"
 harness = false

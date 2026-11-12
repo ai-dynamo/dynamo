@@ -14,7 +14,8 @@ use super::builder::hosted_picker;
 use crate::kv_router::SelectionPolicySource;
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::plugins::request_classifier::{
-    ClassifierError, ClassifyEvent, ClassifyFuture, ClassifyRequest, RequestClassifier, WorkerView,
+    ClassifierError, ClassifyEvent, ClassifyRequest, DispatchDecision, DispatchGate, DispatchHead,
+    DispatchRecheck, RequestClassifier, WorkerView,
 };
 use dynamo_runtime::{
     DistributedRuntime, Runtime,
@@ -2412,9 +2413,13 @@ struct RecordingClassifier {
 
 #[async_trait::async_trait]
 impl RequestClassifier for RecordingClassifier {
-    fn classify(&mut self, request: ClassifyRequest, _workers: &dyn WorkerView) -> ClassifyFuture {
+    fn classify(
+        &mut self,
+        request: ClassifyRequest,
+        _workers: &dyn WorkerView,
+    ) -> Result<ClassifyRequest, Box<ClassifierError>> {
         self.calls.fetch_add(1, Ordering::Relaxed);
-        Box::pin(async move { Ok(request) })
+        Ok(request)
     }
 
     async fn on_event(&mut self, event: ClassifyEvent) {
@@ -2445,9 +2450,13 @@ struct RejectingClassifier {
 
 #[async_trait::async_trait]
 impl RequestClassifier for RejectingClassifier {
-    fn classify(&mut self, _request: ClassifyRequest, _workers: &dyn WorkerView) -> ClassifyFuture {
+    fn classify(
+        &mut self,
+        _request: ClassifyRequest,
+        _workers: &dyn WorkerView,
+    ) -> Result<ClassifyRequest, Box<ClassifierError>> {
         self.calls.fetch_add(1, Ordering::Relaxed);
-        Box::pin(async { Err(Box::new(ClassifierRejected) as Box<ClassifierError>) })
+        Err(Box::new(ClassifierRejected) as Box<ClassifierError>)
     }
 
     async fn on_event(&mut self, event: ClassifyEvent) {
@@ -2515,17 +2524,18 @@ struct TypedRejectingClassifier {
 
 #[async_trait::async_trait]
 impl RequestClassifier for TypedRejectingClassifier {
-    fn classify(&mut self, _request: ClassifyRequest, _workers: &dyn WorkerView) -> ClassifyFuture {
+    fn classify(
+        &mut self,
+        _request: ClassifyRequest,
+        _workers: &dyn WorkerView,
+    ) -> Result<ClassifyRequest, Box<ClassifierError>> {
         self.calls.fetch_add(1, Ordering::Relaxed);
-        let error_type = self.error_type;
-        Box::pin(async move {
-            Err(Box::new(
-                DynamoError::builder()
-                    .error_type(error_type)
-                    .message("classifier shed load")
-                    .build(),
-            ) as Box<ClassifierError>)
-        })
+        Err(Box::new(
+            DynamoError::builder()
+                .error_type(self.error_type)
+                .message("classifier shed load")
+                .build(),
+        ) as Box<ClassifierError>)
     }
 
     async fn on_event(&mut self, event: ClassifyEvent) {
@@ -2708,20 +2718,57 @@ async fn planned_route_admission_classifies_and_carries_lifecycle() {
     runtime.shutdown();
 }
 
+/// Holds every head while `paused` is set; releases through the recheck handle.
+struct PausingGate {
+    paused: AtomicBool,
+    checked: Arc<Notify>,
+    recheck: std::sync::OnceLock<DispatchRecheck>,
+}
+
+impl PausingGate {
+    fn paused() -> Arc<Self> {
+        Arc::new(Self {
+            paused: AtomicBool::new(true),
+            checked: Arc::new(Notify::new()),
+            recheck: std::sync::OnceLock::new(),
+        })
+    }
+
+    fn pause(&self) {
+        self.paused.store(true, Ordering::Relaxed);
+    }
+
+    /// Lets held heads go and wakes the queue to re-ask them.
+    fn resume(&self) {
+        self.paused.store(false, Ordering::Relaxed);
+        self.recheck.get().expect("gate attached").notify();
+    }
+}
+
+impl DispatchGate for PausingGate {
+    fn check(&self, _head: &DispatchHead<'_>) -> DispatchDecision {
+        if self.paused.load(Ordering::Relaxed) {
+            // Announced only for a hold, so a check that lets the head go leaves no permit
+            // for a later wait to consume early.
+            self.checked.notify_one();
+            DispatchDecision::Hold { until: None }
+        } else {
+            DispatchDecision::Go { target: None }
+        }
+    }
+
+    fn attach(&self, recheck: DispatchRecheck) {
+        let _ = self.recheck.set(recheck);
+    }
+}
+
 struct PausingClassifier {
-    entered: Arc<Notify>,
-    resumed: Arc<Notify>,
+    gate: Arc<PausingGate>,
 }
 
 impl RequestClassifier for PausingClassifier {
-    fn classify(&mut self, request: ClassifyRequest, _workers: &dyn WorkerView) -> ClassifyFuture {
-        let entered = Arc::clone(&self.entered);
-        let resumed = Arc::clone(&self.resumed);
-        Box::pin(async move {
-            entered.notify_one();
-            resumed.notified().await;
-            Ok(request)
-        })
+    fn dispatch_gate(&self) -> Option<Arc<dyn DispatchGate>> {
+        Some(Arc::clone(&self.gate) as Arc<dyn DispatchGate>)
     }
 }
 
@@ -2770,8 +2817,10 @@ async fn runtime_lora_rechecks_worker_metadata_after_queued_selection() {
         );
     }
     let filter = Arc::new(LoraFilter::new(LoraRoutingTable::new(), tracker));
-    let entered = Arc::new(Notify::new());
-    let resumed = Arc::new(Notify::new());
+    // The request waits in the queue at the gate, so the class must queue for the gate to be
+    // asked; a hold is announced on `checked`, and `resume` lets the head go.
+    let gate = PausingGate::paused();
+    let checked = Arc::clone(&gate.checked);
     let chooser = temp_env::async_with_vars(
         [
             ("DYN_LORA_ENABLED", Some("true")),
@@ -2788,6 +2837,7 @@ async fn runtime_lora_rechecks_worker_metadata_after_queued_selection() {
                 skip_initial_worker_wait: true,
                 use_kv_events: false,
                 router_track_active_blocks: false,
+                router_queue_threshold: Some(1.0),
                 ..Default::default()
             }),
             None,
@@ -2801,8 +2851,7 @@ async fn runtime_lora_rechecks_worker_metadata_after_queued_selection() {
     .await
     .unwrap()
     .with_request_classifier(PausingClassifier {
-        entered: entered.clone(),
-        resumed: resumed.clone(),
+        gate: Arc::clone(&gate),
     })
     .unwrap();
     let dispatch = Arc::new(PendingThenCompletedDispatch::default());
@@ -2840,23 +2889,24 @@ async fn runtime_lora_rechecks_worker_metadata_after_queued_selection() {
         "capability_taint",
     ] {
         configs_tx.send(initial.clone()).unwrap();
+        gate.pause();
         let mut selected = {
             let router = router.clone();
             let input = input.clone();
             tokio::spawn(async move { router.generate(Context::new(input)).await })
         };
         tokio::select! {
-            _ = entered.notified() => {}
+            _ = checked.notified() => {}
             result = &mut selected => {
                 let detail = match result {
                     Ok(Err(error)) => format!("{error:#}"),
                     Ok(Ok(_)) => "request unexpectedly dispatched".to_string(),
                     Err(error) => error.to_string(),
                 };
-                panic!("{field}: request ended before classification: {detail}");
+                panic!("{field}: request ended before the gate held it: {detail}");
             }
             _ = tokio::time::sleep(Duration::from_secs(5)) => {
-                panic!("{field}: classifier was not reached");
+                panic!("{field}: the gate was not reached");
             }
         }
         let mut changed = capable.clone();
@@ -2880,7 +2930,7 @@ async fn runtime_lora_rechecks_worker_metadata_after_queued_selection() {
             HashMap::from([(101, changed.clone()), (202, changed)])
         };
         configs_tx.send(updated).unwrap();
-        resumed.notify_one();
+        gate.resume();
         assert!(
             tokio::time::timeout(Duration::from_secs(5), selected)
                 .await
@@ -2903,11 +2953,12 @@ async fn runtime_lora_rechecks_worker_metadata_after_queued_selection() {
     configs_tx.send(initial.clone()).unwrap();
     let runtime_request = Context::new(input);
     let budget = CleanupBudget::default();
+    gate.pause();
     let (selected, ()) = tokio::join!(
         router.select_with_affinity(&runtime_request, RequestPhase::Aggregated, false, &budget),
         async {
-            entered.notified().await;
-            resumed.notify_one();
+            checked.notified().await;
+            gate.resume();
         },
     );
     let (mut selection, affinity) = selected.unwrap();
@@ -2955,11 +3006,12 @@ async fn runtime_lora_rechecks_worker_metadata_after_queued_selection() {
     legacy.routing_mut().lora_name = Some("legacy-adapter".into());
     let legacy = Context::new(legacy);
     let budget = CleanupBudget::default();
+    gate.pause();
     let (selected, ()) = tokio::join!(
         router.select_with_affinity(&legacy, RequestPhase::Aggregated, false, &budget),
         async {
-            entered.notified().await;
-            resumed.notify_one();
+            checked.notified().await;
+            gate.resume();
         },
     );
     assert!(selected.is_ok());
@@ -2969,17 +3021,30 @@ async fn runtime_lora_rechecks_worker_metadata_after_queued_selection() {
 }
 
 #[tokio::test]
-async fn classifier_pause_defers_admission_until_resumed() {
-    let entered = Arc::new(Notify::new());
-    let resumed = Arc::new(Notify::new());
-    let (router, runtime) = router_with_classifier(
-        PausingClassifier {
-            entered: Arc::clone(&entered),
-            resumed: Arc::clone(&resumed),
-        },
+async fn gate_hold_defers_admission_until_resumed() {
+    let gate = PausingGate::paused();
+    let checked = Arc::clone(&gate.checked);
+    // The gate is consulted only by a class that queues.
+    let config = KvRouterConfig {
+        skip_initial_worker_wait: true,
+        use_kv_events: false,
+        router_track_active_blocks: false,
+        router_queue_threshold: Some(1.0),
+        ..Default::default()
+    };
+    let (router, runtime) = router_with_config_and_classifier(
         None,
+        HashMap::from([(7, ModelRuntimeConfig::default())]),
+        config,
+        Some(PausingClassifier {
+            gate: Arc::clone(&gate),
+        }),
     )
     .await;
+    assert!(
+        gate.recheck.get().is_some(),
+        "the router hands the gate its recheck handle"
+    );
     let router = Arc::new(router);
     let request = Context::new(request());
     let request_id = request.id().to_string();
@@ -2997,9 +3062,9 @@ async fn classifier_pause_defers_admission_until_resumed() {
         })
     };
 
-    entered.notified().await;
+    checked.notified().await;
     assert!(!selection.is_finished());
-    resumed.notify_one();
+    gate.resume();
     let (selection, _) = selection.await.unwrap().unwrap();
     assert!(selection.request_lifecycle.is_some());
     router.kv_router().free(&request_id).await.unwrap();
@@ -3072,11 +3137,15 @@ struct TokenContractClassifier {
 
 #[async_trait::async_trait]
 impl RequestClassifier for TokenContractClassifier {
-    fn classify(&mut self, request: ClassifyRequest, _workers: &dyn WorkerView) -> ClassifyFuture {
+    fn classify(
+        &mut self,
+        request: ClassifyRequest,
+        _workers: &dyn WorkerView,
+    ) -> Result<ClassifyRequest, Box<ClassifierError>> {
         self.classified
             .send((request.isl_tokens(), request.progress().clone()))
             .unwrap();
-        Box::pin(async move { Ok(request) })
+        Ok(request)
     }
 
     async fn on_event(&mut self, event: ClassifyEvent) {
