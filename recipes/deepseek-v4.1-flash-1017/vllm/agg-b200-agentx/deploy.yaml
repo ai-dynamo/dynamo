@@ -1,0 +1,203 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# DeepSeek-V4.1-Flash-1017 on B200: aggregated TP4, DSpark (5 draft tokens), AgentX trace replay.
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: dsv41-flash-b200-agg
+spec:
+  backendFramework: vllm
+  components:
+  - name: Frontend
+    type: frontend
+    runtimeVersionOverride: 1.7.0
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime-nightly:20261107-403ead2@sha256:d4720315eb5ad855d015b4da1f4b55bdaa26b065bc729e2de788829494ee3ee8
+          imagePullPolicy: IfNotPresent
+          command:
+          - python3
+          args:
+          - -m
+          - dynamo.frontend
+          - --http-host
+          - 0.0.0.0
+          - --http-port
+          - '8000'
+          - --router-mode
+          - kv
+          - --router-kv-events
+          - --router-session-affinity-ttl-secs
+          - '14400'
+          - --router-session-affinity-mode
+          - soft
+          - --active-decode-blocks-threshold
+          - None
+          - --active-prefill-tokens-threshold
+          - None
+          - --active-prefill-tokens-threshold-frac
+          - None
+          env:
+          # KV-aware routing with session affinity: a session keeps hitting the worker that holds its prefix cache.
+          # Workers publish KV events (--kv-events-config); scale out by raising the worker replicas.
+          - name: DYN_ROUTER_TEMPERATURE
+            value: '0'
+          - name: DYN_ROUTER_QUEUE_THRESHOLD
+            value: 'None'
+          - name: DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS
+            value: '3600'
+          - name: DYN_ROUTER_DECODE_ACTIVE_REQUEST_WEIGHT
+            value: '10000000'
+          - name: HF_HUB_OFFLINE
+            value: '1'
+          - name: TRANSFORMERS_OFFLINE
+            value: '1'
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 240
+          resources:
+            requests:
+              cpu: '4'
+              memory: 8Gi
+            limits:
+              cpu: '16'
+              memory: 32Gi
+  - name: VllmWorker
+    type: worker
+    runtimeVersionOverride: 1.7.0
+    replicas: 1
+    sharedMemorySize: 64Gi
+    podTemplate:
+      metadata:
+        annotations:
+          nvidia.com/vllm-distributed-executor-backend: mp
+      spec:
+        terminationGracePeriodSeconds: 60
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime-nightly:20261107-403ead2@sha256:d4720315eb5ad855d015b4da1f4b55bdaa26b065bc729e2de788829494ee3ee8
+          imagePullPolicy: IfNotPresent
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 720
+          command:
+          - python3
+          args:
+          - -m
+          - dynamo.vllm
+          - --model
+          - deepseek-ai/DeepSeek-V4.1-Flash-1017
+          - --revision
+          - 1bae0e1088993b9b82de08f59de5be5a34e42170
+          - --tokenizer-revision
+          - 1bae0e1088993b9b82de08f59de5be5a34e42170
+          - --served-model-name
+          - deepseek-ai/DeepSeek-V4.1-Flash-1017
+          - --tokenizer-mode
+          - deepseek_v41
+          - --tensor-parallel-size
+          - '4'
+          - --max-model-len
+          - '1048576'
+          - --reasoning-parser
+          - deepseek_v41
+          - --dyn-reasoning-parser
+          - deepseek_v41
+          - --dyn-tool-call-parser
+          - deepseek_v41
+          - --distributed-executor-backend
+          - mp
+          - --max-num-seqs
+          - '256'
+          - --enable-multimodal
+          - --kv-events-config
+          - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557","enable_kv_cache_events":true}'
+          - --attention-config
+          - '{"backend":"FLASHINFER_MLA_SPARSE_DSV41","indexer_kv_dtype":"mxfp4","indexer_sparse_logits":true}'
+          - --kv-cache-dtype
+          - fp8
+          - --max-num-batched-tokens
+          - '8192'
+          - --gpu-memory-utilization
+          - '0.92'
+          - --kernel-config
+          - '{"enable_flashinfer_autotune":true,"sparse_indexer_topk_backend":"deep_select"}'
+          - --engram-config
+          - '{"cpu_offload":true,"use_thp":true}'
+          - --compilation-config
+          - '{"mode":"VLLM_COMPILE","cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[6,12,18,24,30,36,48,60,72,96,120,144,192,240,288,384,480,576,768,1020,1536,2046,3072,4092]}'
+          - --max-cudagraph-capture-size
+          - '4092'
+          # Real DSpark acceptance (block verification). perf/README.md gives the benchmark-only
+          # synthetic-acceptance setting used for the published throughput numbers.
+          - --speculative-config
+          - '{"method":"dspark","num_speculative_tokens":5,"draft_sample_method":"probabilistic","rejection_sample_method":"block","enable_adaptive_verification":true,"revision":"1bae0e1088993b9b82de08f59de5be5a34e42170"}'
+          env:
+          - name: HF_HOME
+            value: /shared-model-cache
+          - name: HF_HUB_CACHE
+            value: /shared-model-cache/hub
+          - name: HF_HUB_OFFLINE
+            value: '1'
+          - name: TRANSFORMERS_OFFLINE
+            value: '1'
+          - name: VLLM_ENGINE_READY_TIMEOUT_S
+            value: '3600'
+          - name: VLLM_WORKER_MULTIPROC_METHOD
+            value: spawn
+          - name: DYN_HEALTH_CHECK_ENABLED
+            value: 'false'
+          - name: VLLM_USE_V2_MODEL_RUNNER
+            value: '1'
+          resources:
+            requests:
+              cpu: '32'
+              memory: 400Gi
+              nvidia.com/gpu: '4'
+            limits:
+              cpu: '64'
+              memory: 600Gi
+              nvidia.com/gpu: '4'
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+            capabilities:
+              add:
+              - IPC_LOCK
+              - SYS_PTRACE
+              - SYS_RESOURCE
+          volumeMounts:
+          - name: shared-model-cache
+            mountPath: /shared-model-cache
+          - name: vllm-cache
+            mountPath: /root/.cache/vllm
+        volumes:
+        - name: shared-model-cache
+          persistentVolumeClaim:
+            claimName: shared-model-cache
+        - name: vllm-cache
+          emptyDir: {}

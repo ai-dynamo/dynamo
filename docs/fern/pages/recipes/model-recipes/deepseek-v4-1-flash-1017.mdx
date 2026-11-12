@@ -1,0 +1,357 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "DeepSeek-V4.1-Flash-1017"
+subtitle: "Serve DeepSeek-V4.1-Flash-1017 with Dynamo and vLLM on H200, B200, or GB300, aggregated or disaggregated, tuned for agentic coding traffic."
+---
+
+import { RecipeStyles } from "@/components/RecipeStyles";
+
+<RecipeStyles />
+
+Each target below is a Dynamo + vLLM deployment of DeepSeek-V4.1-Flash-1017 with DSpark speculative decoding (5 draft tokens), KV-aware routing with soft session affinity, and the model's full 1,048,576-token context. The settings come from sweeps on the AgentX multi-turn coding-agent trace. Pick your GPU and serving topology; every command on this page updates to match.
+
+<div className="dynamo-target-picker">
+<p className="dynamo-target-picker-title">Choose your deployment target</p>
+<div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">GPU</span>
+<input type="radio" id="recipe-sku-h200" name="recipe-sku" value="h200" defaultChecked />
+<label htmlFor="recipe-sku-h200">H200</label>
+<input type="radio" id="recipe-sku-b200" name="recipe-sku" value="b200" />
+<label htmlFor="recipe-sku-b200">B200</label>
+<input type="radio" id="recipe-sku-gb300" name="recipe-sku" value="gb300" />
+<label htmlFor="recipe-sku-gb300">GB300</label>
+</div>
+<div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">Topology</span>
+<input type="radio" id="recipe-variant-agg" name="recipe-variant" value="agg" defaultChecked />
+<label htmlFor="recipe-variant-agg">Aggregated <span className="dynamo-target-picker-hint">Recommended</span></label>
+<input type="radio" id="recipe-variant-disagg" name="recipe-variant" value="disagg" />
+<label htmlFor="recipe-variant-disagg">Disaggregated</label>
+</div>
+<div className="dynamo-target-picker-summary" data-sku="h200" data-variant="agg">
+<span><b>Checkpoint</b> deepseek-ai/DeepSeek-V4.1-Flash-1017</span>
+<span><b>GPUs</b> 4x H200, one worker</span>
+<span><b>Parallelism</b> TP4</span>
+<span><b>Speculation</b> DSpark, 5 draft tokens</span>
+<span><b>Routing</b> KV-aware with KV events</span>
+<span><b>Context</b> 1,048,576 tokens</span>
+</div>
+<div className="dynamo-target-picker-summary" data-sku="h200" data-variant="disagg">
+<span><b>Checkpoint</b> deepseek-ai/DeepSeek-V4.1-Flash-1017</span>
+<span><b>GPUs</b> 20x H200: 3 prefill (TP4) + 2 decode (DEP4)</span>
+<span><b>Speculation</b> DSpark, 5 draft tokens, on both roles</span>
+<span><b>Routing</b> KV-aware, approximate mode</span>
+<span><b>KV transfer</b> NIXL</span>
+<span><b>Context</b> 1,048,576 tokens</span>
+</div>
+<div className="dynamo-target-picker-summary" data-sku="b200" data-variant="agg">
+<span><b>Checkpoint</b> deepseek-ai/DeepSeek-V4.1-Flash-1017</span>
+<span><b>GPUs</b> 4x B200, one worker</span>
+<span><b>Parallelism</b> TP4</span>
+<span><b>Speculation</b> DSpark, 5 draft tokens</span>
+<span><b>Routing</b> KV-aware with KV events</span>
+<span><b>Context</b> 1,048,576 tokens</span>
+</div>
+<div className="dynamo-target-picker-summary" data-sku="b200" data-variant="disagg">
+<span><b>Checkpoint</b> deepseek-ai/DeepSeek-V4.1-Flash-1017</span>
+<span><b>GPUs</b> 16x B200: 3 prefill (TP4) + 1 decode (DEP4)</span>
+<span><b>Speculation</b> DSpark, 5 draft tokens, on both roles</span>
+<span><b>Routing</b> KV-aware with KV events</span>
+<span><b>KV transfer</b> NIXL</span>
+<span><b>Context</b> 1,048,576 tokens</span>
+</div>
+<div className="dynamo-target-picker-summary" data-sku="gb300" data-variant="agg">
+<span><b>Checkpoint</b> deepseek-ai/DeepSeek-V4.1-Flash-1017</span>
+<span><b>GPUs</b> 4x GB300, two workers on one node</span>
+<span><b>Parallelism</b> TP2 + expert parallel per worker</span>
+<span><b>Speculation</b> DSpark, 5 draft tokens</span>
+<span><b>Routing</b> KV-aware with KV events</span>
+<span><b>Context</b> 1,048,576 tokens</span>
+</div>
+<div className="dynamo-target-picker-summary" data-sku="gb300" data-variant="disagg">
+<span><b>Checkpoint</b> deepseek-ai/DeepSeek-V4.1-Flash-1017</span>
+<span><b>GPUs</b> 8x GB300: 2 prefill (DEP2) + 1 decode (DEP4)</span>
+<span><b>Speculation</b> DSpark, 5 draft tokens, on both roles</span>
+<span><b>Routing</b> KV-aware with KV events</span>
+<span><b>KV transfer</b> NIXL over MNNVL (ComputeDomain)</span>
+<span><b>Context</b> 1,048,576 tokens</span>
+</div>
+</div>
+
+<Note>
+`deepseek-ai/DeepSeek-V4.1-Flash-1017` is a different checkpoint from `deepseek-ai/DeepSeek-V4.1-Flash`. For that model, see the [DeepSeek-V4.1-Flash recipe](deepseek-v4-1-flash.mdx).
+</Note>
+
+## Prerequisites
+
+- A Dynamo Platform install on your Kubernetes cluster. See the [Kubernetes quickstart](/dynamo/kubernetes/getting-started/quickstart).
+- A ReadWriteMany storage class. The checkpoint is 510 GB over 48 shards; the PVC in this recipe requests 600 Gi.
+- Outbound access to Hugging Face for the download Job. The repository is public; the Job reads `HF_TOKEN` from the `hf-token-secret` Secret.
+
+<div data-sku="h200" data-variant="agg">
+
+Four H200 GPUs on one node.
+
+</div>
+
+<div data-sku="h200" data-variant="disagg">
+
+Twenty H200 GPUs in 4-GPU slots: three prefill workers and two decode workers, each needing four GPUs on one node. NIXL moves KV between nodes with UCX defaults; the manifest requests no RDMA devices, so add your cluster's RDMA resources and UCX settings if KV transfer should use them.
+
+</div>
+
+<div data-sku="b200" data-variant="agg">
+
+Four B200 GPUs on one node.
+
+</div>
+
+<div data-sku="b200" data-variant="disagg">
+
+Sixteen B200 GPUs in 4-GPU slots: three prefill workers and one decode worker, each needing four GPUs on one node. NIXL moves KV between nodes with UCX defaults; the manifest requests no RDMA devices, so add your cluster's RDMA resources and UCX settings if KV transfer should use them.
+
+</div>
+
+<div data-sku="gb300" data-variant="agg">
+
+Four GB300 GPUs on one ARM64 node, for two TP2 workers.
+
+</div>
+
+<div data-sku="gb300" data-variant="disagg">
+
+Eight GB300 GPUs in one NVLink domain: two prefill workers (two GPUs each) and one decode worker (four GPUs), plus the NVIDIA DRA driver with ComputeDomain support. The manifest creates the ComputeDomain, and its channel allows one claim per node, so each worker needs its own node: three nodes in total. KV moves over NVLink (UCX `cuda_ipc` with MNNVL).
+
+</div>
+
+## Deploy
+
+Create the namespace and Hugging Face secret:
+
+```bash
+export NAMESPACE=your-namespace
+kubectl create namespace ${NAMESPACE}
+kubectl create secret generic hf-token-secret \
+  --from-literal=HF_TOKEN="your-token" \
+  -n ${NAMESPACE}
+```
+
+Create the model cache and download the checkpoint. Edit `storageClassName` in `model-cache.yaml` to a ReadWriteMany class on your cluster. The Job pins snapshot `1bae0e1088993b9b82de08f59de5be5a34e42170`, which the workers also load by revision.
+
+```bash
+kubectl apply -f recipes/deepseek-v4.1-flash-1017/model-cache/model-cache.yaml -n ${NAMESPACE}
+kubectl apply -f recipes/deepseek-v4.1-flash-1017/model-cache/model-download.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=7200s
+```
+
+Deploy the graph:
+
+<div data-sku="h200" data-variant="agg">
+
+```bash
+kubectl apply -f recipes/deepseek-v4.1-flash-1017/vllm/agg-h200-agentx/deploy.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Ready dgd/dsv41-flash-h200-agg -n ${NAMESPACE} --timeout=3600s
+```
+
+</div>
+
+<div data-sku="h200" data-variant="disagg">
+
+```bash
+kubectl apply -f recipes/deepseek-v4.1-flash-1017/vllm/disagg-h200-agentx/deploy.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Ready dgd/dsv41-flash-h200-disagg -n ${NAMESPACE} --timeout=3600s
+```
+
+</div>
+
+<div data-sku="b200" data-variant="agg">
+
+```bash
+kubectl apply -f recipes/deepseek-v4.1-flash-1017/vllm/agg-b200-agentx/deploy.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Ready dgd/dsv41-flash-b200-agg -n ${NAMESPACE} --timeout=3600s
+```
+
+</div>
+
+<div data-sku="b200" data-variant="disagg">
+
+```bash
+kubectl apply -f recipes/deepseek-v4.1-flash-1017/vllm/disagg-b200-agentx/deploy.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Ready dgd/dsv41-flash-b200-disagg -n ${NAMESPACE} --timeout=3600s
+```
+
+</div>
+
+<div data-sku="gb300" data-variant="agg">
+
+```bash
+kubectl apply -f recipes/deepseek-v4.1-flash-1017/vllm/agg-gb300-agentx/deploy.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Ready dgd/dsv41-flash-gb300-agg -n ${NAMESPACE} --timeout=3600s
+```
+
+</div>
+
+<div data-sku="gb300" data-variant="disagg">
+
+```bash
+kubectl apply -f recipes/deepseek-v4.1-flash-1017/vllm/disagg-gb300-agentx/deploy.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Ready dgd/dsv41-flash-gb300-disagg -n ${NAMESPACE} --timeout=7200s
+```
+
+</div>
+
+The manifests pin the nightly runtime `nvcr.io/nvidia/ai-dynamo/vllm-runtime-nightly:20261107-403ead2` (Dynamo 1.7.0 with vLLM 0.33.0) by digest. On AWS clusters with EFA, use the `20261107-403ead2-efa` tag of the same build. The manifests carry no node selectors or tolerations; add the ones your cluster needs.
+
+## Smoke Test
+
+Port-forward the frontend:
+
+<div data-sku="h200" data-variant="agg">
+
+```bash
+kubectl port-forward svc/dsv41-flash-h200-agg-frontend 8000:8000 -n ${NAMESPACE}
+```
+
+</div>
+
+<div data-sku="h200" data-variant="disagg">
+
+```bash
+kubectl port-forward svc/dsv41-flash-h200-disagg-frontend 8000:8000 -n ${NAMESPACE}
+```
+
+</div>
+
+<div data-sku="b200" data-variant="agg">
+
+```bash
+kubectl port-forward svc/dsv41-flash-b200-agg-frontend 8000:8000 -n ${NAMESPACE}
+```
+
+</div>
+
+<div data-sku="b200" data-variant="disagg">
+
+```bash
+kubectl port-forward svc/dsv41-flash-b200-disagg-frontend 8000:8000 -n ${NAMESPACE}
+```
+
+</div>
+
+<div data-sku="gb300" data-variant="agg">
+
+```bash
+kubectl port-forward svc/dsv41-flash-gb300-agg-frontend 8000:8000 -n ${NAMESPACE}
+```
+
+</div>
+
+<div data-sku="gb300" data-variant="disagg">
+
+```bash
+kubectl port-forward svc/dsv41-flash-gb300-disagg-frontend 8000:8000 -n ${NAMESPACE}
+```
+
+</div>
+
+Then send a request in a separate terminal:
+
+```bash
+curl -s localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+    "messages": [{"role": "user", "content": "What is 17 * 23?"}],
+    "max_tokens": 4096
+  }' | jq -r '.choices[0].message | .content // .reasoning_content'
+```
+
+This is a reasoning model. The chain of thought is returned in `reasoning_content` and the answer in `content`; a small `max_tokens` can leave `content` empty because reasoning consumes the budget.
+
+## Benchmark
+
+[`perf/perf.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4.1-flash-1017/perf/perf.yaml) is an AIPerf Job that replays the public AgentX trace (`semianalysis_cc_traces_weka_062126`, scenario `inferencex-agentx-mvp`) for a 1200 s window at one concurrency. See [`perf/README.md`](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4.1-flash-1017/perf/README.md) for the render-and-apply command and the published concurrency per target.
+
+## Expected Performance
+
+AgentX trace replay, 1200 s window. A point passes when decode p50 is at least 50 tok/s/user, TTFT p50 is under 2 s, and errors are under 5%. tok/s/GPU is total output tokens per second divided by the GPU count.
+
+<Warning>
+These throughput figures force DSpark's acceptance length to the value measured on SPEED-Bench (3.19 on H200, 3.4 on B200 and GB300), because the trace carries filler text that makes real acceptance unrepresentative. That mode fabricates accepted tokens, so treat the numbers as an upper bound. The shipped manifests use real acceptance; [`perf/README.md`](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4.1-flash-1017/perf/README.md) gives the setting for reproducing these runs.
+</Warning>
+
+<div data-sku="h200" data-variant="agg">
+
+| Concurrency | GPUs | System tok/s/GPU | Decode tok/s/user (p50) | TTFT p50 |
+| --- | --- | --- | --- | --- |
+| 112 | 4 | 444.0 | 51.0 | 278 ms |
+
+</div>
+
+<div data-sku="h200" data-variant="disagg">
+
+| Concurrency | GPUs | System tok/s/GPU | Decode tok/s/user (p50) | TTFT p50 |
+| --- | --- | --- | --- | --- |
+| 480 | 20 | 392.4 | 73.5 | 663 ms |
+
+</div>
+
+<div data-sku="b200" data-variant="agg">
+
+| Concurrency | GPUs | System tok/s/GPU | Decode tok/s/user (p50) | TTFT p50 |
+| --- | --- | --- | --- | --- |
+| 384 | 4 | 1,453.2 | 70.8 | 298 ms |
+
+</div>
+
+<div data-sku="b200" data-variant="disagg">
+
+| Concurrency | GPUs | System tok/s/GPU | Decode tok/s/user (p50) | TTFT p50 |
+| --- | --- | --- | --- | --- |
+| 1408 | 16 | 1,531.6 | 99.2 | 1,141 ms |
+
+</div>
+
+<div data-sku="gb300" data-variant="agg">
+
+| Concurrency | GPUs | System tok/s/GPU | Decode tok/s/user (p50) | TTFT p50 |
+| --- | --- | --- | --- | --- |
+| 576 (288 per worker) | 4 | 2,283.2 | 63.9 | 276 ms |
+
+</div>
+
+<div data-sku="gb300" data-variant="disagg">
+
+| Concurrency | GPUs | System tok/s/GPU | Decode tok/s/user (p50) | TTFT p50 |
+| --- | --- | --- | --- | --- |
+| 864 | 8 | 2,260.6 | 160.7 | 1,029 ms |
+
+</div>
+
+## Compare All Targets
+
+| Target | GPUs | Topology | Concurrency | tok/s/GPU (synthetic acceptance) |
+| --- | --- | --- | --- | --- |
+| `agg-h200-agentx` | 4x H200 | Aggregated, TP4 | 112 | 444.0 |
+| `disagg-h200-agentx` | 20x H200 | 3P2D | 480 | 392.4 |
+| `agg-b200-agentx` | 4x B200 | Aggregated, TP4 | 384 | 1,453.2 |
+| `disagg-b200-agentx` | 16x B200 | 3P1D | 1408 | 1,531.6 |
+| `agg-gb300-agentx` | 4x GB300 | Aggregated, 2x TP2 | 576 | 2,283.2 |
+| `disagg-gb300-agentx` | 8x GB300 | 2P1D | 864 | 2,260.6 |
+
+Aggregated is the recommended default on all three GPUs. On H200 it is 1.13x better per GPU than disaggregated. On B200 and GB300 the two are within a few percent, so choose disaggregated only when a single deployment must carry the higher concurrency or when decode speed per user matters (99 versus 71 tok/s/user on B200, 161 versus 64 on GB300).
+
+## Notes
+
+- **Spec-decode settings must match across prefill and decode.** A mismatch changes KV block geometry and produces wrong output rather than an error.
+- **Send a session ID.** The router keeps each session on the worker that holds its prefix cache, which is where most of the throughput comes from on multi-turn traffic. The benchmark Job sets `AIPERF_HTTP_X_DYNAMO_SESSION_ID_FROM_CORRELATION_ID=1` for this; your own clients need to send a session ID for the same effect.
+- **KV events.** The aggregated and B200/GB300 disaggregated targets publish KV events so the router sees exact cache contents. H200 disaggregated uses approximate routing (`--no-kv-events`).
+- **GB300 aggregated runs two TP2 workers** that together fill one 4-GPU node.
+- **Evaluating the model.** Give it a large token budget (65,536) because it reasons before answering. Set `reasoning_effort` to `high` if you set it; `medium` and integer values are rejected with HTTP 400. The frontend rejects an empty `stop` array, which some evaluators send, so drop that field.
+- **Multimodal input is enabled** (`--enable-multimodal`) on every target.
+
+## Source
+
+- Recipe: [`recipes/deepseek-v4.1-flash-1017`](https://github.com/ai-dynamo/dynamo/tree/main/recipes/deepseek-v4.1-flash-1017)
+- Benchmark: [`perf/`](https://github.com/ai-dynamo/dynamo/tree/main/recipes/deepseek-v4.1-flash-1017/perf)

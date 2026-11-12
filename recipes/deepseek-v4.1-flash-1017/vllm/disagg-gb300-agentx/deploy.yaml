@@ -1,0 +1,294 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# DeepSeek-V4.1-Flash-1017 on GB300: disaggregated 2 prefill (DEP2, 2 GPUs each) + 1 decode (DEP4), DSpark (5 draft
+# tokens), KV-aware routing with soft session affinity, AgentX trace replay. 8 GPUs.
+apiVersion: resource.nvidia.com/v1beta1
+kind: ComputeDomain
+metadata:
+  name: dsv41-flash-gb300-disagg-compute-domain
+spec:
+  channel:
+    allocationMode: Single
+    resourceClaimTemplate:
+      name: dsv41-flash-gb300-disagg-compute-domain-channel
+  numNodes: 0
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: dsv41-flash-gb300-disagg
+spec:
+  backendFramework: vllm
+  components:
+  - name: Frontend
+    type: frontend
+    runtimeVersionOverride: 1.7.0
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime-nightly:20261107-403ead2@sha256:d4720315eb5ad855d015b4da1f4b55bdaa26b065bc729e2de788829494ee3ee8
+          imagePullPolicy: IfNotPresent
+          startupProbe:
+            httpGet: {path: /health, port: 8000}
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 240
+          command: [python3]
+          args: [-m, dynamo.frontend, --http-port, "8000", --router-mode, kv, --router-session-affinity-ttl-secs, "14400", --router-session-affinity-mode, soft, --active-decode-blocks-threshold, None, --active-prefill-tokens-threshold, None, --active-prefill-tokens-threshold-frac, None, --router-kv-events]
+          env:
+          - {name: HF_HUB_OFFLINE, value: "1"}
+          - {name: TRANSFORMERS_OFFLINE, value: "1"}
+          - {name: DYN_TOKENIZER_CACHE, value: "1"}
+          - {name: DYN_ROUTER_TEMPERATURE, value: "0"}
+          - {name: DYN_ROUTER_QUEUE_THRESHOLD, value: "None"}
+          - {name: DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS, value: "3600"}
+          - {name: DYN_ROUTER_DECODE_ACTIVE_REQUEST_WEIGHT, value: "10000000"}
+          - {name: DYN_TCP_CHANNEL_BUFFER, value: "128"}
+          - {name: DYN_TCP_REQUEST_TIMEOUT, value: "60"}
+          ports:
+          - {containerPort: 8000, name: http, protocol: TCP}
+          resources:
+            requests: {cpu: "16", memory: 128Gi}
+  - name: PrefillWorker
+    type: prefill
+    runtimeVersionOverride: 1.7.0
+    replicas: 2
+    sharedMemorySize: 200Gi
+    podTemplate:
+      spec:
+        terminationGracePeriodSeconds: 60
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime-nightly:20261107-403ead2@sha256:d4720315eb5ad855d015b4da1f4b55bdaa26b065bc729e2de788829494ee3ee8
+          imagePullPolicy: IfNotPresent
+          startupProbe:
+            httpGet: {path: /health, port: 9090}
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 720
+          command: [python3]
+          args:
+          - -m
+          - dynamo.vllm
+          - "--disaggregation-mode"
+          - "prefill"
+          - "--kv-events-config"
+          - "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:5557\",\"enable_kv_cache_events\":true}"
+          - "--kv-transfer-config"
+          - "{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_producer\",\"kv_load_failure_policy\":\"fail\",\"kv_connector_extra_config\":{\"backends\":[\"UCX\"],\"kv_lease_duration\":120}}"
+          - "--model"
+          - "deepseek-ai/DeepSeek-V4.1-Flash-1017"
+          - "--revision"
+          - "1bae0e1088993b9b82de08f59de5be5a34e42170"
+          - "--tokenizer-revision"
+          - "1bae0e1088993b9b82de08f59de5be5a34e42170"
+          - "--served-model-name"
+          - "deepseek-ai/DeepSeek-V4.1-Flash-1017"
+          - "--tokenizer-mode"
+          - "deepseek_v41"
+          - "--max-model-len"
+          - "1048576"
+          - "--dyn-reasoning-parser"
+          - "deepseek_v41"
+          - "--dyn-tool-call-parser"
+          - "deepseek_v41"
+          - --enable-multimodal
+          - "--tensor-parallel-size"
+          - "1"
+          - "--data-parallel-size"
+          - "2"
+          - "--data-parallel-size-local"
+          - "2"
+          - "--data-parallel-rpc-port"
+          - "13345"
+          - "--data-parallel-address"
+          - "$(POD_IP)"
+          - "--enable-expert-parallel"
+          - "--enable-ep-weight-filter"
+          - "--enable-cumem-allocator"
+          - "--attention-config"
+          - "{\"backend\":\"FLASHMLA_MEGA_ATTN_DSV41\",\"indexer_kv_dtype\":\"mxfp4\",\"indexer_sparse_logits\":true}"
+          - "--kernel-config"
+          - "{\"enable_flashinfer_autotune\":true,\"moe_backend\":\"deep_gemm_mega_moe\",\"sparse_indexer_topk_backend\":\"deep_select\"}"
+          - "--speculative-config"
+          - "{\"method\":\"dspark\",\"num_speculative_tokens\":5,\"draft_sample_method\":\"probabilistic\",\"enable_adaptive_verification\":false,\"revision\":\"1bae0e1088993b9b82de08f59de5be5a34e42170\"}"
+          - "--kv-cache-dtype"
+          - "fp8"
+          - "--gpu-memory-utilization"
+          - "0.95"
+          - "--compilation-config"
+          - "{\"mode\":\"VLLM_COMPILE\",\"cudagraph_mode\":\"FULL_AND_PIECEWISE\",\"cudagraph_capture_sizes\":[6,12,18,24,30,36,48,60,72,96,120,144,192,240,288,384,480,576,768,1020,1536,2046],\"max_cudagraph_capture_size\":2046}"
+          - "--engram-config"
+          - "{\"cpu_offload\":true,\"embedding_across_dp\":true,\"use_thp\":false}"
+          - "--prefill-schedule-interval"
+          - "2"
+          - "--max-num-seqs"
+          - "64"
+          - "--max-num-batched-tokens"
+          - "32768"
+          - "--long-prefill-token-threshold"
+          - "8192"
+          - "--prefix-cache-retention-interval"
+          - "32768"
+          env:
+          - {name: HF_HOME, value: /shared-model-cache}
+          - {name: HF_HUB_CACHE, value: /shared-model-cache/hub}
+          - {name: HF_HUB_OFFLINE, value: "1"}
+          - {name: TRANSFORMERS_OFFLINE, value: "1"}
+          - {name: VLLM_ENGINE_READY_TIMEOUT_S, value: "7200"}
+          - {name: VLLM_RPC_TIMEOUT, value: "600000"}
+          - {name: DYN_HEALTH_CHECK_ENABLED, value: "false"}
+          - {name: PYTHONUNBUFFERED, value: "1"}
+          - {name: VLLM_USE_V2_MODEL_RUNNER, value: "1"}
+          - {name: VLLM_ALLREDUCE_USE_SYMM_MEM, value: "0"}
+          - {name: VLLM_RANDOMIZE_DP_DUMMY_INPUTS, value: "1"}
+          - {name: NCCL_CUMEM_ENABLE, value: "1"}
+          - {name: NCCL_MNNVL_ENABLE, value: "1"}
+          - {name: NCCL_NVLS_ENABLE, value: "1"}
+          - {name: UCX_TLS, value: "cuda_copy,cuda_ipc,tcp"}
+          - {name: UCX_CUDA_IPC_ENABLE_MNNVL, value: "y"}
+          - {name: UCX_MEMTYPE_CACHE, value: "n"}
+          - {name: UCX_MEMTYPE_REG_WHOLE, value: "n"}
+          - {name: UCX_RNDV_PIPELINE_ERROR_HANDLING, value: "y"}
+          - {name: NIXL_UCX_SGL_ENABLE, value: "1"}
+          - name: POD_IP
+            valueFrom: {fieldRef: {fieldPath: status.podIP}}
+          ports:
+          - {containerPort: 9090, name: system, protocol: TCP}
+          resources:
+            claims:
+            - name: compute-domain-channel
+            requests: {cpu: "32", memory: 400Gi, ephemeral-storage: 64Gi, nvidia.com/gpu: "2"}
+            limits: {nvidia.com/gpu: "2"}
+          securityContext:
+            capabilities: {add: [IPC_LOCK, SYS_PTRACE, SYS_RESOURCE]}
+            runAsUser: 0
+            runAsGroup: 0
+          volumeMounts:
+          - {name: shared-model-cache, mountPath: /shared-model-cache}
+        resourceClaims:
+        - name: compute-domain-channel
+          resourceClaimTemplateName: dsv41-flash-gb300-disagg-compute-domain-channel
+        volumes:
+        - name: shared-model-cache
+          persistentVolumeClaim: {claimName: shared-model-cache}
+  - name: DecodeWorker
+    type: decode
+    runtimeVersionOverride: 1.7.0
+    replicas: 1
+    sharedMemorySize: 200Gi
+    podTemplate:
+      spec:
+        terminationGracePeriodSeconds: 60
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime-nightly:20261107-403ead2@sha256:d4720315eb5ad855d015b4da1f4b55bdaa26b065bc729e2de788829494ee3ee8
+          imagePullPolicy: IfNotPresent
+          startupProbe:
+            httpGet: {path: /health, port: 9090}
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 720
+          command: [python3]
+          args:
+          - -m
+          - dynamo.vllm
+          - "--disaggregation-mode"
+          - "decode"
+          - "--kv-transfer-config"
+          - "{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_consumer\",\"kv_load_failure_policy\":\"fail\",\"kv_connector_extra_config\":{\"backends\":[\"UCX\"]}}"
+          - "--model"
+          - "deepseek-ai/DeepSeek-V4.1-Flash-1017"
+          - "--revision"
+          - "1bae0e1088993b9b82de08f59de5be5a34e42170"
+          - "--tokenizer-revision"
+          - "1bae0e1088993b9b82de08f59de5be5a34e42170"
+          - "--served-model-name"
+          - "deepseek-ai/DeepSeek-V4.1-Flash-1017"
+          - "--tokenizer-mode"
+          - "deepseek_v41"
+          - "--max-model-len"
+          - "1048576"
+          - "--dyn-reasoning-parser"
+          - "deepseek_v41"
+          - "--dyn-tool-call-parser"
+          - "deepseek_v41"
+          - --enable-multimodal
+          - "--tensor-parallel-size"
+          - "1"
+          - "--data-parallel-size"
+          - "4"
+          - "--data-parallel-size-local"
+          - "4"
+          - "--data-parallel-rpc-port"
+          - "13345"
+          - "--data-parallel-address"
+          - "$(POD_IP)"
+          - "--enable-expert-parallel"
+          - "--enable-ep-weight-filter"
+          - "--enable-cumem-allocator"
+          - "--attention-config"
+          - "{\"backend\":\"FLASHMLA_MEGA_ATTN_DSV41\",\"indexer_kv_dtype\":\"mxfp4\",\"indexer_sparse_logits\":true}"
+          - "--kernel-config"
+          - "{\"enable_flashinfer_autotune\":true,\"moe_backend\":\"deep_gemm_mega_moe\",\"sparse_indexer_topk_backend\":\"deep_select\"}"
+          - "--speculative-config"
+          - "{\"method\":\"dspark\",\"num_speculative_tokens\":5,\"draft_sample_method\":\"probabilistic\",\"enable_adaptive_verification\":false,\"revision\":\"1bae0e1088993b9b82de08f59de5be5a34e42170\"}"
+          - "--kv-cache-dtype"
+          - "fp8"
+          - "--gpu-memory-utilization"
+          - "0.95"
+          - "--compilation-config"
+          - "{\"cudagraph_mode\":\"FULL_DECODE_ONLY\",\"max_cudagraph_capture_size\":192,\"cudagraph_capture_sizes\":[6,12,18,24,30,36,42,48,54,60,66,72,78,84,90,96,102,108,114,120,126,132,138,144,150,156,162,168,174,180,186,192]}"
+          - "--engram-config"
+          - "{\"cpu_offload\":false,\"embedding_across_dp\":true,\"use_thp\":false}"
+          - "--no-enable-prefix-caching"
+          - "--max-num-seqs"
+          - "32"
+          - "--max-num-batched-tokens"
+          - "320"
+          env:
+          - {name: HF_HOME, value: /shared-model-cache}
+          - {name: HF_HUB_CACHE, value: /shared-model-cache/hub}
+          - {name: HF_HUB_OFFLINE, value: "1"}
+          - {name: TRANSFORMERS_OFFLINE, value: "1"}
+          - {name: VLLM_ENGINE_READY_TIMEOUT_S, value: "7200"}
+          - {name: VLLM_RPC_TIMEOUT, value: "600000"}
+          - {name: DYN_HEALTH_CHECK_ENABLED, value: "false"}
+          - {name: PYTHONUNBUFFERED, value: "1"}
+          - {name: VLLM_USE_V2_MODEL_RUNNER, value: "1"}
+          - {name: VLLM_ALLREDUCE_USE_SYMM_MEM, value: "0"}
+          - {name: VLLM_RANDOMIZE_DP_DUMMY_INPUTS, value: "1"}
+          - {name: NCCL_CUMEM_ENABLE, value: "1"}
+          - {name: NCCL_MNNVL_ENABLE, value: "1"}
+          - {name: NCCL_NVLS_ENABLE, value: "1"}
+          - {name: UCX_TLS, value: "cuda_copy,cuda_ipc,tcp"}
+          - {name: UCX_CUDA_IPC_ENABLE_MNNVL, value: "y"}
+          - {name: UCX_MEMTYPE_CACHE, value: "n"}
+          - {name: UCX_MEMTYPE_REG_WHOLE, value: "n"}
+          - {name: UCX_RNDV_PIPELINE_ERROR_HANDLING, value: "y"}
+          - {name: NIXL_UCX_SGL_ENABLE, value: "1"}
+          - name: POD_IP
+            valueFrom: {fieldRef: {fieldPath: status.podIP}}
+          ports:
+          - {containerPort: 9090, name: system, protocol: TCP}
+          resources:
+            claims:
+            - name: compute-domain-channel
+            requests: {cpu: "32", memory: 400Gi, ephemeral-storage: 64Gi, nvidia.com/gpu: "4"}
+            limits: {nvidia.com/gpu: "4"}
+          securityContext:
+            capabilities: {add: [IPC_LOCK, SYS_PTRACE, SYS_RESOURCE]}
+            runAsUser: 0
+            runAsGroup: 0
+          volumeMounts:
+          - {name: shared-model-cache, mountPath: /shared-model-cache}
+        resourceClaims:
+        - name: compute-domain-channel
+          resourceClaimTemplateName: dsv41-flash-gb300-disagg-compute-domain-channel
+        volumes:
+        - name: shared-model-cache
+          persistentVolumeClaim: {claimName: shared-model-cache}
+
