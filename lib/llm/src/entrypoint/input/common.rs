@@ -287,18 +287,18 @@ pub async fn prepare_engine(
                 local_model.runtime_config().tokenizer_fallback_enabled,
             );
             let watch_obj = Arc::new(watcher);
-            let discovery = distributed_runtime.discovery();
-            let discovery_stream = discovery
-                .list_and_watch(
-                    dynamo_runtime::discovery::DiscoveryQuery::AllModels,
-                    Some(distributed_runtime.primary_token().clone()),
-                )
-                .await?;
-            let inner_watch_obj = watch_obj.clone();
             let namespace_filter = NamespaceFilter::from_namespace_and_prefix(
                 local_model.namespace(),
                 local_model.namespace_prefix(),
             );
+            let discovery = distributed_runtime.discovery();
+            let discovery_stream = discovery
+                .list_and_watch(
+                    namespace_filter.model_query(),
+                    Some(distributed_runtime.primary_token().clone()),
+                )
+                .await?;
+            let inner_watch_obj = watch_obj.clone();
             let _watcher_task = tokio::spawn(async move {
                 inner_watch_obj
                     .watch(discovery_stream, namespace_filter)

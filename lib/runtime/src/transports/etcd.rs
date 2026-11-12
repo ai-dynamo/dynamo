@@ -783,10 +783,10 @@ impl Client {
                 .watch(
                     prefix.as_str(),
                     Some(
+                        // No prev_kv: events are read for their new key and value only.
                         WatchOptions::new()
                             .with_prefix()
-                            .with_start_revision(start_revision)
-                            .with_prev_key(),
+                            .with_start_revision(start_revision),
                     ),
                 )
                 .await

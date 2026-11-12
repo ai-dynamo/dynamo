@@ -1712,6 +1712,94 @@ async fn queued_selection_errors_on_shutdown() {
 }
 
 #[tokio::test]
+async fn uncached_selection_stays_uncached_after_queue_refresh_deadline() {
+    let shared_queries = SharedCacheCalls::default();
+    let mut config = test_router_config(false, Some(0.0));
+    config.selection.shared_cache_multiplier = Some(0.0);
+    let mut host = SelectionHost::default();
+    host.cache.shared = Some(Arc::new(RecordingSharedCache {
+        calls: Arc::clone(&shared_queries),
+    }));
+    let core = Arc::new(core_with(config, host, None, WorkerType::Aggregated, None));
+    core.upsert_worker(worker(1)).await.unwrap();
+    let mut held = reserve_request("held");
+    held.prompt.token_ids = Some((1..=8).collect());
+    assert_eq!(
+        core.select_and_reserve(held)
+            .await
+            .unwrap()
+            .effective_prefill_tokens,
+        8
+    );
+    let input = prompt();
+    let block_hashes = input.view().block_hashes_for_indexer(4, false).unwrap();
+    let entry = core.entry(&default_key()).unwrap();
+    assert!(entry.indexer.supports_overlap_refresh());
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let cached = entry
+                .indexer
+                .find_tiered_matches(block_hashes.clone())
+                .await
+                .unwrap();
+            if cached
+                .device
+                .overlap_scores
+                .scores
+                .get(&WorkerWithDpRank::new(1, 0))
+                == Some(&1)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(shared_queries.lock().len(), 1);
+    let refresh_after = crate::overlap_refresh::read_overlap_refresh_after()
+        .expect("overlap refresh must be enabled for this regression");
+    tokio::time::pause();
+    let queued_core = Arc::clone(&core);
+    let queued = tokio::spawn(async move {
+        let input = prompt();
+        let mut operation = lease_operation(input.view(), "uncached", true);
+        operation.return_routing_hashes = true;
+        queued_core
+            .run_selection_with_cache_credit(operation, false)
+            .await
+            .result
+            .unwrap()
+    });
+    wait_for_pending_selection(&core).await;
+    tokio::time::advance(refresh_after + Duration::from_secs(1)).await;
+    tokio::time::resume();
+    core.free_reservation("held").await.unwrap();
+    let SelectionOutcome::Selected(selected) = tokio::time::timeout(Duration::from_secs(1), queued)
+        .await
+        .unwrap()
+        .unwrap()
+    else {
+        panic!("queued request rejected");
+    };
+    assert_eq!(selected.response.cached_tokens, 0);
+    assert_eq!(selected.effective_prefill_tokens, 4);
+    assert_eq!(
+        selected.routing_hashes.as_deref(),
+        Some(block_hashes.as_slice())
+    );
+    assert!(selected.kv_hint.is_none());
+    assert!(selected.shared_cache_hits.is_none());
+    assert_eq!(shared_queries.lock().len(), 1);
+    drop(selected);
+    wait_until("uncached booking release", || {
+        !entry.scheduler.has_request("uncached")
+    })
+    .await;
+    core.shutdown();
+}
+
+#[tokio::test]
 async fn booking_is_freed_when_selected_worker_drained_while_queued() {
     let core = saturated_core();
     core.upsert_worker(worker(1)).await.expect("worker upsert");

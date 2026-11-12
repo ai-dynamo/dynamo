@@ -386,6 +386,18 @@ impl PromptRegistry {
         )
     }
 
+    /// The `additional_active_blocks` a projection of `token_sequence` gives `worker`,
+    /// computed for that rank alone.
+    pub(super) fn additional_active_blocks(
+        &self,
+        token_sequence: &[SequenceHash],
+        worker: WorkerWithDpRank,
+    ) -> usize {
+        token_sequence
+            .len()
+            .saturating_sub(self.membership.overlap_depth_for(token_sequence, worker))
+    }
+
     /// Project every registered rank's load for one request into `projections`. With
     /// `full_ranks`, the same pass also judges each rank's projection against the busy
     /// thresholds it carries and counts the ranks without room per worker.

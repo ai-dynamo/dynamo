@@ -252,6 +252,15 @@ impl SelectionCore {
     /// and (for `Book`) install the reservation. Every host's selection goes
     /// through here.
     pub async fn run_selection(&self, operation: SelectionOperation<'_>) -> SelectionRun {
+        self.run_selection_with_cache_credit(operation, true).await
+    }
+
+    /// Run selection with the embedding host's request-wide cache-credit policy.
+    pub async fn run_selection_with_cache_credit(
+        &self,
+        operation: SelectionOperation<'_>,
+        allow_cache_credit: bool,
+    ) -> SelectionRun {
         let mut lookup = None;
         let result = match self.ensure_running() {
             Err(error) => Err(error),
@@ -260,7 +269,7 @@ impl SelectionCore {
                 _ = self.cancel_token.cancelled() => {
                     Err(SelectionError::Scheduler(KvSchedulerError::SubscriberShutdown))
                 }
-                result = self.run_selection_inner(operation, &mut lookup) => result,
+                result = self.run_selection_inner(operation, &mut lookup, allow_cache_credit) => result,
             },
         };
         SelectionRun { result, lookup }
@@ -270,6 +279,7 @@ impl SelectionCore {
         &self,
         operation: SelectionOperation<'_>,
         lookup: &mut Option<LookupTimings>,
+        allow_cache_credit: bool,
     ) -> Result<SelectionOutcome, SelectionError> {
         let SelectionOperation {
             key,
@@ -329,7 +339,8 @@ impl SelectionCore {
         // event-driven, no approximate writes). Bookings use them for the fetch
         // hint; when the policy scores fetchable prefixes, every selection
         // retains them so previews score like bookings.
-        let hint_capable_workers = (book || entry.scores_kv_transfer)
+        let hint_capable_workers = allow_cache_credit
+            && (book || entry.scores_kv_transfer)
             && entry.hint_capable_workers.load(Ordering::Relaxed);
         let retain_kv_transfer_chain =
             hint_capable_workers && entry.indexer.supports_kv_transfer_chain_retention();
@@ -354,6 +365,7 @@ impl SelectionCore {
                 &prompt,
                 track_active_blocks
                     .then(|| self.config.assume_kv_reuse(router_config_override.as_ref())),
+                allow_cache_credit,
                 true,
                 retain_kv_transfer_chain,
                 lookup,
@@ -428,7 +440,8 @@ impl SelectionCore {
         let schedule_request = ScheduleRequest {
             mode,
             token_seq: track_active_blocks.then_some(sequence_hashes),
-            block_hashes: Some(block_hashes),
+            // Queued overlap refresh must not restore credit for an uncached request.
+            block_hashes: allow_cache_credit.then_some(block_hashes),
             isl_tokens,
             overlap,
             kv_transfer_candidates,
@@ -718,11 +731,13 @@ impl SelectionCore {
     /// attached, and the prompt carries raw `token_ids`.
     /// `tracking_assume_kv_reuse` is `None` when the caller does not track
     /// active blocks.
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn prepare_selection_inputs(
         &self,
         entry: &SelectionEntry,
         prompt: &PromptView<'_>,
         tracking_assume_kv_reuse: Option<bool>,
+        allow_cache_credit: bool,
         query_shared_cache: bool,
         retain_kv_transfer_chain: bool,
         lookup: &mut Option<LookupTimings>,
@@ -738,7 +753,7 @@ impl SelectionCore {
         )?;
         let indexer_lookup = async {
             let started = Instant::now();
-            let tiered = if normalized.block_hashes.is_empty() {
+            let tiered = if !allow_cache_credit || normalized.block_hashes.is_empty() {
                 Ok(TieredMatchDetails::default())
             } else {
                 entry
@@ -755,7 +770,7 @@ impl SelectionCore {
             };
             (tiered, started.elapsed())
         };
-        let shared_cache = query_shared_cache
+        let shared_cache = (allow_cache_credit && query_shared_cache)
             .then_some(self.host.cache.shared.as_deref())
             .flatten()
             .zip(prompt.token_ids);
