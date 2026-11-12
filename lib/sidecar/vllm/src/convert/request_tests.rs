@@ -1382,3 +1382,66 @@ fn frontend_router_metadata_rejects_non_array_fields() {
         "InvalidRequest: extra_args.nvext.extra_fields must be an array"
     );
 }
+
+#[test]
+fn mooncake_prefill_allocates_and_injects_transfer_id() {
+    let bootstrap = MooncakeBootstrap {
+        remote_bootstrap_addr: "http://10.0.0.1:8998".to_string(),
+        engine_id: "prefill-engine-0".to_string(),
+    };
+    let handoff = bootstrap.new_handoff();
+    assert!(
+        uuid::Uuid::parse_str(&handoff.transfer_id).is_ok(),
+        "transfer_id must be a UUID: {}",
+        handoff.transfer_id
+    );
+    assert_ne!(
+        bootstrap.new_handoff().transfer_id,
+        handoff.transfer_id,
+        "each request allocates a fresh transfer_id"
+    );
+
+    let wire = build_generate_request_with_handoff(
+        request(),
+        "mooncake-prefill".into(),
+        DisaggregationMode::Prefill,
+        Some(&handoff),
+    )
+    .unwrap();
+    let kv = struct_to_json_v14(
+        wire.kv.unwrap().kv_transfer_params.unwrap(),
+        PEER,
+        KV_TRANSFER_PARAMS,
+    )
+    .unwrap();
+    assert_eq!(
+        kv,
+        json!({
+            "connector_data": {"values": [1, true, null]},
+            "do_remote_decode": true,
+            "do_remote_prefill": false,
+            "transfer_id": handoff.transfer_id,
+        })
+    );
+
+    let wire = build_generate_request_with_handoff(
+        request(),
+        "nixl-prefill".into(),
+        DisaggregationMode::Prefill,
+        None,
+    )
+    .unwrap();
+    let kv = struct_to_json_v14(
+        wire.kv.unwrap().kv_transfer_params.unwrap(),
+        PEER,
+        KV_TRANSFER_PARAMS,
+    )
+    .unwrap();
+    assert_eq!(
+        kv,
+        json!({
+            "connector_data": {"values": [1, true, null]},
+            "do_remote_decode": true,
+        })
+    );
+}

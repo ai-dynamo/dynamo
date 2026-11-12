@@ -3053,6 +3053,7 @@ dependencies = [
  "futures",
  "pep440_rs",
  "prost-types 0.14.4",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "tokio",
@@ -3060,6 +3061,7 @@ dependencies = [
  "tonic 0.14.6",
  "tonic-health 0.14.6",
  "tracing",
+ "uuid",
  "vllm-proto",
 ]
 
