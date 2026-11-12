@@ -6,7 +6,7 @@
 /// Latest observable state for one Mocker scheduler rank.
 #[derive(Clone, Default, Debug, PartialEq)]
 pub struct MockerMetrics {
-    pub dp_rank: dynamo_kv_router::protocols::DpRank,
+    pub dp_rank: dynamo_router_protocol::worker::DpRank,
     pub active_decode_blocks: u64,
     pub total_blocks: u64,
     pub gpu_cache_usage_perc: f64,
@@ -19,7 +19,7 @@ pub struct MockerMetrics {
 
 impl MockerMetrics {
     pub fn new(
-        dp_rank: dynamo_kv_router::protocols::DpRank,
+        dp_rank: dynamo_router_protocol::worker::DpRank,
         active_decode_blocks: u64,
         total_blocks: u64,
     ) -> Self {
@@ -28,7 +28,7 @@ impl MockerMetrics {
 
     #[allow(clippy::too_many_arguments)]
     pub fn from_parts(
-        dp_rank: dynamo_kv_router::protocols::DpRank,
+        dp_rank: dynamo_router_protocol::worker::DpRank,
         active_decode_blocks: u64,
         total_blocks: u64,
         running_requests: u64,

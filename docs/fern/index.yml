@@ -138,6 +138,15 @@ navigation:
                 - page: GKE Setup
                   path: pages/kubernetes/installation/managed-kubernetes/gcp/gke-setup.mdx
 
+      - section: Agent Sandboxes
+        icon: cube
+        collapsed: true
+        contents:
+          - page: Install Substrate
+            path: pages/kubernetes/agent-sandboxes/install-substrate.mdx
+          - page: Monitor Substrate
+            path: pages/kubernetes/agent-sandboxes/monitor-substrate.mdx
+
       # ==================== Usage ====================
       - section: Model Deployment
         icon: microchip
@@ -519,6 +528,8 @@ navigation:
                         path: pages/developer-guide/knowledge-base/modular-components/router/custom-worker-selection.mdx
                       - page: Write an Admission Control Plugin
                         path: pages/developer-guide/knowledge-base/modular-components/router/custom-admission-control.md
+                      - page: Write a KV Hint Plugin
+                        path: pages/developer-guide/knowledge-base/modular-components/router/hint-policies.md
                       - page: Router Examples
                         path: pages/developer-guide/knowledge-base/modular-components/router/router-examples.md
                       - page: Router Testing
@@ -753,6 +764,10 @@ navigation:
             path: pages/use-cases/agents/session-affinity.md
           - page: Prioritize Requests
             path: pages/use-cases/agents/priority-scheduling.mdx
+          - page: Sandboxed Coding Agents
+            path: pages/use-cases/agents/harbor-substrate.mdx
+          - page: Trace Sandboxed Agents
+            path: pages/use-cases/agents/trace-sandboxed-agents.mdx
           - page: Trace an Agent Run
             slug: agent-tracing
             path: pages/use-cases/agents/agent-tracing.md
@@ -954,6 +969,9 @@ navigation:
               - page: Cosmos3 Nano Reasoner
                 path: pages/recipes/model-recipes/cosmos3-nano-reasoner.mdx
                 slug: cosmos3-nano-reasoner
+              - page: Cosmos3 Super Reasoner
+                path: pages/recipes/model-recipes/cosmos3-super-reasoner.mdx
+                slug: cosmos3-super-reasoner
               - page: Nemotron 3 Ultra
                 path: pages/recipes/model-recipes/nemotron-3-ultra.mdx
                 slug: nemotron-3-ultra

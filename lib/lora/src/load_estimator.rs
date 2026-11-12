@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
-use dynamo_kv_router::protocols::{ActiveSequenceEvent, ActiveSequenceEventData};
+use dynamo_slot_tracker::host::{ActiveSequenceEvent, ActiveSequenceEventData};
 
 use crate::config::PredictorType;
 use crate::predictor::{EmaPredictor, LoadPredictor};
@@ -646,7 +646,7 @@ impl Default for LoadEstimator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dynamo_kv_router::protocols::WorkerWithDpRank;
+    use dynamo_router_protocol::worker::WorkerWithDpRank;
 
     impl LoadEstimator {
         /// Update active counts from a snapshot; arrivals are approximated as the
