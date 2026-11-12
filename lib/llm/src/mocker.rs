@@ -233,6 +233,17 @@ fn usage_with_cached_tokens(
     }
 }
 
+/// Final-chunk `engine_data` with the cache-hit report the KV router reads, in the shape
+/// the vLLM, SGLang, and TensorRT-LLM workers send.
+fn kv_cache_hit_engine_data(prompt_tokens: usize, cached_tokens: usize) -> serde_json::Value {
+    serde_json::json!({
+        "kv_cache_hit": {
+            "prompt_tokens": prompt_tokens,
+            "reused_tokens": cached_tokens,
+        }
+    })
+}
+
 fn generate_random_token() -> TokenIdType {
     let mut rng = rand::rng();
     rng.random_range(1000..2000)
@@ -989,6 +1000,9 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             .as_ref()
             .and_then(|info| info.handoff_id);
         let has_handoff_session = handoff_id.is_some();
+        // A disaggregated decode admits the transferred prompt as cached, which is not local
+        // reuse, so only the prefill attempt reports a cache hit.
+        let report_kv_cache_hit = !(self.engine_args.is_decode() && has_handoff_session);
         if request.bootstrap_info.is_some()
             && (self.engine_args.is_prefill() || self.engine_args.is_decode())
             && handoff_id.is_none()
@@ -1349,6 +1363,12 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                                         token_count,
                                         cached,
                                     ));
+                                    if report_kv_cache_hit {
+                                        output.engine_data = Some(kv_cache_hit_engine_data(
+                                            prompt_tokens_count,
+                                            cached,
+                                        ));
+                                    }
                                 }
                                 if !send_response(&stream_tx, output, &async_context) {
                                     break;
@@ -1364,6 +1384,12 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                                         token_count,
                                         cached,
                                     ));
+                                    if report_kv_cache_hit {
+                                        final_output.engine_data = Some(kv_cache_hit_engine_data(
+                                            prompt_tokens_count,
+                                            cached,
+                                        ));
+                                    }
                                 }
                                 if !send_response(&stream_tx, final_output, &async_context) {
                                     break;
@@ -1736,8 +1762,131 @@ mod tests {
         );
         let mut expected_finish = LLMEngineOutput::length();
         expected_finish.completion_usage = Some(usage_with_cached_tokens(3, 1, 0));
+        expected_finish.engine_data = Some(kv_cache_hit_engine_data(3, 0));
         assert_eq!(stream.next().await.unwrap().data.unwrap(), expected_finish);
         assert!(stream.next().await.is_none());
+    }
+
+    /// The router reads worker prefix reuse only from `engine_data.kv_cache_hit` on the
+    /// final chunk, and drops the report when its `prompt_tokens` differs from the prompt.
+    #[tokio::test]
+    async fn final_chunk_reports_kv_cache_hit() {
+        let args = MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "block_size": 4,
+                "num_gpu_blocks": 64,
+                "max_num_batched_tokens": 64,
+                "enable_prefix_caching": true,
+                "speedup_ratio": 1000.0
+            }
+        }))
+        .unwrap();
+        let live = LiveEngine::start(args.clone(), 0).unwrap();
+        let engine = MockerExecutionContext::new(args);
+        assert!(engine.engines.set(vec![live]).is_ok());
+
+        let prompt_tokens = 12;
+        let mut reports = Vec::new();
+        for _ in 0..2 {
+            let mut stream = engine
+                .generate(SingleIn::new(decode_request(prompt_tokens, 2)))
+                .await
+                .unwrap();
+            let mut last = None;
+            while let Some(item) = stream.next().await {
+                last = item.data;
+            }
+            let last = last.unwrap();
+            assert!(last.finish_reason.is_some());
+            reports.push(last.engine_data.unwrap()["kv_cache_hit"].clone());
+        }
+
+        assert_eq!(
+            reports[0],
+            serde_json::json!({ "prompt_tokens": prompt_tokens, "reused_tokens": 0 })
+        );
+        assert_eq!(reports[1]["prompt_tokens"], prompt_tokens);
+        assert!(reports[1]["reused_tokens"].as_u64().unwrap() > 0);
+    }
+
+    /// The decode worker admits the transferred prompt as cached, which is not local reuse,
+    /// so only the prefill worker reports a cache hit.
+    #[tokio::test]
+    async fn disaggregated_decode_does_not_report_kv_cache_hit() {
+        use crate::protocols::common::preprocessor::BootstrapInfo;
+
+        let start = |worker_type: WorkerType| {
+            let args = MockerConfig::from_value(serde_json::json!({
+                "engine": {
+                    "worker_type": worker_type,
+                    "block_size": 4,
+                    "num_gpu_blocks": 64,
+                    "max_num_batched_tokens": 64,
+                    "enable_prefix_caching": true,
+                    "speedup_ratio": 1000.0,
+                    "decode_speedup_ratio": 1000.0
+                },
+                "dynamo": { "bootstrap_port": Some(0) }
+            }))
+            .unwrap();
+            let live = LiveEngine::start(args.clone(), 0).unwrap();
+            let engine = MockerExecutionContext::new(args);
+            assert!(engine.engines.set(vec![live]).is_ok());
+            assert!(
+                engine
+                    .handoff_session_permits
+                    .set(vec![Arc::new(Semaphore::new(4))])
+                    .is_ok()
+            );
+            engine
+        };
+        let prefill = start(WorkerType::Prefill);
+        let prepared = prefill.prepare_bootstrap().await.unwrap().unwrap();
+        prefill.commit_bootstrap(prepared);
+        let decode = start(WorkerType::Decode);
+
+        let prompt_tokens = 12;
+        let mut request = decode_request(prompt_tokens, 2);
+        request.bootstrap_info = Some(BootstrapInfo {
+            bootstrap_host: "127.0.0.1".to_string(),
+            bootstrap_port: prefill.bootstrap_server.get().unwrap().port(),
+            bootstrap_room: 7,
+            handoff_id: Some(Uuid::from_u128(7)),
+        });
+        let request_id = Uuid::from_u128(77).to_string();
+        let input =
+            || SingleIn::with_id_and_metadata(request.clone(), request_id.clone(), BTreeMap::new());
+        async fn last_output(
+            stream: Result<ManyOut<Annotated<LLMEngineOutput>>, Error>,
+        ) -> LLMEngineOutput {
+            let mut stream = stream.unwrap();
+            let mut last = None;
+            while let Some(item) = stream.next().await {
+                last = item.data;
+            }
+            last.unwrap()
+        }
+        let (prefill_last, decode_last) = tokio::time::timeout(Duration::from_secs(10), async {
+            let (prefill_stream, decode_stream) =
+                futures::future::join(prefill.generate(input()), decode.generate(input())).await;
+            futures::future::join(last_output(prefill_stream), last_output(decode_stream)).await
+        })
+        .await
+        .expect("disaggregated request must finish");
+
+        assert!(prefill_last.finish_reason.is_some());
+        assert_eq!(
+            prefill_last.engine_data.unwrap()["kv_cache_hit"],
+            serde_json::json!({ "prompt_tokens": prompt_tokens, "reused_tokens": 0 })
+        );
+        assert!(decode_last.finish_reason.is_some());
+        assert!(
+            decode_last
+                .engine_data
+                .as_ref()
+                .and_then(|data| data.get("kv_cache_hit"))
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -1819,6 +1968,11 @@ mod tests {
         assert_eq!(
             response["meta_info"]["finish_reason"],
             serde_json::json!({"type": "length"})
+        );
+        // The router reads the report beside the native response, as from SGLang workers.
+        assert_eq!(
+            output.engine_data.as_ref().unwrap()["kv_cache_hit"],
+            serde_json::json!({ "prompt_tokens": 3, "reused_tokens": 0 })
         );
         assert!(stream.next().await.is_none());
     }
