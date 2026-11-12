@@ -9,6 +9,8 @@ use std::collections::HashSet;
 use super::hint::hint_capable_partition;
 use super::reservations::{ReservationIndexObserver, spawn_reservation_index_sweep};
 use super::*;
+use dynamo_kv_indexer::ResidentBlockCountsHandle;
+use dynamo_kv_indexer::backend::Indexer;
 use dynamo_slot_tracker::topology::MAX_DATA_PARALLEL_RANKS_PER_WORKER;
 
 impl SelectionCore {
@@ -279,6 +281,25 @@ impl SelectionCore {
         });
         let entry = entry_cell
             .get_or_try_init(|| -> Result<Arc<SelectionEntry>, SelectionError> {
+                // Fail before starting tasks or opening the indexer: a failed init reruns on every
+                // later upsert to this partition.
+                let selector = (self.worker_selection_policy_factory)(
+                    &self.config.selection,
+                    self.worker_type,
+                    key.as_ref(),
+                );
+                // Checked per partition, since the factory may build a different policy for each.
+                let inputs =
+                    WorkerSelector::<SelectionWorkerConfig>::required_worker_inputs(&selector);
+                if inputs.contains(WorkerInputs::RESIDENT_BLOCKS)
+                    && !inputs.contains(WorkerInputs::CACHE)
+                {
+                    return Err(SelectionError::BadRequest(format!(
+                        "RESIDENT_BLOCKS requires the worker-selection policy for {key} to declare WorkerInputs::CACHE"
+                    )));
+                }
+                let profile = (self.config.profiles)(Some(&key.model_name))
+                    .map_err(|error| SelectionError::BadRequest(error.to_string()))?;
                 let (workers_tx, workers_rx) = watch::channel(HashMap::new());
                 let host_replica = self
                     .host
@@ -336,16 +357,8 @@ impl SelectionCore {
                         block_size,
                     ))
                 });
-                let selector = (self.worker_selection_policy_factory)(
-                    &self.config.selection,
-                    self.worker_type,
-                    key.as_ref(),
-                );
-                let scores_kv_transfer =
-                    WorkerSelector::<SelectionWorkerConfig>::required_worker_inputs(&selector)
-                        .contains(WorkerInputs::KV_TRANSFER);
-                let profile = (self.config.profiles)(Some(&key.model_name))
-                    .map_err(|error| SelectionError::BadRequest(error.to_string()))?;
+                let scores_kv_transfer = inputs.contains(WorkerInputs::KV_TRANSFER);
+                let resident_blocks = track_resident_blocks(&key, inputs, &indexer);
                 let scheduler = LocalScheduler::new(
                     slots,
                     workers_rx,
@@ -365,6 +378,9 @@ impl SelectionCore {
                     worker_label,
                     true,
                 );
+                if let Some(counts) = resident_blocks {
+                    scheduler.set_resident_block_counts(counts);
+                }
                 Ok(Arc::new(SelectionEntry {
                     key: key.clone(),
                     block_size,
@@ -435,4 +451,24 @@ impl SelectionCore {
             self.publish_count.fetch_add(1, Ordering::SeqCst);
         }
     }
+}
+
+/// Starts live resident block counts for a policy that reads them. Warns when the partition has
+/// no local indexer, since those components can only ever read `None`.
+pub(super) fn track_resident_blocks(
+    key: &RoutingPartitionId,
+    inputs: WorkerInputs,
+    indexer: &Indexer,
+) -> Option<ResidentBlockCountsHandle> {
+    if !inputs.contains(WorkerInputs::RESIDENT_BLOCKS) {
+        return None;
+    }
+    let counts = indexer.track_resident_blocks();
+    if counts.is_none() {
+        tracing::warn!(
+            partition = %key,
+            "Worker-selection policy reads resident block counts, but the partition has no local indexer; components will read None"
+        );
+    }
+    counts
 }
