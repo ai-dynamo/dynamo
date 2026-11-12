@@ -61,6 +61,12 @@
 #     UCX, NIXL, gdrcopy, libfabric, etcd, nats-server) per native_packages.yaml's
 #     per-image `images:` lists; make_efa adds the EFA-only entries.
 
+{% if make_efa and target == "runtime" and device == "cuda" and framework in ["vllm", "sglang", "trtllm"] %}
+# Install EFA before discovering dependencies, so the inventory and license gate
+# include the installer packages and the optional NIXL plugin that actually ship.
+{% include "templates/aws.Dockerfile" %}
+{% endif %}
+
 {% set shipped_inventory = target in ["frontend", "planner"] or (target == "runtime" and framework in ["vllm", "sglang", "trtllm"]) %}
 {% if shipped_inventory %}
 # Pinned scanner is a build helper only. The final image copies /legal, never

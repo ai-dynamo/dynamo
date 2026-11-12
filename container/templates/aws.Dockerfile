@@ -7,12 +7,17 @@
 ########## AWS EFA ##########
 #############################
 #
-# This stage extends the runtime/dev stage with AWS EFA installer
-# which includes: libfabric and aws-ofi-nccl plugin
+# The shipped CUDA runtime installs EFA before compliance collection. Other
+# targets retain their runtime/dev extension stage. The installer supplies
+# libfabric and the aws-ofi-nccl plugin.
 #
 # Use this stage when deploying on AWS infrastructure with EFA support
 
+{% if target == "runtime" and device == "cuda" and framework in ["vllm", "sglang", "trtllm"] %}
+FROM pre_runtime AS pre_efa
+{% else %}
 FROM ${EFA_BASE_IMAGE} AS aws
+{% endif %}
 
 ARG EFA_VERSION
 

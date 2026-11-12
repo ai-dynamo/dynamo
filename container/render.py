@@ -270,6 +270,13 @@ def _render_context(args, context=None):
         compliance_ecosystems,
         compliance_source_ecosystem_flags,
     ) = _resolve_compliance_inputs(args.framework, args.target, device_key, context)
+    if (
+        args.make_efa
+        and args.target == "runtime"
+        and args.device == "cuda"
+        and args.framework in ("vllm", "sglang", "trtllm")
+    ):
+        compliance_base_stage = "pre_efa"
     return dict(
         framework=args.framework,
         device=args.device,

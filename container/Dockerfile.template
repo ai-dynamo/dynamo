@@ -62,7 +62,13 @@
 {% endif %}
 
 {% if make_efa == true and target == "runtime" %}
+    {% if device == "cuda" and framework in ["vllm", "sglang", "trtllm"] %}
+        # Keep the public EFA build target; runtime already carries EFA and its
+        # final policy-gated inventory, so this alias adds no packages afterward.
+FROM runtime AS aws
+    {% else %}
     {% include "templates/aws.Dockerfile" %}
+    {% endif %}
 {% endif %}
 
 # --- Development Stages
