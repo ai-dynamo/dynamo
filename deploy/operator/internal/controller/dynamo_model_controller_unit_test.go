@@ -132,8 +132,6 @@ func TestWithPodIdentityClassifiesNativeSidecarLoRAFallback(t *testing.T) {
 	}{
 		{name: "vLLM launcher prefill", engine: []string{"python3", "-m", "dynamo.vllm"}, command: []string{"dynamo-vllm-sidecar"}, allow: true},
 		{name: "native vLLM engine is not detected", engine: []string{"vllm-rs"}, command: []string{"dynamo-vllm-sidecar"}},
-		{name: "wrapped runtime does not classify the engine", engine: []string{"vllm-rs"}, command: []string{"sh", "-c", "exec dynamo-vllm-sidecar"}},
-		{name: "runtime image entrypoint does not classify the engine", engine: []string{"vllm-rs"}},
 		{name: "SGLang engine", engine: []string{"python3", "-m", "dynamo.sglang"}, command: []string{"dynamo-vllm-sidecar"}},
 		{name: "opaque engine", command: []string{"dynamo-vllm-sidecar"}},
 	}

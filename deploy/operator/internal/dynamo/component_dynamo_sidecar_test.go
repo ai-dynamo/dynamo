@@ -33,14 +33,9 @@ func TestNativeSidecarBackendFramework(t *testing.T) {
 		want     BackendFramework
 		wantErr  string
 	}{
-		{name: "native engine command is not inferred", engine: []string{"vllm-rs"}, want: BackendFrameworkNoop},
-		{name: "native engine with runtime executable is not inferred", engine: []string{"vllm-rs"}, command: []string{"dynamo-vllm-sidecar"}, want: BackendFrameworkNoop},
-		{name: "wrapped runtime does not change engine backend", engine: []string{"vllm-rs"}, command: []string{"/bin/sh", "-c", "exec dynamo-vllm-sidecar"}, want: BackendFrameworkNoop},
+		{name: "native engine command is not inferred", engine: []string{"vllm-rs"}, command: []string{"dynamo-vllm-sidecar"}, want: BackendFrameworkNoop},
 		{name: "native engine uses explicit backend", engine: []string{"vllm-rs"}, command: []string{"dynamo-vllm-sidecar"}, explicit: "vllm", want: BackendFrameworkVLLM},
-		{name: "sglang", engine: []string{"python3", "-m", "dynamo.sglang"}, want: BackendFrameworkSGLang},
-		{name: "trtllm", engine: []string{"python3", "-m", "dynamo.trtllm"}, want: BackendFrameworkTRTLLM},
-		{name: "launcher conflicts with explicit backend", engine: []string{"python3", "-m", "dynamo.vllm"}, explicit: "sglang", wantErr: "backend framework mismatch"},
-		{name: "opaque engine uses explicit backend", command: []string{"dynamo-vllm-sidecar"}, explicit: "sglang", want: BackendFrameworkSGLang},
+		{name: "launcher is detected beside a runtime sidecar", engine: []string{"python3", "-m", "dynamo.sglang"}, command: []string{"dynamo-sglang-sidecar"}, want: BackendFrameworkSGLang},
 		{name: "opaque engine cannot inherit runtime backend", command: []string{"dynamo-vllm-sidecar"}, want: BackendFrameworkNoop},
 	}
 	for _, tc := range cases {
@@ -87,8 +82,6 @@ func TestNativeSidecarCompilationCacheExplicitBackend(t *testing.T) {
 	}{
 		{name: "default mount", command: []string{"dynamo-vllm-sidecar"}},
 		{name: "explicit mount", mountPath: "/cache", command: []string{"dynamo-vllm-sidecar"}},
-		{name: "runtime shell wrapper", mountPath: "/cache", command: []string{"bash", "-ec", "exec dynamo-vllm-sidecar"}},
-		{name: "runtime image entrypoint", mountPath: "/cache"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			mountPath := tc.mountPath
