@@ -24,7 +24,7 @@ flowchart LR
     Validate --> Reserve["Accounting and reservation"]
 ```
 
-For multiple compile-checked policies, see the [custom policy examples](https://github.com/ai-dynamo/dynamo/tree/main/examples/router/custom-policy-example). Repository contributors who use a coding agent must also provide the [worker-selection API rules](https://github.com/ai-dynamo/dynamo/blob/main/lib/router/worker-selection/README.md).
+For multiple compile-checked policies, see the [custom policy examples](https://github.com/ai-dynamo/dynamo/tree/main/examples/router/custom-policy-example). Repository contributors who use a coding agent must also provide the [worker-selection API rules](https://github.com/ai-dynamo/dynamo/blob/main/lib/router/worker-selection/AGENTS.md).
 
 ## Use a Built-In Policy First
 
