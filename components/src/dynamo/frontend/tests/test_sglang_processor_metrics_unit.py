@@ -57,6 +57,8 @@ def _install_module(install_module, name: str, **attrs):
 
 
 def _install_sglang_stubs(install_module, tokenizer_module):
+    """Install lightweight backend modules with the selected tokenizer layout."""
+
     class _Function:
         pass
 
@@ -157,13 +159,13 @@ class _PostProcessor:
 
 
 def _load_processor_module(
-    module_stubs, tokenizer_module="sglang.srt.utils.hf_transformers_utils"
+    module_stubs, tokenizer_module="sglang.srt.utils.hf_transformers"
 ):
+    """Import a fresh processor against the selected SGLang module layout."""
     install_module, remove_module = module_stubs
     for name in (
         "sglang.srt.hf_transformers",
         "sglang.srt.utils.hf_transformers",
-        "sglang.srt.utils.hf_transformers_utils",
     ):
         remove_module(name)
     _install_sglang_stubs(install_module, tokenizer_module)
@@ -419,10 +421,10 @@ def test_sparse_usage_survives_flushes(
     [
         "sglang.srt.hf_transformers",
         "sglang.srt.utils.hf_transformers",
-        "sglang.srt.utils.hf_transformers_utils",
     ],
 )
 def test_tokenizer_import_layouts(module_stubs, tokenizer_module):
+    """Resolve the tokenizer from current sources and the pinned releases."""
     module = _load_processor_module(module_stubs, tokenizer_module)
     assert module.get_tokenizer is sys.modules[tokenizer_module].get_tokenizer
 
@@ -434,12 +436,14 @@ def test_tokenizer_import_layouts(module_stubs, tokenizer_module):
 def test_tokenizer_import_preserves_dependency_error(
     module_stubs, monkeypatch, tokenizer_module
 ):
+    """Preserve missing dependencies instead of treating them as a layout move."""
     original_import = builtins.__import__
     error = ModuleNotFoundError(
         "No module named 'tokenizer_dependency'", name="tokenizer_dependency"
     )
 
     def import_with_missing_dependency(name, *args, **kwargs):
+        """Fail inside the selected tokenizer module while importing others normally."""
         if name == tokenizer_module:
             raise error
         return original_import(name, *args, **kwargs)

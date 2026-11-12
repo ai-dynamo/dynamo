@@ -58,21 +58,14 @@ from .utils import (
     worker_warmup,
 )
 
-# SGLang moved these helpers twice; retain support for older releases.
 try:
     from sglang.srt.hf_transformers import get_tokenizer
 except ModuleNotFoundError as exc:
     if exc.name != "sglang.srt.hf_transformers":
         raise
-    try:
-        from sglang.srt.utils.hf_transformers import get_tokenizer
-    except ModuleNotFoundError as exc:
-        if exc.name not in (
-            "sglang.srt.utils",
-            "sglang.srt.utils.hf_transformers",
-        ):
-            raise
-        from sglang.srt.utils.hf_transformers_utils import get_tokenizer
+    # SGLang 0.5.11 to 0.5.23 (current CUDA and XPU pins).
+    # Remove once both pins are newer.
+    from sglang.srt.utils.hf_transformers import get_tokenizer
 
 
 logger = logging.getLogger(__name__)

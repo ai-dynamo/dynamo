@@ -28,10 +28,6 @@ pytestmark = [
 # ---------------------------------------------------------------------------
 
 
-def test_get_tokenizer_importable():
-    assert callable(get_tokenizer)
-
-
 def test_function_call_parser_importable():
     from sglang.srt.function_call.function_call_parser import FunctionCallParser
 
@@ -63,6 +59,7 @@ def test_sglang_tool_importable():
 
 
 def test_get_tokenizer_accepts_tokenizer_mode():
+    """Require the tokenizer-loading arguments used by the frontend."""
     sig = inspect.signature(get_tokenizer)
     params = sig.parameters
     assert "tokenizer_name" in params or list(params.keys())[0] != ""
