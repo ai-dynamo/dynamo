@@ -30,7 +30,7 @@ The native router and ThunderAgent are different scheduling paths. Choose one be
 
 ## Prepare the Source
 
-The pinned snapshot and every command on this page are a reference for `ai-dynamo[vllm]==1.4.x` with vLLM `0.26.0`. No verl-recipe and verl pair has been validated on Dynamo 1.7.0 yet. `ai-dynamo[vllm]==1.7.0` pins vLLM `0.33.0`, which requires PyTorch `2.14.0` and Transformers `>=5.16.1,<5.21.0`; the note below lists what blocks the pinned snapshot on that runtime.
+The pinned snapshot and every command on this page are a reference for `ai-dynamo[vllm]==1.4.x` with vLLM `0.26.0`. No verl-recipe and verl pair has been validated on Dynamo 1.7.0 yet. `ai-dynamo[vllm]==1.7.0` pins vLLM `0.33.0`, which requires PyTorch `2.14.0` and Transformers `>=5.16.1,<5.21.0`; the note below lists what blocks the pinned snapshot and the current recipe on that runtime.
 
 The reviewed recipe snapshot is `461b830c`, and its `REQUIRED_VERL.txt` selects the matching core verl commit. The core commit records an older recipe submodule, so use the installer and then set the nested recipe checkout to the same reviewed snapshot:
 
@@ -59,13 +59,13 @@ ValueError: 'lm_head.weight' was skipped because it is tied to 'model.embed_toke
 
 verl drops the redundant tied alias from each bucket starting with [verl-project/verl#7973](https://github.com/verl-project/verl/pull/7973), and in the FP8 path with [verl-project/verl#8064](https://github.com/verl-project/verl/pull/8064). The verl core selected by this snapshot, and the one selected by the current verl-recipe main branch, both predate these changes. Raising the update bucket size is not a supported fix.
 
-Pausing generation for the policy update is a third, independent reason, and it covers `ai-dynamo[vllm]==1.7.0` with vLLM `0.33.0`. Starting with vLLM `0.32.0`, `AsyncLLM.pause_generation` accepts only `mode` and `clear_cache`; the `wait_for_inflight_requests` argument was removed. The verl core selected by this snapshot calls `pause_generation(wait_for_inflight_requests=False, ...)` in `verl/workers/rollout/vllm_rollout/vllm_async_server.py`, so the first policy update fails with:
+The pinned snapshot never reaches a policy update on `ai-dynamo[vllm]==1.7.0`, because the `FusedMoE` import above already fails on vLLM `0.33.0`. A newer snapshot meets a third, independent blocker. Starting with vLLM `0.32.0`, `AsyncLLM.pause_generation` accepts only `mode` and `clear_cache`; the `wait_for_inflight_requests` argument was removed. As of November 2026, verl-recipe main still passes that argument when its Dynamo backend pauses the engines for a policy update, in `dynamo/dynamo_async_server.py`, and so does the verl core it selects (`6cbca9ce`) in `verl/workers/rollout/vllm_rollout/vllm_async_server.py`. On vLLM `0.32.0` or later the call raises:
 
 ```text
 TypeError: AsyncLLM.pause_generation() got an unexpected keyword argument 'wait_for_inflight_requests'
 ```
 
-As of November 2026, the verl core selected by verl-recipe main (`6cbca9ce`) still passes this argument, and so does the recipe's own `dynamo/dynamo_async_server.py`. A Dynamo 1.7.0 setup needs a verl core that uses `mode="abort"` on vLLM `0.32.0` or later and drops the tied alias from each update bucket, plus a recipe whose own pause call is updated. No such pair has been reviewed.
+A Dynamo 1.7.0 setup needs a verl core that uses `mode="abort"` on vLLM `0.32.0` or later and drops the tied alias from each update bucket, plus a recipe whose own pause call is updated. No such pair has been reviewed.
 </Info>
 
 ### Install flash-attn
@@ -171,7 +171,7 @@ See [Profile and Simulate RL Rollouts](operations-and-simulation.md) for request
 - The recipe does not provide one complete native-path Dynamo/vLLM image pin.
 - The documented policy update is the recipe's colocated CUDA IPC path, not public Dynamo worker discovery or ModelExpress.
 - Policy updates for tied-embedding models on vLLM `0.29.0` or later need a verl core that drops the tied alias from each update bucket. No reviewed recipe snapshot selects such a verl core yet.
-- No reviewed recipe snapshot runs on Dynamo 1.7.0 with vLLM `0.33.0`. The removed `wait_for_inflight_requests` argument of `pause_generation` is one known blocker, in both the selected verl core and the recipe.
+- No reviewed recipe snapshot runs on Dynamo 1.7.0 with vLLM `0.33.0`. The current verl-recipe main also does not: its Dynamo backend and the verl core it selects still pass the removed `wait_for_inflight_requests` argument to `pause_generation`.
 - Multi-node and large-model layouts require separate topology and failure validation.
 - Supported status requires an independent run with token correctness, policy refresh, post-update generation, and request, worker, and update recovery.
 
