@@ -2093,6 +2093,12 @@ def _normalize_mocker_config(config: Mapping[str, Any] | str) -> Dict[str, Any]:
     """Validate canonical AISimulate config and materialize Dynamo runtime options."""
     ...
 
+def _convert_preprocessed_request(
+    preprocessed: Dict[str, Any], fast_path: bool
+) -> Optional[Dict[str, Any]]:
+    """Test hook: the fast path's request (None if it declines) or pythonize's, pythonized back."""
+    ...
+
 
 class WorkerType:
     """
@@ -2576,6 +2582,7 @@ def run_mocker_synthetic_trace_replay(
     shared_prefix_ratio: float = 0.0,
     num_prefix_groups: int = 0,
     inter_turn_delay_ms: float = 0.0,
+    accumulate_session_deltas: bool = False,
     model_name: Optional[str] = None,
     sla_ttft_ms: Optional[float] = None,
     sla_itl_ms: Optional[float] = None,

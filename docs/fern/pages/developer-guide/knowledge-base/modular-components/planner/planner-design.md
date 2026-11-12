@@ -255,7 +255,11 @@ Each engine emits per-iteration `ForwardPassMetrics` via ZMQ -> FpmEventRelay ->
 - **scheduled_requests.sum_prefill_tokens**: prefill regression input
 - **scheduled_requests.sum_decode_kv_tokens**: decode regression input
 - **queued_requests**: queued prefill/decode load for TTFT/ITL simulation
-- Idle heartbeats (wall_time=0) are skipped
+- Heartbeats (wall_time=0) are not added as regression observations, but they update moving averages and their `queued_requests` still count as queued load.
+
+The vLLM scheduler suppresses empty heartbeats while requests remain in its running or waiting queues, a scheduled batch still awaits output processing, or the parent scheduler reports pending connector work. This includes finished requests retained for connector cleanup and pending KV or encoder-cache pushes. Nonempty heartbeats carry the latest queue snapshot. The scheduler reuses completed-pass snapshots and limits extra queue scans to once per heartbeat interval, plus when an empty snapshot first gains waiting work. That transition scan ensures a new long pass reports waiting load; later steps reuse it. Counts can lag changes between snapshots. All mutable queue traversal stays on the scheduler thread.
+
+This is a partial fix for scheduler-visible work. It does not establish EngineCore idleness across input-queue work, data-parallel dummy execution, or independent timing and result lifecycles. Suppressing a new empty heartbeat does not invalidate an idle frame already cached by Planner. Those lifecycles, cached-frame handling, and the Rust publishers used by TensorRT-LLM and the mocker need follow-up work. Heartbeats do not prove end-to-end autoscaling correctness.
 
 ### Diagnostics
 
@@ -296,8 +300,8 @@ In aggregated mode (`mode: agg`), engines handle both prefill and decode via chu
 > [!WARNING]
 > **Experimental.** With `retune.executor: local`, the default, retune runs only in
 > planner-in-the-loop offline replay, and a live Planner rejects it at startup. With
-> `executor: dgdr`, a live Planner on Kubernetes retunes three KV router knobs with fixed replicas
-> through DGDR v1beta2 Requests; it is for development clusters only. See
+> `executor: dgdr`, a live Planner on Kubernetes retunes three KV router knobs, and with scaling
+> its own Planner fields, through DGDR v1beta2 Requests; it is for development clusters only. See
 > [Planner Live Retune](../../../../kubernetes/auto-deployment/planner-live-retune.md).
 
 Retune periodically replays the last window of recorded traffic against a grid of router and
@@ -562,7 +566,12 @@ trace that ends at or before the first replayed request; without throughput scal
   `runtime_decision.router_parameters`.
 
 The AISimulate Planner adapter (`planner/simulation/provider.py`) passes `planner.retune` through to
-`PlannerConfig` and fills the scoring SLA from `evaluation.sla`. `dynamo.replay` (`run_trace_replay`,
+`PlannerConfig` and fills the scoring SLA from `evaluation.sla`. For live retune with scaling, it
+also reads `planner.retune_sweep` in `aisimulate recommend`: the live Planner's scaling fields
+(`base`), the Planner points to search (`points`) and the history warm-up by throughput interval
+(`warmup`). Each candidate replays `base` with its point applied, warmed with the rows of its own
+interval, which `DynamoReplayRunner` hands to `run_trace_replay`; its concrete config is the
+section narrowed to that point, which `aisimulate predict` replays again. `dynamo.replay` (`run_trace_replay`,
 and `prepare_planner_replay` for synthetic traffic) rejects traffic that is not an open-loop Dynamo
 request trace, and its error names the AISimulate setting.
 

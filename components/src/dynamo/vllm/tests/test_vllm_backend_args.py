@@ -555,7 +555,7 @@ class TestParseArgsLoraExclusivity:
 
     def test_realtime_with_enable_lora_is_rejected(self):
         with pytest.raises(ValueError, match="enable-lora"):
-            self._parse(["--realtime", "--enable-lora"])
+            self._parse(["--endpoint-types", "realtime", "--enable-lora"])
 
     def test_classify_worker_with_enable_lora_is_rejected(self):
         """Kept separate from the --realtime case: the classify rule may be
@@ -569,7 +569,7 @@ class TestParseArgsLoraExclusivity:
         assert config.engine_args.enable_lora is True
 
     def test_realtime_alone_is_accepted(self):
-        config = self._parse(["--realtime"])
+        config = self._parse(["--endpoint-types", "realtime"])
         assert config.realtime is True
         assert not config.engine_args.enable_lora
 

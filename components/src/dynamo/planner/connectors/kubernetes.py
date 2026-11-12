@@ -1042,9 +1042,32 @@ class KubernetesConnector(PlannerConnector):
             expected_num_decode=d if stable else None,
             prefill_scaling_in_progress=not stable,
             decode_scaling_in_progress=not stable,
-            pending_num_prefill=pending.get(prefill_component_name or "", 0),
-            pending_num_decode=pending.get(decode_component_name or "", 0),
+            pending_num_prefill=self._pending_for_role(
+                deployment, pending, SubComponentType.PREFILL, prefill_component_name
+            ),
+            pending_num_decode=self._pending_for_role(
+                deployment, pending, SubComponentType.DECODE, decode_component_name
+            ),
         )
+
+    @staticmethod
+    def _pending_for_role(
+        deployment: dict,
+        pending: dict[str, int],
+        role: SubComponentType,
+        component_name: Optional[str],
+    ) -> int:
+        """Pending count for the DGD component that serves ``role``.
+
+        Resolves the name the same way the ready count does, so a backend
+        default name still matches a DGD that names the component differently.
+        """
+        if not component_name or not pending:
+            return 0
+        service = get_component_from_type_or_name(
+            deployment, role, component_name=component_name
+        )
+        return pending.get(service.name, 0)
 
     async def get_actual_worker_counts(
         self,

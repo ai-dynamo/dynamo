@@ -436,6 +436,7 @@ async def test_selection_service_session_binding_stream_drains_queue(
 async def test_selection_service_malformed_payload_raises_value_error(
     monkeypatch, method, payload
 ):
+    """Malformed binding inputs raise ValueError without truthy boolean coercion."""
     monkeypatch.setenv("DYN_ROUTER_USE_KV_EVENTS", "false")
     service = SelectionService(indexer_threads=1)
 
@@ -448,6 +449,12 @@ async def test_selection_service_malformed_payload_raises_value_error(
         # Prompt booleans are not coerced by truthiness.
         with pytest.raises(ValueError, match="boolean"):
             await service.select({"token_ids": [1, 2, 3, 4], "is_eagle": "false"})
+
+        for field in ("is_eagle", "engine_owned_mm_identity"):
+            with pytest.raises(ValueError, match="boolean"):
+                await service.upsert_worker({"worker_id": 1, field: "false"})
+            with pytest.raises(ValueError, match="boolean"):
+                await service.patch_worker(1, {field: "false"})
 
         class IteratesNegative(list):
             def __iter__(self):
