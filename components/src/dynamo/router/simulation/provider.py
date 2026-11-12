@@ -216,6 +216,8 @@ class DynamoRouterSweepConfigProvider:
                 value if value is not None else default
             )
         router_config["router_prefill_load_model"] = public.prefill_load_model.type
+        if public.use_kv_events is not None:
+            router_config["use_kv_events"] = public.use_kv_events
         return AdapterReplaySpec(
             config=concrete,
             runtime_hooks=(

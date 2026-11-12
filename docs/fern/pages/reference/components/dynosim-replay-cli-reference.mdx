@@ -350,6 +350,9 @@ hardware offload recipe.
   polynomial model.
 - `router.policy: kv_router` supports one or more routable workers. Set
   `router.prefill_load_model.type` to `none` or `aic`.
+- `router.use_kv_events: false` replays a router started with `--no-router-kv-events`: it indexes
+  its own routing decisions, forgets them 120 s (the frontend's `--router-ttl-secs` default) after
+  the last one, and reads no engine KV events. Offline replay only.
 - With `router.policy: kv_router`, each vLLM aggregated or prefill worker that sets
   `engine.workers.<role>.kv_cache.kvcr` gets the `kv.fetch` hint that the production
   [KV router](../../developer-guide/knowledge-base/modular-components/router/topology-aware-kv-transfer.md#kv-fetch-hints)
