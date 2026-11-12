@@ -94,6 +94,43 @@ __attribute__((weak)) NvtxInitializeInjectionNvtxFunc_t InitializeInjectionNvtx2
 *  - Statically-linked injection library defining InitializeInjectionNvtx2_fnptr
 */
 NVTX_LINKONCE_FWDDECL_FUNCTION int NVTX_VERSIONED_IDENTIFIER(nvtxInitializeInjectionLibrary)(void);
+
+static int nvtxIsSafeInjectionLibraryPath(const NVTX_PATHCHAR* path)
+{
+    size_t i = 0;
+    if (!path || !path[0]) return 0;
+
+#if defined(_WIN32)
+    /* Require absolute path: "X:\..." or UNC "\\server\share\..." */
+    if (!(((path[0] >= L'A' && path[0] <= L'Z') || (path[0] >= L'a' && path[0] <= L'z')) && path[1] == L':' && (path[2] == L'\\' || path[2] == L'/')) &&
+        !(path[0] == L'\\' && path[1] == L'\\'))
+    {
+        return 0;
+    }
+#else
+    /* Require absolute POSIX path */
+    if (path[0] != '/') return 0;
+#endif
+
+    for (i = 0; path[i] != 0; ++i)
+    {
+        if (i >= (NVTX_BUFSIZE - 1)) return 0;
+#if defined(_WIN32)
+        if (path[i] == L'\n' || path[i] == L'\r') return 0;
+#else
+        if (path[i] == '\n' || path[i] == '\r') return 0;
+#endif
+    }
+
+#if defined(_WIN32)
+    if (wcsstr(path, L"..") != 0) return 0;
+#else
+    if (strstr(path, "..") != 0) return 0;
+#endif
+
+    return 1;
+}
+
 NVTX_LINKONCE_DEFINE_FUNCTION int NVTX_VERSIONED_IDENTIFIER(nvtxInitializeInjectionLibrary)(void)
 {
     const char* const initFuncName = "InitializeInjectionNvtx2";
@@ -212,6 +249,12 @@ NVTX_LINKONCE_DEFINE_FUNCTION int NVTX_VERSIONED_IDENTIFIER(nvtxInitializeInject
         *  injection library was specified by a tool. */
         if (injectionLibraryPath)
         {
+            if (!nvtxIsSafeInjectionLibraryPath(injectionLibraryPath))
+            {
+                NVTX_ERR("Injection library path failed validation\n");
+                return NVTX_ERR_INIT_LOAD_LIBRARY;
+            }
+
             /* Load the injection library */
             injectionLibraryHandle = NVTX_DLLOPEN(injectionLibraryPath);
             if (!injectionLibraryHandle)
