@@ -837,7 +837,7 @@ func (r *dgdCheckpointsReconciler) deleteAutomaticSnapshotJobsForDGD(
 			continue
 		}
 		cleanupPending = true
-		if err := r.Delete(ctx, job); err != nil && !apierrors.IsNotFound(err) {
+		if err := r.Delete(ctx, job, client.Preconditions{UID: &job.UID}); err != nil && !apierrors.IsNotFound(err) {
 			return nil, false, fmt.Errorf("delete automatic SnapshotJob %s/%s: %w", job.Namespace, job.Name, err)
 		}
 	}
@@ -874,7 +874,7 @@ func (r *dgdCheckpointsReconciler) deleteAutomaticPodSnapshotsForDGD(
 		if snapshot.Annotations[consts.CheckpointDeletionPolicyAnnotation] == string(nvidiacomv1alpha1.CheckpointDeletionPolicyRetain) {
 			continue
 		}
-		if err := r.Delete(ctx, snapshot); err != nil && !apierrors.IsNotFound(err) {
+		if err := r.Delete(ctx, snapshot, client.Preconditions{UID: &snapshot.UID}); err != nil && !apierrors.IsNotFound(err) {
 			return fmt.Errorf("delete automatic PodSnapshot %s/%s: %w", snapshot.Namespace, snapshot.Name, err)
 		}
 	}
