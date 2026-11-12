@@ -2849,6 +2849,7 @@ mod tests {
 
     /// Actual HTTP docs must use the service flags and response-key configuration.
     #[tokio::test]
+    #[serial_test::serial]
     async fn openapi_http_uses_service_configuration() {
         for enabled in [false, true] {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2918,7 +2919,10 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn openapi_http_tracks_enabled_endpoint_families() {
-        let service = HttpService::builder().build().unwrap();
+        let service = HttpService::builder()
+            .enable_embeddings_endpoints(false)
+            .build()
+            .unwrap();
         let independent = HttpService::builder().build().unwrap();
         let full = super::super::openapi_docs::generate_openapi_spec(service.route_docs()).unwrap();
 
