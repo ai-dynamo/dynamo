@@ -12,9 +12,6 @@ on:
   schedule:
     - cron: '0 9 * * *'  # Every day at 1:00 AM PST (09:00 UTC), after the main nightly
   workflow_dispatch:
-  push:
-    branches:
-      - 'pull-request/[0-9]+'
 
 permissions:
   contents: read
