@@ -13,6 +13,7 @@ Each training step sends a batch of rollouts through the Dynamo frontend, trains
 
 - Complete [Serve Inference with Dynamo](serve-inference.mdx), so that both engines are ready.
 - Have one free GPU for the Ray head, on a node with 16 CPUs and 200 GiB of memory free.
+- Restrict network access to the Ray head, with a NetworkPolicy that your cluster's network plugin enforces, or run the tutorial in an isolated cluster that only trusted users and workloads can reach. The head's dashboard and Jobs API accept requests without authentication, so anyone who can reach the Pod can run code in it. See [Current Limitations](#current-limitations).
 
 ## Start Training
 
@@ -312,6 +313,7 @@ kubectl delete namespace "$NAMESPACE"
 - Weight syncs write full checkpoints to disk. Slime's default NCCL transport fails with the SGLang 0.5.21 engines in Dynamo 1.6 images; see [Known Issues](../../../reference/general/releases/known-issues.mdx#v160). Delta disk updates need the `/pull_weights` route from Slime's SGLang patch, which the Dynamo images don't include.
 - The engines and the trainer use separate GPUs, so Slime's `--colocate` mode doesn't apply.
 - Slime's streaming generator, which `dynamo_generate.py` calls, doesn't support score centering (`--use-score-centering`).
+- The Ray head's dashboard and Jobs API on port 8265 accept requests without authentication. Anyone who can reach the Pod can run code in it as root, with the `slime-data` volume mounted. Restrict access to the Ray head, for example with a NetworkPolicy.
 
 ## Next Steps
 
