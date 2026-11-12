@@ -326,7 +326,7 @@ impl EmbeddedSelection {
             .map(|(index, class)| (class.name.clone(), index))
             .collect();
         let wait_metrics = queue_metrics.clone();
-        let queue_wait_observer: dynamo_kv_router::queue::RouterQueueWaitObserver =
+        let queue_wait_observer: dynamo_scheduler::host::RouterQueueWaitObserver =
             Arc::new(move |class_index: usize, wait: Duration| {
                 if let Some(metrics) = wait_metrics.get(class_index) {
                     metrics.wait_seconds.observe(wait.as_secs_f64());
