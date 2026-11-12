@@ -2086,8 +2086,8 @@ pub fn chat_completion_to_response(
 }
 
 #[cfg(test)]
-mod tests {
-    mod native_tools;
+pub(crate) mod tests {
+    pub(crate) mod native_tools;
     mod phases_and_tool_search;
     mod tool_adaptation;
 

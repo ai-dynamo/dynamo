@@ -1184,14 +1184,14 @@ impl AnthropicStreamConverter {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use dynamo_protocols::types::{
         ChatChoiceStream, ChatCompletionMessageContent, ChatCompletionMessageToolCallChunk,
         ChatCompletionStreamResponseDelta, FinishReason, FunctionCallStream, FunctionType,
     };
 
-    fn text_chunk(text: &str) -> NvCreateChatCompletionStreamResponse {
+    pub(crate) fn text_chunk(text: &str) -> NvCreateChatCompletionStreamResponse {
         #[allow(deprecated)]
         NvCreateChatCompletionStreamResponse {
             message_boundary: None,
@@ -1297,7 +1297,9 @@ mod tests {
             .collect()
     }
 
-    async fn sse_values(events: Vec<Result<Event, anyhow::Error>>) -> Vec<serde_json::Value> {
+    pub(crate) async fn sse_values(
+        events: Vec<Result<Event, anyhow::Error>>,
+    ) -> Vec<serde_json::Value> {
         use axum::response::{IntoResponse, Sse};
 
         let body = Sse::new(futures::stream::iter(events))
@@ -1685,75 +1687,6 @@ mod tests {
                 );
             }
             assert_eq!(values.last().unwrap()["type"], "message_stop");
-        }
-    }
-
-    /// A tool parser can hold a possible call opener past the chunk that
-    /// carries the matched stop, then release it with the finish reason.
-    #[tokio::test]
-    async fn test_stream_stop_sequence_survives_tool_parser_split() {
-        use crate::model_card::ModelDeploymentCard;
-        use crate::preprocessor::OpenAIPreprocessor;
-        use dynamo_runtime::protocols::annotated::Annotated;
-        use futures::StreamExt;
-
-        let request: crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest =
-            serde_json::from_value(serde_json::json!({
-                "model": "test-model",
-                "messages": [{"role": "user", "content": "hi"}],
-                "stream": true,
-                "tools": [{"type": "function", "function": {"name": "calculate"}}]
-            }))
-            .unwrap();
-        for parser in ["hermes", "glm47"] {
-            for text in ["hello<", "hello<tool"] {
-                let mut card = ModelDeploymentCard::load_from_disk(
-                    "tests/data/sample-models/mock-llama-3.1-8b-instruct",
-                    None,
-                )
-                .unwrap();
-                card.runtime_config.tool_call_parser = Some(parser.to_string());
-                let mut terminal = text_chunk(text);
-                terminal.inner.choices[0].finish_reason = Some(FinishReason::Stop);
-                terminal.nvext = Some(serde_json::json!({"stop_reason": "</answer>"}));
-                let parsed: Vec<_> = OpenAIPreprocessor::new(card)
-                    .unwrap()
-                    .postprocessor_parsing_stream(
-                        futures::stream::iter([Annotated::from_data(terminal)]),
-                        &request,
-                        false,
-                        false,
-                    )
-                    .unwrap()
-                    .filter_map(|chunk| async move { chunk.data })
-                    .collect()
-                    .await;
-
-                let mut converter = AnthropicStreamConverter::new("test-model".into(), 0);
-                let mut events = converter.emit_start_events();
-                for chunk in &parsed {
-                    converter.append_chunk_events(chunk, &mut events);
-                }
-                converter.append_end_events(&mut events);
-                let values = sse_values(events).await;
-                let streamed: String = values
-                    .iter()
-                    .filter_map(|event| event["delta"]["text"].as_str())
-                    .collect();
-                assert_eq!(streamed, text, "{parser}");
-                let terminal = values
-                    .iter()
-                    .find(|event| event["type"] == "message_delta")
-                    .unwrap();
-                assert_eq!(
-                    terminal["delta"]["stop_reason"], "stop_sequence",
-                    "{parser}: {text}"
-                );
-                assert_eq!(
-                    terminal["delta"]["stop_sequence"], "</answer>",
-                    "{parser}: {text}"
-                );
-            }
         }
     }
 

@@ -22065,6 +22065,118 @@ mod tests {
             );
         }
     }
+
+    /// A tool parser can hold a possible call opener past the chunk that
+    /// carries the matched stop, then release it with the finish reason.
+    #[tokio::test]
+    async fn test_stream_stop_sequence_survives_tool_parser_split() {
+        use crate::model_card::ModelDeploymentCard;
+        use crate::preprocessor::OpenAIPreprocessor;
+        use crate::protocols::anthropic::stream_converter::{
+            AnthropicStreamConverter,
+            tests::{sse_values, text_chunk},
+        };
+        use dynamo_runtime::protocols::annotated::Annotated;
+        use futures::StreamExt;
+
+        let request: crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest =
+            serde_json::from_value(serde_json::json!({
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "hi"}],
+                "stream": true,
+                "tools": [{"type": "function", "function": {"name": "calculate"}}]
+            }))
+            .unwrap();
+        for parser in ["hermes", "glm47"] {
+            for text in ["hello<", "hello<tool"] {
+                let mut card = ModelDeploymentCard::load_from_disk(
+                    "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+                    None,
+                )
+                .unwrap();
+                card.runtime_config.tool_call_parser = Some(parser.to_string());
+                let mut terminal = text_chunk(text);
+                terminal.inner.choices[0].finish_reason = Some(FinishReason::Stop);
+                terminal.nvext = Some(serde_json::json!({"stop_reason": "</answer>"}));
+                let parsed: Vec<_> = OpenAIPreprocessor::new(card)
+                    .unwrap()
+                    .postprocessor_parsing_stream(
+                        futures::stream::iter([Annotated::from_data(terminal)]),
+                        &request,
+                        false,
+                        false,
+                    )
+                    .unwrap()
+                    .filter_map(|chunk| async move { chunk.data })
+                    .collect()
+                    .await;
+
+                let mut converter = AnthropicStreamConverter::new("test-model".into(), 0);
+                let mut events = converter.emit_start_events();
+                for chunk in &parsed {
+                    converter.append_chunk_events(chunk, &mut events);
+                }
+                converter.append_end_events(&mut events);
+                let values = sse_values(events).await;
+                let streamed: String = values
+                    .iter()
+                    .filter_map(|event| event["delta"]["text"].as_str())
+                    .collect();
+                assert_eq!(streamed, text, "{parser}");
+                let terminal = values
+                    .iter()
+                    .find(|event| event["type"] == "message_delta")
+                    .unwrap();
+                assert_eq!(
+                    terminal["delta"]["stop_reason"], "stop_sequence",
+                    "{parser}: {text}"
+                );
+                assert_eq!(
+                    terminal["delta"]["stop_sequence"], "</answer>",
+                    "{parser}: {text}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn named_tool_rendering_policy_matches_the_production_preprocessor() {
+        use crate::protocols::openai::responses::tests::native_tools::{
+            TEMPLATE, formatter, namespace, request,
+        };
+        use crate::{model_card::ModelDeploymentCard, preprocessor::OpenAIPreprocessor};
+        use serde_json::json;
+        let mut tools = namespace(true);
+        tools
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"type":"function","name":"other","parameters":{"type":"object"}}));
+        for parser in [None, Some("muse_spark_open")] {
+            let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
+            let mut mdc = ModelDeploymentCard::load_from_disk(path, None).unwrap();
+            mdc.runtime_config.tool_call_parser = parser.map(str::to_owned);
+            let mut response = request(tools.clone(), json!("Read a file."));
+            response.inner.tool_choice =
+                Some(serde_json::from_value(json!({"type":"function","name":"fs.read"})).unwrap());
+            let mut chat: NvCreateChatCompletionRequest = response.try_into().unwrap();
+            chat.normalize_responses_tools(true).unwrap();
+            let python = chat
+                .python_chat_processor_request_json(&mdc.runtime_config)
+                .unwrap();
+            let spark = parser.is_some();
+            assert_eq!(
+                python["responses_native_tools"]["render_named_tool_eagerly"],
+                spark
+            );
+            let tokenizer = mdc.tokenizer().unwrap();
+            let preprocessor =
+                OpenAIPreprocessor::new_with_parts(mdc, formatter(TEMPLATE), tokenizer).unwrap();
+            let prompt = preprocessor.apply_template(&chat).unwrap().unwrap();
+            assert_eq!(prompt.as_str().contains("\"path\""), spark);
+            assert_eq!(prompt.as_str().contains("\"name\": \"other\""), !spark);
+        }
+    }
 }
 
 #[cfg(test)]

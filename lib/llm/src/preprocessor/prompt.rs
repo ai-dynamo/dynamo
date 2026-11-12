@@ -29,6 +29,7 @@ use crate::model_card::{
 use crate::protocols::openai::{
     chat_completions::NvCreateChatCompletionRequest, completions::NvCreateCompletionRequest,
 };
+use crate::protocols::unified::UnifiedRequest;
 
 /// lib/llm-local extension carrying multimodal media-IO config. Kept off
 /// [`OAIChatLikeRequest`] so `dynamo_renderer` stays free of the media module;
@@ -394,6 +395,12 @@ impl OAIChatLikeRequest for NvCreateCompletionRequest {
 impl MediaRequestExt for NvCreateCompletionRequest {
     fn media_io_kwargs(&self) -> Option<&serde_json::Value> {
         None
+    }
+}
+
+impl MediaRequestExt for UnifiedRequest {
+    fn media_io_kwargs(&self) -> Option<&serde_json::Value> {
+        self.inner.media_io_kwargs.as_ref()
     }
 }
 

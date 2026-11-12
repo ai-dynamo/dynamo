@@ -5,23 +5,23 @@ use super::super::*;
 use dynamo_renderer::{ChatTemplate, ContextMixins, OAIPromptFormatter, PromptFormatter};
 use serde_json::{Value, json};
 
-const TEMPLATE: &str =
+pub(crate) const TEMPLATE: &str =
     include_str!("../../../../../tests/data/muse_spark_open_deferred_tools.jinja");
 
-fn formatter(template: &str) -> std::sync::Arc<dyn OAIPromptFormatter> {
+pub(crate) fn formatter(template: &str) -> std::sync::Arc<dyn OAIPromptFormatter> {
     let config: ChatTemplate = serde_json::from_value(json!({"chat_template":template})).unwrap();
     let PromptFormatter::OAI(formatter) =
         PromptFormatter::from_parts(config, ContextMixins::new(&[]), true).unwrap();
     formatter
 }
 
-fn request(tools: Value, input: Value) -> NvCreateResponse {
+pub(crate) fn request(tools: Value, input: Value) -> NvCreateResponse {
     serde_json::from_value(json!({"model":"/model", "input":input, "tools":tools,
         "chat_template_args":{"current_date":"2026-10-06"}}))
     .unwrap()
 }
 
-fn namespace(defer: bool) -> Value {
+pub(crate) fn namespace(defer: bool) -> Value {
     json!([{"type":"namespace", "name":"fs", "description":"Files", "defer_loading":defer,
         "tools":[{"type":"function", "name":"read", "description":"Read files", "parameters":{"type":"object", "properties":{"path":{"type":"string"}},"required":["path"]}}]}])
 }
@@ -299,7 +299,7 @@ fn native_and_legacy_names_reach_muse_parser_with_verbatim_custom_input() {
         let mut chat: NvCreateChatCompletionRequest = response.clone().try_into().unwrap();
         chat.normalize_responses_tools(native).unwrap();
         let tools =
-            crate::preprocessor::tool_choice::convert_tools(chat.inner.tools.as_deref().unwrap());
+            crate::protocols::openai::tools::convert_tools(chat.inner.tools.as_deref().unwrap());
         let raw = format!(
             "<|start|>assistant to={name}<|message|><atem:function_calls>\n<atem:invoke name=\"{name}\">\n<atem:parameter name=\"input\">{input}</atem:parameter>\n</atem:invoke>\n</atem:function_calls><|eot|>"
         );
@@ -410,41 +410,6 @@ fn responses_tool_kinds_are_validated_before_function_conversion() {
         let mut req = request(tools, json!("hi"));
         req.inner.tool_choice = Some(serde_json::from_value(choice).unwrap());
         NvCreateChatCompletionRequest::try_from(req).unwrap();
-    }
-}
-
-#[test]
-fn named_tool_rendering_policy_matches_the_production_preprocessor() {
-    use crate::{model_card::ModelDeploymentCard, preprocessor::OpenAIPreprocessor};
-    let mut tools = namespace(true);
-    tools
-        .as_array_mut()
-        .unwrap()
-        .push(json!({"type":"function","name":"other","parameters":{"type":"object"}}));
-    for parser in [None, Some("muse_spark_open")] {
-        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
-        let mut mdc = ModelDeploymentCard::load_from_disk(path, None).unwrap();
-        mdc.runtime_config.tool_call_parser = parser.map(str::to_owned);
-        let mut response = request(tools.clone(), json!("Read a file."));
-        response.inner.tool_choice =
-            Some(serde_json::from_value(json!({"type":"function","name":"fs.read"})).unwrap());
-        let mut chat: NvCreateChatCompletionRequest = response.try_into().unwrap();
-        chat.normalize_responses_tools(true).unwrap();
-        let python = chat
-            .python_chat_processor_request_json(&mdc.runtime_config)
-            .unwrap();
-        let spark = parser.is_some();
-        assert_eq!(
-            python["responses_native_tools"]["render_named_tool_eagerly"],
-            spark
-        );
-        let tokenizer = mdc.tokenizer().unwrap();
-        let preprocessor =
-            OpenAIPreprocessor::new_with_parts(mdc, formatter(TEMPLATE), tokenizer).unwrap();
-        let prompt = preprocessor.apply_template(&chat).unwrap().unwrap();
-        assert_eq!(prompt.as_str().contains("\"path\""), spark);
-        assert_eq!(prompt.as_str().contains("\"name\": \"other\""), !spark);
     }
 }
 

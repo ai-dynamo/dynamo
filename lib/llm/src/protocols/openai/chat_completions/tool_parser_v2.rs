@@ -116,6 +116,19 @@ pub(crate) fn validate_tool_request_mode(
     Ok(())
 }
 
+// Beam tool calls live on the Harmony wire: an analysis channel first, then the
+// `<|start|>assistant to=NAME<|channel|>analysis <|constrain|>xml<|message|>` call
+// header with an `rfl:parameter` body. The generic forced-tool JSON grammar replaces
+// that whole wire with a bare JSON object, so the model emits no analysis channel and
+// the response carries no `reasoning_content`; the Beam chat template then rejects the
+// follow-up request whose history replays that tool-call turn without its reasoning.
+// Forced choices therefore stay on the parser path; the preprocessor installs a regex
+// over the native wire instead (see `tool_choice.rs`), which keeps the analysis channel
+// and still forces the call header of an allowed tool.
+pub(crate) fn is_beam_parser(parser_name: Option<&str>) -> bool {
+    parser_name == Some("beam")
+}
+
 fn validate_parser_version_for_mode(
     version: ParserVersion,
     tool_call_parser: Option<&str>,
@@ -131,7 +144,7 @@ fn validate_parser_version_for_mode(
 
     if version == ParserVersion::Auto {
         // Beam needs both selectors for its rendering, stop-token and reasoning handling.
-        let beam = crate::preprocessor::structural_tag::is_beam_parser;
+        let beam = is_beam_parser;
         if beam(tool_call_parser) != beam(reasoning_parser) {
             anyhow::bail!(
                 "{}=auto routes Beam only when both --dyn-tool-call-parser and --dyn-reasoning-parser are \"beam\" (got {tool_call_parser} / {reasoning_parser})",
