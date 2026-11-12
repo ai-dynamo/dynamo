@@ -133,7 +133,7 @@ struct PendingMutationReceivers<'a> {
     routing_rx: &'a mut mpsc::Receiver<RoutingDecisionRequest>,
 }
 
-pub(crate) enum MutationRequest {
+enum MutationRequest {
     Event(RouterEvent),
     EventWithAck {
         event: RouterEvent,
@@ -236,10 +236,11 @@ impl KvEventSender {
 /// queued before it.
 ///
 /// NOTE: this only orders mutations already in this queue. Routing decisions
-/// (`routing_rx`) are applied after pending mutations, and `deregister` cancels a
-/// listener without waiting for it to exit, so the rest of an in-flight batch can
-/// still land after the removal.
-/// TODO: await listener exit in `deregister`, or fence stale events by worker generation.
+/// (`routing_rx`) are applied after pending mutations (#18519), and
+/// `WorkerRegistry::deregister` cancels a listener without waiting for it to exit,
+/// so the rest of an in-flight batch can still land after the removal (#18518).
+/// TODO(#18518): await listener exit in `WorkerRegistry::deregister`, or fence stale
+/// events by worker generation.
 fn apply_mutation(
     trie: &mut RadixTree,
     approximate_lru_lane: &mut ApproximateLruLane,
@@ -1062,7 +1063,6 @@ impl Drop for KvIndexer {
 #[cfg(test)]
 mod fifo_reset_tests {
     use std::sync::Mutex;
-    use std::sync::atomic::{AtomicBool, Ordering};
 
     use super::*;
     use crate::KvIndexerDelegate;
@@ -1116,17 +1116,15 @@ mod fifo_reset_tests {
 
     /// Parks the indexer thread on its first `on_create` until the test releases it.
     struct Gate {
-        armed: AtomicBool,
         entered: Mutex<Option<oneshot::Sender<()>>>,
         open: Mutex<std::sync::mpsc::Receiver<()>>,
     }
 
     impl KvIndexerDelegate for Gate {
         fn on_create(&self, _: ExternalSequenceBlockHash) {
-            if self.armed.swap(false, Ordering::SeqCst) {
-                if let Some(entered) = self.entered.lock().unwrap().take() {
-                    let _ = entered.send(());
-                }
+            let entered = self.entered.lock().unwrap().take();
+            if let Some(entered) = entered {
+                let _ = entered.send(());
                 let _ = self.open.lock().unwrap().recv();
             }
         }
@@ -1142,7 +1140,6 @@ mod fifo_reset_tests {
         let (entered_tx, entered_rx) = oneshot::channel();
         let (open_tx, open_rx) = std::sync::mpsc::channel();
         let gate = Arc::new(Gate {
-            armed: AtomicBool::new(true),
             entered: Mutex::new(Some(entered_tx)),
             open: Mutex::new(open_rx),
         });
