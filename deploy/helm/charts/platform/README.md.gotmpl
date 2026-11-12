@@ -177,8 +177,10 @@ semantics there, author the full probe; this is an intentional Pod-template upda
 **Existing deployments:** An operator-only upgrade does not change rendered probes. Workloads
 created by operator 1.6.x or earlier keep the field-merged frontend-sidecar probes they run
 today, including timing-only probes that the 1.6.x operator completed from its defaults.
-Installing the CRDs does not rewrite stored probes. The next specification update must satisfy
-the validation rules, so complete any timing-only probe in that update.
+Installing the CRDs does not rewrite stored probes. The rules are CRD validation rules, and
+Kubernetes 1.30 and later ratchet them: an update that leaves a stored timing-only probe
+unchanged is accepted. An update that edits that probe, or re-creation of the resource, must
+supply a complete probe.
 
 #### Operator behavior breaking changes
 
@@ -199,19 +201,6 @@ and Volcano PodGroups created by Dynamo v1.1.x and earlier.
 
 **Existing deployments:** Unmigrated legacy resources remain after
 upgrading, and excess LWS objects can continue consuming cluster resources.
-
-##### Planner Pod access for native sidecar identity
-
-**Change:** Registration-based native sidecar identity requires `list` on `pods` in addition
-to worker metadata access.
-
-**Affected:** Planner service accounts granted before v1.7.0 without Pod list access.
-
-**Action:** Grant Pod-list access to enable registered native names, models, and capabilities.
-
-**Existing deployments:** If an older Planner service account receives HTTP 403 when listing
-Pods, Planner warns and uses existing status/default fallbacks; other API errors still
-propagate. Runtime registration does not affect the desired worker hash or engine configuration.
 
 ##### LPX model paths in every container
 
@@ -267,6 +256,22 @@ so a faulted pipeline does not recover.
 **Affected:** Grove-backed DGDs that explicitly opt into a rollout budget. Existing workloads keep Grove's defaults when the override is absent: `minAvailable` for Coherent and `1` for RollingRecreate. Removing a budget restores the selected strategy's default. Budget-only edits preserve worker hashes and pod templates and do not initiate a workload rollout. LPX reconciles the changed policy while retaining PCS identity and existing pipeline requests.
 
 **Action:** Upgrade Grove and its matching CRDs to `v0.1.0-alpha.15` or later before configuring rollout budgets, including separately managed installations. Set a positive integer, and at least the effective `minAvailable` under Coherent. The budget may exceed the component's desired replicas or its PCS template seed, including for LPX. Keep the budget when scaling below it or to zero; Grove limits disruption to the replicas that remain. Remove the rollout fragment before selecting OnDelete. See the [DGD reference](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/reference/kubernetes-api/dynamo-graph-deployment.mdx#grove-rollout-budget-overrides) for a complete P/D example and scope rules.
+
+##### Planner reads Pods for native sidecar identity
+
+**Change:** Planner resolves the served model name and component identity of native sidecar
+workers from their runtime registration, which requires `list` on `pods` in addition to worker
+metadata access. The chart's Planner Role has granted `pods/list` since v1.5.0.
+
+**Affected:** Planner service accounts managed outside the chart, or from a chart older than
+v1.5.0, that lack Pod list access.
+
+**Action:** Grant `list` on `pods` in the DGD's namespace to enable registered native names,
+models, and capabilities.
+
+**Existing deployments:** If Planner receives HTTP 403 when listing Pods, it warns and uses the
+existing status and default fallbacks; other API errors still propagate. Runtime registration
+does not affect the desired worker hash or engine configuration.
 
 ##### LWS no longer requires Volcano
 
