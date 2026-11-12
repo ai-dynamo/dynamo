@@ -468,6 +468,19 @@ impl ModelWatcher {
         // are process-local, so preserve them when the MDC supplies the base config.
         let router_config =
             effective_router_config(card.router_config.as_ref(), &self.router_config);
+        if card
+            .router_config
+            .as_ref()
+            .is_some_and(|config| config.router_mode == RouterMode::PowerOfTwoChoices)
+        {
+            tracing::warn!(
+                model_name = card.name(),
+                group = %spec.key.id(),
+                "Worker advertises the power-of-two router mode, which was removed in Dynamo v1.7; \
+                 routing this WorkerSet with least-loaded. Restart the workers with another \
+                 --router-mode"
+            );
+        }
 
         let component = self
             .drt
@@ -1549,6 +1562,7 @@ fn effective_router_config<'a>(
     };
 
     let mut effective = worker_config.clone();
+    effective.router_mode = effective.router_mode.effective();
     effective.kv_router_config.router_prefill_policy = frontend_config
         .kv_router_config
         .router_prefill_policy
@@ -3777,6 +3791,19 @@ request_classifier:
         );
         assert!(worker.kv_router_config.router_prefill_policy.is_none());
         assert!(worker.kv_router_config.router_decode_policy.is_none());
+    }
+
+    #[test]
+    fn worker_advertised_power_of_two_routes_least_loaded() {
+        // The `router_config` a v1.5 or v1.6 worker writes into its model card.
+        let mut advertised = serde_json::to_value(RouterConfig::default()).unwrap();
+        advertised["router_mode"] = "power_of_two_choices".into();
+        let worker: RouterConfig = serde_json::from_value(advertised).unwrap();
+        assert_eq!(worker.router_mode, RouterMode::PowerOfTwoChoices);
+
+        let frontend = RouterConfig::default();
+        let effective = effective_router_config(Some(&worker), &frontend);
+        assert_eq!(effective.router_mode, RouterMode::LeastLoaded);
     }
 
     #[tokio::test]

@@ -356,6 +356,17 @@ impl RouterMode {
         *self == RouterMode::Direct
     }
 
+    /// The mode to route with when a model card advertises this one. v1.5 and v1.6 workers can
+    /// still advertise the removed power-of-two mode; least-loaded picks on the same in-flight
+    /// request counts, so their WorkerSets keep serving.
+    // TODO(v1.9): Remove with the `PowerOfTwoChoices` wire value.
+    pub const fn effective(self) -> Self {
+        match self {
+            Self::PowerOfTwoChoices => Self::LeastLoaded,
+            mode => mode,
+        }
+    }
+
     /// Whether this mode admits requests against host-owned occupancy counters.
     pub const fn requires_occupancy(self) -> bool {
         matches!(self, Self::LeastLoaded | Self::DeviceAwareWeighted)
