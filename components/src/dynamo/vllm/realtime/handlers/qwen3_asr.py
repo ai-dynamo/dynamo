@@ -72,6 +72,7 @@ class Qwen3ASRTranscriber:
         committed: list[int] = []
         transcript = ""
         input_tokens = 0
+        prefix_tokens = 0
         ended = False
 
         try:
@@ -110,6 +111,7 @@ class Qwen3ASRTranscriber:
                 if result is None:
                     return
                 generated, input_tokens = result
+                prefix_tokens = len(committed)
                 decoded = received
                 passes += 1
 
@@ -129,18 +131,22 @@ class Qwen3ASRTranscriber:
                             input_audio_transcription_delta_event(turn.item_id, delta)
                         )
 
-            # input_tokens is the last pass's prompt length; output_tokens counts
-            # the final transcript, not tokens regenerated after a rollback.
+            # input_tokens is the last pass's prompt length, whose committed
+            # transcript prefix counts as text; output_tokens counts the final
+            # transcript, not tokens regenerated after a rollback.
             await turn.events.put(
                 input_audio_transcription_completed_event(
                     turn.item_id,
                     transcript,
                     input_tokens=input_tokens,
                     output_tokens=len(committed),
+                    text_tokens=prefix_tokens,
                 )
             )
         except Exception as exc:  # noqa: BLE001 - isolate engine failures per turn
-            logger.exception("realtime transcription failed: %s", exc)
+            logger.exception(
+                "realtime transcription failed for request %s: %s", context.id(), exc
+            )
             await turn.events.put(
                 input_audio_transcription_failed_event(
                     turn.item_id, "Transcription failed"

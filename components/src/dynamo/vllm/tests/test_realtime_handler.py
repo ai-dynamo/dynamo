@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import logging
 from types import SimpleNamespace
 
 import numpy as np
@@ -39,6 +40,9 @@ class _Context:
         self.stopped = False
         self.killed = False
         self._stop_waiters: list[asyncio.Future[bool]] = []
+
+    def id(self) -> str:
+        return "ctx-test"
 
     def is_stopped(self) -> bool:
         return self.stopped
@@ -2080,8 +2084,9 @@ def test_qwen_transcription_decodes_accumulated_audio_as_one_user_turn(monkeypat
 
 def test_qwen_transcription_deltas_only_grow_and_join_to_transcript(monkeypatch):
     _realtime_serving(monkeypatch, _qwen_realtime_cls())
+    engine = _QwenEngine()
     handler = RealtimeTranscriptionHandler.from_engine(
-        engine_client=_QwenEngine(), model_name=MODEL, model_path=MODEL
+        engine_client=engine, model_name=MODEL, model_path=MODEL
     )
 
     events = asyncio.run(asyncio.wait_for(_drive_qwen_turn(handler), timeout=5))
@@ -2099,8 +2104,47 @@ def test_qwen_transcription_deltas_only_grow_and_join_to_transcript(monkeypatch)
     assert events[-1]["type"] == "conversation.item.input_audio_transcription.completed"
     assert events[-1]["transcript"] == expected
     assert "".join(deltas) == expected
-    assert events[-1]["usage"]["output_tokens"] == _QWEN_CLIP_SECONDS * 2
+    usage = events[-1]["usage"]
+    assert usage["output_tokens"] == _QWEN_CLIP_SECONDS * 2
+    # The last prompt's committed transcript prefix is text, not audio.
+    last_prompt = engine.prompts[-1]["prompt_token_ids"]
+    prefix_tokens = len(last_prompt) - len(_QWEN_TEMPLATE)
+    assert prefix_tokens > 0
+    assert usage["input_tokens"] == len(last_prompt)
+    assert usage["input_token_details"] == {
+        "audio_tokens": len(_QWEN_TEMPLATE),
+        "text_tokens": prefix_tokens,
+    }
     assert len({event["item_id"] for event in events if "item_id" in event}) == 1
+
+
+def test_qwen_transcription_failure_logs_request_id(monkeypatch, caplog):
+    _realtime_serving(monkeypatch, _qwen_realtime_cls())
+    engine = _QwenEngine()
+
+    async def fail(**kwargs):
+        raise RuntimeError("engine down")
+        yield
+
+    engine.generate = fail
+    handler = RealtimeTranscriptionHandler.from_engine(
+        engine_client=engine, model_name=MODEL, model_path=MODEL
+    )
+
+    async def request_stream():
+        yield {"type": "session.update", "session": _session()}
+        for event in _seconds_of_pcm(6):
+            yield event
+        yield {"type": "input_audio_buffer.commit"}
+
+    async def drive():
+        return [event async for event in handler.generate(request_stream(), _Context())]
+
+    with caplog.at_level(logging.ERROR):
+        events = asyncio.run(asyncio.wait_for(drive(), timeout=5))
+
+    assert events[-1]["type"] == "conversation.item.input_audio_transcription.failed"
+    assert any("ctx-test" in message for message in caplog.messages)
 
 
 @pytest.mark.parametrize("operation", ["create_chat_completion", "render_chat_request"])
