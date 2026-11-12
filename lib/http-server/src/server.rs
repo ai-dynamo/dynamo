@@ -229,6 +229,12 @@ impl HttpServer {
         })
     }
 
+    /// The TLS acceptor built from this server's configuration, for a caller that serves
+    /// a second listener with the same TLS settings through [`serve`].
+    pub fn tls_acceptor(&self) -> Option<TlsAcceptor> {
+        self.tls.clone()
+    }
+
     /// Serve while admitted response bodies drain before cancelling service state.
     pub async fn serve(
         self,
@@ -275,7 +281,7 @@ fn get_graceful_shutdown_timeout() -> usize {
         .unwrap_or(5)
 }
 
-fn write_idle_timeout() -> Duration {
+pub fn write_idle_timeout() -> Duration {
     std::env::var(env_llm::DYN_HTTP_WRITE_IDLE_TIMEOUT_SECS)
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
@@ -317,7 +323,7 @@ pub fn listen_socket_addr(host: &str, port: u16) -> Result<SocketAddr> {
 /// `tokio::net::TcpListener::bind` listens with a backlog of 128. A few thousand
 /// clients connecting within seconds overflow that, and overflowed connections
 /// are delayed or, depending on host TCP settings, fail.
-fn bind_listener(addr: SocketAddr) -> std::io::Result<tokio::net::TcpListener> {
+pub fn bind_listener(addr: SocketAddr) -> std::io::Result<tokio::net::TcpListener> {
     let socket = if addr.is_ipv4() {
         tokio::net::TcpSocket::new_v4()?
     } else {
