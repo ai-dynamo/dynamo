@@ -12,7 +12,7 @@ cost[w] = prefill_load_scale(t) × max(0, prefill_backlog_blocks[w] + request_bl
         + decode_blocks[w]
         + decode_active_request_weight(t) × active_requests[w]
 
-imbalance(t) = stddev / mean of active_requests across workers, clamped to 0..1, smoothed
+imbalance(t) = sqrt(max(0, variance − mean)) / mean of active_requests across workers, clamped to 0..1, smoothed
 split(t)     = sigmoid(imbalance(t); sigmoid_midpoint, sigmoid_slope)   when engaged, else 0
                the loop engages above enter_threshold, or on a full worker (see slot_capacity)
                at least sigmoid(enter_threshold; ...) while a worker is full (see slot_capacity)
@@ -20,6 +20,8 @@ overlap_score_credit(t)         = baseline × (1 − split(t))
 prefill_load_scale(t)           = baseline × (1 + gain × split(t))
 decode_active_request_weight(t) = baseline × (1 + gain × split(t)) + split(t) × spread_active_request_weight
 ```
+
+Requests placed at random give each worker a count whose variance is about its mean, so `imbalance` subtracts the mean from the variance: a sparse pool (under one request per worker) that is uneven only by chance scores 0, while a spike piled on a few workers still scores high. Under heavy load the measure converges to the plain coefficient of variation.
 
 `request_blocks` and `prefill_backlog_blocks[w]` are token counts divided by the block size, as the default policy computes them, and the whole prefill term is zero for requests that do not track prefill tokens. The loop scales each load weight from its baseline. Scaling alone would keep a baseline `decode_active_request_weight` of 0 (the router default) at 0, and that is the only term that counts in-flight requests (sequence slots) rather than KV blocks, so the loop also adds `split(t) × spread_active_request_weight` to it. At split 0 the term is 0 and the weights equal the baseline.
 

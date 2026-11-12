@@ -3,8 +3,14 @@
 
 //! Dependency-free arithmetic for the adaptive policy. Everything here is a pure function.
 
-/// Coefficient of variation of `loads`, clamped to `0..=1`. Returns 0 for fewer than two
-/// workers or when all loads are zero, so an idle or single-worker pool never looks skewed.
+/// Skew of the in-flight request counts beyond what random placement produces, clamped to
+/// `0..=1`: `sqrt(max(0, variance - mean)) / mean`.
+///
+/// Requests placed at random give each worker a count whose variance is about its mean, so the
+/// plain coefficient of variation of a sparse pool is high by chance alone (one request on each
+/// of three workers and none on five scores 1.0). Subtracting that expected variance leaves the
+/// skew a router actually created; under heavy load the two measures converge.
+/// Returns 0 for fewer than two workers or when all loads are zero.
 pub fn imbalance(loads: &[f64]) -> f64 {
     if loads.len() < 2 {
         return 0.0;
@@ -15,7 +21,7 @@ pub fn imbalance(loads: &[f64]) -> f64 {
         return 0.0;
     }
     let var = loads.iter().map(|x| (x - mean) * (x - mean)).sum::<f64>() / n;
-    (var.sqrt() / mean).clamp(0.0, 1.0)
+    ((var - mean).max(0.0).sqrt() / mean).clamp(0.0, 1.0)
 }
 
 /// Exponential moving average: `alpha` is the weight of the previous value.
@@ -101,11 +107,28 @@ mod tests {
 
     #[test]
     fn imbalance_matches_the_design_example() {
-        // [30, 4, 2, 5]: mean 10.25, population stddev ≈ 11.45, ratio ≈ 1.12, clamped to 1.
+        // [30, 4, 2, 5]: mean 10.25, variance ≈ 131.2; sqrt(131.2 - 10.25) / 10.25 ≈ 1.07, clamped to 1.
         assert_eq!(imbalance(&[30.0, 4.0, 2.0, 5.0]), 1.0);
-        // mild skew stays well below 1
+        // [12, 4, 3, 5]: mean 6, variance 12.5; sqrt(6.5) / 6 ≈ 0.42, below the default enter threshold.
         let mild = imbalance(&[12.0, 4.0, 3.0, 5.0]);
-        assert!(mild > 0.5 && mild < 0.7, "got {mild}");
+        assert!((mild - 0.425).abs() < 0.01, "got {mild}");
+    }
+
+    #[test]
+    fn sparse_load_spread_by_chance_is_not_imbalance() {
+        // Under one request per worker: the plain coefficient of variation of these is 1.0 and 0.62.
+        assert_eq!(imbalance(&[1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0]), 0.0);
+        assert_eq!(imbalance(&[3.0, 2.0, 2.0, 1.0, 1.0, 1.0, 1.0, 0.0]), 0.0);
+    }
+
+    #[test]
+    fn a_spike_piled_on_a_few_workers_is_still_imbalance() {
+        // Recorded under default routing at the spike (requests in flight per worker).
+        let piled = imbalance(&[39.0, 38.0, 33.0, 23.0, 19.0, 1.0, 1.0, 0.0]);
+        assert!(piled > 0.6, "got {piled}");
+        // The same total spread over every worker is not.
+        let spread = imbalance(&[20.0, 20.0, 19.0, 19.0, 19.0, 19.0, 19.0, 19.0]);
+        assert!(spread < 0.1, "got {spread}");
     }
 
     #[test]

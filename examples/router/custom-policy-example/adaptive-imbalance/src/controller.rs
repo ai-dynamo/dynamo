@@ -176,6 +176,20 @@ mod tests {
     }
 
     #[test]
+    fn sparse_load_spread_by_chance_never_engages() {
+        // Background traffic at under one request per worker: the counts look skewed only by chance.
+        let mut c = Controller::new(&params(), baseline());
+        for i in 0..40 {
+            let sample: &[f64] = if i % 2 == 0 {
+                &[1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+            } else {
+                &[3.0, 2.0, 2.0, 1.0, 1.0, 1.0, 1.0, 0.0]
+            };
+            assert!(tick_fresh(&mut c, sample).is_none(), "engaged on tick {i}");
+        }
+    }
+
+    #[test]
     fn even_load_never_engages_or_publishes() {
         let mut c = Controller::new(&params(), baseline());
         for _ in 0..20 {
