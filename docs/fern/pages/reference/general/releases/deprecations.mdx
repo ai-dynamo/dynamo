@@ -45,7 +45,7 @@ Upgrading? Pick the version you run today to see the dependency migration and th
 
   > **Migrate:** Update launch commands, imports, dashboards, alerts, and saved JSON together. Mixed-version KV state agents and routers are not validated, so upgrade them together. Regenerate version-3 `dc_ckf_consumer_bench` corpora as version 4 before loading them.
 
-<span className="dynref-badge dynref-badge--blue">Behavioral</span> **A frontend on the `quic` or `velo` response plane waits at most 30 seconds for a worker to open its response stream**. The request then fails with a response timeout and the worker is inhibited for `DYN_RUNTIME_INHIBITED_DURATION_SECS`. A `quic` frontend on v1.6 waited without bound. The `tcp` response plane is unchanged.
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **A frontend on the `quic` or `velo` response plane waits at most 30 seconds for a worker to open its response stream** ([#18655](https://github.com/ai-dynamo/dynamo/pull/18655)). The request then fails with a response timeout and the worker is inhibited for `DYN_RUNTIME_INHIBITED_DURATION_SECS`. A `quic` frontend on v1.6 waited without bound. The `tcp` response plane is unchanged.
 
   > **Migrate:** If a backend admission queue can hold a request for longer than 30 seconds before the worker starts it, raise `DYN_RESPONSE_STREAM_ESTABLISH_TIMEOUT_SECS` on the frontend, or set it to `0` to disable the bound.
 
