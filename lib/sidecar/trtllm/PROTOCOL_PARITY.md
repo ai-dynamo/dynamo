@@ -102,6 +102,19 @@ error details are preferred. OpenEngine v1 does not expose structured overflow
 fields, so the frontend also recognizes the current TensorRT-LLM bounded-input
 error messages; unrelated invalid arguments are not classified as overflow.
 
+## GLM incomplete output and reasoning boundaries
+
+The default unified/V2 parser and the legacy/V1 GLM adapter report an incomplete
+tool call at backend `stop`/`tool_calls`, or an unterminated stream, as a
+`BackendProtocol` failure. Streaming APIs terminate with an error; unary
+aggregation fails. They do not relabel this condition as `length`/`max_tokens`,
+return a successful `end_turn`, or expose the incomplete call for execution.
+A genuine backend `length` retains its token-limit semantics.
+
+The legacy `glm45` reasoning adapter retains a one-character marker prefix so
+`</think>` split after `<` is recognized. Literal trailing `<` bytes flush at
+stream end. Default GLM routing remains unified/V2 unless V1 is selected explicitly.
+
 ## GLM instruction and reasoning controls
 
 For the GLM parser profile (`glm47` tool parsing or `glm45` reasoning parsing),

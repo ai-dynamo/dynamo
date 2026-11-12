@@ -35,6 +35,7 @@ use dynamo_runtime::config::{
     env_is_falsey, environment_names::llm as env_llm, is_truthy, parse_bool_opt,
 };
 use dynamo_runtime::error::{DynamoError, ErrorType, PublicDetails};
+use dynamo_runtime::protocols::maybe_error::MaybeError;
 use dynamo_runtime::telemetry::{LIFECYCLE_TRACE_CONTEXT_KEY, LifecycleStage, LifecycleTrace};
 use either::Either;
 use futures::Stream;
@@ -6160,7 +6161,9 @@ impl OpenAIPreprocessor {
         // chunk (see `finalize_parser_at_finish`), so its usage is held too.
         let stream: Pin<Box<dyn Stream<Item = _> + Send>> = if defer_reasoning_for_nonempty_content
             || should_strip_disabled_reasoning_start
-            || (should_parse_reasoning && Self::is_minimax_m3_reasoning_parser(reasoning_parser))
+            || (should_parse_reasoning
+                && (reasoning_parser == Some("glm45")
+                    || Self::is_minimax_m3_reasoning_parser(reasoning_parser)))
         {
             Box::pin(Self::hold_usage_until_stream_end(stream))
         } else {
@@ -7020,6 +7023,7 @@ impl OpenAIPreprocessor {
         };
         let pending_out = Arc::clone(&pending);
         let pending_eof = Arc::clone(&pending);
+        let parser_error = Arc::clone(&terminal_error);
         let jailed_output = jailed.flat_map(move |mut a| {
             debug_assert!(
                 a.error.is_none(),
@@ -7080,34 +7084,26 @@ impl OpenAIPreprocessor {
                     let state = recovery.entry(choice.index).or_default();
                     if let Some(marker_start) = crate::protocols::openai::chat_completions::unified_parser::unquoted_native_tool_call_marker_or_prefix_start(&state.input_text, "glm47") {
                         let desired_content = &state.input_text[..marker_start];
-                        // An EOS inside a tool call is incomplete even if the engine reports stop.
-                        let dropped_call_reported_as_length = choice.finish_reason
-                            == Some(dynamo_protocols::types::FinishReason::Stop)
-                            && choice.delta.tool_calls.is_none()
-                            && crate::protocols::openai::chat_completions::unified_parser::first_unquoted_native_tool_call_marker(&state.input_text, "glm47").is_some();
-                        if dropped_call_reported_as_length {
-                            tracing::warn!(
-                                choice_index = choice.index,
-                                why = "dropped_native_tool_call_reported_as_length",
-                                dropped_bytes = state.input_text.len() - desired_content.len(),
-                                "glm47 streaming: reporting length instead of stop for a tool call dropped at end of stream"
-                            );
-                            choice.finish_reason =
-                                Some(dynamo_protocols::types::FinishReason::Length);
-                        }
-                        if choice.finish_reason
-                            == Some(dynamo_protocols::types::FinishReason::Length)
+                        if matches!(choice.finish_reason, Some(
+                            dynamo_protocols::types::FinishReason::Stop
+                            | dynamo_protocols::types::FinishReason::ToolCalls
+                        )) && choice.delta.tool_calls.is_none()
                             && crate::protocols::openai::chat_completions::unified_parser::first_unquoted_native_tool_call_marker(&state.input_text, "glm47").is_some()
                         {
-                            // Count EOS drops separately from max_tokens truncation.
-                            if !dropped_call_reported_as_length {
-                                tracing::warn!(
-                                    choice_index = choice.index,
-                                    why = "truncated_native_tool_call_suppressed",
-                                    suppressed_bytes = state.input_text.len() - desired_content.len(),
-                                    "glm47 streaming: suppressing incomplete native tool output on length finish"
-                                );
-                            }
+                            parser_error.lock().expect("jail terminal error poisoned").get_or_insert_with(||
+                                Annotated::from_err(crate::protocols::openai::chat_completions::unified_parser::incomplete_tool_call_error())
+                            );
+                            return futures::stream::iter(std::iter::once(nv_chunk));
+                        }
+                        if choice.finish_reason == Some(dynamo_protocols::types::FinishReason::Length)
+                            && crate::protocols::openai::chat_completions::unified_parser::first_unquoted_native_tool_call_marker(&state.input_text, "glm47").is_some()
+                        {
+                            tracing::warn!(
+                                choice_index = choice.index,
+                                why = "truncated_native_tool_call_suppressed",
+                                suppressed_bytes = state.input_text.len() - desired_content.len(),
+                                "glm47 streaming: suppressing incomplete native tool output on length finish"
+                            );
                             let replacement = desired_content
                                 .strip_prefix(&state.emitted_text)
                                 .unwrap_or_default();
@@ -7883,8 +7879,8 @@ impl OpenAIPreprocessor {
     {
         // Parsers and bypass decisions are created lazily per `choice.index`
         // inside the unfold loop, so `n > 1` choices never share state.
-        let finalize_parser_at_finish =
-            Self::is_minimax_m3_reasoning_parser(Some(parser_name.as_str()));
+        let finalize_parser_at_finish = parser_name == "glm45"
+            || Self::is_minimax_m3_reasoning_parser(Some(parser_name.as_str()));
         let state = ReasoningState {
             stream: Box::pin(stream),
             parser_name,
@@ -7929,11 +7925,22 @@ impl OpenAIPreprocessor {
                     response.map_data(|mut data| {
                         for choice in data.inner.choices.iter_mut() {
                             let choice_state = choices.entry(choice.index).or_insert_with(|| {
-                                let mut parser =
+                                let mut parser: Box<dyn ReasoningParser> = if parser_name == "glm45"
+                                {
+                                    Box::new(
+                                        dynamo_parsers::reasoning::BasicReasoningParser::new(
+                                            "<think>".into(),
+                                            "</think>".into(),
+                                            false,
+                                            true,
+                                        )
+                                        .with_single_char_marker_buffering(),
+                                    )
+                                } else {
                                     Box::new(ReasoningParserType::get_reasoning_parser_from_name(
                                         parser_name,
                                     ))
-                                        as Box<dyn ReasoningParser>;
+                                };
                                 if prompt_injected_reasoning {
                                     parser.set_in_reasoning(true);
                                 }
@@ -13111,7 +13118,7 @@ responses_tools: None,
     }
 
     #[tokio::test]
-    async fn glm47_streaming_stop_after_bare_tool_call_marker_reports_length() {
+    async fn glm47_streaming_stop_after_bare_tool_call_marker_reports_error() {
         let output = apply_glm47_streaming_with_terminal(
             &["I'll check. ", "<tool_call>"],
             FinishReason::Stop,
@@ -13119,13 +13126,18 @@ responses_tools: None,
         .await;
 
         assert_eq!(stream_content(&output), "I'll check. ");
-        assert!(has_finish_reason(&output, FinishReason::Length));
+        let error = output.last().unwrap().error.as_ref().unwrap();
+        assert_eq!(
+            error.class(),
+            dynamo_runtime::error::ErrorClass::BackendProtocol
+        );
+        assert!(!has_finish_reason(&output, FinishReason::Length));
         assert!(!has_finish_reason(&output, FinishReason::Stop));
         assert_eq!(emitted_tool_call_count(&output), 0);
     }
 
     #[tokio::test]
-    async fn glm47_streaming_stop_after_partial_function_name_reports_length() {
+    async fn glm47_streaming_stop_after_partial_function_name_reports_error() {
         let output = apply_glm47_streaming_with_terminal(
             &["I'll check. <tool_call>ipy"],
             FinishReason::Stop,
@@ -13133,12 +13145,17 @@ responses_tools: None,
         .await;
 
         assert_eq!(stream_content(&output), "I'll check. ");
-        assert!(has_finish_reason(&output, FinishReason::Length));
+        let error = output.last().unwrap().error.as_ref().unwrap();
+        assert_eq!(
+            error.class(),
+            dynamo_runtime::error::ErrorClass::BackendProtocol
+        );
+        assert!(!has_finish_reason(&output, FinishReason::Length));
         assert!(!has_finish_reason(&output, FinishReason::Stop));
     }
 
     #[tokio::test]
-    async fn glm47_streaming_stop_after_partial_arguments_reports_length_without_markup() {
+    async fn glm47_streaming_stop_after_partial_arguments_reports_error_without_markup() {
         let output = apply_glm47_streaming_with_terminal(
             &["<tool_call>get_weather<arg_key>city</arg_key><arg_value>Par"],
             FinishReason::Stop,
@@ -13146,7 +13163,12 @@ responses_tools: None,
         .await;
 
         assert!(stream_content(&output).is_empty());
-        assert!(has_finish_reason(&output, FinishReason::Length));
+        let error = output.last().unwrap().error.as_ref().unwrap();
+        assert_eq!(
+            error.class(),
+            dynamo_runtime::error::ErrorClass::BackendProtocol
+        );
+        assert!(!has_finish_reason(&output, FinishReason::Length));
         assert!(!has_finish_reason(&output, FinishReason::Stop));
         assert_eq!(emitted_tool_call_count(&output), 0);
     }

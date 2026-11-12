@@ -267,6 +267,38 @@ async fn streaming_graceful_stop_drains_tail_and_kill_terminates() {
             );
             svc.shutdown().await;
         }
+        let prefix = load_agent_fixture("text.sse")
+            .await
+            .unwrap()
+            .into_iter()
+            .take(2)
+            .collect();
+        let error = dynamo_runtime::error::DynamoError::builder()
+            .class(dynamo_runtime::error::ErrorClass::BackendProtocol)
+            .message("The model ended with an incomplete tool call.")
+            .public_message("The model ended with an incomplete tool call.")
+            .build();
+        let svc = HarnessService::start_with_backend_error(prefix, error).await;
+        let response = post_messages(
+            &svc,
+            &json!({
+                "model": MODEL, "max_tokens": 64, "stream": true,
+                "messages": [{"role": "user", "content": "ping"}]
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let raw = tokio::time::timeout(Duration::from_secs(2), response.text())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(raw.matches("event: error\n").count(), 1);
+        assert!(!raw.contains("event: message_delta\n"));
+        assert!(!raw.contains("event: message_stop\n"));
+        assert!(raw.contains("incomplete tool call"));
+        assert!(!raw.contains("\"type\":\"tool_use\""));
+        assert_eq!(svc.metrics.get_inflight_count(MODEL), 0);
+        svc.shutdown().await;
     })
     .await;
 }
