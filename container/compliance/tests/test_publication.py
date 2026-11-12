@@ -558,6 +558,27 @@ def test_test_image_callers_supply_all_named_source_contexts():
     assert set(callers) == {"shared-build-image.yml", "xpu-ci.yaml"}
 
 
+def test_cpu_setup_consumes_baked_compliance_fixtures_without_overwriting_them():
+    root = Path(__file__).resolve().parents[3]
+    workflow = yaml.safe_load((root / ".github/workflows/shared-test.yml").read_text())
+    fixtures = (
+        ".github/workflows/shared-compliance-audit.yml",
+        "container/templates/compliance.Dockerfile",
+    )
+    for job in workflow["jobs"].values():
+        for step in job.get("steps", []):
+            script = step.get("run", "")
+            # ARC uid 1001 can read the image's uid-1000-owned fixture files,
+            # but the old setup overlay cannot overwrite them. Use the exact
+            # fixture versions already packaged with the test image.
+            writes_fixtures = (
+                "cp " in script
+                and "${CONTAINER_WORKSPACE}" in script
+                and any(path in script for path in fixtures)
+            )
+            assert not writes_fixtures, step.get("name")
+
+
 @pytest.mark.parametrize("workflow_name", ["pr.yaml", "post-merge-ci.yml"])
 @pytest.mark.parametrize("audit_result", ["success", "failure", "cancelled", "skipped"])
 def test_successful_build_cannot_copy_after_unsuccessful_audit(
