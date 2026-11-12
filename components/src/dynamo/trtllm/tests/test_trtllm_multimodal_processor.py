@@ -260,9 +260,11 @@ def image_video_processor(monkeypatch):
     PIL image and whose input processor asks for ``video_format`` video (None:
     no preference).
 
-    The test media URLs are link-local. The processor reads the URL policy when
-    it is built, so internal URLs are allowed before any processor is built."""
+    The test media URLs are link-local ``http://`` URLs. The processor reads the
+    URL policy when it is built, so remote and internal URLs are allowed before
+    any processor is built."""
     monkeypatch.setenv("DYN_MM_ALLOW_INTERNAL", "1")
+    monkeypatch.setenv("DYN_MM_ALLOW_REMOTE_URLS", "1")
 
     def make(video_format: str | None, model_type: str = "multimodal"):
         processor = MultimodalRequestProcessor(
