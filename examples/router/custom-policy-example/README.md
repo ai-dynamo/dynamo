@@ -7,26 +7,6 @@ SPDX-License-Identifier: Apache-2.0
 
 Use this example as the build guide for a custom Rust worker-selection policy. It covers the full path from `WorkerFilter`, `WorkerScorer`, and `WorkerPicker` implementations to a linked Python frontend or standalone Endpoint Picker Provider (EPP).
 
-## Optional Aggregated Decoder Progress
-
-An explicitly enabled aggregated frontend can expose current-attempt token
-observations to a picker declaring `WorkerInputs::DECODE_PROGRESS` through
-`context.decode_progress()`. Collection is controlled by
-`DYN_ROUTER_DECODE_PROGRESS=1` together with native `router_track_output_blocks: true`,
-independently of TRACE logging. Progress stays with existing slot-tracker request
-owners and reaches the picker through its derived read model. Absence and stale
-data require a policy fallback; remaining token budget does not predict GPU finish
-time. Unsupported multi-choice, disaggregated, unknown-limit, or early-stop requests
-are not collected.
-
-The [progress-group YAML](https://github.com/ai-dynamo/dynamo/blob/main/examples/router/progress-group.yaml)
-demonstrates this input in the shipped two-tier picker with an explicitly supplied
-two-worker calibration profile. Its thresholds are experimental and do not claim
-safe behavior for arbitrary loads. Omit `progress_group` and leave collection off
-to retain the original two-tier path. See the
-[custom-policy contract](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/router/custom-worker-selection.mdx)
-for lifetime, cost, and missing-data semantics.
-
 ## What You Are Building
 
 ```text
@@ -45,6 +25,32 @@ Declare `WorkerInputs::CACHE` to read cache data through `candidate.cache()` (fi
 Preferred routing taints are optional candidate metadata. A filter, scorer, or picker must request `WorkerInputs::PREFERRED_TAINT` before reading `preferred_taint_multiplier()` from a candidate; otherwise, that component receives `None`, even if another component requested it. Exact hard-pinned requests also do not materialize it. Required routing taints remain Dynamo eligibility rules.
 
 Declare `plugins::worker_selection::experimental::resident_blocks::RESIDENT_BLOCKS` together with `WorkerInputs::CACHE`, and import that module's `ResidentBlocks` trait to read `resident_blocks()` from a candidate, or `ResidentBlocksByRow` to read `input.resident_blocks(row)` in a picker. It returns how many blocks the router's indexer holds for that worker rank, including cached blocks no running request uses, as of the last event the indexer applied. Without the declaration, with a remote indexer, or for a rank the indexer has held no blocks for or has removed, it returns `None`; a cleared rank returns `0`. The `experimental` module has no compatibility guarantee.
+
+### Read Experimental Decode Progress
+
+A picker declaring `DECODE_PROGRESS` can query a candidate only when it needs that
+signal. Collection starts from the declaration; no output-block tracking flag or
+environment variable is required. Import the extension alongside the plugin API:
+
+```rust
+use dynamo_kv_router::plugins::prelude::WorkerInputView;
+use dynamo_kv_router::plugins::worker_selection::experimental::decode_progress::{
+    DECODE_PROGRESS, DecodeProgressByRow,
+};
+use std::time::Duration;
+
+// Return DECODE_PROGRESS from the picker's required_worker_inputs().
+fn remaining_budget(input: WorkerInputView<'_>, row: usize, max_age: Duration) -> Option<usize> {
+    let progress = input.decode_progress(row)?;
+    (progress.observed_age()? <= max_age).then_some(progress.remaining_token_budget())
+}
+```
+
+`None` requires a fallback. This frontend-local signal covers supported aggregated,
+single-choice, explicit-limit, ignore-EOS streams only, and is unavailable while
+any active request on the rank lacks valid observations. A remaining budget is a
+token bound, not a time estimate. See the [API guide](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/router/custom-worker-selection.mdx#experimental-decode-progress)
+for lifetime, collection cost, and missing-data behavior.
 
 ## Pick a Starting Point
 
@@ -385,10 +391,6 @@ python3 -m dynamo.mocker \
 ```
 
 Send the same `curl` request from a fourth terminal. The frontend log records separate prefill and decode selections. Each worker set runs its own filter, scorer, and picker.
-
-## Measured hotspot experiment
-
-See [the matched-input result and CPU statistics replay](hotspot-progress-benchmark.md) for the fixed native-tracker comparison, retained group data and scope limits.
 
 ## Runtime Parameters
 

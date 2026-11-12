@@ -3252,7 +3252,6 @@ dependencies = [
  "criterion",
  "dynamo-kv-router",
  "dynamo-scheduler",
- "dynamo-slot-tracker",
  "fastrand",
  "parking_lot",
  "rustc-hash 2.1.2",

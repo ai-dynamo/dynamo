@@ -11,7 +11,6 @@
 
 mod default;
 pub mod kv_fetch;
-mod progress_group;
 pub mod router_modes;
 mod sticky_min_load;
 mod thunderagent;

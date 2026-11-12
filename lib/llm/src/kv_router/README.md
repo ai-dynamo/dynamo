@@ -154,6 +154,7 @@ errors, which return to the client.
 | Excluded workers, parked classifier lifecycle | `PreprocessedRequest::migration_state` |
 | Staged KV that only this decode can release | `PreprocessedRequest::staged_kv_cleanup` |
 | Query-only selection (KV plane) | annotation `query_instance_id` in `PreprocessedRequest::annotations` |
+| Decode progress (experimental picker input) | Original streamed-output observations in this frontend's native bookings; enabled by the policy's `DECODE_PROGRESS` declaration, independent of output-block accounting. The standalone EPP has no producer and supplies none. |
 
 The token-only Runtime EPP selection API has no output options and retains its existing cache
 behavior. Worker sampling options are unaffected by this conservative accounting rule.

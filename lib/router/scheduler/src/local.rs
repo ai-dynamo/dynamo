@@ -901,10 +901,8 @@ where
         num_blocks: usize,
         decay_fraction: Option<f64>,
     ) -> Result<(), KvSchedulerError> {
-        self.queue.ensure_running()?;
-        self.add_output_blocks_if_booking_sync(booking, num_blocks, decay_fraction)
-            .map(|_| ())
-            .map_err(|error| KvSchedulerError::BookingFailed(error.to_string()))
+        self.update_output_if_booking(booking, num_blocks, decay_fraction, None)
+            .await
     }
 
     /// Apply output updates directly without checking queue shutdown.

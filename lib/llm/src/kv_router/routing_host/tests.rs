@@ -1912,144 +1912,157 @@ async fn stream_failure_releases_booking_before_error_is_observable() {
 
 #[tokio::test]
 #[serial_test::serial]
-async fn native_decode_progress_real_booking_stream_projection_and_picker() {
+async fn native_decode_progress_collection_follows_picker_declaration() {
     use dynamo_kv_router::plugins::prelude::{
         WorkerInputView, WorkerInputs, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicy,
     };
+    use dynamo_kv_router::plugins::worker_selection::experimental::decode_progress::{
+        DECODE_PROGRESS, DecodeProgressByRow,
+    };
     use dynamo_worker_selection::host::WorkerSelectionPolicyError;
-    struct Probe(Arc<Mutex<Option<(usize, usize)>>>);
+
+    struct Probe {
+        declare: bool,
+        seen: Arc<Mutex<Option<(usize, usize)>>>,
+    }
     impl WorkerPicker for Probe {
         fn required_worker_inputs(&self) -> WorkerInputs {
-            WorkerInputs::DECODE_PROGRESS
+            if self.declare {
+                DECODE_PROGRESS
+            } else {
+                WorkerInputs::NONE
+            }
         }
         fn pick(
             &self,
-            context: &WorkerSelectionContext<'_>,
-            _: WorkerInputView<'_>,
+            _context: &WorkerSelectionContext<'_>,
+            input: WorkerInputView<'_>,
         ) -> Result<usize, WorkerSelectionPolicyError> {
-            *self.0.lock().unwrap() = context
-                .decode_progress()
-                .and_then(|view| view.entries().first())
-                .map(|entry| (entry.observed_requests(), entry.remaining_token_budget()));
+            *self.seen.lock().unwrap() = input.decode_progress(0).map(|progress| {
+                (
+                    progress.observed_requests(),
+                    progress.remaining_token_budget(),
+                )
+            });
             Ok(0)
         }
     }
-    let seen = Arc::new(Mutex::new(None));
-    let capture = Arc::clone(&seen);
-    let config = KvRouterConfig {
-        skip_initial_worker_wait: true,
-        use_kv_events: false,
-        router_track_active_blocks: true,
-        router_track_output_blocks: true,
-        ..Default::default()
-    };
-    let (router, runtime) = router_with_config_classifier_and_policy(
-        None,
-        HashMap::from([(7, ModelRuntimeConfig::default())]),
-        config,
-        None::<RecordingClassifier>,
-        SelectionPolicySource::Factory(Arc::new(move |config, role, _| {
-            WorkerSelectionPolicy::new(
-                config.clone(),
-                role.as_str(),
-                Vec::new(),
-                Box::new(Probe(Arc::clone(&capture))),
+
+    for declare in [false, true] {
+        let seen = Arc::new(Mutex::new(None));
+        let capture = Arc::clone(&seen);
+        let config = KvRouterConfig {
+            skip_initial_worker_wait: true,
+            use_kv_events: false,
+            router_track_active_blocks: true,
+            router_track_output_blocks: false,
+            ..Default::default()
+        };
+        let (router, runtime) = router_with_config_classifier_and_policy(
+            None,
+            HashMap::from([(7, ModelRuntimeConfig::default())]),
+            config,
+            None::<RecordingClassifier>,
+            SelectionPolicySource::Factory(Arc::new(move |config, role, _| {
+                WorkerSelectionPolicy::new(
+                    config.clone(),
+                    role.as_str(),
+                    Vec::new(),
+                    Box::new(Probe {
+                        declare,
+                        seen: Arc::clone(&capture),
+                    }),
+                )
+            })),
+        )
+        .await;
+        let mut input = request();
+        input.token_ids = vec![1; 15].into();
+        input.stop_conditions.max_tokens = Some(128);
+        input.stop_conditions.ignore_eos = Some(true);
+        let input = Context::new(input);
+        let (mut selection, _) = router
+            .select_with_affinity(
+                &input,
+                RequestPhase::Aggregated,
+                false,
+                &CleanupBudget::default(),
             )
-        })),
-    )
-    .await;
-    let mut input = request();
-    input.token_ids = vec![1; 15].into();
-    input.stop_conditions.max_tokens = Some(128);
-    input.stop_conditions.ignore_eos = Some(true);
-    let input = Context::new(input);
-    let (mut selection, _) = router
-        .select_with_affinity(
+            .await
+            .unwrap();
+        let mut guard = track_selection(
+            &router,
             &input,
+            &mut selection,
             RequestPhase::Aggregated,
-            false,
             &CleanupBudget::default(),
         )
         .await
         .unwrap();
-    let mut guard = track_selection(
-        &router,
-        &input,
-        &mut selection,
-        RequestPhase::Aggregated,
-        &CleanupBudget::default(),
-    )
-    .await
-    .unwrap();
-    // Bypass only the process-wide env switch; retain real booking, producer and read paths.
-    guard.enable_decode_progress_for_test(&input);
-    guard
-        .on_item(&Annotated::from_data(LLMEngineOutput {
-            token_ids: vec![10],
-            ..Default::default()
-        }))
-        .await;
-    router
-        .kv_router()
-        .find_best_match_details_with_policy_class(
-            None,
-            &[1],
-            None,
-            None,
-            false,
-            false,
-            None,
-            None,
-            0.0,
-            0,
-            None,
-            None,
-            None,
-            None,
-            None,
-            RoutingConstraints::default(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(*seen.lock().unwrap(), Some((1, 127)));
-    guard
-        .on_item(&Annotated::from_data(LLMEngineOutput {
-            finish_reason: Some(FinishReason::Length),
-            ..Default::default()
-        }))
-        .await;
-    router
-        .kv_router()
-        .find_best_match_details_with_policy_class(
-            None,
-            &[1],
-            None,
-            None,
-            false,
-            false,
-            None,
-            None,
-            0.0,
-            0,
-            None,
-            None,
-            None,
-            None,
-            None,
-            RoutingConstraints::default(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(*seen.lock().unwrap(), None);
-    guard.complete().await;
-    let loads = router
-        .kv_router()
-        .get_potential_loads(&[], None, None, None, None)
-        .await
-        .unwrap();
-    assert_eq!(loads[0].active_requests, 0);
-    drop(router);
-    runtime.shutdown();
+        let initial_loads = router
+            .kv_router()
+            .get_potential_loads(&[], None, None, None, None)
+            .await
+            .unwrap();
+        let initial_blocks = initial_loads[0].potential_decode_blocks;
+        for (output, expected) in [
+            (
+                LLMEngineOutput {
+                    token_ids: vec![10; 8],
+                    ..Default::default()
+                },
+                declare.then_some((1, 120)),
+            ),
+            (
+                LLMEngineOutput {
+                    finish_reason: Some(FinishReason::Length),
+                    ..Default::default()
+                },
+                None,
+            ),
+        ] {
+            guard.on_item(&Annotated::from_data(output)).await;
+            router
+                .kv_router()
+                .find_best_match_details_with_policy_class(
+                    None,
+                    &[1],
+                    None,
+                    None,
+                    false,
+                    false,
+                    None,
+                    None,
+                    0.0,
+                    0,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    RoutingConstraints::default(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(*seen.lock().unwrap(), expected);
+            let loads = router
+                .kv_router()
+                .get_potential_loads(&[], None, None, None, None)
+                .await
+                .unwrap();
+            assert_eq!(loads[0].active_requests, 1);
+            assert_eq!(loads[0].potential_decode_blocks, initial_blocks);
+        }
+        guard.complete().await;
+        let loads = router
+            .kv_router()
+            .get_potential_loads(&[], None, None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(loads[0].active_requests, 0);
+        drop(router);
+        runtime.shutdown();
+    }
 }
 
 #[tokio::test]

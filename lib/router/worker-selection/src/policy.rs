@@ -177,9 +177,11 @@ impl WorkerSelectionPolicy {
             .into_iter()
             .map(|filter| {
                 (
-                    filter
-                        .required_worker_inputs()
-                        .without(WorkerInputs::KV_COPY | WorkerInputs::ACTIVE_REQUESTS),
+                    filter.required_worker_inputs().without(
+                        WorkerInputs::KV_COPY
+                            | WorkerInputs::ACTIVE_REQUESTS
+                            | WorkerInputs::DECODE_PROGRESS,
+                    ),
                     filter,
                 )
             })
@@ -190,7 +192,7 @@ impl WorkerSelectionPolicy {
                 (
                     scorer
                         .required_worker_inputs()
-                        .without(WorkerInputs::ACTIVE_REQUESTS),
+                        .without(WorkerInputs::ACTIVE_REQUESTS | WorkerInputs::DECODE_PROGRESS),
                     scorer,
                 )
             })
@@ -362,19 +364,6 @@ impl WorkerSelectionPolicy {
         prepared: Option<PreparedRows>,
         trace: Option<SelectionTraceSpec>,
     ) -> Result<RowPick, SelectionFailure> {
-        self.select_rows_with_decode_progress(context, source, prepared, trace, None)
-    }
-
-    /// Select with current native progress supplied by the owning kernel. Only an opted-in
-    /// picker receives the snapshot, after filtering and scoring; prepared rows retain none.
-    pub fn select_rows_with_decode_progress<S: CandidateRowSource>(
-        &self,
-        context: &WorkerSelectionContext<'_>,
-        source: &S,
-        prepared: Option<PreparedRows>,
-        trace: Option<SelectionTraceSpec>,
-        progress: Option<&dynamo_slot_tracker::host::DecodeProgressProvider<'_>>,
-    ) -> Result<RowPick, SelectionFailure> {
         // With the reference policy compiled out the match has one arm; clippy then asks for a
         // `let`, which would not compile with it in.
         #[cfg_attr(
@@ -408,7 +397,7 @@ impl WorkerSelectionPolicy {
             source,
             self.worker_label,
             has_eligible_worker,
-            PickerCapture { trace, progress },
+            trace,
         )
     }
 
@@ -698,9 +687,8 @@ impl ComposedPolicyState {
         source: &S,
         worker_label: &'static str,
         has_eligible_worker: bool,
-        capture: PickerCapture<'_>,
+        trace: Option<SelectionTraceSpec>,
     ) -> Result<RowPick, SelectionFailure> {
-        let PickerCapture { trace, progress } = capture;
         let Self {
             picker,
             picker_inputs,
@@ -751,20 +739,13 @@ impl ComposedPolicyState {
                 .then_some(cache_snapshot.resident_blocks)
                 .flatten(),
         );
-        let decode_progress = picker_inputs
-            .contains(WorkerInputs::DECODE_PROGRESS)
-            .then(|| {
-                dynamo_slot_tracker::host::DecodeProgressSnapshot::capture(
-                    candidates.iter().map(|row| row.worker()),
-                    progress,
-                )
-            })
-            .flatten();
-        let picker_context = WorkerSelectionContext {
-            decode_progress: decode_progress.as_ref(),
-            ..*context
-        };
-        let row = picker.pick(&picker_context, picker_input)?;
+        let picker_input = picker_input.with_decode_progress(
+            picker_inputs
+                .contains(WorkerInputs::DECODE_PROGRESS)
+                .then_some(context.decode_progress)
+                .flatten(),
+        );
+        let row = picker.pick(context, picker_input)?;
         let Some(candidate) = candidates.get(row) else {
             return Err(WorkerSelectionPolicyError::InvalidPickerRow {
                 row,
@@ -1374,6 +1355,107 @@ mod row_source_tests {
     }
 
     #[test]
+    fn decode_progress_reads_are_lazy_and_scoped_to_the_declaring_picker() {
+        use crate::experimental::decode_progress::{DECODE_PROGRESS, DecodeProgressByRow};
+
+        struct DeclaresProgress;
+        impl WorkerFilter for DeclaresProgress {
+            fn required_worker_inputs(&self) -> WorkerInputs {
+                DECODE_PROGRESS
+            }
+
+            fn keep(
+                &self,
+                _context: &WorkerSelectionContext<'_>,
+                _candidate: WorkerCandidate<'_>,
+            ) -> Result<bool, WorkerSelectionPolicyError> {
+                Ok(true)
+            }
+        }
+        impl WorkerScorer for DeclaresProgress {
+            fn required_worker_inputs(&self) -> WorkerInputs {
+                DECODE_PROGRESS
+            }
+
+            fn score(
+                &self,
+                _context: &WorkerSelectionContext<'_>,
+                _candidates: WorkerCandidates<'_>,
+                costs: &mut [f64],
+            ) -> Result<(), WorkerSelectionPolicyError> {
+                costs.fill(0.0);
+                Ok(())
+            }
+        }
+
+        struct ProgressPicker {
+            inputs: WorkerInputs,
+            reads: usize,
+        }
+        impl WorkerPicker for ProgressPicker {
+            fn required_worker_inputs(&self) -> WorkerInputs {
+                self.inputs
+            }
+
+            fn pick(
+                &self,
+                _context: &WorkerSelectionContext<'_>,
+                input: WorkerInputView<'_>,
+            ) -> Result<usize, WorkerSelectionPolicyError> {
+                assert!(input.decode_progress(input.len()).is_none());
+                for _ in 0..self.reads {
+                    assert!(input.decode_progress(1).is_none());
+                }
+                Ok(1)
+            }
+        }
+
+        let mut first = rank(41, 0, 0.0);
+        first.worker = WorkerWithDpRank::new(41, 3);
+        let mut second = rank(73, 0, 0.0);
+        second.worker = WorkerWithDpRank::new(73, 7);
+        let expected_worker = second.worker;
+        let table = Table::new(vec![first, second]);
+        for (case, inputs, has_source, reads, expected_calls) in [
+            ("undeclared", WorkerInputs::NONE, true, 1, 0),
+            (
+                "other input bits",
+                WorkerInputs::CACHE | WorkerInputs::RESIDENT_BLOCKS,
+                true,
+                1,
+                0,
+            ),
+            ("declared but unread", DECODE_PROGRESS, true, 0, 0),
+            ("one live read", DECODE_PROGRESS, true, 1, 1),
+            ("repeated live reads", DECODE_PROGRESS, true, 2, 2),
+            ("missing source", DECODE_PROGRESS, false, 1, 0),
+        ] {
+            let calls = RefCell::new(Vec::new());
+            let provider = |worker| {
+                calls.borrow_mut().push(worker);
+                None
+            };
+            let context = WorkerSelectionContext::new(64, 16)
+                .with_decode_progress(has_source.then_some(&provider));
+            let policy = WorkerSelectionPolicy::new_with_filters(
+                SelectionConfig::default(),
+                "test",
+                vec![Box::new(DeclaresProgress)],
+                vec![Box::new(DeclaresProgress)],
+                Box::new(ProgressPicker { inputs, reads }),
+            );
+            assert_eq!(policy.required_worker_inputs(), inputs, "{case}");
+            let pick = policy.select_rows(&context, &table, None, None).unwrap();
+            assert_eq!(pick.worker, expected_worker, "{case}");
+            assert_eq!(
+                *calls.borrow(),
+                vec![expected_worker; expected_calls],
+                "{case}"
+            );
+        }
+    }
+
+    #[test]
     fn picker_rows_are_bounds_checked() {
         struct OutOfRange;
 
@@ -1405,9 +1487,4 @@ mod row_source_tests {
             ))
         ));
     }
-}
-
-struct PickerCapture<'a> {
-    trace: Option<SelectionTraceSpec>,
-    progress: Option<&'a dynamo_slot_tracker::host::DecodeProgressProvider<'a>>,
 }

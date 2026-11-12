@@ -28,8 +28,8 @@ impl WorkerInputs {
     /// the host rejects a policy that declares it without [`Self::CACHE`], because the counts
     /// come from the indexer that `CACHE` starts.
     pub const RESIDENT_BLOCKS: Self = Self(1 << 3);
-    /// Request a frontend-local native decoder snapshot during the picker callback only.
-    /// Filters and scorers receive no snapshot; CACHE and LOAD do no additional work.
+    /// Request live frontend-local decode progress in a picker. Experimental: plugins read
+    /// it through `experimental::decode_progress`; the host collects it when declared.
     pub const DECODE_PROGRESS: Self = Self(1 << 4);
     /// Request each row's active request count, read through the worker-selection stage's
     /// `WorkerInputView::active_requests`. Picker only: filters and scorers that declare it

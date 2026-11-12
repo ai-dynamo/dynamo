@@ -35,7 +35,7 @@ use super::topology::{WorkerDpRange, WorkerTable, WorkerTopologyChange, WorkerTo
 use super::{PotentialLoadMaps, PrefillTokenDeltas, WorkerLoadProjection};
 use crate::booking::SchedulerBookingDescriptor;
 use crate::busy::FullRankCounts;
-use crate::decode_progress::{DecodeProgressUpdate, NativeDecodeProgress};
+use crate::decode_progress::{DecodeProgress, DecodeProgressUpdate};
 use crate::prelude::{
     ActiveSequenceEvent, ActiveSequenceEventData, PrefillLoadHint, WorkerId, WorkerWithDpRank,
 };
@@ -538,17 +538,6 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             self.prompt_registry.is_block_index_empty(),
             "expected reverse block index to be empty after drain",
         );
-    }
-
-    pub(super) fn project_decode_progress(
-        &self,
-        worker: WorkerWithDpRank,
-        sequences: &ActiveSequences,
-    ) {
-        if sequences.has_decode_progress_tracking() {
-            self.prompt_registry
-                .replace_worker_decode_progress(worker, sequences.decode_progress_snapshot());
-        }
     }
 
     fn publish_worker_load_snapshot(
@@ -1056,7 +1045,6 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             let state_changed = delta.is_some();
             let load = delta.map(|delta| {
                 let load = seq.worker_load_snapshot();
-                self.project_decode_progress(worker, &seq);
                 self.prompt_registry
                     .apply_membership_delta_and_load(worker, delta, load);
                 load
@@ -1116,7 +1104,6 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 return Ok(LifecycleMutationOutcome::NoChange);
             }
             let load = seq.worker_load_snapshot();
-            self.project_decode_progress(worker, &seq);
             self.prompt_registry.replace_worker_load_state(worker, load);
             (completion, load)
         };
@@ -1172,7 +1159,6 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 return Ok(completion);
             }
             let load = seq.worker_load_snapshot();
-            self.project_decode_progress(worker, &seq);
             self.prompt_registry.replace_worker_load_state(worker, load);
             let lora_name = self
                 .replica_sync
@@ -1242,7 +1228,6 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 });
             }
             let load = seq.worker_load_snapshot();
-            self.project_decode_progress(worker, &seq);
             self.prompt_registry.replace_worker_load_state(worker, load);
             load
         };
@@ -1303,8 +1288,10 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             if !blocks_changed && !progress_changed {
                 return Ok(LifecycleMutationOutcome::NoChange);
             }
+            if !blocks_changed {
+                return Ok(LifecycleMutationOutcome::Applied);
+            }
             let load = seq.worker_load_snapshot();
-            self.project_decode_progress(worker, &seq);
             self.prompt_registry.replace_worker_load_state(worker, load);
             load
         };
@@ -1315,32 +1302,18 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         Ok(LifecycleMutationOutcome::Applied)
     }
 
-    pub fn decode_progress_for(&self, worker: WorkerWithDpRank) -> Option<NativeDecodeProgress> {
-        self.prompt_registry.decode_progress_for(worker)
-    }
-
-    #[cfg(feature = "bench")]
-    pub fn update_decode_progress_for_benchmark(
-        &self,
-        booking: &SchedulerBookingDescriptor,
-        update: DecodeProgressUpdate,
-    ) -> Result<LifecycleMutationOutcome, SequenceError> {
-        self.update_output_if_booking(
-            &booking.request_id,
-            booking.worker,
-            booking.attempt_id,
-            0,
-            None,
-            Some(update),
-        )
-    }
-
-    #[cfg(feature = "bench")]
-    pub fn decode_progress_for_benchmark(
-        &self,
-        worker: WorkerWithDpRank,
-    ) -> Option<NativeDecodeProgress> {
-        self.decode_progress_for(worker)
+    /// Read this rank's complete decoding-owner summary on demand.
+    pub fn decode_progress_for(&self, worker: WorkerWithDpRank) -> Option<DecodeProgress> {
+        let table = self.workers.read();
+        let &index = table.index.get(&worker)?;
+        let progress = table
+            .slots
+            .get(index)?
+            .sequences
+            .read()
+            .decode_progress_summary()?;
+        progress.observed_age()?;
+        Some(progress)
     }
 
     /// Get the number of workers.
@@ -1527,7 +1500,6 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             let outcome = seq.force_expiry();
             if !outcome.expired_request_ids.is_empty() {
                 let load = seq.worker_load_snapshot();
-                self.project_decode_progress(slot.worker, &seq);
                 self.prompt_registry.apply_membership_delta_and_load(
                     slot.worker,
                     outcome.membership_delta,
@@ -1649,7 +1621,6 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 decay_now,
             );
             let load = seq.worker_load_snapshot();
-            self.project_decode_progress(worker, &seq);
             self.prompt_registry.apply_membership_delta_and_load(
                 worker,
                 outcome.membership_delta,
@@ -1717,7 +1688,6 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 return Ok(LifecycleMutationOutcome::NoChange);
             };
             let load = seq.worker_load_snapshot();
-            self.project_decode_progress(worker, &seq);
             self.prompt_registry
                 .apply_membership_delta_and_load(worker, delta, load);
             load
@@ -4223,7 +4193,7 @@ mod tests {
     }
 
     #[test]
-    fn native_decode_progress_uses_existing_booking_and_derived_projection() {
+    fn decode_progress_uses_existing_booking_without_load_publication() {
         let (sequences, publisher) = make_recording_sequences(HashMap::from([(1, (0, 1))]));
         let worker = WorkerWithDpRank::new(1, 0);
         let request_id = "raw-progress".to_string();
@@ -4234,6 +4204,16 @@ mod tests {
         sequences
             .mark_prefill_completed_if_booking(&request_id, worker, attempt, now)
             .unwrap();
+        // Progress-only updates must leave the independently published load snapshot alone.
+        sequences.prompt_registry.replace_worker_load_state(
+            worker,
+            WorkerLoadSnapshot {
+                active_blocks: 17,
+                active_requests: 23,
+                ..Default::default()
+            },
+        );
+        let load_before = sequences.worker_load_reader(now).get(worker).unwrap();
         publisher.clear();
         assert!(sequences.decode_progress_for(worker).is_none());
         assert_eq!(
@@ -4249,14 +4229,13 @@ mod tests {
                 .unwrap(),
             LifecycleMutationOutcome::Applied
         );
-        let provider = |candidate| sequences.decode_progress_for(candidate);
-        let snapshot = crate::decode_progress::DecodeProgressSnapshot::capture(
-            [worker].into_iter(),
-            Some(&provider),
-        )
-        .unwrap();
-        assert_eq!(snapshot.entries()[0].remaining_token_budget(), 120);
-        assert_eq!(snapshot.entries()[0].observed_requests(), 1);
+        let progress = sequences.decode_progress_for(worker).unwrap();
+        assert_eq!(progress.remaining_token_budget(), 120);
+        assert_eq!(progress.observed_requests(), 1);
+        assert_eq!(
+            sequences.worker_load_reader(now).get(worker),
+            Some(load_before)
+        );
         assert!(publisher.events.lock().unwrap().is_empty());
         assert!(publisher.single_loads.lock().unwrap().is_empty());
         assert!(publisher.observations.lock().unwrap().is_empty());
@@ -4268,7 +4247,7 @@ mod tests {
     }
 
     #[test]
-    fn native_decode_progress_stale_attempt_cannot_change_or_retire_replacement() {
+    fn decode_progress_stale_attempt_cannot_change_or_retire_replacement() {
         let (sequences, _) = make_recording_sequences(HashMap::from([(1, (0, 1))]));
         let worker = WorkerWithDpRank::new(1, 0);
         let request_id = "reused-id".to_string();
@@ -4323,7 +4302,7 @@ mod tests {
     }
 
     #[test]
-    fn native_decode_progress_is_incomplete_for_unobserved_or_prefilling_owners() {
+    fn decode_progress_is_incomplete_for_unobserved_or_prefilling_owners() {
         let (sequences, _) = make_recording_sequences(HashMap::from([(1, (0, 1))]));
         let worker = WorkerWithDpRank::new(1, 0);
         let now = Instant::now();
@@ -4359,94 +4338,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "manual native producer CPU benchmark"]
-    fn native_decode_progress_update_cpu_benchmark() {
-        const UPDATES: usize = 100_000;
-        for enabled in [false, true] {
-            let worker = WorkerWithDpRank::new(1, 0);
-            let sequences = ActiveSequencesMultiWorker::new_without_expiry(
-                NoopSequencePublisher,
-                64,
-                HashMap::from([(1, (0, 1))]),
-                false,
-                1,
-                "aggregated",
-            );
-            let now = Instant::now();
-            let bookings: Vec<_> = (0..8)
-                .map(|i| {
-                    let request_id = format!("producer-{i}");
-                    let attempt = sequences
-                        .add_request_admitted(
-                            SequenceRequest {
-                                request_id: request_id.clone(),
-                                token_sequence: Some(Vec::new()),
-                                track_prefill_tokens: false,
-                                expected_output_tokens: None,
-                                prefill_load_hint: None,
-                                worker,
-                                lora_name: None,
-                            },
-                            now,
-                        )
-                        .unwrap();
-                    sequences
-                        .mark_prefill_completed_if_booking(&request_id, worker, attempt, now)
-                        .unwrap();
-                    (request_id, attempt)
-                })
-                .collect();
-            let mut output = [0usize; 8];
-            let mut accounted = [1usize; 8];
-            let started = std::time::Instant::now();
-            for step in 0..UPDATES {
-                let i = step % 8;
-                output[i] += 1;
-                let total_blocks = (32 + output[i]).div_ceil(64);
-                let blocks = total_blocks - accounted[i];
-                accounted[i] = total_blocks;
-                if enabled || blocks > 0 {
-                    let (request_id, attempt) = &bookings[i];
-                    sequences
-                        .update_output_if_booking(
-                            request_id,
-                            worker,
-                            *attempt,
-                            blocks,
-                            None,
-                            enabled.then(|| DecodeProgressUpdate::observed(u32::MAX, output[i])),
-                        )
-                        .unwrap();
-                }
-            }
-            let elapsed_ns = started.elapsed().as_nanos();
-            if enabled {
-                let provider = |candidate| sequences.decode_progress_for(candidate);
-                let snapshot = crate::decode_progress::DecodeProgressSnapshot::capture(
-                    [worker].into_iter(),
-                    Some(&provider),
-                )
-                .unwrap();
-                assert_eq!(
-                    snapshot.entries()[0].remaining_token_budget(),
-                    8 * u32::MAX as usize - UPDATES
-                );
-            }
-            println!(
-                "NATIVE_PRODUCER_CPU enabled={enabled} updates={UPDATES} elapsed_ns={elapsed_ns} ns_per_update={}",
-                elapsed_ns as f64 / UPDATES as f64
-            );
-            for (request_id, attempt) in bookings {
-                sequences
-                    .free_if_booking(&request_id, worker, attempt, Instant::now())
-                    .unwrap();
-            }
-            assert!(sequences.decode_progress_for(worker).is_none());
-        }
-    }
-
-    #[test]
-    fn native_decode_progress_column_clears_on_worker_replacement() {
+    fn decode_progress_clears_on_worker_replacement() {
         let (sequences, _) = make_recording_sequences(HashMap::from([(1, (0, 1))]));
         let worker = WorkerWithDpRank::new(1, 0);
         let request_id = "removed-worker".to_string();
@@ -4477,7 +4369,7 @@ mod tests {
     }
 
     #[test]
-    fn native_decode_progress_column_follows_mirrored_lifecycle_changes() {
+    fn decode_progress_follows_mirrored_lifecycle_changes() {
         let (sequences, _) = make_recording_sequences(HashMap::from([(1, (0, 1))]));
         let worker = WorkerWithDpRank::new(1, 0);
         let request_id = "local-owner".to_string();

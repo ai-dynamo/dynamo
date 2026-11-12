@@ -16,14 +16,14 @@ pub use dynamo_worker_selection::experimental;
 pub use dynamo_worker_selection::selection_config;
 pub use dynamo_worker_selection::{
     CacheSnapshot, CandidateData, CandidatePreparer, CandidateRank, CandidateRowSource,
-    DecodeProgressEntry, DecodeProgressSnapshot, HostedSelectionRequest, HostedWorkerPicker,
-    PreparedRows, RankVisitor, RowPick, RuntimePolicyBuilder, RuntimePolicyConfig,
-    RuntimePolicyError, RuntimePolicyUpdate, ScoredWorkerCandidate, SelectionConfig,
-    SelectionFailure, SelectionTrace, SelectionTraceRow, SelectionTraceSpec, SessionContext,
-    SharedCacheHits, SharedCacheType, WorkerCacheData, WorkerCacheInput, WorkerCacheInputs,
-    WorkerCandidate, WorkerCandidates, WorkerCapacity, WorkerCopyInput, WorkerFilter, WorkerInfo,
-    WorkerInputRows, WorkerInputView, WorkerInputs, WorkerLoadInput, WorkerPicker, WorkerScorer,
-    WorkerSelectionContext, WorkerSelectionPolicy, WorkerSelectionPolicyError,
+    HostedSelectionRequest, HostedWorkerPicker, PreparedRows, RankVisitor, RowPick,
+    RuntimePolicyBuilder, RuntimePolicyConfig, RuntimePolicyError, RuntimePolicyUpdate,
+    ScoredWorkerCandidate, SelectionConfig, SelectionFailure, SelectionTrace, SelectionTraceRow,
+    SelectionTraceSpec, SessionContext, SharedCacheHits, SharedCacheType, WorkerCacheData,
+    WorkerCacheInput, WorkerCacheInputs, WorkerCandidate, WorkerCandidates, WorkerCapacity,
+    WorkerCopyInput, WorkerFilter, WorkerInfo, WorkerInputRows, WorkerInputView, WorkerInputs,
+    WorkerLoadInput, WorkerPicker, WorkerScorer, WorkerSelectionContext, WorkerSelectionPolicy,
+    WorkerSelectionPolicyError,
 };
 #[cfg(any(test, feature = "bench"))]
 pub use dynamo_worker_selection::{DefaultPick, DefaultWorkerPicker};

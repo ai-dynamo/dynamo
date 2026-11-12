@@ -11,13 +11,13 @@
 
 // Worker-selection contracts and the candidate rows they read.
 pub use crate::plugins::worker_selection::{
-    DecodeProgressEntry, DecodeProgressSnapshot, HostedSelectionRequest, HostedWorkerPicker,
-    RuntimePolicyBuilder, RuntimePolicyConfig, RuntimePolicyError, RuntimePolicyUpdate,
-    ScoredWorkerCandidate, SelectionConfig, SelectionFailure, WorkerCacheInput, WorkerCacheInputs,
-    WorkerCandidate, WorkerCandidates, WorkerCapacity, WorkerCopyInput, WorkerFilter, WorkerInfo,
-    WorkerInputView, WorkerInputs, WorkerLoadInput, WorkerPicker, WorkerScorer,
-    WorkerSelectionConfig, WorkerSelectionContext, WorkerSelectionInstance, WorkerSelectionPolicy,
-    WorkerSelectionPolicyError, WorkerSelectionPolicyFactory, WorkerSelectionPolicySelection,
+    HostedSelectionRequest, HostedWorkerPicker, RuntimePolicyBuilder, RuntimePolicyConfig,
+    RuntimePolicyError, RuntimePolicyUpdate, ScoredWorkerCandidate, SelectionConfig,
+    SelectionFailure, WorkerCacheInput, WorkerCacheInputs, WorkerCandidate, WorkerCandidates,
+    WorkerCapacity, WorkerCopyInput, WorkerFilter, WorkerInfo, WorkerInputView, WorkerInputs,
+    WorkerLoadInput, WorkerPicker, WorkerScorer, WorkerSelectionConfig, WorkerSelectionContext,
+    WorkerSelectionInstance, WorkerSelectionPolicy, WorkerSelectionPolicyError,
+    WorkerSelectionPolicyFactory, WorkerSelectionPolicySelection,
 };
 
 // Request-classifier contracts and the request they classify.

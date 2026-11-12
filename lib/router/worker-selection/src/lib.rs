@@ -33,7 +33,6 @@ mod shared_cache;
 mod trace;
 
 pub use context::WorkerSelectionContext;
-pub use dynamo_slot_tracker::host::{DecodeProgressEntry, DecodeProgressSnapshot};
 pub use error::WorkerSelectionPolicyError;
 pub use hosted::{HostedSelectionRequest, HostedWorkerPicker};
 #[allow(deprecated)]

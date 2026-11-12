@@ -37,10 +37,6 @@ pub const POLICY_TYPE: &str = "dynamo-two-tier-cost-fn";
 
 /// Keep these equal to `experimental/sgl-router`'s `cache_aware_zmq` defaults, so an instance
 /// with no `parameters` mapping reproduces that policy exactly.
-#[cfg(test)]
-#[path = "progress_group_tests.rs"]
-mod progress_group_tests;
-
 const DEFAULT_CACHE_THRESHOLD: f64 = 0.5;
 const DEFAULT_BALANCE_ABS_THRESHOLD: usize = 32;
 const DEFAULT_BALANCE_REL_THRESHOLD: f64 = 1.1;
@@ -52,8 +48,6 @@ const DEFAULT_BALANCE_REL_THRESHOLD: f64 = 1.1;
 #[derive(Debug, Clone, Copy, serde::Deserialize)]
 #[serde(deny_unknown_fields, default)]
 struct Parameters {
-    /// Explicitly configured progress/group experiment; absent keeps ordinary selection.
-    progress_group: Option<crate::progress_group::ProgressGroupParameters>,
     /// Fraction of the request's blocks that must be device-resident on the best worker before the
     /// cache tier applies. Compared strictly.
     cache_threshold: f64,
@@ -66,7 +60,6 @@ struct Parameters {
 impl Default for Parameters {
     fn default() -> Self {
         Self {
-            progress_group: None,
             cache_threshold: DEFAULT_CACHE_THRESHOLD,
             balance_abs_threshold: DEFAULT_BALANCE_ABS_THRESHOLD,
             balance_rel_threshold: DEFAULT_BALANCE_REL_THRESHOLD,
@@ -76,9 +69,6 @@ impl Default for Parameters {
 
 impl Parameters {
     fn validate(&self) -> Result<(), WorkerSelectionPolicyProviderError> {
-        if let Some(progress) = self.progress_group {
-            progress.validate()?;
-        }
         if !self.cache_threshold.is_finite() || !(0.0..=1.0).contains(&self.cache_threshold) {
             return Err(WorkerSelectionPolicyProviderError::new(
                 "cache_threshold must be a finite number between 0.0 and 1.0",
@@ -150,12 +140,7 @@ impl WorkerPicker for TwoTierCostFnPicker {
     fn required_worker_inputs(&self) -> WorkerInputs {
         // Active request counts, not `LOAD` rows: the host projects `LOAD` rows' decode cost
         // from every rank's overlap with active prompts, which this policy never reads.
-        let inputs = WorkerInputs::CACHE | WorkerInputs::ACTIVE_REQUESTS;
-        if self.parameters.progress_group.is_some() {
-            inputs | WorkerInputs::LOAD | WorkerInputs::DECODE_PROGRESS
-        } else {
-            inputs
-        }
+        WorkerInputs::CACHE | WorkerInputs::ACTIVE_REQUESTS
     }
 
     fn pick(
@@ -166,11 +151,6 @@ impl WorkerPicker for TwoTierCostFnPicker {
         let cache = input
             .cache()
             .ok_or_else(|| WorkerSelectionPolicyError::failed("cache input unavailable"))?;
-        if let Some(parameters) = self.parameters.progress_group
-            && let Some(row) = crate::progress_group::select(parameters, context, input)
-        {
-            return Ok(row);
-        }
         ACTIVE_REQUEST_COUNTS.with_borrow_mut(|load| {
             load.clear();
             for row in 0..input.len() {
@@ -192,10 +172,6 @@ fn provider(
 
     Ok(Arc::new(
         move |config: &SelectionConfig, worker_type, _partition| {
-            let mut parameters = parameters;
-            if !matches!(worker_type, WorkerType::Aggregated) {
-                parameters.progress_group = None;
-            }
             WorkerSelectionPolicy::new(
                 config.clone(),
                 worker_type.as_str(),

@@ -399,17 +399,11 @@ impl ActiveSequences {
         outcome
     }
 
-    pub(super) fn has_decode_progress_tracking(&self) -> bool {
-        self.decode_progress.is_some()
-    }
-
-    pub(super) fn decode_progress_snapshot(
-        &self,
-    ) -> Option<crate::decode_progress::NativeDecodeProgress> {
+    pub(super) fn decode_progress_summary(&self) -> Option<crate::decode_progress::DecodeProgress> {
         if self.prefill_requests != 0 {
             return None;
         }
-        self.decode_progress.as_ref()?.snapshot(self.requests.len())
+        self.decode_progress.as_ref()?.summary(self.requests.len())
     }
 
     pub(super) fn worker_load_snapshot(&self) -> WorkerLoadSnapshot {

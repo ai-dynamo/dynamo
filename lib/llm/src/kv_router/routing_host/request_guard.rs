@@ -1,10 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{
-    collections::HashMap,
-    sync::{Arc, OnceLock},
-};
+use std::{collections::HashMap, sync::Arc};
 
 use prometheus::IntCounter;
 
@@ -30,6 +27,7 @@ use dynamo_kv_hashing::routing::{
     BlockHashOptions, compute_block_hash_for_seq, compute_next_seq_hash,
 };
 use dynamo_kv_indexer::host::{ApproximateAcquireMode, ApproximateLruBlock, RoutingDecisionHashes};
+use dynamo_kv_router::plugins::worker_selection::experimental::decode_progress::DECODE_PROGRESS;
 use dynamo_router_protocol::worker::WorkerWithDpRank;
 use dynamo_runtime::{
     error::DynamoError,
@@ -41,22 +39,14 @@ use dynamo_scheduler::host::{BookingHandle, RequestLifecycle};
 use dynamo_session_affinity::host::AffinityLease;
 use dynamo_slot_tracker::host::DecodeProgressUpdate;
 
-fn decode_progress_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var(dynamo_runtime::config::environment_names::router::DYN_ROUTER_DECODE_PROGRESS)
-            .is_ok_and(|value| value == "1")
-    })
-}
-
-fn decode_progress_request_supported(request: &PreprocessedRequest) -> bool {
-    request.phase() == RequestPhase::Aggregated
+fn decode_progress_output_limit(request: &PreprocessedRequest, phase: RequestPhase) -> Option<u32> {
+    let limit = request
+        .stop_conditions
+        .max_tokens
+        .filter(|limit| *limit > 0)?;
+    (phase == RequestPhase::Aggregated
         && request.sampling_options.n.unwrap_or(1) == 1
         && request.sampling_options.best_of.unwrap_or(1) == 1
-        && request
-            .stop_conditions
-            .max_tokens
-            .is_some_and(|limit| limit > 0)
         && request.stop_conditions.ignore_eos == Some(true)
         && request
             .stop_conditions
@@ -77,7 +67,8 @@ fn decode_progress_request_supported(request: &PreprocessedRequest) -> bool {
             .stop_conditions
             .stop_token_ids_hidden
             .as_ref()
-            .is_none_or(Vec::is_empty)
+            .is_none_or(Vec::is_empty))
+    .then_some(limit)
 }
 
 #[derive(Clone)]
@@ -611,9 +602,7 @@ impl OutputBlockTracker {
     }
 
     fn enable_decode_progress(&mut self, output_limit: u32) {
-        if self.track_output_blocks {
-            self.progress_limit = Some(output_limit);
-        }
+        self.progress_limit = Some(output_limit);
     }
 
     fn invalidate_decode_progress(&mut self) {
@@ -623,7 +612,7 @@ impl OutputBlockTracker {
     }
 
     fn observe(&mut self, cumulative_osl: usize) -> Option<OutputBlockUpdate> {
-        if !self.track_output_blocks {
+        if !self.track_output_blocks && self.progress_limit.is_none() && !self.progress_invalid {
             return None;
         }
         let progress = if std::mem::take(&mut self.progress_invalid) {
@@ -641,12 +630,17 @@ impl OutputBlockTracker {
         } else {
             None
         };
-        let new_total_blocks = (self.isl_tokens + cumulative_osl).div_ceil(self.block_size);
-        let num_blocks = new_total_blocks.saturating_sub(self.current_total_blocks);
+        let num_blocks = if self.track_output_blocks {
+            let new_total_blocks = (self.isl_tokens + cumulative_osl).div_ceil(self.block_size);
+            let num_blocks = new_total_blocks.saturating_sub(self.current_total_blocks);
+            self.current_total_blocks = self.current_total_blocks.max(new_total_blocks);
+            num_blocks
+        } else {
+            0
+        };
         if num_blocks == 0 && progress.is_none() {
             return None;
         }
-        self.current_total_blocks = self.current_total_blocks.max(new_total_blocks);
         // Raw progress supplements the existing path without changing block/OSL-hint semantics.
         let decay_fraction = (num_blocks > 0)
             .then(|| {
@@ -680,12 +674,6 @@ pub(super) struct RequestGuard {
 }
 
 impl RequestGuard {
-    #[cfg(test)]
-    pub(super) fn enable_decode_progress_for_test(&mut self, request: &PreprocessedRequest) {
-        assert!(decode_progress_request_supported(request));
-        self.output_blocks
-            .enable_decode_progress(request.stop_conditions.max_tokens.unwrap());
-    }
     pub(super) fn new_kv_with_cleanup(
         request_metrics: Arc<RouterRequestMetrics>,
         mut cleanup: KvRequestCleanup,
@@ -732,8 +720,11 @@ impl RequestGuard {
             block_size,
             expected_output_tokens,
         );
-        if decode_progress_enabled() && decode_progress_request_supported(request) {
-            output_blocks.enable_decode_progress(request.stop_conditions.max_tokens.unwrap());
+        if attempt_id.is_some()
+            && chooser.required_worker_inputs().contains(DECODE_PROGRESS)
+            && let Some(limit) = decode_progress_output_limit(request, phase)
+        {
+            output_blocks.enable_decode_progress(limit);
         }
         Self {
             cleanup: RequestCleanup::Kv(cleanup),
@@ -976,7 +967,7 @@ impl RequestGuard {
             tracing::warn!(
                 request_id = %cleanup.context_id,
                 %error,
-                "Failed to add output blocks"
+                "Failed to update tracked output"
             );
         }
 
@@ -1104,6 +1095,7 @@ mod output_block_tests {
         let first = tracker.observe(1).unwrap();
         assert_eq!(first.num_blocks, 1);
         assert_eq!(first.decay_fraction, None);
+        assert!(first.progress.is_none());
         assert!(tracker.observe(16).is_none());
         assert_eq!(tracker.observe(33).unwrap().num_blocks, 2);
         assert!(tracker.observe(33).is_none());
@@ -1398,10 +1390,17 @@ mod native_decode_progress_producer_tests {
     }
 
     #[test]
-    fn native_decode_progress_requires_native_output_tracking() {
-        let mut tracker = OutputBlockTracker::new(false, 15, 16, None);
+    fn native_decode_progress_is_independent_of_output_block_tracking() {
+        let mut tracker = OutputBlockTracker::new(false, 15, 16, Some(64));
         tracker.enable_decode_progress(128);
-        assert!(tracker.observe(8).is_none());
+        for cumulative_osl in [8, 32] {
+            let update = tracker.observe(cumulative_osl).unwrap();
+            assert_eq!(update.num_blocks, 0);
+            assert_eq!(update.decay_fraction, None);
+            assert!(update.progress.is_some());
+            assert_eq!(tracker.current_total_blocks, 1);
+        }
+        assert!(tracker.observe(32).is_none());
     }
 
     #[test]
@@ -1416,17 +1415,26 @@ mod native_decode_progress_producer_tests {
             .unwrap();
         request.stop_conditions.max_tokens = Some(128);
         request.stop_conditions.ignore_eos = Some(true);
-        assert!(decode_progress_request_supported(&request));
+        let phase = RequestPhase::Aggregated;
+        assert_eq!(decode_progress_output_limit(&request, phase), Some(128));
+        for unsupported_phase in [RequestPhase::Prefill, RequestPhase::Decode] {
+            assert_eq!(
+                decode_progress_output_limit(&request, unsupported_phase),
+                None
+            );
+        }
         request.stop_conditions.max_tokens = None;
-        assert!(!decode_progress_request_supported(&request));
+        assert_eq!(decode_progress_output_limit(&request, phase), None);
+        request.stop_conditions.max_tokens = Some(0);
+        assert_eq!(decode_progress_output_limit(&request, phase), None);
         request.stop_conditions.max_tokens = Some(128);
         request.stop_conditions.ignore_eos = Some(false);
-        assert!(!decode_progress_request_supported(&request));
+        assert_eq!(decode_progress_output_limit(&request, phase), None);
         request.stop_conditions.ignore_eos = Some(true);
         request.sampling_options.n = Some(2);
-        assert!(!decode_progress_request_supported(&request));
+        assert_eq!(decode_progress_output_limit(&request, phase), None);
         request.sampling_options.n = Some(1);
         request.stop_conditions.stop = Some(vec!["stop".to_string()]);
-        assert!(!decode_progress_request_supported(&request));
+        assert_eq!(decode_progress_output_limit(&request, phase), None);
     }
 }

@@ -13,7 +13,7 @@ use super::shared_cache::SharedCacheHits;
 /// Holds values, not the request: the kernel builds it once per selection from the
 /// request it owns, so a policy sees exactly the fields the accessors expose.
 pub struct WorkerSelectionContext<'a> {
-    pub(crate) decode_progress: Option<&'a super::DecodeProgressSnapshot>,
+    pub(crate) decode_progress: Option<&'a super::host::DecodeProgressSource<'a>>,
     pub(crate) request_id: Option<&'a str>,
     pub(crate) isl_tokens: usize,
     pub(crate) request_blocks: u64,
@@ -33,17 +33,6 @@ pub struct WorkerSelectionContext<'a> {
 }
 
 impl<'a> WorkerSelectionContext<'a> {
-    /// Frontend-local active-attempt observations captured immediately before this picker.
-    /// Available only in a picker declaring `WorkerInputs::DECODE_PROGRESS`, when the
-    /// aggregated frontend enables native output tracking and raw collection. The owning
-    /// native scheduler supplies only complete, supported worker summaries. Missing or
-    /// invalid worker summaries are absent. Facts are unweighted, borrowed for this
-    /// callback, and carry their oldest observation age at capture. LOAD/progress reads
-    /// remain advisory and separate; remaining budgets do not predict GPU completion.
-    pub fn decode_progress(&self) -> Option<&super::DecodeProgressSnapshot> {
-        self.decode_progress
-    }
-
     /// A view of a request of `isl_tokens` routed in blocks of `block_size`, with every other
     /// field at its default: no request id, no pin, no session, no affinity target, no
     /// expected output length, zero priority, no shared-cache hits, no tier matches, no
@@ -161,6 +150,16 @@ impl<'a> WorkerSelectionContext<'a> {
         resident_blocks: Option<&'a dyn ResidentBlockSource>,
     ) -> Self {
         self.resident_blocks = resident_blocks;
+        self
+    }
+
+    /// Lend a live worker lookup to pickers declaring the experimental decode-progress input.
+    /// The lookup is called only when the picker reads a candidate's progress.
+    pub fn with_decode_progress(
+        mut self,
+        progress: Option<&'a super::host::DecodeProgressSource<'a>>,
+    ) -> Self {
+        self.decode_progress = progress;
         self
     }
 

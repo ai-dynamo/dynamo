@@ -2528,17 +2528,17 @@ impl<
                 .get()
                 .map(ResidentBlockCountsHandle::load);
             self.selector
-                .select_worker_with_decode_progress(
+                .select_worker_prepared(
                     WorkerSelectionInput::configured(
                         &workers,
                         request,
                         eligibility,
                         self.block_size,
                     )
-                    .with_resident_blocks(resident_blocks.as_deref().map(|counts| &**counts)),
+                    .with_resident_blocks(resident_blocks.as_deref().map(|counts| &**counts))
+                    .with_decode_progress(Some(&progress)),
                     prepared,
                     trace,
-                    Some(&progress),
                 )
                 .map(|(mut selection, selection_trace)| {
                     // A projection without overlap counts none of the request's blocks as
@@ -3863,19 +3863,6 @@ mod tests {
             }
             self.inner.select_worker_prepared(input, prepared, trace)
         }
-        fn select_worker_with_decode_progress(
-            &self,
-            input: WorkerSelectionInput<'_, SimpleWorkerConfig>,
-            prepared: Option<PreparedCandidates>,
-            trace: Option<SelectionTraceSpec>,
-            progress: Option<&dynamo_slot_tracker::host::DecodeProgressProvider<'_>>,
-        ) -> Result<(WorkerSelectionResult, Option<SelectionTrace>), KvSchedulerError> {
-            if prepared.is_some() {
-                self.prepared_selections.fetch_add(1, Ordering::Relaxed);
-            }
-            self.inner
-                .select_worker_with_decode_progress(input, prepared, trace, progress)
-        }
     }
 
     /// Picks the least-loaded worker; ties go to the lowest worker.
@@ -4600,11 +4587,19 @@ mod tests {
 
             fn pick(
                 &self,
-                context: &WorkerSelectionContext<'_>,
+                _context: &WorkerSelectionContext<'_>,
                 input: WorkerInputView<'_>,
             ) -> Result<usize, crate::WorkerSelectionPolicyError> {
-                let progress = &context.decode_progress().unwrap().entries()[0];
-                assert_eq!(progress.remaining_token_budget(), 48);
+                use dynamo_worker_selection::experimental::decode_progress::DecodeProgressByRow;
+                let row = input
+                    .candidates()
+                    .iter()
+                    .position(|row| row.worker().worker_id == 0)
+                    .unwrap();
+                assert_eq!(
+                    input.decode_progress(row).unwrap().remaining_token_budget(),
+                    48
+                );
                 Ok(input
                     .candidates()
                     .iter()
