@@ -234,6 +234,9 @@ and Mocker runtime behavior.
 
 Use `weka_nested_timestamp_basis="absolute"` or `"relative"` to override nested timestamp
 interpretation in `run_trace_replay(...)`. Omitting it preserves the `auto` heuristic.
+Set `weka_client="agentx"` to spawn and join subagents as the AgentX client does; the default
+`"recorded"` keeps the recorded timing. `weka_chat_template` adds a chat template's tokens to each
+prompt (`request_tokens`, `user_tokens`, `assistant_tokens`, `tail_tokens`, `append_tail_tokens`).
 
 Set `agentic_lanes` to a positive integer to replay a fixed number of trajectories concurrently.
 Plays are stable-sorted and stride-assigned to lanes. A lane starts its next play only after its

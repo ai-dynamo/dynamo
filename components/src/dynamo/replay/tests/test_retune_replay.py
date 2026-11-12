@@ -808,6 +808,8 @@ _IGNORED = {  # no effect on a candidate's engine or score
     "trace_shared_prefix_ratio",  # other trace formats only
     "trace_num_prefix_groups",
     "weka_nested_timestamp_basis",
+    "weka_client",
+    "weka_chat_template",
     "agentic_warmup_policy",  # only with agentic_warmup, which retune rejects
 }
 

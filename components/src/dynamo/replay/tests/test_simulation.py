@@ -822,6 +822,8 @@ def test_agentic_capabilities_follow_engine_support_in_offline_mode(
         supports_agentic_live_warmup=supported,
         supports_agentic_profile=supported,
         supports_state_cache=supported,
+        supports_weka_client=supported,
+        supports_weka_chat_template=supported,
     )
     monkeypatch.setattr(
         simulation.EngineReplayRunnerFactory, "capabilities", lambda self: native
@@ -834,6 +836,8 @@ def test_agentic_capabilities_follow_engine_support_in_offline_mode(
     assert capabilities.supports_agentic_live_warmup is supported
     assert capabilities.supports_agentic_profile is supported
     assert capabilities.supports_state_cache is supported
+    assert capabilities.supports_weka_client is supported
+    assert capabilities.supports_weka_chat_template is supported
     # Dynamo's composed runtime retains its pre-existing HBM speculation support.
     assert capabilities.supports_agentic_speculative_decoding
 
@@ -975,7 +979,7 @@ def _write_weka_trace(path, block_size):
 
 @pytest.mark.timeout(30)
 def test_agentic_replay_matches_the_engine_stack(tmp_path):
-    """Live warmup on a hybrid (state-cache) engine replays as on the engine stack."""
+    """An AgentX workload on a state-cache engine replays as on the engine stack."""
 
     block_size = 64
     trace = tmp_path / "agentic.jsonl"
@@ -1000,6 +1004,14 @@ def test_agentic_replay_matches_the_engine_stack(tmp_path):
             "load_type": "trace_timestamps",
             "trace_format": "weka",
             "trace_path": str(trace),
+            "weka_client": "agentx",
+            "weka_chat_template": {
+                "request_tokens": 5,
+                "user_tokens": 7,
+                "assistant_tokens": 6,
+                "tail_tokens": 2,
+                "append_tail_tokens": 1,
+            },
             "agentic_lanes": 8,
             "agentic_snapshot": {"seed": 42},
             "agentic_warmup": True,

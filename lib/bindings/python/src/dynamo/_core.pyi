@@ -2480,6 +2480,8 @@ def run_mocker_trace_replay(
     agentic_warmup_policy: Optional[
         Literal["repeated_prefixes", "live_trajectory_v1"]
     ] = None,
+    weka_client: Optional[Literal["recorded", "agentx"]] = None,
+    weka_chat_template: Optional[Dict[str, int]] = None,
 ) -> _OfflineReplayResult | Dict[str, Any]:
     """Replay mocker trace files and return the simulation report.
 

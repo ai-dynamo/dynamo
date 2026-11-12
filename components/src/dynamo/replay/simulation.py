@@ -102,6 +102,10 @@ class DynamoReplayRunnerFactory:
             supports_agentic_profile=engine_capabilities.supports_agentic_profile,
             # Engine args, state cache included, reach AISimulate's engine config.
             supports_state_cache=engine_capabilities.supports_state_cache,
+            supports_weka_client=engine_capabilities.supports_weka_client,
+            supports_weka_chat_template=(
+                engine_capabilities.supports_weka_chat_template
+            ),
             # Full AgentX runtime conformance remains a separate checkpoint.
             # Keep the public runner honest about the narrower integration here.
             supported_agentic_topologies=tuple(
@@ -432,13 +436,15 @@ class DynamoReplayRunner:
         if not isinstance(trace_format, str):
             raise TypeError("trace workload requires a string trace_format")
         agentic_lanes = spec.workload.get("agentic_lanes")
-        agentic_options = {
+        workload_options = {
             name: spec.workload[name]
             for name in (
                 "agentic_snapshot",
                 "agentic_warmup",
                 "agentic_warmup_policy",
                 "agentic_profile",
+                "weka_client",
+                "weka_chat_template",
             )
             if name in spec.workload
         }
@@ -461,7 +467,7 @@ class DynamoReplayRunner:
                 trace_block_size=trace_block_size,
                 max_sim_time_ms=spec.workload.get("max_sim_time_ms"),
                 agentic_lanes=agentic_lanes,
-                **agentic_options,
+                **workload_options,
                 execution_model=execution_model,
                 extra_engine_args=self._engine_args(deployment, "aggregated"),
                 num_workers=deployment.num_workers,
@@ -477,7 +483,7 @@ class DynamoReplayRunner:
             trace_block_size=trace_block_size,
             max_sim_time_ms=spec.workload.get("max_sim_time_ms"),
             agentic_lanes=agentic_lanes,
-            **agentic_options,
+            **workload_options,
             execution_model=execution_model,
             prefill_engine_args=self._engine_args(deployment, "prefill"),
             decode_engine_args=self._engine_args(deployment, "decode"),
