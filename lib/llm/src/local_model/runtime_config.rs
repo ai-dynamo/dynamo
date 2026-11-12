@@ -18,7 +18,7 @@ use dynamo_kv_hints::{
 use dynamo_runtime::{config::is_truthy, protocols::EndpointId};
 use dynamo_slot_tracker::host::MAX_DATA_PARALLEL_RANKS_PER_WORKER;
 
-use crate::protocols::openai::chat_completions::tool_parser_v2::unified_family_names;
+use crate::parser_family::unified_family_names;
 use dynamo_parsers::tool_calling::parsers::get_available_tool_parsers;
 
 /// Re-export from parsers crate so that `ModelRuntimeConfig` can use it
@@ -524,7 +524,7 @@ impl Default for ModelRuntimeConfig {
 impl ModelRuntimeConfig {
     /// Whether the configured grammar can replay distinct Responses phases.
     pub fn preserves_response_message_phases(&self) -> bool {
-        crate::protocols::openai::chat_completions::unified_parser::configured_family(
+        crate::parser_family::configured_family(
             self.tool_call_parser.as_deref(),
             self.reasoning_parser.as_deref(),
         ) == Some("muse_spark")
@@ -922,7 +922,8 @@ impl ModelRuntimeConfig {
 mod tests {
     use super::*;
 
-    use crate::protocols::openai::chat_completions::tool_parser_v2::V2_FAMILIES;
+    /// Dynamo tool-parser names served by the `dynamo-parsers-v2` tool-call registry.
+    const V2_FAMILIES: &[&str] = &["qwen3_coder", "deepseek_v4", "deepseek-v4", "deepseekv4"];
 
     #[test]
     fn structural_tag_config_accepts_future_wire_fields_and_rejects_unknown_input_fields() {

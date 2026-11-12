@@ -4410,9 +4410,7 @@ async fn chat_completions(
         crate::protocols::openai::chat_completions::unified_parser::selected_batch_family(
             parsing_options.tool_call_parser.as_deref(),
             parsing_options.reasoning_parser.as_deref(),
-        ) == Some(
-            crate::protocols::openai::chat_completions::unified_parser::MISTRAL_UNIFIED_FAMILY,
-        ),
+        ) == Some(crate::parser_family::MISTRAL_UNIFIED_FAMILY),
     );
 
     // Any force_nonempty_content=true request: surface reasoning as content when
@@ -5297,9 +5295,7 @@ async fn responses(
             crate::protocols::openai::chat_completions::unified_parser::selected_batch_family(
                 parsing_options.tool_call_parser.as_deref(),
                 parsing_options.reasoning_parser.as_deref(),
-            ) == Some(
-                crate::protocols::openai::chat_completions::unified_parser::MISTRAL_UNIFIED_FAMILY,
-            ),
+            ) == Some(crate::parser_family::MISTRAL_UNIFIED_FAMILY),
         );
 
         let mut http_queue_guard = Some(http_queue_guard);

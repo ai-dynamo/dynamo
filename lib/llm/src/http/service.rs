@@ -232,7 +232,6 @@ mod tests {
 
     #[test]
     fn unified_request_controls_use_canonical_family_for_each_selector_shape() {
-        use crate::protocols::openai::chat_completions::unified_parser;
         if crate::test_utils::run_isolated(
             concat!(
                 module_path!(),
@@ -245,8 +244,8 @@ mod tests {
         ) {
             return;
         }
-        for selector in unified_parser::FAMILY_NAMES.iter() {
-            let family = unified_parser::canonical_family(selector).unwrap();
+        for selector in crate::parser_family::FAMILY_NAMES.iter() {
+            let family = crate::parser_family::canonical_family(selector).unwrap();
             for (tool, reasoning) in [
                 (Some(*selector), None),
                 (None, Some(*selector)),

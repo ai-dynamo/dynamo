@@ -671,7 +671,7 @@ mod tests {
                     None,
                     false,
                     dynamo_parsers_v2::UnifiedParserStartingState::Response,
-                    super::super::unified_parser::MISTRAL_UNIFIED_FAMILY,
+                    crate::parser_family::MISTRAL_UNIFIED_FAMILY,
                 );
                 let out: Vec<_> = adapter.stream(parsed).collect().await;
                 assert!(out.iter().all(|item| !item.is_error()));
