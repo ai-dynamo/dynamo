@@ -578,12 +578,22 @@ _REQUESTS_FALLBACK = [
 ]
 
 
+def _conversion_error(e):
+    """Return a conversion error as comparison data; re-raise anything else.
+
+    Request conversion raises plain `Exception`, so a subclass means another failure.
+    """
+    if type(e) is not Exception:
+        raise e
+    return e
+
+
 def _pythonized(preprocessed):
     """pythonize's request, or the exception it raises."""
     try:
         return _convert_preprocessed_request(preprocessed, fast_path=False)
     except Exception as e:
-        return e
+        return _conversion_error(e)
 
 
 @pytest.fixture
@@ -633,7 +643,7 @@ async def _received_or_error(received, call):
     try:
         stream = await call()
     except Exception as e:
-        return e
+        return _conversion_error(e)
     responses = [response async for response in stream]
     assert [response["finish_reason"] for response in responses] == ["stop"]
     return received[-1]
