@@ -29,6 +29,7 @@ mod media_fixtures;
 mod media_schemas;
 pub mod models;
 pub mod pooling;
+mod renderer;
 pub mod rerank;
 pub mod responses;
 pub mod stream_aggregator;
