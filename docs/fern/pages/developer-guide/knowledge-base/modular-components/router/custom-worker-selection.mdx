@@ -682,6 +682,7 @@ What the count contains, and whether router replicas agree on it, depends on the
 - Keep blocking I/O and panics out of `keep`, `score`, and `pick`.
 - Keep any state your policy shares across requests correct under concurrent updates. Dynamo reuses one policy for every request to a model and worker role and handles many requests at once, so two selections can read and change that state at the same time. Policies without such state need nothing extra.
 - Keep policy state local to the factory-created policy unless cross-partition sharing is a deliberate requirement.
+- A policy may own a background task, such as a control loop that rewrites cost weights from pool-level load. Create the task and its state in the factory, keep the per-request reads cheap and the per-request writes bounded, and keep selecting with baseline values when the task is not running. The [`adaptive-imbalance` example](https://github.com/ai-dynamo/dynamo/blob/main/examples/router/custom-policy-example/adaptive-imbalance/README.md) shows the pattern.
 - Build the policy against the same Dynamo revision as the frontend or EPP.
 - If a signal adds work, storage, allocation, or another scan, run the worker-selection benchmark.
 
