@@ -23,6 +23,8 @@ pub const KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY: &str =
     "router_hint_source_control_endpoints";
 
 const KV_HINT_PROTOCOL_VERSION: &str = "0.1";
+/// Upper bound on the actions one hint carries.
+pub const MAX_KV_HINT_ACTIONS: usize = 32;
 const KV_FETCH_ACTION_TYPE: &str = "kv.fetch";
 const KV_FETCH_ACTION_VERSION: &str = "1.0";
 
@@ -53,7 +55,8 @@ pub struct KvHintAction {
 }
 
 impl KvHintAction {
-    /// An action of any type and version over an already-built payload.
+    /// An action with an explicit ID. When the router composes a hint, it numbers every action
+    /// again (see [`KvHint::append_numbered`]), so a hint policy can use [`Self::unnumbered`].
     pub fn new(
         action_id: impl Into<String>,
         action_type: impl Into<String>,
@@ -66,6 +69,15 @@ impl KvHintAction {
             action_version: action_version.into(),
             payload,
         }
+    }
+
+    /// An action without an ID. The router numbers it when it composes the hint.
+    pub fn unnumbered(
+        action_type: impl Into<String>,
+        action_version: impl Into<String>,
+        payload: BTreeMap<String, serde_json::Value>,
+    ) -> Self {
+        Self::new(String::new(), action_type, action_version, payload)
     }
 
     /// The `kv.fetch@1.0` action with its typed payload.
@@ -109,7 +121,63 @@ impl KvHint {
             actions,
         }
     }
+
+    /// An empty hint for one routed request. Its message ID is the request ID.
+    pub fn for_request(request_id: impl Into<String>) -> Self {
+        Self::new(request_id, Vec::new())
+    }
+
+    /// Append one producer's actions whole, numbering each by its position in the hint: `a1`,
+    /// `a2`, and so on. Numbering replaces any ID the producer set, so action IDs are unique
+    /// without producers coordinating them.
+    ///
+    /// Rejects all of `actions`, leaving the hint unchanged, when they would take it past
+    /// [`MAX_KV_HINT_ACTIONS`].
+    pub fn append_numbered(
+        &mut self,
+        actions: Vec<KvHintAction>,
+    ) -> Result<(), KvHintActionLimitError> {
+        if self.actions.len() + actions.len() > MAX_KV_HINT_ACTIONS {
+            return Err(KvHintActionLimitError {
+                present: self.actions.len(),
+                added: actions.len(),
+            });
+        }
+        for mut action in actions {
+            action.action_id = format!("a{}", self.actions.len() + 1);
+            self.actions.push(action);
+        }
+        Ok(())
+    }
+
+    /// Whether the hint carries no action.
+    pub fn is_empty(&self) -> bool {
+        self.actions.is_empty()
+    }
 }
+
+/// Actions that would take a hint past [`MAX_KV_HINT_ACTIONS`].
+#[derive(Debug)]
+pub struct KvHintActionLimitError {
+    present: usize,
+    added: usize,
+}
+
+impl std::fmt::Display for KvHintActionLimitError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "a hint carries at most {MAX_KV_HINT_ACTIONS} actions; "
+        )?;
+        write!(
+            formatter,
+            "it has {} and {} more were offered",
+            self.present, self.added
+        )
+    }
+}
+
+impl std::error::Error for KvHintActionLimitError {}
 
 /// Who holds a KV prefix a target could fetch: a worker rank, or a cache owner by its compact
 /// residency key. The indexer produces it with a match and owns it; this crate keeps the
@@ -152,6 +220,37 @@ mod tests {
                 }],
             })
         );
+    }
+
+    #[test]
+    fn appended_actions_are_numbered_and_bounded() {
+        let action = |id: &str| KvHintAction::new(id, "test.action", "1", BTreeMap::new());
+        let mut hint = KvHint::for_request("request-1");
+        assert!(hint.is_empty());
+        hint.append_numbered(vec![
+            action("x"),
+            KvHintAction::unnumbered("test.action", "1", BTreeMap::new()),
+        ])
+        .unwrap();
+        hint.append_numbered(vec![action("x")]).unwrap();
+        let ids: Vec<_> = hint
+            .actions
+            .iter()
+            .map(|action| action.action_id.as_str())
+            .collect();
+        assert_eq!(ids, ["a1", "a2", "a3"]);
+        assert_eq!(hint.message_id, "request-1");
+
+        // A batch that would overflow the hint is rejected whole.
+        let error = hint
+            .append_numbered(vec![action("y"); MAX_KV_HINT_ACTIONS - 2])
+            .unwrap_err();
+        assert!(error.to_string().contains("at most 32 actions"), "{error}");
+        assert_eq!(hint.actions.len(), 3);
+        hint.append_numbered(vec![action("y"); MAX_KV_HINT_ACTIONS - 3])
+            .unwrap();
+        assert_eq!(hint.actions.len(), MAX_KV_HINT_ACTIONS);
+        assert_eq!(hint.actions[MAX_KV_HINT_ACTIONS - 1].action_id, "a32");
     }
 
     #[test]

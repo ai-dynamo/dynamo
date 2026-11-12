@@ -804,9 +804,9 @@ pub struct SelectResponse {
     /// selections (`SelectRequest::advisory`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub worker_load: Option<SelectionWorkerLoad>,
-    /// Source the chosen worker can fetch a longer cached prefix from. Present
-    /// only for bookings when the partition has router-hint-capable workers,
-    /// the indexer can retain the matched chain, and a better source exists.
+    /// The KV hint composed for a booking: the router's own fetch, then the
+    /// actions of the role's hint policies. Present only for bookings to a
+    /// worker that advertises `router_hint`, when some action was composed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kv_hint: Option<KvHint>,
 }
@@ -834,6 +834,10 @@ pub struct ReservationResponse {
     pub worker_id: WorkerId,
     pub dp_rank: DpRank,
     pub endpoint: String,
+    /// The KV hint composed for a reservation that replays a selection; omitted when its hint
+    /// policies added no action.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kv_hint: Option<KvHint>,
 }
 
 #[derive(Debug, Serialize)]

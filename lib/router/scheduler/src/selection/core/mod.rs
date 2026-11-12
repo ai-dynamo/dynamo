@@ -18,10 +18,9 @@ use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
 use crate::config::{CacheHitWeights, RouterConfig, Validated};
+use crate::hint_policy::HintPolicyFactory;
 use crate::identity::RoutingPartitionId;
-use crate::kv_hints::{
-    KvHint, KvHintAction, KvSourceLocationsPayload, KvTransferCandidateSource, KvTransferCandidates,
-};
+use crate::kv_hints::{KvHint, KvHintAction, KvSourceLocationsPayload, KvTransferCandidates};
 use crate::overlap_summary::MooncakeOverlapSummary;
 use crate::protocols::WorkerConfigLike;
 use crate::queue::SchedulerBookingDescriptor;
@@ -30,6 +29,7 @@ use crate::replication::{
     ReplicaSyncConfig, SchedulerLoadSink, ScopedReplicaEvent, ScopedSequencePublisher,
     setup_scoped_replica_sync,
 };
+use crate::resolve::RouterResponsibilities;
 use crate::selector::{WorkerSelectionPolicy, WorkerSelector};
 use crate::shared_cache::SharedKvCache;
 use crate::tracking_hash::{TrackingHashContext, TrackingHashScope};
@@ -130,8 +130,11 @@ struct SelectionEntry {
     workers_tx: watch::Sender<HashMap<WorkerId, SelectionWorkerConfig>>,
     /// Whether a worker in `workers_tx` consumes router hints, set on publish.
     hint_capable_workers: AtomicBool,
-    /// Whether the selection policy scores fetchable prefixes (`KV_TRANSFER`).
-    scores_kv_transfer: bool,
+    /// What the router does for this partition's role, from its plugins' declarations.
+    responsibilities: RouterResponsibilities,
+    /// Warns once when this partition's workers advertise router hints but its KV index can't
+    /// keep the block chain that copy sources need.
+    copy_sources_warning: std::sync::Once,
     scheduler: SelectionScheduler,
     replica_inbox: Option<ReplicaInbox>,
     affinity: OnceCell<SessionAffinity>,
@@ -181,6 +184,15 @@ pub struct SelectionHost {
     pub eligibility: HostEligibility,
     pub telemetry: HostTelemetry,
     pub replication: HostReplication,
+    pub hints: HostHints,
+}
+
+/// Hint policies the core instantiates for every partition.
+#[derive(Clone, Default)]
+pub struct HostHints {
+    /// The resolved hint policies; `None` runs no hint policies. Each partition's role resolves
+    /// them with its worker-selection policy (see [`crate::plugins::resolve::resolve_role`]).
+    pub policies: Option<HintPolicyFactory>,
 }
 
 /// Load signals the host knows and the partition scheduler does not.

@@ -36,7 +36,16 @@ impl WorkerInputs {
     // TODO(v1.9): Remove this alias.
     #[deprecated(since = "1.7.0", note = "use `WorkerInputs::ACTIVE_REQUESTS`")]
     pub const OCCUPANCY: Self = Self::ACTIVE_REQUESTS;
-    /// Request the KV prefix each worker could fetch from another worker or cache.
+    /// Request each worker's KV copy offer: the prefix it could copy from another worker or
+    /// cache owner.
+    ///
+    /// Which plugin kinds receive each group:
+    ///
+    /// | Group | Filters | Scorers | Pickers | Hint policies |
+    /// | --- | --- | --- | --- | --- |
+    /// | `CACHE`, `LOAD`, `PREFERRED_TAINT` | Yes | Yes | Yes | Rejected |
+    /// | `ACTIVE_REQUESTS` | No | No | Yes | Rejected |
+    /// | `KV_TRANSFER` | No | Yes | No | The booked worker's copy source |
     pub const KV_TRANSFER: Self = Self(1 << 6);
     /// Every optional column but the fetch column, which only scorers may declare.
     pub const ALL: Self = Self(Self::CACHE.0 | Self::LOAD.0 | Self::PREFERRED_TAINT.0);

@@ -2,12 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::super::input::PromptRequest;
-use super::hint::transfer_hint_payload;
 use super::reservations::{
     Reservation, ReservationClaim, ReservationIndexObserver, sweep_reservation_index,
 };
 use super::*;
 use crate::config::RouterConfig;
+use crate::kv_hints::{KvCopySource, KvTransferCandidateSource, kv_copy_locations};
 use crate::protocols::RoutingConstraints;
 use crate::replication::HostReplicaChannels;
 use crate::test_utils::{local_test_core, test_core_with, test_router_config};
@@ -441,6 +441,15 @@ async fn unreachable_remote_indexer_is_reported_not_ready() {
     assert_eq!(error.status_code(), 503);
 }
 
+fn host_with_hints(policies: crate::hint_policy::HintPolicyFactory) -> SelectionHost {
+    SelectionHost {
+        hints: HostHints {
+            policies: Some(policies),
+        },
+        ..SelectionHost::default()
+    }
+}
+
 /// Two event-driven workers; worker 1 holds every block of an 8-token
 /// prompt. `configure` adjusts each registration before upsert.
 async fn hint_fixture(
@@ -455,10 +464,33 @@ async fn hint_fixture_with(
     prompt_tokens: u32,
     configure: impl Fn(&mut WorkerRequest),
 ) -> (SelectionCore, Arc<SelectionEntry>, Vec<u32>) {
+    hint_fixture_on(local_core(config), prompt_tokens, configure).await
+}
+
+/// Like [`hint_fixture`], with `host`'s hint policies and an optional worker-selection policy.
+async fn hint_policy_fixture(
+    host: SelectionHost,
+    policy_factory: Option<WorkerSelectionPolicyFactory>,
+    configure: impl Fn(&mut WorkerRequest),
+) -> (SelectionCore, Arc<SelectionEntry>, Vec<u32>) {
+    let core = core_with(
+        test_config(true),
+        host,
+        policy_factory,
+        WorkerType::Aggregated,
+        None,
+    );
+    hint_fixture_on(core, 8, configure).await
+}
+
+async fn hint_fixture_on(
+    core: SelectionCore,
+    prompt_tokens: u32,
+    configure: impl Fn(&mut WorkerRequest),
+) -> (SelectionCore, Arc<SelectionEntry>, Vec<u32>) {
     use dynamo_kv_hashing::routing::{BlockHashOptions, compute_block_hash_for_seq};
     use dynamo_kv_indexer::KvIndexerInterface;
 
-    let core = local_core(config);
     for worker_id in [1, 2] {
         let mut request = worker_with_kv_events(worker_id);
         configure(&mut request);
@@ -3839,7 +3871,24 @@ fn transfer_hint_for_selection(
         scope,
     )
     .source_for(target, target_keys, local)?;
-    transfer_hint_payload(configs, source, candidates)
+    fetch_payload(
+        configs,
+        KvCopySource::new(target, source, local),
+        candidates,
+    )
+}
+
+/// The router's `kv.fetch` payload for `copy`: every block from 0 through the source's prefix.
+fn fetch_payload(
+    configs: &HashMap<WorkerId, SelectionWorkerConfig>,
+    copy: KvCopySource,
+    candidates: &KvTransferCandidates,
+) -> Option<KvSourceLocationsPayload> {
+    let locations = kv_copy_locations(configs, candidates, &copy)?;
+    Some(KvSourceLocationsPayload {
+        source_control_endpoint: locations.source_address().to_string(),
+        block_hashes: locations.chain()[..locations.source_prefix_blocks()].to_vec(),
+    })
 }
 
 fn hint_config(worker_type: &str, endpoints: &[(u32, &str)]) -> SelectionWorkerConfig {
@@ -3990,11 +4039,12 @@ fn hint_is_dropped_when_the_selected_source_left() {
         prefix_blocks: 2,
     };
     let candidates = hint_candidates(&[101, 102, 103], vec![(source.source, 2)]);
+    let copy = KvCopySource::new(WorkerWithDpRank::new(7, 0), source, 0);
     let mut configs = HashMap::from([(7, hint_config("prefill", &[]))]);
-    assert_eq!(transfer_hint_payload(&configs, source, &candidates), None);
+    assert_eq!(fetch_payload(&configs, copy, &candidates), None);
 
     configs.insert(8, hint_config("prefill", &[(0, "tcp://source:23280")]));
-    let payload = transfer_hint_payload(&configs, source, &candidates).expect("hint");
+    let payload = fetch_payload(&configs, copy, &candidates).expect("hint");
     assert_eq!(payload.source_control_endpoint, "tcp://source:23280");
     assert_eq!(payload.block_hashes.len(), 2);
 }
@@ -4495,4 +4545,292 @@ async fn peer_bindings_converge_by_version() {
     // A stale version cannot displace the newer binding.
     peer.dispatch_affinity_event(first);
     assert_eq!(bound_worker(&peer, "s"), Some(3));
+}
+
+mod hint_policies {
+    use super::*;
+    use crate::hint_policy::{
+        Commitments, HintContext, HintPolicy, HintPolicyConstructor, HintPolicyError,
+        HintPolicyFactory,
+    };
+    use dynamo_worker_selection::{
+        WorkerCandidates, WorkerInputView, WorkerInputs, WorkerPicker, WorkerScorer,
+        WorkerSelectionContext, WorkerSelectionPolicyError,
+    };
+
+    /// Scores each worker by its negated device overlap, so cache reuse wins.
+    struct DeviceOverlapScorer;
+
+    impl WorkerScorer for DeviceOverlapScorer {
+        fn required_worker_inputs(&self) -> WorkerInputs {
+            WorkerInputs::CACHE
+        }
+
+        fn score(
+            &self,
+            _context: &WorkerSelectionContext<'_>,
+            candidates: WorkerCandidates<'_>,
+            costs: &mut [f64],
+        ) -> Result<(), WorkerSelectionPolicyError> {
+            for (candidate, cost) in candidates.iter().zip(costs) {
+                *cost = -candidate
+                    .cache()
+                    .map_or(0.0, |cache| cache.device_overlap_blocks());
+            }
+            Ok(())
+        }
+    }
+
+    /// The lowest cost wins; ties go to the lowest worker ID.
+    struct LowestCostPicker;
+
+    impl WorkerPicker for LowestCostPicker {
+        fn pick(
+            &self,
+            _context: &WorkerSelectionContext<'_>,
+            input: WorkerInputView<'_>,
+        ) -> Result<usize, WorkerSelectionPolicyError> {
+            Ok(input
+                .candidates()
+                .iter()
+                .enumerate()
+                .min_by(|(_, left), (_, right)| {
+                    left.cost()
+                        .total_cmp(&right.cost())
+                        .then_with(|| left.worker().cmp(&right.worker()))
+                })
+                .map(|(row, _)| row)
+                .unwrap_or(0))
+        }
+    }
+
+    fn overlap_policy() -> Option<WorkerSelectionPolicyFactory> {
+        Some(Arc::new(|config, role, _| {
+            WorkerSelectionPolicy::new(
+                config.clone(),
+                role.as_str(),
+                vec![Box::new(DeviceOverlapScorer)],
+                Box::new(LowestCostPicker),
+            )
+        }))
+    }
+
+    fn hints(policies: Vec<(&str, Recorder)>) -> SelectionHost {
+        host_with_hints(
+            HintPolicyFactory::for_all_roles(
+                policies.into_iter().map(|(name, policy)| {
+                    (name.to_string(), HintPolicyConstructor::shared(policy))
+                }),
+            )
+            .unwrap(),
+        )
+    }
+
+    /// Records how often it runs, and emits one action naming the booked worker and prompt length.
+    #[derive(Clone)]
+    struct Recorder {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl Recorder {
+        fn new() -> Self {
+            Self {
+                calls: Arc::default(),
+            }
+        }
+    }
+
+    impl HintPolicy for Recorder {
+        fn build_hints(
+            &self,
+            context: &HintContext<'_>,
+        ) -> Result<Vec<KvHintAction>, HintPolicyError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![KvHintAction::unnumbered(
+                "test.record",
+                "1",
+                [
+                    (
+                        "worker_id".to_string(),
+                        serde_json::json!(context.worker().worker_id),
+                    ),
+                    (
+                        "isl_tokens".to_string(),
+                        serde_json::json!(context.isl_tokens()),
+                    ),
+                ]
+                .into(),
+            )])
+        }
+    }
+
+    /// The recorder's action in `hint`.
+    fn recorded(hint: &KvHint) -> &KvHintAction {
+        hint.actions
+            .iter()
+            .find(|action| action.action_type == "test.record")
+            .expect("the recorder's action")
+    }
+
+    fn prompt_of(tokens: &[u32]) -> PromptRequest {
+        PromptRequest {
+            token_ids: Some(tokens.to_vec()),
+            ..PromptRequest::default()
+        }
+    }
+
+    async fn reserve(core: &SelectionCore, id: &str, tokens: &[u32]) -> SelectResponse {
+        let mut request = reserve_request(id);
+        request.prompt = prompt_of(tokens);
+        core.select_and_reserve(request).await.expect("reserve")
+    }
+
+    #[tokio::test]
+    async fn bookings_compose_policies_in_order_and_previews_never_run_them() {
+        let recorder = Recorder::new();
+        let (core, _entry, tokens) = hint_policy_fixture(
+            hints(vec![("record", recorder.clone())]),
+            None,
+            hint_capable,
+        )
+        .await;
+        let mut preview = select_request();
+        preview.prompt = prompt_of(&tokens);
+        preview.pinned_worker = Some(WorkerWithDpRank::new(2, 0));
+        assert!(core.select(preview).await.unwrap().kv_hint.is_none());
+        assert_eq!(recorder.calls.load(Ordering::SeqCst), 0);
+
+        let response = reserve_pinned(&core, "to-worker-2", &tokens, 2).await;
+        assert_eq!(recorder.calls.load(Ordering::SeqCst), 1);
+        let hint = response.kv_hint.expect("composed hint");
+        let actions: Vec<_> = hint
+            .actions
+            .iter()
+            .map(|action| format!("{}:{}", action.action_id, action.action_type))
+            .collect();
+        // The router's own fetch comes first, then the policies; the stage numbers them all.
+        assert_eq!(actions, ["a1:kv.fetch", "a2:test.record"]);
+        assert_eq!(hint.message_id, "to-worker-2");
+        assert_eq!(hint.actions[1].payload["worker_id"], serde_json::json!(2));
+    }
+
+    #[tokio::test]
+    async fn workers_without_router_hint_get_no_hint() {
+        let recorder = Recorder::new();
+        let (core, _entry, tokens) =
+            hint_policy_fixture(hints(vec![("record", recorder.clone())]), None, |_| {}).await;
+        let response = reserve_pinned(&core, "to-worker-2", &tokens, 2).await;
+        assert!(response.kv_hint.is_none());
+        // The stage skips the policies of a worker that can't receive their hints.
+        assert_eq!(recorder.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn replayed_reservations_run_hint_policies_for_the_booked_worker() {
+        let recorder = Recorder::new();
+        let (core, _entry, tokens) = hint_policy_fixture(
+            hints(vec![("record", recorder.clone())]),
+            overlap_policy(),
+            hint_capable,
+        )
+        .await;
+        let mut select = select_request();
+        select.selection_id = Some("two-phase".to_string());
+        select.prompt = prompt_of(&tokens);
+        let selected = core.select(select).await.expect("select");
+        assert_eq!(selected.worker_id, 1);
+        assert!(selected.kv_hint.is_none());
+        assert_eq!(recorder.calls.load(Ordering::SeqCst), 0);
+
+        let reserved = core
+            .create_reservation(replay_reservation("two-phase"))
+            .await
+            .expect("reserve");
+        assert_eq!(reserved.worker_id, 1);
+        assert_eq!(recorder.calls.load(Ordering::SeqCst), 1);
+        let hint = reserved.kv_hint.expect("the booked worker's actions");
+        assert_eq!(hint.message_id, "two-phase");
+        // A replay carries no copy data, so there is no router fetch.
+        assert_eq!(hint.actions.len(), 1);
+        assert_eq!(hint.actions[0].action_id, "a1");
+        assert_eq!(hint.actions[0].payload["worker_id"], serde_json::json!(1));
+        assert_eq!(
+            hint.actions[0].payload["isl_tokens"],
+            serde_json::json!(tokens.len())
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_bookings_get_their_own_context() {
+        let (core, _entry, _tokens) = hint_policy_fixture(
+            hints(vec![("record", Recorder::new())]),
+            overlap_policy(),
+            hint_capable,
+        )
+        .await;
+        let core = Arc::new(core);
+        let bookings = (1..=8usize).map(|blocks| {
+            let core = Arc::clone(&core);
+            tokio::spawn(async move {
+                let tokens: Vec<u32> = (1..=(4 * blocks) as u32).collect();
+                let id = format!("booking-{blocks}");
+                (tokens.len(), reserve(&core, &id, &tokens).await)
+            })
+        });
+        for booking in futures_util::future::join_all(bookings).await {
+            let (isl_tokens, response) = booking.unwrap();
+            let hint = response.kv_hint.expect("recorded action");
+            let recorded = recorded(&hint);
+            // Each booking's actions carry its own prompt and its own booked worker.
+            assert_eq!(
+                recorded.payload["isl_tokens"],
+                serde_json::json!(isl_tokens)
+            );
+            assert_eq!(
+                recorded.payload["worker_id"],
+                serde_json::json!(response.worker_id)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn conflicting_plugins_fail_partition_setup() {
+        #[derive(Clone)]
+        struct Consumer;
+        impl HintPolicy for Consumer {
+            fn commitments(&self) -> Commitments {
+                Commitments::KV_COPY
+            }
+            fn build_hints(
+                &self,
+                _context: &HintContext<'_>,
+            ) -> Result<Vec<KvHintAction>, HintPolicyError> {
+                Ok(Vec::new())
+            }
+        }
+        let factory = HintPolicyFactory::for_all_roles([
+            ("one".to_string(), HintPolicyConstructor::shared(Consumer)),
+            ("two".to_string(), HintPolicyConstructor::shared(Consumer)),
+        ])
+        .unwrap();
+        let core = core_with(
+            test_config(true),
+            host_with_hints(factory),
+            None,
+            WorkerType::Aggregated,
+            None,
+        );
+        // Partition setup fails, so the worker is recorded as not schedulable, with the reason.
+        let record = core
+            .upsert_worker(worker_with_kv_events(1))
+            .await
+            .expect("upsert");
+        assert!(
+            record
+                .not_schedulable_reasons
+                .iter()
+                .any(|reason| reason.contains("keep one")),
+            "{record:?}"
+        );
+    }
 }

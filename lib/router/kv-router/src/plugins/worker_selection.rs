@@ -33,6 +33,8 @@ pub use super::registry::{
 pub(crate) use config::RawWorkerSelectionConfig;
 pub use config::{WorkerSelectionConfig, WorkerSelectionInstance, WorkerSelectionPolicySelection};
 pub use dynamo_router_protocol::session::WorkerSelectionInputTrigger;
+pub use dynamo_scheduler::hint_policy::Commitments;
+pub use dynamo_scheduler::kv_hints::{KvCopyLocations, KvCopySource};
 pub use dynamo_scheduler::selector::{WorkerCapacityExt, WorkerInfoExt, WorkerLoadInputExt};
 
 /// Factory that creates one worker-selection policy per routing partition.

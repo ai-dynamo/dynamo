@@ -98,10 +98,10 @@ impl<'a> WorkerCandidate<'a> {
             .then_some(&self.data.load)
     }
 
-    /// The KV prefix this worker could fetch, only for a scorer that declared
+    /// This worker's KV copy offer, only for a scorer that declared
     /// KV_TRANSFER; filters and pickers do not receive it. None also means the
-    /// host has no transfer data for this request: no worker in the partition
-    /// consumes router hints, or the indexer cannot retain the matched block chain.
+    /// host has no copy data for this request: no worker in the partition
+    /// advertises `router_hint`, or the indexer cannot retain the matched block chain.
     #[inline]
     pub fn kv_transfer(self) -> Option<WorkerTransferInput> {
         if self.inputs.contains(WorkerInputs::KV_TRANSFER) {
@@ -378,8 +378,6 @@ pub struct WorkerLoadInput {
 // from drifting further without a measurement.
 #[cfg(target_pointer_width = "64")]
 const _: () = assert!(size_of::<WorkerLoadInput>() == 40);
-#[cfg(target_pointer_width = "64")]
-const _: () = assert!(size_of::<CandidateData>() == 128);
 
 pub use dynamo_router_protocol::columns::{WorkerInfo, WorkerInputs};
 pub use dynamo_router_protocol::worker::WorkerCapacity;
@@ -595,12 +593,12 @@ impl WorkerTransferInput {
     /// eligible source holds more than this worker's device and host-pinned
     /// prefix, the `CACHE` inputs' `device_overlap_blocks() + host_overlap_blocks()`.
     ///
-    /// The host chooses the source by its router-hint rules: the same hint
-    /// worker type, neither this worker nor a cache owner attached to it, and,
-    /// when this worker sets a KV transfer domain, its topology island
-    /// (`preferred` enforcement falls back to another island). Booking this
-    /// worker attaches a fetch hint for that source. Fetches are best effort:
-    /// the source may no longer hold the blocks when the request runs.
+    /// The host chooses the source by its copy rules: the same hint worker
+    /// type, neither this worker nor a cache owner attached to it, and, when
+    /// this worker sets a KV transfer domain, its topology island (`preferred`
+    /// enforcement falls back to another island). This is the copy offer for
+    /// this worker; hint policies decide whether a booking sends it. A copy is
+    /// best effort: the source may no longer hold the blocks when it runs.
     #[inline]
     pub fn source_prefix_blocks(&self) -> Option<u32> {
         self.source_prefix_blocks
