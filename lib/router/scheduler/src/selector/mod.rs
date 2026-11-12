@@ -50,7 +50,9 @@ use super::types::{KvSchedulerError, SchedulingRequest, SchedulingResponse};
 use crate::protocols::{SelectionLogFields, WorkerConfigLike, WorkerSelectionResult};
 use dynamo_kv_indexer::ResidentBlockCounts;
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
+use dynamo_slot_tracker::WorkerLoadProjection;
 use dynamo_worker_selection::{SelectionTrace, SelectionTraceSpec};
+use rustc_hash::FxHashMap;
 
 /// Low-level selector used by routing hosts.
 ///
@@ -207,6 +209,26 @@ impl<'a, C: WorkerConfigLike> WorkerSelectionInput<'a, C> {
 pub struct PreparedCandidates {
     rows: PreparedRows,
     kv_transfer_sources: Option<KvTransferSourceSummary>,
+}
+
+impl PreparedCandidates {
+    /// Fill each row's load from `loads`, a projection the caller read for `request`; see
+    /// [`PreparedRows::fill_loads`].
+    pub(crate) fn fill_loads(
+        &mut self,
+        request: &SchedulingRequest,
+        loads: &FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
+    ) {
+        self.rows.fill_loads(|worker| {
+            WorkerLoadInput::for_worker(loads, worker, || request.unobserved_worker_load())
+        });
+    }
+
+    /// Selection uses the projection [`Self::fill_loads`] read, with the `stale` ranks
+    /// re-read since; see [`PreparedRows::keep_filled_loads`].
+    pub(crate) fn keep_filled_loads(&mut self, stale: &[WorkerWithDpRank]) {
+        self.rows.keep_filled_loads(stale);
+    }
 }
 
 /// Kernel-side preparation: build a policy's rows from the request and worker configuration.
