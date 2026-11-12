@@ -151,7 +151,6 @@ Each framework selects the backend differently:
 | **SGLang**      | `SGLANG_DISAGGREGATION_NIXL_BACKEND=LIBFABRIC` env var                                                                                        | UCX → TCP fallback |
 | **vLLM**        | `--kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_connector_extra_config":{"backends":["LIBFABRIC"]}}'` on prefill. `--kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"backends":["LIBFABRIC"]}}'` on decode | UCX → TCP fallback |
 | **TRT-LLM**     | `TRTLLM_NIXL_KVCACHE_BACKEND=LIBFABRIC` env var                                                                                               | UCX → TCP fallback |
-| **KVBM (Rust)** | `DYN_KVBM_NIXL_BACKEND_LIBFABRIC=true` env var                                                                                                | UCX → TCP fallback |
 
 
 This is a silent-failure path — getting it wrong manifests as ~100 s TTFT instead of a clear error. Always [verify at startup](#verification) that LIBFABRIC is active.

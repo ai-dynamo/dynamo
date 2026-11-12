@@ -407,7 +407,6 @@ The dashboard is organized into five sections:
 Other available dashboards:
 - **Dynamo Dashboard** (`dynamo.json`) - Frontend and component metrics
 - **DCGM Metrics** (`dcgm-metrics.json`) - GPU utilization, memory, power
-- **KVBM** (`kvbm.json`) - KV block manager metrics
 - **Disagg Dashboard** (`disagg-dashboard.json`) - Disaggregated serving metrics
 
 ---
