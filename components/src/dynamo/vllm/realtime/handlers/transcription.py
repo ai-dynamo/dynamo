@@ -176,10 +176,8 @@ class RealtimeTranscriptionHandler:
         )
 
         run_turn = None
-        # vLLM carries each 5-second Qwen segment into one growing multi-turn
-        # session, which repeats the opening. Remove this branch once vLLM
-        # decodes Qwen realtime segments without that context
-        # (vllm-project/vllm#56218).
+        # Works around vLLM repeating the opening across Qwen segments
+        # (vllm-project/vllm#56218); remove this branch once that is fixed.
         if issubclass(serving.model_cls, Qwen3ASRRealtimeGeneration):
             run_turn = build_qwen3_asr_transcriber(
                 engine_client=engine_client,
