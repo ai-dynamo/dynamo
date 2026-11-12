@@ -102,7 +102,13 @@ impl HttpFrontend {
         }
 
         let plugins = RouterPluginBuilder::new(self.plugins);
-        plugins.validate_config(&engine_config.local_model().router_config().kv_router_config)?;
+        let router_config = engine_config.local_model().router_config();
+        plugins.validate_config(&router_config.kv_router_config)?;
+        crate::kv_router::check_hint_policies_route_on_kv_path(
+            router_config.router_mode,
+            &router_config.kv_router_config,
+            &crate::kv_router::EVERY_ROLE,
+        )?;
 
         // Callers that reach the frontend without going through `run_input`
         // still have to drain the trace sinks before the process exits. The
@@ -394,7 +400,7 @@ async fn run_watcher(
     let discovery = runtime.discovery();
     let discovery_stream = discovery
         .list_and_watch(
-            dynamo_runtime::discovery::DiscoveryQuery::AllModels,
+            namespace_filter.model_query(),
             Some(runtime.primary_token()),
         )
         .await?;
