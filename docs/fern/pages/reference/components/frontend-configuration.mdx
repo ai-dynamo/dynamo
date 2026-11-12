@@ -776,6 +776,12 @@ The `dynamo` chat processor runs Rust parsing in the frontend; workers publish p
   Environment variable: `DYN_CHAT_PROCESSOR`
 </ParamField>
 
+<ParamField path="--isolate-tool-call-markers" type="boolean" default="false">
+  Tokenize message content that contains the tool-call parser's delimiters (for example a literal `<tool_call>` inside a tool result) as plain sub-words, so the model cannot copy a delimiter token out of untrusted input and have it parsed as a real tool call. Requires `--dyn-chat-processor=sglang`. Requests the option cannot encode safely are rejected, and the native DeepSeek-V4 and Kimi K3 encoders do not support it; see [Echoed delimiters](../../developer-guide/knowledge-base/modular-components/backends/sglang/chat-processor.md#echoed-delimiters) for the cases.
+
+  Environment variable: `DYN_ISOLATE_TOOL_CALL_MARKERS`
+</ParamField>
+
 <ParamField path="--dyn-debug-perf" type="boolean" default="false">
   Log per-function timing for preprocessing (vllm processor only).
 

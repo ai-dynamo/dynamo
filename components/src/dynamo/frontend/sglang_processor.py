@@ -377,6 +377,7 @@ def _init_worker(
     structural_tag_mode: str = "off",
     structural_tag_scope: str = "auto",
     structural_tag_schema: str = "auto",
+    isolate_tool_call_markers: bool = False,
 ) -> None:
     """Initialize a worker process with its own tokenizer."""
     global _w_tokenizer, _w_tool_call_parser_name, _w_reasoning_parser_name
@@ -400,6 +401,7 @@ def _init_worker(
         chat_template=chat_template,
         tool_call_parser_name=tool_call_parser_name,
         reasoning_parser_name=reasoning_parser_name,
+        isolate_tool_call_markers=isolate_tool_call_markers,
     )
 
 
@@ -1288,6 +1290,7 @@ class SglangEngineFactory:
             chat_template=chat_template,
             tool_call_parser_name=tool_call_parser_name,
             reasoning_parser_name=reasoning_parser_name,
+            isolate_tool_call_markers=self.config.isolate_tool_call_markers,
         )
         preprocess_pool = None
         preprocess_workers = self.config.preprocess_workers
@@ -1313,6 +1316,7 @@ class SglangEngineFactory:
                     structural_tag_mode,
                     structural_tag_scope,
                     structural_tag_schema,
+                    self.config.isolate_tool_call_markers,
                 ),
             )
             futures = [

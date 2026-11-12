@@ -4,12 +4,10 @@
 from __future__ import annotations
 
 import copy
-import inspect
 import json
 import logging
 import re
 from dataclasses import dataclass
-from functools import lru_cache
 from typing import Any, TypeAlias
 
 from sglang.srt.entrypoints.openai.protocol import Function as SglangFunction
@@ -34,6 +32,13 @@ from .sglang_prompt_renderer import (
     PromptRenderer,
     build_prompt_renderer,
     resolve_prompt_renderer,
+)
+from .sglang_tool_call_markers import (
+    _callable_accepts_kwarg,
+    _normalize_sglang_parser_name,
+    _parser_tokenizer_kwargs,
+    tool_call_marker_strings,
+    tool_call_marker_token_ids,
 )
 from .structural_tag_policy import (
     ToolChoiceKind,
@@ -115,22 +120,6 @@ _THINKING_BY_DEFAULT = {
     "kimi_k3",
 }
 _THINKING_OPT_IN = {"deepseek-v3", "deepseek-v4", "deepseek-v41", "gemma4"}
-
-_SGLANG_PARSER_NAME_ALIASES = {
-    # Dynamo's Rust parser registry accepts these MiniMax-M3 aliases. SGLang
-    # builds that include MiniMax-M3 expose the parser as "minimax-m3".
-    "minimax_m3": "minimax-m3",
-    "minimax_m3_nom": "minimax-m3",
-    "minimax-m3-nom": "minimax-m3",
-    "kimi-k3": "kimi_k3",
-    "gemma-4": "gemma4",
-}
-
-
-def _normalize_sglang_parser_name(parser_name: str | None) -> str | None:
-    if not parser_name:
-        return parser_name
-    return _SGLANG_PARSER_NAME_ALIASES.get(parser_name, parser_name)
 
 
 def resolve_request_force_reasoning(
@@ -489,24 +478,6 @@ def _with_thinking_template_kwargs(
     return request
 
 
-@lru_cache(maxsize=64)
-def _callable_accepts_kwarg(func: Any, kwarg: str) -> bool:
-    try:
-        signature = inspect.signature(func)
-    except (TypeError, ValueError):
-        return False
-
-    for name, param in signature.parameters.items():
-        if param.kind == inspect.Parameter.VAR_KEYWORD:
-            return True
-        if name == kwarg and param.kind in (
-            inspect.Parameter.POSITIONAL_OR_KEYWORD,
-            inspect.Parameter.KEYWORD_ONLY,
-        ):
-            return True
-    return False
-
-
 def _call_with_optional_parallel_tool_calls(
     func: Any,
     *args: Any,
@@ -539,12 +510,6 @@ def _enforce_function_strict_level(parser: FunctionCallParser) -> None:
     function_level = getattr(type(current_level), "FUNCTION", None)
     if function_level is not None and current_level < function_level:
         parser.tool_strict_level = function_level
-
-
-def _parser_tokenizer_kwargs(parser: Any, tokenizer: Any) -> dict[str, Any]:
-    if tokenizer is not None and _callable_accepts_kwarg(parser, "tokenizer"):
-        return {"tokenizer": tokenizer}
-    return {}
 
 
 def build_tool_call_guided_decoding(
@@ -1120,6 +1085,10 @@ class SglangStreamingPostProcessor:
         self._request_stop_token_ids = set(stop_token_ids or [])
         self._stop_strings = stop_strings or set()
         self._pending_stop_text = ""
+        # (offset within _pending_stop_text, delimiter) for delimiter text that
+        # was emitted as a token id but is being held as a possible stop-string
+        # prefix; it keeps its identity when the text is released.
+        self._pending_stop_markers: list[tuple[int, str]] = []
         self._locally_finished = False
         self._local_stop_reason: str | None = None
         # Decode context, decoded IDs, stop text and hidden stop-token count.
@@ -1147,6 +1116,28 @@ class SglangStreamingPostProcessor:
         self._tool_call_args: dict[int, list[str]] = {}  # tool_index -> arg chunks
         # Full text accumulator for robust finish-time re-parse.
         self._tool_text_parts: list[str] = []
+        # Delimiter token ids of the active format detector. When known, the
+        # parser is opened by the opening id and closed by the closing id;
+        # text outside a call bypasses the parser, so delimiters the model
+        # spells out of sub-words are content, not calls.
+        self._marker_by_id: dict[int, str] = (
+            tool_call_marker_token_ids(tokenizer, tool_call_parser_name)
+            if isinstance(self.tool_call_parser, FunctionCallParser)
+            else {}
+        )
+        self._marker_strings: tuple[str, str] | None = None
+        if self._marker_by_id:
+            self._marker_strings = tool_call_marker_strings(
+                tool_call_parser_name, tokenizer
+            )
+        self._in_tool_call = False
+        # Text since the genuine opening id, as ``(text, delimiters whose id
+        # it carries)``. Released to the parser at the genuine closing id (or
+        # finish) only if no delimiter inside was spelled from sub-words;
+        # otherwise the whole call is content. Tool calls are only emitted at
+        # finish, so holding the body changes nothing the client sees.
+        self._call_pieces: list[tuple[str, list[str]]] = []
+        self._released_whole_call = False
 
     def _strip_matched_stop_token_ids(
         self, token_ids: list[int], stop_reason: Any
@@ -1447,11 +1438,35 @@ class SglangStreamingPostProcessor:
         text: str,
         finish_reason: str | None,
         stop_reason: Any,
-    ) -> tuple[str, int | None]:
-        """Return visible text and, after a local stop, the stop's end in ``text``."""
+        marker: str | None = None,
+    ) -> tuple[str, int | None, list[tuple[int | None, str]]]:
+        """Apply request stop strings to *text*.
+
+        Returns ``(text to emit, stop end, delimiters)``. The stop end is the
+        matched stop string's end in *text* after a local stop, else ``None``.
+        Each delimiter is ``(offset in the emitted text, delimiter)`` for a
+        delimiter whose token id the emitted text carries. *marker* is the
+        delimiter of the current segment (see :meth:`process_output`); when
+        its text is held back as a possible stop-string prefix, the whole
+        delimiter is held and released together with its identity, so the
+        parser gate still flips on it. A delimiter whose text cannot be
+        located is reported with offset ``None``.
+        """
         held_text = self._pending_stop_text
+        held_len = len(held_text)
+        positions = list(self._pending_stop_markers)
+        unlocated: list[tuple[int | None, str]] = []
+        if marker is not None:
+            # The segment's delimiter is its last token; text retained from an
+            # incomplete byte sequence before it may spell the same delimiter.
+            index = text.rfind(marker)
+            if index >= 0:
+                positions.append((held_len + index, marker))
+            else:
+                unlocated.append((None, marker))
         text = held_text + text
         self._pending_stop_text = ""
+        self._pending_stop_markers = []
 
         match = self._find_stop_string(text, stop_reason)
         if match is not None:
@@ -1465,17 +1480,29 @@ class SglangStreamingPostProcessor:
                 del self._pending_logprobs_content[-suppressed_count:]
             self._locally_finished = True
             self._local_stop_reason = matched_stop_string
-            stop_end = match_index + len(matched_stop_string) - len(held_text)
-            return text[:retained_end], stop_end
+            stop_end = match_index + len(matched_stop_string) - held_len
+            released: list[tuple[int | None, str]] = [
+                (off, m) for off, m in positions if off + len(m) <= retained_end
+            ]
+            return text[:retained_end], stop_end, released + unlocated
 
         if finish_reason or not text or not self._stop_strings:
-            return text, None
+            return text, None, [(off, m) for off, m in positions] + unlocated
 
         pending_len = trailing_stop_prefix_len(text, self._stop_strings)
         if pending_len:
-            self._pending_stop_text = text[-pending_len:]
-            return text[:-pending_len], None
-        return text, None
+            cut = len(text) - pending_len
+            # Never split a delimiter between emitted and held text.
+            for off, m in positions:
+                if off < cut < off + len(m):
+                    cut = off
+            self._pending_stop_text = text[cut:]
+            self._pending_stop_markers = [
+                (off - cut, m) for off, m in positions if off >= cut
+            ]
+            released = [(off, m) for off, m in positions if off < cut]
+            return text[:cut], None, released + unlocated
+        return text, None, [(off, m) for off, m in positions] + unlocated
 
     def _parse_reasoning_delta(
         self, delta_text: str, finish_reason: str | None
@@ -1551,7 +1578,199 @@ class SglangStreamingPostProcessor:
         generated_ids = token_ids
         if stop_terminated:
             token_ids = self._strip_matched_stop_token_ids(list(token_ids), stop_reason)
+        hidden_ids = generated_ids[len(token_ids) :]
 
+        if not self._marker_by_id or not any(
+            t in self._marker_by_id for t in token_ids
+        ):
+            return self._process_segment(
+                token_ids,
+                log_probs,
+                top_logprobs,
+                finish_reason,
+                stop_reason,
+                None,
+                generated_ids=generated_ids,
+                trailing_ids=[],
+                hidden_count=len(hidden_ids),
+            )
+
+        # Split the batch at delimiter token ids and run each piece through the
+        # (stateful) text pipeline as if the engine had streamed it separately,
+        # so the parser gate flips exactly where the model emitted the id.
+        segments: list[tuple[list[int], str | None]] = []
+        run: list[int] = []
+        for token_id in token_ids:
+            marker = self._marker_by_id.get(token_id)
+            if marker is None:
+                run.append(token_id)
+                continue
+            if run:
+                segments.append((run, None))
+                run = []
+            segments.append(([token_id], marker))
+        if run:
+            segments.append((run, None))
+
+        # Logprobs may score the retained ids only, or the hidden stop ids too;
+        # the hidden ids belong to the last segment.
+        scored_count = None
+        if log_probs is not None and len(log_probs) in (
+            len(token_ids),
+            len(generated_ids),
+        ):
+            scored_count = len(log_probs)
+        merged: dict[str, Any] | None = None
+        offset = 0
+        for index, (ids, marker) in enumerate(segments):
+            last = index == len(segments) - 1
+            segment_generated = ids + hidden_ids if last else ids
+            segment_log_probs = segment_top_logprobs = None
+            if scored_count is not None:
+                assert log_probs is not None
+                scored = (
+                    segment_generated if scored_count == len(generated_ids) else ids
+                )
+                segment_log_probs = log_probs[offset : offset + len(scored)]
+                if top_logprobs is not None and len(top_logprobs) == scored_count:
+                    segment_top_logprobs = top_logprobs[offset : offset + len(scored)]
+            offset += len(ids)
+            choice = self._process_segment(
+                ids,
+                segment_log_probs,
+                segment_top_logprobs,
+                finish_reason if last else None,
+                stop_reason if last else None,
+                marker,
+                generated_ids=segment_generated,
+                trailing_ids=token_ids[offset:],
+                hidden_count=len(hidden_ids),
+            )
+            merged = self._merge_choices(merged, choice)
+            if self._locally_finished:
+                break
+        return merged
+
+    @staticmethod
+    def _merge_choices(
+        acc: dict[str, Any] | None, choice: dict[str, Any] | None
+    ) -> dict[str, Any] | None:
+        if choice is None:
+            return acc
+        if acc is None:
+            return choice
+        delta = acc["delta"]
+        for key in ("content", "reasoning_content"):
+            if choice["delta"].get(key):
+                delta[key] = (delta.get(key) or "") + choice["delta"][key]
+        if choice["delta"].get("tool_calls"):
+            # Only the finishing segment emits tool calls today; merge by
+            # index anyway so a later segment can never drop an earlier one.
+            by_index = {tc["index"]: tc for tc in delta.get("tool_calls") or []}
+            for tc in choice["delta"]["tool_calls"]:
+                prev = by_index.get(tc["index"])
+                if prev is None:
+                    by_index[tc["index"]] = tc
+                    continue
+                prev_fn, fn = prev["function"], tc["function"]
+                prev_fn["name"] = fn.get("name") or prev_fn.get("name")
+                prev_fn["arguments"] = (prev_fn.get("arguments") or "") + (
+                    fn.get("arguments") or ""
+                )
+            delta["tool_calls"] = [by_index[i] for i in sorted(by_index)]
+        acc["finish_reason"] = choice["finish_reason"]
+        logprobs = choice.get("logprobs")
+        if logprobs:
+            if acc.get("logprobs"):
+                acc["logprobs"]["content"].extend(logprobs["content"])
+            else:
+                acc["logprobs"] = logprobs
+        return acc
+
+    def _gate_tool_parser_text(
+        self, normal_text: str, markers: list[str], finish_reason: str | None
+    ) -> tuple[str, str]:
+        """Return ``(text for the parser, text that bypasses it)``.
+
+        *markers* are the delimiters whose token ids this text carries, in
+        order; it is empty for ordinary text. The reasoning parser runs first,
+        so a delimiter it kept as reasoning does not reach here as normal text
+        and does not flip the gate.
+
+        A call is held from its genuine opening id to its genuine closing id
+        and released whole, so a delimiter the model spells out of sub-words
+        inside the call cannot end it early or start another: such a call is
+        returned as content instead of being parsed.
+        """
+        assert self._marker_strings is not None
+        closing = self._marker_strings[1]
+        present = [m for m in markers if m in normal_text]
+        if present:
+            self._call_pieces.append((normal_text, present))
+            self._in_tool_call = present[-1] != closing
+            if self._in_tool_call and not finish_reason:
+                return "", ""
+            return self._release_tool_call()
+        if self._in_tool_call:
+            if normal_text:
+                self._call_pieces.append((normal_text, []))
+            if finish_reason:
+                return self._release_tool_call()
+            return "", ""
+        return "", normal_text
+
+    def _release_tool_call(self) -> tuple[str, str]:
+        """Hand the held call to the parser, or to content if any delimiter
+        inside it was spelled from sub-words rather than emitted as its id."""
+        assert self._marker_strings is not None
+        pieces, self._call_pieces = self._call_pieces, []
+        self._in_tool_call = False
+        text = "".join(piece for piece, _ in pieces)
+        spelled = False
+        run = ""
+        for piece, markers in pieces:
+            if not markers:
+                run += piece
+                continue
+            spelled = spelled or any(m in run for m in self._marker_strings)
+            run = ""
+            # A delimiter string may occur inside the other one; count what
+            # the genuine delimiters themselves contribute.
+            for m in self._marker_strings:
+                if piece.count(m) != sum(g.count(m) for g in markers):
+                    spelled = True
+        spelled = spelled or any(m in run for m in self._marker_strings)
+        if spelled:
+            logger.warning(
+                "Tool call contains a delimiter spelled from sub-words; "
+                "returning it as content"
+            )
+            return "", text
+        self._released_whole_call = True
+        return text, ""
+
+    def _process_segment(
+        self,
+        token_ids: list[int],
+        log_probs: list[float] | None,
+        top_logprobs: list[list[dict[str, Any]]] | None,
+        finish_reason: str | None,
+        stop_reason: Any,
+        marker: str | None,
+        *,
+        generated_ids: list[int],
+        trailing_ids: list[int],
+        hidden_count: int,
+    ) -> dict[str, Any] | None:
+        """Run one run of token ids through the stateful text pipeline.
+
+        *marker* is the delimiter whose single token id this segment is, or
+        ``None`` for ordinary text; see :meth:`process_output`. *generated_ids*
+        is *token_ids* plus, in the batch's last segment, the hidden stop ids
+        that ended the batch. *trailing_ids* are the batch's retained ids after
+        this segment and *hidden_count* its hidden stop ids: a local stop here
+        reports both as following it.
+        """
         context_ids = self._decode_context_ids
         held_ids = list(self._pending_decode_ids)
         decoded_text = (
@@ -1573,8 +1792,8 @@ class SglangStreamingPostProcessor:
                 self._pending_logprobs_content.extend(content[: len(token_ids)])
                 stop_logprobs = content[len(token_ids) :]
         self._logprob_context_ids = (self._logprob_context_ids + token_ids)[-4:]
-        delta_text, stop_end = self._filter_stop_string_delta(
-            decoded_text, finish_reason, stop_reason
+        delta_text, stop_end, positions = self._filter_stop_string_delta(
+            decoded_text, finish_reason, stop_reason, marker
         )
         if stop_end is None:
             # Queued after stop-string suppression, which matches display text.
@@ -1583,11 +1802,58 @@ class SglangStreamingPostProcessor:
             finish_reason = "stop"
             self._local_stop_boundary = (
                 context_ids,
-                held_ids + token_ids,
+                held_ids + token_ids + trailing_ids,
                 decoded_text[:stop_end],
-                len(generated_ids) - len(token_ids),
+                hidden_count,
             )
 
+        # Text released from the stop-string buffer can hold a delimiter
+        # together with text that came before or after it; route each part
+        # by the gate state at its own delimiter boundary.
+        pieces = self._split_at_markers(delta_text, positions)
+        merged: dict[str, Any] | None = None
+        for index, (text, markers) in enumerate(pieces):
+            last = index == len(pieces) - 1
+            choice = self._process_text(text, finish_reason if last else None, markers)
+            merged = self._merge_choices(merged, choice)
+        return merged
+
+    @staticmethod
+    def _split_at_markers(
+        text: str, positions: list[tuple[int | None, str]]
+    ) -> list[tuple[str, list[str]]]:
+        """Cut *text* so each delimiter is its own piece.
+
+        *positions* holds ``(offset, delimiter)`` for the delimiters whose
+        token id the text carries. An unknown offset keeps the text whole
+        with every delimiter attached, which is the pre-split behaviour.
+        """
+        if not positions:
+            return [(text, [])]
+        if any(offset is None for offset, _ in positions):
+            return [(text, [m for _, m in positions])]
+        located = sorted((o, m) for o, m in positions if o is not None)
+        pieces: list[tuple[str, list[str]]] = []
+        pos = 0
+        for offset, marker in located:
+            if offset > pos:
+                pieces.append((text[pos:offset], []))
+            pieces.append((text[offset : offset + len(marker)], [marker]))
+            pos = offset + len(marker)
+        if pos < len(text):
+            pieces.append((text[pos:], []))
+        return pieces
+
+    def _process_text(
+        self,
+        delta_text: str,
+        finish_reason: str | None,
+        markers: list[str],
+    ) -> dict[str, Any] | None:
+        """Run already stop-filtered text through reasoning and tool parsing.
+
+        *markers* are the delimiters whose token id *delta_text* carries.
+        """
         if self._fast_plain_text:
             if delta_text:
                 return {
@@ -1616,19 +1882,24 @@ class SglangStreamingPostProcessor:
 
         # -- Tool call parsing (accumulate deltas) --
         content_text = normal_text
+        parser_text = normal_text
+        if self.tool_call_parser and self._marker_by_id:
+            parser_text, content_text = self._gate_tool_parser_text(
+                normal_text, markers, finish_reason
+            )
 
-        if self.tool_call_parser and normal_text:
+        if self.tool_call_parser and parser_text:
             # Accumulate raw text for finish-time re-parse.
-            self._tool_text_parts.append(normal_text)
+            self._tool_text_parts.append(parser_text)
 
             if self._is_json_array_parser:
                 result = self.tool_call_parser.parse_streaming_increment(
-                    normal_text, self._sglang_tools
+                    parser_text, self._sglang_tools
                 )
                 parsed_text, tool_calls = result.normal_text, result.calls
             else:
                 parsed_text, tool_calls = self.tool_call_parser.parse_stream_chunk(
-                    normal_text
+                    parser_text
                 )
             content_text = parsed_text
             if self._named_zero_arg_tool is not None:
@@ -1709,7 +1980,10 @@ class SglangStreamingPostProcessor:
             )
             should_reparse = False
             full_text = ""
-            if missing_names or missing_args:
+            # A call released whole by the delimiter gate reaches the
+            # streaming parser in one chunk, and that parser reports one
+            # event per chunk, so the full text is authoritative.
+            if missing_names or missing_args or self._released_whole_call:
                 full_text = "".join(self._tool_text_parts)
                 # Skip the re-parse when the accumulated text has no
                 # tool-call markers.  Avoids wasted `parse_non_stream`
