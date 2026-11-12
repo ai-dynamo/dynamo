@@ -99,7 +99,7 @@ func TestProjectConsumerContract(t *testing.T) {
 			PodIP: "10.0.0.1",
 			Conditions: []corev1.PodCondition{
 				{Type: corev1.PodScheduled, Status: corev1.ConditionTrue, Message: "discard-me"},
-				{Type: corev1.PodReady, Status: corev1.ConditionTrue, Reason: "discard-me"},
+				{Type: corev1.PodReady, Status: corev1.ConditionTrue, Reason: "discard-me", LastTransitionTime: now},
 				{
 					Type:    corev1.PodConditionType(podcontract.RestoredCondition),
 					Status:  corev1.ConditionFalse,
@@ -122,10 +122,10 @@ func TestProjectConsumerContract(t *testing.T) {
 					Name:         "worker",
 					RestartCount: 2,
 					State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
-						ExitCode: 17, Signal: 9, Reason: "Error", Message: "worker failed", ContainerID: "discard-me",
+						ExitCode: 17, Signal: 9, Reason: "Error", Message: "worker failed", ContainerID: "discard-me", FinishedAt: now,
 					}},
 					LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
-						ExitCode: 1, Reason: "Error", Message: "discard-me", ContainerID: "discard-me",
+						ExitCode: 1, Reason: "Error", Message: "discard-me", ContainerID: "discard-me", FinishedAt: now,
 					}},
 				},
 			},
@@ -168,7 +168,7 @@ func TestProjectConsumerContract(t *testing.T) {
 	t.Run("snapshot retains restore state", func(t *testing.T) {
 		assert.Empty(t, got.Spec.SchedulerName)
 		assert.Equal(t, []corev1.PodCondition{
-			{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+			{Type: corev1.PodReady, Status: corev1.ConditionTrue, LastTransitionTime: now},
 			{
 				Type:   corev1.PodConditionType(podcontract.RestoredCondition),
 				Status: corev1.ConditionFalse,
@@ -182,6 +182,7 @@ func TestProjectConsumerContract(t *testing.T) {
 		assert.Equal(t, "ImagePullBackOff", got.Status.ContainerStatuses[0].State.Waiting.Reason)
 		assert.Equal(t, int32(17), got.Status.ContainerStatuses[1].State.Terminated.ExitCode)
 		assert.Equal(t, "worker failed", got.Status.ContainerStatuses[1].State.Terminated.Message)
+		assert.Equal(t, now, got.Status.ContainerStatuses[1].State.Terminated.FinishedAt)
 		require.Len(t, got.Status.InitContainerStatuses, 2)
 		assert.Equal(t, "ErrImagePull", got.Status.InitContainerStatuses[0].State.Waiting.Reason)
 		assert.Equal(t, "GMS failed", got.Status.InitContainerStatuses[1].State.Terminated.Message)
@@ -195,6 +196,13 @@ func TestProjectConsumerContract(t *testing.T) {
 		}}, got.Status.ContainerStatuses[1].LastTerminationState)
 		assert.Nil(t, got.Status.ContainerStatuses[0].LastTerminationState.Terminated)
 		assert.Equal(t, int32(3), got.Status.InitContainerStatuses[0].RestartCount)
+	})
+	t.Run("current failure observation retains Ready transition and FinishedAt only", func(t *testing.T) {
+		require.Len(t, got.Status.Conditions, 2)
+		assert.Equal(t, now, got.Status.Conditions[0].LastTransitionTime)
+		assert.True(t, got.Status.Conditions[1].LastTransitionTime.IsZero())
+		assert.Equal(t, now, got.Status.ContainerStatuses[1].State.Terminated.FinishedAt)
+		assert.True(t, got.Status.ContainerStatuses[1].LastTerminationState.Terminated.FinishedAt.IsZero())
 	})
 	t.Run("GMS replacement retains only native init-sidecar identity", func(t *testing.T) {
 		assert.Equal(t, []corev1.Container{{

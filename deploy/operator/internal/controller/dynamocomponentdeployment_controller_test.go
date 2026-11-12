@@ -20,11 +20,16 @@
 package controller
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
+	lwscontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/lws"
 	podcontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/pods"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
@@ -59,6 +64,8 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	leaderworkersetv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
 )
 
@@ -2214,6 +2221,14 @@ func Test_reconcileLeaderWorkerSetResources(t *testing.T) {
 					UpdatedReplicas: 1,
 					Replicas:        1,
 				},
+				lwsObservations: []lwscontroller.Observation{{
+					Verdict:    lwscontroller.VerdictUnknown,
+					Reason:     lwscontroller.ReasonMissingRootIdentity,
+					Namespace:  "default",
+					DCDName:    "test-component",
+					LWSName:    "test-component-0",
+					ReadOrigin: lwscontroller.ReadOriginManagerCache,
+				}},
 			},
 		},
 		{
@@ -2251,6 +2266,14 @@ func Test_reconcileLeaderWorkerSetResources(t *testing.T) {
 					UpdatedReplicas: 2,
 					Replicas:        3,
 				},
+				lwsObservations: []lwscontroller.Observation{{
+					Verdict:    lwscontroller.VerdictUnknown,
+					Reason:     lwscontroller.ReasonMissingRootIdentity,
+					Namespace:  "default",
+					DCDName:    "test-component",
+					LWSName:    "test-component-0",
+					ReadOrigin: lwscontroller.ReadOriginManagerCache,
+				}},
 			},
 		},
 		{
@@ -2288,6 +2311,14 @@ func Test_reconcileLeaderWorkerSetResources(t *testing.T) {
 					UpdatedReplicas: 3,
 					Replicas:        3,
 				},
+				lwsObservations: []lwscontroller.Observation{{
+					Verdict:    lwscontroller.VerdictUnknown,
+					Reason:     lwscontroller.ReasonMissingRootIdentity,
+					Namespace:  "default",
+					DCDName:    "test-component",
+					LWSName:    "test-component-0",
+					ReadOrigin: lwscontroller.ReadOriginManagerCache,
+				}},
 			},
 		},
 	}
@@ -2358,6 +2389,7 @@ func Test_reconcileLeaderWorkerSetResources(t *testing.T) {
 			// Set up fake client with the DCD and existing LWS objects
 			fakeKubeClient := fake.NewClientBuilder().
 				WithScheme(s).
+				WithIndex(&corev1.Pod{}, lwscontroller.SetNameIndex, lwscontroller.SetNameIndexValues).
 				WithObjects(objects...).
 				WithStatusSubresource(objects...).
 				Build()
@@ -2390,6 +2422,478 @@ func Test_reconcileLeaderWorkerSetResources(t *testing.T) {
 			g.Expect(result).To(gomega.Equal(tt.wantComponentReconcileResult))
 		})
 	}
+}
+
+func Test_reconcileLeaderWorkerSetResources_ObservesWithoutChangingReadiness(t *testing.T) {
+	s := scheme.Scheme
+	require.NoError(t, v1alpha1.AddToScheme(s))
+	require.NoError(t, leaderworkersetv1.AddToScheme(s))
+
+	t.Log("Build a ready LWS-backed DCD with a current failed leader Pod")
+	dcd, lws, leaderSTS, leaderPod := readyLWSObservationFixture(t)
+
+	fakeKubeClient := fake.NewClientBuilder().
+		WithScheme(s).
+		WithIndex(&corev1.Pod{}, lwscontroller.SetNameIndex, lwscontroller.SetNameIndexValues).
+		WithObjects(dcd, lws, leaderSTS, leaderPod, &corev1.ServiceAccount{
+			Name:      "default-test-sa",
+			Namespace: "default",
+			Labels:    map[string]string{commonconsts.KubeLabelDynamoComponentPod: commonconsts.KubeLabelValueTrue},
+		}).
+		WithStatusSubresource(dcd, lws).
+		Build()
+
+	reconciler := &DynamoComponentDeploymentReconciler{
+		Client:        fakeKubeClient,
+		Recorder:      events.NewFakeRecorder(100),
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		RuntimeConfig: &controller_common.RuntimeConfig{},
+		DockerSecretRetriever: &mockDockerSecretRetriever{
+			GetSecretsFunc: func(namespace, imageName string) ([]string, error) { return nil, nil },
+		},
+	}
+
+	var logs bytes.Buffer
+	ctx := ctrl.LoggerInto(t.Context(), zap.New(zap.WriteTo(&logs), zap.UseDevMode(true), zap.JSONEncoder()))
+
+	t.Log("Reconcile and keep Available/Ready based on LWS status despite Pod failure evidence")
+	result, err := reconciler.reconcileLeaderWorkerSetResources(ctx, dcd)
+	require.NoError(t, err)
+	assert.Equal(t, metav1.ConditionTrue, result.status)
+	assert.Equal(t, "LeaderWorkerSetReady", result.reason)
+
+	t.Log("Parse the structured failure evidence line for witness identity")
+	foundFailure := false
+	for line := range strings.SplitSeq(logs.String(), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var entry map[string]any
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			continue
+		}
+		msg, _ := entry["msg"].(string)
+		if msg != "Observed LeaderWorkerSet Pod failure evidence" {
+			continue
+		}
+		foundFailure = true
+		assert.Equal(t, "pod-uid", entry["podUID"])
+		assert.Equal(t, "rev-1", entry["revision"])
+		assert.Equal(t, string(lwscontroller.VerdictCurrentFailure), entry["verdict"])
+		assert.Equal(t, lwscontroller.ReadOriginManagerCache, entry["readOrigin"])
+	}
+	require.True(t, foundFailure, "missing CurrentFailure observation log; logs=%s", logs.String())
+}
+
+func Test_reconcileLeaderWorkerSetResources_ObservationReadErrorKeepsReadiness(t *testing.T) {
+	s := scheme.Scheme
+	require.NoError(t, v1alpha1.AddToScheme(s))
+	require.NoError(t, leaderworkersetv1.AddToScheme(s))
+
+	t.Log("Build a ready LWS and fail the indexed Pod list during observation")
+	dcd, lws, leaderSTS, leaderPod := readyLWSObservationFixture(t)
+	base := fake.NewClientBuilder().
+		WithScheme(s).
+		WithIndex(&corev1.Pod{}, lwscontroller.SetNameIndex, lwscontroller.SetNameIndexValues).
+		WithObjects(dcd, lws, leaderSTS, leaderPod, &corev1.ServiceAccount{
+			Name:      "default-test-sa",
+			Namespace: "default",
+			Labels:    map[string]string{commonconsts.KubeLabelDynamoComponentPod: commonconsts.KubeLabelValueTrue},
+		}).
+		WithStatusSubresource(dcd, lws).
+		Build()
+	fakeKubeClient := interceptor.NewClient(base, interceptor.Funcs{
+		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			if _, ok := list.(*corev1.PodList); ok {
+				return errors.New("forbidden")
+			}
+			return c.List(ctx, list, opts...)
+		},
+	})
+
+	reconciler := &DynamoComponentDeploymentReconciler{
+		Client:        fakeKubeClient,
+		Recorder:      events.NewFakeRecorder(100),
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		RuntimeConfig: &controller_common.RuntimeConfig{},
+		DockerSecretRetriever: &mockDockerSecretRetriever{
+			GetSecretsFunc: func(namespace, imageName string) ([]string, error) { return nil, nil },
+		},
+	}
+
+	var logs bytes.Buffer
+	ctx := ctrl.LoggerInto(t.Context(), zap.New(zap.WriteTo(&logs), zap.UseDevMode(true), zap.JSONEncoder()))
+
+	t.Log("Observation unavailable must log and leave the original Ready result unchanged")
+	result, err := reconciler.reconcileLeaderWorkerSetResources(ctx, dcd)
+	require.NoError(t, err)
+	assert.Equal(t, metav1.ConditionTrue, result.status)
+	assert.Equal(t, "LeaderWorkerSetReady", result.reason)
+	assert.Nil(t, result.lwsObservations)
+	assert.Contains(t, logs.String(), "LeaderWorkerSet Pod observation unavailable")
+	assert.Contains(t, logs.String(), "forbidden")
+}
+
+func Test_reconcileLeaderWorkerSetResources_PersistsFailureRecordsAfterStatus(t *testing.T) {
+	s := scheme.Scheme
+	require.NoError(t, v1alpha1.AddToScheme(s))
+	require.NoError(t, leaderworkersetv1.AddToScheme(s))
+
+	t.Log("Build a ready LWS-backed DCD with current failure evidence")
+	dcd, lws, leaderSTS, leaderPod := readyLWSObservationFixture(t)
+	dcd.ResourceVersion = "1"
+	fakeKubeClient := fake.NewClientBuilder().
+		WithScheme(s).
+		WithIndex(&corev1.Pod{}, lwscontroller.SetNameIndex, lwscontroller.SetNameIndexValues).
+		WithObjects(dcd, lws, leaderSTS, leaderPod, &corev1.ServiceAccount{
+			Name:      "default-test-sa",
+			Namespace: "default",
+			Labels:    map[string]string{commonconsts.KubeLabelDynamoComponentPod: commonconsts.KubeLabelValueTrue},
+		}).
+		WithStatusSubresource(dcd, lws).
+		Build()
+
+	reconciler := &DynamoComponentDeploymentReconciler{
+		Client:        fakeKubeClient,
+		Recorder:      events.NewFakeRecorder(100),
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		RuntimeConfig: &controller_common.RuntimeConfig{},
+		DockerSecretRetriever: &mockDockerSecretRetriever{
+			GetSecretsFunc: func(namespace, imageName string) ([]string, error) { return nil, nil },
+		},
+	}
+
+	t.Log("Carry the immutable observation batch through readiness")
+	result, err := reconciler.reconcileLeaderWorkerSetResources(t.Context(), dcd)
+	require.NoError(t, err)
+	assert.Equal(t, metav1.ConditionTrue, result.status)
+	require.NotEmpty(t, result.lwsObservations)
+	assert.Equal(t, lwscontroller.VerdictCurrentFailure, result.lwsObservations[0].Verdict)
+
+	t.Log("Write status first, then persist records against the returned object")
+	require.NoError(t, reconciler.setStatusConditionAndServiceReplicaStatus(t.Context(), dcd, result))
+	persist, err := lwscontroller.PersistFailureRecords(t.Context(), fakeKubeClient, dcd, result.lwsObservations, time.Now())
+	require.NoError(t, err)
+	assert.True(t, persist.Written)
+
+	stored := &v1beta1.DynamoComponentDeployment{}
+	require.NoError(t, fakeKubeClient.Get(t.Context(), client.ObjectKeyFromObject(dcd), stored))
+	require.Contains(t, stored.Annotations, lwscontroller.FailureRecordsAnnotationKey)
+	assert.Equal(t, metav1.ConditionTrue, result.status)
+
+	t.Log("A duplicate persist against the same evidence is a zero-write no-op")
+	require.NoError(t, fakeKubeClient.Get(t.Context(), client.ObjectKeyFromObject(dcd), dcd))
+	again, err := lwscontroller.PersistFailureRecords(t.Context(), fakeKubeClient, dcd, result.lwsObservations, time.Now())
+	require.NoError(t, err)
+	assert.True(t, again.Noop)
+	assert.False(t, again.Written)
+}
+
+func TestDynamoComponentDeploymentReconcile_FailureRecordsAfterStatusOrder(t *testing.T) {
+	s := scheme.Scheme
+	require.NoError(t, v1alpha1.AddToScheme(s))
+	require.NoError(t, leaderworkersetv1.AddToScheme(s))
+
+	t.Log("Build a multinode LWS fixture with initialized status conditions")
+	dcd, lws, leaderSTS, leaderPod := readyLWSObservationFixture(t)
+	dcd.ResourceVersion = "1"
+	dcd.Status.Conditions = []metav1.Condition{{
+		Type:               v1beta1.DynamoComponentDeploymentConditionTypeAvailable,
+		Status:             metav1.ConditionUnknown,
+		Reason:             "Reconciling",
+		Message:            "seeded",
+		LastTransitionTime: metav1.Now(),
+	}}
+	sa := &corev1.ServiceAccount{
+		Name:      "default-test-sa",
+		Namespace: "default",
+		Labels:    map[string]string{commonconsts.KubeLabelDynamoComponentPod: commonconsts.KubeLabelValueTrue},
+	}
+
+	t.Run("status success precedes records patch and retains conflict requeue", func(t *testing.T) {
+		var order []string
+		base := fake.NewClientBuilder().
+			WithScheme(s).
+			WithIndex(&corev1.Pod{}, lwscontroller.SetNameIndex, lwscontroller.SetNameIndexValues).
+			WithObjects(dcd.DeepCopy(), lws.DeepCopy(), leaderSTS.DeepCopy(), leaderPod.DeepCopy(), sa.DeepCopy()).
+			WithStatusSubresource(dcd, lws).
+			Build()
+		writer := interceptor.NewClient(base, interceptor.Funcs{
+			SubResourceUpdate: func(ctx context.Context, c client.Client, subresource string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+				if subresource == "status" {
+					if _, ok := obj.(*v1beta1.DynamoComponentDeployment); ok {
+						order = append(order, "status")
+					}
+				}
+				return c.SubResource(subresource).Update(ctx, obj, opts...)
+			},
+			Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				data, err := patch.Data(obj)
+				require.NoError(t, err)
+				if strings.Contains(string(data), lwscontroller.FailureRecordsAnnotationKey) {
+					order = append(order, "records-patch")
+					return k8serrors.NewConflict(
+						v1beta1.GroupVersion.WithResource("dynamocomponentdeployments").GroupResource(),
+						dcd.Name,
+						nil,
+					)
+				}
+				return c.Patch(ctx, obj, patch, opts...)
+			},
+		})
+		reconciler := &DynamoComponentDeploymentReconciler{
+			Client:        writer,
+			Recorder:      events.NewFakeRecorder(100),
+			Config:        &configv1alpha1.OperatorConfiguration{},
+			RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{LWS: true}},
+			DockerSecretRetriever: &mockDockerSecretRetriever{
+				GetSecretsFunc: func(namespace, imageName string) ([]string, error) { return nil, nil },
+			},
+		}
+
+		result, err := reconciler.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(dcd)})
+		require.NoError(t, err)
+		require.GreaterOrEqual(t, len(order), 2)
+		assert.Equal(t, "status", order[len(order)-2])
+		assert.Equal(t, "records-patch", order[len(order)-1])
+		assert.Equal(t, lwscontroller.FailureRecordConflictRequeue, result.RequeueAfter)
+
+		stored := &v1beta1.DynamoComponentDeployment{}
+		require.NoError(t, writer.Get(t.Context(), client.ObjectKeyFromObject(dcd), stored))
+		available := meta.FindStatusCondition(stored.Status.Conditions, v1beta1.DynamoComponentDeploymentConditionTypeAvailable)
+		require.NotNil(t, available)
+		assert.Equal(t, metav1.ConditionTrue, available.Status)
+		assert.NotContains(t, stored.Annotations, lwscontroller.FailureRecordsAnnotationKey)
+	})
+
+	t.Run("failed status write causes zero record Patch", func(t *testing.T) {
+		patchCalls := 0
+		base := fake.NewClientBuilder().
+			WithScheme(s).
+			WithIndex(&corev1.Pod{}, lwscontroller.SetNameIndex, lwscontroller.SetNameIndexValues).
+			WithObjects(dcd.DeepCopy(), lws.DeepCopy(), leaderSTS.DeepCopy(), leaderPod.DeepCopy(), sa.DeepCopy()).
+			WithStatusSubresource(dcd, lws).
+			Build()
+		writer := interceptor.NewClient(base, interceptor.Funcs{
+			SubResourceUpdate: func(ctx context.Context, c client.Client, subresource string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+				if subresource == "status" {
+					if _, ok := obj.(*v1beta1.DynamoComponentDeployment); ok {
+						return errors.New("status write failed")
+					}
+				}
+				return c.SubResource(subresource).Update(ctx, obj, opts...)
+			},
+			Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				data, err := patch.Data(obj)
+				require.NoError(t, err)
+				if strings.Contains(string(data), lwscontroller.FailureRecordsAnnotationKey) {
+					patchCalls++
+				}
+				return c.Patch(ctx, obj, patch, opts...)
+			},
+		})
+		reconciler := &DynamoComponentDeploymentReconciler{
+			Client:        writer,
+			Recorder:      events.NewFakeRecorder(100),
+			Config:        &configv1alpha1.OperatorConfiguration{},
+			RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{LWS: true}},
+			DockerSecretRetriever: &mockDockerSecretRetriever{
+				GetSecretsFunc: func(namespace, imageName string) ([]string, error) { return nil, nil },
+			},
+		}
+
+		_, err := reconciler.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(dcd)})
+		require.Error(t, err)
+		assert.Equal(t, 0, patchCalls)
+	})
+}
+
+func TestFailureRecordsAnnotationDoesNotAffectRenderHashOrChildSync(t *testing.T) {
+	s := scheme.Scheme
+	require.NoError(t, v1alpha1.AddToScheme(s))
+	require.NoError(t, leaderworkersetv1.AddToScheme(s))
+
+	t.Log("Render LWS templates before and after a top-level failure-record annotation")
+	dcd, _, _, _ := readyLWSObservationFixture(t)
+	sa := &corev1.ServiceAccount{
+		Name:      "default-test-sa",
+		Namespace: "default",
+		Labels:    map[string]string{commonconsts.KubeLabelDynamoComponentPod: commonconsts.KubeLabelValueTrue},
+	}
+	clientBefore := fake.NewClientBuilder().WithScheme(s).WithObjects(dcd.DeepCopy(), sa.DeepCopy()).Build()
+	reconciler := &DynamoComponentDeploymentReconciler{
+		Client:        clientBefore,
+		Recorder:      events.NewFakeRecorder(10),
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{LWS: true}},
+		DockerSecretRetriever: &mockDockerSecretRetriever{
+			GetSecretsFunc: func(namespace, imageName string) ([]string, error) { return nil, nil },
+		},
+	}
+	beforeAnns := dynamo.GetDCDKubeAnnotations(dcd)
+	beforeLWS, _, err := reconciler.generateLeaderWorkerSet(t.Context(), generateResourceOption{dynamoComponentDeployment: dcd})
+	require.NoError(t, err)
+
+	ledger := `{"version":1,"dcdUID":"dcd-uid","entries":[]}`
+	if dcd.Annotations == nil {
+		dcd.Annotations = map[string]string{}
+	}
+	dcd.Annotations[lwscontroller.FailureRecordsAnnotationKey] = ledger
+	dcd.Annotations["example.com/foreign"] = "keep"
+	afterAnns := dynamo.GetDCDKubeAnnotations(dcd)
+	afterLWS, _, err := reconciler.generateLeaderWorkerSet(t.Context(), generateResourceOption{dynamoComponentDeployment: dcd})
+	require.NoError(t, err)
+	assert.Equal(t, beforeAnns, afterAnns)
+	assert.NotContains(t, afterLWS.Annotations, lwscontroller.FailureRecordsAnnotationKey)
+	require.NotNil(t, afterLWS.Spec.LeaderWorkerTemplate.LeaderTemplate)
+	assert.NotContains(t, afterLWS.Spec.LeaderWorkerTemplate.LeaderTemplate.Annotations, lwscontroller.FailureRecordsAnnotationKey)
+	assert.NotContains(t, afterLWS.Spec.LeaderWorkerTemplate.WorkerTemplate.Annotations, lwscontroller.FailureRecordsAnnotationKey)
+	assert.Equal(t, beforeLWS.Spec, afterLWS.Spec)
+
+	t.Log("SyncObservedResource keeps ledger bytes across a child DCD bookkeeping update")
+	observed := dcd.DeepCopy()
+	observed.ResourceVersion = "5"
+	if observed.Annotations == nil {
+		observed.Annotations = map[string]string{}
+	}
+	observed.Annotations[controller_common.NvidiaAnnotationHashKey] = "oldhash"
+	desired := observed.DeepCopy()
+	desired.Annotations = map[string]string{
+		"example.com/foreign": "keep",
+	}
+	desired.Spec.Replicas = new(int32(2))
+	kube := fake.NewClientBuilder().WithScheme(s).WithObjects(observed.DeepCopy()).Build()
+	parent := &DynamoComponentDeploymentReconciler{
+		Client:   kube,
+		Recorder: events.NewFakeRecorder(4),
+		Config:   &configv1alpha1.OperatorConfiguration{},
+	}
+	modified, synced, err := controller_common.SyncObservedResource(
+		t.Context(),
+		parent,
+		nil,
+		observed,
+		desired,
+	)
+	require.NoError(t, err)
+	require.True(t, modified)
+	assert.Equal(t, ledger, synced.Annotations[lwscontroller.FailureRecordsAnnotationKey])
+	assert.Equal(t, "keep", synced.Annotations["example.com/foreign"])
+	assert.Equal(t, int32(2), *synced.Spec.Replicas)
+}
+
+func readyLWSObservationFixture(t *testing.T) (
+	*v1beta1.DynamoComponentDeployment,
+	*leaderworkersetv1.LeaderWorkerSet,
+	*appsv1.StatefulSet,
+	*corev1.Pod,
+) {
+	t.Helper()
+	dcd := betaDCD(t, &v1alpha1.DynamoComponentDeployment{
+		Name:       "observe-component",
+		Namespace:  "default",
+		UID:        "dcd-uid",
+		Generation: 2,
+		Spec: v1alpha1.DynamoComponentDeploymentSpec{
+			BackendFramework: string(dynamo.BackendFrameworkVLLM),
+			DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ServiceName:     "test-service",
+				DynamoNamespace: new("default"),
+				ComponentType:   string(commonconsts.ComponentTypeDecode),
+				Replicas:        new(int32(1)),
+				Multinode:       &v1alpha1.MultinodeSpec{NodeCount: 2},
+				Resources: &v1alpha1.Resources{
+					Limits: &v1alpha1.ResourceItem{GPU: "1"},
+				},
+				ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+					MainContainer: &corev1.Container{Image: "test-image:latest", Args: []string{"--test-arg"}},
+				},
+			},
+		},
+	})
+
+	now := metav1.Now()
+	lws := &leaderworkersetv1.LeaderWorkerSet{
+		Name:       "observe-component-0",
+		Namespace:  "default",
+		UID:        "lws-uid",
+		Generation: 2,
+		OwnerReferences: []metav1.OwnerReference{
+			*metav1.NewControllerRef(dcd, v1beta1.DynamoComponentDeploymentGVK),
+		},
+		Spec: leaderworkersetv1.LeaderWorkerSetSpec{
+			Replicas: new(int32(1)),
+			LeaderWorkerTemplate: leaderworkersetv1.LeaderWorkerTemplate{
+				Size: new(int32(2)),
+			},
+		},
+		Status: leaderworkersetv1.LeaderWorkerSetStatus{
+			ReadyReplicas:      1,
+			UpdatedReplicas:    1,
+			Replicas:           1,
+			ObservedGeneration: 2,
+			Conditions: []metav1.Condition{{
+				Type:   string(leaderworkersetv1.LeaderWorkerSetAvailable),
+				Status: metav1.ConditionTrue,
+			}},
+		},
+	}
+	leaderSTS := &appsv1.StatefulSet{
+		Name:      "observe-component-0",
+		Namespace: "default",
+		UID:       "sts-uid",
+		Labels:    map[string]string{leaderworkersetv1.SetNameLabelKey: "observe-component-0"},
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: "leaderworkerset.x-k8s.io/v1",
+			Kind:       "LeaderWorkerSet",
+			Name:       lws.Name,
+			UID:        lws.UID,
+			Controller: new(true),
+		}},
+		Spec: appsv1.StatefulSetSpec{
+			Template: corev1.PodTemplateSpec{
+				Labels: map[string]string{leaderworkersetv1.RevisionKey: "rev-1"},
+			},
+		},
+	}
+	leaderPod := &corev1.Pod{
+		Name:              "observe-component-0-0",
+		Namespace:         "default",
+		UID:               "pod-uid",
+		ResourceVersion:   "7",
+		CreationTimestamp: metav1.NewTime(now.Add(-time.Minute)),
+		Labels: map[string]string{
+			leaderworkersetv1.SetNameLabelKey:     "observe-component-0",
+			leaderworkersetv1.GroupIndexLabelKey:  "0",
+			leaderworkersetv1.WorkerIndexLabelKey: "0",
+			leaderworkersetv1.RevisionKey:         "rev-1",
+		},
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: "apps/v1",
+			Kind:       "StatefulSet",
+			Name:       leaderSTS.Name,
+			UID:        leaderSTS.UID,
+			Controller: new(true),
+		}},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			Conditions: []corev1.PodCondition{{
+				Type:               corev1.PodReady,
+				Status:             corev1.ConditionFalse,
+				LastTransitionTime: metav1.NewTime(now.Add(-30 * time.Second)),
+			}},
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name: commonconsts.MainContainerName,
+				State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+					ExitCode:   23,
+					Reason:     "Error",
+					FinishedAt: metav1.NewTime(now.Add(-20 * time.Second)),
+				}},
+			}},
+		},
+	}
+	return dcd, lws, leaderSTS, leaderPod
 }
 
 func Test_reconcileDeploymentResources(t *testing.T) {

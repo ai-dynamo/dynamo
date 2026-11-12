@@ -99,6 +99,7 @@ rules:
   - apps
   resources:
   - daemonsets
+  - statefulsets
   verbs:
   - get
   - list

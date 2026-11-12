@@ -185,6 +185,10 @@ func projectConditions(in []corev1.PodCondition) []corev1.PodCondition {
 			Type:   in[i].Type,
 			Status: in[i].Status,
 		}
+		// Ready transition time is level evidence for current Pod failure observation.
+		if in[i].Type == corev1.PodReady {
+			condition.LastTransitionTime = in[i].LastTransitionTime
+		}
 		if in[i].Type == corev1.PodConditionType(podcontract.RestoredCondition) {
 			condition.Reason = in[i].Reason
 		}
@@ -232,9 +236,10 @@ func projectContainerState(in corev1.ContainerState) corev1.ContainerState {
 	}
 	if in.Terminated != nil {
 		out.Terminated = &corev1.ContainerStateTerminated{
-			ExitCode: in.Terminated.ExitCode,
-			Reason:   in.Terminated.Reason,
-			Message:  in.Terminated.Message,
+			ExitCode:   in.Terminated.ExitCode,
+			Reason:     in.Terminated.Reason,
+			Message:    in.Terminated.Message,
+			FinishedAt: in.Terminated.FinishedAt,
 		}
 	}
 	return out
