@@ -142,7 +142,7 @@ func TestApplyLocalPartitionIDs(t *testing.T) {
 		},
 		{
 			name:    "no local partitions shadows envFrom sources",
-			envFrom: []corev1.EnvFromSource{{ConfigMapRef: &corev1.ConfigMapEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: "authored"}}}},
+			envFrom: []corev1.EnvFromSource{{ConfigMapRef: &corev1.ConfigMapEnvSource{Name: "authored"}}},
 			wantEnv: []corev1.EnvVar{{Name: localPartitionIDsEnv}},
 		},
 		{
@@ -169,7 +169,7 @@ func TestApplyLocalPartitionIDs(t *testing.T) {
 		},
 		{
 			name:    "envFrom shadow precedes dependent values",
-			envFrom: []corev1.EnvFromSource{{ConfigMapRef: &corev1.ConfigMapEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: "authored"}}}},
+			envFrom: []corev1.EnvFromSource{{ConfigMapRef: &corev1.ConfigMapEnvSource{Name: "authored"}}},
 			env: []corev1.EnvVar{
 				{Name: "FIRST", Value: "kept"},
 				{Name: "LOCAL_IDS", Value: "$(" + localPartitionIDsEnv + ")"},

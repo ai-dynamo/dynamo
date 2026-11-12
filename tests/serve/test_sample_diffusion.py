@@ -10,7 +10,10 @@ import pytest
 from tests.serve.common import WORKSPACE_DIR, run_serve_deployment
 from tests.utils.constants import DefaultPort
 from tests.utils.engine_process import EngineConfig
-from tests.utils.payload_builder import images_payload_default
+from tests.utils.payload_builder import (
+    images_accounting_payload,
+    images_payload_default,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +33,14 @@ sample_diffusion_configs = {
         ],
         model="sample-diffusion-model",
         frontend_port=DefaultPort.FRONTEND.value,
-        request_payloads=[images_payload_default()],
+        request_payloads=[
+            images_payload_default(),
+            # One image with a requested step count, two images with the
+            # model default: the accounting counts what came back and echoes
+            # the step count only when the request set one.
+            images_accounting_payload(n=1, num_inference_steps=4),
+            images_accounting_payload(n=2),
+        ],
     ),
 }
 

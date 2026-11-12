@@ -24,7 +24,15 @@ from dynamo.common.utils.namespace import get_worker_namespace
 from dynamo.common.utils.output_modalities import OutputModality
 
 logger = logging.getLogger(__name__)
+# Canonical variable the backend admission gate reads for its full-request
+# limit; it outranks the legacy DYN_ENGINE_REQUEST_LIMIT alias.
+_ENGINE_REQUEST_LIMIT_ENV = "DYN_BACKEND_ADMISSION_ENGINE_REQUEST_LIMIT"
 _FPM_TRACE_VALUES = {"1", "0", "true", "false", "on", "off", "yes", "no"}
+
+# Parser selectors that still work but are scheduled for removal, mapped to the
+# name to configure instead. `muse` predates Muse Spark Open and selects only
+# Muse Glimmer; the frontend emits the matching warning at model registration.
+_DEPRECATED_PARSER_ALIASES: dict[str, str] = {"muse": "muse_glimmer"}
 _fpm_trace_invalid_warning_emitted = False
 
 
@@ -89,9 +97,11 @@ class DynamoRuntimeConfig(ConfigBase):
     # Honored only by the unified backend's `Worker`, where it overrides the engine's
     # default `health_check_payload()` for the runtime canary.
     health_check_payload: Optional[str] = None
-    # Worker-side request admission/rejection knobs. Disabled (None) by
-    # default; when set, these surface env vars that the Rust runtime reads
-    # directly (see lib/runtime/src/pipeline/network/ingress/shared_tcp_endpoint.rs).
+    # Explicit --engine-request-limit for the backend admission gate, per DP
+    # rank. None leaves the gate on its environment settings, unlimited by
+    # default; validate() exports a set value, which the gate reads from the
+    # process environment when it is created (see
+    # lib/llm/src/admission_gate.rs).
     engine_request_limit: Optional[int] = None
     tcp_tls_cert_path: Optional[str] = None
     tcp_tls_key_path: Optional[str] = None
@@ -110,6 +120,21 @@ class DynamoRuntimeConfig(ConfigBase):
     def validate(self) -> None:
         self.namespace = get_worker_namespace(self.namespace)
         self.structural_tag = resolve_structural_tag_config(self)
+        for flag, value in (
+            ("--dyn-tool-call-parser", self.dyn_tool_call_parser),
+            ("--dyn-reasoning-parser", self.dyn_reasoning_parser),
+        ):
+            replacement = _DEPRECATED_PARSER_ALIASES.get(value or "")
+            if replacement is not None:
+                logger.warning(
+                    "%s=%s is a deprecated alias of %s and will be removed in a "
+                    "future release; configure %s instead. Muse Spark Open is a "
+                    "different parser: muse_spark_open.",
+                    flag,
+                    value,
+                    replacement,
+                    replacement,
+                )
 
         # The Rust FPM sink reads this setting from the process environment.
         # Canonicalize the resolved CLI/env value before the runtime or backend
@@ -136,10 +161,20 @@ class DynamoRuntimeConfig(ConfigBase):
 
         self._validate_output_modalities()
 
-        if self.engine_request_limit is not None and self.engine_request_limit <= 0:
-            raise ValueError(
-                f"--engine-request-limit must be a positive integer, got {self.engine_request_limit}"
-            )
+        # Fail at startup on an invalid DYN_MM_* value, not on every request.
+        # Imported here: dynamo.common.http imports this configuration package.
+        from dynamo.common.http.url_validator import UrlValidationPolicy
+
+        UrlValidationPolicy.from_env()
+
+        if self.engine_request_limit is not None:
+            if self.engine_request_limit <= 0:
+                raise ValueError(
+                    f"--engine-request-limit must be a positive integer, got {self.engine_request_limit}"
+                )
+            # An explicit flag outranks both environment names, so it replaces
+            # the canonical one, which the gate reads ahead of the legacy alias.
+            os.environ[_ENGINE_REQUEST_LIMIT_ENV] = str(self.engine_request_limit)
 
         os.environ["DYN_RESPONSE_PLANE"] = self.response_plane
 
@@ -257,7 +292,7 @@ class DynamoRuntimeArgGroup(ArgGroup):
             env_var="DYN_RESPONSE_PLANE",
             default="tcp",
             help="Select the response transport. Frontend and workers must match.",
-            choices=["tcp", "quic"],
+            choices=["tcp", "quic", "velo"],
         )
         add_argument(
             g,
@@ -280,7 +315,7 @@ class DynamoRuntimeArgGroup(ArgGroup):
             flag_name="--connector",
             env_var="DYN_CONNECTOR",
             default=[],
-            help="[Deprecated for vLLM] Use --kv-transfer-config instead. For TRT-LLM, options: nixl, lmcache, kvbm, null, none.",
+            help="[Deprecated for vLLM] Use --kv-transfer-config instead. TensorRT-LLM supports only none; KVBM integration has been removed.",
             nargs="*",
         )
 
@@ -374,7 +409,8 @@ class DynamoRuntimeArgGroup(ArgGroup):
             help="Comma-separated list of endpoint types to enable. Options: "
             "'chat', 'completions', or 'none'. Use 'completions' for models "
             "without chat templates. Use 'none' for topology-only workers "
-            "fronted by another Dynamo service.",
+            "fronted by another Dynamo service. vLLM also accepts 'realtime' "
+            "for /v1/realtime, served with the other types by one engine.",
         )
 
         add_argument(
@@ -439,21 +475,22 @@ class DynamoRuntimeArgGroup(ArgGroup):
             "default health_check_payload(). Unified backend only.",
         )
 
-        # Worker-side request admission/rejection. Defaults to None (disabled);
-        # when unset the worker behaves exactly as before. Surfaces an env var —
-        # the Rust runtime reads DYN_ENGINE_REQUEST_LIMIT directly. The Dynamo-side
-        # overflow queue is a small fixed burst (default 16, hard cap N+16) and is
-        # not a user-facing knob; advanced users may override it via the
-        # DYN_DYNAMO_REQUEST_QUEUE_LIMIT env var.
-        add_argument(
-            g,
-            flag_name="--engine-request-limit",
-            env_var="DYN_ENGINE_REQUEST_LIMIT",
+        # Backend admission full-request limit. Registered without an
+        # environment default: the gate itself resolves the canonical variable,
+        # then the legacy alias, and is otherwise unlimited, so only an explicit
+        # flag is set here, and validate() exports it ahead of both variables.
+        g.add_argument(
+            "--engine-request-limit",
+            dest="engine_request_limit",
+            type=int,
             default=None,
-            arg_type=int,
-            help="Max requests handled concurrently by the engine (worker-pool "
-            "semaphore size). Enables worker-side request rejection when set. "
-            "Disabled by default.",
+            help="Maximum concurrent engine requests admitted by the backend "
+            "admission gate per DP rank, each held from admission until the "
+            "request finishes. Setting it enables backend admission control. "
+            "Takes precedence over both environment variables.\n"
+            f"env var: {_ENGINE_REQUEST_LIMIT_ENV} (legacy alias: "
+            "DYN_ENGINE_REQUEST_LIMIT) | default: unlimited; backend admission "
+            "control stays disabled unless an engine limit is set",
         )
 
         add_argument(

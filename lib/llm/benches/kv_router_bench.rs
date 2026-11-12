@@ -30,15 +30,16 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokenizers::Tokenizer;
 use tokio::sync::{Mutex, Semaphore};
 
-use dynamo_kv_router::protocols::{
-    ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
-    KvCacheStoredBlockData, LocalBlockHash, RouterEvent, WorkerId, compute_block_hash,
-    compute_seq_hash_for_block,
+use dynamo_kv_events::event::{
+    KvCacheEvent, KvCacheEventData, KvCacheStoreData, KvCacheStoredBlockData, RouterEvent,
 };
+use dynamo_kv_hashing::routing::{compute_block_hash, compute_seq_hash_for_block};
+use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::preprocessor::prompt::prompt_formatter_from_mdc;
 use dynamo_mocker::loadgen::RouterSequence;
 use dynamo_renderer::{ChatTemplate, ContextMixins, OAIChatLikeRequest, PromptFormatter};
+use dynamo_router_protocol::worker::WorkerId;
 
 /// KV Router event subject suffix (appended to Component.subject())
 /// Full subject format: namespace.{namespace}.component.{component}.kv-events
@@ -603,7 +604,7 @@ async fn discover_worker_ids(
     endpoint: &str,
 ) -> Result<Vec<WorkerId>> {
     let client = reqwest::Client::new();
-    let url = format!("{}/health", frontend_url);
+    let url = format!("{}/health?instances=true", frontend_url);
 
     println!("  Discovering workers from {}...", url);
 

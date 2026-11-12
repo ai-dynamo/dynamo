@@ -41,6 +41,64 @@ The Dynamo Platform Helm chart deploys the complete Dynamo Kubernetes Platform i
 
 ## Upgrading
 
+Dynamo supports Helm upgrades and downgrades within the installed minor release and between
+adjacent minor releases: `N.M` to `N.(M+1)` for upgrades and `N.(M+1)` to `N.M` for downgrades.
+Move through every intermediate minor release; skipping a minor release is unsupported.
+
+When `dynamo-operator.enabled=true`, the chart runs a read-only `pre-install,pre-upgrade` Job before
+changing the operator Deployment. A first installation passes because no existing Deployment is
+present. Helm and Flux execute the hook directly; Argo CD maps it to PreSync. Raw `kubectl apply`,
+Argo CD selective sync, or disabled hooks do not enforce the check. When the operator subchart is
+disabled, the hook is omitted because the separately managed operator release owns its upgrade policy.
+
+The upgrade-path check is enforced by target charts v1.7.0 and later. Upgrades or downgrades **to**
+earlier charts are not checked.
+
+> [!IMPORTANT]
+> Flux users need helm-controller v1.7.0 or later, first included in Flux v2.10.0. Earlier
+> helm-controller versions panic on this chart's `helm.sh/hook-output-log-policy` annotation.
+> Flux does not forward hook output to controller logs or events; inspect the retained Job Pod logs
+> when a preflight fails.
+
+The Job reads the installed operator version and rejects larger minor jumps and major-version
+changes. After separately validating an unsupported transition, authorize only that target minor
+with the matching override:
+
+```yaml
+dynamo-operator:
+  upgradePreflight:
+    checks:
+      upgradePath:
+        # For an unsupported upgrade from 1.7.x to 1.9.x:
+        unsupportedUpgradeOverride: "1.9"
+        # For an unsupported downgrade from 1.9.x to 1.7.x:
+        unsupportedDowngradeOverride: "1.7"
+```
+
+The value must match the target operator's `N.M` version. If you leave the override in your values,
+it has no effect on later upgrades or downgrades to a different minor. It applies only to the
+upgrade-path check; other preflight checks still run. An override does not make the path supported.
+
+The Job uses Python's standard library and read-only Deployment access. Configure
+`dynamo-operator.upgradePreflight.job.image` and `imagePullSecrets` for an internal registry. Failed
+Jobs are retained for log inspection. The supporting ServiceAccount, Role, and RoleBinding persist
+until the next attempt and require manual removal when retiring the release.
+
+Before uninstalling, record the hook resource names with `helm get hooks <release> -n $NAMESPACE`.
+After uninstalling the default release `dynamo-platform`, without operator name overrides, clean
+them up with:
+
+```bash
+kubectl delete job,serviceaccount,role,rolebinding dynamo-platform-dynamo-operator-check-upgrade-path \
+  --namespace $NAMESPACE --ignore-not-found
+```
+
+For customized names, use the exact resource names from the rendered hooks.
+
+Settings under `upgradePreflight.job` are shared defaults. A check can override individual fields
+under `upgradePreflight.checks.<checkName>.job`. Unspecified fields inherit the shared value;
+`affinity`, `podSecurityContext`, and `imagePullSecrets` replace the shared field as a whole.
+
 Releases are listed newest first. Read bottom-up through releases newer than your installed version,
 up to your target version. Each entry describes changes introduced in that release. Releases and
 categories without migration notes recorded here are omitted. For supported Grove and KAI Scheduler
@@ -48,7 +106,73 @@ versions, see the [compatibility matrix](#kai-scheduler-and-grove-configuration)
 
 ### v1.7.0
 
+#### Deployment Tool Compatibility
+
+##### Upgrade-Path Preflight Enforcement
+
+**Change:** When `dynamo-operator.enabled=true`, target charts v1.7.0 and later reject skipped-minor
+and major-version upgrades or downgrades before changing the operator Deployment. An initial
+installation passes when no operator Deployment exists. Target charts older than v1.7.0 do not
+contain this check.
+
+**Affected:** Existing releases upgrading from v1.5.x or earlier directly to v1.7.x, and releases
+downgrading across more than one minor to a chart that includes the check.
+
+**Action:** Move through each intermediate minor. After separately validating an unsupported path,
+set `dynamo-operator.upgradePreflight.checks.upgradePath.unsupportedUpgradeOverride` (or
+`unsupportedDowngradeOverride`) to the target `N.M`, as shown above. Other preflight checks still run.
+
+##### Flux Requires helm-controller v1.7.0 or Later
+
+**Change:** Upgrade preflight Jobs use the `helm.sh/hook-output-log-policy: hook-failed`
+annotation. Flux support requires helm-controller v1.7.0 or later, which includes the fix for
+[fluxcd/helm-controller#1604](https://github.com/fluxcd/helm-controller/pull/1604). Flux v2.10.0
+is the first Flux release that includes a compatible controller.
+
+**Affected:** Flux installations using helm-controller v1.6.5 or earlier. Those versions panic
+when they process a hook with this annotation.
+
+**Action:** Upgrade to Flux v2.10.0 or later, or helm-controller v1.7.0 or later, before upgrading
+Dynamo. If a preflight Job fails, inspect the retained Job Pod logs. The helm-controller fix
+prevents the panic but does not forward hook output to controller logs or events.
+
+#### Runtime Compatibility
+
+##### Frontend Startup Probe Defaults
+
+**Change:** Generated frontend startup probes require both a workload origin of operator
+1.7.0 or later and a frontend runtime of 1.6.0 or later. Standalone DCDs record their
+immutable origin only on CREATE; UPDATE never backfills existing resources. DGD-managed
+DCDs inherit the parent graph origin, even when the child is created by a newer operator.
+Frontend sidecars use the same origin and resolve their own image version.
+
+**Existing deployments:** Workloads created by operator 1.6.x or earlier, and resources
+without a resolvable origin, retain their previous frontend defaults during operator-only
+upgrades. Explicitly authored complete probes remain effective.
+
+**Action:** To enable startup protection on an existing workload, configure a complete
+`startupProbe` on its frontend container. This is an intentional Pod-template update;
+plan for frontend replacement, including a possible single-replica Grove Service outage.
+
 #### Operator behavior breaking changes
+
+##### Legacy LWS migration cleanup removed
+
+**Change:** The operator no longer cleans up the per-replica LWS objects
+and Volcano PodGroups created by Dynamo v1.1.x and earlier.
+
+**Affected:** LWS deployments that still use the legacy per-replica layout.
+
+**Action:**
+
+> [!WARNING]
+> Complete the native-scaling migration before upgrading to v1.7.0.
+> Use an intermediate operator version that includes migration cleanup,
+> such as v1.2.x. Verify that reconciliation has removed excess indexed
+> LWS objects and legacy Volcano PodGroups before proceeding.
+
+**Existing deployments:** Unmigrated legacy resources remain after
+upgrading, and excess LWS objects can continue consuming cluster resources.
 
 ##### Native sidecar backend inference
 
@@ -79,6 +203,151 @@ in addition to worker metadata access. If an older Planner service account recei
 HTTP 403 when listing Pods, Planner warns and uses existing status/default fallbacks.
 Grant Pod-list access to enable registered native names, models, and capabilities;
 other API errors still propagate.
+
+##### LPX model paths in every container
+
+**Change:** The operator sets the LPX model-path variables (`LPX_MODEL_PATH`, or
+`LPX_DRAFT_MODEL_PATH` and `LPX_TARGET_MODEL_PATH` for a speculative pair) in every
+regular and init container of every LPX role. Previously it set them only in `main`
+of the conductor role for LPU-only builds and of the agent role for hybrid builds.
+The operator's value replaces any value authored under these names.
+
+**Affected:** Every DGD with an LPX component: at least the agent template of an
+LPU-only build or the conductor template of a hybrid build gains these variables.
+
+**Action:** Plan for a one-time rollout of LPX workloads when upgrading to v1.7.0.
+No manifest change is needed unless a container sets one of these variables to its
+own value; rename that variable before upgrading.
+
+**Existing deployments:** Reconciliation rolls each LPX workload once without an
+authored manifest change.
+
+##### Hybrid LPX conductors require the runtime sidecar
+
+**Change:** Reconciliation rejects a hybrid LPX build whose conductor template declares no
+`spec.initContainers[name=runtime]`, and the DGD reports `status.state: failed`. Previously the
+operator ran the conductor's `main` container as a Dynamo worker. Operator v1.6.x rejects a
+`runtime` init container in LPX role templates, so affected DGDs can migrate only after the
+upgrade.
+
+**Affected:** DGDs with a hybrid LPX component whose conductor role has no runtime sidecar.
+
+**Action:** After upgrading to v1.7.0, add the `runtime` init container to the conductor template,
+as described in
+[Dynamo Sidecar Mode](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/reference/kubernetes-api/dynamo-component-deployment.mdx#dynamo-sidecar-mode),
+with an engine image that serves through it. Run the sidecar with the `lpx` subcommand,
+`--grpc-endpoint` set to the engine's endpoint, and `--model-path` set to the model's tokenizer
+directory, such as `$(LPX_MODEL_PATH)/tokenizer`. Mount the volume the sidecar uses to reach the
+engine in both containers. The sidecar takes over the `system` port and the Dynamo environment, so
+probe the engine on its own port and remove references such as `$(DYN_NAMESPACE)` or `$(POD_IP)`
+from `main`. The edit changes the DGD's serving revision, so its other workers also roll once.
+
+**Existing deployments:** Until the conductor declares the sidecar, the operator still deletes
+released Agent Pods, which Grove recreates, but makes no other change to the LPX workload. It does
+not update its templates or replica count, and it does not retire or republish pipeline requests,
+so a faulted pipeline does not recover.
+
+#### New behavior
+
+##### LWS no longer requires Volcano
+
+**Change:** LWS auto-detection and explicit enablement require only the
+LWS API.
+
+**Affected:** Clusters with LWS installed but without the Volcano API.
+
+**Action:** Configure gang scheduling separately through LWS. For the
+documented Volcano setup, install Volcano and set the LWS Helm value
+`gangSchedulingManagement.schedulerProvider=volcano`. Native Kubernetes
+gang scheduling is not supported for Dynamo-managed LWS workloads.
+
+**Existing deployments:** After the operator upgrade, clusters with LWS
+installed but no Volcano API automatically enable LWS orchestration.
+Without separately configured gang scheduling or group admission
+(e.g., through Kueue), multinode DGD/DCD workloads using LWS may remain
+partially scheduled.
+
+##### Multinode sidecars for SGLang, vLLM, and TensorRT-LLM
+
+**Change:** Admission accepts `multinode` on a component that declares a `runtime` init
+container when the component supplies complete `leader` and `worker` role templates. Set
+`backendFramework` explicitly, as the examples do; the operator does not infer a backend from
+a native engine command. The operator renders the authored engine commands,
+probes, and ports unchanged and merges Dynamo defaults into each declared `runtime`.
+
+**Affected:** New multinode DGDs that opt into sidecar mode.
+
+**Action:** None for existing workloads. To opt in, see the
+[SGLang](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/sglang/sidecar.md#deploy-on-kubernetes),
+[vLLM](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/vllm/sidecar.md#deploy-on-kubernetes),
+and [TensorRT-LLM](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/tensorrt-llm/sidecar.md#deploy-on-kubernetes)
+sidecar guides.
+
+**Existing deployments:** No existing workload rolls. Components without a `runtime` init
+container keep running the engine and Dynamo together in `main`.
+
+##### Bundled KAI Queue creation waits for the queue webhook
+
+**Change:** With `global.kai-scheduler.install=true`, a `post-install,post-upgrade` Job holds the
+`dynamo-default` and `dynamo` Queue hooks until KAI's `queue-controller` is Available, the
+`kai-queue-validation-v2` webhook configuration exists, and the webhook admits a server-side
+dry-run Queue. This fixes `helm install --wait` failing with
+`failed calling webhook "queue-validation.kai.scheduler"`.
+
+**Affected:** Bundled KAI installations whose queue-controller is enabled and whose `kai-config`
+is applied by the chart (the default `kaiConfigDeployer`, or `kaiConfig.render=true`).
+
+**Action:** Mirror `kaiQueueWait.image` (`registry.k8s.io/kubectl`) for restricted registries.
+Set `kaiQueueWait.enabled=false` only when the queue webhook is known to be serving, or when
+kai-config disables Queue validation (`spec.queueController.webhooks.enableValidation=false`) or
+changes its webhook name prefix; otherwise the Job waits for a webhook that never appears. The Job
+waits up to `kaiQueueWait.activeDeadlineSeconds` (600), within Helm's `--timeout`.
+
+**Existing deployments:** Successful runs delete the Job and its ServiceAccount, Role,
+ClusterRole, bindings, and ConfigMap. After a failure they persist for diagnosis until the next
+install or upgrade replaces them. `helm uninstall` does not remove them, so delete them manually
+when retiring a failed release.
+
+#### Dependency compatibility
+
+##### Grove v0.2.0-beta1
+
+**Change:** The bundled Grove chart and Go API dependency are now `v0.2.0-beta1`.
+Grove stores resources as `grove.io/v1beta1` and continues serving the
+`grove.io/v1alpha1` API used by Dynamo. The external Grove preflight accepts beta
+release tags and requires the pinned version or later.
+
+**Affected:** All Grove-backed deployments upgrading to Dynamo 1.7.0.
+
+**Action:** Upgrade externally managed Grove and matching CRDs first, with
+`crdInstaller.upgradeCRDs=true`. The platform chart enables this setting for
+bundled Grove, replacing `grove.crdInstaller.enabled`. The API server must be able
+to reach Grove's conversion webhook. With Grove integration enabled, Dynamo's
+alpha informers depend on that webhook to read beta-stored resources. If it is
+unavailable during initial cache synchronization, the shared Dynamo manager can
+fail to start, affecting non-Grove workloads handled by that manager too. After
+startup, failed LIST/WATCH reconnects can leave Grove observations stale while
+cached reads continue to work. This Grove informer dependency does not apply
+when Grove integration is disabled. Read the
+[Grove upgrade and downgrade guide](https://github.com/ai-dynamo/grove/blob/v0.2.0-beta1/docs/user-guide/upgrading-to-v1beta1-v0.2.0-beta1.md)
+before upgrading. Run the downgrade migration back to `v1alpha1` while the
+`v0.2.0-beta1` operator is still running, then roll back to Grove
+`v0.1.0-alpha.16`.
+Earlier CRDs can drop fields written by newer releases.
+
+For bundled Grove, prepare the rollback platform chart with its
+`dynamo.nvidia.com/grove-version` annotation and `grove` dependency pinned to
+`v0.1.0-alpha.16`, then rebuild its dependencies with `helm dependency update`.
+After the migration, deploy that chart with `helm upgrade` to the same release
+and namespace, using saved pre-upgrade values, `global.grove.install=true`, and
+`grove.crdInstaller.enabled=true`. Use client-side apply for this rollback:
+Helm 3 does so by default; with Helm 4, pass `--server-side=false`. Do not roll
+back to an unmodified older platform chart: Dynamo `v1.6.0` bundles `alpha.14`,
+and pre-upgrade `main` bundles `alpha.15`.
+
+**Existing deployments:** Grove converts existing alpha resources without requiring
+manifest changes. An unset clique or scaling-group `scaleConfig.minReplicas` now
+defaults to `minAvailable` rather than `replicas`; existing explicit minima are retained.
 
 ### v1.6.0
 
@@ -184,6 +453,11 @@ created by Dynamo 1.6.0 when Grove is managed outside the platform chart.
 using rollout budgets or Coherent updates, or creating new multinode DGDs. Updating Dynamo's
 dependency or platform chart does not upgrade separately managed Grove installations.
 
+**Existing deployments:** `DYNAMO_RANK` and `DYNAMO_LEADER_ADDRESS` are injected only into DGDs
+created by operator 1.6.0 or later. An operator upgrade does not add them to an older DGD, and
+later edits of that DGD do not add them. See
+[Use the variables in a DGD created before 1.6.0](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/kubernetes/installation/multinode-orchestration.md#use-the-variables-in-a-dgd-created-before-160).
+
 #### External Grove installation preflight
 
 With `global.grove.enabled=true` and `global.grove.install=false`, a read-only
@@ -230,10 +504,6 @@ Helm 3.18+ also prints them via `helm.sh/hook-output-log-policy: hook-failed`, u
 installer's Pod/log read permissions. With older Helm, read them with `kubectl logs`.
 Successful Jobs are deleted. Supporting ServiceAccount/ClusterRole/ClusterRoleBinding hooks
 persist until the next attempt and require manual removal when retiring the release.
-
-**Existing deployments:** The operator origin version gates alias injection. An operator-only
-upgrade leaves existing multinode workload pod templates unchanged and does not roll them solely to
-add the aliases.
 
 ### v1.5.0
 
@@ -491,6 +761,7 @@ For **production environments**, Kai Scheduler and Grove should be installed sep
 | 1.4.x           | >= v0.13.4    | >= v0.1.0-alpha.12-rc1 |
 | 1.5.x           | >= v0.17.0    | >= v0.1.0-alpha.13 |
 | 1.6.x           | >= v0.17.0    | >= v0.1.0-alpha.15 |
+| 1.7.x           | >= v0.17.0    | >= v0.2.0-beta1 |
 
 Upgrade Grove in lockstep with Dynamo while Grove APIs are not stable. See the
 [v1.4.0 upgrade notes](#v140) for the topology API transition and the

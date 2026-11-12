@@ -29,7 +29,6 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
-	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -342,7 +341,7 @@ func (r *CRDMigrator) cleanupManagedFields(ctx context.Context, crd *apiextensio
 				managedFields = append(managedFields, metav1.ManagedFieldsEntry{
 					Manager: first.Manager, Operation: first.Operation,
 					APIVersion: crd.Spec.Group + "/" + storageVersion,
-					Time:       ptr.To(metav1.Now()), FieldsType: "FieldsV1",
+					Time:       new(metav1.Now()), FieldsType: "FieldsV1",
 					FieldsV1: &metav1.FieldsV1{Raw: fields},
 				})
 			}
