@@ -365,15 +365,21 @@ For image edits, these limits apply alongside the
   local inhibited set while the selected worker remains in discovery.
 </ParamField>
 
-<ParamField path="DYN_RESPONSE_STREAM_ESTABLISH_TIMEOUT_SECS" type="integer" default="0">
+<ParamField path="DYN_RESPONSE_STREAM_ESTABLISH_TIMEOUT_SECS" type="integer" default="unset">
   Seconds a frontend waits for a worker to establish its response stream after the worker
   acknowledges a unary request. The timer starts at the acknowledgement, so waiting for local
   admission, connecting, and sending does not count. It covers worker queueing and setup before the
   response stream opens, and a worker that accepts requests but cannot connect back. Set it above the
   worst-case time a healthy worker takes to start a response. On expiry the request fails with a
   response timeout, or migrates when migration is enabled, and the worker is locally inhibited for
-  `DYN_RUNTIME_INHIBITED_DURATION_SECS`. Set to `0` or leave unset to disable. Routers without fault
-  detection and bidirectional requests do not apply this timeout.
+  `DYN_RUNTIME_INHIBITED_DURATION_SECS`. Routers without fault detection and bidirectional requests do
+  not apply this timeout.
+
+  When the variable is unset, a frontend on the `tcp` response plane applies no timeout, and a
+  frontend on `quic` or `velo` applies 30 seconds, because a worker that predates the frontend's
+  response plane accepts the request and never answers. Set to `0` to disable the timeout on every
+  response plane. On `quic` or `velo`, raise it above the longest time a request can wait in a
+  backend admission queue before the worker starts it.
 </ParamField>
 
 ## Operations

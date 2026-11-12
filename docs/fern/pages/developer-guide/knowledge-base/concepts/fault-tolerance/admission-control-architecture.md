@@ -76,7 +76,10 @@ the engine request limit until its response stream ends. Interim metadata does n
 
 Cancelled queued requests are removed and free their queue space. Requests that finish, fail, or are
 cancelled at the engine free their remaining capacity. The gate does not preempt engine work or
-enforce a queue waiting-time limit.
+enforce a queue waiting-time limit. A frontend on the `quic` or `velo` response plane does bound
+the wait: it fails a request whose response stream has not opened within
+`DYN_RESPONSE_STREAM_ESTABLISH_TIMEOUT_SECS` (30 seconds by default on those response planes), so
+raise that value above the longest expected queue wait.
 
 **Data-parallel ranks.** Each data-parallel (DP) rank has its own limits and FIFO queue. A request with
 a specified, recognized rank uses that rank's queue and limits. A busy rank does not prevent another
