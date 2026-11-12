@@ -2437,6 +2437,53 @@ def test_build_sampling_params_openai_root_thinking_token_budget_overrides_nvext
     assert sp.thinking_token_budget == 2048
 
 
+@pytest.mark.parametrize(
+    ("limits", "expected"),
+    [
+        pytest.param({"max_completion_tokens": 256}, 256, id="max-completion-tokens"),
+        pytest.param({"max_tokens": 64}, 64, id="max-tokens"),
+        pytest.param(
+            {"max_completion_tokens": 256, "max_tokens": 64},
+            256,
+            id="max-completion-tokens-wins",
+        ),
+        pytest.param(
+            {"max_completion_tokens": None, "max_tokens": 64},
+            64,
+            id="null-max-completion-tokens",
+        ),
+    ],
+)
+def test_build_sampling_params_openai_chat_token_limits(limits, expected):
+    from dynamo.vllm.handlers import build_sampling_params_openai
+
+    request = {
+        "model": "test-model",
+        "messages": [{"role": "user", "content": "hi"}],
+        **limits,
+    }
+    sp = build_sampling_params_openai(request, default_sampling_params={})
+    assert sp.max_tokens == expected
+
+
+def test_build_sampling_params_openai_omitted_chat_limit_uses_remaining_context():
+    from dynamo.vllm.handlers import build_sampling_params_openai
+
+    request = {"model": "test-model", "messages": [{"role": "user", "content": "hi"}]}
+    # None lets vLLM fill max_model_len - prompt_len, as its chat server does.
+    assert build_sampling_params_openai(request, {}).max_tokens is None
+    # A generation-config limit still applies.
+    assert build_sampling_params_openai(request, {"max_tokens": 48}).max_tokens == 48
+
+
+def test_build_sampling_params_openai_omitted_completion_limit_keeps_default():
+    from dynamo.vllm.handlers import build_sampling_params_openai
+
+    request = {"model": "test-model", "prompt": "hi"}
+    assert build_sampling_params_openai(request, {}).max_tokens == 16
+    assert build_sampling_params_openai(request, {"max_tokens": 48}).max_tokens == 48
+
+
 @pytest.mark.asyncio
 async def test_generate_text_mode_applies_nvext_cache_salt():
     from dynamo.vllm.handlers import DecodeWorkerHandler
