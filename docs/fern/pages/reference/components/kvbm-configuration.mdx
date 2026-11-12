@@ -6,6 +6,10 @@ subtitle: Field reference for the KV Block Manager environment variables and the
 ---
 
 <Warning>
+  KVBM (KV Block Manager) is deprecated in v1.5.0 and removal is targeted for v1.7.0. Use the engine's native KV offloading for host and disk tiering. Cross-node KV cache sharing is the scope of the separate, early-stage KV Cache Runner (KVCR) project, which does not replace KVBM. See the [Deprecations](../general/releases/deprecations.mdx#v150) ledger.
+</Warning>
+
+<Warning>
 The TensorRT-LLM KVBM connector and event consolidator have been removed. These settings do not apply to TensorRT-LLM workers. Native TensorRT-LLM KV-event publishing and KV-aware routing remain supported.
 </Warning>
 
