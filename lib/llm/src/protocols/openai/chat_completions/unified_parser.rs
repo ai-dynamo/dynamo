@@ -56,7 +56,7 @@ use futures::{Stream, StreamExt};
 use uuid::Uuid;
 
 use crate::protocols::openai::GuidedToolConstraint;
-use crate::tokenizers::traits::Tokenizer;
+use dynamo_tokenizers::traits::Tokenizer;
 
 use super::NvCreateChatCompletionStreamResponse;
 
@@ -14228,7 +14228,7 @@ pub(crate) mod tests {
             return;
         };
         let v1_selected = mode == "1";
-        let tekken = crate::tokenizers::TekkenTokenizer::from_file(concat!(
+        let tekken = dynamo_tokenizers::TekkenTokenizer::from_file(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/tests/data/sample-models/mock-mistral-tekken/tekken.json"
         ))
@@ -14241,7 +14241,7 @@ pub(crate) mod tests {
             "model": {"type": "BPE", "vocab": {"a": 0, "[TOOL_CALLS]": 1}, "merges": []}
         }))
         .unwrap();
-        let pre_v11 = crate::tokenizers::HuggingFaceTokenizer::from_tokenizer(pre_v11);
+        let pre_v11 = dynamo_tokenizers::HuggingFaceTokenizer::from_tokenizer(pre_v11);
 
         for (tool, reasoning) in [
             (Some("mistral"), Some("mistral")),
