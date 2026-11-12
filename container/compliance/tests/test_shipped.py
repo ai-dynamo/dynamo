@@ -20,7 +20,12 @@ from compliance.identity import component_identity
 from compliance.policy.validate import load_policy, validate_row
 from jinja2 import Environment, StrictUndefined
 
-pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
+pytestmark = [
+    pytest.mark.parallel,
+    pytest.mark.pre_merge,
+    pytest.mark.unit,
+    pytest.mark.gpu_0,
+]
 _READ_URL = shipped._read_url  # The autouse fixture blocks production network reads.
 
 

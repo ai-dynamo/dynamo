@@ -7,7 +7,12 @@ import json
 import pytest
 from compliance.audit_image_sbom import _covered_by_owner, _ownership_coverage, main
 
-pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
+pytestmark = [
+    pytest.mark.parallel,
+    pytest.mark.pre_merge,
+    pytest.mark.unit,
+    pytest.mark.gpu_0,
+]
 
 
 def _component(*paths):

@@ -16,7 +16,12 @@ from compliance.prepare_diff import (
     select_osrb_csv,
 )
 
-pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
+pytestmark = [
+    pytest.mark.parallel,
+    pytest.mark.pre_merge,
+    pytest.mark.unit,
+    pytest.mark.gpu_0,
+]
 CURRENT = "a" * 40
 BASE = "b" * 40
 CSV = "ecosystem,name,version,spdx,source_url,notes\npython,example,1.0,MIT,,\n"

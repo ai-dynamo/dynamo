@@ -16,6 +16,7 @@ import pytest
 from compliance.scan_codecs import CodecPolicy, main, scan_filesystem, scan_sbom
 
 pytestmark = [
+    pytest.mark.parallel,
     pytest.mark.pre_merge,
     pytest.mark.post_merge,
     pytest.mark.gpu_0,

@@ -16,7 +16,12 @@ from compliance import image_provenance as provenance
 from compliance import publication
 from compliance.prepare_diff import inventory_name
 
-pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
+pytestmark = [
+    pytest.mark.parallel,
+    pytest.mark.pre_merge,
+    pytest.mark.unit,
+    pytest.mark.gpu_0,
+]
 
 SHA = "a" * 40
 INDEX = "sha256:" + "b" * 64
@@ -532,6 +537,25 @@ def test_operator_main_binaries_keep_their_first_party_package_identity():
                 relative,
                 targets,
             )
+
+
+def test_test_image_callers_supply_all_named_source_contexts():
+    root = Path(__file__).resolve().parents[3]
+    dockerfile = (root / "container/Dockerfile.test").read_text()
+    required = set(re.findall(r"--from=(repo-[a-z-]+)", dockerfile))
+    assert required
+    callers = []
+    for path in (root / ".github/workflows").glob("*.y*ml"):
+        workflow = yaml.safe_load(path.read_text())
+        for job in workflow.get("jobs", {}).values():
+            for step in job.get("steps", []):
+                script = step.get("run", "")
+                if "-f container/Dockerfile.test" not in script:
+                    continue
+                supplied = set(re.findall(r"--build-context\s+(repo-[a-z-]+)=", script))
+                assert required <= supplied, (path.name, required - supplied)
+                callers.append(path.name)
+    assert set(callers) == {"shared-build-image.yml", "xpu-ci.yaml"}
 
 
 @pytest.mark.parametrize("workflow_name", ["pr.yaml", "post-merge-ci.yml"])

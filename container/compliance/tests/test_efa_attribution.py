@@ -10,7 +10,12 @@ import pytest
 import render as container_render
 import yaml
 
-pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
+pytestmark = [
+    pytest.mark.parallel,
+    pytest.mark.pre_merge,
+    pytest.mark.unit,
+    pytest.mark.gpu_0,
+]
 
 
 def _render(framework, target="runtime", make_efa=True, platform="multi"):
