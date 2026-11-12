@@ -147,6 +147,65 @@ impl<T: DeserializeOwned> ValidatedRequest<T> {
         Ok(None)
     }
 
+    /// Splice image blocks without rebuilding JSON, preserving duplicate-field validation.
+    pub(super) fn omit_images(mut self) -> Result<Self, String> {
+        #[derive(Deserialize)]
+        struct Message<'a> {
+            #[serde(borrow)]
+            content: &'a RawValue,
+        }
+        #[derive(Deserialize)]
+        struct Messages<'a> {
+            #[serde(borrow)]
+            messages: Vec<Message<'a>>,
+        }
+        #[derive(Deserialize)]
+        struct Block<'a> {
+            #[serde(rename = "type")]
+            kind: String,
+            #[serde(borrow)]
+            content: Option<&'a RawValue>,
+        }
+        fn image_blocks<'a>(content: &'a RawValue, nested: bool, images: &mut Vec<&'a RawValue>) {
+            let Ok(blocks) = serde_json::from_str::<Vec<&RawValue>>(content.get()) else {
+                return;
+            };
+            for raw in blocks {
+                let Ok(block) = serde_json::from_str::<Block<'_>>(raw.get()) else {
+                    continue;
+                };
+                if block.kind == "image" {
+                    images.push(raw);
+                } else if nested
+                    && block.kind == "tool_result"
+                    && let Some(content) = block.content
+                {
+                    image_blocks(content, false, images);
+                }
+            }
+        }
+        let messages: Messages<'_> =
+            serde_json::from_slice(&self.body).map_err(|error| error.to_string())?;
+        let mut images = Vec::new();
+        for message in messages.messages {
+            image_blocks(message.content, true, &mut images);
+        }
+        if images.is_empty() {
+            return Ok(self);
+        }
+        let mut body = Vec::new();
+        let mut cursor = 0;
+        for image in images {
+            let start = image.get().as_ptr() as usize - self.body.as_ptr() as usize;
+            body.extend_from_slice(&self.body[cursor..start]);
+            body.extend_from_slice(br#"{"type":"text","text":"[image omitted]"}"#);
+            cursor = start + image.get().len();
+        }
+        body.extend_from_slice(&self.body[cursor..]);
+        self.body = body.into();
+        Ok(self)
+    }
+
     pub(super) fn into_request(self, headers: &HeaderMap) -> Result<T, String> {
         validate(&self.fields?, headers)?;
         // Read the original bytes, preserving duplicate-field rejection and Axum's

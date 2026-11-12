@@ -35,6 +35,7 @@ use dynamo_runtime::config::{
     env_is_falsey, environment_names::llm as env_llm, is_truthy, parse_bool_opt,
 };
 use dynamo_runtime::error::{DynamoError, ErrorType, PublicDetails};
+use dynamo_runtime::protocols::maybe_error::MaybeError;
 use dynamo_runtime::telemetry::{LIFECYCLE_TRACE_CONTEXT_KEY, LifecycleStage, LifecycleTrace};
 use either::Either;
 use futures::Stream;
@@ -1779,6 +1780,7 @@ fn attach_request_context_metadata(
 struct NormalizedArgsRequest<'a, R> {
     inner: &'a R,
     normalize_tool_call_args: bool,
+    normalize_developer_role: bool,
     continue_final_message: bool,
     named_tool: Option<&'a str>,
     final_message_start_tag: Option<&'a crate::preprocessor::prompt::FinalMessageTags>,
@@ -1794,6 +1796,15 @@ impl<R: OAIChatLikeRequest> OAIChatLikeRequest for NormalizedArgsRequest<'_, R> 
 
     fn messages(&self) -> minijinja::value::Value {
         let mut json = serde_json::to_value(self.inner.messages()).unwrap_or_default();
+        if self.normalize_developer_role
+            && let Some(messages) = json.as_array_mut()
+        {
+            for message in messages {
+                if message.get("role").and_then(serde_json::Value::as_str) == Some("developer") {
+                    message["role"] = serde_json::json!("system");
+                }
+            }
+        }
         if self.normalize_tool_call_args
             && let Err(e) = crate::preprocessor::prompt::normalize_tool_call_arguments(&mut json)
         {
@@ -3731,6 +3742,7 @@ impl OpenAIPreprocessor {
 
         // apply ignore eos if not already set
         stop_conditions.apply_ignore_eos();
+        self.apply_single_tool_call_stop(request, &mut stop_conditions)?;
 
         if !stop_conditions.ignore_eos.unwrap_or(false) {
             builder.eos_token_ids(eos_token_ids);
@@ -3862,6 +3874,37 @@ impl OpenAIPreprocessor {
         Ok(builder)
     }
 
+    fn apply_single_tool_call_stop<R: OAIChatLikeRequest + CommonExtProvider>(
+        &self,
+        request: &R,
+        stop_conditions: &mut crate::protocols::common::StopConditions,
+    ) -> Result<()> {
+        if request.get_parallel_tool_calls() == Some(false)
+            && Self::request_has_effective_tools(request)
+            && request
+                .tool_choice()
+                .as_ref()
+                .and_then(|choice| choice.as_str())
+                != Some("none")
+            && self
+                .runtime_config
+                .get_engine_specific::<bool>(
+                    crate::local_model::runtime_config::VISIBLE_STOP_STRINGS_CAPABILITY,
+                )?
+                .unwrap_or(false)
+        {
+            let boundary = match self.tool_call_parser.as_deref() {
+                Some("kimi_k3" | "kimi-k3") => Some("<|close|>call<|sep|>"),
+                Some("glm4" | "glm47") => Some("</tool_call>"),
+                _ => None,
+            };
+            if let Some(boundary) = boundary {
+                stop_conditions.stop_visible = Some(vec![boundary.to_string()]);
+            }
+        }
+        Ok(())
+    }
+
     fn remove_tool_parser_end_tokens_from_hidden_stops<R: OAIChatLikeRequest>(
         &self,
         request: &R,
@@ -3982,6 +4025,13 @@ impl OpenAIPreprocessor {
             .map(|(prompt, _)| prompt)
     }
 
+    fn uses_glm_parser(&self) -> bool {
+        crate::protocols::openai::chat_completions::unified_parser::configured_family(
+            self.tool_call_parser.as_deref(),
+            self.runtime_config.reasoning_parser.as_deref(),
+        ) == Some(crate::protocols::openai::chat_completions::unified_parser::GLM47_UNIFIED_FAMILY)
+    }
+
     fn apply_template_and_prefill<
         R: OAIChatLikeRequest
             + AnnotationsProvider
@@ -4039,7 +4089,9 @@ impl OpenAIPreprocessor {
         } else {
             None
         };
+        let normalize_developer_role = self.uses_glm_parser();
         let formatted_prompt = if self.normalize_tool_call_args
+            || normalize_developer_role
             || continue_final
             || rendering.is_some()
             || named_tool.is_some()
@@ -4047,6 +4099,7 @@ impl OpenAIPreprocessor {
             self.apply_template_inner(&NormalizedArgsRequest {
                 inner: request,
                 normalize_tool_call_args: self.normalize_tool_call_args,
+                normalize_developer_role,
                 continue_final_message: continue_final,
                 named_tool: named_tool.as_deref(),
                 final_message_start_tag: final_message_start_tag.as_ref(),
@@ -4078,6 +4131,24 @@ impl OpenAIPreprocessor {
             }
             None => (None, None),
         };
+        // GLM templates that ignore the toggle must not silently accept thinking-off.
+        if self.uses_glm_parser()
+            && Self::normalize_thinking_aliases(
+                request.chat_template_args(),
+                self.runtime_config.reasoning_parser.as_deref(),
+            ) == Some(false)
+            && !formatted_prompt
+                .as_ref()
+                .is_some_and(|prompt| prompt.as_str().trim_end().ends_with("</think>"))
+        {
+            let message = "The selected GLM chat template does not render a closed reasoning prefill for thinking-off. Remove the reasoning-off setting or use a template that supports it.";
+            return Err(DynamoError::builder()
+                .error_type(ErrorType::InvalidArgument)
+                .message(message)
+                .public_message(message)
+                .build()
+                .into());
+        }
         let mut prefill = Self::prompt_reasoning_prefill_at_boundary(
             self.tool_call_parser.as_deref(),
             self.runtime_config.reasoning_parser.as_deref(),
@@ -6090,7 +6161,9 @@ impl OpenAIPreprocessor {
         // chunk (see `finalize_parser_at_finish`), so its usage is held too.
         let stream: Pin<Box<dyn Stream<Item = _> + Send>> = if defer_reasoning_for_nonempty_content
             || should_strip_disabled_reasoning_start
-            || (should_parse_reasoning && Self::is_minimax_m3_reasoning_parser(reasoning_parser))
+            || (should_parse_reasoning
+                && (reasoning_parser == Some("glm45")
+                    || Self::is_minimax_m3_reasoning_parser(reasoning_parser)))
         {
             Box::pin(Self::hold_usage_until_stream_end(stream))
         } else {
@@ -6950,6 +7023,7 @@ impl OpenAIPreprocessor {
         };
         let pending_out = Arc::clone(&pending);
         let pending_eof = Arc::clone(&pending);
+        let parser_error = Arc::clone(&terminal_error);
         let jailed_output = jailed.flat_map(move |mut a| {
             debug_assert!(
                 a.error.is_none(),
@@ -7010,34 +7084,26 @@ impl OpenAIPreprocessor {
                     let state = recovery.entry(choice.index).or_default();
                     if let Some(marker_start) = crate::protocols::openai::chat_completions::unified_parser::unquoted_native_tool_call_marker_or_prefix_start(&state.input_text, "glm47") {
                         let desired_content = &state.input_text[..marker_start];
-                        // An EOS inside a tool call is incomplete even if the engine reports stop.
-                        let dropped_call_reported_as_length = choice.finish_reason
-                            == Some(dynamo_protocols::types::FinishReason::Stop)
-                            && choice.delta.tool_calls.is_none()
-                            && crate::protocols::openai::chat_completions::unified_parser::first_unquoted_native_tool_call_marker(&state.input_text, "glm47").is_some();
-                        if dropped_call_reported_as_length {
-                            tracing::warn!(
-                                choice_index = choice.index,
-                                why = "dropped_native_tool_call_reported_as_length",
-                                dropped_bytes = state.input_text.len() - desired_content.len(),
-                                "glm47 streaming: reporting length instead of stop for a tool call dropped at end of stream"
-                            );
-                            choice.finish_reason =
-                                Some(dynamo_protocols::types::FinishReason::Length);
-                        }
-                        if choice.finish_reason
-                            == Some(dynamo_protocols::types::FinishReason::Length)
+                        if matches!(choice.finish_reason, Some(
+                            dynamo_protocols::types::FinishReason::Stop
+                            | dynamo_protocols::types::FinishReason::ToolCalls
+                        )) && choice.delta.tool_calls.is_none()
                             && crate::protocols::openai::chat_completions::unified_parser::first_unquoted_native_tool_call_marker(&state.input_text, "glm47").is_some()
                         {
-                            // Count EOS drops separately from max_tokens truncation.
-                            if !dropped_call_reported_as_length {
-                                tracing::warn!(
-                                    choice_index = choice.index,
-                                    why = "truncated_native_tool_call_suppressed",
-                                    suppressed_bytes = state.input_text.len() - desired_content.len(),
-                                    "glm47 streaming: suppressing incomplete native tool output on length finish"
-                                );
-                            }
+                            parser_error.lock().expect("jail terminal error poisoned").get_or_insert_with(||
+                                Annotated::from_err(crate::protocols::openai::chat_completions::unified_parser::incomplete_tool_call_error())
+                            );
+                            return futures::stream::iter(std::iter::once(nv_chunk));
+                        }
+                        if choice.finish_reason == Some(dynamo_protocols::types::FinishReason::Length)
+                            && crate::protocols::openai::chat_completions::unified_parser::first_unquoted_native_tool_call_marker(&state.input_text, "glm47").is_some()
+                        {
+                            tracing::warn!(
+                                choice_index = choice.index,
+                                why = "truncated_native_tool_call_suppressed",
+                                suppressed_bytes = state.input_text.len() - desired_content.len(),
+                                "glm47 streaming: suppressing incomplete native tool output on length finish"
+                            );
                             let replacement = desired_content
                                 .strip_prefix(&state.emitted_text)
                                 .unwrap_or_default();
@@ -7813,8 +7879,8 @@ impl OpenAIPreprocessor {
     {
         // Parsers and bypass decisions are created lazily per `choice.index`
         // inside the unfold loop, so `n > 1` choices never share state.
-        let finalize_parser_at_finish =
-            Self::is_minimax_m3_reasoning_parser(Some(parser_name.as_str()));
+        let finalize_parser_at_finish = parser_name == "glm45"
+            || Self::is_minimax_m3_reasoning_parser(Some(parser_name.as_str()));
         let state = ReasoningState {
             stream: Box::pin(stream),
             parser_name,
@@ -7859,11 +7925,22 @@ impl OpenAIPreprocessor {
                     response.map_data(|mut data| {
                         for choice in data.inner.choices.iter_mut() {
                             let choice_state = choices.entry(choice.index).or_insert_with(|| {
-                                let mut parser =
+                                let mut parser: Box<dyn ReasoningParser> = if parser_name == "glm45"
+                                {
+                                    Box::new(
+                                        dynamo_parsers::reasoning::BasicReasoningParser::new(
+                                            "<think>".into(),
+                                            "</think>".into(),
+                                            false,
+                                            true,
+                                        )
+                                        .with_single_char_marker_buffering(),
+                                    )
+                                } else {
                                     Box::new(ReasoningParserType::get_reasoning_parser_from_name(
                                         parser_name,
                                     ))
-                                        as Box<dyn ReasoningParser>;
+                                };
                                 if prompt_injected_reasoning {
                                     parser.set_in_reasoning(true);
                                 }
@@ -9864,6 +9941,149 @@ mod tests {
         FinishReason, Role,
     };
     use std::path::PathBuf;
+
+    #[test]
+    fn glm_developer_messages_reach_the_rendered_prompt_in_order() {
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test", "messages": [
+                {"role": "system", "content": "SYSTEM"},
+                {"role": "developer", "content": "DEV_ONE"},
+                {"role": "user", "content": "USER"},
+                {"role": "developer", "content": "DEV_TWO"}
+            ]
+        }))
+        .unwrap();
+        let original = serde_json::to_value(&request).unwrap();
+        const TEMPLATE: &str = "{% for m in messages %}{% if m.role == 'system' or m.role == 'user' %}[{{ m.role }}:{{ m.content }}]{% endif %}{% endfor %}";
+        for (tool, reasoning, expected) in [
+            (
+                Some("glm47"),
+                Some("glm45"),
+                "[system:SYSTEM][system:DEV_ONE][user:USER][system:DEV_TWO]",
+            ),
+            (
+                None,
+                Some("glm45"),
+                "[system:SYSTEM][system:DEV_ONE][user:USER][system:DEV_TWO]",
+            ),
+            (Some("qwen3"), Some("qwen3"), "[system:SYSTEM][user:USER]"),
+        ] {
+            let mut preprocessor = extra_args_media_copy_tests::test_preprocessor();
+            preprocessor.formatter = test_prompt_formatter(TEMPLATE);
+            preprocessor.tool_call_parser = tool.map(str::to_owned);
+            preprocessor.runtime_config.reasoning_parser = reasoning.map(str::to_owned);
+            let rendered = preprocessor.apply_template(&request).unwrap().unwrap();
+            assert_eq!(
+                rendered.as_str(),
+                expected,
+                "tool={tool:?} reasoning={reasoning:?}"
+            );
+            assert_eq!(serde_json::to_value(&request).unwrap(), original);
+        }
+    }
+
+    #[tokio::test]
+    async fn glm_thinking_off_requires_closed_prefill_and_preserves_output_channels() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::glm_thinking_off_requires_closed_prefill_and_preserves_output_channels"
+            ),
+            &[(env_llm::DYN_PARSER_VERSION, "2")],
+        ) {
+            return;
+        }
+        const CLOSED: &str = "{% if thinking is defined and not thinking %}<|assistant|>\n<think></think>\n{% else %}<|assistant|>\n<think>{% endif %}";
+        for tool in [Some("glm47"), None] {
+            let mut preprocessor = extra_args_media_copy_tests::test_preprocessor();
+            preprocessor.formatter = test_prompt_formatter(CLOSED);
+            preprocessor.tool_call_parser = tool.map(str::to_owned);
+            preprocessor.runtime_config.reasoning_parser = Some("glm45".into());
+            for controls in [
+                serde_json::json!({"chat_template_kwargs": {"thinking": false}}),
+                serde_json::json!({"chat_template_kwargs": {"enable_thinking": false}}),
+                serde_json::json!({"chat_template_kwargs": {"thinking_mode": "disabled"}}),
+                serde_json::json!({"thinking": {"type": "disabled"}}),
+                serde_json::json!({"reasoning_effort": "none"}),
+            ] {
+                let mut body = serde_json::json!({"model": "test", "messages": [{"role": "user", "content": "hello"}]});
+                body.as_object_mut()
+                    .unwrap()
+                    .extend(controls.as_object().unwrap().clone());
+                let mut request: NvCreateChatCompletionRequest =
+                    serde_json::from_value(body).unwrap();
+                request.normalize_reasoning_template_args().unwrap();
+                let (_, prefill) = preprocessor.apply_template_and_prefill(&request).unwrap();
+                assert!(!prefill.unified, "{controls}");
+                for ignored_template in ["<|assistant|>\n<think>", "<|assistant|>\n"] {
+                    preprocessor.formatter = test_prompt_formatter(ignored_template);
+                    let error = preprocessor.apply_template(&request).unwrap_err();
+                    assert_eq!(
+                        error.downcast_ref::<DynamoError>().unwrap().error_type(),
+                        ErrorType::InvalidArgument
+                    );
+                    assert!(error.to_string().contains("closed reasoning prefill"));
+                    assert!(
+                        error
+                            .downcast_ref::<DynamoError>()
+                            .unwrap()
+                            .public_message()
+                            .is_some_and(|message| message.contains("closed reasoning prefill"))
+                    );
+                }
+                preprocessor.formatter = test_prompt_formatter(CLOSED);
+                let reasoning_disabled = OpenAIPreprocessor::request_disables_reasoning_with_family(
+                    &request,
+                    tool,
+                    Some("glm45"),
+                    None,
+                    Some("glm47"),
+                );
+                assert!(!reasoning_disabled);
+                let batch = crate::protocols::openai::chat_completions::unified_parser::parse_complete_with_policy(
+                    "glm47", "<think>private thought</think>answer", &crate::protocols::openai::GuidedToolConstraint::None, &[],
+                    crate::protocols::openai::chat_completions::unified_parser::UnifiedRequestPolicy {
+                        reasoning_disabled, ..Default::default()
+                    },
+                ).unwrap();
+                assert_eq!(
+                    (batch.text.as_str(), batch.reasoning.as_str()),
+                    ("answer", "private thought")
+                );
+                let chunks = ["<think>private", " thought</think>answer"]
+                    .into_iter()
+                    .map(|text| {
+                        let mut chunk = chat_stream_chunk(0, None);
+                        let choice = &mut chunk.data.as_mut().unwrap().inner.choices[0];
+                        choice.delta.content =
+                            Some(ChatCompletionMessageContent::Text(text.into()));
+                        chunk
+                    });
+                let output = preprocessor
+                    .postprocessor_parsing_stream(
+                        futures::stream::iter(chunks),
+                        &request,
+                        prefill,
+                        false,
+                    )
+                    .unwrap()
+                    .collect::<Vec<_>>()
+                    .await;
+                assert_eq!(
+                    gpt_oss_stream_text(&output),
+                    ("answer".into(), "private thought".into()),
+                    "{controls}"
+                );
+            }
+            let request: NvCreateChatCompletionRequest =
+                serde_json::from_value(serde_json::json!({
+                    "model": "test", "messages": [{"role": "user", "content": "hello"}]
+                }))
+                .unwrap();
+            let (_, prefill) = preprocessor.apply_template_and_prefill(&request).unwrap();
+            assert!(prefill.unified);
+        }
+    }
 
     #[test]
     fn video_routing_startup_does_not_claim_active_routing() {
@@ -12898,7 +13118,7 @@ responses_tools: None,
     }
 
     #[tokio::test]
-    async fn glm47_streaming_stop_after_bare_tool_call_marker_reports_length() {
+    async fn glm47_streaming_stop_after_bare_tool_call_marker_reports_error() {
         let output = apply_glm47_streaming_with_terminal(
             &["I'll check. ", "<tool_call>"],
             FinishReason::Stop,
@@ -12906,13 +13126,18 @@ responses_tools: None,
         .await;
 
         assert_eq!(stream_content(&output), "I'll check. ");
-        assert!(has_finish_reason(&output, FinishReason::Length));
+        let error = output.last().unwrap().error.as_ref().unwrap();
+        assert_eq!(
+            error.class(),
+            dynamo_runtime::error::ErrorClass::BackendProtocol
+        );
+        assert!(!has_finish_reason(&output, FinishReason::Length));
         assert!(!has_finish_reason(&output, FinishReason::Stop));
         assert_eq!(emitted_tool_call_count(&output), 0);
     }
 
     #[tokio::test]
-    async fn glm47_streaming_stop_after_partial_function_name_reports_length() {
+    async fn glm47_streaming_stop_after_partial_function_name_reports_error() {
         let output = apply_glm47_streaming_with_terminal(
             &["I'll check. <tool_call>ipy"],
             FinishReason::Stop,
@@ -12920,12 +13145,17 @@ responses_tools: None,
         .await;
 
         assert_eq!(stream_content(&output), "I'll check. ");
-        assert!(has_finish_reason(&output, FinishReason::Length));
+        let error = output.last().unwrap().error.as_ref().unwrap();
+        assert_eq!(
+            error.class(),
+            dynamo_runtime::error::ErrorClass::BackendProtocol
+        );
+        assert!(!has_finish_reason(&output, FinishReason::Length));
         assert!(!has_finish_reason(&output, FinishReason::Stop));
     }
 
     #[tokio::test]
-    async fn glm47_streaming_stop_after_partial_arguments_reports_length_without_markup() {
+    async fn glm47_streaming_stop_after_partial_arguments_reports_error_without_markup() {
         let output = apply_glm47_streaming_with_terminal(
             &["<tool_call>get_weather<arg_key>city</arg_key><arg_value>Par"],
             FinishReason::Stop,
@@ -12933,7 +13163,12 @@ responses_tools: None,
         .await;
 
         assert!(stream_content(&output).is_empty());
-        assert!(has_finish_reason(&output, FinishReason::Length));
+        let error = output.last().unwrap().error.as_ref().unwrap();
+        assert_eq!(
+            error.class(),
+            dynamo_runtime::error::ErrorClass::BackendProtocol
+        );
+        assert!(!has_finish_reason(&output, FinishReason::Length));
         assert!(!has_finish_reason(&output, FinishReason::Stop));
         assert_eq!(emitted_tool_call_count(&output), 0);
     }
@@ -13214,6 +13449,39 @@ responses_tools: None,
             none_hidden,
             [HARMONY_CALL_TOKEN_ID, HARMONY_RETURN_TOKEN_ID, 7]
         );
+    }
+
+    #[test]
+    fn single_call_boundary_requires_worker_support_and_explicit_false() {
+        use crate::local_model::runtime_config::VISIBLE_STOP_STRINGS_CAPABILITY;
+        let mut preprocessor = hidden_stop_preprocessor();
+        preprocessor.tool_call_parser = Some("kimi_k3".into());
+        for supported in [false, true] {
+            preprocessor
+                .runtime_config
+                .set_engine_specific(VISIBLE_STOP_STRINGS_CAPABILITY, supported)
+                .unwrap();
+            for parallel in [None, Some(true), Some(false)] {
+                for choice in ["auto", "none"] {
+                    let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+                        "model":"m", "messages":[{"role":"user","content":"test"}],
+                        "tools":[{"type":"function","function":{"name":"exec","parameters":{"type":"object"}}}],
+                        "tool_choice":choice, "parallel_tool_calls":parallel
+                    })).unwrap();
+                    let mut stops = crate::protocols::common::StopConditions::default();
+                    preprocessor
+                        .apply_single_tool_call_stop(&request, &mut stops)
+                        .unwrap();
+                    assert_eq!(
+                        stops.stop_visible.is_some(),
+                        supported && parallel == Some(false) && choice != "none"
+                    );
+                    if let Some(stops) = stops.stop_visible {
+                        assert_eq!(stops, ["<|close|>call<|sep|>"]);
+                    }
+                }
+            }
+        }
     }
 
     async fn apply_kimi_k3_no_tools(
@@ -15521,11 +15789,27 @@ responses_tools: None,
                                 Some(parser),
                                 Some("glm47"),
                             );
-                            let (common, _, prefill) = preprocessor
-                                .preprocess_request(&request, None)
-                                .await
-                                .unwrap();
+                            let result = preprocessor.preprocess_request(&request, None).await;
                             let case = format!("{parser} {tail:?} {control}={requested} {fields}");
+                            if !requested && reasoning_open {
+                                let error =
+                                    result.err().expect("open thinking-off prefill must fail");
+                                let error = error.downcast_ref::<DynamoError>().unwrap();
+                                assert_eq!(
+                                    error.error_type(),
+                                    ErrorType::InvalidArgument,
+                                    "{case}"
+                                );
+                                assert!(
+                                    error
+                                        .public_message()
+                                        .unwrap()
+                                        .contains("closed reasoning prefill"),
+                                    "{case}"
+                                );
+                                continue;
+                            }
+                            let (common, _, prefill) = result.unwrap();
                             assert_eq!(
                                 common.require_reasoning,
                                 reasoning_open && needs_gate,
@@ -15566,10 +15850,22 @@ responses_tools: None,
                         "add_generation_prompt": add_generation_prompt,
                     }))
                     .unwrap();
-                let (common, _, _) = preprocessor
-                    .preprocess_request(&request, None)
-                    .await
-                    .unwrap();
+                let result = preprocessor.preprocess_request(&request, None).await;
+                if !requested && !tail.trim_end().ends_with("</think>") {
+                    let error = result
+                        .err()
+                        .expect("unknown thinking-off prefill must fail");
+                    let error = error.downcast_ref::<DynamoError>().unwrap();
+                    assert_eq!(error.error_type(), ErrorType::InvalidArgument);
+                    assert!(
+                        error
+                            .public_message()
+                            .unwrap()
+                            .contains("closed reasoning prefill")
+                    );
+                    continue;
+                }
+                let (common, _, _) = result.unwrap();
                 assert_eq!(common.require_reasoning, requested, "{tail:?} {requested}");
                 let extra = common.extra_args.as_ref().unwrap();
                 assert!(
@@ -16893,6 +17189,7 @@ responses_tools: None,
             named_tool: None,
             inner: &request,
             normalize_tool_call_args: true,
+            normalize_developer_role: false,
             continue_final_message: true,
             final_message_start_tag: None,
             rendering: None,
@@ -16938,6 +17235,7 @@ responses_tools: None,
                     named_tool: None,
                     inner: request,
                     normalize_tool_call_args: false,
+                    normalize_developer_role: false,
                     continue_final_message: true,
                     final_message_start_tag: None,
                     rendering: None,

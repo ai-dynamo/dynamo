@@ -78,7 +78,7 @@ pub(crate) struct ModelLimits {
     /// optional input-capability fields.
     pub(crate) supported_inputs: Option<SupportedInputs>,
     /// Modalities advertised by both the portable and engine-specific capabilities.
-    /// `None` is unresolved metadata; startup always resolves this.
+    /// `None` means missing or malformed capability metadata.
     pub(crate) supported_media: Option<SupportedMedia>,
     pub(crate) supports_image_routing: bool,
 }
@@ -235,7 +235,6 @@ impl TrtllmClient {
             })
             .await?
             .into_inner();
-        let mut supported_media = SupportedMedia::default();
         let supported_inputs =
             if info.supports_text_input.is_none() && info.supports_token_ids_input.is_none() {
                 None
@@ -245,34 +244,45 @@ impl TrtllmClient {
                     token_ids: info.supports_token_ids_input == Some(true),
                 })
             };
-        if info.supports_multimodal == Some(true)
+        let supported_media = if info.supports_multimodal == Some(false) {
+            Some(SupportedMedia::default())
+        } else if info.supports_multimodal == Some(true)
             && let Some(prost_types::value::Kind::ListValue(modalities)) = info
                 .extra
                 .as_ref()
                 .and_then(|extra| extra.fields.get("trtllm_supported_modalities"))
                 .and_then(|value| value.kind.as_ref())
+            && modalities.values.iter().all(|value| {
+                matches!(
+                    value.kind.as_ref(),
+                    Some(prost_types::value::Kind::StringValue(_))
+                )
+            })
         {
+            let mut media = SupportedMedia::default();
             for value in &modalities.values {
-                let Some(prost_types::value::Kind::StringValue(modality)) = value.kind.as_ref()
-                else {
-                    continue;
-                };
-                match modality.as_str() {
-                    "image" => supported_media.image = true,
-                    "video" => supported_media.video = true,
-                    "audio" => supported_media.audio = true,
-                    _ => {}
+                if let Some(prost_types::value::Kind::StringValue(modality)) = &value.kind {
+                    match modality.as_str() {
+                        "image" => media.image = true,
+                        "video" => media.video = true,
+                        "audio" => media.audio = true,
+                        _ => {}
+                    }
                 }
             }
-        }
+            Some(media)
+        } else {
+            None
+        };
         Ok(ModelInfo {
             limits: ModelLimits {
                 context_length: info.max_context_length.filter(|len| *len > 0),
                 engine_context_length: info.max_context_length.filter(|len| *len > 0),
                 max_output_tokens: info.max_output_tokens.filter(|cap| *cap > 0),
                 supported_inputs,
-                supported_media: Some(supported_media),
-                supports_image_routing: supported_media.image && has_image_routing_v1(&info),
+                supported_media,
+                supports_image_routing: supported_media.is_some_and(|media| media.image)
+                    && has_image_routing_v1(&info),
             },
             served_model_name: info.served_model_name,
         })

@@ -605,6 +605,10 @@ impl OpenAISamplingOptionsProvider for NvCreateChatCompletionRequest {
 /// Implements `CommonExtProvider` for `NvCreateChatCompletionRequest`,
 /// providing access to common extension fields.
 impl CommonExtProvider for NvCreateChatCompletionRequest {
+    fn get_parallel_tool_calls(&self) -> Option<bool> {
+        self.inner.parallel_tool_calls
+    }
+
     /// Returns a reference to the CommonExt struct.
     fn common_ext(&self) -> Option<&CommonExt> {
         Some(&self.common)

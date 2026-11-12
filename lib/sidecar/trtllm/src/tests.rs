@@ -913,6 +913,35 @@ async fn visible_stop_token_is_returned_and_hidden_stop_token_is_not() {
 }
 
 #[tokio::test]
+async fn parser_stop_strings_cross_the_rpc_and_do_not_expose_hidden_tokens() {
+    let server = FakeServer::start(FakeTrtllm::default()).await;
+    let engine = engine(&server.endpoint, 1);
+    let config = engine.start(0).await.expect("start");
+    assert_eq!(
+        config.runtime_data
+            [dynamo_llm::local_model::runtime_config::VISIBLE_STOP_STRINGS_CAPABILITY],
+        serde_json::json!(true)
+    );
+    let mut req = request();
+    req.stop_conditions.stop_visible = Some(vec!["<|close|>call<|sep|>".into()]);
+    req.stop_conditions.stop_token_ids_hidden = Some(vec![42]);
+    let outputs = collect(&engine, req).await;
+    assert!(outputs.iter().all(|output| output.token_ids.is_empty()));
+    let requests = server.service.requests.lock().await;
+    let stopping = requests[0].stopping.as_ref().unwrap();
+    assert_eq!(stopping.include_stop_in_output, Some(true));
+    assert!(
+        stopping
+            .conditions
+            .iter()
+            .any(|condition| condition.condition
+                == Some(pb::stop_condition::Condition::StopText(
+                    "<|close|>call<|sep|>".into()
+                )))
+    );
+}
+
+#[tokio::test]
 async fn pool_uses_each_configured_connection() {
     let server = FakeServer::start(FakeTrtllm::default()).await;
     let endpoint =

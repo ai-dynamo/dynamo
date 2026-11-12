@@ -1177,3 +1177,26 @@ fn prefill_result_on_a_non_decode_worker_is_rejected() {
         );
     }
 }
+
+#[test]
+fn visible_parser_stops_cross_grpc_without_exposing_hidden_token_stops() {
+    let mut req = request();
+    req.stop_conditions.stop_visible = Some(vec!["<|close|>call<|sep|>".into()]);
+    let proto = build_generate_request(req, "req", "model", None, AGG).unwrap();
+    let stopping = proto.stopping.unwrap();
+    assert_eq!(stopping.include_stop_in_output, Some(true));
+    assert!(
+        stopping
+            .conditions
+            .iter()
+            .any(|condition| condition.condition
+                == Some(pb::stop_condition::Condition::StopText(
+                    "<|close|>call<|sep|>".into()
+                )))
+    );
+    // The engine returns all stops when retention is enabled; frontend decoding
+    // must still hide user EOS IDs and ordinary user stop strings.
+    let mut req = request();
+    req.stop_conditions.stop_visible = Some(vec!["<|close|>call<|sep|>".into()]);
+    assert!(retained_hidden_stop_ids(&req).contains(&2));
+}
