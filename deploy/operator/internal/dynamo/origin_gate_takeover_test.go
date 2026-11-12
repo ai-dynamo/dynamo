@@ -295,15 +295,15 @@ func TestNativeEngineWorkerHashMatchesLegacyOperator(t *testing.T) {
 	assert.Equal(t, "4a915483", explicitHash)
 }
 
-func TestDetectBackendFrameworkFromArgsKeepsNativeEngineClassification(t *testing.T) {
+func TestNativeEngineCommandIsNotDetected(t *testing.T) {
 	command, args := []string{"/usr/local/bin/vllm-rs"}, []string{"--model", "m"}
 
-	t.Log("Classify a running native engine command for Pod-level consumers such as LoRA fallback")
+	t.Log("Leave a direct native engine command undetected in launcher detection")
 	backend, err := DetectBackendFrameworkFromArgs(command, args)
 	require.NoError(t, err)
-	assert.Equal(t, BackendFrameworkVLLM, backend)
+	assert.Equal(t, BackendFrameworkNoop, backend)
 
-	t.Log("Confirm workload resolution leaves the same command undetected")
+	t.Log("Resolve the same command to the undetected backend for a worker without an explicit framework")
 	backend, err = determineBackendFramework(string(v1beta1.ComponentTypeWorker), command, args, "")
 	require.NoError(t, err)
 	assert.Equal(t, BackendFrameworkNoop, backend)

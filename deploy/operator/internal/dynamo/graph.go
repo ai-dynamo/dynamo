@@ -23,7 +23,6 @@ import (
 	"fmt"
 	"hash/fnv"
 	"maps"
-	"path"
 	"regexp"
 	"slices"
 	"sort"
@@ -3323,24 +3322,12 @@ func GetDGDPreservedAlphaPVCs(dgd *v1beta1.DynamoGraphDeployment) []v1alpha1.PVC
 	return append([]v1alpha1.PVC(nil), alpha.Spec.PVCs...)
 }
 
-// DetectBackendFrameworkFromArgs classifies a running engine launch for Pod-level
-// consumers such as LoRA fallback, including a direct native engine command.
+// DetectBackendFrameworkFromArgs detects the backend framework from the Dynamo
+// launcher in command/args. Native engine commands such as vllm-rs are not
+// detected: the resolved backend is persisted on the child DCD and hashed into
+// the worker generation, so a new launcher heuristic would roll existing
+// workloads (#17543). Native engines set backendFramework explicitly.
 func DetectBackendFrameworkFromArgs(command []string, args []string) (BackendFramework, error) {
-	return detectBackendFrameworkFromArgs(command, args, true)
-}
-
-// detectBackendFrameworkFromArgs classifies the engine launch. inferNativeEngine
-// selects whether a direct native engine command such as vllm-rs resolves its
-// backend. Workload resolution passes false: the resolved backend is persisted on
-// the child DCD and hashed into the worker generation, so a launcher heuristic
-// must not change it (#17543). Native engines set backendFramework explicitly.
-func detectBackendFrameworkFromArgs(command []string, args []string, inferNativeEngine bool) (BackendFramework, error) {
-	// Kubernetes command is argv, not shell source. Wrapped native launches
-	// require an explicit backendFramework rather than shell interpretation.
-	if inferNativeEngine && len(command) > 0 && !strings.Contains(command[0], "$(") && path.Base(command[0]) == "vllm-rs" {
-		return BackendFrameworkVLLM, nil
-	}
-
 	// Combine command and args to search through all parts
 	allParts := slices.Concat(command, args)
 	fullCommand := strings.Join(allParts, " ")
@@ -3386,9 +3373,9 @@ func determineBackendFramework(
 	var detectedFramework BackendFramework
 	var detectionError error
 
-	// Detect Dynamo launchers only; native engine commands need an explicit backend.
+	// Try to detect from command/args
 	if len(command) > 0 || len(args) > 0 {
-		detected, err := detectBackendFrameworkFromArgs(command, args, false)
+		detected, err := DetectBackendFrameworkFromArgs(command, args)
 		if err == nil {
 			detectedFramework = detected
 		} else {
