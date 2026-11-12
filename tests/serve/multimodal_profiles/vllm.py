@@ -768,6 +768,10 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
 ]
 
 
+# Engines per topology that may run vLLM's video decoder; encode workers never do.
+_VIDEO_DECODING_ENGINES = {"e_pd": 1, "epd": 2, "epd_video": 2, "p_d": 2}
+
+
 def _reserve_for_pynvvideocodec(profiles: list[MultimodalModelProfile]) -> None:
     """Add vLLM's PyNvVideoCodec decoder reservation back to each topology.
 
@@ -779,12 +783,12 @@ def _reserve_for_pynvvideocodec(profiles: list[MultimodalModelProfile]) -> None:
     if not reserved:
         return
     for profile in profiles:
-        for topo in profile.topologies.values():
+        for key, topo in profile.topologies.items():
             if topo.env.get("VLLM_VIDEO_LOADER_BACKEND", "pynvvideocodec") != (
                 "pynvvideocodec"
             ):
                 continue
-            engines = topo.health_check_worker_count if topo.health_check_workers else 1
+            engines = _VIDEO_DECODING_ENGINES.get(key, 1)
             if topo.requested_vllm_kv_cache_bytes:
                 topo.requested_vllm_kv_cache_bytes += reserved
             if topo.profiled_vram_gib is not None:
