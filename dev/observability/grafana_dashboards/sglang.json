@@ -4473,7 +4473,7 @@
           "id": 58,
           "type": "timeseries",
           "title": "Tokio Worker Mean Poll Time",
-          "description": "DYN: dynamo_tokio_worker_mean_poll_time_ns \u2014 mean task poll time per runtime thread; sustained values near 1 ms or more mean the runtime is starved",
+          "description": "DYN: dynamo_tokio_worker_mean_poll_time_ns \u2014 mean task poll time per runtime thread, in nanoseconds",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
