@@ -25,6 +25,8 @@ from aisimulate.sweeper.replay import (
     ReplaySpec,
 )
 
+from dynamo.llm import AisPerfConfig
+from dynamo.mocker.config import performance_config
 from dynamo.replay import (
     PlannerReplayDetails,
     ReplayReport,
@@ -1225,3 +1227,234 @@ def test_shared_g2_launch_rejects_unsupported_backend(backend):
                 "timing_model": {"type": "fixed", "prefill_ms": 1.0, "decode_ms": 1.0},
             }
         )
+
+
+class _NativeCallRecorded(Exception):
+    """Raised by the stand-in native call, so no report is built."""
+
+
+@pytest.fixture
+def native_replay_kwargs(monkeypatch) -> dict:
+    """The keyword arguments of the native replay call the runner reaches."""
+    seen: dict = {}
+
+    def record(*_args, **kwargs):
+        seen.update(kwargs)
+        raise _NativeCallRecorded
+
+    monkeypatch.setattr(replay_api, "_run_mocker_trace_replay", record)
+    monkeypatch.setattr(replay_api, "_run_mocker_synthetic_trace_replay", record)
+    return seen
+
+
+_AIS_PERF_CONFIG = {
+    "backend": "vllm",
+    "system": "h200_sxm",
+    "model": "example/model",
+    "worker_type": "aggregated",
+}
+_TRACE_WORKLOAD = {"trace_path": "tiny.jsonl", "trace_format": "dynamo"}
+_SYNTHETIC_WORKLOAD = {
+    "trace_path": None,
+    "isl": 512,
+    "osl": 128,
+    "num_request_ratio": 10.0,
+    "concurrency": None,
+    "request_rate": 20.0,
+}
+
+
+def _replay_with_router_hook(deployment, workload, **hook_config) -> ReplaySpec:
+    return ReplaySpec(
+        backend_deployment=deployment,
+        workload=workload,
+        goal={"target": "throughput"},
+        adapters={
+            "dynamo.router": AdapterReplaySpec(
+                runtime_hooks=(
+                    RuntimeHookSpec(
+                        provider="dynamo.router",
+                        kind="placement_policy",
+                        api_version=1,
+                        config={
+                            "router_mode": "kv_router",
+                            "router_config": {"router_prefill_load_model": "ais"},
+                            **hook_config,
+                        },
+                    ),
+                )
+            )
+        },
+    )
+
+
+def test_router_hook_mapping_reaches_native_trace_call(native_replay_kwargs) -> None:
+    replay = _replay_with_router_hook(
+        _agg_deployment(), _TRACE_WORKLOAD, ais_perf_config=_AIS_PERF_CONFIG
+    )
+
+    with pytest.raises(_NativeCallRecorded):
+        simulation.DynamoReplayRunnerFactory().create(0).run(replay)
+
+    assert (
+        native_replay_kwargs["ais_perf_config"].to_dict()
+        == AisPerfConfig(config=_AIS_PERF_CONFIG).to_dict()
+    )
+
+
+def test_router_hook_mapping_reaches_native_synthetic_call(
+    native_replay_kwargs,
+) -> None:
+    replay = _replay_with_router_hook(
+        _agg_deployment(), _SYNTHETIC_WORKLOAD, ais_perf_config=_AIS_PERF_CONFIG
+    )
+
+    with pytest.raises(_NativeCallRecorded):
+        simulation.DynamoReplayRunnerFactory().create(0).run(replay)
+
+    assert (
+        native_replay_kwargs["ais_perf_config"].to_dict()
+        == AisPerfConfig(config=_AIS_PERF_CONFIG).to_dict()
+    )
+
+
+def _ais_timing_model(worker_type: str) -> dict:
+    return {
+        "type": "external",
+        "provider": "ais",
+        "config": {**_AIS_PERF_CONFIG, "worker_type": worker_type},
+    }
+
+
+def _agg_deployment_with_ais_timing() -> BackendDeploymentSpec:
+    # num_gpu_blocks is given so that the launch config needs no model lookup.
+    return BackendDeploymentSpec(
+        deployment_mode="agg",
+        backend="vllm",
+        backend_version="0.11.0",
+        agg_engine_args={
+            "engine_type": "vllm",
+            "max_num_seqs": 256,
+            "num_gpu_blocks": 1024,
+            "timing_model": _ais_timing_model("aggregated"),
+        },
+        num_workers=3,
+    )
+
+
+def _disagg_deployment_with_ais_timing() -> BackendDeploymentSpec:
+    return BackendDeploymentSpec(
+        deployment_mode="disagg",
+        backend="vllm",
+        backend_version="0.11.0",
+        prefill_engine_args={
+            "worker_type": "prefill",
+            "num_gpu_blocks": 1024,
+            "timing_model": _ais_timing_model("prefill"),
+        },
+        decode_engine_args={
+            "worker_type": "decode",
+            "timing_model": {"type": "polynomial"},
+        },
+        num_prefill_workers=1,
+        num_decode_workers=2,
+    )
+
+
+@pytest.mark.parametrize(
+    ("deployment", "role"),
+    [
+        (_agg_deployment_with_ais_timing(), "aggregated"),
+        (_disagg_deployment_with_ais_timing(), "prefill"),
+    ],
+    ids=["agg", "disagg"],
+)
+@pytest.mark.parametrize(
+    "workload", [_TRACE_WORKLOAD, _SYNTHETIC_WORKLOAD], ids=["trace", "synthetic"]
+)
+def test_use_engine_marker_fills_router_config_from_engine(
+    deployment, role, workload, native_replay_kwargs
+) -> None:
+    replay = _replay_with_router_hook(
+        deployment, workload, ais_perf_config=None, ais_perf_config_from_engine=True
+    )
+
+    with pytest.raises(_NativeCallRecorded):
+        simulation.DynamoReplayRunnerFactory().create(0).run(replay)
+
+    engine_config = performance_config(
+        simulation.DynamoReplayRunner._engine_args(deployment, role)
+    )
+    assert engine_config["worker_type"] == role
+    assert (
+        native_replay_kwargs["ais_perf_config"].to_dict()
+        == AisPerfConfig(config=engine_config).to_dict()
+    )
+
+
+@pytest.mark.parametrize(
+    ("deployment", "role"),
+    [(_agg_deployment(), "aggregated"), (_disagg_deployment(), "prefill")],
+    ids=["agg", "disagg"],
+)
+@pytest.mark.parametrize(
+    "timing_model",
+    [{"type": "fixed", "prefill_ms": 1.0, "decode_ms": 1.0}, {"type": "polynomial"}],
+    ids=["fixed", "polynomial"],
+)
+def test_use_engine_marker_without_engine_perf_model_error(
+    deployment, role, timing_model, native_replay_kwargs
+) -> None:
+    if role == "aggregated":
+        engine_args = {**deployment.agg_engine_args, "timing_model": timing_model}
+        deployment = replace(deployment, agg_engine_args=engine_args)
+    else:
+        engine_args = {**deployment.prefill_engine_args, "timing_model": timing_model}
+        deployment = replace(deployment, prefill_engine_args=engine_args)
+    replay = _replay_with_router_hook(
+        deployment, _TRACE_WORKLOAD, ais_perf_config_from_engine=True
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=r"^router\.ais_perf_model: \{use: engine\} needs an AIS perf model on "
+        f"the {role} engine; it has none$",
+    ):
+        simulation.DynamoReplayRunnerFactory().create(0).run(replay)
+
+    assert native_replay_kwargs == {}
+
+
+def test_use_engine_marker_with_mapping_error(native_replay_kwargs) -> None:
+    replay = _replay_with_router_hook(
+        _agg_deployment_with_ais_timing(),
+        _TRACE_WORKLOAD,
+        ais_perf_config=_AIS_PERF_CONFIG,
+        ais_perf_config_from_engine=True,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="^Dynamo Router hook config has both ais_perf_config and "
+        "ais_perf_config_from_engine$",
+    ):
+        simulation.DynamoReplayRunnerFactory().create(0).run(replay)
+
+    assert native_replay_kwargs == {}
+
+
+@pytest.mark.parametrize("marker", ["yes", False, 1])
+def test_use_engine_marker_must_be_true(marker, native_replay_kwargs) -> None:
+    replay = _replay_with_router_hook(
+        _agg_deployment_with_ais_timing(),
+        _TRACE_WORKLOAD,
+        ais_perf_config_from_engine=marker,
+    )
+
+    with pytest.raises(
+        TypeError,
+        match="^Dynamo Router ais_perf_config_from_engine must be true or absent$",
+    ):
+        simulation.DynamoReplayRunnerFactory().create(0).run(replay)
+
+    assert native_replay_kwargs == {}

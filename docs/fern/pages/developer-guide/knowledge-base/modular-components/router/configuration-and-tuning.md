@@ -581,55 +581,86 @@ Enable it on the frontend like this:
 python -m dynamo.frontend \
     --router-mode kv \
     --router-prefill-load-model ais \
-    --ais-backend vllm \
-    --ais-system h200_sxm \
-    --ais-model-path nvidia/Llama-3.1-8B-Instruct-FP8
+    --ais-perf-model perf-model.yaml
 ```
 
 Required when `--router-prefill-load-model=ais` is enabled:
 
 - `--router-mode kv` on the frontend
 - `--router-track-prefill-tokens`
-- `--ais-backend`
-- `--ais-system`
-- `--ais-model-path`
+- `--ais-perf-model`
 
-For full estimator settings, use `--ais-perf-config` with a JSON object or a JSON/YAML
-file. It accepts the AISimulate `ForwardPassPerfModelConfig` unchanged, including
-`worker_type`, ordered `systems_paths`, `estimation_mode`, `fallback_policy`, and
-nested `estimator_config`. The default selection is `auto` with `deny`; auto tries
+`--ais-perf-model` names the AIS perf model that Router predicts prefill durations with.
+The value is one perf model config, or a list of configs with one `worker_type` each.
+Write it as a path to a YAML or JSON file, or as inline JSON (text that starts with `{`
+or `[`):
+
+```bash
+--ais-perf-model perf-model.yaml
+--ais-perf-model '{"model": "Qwen/Qwen3-32B", "system": "h200_sxm", "backend": "vllm", "worker_type": "aggregated"}'
+```
+
+A file with one config looks like this:
+
+```yaml
+model: Qwen/Qwen3-32B
+system: h200_sxm
+backend: vllm
+backend_version: current
+worker_type: aggregated
+estimation_mode: auto
+fallback_policy: deny
+```
+
+A config holds AISimulate `ForwardPassPerfModelConfig` keys, including `worker_type`,
+ordered `systems_paths`, `estimation_mode`, `fallback_policy`, and nested
+`estimator_config`, or `from` to take them from a template file, a dataset, or a state
+snapshot. See
+[Unified perf-model input](https://github.com/ai-dynamo/aisimulate/blob/main/docs/perf-model/configuration.md#unified-perf-model-input)
+in the AISimulate documentation. The default selection is `auto` with `deny`; auto tries
 op-level data, FPM interpolation, then FPM regression. Router requires a ready
 model and rejects cold regression because it has no training observations.
 
-```json
-{
-  "model": "Qwen/Qwen3-32B",
-  "system": "h200_sxm",
-  "backend": "vllm",
-  "backend_version": "current",
-  "worker_type": "aggregated",
-  "estimation_mode": "auto",
-  "fallback_policy": "deny"
-}
-```
-
 Set `worker_type` to the modeled deployment's role, even when Router only queries
-prefill work. Do not combine the full config with flat identity flags. The Python
-SDK accepts the same mapping as `dynamo.llm.AisPerfConfig(config=payload)`.
+prefill work. Router takes the `prefill` config or the `aggregated` config of the value.
+When the value is one config without `worker_type`, or a list with both a `prefill` and
+an `aggregated` config, set `--router-prefill-load-worker-type` to `prefill` or
+`aggregated`. A relative file path starts at the working directory. Relative paths inside
+a file start at the folder of that file.
 
-Deprecated `--aic-*` flags remain accepted by the CLI parser. Use `DYN_AIS_*`
-environment variables and `AisPerfConfig` in the SDK. Supplying both CLI spellings
-of the same input is an error; configuration output uses `ais`.
+`DYN_AIS_PERF_MODEL` and `DYN_ROUTER_PREFILL_LOAD_WORKER_TYPE` set the two values from the
+environment; a flag wins over its variable. A flag without
+`--router-prefill-load-model ais` is an error, for example
+`--ais-perf-model requires --router-prefill-load-model=ais`. A variable alone is ignored
+when the load model is not `ais`.
 
-Optional AIS knobs:
+The Python SDK accepts one config without `from` as
+`dynamo.llm.AisPerfConfig(config=payload)`.
 
+> [!WARNING]
+> **Deprecated.** Use `--ais-perf-model`. Removed in v1.9. This applies to
+> `--ais-perf-config`, the flat flags below, `--ais-nextn`, their `DYN_AIS_*` environment
+> variables, and the `--aic-*` spellings of the flat flags. They still work and print one
+> warning that names the inputs in use, for example
+> `--ais-backend, --ais-system and --ais-model-path are deprecated and will be removed in v1.9; use --ais-perf-model.`
+> A deprecated input together with `--ais-perf-model` or `DYN_AIS_PERF_MODEL` is an error,
+> for example `--ais-perf-model cannot be combined with --ais-backend`.
+
+`--ais-perf-config` takes one complete config as a JSON object or a JSON/YAML file. Do not
+combine it with the flat flags. Supplying both CLI spellings of the same flat flag is an
+error. In place of `--ais-nextn`, write `nextn` in the config. `--ais-nextn-accept-rates`
+and `--ais-mtp-seed` are not deprecated and can be combined with `--ais-perf-model`.
+
+Deprecated flat flags:
+
+- `--ais-backend`, `--ais-system`, `--ais-model-path`: backend family, hardware system, and model to look up; all three are required when the flat flags are used
 - `--ais-backend-version`: pinned AIS database version; if omitted, Dynamo uses a backend-specific default
 - `--ais-tp-size`: tensor-parallel size for the modeled backend; defaults to `1`
 - `--ais-moe-tp-size`: MoE tensor-parallel size for models that require AIS MoE parallelism
 - `--ais-moe-ep-size`: MoE expert-parallel size for models that require AIS MoE parallelism
 - `--ais-attention-dp-size`: attention data-parallel size for models that require AIS MoE parallelism
 
-For MoE models, these values must satisfy AIS's parallelism constraint:
+For MoE models, the flat flag values must satisfy AIS's parallelism constraint:
 `ais_tp_size * ais_attention_dp_size == ais_moe_tp_size * ais_moe_ep_size`.
 For Kimi-style TP-only MoE runs, use `--ais-moe-tp-size` equal to `--ais-tp-size`,
 `--ais-moe-ep-size 1`, and `--ais-attention-dp-size 1`.
@@ -747,7 +778,7 @@ Use `DYN_ROUTER_OVERLAP_REFRESH_AFTER_SECS` when queued requests may wait long e
 
 The threshold is applied as `active_tokens > threshold * max_num_batched_tokens`, so this fallback inflates the effective denominator and a threshold like `1.0` may effectively never queue. To get the originally intended "fraction of the per-step prefill window" semantics on SGLang, either set `--max-prefill-tokens` explicitly on the SGLang backend so the MDC value matches the prefill window, or use a much smaller `--router-queue-threshold` (for example `0.1`) to compensate for the inflated denominator.
 
-Use `--router-prefill-load-model ais` when you want prompt-side load tracking to decay the oldest active prefill request using an AIS-predicted duration instead of keeping prompt load static until first token. This requires `--router-track-prefill-tokens` and the shared `--ais-*` config; see [AIS Prefill Load Model](#ais-prefill-load-model) for the full flag set and [Prefill Load Modeling](routing-concepts.md#prefill-load-modeling) for the cost-model details.
+Use `--router-prefill-load-model ais` when you want prompt-side load tracking to decay the oldest active prefill request using an AIS-predicted duration instead of keeping prompt load static until first token. This requires `--router-track-prefill-tokens` and `--ais-perf-model`; see [AIS Prefill Load Model](#ais-prefill-load-model) for the full flag set and [Prefill Load Modeling](routing-concepts.md#prefill-load-modeling) for the cost-model details.
 
 Use `--router-queue-policy wspt` when your workload has a mix of short and long requests and you want to minimize average TTFT. Use the default `fcfs` when you want to minimize tail TTFT.
 

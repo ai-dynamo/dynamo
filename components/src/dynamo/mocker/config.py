@@ -11,6 +11,13 @@ import socket
 from collections.abc import Mapping
 from typing import Any
 
+from dynamo.common.ais_perf_model import (
+    engine_args_as_written,
+    join_names,
+    load_document,
+    resolve_entry,
+    set_timing_model,
+)
 from dynamo.common.configuration.groups.ais_perf_args import parse_ais_perf_config
 from dynamo.common.utils.topology import apply_topology_config
 from dynamo.llm import ModelRuntimeConfig
@@ -20,6 +27,16 @@ def normalize_mocker_config(config: Mapping[str, Any] | str | None = None) -> di
     from dynamo._core import _normalize_mocker_config
 
     return _normalize_mocker_config({} if config is None else config)
+
+
+def _normalize_with_ais_perf_model(config: Mapping[str, Any]) -> dict:
+    """Normalize a config whose timing model came from an AIS perf model value."""
+    try:
+        return normalize_mocker_config(config)
+    except TypeError as error:
+        # AISimulate's config class raises this for a key it does not take or
+        # misses: a wrong value in the user's perf model, like any other.
+        raise ValueError(f"ais_perf_model: {error}") from error
 
 
 def performance_config(config: Mapping[str, Any]) -> dict | None:
@@ -54,6 +71,36 @@ def _build_native_host_offload(args: argparse.Namespace) -> dict | None:
             raise ValueError("--host-offload-* flags require --num-host-blocks")
         return None
     return {"num_host_blocks": num_host_blocks, **controls}
+
+
+def old_ais_perf_inputs(args: argparse.Namespace) -> list[str]:
+    """Return the names of the old AIS perf model inputs ``args`` holds.
+
+    These are ``--ais-perf-model`` without a value, ``--ais-perf-config`` and
+    the flat identity flags, named with the ``--ais-`` spelling. An attribute
+    that ``args`` does not have counts as not given.
+    """
+    names = []
+    if getattr(args, "ais_perf_model", None):
+        names.append("--ais-perf-model without a value")
+    for attribute, name in (
+        ("ais_perf_config", "--ais-perf-config"),
+        ("ais_backend", "--ais-backend"),
+        ("ais_system", "--ais-system"),
+        ("ais_backend_version", "--ais-backend-version"),
+        ("ais_tp_size", "--ais-tp-size"),
+        ("ais_moe_tp_size", "--ais-moe-tp-size"),
+        ("ais_moe_ep_size", "--ais-moe-ep-size"),
+        ("ais_attention_dp_size", "--ais-attention-dp-size"),
+    ):
+        if getattr(args, attribute, None) is not None:
+            names.append(name)
+    return names
+
+
+def _ais_perf_model_source(args: argparse.Namespace) -> str:
+    """Return the name of what gave ``args.ais_perf_model_value``, for an error."""
+    return getattr(args, "ais_perf_model_source", None) or "--ais-perf-model"
 
 
 def build_mocker_engine_args(args: argparse.Namespace) -> dict:
@@ -127,7 +174,21 @@ def build_mocker_engine_args(args: argparse.Namespace) -> dict:
         )
         if getattr(args, f"ais_{source}", None) is not None
     }
-    if canonical is not None:
+    value = getattr(args, "ais_perf_model_value", None)
+    if value is not None:
+        old = old_ais_perf_inputs(args)
+        if old:
+            raise ValueError(
+                f"{_ais_perf_model_source(args)} cannot be combined with "
+                f"{join_names(old)}"
+            )
+        nextn = getattr(args, "ais_nextn", None)
+        canonical = resolve_entry(
+            load_document(value).select(worker_type),
+            worker_type=worker_type,
+            fill=None if nextn is None else {"nextn": nextn},
+        )
+    elif canonical is not None:
         if args.ais_perf_model or flat:
             raise ValueError(
                 "--ais-perf-config cannot be combined with flat AIS/AIC identity flags"
@@ -179,12 +240,33 @@ def build_mocker_engine_args(args: argparse.Namespace) -> dict:
         runtime["reasoning"] = json.loads(args.reasoning)
     if getattr(args, "response_replay_trace_path", None):
         runtime["response_replay_trace_path"] = str(args.response_replay_trace_path)
-    return normalize_mocker_config({**config, "engine": rank, "dynamo": runtime})
+    engine_args = {**config, "engine": rank, "dynamo": runtime}
+    if value is not None:
+        return _normalize_with_ais_perf_model(engine_args)
+    return normalize_mocker_config(engine_args)
 
 
 def load_mocker_engine_args(args: argparse.Namespace) -> dict:
     if args.extra_engine_args:
-        config = normalize_mocker_config(args.extra_engine_args.read_text())
+        text = args.extra_engine_args.read_text()
+        value = getattr(args, "ais_perf_model_value", None)
+        if value is None:
+            config = normalize_mocker_config(text)
+        else:
+            # The file gives the worker type; the perf model value gives the
+            # timing model, which the file must then leave out.
+            names = {
+                "engine_args_name": "--extra-engine-args",
+                "perf_model_name": _ais_perf_model_source(args),
+            }
+            written = engine_args_as_written(text, **names)
+            worker_type = normalize_mocker_config(written)["engine"]["worker_type"]
+            entry = resolve_entry(
+                load_document(value).select(worker_type), worker_type=worker_type
+            )
+            config = _normalize_with_ais_perf_model(
+                set_timing_model(written, entry, **names)
+            )
     else:
         config = build_mocker_engine_args(args)
     validate_systemone_serial_config(args, config)

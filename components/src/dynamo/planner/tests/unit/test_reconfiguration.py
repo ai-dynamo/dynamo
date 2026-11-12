@@ -667,6 +667,46 @@ def test_candidate_config_keeps_the_fields_excluded_from_the_dump(monkeypatch):
     assert candidate.namespace == "test-ns"
 
 
+_AIS_CONTENT = {"model": "test-model", "system": "test-system", "backend": "vllm"}
+
+
+@pytest.mark.parametrize(
+    "ais_perf_model",
+    [
+        pytest.param({"roles": {"decode": _AIS_CONTENT}}, id="old-roles"),
+        pytest.param(
+            {
+                "dataset_profiles": {
+                    "decode": {"root": "/not-mounted-yet", "manifest": "profile.json"}
+                }
+            },
+            id="old-dataset-profiles",
+        ),
+        pytest.param({**_AIS_CONTENT, "tp": 2}, id="one-config"),
+        pytest.param(
+            [
+                {**_AIS_CONTENT, "worker_type": "decode"},
+                {"worker_type": "prefill", "from": "prefill.yaml"},
+            ],
+            id="list",
+        ),
+    ],
+)
+def test_reconfiguration_keeps_every_form(ais_perf_model):
+    config = PlannerConfig(
+        namespace="test-ns",
+        mode="decode",
+        optimization_target="sla",
+        ais_perf_model=ais_perf_model,
+    )
+
+    candidate = candidate_config(config, {"max_gpu_budget": 24})
+
+    assert candidate.max_gpu_budget == 24
+    assert candidate.ais_perf_model == config.ais_perf_model
+    assert type(candidate.ais_perf_model) is type(config.ais_perf_model)
+
+
 async def test_runtime_candidate_errors_match_runtime_validation():
     planner = _planner(
         "disagg", prefill_gpu_cost=2, decode_gpu_cost=1, total_gpu_power_limit=2000

@@ -9,7 +9,7 @@ subtitle: Runs the AIConfigurator-driven profiling pipeline that turns a model, 
 
 The Dynamo Profiler analyzes model inference performance and generates optimized deployment configurations (DynamoGraphDeployments). Given a model, hardware, and SLA targets, it determines the best parallelization strategy, selects optimal prefill and decode engine configurations, and produces a ready-to-deploy DGD YAML.
 
-The profiler accepts a `DynamoGraphDeploymentRequestSpec` (DGDR) as input and uses [AIConfigurator (AIC)](../../../additional-resources/aiconfigurator-reference.md) compatibility APIs from the `aisimulate` wheel for performance simulation, candidate enumeration, and configuration picking. When the Planner is enabled, the profiler also emits the canonical AIS configuration under `ais_perf_model.roles` and can generate optional engine interpolation curves used to bootstrap runtime autoscaling.
+The profiler accepts a `DynamoGraphDeploymentRequestSpec` (DGDR) as input and uses [AIConfigurator (AIC)](../../../additional-resources/aiconfigurator-reference.md) compatibility APIs from the `aisimulate` wheel for performance simulation, candidate enumeration, and configuration picking. When the Planner is enabled, the profiler also emits the canonical AIS configuration under `ais_perf_model` and can generate optional engine interpolation curves used to bootstrap runtime autoscaling.
 
 ## Workflow
 
@@ -65,7 +65,7 @@ flowchart TD
 
 4. **DGD Generation**: The picked configuration is rendered into a complete DGD YAML via AIC's generator pipeline, including correct parallelization, replica counts, container image, and PVC mounts.
 
-5. **Interpolation** (planner bootstrap/mocker): When mocker or planner bootstrap data is requested, the profiler generates detailed performance interpolation curves — TTFT vs ISL for prefill, ITL vs KV-cache utilization for decode. In thorough sweeping, these are stored as NPZ files and later packaged into a ConfigMap during final assembly. In rapid sweeping, consumers use AIC performance-model flags, planner `ais_perf_model.roles`, or in-process interpolation instead, so no profile-data ConfigMap is generated.
+5. **Interpolation** (planner bootstrap/mocker): When mocker or planner bootstrap data is requested, the profiler generates detailed performance interpolation curves — TTFT vs ISL for prefill, ITL vs KV-cache utilization for decode. In thorough sweeping, these are stored as NPZ files and later packaged into a ConfigMap during final assembly. In rapid sweeping, consumers use AIC performance-model flags, planner `ais_perf_model`, or in-process interpolation instead, so no profile-data ConfigMap is generated.
 
 6. **Final Assembly** (3 composable layers):
    1. **Mocker base**: If mocker is enabled, the base DGD is swapped for the mocker DGD template (`generate_mocker_config`). Otherwise the AIC-picked DGD is kept.
@@ -128,7 +128,7 @@ Triggered when there is **no planner and no target load**. Maximizes throughput 
 
 ## Planner Integration
 
-When the Planner is enabled, the profiler emits `ais_perf_model.roles` with complete AISimulate configurations for the selected deployment roles. It preserves model identity, backend version and parallel topology; new configurations use `auto` selection with `deny` fallback. Mocker arguments use `--ais-*` names. The `pre_deployment_sweeping_mode` field controls optional bootstrap data:
+When the Planner is enabled, the profiler emits `ais_perf_model` as a list with one configuration per deployed worker type. It preserves model identity, backend version and parallel topology; new configurations use `auto` selection with `deny` fallback. An `ais_perf_model` value written in the request is kept as written. Mocker workers get one `--ais-perf-model` argument with the configuration as inline JSON. The `pre_deployment_sweeping_mode` field controls optional bootstrap data:
 
 ```yaml
 features:
@@ -140,12 +140,12 @@ features:
 
 `optimization_target` must be set to `sla` for `enable_throughput_scaling` and the planner's `ttft_ms`/`itl_ms` SLA targets to take effect. The `PlannerConfig` default is `throughput`, which uses static queue/utilization thresholds: it silently flips `enable_throughput_scaling` to `false` (so pre-deployment profiling is skipped and `planner-profile-data-XXXX` is not emitted) and ignores any `features.planner.ttft_ms`/`itl_ms` values. `enable_load_scaling` is unaffected (easy-mode keeps load scaling enabled). See the [Planner Guide](../planner/planner-guide.md#optimization-target) for the full explanation of each `optimization_target` value.
 
-- **rapid**: Uses AIC simulation to generate interpolation curves (~30s, no GPUs). Consumers use AIS performance-model flags, planner `ais_perf_model.roles`, or in-process interpolation, so `planner-profile-data-XXXX` is not emitted.
+- **rapid**: Uses AIC simulation to generate interpolation curves (~30s, no GPUs). Consumers use AIS performance-model flags, planner `ais_perf_model`, or in-process interpolation, so `planner-profile-data-XXXX` is not emitted.
 - **thorough**: Deploys the selected engine config on real GPUs and sweeps across ISL/concurrency ranges (2-4h). When profile data is needed, the profiler packages it into `planner-profile-data-XXXX`.
 - **none**: Skips interpolation. Planner throughput scaling can still start from native AISimulate or live FPM regression warmup. Mocker still requires pre-deployment sweeping.
 
 The generated DGD can include these ConfigMaps:
-- **planner-config-XXXX**: Serialized `PlannerConfig` JSON (with `ais_perf_model.roles` when available and `profile_results_dir` pointing to the profiling data mount)
+- **planner-config-XXXX**: Serialized `PlannerConfig` JSON (with `ais_perf_model` when available and `profile_results_dir` pointing to the profiling data mount)
 - **planner-profile-data-XXXX**: Prefill and decode interpolation data (JSON). Only emitted when `pre_deployment_sweeping_mode: thorough` and either `optimization_target: sla` is set alongside `enable_throughput_scaling: true`, or mocker is enabled. Rapid mode does not emit this ConfigMap.
 
 See the [Planner Guide](../planner/planner-guide.md) for the full `PlannerConfig` reference.
@@ -155,6 +155,18 @@ See the [Planner Guide](../planner/planner-guide.md) for the full `PlannerConfig
 When `features.mocker.enabled: true`, the profiler outputs a mocker DGD that simulates engine behavior without real GPUs. This is useful for testing planner behavior and validating configurations at scale.
 
 Mocker requires pre-deployment sweeping to generate simulated performance profiles — `pre_deployment_sweeping_mode` cannot be `none` when mocker is enabled.
+
+Each generated mocker worker gets one `--ais-perf-model` argument. When `overrides.dgd` adds one of the arguments below to the `args` or `command` of any service or component, all generated mocker workers keep the deprecated arguments (`--ais-perf-model` without a value plus the flat `--ais-*` flags), and the profiler logs one warning that names the override arguments:
+
+- `--ais-perf-model` without a value, or any other `--ais-*` or `--aic-*` argument except `--ais-nextn`, `--ais-nextn-accept-rates`, `--ais-mtp-seed`, and their `--aic-` spellings
+- `--extra-engine-args`
+- `--model-path`
+
+An override that gives `--ais-perf-model` a value in the `args` of any service or component does not have this effect, whatever else it adds; every generated worker then gets the one argument, and the value the override gives a worker replaces the generated one. In a `spec.components` override, add `$patch: {args: append}` to the container to keep the other generated arguments; without it, the override's `args` replace the whole generated list (see [Generated DGD overrides](../../../../reference/kubernetes-api/dynamo-graph-deployment-request.mdx#generated-dgd-overrides)).
+
+Write the value in `args`, not in `command`. A generated worker's `args` come after its `command`, so the worker would use the generated value; the profiler fails with an error instead when an override gives `--ais-perf-model` a value in a `command` list.
+
+An override that changes the `image` of the Planner or of a generated mocker worker must name an image that reads the list form of `ais_perf_model` and `--ais-perf-model` with a value.
 
 ## Gate Checks and Constraints
 
@@ -308,7 +320,7 @@ require the helper.
 Use a binary from the same Dynamo release as the profiler. The profiler checks
 the binary protocol before applying an override and rejects incompatible versions.
 For supported DGD versions and merge behavior, see
-[Generated DGD Overrides](../../../../kubernetes/auto-deployment/auto-deploy-with-dgdr.md#generated-dgd-overrides).
+[Generated DGD overrides](../../../../reference/kubernetes-api/dynamo-graph-deployment-request.mdx#generated-dgd-overrides).
 
 Registry credentials are namespace-scoped. The operator chart's
 `imagePullSecrets` pull the operator Pod only. A profiling Job that needs

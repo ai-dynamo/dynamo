@@ -17,6 +17,23 @@ Upgrading? Pick the version you run today to see the dependency migration and th
 
 <UpgradeSelector />
 
+<a id="v180"></a>
+
+## v1.8.0 - Upcoming
+
+<span className="dynref-badge dynref-badge--amber">Deprecated</span> **Deprecated the separate AIS perf model inputs** in favor of one input per component: `--ais-perf-model VALUE` or `DYN_AIS_PERF_MODEL` on a command line, and `ais_perf_model` in a configuration. The value is one perf model config or a list of configs with one `worker_type` each; on a command line it is a path to a YAML or JSON file, or inline JSON. The old inputs still work, print one warning, and are scheduled for removal in v1.9.0. An old input together with the new one is an error.
+
+| Old | New |
+| :---- | :---- |
+| Frontend and routers: `--ais-perf-config` and `DYN_AIS_PERF_CONFIG`; `--ais-backend`, `--ais-system`, `--ais-model-path`, `--ais-backend-version`, `--ais-tp-size`, `--ais-moe-tp-size`, `--ais-moe-ep-size`, `--ais-attention-dp-size`, and `--ais-nextn`, with their `DYN_AIS_*` variables and `--aic-*` spellings | `--ais-perf-model VALUE` or `DYN_AIS_PERF_MODEL` |
+| The same inputs on `dynamo.squeeze_evolve` | `ais_perf_model` in each `--tiers` entry (or `--ais-perf-model` with one tier) |
+| Mocker: `--ais-perf-model` without a value (also spelled `--aic-perf-model`) and `--ais-perf-config`; `--ais-backend`, `--ais-system`, `--ais-backend-version`, `--ais-tp-size`, `--ais-moe-tp-size`, `--ais-moe-ep-size`, and `--ais-attention-dp-size`, with their `--aic-*` spellings | `--ais-perf-model VALUE` or `DYN_AIS_PERF_MODEL` |
+| Planner: the `roles` and `dataset_profiles` keys of `ais_perf_model` | `ais_perf_model` with one perf model config or a list of configs |
+| Python replay API: `ais_perf_config=` | `router_ais_perf_model=` |
+| Simulation config: `router.prefill_load_model.type: ais` without `router.ais_perf_model` | `router.ais_perf_model: {use: engine}` or a perf model config |
+
+  > **Migrate:** Write the values of the old inputs into one perf model config per worker type, and pass it through the new input of the component. For the keys of a config, see [Unified perf-model input](https://github.com/ai-dynamo/aisimulate/blob/main/docs/perf-model/configuration.md#unified-perf-model-input) in the AISimulate documentation.
+
 <a id="v170"></a>
 
 ## v1.7.0 - Upcoming

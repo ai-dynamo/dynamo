@@ -23,6 +23,7 @@ from typing import Any, Optional
 from aisimulate_core.datasets import prepare_execution_profile
 from aisimulate_core.sdk import ForwardPassPerfModelConfig
 
+from dynamo.common.ais_perf_model import load_document, resolve_entry
 from dynamo.common.forward_pass_metrics import (
     FPM_VERSION,
     ForwardPassMetrics,
@@ -109,6 +110,10 @@ class PlannerEnginePerfModel:
         self._profile_directory: Optional[TemporaryDirectory] = None
         self._profile_source: Optional[tuple[str, str]] = None
         self._profile_config: Optional[dict[str, Any]] = None
+        # The config or list of configs the resolved entry was read from: the
+        # files it names are read once, and again only when the value changes.
+        self._written_perf_model: Any = None
+        self._resolved_perf_model: Optional[dict[str, Any]] = None
         # Retained history is canonical; pending marks that the active engine
         # model has not successfully consumed the complete history.
         self._pending_iterations: list[list[ForwardPassMetrics]] = []
@@ -248,6 +253,21 @@ class PlannerEnginePerfModel:
         spec = self._config.ais_perf_model
         if spec is None:
             raise ValueError("AIS role configuration is absent")
+        if not isinstance(spec, AISPerfModelSpec):
+            if self._written_perf_model != spec:
+                entry = resolve_entry(
+                    load_document(spec).select(self._worker_type),
+                    worker_type=self._worker_type,
+                )
+                # The content gets the checks a roles entry gets when the
+                # Planner config is loaded.
+                self._resolved_perf_model = AISPerfModelSpec(
+                    roles={self._worker_type: entry}
+                ).roles[self._worker_type]
+                self._written_perf_model = deepcopy(spec)
+            if self._resolved_perf_model is None:
+                raise RuntimeError("AIS perf model entry was not resolved")
+            return self._resolved_perf_model
         source = spec.dataset_profiles.get(self._worker_type)
         if source is None:
             return spec.roles[self._worker_type]

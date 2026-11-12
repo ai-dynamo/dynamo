@@ -155,7 +155,7 @@ targets. The perf model is bootstrapped from the first available source:
 
 The Planner constructs all estimators through
 `aisimulate_core.sdk.RustForwardPassPerfModel.best_available(config)` using the
-role-indexed canonical configurations in `ais_perf_model.roles`. AISimulate owns
+canonical configurations in `ais_perf_model` (one configuration per worker type). AISimulate owns
 schema validation, selection, tuning, and prediction. Dynamo binds immutable
 worker identity and runtime limits, and derives queue drain, TTFT, ITL, and capacity.
 New configurations default to `auto` selection with `deny` fallback. Auto still

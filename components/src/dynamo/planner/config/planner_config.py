@@ -20,11 +20,11 @@ import os
 import re
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
-from dataclasses import asdict
+from dataclasses import asdict, fields
 from enum import Enum
 from functools import lru_cache
 from pathlib import Path, PurePosixPath
-from typing import Annotated, Any, Dict, Literal, Optional, Protocol, cast
+from typing import Annotated, Any, Dict, Literal, Optional, Protocol, Union, cast
 from urllib.parse import parse_qsl, urlsplit
 
 import yaml
@@ -43,6 +43,7 @@ from pydantic import (
     model_validator,
 )
 
+from dynamo.common.ais_perf_model import load_document
 from dynamo.planner.config.aic_interpolation_spec import AICInterpolationSpec
 from dynamo.planner.config.batch_policy_config import BatchSchedulingPolicyConfig
 from dynamo.planner.config.defaults import SLAPlannerDefaults
@@ -197,6 +198,69 @@ class AISPerfModelSpec(BaseModel):
             except TypeError as error:
                 raise ValueError(f"invalid AIS config for {role}: {error}") from error
         return result
+
+
+# What PlannerConfig.ais_perf_model holds: the deprecated mapping with roles
+# and dataset_profiles, one perf model config, or a list of configs.
+AISPerfModelValue = Union[AISPerfModelSpec, dict[str, Any], list[dict[str, Any]]]
+
+# How messages name the form of ais_perf_model that replaces roles and
+# dataset_profiles.
+AIS_PERF_MODEL_NEW_FORM = (
+    "ais_perf_model with one perf model config or a list of configs "
+    "(one per worker_type)"
+)
+_AIS_PERF_MODEL_OLD_KEYS = frozenset({"roles", "dataset_profiles"})
+
+
+def ais_perf_model_old_form_names(value: Any) -> list[str]:
+    """Return the deprecated keys an ``ais_perf_model`` value is written with.
+
+    The list is empty for ``None`` and for one config or a list of configs.
+    """
+    if not isinstance(value, AISPerfModelSpec):
+        return []
+    names = []
+    if value.roles:
+        names.append("ais_perf_model.roles")
+    if value.dataset_profiles:
+        names.append("ais_perf_model.dataset_profiles")
+    return names or ["ais_perf_model.roles"]
+
+
+def _ais_perf_model_config_keys() -> set[str]:
+    """Return the keys one perf model config can have."""
+    try:
+        # Operator schema generation imports this module without the optional
+        # estimator runtime; without it no key can be told apart.
+        from aisimulate_core.sdk import ForwardPassPerfModelConfig
+    except ImportError:
+        return set()
+    return {"from", *(field.name for field in fields(ForwardPassPerfModelConfig))}
+
+
+def _reject_unknown_config_keys(value: Any, config_keys: set[str]) -> None:
+    """Raise ``ValueError`` for keys that no perf model config has.
+
+    ``value`` is one config or a list of configs that the loader accepted,
+    ``config_keys`` the result of ``_ais_perf_model_config_keys``. The first
+    config with such keys is reported. A key written without a value is not
+    looked at: the loader drops it.
+    """
+    if not config_keys:
+        # Without the estimator runtime no key can be told apart.
+        return
+    bare = isinstance(value, Mapping)
+    for position, config in enumerate([value] if bare else value, start=1):
+        unknown = sorted(
+            key
+            for key, item in config.items()
+            if item is not None and key not in config_keys
+        )
+        if unknown:
+            # Entries are counted from 1, as in the loader's own errors.
+            where = "ais_perf_model" if bare else f"ais_perf_model: entry {position}"
+            raise ValueError(f"{where}: unknown keys: {', '.join(unknown)}")
 
 
 class ExternalPluginEntry(BaseModel):
@@ -1712,22 +1776,65 @@ class PlannerConfig(BaseModel):
             "the legacy profile_results_dir file loader)."
         ),
     )
-    ais_perf_model: Optional[AISPerfModelSpec] = Field(
+    ais_perf_model: Optional[AISPerfModelValue] = Field(
         default=None,
         description=(
-            "Role-indexed AISimulate ForwardPassPerfModelConfig mappings. "
-            "The SDK owns estimator selection, tuning, and validation; "
-            "new configs default to auto selection with fallback denied."
+            "AISimulate perf model of the workers the Planner scales: one perf "
+            "model config (a mapping), or a list of configs with one "
+            "worker_type each (prefill, decode or aggregated). A config holds "
+            "AISimulate ForwardPassPerfModelConfig keys, or `from` to take "
+            "them from a template file, a dataset or a state snapshot. The "
+            "value is stored as written; the Planner reads the files it names "
+            "when it first needs the model. The SDK owns estimator selection, "
+            "tuning, and validation; new configs default to auto selection "
+            "with fallback denied. The older mapping with `roles` and "
+            "`dataset_profiles` is deprecated."
         ),
     )
+
+    @field_validator("ais_perf_model", mode="before")
+    @classmethod
+    def read_ais_perf_model_form(cls, value: Any) -> Any:
+        if value is None or isinstance(value, AISPerfModelSpec):
+            return value
+        if isinstance(value, str):
+            raise ValueError(
+                "ais_perf_model must be a perf model config (a mapping) or a list "
+                "of configs, not a string; a file path is not read here"
+            )
+        if isinstance(value, Mapping):
+            other_keys = value.keys() - _AIS_PERF_MODEL_OLD_KEYS
+            if not other_keys:
+                return AISPerfModelSpec.model_validate(value)
+            config_keys = _ais_perf_model_config_keys()
+            if _AIS_PERF_MODEL_OLD_KEYS & value.keys():
+                if other_keys & config_keys:
+                    raise ValueError(
+                        "ais_perf_model mixes the old form (roles, dataset_profiles) "
+                        f"with other keys ({', '.join(sorted(map(str, other_keys)))}); "
+                        "write one form"
+                    )
+                # A misspelled key of the old form keeps that form's error.
+                return AISPerfModelSpec.model_validate(value)
+            if config_keys and not other_keys & config_keys:
+                # No key of either form: the old form's error names each key.
+                return AISPerfModelSpec.model_validate(value)
+        elif isinstance(value, list):
+            config_keys = _ais_perf_model_config_keys()
+        else:
+            return AISPerfModelSpec.model_validate(value)
+        # Only the syntax and the names of the keys are checked here: no file
+        # the value names is opened.
+        load_document(value)
+        _reject_unknown_config_keys(value, config_keys)
+        return deepcopy(value)
 
     @model_validator(mode="before")
     @classmethod
     def reject_retired_perf_model_config(cls, values):
         if isinstance(values, dict) and "aic_perf_model" in values:
             raise ValueError(
-                "aic_perf_model is no longer supported; use ais_perf_model.roles "
-                "with canonical AISimulate configurations"
+                f"aic_perf_model is no longer supported; use {AIS_PERF_MODEL_NEW_FORM}"
             )
         return values
 
@@ -2394,15 +2501,28 @@ class PlannerConfig(BaseModel):
                 "decode": ("decode",),
                 "agg": ("aggregated",),
             }[self.mode]
-            for role in required_roles:
-                if (
-                    role not in self.ais_perf_model.roles
-                    and role not in self.ais_perf_model.dataset_profiles
-                ):
-                    raise ValueError(
-                        f"ais_perf_model.roles.{role} or dataset_profiles.{role} "
-                        f"is required for mode={self.mode!r}"
-                    )
+            if isinstance(self.ais_perf_model, AISPerfModelSpec):
+                for role in required_roles:
+                    if (
+                        role not in self.ais_perf_model.roles
+                        and role not in self.ais_perf_model.dataset_profiles
+                    ):
+                        raise ValueError(
+                            f"ais_perf_model.roles.{role} or dataset_profiles.{role} "
+                            f"is required for mode={self.mode!r}"
+                        )
+            else:
+                document = load_document(self.ais_perf_model)
+                for role in required_roles:
+                    try:
+                        document.select(role)
+                    except ValueError as error:
+                        written = ", ".join(document.worker_types)
+                        raise ValueError(
+                            f"ais_perf_model: mode={self.mode!r} needs an entry for "
+                            f"worker type {role!r}; it has: "
+                            f"{written or 'one config without worker_type'}"
+                        ) from error
 
         intervals = [float(self.load_adjustment_interval_seconds)]
         if self.enable_throughput_scaling:

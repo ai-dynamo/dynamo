@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 from typing import Optional
 
+from dynamo.common.ais_perf_model import join_names, router_config
 from dynamo.common.configuration.arg_group import ArgGroup
 from dynamo.common.configuration.groups.ais_perf_args import (
     AisPerfArgGroup,
@@ -73,14 +74,80 @@ class SqueezeEvolveRunConfig(KvRouterConfigBase, AisPerfConfigBase):
             tier_concurrency=self.tier_concurrency,
         )
 
+    def _tiers_with_ais_perf_model(self) -> list[int]:
+        """Return the index of each tier that writes ``ais_perf_model``."""
+        return [
+            index
+            for index, tier in enumerate(self.tiers or [])
+            if tier.ais_perf_model is not None
+        ]
+
+    def ais_perf_kwargs_by_tier(self) -> list[Optional[dict]]:
+        """Return the ``AisPerfConfig`` arguments of each tier, in ``--tiers`` order.
+
+        Every item is ``None`` when the load model is not ``ais``. A tier that
+        writes ``ais_perf_model`` gets its own config; a global input is shared
+        by every tier. An error in the value of tier ``i`` starts with
+        ``--tiers[i]:``.
+        """
+        tiers = self.tiers or []
+        if self.router_prefill_load_model != "ais":
+            return [None] * len(tiers)
+        if self._tiers_with_ais_perf_model():
+            # Read before the tiers: its error is not about one tier's value.
+            worker_type = self.router_worker_type()
+            by_tier: list[Optional[dict]] = []
+            for index, tier in enumerate(tiers):
+                try:
+                    config = router_config(tier.ais_perf_model, worker_type)
+                except ValueError as error:
+                    raise ValueError(f"--tiers[{index}]: {error}") from error
+                self._check_nextn_accept_rates(config)
+                by_tier.append({"config": config})
+            return by_tier
+        # The global input is read with no tiers too: its errors come first.
+        return [self.ais_perf_kwargs()] * len(tiers)
+
     def validate(self) -> None:  # type: ignore[override]
         self.apply_router_config()
-        if self.router_prefill_load_model == "ais":
-            self.ais_perf_kwargs()
-        elif self.ais_perf_config is not None:
-            raise ValueError(
-                "--ais-perf-config requires --router-prefill-load-model=ais"
-            )
+        ais = self.router_prefill_load_model == "ais"
+        if ais:
+            self.check_renamed_env_vars()
+        tier_count = len(self.tiers or [])
+        with_key = self._tiers_with_ais_perf_model()
+        value, name = self.new_ais_perf_input()
+        if ais and not self.old_ais_perf_inputs():
+            if tier_count > 1 and value is not None:
+                raise ValueError(
+                    f"{name} applies to one tier only; write ais_perf_model in "
+                    "each --tiers entry"
+                )
+            if tier_count == 1 and value is not None and with_key:
+                raise ValueError(
+                    f"{name} cannot be combined with ais_perf_model in --tiers[0]"
+                )
+            if tier_count > 1 and len(with_key) < tier_count:
+                missing = [
+                    f"--tiers[{index}]"
+                    for index in range(tier_count)
+                    if index not in with_key
+                ]
+                verb = "has" if len(missing) == 1 else "have"
+                raise ValueError(
+                    f"{join_names(missing)} {verb} no ais_perf_model; with "
+                    "--router-prefill-load-model=ais every tier needs one"
+                )
+        self.validate_ais_perf_inputs(
+            replacement=(
+                "ais_perf_model in each --tiers entry "
+                "(or --ais-perf-model with one tier)"
+            ),
+            other_new_inputs=[
+                f"ais_perf_model in --tiers[{index}]" for index in with_key
+            ],
+        )
+        if ais:
+            self.ais_perf_kwargs_by_tier()
         if not self.tiers:
             raise ValueError("--tiers is required (JSON array, cheapest first)")
         self.confidence_percentiles = [float(p) for p in self.confidence_percentiles]
@@ -124,7 +191,9 @@ class SqueezeEvolveArgGroup(ArgGroup):
             help="JSON array of model tiers, cheapest first. Each entry: "
             "{endpoint (3-part namespace.component.endpoint), model (HF id), "
             "temperature?, top_p?, max_tokens?, block_size?, tokenizer?, "
-            "trust_remote_code?}. "
+            "trust_remote_code?, ais_perf_model? (AIS perf model of this tier "
+            "for --router-prefill-load-model=ais: a config, a list of configs, "
+            "a file path or inline JSON)}. "
             f"Example: {_TIERS_EXAMPLE}",
         )
         add_argument(

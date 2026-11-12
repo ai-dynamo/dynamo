@@ -548,46 +548,92 @@ service.
   Directory holding profiler-generated performance data (npz or JSON), used to bootstrap or tune the performance model when the `get_perf_metrics` endpoint is unavailable.
 </ParamField>
 
-<ParamField path="ais_perf_model" type="AISPerfModelSpec" default="null">
-  Role-indexed AISimulate forward-pass configurations. Constructs each model through
+<ParamField path="ais_perf_model" type="object or list of objects" default="null">
+  AISimulate perf model of the workers the Planner scales. The value is one perf model
+  config, or a list of configs with one `worker_type` each (`prefill`, `decode`, or
+  `aggregated`):
+
+  ```yaml
+  ais_perf_model:
+    - worker_type: prefill
+      model: Qwen/Qwen3-32B
+      system: h200_sxm
+      backend: vllm
+      tp: 2
+    - worker_type: decode
+      model: Qwen/Qwen3-32B
+      system: h200_sxm
+      backend: vllm
+      tp: 2
+  ```
+
+  A config holds AISimulate `ForwardPassPerfModelConfig` keys, or `from` to take them
+  from a template file, a dataset, or a state snapshot. See
+  [Unified perf-model input](https://github.com/ai-dynamo/aisimulate/blob/main/docs/perf-model/configuration.md#unified-perf-model-input)
+  in the AISimulate documentation. One config without `worker_type` covers every worker
+  type. A string is an error; a file path is not read here.
+
+  When the field is unset, the profiler writes a list with one config per worker type of
+  the Planner mode into the generated Planner config. A value you write is kept as
+  written. The profiler compares `model`, `system`, `backend`, `worker_type`, `tp`, `pp`,
+  `attention_dp`, `moe_tp_size`, and `moe_ep_size` of each config with the deployment it
+  selects; for a config with `from` it compares only the keys the config writes itself.
+  A difference is an error, for example
+  `ais_perf_model entry for decode: tp=4 conflicts with selected deployment tp=2`.
+
+  Constructs each model through
   `aisimulate_core.sdk.RustForwardPassPerfModel.best_available(config)` without an
-  interpolation sweep. Configure model identity and estimator controls through
-  `ais_perf_model.roles`; the retired `aic_perf_model` and `hf_id` / pick shape
+  interpolation sweep. The retired `aic_perf_model` and `hf_id` / pick shape
   are rejected.
+
+  The `roles` and `dataset_profiles` keys are the deprecated form of the value. They
+  still work and print one warning, for example
+  `ais_perf_model.roles is deprecated and will be removed in v1.9; use ais_perf_model with one perf model config or a list of configs (one per worker_type).`
+  A deprecated key together with other keys is an error.
 </ParamField>
 
 <Indent>
-  <ParamField path="roles" type="object" required={true}>
-    Maps deployment roles to complete upstream `ForwardPassPerfModelConfig` objects.
-    Supply `prefill` and `decode` for `disagg`, the matching single role for `prefill`
-    or `decode`, and `aggregated` for `agg`. Each key must match `worker_type`.
-  </ParamField>
-  <ParamField path="roles.&lt;role&gt;.model / system / backend" type="string" required={true}>
-    Model identifier, AISimulate system identifier, and inference backend
-    (`vllm`, `sglang`, or `trtllm`). Optional `backend_version`, `tp`, `pp`,
+  <ParamField path="model / system / backend" type="string">
+    Keys of a config. Model identifier, AISimulate system identifier, and inference backend
+    (`vllm`, `sglang`, or `trtllm`). A config without `from` must write all three.
+    Optional `backend_version`, `tp`, `pp`,
     `attention_dp`, MoE axes, quantization, KV block size, and speculation fields
     use the upstream schema. Published worker capabilities must agree with the
     configured identity.
   </ParamField>
-  <ParamField path="roles.&lt;role&gt;.estimation_mode" type="string" default="auto">
-    `auto` searches `op_level`, `fpm_interpolation`, then `fpm_regression`.
+  <ParamField path="estimation_mode" type="string" default="auto">
+    Key of a config. `auto` searches `op_level`, `fpm_interpolation`, then `fpm_regression`.
     Explicit modes select the named estimator.
   </ParamField>
-  <ParamField path="roles.&lt;role&gt;.fallback_policy" type="string" default="deny">
-    `deny` rejects failure of an explicitly selected mode. `allow` tries the other modes in
+  <ParamField path="fallback_policy" type="string" default="deny">
+    Key of a config. `deny` rejects failure of an explicitly selected mode. `allow` tries the other modes in
     `op_level`, `fpm_interpolation`, `fpm_regression` priority order; `regression` permits a regression fallback.
     Auto selection searches the full priority order even with `deny`.
   </ParamField>
-  <ParamField path="roles.&lt;role&gt;.systems_paths" type="list[string]" default="[]">
-    Ordered performance-data roots. The SDK resolves its packaged root when unset.
+  <ParamField path="systems_paths" type="list[string]" default="[]">
+    Key of a config. Ordered performance-data roots. The SDK resolves its packaged root when unset.
     `database_mode` and `transfer_policy` are also passed through unchanged.
   </ParamField>
-  <ParamField path="roles.&lt;role&gt;.estimator_config" type="object" default="{}">
-    Complete upstream estimator controls, including independent regression and
+  <ParamField path="estimator_config" type="object" default="{}">
+    Key of a config. Complete upstream estimator controls, including independent regression and
     correction sampling, fit settings, feature weights, and correction bounds.
     Explicit settings override Planner sampling defaults. A legacy total bucket
     count of 16 maps to `bins_per_axis: [4, 4]`. Unknown fields are rejected by
     AISimulate. See the [AISimulate core API](https://github.com/ai-dynamo/aisimulate/blob/main/docs/core-api.md).
+  </ParamField>
+  <ParamField path="roles" type="object" deprecated={true}>
+    **Deprecated.** Use a list of configs. Removed in v1.9.
+
+    Maps deployment roles to complete upstream `ForwardPassPerfModelConfig` objects.
+    Supply `prefill` and `decode` for `disagg`, the matching single role for `prefill`
+    or `decode`, and `aggregated` for `agg`. Each key must match `worker_type`.
+    A role takes the config keys above.
+  </ParamField>
+  <ParamField path="dataset_profiles" type="object" deprecated={true}>
+    **Deprecated.** Use `from: {dataset: {root, manifest}}` in a config. Removed in v1.9.
+
+    Maps a role to an execution-profile manifest in a local AISimulate dataset. See
+    [Planner configuration](../components/planner-configuration.mdx#local-execution-profile-datasets).
   </ParamField>
 </Indent>
 

@@ -148,11 +148,11 @@ async def worker(runtime: DistributedRuntime) -> None:
         # build_ais_perf_config, which are typed for DynamoRouterConfig
         # (single --endpoint); this config inherits the shared bases directly.
         kv_router_config=KvRouterConfig(**config.kv_router_kwargs()),
-        ais_perf_config=(
-            AisPerfConfig(**config.ais_perf_kwargs())
-            if config.router_prefill_load_model == "ais"
-            else None
-        ),
+        # One item per tier; None when the load model is not ais.
+        ais_perf_configs=[
+            AisPerfConfig(**kwargs) if kwargs is not None else None
+            for kwargs in config.ais_perf_kwargs_by_tier()
+        ],
         default_block_size=config.default_block_size,
     )
     handler = SqueezeEvolveHandler(model_name, orchestrator)

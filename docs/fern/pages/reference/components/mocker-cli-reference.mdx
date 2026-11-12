@@ -201,7 +201,59 @@ MTP (`--ais-nextn`).
 
 ## AIS performance model
 
-<ParamField path="--ais-perf-config" type="JSON object or JSON/YAML file" default="null">
+Opt-in flags for the AISimulate (AIS) latency model. Live Mocker workers do not use AIS by
+default.
+For the timing-model design, see [Mocker Engine Architecture](../../developer-guide/knowledge-base/modular-components/backends/mocker/mocker-engine-architecture.md#performance-model).
+
+<ParamField path="--ais-perf-model" type="JSON/YAML file or inline JSON" default="null">
+  Use the AISimulate perf model for latency prediction instead of the interpolated or polynomial
+  models. The value is one perf model config, or a list of configs with one `worker_type` each.
+  Write it as a path to a YAML or JSON file, or as inline JSON (text that starts with `{` or `[`):
+
+  ```bash
+  --ais-perf-model perf-model.yaml
+  --ais-perf-model '{"model": "Qwen/Qwen3-32B", "system": "h200_sxm", "backend": "vllm"}'
+  ```
+
+  The mocker uses the config of its own worker type: `aggregated`, `prefill` or `decode`, as set
+  by `--disaggregation-mode`. One config without `worker_type` fits every worker type. The config
+  names `model`, `system` and `backend` itself; `--model-path` and `--engine-type` do not change
+  it. For the keys of a config, see
+  [Unified perf-model input](https://github.com/ai-dynamo/aisimulate/blob/main/docs/perf-model/configuration.md#unified-perf-model-input)
+  in the AISimulate documentation. Install `aisimulate` and use a supported
+  `system/backend/version` tuple.
+
+  `--ais-nextn`, `--ais-nextn-accept-rates` and `--ais-mtp-seed` can be combined with the value.
+  `--ais-nextn` sets `nextn` in the config; a config that writes a different `nextn` is an error.
+
+  With `--extra-engine-args`, the file gives the worker type and the value sets
+  `engine.timing_model`. A file that sets `engine.timing_model` itself is an error:
+  `--extra-engine-args already sets engine.timing_model; it cannot be combined with --ais-perf-model`.
+
+  `DYN_AIS_PERF_MODEL` holds the same value. When the flag is not given, the variable turns on AIS
+  timing for every mocker that has it in its environment.
+</ParamField>
+
+The inputs below are deprecated. They still work and print one warning that names the inputs in
+use, for example
+`--ais-perf-model without a value, --ais-backend and --ais-system are deprecated and will be removed in v1.9; use --ais-perf-model VALUE.`
+A deprecated input together with `--ais-perf-model VALUE` or `DYN_AIS_PERF_MODEL` is an error, for
+example `--ais-perf-model cannot be combined with --ais-system`. The `--aic-*` spellings of the
+flat flags are deprecated with them.
+
+<ParamField path="--ais-perf-model (without a value)" type="boolean" default="false" deprecated={true}>
+  **Deprecated.** Use `--ais-perf-model VALUE`. Removed in v1.9.
+
+  Switch form of the flag. It builds the perf model from `--model-path`, `--engine-type` and the
+  flat `--ais-*` flags below. `--aic-perf-model` is the older spelling of the switch and takes no
+  value: `--aic-perf-model takes no value; write --ais-perf-model VALUE`. The switch cannot be
+  combined with `DYN_AIS_PERF_MODEL`:
+  `--ais-perf-model without a value cannot be combined with DYN_AIS_PERF_MODEL`.
+</ParamField>
+
+<ParamField path="--ais-perf-config" type="JSON object or JSON/YAML file" default="null" deprecated={true}>
+  **Deprecated.** Use `--ais-perf-model VALUE`. Removed in v1.9.
+
   Complete AISimulate `ForwardPassPerfModelConfig`, including immutable worker role,
   data roots, selection policy and nested estimator controls. Defaults to
   `estimation_mode: auto` and `fallback_policy: deny`. Do not combine this input
@@ -209,51 +261,52 @@ MTP (`--ais-nextn`).
   Mocker and Dynamo Replay require `pp: 1`; pipeline-parallel configurations are rejected.
 </ParamField>
 
-Legacy `--aic-*` spellings remain input aliases. Use `--ais-*` in new configurations.
+<ParamField path="--ais-system" type="string" default="h200_sxm when AIS is enabled" deprecated={true}>
+  **Deprecated.** Use `--ais-perf-model VALUE`. Removed in v1.9.
 
-
-Opt-in flags for the AISimulate (AIS) latency model. Live Mocker workers do not use AIS by
-default.
-For the timing-model design, see [Mocker Engine Architecture](../../developer-guide/knowledge-base/modular-components/backends/mocker/mocker-engine-architecture.md#performance-model).
-
-<ParamField path="--ais-perf-model" type="boolean" default="false">
-  Use the canonical AISimulate performance-model API for latency prediction instead of the
-  interpolated or polynomial models. Install `aisimulate` and use a supported
-  `system/backend/version` tuple.
-</ParamField>
-
-<ParamField path="--ais-system" type="string" default="h200_sxm when AIS is enabled">
-  AIS system name used with `--ais-perf-model`. The raw CLI value is unset when omitted; runtime
+  AIS system name used with the deprecated switch. The raw CLI value is unset when omitted; runtime
   resolution uses `h200_sxm` when AIS modeling is enabled.
 </ParamField>
 
-<ParamField path="--ais-backend" type="string" default="--engine-type">
+<ParamField path="--ais-backend" type="string" default="--engine-type" deprecated={true}>
+  **Deprecated.** Use `--ais-perf-model VALUE`. Removed in v1.9.
+
   Backend used for AIS performance-data lookup. Set it only to model timing for a different backend
   than the simulated scheduler.
 
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>vllm</Badge> <Badge intent="note" minimal>sglang</Badge> <Badge intent="note" minimal>trtllm</Badge></span>
 </ParamField>
 
-<ParamField path="--ais-backend-version" type="string" default="auto">
+<ParamField path="--ais-backend-version" type="string" default="auto" deprecated={true}>
+  **Deprecated.** Use `--ais-perf-model VALUE`. Removed in v1.9.
+
   AIS performance-database version. Use `current`, `previous`, or `next` when the slot is available
   for the selected system and backend, or specify a version assigned to one of those slots.
   When unset, uses the release database's `current` slot.
 </ParamField>
 
-<ParamField path="--ais-tp-size" type="integer" default="1">
+<ParamField path="--ais-tp-size" type="integer" default="1" deprecated={true}>
+  **Deprecated.** Use `--ais-perf-model VALUE`. Removed in v1.9.
+
   Tensor-parallel size for AIS latency prediction. Affects only AIS performance-model lookups, not
   mocker scheduling.
 </ParamField>
 
-<ParamField path="--ais-moe-tp-size" type="integer" default="null">
+<ParamField path="--ais-moe-tp-size" type="integer" default="null" deprecated={true}>
+  **Deprecated.** Use `--ais-perf-model VALUE`. Removed in v1.9.
+
   Mixture-of-Experts tensor-parallel size for AIS latency prediction. Required by some MoE models.
 </ParamField>
 
-<ParamField path="--ais-moe-ep-size" type="integer" default="null">
+<ParamField path="--ais-moe-ep-size" type="integer" default="null" deprecated={true}>
+  **Deprecated.** Use `--ais-perf-model VALUE`. Removed in v1.9.
+
   Mixture-of-Experts expert-parallel size for AIS latency prediction. Required by some MoE models.
 </ParamField>
 
-<ParamField path="--ais-attention-dp-size" type="integer" default="null">
+<ParamField path="--ais-attention-dp-size" type="integer" default="null" deprecated={true}>
+  **Deprecated.** Use `--ais-perf-model VALUE`. Removed in v1.9.
+
   Attention data-parallel size for AIS latency prediction. Required by some MoE models.
 </ParamField>
 
@@ -407,6 +460,7 @@ for the shared fields.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `DYN_MOCKER_KV_CACHE_TRACE` | off | Set to `1` or `true` to log structured native KV-cache allocation and eviction traces. |
+| `DYN_AIS_PERF_MODEL` | unset | Value of [`--ais-perf-model`](#ais-performance-model) when the flag is not given. |
 
 ## Related pages
 

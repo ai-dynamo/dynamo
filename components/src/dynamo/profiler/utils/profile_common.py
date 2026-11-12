@@ -177,7 +177,7 @@ def needs_profile_data(dgdr: DynamoGraphDeploymentRequestSpec) -> bool:
       Requests with Planner configuration use its sweep mode; mocker-only
       requests use the DGDR search strategy. In rapid mode the mocker pulls
       latency data directly from the AIConfigurator SDK via
-      ``--ais-perf-model`` flags injected by the profiler, so no NPZ is
+      ``--ais-perf-model VALUE`` injected by the profiler, so no NPZ is
       emitted.
     * **Planner** when thorough-mode bootstrap data is requested. In rapid
       mode the planner receives ``ais_perf_model`` and can also run AIC

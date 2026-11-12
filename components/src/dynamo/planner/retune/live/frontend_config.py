@@ -58,6 +58,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Optional
 
+from dynamo.common.ais_perf_model import WORKER_TYPE_ENV_VAR
 from dynamo.common.configuration.groups.kv_router_args import (
     _KV_ROUTER_FIELDS,
     KvRouterConfigBase,
@@ -182,6 +183,9 @@ _TRANSPORT_ROUTER_ENV = frozenset(
         "DYN_ROUTER_ZMQ_ENDPOINTS_PER_SUB",
     }
 )
+# Router env that only chooses the entry of an AIS perf model. It cannot change
+# a result here: live retune already requires the load model 'none'.
+_IGNORED_ROUTER_ENV = frozenset({WORKER_TYPE_ENV_VAR})
 # The deprecated overlap_score_weight: KvRouterArgGroup reads the first name
 # when it is set and the second otherwise.
 _OVERLAP_WEIGHT_ENV = ("DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT", "DYN_OVERLAP_SCORE_WEIGHT")
@@ -669,7 +673,9 @@ def _parse(
         if name in registered:
             return registered[name] in _RELEVANT_DESTS
         return name in _OVERLAP_WEIGHT_ENV or (
-            name.startswith(_ROUTER_ENV_PREFIX) and name not in _TRANSPORT_ROUTER_ENV
+            name.startswith(_ROUTER_ENV_PREFIX)
+            and name not in _TRANSPORT_ROUTER_ENV
+            and name not in _IGNORED_ROUTER_ENV
         )
 
     # Router env the planner cannot read makes the startup unknowable.
@@ -773,6 +779,7 @@ def _parse(
             not name.startswith(_ROUTER_ENV_PREFIX)
             or name in registered
             or name in _TRANSPORT_ROUTER_ENV
+            or name in _IGNORED_ROUTER_ENV
         ):
             continue
         if name == ENV_WORKER_SELECTION_POLICY:

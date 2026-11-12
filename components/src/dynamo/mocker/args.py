@@ -7,12 +7,20 @@ import os
 import tempfile
 from pathlib import Path
 
+from dynamo.common.ais_perf_model import (
+    ENV_VAR,
+    env_value,
+    join_names,
+    old_inputs_message,
+    warn_old_inputs,
+)
 from dynamo.common.configuration.groups.router_args import (
     WorkerRouterConfig,
     add_worker_router_arguments,
 )
 from dynamo.common.configuration.utils import Deprecated
 from dynamo.common.utils.namespace import get_worker_namespace
+from dynamo.mocker.config import normalize_mocker_config, old_ais_perf_inputs
 
 from . import __version__
 
@@ -148,14 +156,66 @@ def parse_bootstrap_ports(ports_str: str | None) -> list[int]:
     return [int(p.strip()) for p in ports_str.split(",")]
 
 
+class _AisPerfModelOccurrence(argparse.Action):
+    """Record every use of ``--ais-perf-model`` as ``(option string, value)``.
+
+    The option takes a perf model value and, without one, is still the switch
+    it used to be. ``parse_args`` needs each use, with the spelling typed, to
+    tell the two apart. The value is ``None`` when none was given.
+    """
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        occurrences = getattr(namespace, self.dest, None) or []
+        setattr(namespace, self.dest, [*occurrences, (option_string, values)])
+
+
+def _set_ais_perf_model_attributes(
+    parser: argparse.ArgumentParser, args: argparse.Namespace
+) -> None:
+    """Replace the recorded uses of ``--ais-perf-model`` by three attributes.
+
+    ``ais_perf_model`` is whether the option was given without a value,
+    ``ais_perf_model_value`` the value typed last, else ``DYN_AIS_PERF_MODEL``,
+    else ``None``, and ``ais_perf_model_source`` the name of what gave the
+    value. A combination that has no single meaning is a parser error.
+    """
+    occurrences = args.ais_perf_model_occurrences or []
+    del args.ais_perf_model_occurrences
+    bare = [flag for flag, value in occurrences if value is None]
+    valued = [(flag, value) for flag, value in occurrences if value is not None]
+    env = env_value(ENV_VAR)
+    if any(flag == "--aic-perf-model" for flag, _ in valued):
+        parser.error("--aic-perf-model takes no value; write --ais-perf-model VALUE")
+    if bare and valued:
+        parser.error(
+            "--ais-perf-model is given with and without a value; write it once, "
+            "with the value"
+        )
+    if bare and env is not None:
+        parser.error(
+            f"--ais-perf-model without a value cannot be combined with {ENV_VAR}"
+        )
+    args.ais_perf_model = bool(bare)
+    if valued:
+        # As for every other option with a value, the last one typed is used.
+        args.ais_perf_model_value = valued[-1][1]
+        args.ais_perf_model_source = "--ais-perf-model"
+    else:
+        args.ais_perf_model_value = env
+        args.ais_perf_model_source = None if env is None else ENV_VAR
+
+
+def _old_ais_help(flag: str, text: str) -> str:
+    """Return the help of an old AIS input: the deprecation sentence, then ``text``."""
+    return old_inputs_message([flag], "--ais-perf-model VALUE") + " " + text
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse command-line arguments for the Dynamo mocker engine.
 
     Returns:
         argparse.Namespace: Parsed command-line arguments.
     """
-    from dynamo.mocker.config import normalize_mocker_config
-
     engine_defaults = normalize_mocker_config()["engine"]
     parser = argparse.ArgumentParser(
         description="Mocker engine for testing Dynamo LLM infrastructure with vLLM-style CLI.",
@@ -293,11 +353,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--ais-perf-model",
         "--aic-perf-model",
-        dest="ais_perf_model",
-        action="store_true",
-        default=False,
-        help="Use AISimulate's perf model directly for latency prediction. "
-        "Requires aisimulate installed.",
+        dest="ais_perf_model_occurrences",
+        action=_AisPerfModelOccurrence,
+        nargs="?",
+        default=None,
+        metavar="VALUE",
+        help="Use AISimulate's perf model for latency prediction. VALUE is a "
+        "JSON/YAML file or inline JSON: one perf model config, or a list of "
+        f"configs with one worker_type each (env: {ENV_VAR}). The config of "
+        "this worker's type is used. Requires aisimulate installed. Without "
+        "VALUE (deprecated) the perf model is built from --model-path, "
+        "--engine-type and the flat --ais-* flags.",
     )
     parser.add_argument(
         "--gpu-memory-utilization",
@@ -326,7 +392,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         dest="ais_system",
         type=str,
         default=None,
-        help="AIS system name (e.g., 'h200_sxm'). Used with --ais-perf-model.",
+        help=_old_ais_help(
+            "--ais-system",
+            "AIS system name (e.g., 'h200_sxm'). Used with --ais-perf-model without a value.",
+        ),
     )
     parser.add_argument(
         "--ais-backend",
@@ -334,10 +403,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         dest="ais_backend",
         type=str,
         default=None,
-        help="AIS backend name used for perf database lookups. When unset, "
-        "falls back to --engine-type. Set this to decouple the AIS perf model "
-        "from the simulated engine type (e.g. simulate with vllm while using "
-        "trtllm AIS data).",
+        help=_old_ais_help(
+            "--ais-backend",
+            "AIS backend name used for perf database lookups. When unset, "
+            "falls back to --engine-type. Set this to decouple the AIS perf model "
+            "from the simulated engine type (e.g. simulate with vllm while using "
+            "trtllm AIS data).",
+        ),
     )
     parser.add_argument(
         "--ais-backend-version",
@@ -345,9 +417,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         dest="ais_backend_version",
         type=str,
         default=None,
-        help="AIS performance-database version: 'current', 'previous', or 'next' "
-        "when available, or a version assigned to one of those slots. "
-        "Defaults to the release database's 'current' slot.",
+        help=_old_ais_help(
+            "--ais-backend-version",
+            "AIS performance-database version: 'current', 'previous', or 'next' "
+            "when available, or a version assigned to one of those slots. "
+            "Defaults to the release database's 'current' slot.",
+        ),
     )
     parser.add_argument(
         "--ais-tp-size",
@@ -355,8 +430,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         dest="ais_tp_size",
         type=int,
         default=None,
-        help="Tensor parallel size for AIS latency prediction (default: 1). "
-        "Only affects AIS performance model lookups, not mocker scheduling.",
+        help=_old_ais_help(
+            "--ais-tp-size",
+            "Tensor parallel size for AIS latency prediction (default: 1). "
+            "Only affects AIS performance model lookups, not mocker scheduling.",
+        ),
     )
     parser.add_argument(
         "--ais-moe-tp-size",
@@ -364,8 +442,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         dest="ais_moe_tp_size",
         type=int,
         default=None,
-        help="MoE tensor-parallel size for AIS latency prediction. "
-        "Required for MoE models. Constraint: ais_tp_size * ais_attention_dp_size == ais_moe_tp_size * ais_moe_ep_size.",
+        help=_old_ais_help(
+            "--ais-moe-tp-size",
+            "MoE tensor-parallel size for AIS latency prediction. "
+            "Required for MoE models. Constraint: ais_tp_size * ais_attention_dp_size == ais_moe_tp_size * ais_moe_ep_size.",
+        ),
     )
     parser.add_argument(
         "--ais-moe-ep-size",
@@ -373,8 +454,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         dest="ais_moe_ep_size",
         type=int,
         default=None,
-        help="MoE expert-parallel size for AIS latency prediction. "
-        "Required for MoE models. Constraint: ais_tp_size * ais_attention_dp_size == ais_moe_tp_size * ais_moe_ep_size.",
+        help=_old_ais_help(
+            "--ais-moe-ep-size",
+            "MoE expert-parallel size for AIS latency prediction. "
+            "Required for MoE models. Constraint: ais_tp_size * ais_attention_dp_size == ais_moe_tp_size * ais_moe_ep_size.",
+        ),
     )
     parser.add_argument(
         "--ais-attention-dp-size",
@@ -382,8 +466,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         dest="ais_attention_dp_size",
         type=int,
         default=None,
-        help="Attention data-parallel size for AIS latency prediction (default: 1). "
-        "Corresponds to the 'dp' dimension in AIS CLI output.",
+        help=_old_ais_help(
+            "--ais-attention-dp-size",
+            "Attention data-parallel size for AIS latency prediction (default: 1). "
+            "Corresponds to the 'dp' dimension in AIS CLI output.",
+        ),
     )
     parser.add_argument(
         "--ais-nextn",
@@ -426,7 +513,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--ais-perf-config",
         type=parse_ais_perf_config,
         default=None,
-        help="Complete ForwardPassPerfModelConfig as JSON or a JSON/YAML file.",
+        help=_old_ais_help(
+            "--ais-perf-config",
+            "Complete ForwardPassPerfModelConfig as JSON or a JSON/YAML file.",
+        ),
     )
 
     # Reasoning token output
@@ -688,6 +778,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                 )
             spellings[canonical] = flag
     args = parser.parse_args(argv)
+    _set_ais_perf_model_attributes(parser, args)
+    old_ais_perf = old_ais_perf_inputs(args)
+    if args.ais_perf_model_value is not None and old_ais_perf:
+        parser.error(
+            f"{args.ais_perf_model_source} cannot be combined with "
+            f"{join_names(old_ais_perf)}"
+        )
     if args.sglang_schedule_policy == "fcfs":
         Deprecated(
             "--sglang-schedule-policy fifo", remove_in=_SGLANG_ALIAS_REMOVAL
@@ -757,4 +854,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         else:
             args.endpoint = DEFAULT_ENDPOINT
             logger.debug(f"Using default endpoint: {args.endpoint}")
+    # Last, so that an error above is reported without a warning before it.
+    if old_ais_perf:
+        warn_old_inputs(old_ais_perf, "--ais-perf-model VALUE", stacklevel=2)
     return args

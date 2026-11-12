@@ -6,10 +6,21 @@
 import argparse
 import json
 import os
+from collections.abc import Sequence
 from pathlib import Path
 
 import yaml
 
+from dynamo.common.ais_perf_model import (
+    ENV_VAR,
+    ROUTER_WORKER_TYPES,
+    WORKER_TYPE_ENV_VAR,
+    env_value,
+    join_names,
+    old_inputs_message,
+    router_config,
+    warn_old_inputs,
+)
 from dynamo.common.configuration.arg_group import ArgGroup
 from dynamo.common.configuration.config_base import ConfigBase
 
@@ -69,8 +80,132 @@ def _env(name, convert, default):
 
 class AisPerfConfigBase(ConfigBase):
     ais_perf_config = None
+    ais_perf_model = None
+    router_prefill_load_worker_type = None
 
-    def ais_perf_kwargs(self) -> dict:
+    def new_ais_perf_input(self) -> tuple[str | None, str | None]:
+        """Return the AIS perf model value and the name of the input that gave it.
+
+        A typed ``--ais-perf-model`` wins over ``DYN_AIS_PERF_MODEL``. Both
+        items are ``None`` when neither is set.
+        """
+        if self.ais_perf_model is not None:
+            return self.ais_perf_model, "--ais-perf-model"
+        value = env_value(ENV_VAR)
+        if value is not None:
+            return value, ENV_VAR
+        return None, None
+
+    def old_ais_perf_inputs(self) -> list[str]:
+        """Return the names of the old AIS inputs that are set.
+
+        An input is named as the user gave it: the flag when it was typed, the
+        environment variable when the value came from it. The acceptance rates
+        and the seed are not old inputs.
+        """
+        names = []
+        if self.ais_perf_config is not None:
+            # The parser keeps no mark of a typed --ais-perf-config.
+            names.append(
+                "DYN_AIS_PERF_CONFIG"
+                if "DYN_AIS_PERF_CONFIG" in os.environ
+                else "--ais-perf-config"
+            )
+        for name, (_, _, key) in _FIELDS.items():
+            if key is None or getattr(self, "ais_" + name, None) is None:
+                continue
+            flag = "--ais-" + name.replace("_", "-")
+            variable = "DYN_AIS_" + name.upper()
+            typed = getattr(self, "_seen_ais_" + name, None) is not None
+            names.append(flag if typed or variable not in os.environ else variable)
+        return names
+
+    def router_worker_type(self) -> str | None:
+        """Return the worker type chosen for the AIS perf model, or ``None``.
+
+        A typed ``--router-prefill-load-worker-type`` wins over
+        ``DYN_ROUTER_PREFILL_LOAD_WORKER_TYPE``.
+        """
+        if self.router_prefill_load_worker_type is not None:
+            return self.router_prefill_load_worker_type
+        value = env_value(WORKER_TYPE_ENV_VAR)
+        if value is not None and value not in ROUTER_WORKER_TYPES:
+            raise ValueError(
+                f"{WORKER_TYPE_ENV_VAR} is {value!r}; use prefill or aggregated"
+            )
+        return value
+
+    def validate_ais_perf_inputs(
+        self,
+        *,
+        replacement: str = "--ais-perf-model",
+        other_new_inputs: Sequence[str] = (),
+        stacklevel: int = 3,
+    ) -> None:
+        """Check which AIS perf model inputs are given together.
+
+        ``other_new_inputs`` names new inputs the caller found outside this
+        group. Old inputs get one deprecation warning that names
+        ``replacement``; ``stacklevel=3`` is the caller of the ``validate()``
+        that calls this method. No value is read here: ``ais_perf_kwargs()``
+        does that.
+        """
+        ais = getattr(self, "router_prefill_load_model", None) == "ais"
+        value, name = self.new_ais_perf_input()
+        old = self.old_ais_perf_inputs()
+        if not ais:
+            if self.ais_perf_config is not None:
+                raise ValueError(
+                    "--ais-perf-config requires --router-prefill-load-model=ais"
+                )
+            if self.ais_perf_model is not None:
+                raise ValueError(
+                    "--ais-perf-model requires --router-prefill-load-model=ais"
+                )
+            if self.router_prefill_load_worker_type is not None:
+                raise ValueError(
+                    "--router-prefill-load-worker-type requires "
+                    "--router-prefill-load-model=ais"
+                )
+            if other_new_inputs:
+                raise ValueError(
+                    f"{other_new_inputs[0]} requires --router-prefill-load-model=ais"
+                )
+            # The two environment variables are ignored here, so that processes
+            # with and without the AIS load model can share one environment.
+        elif old:
+            if value is not None or other_new_inputs:
+                new = name if value is not None else other_new_inputs[0]
+                raise ValueError(f"{new} cannot be combined with {join_names(old)}")
+            if self.router_prefill_load_worker_type is not None:
+                raise ValueError(
+                    "--router-prefill-load-worker-type requires --ais-perf-model"
+                )
+        elif value is not None or other_new_inputs:
+            self.router_worker_type()
+        # Last statement: every error above is raised before the warning.
+        if old:
+            warn_old_inputs(old, replacement, stacklevel=stacklevel)
+
+    def ais_perf_model_kwargs(self, value) -> dict:
+        """Return the ``AisPerfConfig`` arguments for one AIS perf model value.
+
+        A relative path in ``value`` starts at the working directory.
+        """
+        config = router_config(value, self.router_worker_type())
+        self._check_nextn_accept_rates(config)
+        return {"config": config}
+
+    def _check_nextn_accept_rates(self, config) -> None:
+        rates = getattr(self, "ais_nextn_accept_rates", None)
+        if config.get("nextn", 0) and rates is not None:
+            # Imported here: the helper lives in the native bindings package.
+            from dynamo._internal.ais import _pad_nextn_accept_rates
+
+            _pad_nextn_accept_rates(rates)
+
+    def check_renamed_env_vars(self) -> None:
+        """Reject a ``DYN_AIC_*`` variable: it was renamed to ``DYN_AIS_*``."""
         legacy = [
             "DYN_AIC_" + name.upper()
             for name in _FIELDS
@@ -81,6 +216,15 @@ class AisPerfConfigBase(ConfigBase):
                 "renamed environment variables are no longer read: "
                 f"{', '.join(legacy)}; use the DYN_AIS_* names"
             )
+
+    def ais_perf_kwargs(self) -> dict:
+        self.check_renamed_env_vars()
+        value, name = self.new_ais_perf_input()
+        if value is not None:
+            old = self.old_ais_perf_inputs()
+            if old:
+                raise ValueError(f"{name} cannot be combined with {join_names(old)}")
+            return self.ais_perf_model_kwargs(value)
         authored = getattr(self, "ais_perf_config", None)
         shorthand = {
             key: getattr(self, "ais_" + name, None)
@@ -104,29 +248,63 @@ class AisPerfConfigBase(ConfigBase):
             if not config.get(key)
         ]
         if missing:
+            if authored is None and not shorthand:
+                raise ValueError(
+                    "--router-prefill-load-model=ais requires an AIS perf model: "
+                    f"set --ais-perf-model or {ENV_VAR}"
+                )
             raise ValueError("AIS perf config requires " + ", ".join(missing))
         # The upstream class preserves estimator_config, ordered roots and policy.
         from aisimulate_core.sdk import ForwardPassPerfModelConfig
 
-        rates = getattr(self, "ais_nextn_accept_rates", None)
-        if config.get("nextn", 0) and rates is not None:
-            from dynamo._internal.ais import _pad_nextn_accept_rates
-
-            _pad_nextn_accept_rates(rates)
+        self._check_nextn_accept_rates(config)
         return {"config": ForwardPassPerfModelConfig(**config).to_dict()}
 
 
 class AisPerfArgGroup(ArgGroup):
     def add_arguments(self, parser) -> None:
         group = parser.add_argument_group("AISimulate Perf Model Options")
+        # The two environment variables are read when the config is validated.
+        group.add_argument(
+            "--ais-perf-model",
+            dest="ais_perf_model",
+            default=None,
+            metavar="VALUE",
+            help=(
+                "AIS perf model for --router-prefill-load-model=ais: a file path "
+                "or inline JSON, holding one perf model config or a list of "
+                f"configs with one worker_type each; {ENV_VAR}."
+            ),
+        )
+        group.add_argument(
+            "--router-prefill-load-worker-type",
+            dest="router_prefill_load_worker_type",
+            choices=ROUTER_WORKER_TYPES,
+            default=None,
+            help=(
+                "Worker type whose config the router takes from --ais-perf-model; "
+                "needed when the value has both or names none; "
+                f"{WORKER_TYPE_ENV_VAR}."
+            ),
+        )
         group.add_argument(
             "--ais-perf-config",
             type=parse_ais_perf_config,
             default=os.environ.get("DYN_AIS_PERF_CONFIG"),
-            help="Complete ForwardPassPerfModelConfig as JSON or a JSON/YAML path.",
+            help=(
+                old_inputs_message(["--ais-perf-config"], "--ais-perf-model")
+                + " Complete ForwardPassPerfModelConfig as JSON or a JSON/YAML path."
+            ),
         )
-        for name, (convert, default, _) in _FIELDS.items():
+        for name, (convert, default, key) in _FIELDS.items():
             flag = name.replace("_", "-")
+            text = f"AISimulate {flag}; DYN_AIS_{name.upper()}. Legacy aic spelling accepted."
+            if key is not None:
+                text = (
+                    old_inputs_message(["--ais-" + flag], "--ais-perf-model")
+                    + " "
+                    + text
+                )
             group.add_argument(
                 "--ais-" + flag,
                 "--aic-" + flag,
@@ -137,6 +315,6 @@ class AisPerfArgGroup(ArgGroup):
                 help=(
                     "Comma-separated conditional acceptance rates: entry i is P(draft i accepted | all earlier drafts were accepted)."
                     if name == "nextn_accept_rates"
-                    else f"AISimulate {flag}; DYN_AIS_{name.upper()}. Legacy aic spelling accepted."
+                    else text
                 ),
             )

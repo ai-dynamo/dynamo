@@ -22,7 +22,12 @@ from typing import Any, Optional
 
 from pydantic import BaseModel
 
-from dynamo.planner.config.planner_config import PlannerConfig
+from dynamo.common.ais_perf_model import warn_old_inputs
+from dynamo.planner.config.planner_config import (
+    AIS_PERF_MODEL_NEW_FORM,
+    PlannerConfig,
+    ais_perf_model_old_form_names,
+)
 from dynamo.planner.core.planner_factory import construct_planner
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 
@@ -144,7 +149,11 @@ def _parse_config() -> PlannerConfig:
         help="JSON string or path to a JSON/YAML config file",
     )
     args = parser.parse_args()
-    return PlannerConfig.from_config_arg(args.config)
+    config = PlannerConfig.from_config_arg(args.config)
+    old = ais_perf_model_old_form_names(config.ais_perf_model)
+    if old:
+        warn_old_inputs(old, AIS_PERF_MODEL_NEW_FORM, stacklevel=2)
+    return config
 
 
 @dynamo_worker()

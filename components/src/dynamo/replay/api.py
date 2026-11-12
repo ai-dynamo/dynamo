@@ -7,17 +7,23 @@ import functools
 import json
 import math
 import os
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, TypedDict, overload
 
 from typing_extensions import Unpack
 
-from dynamo._core import KvRouterConfig
+from dynamo._core import AisPerfConfig, KvRouterConfig
 from dynamo._core import (
     run_mocker_synthetic_trace_replay as _run_mocker_synthetic_trace_replay,
 )
 from dynamo._core import run_mocker_trace_replay as _run_mocker_trace_replay
+
+# router_config gets another name here: the public functions have a parameter
+# named router_config.
+from dynamo.common.ais_perf_model import load_document, normalized_config, resolve_entry
+from dynamo.common.ais_perf_model import router_config as _router_perf_config
+from dynamo.common.ais_perf_model import set_timing_model, warn_old_inputs
 from dynamo.replay.report import (
     PlannerReplayDetails,
     ReplayReport,
@@ -64,6 +70,10 @@ class _CommonReplayOptions(TypedDict, total=False):
     decode_engine_args: Any
     router_config: Any
     ais_perf_config: Any
+    router_ais_perf_model: Any
+    ais_perf_model: Any
+    # Internal; not part of the public API.
+    _native_ais_perf_config: Any
     num_workers: int
     num_prefill_workers: int
     num_decode_workers: int
@@ -117,6 +127,111 @@ def _normalize_trace_files(trace_files):
     if isinstance(trace_files, (str, os.PathLike)):
         return [trace_files]
     return list(trace_files)
+
+
+def _perf_model_inputs(
+    *,
+    ais_perf_config: Any,
+    router_ais_perf_model: Any,
+    ais_perf_model: Any,
+    native_ais_perf_config: Any,
+    router_mode: str,
+    router_config: Any,
+    extra_engine_args: Any,
+    prefill_engine_args: Any,
+    decode_engine_args: Any,
+) -> tuple[Any, Any, Any, Any]:
+    """Return the router perf config object and the three engine args to run with.
+
+    ``router_ais_perf_model`` becomes the object the native replay takes as
+    ``ais_perf_config``. ``ais_perf_model`` becomes the AIS timing model of the
+    engine args of each role the replay runs; the caller's engine args are
+    copied, not changed. A replay is disaggregated when prefill or decode
+    engine args are given. Called by the public replay functions only: the
+    deprecation warning names the line that called them.
+    """
+    for keyword, value in (
+        ("router_ais_perf_model", router_ais_perf_model),
+        ("ais_perf_model", ais_perf_model),
+    ):
+        if value is not None and not isinstance(
+            value, (str, os.PathLike, Mapping, list, tuple)
+        ):
+            raise ValueError(
+                f"{keyword}= takes a file path, inline JSON, a config or a list of "
+                f"configs, not {type(value).__name__}"
+            )
+    if ais_perf_config is not None and router_ais_perf_model is not None:
+        raise ValueError(
+            "ais_perf_config= cannot be combined with router_ais_perf_model="
+        )
+    if native_ais_perf_config is not None and (
+        ais_perf_config is not None or router_ais_perf_model is not None
+    ):
+        raise ValueError(
+            "_native_ais_perf_config is internal; it cannot be combined with "
+            "ais_perf_config= or router_ais_perf_model="
+        )
+    disaggregated = prefill_engine_args is not None or decode_engine_args is not None
+    router_perf_config = (
+        ais_perf_config if native_ais_perf_config is None else native_ais_perf_config
+    )
+    if router_ais_perf_model is not None:
+        if router_mode != "kv_router":
+            raise ValueError("router_ais_perf_model= requires router_mode='kv_router'")
+        if router_config is None:
+            raise ValueError(
+                "router_ais_perf_model= requires router_config with "
+                "router_prefill_load_model='ais'"
+            )
+        try:
+            router_perf_model = _router_perf_config(
+                router_ais_perf_model, "prefill" if disaggregated else "aggregated"
+            )
+        except ValueError as error:
+            # ais_perf_model= can raise the same text, so the error says
+            # which keyword it is about.
+            raise ValueError(f"router_ais_perf_model: {error}") from error
+        router_perf_config = AisPerfConfig(config=router_perf_model)
+    if ais_perf_model is not None:
+        document = load_document(ais_perf_model)
+        engine_args = {
+            "extra_engine_args": extra_engine_args,
+            "prefill_engine_args": prefill_engine_args,
+            "decode_engine_args": decode_engine_args,
+        }
+        roles = (
+            {"prefill": "prefill_engine_args", "decode": "decode_engine_args"}
+            if disaggregated
+            else {"aggregated": "extra_engine_args"}
+        )
+        for role, name in roles.items():
+            # A disaggregated role needs engine.worker_type in its engine
+            # args, so they are not created here: the native check reports
+            # the missing ones.
+            if disaggregated and engine_args[name] is None:
+                continue
+            config = resolve_entry(document.select(role), worker_type=role)
+            # Only a check: the engine gets the config as resolved, without
+            # the defaults the normalized form adds.
+            normalized_config(config)
+            engine_args[name] = set_timing_model(
+                engine_args[name],
+                config,
+                engine_args_name=name,
+                perf_model_name="ais_perf_model",
+            )
+        extra_engine_args = engine_args["extra_engine_args"]
+        prefill_engine_args = engine_args["prefill_engine_args"]
+        decode_engine_args = engine_args["decode_engine_args"]
+    if ais_perf_config is not None:
+        warn_old_inputs(["ais_perf_config="], "router_ais_perf_model=", stacklevel=3)
+    return (
+        router_perf_config,
+        extra_engine_args,
+        prefill_engine_args,
+        decode_engine_args,
+    )
 
 
 def _retune_inputs(
@@ -395,6 +510,9 @@ def run_trace_replay(
     decode_engine_args=None,
     router_config=None,
     ais_perf_config=None,
+    router_ais_perf_model=None,
+    ais_perf_model=None,
+    _native_ais_perf_config=None,
     num_workers=1,
     num_prefill_workers=1,
     num_decode_workers=1,
@@ -463,6 +581,23 @@ def run_trace_replay(
     persistence overhead. JSONL output is opened lazily on the first sample.
     If a later write fails, replay fails; completed prior lines remain, and the
     failing final line may be partial.
+
+    ``ais_perf_model`` gives the engines an AIS perf model and
+    ``router_ais_perf_model`` gives the KV router the one its ``ais`` prefill
+    load model reads. Each takes a file path, inline JSON, one config or a
+    list of configs with one ``worker_type`` each. ``ais_perf_model`` sets
+    ``engine.timing_model`` in the engine args of every role the replay runs:
+    ``prefill`` and ``decode`` when prefill or decode engine args are given,
+    ``aggregated`` otherwise. It creates aggregated engine args when none are
+    given, is an error with engine args that already write
+    ``engine.timing_model``, and does not configure the router. For a
+    disaggregated replay pass both ``prefill_engine_args`` and
+    ``decode_engine_args`` together with ``ais_perf_model``: engine args are
+    not created for a role that has none.
+    ``router_ais_perf_model`` requires ``router_mode="kv_router"`` and a
+    ``router_config`` with ``router_prefill_load_model="ais"``; it reads the
+    ``prefill`` entry of a disaggregated replay and the ``aggregated`` entry
+    otherwise. ``ais_perf_config`` is deprecated: use ``router_ais_perf_model``.
     """
     if isinstance(agentic_lanes, bool) or (
         agentic_lanes is not None and not isinstance(agentic_lanes, int)
@@ -479,6 +614,22 @@ def run_trace_replay(
             raise ValueError("weka_nested_timestamp_basis requires trace_format='weka'")
     execution_model = _normalize_execution_model(trace_format, execution_model)
     trace_files = _normalize_trace_files(trace_files)
+    (
+        ais_perf_config,
+        extra_engine_args,
+        prefill_engine_args,
+        decode_engine_args,
+    ) = _perf_model_inputs(
+        ais_perf_config=ais_perf_config,
+        router_ais_perf_model=router_ais_perf_model,
+        ais_perf_model=ais_perf_model,
+        native_ais_perf_config=_native_ais_perf_config,
+        router_mode=router_mode,
+        router_config=router_config,
+        extra_engine_args=extra_engine_args,
+        prefill_engine_args=prefill_engine_args,
+        decode_engine_args=decode_engine_args,
+    )
     replay_kwargs = {
         "extra_engine_args": extra_engine_args,
         "prefill_engine_args": prefill_engine_args,
@@ -648,6 +799,9 @@ def run_synthetic_trace_replay(
     decode_engine_args=None,
     router_config=None,
     ais_perf_config=None,
+    router_ais_perf_model=None,
+    ais_perf_model=None,
+    _native_ais_perf_config=None,
     num_workers=1,
     num_prefill_workers=1,
     num_decode_workers=1,
@@ -687,7 +841,29 @@ def run_synthetic_trace_replay(
     randomly even at router temperature zero. A fixed arrival seed therefore
     does not guarantee identical routing, prefix reuse, or latency across runs,
     including offline replay.
+
+    ``ais_perf_model``, ``router_ais_perf_model`` and the deprecated
+    ``ais_perf_config`` work as in :func:`run_trace_replay`. For a
+    disaggregated replay pass both ``prefill_engine_args`` and
+    ``decode_engine_args`` together with ``ais_perf_model``: engine args are
+    not created for a role that has none.
     """
+    (
+        ais_perf_config,
+        extra_engine_args,
+        prefill_engine_args,
+        decode_engine_args,
+    ) = _perf_model_inputs(
+        ais_perf_config=ais_perf_config,
+        router_ais_perf_model=router_ais_perf_model,
+        ais_perf_model=ais_perf_model,
+        native_ais_perf_config=_native_ais_perf_config,
+        router_mode=router_mode,
+        router_config=router_config,
+        extra_engine_args=extra_engine_args,
+        prefill_engine_args=prefill_engine_args,
+        decode_engine_args=decode_engine_args,
+    )
     replay_kwargs = {
         "extra_engine_args": extra_engine_args,
         "prefill_engine_args": prefill_engine_args,

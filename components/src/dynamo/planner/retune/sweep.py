@@ -509,6 +509,9 @@ def evaluate_candidate(
     """
 
     kwargs = engine.replay_kwargs(params.router)
+    # The replay takes the pinned config under its internal keyword: the
+    # public one is deprecated and warns.
+    kwargs["_native_ais_perf_config"] = kwargs.pop("ais_perf_config")
     if engine.is_disagg:
         kwargs["num_prefill_workers"] = replicas["prefill"]
         kwargs["num_decode_workers"] = replicas["decode"]

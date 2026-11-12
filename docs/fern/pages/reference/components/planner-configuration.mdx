@@ -117,64 +117,117 @@ When `optimization_target` is `throughput`, `latency`, or `load`, the Planner fo
   Directory holding profiler-generated performance data (npz or JSON), used to bootstrap or tune the performance model when the `get_perf_metrics` endpoint is unavailable.
 </ParamField>
 
-<ParamField path="ais_perf_model" type="AISPerfModelSpec" default="null">
-  Role-indexed AISimulate forward-pass configurations. Constructs each model through
+<ParamField path="ais_perf_model" type="object or list of objects" default="null">
+  AISimulate perf model of the workers the Planner scales. The value is one perf model
+  config, or a list of configs with one `worker_type` each (`prefill`, `decode`, or
+  `aggregated`):
+
+  ```yaml
+  ais_perf_model:
+    - worker_type: prefill
+      model: Qwen/Qwen3-32B
+      system: h200_sxm
+      backend: vllm
+    - worker_type: decode
+      model: Qwen/Qwen3-32B
+      system: h200_sxm
+      backend: vllm
+  ```
+
+  One config without `worker_type` covers every worker type:
+
+  ```yaml
+  ais_perf_model:
+    model: Qwen/Qwen3-32B
+    system: h200_sxm
+    backend: vllm
+  ```
+
+  A config holds AISimulate `ForwardPassPerfModelConfig` keys, or `from` to take them
+  from a template file, a dataset, or a state snapshot. See
+  [Unified perf-model input](https://github.com/ai-dynamo/aisimulate/blob/main/docs/perf-model/configuration.md#unified-perf-model-input)
+  in the AISimulate documentation.
+
+  Write the value in the Planner config. The Planner has no command-line flag and no
+  environment variable for it, and a string is an error:
+  `ais_perf_model must be a perf model config (a mapping) or a list of configs, not a string; a file path is not read here`.
+
+  The Planner keeps the value as written. It checks the names of the keys of a config
+  when the config is loaded, and an unknown key is an error, for example
+  `ais_perf_model: unknown keys: tp_size`. It reads the files a config names and checks
+  the values when it first needs the model; the keys inside a file that `from` names are
+  checked then too. Relative paths start at the
+  working directory of the Planner. Each model is constructed through
   `aisimulate_core.sdk.RustForwardPassPerfModel.best_available(config)` without an
-  interpolation sweep. Configure model identity and estimator controls through
-  `ais_perf_model.roles`, or select local dataset manifests with `dataset_profiles`;
-  the retired `aic_perf_model` and `hf_id` / pick shape
+  interpolation sweep. The retired `aic_perf_model` and `hf_id` / pick shape
   are rejected.
+
+  The `roles` and `dataset_profiles` keys are the deprecated form of the value. They
+  still work, and the Planner prints one warning that names the keys in use, for example
+  `ais_perf_model.roles is deprecated and will be removed in v1.9; use ais_perf_model with one perf model config or a list of configs (one per worker_type).`
+  A deprecated key together with other keys is an error, for example
+  `ais_perf_model mixes the old form (roles, dataset_profiles) with other keys (model); write one form`.
 </ParamField>
 
 <Indent>
-  <ParamField path="roles" type="object" default="{}">
+  <ParamField path="model / system / backend" type="string">
+    Keys of a config. Model identifier, AISimulate system identifier, and inference backend
+    (`vllm`, `sglang`, or `trtllm`). A config without `from` must write all three.
+    Optional `backend_version`, `tp`, `pp`,
+    `attention_dp`, MoE axes, quantization, KV block size, and speculation fields
+    use the upstream schema. Published worker capabilities must agree with the
+    configured identity.
+  </ParamField>
+  <ParamField path="estimation_mode" type="string" default="auto">
+    Key of a config. `auto` searches `op_level`, `fpm_interpolation`, then `fpm_regression`.
+    Explicit modes select the named estimator.
+  </ParamField>
+  <ParamField path="fallback_policy" type="string" default="deny">
+    Key of a config. `deny` rejects failure of an explicitly selected mode. `allow` tries the other modes in
+    `op_level`, `fpm_interpolation`, `fpm_regression` priority order; `regression` permits a regression fallback.
+    Auto selection searches the full priority order even with `deny`.
+  </ParamField>
+  <ParamField path="systems_paths" type="list[string]" default="[]">
+    Key of a config. Ordered performance-data roots. The SDK resolves its packaged root when unset.
+    `database_mode` and `transfer_policy` are also passed through unchanged.
+  </ParamField>
+  <ParamField path="estimator_config" type="object" default="{}">
+    Key of a config. Complete upstream estimator controls, including independent regression and
+    correction sampling, fit settings, feature weights, and correction bounds.
+    Explicit settings override Planner sampling defaults. A legacy total bucket
+    count of 16 maps to `bins_per_axis: [4, 4]`. Unknown fields are rejected by
+    AISimulate. See the [AISimulate core API](https://github.com/ai-dynamo/aisimulate/blob/main/docs/core-api.md).
+  </ParamField>
+  <ParamField path="roles" type="object" default="{}" deprecated={true}>
+    **Deprecated.** Use a list of configs. Removed in v1.9.
+
     Maps deployment roles to complete upstream `ForwardPassPerfModelConfig` objects.
     Supply `prefill` and `decode` for `disagg`, the matching single role for `prefill`
     or `decode`, and `aggregated` for `agg`. Each key must match `worker_type`.
     Each required role must appear in exactly one of `roles` and `dataset_profiles`.
+    A role takes the config keys above.
   </ParamField>
-  <ParamField path="dataset_profiles" type="object" default="{}">
+  <ParamField path="dataset_profiles" type="object" default="{}" deprecated={true}>
+    **Deprecated.** Use `from: {dataset: {root, manifest}}` in a config. Removed in v1.9.
+
     Maps `prefill`, `decode`, or `aggregated` to an execution-profile manifest in a
     local AISimulate dataset. The manifest supplies the complete
     canonical configuration; Planner does not override its model, runtime, or pin.
   </ParamField>
-  <ParamField path="dataset_profiles.&lt;role&gt;.root" type="string">
+  <ParamField path="dataset_profiles.&lt;role&gt;.root" type="string" deprecated={true}>
+    **Deprecated.** Use `from.dataset.root` in a config. Removed in v1.9.
+
     Required absolute path to the dataset snapshot already installed in the container.
     Planner performs no downloads and needs no Hugging Face credentials.
   </ParamField>
-  <ParamField path="dataset_profiles.&lt;role&gt;.manifest" type="string">
+  <ParamField path="dataset_profiles.&lt;role&gt;.manifest" type="string" deprecated={true}>
+    **Deprecated.** Use `from.dataset.manifest` in a config. Removed in v1.9.
+
     Required path relative to `root`, selecting an execution-profile manifest for that
     role. AISimulate validates artifact hashes, the compiled graph, and retained inputs.
     Planner prepares a private temporary directory once per role/source and retains it
     across worker-limit changes. Provide writable temporary storage and bundled or
     existing local model metadata. Restart Planner to adopt changed dataset contents.
-  </ParamField>
-  <ParamField path="roles.&lt;role&gt;.model / system / backend" type="string" required={true}>
-    Model identifier, AISimulate system identifier, and inference backend
-    (`vllm`, `sglang`, or `trtllm`). Optional `backend_version`, `tp`, `pp`,
-    `attention_dp`, MoE axes, quantization, KV block size, and speculation fields
-    use the upstream schema. Published worker capabilities must agree with the
-    configured identity.
-  </ParamField>
-  <ParamField path="roles.&lt;role&gt;.estimation_mode" type="string" default="auto">
-    `auto` searches `op_level`, `fpm_interpolation`, then `fpm_regression`.
-    Explicit modes select the named estimator.
-  </ParamField>
-  <ParamField path="roles.&lt;role&gt;.fallback_policy" type="string" default="deny">
-    `deny` rejects failure of an explicitly selected mode. `allow` tries the other modes in
-    `op_level`, `fpm_interpolation`, `fpm_regression` priority order; `regression` permits a regression fallback.
-    Auto selection searches the full priority order even with `deny`.
-  </ParamField>
-  <ParamField path="roles.&lt;role&gt;.systems_paths" type="list[string]" default="[]">
-    Ordered performance-data roots. The SDK resolves its packaged root when unset.
-    `database_mode` and `transfer_policy` are also passed through unchanged.
-  </ParamField>
-  <ParamField path="roles.&lt;role&gt;.estimator_config" type="object" default="{}">
-    Complete upstream estimator controls, including independent regression and
-    correction sampling, fit settings, feature weights, and correction bounds.
-    Explicit settings override Planner sampling defaults. A legacy total bucket
-    count of 16 maps to `bins_per_axis: [4, 4]`. Unknown fields are rejected by
-    AISimulate. See the [AISimulate core API](https://github.com/ai-dynamo/aisimulate/blob/main/docs/core-api.md).
   </ParamField>
 </Indent>
 
@@ -195,16 +248,18 @@ The following configuration illustrates the paths to supply for a prefill role:
 mode: prefill
 pre_deployment_sweeping_mode: none
 ais_perf_model:
-  dataset_profiles:
-    prefill:
-      root: /opt/aisim-data
-      manifest: metadata/prefill-manifest.json
+  - worker_type: prefill
+    from:
+      dataset:
+        root: /opt/aisim-data
+        manifest: metadata/prefill-manifest.json
 ```
 
-Set the paths to the installed snapshot and its selected manifest. For disaggregated
-serving, supply separate `prefill` and `decode` sources. For `mode: agg`, use an
-`aggregated` source whose profile contains both phase graphs. Canonical prepared configs
-containing `estimator_config.op_level.execution_profile` also work through `roles`.
+Set the paths to the installed snapshot and its selected manifest; `manifest` is relative
+to `root`. For disaggregated serving, supply separate `prefill` and `decode` entries. For
+`mode: agg`, use an `aggregated` entry whose profile contains both phase graphs. Restart
+Planner to adopt changed dataset contents. Canonical prepared configs
+containing `estimator_config.op_level.execution_profile` also work as a config without `from`.
 
 Planner applies its existing workload estimates, including queue scaling,
 prefix-cache discounts, and next-request estimates, before calling AISimulate's
@@ -1071,7 +1126,7 @@ The Planner enforces these cross-field rules at startup and rejects a config tha
 - `global_planner_namespace` is required when `environment` is `global-planner`.
 - Under `optimization_target: load`, prefill modes require `prefill_scale_up_queue_tokens` > `prefill_scale_down_queue_tokens`, and decode modes require `decode_scale_up_kv_rate` > `decode_scale_down_kv_rate`.
 - At least one scaling mode must be enabled. Under any `optimization_target` other than `sla`, the Planner forces load scaling on and throughput scaling off and ignores `ttft_ms` / `itl_ms`. The only exception is retune-only mode: `retune` set with both `enable_load_scaling` and `enable_throughput_scaling` explicitly `false` (see [Retune](#retune-experimental)).
-- When `ais_perf_model` is set, its `roles` must cover the deployment: `prefill` and `decode` for `disagg`, the matching role for `prefill`/`decode`, or `aggregated` for `agg`. Role keys must agree with `worker_type`. Unknown canonical fields and the retired `aic_perf_model` input are rejected.
+- When `ais_perf_model` is set, it must have an entry for every worker type of the mode: `prefill` and `decode` for `disagg`, the matching worker type for `prefill`/`decode`, or `aggregated` for `agg`. One config without `worker_type` covers every worker type. The retired `aic_perf_model` input is rejected. Unknown keys written in the config are rejected when the config is loaded; wrong values, missing files and unknown keys inside a file that `from` names are rejected when the Planner first uses the config (at startup for the deprecated `roles` form).
 - `scheduling.scale_interval_seconds` must evenly divide `load_adjustment_interval_seconds` and, when throughput scaling is enabled, `throughput_adjustment_interval_seconds`.
 - When both scaling modes are enabled, `load_adjustment_interval_seconds` must be shorter than `throughput_adjustment_interval_seconds`.
 - `retune` has its own cross-field rules, listed with its fields in [Retune](#retune-experimental). A live Planner rejects a `retune` with executor `local`; executor `dgdr` adds the [configuration rules](../../kubernetes/auto-deployment/planner-live-retune.md#deployment-rules) of live retune.

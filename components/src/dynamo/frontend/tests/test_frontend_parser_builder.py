@@ -11,6 +11,7 @@ import sys
 import pytest
 
 from dynamo.common.configuration.utils import env_or_default
+from dynamo.frontend import main as frontend_main
 from dynamo.frontend.frontend_args import build_frontend_parser
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
@@ -105,3 +106,58 @@ def test_parses_without_notices_or_local_files(
     assert unknown == ["--ais-perf-config", "/not/a/local/file.yaml"]
     assert not caplog.records
     assert not recwarn
+
+
+def test_env_mode_parser_leaves_new_flags_unknown() -> None:
+    args = [
+        "--ais-perf-model",
+        "/not/a/local/file.yaml",
+        "--router-prefill-load-worker-type",
+        "prefill",
+    ]
+    parser = argparse.ArgumentParser(add_help=False)
+    build_frontend_parser({}, parser)
+
+    namespace, unknown = parser.parse_known_args(args)
+
+    assert unknown == args
+    assert not hasattr(namespace, "ais_perf_model")
+    assert not hasattr(namespace, "router_prefill_load_worker_type")
+
+
+def test_frontend_start_warns_once_for_old_ais_inputs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in os.environ:
+        if name.startswith(("DYN_AIS_", "DYN_AIC_", "DYN_ROUTER_PREFILL_LOAD_")):
+            monkeypatch.delenv(name)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "dynamo.frontend",
+            "--router-mode",
+            "kv",
+            "--router-prefill-load-model",
+            "ais",
+            "--aic-backend",
+            "vllm",
+            "--ais-system",
+            "h200_sxm",
+            "--ais-model-path",
+            "Qwen/Qwen3-0.6B",
+        ],
+    )
+
+    # The frontend reads the config when it parses and again when it starts.
+    with pytest.warns(FutureWarning) as records:
+        config, _, _ = frontend_main.parse_args()
+        kwargs = config.ais_perf_kwargs()
+
+    assert [str(record.message) for record in records] == [
+        "--ais-backend, --ais-system and --ais-model-path are deprecated and will "
+        "be removed in v1.9; use --ais-perf-model."
+    ]
+    assert records[0].filename == frontend_main.__file__
+    assert kwargs["config"]["worker_type"] == "aggregated"
+    assert kwargs["config"]["model"] == "Qwen/Qwen3-0.6B"

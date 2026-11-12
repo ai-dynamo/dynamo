@@ -34,6 +34,11 @@ from pathlib import Path
 
 import yaml
 
+from dynamo.common.ais_perf_model import warn_old_inputs
+from dynamo.planner.config.planner_config import (
+    AIS_PERF_MODEL_NEW_FORM,
+    ais_perf_model_old_form_names,
+)
 from dynamo.profiler.utils.dgdr_v1beta1_types import DynamoGraphDeploymentRequestSpec
 
 from .profile_sla import run_profile
@@ -215,6 +220,12 @@ def main() -> None:
     )
     logging.getLogger().addHandler(log_file_handler)
 
+    planner = dgdr.features.planner if dgdr.features is not None else None
+    old = ais_perf_model_old_form_names(
+        planner.ais_perf_model if planner is not None else None
+    )
+    if old:
+        warn_old_inputs(old, AIS_PERF_MODEL_NEW_FORM, stacklevel=1)
     asyncio.run(run_profile(dgdr, ops))
 
 
