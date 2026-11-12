@@ -23,6 +23,7 @@ use dynamo_kv_router::plugins::hint_policy::HintPolicyFactory;
 use dynamo_kv_router::plugins::request_classifier::{RequestClassifier, RequestClassifierContext};
 #[cfg(test)]
 use dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicy;
+use dynamo_kv_router::plugins::worker_selection::experimental::resident_blocks::RESIDENT_BLOCKS;
 use dynamo_kv_router::plugins::worker_selection::{
     WorkerInfo, WorkerInfoExt, WorkerInputs, WorkerSelectionPolicyFactory,
 };
@@ -160,6 +161,12 @@ impl SelectionPolicySource {
             anyhow::ensure!(
                 !config.enable_session_prefix_index,
                 "enable_session_prefix_index requires the worker-selection policy to declare WorkerInputs::CACHE"
+            );
+            // Resident block counts come from the indexer that CACHE starts. The input is
+            // experimental; this check is the frontend's only use of that namespace.
+            anyhow::ensure!(
+                !prepared.inputs().contains(RESIDENT_BLOCKS),
+                "RESIDENT_BLOCKS requires the worker-selection policy to declare WorkerInputs::CACHE"
             );
         }
         Ok(prepared)
@@ -1339,6 +1346,7 @@ impl KvRouter {
             routing_constraints,
             FindBestMatchAdmission::WithAdmission,
             Default::default(),
+            false,
         )
         .await
     }
@@ -1365,6 +1373,7 @@ impl KvRouter {
         routing_constraints: RoutingConstraints,
         admission: FindBestMatchAdmission,
         accounting_attribution: dynamo_scheduler::host::AccountingAttribution,
+        needs_uncached_prefill: bool,
     ) -> anyhow::Result<AdmittedFindBestMatchOutcome> {
         let start = Instant::now();
         if update_states && context_id.is_none() {
@@ -1395,37 +1404,40 @@ impl KvRouter {
             lookup,
         } = self
             .selection
-            .run_selection(SelectionOperation {
-                accounting_attribution,
-                key: self.selection.partition_key().clone(),
-                prompt: PromptView {
-                    token_ids: Some(tokens),
-                    mm_routing_info: None,
-                    block_mm_infos,
-                    block_hashes: None,
-                    sequence_hashes: None,
-                    isl_tokens: None,
-                    lora_name: lora_name.as_deref(),
-                    cache_namespace: cache_namespace.as_deref(),
-                    is_eagle: Some(self.is_eagle),
+            .run_selection(
+                SelectionOperation {
+                    accounting_attribution,
+                    key: self.selection.partition_key().clone(),
+                    prompt: PromptView {
+                        token_ids: Some(tokens),
+                        mm_routing_info: None,
+                        block_mm_infos,
+                        block_hashes: None,
+                        sequence_hashes: None,
+                        isl_tokens: None,
+                        lora_name: lora_name.as_deref(),
+                        cache_namespace: cache_namespace.as_deref(),
+                        is_eagle: Some(self.is_eagle),
+                    },
+                    router_config_override: router_config_override.cloned(),
+                    expected_output_tokens,
+                    priority_jump,
+                    strict_priority,
+                    policy_class,
+                    session_context,
+                    session: SessionBinding::None,
+                    affinity_target,
+                    pinned_worker,
+                    allowed_worker_ids,
+                    routing_constraints,
+                    admission: core_admission,
+                    track_active_blocks: self.kv_router_config.router_track_active_blocks,
+                    return_routing_hashes: return_routing_hashes || session_index_context.is_some(),
+                    // Hosted selections do not populate the public reservation replay cache.
+                    replay_id: None,
                 },
-                router_config_override: router_config_override.cloned(),
-                expected_output_tokens,
-                priority_jump,
-                strict_priority,
-                policy_class,
-                session_context,
-                session: SessionBinding::None,
-                affinity_target,
-                pinned_worker,
-                allowed_worker_ids,
-                routing_constraints,
-                admission: core_admission,
-                track_active_blocks: self.kv_router_config.router_track_active_blocks,
-                return_routing_hashes: return_routing_hashes || session_index_context.is_some(),
-                // Hosted selections do not populate the public reservation replay cache.
-                replay_id: None,
-            })
+                !needs_uncached_prefill,
+            )
             .await;
         if lookup.is_some_and(|lookup| lookup.shared_cache_error)
             && let Some(m) = metrics::RoutingOverheadMetrics::get()
@@ -2303,6 +2315,22 @@ mod tests {
         }
     }
 
+    struct DeclaredInputsPicker(WorkerInputs);
+
+    impl WorkerPicker for DeclaredInputsPicker {
+        fn required_worker_inputs(&self) -> WorkerInputs {
+            self.0
+        }
+
+        fn pick(
+            &self,
+            _context: &WorkerSelectionContext<'_>,
+            _input: WorkerInputView<'_>,
+        ) -> Result<usize, WorkerSelectionPolicyError> {
+            unreachable!("capability construction test does not select a worker")
+        }
+    }
+
     fn fixed_policy(
         expected_shared_blocks: Option<u32>,
         worker: WorkerWithDpRank,
@@ -2535,6 +2563,20 @@ mod tests {
                 .prepare(&config, WorkerType::Aggregated, "decode", Some("model"))
                 .expect("CACHE allows indexer features even with zero scoring credit");
         }
+    }
+
+    #[tokio::test]
+    async fn resident_blocks_require_declared_cache_input() {
+        let config = KvRouterConfig::default();
+        let error = picker_policy(|| Box::new(DeclaredInputsPicker(RESIDENT_BLOCKS)))
+            .prepare(&config, WorkerType::Aggregated, "decode", Some("model"))
+            .err()
+            .expect("without CACHE there is no indexer to count blocks");
+        assert!(error.to_string().contains("RESIDENT_BLOCKS"));
+        assert!(error.to_string().contains("WorkerInputs::CACHE"));
+        picker_policy(|| Box::new(DeclaredInputsPicker(RESIDENT_BLOCKS | WorkerInputs::CACHE)))
+            .prepare(&config, WorkerType::Aggregated, "decode", Some("model"))
+            .expect("CACHE starts the indexer the counts come from");
     }
 
     #[tokio::test]
@@ -2827,6 +2869,7 @@ mod tests {
                     RoutingConstraints::default(),
                     admission,
                     Default::default(),
+                    false,
                 )
                 .await
                 .unwrap();
@@ -3013,6 +3056,7 @@ mod tests {
                     RoutingConstraints::default(),
                     FindBestMatchAdmission::WithAdmission,
                     Default::default(),
+                    false,
                 )
                 .await
                 .unwrap();
@@ -3161,6 +3205,7 @@ mod tests {
                 RoutingConstraints::default(),
                 FindBestMatchAdmission::WithAdmission,
                 Default::default(),
+                false,
             )
             .await
             .unwrap();

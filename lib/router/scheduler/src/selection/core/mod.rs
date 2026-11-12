@@ -30,7 +30,7 @@ use crate::replication::{
     setup_scoped_replica_sync,
 };
 use crate::resolve::RouterResponsibilities;
-use crate::selector::WorkerSelectionPolicy;
+use crate::selector::{WorkerSelectionPolicy, WorkerSelector};
 use crate::shared_cache::SharedKvCache;
 use crate::tracking_hash::{TrackingHashContext, TrackingHashScope};
 use crate::{
@@ -51,6 +51,7 @@ use dynamo_slot_tracker::{
     ReplicaWorkerPolicy, SequenceRequest, SequenceTrackerOptions, active_request_expiry_duration,
 };
 use dynamo_worker_selection::SharedCacheHits;
+use dynamo_worker_selection::WorkerInputs;
 use dynamo_worker_selection::lora_filter::{LoraWorkerFilter, narrow_allowed_worker_ids_by_lora};
 
 mod hint;
