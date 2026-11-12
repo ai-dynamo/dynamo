@@ -2402,6 +2402,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn model_readiness_waits_for_topology_engine_and_routes() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
