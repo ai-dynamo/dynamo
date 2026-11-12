@@ -8,11 +8,10 @@ use std::{
     time::Duration,
 };
 
-use dynamo_kv_router::{
-    protocols::{TokensWithHashes, WorkerConfigLike, WorkerWithDpRank},
-    scheduling::{AbortCause, KvSchedulerError},
-    selector::{WorkerInputs, WorkerSelector},
-};
+use dynamo_admission::host::AbortCause;
+use dynamo_kv_hashing::routing::TokensWithHashes;
+use dynamo_kv_router::plugins::worker_selection::WorkerInputs;
+use dynamo_router_protocol::worker::WorkerWithDpRank;
 use dynamo_runtime::{
     error::{DynamoError, ErrorType, match_error_chain},
     metrics::frontend_perf::{STAGE_ROUTE, StageGuard},
@@ -25,6 +24,8 @@ use dynamo_runtime::{
     },
     protocols::annotated::Annotated,
 };
+use dynamo_scheduler::host::{KvSchedulerError, WorkerConfigLike};
+use dynamo_worker_selection::host::{HostedSelectionRequest, HostedWorkerPicker};
 use futures::stream::{self, StreamExt};
 use tracing::Instrument;
 
@@ -33,7 +34,6 @@ use crate::{
         KvRouter, metrics::RouterRequestMetrics, request_lease::RequestAttemptRelease,
         to_worker_selection_session_context,
     },
-    lora::{LoadEstimator, LoraFilter},
     preprocessor::PreprocessedRequest,
     protocols::common::{
         FinishReason,
@@ -42,6 +42,7 @@ use crate::{
         preprocessor::owned_abort_error,
         timing::{RequestPhase, RoutingData, WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL},
     },
+    routing_policy::{HostedCandidatePolicy, check_candidate_policy},
     session_affinity::{
         AffinityCoordinator, AffinityTarget, Hold, SessionAffinityMode, affinity_id,
         explicit_target, from_table, invalid_argument, subagent_group_affinity_id,
@@ -49,20 +50,21 @@ use crate::{
 };
 
 mod builder;
-mod builtin;
 mod cancellation;
+mod hosted;
 mod kv;
 mod kv_selection;
 mod occupancy;
 mod request_guard;
 
+pub(crate) use builder::hosted_picker;
 pub use builder::{LlmDispatch, MultimodalCache, RoutingHostBuilder};
-use builtin::BuiltinWorkerSelector;
 use cancellation::{CleanupBudget, DispatchCancellation, StagedKv, await_with_cleanup_policy};
+pub(crate) use hosted::hosted_request;
 use kv_selection::{RoutingRequestParts, SelectionOptions, WorkerSelection};
 use occupancy::HostedOccupancy;
 pub(crate) use request_guard::prompt_private_blocks;
-use request_guard::{KvRequestCleanup, LoraLoadGuard, RequestGuard};
+use request_guard::{KvRequestCleanup, RequestGuard};
 
 const OUTPUT_REPLAY_ID_ANNOTATION_KEY: &str = "output_replay_id";
 const OUTPUT_REPLAY_CONSUMER_RUNTIME_KEY: &str = "output_replay_consumer";
@@ -268,21 +270,9 @@ fn into_monitored_response(
 
 enum RoutingPolicy {
     Kv(Arc<KvRouter>),
-    Builtin(BuiltinWorkerSelector),
+    Hosted(HostedWorkerPicker),
     Direct,
     DeviceAwareWeighted,
-}
-
-struct LoraRouting {
-    filter: Arc<LoraFilter>,
-    load_estimator: Arc<LoadEstimator>,
-    selector: BuiltinWorkerSelector,
-}
-
-struct LoraSelection {
-    target: u64,
-    allowed_fallback: HashSet<u64>,
-    load_guard: LoraLoadGuard,
 }
 
 struct HostedSelection {
@@ -312,7 +302,7 @@ pub struct RoutingHost {
     affinity: Option<AffinityCoordinator>,
     session_affinity_mode: SessionAffinityMode,
     hosted_occupancy: Option<HostedOccupancy>,
-    lora: Option<LoraRouting>,
+    candidate_policy: Option<Arc<dyn HostedCandidatePolicy>>,
     /// Retains the shared client, overload state, and cancellation subtree for this host.
     ///
     /// Required for every mode except KV, where the [`KvRouter`] owns the client.
@@ -405,9 +395,9 @@ impl RoutingHost {
     pub fn required_worker_inputs(&self) -> WorkerInputs {
         match &self.policy {
             RoutingPolicy::Kv(chooser) => chooser.required_worker_inputs(),
-            RoutingPolicy::Builtin(selector) => selector.required_worker_inputs(),
+            RoutingPolicy::Hosted(picker) => picker.inputs(),
             RoutingPolicy::Direct => WorkerInputs::NONE,
-            RoutingPolicy::DeviceAwareWeighted => WorkerInputs::OCCUPANCY,
+            RoutingPolicy::DeviceAwareWeighted => WorkerInputs::ACTIVE_REQUESTS,
         }
     }
 
@@ -433,7 +423,7 @@ impl RoutingHost {
     pub(crate) fn kv_router_if_enabled(&self) -> Option<&Arc<KvRouter>> {
         match &self.policy {
             RoutingPolicy::Kv(chooser) => Some(chooser),
-            RoutingPolicy::Builtin(_)
+            RoutingPolicy::Hosted(_)
             | RoutingPolicy::Direct
             | RoutingPolicy::DeviceAwareWeighted => None,
         }
@@ -441,13 +431,15 @@ impl RoutingHost {
 
     pub(crate) fn peek_next_worker(&self) -> Option<u64> {
         match &self.policy {
-            RoutingPolicy::Builtin(selector) => match &self.hosted_occupancy {
-                Some(occupancy) => occupancy.peek(&self.inner, selector),
+            RoutingPolicy::Hosted(picker) => match &self.hosted_occupancy {
+                Some(occupancy) => occupancy.peek(&self.inner, picker),
                 None => self
                     .inner
                     .with_selectable_worker_ids(|ids| {
-                        selector.peek_worker(
-                            dynamo_kv_router::selector::WorkerSelectionInput::hosted(ids, None),
+                        picker.select(
+                            ids,
+                            None,
+                            &HostedSelectionRequest::new(0).with_preview(true),
                         )
                     })
                     .ok()
@@ -664,7 +656,7 @@ impl RoutingHost {
             && explicit.is_none()
             && matches!(
                 &self.policy,
-                RoutingPolicy::Builtin(_) | RoutingPolicy::DeviceAwareWeighted
+                RoutingPolicy::Hosted(_) | RoutingPolicy::DeviceAwareWeighted
             )
             && operation
                 .target()
@@ -701,7 +693,7 @@ impl RoutingHost {
     {
         match &self.policy {
             RoutingPolicy::Kv(_) => self.select_and_dispatch_kv_prefill(request, prepare).await,
-            RoutingPolicy::Builtin(_)
+            RoutingPolicy::Hosted(_)
             | RoutingPolicy::Direct
             | RoutingPolicy::DeviceAwareWeighted => {
                 let (metadata, stream) = self

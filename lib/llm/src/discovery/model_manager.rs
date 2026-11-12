@@ -9,14 +9,15 @@ use std::{
     },
 };
 
+#[cfg(test)]
+use crate::model_card::LoraInfo;
 use arc_swap::ArcSwap;
 use dashmap::{DashMap, mapref::entry::Entry};
-use dynamo_kv_router::{
-    PrefillLoadEstimator,
-    config::KvRouterConfig,
-    protocols::{KvTransferEnforcement, RoutingConstraints, WorkerId, WorkerWithDpRank},
-    selector::WorkerInputs,
-};
+use dynamo_kv_hints::KvTransferEnforcement;
+use dynamo_kv_router::config::KvRouterConfig;
+use dynamo_kv_router::plugins::worker_selection::WorkerInputs;
+use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
+use dynamo_scheduler::host::{PrefillLoadEstimator, RoutingConstraints};
 use tokio_util::sync::CancellationToken;
 
 use super::worker_monitor::LoadThresholdConfig;
@@ -42,9 +43,12 @@ use crate::{
         DisaggregatedEndpoint, ModelRuntimeConfig, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
         topology_taint,
     },
-    lora::state_tracker::LoraWorkerProjection,
-    lora::{LoraFilter, LoraRoutingTable, LoraStateTracker, load_estimator::LoadEstimator},
-    model_card::{LoraInfo, ModelDeploymentCard},
+    lora::state_tracker::{LoraWorkerObservation, LoraWorkerProjection},
+    lora::{
+        LoadEstimatorSubscription, LoraFilter, LoraRoutingTable, LoraStateTracker,
+        load_estimator::LoadEstimator,
+    },
+    model_card::ModelDeploymentCard,
     model_type::ModelType,
     types::{
         RealtimeBidirectionalEngine,
@@ -55,7 +59,9 @@ use crate::{
             classify::OpenAIClassifyStreamingEngine, completions::OpenAICompletionsStreamingEngine,
             embeddings::OpenAIEmbeddingsStreamingEngine, generate::GenerateStreamingEngine,
             images::OpenAIImagesStreamingEngine, pooling::OpenAIPoolingStreamingEngine,
-            rerank::OpenAIRerankStreamingEngine, videos::OpenAIVideosStreamingEngine,
+            rerank::OpenAIRerankStreamingEngine,
+            transcriptions::OpenAITranscriptionsStreamingEngine,
+            videos::OpenAIVideosStreamingEngine,
         },
     },
     worker_type::WorkerType,
@@ -135,13 +141,6 @@ struct CommittedDiscoveryGroup {
     adapters: HashMap<String, ModelDeploymentCard>,
     representative: ModelDeploymentCard,
     worker_set: Arc<WorkerSet>,
-}
-
-#[derive(Default)]
-struct PendingLoraProjection {
-    base_capacities: Vec<u32>,
-    adapters: HashMap<String, LoraInfo>,
-    is_registration_required: bool,
 }
 
 type EndpointLoraProjection = HashMap<EndpointId, HashMap<WorkerWithDpRank, LoraWorkerProjection>>;
@@ -325,7 +324,7 @@ impl ModelManager {
     }
 
     fn lora_projection_locked(&self) -> EndpointLoraProjection {
-        let mut pending: HashMap<EndpointId, HashMap<WorkerWithDpRank, PendingLoraProjection>> =
+        let mut pending: HashMap<EndpointId, HashMap<WorkerWithDpRank, LoraWorkerObservation>> =
             HashMap::new();
         for group in self.discovery_groups.iter() {
             for (key, card) in &group.cards {
@@ -375,45 +374,10 @@ impl ModelManager {
             .map(|(endpoint_id, workers)| {
                 let workers = workers
                     .into_iter()
-                    .filter_map(|(worker, mut projection)| {
-                        projection.base_capacities.sort_unstable();
-                        projection.base_capacities.dedup();
-                        if projection.base_capacities.len() > 1 {
-                            tracing::warn!(
-                                endpoint = %endpoint_id,
-                                worker_id = worker.worker_id,
-                                capacities = ?projection.base_capacities,
-                                "Base MDCs disagree on LoRA capacity; using the conservative minimum"
-                            );
-                        }
-                        let mut loras = projection.adapters.into_values().collect::<Vec<_>>();
-                        loras.sort_by(|left, right| left.name.cmp(&right.name));
-                        let mut adapter_capacities = loras
-                            .iter()
-                            .filter_map(|lora| lora.max_gpu_lora_count)
-                            .collect::<Vec<_>>();
-                        adapter_capacities.sort_unstable();
-                        adapter_capacities.dedup();
-                        if adapter_capacities.len() > 1 {
-                            tracing::warn!(
-                                endpoint = %endpoint_id,
-                                worker_id = worker.worker_id,
-                                capacities = ?adapter_capacities,
-                                "Adapter MDCs disagree on LoRA capacity; using the conservative minimum"
-                            );
-                        }
-                        let capacity = projection
-                            .base_capacities
-                            .first()
-                            .copied()
-                            .or_else(|| adapter_capacities.first().copied())
-                            .or_else(|| (!loras.is_empty()).then_some(4))
-                            .or_else(|| projection.is_registration_required.then_some(0))?;
-                        Some((worker, LoraWorkerProjection {
-                            capacity,
-                            loras,
-                            is_registration_required: projection.is_registration_required,
-                        }))
+                    .filter_map(|(worker, projection)| {
+                        projection
+                            .into_projection(worker, &endpoint_id)
+                            .map(|projection| (worker, projection))
                     })
                     .collect();
                 (endpoint_id, workers)
@@ -433,18 +397,7 @@ impl ModelManager {
                     endpoint_union.insert(*worker, projection.clone());
                     continue;
                 };
-                existing.capacity = existing.capacity.min(projection.capacity);
-                existing.is_registration_required |= projection.is_registration_required;
-                let mut loras = existing
-                    .loras
-                    .iter()
-                    .chain(&projection.loras)
-                    .map(|lora| (lora.name.clone(), lora.clone()))
-                    .collect::<HashMap<_, _>>()
-                    .into_values()
-                    .collect::<Vec<_>>();
-                loras.sort_by(|left, right| left.name.cmp(&right.name));
-                existing.loras = loras;
+                existing.merge(projection);
             }
         }
         union
@@ -1348,6 +1301,16 @@ impl ModelManager {
             .collect()
     }
 
+    pub fn list_transcriptions_models(&self) -> Vec<String> {
+        self.catalog
+            .load()
+            .models
+            .iter()
+            .filter(|(_, model)| model.has_transcriptions_engine())
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+
     pub fn list_videos_models(&self) -> Vec<String> {
         self.catalog
             .load()
@@ -1415,6 +1378,8 @@ impl ModelManager {
                 || (model_type.contains(ModelType::Embedding) && model.has_embeddings_engine())
                 || (model_type.contains(ModelType::Images) && model.has_images_engine())
                 || (model_type.contains(ModelType::Audios) && model.has_audios_engine())
+                || (model_type.contains(ModelType::Transcriptions)
+                    && model.has_transcriptions_engine())
                 || (model_type.contains(ModelType::Videos) && model.has_videos_engine())
                 || (model_type.contains(ModelType::TensorBased) && model.has_tensor_engine())
                 || (model_type.contains(ModelType::Realtime) && model.has_realtime_engine())
@@ -1556,6 +1521,18 @@ impl ModelManager {
             .get(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
             .get_audios_engine()
+    }
+
+    pub fn get_transcriptions_engine(
+        &self,
+        model: &str,
+    ) -> Result<OpenAITranscriptionsStreamingEngine, ModelManagerError> {
+        self.catalog
+            .load()
+            .models
+            .get(model)
+            .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
+            .get_transcriptions_engine()
     }
 
     pub fn get_realtime_engine(
@@ -1958,6 +1935,30 @@ impl ModelManager {
         Ok(())
     }
 
+    pub fn add_transcriptions_model(
+        &self,
+        model: &str,
+        card_checksum: &str,
+        engine: OpenAITranscriptionsStreamingEngine,
+    ) -> Result<(), ModelManagerError> {
+        let _reservation = self.reservation_lock.lock();
+        self.ensure_name_not_alias(model)?;
+        let model_entry = self.get_or_create_model(model);
+        if model_entry.has_transcriptions_engine() {
+            return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
+        }
+        let namespace = format!("__local_transcriptions_{}", model);
+        let mut ws = WorkerSet::new(
+            namespace.clone(),
+            card_checksum.to_string(),
+            Self::aggregated_local_card(),
+        );
+        ws.transcriptions_engine = Some(engine);
+        model_entry.add_worker_set(namespace, Arc::new(ws));
+        self.publish_catalog_locked();
+        Ok(())
+    }
+
     pub fn add_realtime_model(
         &self,
         model: &str,
@@ -2109,6 +2110,13 @@ impl ModelManager {
 
     pub fn remove_realtime_model(&self, model: &str) -> Result<(), ModelManagerError> {
         let namespace = format!("__local_realtime_{}", model);
+        self.remove_worker_set(model, &namespace)
+            .map(|_| ())
+            .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))
+    }
+
+    pub fn remove_transcriptions_model(&self, model: &str) -> Result<(), ModelManagerError> {
+        let namespace = format!("__local_transcriptions_{}", model);
         self.remove_worker_set(model, &namespace)
             .map(|_| ())
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))
@@ -2428,14 +2436,14 @@ impl ModelManager {
         // A policy that does not consume cache input must not create a shared-cache client or
         // subscribe to its updates.
         let wants_cache = policy.inputs().contains(WorkerInputs::CACHE);
-        let shared_cache: Option<Arc<dyn dynamo_kv_router::SharedKvCache>> = if wants_cache {
+        let shared_cache: Option<Arc<dyn dynamo_scheduler::host::SharedKvCache>> = if wants_cache {
             match kv_router_config
                 .as_ref()
                 .map(|c| c.shared_cache_type)
                 .unwrap_or_default()
             {
-                dynamo_kv_router::SharedCacheType::None => None,
-                dynamo_kv_router::SharedCacheType::Hicache => {
+                dynamo_worker_selection::host::SharedCacheType::None => None,
+                dynamo_worker_selection::host::SharedCacheType::Hicache => {
                     let worker_component_name = &endpoint.id().component;
                     tracing::info!(
                         worker_component = worker_component_name,
@@ -2479,7 +2487,8 @@ impl ModelManager {
             model_name,
             is_eagle,
             shared_cache,
-            self.lora_enabled.then(|| lora_domain.filter.clone()),
+            self.lora_enabled
+                .then(|| crate::lora_routing::LoraKvPolicy::kv(lora_domain.filter.clone())),
             scheduler_load,
             cancellation_token,
         )
@@ -2588,13 +2597,14 @@ impl ModelManager {
             });
         let domain_cancel = cancel_token.child_token();
         *domain.controller_cancel.lock() = Some(domain_cancel.clone());
-        let _handle = crate::lora::LoraController::start_for_endpoint(
+        let _handle = crate::lora::LoraController::start_for_endpoint_with_metrics(
             endpoint_id.clone(),
             config,
             domain.routing_table.clone(),
             domain.state_tracker.clone(),
             domain.load_estimator.clone(),
             domain_cancel,
+            crate::lora::controller_metrics(),
         );
     }
 
@@ -2729,6 +2739,13 @@ impl ModelManager {
         model_entry.load_threshold_config(config)
     }
 
+    /// See [`Model::accepts_load_thresholds`].
+    pub(crate) fn accepts_load_thresholds(&self, model: &str) -> bool {
+        self.models
+            .get(model)
+            .is_some_and(|model| model.accepts_load_thresholds())
+    }
+
     /// Lists all models with worker monitors configured.
     pub fn list_busy_thresholds(&self) -> Vec<(String, LoadThresholdConfig)> {
         let mut result = Vec::new();
@@ -2849,6 +2866,21 @@ impl ModelManager {
         Some(configs.get(&worker_id)?.data_parallel_size)
     }
 
+    pub fn worker_supports_runtime_capability(
+        &self,
+        endpoint_id: &EndpointId,
+        worker_id: WorkerId,
+        capability: &str,
+    ) -> bool {
+        let Some(rx) = self.runtime_configs.get(endpoint_id) else {
+            return false;
+        };
+        let configs = rx.borrow();
+        configs
+            .get(&worker_id)
+            .is_some_and(|config| config.supports_runtime_capability(capability))
+    }
+
     /// Whether any worker on this endpoint advertises a required KV-transfer topology policy.
     pub fn has_kv_transfer_required_routing_policy(&self, endpoint_id: &EndpointId) -> bool {
         let Some(rx) = self.runtime_configs.get(endpoint_id) else {
@@ -2942,7 +2974,8 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
-    use dynamo_kv_router::protocols::{KV_EVENT_SUBJECT, WorkerWithDpRank};
+    use dynamo_kv_events::event::KV_EVENT_SUBJECT;
+    use dynamo_router_protocol::worker::WorkerWithDpRank;
     use dynamo_runtime::{
         DistributedRuntime, Runtime,
         discovery::{Discovery, DiscoverySpec, MockDiscovery, SharedMockRegistry},
@@ -2958,7 +2991,7 @@ mod tests {
     };
     use crate::{
         discovery::{KvEventSource, KvSourceStatus},
-        local_model::runtime_config::ModelRuntimeConfig,
+        local_model::runtime_config::{DISAGG_PREFILL_CANCEL_ANYTIME_V1, ModelRuntimeConfig},
     };
 
     fn make_worker_set(namespace: &str, mdcsum: &str) -> WorkerSet {
@@ -3346,6 +3379,42 @@ mod tests {
     }
 
     #[test]
+    fn runtime_capability_lookup_is_worker_specific_and_fail_closed() {
+        let manager = ModelManager::new();
+        let endpoint_id = EndpointId::from("test.prefill.generate");
+        let missing_endpoint = EndpointId::from("test.missing.generate");
+        let mut enabled = ModelRuntimeConfig::default();
+        enabled.runtime_data.insert(
+            DISAGG_PREFILL_CANCEL_ANYTIME_V1.to_string(),
+            serde_json::Value::Bool(true),
+        );
+        let mut disabled = ModelRuntimeConfig::default();
+        disabled.runtime_data.insert(
+            DISAGG_PREFILL_CANCEL_ANYTIME_V1.to_string(),
+            serde_json::Value::Bool(false),
+        );
+        insert_runtime_configs(
+            &manager,
+            &endpoint_id,
+            HashMap::from([(7, enabled), (8, disabled)]),
+        );
+
+        assert!(manager.worker_supports_runtime_capability(
+            &endpoint_id,
+            7,
+            DISAGG_PREFILL_CANCEL_ANYTIME_V1,
+        ));
+        for (endpoint, worker_id) in [(&endpoint_id, 8), (&endpoint_id, 9), (&missing_endpoint, 7)]
+        {
+            assert!(!manager.worker_supports_runtime_capability(
+                endpoint,
+                worker_id,
+                DISAGG_PREFILL_CANCEL_ANYTIME_V1,
+            ));
+        }
+    }
+
+    #[test]
     fn lora_load_feed_starts_for_aggregated_and_decode_not_prefill() {
         use crate::protocols::common::timing::{WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL};
         // Aggregated and disaggregated-decode deployments both route via WORKER_TYPE_DECODE
@@ -3371,8 +3440,8 @@ mod tests {
 
     #[test]
     fn lora_state_and_load_are_isolated_by_endpoint() {
-        use crate::kv_router::protocols::WorkerWithDpRank;
         use crate::model_card::LoraInfo;
+        use dynamo_router_protocol::worker::WorkerWithDpRank;
 
         let manager = ModelManager::new();
         let endpoint_a = EndpointId::from("test.worker-a.generate");
@@ -4777,6 +4846,22 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_add_get_remove_transcriptions_model_round_trip() {
+        let mm = ModelManager::new();
+        mm.add_transcriptions_model("stt", "0", Arc::new(UncalledEngine))
+            .unwrap();
+        assert!(mm.list_transcriptions_models().contains(&"stt".to_string()));
+        assert!(mm.get_transcriptions_engine("stt").is_ok());
+
+        mm.remove_transcriptions_model("stt").unwrap();
+        assert!(!mm.list_transcriptions_models().contains(&"stt".to_string()));
+        assert!(matches!(
+            mm.remove_transcriptions_model("stt"),
+            Err(ModelManagerError::ModelNotFound(_))
+        ));
+    }
+
     /// Registers one model that occupies `model_type`. Returns false when this test has no
     /// way to occupy that unit, which is the signal the caller turns into a failure.
     fn register_model_occupying(manager: &ModelManager, model_type: ModelType) -> bool {
@@ -4791,6 +4876,8 @@ mod tests {
             manager.add_images_model(name, "ck", Arc::new(UncalledEngine))
         } else if model_type == ModelType::Audios {
             manager.add_audios_model(name, "ck", Arc::new(UncalledEngine))
+        } else if model_type == ModelType::Transcriptions {
+            manager.add_transcriptions_model(name, "ck", Arc::new(UncalledEngine))
         } else if model_type == ModelType::Videos {
             manager.add_videos_model(name, "ck", Arc::new(UncalledEngine))
         } else if model_type == ModelType::TensorBased {

@@ -45,6 +45,7 @@ type SpecTopologyConstraint struct {
 	// TopologyProfile is the name of the ClusterTopology CR that defines the
 	// topology hierarchy for this deployment.
 	// +kubebuilder:validation:MinLength=1
+	// +required
 	TopologyProfile string `json:"topologyProfile"`
 
 	// PackDomain is the default topology domain to pack pods within.
@@ -59,6 +60,7 @@ type SpecTopologyConstraint struct {
 type TopologyConstraint struct {
 	// PackDomain is the topology domain to pack pods within. Must match a
 	// domain defined in the referenced ClusterTopology CR.
+	// +required
 	PackDomain TopologyDomain `json:"packDomain"`
 }
 
@@ -122,6 +124,7 @@ type KvTransferPolicy struct {
 	// Domain is the logical name for the topology level to enforce
 	// (e.g. "zone", "rack"). The router uses this to match workers that
 	// share the same value for the label identified by `labelKey`.
+	// +required
 	Domain TopologyDomain `json:"domain"`
 
 	// Enforcement controls how the selected prefill worker's topology is
