@@ -217,7 +217,9 @@ class GoToPydanticConverter:
                 stripped = line.strip()
                 if stripped == "//":
                     break  # blank comment line — stop collecting
-                if stripped.startswith("//") and "kubebuilder" not in stripped:
+                if stripped.startswith("//") and not stripped.lstrip("/ ").startswith(
+                    "+"
+                ):
                     comment_lines.insert(0, stripped.lstrip("/ ").strip())
                 elif stripped and not stripped.startswith("//"):
                     break
@@ -317,11 +319,12 @@ class GoToPydanticConverter:
                         break
                 elif (
                     stripped.startswith("//")
-                    and "kubebuilder" not in stripped
+                    and not stripped.lstrip("/ ").startswith("+")
                     and "EDIT THIS FILE" not in stripped
                 ):
                     comment_lines.append(stripped.lstrip("/ ").strip())
-                # kubebuilder markers and empty lines: skip, keep scanning
+                # marker comments (+kubebuilder:*, +optional, +required, ...) and
+                # empty lines: skip, keep scanning
 
             # Parse fields
             fields, embedded_types = self._parse_struct_fields(struct_body)
@@ -363,11 +366,7 @@ class GoToPydanticConverter:
                     default_value = kb_match.group(1)
                 elif py_match:
                     default_value = py_match.group(1)
-                elif (
-                    "kubebuilder" not in line
-                    and "+optional" not in line.lower()
-                    and "+python-default" not in line
-                ):
+                elif not re.match(r"//\s*\+", line):
                     comment_lines.append(line.lstrip("/ ").strip())
                 i += 1
                 if i >= len(lines):
