@@ -15,6 +15,7 @@
 
 import logging
 import math
+import re
 import typing
 from dataclasses import dataclass
 from typing import Dict, Optional
@@ -103,6 +104,19 @@ class FrontendMetric(BaseModel):
 class FrontendMetricContainer(BaseModel):
     metric: FrontendMetric
     value: typing.Tuple[float, float]  # [timestamp, value]
+
+
+_RE2_REGEX_METACHARS = re.compile(r"([\\.+*?()|\[\]{}^$])")
+
+
+def _escape_label_regex(value: str) -> str:
+    """Escape a label value for use inside a PromQL ``=~`` regex.
+
+    Only RE2 metacharacters are escaped. ``re.escape`` is not usable here: it
+    also escapes ``-``, which Prometheus's RE2 parser rejects
+    ("unknown escape sequence U+002D '-'").
+    """
+    return _RE2_REGEX_METACHARS.sub(r"\\\1", value)
 
 
 class PrometheusAPIClient:
@@ -538,16 +552,33 @@ class PrometheusAPIClient:
         namespace: Optional[str] = None,
         endpoint_name: Optional[str] = None,
     ) -> str:
+        """Build the label selector for directly scraped engine metric series.
+
+        Sidecar direct scrape (DEP #16468) leaves engine series without
+        ``dynamo_component`` or ``dynamo_endpoint`` labels, so the selector must
+        not require them — doing so matches nothing. ``component_name`` and
+        ``endpoint_name`` are accepted for call-site compatibility but do not
+        appear in the selector.
+
+        Runtime series sanitize the namespace value to underscores while
+        relabeling keeps hyphens, and the value form is still undecided (DEP
+        #16468 open question), so the namespace condition matches both forms.
+        """
         metric_namespace = namespace or self.dynamo_namespace
-        metric_endpoint = endpoint_name or "generate"
-        filters = [
-            f'{prometheus_names.labels.NAMESPACE}="{self._quote_label_value(metric_namespace)}"',
-            f'{prometheus_names.labels.ENDPOINT}="{self._quote_label_value(metric_endpoint)}"',
-        ]
-        if component_name:
-            filters.append(
-                f'{prometheus_names.labels.COMPONENT}="{self._quote_label_value(component_name)}"'
+        namespace_forms = list(
+            dict.fromkeys((metric_namespace, metric_namespace.replace("-", "_")))
+        )
+        if len(namespace_forms) == 1:
+            quoted_ns = self._quote_label_value(namespace_forms[0])
+            namespace_filter = f'{prometheus_names.labels.NAMESPACE}="{quoted_ns}"'
+        else:
+            namespace_pattern = "|".join(
+                _escape_label_regex(form) for form in namespace_forms
             )
+            namespace_filter = (
+                f'{prometheus_names.labels.NAMESPACE}=~"{namespace_pattern}"'
+            )
+        filters = [namespace_filter]
         if model_name:
             filters.append(
                 f'{prometheus_names.labels.MODEL}="{self._quote_label_value(model_name)}"'
