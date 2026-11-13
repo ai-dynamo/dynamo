@@ -99,6 +99,9 @@ func testUpgradeCompatibility(t *testing.T, input string) {
 	after := captureUpgrade(t, env)
 	require.NoError(t, upgradeSafetyError(transition.hashChanged, before, after))
 
+	t.Log("Compare the complete owned graph with the reviewed golden")
+	golden.MatchCapturedManifests(t, after, filepath.Join(filepath.Dir(input), "output.yaml"))
+
 	t.Log("Capture the released takeover state for the next release regeneration")
 	if root := os.Getenv("DYNAMO_UPGRADE_CAPTURE_DIR"); root != "" && !t.Failed() {
 		path := filepath.Join(root, "compatibility", name, "input.yaml")

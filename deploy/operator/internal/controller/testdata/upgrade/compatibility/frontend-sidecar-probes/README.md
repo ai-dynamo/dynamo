@@ -36,7 +36,8 @@ KUBEBUILDER_ASSETS=/absolute/path/to/envtest/binaries \
 
 `TestClusterOperatorUpgrade/frontend-sidecar-probes` seeds the snapshot through the
 shared permissive historical phase, runs production takeover, checks the independent
-safety assertion, and additionally checks the two merged probe fields that
-replacement would drop. Formal release regeneration captures the takeover result and
-publishes it with the compatibility lock. Serving workloads remain blocked; this is a
+safety assertion, compares the complete owned graph with the reviewed `output.yaml`,
+and additionally checks the two merged probe fields that replacement would drop.
+Formal release regeneration captures the takeover result and publishes it, with a
+regenerated `output.yaml`, under the compatibility lock. Serving workloads remain blocked; this is a
 CPU admission/controller/API-server check, not an inference test.
