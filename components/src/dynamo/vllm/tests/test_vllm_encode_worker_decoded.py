@@ -3,8 +3,11 @@
 
 """Unit tests for encode-worker multimodal helpers."""
 
+import asyncio
+import gc
 import importlib.util
 import logging
+import weakref
 from types import SimpleNamespace
 
 import pytest
@@ -118,7 +121,48 @@ async def test_encode_worker_image_cache_capacity_follows_env(
             assert keys[-1] in loader._image_cache
     finally:
         handler.cleanup()
-        await handler.send_complete_checker_task
+        assert not handler._pending_sends
+
+
+async def test_stuck_transfer_does_not_pin_later_transfer_buffers():
+    handler = EncodeWorkerHandler.__new__(EncodeWorkerHandler)
+    handler._pending_sends = set()
+    loop = asyncio.get_running_loop()
+    stuck_future, sent_future = loop.create_future(), loop.create_future()
+    stuck, sent = torch.empty(4), torch.empty(4)
+    stuck_ref, sent_ref = weakref.ref(stuck), weakref.ref(sent)
+    handler._keep_alive_until_sent(stuck_future, stuck)
+    handler._keep_alive_until_sent(sent_future, sent)
+    del stuck, sent
+
+    sent_future.set_result(None)
+    for _ in range(3):
+        await asyncio.sleep(0)
+    gc.collect()
+
+    assert sent_ref() is None
+    assert stuck_ref() is not None
+    pending = list(handler._pending_sends)
+    handler.cleanup()
+    await asyncio.gather(*pending, return_exceptions=True)
+    assert not handler._pending_sends
+
+
+async def test_failed_transfer_is_logged_and_released(caplog):
+    handler = EncodeWorkerHandler.__new__(EncodeWorkerHandler)
+    handler._pending_sends = set()
+    failed = asyncio.get_running_loop().create_future()
+    handler._keep_alive_until_sent(failed, torch.empty(4))
+    (task,) = handler._pending_sends
+
+    failed.set_exception(RuntimeError("nixl write failed"))
+    with caplog.at_level(logging.ERROR, logger=encode_worker_handler.__name__):
+        await asyncio.gather(task, return_exceptions=True)
+        await asyncio.sleep(0)
+
+    assert not handler._pending_sends
+    assert "Embedding transfer failed" in caplog.text
+    assert "nixl write failed" in caplog.text
 
 
 def test_prepare_embedding_transfers_coalesces_uneven_images():
