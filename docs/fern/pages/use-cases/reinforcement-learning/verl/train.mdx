@@ -320,11 +320,13 @@ kubectl delete rayjob verl-grpo -n "$NAMESPACE"
 | Hydra fails with `Key 'router_mode' is not in struct` | Prefix each key under `engine_kwargs.dynamo` with `++`. |
 | The job fails with `RuntimeError: Dynamo frontend response carried no parseable token ids` | The engines returned no token IDs, which verl needs to pair the engines' log-probabilities with tokens. Keep `request_engine_data=true` and `request_completion_token_ids=true`. |
 | The first weight update fails with `ValueError: 'lm_head.weight' was skipped because it is tied to 'model.embed_tokens.weight'` | The model has tied embeddings, and the engines run vLLM 0.29.0 or later. Use the Dynamo 1.5.1 image. |
+| The job fails with `TypeError: AsyncLLM.pause_generation() got an unexpected keyword argument 'wait_for_inflight_requests'` | The engines run vLLM 0.32.0 or later. Use the Dynamo 1.5.1 image. |
 | The driver log ends with `Exception ignored in atexit callback` and `RuntimeError: DataLoader worker (pid ...) is killed by signal: Killed.` | The message comes from shutdown after training. Check `JOB STATUS` on the RayJob. |
 
 ## Current Limitations
 
 - The pages use Dynamo 1.5.1 images, whose vLLM 0.28.0 is the version that the recipe tests. Dynamo 1.6 images ship vLLM 0.31.0. From vLLM 0.29.0 on, the first weight update fails for models with tied embeddings, such as Qwen2.5-0.5B, with the verl commit that the recipe pins. verl fixes this in [verl-project/verl#7973](https://github.com/verl-project/verl/pull/7973), which the pinned commit predates.
+- These pages don't support Dynamo 1.7.0, whose images ship vLLM 0.33.0. Besides the tied-embedding failure, vLLM 0.32.0 removed the `wait_for_inflight_requests` argument from `AsyncLLM.pause_generation`, which the pinned verl and recipe commits still pass when they pause the engines for a weight update. The recipe also counts workers from the frontend's `/health` response without `?instances=true`, which Dynamo 1.7.0 needs to list them, so the job waits until its startup timeout. See the [health endpoint contract](../../../reference/observability/health-checks.mdx). A Dynamo 1.7.0 run with these commits has been reported only with local patches.
 - Dynamo runs inside the Ray job, so no operator restarts a failed engine or frontend. The job fails instead.
 - The Ray head's dashboard and Jobs API on port 8265 accept requests without authentication, and the recipe runs etcd and NATS without authentication in the same Pod. Anyone who can reach the Pod can run code in it. Restrict access to the Ray head, for example with a NetworkPolicy.
 - Each Ray Pod installs the setup Job's wheels when it starts, because the Dynamo image doesn't include Ray or verl.
