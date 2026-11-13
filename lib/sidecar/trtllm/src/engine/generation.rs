@@ -3,8 +3,11 @@
 
 //! Request dispatch, encoder-result release, and cancellation settlement.
 
+use std::sync::Arc;
+
 use dynamo_backend_common::{
-    DynamoError, GenerateContext, LLMEngineOutput, LLMEngineOutputExt, PreprocessedRequest, usage,
+    AsyncEngineContext, DynamoError, GenerateContext, LLMEngineOutput, LLMEngineOutputExt,
+    PreprocessedRequest, usage,
 };
 use dynamo_llm::protocols::common::preprocessor::RELEASE_ENCODER_RESULT;
 use futures::stream::BoxStream;
@@ -17,12 +20,13 @@ use crate::convert::{
 };
 use crate::proto as pb;
 
-struct EncoderProbeCleanup {
+struct EncoderHandoffCleanup {
     client: client::TrtllmClient,
     handoff: Option<pb::EncoderHandoffRef>,
+    context: Option<Arc<dyn AsyncEngineContext>>,
 }
 
-impl EncoderProbeCleanup {
+impl EncoderHandoffCleanup {
     async fn release(&mut self) -> Result<(), DynamoError> {
         if let Some(handoff) = self.handoff.as_ref() {
             self.client.release_encoder_handoff(handoff.clone()).await?;
@@ -32,8 +36,11 @@ impl EncoderProbeCleanup {
     }
 }
 
-impl Drop for EncoderProbeCleanup {
+impl Drop for EncoderHandoffCleanup {
     fn drop(&mut self) {
+        if self.context.as_ref().is_some_and(|ctx| !ctx.is_stopped()) {
+            return;
+        }
         let Some(handoff) = self.handoff.take() else {
             return;
         };
@@ -42,13 +49,13 @@ impl Drop for EncoderProbeCleanup {
             runtime.spawn(
                 async move {
                     if let Err(error) = client.release_encoder_handoff(handoff).await {
-                        tracing::warn!(%error, "Unable to release encoder probe handoff");
+                        tracing::warn!(%error, "Unable to release encoder handoff");
                     }
                 }
                 .in_current_span(),
             );
         } else {
-            tracing::warn!("Runtime stopped before encoder probe handoff release");
+            tracing::warn!("Runtime stopped before encoder handoff release");
         }
     }
 }
@@ -145,7 +152,8 @@ impl TrtllmSidecarEngine {
             ));
         }
         let mut state = ResponseState::new(&request, self.mode);
-        let probe_client = (self.mode.is_encode() && request.is_probe).then(|| client.clone());
+        let encoder_client = self.mode.is_encode().then(|| client.clone());
+        let is_encoder_probe = self.mode.is_encode() && request.is_probe;
         let needs_cancellation_deferral = self.mode.is_decode() && request.prefill_result.is_some();
         let stopped_ctx = ctx.inner_arc();
         // Hoisted: `stopped()` is an async-trait method, so re-creating it per
@@ -183,6 +191,7 @@ impl TrtllmSidecarEngine {
         };
 
         Ok(Box::pin(async_stream::stream! {
+            let mut encoder_cleanup = None;
             let mut is_transfer_settled = false;
             loop {
                 tokio::select! {
@@ -198,17 +207,19 @@ impl TrtllmSidecarEngine {
                     message = stream.message() => {
                         match message {
                             Ok(Some(response)) => {
-                                if let Some(client) = probe_client.as_ref()
+                                if let Some(client) = encoder_client.as_ref()
                                     && let Some(pb::generate_response::Event::EncodeReady(ready)) = response.event.as_ref()
                                     && let Some(handoff) = ready.handoff.as_ref()
                                 {
-                                    // A canary has no downstream consumer. Release before reporting
-                                    // success; Drop retries if the probe disappears during the RPC.
-                                    let mut cleanup = EncoderProbeCleanup {
+                                    encoder_cleanup = Some(EncoderHandoffCleanup {
                                         client: client.clone(),
                                         handoff: Some(handoff.clone()),
-                                    };
-                                    if let Err(error) = cleanup.release().await {
+                                        context: None,
+                                    });
+                                    if is_encoder_probe
+                                        && let Some(cleanup) = encoder_cleanup.as_mut()
+                                        && let Err(error) = cleanup.release().await
+                                    {
                                         yield Err(error);
                                         break;
                                     }
@@ -221,9 +232,14 @@ impl TrtllmSidecarEngine {
                                         break;
                                     }
                                 };
-                                if probe_client.is_some() {
+                                if is_encoder_probe {
                                     output.encoder_result = None;
                                     output.extra_args = None;
+                                }
+                                if let Some(cleanup) = encoder_cleanup.as_mut() {
+                                    // A failed publish stops this context before dropping the stream.
+                                    // Normal completion leaves the handoff available to its consumer.
+                                    cleanup.context = Some(ctx.inner_arc());
                                 }
                                 is_transfer_settled |= !output.token_ids.is_empty();
                                 let terminal = output.finish_reason.is_some();

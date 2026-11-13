@@ -29,6 +29,12 @@ engine processes. In E+P+D, P consumes the encoder reference once and returns th
 session with decode-preparation metadata. D receives that KV session and does not
 replay the encoder reference.
 
+Unused encoder references are released after observed cancellation, detected response
+publication failure, or rejection of a received encoder result. Normal stream completion
+leaves the reference available to its consumer. Delivery has no frontend acknowledgement;
+if a result is accepted by the transport but never reaches the frontend, the producer
+reclaims it through engine-side expiry and collection.
+
 Encoder references are limited to 64 KiB. E+P+D also requires portable decode
 state, limited separately to 2 MiB; the engine rejects a context request if that
 state cannot be produced within the limit. The state grows with the expanded

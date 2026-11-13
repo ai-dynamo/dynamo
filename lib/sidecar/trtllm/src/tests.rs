@@ -45,6 +45,7 @@ struct FakeTrtllm {
     aborts: Arc<Mutex<Vec<String>>>,
     released_encoder_handoffs: Arc<Mutex<Vec<pb::EncoderHandoffRef>>>,
     encoder_release_error: Arc<Mutex<Option<tonic::Code>>>,
+    encode_ready_usage: Arc<AtomicBool>,
     encoder_release_started: Arc<tokio::sync::Notify>,
     encoder_release_resume: Arc<tokio::sync::Notify>,
     encoder_release_completions: Arc<Mutex<Vec<oneshot::Receiver<()>>>>,
@@ -140,7 +141,10 @@ impl pb::inference_server::Inference for FakeTrtllm {
                         opaque_state: vec![1, 2, 3],
                     }),
                 })),
-                ..Default::default()
+                usage: self
+                    .encode_ready_usage
+                    .load(Ordering::SeqCst)
+                    .then_some(pb::Usage::default()),
             })]);
             return Ok(Response::new(Box::pin(stream)));
         }
@@ -1011,6 +1015,90 @@ async fn encoder_rejects_invalid_sampling_before_export() {
     })
     .await
     .expect("encoder validation must finish promptly");
+}
+
+#[tokio::test]
+async fn encoder_cancelled_terminal_releases_unobserved_export() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        for killed in [false, true] {
+            let service = FakeTrtllm::default();
+            *service.encoder_role.lock().await = Some("encode".into());
+            let server = FakeServer::start(service).await;
+            let encoder = engine_in_mode(&server.endpoint, 1, DisaggregationMode::Encode);
+            encoder.start(0).await.unwrap();
+            let mut req = request();
+            add_images(&mut req, ["https://example.com/image.png"]);
+            let context = dynamo_backend_common::testing::mock_context();
+            let mut stream = encoder
+                .generate(req, GenerateContext::new(context.clone(), None))
+                .await
+                .unwrap();
+            let output = stream.next().await.unwrap().unwrap();
+            assert!(output.encoder_result.is_some());
+            // The response publisher signals a failed send through this context.
+            if killed {
+                context.kill();
+            } else {
+                context.stop_generating();
+            }
+            drop(stream);
+            server.service.encoder_release_started.notified().await;
+            assert_eq!(
+                server
+                    .service
+                    .released_encoder_handoffs
+                    .lock()
+                    .await
+                    .as_slice(),
+                [pb::EncoderHandoffRef {
+                    transfer_backend: "trtllm-nixl-encoder-v1".into(),
+                    opaque_state: vec![1, 2, 3],
+                }]
+            );
+            encoder.cleanup().await.unwrap();
+        }
+    })
+    .await
+    .expect("a cancelled encoder terminal must release its unobserved export");
+}
+
+#[tokio::test]
+async fn encoder_invalid_terminal_releases_export() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let service = FakeTrtllm::default();
+        *service.encoder_role.lock().await = Some("encode".into());
+        service.encode_ready_usage.store(true, Ordering::SeqCst);
+        let server = FakeServer::start(service).await;
+        let encoder = engine_in_mode(&server.endpoint, 1, DisaggregationMode::Encode);
+        encoder.start(0).await.unwrap();
+        let mut req = request();
+        add_images(&mut req, ["https://example.com/image.png"]);
+        let mut stream = encoder
+            .generate(
+                req,
+                GenerateContext::new(dynamo_backend_common::testing::mock_context(), None),
+            )
+            .await
+            .unwrap();
+        assert!(
+            stream
+                .next()
+                .await
+                .unwrap()
+                .unwrap_err()
+                .to_string()
+                .contains("must omit generation usage")
+        );
+        drop(stream);
+        server.service.encoder_release_started.notified().await;
+        assert_eq!(
+            server.service.released_encoder_handoffs.lock().await.len(),
+            1
+        );
+        encoder.cleanup().await.unwrap();
+    })
+    .await
+    .expect("an invalid encoder terminal must release its export");
 }
 
 #[tokio::test]
