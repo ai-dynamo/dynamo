@@ -248,7 +248,9 @@ impl<C: ClientCodec> GenerateFormat for SglangFormat<C> {
                         PAYLOAD_KEY.to_owned(),
                         Value::Object(body),
                     )]))))
-                    .annotations(prefill_annotations(prefill_need))
+                    // Hold decode output for prefill's even when unary: a retry after
+                    // a decode failure would lose a late prefill output.
+                    .annotations(prefill_annotations(prefill_need, true))
                     .build()
                     .map_err(|error| ClientError::new(error.to_string()))?;
                 Ok(Bound {
@@ -468,9 +470,7 @@ mod tests {
                     default_request_id: "id",
                 })
                 .unwrap();
-            let mut exchange = bind(&crate::testkit::worker(&Value::Null))
-                .unwrap()
-                .exchange;
+            let mut exchange = bind(&crate::testkit::worker()).unwrap().exchange;
             for chunk in fixture["stream"].as_array().unwrap() {
                 let output = LLMEngineOutput {
                     engine_data: Some(json!({ RESPONSE_KEY: chunk })),

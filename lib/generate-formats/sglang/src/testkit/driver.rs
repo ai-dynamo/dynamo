@@ -113,7 +113,7 @@ fn drive(
     if let Err(error) = validation {
         return Ok(Outcome::Rejected(error.message));
     }
-    let bound = match bind(&super::worker(&scenario.engine_info)) {
+    let bound = match bind(&super::worker_with(&scenario.engine_info)) {
         Ok(bound) => bound,
         Err(error) => return Ok(Outcome::Rejected(error.message)),
     };

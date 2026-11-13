@@ -21,17 +21,15 @@ pub enum PrefillNeed {
     BeforeFirst,
 }
 
-/// The annotations asking the prefill router for prefill's output. Decode
-/// output waits for it when every chunk needs it, unary too: a decode failure
-/// before a late prefill output would lose it, and a retry's prefill computes
-/// prompt-side values over a prompt that now holds output.
-pub fn prefill_annotations(need: PrefillNeed) -> Vec<String> {
+/// Request prefill output before the first streamed chunk or the final output.
+pub fn prefill_annotations(need: PrefillNeed, streaming: bool) -> Vec<String> {
     match need {
         PrefillNeed::None => vec![],
         PrefillNeed::BeforeLast => vec![PREFILL_OUTPUT_ANNOTATION.to_string()],
-        PrefillNeed::BeforeFirst => vec![
+        PrefillNeed::BeforeFirst if streaming => vec![
             PREFILL_OUTPUT_ANNOTATION.to_string(),
             PREFILL_OUTPUT_FIRST_ANNOTATION.to_string(),
         ],
+        PrefillNeed::BeforeFirst => vec![PREFILL_OUTPUT_ANNOTATION.to_string()],
     }
 }

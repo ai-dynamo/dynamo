@@ -288,7 +288,7 @@ impl Harness {
                 default_request_id: "dynamo-request",
             })
             .is_ok_and(|opened| {
-                let worker = super::worker(&scenario.engine_info);
+                let worker = super::worker_with(&scenario.engine_info);
                 opened.validation.is_ok()
                     && (opened.bind)(&worker).is_ok_and(|bound| bound.migration.is_ok())
             })
@@ -464,7 +464,7 @@ impl Harness {
                 if validation.is_err() {
                     return Ok(());
                 }
-                let Ok(bound) = bind(&super::worker(&scenario.engine_info)) else {
+                let Ok(bound) = bind(&super::worker_with(&scenario.engine_info)) else {
                     return Ok(());
                 };
                 let mut request = bound.request;

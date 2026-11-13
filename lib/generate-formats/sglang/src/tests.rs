@@ -47,7 +47,7 @@ fn catalog_format_owns_client_shape_and_reuses_native_exchange() {
             default_request_id: "public",
         })
         .unwrap();
-    let mut bound = (opened.bind)(&crate::testkit::worker(&json!({}))).unwrap();
+    let mut bound = (opened.bind)(&crate::testkit::worker_with(&json!({}))).unwrap();
     assert_eq!(bound.request.token_ids.as_slice(), &[1]);
     assert!(bound.migration.is_ok());
     for (ids, finish) in [
@@ -108,7 +108,7 @@ fn codec_extends_native_field_rules_and_joins_structured_sequences() {
             default_request_id: "public",
         })
         .unwrap();
-    let mut bound = (opened.bind)(&crate::testkit::worker(&serde_json::Value::Null)).unwrap();
+    let mut bound = (opened.bind)(&crate::testkit::worker()).unwrap();
     assert!(
         bound
             .request
