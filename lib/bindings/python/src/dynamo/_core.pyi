@@ -2935,8 +2935,19 @@ class KvStateAgentHost:
 
 class KvStateAttachmentOwner:
     def __init__(
-        self, endpoint: Endpoint, worker_id: int, descriptors: List[Dict[str, Any]]
+        self,
+        endpoint: Endpoint,
+        worker_id: int,
+        descriptors: List[Dict[str, Any]],
+        host_component: Optional[str] = None,
     ) -> None:
+        """
+        Attach a worker's DP ranks to a KV state-agent host.
+
+        Args:
+            host_component: Component of the state-agent host to attach to.
+                None selects the default host component, `kv_state_agent`.
+        """
         ...
 
     async def start(self) -> None:

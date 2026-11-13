@@ -19,8 +19,21 @@ configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
 
+DEFAULT_COMPONENT = "kv_state_agent"
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Dynamo KV state-agent host")
+    parser.add_argument(
+        "--component",
+        default=os.environ.get("DYN_KV_STATE_AGENT_COMPONENT") or DEFAULT_COMPONENT,
+        help=(
+            "Dynamo component this host registers under. Workers attach to the "
+            "host named by their --kv-state-agent-component, so give each host "
+            "in a namespace its own name. [env: DYN_KV_STATE_AGENT_COMPONENT] "
+            f"(default: {DEFAULT_COMPONENT})"
+        ),
+    )
     parser.add_argument("--max-slots", type=int, default=8)
     parser.add_argument(
         "--slots-per-socket",
@@ -61,8 +74,9 @@ async def worker(runtime: DistributedRuntime) -> None:
         raise ValueError("--slots-per-socket must be greater than zero")
 
     namespace = os.environ.get("DYN_NAMESPACE", "dynamo")
+    component = args.component
     host = KvStateAgentHost(
-        runtime.endpoint(f"{namespace}.kv_state_agent.control"),
+        runtime.endpoint(f"{namespace}.{component}.control"),
         args.max_slots,
         args.slots_per_socket,
     )
@@ -72,7 +86,7 @@ async def worker(runtime: DistributedRuntime) -> None:
     try:
         diagnostics = HostDiagnostics(host)
         health_task = asyncio.ensure_future(
-            runtime.endpoint(f"{namespace}.kv_state_agent.health").serve_endpoint(
+            runtime.endpoint(f"{namespace}.{component}.health").serve_endpoint(
                 diagnostics.health,
                 graceful_shutdown=True,
                 metrics_labels=[("service", "kv_state_agent")],
@@ -81,7 +95,12 @@ async def worker(runtime: DistributedRuntime) -> None:
         )
         # PyO3 exposes this as an awaitable Future, not necessarily a coroutine.
         termination_task = asyncio.ensure_future(host.wait_terminated())
-        logger.info("KV state-agent host started with max_slots=%d", args.max_slots)
+        logger.info(
+            "KV state-agent host %s.%s started with max_slots=%d",
+            namespace,
+            component,
+            args.max_slots,
+        )
         done, _ = await asyncio.wait(
             {health_task, termination_task}, return_when=asyncio.FIRST_COMPLETED
         )

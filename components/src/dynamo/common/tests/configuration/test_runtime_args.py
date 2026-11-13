@@ -81,6 +81,22 @@ def test_kv_state_endpoint_supports_cli_and_env(monkeypatch):
     assert "DYN_KV_STATE_ENDPOINT" in help_text
 
 
+def test_kv_state_agent_component_supports_cli_and_env(monkeypatch):
+    monkeypatch.delenv("DYN_KV_STATE_AGENT_COMPONENT", raising=False)
+    default_config, help_text = _parse_runtime_args([])
+    cli_config, _ = _parse_runtime_args(
+        ["--kv-state-agent-component", "kv_state_agent_1"]
+    )
+    monkeypatch.setenv("DYN_KV_STATE_AGENT_COMPONENT", "kv_state_agent_0")
+    env_config, _ = _parse_runtime_args([])
+
+    assert default_config.kv_state_agent_component is None
+    assert cli_config.kv_state_agent_component == "kv_state_agent_1"
+    assert env_config.kv_state_agent_component == "kv_state_agent_0"
+    assert "--kv-state-agent-component" in help_text
+    assert "DYN_KV_STATE_AGENT_COMPONENT" in help_text
+
+
 def test_response_plane_defaults_to_tcp_and_accepts_quic(monkeypatch):
     monkeypatch.delenv("DYN_RESPONSE_PLANE", raising=False)
 

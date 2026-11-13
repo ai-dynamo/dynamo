@@ -35,6 +35,7 @@ def _config(mapping: dict[str, str], host: str = "worker-a.example"):
         component="backend",
         endpoint="generate",
         kv_state_endpoint=None,
+        kv_state_agent_component=None,
         engine_args=SimpleNamespace(
             kv_transfer_config=SimpleNamespace(
                 kv_connector_extra_config={
@@ -169,9 +170,12 @@ async def test_attachment_owner_preserves_global_rank_and_resolved_endpoint(
     captured = {}
 
     class FakeOwner:
-        def __init__(self, endpoint, worker_id, descriptors):
+        def __init__(self, endpoint, worker_id, descriptors, host_component=None):
             captured.update(
-                endpoint=endpoint, worker_id=worker_id, descriptors=descriptors
+                endpoint=endpoint,
+                worker_id=worker_id,
+                descriptors=descriptors,
+                host_component=host_component,
             )
 
         async def start(self):
@@ -188,6 +192,7 @@ async def test_attachment_owner_preserves_global_rank_and_resolved_endpoint(
         }
     )
     config.disaggregation_mode = state_agent.DisaggregationMode.PREFILL
+    config.kv_state_agent_component = "kv_state_agent_1"
     config.engine_args.kv_transfer_config.kv_connector_extra_config[
         "secondary_tiers"
     ] = [
@@ -210,6 +215,7 @@ async def test_attachment_owner_preserves_global_rank_and_resolved_endpoint(
 
     assert owner is not None
     assert captured["worker_id"] == 17
+    assert captured["host_component"] == "kv_state_agent_1"
     assert [item["kv_block_size"] for item in captured["descriptors"]] == [32] * 4
     assert vllm_config.cache_config.block_size == 16
     assert [item["global_dp_rank"] for item in captured["descriptors"]] == [4, 5, 6, 7]
@@ -253,8 +259,9 @@ async def test_attachment_owner_publishes_the_worker_island(monkeypatch):
     captured = {}
 
     class FakeOwner:
-        def __init__(self, endpoint, worker_id, descriptors):
+        def __init__(self, endpoint, worker_id, descriptors, host_component):
             captured["descriptors"] = descriptors
+            captured["host_component"] = host_component
 
         async def start(self):
             pass
@@ -283,6 +290,8 @@ async def test_attachment_owner_publishes_the_worker_island(monkeypatch):
         item["router_hint_source"]["topology_domains"]
         for item in captured["descriptors"]
     ] == [{"rdma-island": "island-1"}]
+    # A worker that names no host component leaves the choice to the default.
+    assert captured["host_component"] is None
 
 
 @pytest.mark.asyncio

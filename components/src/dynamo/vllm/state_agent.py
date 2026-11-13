@@ -214,6 +214,7 @@ async def start_attachment_owner(
         generate_endpoint,
         generate_endpoint.connection_id(),
         descriptors,
+        host_component=config.kv_state_agent_component,
     )
     await attachment_owner.start()
     return attachment_owner

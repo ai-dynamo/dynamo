@@ -15,8 +15,8 @@ KVCR-capable Dynamo vLLM runtime image for every process.
   resource shares described below.
 - The Dynamo Kubernetes Platform and `nvidia.com/v1beta1` DGD API.
 - The Dynamo operator's Grove workload provider and the Grove PodCliqueSet
-  API. The example uses the stable PodClique replica index to place one state
-  agent for the two engines.
+  API. The example uses the stable PodClique replica index to name each
+  worker's state agent and cache slot.
 - An operator-configured etcd endpoint for the process-local variant.
 - An `hf-token-secret` in the target namespace.
 - A runtime image containing mutually compatible Dynamo, vLLM, KVCR, NIXL,
@@ -94,24 +94,29 @@ example. The slot identifies a logical DP slot in the cache pool, not a Pod or
 process. Its assignment must remain unchanged when an engine is restarted or
 replaced and must be unique among DP ranks sharing the pool. The startup command
 validates the slot against `KVCR_CACHE_SLOT_COUNT` before constructing the
-cache-owner ID, so a replacement Pod reclaims the same state-agent slot.
+cache-owner ID, so a restarted or replaced engine keeps the same cache owner.
 
 ## Understand the process lifecycle
 
+Each worker Pod runs its own state agent. The agent registers under the
+component `kv_state_agent_<replica index>` (`--component`), and the engine in
+the same Pod attaches to it by that name (`--kv-state-agent-component`). A
+worker that names no component looks for the single host registered as
+`kv_state_agent` in its Dynamo namespace.
+
 In `agg.yaml`, the state agent and `dynamo.vllm` run under one supervisor in
-worker 0's `main` container. Both workers use etcd discovery because Kubernetes
-container discovery permits one metadata writer per actual container. If the
-state agent or its local vLLM process exits, the supervisor terminates worker
-0's container and Kubernetes restarts both processes. The operator supplies
-the standard HTTP probes for the `main` container. Worker 1 runs only vLLM.
-KVCR uses process-local host memory, so this variant does not preserve its KV
-pool across a restart. Because live state-agent host reselection is not yet
-supported, restart both workers to restore state tracking after worker 0
-restarts.
+each worker's `main` container. Both workers use etcd discovery because
+Kubernetes container discovery permits one metadata writer per actual
+container. If the state agent or its vLLM process exits, the supervisor
+terminates that worker's container and Kubernetes restarts both processes. The
+operator supplies the standard HTTP probes for the `main` container. KVCR uses
+process-local host memory, so this variant does not preserve its KV pool across
+a restart. The state agent restarts with its engine, so the router does not
+keep that worker's inventory from before the restart.
 
 In `agg-memory-service.yaml`, `dynamo.vllm` runs in `main`. A regular
 `kvcr-services` sidecar runs the KVCR memory service (`kvcr.service.server`)
-and, on worker 0 only, the state agent. Both containers mount `/run/kvcr` for
+and that worker's state agent. Both containers mount `/run/kvcr` for
 the Unix socket. Only the sidecar mounts the memory-backed `/dev/shm/kvcr`
 volume. Guard passes the pool and control-listener file descriptors over the
 socket using `SCM_RIGHTS`; the engine maps the same backing pages without
@@ -120,12 +125,12 @@ init container is needed in the engine. Both containers must use the same UID
 to access the service socket. A vLLM container restart leaves the service,
 Guard, and pool running.
 
-Both engines report residency to worker 0's state agent. Each Guard can serve
+Each engine reports residency to the state agent in its own Pod. Each Guard can serve
 its preserved pool after its engine exits. The FD handoff
 does not let a replacement service adopt a live engine's pool; the coupled
 failure policy below still applies.
 
-`services.sh` starts KVCR and, on worker 0, the state agent. It uses Dynamo's
+`services.sh` starts KVCR and the state agent. It uses Dynamo's
 `wait_any_exit` and process-group cleanup helpers: any child exit ends the
 wrapper and terminates/reaps its companion; SIGTERM does the same. Kubernetes'
 Pod termination grace period (default: 30 seconds) is the final bound for stuck
@@ -160,7 +165,7 @@ KVCR_MEMORY_SERVICE_ENABLED=true KVCR_POOL_SIZE_GIB=1024 \
 ```
 
 The sidecar's HTTP readiness probe checks that the Unix accept
-loop and Guard actor loops progress, plus worker 0's state-agent `/live` endpoint.
+loop and Guard actor loops progress, plus its state agent's `/live` endpoint.
 It does not require an attached engine or mutate a pool. No liveness/startup
 restart probe is set on the sidecar: a failed probe must not restart it beneath
 a live engine. Readiness does not itself fence engines or remove Dynamo routing
@@ -172,13 +177,12 @@ Kubernetes currently restarts a failed `kvcr-services` container independently.
 In this MVP, any such restart invalidates the Guard-recovery guarantee and is
 deployment-fatal: a replacement service cannot adopt the original Guard and
 pool while vLLM remains alive. An external deployment controller must replace
-the entire affected worker Pod instead of restarting only the sidecar. If
-worker 0's sidecar restarts, recreate the worker group or DGD because its state
-agent's routing state was also lost. State-agent loss alone does not destroy KV
-payloads, but current engines bind a discovered agent instance and do not
-automatically reselect its replacement. Group recreation is the conservative
-way to restore those bindings. This example requires an external controller to
-coordinate Pod or worker-group replacement.
+the entire affected worker Pod instead of restarting only the sidecar. A
+sidecar restart also restarts that Pod's state agent and loses its routing
+state. State-agent loss alone does not destroy KV payloads, but current engines
+bind a discovered agent instance and do not automatically reselect its
+replacement. Replacing the affected worker Pod restores that binding. This
+example requires an external controller to coordinate that Pod replacement.
 
 The state agent carries routing and residency information; it does not move
 KV payloads. KVCR uses NIXL and UCX for the remote payload transfer.

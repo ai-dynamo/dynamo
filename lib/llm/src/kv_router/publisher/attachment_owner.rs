@@ -38,7 +38,8 @@ use crate::discovery::kv_state_agent::{
     KvStateHostAdvertisement, KvStateIngressProtocol,
 };
 
-const HOST_COMPONENT: &str = "kv_state_agent";
+/// Host component a worker searches when it names none.
+const DEFAULT_HOST_COMPONENT: &str = "kv_state_agent";
 const DEFAULT_HOST_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(30);
 const JSON_SAFE_MASK: u64 = (1u64 << 53) - 1;
 
@@ -68,14 +69,20 @@ pub struct KvStateAttachmentOwner {
 }
 
 impl KvStateAttachmentOwner {
+    /// Attach this worker's ranks to the state-agent host registered under
+    /// `host_component` in the worker's namespace. `None` selects the default
+    /// component; name one to run several hosts in a namespace, each serving
+    /// the workers that name it.
     pub async fn start(
         endpoint: Endpoint,
         worker_id: WorkerId,
         descriptors: Vec<KvStateAttachmentDescriptor>,
+        host_component: Option<String>,
     ) -> Result<Arc<Self>> {
         validate_descriptors(&descriptors)?;
+        let host_component = resolve_host_component(host_component)?;
         let component = endpoint.component().clone();
-        let host = discover_single_host(&component).await?;
+        let host = discover_single_host(&component, &host_component).await?;
         let producer_instance = producer_instance(&endpoint).await?;
 
         let intents = materialize_intents(&host, &producer_instance, worker_id, descriptors)?;
@@ -186,9 +193,22 @@ fn validate_descriptors(descriptors: &[KvStateAttachmentDescriptor]) -> Result<(
     Ok(())
 }
 
-/// Resolve the single live V2 state-agent host for this component's namespace.
+/// The host component a worker searches: the one it names, or the default.
+fn resolve_host_component(host_component: Option<String>) -> Result<String> {
+    match host_component {
+        None => Ok(DEFAULT_HOST_COMPONENT.to_string()),
+        Some(name) if name.trim().is_empty() => {
+            anyhow::bail!("KV state-agent host component must not be empty")
+        }
+        Some(name) => Ok(name),
+    }
+}
+
+/// Resolve the single live V2 state-agent host registered under
+/// `host_component` in this component's namespace.
 async fn discover_single_host(
     component: &dynamo_runtime::component::Component,
+    host_component: &str,
 ) -> Result<KvStateHostAdvertisement> {
     let namespace = component.namespace().name();
     let discovery = component.drt().discovery();
@@ -196,6 +216,7 @@ async fn discover_single_host(
     await_single_host(
         discovery.as_ref(),
         &namespace,
+        host_component,
         host_discovery_timeout(|key| std::env::var_os(key)),
         &shutdown,
     )
@@ -221,7 +242,8 @@ fn host_discovery_timeout(mut get_env: impl FnMut(&str) -> Option<OsString>) -> 
     }
 }
 
-/// Wait up to `timeout` for exactly one live V2 state-agent host.
+/// Wait up to `timeout` for exactly one live V2 state-agent host under
+/// `namespace/host_component`.
 ///
 /// The `list` snapshot stays authoritative: two or more hosts fail closed
 /// immediately (misconfiguration, not a race), and the watch stream is only a
@@ -232,17 +254,20 @@ fn host_discovery_timeout(mut get_env: impl FnMut(&str) -> Option<OsString>) -> 
 async fn await_single_host(
     discovery: &dyn Discovery,
     namespace: &str,
+    host_component: &str,
     timeout: Duration,
     shutdown: &CancellationToken,
 ) -> Result<KvStateHostAdvertisement> {
-    // NOTE: V2 assumes one host per control scope that remains alive for the
-    // deployment run. This wait covers only start ordering: source mode is
-    // immutable for a worker lifecycle, so a worker that races the host's
-    // advertisement would otherwise serve without KV routing until it
-    // restarts. TODO(#13044): watch and reselect the host after startup when
-    // rolling host replacement and Kubernetes lifecycle are supported.
+    // NOTE: V2 assumes one host per control scope (a namespace and host
+    // component) that remains alive for the deployment run. Hosts under other
+    // components in the namespace serve other workers and are not candidates.
+    // This wait covers only start ordering: source mode is immutable for a
+    // worker lifecycle, so a worker that races the host's advertisement would
+    // otherwise serve without KV routing until it restarts. TODO(#13044):
+    // watch and reselect the host after startup when rolling host replacement
+    // and Kubernetes lifecycle are supported.
     if timeout.is_zero() {
-        return match list_single_host(discovery, namespace).await? {
+        return match list_single_host(discovery, namespace, host_component).await? {
             Some(host) => Ok(host),
             None => Err(exactly_one_host_error(0)),
         };
@@ -255,21 +280,25 @@ async fn await_single_host(
     // outlives the wait for the rest of the process.
     let _watch_guard = watch_cancel.clone().drop_guard();
     let wait = async {
-        if let Some(host) = list_single_host(discovery, namespace).await? {
+        if let Some(host) = list_single_host(discovery, namespace, host_component).await? {
             return Ok(host);
         }
         tracing::info!(
             namespace,
+            host_component,
             timeout_secs = timeout.as_secs(),
             "KV state-agent host is not advertised yet; waiting"
         );
         let mut events = discovery
-            .list_and_watch(host_query(namespace), Some(watch_cancel.clone()))
+            .list_and_watch(
+                host_query(namespace, host_component),
+                Some(watch_cancel.clone()),
+            )
             .await
             .context("failed to watch for the KV state-agent host")?;
         while let Some(event) = events.next().await {
             event.context("KV state-agent host discovery watch failed")?;
-            if let Some(host) = list_single_host(discovery, namespace).await? {
+            if let Some(host) = list_single_host(discovery, namespace, host_component).await? {
                 return Ok(host);
             }
         }
@@ -284,7 +313,7 @@ async fn await_single_host(
             Ok(result) => result,
             Err(_elapsed) => anyhow::bail!(
                 "no live V2 KV state-agent host appeared within {}s \
-                 (topic {KV_STATE_HOST_TOPIC_V2} on {namespace}/{HOST_COMPONENT}; \
+                 (topic {KV_STATE_HOST_TOPIC_V2} on {namespace}/{host_component}; \
                  set {HOST_DISCOVERY_TIMEOUT_ENV} to adjust the startup wait)",
                 timeout.as_secs()
             ),
@@ -306,10 +335,10 @@ fn exactly_one_host_error(found: usize) -> anyhow::Error {
 }
 
 /// The one discovery query the snapshot and the watch must share.
-fn host_query(namespace: &str) -> DiscoveryQuery {
+fn host_query(namespace: &str, host_component: &str) -> DiscoveryQuery {
     DiscoveryQuery::EventSources(EventSourceQuery::topic(
         namespace,
-        HOST_COMPONENT,
+        host_component,
         KV_STATE_HOST_TOPIC_V2,
     ))
 }
@@ -318,9 +347,10 @@ fn host_query(namespace: &str) -> DiscoveryQuery {
 async fn list_single_host(
     discovery: &dyn Discovery,
     namespace: &str,
+    host_component: &str,
 ) -> Result<Option<KvStateHostAdvertisement>> {
     let instances = discovery
-        .list(host_query(namespace))
+        .list(host_query(namespace, host_component))
         .await
         .context("failed to discover KV state-agent host")?;
     let mut hosts = Vec::new();
@@ -612,7 +642,11 @@ mod tests {
     }
 
     fn host() -> KvStateHostAdvertisement {
-        let host = instance("kv_state_agent", 1);
+        host_under(DEFAULT_HOST_COMPONENT, 1)
+    }
+
+    fn host_under(component: &str, instance_id: u64) -> KvStateHostAdvertisement {
+        let host = instance(component, instance_id);
         KvStateHostAdvertisement {
             protocol_version: KvStateProtocolVersion::V2,
             host_instance: host.clone(),
@@ -647,7 +681,7 @@ mod tests {
     fn intent_query() -> DiscoveryQuery {
         DiscoveryQuery::EventSources(EventSourceQuery::topic(
             "ns",
-            "kv_state_agent",
+            DEFAULT_HOST_COMPONENT,
             KV_STATE_ATTACHMENT_INTENT_TOPIC_V2,
         ))
     }
@@ -730,7 +764,8 @@ mod tests {
         Arc::new(MockDiscovery::new(Some(1), SharedMockRegistry::new()))
     }
 
-    /// Advertise a host on the V2 topic the way `state_agent_host` would.
+    /// Advertise a host on the V2 topic the way `state_agent_host` would:
+    /// under the component its control endpoint lives in.
     async fn register_host(
         discovery: &dyn Discovery,
         publisher_id: u64,
@@ -739,8 +774,8 @@ mod tests {
         discovery
             .register(DiscoverySpec::EventSource {
                 scope: EventScope::Component {
-                    namespace: "ns".to_string(),
-                    component: HOST_COMPONENT.to_string(),
+                    namespace: advertisement.host_instance.namespace.clone(),
+                    component: advertisement.host_instance.component.clone(),
                 },
                 topic: KV_STATE_HOST_TOPIC_V2.to_string(),
                 publisher_id,
@@ -777,6 +812,7 @@ mod tests {
         let found = await_single_host(
             discovery.as_ref(),
             "ns",
+            DEFAULT_HOST_COMPONENT,
             Duration::ZERO,
             &CancellationToken::new(),
         )
@@ -801,6 +837,7 @@ mod tests {
             await_single_host(
                 discovery.as_ref(),
                 "ns",
+                DEFAULT_HOST_COMPONENT,
                 Duration::from_secs(30),
                 &CancellationToken::new(),
             ),
@@ -831,7 +868,13 @@ mod tests {
         let started = tokio::time::Instant::now();
         let error = tokio::time::timeout(
             Duration::from_secs(10),
-            await_single_host(discovery.as_ref(), "ns", Duration::from_secs(30), &shutdown),
+            await_single_host(
+                discovery.as_ref(),
+                "ns",
+                DEFAULT_HOST_COMPONENT,
+                Duration::from_secs(30),
+                &shutdown,
+            ),
         )
         .await
         .expect("cancellation must resolve the wait")
@@ -846,6 +889,7 @@ mod tests {
         let error = await_single_host(
             discovery.as_ref(),
             "ns",
+            "kv_state_agent_7",
             Duration::from_millis(200),
             &CancellationToken::new(),
         )
@@ -857,6 +901,8 @@ mod tests {
             "{message}"
         );
         assert!(message.contains(HOST_DISCOVERY_TIMEOUT_ENV), "{message}");
+        // The searched scope is what a misnamed component needs to show.
+        assert!(message.contains("ns/kv_state_agent_7"), "{message}");
     }
 
     #[tokio::test]
@@ -865,6 +911,7 @@ mod tests {
         let error = await_single_host(
             discovery.as_ref(),
             "ns",
+            DEFAULT_HOST_COMPONENT,
             Duration::ZERO,
             &CancellationToken::new(),
         )
@@ -878,13 +925,7 @@ mod tests {
     async fn two_advertised_hosts_fail_closed_before_the_deadline() {
         let discovery = mock_discovery();
         register_host(discovery.as_ref(), 41, &host()).await;
-        let second_instance = instance("kv_state_agent", 2);
-        let second = KvStateHostAdvertisement {
-            protocol_version: KvStateProtocolVersion::V2,
-            host_instance: second_instance.clone(),
-            control_target: second_instance,
-            max_slots: 8,
-        };
+        let second = host_under(DEFAULT_HOST_COMPONENT, 2);
         // Distinct publisher ids: a same-id re-register resolves to the
         // existing instance and would silently collapse this into one host.
         register_host(discovery.as_ref(), 42, &second).await;
@@ -892,6 +933,7 @@ mod tests {
         let error = await_single_host(
             discovery.as_ref(),
             "ns",
+            DEFAULT_HOST_COMPONENT,
             Duration::from_secs(30),
             &CancellationToken::new(),
         )
@@ -899,5 +941,57 @@ mod tests {
         .unwrap_err();
         assert!(started.elapsed() < Duration::from_secs(5));
         assert!(format!("{error:#}").contains("exactly one live V2 host, found 2"));
+    }
+
+    /// Hosts under different components coexist in one namespace: a worker
+    /// sees only the host under the component it names.
+    #[tokio::test]
+    async fn hosts_under_distinct_components_are_selected_independently() {
+        let discovery = mock_discovery();
+        let first = host_under("kv_state_agent_0", 1);
+        let second = host_under("kv_state_agent_1", 2);
+        register_host(discovery.as_ref(), 41, &first).await;
+        register_host(discovery.as_ref(), 42, &second).await;
+
+        for expected in [&first, &second] {
+            let found = await_single_host(
+                discovery.as_ref(),
+                "ns",
+                &expected.host_instance.component,
+                Duration::ZERO,
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(found.host_instance, expected.host_instance);
+        }
+
+        // Neither is a candidate for a worker that names no component.
+        let error = await_single_host(
+            discovery.as_ref(),
+            "ns",
+            DEFAULT_HOST_COMPONENT,
+            Duration::ZERO,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("exactly one live V2 host, found 0"));
+    }
+
+    #[test]
+    fn host_component_defaults_and_rejects_an_empty_name() {
+        assert_eq!(
+            resolve_host_component(None).unwrap(),
+            DEFAULT_HOST_COMPONENT
+        );
+        assert_eq!(
+            resolve_host_component(Some("kv_state_agent_3".to_string())).unwrap(),
+            "kv_state_agent_3"
+        );
+        for empty in ["", "  "] {
+            let error = resolve_host_component(Some(empty.to_string())).unwrap_err();
+            assert!(format!("{error:#}").contains("must not be empty"));
+        }
     }
 }
