@@ -33,6 +33,7 @@ from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser
 from vllm.tool_parsers.utils import get_json_schema_from_tools
 from vllm.utils.async_utils import make_async
+from xgrammar import StructuralTag
 
 from dynamo.common.utils.guided_json import admits_only_empty_object
 from dynamo.llm.exceptions import InvalidArgument
@@ -47,12 +48,18 @@ from .thinking import apply_default_thinking_mode_to_template_kwargs
 from .utils import legacy_guided_decoding
 
 get_model_structural_tag: Any
+limit_to_single_tool_call: Any
 try:
     from vllm.tool_parsers import structural_tag_registry
 except ImportError:  # Older supported vLLM releases do not expose this registry.
     get_model_structural_tag = None
+    limit_to_single_tool_call = None
 else:
     get_model_structural_tag = structural_tag_registry.get_model_structural_tag
+    # Older registries and parser hooks do not expose the typed limiter.
+    limit_to_single_tool_call = getattr(
+        structural_tag_registry, "limit_to_single_tool_call", None
+    )
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
@@ -273,6 +280,27 @@ def _request_for_vllm_structural_tag(
     return request.model_copy(update={"tools": tools})
 
 
+def _limit_structural_tag_to_single_call(tag: dict[str, Any]) -> None:
+    """Limit serialized tags from older vLLM hooks without the typed helper.
+
+    Only format children are visited, so argument schemas are left unchanged.
+    These three list formats repeat tool calls in vLLM's registered tags.
+    """
+    if tag.get("type") in (
+        "triggered_tags",
+        "token_triggered_tags",
+        "tags_with_separator",
+    ):
+        tag["stop_after_first"] = True
+    for key in ("format", "content"):
+        child = tag.get(key)
+        if isinstance(child, dict):
+            _limit_structural_tag_to_single_call(child)
+    for key in ("elements", "tags"):
+        for child in tag.get(key, []):
+            _limit_structural_tag_to_single_call(child)
+
+
 def build_tool_call_guided_decoding(
     request: ChatCompletionRequest,
     tool_parser: ToolParser | None,
@@ -340,11 +368,19 @@ def build_tool_call_guided_decoding(
             # or unconstrained compatibility path for the request.
             structural_tag = None
         if structural_tag is not None:
+            single_call = request.parallel_tool_calls is False
+            use_typed_limiter = limit_to_single_tool_call is not None and isinstance(
+                structural_tag, StructuralTag
+            )
+            if single_call and use_typed_limiter:
+                limit_to_single_tool_call(structural_tag)
             tag_value = (
                 structural_tag.model_dump()
                 if hasattr(structural_tag, "model_dump")
                 else structural_tag
             )
+            if single_call and not use_typed_limiter:
+                _limit_structural_tag_to_single_call(tag_value)
             return {"structural_tag": tag_value}
 
     if parser_guided_decoding is not None:
