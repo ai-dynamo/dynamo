@@ -154,7 +154,7 @@ timing from `engine.workers.<role>.timing`. The timing model predicts prefill an
 The Mocker engine still owns batching, KV-cache state, prefix reuse, preemption, and request
 progression.
 
-AIConfigurator compatibility APIs from the `aisimulate` wheel are used in two distinct places:
+AIConfigurator compatibility APIs from the `aisim` wheel are used in two distinct places:
 
 - `engine.workers.<role>.timing.type: default` configures the Mocker forward-pass timing model
 - `router.prefill_load_model.type: aic` configures router-side prompt-load estimation

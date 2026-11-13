@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from aisimulate.config.common import Choices, IntegerRange, NumericRange
+from aisim.config.common import Choices, IntegerRange, NumericRange
 from pydantic import BaseModel, Discriminator, Tag
 
 SCALAR = Tag("scalar")

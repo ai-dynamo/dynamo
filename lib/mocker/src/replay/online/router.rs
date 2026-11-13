@@ -680,18 +680,18 @@ mod tests {
         for mode in [ReplayRouterMode::RoundRobin, ReplayRouterMode::KvRouter] {
             let router = ReplayRouter::new(mode, &MockerConfig::default(), None, None, 1).unwrap();
             let mut request = priority_request(1, 0, 0);
-            request.kv_hints = Some(aisimulate_core::replay::AuthoredKvHints {
+            request.kv_hints = Some(aisim_core::replay::AuthoredKvHints {
                 source_worker: 0,
                 source_dp_rank: 0,
             });
             let error = router.select_worker(&request, 1, 1).await.unwrap_err();
             assert!(error.to_string().contains("authored KV fetch hints"));
             request.kv_hints = None;
-            request.images.push(aisimulate_core::engine::ImageSpec {
+            request.images.push(aisim_core::engine::ImageSpec {
                 identity: 1,
                 token_start: 0,
                 token_end: 1,
-                encoder: aisimulate_core::engine::EncoderShape {
+                encoder: aisim_core::engine::EncoderShape {
                     sequences: 1,
                     patch_tokens: 1,
                     transformer_tokens: 1,

@@ -41,10 +41,10 @@ objects needed by replay.
 
 ## Registration
 
-Expose a zero-argument factory from the `aisimulate.sweep_config_providers` entry-point group:
+Expose a zero-argument factory from the `aisim.sweep_config_providers` entry-point group:
 
 ```toml
-[project.entry-points."aisimulate.sweep_config_providers"]
+[project.entry-points."aisim.sweep_config_providers"]
 "example.policy" = "example_package.simulation:create_provider"
 ```
 

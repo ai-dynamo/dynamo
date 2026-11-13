@@ -14,7 +14,7 @@ Sweeper searches deployment configurations with a black-box optimizer. It turns 
 into a versioned `ReplaySpec`, sends that specification to an injected `RunnerFactory`, and returns
 ranked candidates or a Pareto front.
 
-The `aisimulate` package owns only backend-neutral simulation behavior. Optional feature packages
+The `aisim` package owns only backend-neutral simulation behavior. Optional feature packages
 can register a `SweepConfigProvider` that contributes search dimensions and materializes its part
 of a replay. Sweeper imports a provider only when its adapter name appears in the configuration.
 
@@ -34,7 +34,7 @@ of a replay. Sweeper imports a provider only when its adapter name appears in th
 `Sweeper` is the only public execution interface. Supply a replay runtime explicitly:
 
 ```python
-from aisimulate.sweeper import SmartSearchConfig, Sweeper
+from aisim.sweeper import SmartSearchConfig, Sweeper
 
 config = SmartSearchConfig.from_yaml("sweep.yaml")
 candidates = Sweeper(runner_factory=my_runner_factory).run(config)

@@ -119,7 +119,7 @@ When `optimization_target` is `throughput`, `latency`, or `load`, the Planner fo
 
 <ParamField path="ais_perf_model" type="AISPerfModelSpec" default="null">
   Role-indexed AISimulate forward-pass configurations. Constructs each model through
-  `aisimulate_core.sdk.RustForwardPassPerfModel.best_available(config)` without an
+  `aisim_core.sdk.RustForwardPassPerfModel.best_available(config)` without an
   interpolation sweep. Configure model identity and estimator controls through
   `ais_perf_model.roles`, or select local dataset manifests with `dataset_profiles`;
   the retired `aic_perf_model` and `hf_id` / pick shape

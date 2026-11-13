@@ -47,7 +47,7 @@ def generated_files(root: Path) -> dict[Path, str]:
         )
 
     # Match the public CLI envelope; Python-only validators remain runtime-owned.
-    from aisimulate.config import CoreRecommendationConfig
+    from aisim.config import CoreRecommendationConfig
 
     schema = CoreRecommendationConfig.model_json_schema(mode="validation")
     schema["$schema"] = "https://json-schema.org/draft/2020-12/schema"
@@ -61,10 +61,10 @@ def generated_files(root: Path) -> dict[Path, str]:
     entry_points = project["project"]["entry-points"]
     sections = {
         name.removeprefix("dynamo.")
-        for name in entry_points.get("aisimulate.config_adapters", {})
+        for name in entry_points.get("aisim.config_adapters", {})
         if name.startswith("dynamo.")
     }
-    if "dgdr_run" not in entry_points.get("aisimulate.output_adapters", {}):
+    if "dgdr_run" not in entry_points.get("aisim.output_adapters", {}):
         raise ValueError(
             "the operator's selected dgdr_run output adapter is not registered"
         )

@@ -231,7 +231,7 @@ capacity and the context length.
 AISimulate owns public Weka ingestion, validation, and lowering into the canonical
 `ValidatedAgenticGraph`. The lower-level
 `dynamo.replay.run_trace_replay(...)` API keeps `trace_format="weka"` as a compatibility adapter,
-but delegates graph construction directly to `aisimulate-core` before Dynamo composes its Router
+but delegates graph construction directly to `aisim-core` before Dynamo composes its Router
 and Mocker runtime behavior.
 
 Use `weka_nested_timestamp_basis="absolute"` or `"relative"` to override nested timestamp

@@ -59,7 +59,7 @@ def _engine_args(worker_type: str | None = None):
 
 
 def test_real_ais_memory_estimates_gpu_blocks() -> None:
-    from aisimulate_core.sdk.memory import estimate_num_gpu_blocks
+    from aisim_core.sdk.memory import estimate_num_gpu_blocks
 
     blocks = estimate_num_gpu_blocks(
         model_path=AIS_MODEL,
@@ -83,7 +83,7 @@ def test_default_ais_capacity_uses_queryable_version() -> None:
 
 
 def test_aggregated_replay_uses_native_ais_engine() -> None:
-    from aisimulate_core.sdk.engine import compile_engine
+    from aisim_core.sdk.engine import compile_engine
 
     from dynamo.replay import run_synthetic_trace_replay
 
@@ -129,7 +129,7 @@ def test_disaggregated_replay_uses_native_ais_engine() -> None:
 def test_canonical_python_presets_survive_mocker_round_trip_and_replay(
     input_kind, policy
 ) -> None:
-    from aisimulate_core.sdk import ForwardPassPerfModelConfig
+    from aisim_core.sdk import ForwardPassPerfModelConfig
 
     from dynamo._core import AisPerfConfig, run_mocker_synthetic_trace_replay
     from dynamo.mocker.config import normalize_mocker_config

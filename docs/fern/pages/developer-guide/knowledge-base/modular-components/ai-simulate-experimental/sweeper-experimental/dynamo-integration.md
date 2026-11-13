@@ -41,7 +41,7 @@ toolchain. Such development pins do not imply that a matching release wheel or c
 container builds require the published pair and matching release pins.
 
 On supported Python versions, `ai-dynamo` declares AISimulate as a base dependency. Keep that pin,
-`container/deps/requirements.aisimulate.txt`, and the `aisimulate-core` Cargo pins aligned when
+`container/deps/requirements.aisimulate.txt`, and the `aisim-core` Cargo pins aligned when
 upgrading. No `ai-dynamo[simulation]` extra is required.
 
 ## Run the Unified CLI
@@ -61,10 +61,10 @@ The `ai-dynamo` distribution registers:
 
 | Entry-point group | Name | Purpose |
 |---|---|---|
-| `aisimulate.runner_factories` | `dynamo` | Execute a complete replay through Dynamo composition |
-| `aisimulate.config_adapters` | `dynamo.router` | Validate and materialize the public `router` section |
-| `aisimulate.config_adapters` | `dynamo.planner` | Validate and materialize the public `planner` section |
-| `aisimulate.sweep_config_providers` | `dynamo.router`, `dynamo.planner` | Preserve the legacy Sweeper Python API |
+| `aisim.runner_factories` | `dynamo` | Execute a complete replay through Dynamo composition |
+| `aisim.config_adapters` | `dynamo.router` | Validate and materialize the public `router` section |
+| `aisim.config_adapters` | `dynamo.planner` | Validate and materialize the public `planner` section |
+| `aisim.sweep_config_providers` | `dynamo.router`, `dynamo.planner` | Preserve the legacy Sweeper Python API |
 
 ## Use the Python SDK
 
@@ -72,7 +72,7 @@ Call the retained Sweeper Python API only when an application needs the legacy `
 contract and explicit runner injection:
 
 ```python
-from aisimulate.sweeper import SmartSearchConfig, Sweeper
+from aisim.sweeper import SmartSearchConfig, Sweeper
 from dynamo.replay.simulation import DynamoReplayRunnerFactory
 
 config = SmartSearchConfig.from_yaml("smart_sweep.yaml")

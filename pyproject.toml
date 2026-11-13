@@ -131,18 +131,18 @@ trtllm_tests = "dynamo.trtllm.tests.conftest"
 triton_tests = "dynamo.triton.tests.conftest"
 sglang_tests = "dynamo.sglang.tests.conftest"
 
-[project.entry-points."aisimulate.sweep_config_providers"]
+[project.entry-points."aisim.sweep_config_providers"]
 "dynamo.planner" = "dynamo.planner.simulation:create_provider"
 "dynamo.router" = "dynamo.router.simulation:create_provider"
 
-[project.entry-points."aisimulate.runner_factories"]
+[project.entry-points."aisim.runner_factories"]
 dynamo = "dynamo.replay.simulation:DynamoReplayRunnerFactory"
 
-[project.entry-points."aisimulate.config_adapters"]
+[project.entry-points."aisim.config_adapters"]
 "dynamo.planner" = "dynamo.planner.simulation:create_provider"
 "dynamo.router" = "dynamo.router.simulation:create_provider"
 
-[project.entry-points."aisimulate.output_adapters"]
+[project.entry-points."aisim.output_adapters"]
 dgd = "dynamo.aisimulate.output.dgd:create_adapter"
 dgdr_run = "dynamo.aisimulate.output.dgdr_run:create_adapter"
 
@@ -226,7 +226,7 @@ known_first_party = ["dynamo", "deploy"]
 # failure. To mitigate 1) one can install 3rd party lib so that isort is aware of it,
 # 2) hardcode 3rd party lib here, 3) add "# isort: skip_file" to problematic files
 # as the last resort.
-known_third_party = ["vllm", "tensorrt_llm", "sglang", "tokenspeed", "aisimulate", "aisimulate_core"]
+known_third_party = ["vllm", "tensorrt_llm", "sglang", "tokenspeed", "aisim", "aisim_core"]
 
 [tool.pytest.ini_options]
 minversion = "8.0"
@@ -483,7 +483,7 @@ ignore_errors = true
 [[tool.mypy.overrides]]
 # AI Simulate is a separate, optional distribution. Load its types when it is
 # installed without reporting errors that originate inside that distribution.
-module = ["aisimulate", "aisimulate.*"]
+module = ["aisim", "aisim.*"]
 follow_imports = "silent"
 ignore_missing_imports = true
 
@@ -604,10 +604,10 @@ module = [
     "ray",
     "ray.*",
     "pydantic_core",
-    "aisimulate",
-    "aisimulate.*",
-    "aisimulate_core",
-    "aisimulate_core.*",
+    "aisim",
+    "aisim.*",
+    "aisim_core",
+    "aisim_core.*",
     "soundfile",
     "soundfile.*",
     "librosa",

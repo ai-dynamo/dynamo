@@ -15,12 +15,9 @@ from dataclasses import replace
 from enum import Enum
 from typing import Any, cast
 
-from aisimulate.config.common import Choices, IntegerRange, NumericRange
-from aisimulate.config_adapter import (
-    PredictionAdapterContext,
-    RecommendationAdapterContext,
-)
-from aisimulate.sweeper.provider import (
+from aisim.config.common import Choices, IntegerRange, NumericRange
+from aisim.config_adapter import PredictionAdapterContext, RecommendationAdapterContext
+from aisim.sweeper.provider import (
     AdapterReplaySpec,
     AdapterSearchPlan,
     CandidateContext,

@@ -363,7 +363,7 @@ def expand_router_domain(
 
 
 def _check_startup_load_model(public: RouterRetuneConfig, startup: str) -> None:
-    from aisimulate.config.common import Choices
+    from aisim.config.common import Choices
 
     model = public.prefill_load_model
     if (

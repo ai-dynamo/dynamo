@@ -297,7 +297,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         default=False,
         help="Use AISimulate's perf model directly for latency prediction. "
-        "Requires aisimulate installed.",
+        "Requires aisim installed.",
     )
     parser.add_argument(
         "--gpu-memory-utilization",

@@ -3,7 +3,7 @@
 
 """Planner-owned engine-level queries over AISimulate forward-pass estimates.
 
-``aisimulate_core.sdk.RustForwardPassPerfModel`` owns native AISimulate
+``aisim_core.sdk.RustForwardPassPerfModel`` owns native AISimulate
 estimation, online correction, and regression fallback. This module owns the
 Dynamo policy above that forward-pass abstraction: queue-drain estimates,
 TTFT/ITL derivation, engine-limit checks, and bounded capacity searches.
@@ -19,7 +19,7 @@ from itertools import pairwise
 from typing import Any, Callable, Literal, Optional
 
 import msgspec
-from aisimulate_core.sdk import RustForwardPassPerfModel as AISForwardPassPerfModel
+from aisim_core.sdk import RustForwardPassPerfModel as AISForwardPassPerfModel
 
 from dynamo.common.forward_pass_metrics import (
     FPM_VERSION,

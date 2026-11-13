@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 import yaml
-from aisimulate.sweeper.result import SweepResult
+from aisim.sweeper.result import SweepResult
 
 pytestmark = [
     pytest.mark.e2e,
@@ -222,7 +222,7 @@ def test_dgd_cli_cases(config_path: Path, tmp_path: Path) -> None:
     command = [
         sys.executable,
         "-m",
-        "aisimulate",
+        "aisim",
         "recommend",
         "--stack",
         "dynamo",

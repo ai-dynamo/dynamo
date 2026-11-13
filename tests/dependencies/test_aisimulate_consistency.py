@@ -120,10 +120,7 @@ def test_dynamo_pins_matching_published_aisimulate_releases() -> None:
     assert _exact_version(_python_requirement(benchmarks)) == python_version
     assert "aisim" not in pyproject.get("tool", {}).get("uv", {}).get("sources", {})
 
-    # The crate is published as aisim-core; the dependency keeps its former key,
-    # so Rust code still names it aisimulate_core.
-    cargo_dependency = cargo["workspace"]["dependencies"]["aisimulate-core"]
-    assert cargo_dependency["package"] == "aisim-core"
+    cargo_dependency = cargo["workspace"]["dependencies"]["aisim-core"]
     assert not {"path", "git", "rev", "branch", "tag"} & cargo_dependency.keys()
     cargo_requirement = str(cargo_dependency["version"])
     assert cargo_requirement.startswith(
@@ -133,8 +130,7 @@ def test_dynamo_pins_matching_published_aisimulate_releases() -> None:
 
     with (ROOT / "lib/bindings/python/Cargo.toml").open("rb") as handle:
         bindings = tomllib.load(handle)
-    bindings_dependency = bindings["dependencies"]["aisimulate-core"]
-    assert bindings_dependency["package"] == "aisim-core"
+    bindings_dependency = bindings["dependencies"]["aisim-core"]
     assert not {"path", "git", "rev", "branch", "tag"} & bindings_dependency.keys()
     assert bindings_dependency["version"] == cargo_requirement
 
@@ -193,14 +189,14 @@ def test_ai_dynamo_registers_only_its_aisimulate_providers() -> None:
 
     extras = set(project.get("optional-dependencies", {}))
     assert {"sweeper", "simulate", "simulation"}.isdisjoint(extras)
-    assert project["entry-points"]["aisimulate.sweep_config_providers"] == {
+    assert project["entry-points"]["aisim.sweep_config_providers"] == {
         "dynamo.planner": "dynamo.planner.simulation:create_provider",
         "dynamo.router": "dynamo.router.simulation:create_provider",
     }
-    assert project["entry-points"]["aisimulate.runner_factories"] == {
+    assert project["entry-points"]["aisim.runner_factories"] == {
         "dynamo": "dynamo.replay.simulation:DynamoReplayRunnerFactory"
     }
-    assert project["entry-points"]["aisimulate.config_adapters"] == {
+    assert project["entry-points"]["aisim.config_adapters"] == {
         "dynamo.planner": "dynamo.planner.simulation:create_provider",
         "dynamo.router": "dynamo.router.simulation:create_provider",
     }

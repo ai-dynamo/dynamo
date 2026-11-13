@@ -9,7 +9,7 @@ import math
 from collections.abc import Mapping
 from typing import Annotated, Any, Literal, TypeAlias
 
-from aisimulate.config.common import Choices, NumericRange
+from aisim.config.common import Choices, NumericRange
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from dynamo.aisimulate.domains import (

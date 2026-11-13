@@ -95,7 +95,7 @@ At least one scaling mode must be enabled when using `optimization_target: sla`.
 | `pre_deployment_sweeping_mode` | string | `rapid` | How to generate optional bootstrap performance data: `rapid` (AIC simulation, ~30s), `thorough` (real GPUs, 2-4h), or `none` (skip). |
 
 SLA mode constructs each role's model through
-`aisimulate_core.sdk.RustForwardPassPerfModel.best_available(config)`. Set
+`aisim_core.sdk.RustForwardPassPerfModel.best_available(config)`. Set
 `ais_perf_model.roles` to the complete AISimulate configuration for each deployed
 role: `prefill` and `decode` for disaggregated deployments, or `aggregated` for an
 aggregated deployment. Each role key must match its `worker_type`.
