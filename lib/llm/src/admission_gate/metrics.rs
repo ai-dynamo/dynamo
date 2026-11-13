@@ -37,8 +37,11 @@
 //! [`REQUEST_RECEIVE_TOTAL`], and once more by [`REQUEST_ADMIT_TOTAL`] if it is
 //! passed into the engine, labelled by whether it waited in the gate queue
 //! first. A request refused or cancelled before that handoff is counted by the
-//! rejection or cancellation counter instead. Cancellation is counted on its
-//! own: the caller went away, which is neither a rejection nor an overload.
+//! rejection, queue timeout or cancellation counter instead, and by exactly
+//! one of them. A queue timeout is counted apart from a rejection: the request
+//! was queued, and refused only when the queue timeout ran out. Cancellation
+//! is counted on its own: the caller went away, which is neither a rejection
+//! nor an overload.
 //!
 //! The TCP request plane's own pool saturation metrics are an unrelated family
 //! and stay in [`dynamo_runtime::metrics::work_handler_pool`].
@@ -60,6 +63,7 @@ const REQUEST_QUEUE_COUNT: &str = "request_queue_count";
 const REQUEST_RECEIVE_TOTAL: &str = "request_receive_total";
 const REQUEST_ADMIT_TOTAL: &str = "request_admit_total";
 const REJECTION_TOTAL: &str = "rejection_total";
+const REQUEST_QUEUE_TIMEOUT_TOTAL: &str = "request_queue_timeout_total";
 const CANCELLATION_TOTAL: &str = "cancellation_total";
 
 /// How each metric of the family is created: named under [`METRIC_PREFIX`],
@@ -115,6 +119,7 @@ pub(super) struct BackendAdmissionMetrics {
     receives: IntCounterVec,
     admissions: IntCounterVec,
     rejections: IntCounterVec,
+    queue_timeouts: IntCounterVec,
     cancellations: IntCounterVec,
 }
 
@@ -157,6 +162,11 @@ impl BackendAdmissionMetrics {
                 "Requests rejected by the backend admission gate because they could not be \
                  admitted and its queue had no room, by admission DP rank",
             ),
+            queue_timeouts: counter(
+                REQUEST_QUEUE_TIMEOUT_TOTAL,
+                "Requests rejected by the backend admission gate because they waited in its \
+                 queue for the whole queue timeout, by admission DP rank",
+            ),
             cancellations: counter(
                 CANCELLATION_TOTAL,
                 "Requests cancelled before backend admission, by admission DP rank",
@@ -178,6 +188,7 @@ impl BackendAdmissionMetrics {
             admitted_direct: self.admissions.with_label_values(&[dp_rank, SOURCE_DIRECT]),
             admitted_queue: self.admissions.with_label_values(&[dp_rank, SOURCE_QUEUE]),
             rejected: self.rejections.with_label_values(&[dp_rank]),
+            queue_timed_out: self.queue_timeouts.with_label_values(&[dp_rank]),
             cancelled: self.cancellations.with_label_values(&[dp_rank]),
         }
     }
@@ -193,6 +204,7 @@ pub(super) struct RankSeries {
     admitted_direct: IntCounter,
     admitted_queue: IntCounter,
     rejected: IntCounter,
+    queue_timed_out: IntCounter,
     cancelled: IntCounter,
 }
 
@@ -229,6 +241,12 @@ impl RankSeries {
         self.rejected.inc();
     }
 
+    /// Count one request rejected because it stayed in the queue for the whole
+    /// queue timeout. It is not also counted as rejected.
+    pub(super) fn queue_timed_out(&self) {
+        self.queue_timed_out.inc();
+    }
+
     /// Count one request cancelled before backend admission, whether it was
     /// already cancelled when the gate looked, went away while queued, was found
     /// cancelled at its dequeue, or refused capacity it had been offered.
@@ -260,6 +278,11 @@ impl RankSeries {
             self.rejected.get(),
             self.cancelled.get(),
         )
+    }
+
+    /// Requests rejected at their queue timeout.
+    pub(super) fn queue_timeouts(&self) -> u64 {
+        self.queue_timed_out.get()
     }
 }
 
@@ -339,7 +362,7 @@ mod tests {
         labels
     }
 
-    /// A registry receives exactly these seven collectors — no limit gauges —
+    /// A registry receives exactly these eight collectors — no limit gauges —
     /// and a rank's series exist at zero as soon as it is resolved, labelled by
     /// `dp_rank` alone, plus `source` on admissions.
     #[test]
@@ -350,6 +373,7 @@ mod tests {
         let rank = metrics.series("4");
         assert_eq!(unspecified.published(), (0, 0, 0));
         assert_eq!(rank.outcomes(), (0, 0, 0, 0, 0));
+        assert_eq!(rank.queue_timeouts(), 0);
 
         let families = hierarchy.registry.get_prometheus_registry().gather();
         let mut names: Vec<&str> = families.iter().map(|family| family.name()).collect();
@@ -363,6 +387,7 @@ mod tests {
                 "dynamo_backend_admission_rejection_total",
                 "dynamo_backend_admission_request_admit_total",
                 "dynamo_backend_admission_request_queue_count",
+                "dynamo_backend_admission_request_queue_timeout_total",
                 "dynamo_backend_admission_request_receive_total",
             ]
         );
@@ -372,6 +397,7 @@ mod tests {
             "dynamo_backend_admission_engine_request_waiting_count",
             "dynamo_backend_admission_rejection_total",
             "dynamo_backend_admission_request_queue_count",
+            "dynamo_backend_admission_request_queue_timeout_total",
             "dynamo_backend_admission_request_receive_total",
         ] {
             assert_eq!(
@@ -407,7 +433,7 @@ mod tests {
         metrics.series("4");
 
         let families = component.registry.get_prometheus_registry().gather();
-        assert_eq!(families.len(), 7);
+        assert_eq!(families.len(), 8);
         let owner = "dynamo_component=backend,dynamo_namespace=ns";
         for family in &families {
             let name = family.name();
@@ -450,8 +476,13 @@ mod tests {
         four.admitted(AdmissionSource::Queue);
         four.rejected();
         four.cancelled();
+        four.queue_timed_out();
+        four.queue_timed_out();
+        four.queue_timed_out();
         assert_eq!(four.outcomes(), (2, 1, 2, 1, 1));
+        assert_eq!(four.queue_timeouts(), 3);
         assert_eq!(five.outcomes(), (0, 0, 0, 0, 0));
+        assert_eq!(five.queue_timeouts(), 0);
 
         // Resolving the same rank again reaches the same series.
         assert_eq!(metrics.series("4").outcomes(), (2, 1, 2, 1, 1));

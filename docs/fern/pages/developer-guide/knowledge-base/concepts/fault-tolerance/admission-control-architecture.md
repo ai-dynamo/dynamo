@@ -75,8 +75,15 @@ A request can complete without generating a token. Once waiting ends, the reques
 the engine request limit until its response stream ends. Interim metadata does not end the wait.
 
 Cancelled queued requests are removed and free their queue space. Requests that finish, fail, or are
-cancelled at the engine free their remaining capacity. The gate does not preempt engine work or
-enforce a queue waiting-time limit.
+cancelled at the engine free their remaining capacity. The gate does not preempt engine work, and by
+default it enforces no queue waiting-time limit.
+
+**Queue timeout.** With a request queue timeout set, a request still queued that long after it joined
+the queue is removed and rejected as an overload, the same way a request is when the queue is full, so
+the Frontend can migrate or retry it instead of leaving it to wait. The timeout covers time in the gate
+queue only. It does not account for work done before the request reached the worker or for engine
+queueing after admission. If capacity is handed to a request at the same moment its timeout runs out,
+the request is admitted.
 
 **Data-parallel ranks.** Each data-parallel (DP) rank has its own limits and FIFO queue. A request with
 a specified, recognized rank uses that rank's queue and limits. A busy rank does not prevent another
@@ -109,9 +116,12 @@ combined capacity of its ranks. Restart the worker to change a setting.
 | Engine request limit | `DYN_BACKEND_ADMISSION_ENGINE_REQUEST_LIMIT` | `--engine-request-limit`; alias `DYN_ENGINE_REQUEST_LIMIT` | Unset: unlimited |
 | Engine request waiting limit | `DYN_BACKEND_ADMISSION_ENGINE_REQUEST_WAITING_LIMIT` | Alias `DYN_BACKEND_ADMISSION_ENGINE_WAIT_LIMIT` | Unset: unlimited |
 | Request queue limit | `DYN_BACKEND_ADMISSION_REQUEST_QUEUE_LIMIT` | Alias `DYN_DYNAMO_REQUEST_QUEUE_LIMIT` | `0`: no queue. A positive queue limit requires at least one engine limit; otherwise, worker startup fails. |
+| Request queue timeout | `DYN_BACKEND_ADMISSION_REQUEST_QUEUE_TIMEOUT_MS` | None | Unset: no waiting-time limit |
 
 Both engine limits accept positive integers. The queue limit accepts non-negative integers; `0`
-disables queueing, so requests that cannot enter immediately are rejected.
+disables queueing, so requests that cannot enter immediately are rejected. The queue timeout accepts a
+positive integer number of milliseconds and applies to each queued request, whatever its rank. Without
+a queue it has no effect, and the worker logs a warning.
 
 Setting either engine limit enables admission control. An engine limit left unset stays unlimited, but
 the gate still reports its occupancy. With both engine limits unset, the gate is disabled: requests pass
@@ -146,8 +156,19 @@ capacity.
 **Tune from there for your workload and SLOs.** Use the request limit to bound ongoing work, including
 requests already streaming, and the waiting limit to bound work still awaiting a first token or
 completion; size the waiting limit with Little's law, as described below. A deeper queue absorbs
-longer bursts at the cost of longer waits; the gate does not reject requests based on how long they
-have waited. Validate each change under representative load, watching goodput and latency.
+longer bursts at the cost of longer waits; unless you set a request queue timeout, the gate does not
+reject requests based on how long they have waited. Validate each change under representative load,
+watching goodput and latency.
+
+**Bound the queue wait when queued work depends on state that expires.** A request waiting in the gate
+queue is not yet visible to the engine. In a disaggregated deployment, a decode worker's queue can hold
+requests whose prefill already finished on another worker, and the prefill side may keep their KV
+blocks only for a limited time. Set `DYN_BACKEND_ADMISSION_REQUEST_QUEUE_TIMEOUT_MS` on the decode
+worker well below that time, leaving margin for the part already spent before the request was queued
+and for the engine's own delay after admission. The timeout limits queue delay; it does not by itself
+guarantee that the state is still valid when the engine reads it. Watch
+`dynamo_backend_admission_request_queue_timeout_total` to see how often it applies: a steady rate means
+the worker is undersized for its load, not that the timeout is too short.
 
 #### Size the waiting limit with Little's law
 
@@ -201,6 +222,7 @@ Each worker exposes the following metrics. In the **Labels** column, `dp_rank` i
 | `dynamo_backend_admission_request_receive_total` | Counter | `dp_rank` | All requests received by the gate, counted once regardless of outcome. |
 | `dynamo_backend_admission_request_admit_total` | Counter | `dp_rank`, `source="direct"` or `source="queue"` | Requests passed into the engine, directly or after queueing. |
 | `dynamo_backend_admission_rejection_total` | Counter | `dp_rank` | Requests the gate could neither admit nor queue. |
+| `dynamo_backend_admission_request_queue_timeout_total` | Counter | `dp_rank` | Requests rejected after waiting in a gate queue for the whole request queue timeout. Not included in `rejection_total`. |
 | `dynamo_backend_admission_cancellation_total` | Counter | `dp_rank` | Requests cancelled before engine admission. |
 
 Each request is counted under one `dp_rank` value. Sum across all values, including `unspecified`, for
