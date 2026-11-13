@@ -37,6 +37,52 @@ use super::{
     tools::{ToolChoiceError, validate_openai_tool_choice},
 };
 
+/// Associates a validation failure with the request field that owns the rule.
+///
+/// The wrapper preserves the original error text and source chain while giving
+/// observability code a privacy-safe field name that never contains request data.
+#[derive(Debug)]
+pub(crate) struct RequestValidationError {
+    field: &'static str,
+    source: anyhow::Error,
+}
+
+impl std::fmt::Display for RequestValidationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.source.fmt(formatter)
+    }
+}
+
+impl std::error::Error for RequestValidationError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.source.as_ref())
+    }
+}
+
+pub(crate) fn with_validation_field<T, E>(
+    field: &'static str,
+    result: Result<T, E>,
+) -> Result<T, anyhow::Error>
+where
+    E: Into<anyhow::Error>,
+{
+    result.map_err(|source| {
+        RequestValidationError {
+            field,
+            source: source.into(),
+        }
+        .into()
+    })
+}
+
+pub(crate) fn validation_field(error: &anyhow::Error) -> Option<&'static str> {
+    error.chain().find_map(|cause| {
+        cause
+            .downcast_ref::<RequestValidationError>()
+            .map(|error| error.field)
+    })
+}
+
 //
 // Hyperparameter Contraints
 //
@@ -138,44 +184,75 @@ fn validate_no_unsupported_fields_with_ignore(
         .map(|s| format!("`{}`", s))
         .collect();
     if !unknown.is_empty() && !ignore_unsupported_fields {
-        anyhow::bail!("Unsupported parameter(s): {}", unknown.join(", "));
+        return with_validation_field(
+            "unsupported_fields",
+            Err(anyhow::anyhow!(
+                "Unsupported parameter(s): {}",
+                unknown.join(", ")
+            )),
+        );
     }
-    if let Some(value) = unsupported_fields.get("cache_salt")
-        && !value.is_string()
-    {
-        anyhow::bail!("`cache_salt` must be a string");
+    if let Some(value) = unsupported_fields.get("cache_salt") {
+        with_validation_field(
+            "cache_salt",
+            value
+                .is_string()
+                .then_some(())
+                .ok_or_else(|| anyhow::anyhow!("`cache_salt` must be a string")),
+        )?;
     }
     if let Some(value) = unsupported_fields.get("stop_token_ids") {
-        let token_ids: Vec<crate::types::TokenIdType> = serde_json::from_value(value.clone())
-            .map_err(|_| anyhow::anyhow!("`stop_token_ids` must be an array of token IDs"))?;
-        if token_ids.len() > MAX_STOP_SEQUENCES {
-            return Err(crate::protocols::common::invalid_argument_error(format!(
-                "Maximum of {} stop token IDs allowed, got {}",
-                MAX_STOP_SEQUENCES,
-                token_ids.len()
-            )));
-        }
+        with_validation_field(
+            "stop_token_ids",
+            (|| {
+                let token_ids: Vec<crate::types::TokenIdType> =
+                    serde_json::from_value(value.clone()).map_err(|_| {
+                        anyhow::anyhow!("`stop_token_ids` must be an array of token IDs")
+                    })?;
+                if token_ids.len() > MAX_STOP_SEQUENCES {
+                    return Err(crate::protocols::common::invalid_argument_error(format!(
+                        "Maximum of {} stop token IDs allowed, got {}",
+                        MAX_STOP_SEQUENCES,
+                        token_ids.len()
+                    )));
+                }
+                Ok(())
+            })(),
+        )?;
     }
-    if let Some(value) = unsupported_fields.get("detokenize")
-        && !value.is_boolean()
-    {
-        anyhow::bail!("`detokenize` must be a boolean");
+    if let Some(value) = unsupported_fields.get("detokenize") {
+        with_validation_field(
+            "detokenize",
+            value
+                .is_boolean()
+                .then_some(())
+                .ok_or_else(|| anyhow::anyhow!("`detokenize` must be a boolean")),
+        )?;
     }
     if let Some(value) = unsupported_fields.get("allowed_token_ids") {
-        serde_json::from_value::<Vec<crate::types::TokenIdType>>(value.clone())
-            .map_err(|_| anyhow::anyhow!("`allowed_token_ids` must be an array of token IDs"))?;
+        with_validation_field(
+            "allowed_token_ids",
+            serde_json::from_value::<Vec<crate::types::TokenIdType>>(value.clone())
+                .map_err(|_| anyhow::anyhow!("`allowed_token_ids` must be an array of token IDs")),
+        )?;
     }
     if let Some(value) = unsupported_fields.get("bad_words_token_ids") {
-        serde_json::from_value::<Vec<Vec<crate::types::TokenIdType>>>(value.clone()).map_err(
-            |_| anyhow::anyhow!("`bad_words_token_ids` must be an array of token ID arrays"),
+        with_validation_field(
+            "bad_words_token_ids",
+            serde_json::from_value::<Vec<Vec<crate::types::TokenIdType>>>(value.clone()).map_err(
+                |_| anyhow::anyhow!("`bad_words_token_ids` must be an array of token ID arrays"),
+            ),
         )?;
     }
     if let Some(value) = unsupported_fields.get("logprob_token_ids") {
-        serde_json::from_value::<Vec<crate::types::TokenIdType>>(value.clone())
-            .map_err(|_| anyhow::anyhow!("`logprob_token_ids` must be an array of token IDs"))?;
+        with_validation_field(
+            "logprob_token_ids",
+            serde_json::from_value::<Vec<crate::types::TokenIdType>>(value.clone())
+                .map_err(|_| anyhow::anyhow!("`logprob_token_ids` must be an array of token IDs")),
+        )?;
     }
     if let Some(value) = unsupported_fields.get("vllm_xargs") {
-        validate_vllm_xargs(value)?;
+        with_validation_field("vllm_xargs", validate_vllm_xargs(value))?;
     }
     Ok(())
 }
@@ -1284,6 +1361,14 @@ mod tests {
             let err =
                 validate_no_unsupported_fields_with_ignore(&fields.fields, false).unwrap_err();
             assert!(err.to_string().contains(field), "{err}");
+            assert_eq!(
+                validation_field(&err),
+                Some(if field == "experimental_field" {
+                    "unsupported_fields"
+                } else {
+                    field
+                })
+            );
         }
     }
 

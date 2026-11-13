@@ -4164,7 +4164,10 @@ async fn chat_completions(
         .chat_template_defaults()
         .apply_to_request(&mut request);
     if let Err(err_response) = normalize_chat_reasoning_template_args(&mut request) {
-        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        inflight_guard.mark_error_with_invalid_parameter(
+            extract_error_type_from_response(&err_response),
+            "thinking",
+        );
         return Err(err_response);
     }
 
@@ -4178,7 +4181,10 @@ async fn chat_completions(
                 invalid_argument(error.to_string()).into(),
                 "Invalid custom tools",
             );
-            inflight_guard.mark_error(extract_error_type_from_response(&response));
+            inflight_guard.mark_error_with_invalid_parameter(
+                extract_error_type_from_response(&response),
+                "tools",
+            );
             response
         })?;
 
@@ -4186,25 +4192,37 @@ async fn chat_completions(
     // validate_chat_completion_unsupported_fields,
     // then a field was used that is unsupported. We will log an error message
     // and early return a 501 NOT_IMPLEMENTED status code. Otherwise, proceeed.
-    if let Err(err_response) = validate_chat_completion_unsupported_fields(&request) {
-        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
-        return Err(err_response);
+    if let Err(failure) = validate_chat_completion_unsupported_fields_detailed(&request) {
+        inflight_guard.mark_error_with_invalid_parameter(
+            extract_error_type_from_response(&failure.response),
+            failure.field,
+        );
+        return Err(failure.response);
     }
 
     // Handle required fields like messages shouldn't be empty.
     if let Err(err_response) = validate_chat_completion_required_fields(&request) {
-        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        inflight_guard.mark_error_with_invalid_parameter(
+            extract_error_type_from_response(&err_response),
+            "messages",
+        );
         return Err(err_response);
     }
 
     // Validate stream_options is only used when streaming (NVBug 5662680)
     if let Err(err_response) = validate_chat_completion_stream_options(&request) {
-        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        inflight_guard.mark_error_with_invalid_parameter(
+            extract_error_type_from_response(&err_response),
+            "stream_options",
+        );
         return Err(err_response);
     }
 
     if let Err(err_response) = reject_media_if_configured(&state, &request) {
-        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        inflight_guard.mark_error_with_invalid_parameter(
+            extract_error_type_from_response(&err_response),
+            "messages",
+        );
         return Err(err_response);
     }
 
@@ -4236,9 +4254,12 @@ async fn chat_completions(
     );
 
     // Handle Rest of Validation Errors
-    if let Err(err_response) = validate_chat_completion_fields_generic(&request) {
-        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
-        return Err(err_response);
+    if let Err(failure) = validate_chat_completion_fields_generic_detailed(&request) {
+        inflight_guard.mark_error_with_invalid_parameter(
+            extract_error_type_from_response(&failure.response),
+            failure.field,
+        );
+        return Err(failure.response);
     }
     drop(nvtx_validate);
 
@@ -4256,7 +4277,10 @@ async fn chat_completions(
     let parsing_options = apply_request_tool_call_parsing_options(parsing_options, &request)
         .map_err(|e| {
             let err_response = ErrorMessage::from_anyhow(e.into(), "Invalid tool_choice");
-            inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+            inflight_guard.mark_error_with_invalid_parameter(
+                extract_error_type_from_response(&err_response),
+                "tool_choice",
+            );
             err_response
         })?;
 
@@ -4592,29 +4616,49 @@ async fn chat_completions(
     }
 }
 
-/// Checks for unsupported fields in the request.
-/// Returns Some(response) if unsupported fields are present.
+#[derive(Debug)]
+struct RequestValidationFailure {
+    response: ErrorResponse,
+    field: &'static str,
+}
+
+/// Checks for unsupported fields in the request and reports which field failed.
 #[allow(deprecated)]
-pub fn validate_chat_completion_unsupported_fields(
+fn validate_chat_completion_unsupported_fields_detailed(
     request: &NvCreateChatCompletionRequest,
-) -> Result<(), ErrorResponse> {
+) -> Result<(), RequestValidationFailure> {
     let inner = &request.inner;
 
     if inner.function_call.is_some() {
-        return Err(ErrorMessage::not_implemented_error(
-            VALIDATION_PREFIX.to_string()
-                + "`function_call` is deprecated. Please migrate to use `tool_choice` instead.",
-        ));
+        return Err(RequestValidationFailure {
+            response: ErrorMessage::not_implemented_error(
+                VALIDATION_PREFIX.to_string()
+                    + "`function_call` is deprecated. Please migrate to use `tool_choice` instead.",
+            ),
+            field: "function_call",
+        });
     }
 
     if inner.functions.is_some() {
-        return Err(ErrorMessage::not_implemented_error(
-            VALIDATION_PREFIX.to_string()
-                + "`functions` is deprecated. Please migrate to use `tools` instead.",
-        ));
+        return Err(RequestValidationFailure {
+            response: ErrorMessage::not_implemented_error(
+                VALIDATION_PREFIX.to_string()
+                    + "`functions` is deprecated. Please migrate to use `tools` instead.",
+            ),
+            field: "functions",
+        });
     }
 
     Ok(())
+}
+
+/// Checks for unsupported fields in the request.
+#[allow(dead_code)] // Retained for direct Rust callers; HTTP needs the detailed variant above.
+pub fn validate_chat_completion_unsupported_fields(
+    request: &NvCreateChatCompletionRequest,
+) -> Result<(), ErrorResponse> {
+    validate_chat_completion_unsupported_fields_detailed(request)
+        .map_err(|failure| failure.response)
 }
 
 /// Normalizes OpenAI-style reasoning controls before chat completion validation.
@@ -4687,29 +4731,47 @@ pub fn validate_chat_completion_stream_options(
 /// `request_kind` names the request kind in the message of a backend
 /// `InvalidArgument` error, for example "chat completion". Every other validation failure
 /// becomes a 400 with the [`VALIDATION_PREFIX`] message.
+fn validate_request_fields_generic_detailed<R: ValidateRequest>(
+    request: &R,
+    request_kind: &str,
+) -> Result<(), RequestValidationFailure> {
+    request.validate().map_err(|e| {
+        let field = crate::protocols::openai::validate::validation_field(&e).unwrap_or("request");
+        let response = if find_invalid_argument_in_chain(e.as_ref()).is_some() {
+            ErrorMessage::from_anyhow(e, &format!("Invalid {request_kind} request"))
+        } else {
+            ErrorMessage::from_http_error(
+                ErrorClass::InvalidRequest,
+                HttpError {
+                    code: 400,
+                    message: VALIDATION_PREFIX.to_string() + &e.to_string(),
+                },
+            )
+        };
+        RequestValidationFailure { response, field }
+    })
+}
+
 fn validate_request_fields_generic<R: ValidateRequest>(
     request: &R,
     request_kind: &str,
 ) -> Result<(), ErrorResponse> {
-    request.validate().map_err(|e| {
-        if find_invalid_argument_in_chain(e.as_ref()).is_some() {
-            return ErrorMessage::from_anyhow(e, &format!("Invalid {request_kind} request"));
-        }
-        ErrorMessage::from_http_error(
-            ErrorClass::InvalidRequest,
-            HttpError {
-                code: 400,
-                message: VALIDATION_PREFIX.to_string() + &e.to_string(),
-            },
-        )
-    })
+    validate_request_fields_generic_detailed(request, request_kind)
+        .map_err(|failure| failure.response)
 }
 
 /// Validates a chat completion request and returns an error response if validation fails.
+#[allow(dead_code)] // Retained for direct Rust callers; HTTP needs the detailed variant below.
 pub fn validate_chat_completion_fields_generic(
     request: &NvCreateChatCompletionRequest,
 ) -> Result<(), ErrorResponse> {
     validate_request_fields_generic(request, "chat completion")
+}
+
+fn validate_chat_completion_fields_generic_detailed(
+    request: &NvCreateChatCompletionRequest,
+) -> Result<(), RequestValidationFailure> {
+    validate_request_fields_generic_detailed(request, "chat completion")
 }
 
 /// Validates that stream_options is only used when stream=true for completions (NVBug 5662680)
@@ -9663,6 +9725,43 @@ mod tests {
         // Verify metadata is accessible
         assert!(request.metadata.is_some());
         assert_eq!(request.metadata.as_ref().unwrap()["user"]["id"], 1);
+    }
+
+    #[test]
+    fn test_detailed_chat_validation_reports_invalid_parameter() {
+        let request = NvCreateChatCompletionRequest {
+            preserve_thinking: None,
+            responses_tools: None,
+            inner: CreateChatCompletionRequest {
+                model: "test-model".to_string(),
+                messages: vec![ChatCompletionRequestMessage::User(
+                    ChatCompletionRequestUserMessage {
+                        content: ChatCompletionRequestUserMessageContent::Text("hi".to_string()),
+                        name: None,
+                    },
+                )],
+                temperature: Some(3.0),
+                ..Default::default()
+            },
+            common: Default::default(),
+            nvext: None,
+            chat_template_args: None,
+            thinking: None,
+            media_io_kwargs: None,
+            return_tokens_as_token_ids: None,
+            thinking_token_budget: None,
+            unsupported_fields: Default::default(),
+        };
+
+        let failure = validate_chat_completion_fields_generic_detailed(&request)
+            .expect_err("out-of-range temperature must fail validation");
+
+        assert_eq!(failure.field, "temperature");
+        assert_eq!(failure.response.0, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            failure.response.1.message,
+            format!("{VALIDATION_PREFIX}Temperature must be between 0 and 2, got 3")
+        );
     }
 
     #[test]

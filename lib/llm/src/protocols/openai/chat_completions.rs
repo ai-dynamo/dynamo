@@ -795,66 +795,130 @@ impl ValidateRequest for NvCreateChatCompletionRequest {
         // tool-choice contract as HTTP, without changing their replay payload.
         if self.inner.has_custom_tools() {
             let mut normalized = self.clone();
-            normalized.inner.normalize_custom_tools()?;
+            validate::with_validation_field("tools", normalized.inner.normalize_custom_tools())?;
             return ValidateRequest::validate(&normalized);
         }
         validate::validate_no_unsupported_fields(&self.unsupported_fields)?;
-        validate::validate_guided_decoding(self)?;
-        validate::validate_chat_template_args(self.chat_template_args.as_ref())?;
-        validate::validate_messages(&self.inner.messages)?;
-        validate::validate_model(&self.inner.model)?;
+        validate::with_validation_field(
+            "guided_decoding",
+            validate::validate_guided_decoding(self),
+        )?;
+        validate::with_validation_field(
+            "chat_template_args",
+            validate::validate_chat_template_args(self.chat_template_args.as_ref()),
+        )?;
+        validate::with_validation_field(
+            "messages",
+            validate::validate_messages(&self.inner.messages),
+        )?;
+        validate::with_validation_field("model", validate::validate_model(&self.inner.model))?;
         // none for store
-        validate::validate_reasoning_effort(&self.inner.reasoning_effort)?;
+        validate::with_validation_field(
+            "reasoning_effort",
+            validate::validate_reasoning_effort(&self.inner.reasoning_effort),
+        )?;
         // none for metadata
-        validate::validate_frequency_penalty(self.inner.frequency_penalty)?;
-        validate::validate_logit_bias(&self.inner.logit_bias)?;
+        validate::with_validation_field(
+            "frequency_penalty",
+            validate::validate_frequency_penalty(self.inner.frequency_penalty),
+        )?;
+        validate::with_validation_field(
+            "logit_bias",
+            validate::validate_logit_bias(&self.inner.logit_bias),
+        )?;
         // none for logprobs
-        validate::validate_top_logprobs(self.inner.top_logprobs)?;
+        validate::with_validation_field(
+            "top_logprobs",
+            validate::validate_top_logprobs(self.inner.top_logprobs),
+        )?;
         // `max_tokens` is deprecated but still accepted as a fallback for
         // `max_completion_tokens`, so it must be validated too.
         #[allow(deprecated)]
-        validate::validate_max_tokens(self.inner.max_tokens)?;
-        validate::validate_max_completion_tokens(self.inner.max_completion_tokens)?;
-        validate::validate_n(self.inner.n)?;
-        validate_completion_token_ids_single_choice(
-            self.inner.n.unwrap_or(1) as usize,
-            self.nvext.as_ref(),
+        validate::with_validation_field(
+            "max_tokens",
+            validate::validate_max_tokens(self.inner.max_tokens),
         )?;
-        validate_metadata_upload_single_choice(
-            self.inner.n.unwrap_or(1) as usize,
-            self.nvext.as_ref(),
+        validate::with_validation_field(
+            "max_completion_tokens",
+            validate::validate_max_completion_tokens(self.inner.max_completion_tokens),
         )?;
-        validate_metadata_upload_stop_strings(
-            self.get_stop().is_some_and(|stop| !stop.is_empty()),
-            self.nvext.as_ref(),
+        validate::with_validation_field("n", validate::validate_n(self.inner.n))?;
+        validate::with_validation_field(
+            "nvext.completion_token_ids",
+            validate_completion_token_ids_single_choice(
+                self.inner.n.unwrap_or(1) as usize,
+                self.nvext.as_ref(),
+            ),
+        )?;
+        validate::with_validation_field(
+            "nvext.metadata_upload",
+            validate_metadata_upload_single_choice(
+                self.inner.n.unwrap_or(1) as usize,
+                self.nvext.as_ref(),
+            ),
+        )?;
+        validate::with_validation_field(
+            "nvext.metadata_upload",
+            validate_metadata_upload_stop_strings(
+                self.get_stop().is_some_and(|stop| !stop.is_empty()),
+                self.nvext.as_ref(),
+            ),
         )?;
         // none for modalities
         // none for prediction
         // none for audio
-        validate::validate_presence_penalty(self.inner.presence_penalty)?;
-        validate::validate_response_format(&self.inner.response_format)?;
+        validate::with_validation_field(
+            "presence_penalty",
+            validate::validate_presence_penalty(self.inner.presence_penalty),
+        )?;
+        validate::with_validation_field(
+            "response_format",
+            validate::validate_response_format(&self.inner.response_format),
+        )?;
         // none for seed
-        validate::validate_service_tier(&self.inner.service_tier)?;
-        validate::validate_stop(&self.inner.stop)?;
+        validate::with_validation_field(
+            "service_tier",
+            validate::validate_service_tier(&self.inner.service_tier),
+        )?;
+        validate::with_validation_field("stop", validate::validate_stop(&self.inner.stop))?;
         // none for stream
         // none for stream_options
-        validate::validate_temperature(self.inner.temperature)?;
-        validate::validate_top_p(self.inner.top_p)?;
-        let effective_tools = self.validated_effective_tools()?;
-        validate::validate_tool_choice(&self.inner.tool_choice, Some(effective_tools.as_ref()))?;
+        validate::with_validation_field(
+            "temperature",
+            validate::validate_temperature(self.inner.temperature),
+        )?;
+        validate::with_validation_field("top_p", validate::validate_top_p(self.inner.top_p))?;
+        let effective_tools =
+            validate::with_validation_field("tools", self.validated_effective_tools())?;
+        validate::with_validation_field(
+            "tool_choice",
+            validate::validate_tool_choice(&self.inner.tool_choice, Some(effective_tools.as_ref())),
+        )?;
         // none for parallel_tool_calls
-        validate::validate_user(self.inner.user.as_deref())?;
+        validate::with_validation_field(
+            "user",
+            validate::validate_user(self.inner.user.as_deref()),
+        )?;
         // none for function call
         // none for functions
         // Common Ext
-        validate::validate_repetition_penalty(self.get_repetition_penalty())?;
-        validate::validate_min_p(self.get_min_p())?;
-        validate::validate_top_k(self.get_top_k())?;
+        validate::with_validation_field(
+            "repetition_penalty",
+            validate::validate_repetition_penalty(self.get_repetition_penalty()),
+        )?;
+        validate::with_validation_field("min_p", validate::validate_min_p(self.get_min_p()))?;
+        validate::with_validation_field("top_k", validate::validate_top_k(self.get_top_k()))?;
         // Cross-field validation
-        validate::validate_n_with_temperature(self.inner.n, self.inner.temperature)?;
-        validate::validate_continue_final_message(
-            self.common.add_generation_prompt,
-            self.common.continue_final_message,
+        validate::with_validation_field(
+            "n,temperature",
+            validate::validate_n_with_temperature(self.inner.n, self.inner.temperature),
+        )?;
+        validate::with_validation_field(
+            "continue_final_message,add_generation_prompt",
+            validate::validate_continue_final_message(
+                self.common.add_generation_prompt,
+                self.common.continue_final_message,
+            ),
         )?;
 
         Ok(())

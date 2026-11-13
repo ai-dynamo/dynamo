@@ -861,6 +861,7 @@ pub struct InflightGuard {
     request_type: RequestType,
     status: Status,
     error_type: ErrorType,
+    invalid_parameter: Option<&'static str>,
     timer: Instant,
     request_id: String,
     span: tracing::Span,
@@ -2319,6 +2320,7 @@ impl InflightGuard {
             request_type,
             status: Status::Error,
             error_type: ErrorType::Internal,
+            invalid_parameter: None,
             timer,
             request_id,
             span: tracing::Span::current(),
@@ -2365,6 +2367,17 @@ impl InflightGuard {
     pub(crate) fn mark_error(&mut self, error_type: ErrorType) {
         self.status = Status::Error;
         self.error_type = error_type;
+        self.invalid_parameter = None;
+    }
+
+    pub(crate) fn mark_error_with_invalid_parameter(
+        &mut self,
+        error_type: ErrorType,
+        invalid_parameter: &'static str,
+    ) {
+        self.status = Status::Error;
+        self.error_type = error_type;
+        self.invalid_parameter = Some(invalid_parameter);
     }
 
     fn request_completion(&self) -> RequestCompletion {
@@ -2420,6 +2433,7 @@ impl Drop for InflightGuard {
                     status = %status_str,
                     error_type = %self.error_type,
                     error_detail = %detail,
+                    invalid_parameter = self.invalid_parameter,
                     elapsed_ms = %elapsed_ms,
                     "request completed"
                 );
@@ -5148,19 +5162,46 @@ mod tests {
 
     #[test]
     fn test_inflight_guard_marks_validation_error() {
+        #[derive(Clone, Default)]
+        struct CapturedLogs(Arc<std::sync::Mutex<Vec<u8>>>);
+
+        impl std::io::Write for CapturedLogs {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
         let metrics = Arc::new(Metrics::new());
         let registry = prometheus::Registry::new();
         metrics.register(&registry).unwrap();
 
         let model = "test-model";
+        let logs = CapturedLogs::default();
+        let writer = logs.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_target(false)
+            .with_writer(move || writer.clone())
+            .finish();
 
-        {
+        tracing::subscriber::with_default(subscriber, || {
             let mut guard =
                 metrics
                     .clone()
                     .create_inflight_guard(model, Endpoint::ChatCompletions, false, "");
-            guard.mark_error(ErrorType::Validation);
-        } // guard drops here
+            guard.mark_error_with_invalid_parameter(ErrorType::Validation, "stream_options");
+            drop(guard);
+        });
+
+        let recorded = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+        assert!(recorded.contains("invalid_parameter=\"stream_options\""));
+        assert!(recorded.contains("error_detail=invalid request parameters"));
 
         // Verify counter incremented with status=error, error_type=validation
         let counter_value = metrics
