@@ -420,6 +420,8 @@ Groups opt-in preview features for a component. Referenced by `experimental`. Ne
 
 <ParamField path="failover" type="FailoverSpec">
   Configures active-passive GPU failover for a worker component. The `spec.podTemplate.spec.containers[name=main]` container is cloned into two engine containers (active + standby) sharing GPUs via DRA, and the standby acquires the flock when the active engine fails. Requires `gpuMemoryService` to be set, `failover.mode` to match `gpuMemoryService.mode`, and the `nvidia.com/dynamo-kube-discovery-mode: container` annotation on the DGD.
+
+  Intra-pod failover uses `DYN_SYSTEM_PORT` as the first engine's system port and the next port for the second engine. For example, `12345` allocates `12345` and `12346`; both must be available. The default base is `9090`. An override must be a literal integer from `1` through `32766`; `valueFrom`, environment expansion, disabled listeners and ephemeral ports are rejected because the operator must declare both ports before startup. Probes follow each engine's named port, and host-network Pods reserve both host ports. Upgrading the operator can recreate affected failover Pods when their generated ports change.
 </ParamField>
 
 <Indent>
