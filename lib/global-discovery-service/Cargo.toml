@@ -34,7 +34,7 @@ tracing = { workspace = true }
 url = { workspace = true }
 
 [dev-dependencies]
-dynamo-global-discovery-client = { path = "../global-discovery-client" }
+dynamo-global-discovery-client = { path = "../global-discovery-client", version = "1.7.0" }
 
 reqwest = { workspace = true }
 serde_json = { workspace = true }
