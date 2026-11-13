@@ -54,6 +54,7 @@ use super::{
         process_response_and_observe_metrics,
         process_response_using_event_converter_and_observe_metrics,
     },
+    response_headers::{RESPONSE_HEADERS_CONTEXT_KEY, ResponseHeaders},
     service_v2::{self, BackendErrorCheck},
 };
 use crate::engines::ValidateRequest;
@@ -2755,6 +2756,13 @@ async fn handler_chat_completions(
             captured,
         );
     }
+    // Headers the chat engine sets on this response. The request carries them
+    // only when the engine's stream is read before the response is committed;
+    // otherwise the engine would race the commit.
+    let response_headers = ResponseHeaders::default();
+    if !streaming || state.streaming_backend_error_check() != BackendErrorCheck::Skip {
+        request.insert(RESPONSE_HEADERS_CONTEXT_KEY, response_headers.clone());
+    }
     let context = request.context();
 
     if lifecycle.is_enabled() {
@@ -2816,7 +2824,22 @@ async fn handler_chat_completions(
     // without need to be cancelled.
     connection_handle.disarm();
 
-    response
+    with_response_headers(response, response_headers.take())
+}
+
+/// Add the headers a chat engine set to its response, error responses included.
+fn with_response_headers(
+    response: Result<Response, ErrorResponse>,
+    headers: HeaderMap,
+) -> Result<Response, ErrorResponse> {
+    if headers.is_empty() {
+        return response;
+    }
+    let mut response = response.unwrap_or_else(IntoResponse::into_response);
+    for (name, value) in &headers {
+        response.headers_mut().append(name, value.clone());
+    }
+    Ok(response)
 }
 
 /// Parse typed JSON with the existing control-character recovery and error mapping.
@@ -4985,6 +5008,7 @@ async fn responses(
         text: request.inner.text.clone(),
         service_tier: request.inner.service_tier.clone(),
         include: request.inner.include.clone(),
+        top_logprobs: request.inner.top_logprobs,
         truncation: request.inner.truncation,
         // Upstream `CreateResponse` doesn't carry these yet; plumbed through so
         // the response serializer can default to 0.0 without hardcoding at the
@@ -6045,7 +6069,21 @@ async fn images_with_request(
 
     connection_handle.disarm();
     inflight.mark_ok();
-    Ok(Json(response).into_response())
+    // The body and header `Json(response)` would send, but each b64_json
+    // image is copied instead of checked for escapes byte by byte.
+    // TODO: back to `Json(response)` once serde_json escapes faster; see
+    // `NvImagesResponse::to_json_vec`.
+    let body = response.to_json_vec().map_err(|e| {
+        ErrorMessage::internal_server_error_with_details("Failed to serialize images response", e)
+    })?;
+    Ok((
+        [(
+            axum::http::header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_static("application/json"),
+        )],
+        body,
+    )
+        .into_response())
 }
 
 /// Accept ordered uploads or the JSON reference extension for image edits.

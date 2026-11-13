@@ -122,7 +122,7 @@ pub fn inspect(response: Value, is_prefill: bool) -> Result<Inspected, DynamoErr
     output.token_ids = token_ids;
     let mut engine_data = Map::new();
     engine_data.insert(RESPONSE_KEY.to_string(), response);
-    output.engine_data = Some(Value::Object(engine_data));
+    output.engine_data = Some(Box::new(Value::Object(engine_data)));
     Ok(Inspected {
         output,
         terminal,

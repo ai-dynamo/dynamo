@@ -645,7 +645,7 @@ fn drain_router_routing_data(
     let Some(tracker) = tracker else {
         return;
     };
-    tracker.ingest_routing_data(routing_data);
+    tracker.ingest_routing_data(*routing_data);
 }
 
 fn attach_metrics_annotation<Resp>(response: &mut Annotated<Resp>, metrics: &LLMMetricAnnotation) {
