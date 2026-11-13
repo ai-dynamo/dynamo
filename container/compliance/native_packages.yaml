@@ -122,6 +122,7 @@ packages:
     license: Apache-2.0
     source: https://github.com/etcd-io/etcd
     images:
+      - tokenspeed-runtime
       - vllm-runtime
       - vllm-runtime-efa
       - sglang-runtime
@@ -136,6 +137,7 @@ packages:
     license: Apache-2.0
     source: https://github.com/nats-io/nats-server
     images:
+      - tokenspeed-runtime
       - vllm-runtime
       - vllm-runtime-efa
       - sglang-runtime

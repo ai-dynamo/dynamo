@@ -61,6 +61,11 @@ function checkFilter(file, patterns) {
 // expectations: { filterName: expectedValue, ... }
 const testCases = [
   {
+    file: 'container/templates/tokenspeed_runtime.Dockerfile',
+    expect: { tokenspeed: true, core: false, vllm: false, sglang: false, trtllm: false, triton: false },
+    desc: 'TokenSpeed runtime templates have their own filter'
+  },
+  {
     file: 'lib/llm/tests/data/media/triangle_240p_10.mp4',
     expect: { sidecar_trtllm_image: true },
     desc: 'the video fixture triggers the nightly harness checksum tests'
@@ -151,17 +156,17 @@ const testCases = [
   },
   {
     file: 'examples/backends/tokenspeed/tests/test_validate_disagg.py',
-    expect: { core: true },
-    desc: 'TokenSpeed validator tests trigger the runtime test lane'
+    expect: { core: false, tokenspeed: true },
+    desc: 'TokenSpeed validator tests trigger TokenSpeed build and runtime validation'
   },
   {
     file: 'examples/backends/tokenspeed/launch_disagg.sh',
-    expect: { core: true },
-    desc: 'TokenSpeed example code triggers runtime validation'
+    expect: { core: false, tokenspeed: true },
+    desc: 'TokenSpeed example code triggers TokenSpeed build and runtime validation'
   },
   {
     file: 'examples/backends/tokenspeed/README.md',
-    expect: { core: false },
+    expect: { core: false, tokenspeed: false },
     desc: 'TokenSpeed documentation alone avoids runtime builds'
   },
   {

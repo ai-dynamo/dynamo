@@ -684,7 +684,7 @@ COPY examples/router/custom-policy-example/ /opt/dynamo/examples/router/custom-p
 COPY deploy/inference-gateway/ext-proc/ /opt/dynamo/deploy/inference-gateway/ext-proc/
 COPY deploy/inference-gateway/sidecar/ /opt/dynamo/deploy/inference-gateway/sidecar/
 
-{% if target == "planner" or (target == "runtime" and framework in ("vllm", "sglang", "trtllm")) %}
+{% if target == "planner" or (target == "runtime" and framework in ("vllm", "sglang", "trtllm", "tokenspeed")) %}
 COPY container/deps/requirements.aisimulate.txt /opt/dynamo/container/deps/requirements.aisimulate.txt
 
 # AISimulate is released separately as an abi3 wheel. Stage the pinned wheel

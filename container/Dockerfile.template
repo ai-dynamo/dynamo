@@ -61,6 +61,11 @@
 # --- No Triton stages included
 {% endif %}
 
+{% if framework == "tokenspeed" %}
+# --- TokenSpeed Stages
+    {% include "templates/tokenspeed_runtime.Dockerfile" %}
+{% endif %}
+
 {% if make_efa == true and target == "runtime" %}
     {% include "templates/aws.Dockerfile" %}
 {% endif %}

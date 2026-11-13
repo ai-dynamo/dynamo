@@ -1,7 +1,7 @@
 # CI Filter Patterns - See FILTERS.md for documentation
 #
 # Filters that trigger CI jobs:
-#   core     -> dynamo build-test, all backend builds (vllm/sglang/trtllm)
+#   core     -> dynamo build-test and all runtime backend builds
 #   operator -> operator build and test
 #   snapshot -> standalone Snapshot integration + all-framework checkpoint deploy tests
 #   snapshot_vllm / snapshot_sglang / snapshot_trtllm -> that framework's checkpoint suite
@@ -14,6 +14,7 @@
 #   sglang   -> sglang build and test
 #   trtllm   -> trtllm build and test
 #   triton   -> triton build and test
+#   tokenspeed -> runtime build with inline compliance and dynamo validation
 #   frontend -> frontend EPP image build, dynamo build-test
 #   benchmarks -> dynamo build-test (runs tests/benchmarks/** pytest suite)
 #   efa      -> all framework EFA runtime image builds (changes to container/templates/aws.Dockerfile)
@@ -205,10 +206,6 @@ core:
   - 'components/src/dynamo/artifacts/**'
   - 'components/src/dynamo/experimental/**'
   - 'components/src/dynamo/gpu_memory_service/**'
-  # TODO(will): Move TokenSpeed to a dedicated framework filter once CI has
-  # TokenSpeed Docker images and backend-specific build/test jobs.
-  - 'components/src/dynamo/tokenspeed/**'
-  - 'examples/backends/tokenspeed/**'
   - 'components/src/dynamo/squeeze_evolve/**'
   - '*.toml'
   - '*.lock'
@@ -456,6 +453,13 @@ trtllm:
 triton:
   - 'components/src/dynamo/triton/**'
   - 'container/templates/triton_*'
+  - '!**/*.md'
+  - '!**/*.rst'
+
+tokenspeed:
+  - 'components/src/dynamo/tokenspeed/**'
+  - 'examples/backends/tokenspeed/**'
+  - 'container/templates/tokenspeed_*'
   - '!**/*.md'
   - '!**/*.rst'
 

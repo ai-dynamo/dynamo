@@ -40,6 +40,7 @@ jobs:
       sglang: ${{ steps.changes.outputs.sglang }}
       trtllm: ${{ steps.changes.outputs.trtllm }}
       triton: ${{ steps.changes.outputs.triton }}
+      tokenspeed: ${{ steps.changes.outputs.tokenspeed }}
       frontend: ${{ steps.changes.outputs.frontend }}
       benchmarks: ${{ steps.changes.outputs.benchmarks }}
       sample: ${{ steps.changes.outputs.sample }}
@@ -152,6 +153,7 @@ jobs:
       - trtllm-multi-gpu-test
       - trtllm-copy-to-acr
       - triton-build
+      - tokenspeed-build
       - triton-test
       - vllm-efa-build
       - sglang-efa-build
@@ -603,6 +605,29 @@ jobs:
       extra_build_args: |
         USER_UID=1000
         USER_GID=1000
+    secrets: inherit
+
+  tokenspeed-build:
+    name: tokenspeed-runtime
+    needs: [changed-files]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.tokenspeed == 'true'
+    uses: $/.github/workflows/shared-build-image.yml
+    with:
+      framework: tokenspeed
+      target: runtime
+      cuda_version: '["13.0"]'
+      platform: 'linux/amd64,linux/arm64'
+      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      inline_compliance: true
+      artifact_retention_days: '7'
+      build_timeout_minutes: 90
+      diff_event_context: pr
+      diff_current_branch: ${{ github.ref_name }}
+      diff_base_branch: ${{ needs.changed-files.outputs.base_ref }}
+      diff_merge_base_sha: ${{ needs.changed-files.outputs.merge_base_sha }}
+    permissions:
+      contents: read
+      actions: read
     secrets: inherit
 
   triton-build:
@@ -1089,6 +1114,7 @@ jobs:
       needs.changed-files.outputs.sglang == 'true' ||
       needs.changed-files.outputs.trtllm == 'true' ||
       needs.changed-files.outputs.triton == 'true' ||
+      needs.changed-files.outputs.tokenspeed == 'true' ||
       needs.changed-files.outputs.benchmarks == 'true'
     uses: $/.github/workflows/dynamo-pipeline.yml
     with:
