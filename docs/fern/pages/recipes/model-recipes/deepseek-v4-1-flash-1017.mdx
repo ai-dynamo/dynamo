@@ -271,11 +271,11 @@ This is a reasoning model. The chain of thought is returned in `reasoning_conten
 
 ## Benchmark
 
-[`perf/perf.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4.1-flash-1017/perf/perf.yaml) is an AIPerf Job that replays the public AgentX trace (`semianalysis_cc_traces_weka_062126`, scenario `inferencex-agentx-mvp`) for a 1200 s window at one concurrency. See [`perf/README.md`](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4.1-flash-1017/perf/README.md) for the render-and-apply command and the published concurrency per target.
+[`perf/perf.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4.1-flash-1017/perf/perf.yaml) is an AIPerf Job that replays the public AgentX trace (`semianalysis_cc_traces_weka_062126`, scenario `inferencex-agentx-mvp`) for a 3600 s window at one concurrency. See [`perf/README.md`](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4.1-flash-1017/perf/README.md) for the render-and-apply command and the published concurrency per target.
 
 ## Expected Performance
 
-AgentX trace replay, 1200 s window. A point passes when decode p50 is at least 50 tok/s/user, TTFT p50 is under 2 s, and errors are under 5%. tok/s/GPU is total output tokens per second divided by the GPU count.
+AgentX trace replay, 3600 s window. A point passes when decode p50 is at least 50 tok/s/user, TTFT p50 is under 2 s, and errors are under 5%. tok/s/GPU is total output tokens per second divided by the GPU count.
 
 <Warning>
 These throughput figures force DSpark's acceptance length to the value measured on SPEED-Bench (3.19 on H200, 3.4 on B200 and GB300), because the trace carries filler text that makes real acceptance unrepresentative. That mode fabricates accepted tokens, so treat the numbers as an upper bound. The shipped manifests use real acceptance; [`perf/README.md`](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4.1-flash-1017/perf/README.md) gives the setting for reproducing these runs.
@@ -285,7 +285,7 @@ These throughput figures force DSpark's acceptance length to the value measured 
 
 | Concurrency | GPUs | System tok/s/GPU | Decode tok/s/user (p50) | TTFT p50 |
 | --- | --- | --- | --- | --- |
-| 112 | 4 | 444.0 | 51.0 | 278 ms |
+| 108 | 4 | 482.1 | 50.9 | 287 ms |
 
 </div>
 
@@ -293,7 +293,7 @@ These throughput figures force DSpark's acceptance length to the value measured 
 
 | Concurrency | GPUs | System tok/s/GPU | Decode tok/s/user (p50) | TTFT p50 |
 | --- | --- | --- | --- | --- |
-| 480 | 20 | 392.4 | 73.5 | 663 ms |
+| 480 | 20 | 384.8 | 72.5 | 842 ms |
 
 </div>
 
@@ -301,7 +301,7 @@ These throughput figures force DSpark's acceptance length to the value measured 
 
 | Concurrency | GPUs | System tok/s/GPU | Decode tok/s/user (p50) | TTFT p50 |
 | --- | --- | --- | --- | --- |
-| 384 | 4 | 1,453.2 | 70.8 | 298 ms |
+| 400 | 4 | 1,552.4 | 58.6 | 496 ms |
 
 </div>
 
@@ -309,7 +309,7 @@ These throughput figures force DSpark's acceptance length to the value measured 
 
 | Concurrency | GPUs | System tok/s/GPU | Decode tok/s/user (p50) | TTFT p50 |
 | --- | --- | --- | --- | --- |
-| 1408 | 16 | 1,531.6 | 99.2 | 1,141 ms |
+| 1408 | 16 | 1,478.4 | 99.7 | 1,285 ms |
 
 </div>
 
@@ -317,7 +317,7 @@ These throughput figures force DSpark's acceptance length to the value measured 
 
 | Concurrency | GPUs | System tok/s/GPU | Decode tok/s/user (p50) | TTFT p50 |
 | --- | --- | --- | --- | --- |
-| 576 (288 per worker) | 4 | 2,283.2 | 63.9 | 276 ms |
+| 616 (308 per worker) | 4 | 2,320.1 | 60.3 | 310 ms |
 
 </div>
 
@@ -325,7 +325,7 @@ These throughput figures force DSpark's acceptance length to the value measured 
 
 | Concurrency | GPUs | System tok/s/GPU | Decode tok/s/user (p50) | TTFT p50 |
 | --- | --- | --- | --- | --- |
-| 864 | 8 | 2,260.6 | 160.7 | 1,029 ms |
+| 920 | 8 | 2,162.3 | 154.0 | 1,725 ms |
 
 </div>
 
@@ -333,14 +333,14 @@ These throughput figures force DSpark's acceptance length to the value measured 
 
 | Target | GPUs | Topology | Concurrency | tok/s/GPU (synthetic acceptance) |
 | --- | --- | --- | --- | --- |
-| `agg-h200-agentx` | 4x H200 | Aggregated, TP4 | 112 | 444.0 |
-| `disagg-h200-agentx` | 20x H200 | 3P2D | 480 | 392.4 |
-| `agg-b200-agentx` | 4x B200 | Aggregated, TP4 | 384 | 1,453.2 |
-| `disagg-b200-agentx` | 16x B200 | 3P1D | 1408 | 1,531.6 |
-| `agg-gb300-agentx` | 4x GB300 | Aggregated, 2x TP2 | 576 | 2,283.2 |
-| `disagg-gb300-agentx` | 8x GB300 | 2P1D | 864 | 2,260.6 |
+| `agg-h200-agentx` | 4x H200 | Aggregated, TP4 | 108 | 482.1 |
+| `disagg-h200-agentx` | 20x H200 | 3P2D | 480 | 384.8 |
+| `agg-b200-agentx` | 4x B200 | Aggregated, TP4 | 400 | 1,552.4 |
+| `disagg-b200-agentx` | 16x B200 | 3P1D | 1408 | 1,478.4 |
+| `agg-gb300-agentx` | 4x GB300 | Aggregated, 2x TP2 | 616 | 2,320.1 |
+| `disagg-gb300-agentx` | 8x GB300 | 2P1D | 920 | 2,162.3 |
 
-Aggregated is the recommended default on all three GPUs. On H200 it is 1.13x better per GPU than disaggregated. On B200 and GB300 the two are within a few percent, so choose disaggregated only when a single deployment must carry the higher concurrency or when decode speed per user matters (99 versus 71 tok/s/user on B200, 161 versus 64 on GB300).
+Aggregated is the recommended default on all three GPUs. On H200 it is 1.25x better per GPU than disaggregated. On B200 and GB300 it leads by 5% and 7%, so choose disaggregated only when a single deployment must carry the higher concurrency or when decode speed per user matters (100 versus 59 tok/s/user on B200, 154 versus 60 on GB300).
 
 ## Notes
 

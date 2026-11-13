@@ -7,7 +7,7 @@ SPDX-License-Identifier: Apache-2.0
 
 `perf.yaml` is a Kubernetes Job that replays the public AgentX multi-turn coding-agent trace
 (`semianalysis_cc_traces_weka_062126`, aiperf scenario `inferencex-agentx-mvp`) against one deployed recipe at one
-concurrency, for a 1200 s measured window after a warmup phase. The dataset is downloaded from Hugging Face at start,
+concurrency, for a 3600 s measured window after a warmup phase. The dataset is downloaded from Hugging Face at start,
 so the Job needs outbound access and no token.
 
 ## Variants
@@ -17,12 +17,12 @@ which the published number was measured.
 
 | Recipe | DGD name | GPUs | Published concurrency | tok/s/GPU (synthetic acceptance) |
 |---|---|---|---|---|
-| `agg-h200-agentx` | `dsv41-flash-h200-agg` | 4 | 112 | 444.0 |
-| `disagg-h200-agentx` | `dsv41-flash-h200-disagg` | 20 | 480 | 392.4 |
-| `agg-b200-agentx` | `dsv41-flash-b200-agg` | 4 | 384 | 1,453.2 |
-| `disagg-b200-agentx` | `dsv41-flash-b200-disagg` | 16 | 1408 | 1,531.6 |
-| `agg-gb300-agentx` | `dsv41-flash-gb300-agg` | 4 | 576 | 2,283.2 |
-| `disagg-gb300-agentx` | `dsv41-flash-gb300-disagg` | 8 | 864 | 2,260.6 |
+| `agg-h200-agentx` | `dsv41-flash-h200-agg` | 4 | 108 | 482.1 |
+| `disagg-h200-agentx` | `dsv41-flash-h200-disagg` | 20 | 480 | 384.8 |
+| `agg-b200-agentx` | `dsv41-flash-b200-agg` | 4 | 400 | 1,552.4 |
+| `disagg-b200-agentx` | `dsv41-flash-b200-disagg` | 16 | 1408 | 1,478.4 |
+| `agg-gb300-agentx` | `dsv41-flash-gb300-agg` | 4 | 616 | 2,320.1 |
+| `disagg-gb300-agentx` | `dsv41-flash-gb300-disagg` | 8 | 920 | 2,162.3 |
 
 tok/s/GPU is the total output tokens per second printed in the aiperf summary, divided by the GPU count. A point passes
 when decode p50 is at least 50 tok/s/user, TTFT p50 is under 2 s and errors are under 5%.
@@ -49,7 +49,7 @@ a different workload and the result is not comparable to the published numbers.
 kubectl apply -f recipes/deepseek-v4.1-flash-1017/vllm/<recipe>/deploy.yaml -n ${NAMESPACE}
 
 # 2. render and apply the Job (CACHE_SALT must be fresh for every run so earlier runs do not warm the prefix cache)
-CONCURRENCY=576 ENDPOINT=http://dsv41-flash-gb300-agg-frontend:8000 CACHE_SALT=$(openssl rand -hex 12) \
+CONCURRENCY=616 ENDPOINT=http://dsv41-flash-gb300-agg-frontend:8000 CACHE_SALT=$(openssl rand -hex 12) \
   envsubst '$CONCURRENCY $ENDPOINT $CACHE_SALT' < recipes/deepseek-v4.1-flash-1017/perf/perf.yaml \
   | kubectl apply -f - -n ${NAMESPACE}
 
@@ -65,8 +65,8 @@ summary table; `profile_export_aiperf.csv` is in the pod until then). Delete the
 
 - **Warmup is part of the run and grows with concurrency.** The agentic scenario completes about 1.07 requests per
   concurrent session before the measured window starts. Warmup sends requests nearly one at a time and speeds up as it
-  goes, so the GPUs look idle at first. At concurrency 1,152 it takes about 110 minutes; `activeDeadlineSeconds` is
-  8 hours.
+  goes, so the GPUs look idle at first. At concurrency 1,152 it takes about 110 minutes, so with the 60-minute window the
+  Job runs about 3 hours; `activeDeadlineSeconds` is 8 hours.
 - **Session affinity needs the header.** The Job sets `AIPERF_HTTP_X_DYNAMO_SESSION_ID_FROM_CORRELATION_ID=1`, which
   makes the Dynamo router pin each trajectory to one worker. Without it, multi-worker results are much worse.
 - On arm64 nodes the Job compiles one dependency (`crick`), so the first minutes show a package build.
