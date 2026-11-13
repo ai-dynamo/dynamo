@@ -1686,6 +1686,22 @@ def test_build_vllm_kv_hints_constructs_envelope():
     assert envelope.actions[0].payload == source_locations_payload
 
 
+def test_build_vllm_kv_hints_rejects_structural_breaks_as_internal_errors():
+    from dynamo.vllm.handlers import _build_vllm_kv_hints
+
+    with pytest.raises(RuntimeError, match="kv_hint must be an object"):
+        _build_vllm_kv_hints({"kv_hint": "not-an-object"})
+
+    with pytest.raises(RuntimeError, match="kv_hint.actions must be a list"):
+        _build_vllm_kv_hints({"kv_hint": {"actions": {}}})
+
+    with pytest.raises(RuntimeError, match="each kv_hint action must be an object"):
+        _build_vllm_kv_hints({"kv_hint": {"actions": ["not-an-object"]}})
+
+    with pytest.raises(RuntimeError, match="kv_hint action payload must be an object"):
+        _build_vllm_kv_hints({"kv_hint": {"actions": [{"payload": "not-an-object"}]}})
+
+
 def test_update_kv_transfer_params_copies_extra_args_before_mutating():
     from dynamo.vllm.handlers import _update_kv_transfer_params
 

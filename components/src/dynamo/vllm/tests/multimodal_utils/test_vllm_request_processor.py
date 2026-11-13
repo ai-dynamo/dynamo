@@ -1228,8 +1228,21 @@ def test_mark_forwarded_mm_hashes_for_routing(hashes, expected):
 
 
 def test_mark_forwarded_mm_hashes_rejects_noncanonical_hash():
-    with pytest.raises(ValueError, match="must start with 16 hex characters"):
+    with pytest.raises(RuntimeError, match="must start with 16 hex characters"):
         mod.mark_forwarded_mm_hashes_for_routing(["opaque-key"])
+
+
+def test_mm_internal_contract_breaks_are_server_errors():
+    with pytest.raises(RuntimeError, match="explicit_audio_count and video_count"):
+        mod._build_user_mm_uuids({}, False, use_audio_in_video=True)
+
+    with pytest.raises(RuntimeError, match="is_embed length"):
+        mod._placeholder_range_from_extra_arg(
+            {"offset": 0, "length": 4, "is_embed": [True, False]}
+        )
+
+    with pytest.raises(RuntimeError, match="vision_chunk entries must be objects"):
+        mod.compute_mm_uuids({"vision_chunk": ["not-a-dict"]})
 
 
 def test_build_tokens_prompt_omits_absent_processor_kwargs():
