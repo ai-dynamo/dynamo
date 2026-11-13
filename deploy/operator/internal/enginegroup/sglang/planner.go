@@ -17,6 +17,7 @@ type ScalePlanner struct {
 	ProfileFingerprint string
 	WorldID            string
 	MembersPerReplica  int32
+	RetirementEnabled  bool
 }
 
 func (p ScalePlanner) ResolveScalePlan(
@@ -50,10 +51,22 @@ func (p ScalePlanner) ResolveScalePlan(
 		}}, nil
 	}
 	if targetReplicas < current {
-		return domain.ScalePlanResolution{Rejection: &domain.Failure{
-			Classification: domain.FailureClassificationTerminal,
-			Reason:         "SGLangShrinkUnsupported",
-			Message:        "this SGLang integration supports append growth only",
+		if !p.RetirementEnabled {
+			return domain.ScalePlanResolution{Rejection: &domain.Failure{
+				Classification: domain.FailureClassificationTerminal,
+				Reason:         "SGLangShrinkUnsupported",
+				Message:        "planned shrink requires explicit native external retiree lifecycle",
+			}}, nil
+		}
+		return domain.ScalePlanResolution{Plan: &domain.ResolvedPlan{
+			ID:                      fmt.Sprintf("sglang-retire-%s-%d-%d", p.WorldID, base.Generation, current-1),
+			ProfileFingerprint:      p.ProfileFingerprint,
+			ProcessLifecycleOwner:   domain.ProcessLifecycleOwnerOrchestrator,
+			TrafficRequirement:      domain.TrafficRequirementEngineManagedDrain,
+			VerificationRequirement: domain.VerificationRequirementRequired,
+			Change: domain.ResolvedChange{Kind: domain.PlanKindRetire,
+				Retire: &domain.RetireChange{Replicas: []domain.ReplicaID{domain.ReplicaID(fmt.Sprintf("replica-%d", current-1))}},
+			},
 		}}, nil
 	}
 	// Each native append admits one complete allocation; larger absolute targets converge through separate commits.
