@@ -47,7 +47,7 @@ so every pod is permanently NotReady and the rollout stalls at the first node.
 
 {{- if .Values.dev.enabled }}
 
-DEV MODE: a single Pod (not a DaemonSet) was created, pinned to node "{{ .Values.dev.nodeName }}".
+DEV MODE: a single Pod (not a DaemonSet) was created, {{ if .Values.dev.nodeName }}pinned to node "{{ .Values.dev.nodeName }}"{{ else }}scheduled via the affinity rules in dev.affinity{{ end }}.
 
 ╭─ PREREQUISITE — the script ConfigMap MUST exist before this Pod can start ─╮
 │                                                                            │
