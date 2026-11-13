@@ -350,7 +350,22 @@ The SGLang scheduler keeps one token of the context for itself, admits a prompt 
 than five further tokens stay free, and caps the output by the free KV capacity. A decode worker
 reserves 512 tokens for each handoff and keeps no prefix cache. To change these two defaults, set
 `engine.sglang.num_reserved_decode_tokens` or
-`engine.sglang.disaggregation_decode_enable_radix_cache` in the `--extra-engine-args` file.
+`engine.sglang.disaggregation_decode_enable_radix_cache` in the `--extra-engine-args` file. That
+file replaces the engine flags, so it also names the backend and the worker role. Without
+`engine.backend` the engine is vLLM and the SGLang settings have no effect.
+
+```json
+{
+  "engine": {
+    "backend": "sglang",
+    "worker_type": "decode",
+    "sglang": {
+      "num_reserved_decode_tokens": 128,
+      "disaggregation_decode_enable_radix_cache": true
+    }
+  }
+}
+```
 
 <ParamField path="--sglang-schedule-policy" type="string" default="fifo">
   SGLang scheduling policy. `fifo` is the default; `lpm` is longest prefix match.
