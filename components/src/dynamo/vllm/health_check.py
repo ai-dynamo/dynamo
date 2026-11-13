@@ -73,9 +73,8 @@ def _make_default_payload(
 ) -> dict:
     sampling_options: dict[str, Any]
     if _sampling_mask_enabled(engine_client):
-        # With return_sampling_mask, vLLM rejects any request unless
-        # temperature > 0 and top_k > 0, so a greedy canary would fail
-        # every probe. The single sampled token is never read.
+        # vLLM rejects mask-mode requests unless temperature > 0 and top_k > 0,
+        # so a greedy canary fails every probe; the sampled token is never read.
         sampling_options = {"temperature": 1.0, "top_k": 8}
         logger.info(
             "return_sampling_mask is enabled; health check uses sampled "
