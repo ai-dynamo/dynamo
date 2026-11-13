@@ -10,6 +10,7 @@ BaseFormatDetector.parse_streaming_increment.
 """
 
 import json
+from types import SimpleNamespace
 
 import pytest
 from sglang.srt.entrypoints.openai.protocol import Function as SglangFunction
@@ -19,7 +20,9 @@ from sglang.srt.function_call.json_array_parser import JsonArrayParser
 from sglang.srt.parser.reasoning_parser import ReasoningParser
 from sglang.srt.utils.hf_transformers_utils import get_tokenizer
 
+import dynamo.frontend.sglang_prepost as sglang_prepost_module
 from dynamo.frontend.sglang_prepost import SglangStreamingPostProcessor
+from dynamo.frontend.sglang_processor import SglangProcessor
 
 # Needs sglang packages (gpu_1 container), but does not allocate GPU VRAM.
 pytestmark = [
@@ -529,13 +532,211 @@ class TestJsonArrayParserReparse:  # FRONTEND.4 — JSON-array parser reparse pa
     """Exercise the JsonArrayParser branch of the finish-time re-parse.
 
     Under ``tool_choice="required"`` or a named function, guided decoding
-    constrains the model to emit a raw JSON array and
-    SglangStreamingPostProcessor is constructed with a JsonArrayParser
-    instead of a FunctionCallParser. The re-parse path uses
-    ``has_tool_call`` on the parser as a cheap gate and
-    ``_parse_json_array_buffer`` for recovery — this class locks in that
-    API surface so a SGLang upgrade can't silently break it.
+    constrains the model to emit a raw JSON array. If the backend ignores
+    guidance, recover native tool calls or preserve ordinary text while
+    respecting the selected tool.
     """
+
+    @staticmethod
+    def _run_forced_choice(tokenizer, text, tool_choice, batch_size):
+        # Exercise the shared builder used by inline and process-pool requests.
+        processor = SimpleNamespace(
+            tokenizer=tokenizer, tool_call_parser_name="hunyuan", eos_token_ids=[]
+        )
+        post = SglangProcessor._build_postprocessor(
+            processor,
+            {
+                "tools": [tool.model_dump() for tool in TOOLS],
+                "tool_choice": tool_choice,
+            },
+            {"sampling_options": {"guided_decoding": None}, "require_reasoning": False},
+            tool_call_parser=JsonArrayParser(),
+            reasoning_parser=None,
+            named_zero_arg_tool=None,
+            prompt_token_ids=[],
+        )
+        token_ids = tokenizer.encode(text)
+        choices = []
+        for start in range(0, len(token_ids), batch_size):
+            end = start + batch_size
+            choice = post.process_output(
+                {
+                    "token_ids": token_ids[start:end],
+                    "finish_reason": "stop" if end >= len(token_ids) else None,
+                }
+            )
+            if choice is not None:
+                choices.append(choice)
+        return choices
+
+    @pytest.mark.parametrize("batch_size", [1, 8, 1000])
+    @pytest.mark.parametrize("named", [False, True])
+    @pytest.mark.parametrize(
+        "text",
+        ["The service is unavailable.", "Service unavailable [503]; retry {later}."],
+    )
+    def test_forced_choice_preserves_plain_text(
+        self, tokenizer, batch_size, named, text
+    ):
+        tool_choice = (
+            {"type": "function", "function": {"name": "get_weather"}}
+            if named
+            else "required"
+        )
+        choices = self._run_forced_choice(tokenizer, text, tool_choice, batch_size)
+
+        assert all(not choice["delta"].get("content") for choice in choices[:-1])
+        assert choices[-1]["delta"]["content"] == text
+        assert choices[-1]["finish_reason"] == "stop"
+        assert all(not choice["delta"].get("tool_calls") for choice in choices)
+
+    @pytest.mark.parametrize("batch_size", [1, 8, 1000])
+    @pytest.mark.parametrize(
+        "text",
+        ["The service is unavailable.", "Service unavailable [503]; retry {later}."],
+    )
+    def test_plain_text_avoids_native_detector_construction(
+        self, tokenizer, monkeypatch, batch_size, text
+    ):
+        def unexpected_parser(*args, **kwargs):
+            pytest.fail(
+                "Ordinary text must not construct the vocabulary-scanning parser"
+            )
+
+        monkeypatch.setattr(
+            sglang_prepost_module, "FunctionCallParser", unexpected_parser
+        )
+        choices = self._run_forced_choice(tokenizer, text, "required", batch_size)
+        assert choices[-1]["delta"]["content"] == text
+        assert choices[-1]["finish_reason"] == "stop"
+
+    @pytest.mark.parametrize("batch_size", [1, 2, 4, 8, 20, 32, 1000])
+    @pytest.mark.parametrize("selected_first", [False, True])
+    def test_named_choice_emits_dense_indices(
+        self, tokenizer, batch_size, selected_first
+    ):
+        from openai.lib.streaming.chat import ChatCompletionStreamState
+        from openai.types.chat import ChatCompletionChunk
+
+        selected = {"name": "get_weather", "parameters": {"city": "NYC"}}
+        other = {
+            "name": "search_gutenberg_books",
+            "parameters": {"search_terms": ["Joyce"]},
+        }
+        payload = [selected, other, selected] if selected_first else [other, selected]
+        choices = self._run_forced_choice(
+            tokenizer,
+            json.dumps(payload),
+            {"type": "function", "function": {"name": "get_weather"}},
+            batch_size,
+        )
+        calls = choices[-1]["delta"]["tool_calls"]
+        count = 2 if selected_first else 1
+        assert [call["index"] for call in calls] == list(range(count))
+        assert all(call["function"]["name"] == "get_weather" for call in calls)
+        assert all(
+            json.loads(call["function"]["arguments"]) == {"city": "NYC"}
+            for call in calls
+        )
+        state = ChatCompletionStreamState()
+        for choice in choices:
+            state.handle_chunk(
+                ChatCompletionChunk(
+                    id="test",
+                    created=0,
+                    model="test",
+                    object="chat.completion.chunk",
+                    choices=[choice],
+                )
+            )
+        assert (
+            len(state.current_completion_snapshot.choices[0].message.tool_calls)
+            == count
+        )
+
+    @pytest.mark.parametrize("batch_size", [1, 8, 1000])
+    @pytest.mark.parametrize("native", [False, True])
+    @pytest.mark.parametrize("selected", ["get_weather", "search_gutenberg_books"])
+    def test_named_choice_filters_other_offered_tools(
+        self, tokenizer, batch_size, native, selected
+    ):
+        text = (
+            "<tool_calls><tool_call>get_weather"
+            "<arg_key>city</arg_key><arg_value>NYC</arg_value>"
+            "</tool_call></tool_calls>"
+            if native
+            else '[{"name": "get_weather", "parameters": {"city": "NYC"}}]'
+        )
+        choices = self._run_forced_choice(
+            tokenizer,
+            text,
+            {"type": "function", "function": {"name": selected}},
+            batch_size,
+        )
+
+        assert all(not choice["delta"].get("content") for choice in choices)
+        calls = choices[-1]["delta"].get("tool_calls", [])
+        if selected == "get_weather":
+            assert len(calls) == 1
+            assert calls[0]["function"]["name"] == selected
+            assert json.loads(calls[0]["function"]["arguments"]) == {"city": "NYC"}
+            assert choices[-1]["finish_reason"] == "tool_calls"
+        else:
+            assert calls == []
+            assert choices[-1]["finish_reason"] == "stop"
+
+    @pytest.mark.parametrize("batch_size", [1, 8, 1000])
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "<tool_calls><tool_call>get_weather<arg_key>city</arg_key>",
+            '[{"name": "get_weather", "parameters": {"city":',
+        ],
+    )
+    def test_malformed_forced_tool_markup_stays_hidden(
+        self, tokenizer, batch_size, text
+    ):
+        choices = self._run_forced_choice(tokenizer, text, "required", batch_size)
+
+        assert all(not choice["delta"].get("content") for choice in choices)
+        assert all(not choice["delta"].get("tool_calls") for choice in choices)
+        assert choices[-1]["finish_reason"] == "stop"
+
+    @pytest.mark.parametrize("batch_size", [1, 8, 1000])
+    def test_hunyuan_native_fallback(self, tokenizer, batch_size):
+        """Forced calls recover native markup without emitting it as content."""
+        text = (
+            "<tool_calls><tool_call>get_weather"
+            "<arg_key>city</arg_key><arg_value>NYC</arg_value>"
+            "</tool_call></tool_calls>"
+        )
+        post = SglangStreamingPostProcessor(
+            tokenizer=tokenizer,
+            tool_call_parser=JsonArrayParser(),
+            reasoning_parser=None,
+            sglang_tools=TOOLS,
+            tool_call_parser_name="hunyuan",
+        )
+        token_ids = tokenizer.encode(text)
+        choices = []
+        for start in range(0, len(token_ids), batch_size):
+            end = start + batch_size
+            choice = post.process_output(
+                {
+                    "token_ids": token_ids[start:end],
+                    "finish_reason": "stop" if end >= len(token_ids) else None,
+                }
+            )
+            if choice is not None:
+                choices.append(choice)
+
+        assert all(not choice["delta"].get("content") for choice in choices)
+        final = choices[-1]
+        assert final["finish_reason"] == "tool_calls"
+        calls = final["delta"]["tool_calls"]
+        assert len(calls) == 1
+        assert calls[0]["function"]["name"] == "get_weather"
+        assert json.loads(calls[0]["function"]["arguments"]) == {"city": "NYC"}
 
     def test_single_call_reparse(self, tokenizer):
         """Full JSON array arriving in one chunk triggers the re-parse."""
@@ -650,23 +851,16 @@ class TestJsonArrayParserReparse:  # FRONTEND.4 — JSON-array parser reparse pa
         assert choice["delta"]["content"] == text
         assert "tool_calls" not in choice["delta"]
 
-    def test_multiple_calls_reparse(self, tokenizer):
-        """Multiple calls in one chunk; re-parse must recover all."""
+    @pytest.mark.parametrize("batch_size", [1, 8, 20, 32, 1000])
+    def test_multiple_calls_reparse(self, tokenizer, batch_size):
+        """A complete first call must not hide subsequent calls at finish."""
         text = (
             '[{"name": "search_gutenberg_books", '
             '"parameters": {"search_terms": ["Joyce"]}}, '
             '{"name": "get_weather", "parameters": {"city": "London"}}]'
         )
-        post = SglangStreamingPostProcessor(
-            tokenizer=tokenizer,
-            tool_call_parser=JsonArrayParser(),
-            reasoning_parser=None,
-            sglang_tools=TOOLS,
-        )
-        token_ids = tokenizer.encode(text)
-        choice = post.process_output({"token_ids": token_ids, "finish_reason": "stop"})
-        assert choice is not None
-        tc = choice.get("delta", {}).get("tool_calls", [])
+        choices = self._run_forced_choice(tokenizer, text, "required", batch_size)
+        tc = choices[-1]["delta"].get("tool_calls", [])
         assert len(tc) == 2
         names = {t["function"]["name"] for t in tc}
         assert names == {"search_gutenberg_books", "get_weather"}
