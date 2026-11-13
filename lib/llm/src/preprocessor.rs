@@ -15,6 +15,9 @@ mod edit;
 pub mod media;
 #[cfg(feature = "mm-routing")]
 pub mod mm_routing;
+
+#[cfg(all(test, feature = "mm-routing"))]
+mod glm5_next_tests;
 pub mod prompt;
 pub mod speculative_prefill;
 pub(crate) mod structural_tag;
@@ -656,7 +659,7 @@ fn drain_router_routing_data(
     let Some(tracker) = tracker else {
         return;
     };
-    tracker.ingest_routing_data(routing_data);
+    tracker.ingest_routing_data(*routing_data);
 }
 
 fn attach_metrics_annotation<Resp>(response: &mut Annotated<Resp>, metrics: &LLMMetricAnnotation) {
@@ -2046,8 +2049,7 @@ pub struct OpenAIPreprocessor {
     /// Tracks warmups and cancels them when this preprocessor is retired.
     speculative_prefill_tasks: speculative_prefill::PrefillTasks,
     /// Per-image token-count engine. `None` when the feature is disabled, the
-    /// model isn't covered by the registry, or `preprocessor_config.json` is
-    /// unreadable.
+    /// model isn't supported, or its processor configuration is invalid.
     #[cfg(feature = "mm-routing")]
     image_token_counter: Option<mm_routing::image::ImageRoutingProcessor>,
     /// Lightweight model-visible video expansion. Unlike the image counter,
@@ -4999,6 +5001,15 @@ impl OpenAIPreprocessor {
                     return None;
                 }
             };
+            if let Err(error) = counter.validate_image_prompt(token_ids, &dimensions) {
+                tracing::warn!(
+                    target: "mm_routing",
+                    model = counter.model_id(),
+                    %error,
+                    "image prompt layout is unsupported; skipping MM routing info"
+                );
+                return None;
+            }
             let (expanded, expanded_prompt_len) = try_expand_mm_routing_tokens(
                 self.tokenizer.as_ref(),
                 self.routing_image_prompt_layout

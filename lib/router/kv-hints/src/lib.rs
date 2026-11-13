@@ -49,6 +49,6 @@ pub use transfer::{
 };
 pub use wire::{
     KV_HINT_TRANSFER_CAPABILITY_KEY, KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
-    KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY, KvHint, KvHintAction, KvSourceLocationsPayload,
-    KvTransferCandidateSource,
+    KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY, KvHint, KvHintAction, KvHintActionLimitError,
+    KvSourceLocationsPayload, KvTransferCandidateSource, MAX_KV_HINT_ACTIONS,
 };

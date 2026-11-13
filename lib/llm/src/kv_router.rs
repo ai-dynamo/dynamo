@@ -18,9 +18,12 @@ use dynamo_kv_indexer::host::{
     SessionPrefixIndexer,
 };
 use dynamo_kv_router::config::{KvRouterConfig, min_initial_workers_from_env};
+use dynamo_kv_router::plugins::check_role;
+use dynamo_kv_router::plugins::hint_policy::HintPolicyFactory;
 use dynamo_kv_router::plugins::request_classifier::{RequestClassifier, RequestClassifierContext};
 #[cfg(test)]
 use dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicy;
+use dynamo_kv_router::plugins::worker_selection::experimental::resident_blocks::RESIDENT_BLOCKS;
 use dynamo_kv_router::plugins::worker_selection::{
     WorkerInfo, WorkerInfoExt, WorkerInputs, WorkerSelectionPolicyFactory,
 };
@@ -79,6 +82,7 @@ pub use encoder_router::EncoderRouter;
 pub use indexer::Indexer;
 pub use prefill_router::PrefillRouter;
 pub(crate) use request_lease::RequestAttemptRelease;
+pub(crate) use routing_host::{EVERY_ROLE, check_hint_policies_route_on_kv_path};
 pub use routing_host::{
     KvPushRouter, LlmDispatch, MultimodalCache, RoutingHost, RoutingHostBuilder,
 };
@@ -147,7 +151,7 @@ impl SelectionPolicySource {
                 config,
                 worker_type,
                 model_name,
-            ),
+            )?,
         };
         if !prepared.inputs().contains(WorkerInputs::CACHE) {
             anyhow::ensure!(
@@ -157,6 +161,12 @@ impl SelectionPolicySource {
             anyhow::ensure!(
                 !config.enable_session_prefix_index,
                 "enable_session_prefix_index requires the worker-selection policy to declare WorkerInputs::CACHE"
+            );
+            // Resident block counts come from the indexer that CACHE starts. The input is
+            // experimental; this check is the frontend's only use of that namespace.
+            anyhow::ensure!(
+                !prepared.inputs().contains(RESIDENT_BLOCKS),
+                "RESIDENT_BLOCKS requires the worker-selection policy to declare WorkerInputs::CACHE"
             );
         }
         Ok(prepared)
@@ -168,10 +178,15 @@ impl SelectionPolicySource {
 /// `embedded::EmbeddedSelection::start` builds) and defers every other call to
 /// the wrapped factory. This keeps the one-call-per-partition contract while
 /// letting the router read the inputs of the instance that actually serves.
+///
+/// Preparing also resolves the role's hint policies and checks, with [`check_role`], that they
+/// fit the policy, so a bad combination fails when the router is built.
 #[derive(Clone)]
 pub struct PreparedSelectionPolicy {
     factory: WorkerSelectionPolicyFactory,
     inputs: WorkerInputs,
+    prepare_inputs: WorkerInputs,
+    hint_policies: HintPolicyFactory,
 }
 
 impl PreparedSelectionPolicy {
@@ -180,13 +195,20 @@ impl PreparedSelectionPolicy {
         config: &KvRouterConfig,
         worker_type: WorkerType,
         model_name: Option<&str>,
-    ) -> Self {
+    ) -> Result<Self> {
         let key = embedded::embedded_partition_key(model_name);
         let policy = inner(&SelectionConfig::from(config), worker_type, key.as_ref());
         let inputs =
             dynamo_scheduler::host::WorkerSelector::<ModelRuntimeConfig>::required_worker_inputs(
                 &policy,
             );
+        let hint_policies = plugins::router_plugin_registry().resolve_hint_policies(config)?;
+        let prepare_inputs = check_role(
+            worker_type,
+            &policy,
+            hint_policies.instances(&SelectionConfig::from(config), worker_type, key.as_ref()),
+            config,
+        )?;
         let slot = Arc::new(parking_lot::Mutex::new(Some(policy)));
         let factory: WorkerSelectionPolicyFactory = Arc::new(
             move |config: &SelectionConfig, worker_type, partition: RoutingPartitionRef<'_>| {
@@ -198,12 +220,28 @@ impl PreparedSelectionPolicy {
                 inner(config, worker_type, partition)
             },
         );
-        Self { factory, inputs }
+        Ok(Self {
+            factory,
+            inputs,
+            prepare_inputs,
+            hint_policies,
+        })
     }
 
     /// The optional worker inputs the prepared instance consumes.
     pub fn inputs(&self) -> WorkerInputs {
         self.inputs
+    }
+
+    /// The worker inputs whose resources the router starts: the policy's, plus those of the
+    /// role's configured hint policies. Default hint policies add none.
+    pub fn prepare_inputs(&self) -> WorkerInputs {
+        self.prepare_inputs
+    }
+
+    /// The resolved hint policies the router's partitions run.
+    pub fn hint_policies(&self) -> &HintPolicyFactory {
+        &self.hint_policies
     }
 }
 
@@ -757,11 +795,15 @@ impl KvRouter {
             metric_worker_type,
             model_name.as_deref(),
         )?;
+        // A configured hint policy that reads KV copy sources starts the KV index even when the
+        // worker-selection policy does not read it.
         let required_worker_inputs = prepared.inputs();
+        let index_inputs = prepared.prepare_inputs();
+        let hint_policies = prepared.hint_policies().clone();
         let policy_factory = prepared.factory;
         // ModelManager gates client construction as well, but preserve the capability boundary for
         // direct KvRouter callers.
-        let shared_cache = if required_worker_inputs.contains(WorkerInputs::CACHE) {
+        let shared_cache = if index_inputs.contains(WorkerInputs::CACHE) {
             shared_cache
         } else {
             None
@@ -769,11 +811,8 @@ impl KvRouter {
         let tracking_hash = tracking_hash_context(&kv_router_config)?;
         let tracking_model_name =
             resolve_tracking_model_name(tracking_hash.algorithm(), model_name.as_deref())?;
-        let kv_event_source_requirement = KvEventSourceRequirement::derive(
-            worker_role,
-            &kv_router_config,
-            required_worker_inputs,
-        );
+        let kv_event_source_requirement =
+            KvEventSourceRequirement::derive(worker_role, &kv_router_config, index_inputs);
         let component = endpoint.component();
         // All chooser tasks are children of the routing load context owner.
         let cancellation_token = parent_token.child_token();
@@ -793,7 +832,7 @@ impl KvRouter {
             model_name: model_name.as_deref(),
             worker_role,
             metric_worker_type,
-            worker_inputs: required_worker_inputs,
+            worker_inputs: index_inputs,
             kv_event_source_requirement,
             kv_source_membership,
             cancellation_token: cancellation_token.clone(),
@@ -895,6 +934,7 @@ impl KvRouter {
                 endpoint: endpoint.clone(),
                 router_id: endpoint.drt().discovery().instance_id(),
                 policy_factory,
+                hint_policies,
             },
             workers_with_configs.clone(),
             Some(request_leases.replica_observer()),
@@ -1306,6 +1346,7 @@ impl KvRouter {
             routing_constraints,
             FindBestMatchAdmission::WithAdmission,
             Default::default(),
+            false,
         )
         .await
     }
@@ -1332,6 +1373,7 @@ impl KvRouter {
         routing_constraints: RoutingConstraints,
         admission: FindBestMatchAdmission,
         accounting_attribution: dynamo_scheduler::host::AccountingAttribution,
+        needs_uncached_prefill: bool,
     ) -> anyhow::Result<AdmittedFindBestMatchOutcome> {
         let start = Instant::now();
         if update_states && context_id.is_none() {
@@ -1362,37 +1404,40 @@ impl KvRouter {
             lookup,
         } = self
             .selection
-            .run_selection(SelectionOperation {
-                accounting_attribution,
-                key: self.selection.partition_key().clone(),
-                prompt: PromptView {
-                    token_ids: Some(tokens),
-                    mm_routing_info: None,
-                    block_mm_infos,
-                    block_hashes: None,
-                    sequence_hashes: None,
-                    isl_tokens: None,
-                    lora_name: lora_name.as_deref(),
-                    cache_namespace: cache_namespace.as_deref(),
-                    is_eagle: Some(self.is_eagle),
+            .run_selection(
+                SelectionOperation {
+                    accounting_attribution,
+                    key: self.selection.partition_key().clone(),
+                    prompt: PromptView {
+                        token_ids: Some(tokens),
+                        mm_routing_info: None,
+                        block_mm_infos,
+                        block_hashes: None,
+                        sequence_hashes: None,
+                        isl_tokens: None,
+                        lora_name: lora_name.as_deref(),
+                        cache_namespace: cache_namespace.as_deref(),
+                        is_eagle: Some(self.is_eagle),
+                    },
+                    router_config_override: router_config_override.cloned(),
+                    expected_output_tokens,
+                    priority_jump,
+                    strict_priority,
+                    policy_class,
+                    session_context,
+                    session: SessionBinding::None,
+                    affinity_target,
+                    pinned_worker,
+                    allowed_worker_ids,
+                    routing_constraints,
+                    admission: core_admission,
+                    track_active_blocks: self.kv_router_config.router_track_active_blocks,
+                    return_routing_hashes: return_routing_hashes || session_index_context.is_some(),
+                    // Hosted selections do not populate the public reservation replay cache.
+                    replay_id: None,
                 },
-                router_config_override: router_config_override.cloned(),
-                expected_output_tokens,
-                priority_jump,
-                strict_priority,
-                policy_class,
-                session_context,
-                session: SessionBinding::None,
-                affinity_target,
-                pinned_worker,
-                allowed_worker_ids,
-                routing_constraints,
-                admission: core_admission,
-                track_active_blocks: self.kv_router_config.router_track_active_blocks,
-                return_routing_hashes: return_routing_hashes || session_index_context.is_some(),
-                // Hosted selections do not populate the public reservation replay cache.
-                replay_id: None,
-            })
+                !needs_uncached_prefill,
+            )
             .await;
         if lookup.is_some_and(|lookup| lookup.shared_cache_error)
             && let Some(m) = metrics::RoutingOverheadMetrics::get()
@@ -2147,7 +2192,7 @@ mod tests {
             for inputs in [
                 WorkerInputs::LOAD,
                 WorkerInputs::CACHE | WorkerInputs::LOAD,
-                WorkerInputs::KV_TRANSFER | WorkerInputs::LOAD,
+                WorkerInputs::KV_COPY | WorkerInputs::LOAD,
             ] {
                 for overlap_score_credit in [0.0, 1.0, 2.0] {
                     for use_kv_events in [false, true] {
@@ -2161,7 +2206,7 @@ mod tests {
                                     ..Default::default()
                                 };
                                 let reads_index = inputs.contains(WorkerInputs::CACHE)
-                                    || inputs.contains(WorkerInputs::KV_TRANSFER);
+                                    || inputs.contains(WorkerInputs::KV_COPY);
                                 let expected =
                                     if !reads_index || !use_kv_events || use_remote_indexer {
                                         KvEventSourceRequirement::NotRequired
@@ -2259,6 +2304,22 @@ mod tests {
     impl WorkerPicker for LoadOnlyPicker {
         fn required_worker_inputs(&self) -> WorkerInputs {
             WorkerInputs::LOAD
+        }
+
+        fn pick(
+            &self,
+            _context: &WorkerSelectionContext<'_>,
+            _input: WorkerInputView<'_>,
+        ) -> Result<usize, WorkerSelectionPolicyError> {
+            unreachable!("capability construction test does not select a worker")
+        }
+    }
+
+    struct DeclaredInputsPicker(WorkerInputs);
+
+    impl WorkerPicker for DeclaredInputsPicker {
+        fn required_worker_inputs(&self) -> WorkerInputs {
+            self.0
         }
 
         fn pick(
@@ -2502,6 +2563,20 @@ mod tests {
                 .prepare(&config, WorkerType::Aggregated, "decode", Some("model"))
                 .expect("CACHE allows indexer features even with zero scoring credit");
         }
+    }
+
+    #[tokio::test]
+    async fn resident_blocks_require_declared_cache_input() {
+        let config = KvRouterConfig::default();
+        let error = picker_policy(|| Box::new(DeclaredInputsPicker(RESIDENT_BLOCKS)))
+            .prepare(&config, WorkerType::Aggregated, "decode", Some("model"))
+            .err()
+            .expect("without CACHE there is no indexer to count blocks");
+        assert!(error.to_string().contains("RESIDENT_BLOCKS"));
+        assert!(error.to_string().contains("WorkerInputs::CACHE"));
+        picker_policy(|| Box::new(DeclaredInputsPicker(RESIDENT_BLOCKS | WorkerInputs::CACHE)))
+            .prepare(&config, WorkerType::Aggregated, "decode", Some("model"))
+            .expect("CACHE starts the indexer the counts come from");
     }
 
     #[tokio::test]
@@ -2794,6 +2869,7 @@ mod tests {
                     RoutingConstraints::default(),
                     admission,
                     Default::default(),
+                    false,
                 )
                 .await
                 .unwrap();
@@ -2980,6 +3056,7 @@ mod tests {
                     RoutingConstraints::default(),
                     FindBestMatchAdmission::WithAdmission,
                     Default::default(),
+                    false,
                 )
                 .await
                 .unwrap();
@@ -3128,6 +3205,7 @@ mod tests {
                 RoutingConstraints::default(),
                 FindBestMatchAdmission::WithAdmission,
                 Default::default(),
+                false,
             )
             .await
             .unwrap();
@@ -3395,7 +3473,8 @@ mod tests {
             &config,
             WorkerType::Decode,
             Some("named-model"),
-        );
+        )
+        .expect("prepare");
         assert_eq!(constructions.load(Ordering::SeqCst), 1);
         let inputs = prepared.inputs();
 
