@@ -58,18 +58,22 @@ def sglang_dp_layout(server_args: Any) -> tuple[int, bool]:
 
 
 def local_dp_rank_bounds(server_args: Any) -> tuple[int, int]:
+    # Native automatic bootstrap preserves the physical allocation index after resolving initial/joiner roles.
+    allocation_index = getattr(server_args, "elastic_ep_allocation_index", None)
+    allocation_width = getattr(server_args, "elastic_ep_allocation_width", None)
+    if allocation_index is not None and allocation_width:
+        start = allocation_index * allocation_width
+        return start, start + allocation_width
+
     dp_size, enable_dp_attention = sglang_dp_layout(server_args)
     nnodes = getattr(server_args, "nnodes", 1) or 1
     node_rank = getattr(server_args, "node_rank", 0) or 0
-
     if not enable_dp_attention:
         return 0, dp_size
-
     if dp_size > 1:
-        local_dp_size = dp_size // nnodes if nnodes > 0 else dp_size
-        start_dp_rank = node_rank * local_dp_size
-        return start_dp_rank, start_dp_rank + local_dp_size
-
+        local = dp_size // nnodes if nnodes > 0 else dp_size
+        start = node_rank * local
+        return start, start + local
     return 0, 1
 
 
@@ -85,6 +89,8 @@ def publishes_kv_events(server_args: Any) -> bool:
     distinct rank. Only the leader owns the single logical rank in multinode
     TP-only mode.
     """
+    if getattr(server_args, "elastic_ep_allocation_index", None) is not None:
+        return True
     dp_size, enable_dp_attention = sglang_dp_layout(server_args)
     nnodes = getattr(server_args, "nnodes", 1) or 1
     node_rank = getattr(server_args, "node_rank", 0) or 0
@@ -96,6 +102,10 @@ def publishes_kv_events(server_args: Any) -> bool:
 
 
 def model_card_dp_rank_bounds(server_args: Any) -> tuple[int, int]:
+    # Elastic SGLang owns admission and round-robin scheduling behind one stable primary endpoint.
+    # Publishing a fixed startup rank range would prevent appended ranks from receiving traffic.
+    if getattr(server_args, "elastic_ep_allocation_index", None) is not None:
+        return 0, 1
     dp_size, _ = sglang_dp_layout(server_args)
     return 0, dp_size
 
