@@ -87,8 +87,8 @@ dynamo-lora = { path = "lib/lora", version = "1.7.0" }
 dynamo-sglang-generate = { path = "lib/generate-formats/sglang", version = "1.7.0" }
 dynamo-vllm-generate = { path = "lib/generate-formats/vllm", version = "1.7.0" }
 dynamo-rl = { path = "lib/rl", version = "1.7.0" }
-dynamo-tokenizers = { version = "=4.1.2" }
-dynamo-renderer = { version = "=10.1.0" }
+dynamo-tokenizers = { version = "=4.3.0" }
+dynamo-renderer = { version = "=10.4.1" }
 dynamo-tokens = { path = "lib/tokens", version = "1.7.0" }
 dynamo-truthy = { path = "lib/truthy", version = "1.7.0" }
 dynamo-error = { path = "lib/error", version = "1.7.0" }

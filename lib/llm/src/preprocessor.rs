@@ -1791,14 +1791,12 @@ fn attach_request_context_metadata(
 /// Thin wrapper that prepares messages for MiniJinja. Normalizes historical
 /// `function.arguments` when the model opts in (GLM-5.2), and appends
 /// HuggingFace's unique continue-final-message marker when that flag is set.
-/// `input_audio` content parts are rendered as the model's audio placeholder.
 /// Other trait methods delegate to the inner request, except typed_messages:
 /// rendering must use the transformed messages rather than the original slice.
 struct NormalizedArgsRequest<'a, R> {
     inner: &'a R,
     normalize_tool_call_args: bool,
     continue_final_message: bool,
-    render_audio_placeholder: bool,
     named_tool: Option<&'a str>,
     final_message_start_tag: Option<&'a crate::preprocessor::prompt::FinalMessageTags>,
     /// Beam's render-only view of `tools` / `chat_template_args` (`builtin_tools`
@@ -1813,19 +1811,6 @@ impl<R: OAIChatLikeRequest> OAIChatLikeRequest for NormalizedArgsRequest<'_, R> 
 
     fn messages(&self) -> minijinja::value::Value {
         let mut json = serde_json::to_value(self.inner.messages()).unwrap_or_default();
-        if self.render_audio_placeholder
-            && let Some(messages) = json.as_array_mut()
-        {
-            for message in messages {
-                if let Some(parts) = message.get_mut("content").and_then(|v| v.as_array_mut()) {
-                    for part in parts {
-                        if part.get("type").and_then(|v| v.as_str()) == Some("input_audio") {
-                            *part = serde_json::json!({"type": "audio"});
-                        }
-                    }
-                }
-            }
-        }
         if self.normalize_tool_call_args
             && let Err(e) = crate::preprocessor::prompt::normalize_tool_call_arguments(&mut json)
         {
@@ -4040,20 +4025,6 @@ impl OpenAIPreprocessor {
                 "Cannot continue the final message because the prompt formatter moves it before other messages",
             ));
         }
-        let render_audio_placeholder = request.typed_messages().is_some_and(|messages| {
-            messages.iter().any(|message| {
-                multimodal_content_parts(message).is_some_and(|mut parts| {
-                    parts.any(|part| {
-                        matches!(
-                            part,
-                            MultimodalContentPart::User(
-                                ChatCompletionRequestUserMessageContentPart::InputAudio(_)
-                            )
-                        )
-                    })
-                })
-            })
-        });
         let named_tool = if tool_choice::uses_muse_spark_parser(
             self.tool_call_parser.as_deref(),
             self.runtime_config.reasoning_parser.as_deref(),
@@ -4086,7 +4057,6 @@ impl OpenAIPreprocessor {
         };
         let formatted_prompt = if self.normalize_tool_call_args
             || continue_final
-            || render_audio_placeholder
             || rendering.is_some()
             || named_tool.is_some()
         {
@@ -4094,7 +4064,6 @@ impl OpenAIPreprocessor {
                 inner: request,
                 normalize_tool_call_args: self.normalize_tool_call_args,
                 continue_final_message: continue_final,
-                render_audio_placeholder,
                 named_tool: named_tool.as_deref(),
                 final_message_start_tag: final_message_start_tag.as_ref(),
                 rendering,
@@ -9557,44 +9526,7 @@ mod token_data_tests {
 
 #[cfg(test)]
 mod strip_tests {
-    use super::{NormalizedArgsRequest, OpenAIPreprocessor};
-    use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
-    use dynamo_renderer::OAIChatLikeRequest;
-
-    #[test]
-    fn input_audio_parts_render_as_audio_placeholders() {
-        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
-            "model": "test-model",
-            "messages": [{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "transcribe"},
-                    {"type": "input_audio", "input_audio": {"data": "AA==", "format": "wav"}},
-                    {"type": "audio_url", "audio_url": {"url": "https://example.com/audio.wav"}}
-                ]
-            }]
-        }))
-        .unwrap();
-        let wrapped = NormalizedArgsRequest {
-            inner: &request,
-            normalize_tool_call_args: false,
-            continue_final_message: false,
-            render_audio_placeholder: true,
-            named_tool: None,
-            final_message_start_tag: None,
-            rendering: None,
-        };
-        assert!(wrapped.typed_messages().is_none());
-        let messages = serde_json::to_value(wrapped.messages()).unwrap();
-        assert_eq!(
-            messages[0]["content"][1],
-            serde_json::json!({"type": "audio"})
-        );
-        assert_eq!(
-            messages[0]["content"][2],
-            serde_json::json!({"type": "audio_url", "audio_url": {"url": "https://example.com/audio.wav"}})
-        );
-    }
+    use super::OpenAIPreprocessor;
 
     #[test]
     fn test_strip_inline_data_urls_replaces_data_urls() {
@@ -17038,7 +16970,6 @@ responses_tools: None,
             inner: &request,
             normalize_tool_call_args: true,
             continue_final_message: true,
-            render_audio_placeholder: false,
             final_message_start_tag: None,
             rendering: None,
         };
@@ -17084,7 +17015,6 @@ responses_tools: None,
                     inner: request,
                     normalize_tool_call_args: false,
                     continue_final_message: true,
-                    render_audio_placeholder: false,
                     final_message_start_tag: None,
                     rendering: None,
                 })
