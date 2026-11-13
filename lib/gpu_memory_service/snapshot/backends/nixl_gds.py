@@ -159,9 +159,7 @@ class _NixlGDSTransferSession:
     ) -> None:
         fd = open_direct_read_fd(file_path, logger=logger, require_direct=True)
         try:
-            self._agent.deregister_memory(
-                self._register_file(file_path, fd, sources)
-            )
+            self._agent.deregister_memory(self._register_file(file_path, fd, sources))
         finally:
             os.close(fd)
 
