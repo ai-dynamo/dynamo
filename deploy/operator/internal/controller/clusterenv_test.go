@@ -37,6 +37,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -404,6 +405,7 @@ func TestClusterDynamoGraphDeploymentRequestV1beta2ProducesCandidates(t *testing
 				"admission must use the selected 8-GPU node shape, not the 12-GPU inventory")
 			require.Equal(t, int32(8), ptr.Deref(request.Spec.Hardware.NumGPUsPerNode, 0),
 				"admission must persist the selected node width")
+			pareto := request.Spec.Objective != nil && request.Spec.Objective.Mode == nvidiacomv1beta2.ObjectiveModePareto
 
 			t.Log("Watch every Run transition before starting the production controllers")
 			watchClient, err := client.NewWithWatch(env.RESTConfig(), client.Options{Scheme: newClusterTestScheme()})
@@ -411,6 +413,20 @@ func TestClusterDynamoGraphDeploymentRequestV1beta2ProducesCandidates(t *testing
 			runWatch, err := watchClient.Watch(ctx, &nvidiacomv1beta2.DynamoGraphDeploymentRunList{}, client.InNamespace(env.Namespace()))
 			require.NoError(t, err)
 			defer runWatch.Stop()
+
+			// Observe the unchanged Job's files only for the Pareto scenario.
+			var podEvents <-chan watch.Event
+			var observationScript string
+			if pareto {
+				t.Log("Watch the real sweeper Pod so its live output can be checked against the SDK ledger")
+				podWatch, err := watchClient.Watch(ctx, &corev1.PodList{}, client.InNamespace(env.Namespace()))
+				require.NoError(t, err)
+				defer podWatch.Stop()
+				podEvents = podWatch.ResultChan()
+				script, err := os.ReadFile(filepath.Join(scenarioDir, "observe.py"))
+				require.NoError(t, err)
+				observationScript = string(script)
+			}
 
 			t.Log("Start the production Request, Run, AISimulate Job, and publisher chain")
 			operatorConfig := clusterTestRestrictedConfig(env.Namespace())
@@ -431,6 +447,8 @@ func TestClusterDynamoGraphDeploymentRequestV1beta2ProducesCandidates(t *testing
 
 			t.Log("Observe the Run until the real AISimulate and publisher containers finish")
 			var completedRun nvidiacomv1beta2.DynamoGraphDeploymentRun
+			var liveRuns []nvidiacomv1beta2.DynamoGraphDeploymentRun
+			var observations <-chan clusterParetoObservationResult
 			deadline := time.NewTimer(10 * time.Minute)
 			defer deadline.Stop()
 			for completedRun.Status.Phase != nvidiacomv1beta2.DGDRRunPhaseSucceeded {
@@ -447,7 +465,22 @@ func TestClusterDynamoGraphDeploymentRequestV1beta2ProducesCandidates(t *testing
 					}
 					require.NotEqual(t, nvidiacomv1beta2.DGDRRunPhaseFailed, run.Status.Phase,
 						"Run failed: %v", run.Status.Conditions)
+					if pareto && run.Status.Phase == nvidiacomv1beta2.DGDRRunPhaseRunning && run.Status.Progress != nil && run.Status.Progress.Candidates != nil && run.Status.Progress.Candidates.Published > 0 {
+						liveRuns = append(liveRuns, *run.DeepCopy())
+					}
 					completedRun = *run.DeepCopy()
+				case event, ok := <-podEvents:
+					require.True(t, ok, "Pod watch closed before the Pareto execution completed")
+					if event.Type == watch.Error {
+						t.Fatalf("Pod watch failed: %v", apierrors.FromObject(event.Object))
+					}
+					pod, ok := event.Object.(*corev1.Pod)
+					require.Truef(t, ok, "Pod watch returned %T", event.Object)
+					for _, status := range pod.Status.ContainerStatuses {
+						if observations == nil && status.Name == dgdrRunSweeperContainer && status.State.Running != nil {
+							observations = observeClusterPareto(ctx, env.RESTConfig(), env.Namespace(), pod.Name, observationScript)
+						}
+					}
 				case <-deadline.C:
 					t.Fatal("v1beta2 DGDR did not complete with a candidate")
 				}
@@ -456,6 +489,16 @@ func TestClusterDynamoGraphDeploymentRequestV1beta2ProducesCandidates(t *testing
 			require.NotNil(t, completedRun.Status.Progress.Candidates, "completed Run has no candidate progress")
 			require.Equal(t, int32(1), completedRun.Status.Progress.Candidates.Published)
 			require.Len(t, completedRun.Status.CandidateRefs, 1)
+			if pareto {
+				require.NotNil(t, observations, "real sweeper container was never observed Running")
+				select {
+				case result := <-observations:
+					require.NoError(t, result.Err)
+					assertClusterParetoPublication(t, result.Observation, liveRuns, &completedRun)
+				case <-deadline.C:
+					t.Fatal("did not capture the real AISimulate ledger and live snapshots")
+				}
+			}
 			require.NotNil(t, completedRun.Spec.Hardware)
 			require.NotNil(t, completedRun.Spec.Hardware.GPU)
 			require.Equal(t, int32(8), ptr.Deref(completedRun.Spec.Hardware.GPU.Budget, 0),
@@ -465,8 +508,8 @@ func TestClusterDynamoGraphDeploymentRequestV1beta2ProducesCandidates(t *testing
 
 			t.Log("Verify the Job consumed the immutable input recorded in Run status")
 			require.NotNil(t, completedRun.Status.JobRef, "completed Run has no Job reference")
-			require.NotNil(t, completedRun.Status.AISimulate, "completed Run has no AISimulate status")
-			require.NotNil(t, completedRun.Status.AISimulate.Input, "completed Run has no effective AISimulate input")
+			require.NotNil(t, completedRun.Status.AISim, "completed Run has no AISimulate status")
+			require.NotNil(t, completedRun.Status.AISim.Input, "completed Run has no effective AISimulate input")
 			key := types.NamespacedName{Namespace: env.Namespace(), Name: completedRun.Status.JobRef.Name}
 			var executionConfig corev1.ConfigMap
 			require.NoError(t, env.Client().Get(ctx, key, &executionConfig))
@@ -490,8 +533,8 @@ func TestClusterDynamoGraphDeploymentRequestV1beta2ProducesCandidates(t *testing
 			})
 			configInput, err := dgdrRunStatusInput(executionConfig.Data[dgdrRunInputKey])
 			require.NoError(t, err)
-			require.JSONEq(t, string(completedRun.Status.AISimulate.Input.Raw), string(configInput.Raw))
-			require.Equal(t, int64(8), aisimulateHardwareBudget(t, completedRun.Status.AISimulate.Input.Raw),
+			require.JSONEq(t, string(completedRun.Status.AISim.Input.Raw), string(configInput.Raw))
+			require.Equal(t, int64(8), aisimulateHardwareBudget(t, completedRun.Status.AISim.Input.Raw),
 				"lowered AISimulate input lost the selected-shape budget")
 
 			t.Log("Verify the Candidate is a real API object controlled by the immutable Run")
@@ -501,7 +544,10 @@ func TestClusterDynamoGraphDeploymentRequestV1beta2ProducesCandidates(t *testing
 			require.Len(t, candidates.Items, 1)
 			require.True(t, metav1.IsControlledBy(&candidates.Items[0], &completedRun), "Candidate is not controlled by its Run")
 			require.Equal(t, completedRun.Status.CandidateRefs[0].Name, candidates.Items[0].Name)
-			require.NotEmpty(t, candidates.Items[0].Spec.Components, "Candidate has no materialized DGD components")
+			var candidateSpec nvidiacomv1beta1.DynamoGraphDeploymentSpec
+			require.NoError(t, json.Unmarshal(candidates.Items[0].Spec.Raw, &candidateSpec))
+			require.NotEmpty(t, candidateSpec.Components, "Candidate has no materialized DGD components")
+			require.True(t, meta.IsStatusConditionTrue(candidates.Items[0].Status.Conditions, nvidiacomv1beta2.DGDCConditionValid))
 			require.LessOrEqual(t, candidateUsedGPUs(t, candidates.Items[0].Status.Metrics), int64(8),
 				"Candidate exceeds the selected-shape GPU budget")
 

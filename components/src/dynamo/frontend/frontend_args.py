@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
+import json
 import os
 import pathlib
 from collections.abc import Mapping
@@ -34,6 +35,25 @@ from . import __version__
 
 _U32_MAX = 2**32 - 1
 _MAX_SESSION_AFFINITY_TTL_SECS = 31_536_000
+
+
+# --dyn-chat-processor values Dynamo implements; any other value names a custom
+# chat processor, resolved by dynamo.frontend.main.
+BUILTIN_CHAT_PROCESSORS = ("dynamo", "vllm", "sglang")
+
+
+def _parse_chat_template_kwargs(value: str) -> Dict[str, Any]:
+    parsed = json.loads(value)
+    if not isinstance(parsed, dict):
+        raise ValueError("--default-chat-template-kwargs must be a JSON object")
+    return parsed
+
+
+def _parse_chat_processor_config(value: str) -> Dict[str, Any]:
+    parsed = json.loads(value)
+    if not isinstance(parsed, dict):
+        raise ValueError("--dyn-chat-processor-config must be a JSON object")
+    return parsed
 
 
 def _mountinfo_path(value: str) -> str:
@@ -211,6 +231,7 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
     response_plane: str = "tcp"
     event_plane: Optional[str] = None
     chat_processor: str
+    chat_processor_config: Optional[Dict[str, Any]] = None
     enable_anthropic_api: bool
     enable_systemone_api: bool
     strip_anthropic_preamble: bool
@@ -221,6 +242,7 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
     enable_streaming_reasoning_dispatch: bool
     reasoning_field_name: str
     exclude_tools_when_tool_choice_none: bool
+    default_chat_template_kwargs: Optional[Dict[str, Any]] = None
     preprocess_workers: Optional[int]
     tokenizer_backend: str
     tokenizer_fallback: bool
@@ -229,7 +251,24 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
 
     _VALID_TOKENIZER_BACKENDS = {"default", "fastokens", "basetenkenizer"}
 
+    def validate_default_chat_template_kwargs(self) -> None:
+        # Request validation rejects a nested chat_template on every path, so
+        # this default would fail every request.
+        if "chat_template" in (self.default_chat_template_kwargs or {}):
+            raise ValueError(
+                "--default-chat-template-kwargs cannot set chat_template. Use "
+                "--custom-jinja-template on the worker to replace the chat template."
+            )
+
     def validate(self) -> None:
+        if (
+            self.chat_processor_config is not None
+            and self.chat_processor in BUILTIN_CHAT_PROCESSORS
+        ):
+            raise ValueError(
+                "--dyn-chat-processor-config only applies to a custom "
+                f"--dyn-chat-processor, not '{self.chat_processor}'"
+            )
         if self.preprocess_workers is None:
             self.preprocess_workers = (
                 _default_sglang_preprocess_workers()
@@ -296,6 +335,9 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
                 "--router-session-affinity-ttl-secs must be between 1 and "
                 f"{_MAX_SESSION_AFFINITY_TTL_SECS}"
             )
+        if self.session_affinity_max_entries < 1:
+            raise ValueError("--router-session-affinity-max-entries must be >= 1")
+        self.validate_default_chat_template_kwargs()
         if self.tokenizer_backend not in self._VALID_TOKENIZER_BACKENDS:
             raise ValueError(
                 f"--tokenizer: invalid value '{self.tokenizer_backend}' "
@@ -799,6 +841,7 @@ class FrontendArgGroup(ArgGroup):
                 "instead of a 200 followed by an error event. The status is set by "
                 "--reject-media-status-code."
             ),
+            env=self.env,
         )
         add_argument(
             g,
@@ -811,6 +854,7 @@ class FrontendArgGroup(ArgGroup):
                 "to send these requests to a multimodal model."
             ),
             arg_type=int,
+            env=self.env,
         )
         add_negatable_bool_argument(
             g,
@@ -868,6 +912,23 @@ class FrontendArgGroup(ArgGroup):
         )
         add_argument(
             g,
+            flag_name="--default-chat-template-kwargs",
+            env_var="DYN_DEFAULT_CHAT_TEMPLATE_KWARGS",
+            default=None,
+            arg_type=_parse_chat_template_kwargs,
+            help=(
+                "JSON object of chat template kwargs that apply to every chat request "
+                "this frontend serves, for every model. Each request's own "
+                'chat_template_kwargs win per key, except null and "auto" values, '
+                "and a request thinking control "
+                "replaces the thinking keys. Set this on the frontend, not on the "
+                "engine: the frontend renders the chat template, so the engine flag "
+                "has no effect behind Dynamo."
+            ),
+            env=self.env,
+        )
+        add_argument(
+            g,
             flag_name="--dyn-chat-processor",
             env_var="DYN_CHAT_PROCESSOR",
             default="dynamo",
@@ -876,9 +937,23 @@ class FrontendArgGroup(ArgGroup):
                 "[EXPERIMENTAL] Chat pre/post processor backend. 'dynamo' uses the Rust "
                 "preprocessor. 'vllm' uses local vLLM for pre and post processing. "
                 "'sglang' uses SGLang APIs for chat template rendering, tool call "
-                "parsing, and reasoning parsing."
+                "parsing, and reasoning parsing. Any other value loads a custom chat "
+                "processor: a name registered in the 'dynamo.frontend.chat_processors' "
+                "entry-point group, or a 'module:function' path."
             ),
-            choices=["dynamo", "vllm", "sglang"],
+            env=self.env,
+        )
+        add_argument(
+            g,
+            flag_name="--dyn-chat-processor-config",
+            env_var="DYN_CHAT_PROCESSOR_CONFIG",
+            default=None,
+            dest="chat_processor_config",
+            arg_type=_parse_chat_processor_config,
+            help=(
+                "JSON object passed to a custom --dyn-chat-processor as its settings. "
+                "Not accepted with the built-in processors."
+            ),
             env=self.env,
         )
 

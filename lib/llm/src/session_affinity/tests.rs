@@ -22,7 +22,7 @@ use crate::{
         timing::RequestPhase,
     },
 };
-use dynamo_kv_router::services::selection::affinity::MAX_SESSION_AFFINITY_ID_BYTES;
+use dynamo_session_affinity::host::MAX_SESSION_AFFINITY_ID_BYTES;
 
 fn session_id() -> SessionAffinityId {
     SessionAffinityId::new("session-1")
@@ -35,7 +35,7 @@ fn target(worker_id: u64, dp_rank: Option<u32>) -> AffinityTarget {
 fn table_target(
     worker_id: u64,
     dp_rank: Option<u32>,
-) -> dynamo_kv_router::services::selection::affinity::AffinityTarget {
+) -> dynamo_session_affinity::host::AffinityTarget {
     to_table(target(worker_id, dp_rank))
 }
 
@@ -754,4 +754,24 @@ fn a_subagent_group_id_is_namespaced_and_fixed_size() {
     let long = subagent_group_affinity_id(&"p".repeat(10_000));
     assert_eq!(long.len(), a.len());
     assert!(long.len() <= MAX_SESSION_AFFINITY_ID_BYTES);
+}
+
+#[test]
+fn session_affinity_max_entries_comes_from_the_environment() {
+    use std::env::VarError;
+
+    assert_eq!(
+        super::max_entries_from(Err(VarError::NotPresent)).unwrap(),
+        65_536
+    );
+    assert_eq!(super::max_entries_from(Ok("2".into())).unwrap(), 2);
+    for value in ["0", "-1", "abc"] {
+        let error = super::max_entries_from(Ok(value.into())).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .starts_with("DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES must be a positive integer"),
+            "{error}"
+        );
+    }
 }

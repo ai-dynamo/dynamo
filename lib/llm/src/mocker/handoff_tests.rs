@@ -3,7 +3,8 @@
 
 use super::*;
 use async_trait::async_trait;
-use dynamo_kv_router::protocols::{ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData};
+use dynamo_kv_events::event::{KvCacheEvent, KvCacheEventData};
+use dynamo_kv_hashing::ExternalSequenceBlockHash;
 use dynamo_mocker::common::handoff::{
     HandoffTransferTiming, NormalizedHandoffConformance, NormalizedHandoffEvent,
     NormalizedStoredTiming,

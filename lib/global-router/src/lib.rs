@@ -8,17 +8,21 @@
 //! [`PoolSignals`], which background tasks fill from each pool's Relay and
 //! from round trips this process measures, and count this process's own
 //! requests in an [`InFlightTracker`].
+//!
+//! [`SelectionCoreSelector`] selects through the embedded router core instead.
 
-mod affinity;
+pub mod affinity;
 mod load;
 mod pool;
+mod selection_core;
 mod selector;
 mod signals;
 
 pub use affinity::AffinitySelector;
 pub use load::{InFlightGuard, InFlightTracker};
 pub use pool::Pool;
+pub use selection_core::{SelectionCorePolicy, SelectionCoreSelector};
 pub use selector::{
     LeastInFlightSelector, PoolSelector, PoolTarget, RoundRobinSelector, RoutingRequest,
 };
-pub use signals::{LoadReport, PoolOccupancy, PoolSignals, RelaySource};
+pub use signals::{LoadReport, PoolOccupancy, PoolSignals, RelaySource, ReportReceipt};

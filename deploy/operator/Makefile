@@ -1,6 +1,7 @@
 
 # Image URL to use all building/pushing image targets
 IMG ?= controller:latest
+PYTHON ?= python3
 
 # ENVTEST_K8S_VERSION refers to the version of kubebuilder assets to be downloaded by envtest binary.
 ENVTEST_K8S_VERSION = 1.30.0
@@ -216,7 +217,7 @@ docker-push-all: docker-push-planner docker-push-frontend docker-push-vllm docke
 ##@ Development
 
 .PHONY: check
-check: generate manifests generate-api-docs generate-helm-docs
+check: generate manifests generate-api-docs generate-helm-docs check-aisimulate-schema
 	@echo "> Checking for uncommitted changes"
 	@if [ -n "$$(git status --porcelain)" ]; then \
 		echo "ERROR: Git tree is dirty after running validation steps."; \
@@ -226,6 +227,14 @@ check: generate manifests generate-api-docs generate-helm-docs
 		exit 1; \
 	fi
 	@echo "> Check complete"
+
+.PHONY: generate-aisimulate-schema
+generate-aisimulate-schema: ## Export the pinned AISimulate Pydantic schema and active Go version.
+	$(PYTHON) hack/generate_aisimulate_schema.py
+
+.PHONY: check-aisimulate-schema
+check-aisimulate-schema: ## Reject a missing or stale AISimulate schema after dependency changes.
+	$(PYTHON) hack/generate_aisimulate_schema.py --check
 
 
 .PHONY: tilt-up
@@ -393,8 +402,8 @@ lint-fix: golangci-lint ## Run golangci-lint linter and perform fixes
 	$(GOLANGCI_LINT) run --fix
 
 .PHONY: lint-api
-lint-api: kube-api-linter ## Check the v1beta2 API types against Kubernetes API conventions
-	$(KUBE_API_LINTER) run -c .golangci-kal.yml ./api/v1beta2/...
+lint-api: kube-api-linter ## Check the CRD API types against Kubernetes API conventions
+	$(KUBE_API_LINTER) run -c .golangci-kal.yml ./api/...
 
 ##@ Build
 

@@ -581,6 +581,20 @@ class Context:
         auto-fires on the first non-empty chunk in the response stream."""
         ...
 
+    def set_response_header(self, name: str, value: str) -> bool:
+        """Set an HTTP response header from a frontend chat engine.
+
+        Call it before the engine's first yield, or before it raises. Returns
+        ``False`` when this request's response cannot carry the header: the
+        response is already committed (a streaming request without
+        ``DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS``, or a call after the first
+        yield of one with it), or the request is not a ``/v1/chat/completions``
+        request. Otherwise raises ``ValueError`` for a name or value that is
+        not a valid header, or for a header the HTTP layer owns
+        (``content-type``, ``content-length``, ``content-encoding``,
+        ``x-request-id``, hop-by-hop headers)."""
+        ...
+
     @property
     def metadata(self) -> ContextMetadata:
         """
@@ -1481,8 +1495,9 @@ class FpmEventSubscriber:
         """
         Start background tracking of the latest FPM per (worker_id, dp_rank).
 
-        ``max_age_seconds`` fixes the freshness and cleanup window for this
-        subscription. It must be finite and positive.
+        ``max_age_seconds`` sets the freshness and cleanup window for this
+        subscription; ``set_max_age`` changes it later. It must be finite and
+        positive.
 
         Spawns two background tasks:
 
@@ -1494,6 +1509,15 @@ class FpmEventSubscriber:
            worker_id matches the removed instance_id are purged.
 
         After calling this, ``recv()`` will raise RuntimeError.
+        """
+        ...
+
+    def set_max_age(self, max_age_seconds: float) -> None:
+        """
+        Change the freshness and cleanup window after ``start_tracking``,
+        which sets it from its own ``max_age_seconds`` and so replaces a value
+        set earlier. Tracked samples are kept; snapshot reads and the next
+        cleanup use the new age. It must be finite and positive.
         """
         ...
 
@@ -1516,7 +1540,7 @@ class FpmEventSubscriber:
         """Return fresh samples, unjoined IDs, stale count, and missing rank count.
 
         Age is measured from local receive time, including idle heartbeats.
-        The age limit is set once by ``start_tracking()``.
+        The age limit is set by ``start_tracking()`` and changed by ``set_max_age()``.
         Missing ranks include discovered workers that have not published a sample.
         """
         ...
@@ -1957,9 +1981,9 @@ class KvRouterConfig:
                 Requests are queued if all workers exceed this fraction of max_num_batched_tokens.
                 Enables priority scheduling via request priority hints.
                 Set a numeric value to enable queueing.
-            router_policy_config: Startup-only policy-family and cache-bucket queue
-                YAML path. When omitted, router_queue_threshold and
-                router_queue_policy define one synthetic policy class.
+            router_policy_config: Startup-only policy-class queue YAML path.
+                When omitted, router_queue_threshold and router_queue_policy
+                define one synthetic policy class.
             router_prefill_policy: Process-local override of
                 worker_selection.prefill for disaggregated prefill workers.
             router_decode_policy: Process-local override of worker_selection.decode
@@ -1968,6 +1992,8 @@ class KvRouterConfig:
                 When > 1, uses a concurrent radix tree with a thread pool,
                 including for approximate routing when KV events are disabled.
             router_queue_policy: Scheduling policy for the router queue (default: "fcfs").
+                It sets the synthetic policy class; configured policy classes default to "edf".
+                "edf": earliest due time first, then arrival order; priorities do not reorder it.
                 "fcfs": first-come first-served with priority bumps — optimizes tail TTFT.
                 "lcfs": last-come first-served with priority bumps — intentionally worsens tail behavior for policy comparisons.
                 "wspt": weighted shortest processing time (Smith's rule) — optimizes average TTFT.
@@ -2079,6 +2105,20 @@ class ReasoningConfig:
 
 def _normalize_mocker_config(config: Mapping[str, Any] | str) -> Dict[str, Any]:
     """Validate canonical AISimulate config and materialize Dynamo runtime options."""
+    ...
+
+def _convert_preprocessed_request(
+    preprocessed: Dict[str, Any], fast_path: bool
+) -> Optional[Dict[str, Any]]:
+    """Test hook: the fast path's request (None if it declines) or pythonize's, pythonized back."""
+    ...
+
+def _raise_routed_http_error(
+    code: int, message: str, routed_engine: bool = True
+) -> None:
+    """Test hook: raise what a response stream raises for a backend
+    `HttpError(code, message)`: a `RoutedEngine`'s stream by default, any other
+    with `routed_engine=False`."""
     ...
 
 
@@ -2564,6 +2604,7 @@ def run_mocker_synthetic_trace_replay(
     shared_prefix_ratio: float = 0.0,
     num_prefix_groups: int = 0,
     inter_turn_delay_ms: float = 0.0,
+    accumulate_session_deltas: bool = False,
     model_name: Optional[str] = None,
     sla_ttft_ms: Optional[float] = None,
     sla_itl_ms: Optional[float] = None,
@@ -2835,6 +2876,9 @@ class PoolRelay:
         sources_file: Optional[str] = None,
         connection_revision: Optional[str] = None,
         global_discovery_url: Optional[str] = None,
+        routing_pool: Optional[str] = None,
+        routing_pool_region: Optional[str] = None,
+        routing_pool_frontends: Optional[List[str]] = None,
     ) -> None:
         ...
 
@@ -3031,9 +3075,9 @@ class KvRouter:
                            blocks. When provided, this is used in block hash computation
                            to enable MM-aware worker selection.
             cache_namespace: Optional cache namespace used in block hash computation.
-            policy_class: Requested policy family, or an exact explicit class.
-                          Missing, unknown, and ordinary physical-class names use the
-                          configured default family before cache-bucket resolution.
+            policy_class: Requested policy class name. An omitted name uses
+                          the configured default class; a name that matches no
+                          configured class raises an error.
 
         Returns:
             A tuple of (worker_id, dp_rank, overlap_blocks) where:
@@ -3195,6 +3239,7 @@ class EntrypointArgs:
         batch_gateway_url: Optional[str] = None,
         reject_media: Optional[bool] = None,
         reject_media_status_code: Optional[int] = None,
+        default_chat_template_kwargs: Optional[Mapping[str, Any]] = None,
     ) -> None:
         """
         Create EntrypointArgs.
@@ -3236,6 +3281,8 @@ class EntrypointArgs:
             batch_gateway_url: Internal Batch Gateway URL for the files and batch APIs.
             reject_media: Optional override: refuse chat requests carrying image, video, or audio content before routing
             reject_media_status_code: Optional 4xx/5xx status for a request refused by reject_media (default 415)
+            default_chat_template_kwargs: Chat template kwargs that the frontend applies
+                under each request's own kwargs, for every discovered model
         """
         ...
 
@@ -3364,6 +3411,17 @@ class WorkerUnavailable(DynamoException):
 
     Raised by `RoutedEngine.generate`, for example while prefill routing is
     still activating. Re-raise it unchanged to keep the 503.
+    """
+
+    ...
+
+class RoutedEngineError(ValueError):
+    """A backend error raised by `RoutedEngine.generate` and its response stream.
+
+    Raised for every classified error except a validation error, which raises
+    `InvalidArgument`. A chat engine that lets it escape answers with the
+    backend's status, because the original error is restored. `Client` and
+    `KvRouter` streams raise a plain `ValueError` instead.
     """
 
     ...
