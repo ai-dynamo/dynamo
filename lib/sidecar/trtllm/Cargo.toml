@@ -58,3 +58,4 @@ dynamo-backend-common = { workspace = true, features = ["testing"] }
 dynamo-kv-hashing = { workspace = true }
 dynamo-router-protocol = { workspace = true }
 tokio-stream = { workspace = true, features = ["net"] }
+tracing-subscriber = { workspace = true }

@@ -2731,6 +2731,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -3681,6 +3682,7 @@ dependencies = [
  "tonic-build 0.13.1",
  "tonic-health 0.13.1",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

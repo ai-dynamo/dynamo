@@ -40,11 +40,6 @@ pub(super) fn record_store_without_image_routing(blocks: usize) {
     }
 }
 
-#[cfg(test)]
-pub(super) fn stores_without_image_routing() -> u64 {
-    STORES_WITHOUT_IMAGE_ROUTING.load(Ordering::Relaxed)
-}
-
 pub(super) enum MapTokenIds {
     Plain(KvTokenIds),
     DigestFirst(Vec<Token>),

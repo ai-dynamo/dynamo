@@ -25,3 +25,4 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 rstest = "0.18.2"
+tracing-subscriber = { workspace = true }

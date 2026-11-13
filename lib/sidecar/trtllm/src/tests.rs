@@ -55,6 +55,7 @@ struct FakeTrtllm {
     model_info_unavailable: Arc<tokio::sync::Notify>,
     model_info_calls: Arc<AtomicUsize>,
     served_model_name: Arc<Mutex<Option<String>>>,
+    model_info: Arc<Mutex<Option<pb::ModelInfo>>>,
     kv_routing: Arc<AtomicBool>,
     server_info_error: Arc<Mutex<Option<tonic::Code>>>,
     kv_sources_error: Arc<Mutex<Option<tonic::Code>>>,
@@ -228,6 +229,9 @@ impl pb::control_server::Control for FakeTrtllm {
         if self.unavailable_model_info.load(Ordering::SeqCst) {
             self.model_info_unavailable.notify_one();
             return Err(Status::unavailable("not serving yet"));
+        }
+        if let Some(info) = self.model_info.lock().await.clone() {
+            return Ok(Response::new(info));
         }
         Ok(Response::new(pb::ModelInfo {
             model_id: "fake-model".to_string(),

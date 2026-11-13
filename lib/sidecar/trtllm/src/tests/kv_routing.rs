@@ -6,6 +6,111 @@
 use super::*;
 use crate::convert::build_generate_request;
 
+#[derive(Clone, Default)]
+struct LogBuffer(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogBuffer {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Only image-capable engines with KV events and no routing v1 need this warning.
+#[tokio::test]
+async fn startup_warns_only_when_image_kv_events_lack_image_routing() {
+    use tracing::instrument::WithSubscriber;
+
+    for (modality, version, events, needs_warning) in [
+        (Some("image"), None, true, true),
+        (Some("image"), Some(2.0), true, true),
+        (Some("image"), Some(1.0), true, false),
+        (Some("image"), None, false, false),
+        (None, None, true, false),
+        (Some("video"), None, true, false),
+    ] {
+        let service = FakeTrtllm::default();
+        service.kv_routing.store(true, Ordering::SeqCst);
+        service.disable_events.store(!events, Ordering::SeqCst);
+        let mut fields = std::collections::BTreeMap::new();
+        if let Some(modality) = modality {
+            fields.insert(
+                "trtllm_supported_modalities".to_string(),
+                prost_types::Value {
+                    kind: Some(prost_types::value::Kind::ListValue(
+                        prost_types::ListValue {
+                            values: vec![prost_types::Value {
+                                kind: Some(prost_types::value::Kind::StringValue(
+                                    modality.to_string(),
+                                )),
+                            }],
+                        },
+                    )),
+                },
+            );
+        }
+        if let Some(version) = version {
+            fields.insert(
+                "trtllm_image_routing_version".to_string(),
+                prost_types::Value {
+                    kind: Some(prost_types::value::Kind::NumberValue(version)),
+                },
+            );
+        }
+        *service.model_info.lock().await = Some(pb::ModelInfo {
+            model_id: "fake-model".to_string(),
+            served_model_name: "served-model".to_string(),
+            max_context_length: Some(4096),
+            supports_multimodal: Some(modality.is_some()),
+            extra: Some(prost_types::Struct { fields }),
+            ..Default::default()
+        });
+        let server = FakeServer::start(service).await;
+        let engine = engine_with_kv_routing(&server.endpoint);
+        let logs = LogBuffer::default();
+        let writer = logs.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_ansi(false)
+            .without_time()
+            .with_target(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            engine.start(0).with_subscriber(subscriber),
+        )
+        .await
+        .expect("startup deadline")
+        .expect("start with advertised capabilities");
+
+        let output = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+        let warnings: Vec<_> = output
+            .lines()
+            .filter(|line| {
+                line.contains("reports image input but not trtllm_image_routing_version")
+            })
+            .collect();
+        assert_eq!(
+            warnings.len(),
+            usize::from(needs_warning),
+            "modality={modality:?}, version={version:?}, events={events}: {output}"
+        );
+        if needs_warning {
+            assert!(warnings[0].trim_start().starts_with("WARN "), "{output}");
+            assert!(
+                warnings[0].contains("NVIDIA/TensorRT-LLM#21125"),
+                "{output}"
+            );
+        }
+        engine.cleanup().await.expect("clean up sidecar");
+    }
+}
+
 #[tokio::test]
 async fn sidecar_signs_parent_context_affinity_without_replacing_child() {
     let server = FakeServer::start(FakeTrtllm::default()).await;
