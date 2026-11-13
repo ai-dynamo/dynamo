@@ -7,3 +7,8 @@
 - Hosts import this crate through its `host` module.
 - Check: `bash scripts/router_layering_check.sh` (and `--host`).
 - Design: `lib/router/README.md`.
+
+`record_full_worker_ranks_at` fills a caller-owned `FullRankCounts` from the derived
+prompt registry at one instant. It holds one read guard and creates no projection
+map or per-request ownership state. The scheduler uses it when exclusive-affinity
+costing or queued readiness needs current host-reject fullness.
