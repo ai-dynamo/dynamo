@@ -1,11 +1,13 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Agent Trace Replay
+title: Simulate an Agent Run
 subtitle: Capture an agent workload once, then replay it on real or simulated infrastructure
 ---
 
-Agent trace replay records the workload that an agent sends to Dynamo and turns it into a reusable benchmark. Capture one real run, then use the same request graph to validate a live endpoint or explore configurations offline. It replays the serving workload rather than the agent itself, so the model does not repeat its decisions and tools are not executed again.
+By the end of this guide, you have captured an agent run once and replayed it, either against a live Dynamo endpoint or in an offline simulation. Agent simulation records the workload that an agent sends to Dynamo and turns it into a reusable benchmark. Capture one real run, then use the same request graph to validate a live endpoint or explore configurations offline. It replays the serving workload rather than the agent itself, so the model does not repeat its decisions and tools are not executed again.
+
+![A real agent run is captured as a request graph. The graph replays live with AIPerf against a real endpoint or offline with DynoSim against a simulated scheduler, router, and KV cache.](../../../assets/img/agent-simulation-flow.svg)
 
 ## What This Captures
 
@@ -41,13 +43,7 @@ Live replay measures the real serving stack. Offline simulation predicts how a c
 
 The complete flow is:
 
-```mermaid
-flowchart LR
-    A["Agent harness"] --> F["Dynamo frontend"]
-    F --> C["request trace"]
-    C --> D["DynoSim"]
-    C --> W["Live replay trace"] --> P["AIPerf"] --> E["Dynamo endpoint"]
-```
+![The agent harness sends requests through the Dynamo frontend, which writes a request trace. The trace feeds DynoSim for offline simulation, or a live replay trace that AIPerf sends to a Dynamo endpoint.](../../../assets/img/agent-simulation-complete-flow.svg)
 
 <Steps toc={true}>
 <Step title="Capture a Real Agent Run" id="step-1-capture-a-real-agent-run">
@@ -65,7 +61,7 @@ Run the agent workload normally against this frontend. Use the real tools if you
 
 Each agent chain should send `X-Dynamo-Session-ID`. A child agent should also send `X-Dynamo-Parent-Session-ID`. These headers describe the request graph; they do not enable session affinity or change routing.
 
-Dynamo writes rotating `request-trace.NNNNNN.jsonl.gz` files. Stop the frontend, or otherwise allow tracing to flush, before using the files. See [Agent Tracing](agent-tracing.md) for configuration, the record schema, Perfetto conversion, and optional tool-event ingestion.
+Dynamo writes rotating `request-trace.NNNNNN.jsonl.gz` files. Stop the frontend, or otherwise allow tracing to flush, before using the files. See [Trace an Agent Run](agent-tracing.md) for configuration, the record schema, Perfetto conversion, and optional tool-event ingestion.
 
 </Step>
 <Step title="Check the Capture" id="step-2-check-the-capture">
@@ -143,7 +139,7 @@ traffic:
   source:
     type: trace
     format: dynamo
-    paths: [/tmp/agent-run/request-trace.0000.jsonl.gz]
+    paths: [/tmp/agent-run/request-trace.000000.jsonl.gz]
   load: {type: trace_timestamps, speedup: 1.0}
 engine:
   mode: aggregated

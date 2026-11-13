@@ -18,7 +18,6 @@ from dataclasses import dataclass
 from typing import Any, cast
 
 from sglang.srt.parser.conversation import chat_template_exists
-from sglang.srt.utils.hf_transformers_utils import get_tokenizer
 
 from dynamo._internal import ModelDeploymentCard
 from dynamo.common.multimodal.cache_uuid import reject_unsupported_multimodal_uuids
@@ -41,6 +40,7 @@ from .sglang_prepost import (
     preprocess_chat_request,
     resolve_skip_special_tokens,
 )
+from .sglang_prompt_renderer import PromptRenderer, build_prompt_renderer
 from .structural_tag_policy import runtime_structural_tag_options
 from .thinking import runtime_default_thinking_mode
 from .usage import response_usage, update_usage_metadata
@@ -57,6 +57,16 @@ from .utils import (
     resolve_chat_template,
     worker_warmup,
 )
+
+try:
+    from sglang.srt.hf_transformers import get_tokenizer
+except ModuleNotFoundError as exc:
+    if exc.name != "sglang.srt.hf_transformers":
+        raise
+    # SGLang 0.5.11 to 0.5.23 (current CUDA and XPU pins).
+    # Remove once both pins are newer.
+    from sglang.srt.utils.hf_transformers import get_tokenizer
+
 
 logger = logging.getLogger(__name__)
 
@@ -275,13 +285,29 @@ _FINISH_REASON_MAP: dict[str, str] = {
 }
 
 
-def _map_finish_reason(raw: str | None) -> str | None:
+def _finish_reason_error_message(
+    raw_reason: str | dict[str, Any] | None,
+) -> str | None:
+    """Extract a backend error before OpenAI finish-reason projection."""
+    if isinstance(raw_reason, dict):
+        error_message = raw_reason.get("error")
+        return error_message if isinstance(error_message, str) else None
+    if isinstance(raw_reason, str) and raw_reason.startswith("error"):
+        _, separator, detail = raw_reason.partition(":")
+        return detail.strip() if separator and detail.strip() else raw_reason
+    return None
+
+
+def _map_finish_reason(raw: str | dict[str, Any] | None) -> str | None:
     """Map Dynamo router finish reasons to OpenAI finish reasons.
 
     Exact matches use the dict.  Prefixed variants (``error:timeout``,
     ``abort:cancelled``) are handled by ``startswith`` fallbacks.
     """
     if raw is None:
+        return None
+    if not isinstance(raw, str):
+        logger.warning("Malformed finish_reason from router: %r", raw)
         return None
     mapped = _FINISH_REASON_MAP.get(raw)
     if mapped is not None:
@@ -305,6 +331,7 @@ _w_default_thinking_mode: str | None = None
 _w_structural_tag_mode: str = "off"
 _w_structural_tag_scope: str = "auto"
 _w_structural_tag_schema: str = "auto"
+_w_prompt_renderer: PromptRenderer | None = None
 
 
 def _load_chat_template(chat_template: str | None) -> str | None:
@@ -364,7 +391,7 @@ def _init_worker(
     global _w_tokenizer, _w_tool_call_parser_name, _w_reasoning_parser_name
     global _w_exclude_tools_when_tool_choice_none, _w_template_force_reasoning
     global _w_default_thinking_mode, _w_structural_tag_mode
-    global _w_structural_tag_scope, _w_structural_tag_schema
+    global _w_structural_tag_scope, _w_structural_tag_schema, _w_prompt_renderer
     _w_tokenizer = _load_tokenizer(model_path, trust_remote_code)
     if chat_template is not None:
         _w_tokenizer.chat_template = chat_template
@@ -376,6 +403,13 @@ def _init_worker(
     _w_structural_tag_mode = structural_tag_mode
     _w_structural_tag_scope = structural_tag_scope
     _w_structural_tag_schema = structural_tag_schema
+    _w_prompt_renderer = build_prompt_renderer(
+        _w_tokenizer,
+        model_path=model_path,
+        chat_template=chat_template,
+        tool_call_parser_name=tool_call_parser_name,
+        reasoning_parser_name=reasoning_parser_name,
+    )
 
 
 def _preprocess_worker(
@@ -395,6 +429,7 @@ def _preprocess_worker(
         structural_tag_mode=_w_structural_tag_mode,
         structural_tag_scope=_w_structural_tag_scope,
         structural_tag_schema=_w_structural_tag_schema,
+        prompt_renderer=_w_prompt_renderer,
     )
 
     n = request.get("n", 1)
@@ -485,6 +520,13 @@ def _build_dynamo_preproc(
     else:
         routing = nvext_routing
 
+    # PreprocessedRequest.logit_bias is HashMap<u32, f32>, so JSON's str keys must
+    # become int; the HTTP layer has already validated the keys and values.
+    logit_bias = request.get("logit_bias")
+    logit_bias = (
+        {int(k): float(v) for k, v in logit_bias.items()} if logit_bias else None
+    )
+
     preproc = {
         "model": model_name,
         "token_ids": prompt_token_ids,
@@ -508,6 +550,7 @@ def _build_dynamo_preproc(
             "top_k": request.get("top_k", 0) or -1,
             "min_p": request.get("min_p", 0.0),
             "seed": request.get("seed"),
+            "logit_bias": logit_bias,
             "guided_decoding": guided_decoding,
         },
         "output_options": {
@@ -565,6 +608,7 @@ class SglangProcessor:
         structural_tag_mode: str = "off",
         structural_tag_scope: str = "auto",
         structural_tag_schema: str = "auto",
+        prompt_renderer: PromptRenderer | None = None,
     ):
         self.tokenizer = tokenizer
         # Detect force_reasoning once from the chat template, matching
@@ -592,6 +636,7 @@ class SglangProcessor:
         self.structural_tag_mode = structural_tag_mode
         self.structural_tag_scope = structural_tag_scope
         self.structural_tag_schema = structural_tag_schema
+        self.prompt_renderer = prompt_renderer
         self.preprocess_pool = preprocess_pool
         if preprocess_pool is not None:
             self._worker_semaphore: asyncio.Semaphore | None = asyncio.Semaphore(
@@ -696,6 +741,7 @@ class SglangProcessor:
                 structural_tag_mode=self.structural_tag_mode,
                 structural_tag_scope=self.structural_tag_scope,
                 structural_tag_schema=self.structural_tag_schema,
+                prompt_renderer=self.prompt_renderer,
             )
 
             if self.debug_perf:
@@ -832,6 +878,10 @@ class SglangProcessor:
         stream_interval = self.stream_interval
         prompt_logprobs = PromptLogprobsAccumulator(request)
         logprobs_count = _request_logprobs_count(request)
+        include_completion_ids = nvext_extra_field_requested(
+            request, "completion_token_ids"
+        )
+        include_prompt_ids = nvext_extra_field_requested(request, "prompt_token_ids")
 
         try:
             dynamo_stream = await self.routed_engine.generate(
@@ -845,6 +895,8 @@ class SglangProcessor:
             pending_token_ids: list[int] = []
             pending_log_probs: list[float] | None = None
             pending_top_logprobs: list[list[dict[str, Any]]] | None = None
+            # Requested generated IDs wait here while parsing emits no chunk.
+            completion_ids: list[int] = []
             latest_usage: dict[str, Any] = {}
             pending_terminal: dict[str, Any] | None = None
             first_chunk = True
@@ -868,6 +920,7 @@ class SglangProcessor:
                 nonlocal pending_token_ids
                 nonlocal pending_log_probs
                 nonlocal pending_top_logprobs
+                nonlocal completion_ids
                 nonlocal latest_usage
                 nonlocal first_chunk
                 nonlocal post_proc_total_ms
@@ -889,6 +942,12 @@ class SglangProcessor:
                     t_pp0 = time.monotonic()
 
                 choice = post.process_output(mapped_response)
+                if include_completion_ids:
+                    completion_ids.extend(pending_token_ids)
+                    if post.locally_finished:
+                        # IDs that decoding withheld before the stop are still queued.
+                        dropped = post.post_stop_token_count()
+                        del completion_ids[len(completion_ids) - dropped :]
 
                 if post.locally_finished and not latest_usage:
                     latest_usage = {
@@ -935,6 +994,11 @@ class SglangProcessor:
                         request, "engine_data"
                     ):
                         response_nvext["engine_data"] = engine_data
+                    if include_completion_ids:
+                        response_nvext["completion_token_ids"] = completion_ids
+                        completion_ids = []
+                    if include_prompt_ids and (finish_reason or post.locally_finished):
+                        response_nvext["prompt_token_ids"] = tokens
                     if response_nvext:
                         dynamo_out["nvext"] = response_nvext
 
@@ -1013,13 +1077,21 @@ class SglangProcessor:
                     break
 
                 raw_finish_reason = engine_response.get("finish_reason")
-                finish_reason = _map_finish_reason(raw_finish_reason)
-                backend_finished = raw_finish_reason is not None
-                if pending_terminal is not None and finish_reason == "error":
+                # Backend errors (structured or legacy "error: ..." strings)
+                # end the stream before OpenAI finish-reason projection.
+                error_message = _finish_reason_error_message(raw_finish_reason)
+                if error_message is not None:
+                    logger.error(
+                        "Router reported a generation error for request %s: %s",
+                        request_id,
+                        error_message,
+                    )
                     yield as_error_envelope(
-                        make_internal_error(request_id, raw_finish_reason)
+                        make_internal_error(request_id, error_message)
                     )
                     break
+                finish_reason = _map_finish_reason(raw_finish_reason)
+                backend_finished = raw_finish_reason is not None
                 prompt_logprobs.update(engine_response)
                 if usage := engine_response.get("completion_usage"):
                     update_usage_metadata(latest_usage, usage)
@@ -1219,6 +1291,13 @@ class SglangEngineFactory:
         if default_thinking_mode:
             logger.info("SGLang default thinking mode: %s", default_thinking_mode)
 
+        prompt_renderer = build_prompt_renderer(
+            tokenizer,
+            model_path=local_dir,
+            chat_template=chat_template,
+            tool_call_parser_name=tool_call_parser_name,
+            reasoning_parser_name=reasoning_parser_name,
+        )
         preprocess_pool = None
         preprocess_workers = self.config.preprocess_workers
         assert preprocess_workers is not None  # Resolved by FrontendConfig.validate().
@@ -1282,6 +1361,7 @@ class SglangEngineFactory:
             structural_tag_mode=structural_tag_mode,
             structural_tag_scope=structural_tag_scope,
             structural_tag_schema=structural_tag_schema,
+            prompt_renderer=prompt_renderer,
         )
         gen.exclude_tools_when_tool_choice_none = (
             self.config.exclude_tools_when_tool_choice_none
