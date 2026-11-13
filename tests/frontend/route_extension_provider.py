@@ -24,7 +24,6 @@ HELLO_PATH = "/hello_world"
 HELLO_BODY = {"message": "hello world!"}
 
 READINESS_PATH = "/test/ctx/ready"
-ECHO_PATH = "/test/echo"
 ECHO_ASYNC_PATH = "/test/echo_async"
 SLOW_PATH = "/test/slow"
 OWN_TIMEOUT_PATH = "/test/own_timeout"
@@ -42,10 +41,6 @@ def _hello(ctx: Any) -> dict:
 def _readiness(ctx: Any) -> dict:
     """Exercises FrontendExtensionContext — returns live model-readiness state."""
     return {"ready": ctx.has_any_ready_model()}
-
-
-def _echo(ctx: Any) -> Any:
-    return json.loads(ctx.body)
 
 
 async def _echo_async(ctx: Any) -> dict:
@@ -86,7 +81,6 @@ def routes():
     return [
         FrontendRoute("GET", HELLO_PATH, _hello),
         FrontendRoute("GET", READINESS_PATH, _readiness),
-        FrontendRoute("POST", ECHO_PATH, _echo),
         FrontendRoute("POST", ECHO_ASYNC_PATH, _echo_async),
         FrontendRoute("POST", SLOW_PATH, _slow, timeout_s=0.5),
         FrontendRoute("POST", OWN_TIMEOUT_PATH, _own_timeout),

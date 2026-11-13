@@ -2282,7 +2282,7 @@ class FrontendExtensionContext:
 
     @property
     def headers(self) -> dict[str, str]:
-        """Request headers as a new dict: lower-case names, repeated headers
+        """Request headers as a dict: lower-case names, repeated headers
         joined with ``", "``."""
         ...
 

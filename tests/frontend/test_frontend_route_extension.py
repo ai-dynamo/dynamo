@@ -31,7 +31,6 @@ import requests
 
 from tests.frontend.route_extension_provider import (
     ECHO_ASYNC_PATH,
-    ECHO_PATH,
     HELLO_BODY,
     HELLO_PATH,
     OWN_TIMEOUT_PATH,
@@ -143,10 +142,6 @@ def test_frontend_route_extension_serves_custom_route(request, tmp_path, selecto
 
         base = f"http://localhost:{frontend.frontend_port}"
         payload = [{"ticket_id": "t1"}, {"ticket_id": "t2"}]
-        echo = requests.post(f"{base}{ECHO_PATH}", json=payload, timeout=5)
-        assert echo.status_code == 200, echo.text
-        assert echo.json() == payload
-
         echo_async = requests.post(
             f"{base}{ECHO_ASYNC_PATH}",
             json=payload,

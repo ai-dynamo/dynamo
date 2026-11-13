@@ -748,12 +748,11 @@ curl -s localhost:8000/metrics | grep dynamo_frontend_inter_token_latency_second
 - **Live state:** `FrontendExtensionContext` exposes `is_ready()`, `is_cancelled()`,
   `has_any_ready_model()`, `is_model_ready_to_serve(name)`, `model_display_names()`, and
   `serving_ready_display_names()`.
-- **Execution limits:** Synchronous handlers run in a small dedicated thread pool. A handler still
-  running when the route's `timeout_s` has passed since the request body was read returns 503; an async
-  handler is cancelled then. Each route admits 64 calls at once, waiting or running; a request
-  beyond that, or one that finds the pool's queue full, is rejected with the configured overload
-  status code, 529 by default. A handler that raises returns 500. Request bodies are limited by
-  `DYN_HTTP_BODY_LIMIT_MB`, 45 MB by default.
+- **Execution limits:** A handler that exceeds its route's `timeout_s` returns 503. A route with 64
+  calls in flight, or a full handler pool, rejects new requests with the configured overload status
+  code, 529 by default. See
+  [Handler limits](../../developer-guide/knowledge-base/modular-components/frontend/python-route-extensions.md#handler-limits)
+  for the full rules.
 - **Multiple providers:** Repeating the CLI option or listing whitespace-separated environment
   values loads multiple providers. Duplicate provider names are de-duplicated.
 

@@ -131,7 +131,7 @@ await request-plane calls to workers. The context also carries the request and t
 runtime:
 
 - `body`: the raw request body as `bytes`, empty when the request has none.
-- `headers`: the request headers as a new `dict`, with lower-case names. Repeated headers are joined
+- `headers`: the request headers as a `dict` with lower-case names. Repeated headers are joined
   with `", "`.
 - `runtime`: the Frontend's own `DistributedRuntime`, for clients to worker endpoints. Its async
   methods need the event loop, so call them from an `async def` handler.

@@ -1741,13 +1741,7 @@ impl HttpServiceConfigBuilder {
         ];
         for extension in &config.frontend_route_extensions {
             let route_set = extension(FrontendExtensionContext::new(state.clone()))?;
-            let (route_docs, router) = route_set.into_parts();
-            // Extension routes may take request bodies; give them the inference
-            // routes' limit rather than axum's 2 MB default.
-            let router = router.layer(axum::extract::DefaultBodyLimit::max(
-                super::openai::get_body_limit(),
-            ));
-            system_routes.push((route_docs, router));
+            system_routes.push(route_set.into_parts());
         }
         if let Some(gateway) = config.batch_gateway_url.as_deref() {
             system_routes.push(super::batch_proxy::router(

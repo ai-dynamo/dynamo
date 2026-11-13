@@ -54,9 +54,16 @@ impl PyFrontendRoute {
                 "FrontendRoute handler must be callable",
             ));
         }
-        // Reuse the core validators so Python and the Rust builder can't drift.
-        let method = dynamo_llm::http::service::validate_extension_route_method(&method)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        // `HEAD` is served by a `GET` route.
+        let method = Method::from_bytes(method.to_ascii_uppercase().as_bytes())
+            .ok()
+            .filter(|m| ["GET", "POST", "PUT", "PATCH", "DELETE"].contains(&m.as_str()))
+            .ok_or_else(|| {
+                PyValueError::new_err(format!(
+                    "unsupported FrontendRoute method {method:?}; expected GET, POST, PUT, PATCH or DELETE"
+                ))
+            })?;
+        // Reuse the core validator so Python and the Rust builder can't drift.
         dynamo_llm::http::service::validate_extension_route_path(&path)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         // `try_from_secs_f64` rejects negative, NaN and infinite values.
@@ -112,9 +119,39 @@ impl PyFrontendResponse {
 #[pyclass(name = "FrontendExtensionContext")]
 pub(crate) struct PyFrontendExtensionContext {
     inner: RsFrontendExtensionContext,
-    body: Bytes,
-    headers: HeaderMap,
-    env: Arc<PyRouteEnv>,
+    /// Raw request body; empty when the request has none.
+    #[pyo3(get)]
+    body: Py<PyBytes>,
+    /// Request headers: lower-case names, repeated headers joined with ", ",
+    /// values decoded as lossy UTF-8.
+    #[pyo3(get)]
+    headers: Py<PyDict>,
+    /// The frontend's own `DistributedRuntime`.
+    #[pyo3(get)]
+    runtime: PyObject,
+}
+
+impl PyFrontendExtensionContext {
+    fn new(
+        py: Python<'_>,
+        inner: RsFrontendExtensionContext,
+        headers: &HeaderMap,
+        body: &[u8],
+        runtime: &PyObject,
+    ) -> PyResult<Self> {
+        let dict = PyDict::new(py);
+        for name in headers.keys() {
+            let values = headers.get_all(name).iter();
+            let values = values.map(|v| String::from_utf8_lossy(v.as_bytes()));
+            dict.set_item(name.as_str(), values.collect::<Vec<_>>().join(", "))?;
+        }
+        Ok(Self {
+            inner,
+            body: PyBytes::new(py, body).unbind(),
+            headers: dict.unbind(),
+            runtime: runtime.clone_ref(py),
+        })
+    }
 }
 
 #[pymethods]
@@ -142,53 +179,18 @@ impl PyFrontendExtensionContext {
     pub fn serving_ready_display_names(&self) -> Vec<String> {
         sorted_strings(self.inner.serving_ready_display_names().into_iter())
     }
-
-    /// Raw request body; empty when the request has none.
-    #[getter]
-    pub fn body<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
-        PyBytes::new(py, &self.body)
-    }
-
-    /// Request headers as a new dict: lower-case names, repeated headers
-    /// joined with ", ", values decoded as lossy UTF-8.
-    #[getter]
-    pub fn headers<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-        let dict = PyDict::new(py);
-        for name in self.headers.keys() {
-            let value = self
-                .headers
-                .get_all(name)
-                .iter()
-                .map(|v| String::from_utf8_lossy(v.as_bytes()))
-                .collect::<Vec<_>>()
-                .join(", ");
-            dict.set_item(name.as_str(), value)?;
-        }
-        Ok(dict)
-    }
-
-    /// The frontend's own `DistributedRuntime`.
-    #[getter]
-    pub fn runtime(&self, py: Python<'_>) -> PyObject {
-        self.env.runtime.clone_ref(py)
-    }
-}
-
-/// Frontend-process objects every route handler shares.
-struct PyRouteEnv {
-    /// The frontend's asyncio loop; awaitable handler results run here.
-    event_loop: PyObject,
-    /// The frontend's `DistributedRuntime` Python object.
-    runtime: PyObject,
 }
 
 struct PyRouteHandler {
-    handler: PyObject,
-    timeout: Duration,
-    /// This route's calls in flight: queued or running on the pool, or running
-    /// on the event loop. Per route, so a slow route can't shed the others.
+    spec: PyFrontendRoute,
+    /// The frontend's asyncio loop; awaitable handler results run here.
+    event_loop: PyObject,
+    /// The frontend's `DistributedRuntime`, handed to handlers as `ctx.runtime`.
+    runtime: PyObject,
+    /// Calls in flight: queued or running on the pool, or running on the event
+    /// loop. A slot is held until its handler is done, so slow async calls are
+    /// shed rather than piled onto the loop. Sync routes also share the pool.
     in_flight: Arc<Semaphore>,
-    env: Arc<PyRouteEnv>,
 }
 
 pub(crate) fn frontend_route_extensions_from_py(
@@ -222,46 +224,32 @@ pub(crate) fn frontend_route_extensions_from_py(
         return Ok(Vec::new());
     }
     // `run_input` is awaited from the frontend's event loop, so it is running here.
-    let event_loop = py
-        .import("asyncio")?
-        .call_method0("get_running_loop")?
-        .unbind();
-    let env = Arc::new(PyRouteEnv {
-        event_loop,
-        runtime,
+    let event_loop = py.import("asyncio")?.call_method0("get_running_loop")?;
+    // Shared into the route closures by `Arc`: they run on tokio workers, which
+    // never hold the GIL that cloning a Python reference needs.
+    let routes = route_specs.into_iter().map(|spec| {
+        Arc::new(PyRouteHandler {
+            spec,
+            event_loop: event_loop.clone().unbind(),
+            runtime: runtime.clone_ref(py),
+            in_flight: Arc::new(Semaphore::new(ROUTE_MAX_IN_FLIGHT)),
+        })
     });
-    Ok(vec![frontend_route_extension_from_routes(route_specs, env)])
+    Ok(vec![frontend_route_extension_from_routes(routes.collect())])
 }
 
 fn frontend_route_extension_from_routes(
-    routes: Vec<PyFrontendRoute>,
-    env: Arc<PyRouteEnv>,
+    routes: Vec<Arc<PyRouteHandler>>,
 ) -> FrontendRouteExtension {
-    let routes = Arc::new(routes);
     Arc::new(move |context: RsFrontendExtensionContext| {
         let mut builder = FrontendRouteSet::builder();
-        for route in routes.iter() {
-            // Clone the handler under the GIL (`clone_ref` requires it), then
-            // share it into the handler closure via `Arc` (GIL-free clone) —
-            // the closure runs on tokio workers that don't hold the GIL.
-            let handler = Arc::new(PyRouteHandler {
-                handler: Python::with_gil(|py| route.handler.clone_ref(py)),
-                timeout: route.timeout,
-                in_flight: Arc::new(Semaphore::new(ROUTE_MAX_IN_FLIGHT)),
-                env: env.clone(),
-            });
-            let context = context.clone();
+        for route in &routes {
+            let (route, context) = (route.clone(), context.clone());
             builder = builder.route(
-                route.method.clone(),
-                route.path.clone(),
+                route.spec.method.clone(),
+                route.spec.path.clone(),
                 move |headers: HeaderMap, body: Bytes| {
-                    let ctx = PyFrontendExtensionContext {
-                        inner: context.clone(),
-                        body,
-                        headers,
-                        env: handler.env.clone(),
-                    };
-                    call_python_frontend_route(handler.clone(), ctx)
+                    call_python_frontend_route(route.clone(), context.clone(), headers, body)
                 },
             )?;
         }
@@ -286,7 +274,6 @@ enum RouteError {
     TimedOut,
 }
 type RouteResult = Result<(StatusCode, Value), RouteError>;
-type RouteSender = tokio::sync::oneshot::Sender<RouteResult>;
 
 /// Dedicated pool for Python extension handlers, kept off tokio's shared
 /// `spawn_blocking` pool so a slow handler can't starve inference tokenization.
@@ -328,20 +315,20 @@ fn extension_error_response(status: StatusCode, message: &str) -> Response {
 
 async fn call_python_frontend_route(
     route: Arc<PyRouteHandler>,
-    ctx: PyFrontendExtensionContext,
+    context: RsFrontendExtensionContext,
+    headers: HeaderMap,
+    body: Bytes,
 ) -> Response {
-    let timeout = route.timeout;
-    let deadline = tokio::time::Instant::now() + timeout;
+    let (method, path) = (&route.spec.method, route.spec.path.as_str());
+    let deadline = tokio::time::Instant::now() + route.spec.timeout;
     // Bounded: shed with the shared overload code (DYN_HTTP_OVERLOAD_STATUS_CODE).
     let shed = || {
-        tracing::warn!("frontend extension handlers saturated; shedding request");
+        tracing::warn!(%method, path, "frontend extension handlers saturated; shedding request");
         extension_error_response(
             dynamo_llm::http::service::error::SanitizedError::Overloaded.status(),
             "frontend route extension busy",
         )
     };
-    // Held until the Python handler actually finishes, so a flood of slow async
-    // calls is shed rather than piled onto the loop.
     let Ok(permit) = route.in_flight.clone().try_acquire_owned() else {
         return shed();
     };
@@ -352,10 +339,11 @@ async fn call_python_frontend_route(
         deadline: deadline.into_std(),
         timer: None,
     };
+    let job_route = route.clone();
     let job: ExtensionJob = Box::new(move || {
         // Caller already gave up (timed out/disconnected): skip before the GIL.
         if !reply.is_closed() {
-            Python::with_gil(|py| run_handler(py, &route, ctx, reply));
+            Python::with_gil(|py| run_handler(py, &job_route, context, &headers, &body, reply));
         }
     });
     if extension_executor().try_send(job).is_err() {
@@ -372,7 +360,7 @@ async fn call_python_frontend_route(
     };
     match failure {
         RouteError::Failed(err) => {
-            tracing::error!(error = %err, "Python frontend route extension failed");
+            tracing::error!(%method, path, error = %err, "Python frontend route extension failed");
             extension_error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "frontend route extension failed",
@@ -380,7 +368,7 @@ async fn call_python_frontend_route(
         }
         RouteError::TimedOut => {
             tracing::error!(
-                timeout_s = timeout.as_secs_f64(),
+                %method, path, timeout_s = route.spec.timeout.as_secs_f64(),
                 "Python frontend route extension timed out"
             );
             extension_error_response(
@@ -396,10 +384,14 @@ async fn call_python_frontend_route(
 fn run_handler(
     py: Python<'_>,
     route: &PyRouteHandler,
-    ctx: PyFrontendExtensionContext,
+    context: RsFrontendExtensionContext,
+    headers: &HeaderMap,
+    body: &[u8],
     mut reply: Reply,
 ) {
-    let result = match Py::new(py, ctx).and_then(|ctx| route.handler.call1(py, (ctx,))) {
+    let result = PyFrontendExtensionContext::new(py, context, headers, body, &route.runtime)
+        .and_then(|ctx| route.spec.handler.call1(py, (ctx,)));
+    let result = match result {
         Ok(result) => result.into_bound(py),
         Err(err) => return reply.finish(Err(RouteError::Failed(err.to_string()))),
     };
@@ -408,20 +400,16 @@ fn run_handler(
         return reply.finish(response.map_err(|e| RouteError::Failed(e.to_string())));
     }
     // On failure `reply` is dropped unanswered; the caller answers 500.
-    let Ok(reply) = Py::new(py, reply) else {
+    let Ok(reply) = Bound::new(py, reply) else {
         return;
     };
-    let scheduled = reply.bind(py).getattr("start").and_then(|start| {
+    let scheduled = reply.getattr("start").and_then(|start| {
         route
-            .env
             .event_loop
             .call_method1(py, "call_soon_threadsafe", (start, &result))
     });
     if let Err(err) = scheduled {
-        let _ = result.call_method0("close");
-        reply
-            .borrow_mut(py)
-            .finish(Err(RouteError::Failed(err.to_string())));
+        Reply::abort(&reply, &result, RouteError::Failed(err.to_string()));
     }
 }
 
@@ -429,11 +417,10 @@ fn run_handler(
 /// handler is done rather than until the caller stops waiting.
 #[pyclass]
 struct Reply {
-    tx: Option<RouteSender>,
+    tx: Option<tokio::sync::oneshot::Sender<RouteResult>>,
     permit: Option<OwnedSemaphorePermit>,
     deadline: std::time::Instant,
-    /// The event loop's deadline timer for an async handler, until it fires or
-    /// the handler is done.
+    /// The event loop's deadline timer, until it fires or the handler is done.
     timer: Option<PyObject>,
 }
 
@@ -461,6 +448,12 @@ impl Reply {
         self.permit = None;
         self.answer(result);
     }
+
+    /// Close an awaitable that will not run, and answer the caller.
+    fn abort(slf: &Bound<'_, Self>, awaitable: &Bound<'_, PyAny>, err: RouteError) {
+        let _ = awaitable.call_method0("close");
+        slf.borrow_mut().finish(Err(err));
+    }
 }
 
 #[pymethods]
@@ -469,13 +462,9 @@ impl Reply {
     /// the deadline. A call the loop picks up after its deadline, or whose
     /// caller is gone, is skipped.
     fn start(slf: &Bound<'_, Self>, awaitable: &Bound<'_, PyAny>) {
-        let abort = |err: RouteError| {
-            let _ = awaitable.call_method0("close");
-            slf.borrow_mut().finish(Err(err));
-        };
         let remaining = slf.borrow().remaining();
         let Some(remaining) = remaining else {
-            return abort(RouteError::TimedOut);
+            return Self::abort(slf, awaitable, RouteError::TimedOut);
         };
         let started = slf.py().import("asyncio").and_then(|asyncio| {
             let task = asyncio.call_method1("ensure_future", (awaitable,))?;
@@ -488,7 +477,7 @@ impl Reply {
             Ok(())
         });
         if let Err(err) = started {
-            abort(RouteError::Failed(err.to_string()));
+            Self::abort(slf, awaitable, RouteError::Failed(err.to_string()));
         }
     }
 
