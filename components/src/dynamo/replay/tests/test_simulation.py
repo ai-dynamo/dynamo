@@ -748,6 +748,39 @@ def test_factory_supports_native_trtllm_disagg() -> None:
     assert capabilities.supports_disaggregated_attention_dp
 
 
+@pytest.mark.parametrize(
+    "control,accepted",
+    [
+        ("kvcache_quant_mode", True),
+        ("gemm_quant_mode", True),
+        ("fmha_quant_mode", False),
+    ],
+)
+def test_factory_accepts_only_kv_and_gemm_quant_modes(control, accepted) -> None:
+    deployment = replace(
+        _agg_deployment(),
+        agg_engine_args={
+            "engine_type": "vllm",
+            "timing_model": {
+                "type": "external",
+                "provider": "aic",
+                "config": {control: "fp8"},
+            },
+        },
+    )
+    spec = ReplaySpec(
+        backend_deployment=deployment,
+        workload={"isl": 100, "osl": 20},
+        goal={"target": "throughput"},
+    )
+    capabilities = simulation.DynamoReplayRunnerFactory().capabilities()
+    if accepted:
+        capabilities.require_compatible(spec)
+    else:
+        with pytest.raises(ValueError, match="engine model controls"):
+            capabilities.require_compatible(spec)
+
+
 def test_factory_follows_engine_capabilities_with_adapter_constraints(
     monkeypatch,
 ) -> None:

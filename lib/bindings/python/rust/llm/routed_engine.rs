@@ -162,7 +162,7 @@ impl RoutedEngine {
                     }
                 });
 
-                Ok(crate::AsyncResponseStream::new(rx, true))
+                Ok(crate::AsyncResponseStream::routed_engine(rx))
             }
             .instrument(dispatch_span),
         )
