@@ -594,8 +594,7 @@ impl TcpConnection {
         sock_ref.set_nodelay(true)?;
 
         // Buffer sizes are left to the kernel: an explicit SO_SNDBUF or SO_RCVBUF is clamped to
-        // net.core.{w,r}mem_max (208 KiB by default) and turns autotuning off, which holds the
-        // send buffer to about one large request.
+        // net.core.{w,r}mem_max (208 KiB by default) and turns autotuning off.
 
         // Advanced Linux optimizations for ultra-low latency (optional feature)
         #[cfg(feature = "tcp-low-latency")]
@@ -3561,31 +3560,17 @@ mod tests {
         );
     }
 
-    /// The kernel stays free to size the request socket's buffers.
-    #[cfg(target_os = "linux")]
     #[tokio::test]
-    async fn configure_socket_leaves_buffer_autotuning_on() {
-        use std::os::fd::AsRawFd;
-
+    async fn configure_socket_leaves_buffer_sizes_alone() {
         let (addr, _) = spawn_echo_server().await;
         let stream = TcpStream::connect(addr).await.unwrap();
+        let sock = socket2::SockRef::from(&stream);
+        let send = sock.send_buffer_size().unwrap();
+        let recv = sock.recv_buffer_size().unwrap();
+
         TcpConnection::configure_socket(&stream).unwrap();
 
-        // SO_BUF_LOCK reports which of SO_SNDBUF and SO_RCVBUF were set explicitly.
-        let mut locks: libc::c_int = -1;
-        let mut len = std::mem::size_of_val(&locks) as libc::socklen_t;
-        let rc = unsafe {
-            libc::getsockopt(
-                stream.as_raw_fd(),
-                libc::SOL_SOCKET,
-                libc::SO_BUF_LOCK,
-                &mut locks as *mut _ as *mut libc::c_void,
-                &mut len,
-            )
-        };
-        // Kernels before 5.14 don't have the option.
-        if rc == 0 {
-            assert_eq!(locks, 0, "an explicit buffer size turns autotuning off");
-        }
+        assert_eq!(sock.send_buffer_size().unwrap(), send);
+        assert_eq!(sock.recv_buffer_size().unwrap(), recv);
     }
 }
