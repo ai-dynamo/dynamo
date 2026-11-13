@@ -125,14 +125,17 @@ try:
             while vLLM's own client follows redirects without re-checking
             them. vLLM's media_io still decodes the bytes, so the renderer
             gets the same objects as from the parent. data: URLs and local
-            files don't touch the network and stay with the parent.
+            files don't touch the network and stay with the parent, once
+            they pass the same checks: DYN_MM_MAX_DATA_URL_MB for a data:
+            URL, as ImageLoader applies to images, and DYN_MM_LOCAL_PATH for
+            a local file.
             """
+            policy = UrlValidationPolicy.from_env()
+            await validate_media_url(url, policy)
             if url[:5].lower() == "data:":
                 return await super().load_from_url_async(
                     url, media_io, fetch_timeout=fetch_timeout
                 )
-            policy = UrlValidationPolicy.from_env()
-            await validate_media_url(url, policy)
             url_spec = parse_url(url)
             if not (url_spec.scheme and url_spec.scheme.lower() in ("http", "https")):
                 return await super().load_from_url_async(

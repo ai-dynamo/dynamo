@@ -10,7 +10,7 @@ from PIL import Image
 
 import dynamo.common.multimodal.media_connector as media_connector_module
 from dynamo.common.http import HttpStatusError
-from dynamo.common.http.url_validator import UrlValidationError
+from dynamo.common.http.url_validator import MediaSizeError, UrlValidationError
 from dynamo.common.multimodal.image_loader import ImageLoader
 
 pytestmark = [
@@ -129,7 +129,33 @@ async def test_connector_applies_url_policy_to_audio_and_video(
         await getattr(connector, fetch)(url)
     parent_load.assert_not_awaited()
 
-    # data: URLs carry the media inline, so they skip the URL check.
+    # data: URLs carry the media inline, so the URL rules don't apply.
+    await getattr(connector, fetch)("data:audio/wav;base64,AAAA")
+    parent_load.assert_awaited_once()
+
+
+@pytest.mark.vllm
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fetch", ["fetch_audio_async", "fetch_video_async"])
+async def test_connector_applies_data_url_size_limit(fetch, monkeypatch):
+    """Audio and video data: URLs get the DYN_MM_MAX_DATA_URL_MB cap that
+    ImageLoader applies to images, before vLLM decodes them."""
+    connector_class = getattr(media_connector_module, "DynamoMediaConnector", None)
+    if connector_class is None:
+        pytest.skip("vLLM is not installed")
+
+    monkeypatch.setenv("DYN_MM_MAX_DATA_URL_MB", "1")
+    parent_load = AsyncMock()
+    monkeypatch.setattr(connector_class.__mro__[1], "load_from_url_async", parent_load)
+    connector = object.__new__(connector_class)
+    connector.media_io_kwargs = {}
+    connector.decoded_budget = None
+
+    oversized = "data:audio/wav;base64," + "A" * (1024 * 1024)
+    with pytest.raises(MediaSizeError, match="DYN_MM_MAX_DATA_URL_MB"):
+        await getattr(connector, fetch)(oversized)
+    parent_load.assert_not_awaited()
+
     await getattr(connector, fetch)("data:audio/wav;base64,AAAA")
     parent_load.assert_awaited_once()
 

@@ -15,6 +15,12 @@ This page describes multimodal inference with the Dynamo vLLM backend.
 > serve but also extends it to all multimodal content (URL, embeddings, and
 > base64 data).
 
+> [!NOTE]
+> Embedding workers are the exception. A vLLM `--embedding-worker` accepts
+> image, video, and audio in chat-style `messages` without
+> `--enable-multimodal`, and cannot be combined with it. See
+> [Embedding](../../../../../reference/backends/vllm-configuration.mdx#embedding).
+
 ## Support Matrix
 
 | Modality | Aggregated | P/D | Separate encode worker |
