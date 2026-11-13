@@ -23,6 +23,7 @@ from tests.serve.multimodal_profiles.vllm import (
 )
 from tests.utils.constants import DefaultPort
 from tests.utils.engine_process import EngineConfig
+from tests.utils.gpu_args import PYNVVIDEOCODEC_RESERVED_BYTES
 from tests.utils.multimodal import make_multimodal_configs
 from tests.utils.payload_builder import (
     chat_payload,
@@ -964,6 +965,24 @@ def test_serve_deployment(
         vllm_config_test, frontend_port=dynamo_dynamic_ports.frontend_port
     )
     run_serve_deployment(config, request, ports=dynamo_dynamic_ports)
+
+
+@pytest.mark.vllm
+@pytest.mark.unit
+@pytest.mark.gpu_0
+@pytest.mark.pre_merge
+def test_pynvvideocodec_reservation_matches_vllm():
+    """The multimodal profiles' decoder reservation must match vLLM's."""
+    from vllm.multimodal.video_decoders.base import PYNVVIDEOCODEC_DEFAULT_HW_DECODERS
+    from vllm.multimodal.video_decoders.pynvvideocodec import (
+        PYNVVIDEOCODEC_CUDA_CONTEXT_BYTES,
+        PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES,
+    )
+
+    assert PYNVVIDEOCODEC_RESERVED_BYTES == (
+        PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES * PYNVVIDEOCODEC_DEFAULT_HW_DECODERS
+        + PYNVVIDEOCODEC_CUDA_CONTEXT_BYTES
+    )
 
 
 # LoRA Test Directory
