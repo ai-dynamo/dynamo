@@ -223,6 +223,16 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 			dynamoComponentDeployment: dynamoComponentDeployment,
 		})
 		if err != nil {
+			if stderrors.Is(err, serviceidentity.ErrCacheObservationPending) {
+				_, err = r.setStatusConditions(ctx, req,
+					metav1.Condition{Type: nvidiacomv1beta1.DynamoComponentDeploymentConditionTypeAvailable, Status: metav1.ConditionUnknown,
+						ObservedGeneration: dynamoComponentDeployment.Generation, Reason: "ServiceIdentityPending", Message: "Waiting for the Service cache observation"},
+					metav1.Condition{Type: nvidiacomv1beta1.DynamoComponentDeploymentConditionTypeDynamoComponentReady, Status: metav1.ConditionUnknown,
+						ObservedGeneration: dynamoComponentDeployment.Generation, Reason: "ServiceIdentityPending", Message: "Waiting for the Service cache observation"},
+				)
+				return ctrl.Result{}, err
+			}
+
 			return ctrl.Result{}, fmt.Errorf("failed to create or update the service: %w", err)
 		}
 
@@ -1024,7 +1034,7 @@ func (r *DynamoComponentDeploymentReconciler) controllerBuilder(mgr ctrl.Manager
 			podcontroller.EnqueueOwners(podcontroller.DCDName),
 			builder.WithPredicates(podcontroller.CrashLoopPredicate(podcontroller.DCDName)),
 		).
-		Owns(&corev1.Service{}, builder.WithPredicates(predicate.Or(predicate.GenerationChangedPredicate{}, predicate.LabelChangedPredicate{}))).
+		Owns(&corev1.Service{}, builder.WithPredicates(predicate.ResourceVersionChangedPredicate{})).
 		Owns(&networkingv1.Ingress{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		WithEventFilter(deploymentEventFilter(r.Config, r.RuntimeConfig))
 

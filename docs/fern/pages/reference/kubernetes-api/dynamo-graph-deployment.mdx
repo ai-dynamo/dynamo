@@ -56,8 +56,8 @@ Component-specific Services expose the same logical identity regardless of the w
 |---|---|
 | `nvidia.com/dynamo-graph-deployment-name` | Name of the source DGD in the Service's namespace |
 | `nvidia.com/dynamo-component` | Logical component name |
-| `nvidia.com/dynamo-component-type` | Effective component type used by the selected Pods, including legacy `worker` identity where applicable |
-| `nvidia.com/dynamo-namespace` | Resolved Dynamo runtime namespace of the component |
+| `nvidia.com/dynamo-component-type` | Effective component type used by the selected Pods, including legacy `worker` identity where applicable. When no type is resolved, an authored value or its absence is preserved. |
+| `nvidia.com/dynamo-namespace` | Base Dynamo namespace of the component, without the worker-generation hash suffix |
 
 The operator sets these values after authored labels, so authored values cannot override component identity. Unrelated labels remain intact. Existing Services receive the identity labels on their next reconciliation. This metadata update preserves Service names, allocated addresses, selectors, Pod templates, and rollout hashes.
 

@@ -309,6 +309,11 @@ func (r *graphReconciler) reconcileWorkloads(
 
 	// Synchronize configuration before any scale-up, scale-down, or request retirement.
 	if err := r.reconcileRuntimeResources(ctx, deployment, resources); err != nil {
+		if errors.Is(err, serviceidentity.ErrCacheObservationPending) {
+			setReadyCondition(deployment, v1beta1.DGDStatePending, "Waiting for the runtime resource cache observation")
+			return ctrl.Result{}, nil
+		}
+
 		return ctrl.Result{}, err
 	}
 

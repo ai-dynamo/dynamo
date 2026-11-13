@@ -7,16 +7,21 @@ package serviceidentity
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	corev1apply "k8s.io/client-go/applyconfigurations/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 const fieldOwner = "dynamo-operator-service-identity"
+
+// ErrCacheObservationPending marks an identity write rejected by its stale observation.
+var ErrCacheObservationPending = errors.New("waiting for the Service cache observation")
 
 // Labels copies authored labels and stamps the canonical component identity.
 // An empty graphDeploymentName supports standalone DCDs without inventing a DGD.
@@ -28,7 +33,9 @@ func Labels(authored map[string]string, graphDeploymentName, componentName, comp
 
 	// Service identity uses the same component values as the selected Pods.
 	labels[consts.KubeLabelDynamoComponent] = componentName
-	labels[consts.KubeLabelDynamoComponentType] = componentType
+	if componentType != "" {
+		labels[consts.KubeLabelDynamoComponentType] = componentType
+	}
 	labels[consts.KubeLabelDynamoNamespace] = dynamoNamespace
 	if graphDeploymentName != "" {
 		labels[consts.KubeLabelDynamoGraphDeploymentName] = graphDeploymentName
@@ -64,6 +71,9 @@ func Apply(ctx context.Context, writer client.Writer, desired, observed *corev1.
 		WithResourceVersion(observed.ResourceVersion).
 		WithLabels(labels)
 	if err := writer.Apply(ctx, configuration, client.FieldOwner(fieldOwner), client.ForceOwnership); err != nil {
+		if apierrors.IsConflict(err) {
+			return false, fmt.Errorf("%w: %w", ErrCacheObservationPending, err)
+		}
 		return false, fmt.Errorf("apply Service identity %s/%s: %w", observed.Namespace, observed.Name, err)
 	}
 	return true, nil
