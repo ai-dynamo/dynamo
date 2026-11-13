@@ -271,7 +271,7 @@ from dynamo.frontend.prepost import PreprocessResult
 PreprocessResult(request_for_sampling: ChatCompletionRequest, tool_parser: ToolParser | None, chat_template_kwargs: dict[str, Any], engine_prompt: dict[str, Any], prompt_token_ids: list[int], guided_decoding: dict[str, Any] | None = None, uses_dynamo_json_tool_call_fallback: bool = False) -> None
 ```
 
-[`components/src/dynamo/frontend/prepost.py#L77`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/prepost.py#L77)
+[`components/src/dynamo/frontend/prepost.py#L84`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/prepost.py#L84)
 
 **Public methods**
 
@@ -411,7 +411,7 @@ from dynamo.frontend.sglang_prepost import SglangPreprocessResult
 SglangPreprocessResult(prompt_token_ids: list[int], tool_call_parser: ToolCallParserType | None, reasoning_parser: ReasoningParser | None, guided_decoding: dict[str, Any] | None, request: dict[str, Any], force_reasoning: bool = False, named_zero_arg_tool: str | None = None) -> None
 ```
 
-[`components/src/dynamo/frontend/sglang_prepost.py#L55`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_prepost.py#L55)
+[`components/src/dynamo/frontend/sglang_prepost.py#L56`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_prepost.py#L56)
 
 **Public methods**
 
@@ -504,7 +504,7 @@ Handles:
 - Reasoning content extraction via SGLang ReasoningParser
 - Tool call parsing via SGLang FunctionCallParser or JsonArrayParser
 
-[`components/src/dynamo/frontend/sglang_prepost.py#L1040`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_prepost.py#L1040)
+[`components/src/dynamo/frontend/sglang_prepost.py#L1067`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_prepost.py#L1067)
 
 **Public methods**
 
@@ -516,7 +516,7 @@ __init__(*, tokenizer, tool_call_parser: ToolCallParserType | None, reasoning_pa
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_prepost.py#L1049)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_prepost.py#L1076)
 
 <h4 id="api-dynamo-frontend-sglang-prepost-sglangstreamingpostprocessor-post-stop-token-count">post_stop_token_count</h4>
 
@@ -529,7 +529,7 @@ Count the latest generated IDs that follow a local stop string.
 The token completing the stop is kept. The count spans IDs withheld by
 incremental decoding and is computed on demand by re-decoding them.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_prepost.py#L1394)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_prepost.py#L1421)
 
 <h4 id="api-dynamo-frontend-sglang-prepost-sglangstreamingpostprocessor-process-output">process_output</h4>
 
@@ -549,7 +549,7 @@ Dict with ``token_ids`` and optional ``finish_reason``.
 
 - `dict[str, Any] | None` — OpenAI choice dict or ``None`` if nothing to emit yet.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_prepost.py#L1530)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_prepost.py#L1557)
 </Accordion>
 
 <Accordion id="api-dynamo-frontend-prepost-streamingpostprocessor" title="StreamingPostProcessor (class)">
@@ -563,7 +563,7 @@ from dynamo.frontend.prepost import StreamingPostProcessor
 StreamingPostProcessor(*, tokenizer: TokenizerLike, request_for_sampling: ChatCompletionRequest, sampling_params: SamplingParams, prompt_token_ids: Sequence[int], tool_parser: ToolParser | None, reasoning_parser_class: type[ReasoningParser] | None, chat_template_kwargs: dict[str, Any], model_config: ModelConfig | None = None, response_reasoning_ended: bool | None = None, stream_response: bool = True, uses_dynamo_json_tool_call_fallback: bool = False) -> None
 ```
 
-[`components/src/dynamo/frontend/prepost.py#L969`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/prepost.py#L969)
+[`components/src/dynamo/frontend/prepost.py#L1005`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/prepost.py#L1005)
 
 **Public methods**
 
@@ -575,7 +575,7 @@ __init__(*, tokenizer: TokenizerLike, request_for_sampling: ChatCompletionReques
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/prepost.py#L970)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/prepost.py#L1006)
 
 <h4 id="api-dynamo-frontend-prepost-streamingpostprocessor-process-output">process_output</h4>
 
@@ -585,7 +585,7 @@ process_output(output: Any) -> dict[str, Any] | None
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/prepost.py#L1488)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/prepost.py#L1524)
 </Accordion>
 
 <Accordion id="api-dynamo-frontend-vllm-processor-vllmprocessor" title="VllmProcessor (class)">
@@ -752,7 +752,7 @@ from dynamo.frontend.sglang_prepost import build_response_format_guided_decoding
 build_response_format_guided_decoding(request: dict[str, Any]) -> dict[str, Any] | None
 ```
 
-[`components/src/dynamo/frontend/sglang_prepost.py#L696`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_prepost.py#L696)
+[`components/src/dynamo/frontend/sglang_prepost.py#L723`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_prepost.py#L723)
 </Accordion>
 
 <Accordion id="api-dynamo-frontend-prepost-build-tool-call-guided-decoding" title="build_tool_call_guided_decoding (function)">
@@ -771,7 +771,7 @@ block the prompt opened and the engine does not hold the grammar back until
 that block ends. The structural tag must then accept the reasoning text and
 its end marker before the tool-call section.
 
-[`components/src/dynamo/frontend/prepost.py#L276`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/prepost.py#L276)
+[`components/src/dynamo/frontend/prepost.py#L304`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/prepost.py#L304)
 </Accordion>
 
 <Accordion id="api-dynamo-frontend-sglang-prepost-build-tool-call-guided-decoding" title="build_tool_call_guided_decoding (function)">
@@ -785,7 +785,7 @@ from dynamo.frontend.sglang_prepost import build_tool_call_guided_decoding
 build_tool_call_guided_decoding(request: dict[str, Any], *, tool_call_parser_name: str | None, tokenizer: Any | None = None, sglang_tools: list[SglangTool] | None, structural_tag_mode: str = 'off', structural_tag_scope: str = 'auto', structural_tag_schema: str = 'auto') -> dict[str, Any] | None
 ```
 
-[`components/src/dynamo/frontend/sglang_prepost.py#L550`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_prepost.py#L550)
+[`components/src/dynamo/frontend/sglang_prepost.py#L551`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_prepost.py#L551)
 </Accordion>
 
 <Accordion id="api-dynamo-frontend-sglang-prepost-convert-tools" title="convert_tools (function)">
@@ -802,7 +802,7 @@ convert_tools(tools: list[dict[str, Any]] | None, *, structural_tag_schema: str 
 ``structural_tag_schema`` is set only for the guidance copy. Prompt and
 parser copies retain SGLang's existing omitted-strict representation.
 
-[`components/src/dynamo/frontend/sglang_prepost.py#L219`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_prepost.py#L219)
+[`components/src/dynamo/frontend/sglang_prepost.py#L220`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_prepost.py#L220)
 </Accordion>
 
 <Accordion id="api-dynamo-frontend-sglang-prepost-create-parsers" title="create_parsers (function)">
@@ -826,7 +826,7 @@ Required and named choices use the model-specific `FunctionCallParser`
 when the effective guidance is a structural tag. Their JSON fallback keeps
 `JsonArrayParser`. Automatic choices use `FunctionCallParser`.
 
-[`components/src/dynamo/frontend/sglang_prepost.py#L311`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_prepost.py#L311)
+[`components/src/dynamo/frontend/sglang_prepost.py#L312`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_prepost.py#L312)
 </Accordion>
 
 <Accordion id="api-dynamo-frontend-sglang-prepost-detect-force-reasoning-from-template" title="detect_force_reasoning_from_template (function)">
@@ -843,7 +843,7 @@ detect_force_reasoning_from_template(chat_template: str | None) -> bool
 Intended to be called once at processor startup with
 ``tokenizer.chat_template`` and cached on the processor.
 
-[`components/src/dynamo/frontend/sglang_prepost.py#L92`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_prepost.py#L92)
+[`components/src/dynamo/frontend/sglang_prepost.py#L93`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_prepost.py#L93)
 </Accordion>
 
 <Accordion id="api-dynamo-frontend-structural-tag-policy-effective-tool-strict" title="effective_tool_strict (function)">
@@ -1024,7 +1024,7 @@ from dynamo.frontend.sglang_prepost import named_closed_zero_arg_tool
 named_closed_zero_arg_tool(request: dict[str, Any]) -> str | None
 ```
 
-[`components/src/dynamo/frontend/sglang_prepost.py#L376`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_prepost.py#L376)
+[`components/src/dynamo/frontend/sglang_prepost.py#L377`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_prepost.py#L377)
 </Accordion>
 
 <Accordion id="api-dynamo-frontend-utils-nvext-extra-field-requested" title="nvext_extra_field_requested (function)">
@@ -1071,7 +1071,7 @@ from dynamo.frontend.prepost import preprocess_chat_request
 preprocess_chat_request(request: dict[str, Any] | ChatCompletionRequest, *, tokenizer: TokenizerLike, renderer: _Renderer, tool_parser_class: type[ToolParser] | None, reasoning_parser_class: type[ReasoningParser] | None = None, model_config: ModelConfig | None = None, exclude_tools_when_tool_choice_none: bool = True, enable_auto_tool_choice: bool = False, default_thinking_mode: str | None = None, structural_tag_mode: str = 'off', structural_tag_scope: str = 'auto', structural_tag_schema: str = 'auto', structural_tag_excludes_reasoning: bool = False) -> PreprocessResult
 ```
 
-[`components/src/dynamo/frontend/prepost.py#L769`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/prepost.py#L769)
+[`components/src/dynamo/frontend/prepost.py#L805`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/prepost.py#L805)
 </Accordion>
 
 <Accordion id="api-dynamo-frontend-sglang-prepost-preprocess-chat-request" title="preprocess_chat_request (function)">
@@ -1092,7 +1092,7 @@ request-level thinking controls.
 
 Synchronous -- suitable for both main-process and worker-process execution.
 
-[`components/src/dynamo/frontend/sglang_prepost.py#L736`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_prepost.py#L736)
+[`components/src/dynamo/frontend/sglang_prepost.py#L763`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_prepost.py#L763)
 </Accordion>
 
 <Accordion id="api-dynamo-frontend-utils-random-call-id" title="random_call_id (function)">
@@ -1223,7 +1223,7 @@ explicitly ``"disabled"``.
 enabled by ``chat_template_kwargs.{thinking,enable_thinking}=True``.
 * anything else: follow the statically-detected template default.
 
-[`components/src/dynamo/frontend/sglang_prepost.py#L136`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_prepost.py#L136)
+[`components/src/dynamo/frontend/sglang_prepost.py#L137`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_prepost.py#L137)
 </Accordion>
 
 <Accordion id="api-dynamo-frontend-sglang-prepost-resolve-skip-special-tokens" title="resolve_skip_special_tokens (function)">
@@ -1237,7 +1237,7 @@ from dynamo.frontend.sglang_prepost import resolve_skip_special_tokens
 resolve_skip_special_tokens(requested: bool | None, *, has_parser: bool) -> bool
 ```
 
-[`components/src/dynamo/frontend/sglang_prepost.py#L1033`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_prepost.py#L1033)
+[`components/src/dynamo/frontend/sglang_prepost.py#L1060`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_prepost.py#L1060)
 </Accordion>
 
 <Accordion id="api-dynamo-frontend-usage-response-usage" title="response_usage (function)">
