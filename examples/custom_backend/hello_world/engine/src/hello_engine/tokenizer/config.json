@@ -1,0 +1,8 @@
+{
+  "model_type": "llama",
+  "architectures": ["HelloEngine"],
+  "eos_token_id": 256,
+  "bos_token_id": 256,
+  "vocab_size": 257,
+  "max_position_embeddings": 4096
+}
