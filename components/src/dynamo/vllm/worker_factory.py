@@ -16,8 +16,10 @@ from pathlib import Path
 from types import TracebackType
 from typing import Any, Optional
 
+import vllm.envs as vllm_envs
 from vllm.config import VllmConfig
 from vllm.v1.engine.async_llm import AsyncLLM
+from vllm.v1.engine.utils import get_engine_process_shutdown_timeout
 
 from dynamo import prometheus_names
 from dynamo.common.model_taints import register_model_taint_route
@@ -150,6 +152,19 @@ def _snapshot_uses_instrumented_scheduler(vllm_config: VllmConfig) -> bool:
     )
 
 
+def _engine_shutdown_timeout(vllm_config: VllmConfig) -> float:
+    """Seconds EngineCore gets to exit before vLLM force-kills it."""
+    if vllm_config.shutdown_timeout > 0:
+        return float(vllm_config.shutdown_timeout)
+    # vLLM's default 0 means "abort requests at once" to EngineCore, but
+    # forwarding it also gives the process no time to release GPU and IPC
+    # resources, so vLLM SIGKILLs EngineCore and its TP workers. Use vLLM's
+    # own cleanup window instead: an explicit VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS,
+    # then ROCm's 15 s, then that env var's 5 s default.
+    window = get_engine_process_shutdown_timeout(0, 0)
+    return window if window else float(vllm_envs.VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS)
+
+
 async def _sync_fpm_worker_id(
     engine_client: AsyncLLM, vllm_config: VllmConfig, new_worker_id: str
 ) -> None:
@@ -193,7 +208,7 @@ async def _sync_fpm_worker_id_or_shutdown(
         await _sync_fpm_worker_id(engine_client, vllm_config, new_worker_id)
     except BaseException:
         try:
-            engine_client.shutdown(timeout=vllm_config.shutdown_timeout)
+            engine_client.shutdown(timeout=_engine_shutdown_timeout(vllm_config))
         except Exception:
             logger.exception(
                 "Failed to shut down the restored engine after the FPM worker_id "
@@ -1745,7 +1760,9 @@ class _WorkerLifecycle:
                 self.handler.cleanup()
         finally:
             if self.engine_client is not None and self.vllm_config is not None:
-                self.engine_client.shutdown(timeout=self.vllm_config.shutdown_timeout)
+                self.engine_client.shutdown(
+                    timeout=_engine_shutdown_timeout(self.vllm_config)
+                )
 
 
 class WorkerFactory:
