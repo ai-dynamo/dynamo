@@ -160,6 +160,27 @@ def test_custom_jinja_template_valid_path(mock_vllm_cli):
     )
 
 
+def test_custom_jinja_template_rejects_vllm_tokenizer(mock_vllm_cli):
+    mock_vllm_cli(
+        "--model",
+        "Qwen/Qwen3-0.6B",
+        "--custom-jinja-template",
+        JINJA_TEMPLATE_PATH,
+        "--use-vllm-tokenizer",
+    )
+
+    with pytest.raises(ValueError) as excinfo:
+        parse_args()
+
+    assert str(excinfo.value) == (
+        "Cannot use --custom-jinja-template with --use-vllm-tokenizer: the worker "
+        "renders with the model's own chat template. Remove --use-vllm-tokenizer. "
+        "Then keep --custom-jinja-template to apply the template in Dynamo's "
+        "preprocessor, or start the frontend with --dyn-chat-processor vllm "
+        "--chat-template <file> to render it in vLLM."
+    )
+
+
 def test_custom_jinja_template_env_var_expansion(monkeypatch, mock_vllm_cli):
     """Test that environment variables in paths are expanded by Python code."""
     jinja_dir = str(TEST_DIR / "serve" / "fixtures")
@@ -2352,7 +2373,7 @@ class TestEmbeddingWorkerFlag:
 
 
 class TestRealtimeWorkerFlag:
-    """Parsing for the generic --realtime worker mode."""
+    """Parsing for the generic realtime worker mode."""
 
     def test_default_false(self, mock_vllm_cli):
         mock_vllm_cli("--model", "Qwen/Qwen3-0.6B")
@@ -2360,13 +2381,41 @@ class TestRealtimeWorkerFlag:
         config = parse_args()
 
         assert config.realtime is False
+        assert config.endpoint_types == "chat,completions"
 
-    def test_flag_sets_true(self, mock_vllm_cli):
-        mock_vllm_cli("--model", "Qwen/Qwen3-0.6B", "--realtime")
+    @pytest.mark.parametrize(
+        ("endpoint_types", "openai_types"),
+        [
+            ("realtime", "none"),
+            ("chat,realtime", "chat"),
+            ("realtime, Chat ,completions", "chat,completions"),
+        ],
+    )
+    def test_endpoint_type_sets_true(self, mock_vllm_cli, endpoint_types, openai_types):
+        mock_vllm_cli("--model", "Qwen/Qwen3-0.6B", "--endpoint-types", endpoint_types)
 
         config = parse_args()
 
         assert config.realtime is True
+        assert config.endpoint_types == openai_types
+
+    def test_deprecated_flag_sets_true(self, mock_vllm_cli):
+        mock_vllm_cli("--model", "Qwen/Qwen3-0.6B", "--realtime")
+
+        with pytest.warns(FutureWarning, match="--endpoint-types realtime"):
+            config = parse_args()
+
+        assert config.realtime is True
+        assert config.endpoint_types == "none"
+
+    @pytest.mark.parametrize("endpoint_types", ["realtime,bogus", "realtime,none,chat"])
+    def test_invalid_types_with_realtime_are_rejected(
+        self, mock_vllm_cli, endpoint_types
+    ):
+        mock_vllm_cli("--model", "Qwen/Qwen3-0.6B", "--endpoint-types", endpoint_types)
+
+        with pytest.raises(ValueError, match="(?i)endpoint type"):
+            parse_args()
 
 
 def test_build_sampling_params_openai_maps_max_thinking_tokens():

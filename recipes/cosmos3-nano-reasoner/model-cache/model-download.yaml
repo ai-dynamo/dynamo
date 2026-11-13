@@ -53,7 +53,7 @@ spec:
               value: reasoner
             - name: NIM_DYNAMO_WORKER
               value: "true"
-            - name: NIM_MODEL_SIZE
+            - name: NIM_MODEL_VARIANT
               value: nano
             - name: NIM_PRECISION
               value: fp8

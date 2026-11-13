@@ -11,10 +11,12 @@ use dynamo_llm::http::service::metrics::{Endpoint, ErrorType, RequestType, Statu
 use dynamo_protocols::types::{
     ChatCompletionRequestAssistantMessageContent, ChatCompletionRequestMessage,
     ChatCompletionRequestToolMessageContent, ChatCompletionRequestUserMessageContent,
+    CompletionUsage,
 };
 use dynamo_runtime::config::environment_names::llm::{
     DYN_DISABLE_FRONTEND_NVEXT, DYN_ENABLE_ANTHROPIC_API, DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
 };
+use dynamo_runtime::error::{BackendError, DynamoError, ErrorType as DynamoErrorType};
 use futures::StreamExt;
 use serde_json::{Value, json};
 use serial_test::serial;
@@ -305,6 +307,90 @@ async fn streaming_text_baseline() {
     .await;
 }
 
+/// Refusal fragments reach unary text and streaming deltas, with ordinary
+/// content first when both are present and the stop reason unchanged.
+#[tokio::test]
+#[serial]
+async fn refusal_fragments_reach_messages_content_and_events() {
+    temp_env::async_with_vars(ENV, async {
+        for stream in [false, true] {
+            for include_text in [false, true] {
+                let mut script = load_agent_fixture("text.sse").await.unwrap();
+                let chunk = script[1].data.as_mut().unwrap();
+                if !include_text {
+                    chunk.inner.choices[0].delta.content = None;
+                }
+                chunk.inner.choices[0].delta.refusal = Some("I cannot ".into());
+                let mut tail = script[1].clone();
+                let delta = &mut tail.data.as_mut().unwrap().inner.choices[0].delta;
+                delta.content = None;
+                delta.refusal = Some("help with that.".into());
+                script.insert(2, tail);
+                let svc = HarnessService::start([script]).await;
+                let response = post_messages(
+                    &svc,
+                    &json!({
+                        "model": MODEL,
+                        "max_tokens": 64,
+                        "stream": stream,
+                        "messages": [{"role": "user", "content": "ping"}]
+                    }),
+                )
+                .await;
+                assert_eq!(response.status(), reqwest::StatusCode::OK);
+                let expected = if include_text {
+                    "Pong.I cannot help with that."
+                } else {
+                    "I cannot help with that."
+                };
+                if stream {
+                    let events = parse_anthropic_sse(&response.text().await.unwrap())
+                        .await
+                        .unwrap();
+                    let count = |name: &str| events.iter().filter(|e| e.event == name).count();
+                    assert_eq!(count("content_block_start"), 1);
+                    assert_eq!(count("content_block_stop"), 1);
+                    let start = events
+                        .iter()
+                        .find(|event| event.event == "content_block_start")
+                        .unwrap();
+                    assert_eq!(start.data["content_block"]["type"], "text");
+                    let deltas: Vec<_> = events
+                        .iter()
+                        .filter(|event| event.event == "content_block_delta")
+                        .collect();
+                    for event in &deltas {
+                        assert_eq!(event.data["delta"]["type"], "text_delta");
+                        assert_eq!(event.data["index"], start.data["index"]);
+                    }
+                    let texts: Vec<_> = deltas
+                        .iter()
+                        .map(|event| event.data["delta"]["text"].as_str().unwrap())
+                        .collect();
+                    let mut expected_texts = vec!["I cannot ", "help with that."];
+                    if include_text {
+                        expected_texts.insert(0, "Pong.");
+                    }
+                    assert_eq!(texts, expected_texts);
+                    assert_eq!(texts.concat(), expected);
+                    let message_delta = events
+                        .iter()
+                        .find(|event| event.event == "message_delta")
+                        .unwrap();
+                    assert_eq!(message_delta.data["delta"]["stop_reason"], "end_turn");
+                } else {
+                    let body: Value = response.json().await.unwrap();
+                    assert_eq!(body["content"], json!([{"type": "text", "text": expected}]));
+                    assert_eq!(body["stop_reason"], "end_turn");
+                }
+                assert_eq!(svc.engine.remaining_scripts().await, 0);
+                svc.shutdown().await;
+            }
+        }
+    })
+    .await;
+}
+
 #[tokio::test]
 #[serial]
 async fn fragmented_tool_arguments_close_after_all_deltas() {
@@ -471,6 +557,163 @@ async fn completed_tool_block_precedes_gated_tail(#[case] per_tool_completion: b
         );
 
         svc.shutdown().await;
+    })
+    .await;
+}
+
+/// `fragmented-tool.sse` with cumulative usage on each tool-call chunk, two
+/// output tokens per chunk as with speculative decoding (2, 4, 6), and the
+/// position of its finish chunk.
+async fn tool_script_with_running_usage(step: u32) -> (Script, usize) {
+    let mut script = load_agent_fixture("fragmented-tool.sse").await.unwrap();
+    let mut output = 0;
+    for data in script.iter_mut().filter_map(|chunk| chunk.data.as_mut()) {
+        if data
+            .inner
+            .choices
+            .iter()
+            .any(|choice| choice.delta.tool_calls.is_some())
+        {
+            output += step;
+            data.inner.usage = Some(CompletionUsage {
+                prompt_tokens: 30,
+                completion_tokens: output,
+                total_tokens: 30 + output,
+                prompt_tokens_details: None,
+                completion_tokens_details: None,
+            });
+        }
+    }
+    assert_eq!(output, 3 * step);
+    let finish = script
+        .iter()
+        .position(|chunk| {
+            chunk.data.as_ref().is_some_and(|data| {
+                data.inner
+                    .choices
+                    .iter()
+                    .any(|choice| choice.finish_reason.is_some())
+            })
+        })
+        .expect("fragmented-tool fixture has no finish chunk");
+    (script, finish)
+}
+
+fn list_tmp_request() -> Value {
+    json!({
+        "model": MODEL,
+        "max_tokens": 128,
+        "stream": true,
+        "tools": [tool("list_directory")],
+        "messages": [{"role": "user", "content": "List /tmp"}]
+    })
+}
+
+/// A tool call is held until it completes, so its chunks emit no delta. The
+/// usage they report must still reach a client that may hang up mid call.
+#[tokio::test]
+#[serial]
+async fn held_tool_call_usage_reaches_client_before_the_call_completes() {
+    temp_env::async_with_vars(ENV, async {
+        let (script, finish) = tool_script_with_running_usage(2).await;
+        let (svc, gate) = HarnessService::start_with_gated_tail(script, finish).await;
+        let response = post_messages(&svc, &list_tmp_request()).await;
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+        let mut body = response.bytes_stream();
+        let mut parser = IncrementalSseParser::default();
+        let mut held = Vec::new();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while held.iter().filter(|event| *event == "ping").count() < 3 {
+                let bytes = body
+                    .next()
+                    .await
+                    .expect("response ended while the tool call was held")
+                    .expect("failed to read response SSE bytes");
+                held.extend(parser.push(&bytes).expect("failed to parse response SSE"));
+            }
+        })
+        .await
+        .expect("usage of the held tool call never reached the client");
+        assert!(
+            !held.iter().any(|event| event == "content_block_start"),
+            "the tool block itself stays held until the call completes"
+        );
+
+        gate.release();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while let Some(bytes) = body.next().await {
+                let bytes = bytes.expect("failed to drain response SSE bytes");
+                parser.push(&bytes).expect("failed to parse response SSE");
+            }
+        })
+        .await
+        .expect("response did not finish after releasing the tail");
+        let raw = parser.into_body().expect("response SSE was not UTF-8");
+        let events = parse_anthropic_sse(&raw).await.unwrap();
+
+        let pings: Vec<_> = events
+            .iter()
+            .filter(|event| event.event == "ping")
+            .map(|event| event.data["usage"]["output_tokens"].as_u64())
+            .collect();
+        assert_eq!(pings[..3], [Some(2), Some(4), Some(6)]);
+        let outputs: Vec<_> = events
+            .iter()
+            .filter_map(|event| event.data["usage"]["output_tokens"].as_u64())
+            .collect();
+        assert!(
+            outputs.is_sorted(),
+            "flushed fragments never lower the usage a ping published: {outputs:?}"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.data["delta"]["type"] == "input_json_delta")
+                .filter_map(|event| event.data["delta"]["partial_json"].as_str())
+                .collect::<String>(),
+            r#"{"path":"/tmp"}"#,
+            "the tool block is unchanged"
+        );
+
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+/// A backend fault mid tool call ends the stream with `error`. The usage of
+/// the tokens generated before it must already be on the wire.
+#[tokio::test]
+#[serial]
+async fn backend_error_mid_tool_call_keeps_generated_usage() {
+    temp_env::async_with_vars(ENV, async {
+        // With one token per chunk the last chunk stays within the ping
+        // tolerance, so only the error path can publish it.
+        for step in [1, 2] {
+            let (mut script, finish) = tool_script_with_running_usage(step).await;
+            script.truncate(finish);
+            let error = DynamoError::builder()
+                .error_type(DynamoErrorType::Backend(BackendError::EngineShutdown))
+                .message("engine died mid tool call")
+                .build();
+            let svc = HarnessService::start_with_backend_error(script, error).await;
+            let response = post_messages(&svc, &list_tmp_request()).await;
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            let events = parse_anthropic_sse(&response.text().await.unwrap())
+                .await
+                .unwrap();
+
+            assert_eq!(events.last().unwrap().event, "error");
+            let last_usage = events
+                .iter()
+                .rev()
+                .find_map(|event| event.data.get("usage"))
+                .expect("no usage reached the client before the error");
+            assert_eq!(last_usage["output_tokens"], 3 * step, "step {step}");
+            assert_eq!(last_usage["total_tokens"], 30 + 3 * step, "step {step}");
+
+            svc.shutdown().await;
+        }
     })
     .await;
 }

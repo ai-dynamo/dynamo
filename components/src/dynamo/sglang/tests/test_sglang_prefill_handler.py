@@ -120,6 +120,7 @@ async def test_prefill_cancellation_waits_for_dispatch_and_drains(
     handler._supports_ordered_cancellation = ordered_cancellation
     handler._generate_bootstrap_room = lambda: 17
     handler._get_input_param = lambda request: {"input_ids": request["token_ids"]}
+    handler.use_sglang_tokenizer = False
     handler._resolve_lora = lambda request: None
     handler._priority_kwargs = lambda priority: {}
     monkeypatch.setattr(
@@ -205,6 +206,7 @@ async def test_native_batched_prefill_disables_ordered_cancellation(monkeypatch)
     handler._supports_ordered_cancellation = True
     handler._generate_bootstrap_room = lambda: 17
     handler._get_input_param = lambda request: {"input_ids": request["token_ids"]}
+    handler.use_sglang_tokenizer = False
     handler._resolve_lora = lambda request: None
     handler._priority_kwargs = lambda priority: {}
 
@@ -267,6 +269,7 @@ def _kv_hit_prefill_handler(monkeypatch, responses, *, cancelled):
     handler._consume_tasks = set()
     handler._generate_bootstrap_room = lambda: 17
     handler._get_input_param = lambda request: {"input_ids": request["token_ids"]}
+    handler.use_sglang_tokenizer = False
     handler._resolve_lora = lambda request: None
     handler._priority_kwargs = lambda priority: {}
 
@@ -510,6 +513,7 @@ def _bootstrap_capture_handler(monkeypatch, *, native):
     handler._default_sampling_params = {}
     handler._generate_bootstrap_room = lambda: 17
     handler._get_input_param = lambda request: {"input_ids": request["token_ids"]}
+    handler.use_sglang_tokenizer = False
     handler._resolve_lora = lambda request: None
     handler._priority_kwargs = lambda priority: {}
 

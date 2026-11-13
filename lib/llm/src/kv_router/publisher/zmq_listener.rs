@@ -10,8 +10,12 @@ use futures::StreamExt;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use dynamo_kv_router::protocols::*;
-use dynamo_kv_router::zmq_wire::*;
+use dynamo_kv_events::event::KvCacheEventData;
+use dynamo_kv_events::placement::PlacementEvent;
+use dynamo_kv_events::zmq_wire::{
+    KvEventBatch, RawKvEvent, ZmqEventNormalizer, decode_event_batch,
+};
+use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 
 use super::{PublisherInput, ZmqRecoveryConfig};
 use crate::kv_router::metrics::kv_publisher_metrics;

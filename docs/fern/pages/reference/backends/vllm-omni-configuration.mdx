@@ -5,7 +5,7 @@ title: vLLM-Omni Configuration
 subtitle: CLI flag reference for the vLLM-Omni multimodal backend (python -m dynamo.vllm.omni).
 ---
 
-The vLLM-Omni backend uses a dedicated entrypoint: `python -m dynamo.vllm.omni`. This page documents its CLI flags. For deployment guides and per-modality examples, see the [Diffusion Overview](../../use-cases/diffusion/overview.md).
+The vLLM-Omni backend uses a dedicated entrypoint: `python -m dynamo.vllm.omni`. This page documents its CLI flags. For setup, see [Diffusion › Install the Backend](../../use-cases/diffusion/overview.md#install-the-backend). For per-modality examples, see [Text to Image](../../use-cases/diffusion/workflows/text-to-image.md), [Text to Video (T2V)](../../use-cases/diffusion/workflows/text-to-video.md), and [Text-to-Speech](../../use-cases/speech/text-to-speech.md).
 
 <Note>
 These are the vLLM-Omni orchestration flags. The omni worker also accepts the same underlying vLLM engine arguments and the cross-cutting [Dynamo Runtime](../components/runtime-configuration.mdx) flags (`--namespace`, `--endpoint`, and others).

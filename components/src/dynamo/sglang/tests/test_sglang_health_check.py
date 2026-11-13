@@ -1,14 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Sglang health-check payload and lifecycle tests.
-
-Asserts the canary HEALTH_CHECK_KEY marker is layered onto the disagg payload
-(which the prefill handler reads), absent from the decode/agg payload (which
-no handler reads), survives DYN_HEALTH_CHECK_PAYLOAD env overrides with the
-prefill engine still in fake-transfer mode, and tracks multimodal encoder
-registration and shutdown.
-"""
+"""SGLang canary payloads and worker health lifecycle tests."""
 
 import asyncio
 import json
@@ -18,7 +11,9 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST
 
+from dynamo._core import WorkerDraining
 from dynamo.health_check import HEALTH_CHECK_KEY
+from dynamo.sglang.drain import WorkerDrain
 from dynamo.sglang.health_check import (
     SglangDisaggHealthCheckPayload,
     SglangEmbeddingHealthCheckPayload,
@@ -39,13 +34,12 @@ pytestmark = [
 ]
 
 
-def test_disagg_payload_has_marker():
-    assert SglangDisaggHealthCheckPayload().to_dict()[HEALTH_CHECK_KEY] is True
-
-
-def test_decode_payload_has_no_marker():
-    # Decode/agg handler doesn't read the marker; payload stays unmarked.
-    assert HEALTH_CHECK_KEY not in SglangHealthCheckPayload().to_dict()
+@pytest.mark.parametrize(
+    "payload_type", [SglangHealthCheckPayload, SglangDisaggHealthCheckPayload]
+)
+def test_generation_payload_has_marker(monkeypatch, payload_type):
+    monkeypatch.delenv("DYN_HEALTH_CHECK_PAYLOAD", raising=False)
+    assert payload_type().to_dict()[HEALTH_CHECK_KEY] is True
 
 
 def test_embedding_payload_uses_engine_bos_token(monkeypatch):
@@ -109,6 +103,59 @@ async def test_disagg_env_override_preserves_marker(monkeypatch, bootstrap_info)
     assert call["sampling_params"]["temperature"] == 0.5
     if bootstrap_info is not None:
         assert call["bootstrap_room"] == 5
+
+
+@pytest.mark.parametrize(
+    "payload_type", [SglangHealthCheckPayload, SglangDisaggHealthCheckPayload]
+)
+def test_generation_env_override_preserves_marker(monkeypatch, payload_type):
+    override = {
+        "token_ids": [42],
+        "sampling_options": {"temperature": 0.0},
+        "stop_conditions": {"max_tokens": 1},
+        HEALTH_CHECK_KEY: False,
+    }
+    monkeypatch.setenv("DYN_HEALTH_CHECK_PAYLOAD", json.dumps(override))
+    assert payload_type().to_dict() == {**override, HEALTH_CHECK_KEY: True}
+
+
+@pytest.mark.asyncio
+async def test_aggregate_canary_stays_admitted_during_drain(monkeypatch):
+    monkeypatch.delenv("DYN_HEALTH_CHECK_PAYLOAD", raising=False)
+    endpoint = SimpleNamespace(
+        unregister_endpoint_instance=AsyncMock(),
+        register_endpoint_instance=AsyncMock(),
+    )
+    ready, shutdown = asyncio.Event(), asyncio.Event()
+    ready.set()
+    drain = WorkerDrain(
+        endpoint,
+        lock=asyncio.Lock(),
+        shutdown_event=shutdown,
+        terminal_event=asyncio.Event(),
+        ready_event=ready,
+        is_paused=lambda: False,
+        grace_period=0,
+    )
+    executed = []
+
+    async def generate(request):
+        executed.append(request)
+        yield "healthy"
+
+    tracked = drain.wrap(generate)
+    await drain.drain({})
+    with pytest.raises(WorkerDraining):
+        await anext(tracked({"token_ids": [42]}))
+    canary = SglangHealthCheckPayload().to_dict()
+    assert [item async for item in tracked(canary)] == ["healthy"]
+    assert executed == [canary]
+    assert drain.withdrawn
+    endpoint.unregister_endpoint_instance.assert_awaited_once()
+    endpoint.register_endpoint_instance.assert_not_awaited()
+    shutdown.set()
+    with pytest.raises(WorkerDraining):
+        await anext(tracked(canary))
 
 
 @pytest.mark.asyncio

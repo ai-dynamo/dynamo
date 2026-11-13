@@ -24,6 +24,7 @@ integration = ["dynamo-runtime/integration"]
 [dependencies]
 dynamo-runtime = { workspace = true }
 dynamo-llm = { workspace = true }
+dynamo-kv-hints = { workspace = true }
 dynamo-protocols = { workspace = true }
 dynamo-rl = { workspace = true }
 

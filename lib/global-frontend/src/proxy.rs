@@ -18,7 +18,8 @@ use axum::http::{HeaderMap, HeaderName, Method, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use dynamo_global_router::{InFlightTracker, PoolSelector, RoutingRequest};
+use dynamo_global_router::affinity::tenant_id;
+use dynamo_global_router::{InFlightTracker, PoolSelector, RoutingRequest, SelectionCoreSelector};
 use dynamo_llm::protocols::agents::HEADER_DYNAMO_SESSION_ID;
 use dynamo_runtime::config::environment_names::llm::DYN_HTTP_BODY_LIMIT_MB;
 use dynamo_runtime::metrics::prometheus_names::frontend_service::error_type;
@@ -45,10 +46,16 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
 
 struct Proxy {
     pools: watch::Receiver<Arc<PoolSnapshot>>,
-    selector: Arc<dyn PoolSelector>,
+    selector: Selector,
     in_flight: Arc<InFlightTracker>,
     http: reqwest::Client,
     metrics: Metrics,
+}
+
+/// A pool selector, or the router core.
+enum Selector {
+    Pool(Arc<dyn PoolSelector>),
+    SelectionCore(Arc<SelectionCoreSelector>),
 }
 
 /// The Global Frontend's routes over the pools `pools` publishes.
@@ -65,13 +72,35 @@ pub fn app(
     http: reqwest::Client,
     metrics: Metrics,
 ) -> Router {
-    let proxy = Arc::new(Proxy {
+    build_router(Proxy {
         pools,
-        selector,
+        selector: Selector::Pool(selector),
         in_flight,
         http,
         metrics,
-    });
+    })
+}
+
+/// [`app`], selecting through `selection_core`, which must count in `in_flight`.
+/// `pools` is the receiver its `reconcile_catalog` returns.
+pub fn app_with_selection_core(
+    pools: watch::Receiver<Arc<PoolSnapshot>>,
+    selection_core: Arc<SelectionCoreSelector>,
+    in_flight: Arc<InFlightTracker>,
+    http: reqwest::Client,
+    metrics: Metrics,
+) -> Router {
+    build_router(Proxy {
+        pools,
+        selector: Selector::SelectionCore(selection_core),
+        in_flight,
+        http,
+        metrics,
+    })
+}
+
+fn build_router(proxy: Proxy) -> Router {
+    let proxy = Arc::new(proxy);
     Router::new()
         .route("/v1/models", get(models))
         .route("/v1/{*route}", post(forward))
@@ -197,14 +226,36 @@ async fn forward(
     let session = headers
         .get(HEADER_DYNAMO_SESSION_ID)
         .and_then(|session| session.to_str().ok());
-    let request = RoutingRequest::new(&model).with_session(session);
-    let Some(target) = proxy.selector.select(&request, &candidates) else {
+    // Selection happens before the pool authorizes the request, so a session
+    // binding is not an admission decision and the Global Frontend does not
+    // validate the credential. Keying on a digest of it is what keeps two
+    // tenants that reuse one session ID off each other's bindings; the pool
+    // still rejects a request whose `authorization` it does not accept.
+    let tenant = tenant_id(
+        headers
+            .get(header::AUTHORIZATION)
+            .and_then(|credential| credential.to_str().ok()),
+    );
+    let request = RoutingRequest::new(&model)
+        .with_session(session)
+        .with_tenant(&tenant);
+    let selecting = Instant::now();
+    let selected = match &proxy.selector {
+        Selector::Pool(selector) => selector
+            .select(&request, &candidates)
+            .await
+            .map(|target| (target, proxy.in_flight.start(&target.pool.id))),
+        Selector::SelectionCore(selection_core) => {
+            selection_core.select(&request, &candidates).await
+        }
+    };
+    metrics.selected(selecting);
+    let Some((target, in_flight)) = selected else {
         metrics.rejected(error_type::UNAVAILABLE);
         let message = format!("no pool can serve model {model}");
         return error(StatusCode::SERVICE_UNAVAILABLE, message);
     };
     let pool = target.pool;
-    let in_flight = proxy.in_flight.start(&pool.id);
     let Some(url) = route_url(target.frontend, &uri) else {
         metrics.rejected(error_type::VALIDATION);
         return error(StatusCode::BAD_REQUEST, "invalid route".to_owned());
