@@ -40,11 +40,8 @@ image by digest for every component, for example
 `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0@sha256:REPLACE_ME`. Until KVCR is
 available in a Dynamo release image, build that image from matching Dynamo,
 KVCR, and vLLM revisions. Use [KVCR tag
-`v0.1.0`](https://github.com/ai-dynamo/kvcr/tree/v0.1.0). Until
-[vLLM PR 53624](https://github.com/vllm-project/vllm/pull/53624) is merged, pin
-vLLM to the PR's immutable head SHA; at the time of this update it is
-[`7015687c`](https://github.com/vllm-project/vllm/commit/7015687c390442fae384b78fc62e6621b3bf6e56).
-After the PR merges, pin the commit that lands on vLLM `main`. Record the exact
+`v0.1.1`](https://github.com/ai-dynamo/kvcr/tree/v0.1.1) with vLLM 0.33.0
+and NIXL 1.5.0. Record the exact
 Dynamo, KVCR, and vLLM commit IDs with the image digest used for every qualified
 deployment.
 
