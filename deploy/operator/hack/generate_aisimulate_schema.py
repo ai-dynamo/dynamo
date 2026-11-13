@@ -48,7 +48,7 @@ def generated_files(root: Path, source: Path) -> dict[Path, str]:
     patch = cargo["patch"]["crates-io"]["aisim-core"]
     repository = patch["git"]
     revision = patch["rev"]
-    if repository != "https://github.com/ai-dynamo/aisimulate.git" or not re.fullmatch(
+    if repository != "https://github.com/ai-dynamo/aisim.git" or not re.fullmatch(
         r"[0-9a-f]{40}", revision
     ):
         raise ValueError(
