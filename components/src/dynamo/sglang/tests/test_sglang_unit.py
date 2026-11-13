@@ -19,7 +19,9 @@ import pytest
 import torch
 import yaml
 from packaging.requirements import Requirement
+from safetensors.torch import save_file
 from sglang.multimodal_gen.configs.pipeline_configs.base import PipelineConfig
+from sglang.multimodal_gen.runtime.server_args import auto_tune
 from sglang.multimodal_gen.runtime.utils.precision import resolve_component_precision
 from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST
 from sglang.srt.managers.io_struct import ProfileReq
@@ -65,6 +67,12 @@ from dynamo.sglang.publisher import finish_worker_teardown
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 from dynamo.sglang.request_handlers.llm.decode_handler import DecodeWorkerHandler
 from dynamo.sglang.tests.conftest import make_cli_args_fixture
+
+try:
+    from sglang.multimodal_gen.runtime.loader.utils import checkpoint_component_sizes
+except ImportError:
+    # SGLang 0.5.22 has no sizing check. Remove when minimum is 0.5.23+.
+    checkpoint_component_sizes = None
 
 try:
     from dynamo.sglang import register as sglang_register
@@ -234,8 +242,7 @@ def test_diffusion_generator_kwargs_omits_unset_master_port():
 
 
 def _write_diffusers_checkpoint(root: Path, encoders: list[str]) -> str:
-    # Only model_index.json and the component folders it names are needed to
-    # resolve the pipeline config; the bug is in sizing, not loading.
+    """Write metadata and tiny weights for SGLang's real checkpoint sizing."""
     components = {name: ["transformers", "CLIPTextModel"] for name in encoders}
     components |= {
         "tokenizer": ["transformers", "CLIPTokenizer"],
@@ -245,6 +252,8 @@ def _write_diffusers_checkpoint(root: Path, encoders: list[str]) -> str:
     }
     for name in components:
         (root / name).mkdir()
+    for name in encoders:
+        save_file({"weight": torch.zeros(1)}, str(root / name / "model.safetensors"))
     index = {
         # No native SGLang pipeline, so SGLang falls back to Diffusers.
         "_class_name": "StableDiffusionXLPipeline",
@@ -274,43 +283,75 @@ def _resolve_text_encoder_precisions(kwargs: dict, encoders: list[str]) -> dict:
         ),
     ],
 )
+@pytest.mark.parametrize(
+    "index_cached", [True, False], ids=["index-cached", "weights-only"]
+)
+@pytest.mark.skipif(
+    checkpoint_component_sizes is None,
+    reason="SGLang 0.5.22 has no memory sizing check",
+)
 def test_diffusers_text_encoder_precision_kwargs_sizes_every_encoder(
-    tmp_path, encoders
+    tmp_path, encoders, index_cached, monkeypatch
 ):
+    """Keep cached multi-encoder checkpoints usable by SGLang's auto-tuner."""
     kwargs = {
         "model_path": _write_diffusers_checkpoint(tmp_path, encoders),
         "num_gpus": 1,
     }
+    # Exercise the auto-tuner too: a fix there must prompt shim removal even
+    # when the fallback precision tuple stays unchanged.
+    server_args = SimpleNamespace(
+        model_path=kwargs["model_path"],
+        pipeline_config=PipelineConfig.from_kwargs(dict(kwargs)),
+        component_precisions={},
+        performance_mode="auto",
+        batching_max_size=1,
+        quantization=None,
+        transformer_weights_path=None,
+        nunchaku_config=None,
+        component_paths={},
+        component_weights_paths={},
+        component_quantizations={},
+        model_subfolder=None,
+        revision=None,
+        tp_size=1,
+    )
+    monkeypatch.setattr(auto_tune.current_platform, "is_cpu", lambda: False)
+    monkeypatch.setattr(auto_tune.current_platform, "is_mps", lambda: False)
+    monkeypatch.setattr(
+        auto_tune.current_platform, "device_shares_host_memory", lambda: False
+    )
+    tuner = SimpleNamespace(
+        server_args=server_args, _get_min_available_device_memory_gb=lambda: 80
+    )
     with pytest.raises(
         ValueError, match="No configured precision for 'text_encoder_2'"
     ):
-        _resolve_text_encoder_precisions(kwargs, encoders)
+        auto_tune.ServerArgsAutoTuner._fits_all_components_resident(tuner)
+
+    if not index_cached:
+        index_path = tmp_path / "model_index.json"
+        index = index_path.read_text()
+        index_path.unlink()
+        from_kwargs = PipelineConfig.from_kwargs
+
+        def resolve_config(config_kwargs):
+            # Stand in for the metadata fetch during SGLang config resolution.
+            index_path.write_text(index)
+            return from_kwargs(config_kwargs)
+
+        monkeypatch.setattr(PipelineConfig, "from_kwargs", resolve_config)
 
     patched = diffusers_text_encoder_precision_kwargs(kwargs)
 
     assert "component_precisions" not in kwargs
+    server_args.component_precisions = patched["component_precisions"]
+    assert auto_tune.ServerArgsAutoTuner._fits_all_components_resident(tuner)
     # The fallback loads every component at dit_precision (bf16).
     assert _resolve_text_encoder_precisions(patched, encoders) == {
         "text_encoder": torch.float16,
         **{name: torch.bfloat16 for name in encoders[1:]},
     }
-
-
-def test_diffusers_text_encoder_precision_kwargs_keeps_explicit_precision(tmp_path):
-    kwargs = {
-        "model_path": _write_diffusers_checkpoint(
-            tmp_path, ["text_encoder", "text_encoder_2", "text_encoder_3"]
-        ),
-        "component_precisions": {"text_encoder_2": "fp32"},
-    }
-
-    patched = diffusers_text_encoder_precision_kwargs(kwargs)
-
-    assert patched["component_precisions"] == {
-        "text_encoder_2": "fp32",
-        "text_encoder_3": "bf16",
-    }
-    assert kwargs["component_precisions"] == {"text_encoder_2": "fp32"}
 
 
 def test_override_server_args_uses_declarative_resolution(monkeypatch):
