@@ -64,6 +64,7 @@ import (
 	nvidiacomv1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
 	internalcert "github.com/ai-dynamo/dynamo/deploy/operator/internal/cert"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller"
+	enginegroupcontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/enginegroup"
 	poolrelaycontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/poolrelay"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/crdmigrator"
@@ -620,6 +621,12 @@ func registerControllers(
 		return err
 	}
 	if err := controller.SetupDynamoGraphDeploymentScalingAdapter(mgr, setupOptions); err != nil {
+		return err
+	}
+	if err := enginegroupcontroller.Setup(
+		mgr,
+		enginegroupcontroller.SetupOptions{},
+	); err != nil {
 		return err
 	}
 	if err := controller.SetupDynamoGraphDeploymentRequest(mgr, controller.DynamoGraphDeploymentRequestSetupOptions{
