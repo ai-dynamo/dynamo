@@ -61,12 +61,28 @@ def _get_bos_token_id_from_engine(engine_client) -> int:
     return 1
 
 
+def _sampling_mask_enabled(engine_client) -> bool:
+    """Return True when the engine runs with ``--return-sampling-mask``."""
+    vllm_config = getattr(engine_client, "vllm_config", None)
+    model_config = getattr(vllm_config, "model_config", None)
+    return getattr(model_config, "return_sampling_mask", False) is True
+
+
 def _make_default_payload(
     engine_client: Optional["AsyncLLM"], use_text_input: bool
 ) -> dict:
-    sampling_options = {
-        "temperature": 0.0,
-    }
+    sampling_options: dict[str, Any]
+    if _sampling_mask_enabled(engine_client):
+        # With return_sampling_mask, vLLM rejects any request unless
+        # temperature > 0 and top_k > 0, so a greedy canary would fail
+        # every probe. The single sampled token is never read.
+        sampling_options = {"temperature": 1.0, "top_k": 8}
+        logger.info(
+            "return_sampling_mask is enabled; health check uses sampled "
+            "decoding (temperature=1.0, top_k=8)"
+        )
+    else:
+        sampling_options = {"temperature": 0.0}
 
     stop_conditions = {
         "max_tokens": 1,
