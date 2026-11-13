@@ -9,7 +9,7 @@
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use dynamo_kv_indexer::host::{
     ConcurrentRadixTreeCompressed, IndexRegistry, Indexer, KvIndexerMetrics, LowerTierIndexers,
     ThreadPoolIndexer,
@@ -17,7 +17,6 @@ use dynamo_kv_indexer::host::{
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::plugins::RouterPluginRegistry;
 use dynamo_kv_router::services::selection::{SelectionService, SelectionServiceBuilder};
-use dynamo_router_policies::default_factory;
 use dynamo_router_protocol::identity::{DEFAULT_ROUTING_GROUP, RoutingPartitionId};
 use dynamo_router_protocol::worker::WorkerId;
 use dynamo_router_protocol::worker_type::WorkerType;
@@ -38,27 +37,55 @@ const REPLICA_EVENT_CHANNEL_CAPACITY: usize = 100_000;
 /// The bench's router identity on the replica channels; distinct from every worker ID.
 const BENCH_ROUTER_ID: u64 = u64::MAX;
 
-/// `KvRouterConfig`'s defaults with replica sync on, as the AgentX frontend runs,
-/// and `json`'s fields over them. Deserialization rejects unknown fields.
+/// `KvRouterConfig`'s defaults with replica sync on, as the AgentX frontend runs, and
+/// `json`'s fields over them: deserialization fills the defaults and rejects unknown
+/// fields. The policy config is applied and the result validated, as the frontend does
+/// at startup, so the bench reads the settings the service runs.
 pub fn router_config(json: Option<&str>) -> Result<KvRouterConfig> {
-    let config = KvRouterConfig {
-        router_replica_sync: true,
-        ..KvRouterConfig::default()
-    };
-    let Some(json) = json else {
-        return Ok(config);
-    };
-    let serde_json::Value::Object(overrides) =
-        serde_json::from_str(json).context("--router-config-json")?
-    else {
-        bail!("--router-config-json must be a JSON object");
-    };
-    let mut merged = serde_json::to_value(&config)?;
-    merged
-        .as_object_mut()
-        .context("KvRouterConfig serializes to an object")?
-        .extend(overrides);
-    serde_json::from_value(merged).context("--router-config-json")
+    let mut fields: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_str(json.unwrap_or("{}")).context("--router-config-json")?;
+    fields
+        .entry("router_replica_sync")
+        .or_insert(serde_json::Value::Bool(true));
+    let mut config: KvRouterConfig =
+        serde_json::from_value(fields.into()).context("--router-config-json")?;
+    config.apply_policy_config().map_err(anyhow::Error::msg)?;
+    config.validate().map_err(anyhow::Error::msg)?;
+    Ok(config)
+}
+
+/// Router options the replay does not model. Accepting one would measure a router that
+/// differs from the one the config describes.
+pub fn check_modeled(router: &KvRouterConfig) -> Result<()> {
+    ensure!(
+        router.use_kv_events,
+        "the bench feeds KV events; use_kv_events must stay on"
+    );
+    ensure!(
+        router.router_event_threads > 1,
+        "router_event_threads must be at least 2: the frontend's concurrent indexer"
+    );
+    ensure!(
+        !router.router_track_output_blocks,
+        "router_track_output_blocks is not modeled: the replay reports no output blocks \
+         to the scheduler"
+    );
+    ensure!(
+        router.router_predicted_ttl_secs.is_none(),
+        "router_predicted_ttl_secs is not modeled: the replay builds no predict-on-route index"
+    );
+    ensure!(
+        !router.enable_session_prefix_index,
+        "enable_session_prefix_index is not modeled: the replay builds no session prefix index"
+    );
+    Ok(())
+}
+
+/// The policies Dynamo ships, as the frontend links them; the router config picks one.
+fn plugin_registry() -> Result<RouterPluginRegistry> {
+    let mut registry = dynamo_router_policies::default_registry();
+    dynamo_router_policies::register(&mut registry).context("register the builtin policies")?;
+    Ok(registry)
 }
 
 #[derive(Clone, Debug)]
@@ -108,19 +135,8 @@ impl BenchHost {
     /// so the scheduler actor and replica tasks run on it.
     pub async fn start(config: &HostConfig, workers: &[WorkerRequest]) -> Result<Self> {
         let router = &config.router;
-        ensure!(
-            router.use_kv_events,
-            "the bench feeds KV events; use_kv_events must stay on"
-        );
-        ensure!(
-            !router.router_track_output_blocks,
-            "output-block tracking is not modeled: the corpus keeps no per-block output timing"
-        );
+        check_modeled(router)?;
         let threads = router.router_event_threads as usize;
-        ensure!(
-            threads > 1,
-            "router_event_threads must be at least 2: the frontend's concurrent indexer"
-        );
 
         // As `lib/llm/src/kv_router/indexer/mod.rs` builds the concurrent index.
         let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
@@ -144,9 +160,11 @@ impl BenchHost {
         let all_workers: Arc<HashSet<WorkerId>> =
             Arc::new(workers.iter().map(|worker| worker.worker_id).collect());
         let busy = config.busy;
+        // The frontend's client reports these on every selection; here none is overloaded.
+        let none_overloaded: Arc<HashSet<WorkerId>> = Arc::default();
         let load = HostLoad {
             prefill_estimator: None,
-            overloaded_workers: None,
+            overloaded_workers: Some(Arc::new(move || Some(Arc::clone(&none_overloaded)))),
             available_workers: Some(Arc::new(move |_| Some(Arc::clone(&all_workers)))),
             reject_thresholds: busy
                 .is_configured()
@@ -175,12 +193,13 @@ impl BenchHost {
         let channels: HostReplicaSyncFactory =
             Arc::new(move |_| slot.lock().ok().and_then(|mut channels| channels.take()));
 
+        // No factory is set, so the builder resolves the worker-selection and hint
+        // policies the config names from the registry, as the frontend's catalog does.
         let service = SelectionServiceBuilder::new(
             router.clone(),
             WorkerType::Aggregated,
-            RouterPluginRegistry::default(),
+            plugin_registry()?,
         )
-        .worker_selection_policy_factory(default_factory())
         .host_manages_request_lifecycle()
         .indexer_threads(1)
         .host(SelectionHost {

@@ -144,6 +144,9 @@ pub struct RunResult {
     /// Saturation: how often every admission in the window waited on an engine
     /// action, as a queueing router's do, so trace time ran on until one finished.
     pub stall_advances: u64,
+    /// Worker-origin prefill marks dropped because the router's replica channel was
+    /// full, as the frontend's ingress drops them: the router did not keep up.
+    pub dropped_worker_marks: u64,
     /// Bookings in flight through the window, and at the end of the run.
     pub booked_in_flight: InFlight,
     /// Admissions waiting in the router through the window: queued, or not yet
@@ -260,6 +263,7 @@ struct Shared {
     failed: AtomicUsize,
     events_issued: AtomicU64,
     stall_advances: AtomicU64,
+    dropped_worker_marks: AtomicU64,
     caches: KvCaches,
     failure_samples: Mutex<Vec<String>>,
     window_start_us: u64,
@@ -337,6 +341,8 @@ pub fn run(
          {engine_issuers} engine issuers and {prep_threads} prep threads"
     );
     config.mode.validate()?;
+    // Before any thread starts, so a bad path fails here and not after the run.
+    let perf = PerfControl::open(config)?;
     let clock = BenchmarkClock::new(SPIN_NS)?;
     // Blocks per trace block, when trace blocks hold whole blocks.
     let block_size = params.block_size as usize;
@@ -370,6 +376,7 @@ pub fn run(
         failed: AtomicUsize::new(0),
         events_issued: AtomicU64::new(0),
         stall_advances: AtomicU64::new(0),
+        dropped_worker_marks: AtomicU64::new(0),
         caches: KvCaches::new(
             params.workers,
             params.dp_size,
@@ -443,7 +450,7 @@ pub fn run(
             .collect::<std::io::Result<Vec<_>>>()?;
         let sampler = thread("bench-sampler".into()).spawn_scoped(scope, move || {
             pin(sampler_cpu)?;
-            sample(shared, config)
+            sample(shared, perf)
         })?;
         let requests = thread("bench-requests".into()).spawn_scoped(scope, move || {
             // Let the engine issuers run out the timeline.
@@ -893,8 +900,7 @@ struct Sample {
 
 /// Samples the run every 100 ms and brackets the measured window for
 /// `perf record --control`.
-fn sample(shared: &Shared, config: &RunConfig) -> Result<Vec<Sample>> {
-    let mut perf = PerfControl::open(config)?;
+fn sample(shared: &Shared, mut perf: PerfControl) -> Result<Vec<Sample>> {
     let mut samples = Vec::new();
     let (mut opened, mut closed) = (false, false);
     let mut next_sample = shared.clock.now_ns();
@@ -1053,13 +1059,17 @@ async fn admit(shared: Arc<Shared>, index: usize, tokens: Vec<u32>, prompt: Prom
 /// marks the booking itself on the first output tokens.
 async fn mark_prefill_complete(shared: &Shared, index: usize) {
     let booking = shared.slots[index].booking.get().expect("booked");
-    let _ = shared.host.inbound.try_send(ActiveSequenceEvent {
+    let mark = ActiveSequenceEvent {
         request_id: booking.request_id.clone(),
         worker: booking.worker,
         data: ActiveSequenceEventData::MarkPrefillCompleted,
         router_id: booking.worker.worker_id,
         lora_name: None,
-    });
+    };
+    // A full channel drops the mark, as the frontend's ingress does; it counts them too.
+    if shared.host.inbound.try_send(mark).is_err() {
+        shared.dropped_worker_marks.fetch_add(1, Ordering::Relaxed);
+    }
     if let Err(error) = shared
         .host
         .partition
@@ -1198,6 +1208,13 @@ fn analyze(
         ));
     }
 
+    let dropped_worker_marks = shared.dropped_worker_marks.load(Ordering::Relaxed);
+    if dropped_worker_marks > 0 {
+        failure_reasons.push(format!(
+            "{dropped_worker_marks} worker prefill marks dropped: the replica channel was full"
+        ));
+    }
+
     let window_samples: Vec<&Sample> = samples
         .iter()
         .filter(|sample| shared.in_window(sample.trace_us))
@@ -1232,6 +1249,7 @@ fn analyze(
         engine_issue_lag_ns,
         harness_wait_share,
         stall_advances: shared.stall_advances.load(Ordering::Relaxed),
+        dropped_worker_marks,
         booked_in_flight: spread(|sample| sample.booked_in_flight),
         admissions_waiting: spread(|sample| sample.outstanding),
         booked_at_end: shared.booked_in_flight.load(Ordering::Acquire),

@@ -21,7 +21,7 @@ use corpus::{Corpus, TraceFormat, WorkloadParams};
 use dynamo_kv_events::event::{KvCacheEvent, KvCacheEventData};
 use dynamo_kv_router::config::KvRouterConfig;
 use engine::{Action, Lifecycle, Limits, Mode, RunConfig};
-use host::{BenchHost, HostConfig, router_config, worker_request};
+use host::{BenchHost, HostConfig, check_modeled, router_config, worker_request};
 use kv_cache::{KvCaches, decode_block_hashes};
 
 /// Slots a test request holds in a worker's cache.
@@ -151,6 +151,8 @@ fn saturation_runs_on_while_the_router_queues() {
     );
     assert_eq!(result.failed, 0, "{:?}", result.failure_samples);
     assert_eq!(result.admitted + result.rejected, result.window_requests);
+    // Queued admissions held every slot at least once, and trace time ran on.
+    assert!(result.stall_advances > 0, "the router never queued");
 }
 
 /// Three three-turn sessions, each turn extending the last, in a temporary Mooncake
@@ -232,6 +234,21 @@ fn mooncake_arrivals_are_relative_to_the_trace_start() {
 }
 
 #[test]
+fn a_lane_that_runs_out_of_turns_inside_the_window_is_an_error() {
+    let trace = multi_turn_trace("exhausted", 0);
+    // Turns this fast finish a lane's whole chain of plays before the window ends.
+    let fast = WorkloadParams {
+        engine_speedup: 100_000.0,
+        ignore_trace_delays: true,
+        ..params(32, 3)
+    };
+    let error = corpus::generate(&trace, &fast, 2).err();
+    std::fs::remove_file(&trace).unwrap();
+    let error = format!("{:#}", error.expect("the lanes ran out of turns"));
+    assert!(error.contains("chained turns"), "{error}");
+}
+
+#[test]
 fn a_late_booking_applies_the_actions_already_due_in_order() {
     let mut lifecycle = Lifecycle::default();
     assert!(!lifecycle.due(Action::FirstOutput));
@@ -302,6 +319,73 @@ fn router_config_overrides_any_field_and_rejects_unknown_ones() {
     assert!(config.router_replica_sync);
     assert!(router_config(Some(r#"{"no_such_field": 1}"#)).is_err());
     assert!(router_config(Some("[]")).is_err());
+}
+
+#[test]
+fn router_options_the_replay_does_not_model_are_rejected() {
+    let modeled = router_config(None).unwrap();
+    check_modeled(&modeled).unwrap();
+    for unmodeled in [
+        KvRouterConfig {
+            use_kv_events: false,
+            ..modeled.clone()
+        },
+        KvRouterConfig {
+            router_event_threads: 1,
+            ..modeled.clone()
+        },
+        KvRouterConfig {
+            router_track_output_blocks: true,
+            ..modeled.clone()
+        },
+        KvRouterConfig {
+            router_predicted_ttl_secs: Some(5.0),
+            ..modeled.clone()
+        },
+        KvRouterConfig {
+            enable_session_prefix_index: true,
+            ..modeled.clone()
+        },
+    ] {
+        assert!(check_modeled(&unmodeled).is_err(), "{unmodeled:?}");
+    }
+}
+
+#[test]
+fn the_router_config_picks_the_worker_selection_policy() {
+    let start = |policy: &str| -> anyhow::Result<()> {
+        let file = std::env::temp_dir().join(format!(
+            "selection-replay-{policy}-{}.yaml",
+            std::process::id()
+        ));
+        std::fs::write(
+            &file,
+            format!("worker_selection:\n  aggregated: {policy}\n"),
+        )
+        .unwrap();
+        let json = serde_json::json!({ "router_policy_config": file }).to_string();
+        let started = router_config(Some(&json)).and_then(|router| {
+            let host_config = HostConfig {
+                router,
+                block_size: 16,
+                busy: Default::default(),
+            };
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()?;
+            runtime.block_on(async {
+                BenchHost::start(&host_config, &[]).await?.shutdown().await;
+                Ok(())
+            })
+        });
+        std::fs::remove_file(&file).unwrap();
+        started
+    };
+    // A policy Dynamo ships resolves; a name the bench does not link is an error, not
+    // the default policy.
+    start("dynamo-sticky-min-load").unwrap();
+    assert!(start("no-such-policy").is_err());
 }
 
 fn prompt(blocks: &[u64]) -> kv_cache::PromptBlocks {

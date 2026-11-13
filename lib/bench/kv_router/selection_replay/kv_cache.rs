@@ -270,13 +270,6 @@ impl WorkerCache {
         run_blocks: usize,
         evicted: &mut Vec<u64>,
     ) -> u32 {
-        // Every block belongs to one entry. Replacing a resident entry's key would
-        // strand it, and its eviction would remove blocks the cache still holds.
-        debug_assert!(!self.entries.contains_key(&run[0]));
-        if let Some(&entry) = self.entries.get(&run[0]) {
-            self.pin(entry);
-            return entry;
-        }
         while self.blocks + run.len() > capacity && self.head != NIL {
             let victim = self.head;
             self.unlink(victim);
@@ -311,7 +304,14 @@ impl WorkerCache {
         };
         let start = entry as usize * run_blocks;
         self.hashes[start..start + run.len()].copy_from_slice(run);
-        self.entries.insert(run[0], entry);
+        // Every block belongs to one entry. Replacing a resident entry's key would
+        // strand it, and its eviction would remove blocks the cache still holds.
+        let replaced = self.entries.insert(run[0], entry);
+        assert!(
+            replaced.is_none(),
+            "block {:#x} is already resident",
+            run[0]
+        );
         self.blocks += run.len();
         entry
     }

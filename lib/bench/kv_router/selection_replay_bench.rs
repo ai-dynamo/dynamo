@@ -47,7 +47,7 @@ struct Args {
     #[arg(long)]
     save_corpus: Option<PathBuf>,
     /// Replay a saved corpus instead of generating one.
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["trace", "save_corpus", "generate_only"])]
     load_corpus: Option<PathBuf>,
     /// Generate (and save) the corpus, then exit.
     #[arg(long)]

@@ -1,13 +1,14 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! The replay corpus: a trace's plays become lanes, the mocker simulates them
+//! The replay corpus: lanes replay a trace's plays, the mocker simulates them
 //! offline, and the result is compacted into each request's timing.
 //!
 //! A lane is one closed-loop conversation slot, like one unit of aiperf
-//! concurrency: it replays a play's requests in order, one at a time, and starts
-//! another play when one ends. Every copy of a play gets disjoint hash IDs, the way
-//! aiperf's cache-bust prefixes make repeated plays unique.
+//! concurrency: it replays a play's requests in the order they started, one at a
+//! time (a Weka play's subagents run in series with it), and starts another play
+//! when one ends. Every copy of a play gets disjoint hash IDs, the way aiperf's
+//! cache-bust prefixes make repeated plays unique.
 //!
 //! Only timing comes from the mocker: when each request arrives, produces its first
 //! output, and completes. Where its KV blocks live is decided at replay by the router
@@ -571,6 +572,15 @@ impl Simulator<'_> {
         for (index, last) in last.iter().enumerate() {
             let next = last.map_or(0, |(position, _)| position + 1);
             let Some(&(copy, turn)) = positions[index].get(next) else {
+                // The lane ran out of chained turns. Inside the window it would idle
+                // from here, and the load would fall below `--lanes` unseen.
+                ensure!(
+                    last.is_none_or(|(_, completed_us)| completed_us >= window_end_us),
+                    "lane {} finished all {} of its chained turns before the window ended; \
+                     shorten --window-ms or lower --engine-speedup",
+                    lanes[index],
+                    positions[index].len()
+                );
                 continue;
             };
             let copies = &self.lanes[lanes[index]];

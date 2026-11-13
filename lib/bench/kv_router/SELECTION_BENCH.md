@@ -15,8 +15,10 @@ does not react to where a request lands.
 ## What runs
 
 The selection service is built as the frontend builds its embedded selection
-(`lib/llm/src/kv_router/embedded.rs`): the builtin default policy, host-managed
-request lifecycle, lazy replica registration, and the concurrent indexer. Each
+(`lib/llm/src/kv_router/embedded.rs`): the worker-selection policy the router
+config names (the builtin default unless it names another policy Dynamo ships),
+host-managed request lifecycle, lazy replica registration, and the concurrent
+indexer. Each
 request follows the frontend's calls: `run_selection` with a `Lease` and the
 prompt's token IDs, `commit`, the worker-origin and frontend prefill-complete
 marks at its first output, and the acknowledged release at completion. KV events
@@ -28,11 +30,14 @@ router's runtime sees less interference than in a frontend.
 
 ## Workload
 
-The corpus holds only request timing. Each play (conversation) of the trace
-becomes a lane, one closed-loop slot like one unit of aiperf concurrency; lanes
-that reuse a play get disjoint hash IDs, as aiperf's cache-bust prefixes do. The
+The corpus holds only request timing. A lane is one closed-loop slot, like one
+unit of aiperf concurrency: it replays a play (conversation) of the trace one
+request at a time, and starts another play when one ends. Every copy of a play
+gets disjoint hash IDs, as aiperf's cache-bust prefixes do. A play's requests run
+in the order they started, so a Weka play's subagents run in series with it. The
 mocker simulates the lanes, pinned round-robin to engine ranks, for each request's
-arrival, first output, and completion.
+arrival, first output, and completion. Generation fails if a lane runs out of
+plays inside the window, because the load would then fall below `--lanes`.
 
 KV state comes from the replay's own placements. Engine issuer threads play the
 workers: each worker has a cache of `--num-gpu-blocks` blocks that follows a vLLM
@@ -57,9 +62,18 @@ block's worth of blocks at once. It is one device tier; host (G2) or remote
 | Router | `KvRouterConfig::default()` with replica sync on |
 | Window | 30 s warmup, then 90 s measured, in trace time |
 
-Every workload value is a flag (`--help`). `--router-config-json` sets any
-`KvRouterConfig` field and reuses a saved corpus; for example, a heavily queued
-router: `--router-config-json '{"router_queue_threshold": 0.1}'`.
+Every workload value is a flag (`--help`). With `--ignore-trace-delays false`, a
+Weka turn waits the gap between its recorded start and the previous turn's.
+
+`--router-config-json` sets `KvRouterConfig` fields over these defaults; for
+example, a heavily queued router:
+`--router-config-json '{"router_queue_threshold": 0.1}'`. The router config is
+not part of the corpus, so one saved corpus serves every router config. A
+`router_policy_config` file is applied as the frontend applies it, including the
+worker-selection policy it names. The replay rejects the options it does not
+model: `use_kv_events: false`, a single `router_event_threads`,
+`router_track_output_blocks`, `router_predicted_ttl_secs`, and
+`enable_session_prefix_index`.
 
 ```bash
 mkdir -p traces/agentx && cd traces/agentx
@@ -91,7 +105,9 @@ threads, not the router, held back; above 5% the run is invalid.
 In both modes, an index more than 20,000 events behind during the window means
 the router routed on a stale index because it could not take the load: the run
 reports `kept_up=false` ("the index fell N events behind"), and
-`mean_cached_blocks_error` shows how far its predictions drifted.
+`mean_cached_blocks_error` shows how far its predictions drifted. So does a
+replica channel so full that it drops workers' prefill-complete marks
+(`dropped_worker_marks`), which the frontend's ingress drops and counts too.
 
 ## Running
 
