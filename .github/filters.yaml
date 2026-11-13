@@ -182,6 +182,7 @@ core:
   - *ci
   - 'container/render.py'
   - 'container/Dockerfile.template'
+  - 'container/Dockerfile.compliance-audit'
   - 'container/context.yaml'
   - 'container/templates/args.Dockerfile'
   - 'container/templates/dynamo_*'
@@ -534,3 +535,7 @@ benchmarks:
 
 efa:
   - 'container/templates/aws.Dockerfile'
+  # The same inventory and publication gates must also pass on EFA variants.
+  - 'container/compliance/**'
+  - 'container/Dockerfile.compliance-audit'
+  - '!**/*.md'

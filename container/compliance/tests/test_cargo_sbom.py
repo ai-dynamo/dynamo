@@ -23,7 +23,12 @@ from compliance.generators.rust import collect_components
 
 # CPU-only unit tests; markers are required by .ai/pytest-guidelines.md
 # (lifecycle / test-type / hardware categories).
-pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
+pytestmark = [
+    pytest.mark.parallel,
+    pytest.mark.pre_merge,
+    pytest.mark.unit,
+    pytest.mark.gpu_0,
+]
 
 
 def _metadata(*packages: dict) -> dict:

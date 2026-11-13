@@ -2,44 +2,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Resolve the baseline commit to diff a build's OSRB CSV against.
+"""Resolve an exact, trusted workflow run and artifact for an OSRB comparison.
 
-The baseline depends on where the build runs:
-
-1. PR targeting ``main``            -> the PR's merge-base, walking backward
-                                       only when that commit lacks the artifact.
-2. Post-merge push to ``main``      -> the previous commit on ``main`` (HEAD~1).
-3. PR targeting / push to a ``release/*`` branch
-                                    -> the release tag ``vX.Y.Z`` that is the
-                                       highest one strictly older than the
-                                       current version. Semver order first
-                                       (``1.3.0`` beats ``1.2.5`` for a ``1.3.1``
-                                       build, regardless of publish date); when
-                                       several tags share the same ``X.Y.Z`` base
-                                       (e.g. ``v1.2.3-nemo-3`` vs ``v1.2.3-minimax``)
-                                       the one published later wins.
-4. Nightly build                    -> the previous successful scheduled run of
-                                       the same workflow, found via the Actions
-                                       API; manual ``workflow_dispatch`` runs are
-                                       excluded and the selected run's
-                                       ``head_sha`` names the baseline artifact.
-
-Prints four ``key=value`` lines to stdout (suitable for ``>> "$GITHUB_OUTPUT"``)::
-
-    base_sha=<40-hex-sha or empty>
-    base_label=<human description of the baseline>
-    base_artifact_id=<GitHub Actions artifact id or empty>
-    base_run_id=<generating workflow run id or empty>
-
-An empty ``base_sha`` is not an error: it means there is no baseline to diff
-against (first release of a line, unrecognized context, or a commit that could
-not be resolved). Callers degrade gracefully.
-
-Usage:
-    resolve_diff_base.py --event-context {pr|push} --current-branch <ref_name> \\
-        --base-branch <baseRefName|''> --merge-base-sha <sha|''> \\
-        --current-sha <sha> \\
-        --current-version <X.Y.Z|''> --repo <owner/repo>
+PRs use their stable merge-base and main pushes their first-parent predecessor.
+Release branches retain the highest strictly older release-tag baseline.
+Nightlies use the prior scheduled run with the matching artifact, regardless
+of unrelated workflow failures. Missing or invalid evidence fails closed;
+first-of-kind bootstrapping requires an explicit flag.
 """
 
 from __future__ import annotations
@@ -49,6 +18,7 @@ import json
 import re
 import subprocess
 import sys
+from urllib.parse import urlencode
 
 # Matches a leading X.Y.Z in a tag/version, tolerant of any suffix
 # (-rc6, -nemo-3, -minimax, .dev1, ...). We deliberately do NOT rely on PEP 440
@@ -104,157 +74,149 @@ def is_release_branch(ref: str) -> bool:
     return bool(ref) and ref.startswith("release/")
 
 
-def _git(*args: str) -> str | None:
-    """Run a read-only git command; return stripped stdout or None on failure."""
-    try:
-        out = subprocess.run(
-            ["git", *args],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-    except (subprocess.CalledProcessError, FileNotFoundError) as exc:
-        print(f"git {' '.join(args)} failed: {exc}", file=sys.stderr)
-        return None
-    sha = out.stdout.strip()
-    return sha or None
+class BaselineError(RuntimeError):
+    """A comparison cannot be established safely."""
+
+
+def _git(*args: str) -> str:
+    result = subprocess.run(["git", *args], capture_output=True, text=True, check=True)
+    return result.stdout.strip()
 
 
 def _tag_dates() -> list[tuple[str, int]]:
-    """List (tag, unix_date) for every ``v*`` tag. Empty on failure."""
     out = _git(
         "for-each-ref",
         "--format=%(refname:short)%09%(creatordate:unix)",
         "refs/tags/v*",
     )
-    if not out:
-        return []
-    pairs: list[tuple[str, int]] = []
-    for line in out.splitlines():
-        parts = line.split("\t", 1)
-        if len(parts) != 2:
-            continue
-        tag, date = parts[0].strip(), parts[1].strip()
-        try:
-            pairs.append((tag, int(date)))
-        except ValueError:
-            continue
-    return pairs
-
-
-def _gh(*args: str) -> str | None:
-    """Run a `gh api` call; return stripped stdout or None on failure.
-
-    Reads GH_TOKEN from the environment (set by the CI resolve step).
-    """
-    try:
-        out = subprocess.run(
-            ["gh", "api", *args],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-    except (subprocess.CalledProcessError, FileNotFoundError) as exc:
-        print(f"gh api {' '.join(args)} failed: {exc}", file=sys.stderr)
-        return None
-    return out.stdout.strip() or None
-
-
-def pick_previous_run_sha(current_run_id: int, runs: list[dict]) -> str | None:
-    """Return the head SHA of the most recent successful scheduled prior run.
-
-    ``runs`` is a list of ``{"id", "head_sha", "event", "conclusion"}``
-    dicts. Run ids increase over time, so "before this run" is
-    ``id < current_run_id`` and "most recent" is the max such id. Requiring
-    ``event == "schedule"`` keeps successful manual nightlies from becoming the
-    baseline for the next cron-triggered run.
-    """
-    prev = [
-        r
-        for r in runs
-        if isinstance(r.get("id"), int)
-        and r["id"] < current_run_id
-        and r.get("event") == "schedule"
-        and r.get("conclusion") == "success"
+    return [
+        (tag, int(date))
+        for tag, date in (line.split("\t") for line in out.splitlines())
     ]
-    if not prev:
-        return None
-    best = max(prev, key=lambda r: r["id"])
-    return best.get("head_sha") or None
 
 
-def _fetch_workflow_runs(repo: str, current_run_id: int) -> list[dict]:
-    """List recent runs of the current run's workflow. Empty on any failure."""
-    workflow_id = _gh(
-        f"/repos/{repo}/actions/runs/{current_run_id}", "--jq", ".workflow_id"
+def _gh_json(endpoint: str) -> dict:
+    """API and decoding failures are errors, never evidence that a baseline is absent."""
+    result = subprocess.run(
+        ["gh", "api", endpoint], capture_output=True, text=True, check=True
     )
-    if not workflow_id:
-        return []
-    # per_page goes in the query string (not `-f`) so `gh api` stays a GET; a
-    # `-f` field would flip it to POST and the runs list would never resolve.
-    raw = _gh(
-        f"/repos/{repo}/actions/workflows/{workflow_id}/runs"
-        "?event=schedule&status=success&per_page=50",
-        "--jq",
-        "[.workflow_runs[] | {id, head_sha, event, conclusion}]",
-    )
-    if not raw:
-        return []
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        return []
+    payload = json.loads(result.stdout)
+    if not isinstance(payload, dict):
+        raise BaselineError(f"Unexpected GitHub API response for {endpoint}")
+    return payload
 
 
 def _short(sha: str) -> str:
-    return sha[:8] if sha else ""
+    return sha[:8]
 
 
-def find_artifact(
-    repo: str, sha: str, prefix: str
-) -> tuple[tuple[str, str] | None, bool]:
-    """Return ((artifact_id, run_id), api_error) for a compliance artifact."""
-    if not (repo and sha and prefix):
-        return None, False
-    out = _gh(
-        f"/repos/{repo}/actions/artifacts?name=compliance-{sha}-{prefix}",
-        "--jq",
-        "[.artifacts[] | select(.expired == false)] "
-        "| sort_by(.created_at) | last "
-        '| if . == null then "absent" '
-        r'else "\(.id)\t\(.workflow_run.id)" end',
+def _run_matches(run: dict, *, sha: str, branch: str, workflow: str, repo: str) -> bool:
+    return (
+        run["head_sha"] == sha
+        and run["head_branch"] == branch
+        and run["path"].split("@")[0] == workflow
+        and run["event"] == "push"
+        and run["head_repository"]["full_name"] == repo
     )
-    if out is None:
-        return None, True
-    if out == "absent":
-        return None, False
-    ids = out.split("\t", 1)
-    if len(ids) != 2 or not all(value.isdigit() for value in ids):
-        return None, True
-    return (ids[0], ids[1]), False
 
 
-def _first_parent_shas(ref: str, limit: int) -> list[str]:
-    """First-parent commit SHAs reachable from ref (newest first), capped at limit."""
-    out = _git("rev-list", "--first-parent", "-n", str(limit), ref)
-    return out.splitlines() if out else []
+def find_run_artifact(repo: str, run: dict, prefix: str) -> tuple[str | None, bool]:
+    """Return an exact run's artifact id and whether an expired copy was found.
 
-
-def pick_commit_with_artifact(
-    shas, find_fn
-) -> tuple[str | None, tuple[str, str] | None, bool]:
-    """Return (first matching sha, artifact ids, saw_error).
-
-    saw_error is True if any lookup reported an API failure, letting the
-    caller fall back instead of mistaking a flaky API for "no baseline".
+    Never search repository-wide by SHA: a manual or PR run of the same commit
+    may have different image inputs. Pagination is necessary on large matrix runs.
     """
-    saw_error = False
-    for sha in shas:
-        artifact, api_error = find_fn(sha)
-        saw_error = saw_error or api_error
-        if artifact:
-            return sha, artifact, saw_error
-    return None, None, saw_error
+    name = f"compliance-{run['head_sha']}-{prefix}"
+    page = 1
+    matches = []
+    expired = False
+    while True:
+        payload = _gh_json(
+            f"/repos/{repo}/actions/runs/{run['id']}/artifacts?per_page=100&page={page}"
+        )
+        artifacts = payload["artifacts"]
+        for artifact in artifacts:
+            if artifact["name"] != name:
+                continue
+            provenance = artifact["workflow_run"]
+            if (
+                provenance["id"] != run["id"]
+                or provenance["head_sha"] != run["head_sha"]
+            ):
+                raise BaselineError(
+                    f"Artifact {artifact['id']} has inconsistent run provenance"
+                )
+            if artifact["expired"]:
+                expired = True
+            elif artifact["size_in_bytes"] <= 0:
+                raise BaselineError(f"Baseline artifact {artifact['id']} is empty")
+            else:
+                matches.append(str(artifact["id"]))
+        if page * 100 >= payload["total_count"]:
+            break
+        page += 1
+    if len(matches) > 1:
+        raise BaselineError(f"Ambiguous artifact {name} in run {run['id']}")
+    return (matches[0] if matches else None), expired
+
+
+def _fetch_workflow_runs(repo: str, current_run_id: int) -> list[dict]:
+    current = _gh_json(f"/repos/{repo}/actions/runs/{current_run_id}")
+    if current["head_repository"]["full_name"] != repo:
+        raise BaselineError(
+            "Nightly workflow does not belong to the expected repository"
+        )
+    query = urlencode(
+        {"event": "schedule", "branch": current["head_branch"], "per_page": 100}
+    )
+    payload = _gh_json(
+        f"/repos/{repo}/actions/workflows/{current['workflow_id']}/runs?{query}"
+    )
+    # Overall workflow success is deliberately irrelevant: unrelated test or
+    # publication legs can fail after this container's compliance artifact lands.
+    return sorted(
+        (
+            run
+            for run in payload["workflow_runs"]
+            if run["id"] < current_run_id
+            and run["event"] == "schedule"
+            and run["workflow_id"] == current["workflow_id"]
+            and run["head_branch"] == current["head_branch"]
+            and run["head_repository"]["full_name"] == repo
+            and run["status"] == "completed"
+        ),
+        key=lambda run: run["id"],
+        reverse=True,
+    )
+
+
+def _find_commit_artifact(
+    repo: str, sha: str, prefix: str, branch: str
+) -> tuple[tuple[str, str] | None, bool]:
+    workflow = ".github/workflows/post-merge-ci.yml"
+    query = urlencode(
+        {"head_sha": sha, "branch": branch, "event": "push", "per_page": 100}
+    )
+    runs = _gh_json(f"/repos/{repo}/actions/workflows/post-merge-ci.yml/runs?{query}")[
+        "workflow_runs"
+    ]
+    expired = False
+    for run in sorted(runs, key=lambda run: run["id"], reverse=True):
+        if not _run_matches(run, sha=sha, branch=branch, workflow=workflow, repo=repo):
+            continue
+        artifact_id, was_expired = find_run_artifact(repo, run, prefix)
+        expired |= was_expired
+        if artifact_id:
+            return (artifact_id, str(run["id"])), expired
+    return None, expired
+
+
+def _missing(
+    label: str, *, allow_bootstrap: bool, expired: bool = False
+) -> tuple[str, str, str, str]:
+    if allow_bootstrap and not expired:
+        return "", f"explicit bootstrap: {label}", "", ""
+    raise BaselineError(label + (" (prior artifact expired)" if expired else ""))
 
 
 def _resolve_main_baseline(
@@ -263,70 +225,29 @@ def _resolve_main_baseline(
     artifact_prefix: str,
     label: str = "main",
     limit: int = 25,
+    allow_bootstrap: bool = False,
 ) -> tuple[str, str, str, str]:
-    """Baseline for the main cases: the most recent commit on main's first-parent
-    history (from ``start_ref`` backward) that actually has a
-    ``compliance-<sha>-<prefix>`` artifact.
-
-    Post-merge builds every framework, but each container's artifact lands at a
-    different time (and a leg can fail), so the tip of main frequently lacks a
-    given container's artifact when a PR builds. Walking back finds the newest
-    commit that does have it, per container.
-    """
-    tip = _git("rev-parse", start_ref)
-    if not tip:
-        return (
-            "",
-            f"{label} baseline ({start_ref} unresolved; shallow clone?)",
-            "",
-            "",
+    """Walk only first-parent history from the stable PR fork or previous main commit."""
+    shas = _git("rev-list", "--first-parent", "-n", str(limit), start_ref).splitlines()
+    expired = False
+    for sha in shas:
+        artifact, was_expired = _find_commit_artifact(
+            repo, sha, artifact_prefix, "main"
         )
-    # Without a prefix (or token) we can't check availability -> use the tip,
-    # preserving the original behavior.
-    if not artifact_prefix:
-        return tip, f"{label} {_short(tip)}", "", ""
-    shas = _first_parent_shas(start_ref, limit)
-    chosen, artifact, saw_error = pick_commit_with_artifact(
-        shas, lambda s: find_artifact(repo, s, artifact_prefix)
-    )
-    if chosen and artifact:
-        artifact_id, run_id = artifact
-        if chosen == tip:
-            return chosen, f"{label} {_short(chosen)}", artifact_id, run_id
-        return (
-            chosen,
-            f"{label} {_short(chosen)} (nearest with {artifact_prefix} artifact)",
-            artifact_id,
-            run_id,
-        )
-    if saw_error:
-        # Preserve the candidate SHA for diagnostics. Without an artifact id,
-        # the download soft-degrades to a baseline_unavailable diff.
-        return (
-            tip,
-            f"{label} {_short(tip)} (artifact availability unchecked)",
-            "",
-            "",
-        )
-    return (
-        "",
+        expired |= was_expired
+        if artifact:
+            artifact_id, run_id = artifact
+            return (
+                sha,
+                f"{label} {_short(sha)} (nearest with {artifact_prefix} artifact)",
+                artifact_id,
+                run_id,
+            )
+    return _missing(
         f"no {label} commit with a {artifact_prefix} artifact in last {limit}",
-        "",
-        "",
+        allow_bootstrap=allow_bootstrap,
+        expired=expired,
     )
-
-
-def _with_artifact(
-    sha: str, label: str, repo: str, artifact_prefix: str
-) -> tuple[str, str, str, str]:
-    """Attach the exact artifact and run ids to a resolved baseline."""
-    if not (sha and artifact_prefix):
-        return sha, label, "", ""
-    artifact, _ = find_artifact(repo, sha, artifact_prefix)
-    if not artifact:
-        return sha, label, "", ""
-    artifact_id, run_id = artifact
-    return sha, label, artifact_id, run_id
 
 
 def resolve(
@@ -338,137 +259,126 @@ def resolve(
     current_run_id: str = "",
     artifact_prefix: str = "",
     merge_base_sha: str = "",
+    allow_bootstrap: bool = False,
 ) -> tuple[str, str, str, str]:
-    """Return (base_sha, base_label, artifact_id, run_id)."""
-    # Rule 4: nightly build -> previous successful scheduled run of the same
-    # workflow. Manual workflow_dispatch runs are deliberately excluded.
+    """Return a validated (base_sha, label, artifact_id, run_id), or raise."""
+    if not repo or not artifact_prefix:
+        raise BaselineError("Both repository and artifact prefix are required")
     if event_context == "nightly":
-        try:
-            rid = int(current_run_id)
-        except (TypeError, ValueError):
-            return "", "nightly baseline (no current run id)", "", ""
-        sha = pick_previous_run_sha(rid, _fetch_workflow_runs(repo, rid))
-        if sha:
-            return _with_artifact(
-                sha,
-                f"previous scheduled nightly {_short(sha)}",
-                repo,
-                artifact_prefix,
-            )
-        return "", "no previous successful scheduled nightly run found", "", ""
-
-    # Rule 1: PR targeting main -> the PR's stable fork point, walking backward
-    # only if that commit lacks this container's artifact.
+        if not current_run_id.isdigit():
+            raise BaselineError("Nightly baseline requires the current run id")
+        expired = False
+        for run in _fetch_workflow_runs(repo, int(current_run_id)):
+            artifact_id, was_expired = find_run_artifact(repo, run, artifact_prefix)
+            expired |= was_expired
+            if artifact_id:
+                sha = run["head_sha"]
+                return (
+                    sha,
+                    f"previous scheduled nightly {_short(sha)}",
+                    artifact_id,
+                    str(run["id"]),
+                )
+        return _missing(
+            "no prior scheduled nightly with the matching compliance artifact in the last 100 runs",
+            allow_bootstrap=allow_bootstrap,
+            expired=expired,
+        )
     if event_context == "pr" and base_branch == "main":
         if not merge_base_sha:
-            return "", "PR merge-base unavailable", "", ""
+            raise BaselineError("PR merge-base unavailable")
         return _resolve_main_baseline(
-            merge_base_sha, repo, artifact_prefix, label="PR merge-base"
+            merge_base_sha,
+            repo,
+            artifact_prefix,
+            label="PR merge-base",
+            allow_bootstrap=allow_bootstrap,
         )
-
-    # Rule 2: post-merge push to main -> walk back from the previous main commit
-    # (HEAD is the just-merged commit, still building, so start at HEAD~1).
     if event_context == "push" and current_branch == "main":
-        return _resolve_main_baseline("HEAD~1", repo, artifact_prefix)
-
-    # Rule 3: PR targeting / push to a release branch -> prior release tag.
+        return _resolve_main_baseline(
+            "HEAD~1", repo, artifact_prefix, allow_bootstrap=allow_bootstrap
+        )
     release_ref = base_branch if is_release_branch(base_branch) else current_branch
     if is_release_branch(release_ref):
         if not parse_release_tuple(current_version):
-            return (
-                "",
-                f"release baseline (no parseable current version '{current_version}')",
-                "",
-                "",
+            raise BaselineError(
+                f"No parseable current release version: {current_version}"
             )
         tag = pick_prior_release_tag(current_version, _tag_dates())
         if tag is None:
-            return (
-                "",
-                f"no prior release tag older than {current_version} (first of its line)",
-                "",
-                "",
+            return _missing(
+                f"no prior release tag older than {current_version}",
+                allow_bootstrap=allow_bootstrap,
             )
         sha = _git("rev-list", "-n", "1", tag)
-        if sha:
-            return _with_artifact(
+        # Keep vendor/dev suffixes: their artifacts come from the matching
+        # release branch, not the unrelated plain X.Y.Z release line.
+        branch = "release/" + tag.removeprefix("v")
+        artifact, expired = _find_commit_artifact(repo, sha, artifact_prefix, branch)
+        if artifact:
+            return (
                 sha,
                 f"release baseline {tag} ({_short(sha)})",
-                repo,
-                artifact_prefix,
+                artifact[0],
+                artifact[1],
             )
-        return "", f"release baseline {tag} (could not resolve tag commit)", "", ""
-
-    # Fallback: unrecognized context -> no baseline.
-    return "", "no baseline (unrecognized build context)", "", ""
+        return _missing(
+            f"release baseline {tag} has no matching artifact",
+            allow_bootstrap=allow_bootstrap,
+            expired=expired,
+        )
+    raise BaselineError(
+        "Unrecognized build context; a comparison cannot be silently disabled"
+    )
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Resolve the baseline commit to diff a build's OSRB CSV against",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
+    parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--event-context", required=True, choices=["pr", "push", "nightly"]
     )
+    parser.add_argument("--current-branch", default="")
+    parser.add_argument("--base-branch", default="")
+    parser.add_argument("--merge-base-sha", default="")
+    parser.add_argument("--current-sha", default="", help="Source SHA (informational)")
+    parser.add_argument("--current-version", default="")
+    parser.add_argument("--repo", required=True)
+    parser.add_argument("--current-run-id", default="")
+    parser.add_argument("--artifact-prefix", required=True)
     parser.add_argument(
-        "--current-branch",
-        default="",
-        help="github.ref_name (main, release/X.Y.Z, ...)",
-    )
-    parser.add_argument(
-        "--base-branch",
-        default="",
-        help="For PRs, the PR's target branch (gh pr view --json baseRefName); empty for pushes",
-    )
-    parser.add_argument(
-        "--merge-base-sha",
-        default="",
-        help="For PRs targeting main, the true merge-base SHA used as the stable baseline starting point",
-    )
-    parser.add_argument("--current-sha", default="", help="github.sha (informational)")
-    parser.add_argument(
-        "--current-version",
-        default="",
-        help="Current X.Y.Z version (from pyproject.toml); required for release baselines",
-    )
-    parser.add_argument(
-        "--repo", default="", help="owner/repo (required for the nightly context)"
-    )
-    parser.add_argument(
-        "--current-run-id",
-        default="",
-        help="github.run_id of this build; used by the nightly context to find the previous run",
-    )
-    parser.add_argument(
-        "--artifact-prefix",
-        default="",
-        help="Container artifact prefix (target_tag_plain, e.g. vllm-runtime); for the "
-        "main cases, the resolver walks main's history for a commit that has a "
-        "compliance-<sha>-<prefix> artifact. Requires --repo and GH_TOKEN.",
+        "--allow-bootstrap",
+        action="store_true",
+        help="Explicit first-of-kind bootstrap; never bypass API errors or expired evidence",
     )
     args = parser.parse_args()
-
-    base_sha, base_label, base_artifact_id, base_run_id = resolve(
-        args.event_context,
-        args.current_branch,
-        args.base_branch,
-        args.current_version,
-        args.repo,
-        args.current_run_id,
-        args.artifact_prefix,
-        args.merge_base_sha,
-    )
-
+    try:
+        result = resolve(
+            args.event_context,
+            args.current_branch,
+            args.base_branch,
+            args.current_version,
+            args.repo,
+            args.current_run_id,
+            args.artifact_prefix,
+            args.merge_base_sha,
+            args.allow_bootstrap,
+        )
+    except (
+        BaselineError,
+        subprocess.CalledProcessError,
+        FileNotFoundError,
+        json.JSONDecodeError,
+    ) as exc:
+        parser.exit(1, f"Baseline resolution failed: {exc}\n")
+    sha, label, artifact_id, run_id = result
     print(
-        f"Resolved diff baseline: {base_label} (sha={base_sha or 'none'})",
-        file=sys.stderr,
+        f"Resolved diff baseline: {label} (sha={sha or 'bootstrap'})", file=sys.stderr
     )
-    # stdout carries ONLY the GITHUB_OUTPUT key=value lines.
-    print(f"base_sha={base_sha}")
-    print(f"base_label={base_label}")
-    print(f"base_artifact_id={base_artifact_id}")
-    print(f"base_run_id={base_run_id}")
+    for key, value in zip(
+        ("base_sha", "base_label", "base_artifact_id", "base_run_id"), result
+    ):
+        print(f"{key}={value}")
+    print(f"base_bootstrap={'true' if not sha else 'false'}")
 
 
 if __name__ == "__main__":

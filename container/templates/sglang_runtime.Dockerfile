@@ -483,7 +483,7 @@ CMD []
 ########## Final runtime image ########
 #######################################
 
-FROM pre_runtime AS runtime
+FROM {{ "pre_efa" if make_efa and target == "runtime" and device == "cuda" else "pre_runtime" }} AS runtime
 # NVDEC (PyNvVideoCodec, added in requirements.sglang.txt) needs the driver
 # "video" capability at runtime so libnvcuvid is exposed; without it
 # PyNvVideoCodec cannot import. Ensure the K8s pod/runtimeClass does not drop it.

@@ -12,18 +12,21 @@ in our unified osrb-deps.csv — i.e. something shipped that we failed to attrib
 
 Inputs:
   --syft-sbom    CycloneDX JSON from `syft <image> -o cyclonedx-json`
+  --syft-json    optional native Syft JSON with package file ownership
   --base-sbom    baseline CycloneDX (container/compliance/base_sboms/<stem>-<arch>.cdx.json)
   --our-csv      the build's unified osrb-deps.csv
   --image        image ref/label, for the report header (optional)
   --report       optional path to write the unattributed list (one per line)
   --fail-on-findings  exit non-zero if any unattributed component is found
-                      (default: report-only / exit 0 — the audit job is a
-                      non-blocking soft gate until the name-normalization is
-                      proven low-noise)
+                      (default: report-only / exit 0 for local investigations;
+                      CI passes --fail-on-findings)
 
-Name matching is NORMALIZED and version-agnostic to avoid false alarms from
-packaging-name skew (dist vs import name, '_' vs '-', purl qualifiers): a syft
-component is considered attributed if a normalized name match exists in our CSV.
+Matching requires ecosystem, name and version. Python names use PEP 503
+normalization; Go versions accept the conventional leading v. Generic binary
+identities require native rows, not an unrelated Rust/Python name. With --policy,
+the resolved inventory licenses must also pass the build's license policy.
+Scanner metadata is retained in the SBOM; it does not silently replace the
+inventory's reviewed license corrections.
 """
 
 from __future__ import annotations
@@ -33,8 +36,13 @@ import csv
 import json
 import logging
 import os
+import re
 import sys
 from pathlib import Path
+from posixpath import normpath
+
+from .identity import component_identity, identity
+from .policy.validate import load_policy, validate_row
 
 logger = logging.getLogger("compliance.audit_image_sbom")
 
@@ -51,22 +59,35 @@ def _load_cdx_components(path: Path) -> list[dict]:
     return doc.get("components", []) or []
 
 
-def _name_version_keys(components: list[dict]) -> set[tuple[str, str]]:
-    keys: set[tuple[str, str]] = set()
-    for c in components:
-        name, version = c.get("name"), c.get("version")
-        if name and version is not None:
-            keys.add((name, str(version)))
-    return keys
+def _version(ecosystem: str, version: str) -> str:
+    value = str(version or "UNKNOWN").strip()
+    return re.sub(r"^v(?=\d)", "", value) if ecosystem == "go" else value
 
 
-def _csv_names(csv_path: Path) -> set[str]:
-    names: set[str] = set()
-    with csv_path.open(newline="", encoding="utf-8") as f:
-        for row in csv.DictReader(f):
-            if row.get("name"):
-                names.add(_normalize(row["name"]))
-    return names
+def _key(ecosystem: str, name: str, version: str) -> tuple[str, str, str]:
+    return (*identity(ecosystem, name), _version(ecosystem, version))
+
+
+def _component_key(component: dict) -> tuple[str, str, str]:
+    ecosystem, name = component_identity(component)
+    return _key(ecosystem, name, component.get("version", ""))
+
+
+def _csv_inventory(csv_path: Path) -> dict[tuple[str, str, str], dict[str, str]]:
+    """Read the full current inventory; reject diff/legacy or ambiguous input."""
+    records = {}
+    with csv_path.open(newline="", encoding="utf-8") as stream:
+        reader = csv.DictReader(stream)
+        if not {"ecosystem", "name", "version"}.issubset(reader.fieldnames or []):
+            raise ValueError(f"not a full attribution inventory: {csv_path}")
+        for row in reader:
+            if not all(row.get(field) for field in ("ecosystem", "name", "version")):
+                raise ValueError(f"incomplete component identity in {csv_path}")
+            key = _key(row["ecosystem"], row["name"], row["version"])
+            if key in records and records[key].get("spdx") != row.get("spdx"):
+                raise ValueError(f"conflicting license records for {key} in {csv_path}")
+            records[key] = row
+    return records
 
 
 def _purl_type(purl: str | None) -> str:
@@ -92,11 +113,75 @@ def _is_first_party(name: str) -> bool:
     return name.startswith(_FIRST_PARTY_GO_PREFIXES)
 
 
+def _rootfs_path(path: str, rootfs_prefix: str = "") -> str:
+    """Use one root-relative representation for Syft and package-owned paths."""
+    normalized = normpath("/" + path.lstrip("/"))
+    prefix = rootfs_prefix.rstrip("/")
+    if prefix and (normalized == prefix or normalized.startswith(prefix + "/")):
+        normalized = normalized[len(prefix) :] or "/"
+    return normalized
+
+
+def _locations(component: dict, rootfs_prefix: str = "") -> set[str]:
+    return {
+        _rootfs_path(p["value"], rootfs_prefix)
+        for p in component.get("properties", [])
+        if p["name"].startswith("syft:location:") and p["name"].endswith(":path")
+    }
+
+
+def _ownership_coverage(
+    native: dict, our_keys: set[tuple[str, str, str]], rootfs_prefix: str = ""
+) -> dict[str, set[str]]:
+    """Known owning-package records; never infer coverage from directory alone."""
+    owners: dict[str, set[str]] = {}
+    for artifact in native.get("artifacts", []):
+        name = artifact["name"]
+        key = _key("dpkg", name, artifact.get("version", ""))
+        if key not in our_keys or artifact["type"] != "deb":
+            continue
+        for item in artifact.get("metadata", {}).get("files", []):
+            owners.setdefault(_rootfs_path(item["path"], rootfs_prefix), set()).add(
+                name
+            )
+    return owners
+
+
+def _covered_by_owner(
+    component: dict, owners: dict[str, set[str]], rootfs_prefix: str = ""
+) -> bool:
+    locations = _locations(component, rootfs_prefix)
+    if not locations:
+        return False
+    # Python metadata is covered under its owning dpkg package. Do not use a
+    # parent wheel to hide vendored distributions with independent licenses.
+    if _purl_type(component.get("purl")) == "pypi" and all(
+        path.startswith("/usr/lib/python3/dist-packages/") for path in locations
+    ):
+        return all(
+            any(owner.startswith("python3-") for owner in owners.get(path, set()))
+            for path in locations
+        )
+    return False
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="compliance.audit_image_sbom")
     p.add_argument("--syft-sbom", type=Path, required=True)
+    p.add_argument(
+        "--syft-json",
+        type=Path,
+        default=None,
+        help="Native Syft JSON with package file ownership",
+    )
     p.add_argument("--base-sbom", type=Path, default=None)
     p.add_argument("--our-csv", type=Path, required=True)
+    p.add_argument("--policy", type=Path, help="Validate resolved inventory licenses")
+    p.add_argument(
+        "--rootfs-prefix",
+        default="",
+        help="Physical root of an external directory scan",
+    )
     p.add_argument("--image", default="")
     p.add_argument("--report", type=Path, default=None)
     p.add_argument("--fail-on-findings", action="store_true")
@@ -108,36 +193,67 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     syft_components = _load_cdx_components(args.syft_sbom)
-    baseline_keys: set[tuple[str, str]] = set()
+    baseline_keys: set[tuple[str, str, str]] = set()
     if args.base_sbom and args.base_sbom.is_file():
-        baseline_keys = _name_version_keys(_load_cdx_components(args.base_sbom))
+        baseline_keys = {
+            _component_key(c)
+            for c in _load_cdx_components(args.base_sbom)
+            if c.get("name")
+        }
     elif args.base_sbom:
-        logger.warning(
-            "baseline SBOM not found: %s (auditing full image)", args.base_sbom
+        p.error(f"requested baseline SBOM not found: {args.base_sbom}")
+
+    inventory = _csv_inventory(args.our_csv)
+    our_keys = set(inventory)
+    violations = []
+    if args.policy:
+        policy = load_policy(args.policy)
+        for row in inventory.values():
+            violation = validate_row(
+                policy,
+                row["ecosystem"],
+                row["name"],
+                row["version"],
+                row.get("spdx", ""),
+            )
+            if violation:
+                violations.append(violation)
+    owners = (
+        _ownership_coverage(
+            json.loads(args.syft_json.read_text()), our_keys, args.rootfs_prefix
         )
+        if args.syft_json
+        else {}
+    )
+    owner_matched = 0
 
-    our_names = _csv_names(args.our_csv)
-
-    # syft_delta = image components above the baseline (exact name+version, as
-    # the generators subtract). Then flag any whose normalized name is absent
-    # from our attribution.
+    # Only an exact ecosystem/name/version match can establish attribution.
+    # A same-name package from a different ecosystem or release is not evidence.
     unattributed: list[dict] = []
     delta = 0
     for c in syft_components:
-        name, version = c.get("name"), c.get("version")
-        if not name or version is None:
+        # Syft's CycloneDX includes source files used as package evidence and
+        # the operating-system descriptor. These are not package identities.
+        if c.get("type") in {"file", "operating-system"}:
             continue
-        if (name, str(version)) in baseline_keys:
+        name, version = c.get("name"), c.get("version")
+        if not name:
+            continue
+        key = _component_key(c)
+        if key in baseline_keys:
             continue
         delta += 1
-        if _normalize(name) not in our_names and not _is_first_party(name):
+        if key not in our_keys and not _is_first_party(name):
+            if _covered_by_owner(c, owners, args.rootfs_prefix):
+                owner_matched += 1
+                continue
             unattributed.append(c)
 
-    # De-dup by normalized name for the report.
-    seen: set[str] = set()
+    # Keep distinct versions and ecosystems visible in the report.
+    seen: set[tuple[str, str, str]] = set()
     rows: list[tuple[str, str, str]] = []
     for c in sorted(unattributed, key=lambda c: _normalize(c.get("name", ""))):
-        key = _normalize(c.get("name", ""))
+        key = _component_key(c)
         if key in seen:
             continue
         seen.add(key)
@@ -149,15 +265,21 @@ def main(argv: list[str] | None = None) -> int:
     print(hdr)
     print(
         f"  syft components: {len(syft_components)} | "
-        f"above baseline: {delta} | attributed in osrb-deps.csv: {len(our_names)} | "
-        f"POTENTIALLY UNATTRIBUTED: {len(rows)}"
+        f"above baseline: {delta} | attributed in osrb-deps.csv: {len(our_keys)} | "
+        f"owner-matched: {owner_matched} | POTENTIALLY UNATTRIBUTED: {len(rows)} | "
+        f"POLICY VIOLATIONS: {len(violations)}"
     )
     for name, version, ptype in rows:
         print(f"  - {ptype:8} {name} {version}")
+    for violation in violations:
+        print(str(violation))
 
     if args.report:
         args.report.write_text(
-            "\n".join(f"{ptype}\t{name}\t{version}" for name, version, ptype in rows)
+            "\n".join(
+                [f"{ptype}\t{name}\t{version}" for name, version, ptype in rows]
+                + [f"policy\t{violation}" for violation in violations]
+            )
             + "\n",
             encoding="utf-8",
         )
@@ -169,6 +291,7 @@ def main(argv: list[str] | None = None) -> int:
             s.write(f"### {hdr}\n\n")
             s.write(f"- above baseline: **{delta}**\n")
             s.write(f"- potentially unattributed: **{len(rows)}**\n\n")
+            s.write(f"- policy violations: **{len(violations)}**\n\n")
             if rows:
                 s.write("| type | name | version |\n|---|---|---|\n")
                 for name, version, ptype in rows:
@@ -176,8 +299,12 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 s.write("✅ every shipped component above the baseline is attributed.\n")
 
-    if rows and args.fail_on_findings:
-        logger.error("%d potentially-unattributed component(s) found", len(rows))
+    if (rows or violations) and args.fail_on_findings:
+        logger.error(
+            "%d unattributed components and %d policy violations",
+            len(rows),
+            len(violations),
+        )
         return 1
     return 0
 

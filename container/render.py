@@ -270,6 +270,13 @@ def _render_context(args, context=None):
         compliance_ecosystems,
         compliance_source_ecosystem_flags,
     ) = _resolve_compliance_inputs(args.framework, args.target, device_key, context)
+    if (
+        args.make_efa
+        and args.target == "runtime"
+        and args.device == "cuda"
+        and args.framework in ("vllm", "sglang", "trtllm")
+    ):
+        compliance_base_stage = "pre_efa"
     return dict(
         framework=args.framework,
         device=args.device,
@@ -293,9 +300,9 @@ def _resolve_compliance_inputs(framework, target, device_key, context):
       - which baseline SBOM file to subtract (may be empty if not captured)
       - which ecosystems to scan. planner is distroless-python: it ships the
         venv (python), the runtime wheel's crates (rust) and a few native
-        binaries, but none of planner_builder's Debian packages — so it drops
-        dpkg to avoid attributing builder-only packages. dash is carried via
-        native and libgomp via the base SBOM instead.
+        binaries, but none of planner_builder's Debian packages. Its generators
+        read a copy of the assembled pre_planner filesystem, including a full
+        supplemental scan, instead of attributing builder-only packages.
     All depend on `target` + `framework` + `device_key`, so the lookup lives
     here rather than being repeated as Jinja expressions per template.
     """

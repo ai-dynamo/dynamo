@@ -61,12 +61,44 @@
 #     UCX, NIXL, gdrcopy, libfabric, etcd, nats-server) per native_packages.yaml's
 #     per-image `images:` lists; make_efa adds the EFA-only entries.
 
+{% if make_efa and target == "runtime" and device == "cuda" and framework in ["vllm", "sglang", "trtllm"] %}
+# Install EFA before discovering dependencies, so the inventory and license gate
+# include the installer packages and the optional NIXL plugin that actually ship.
+{% include "templates/aws.Dockerfile" %}
+{% endif %}
+
+{% set shipped_inventory = target in ["frontend", "planner"] or (target == "runtime" and framework in ["vllm", "sglang", "trtllm"]) %}
+{% if shipped_inventory %}
+# Pinned scanner is a build helper only. The final image copies /legal, never
+# this stage's tools. One discovery pass supplements ecosystem generators;
+# the independent CI audit still scans the final image separately.
+FROM anchore/syft:v1.54.1@sha256:3eb5379ba7b409c3f4069b686110527af0c47df993fa5c10d13e7cf34f49b1aa AS compliance_cataloger
+
+{% endif %}
 FROM {{ compliance_base_stage }} AS licenses
 
 USER root
 RUN mkdir -p /legal /sboms
 COPY --chown=root:0 container/compliance /opt/compliance
 ENV PYTHONPATH=/opt
+{% if target == "planner" %}
+# The planner uses a separate distroless runtime base. Inspect that assembled
+# filesystem without executing it or attributing the builder's compiler/tools.
+COPY --from=pre_planner / /opt/shipped-root/
+{% endif %}
+{% if shipped_inventory %}
+COPY --from=compliance_cataloger /syft /opt/compliance/bin/syft
+# Retain actual upstream license contents. Go binaries expose module versions
+# but do not embed their dependency licenses; resolve those exact versions.
+RUN SYFT_GOLANG_SEARCH_REMOTE_LICENSES=true SYFT_LICENSE_CONTENT=all \
+    /opt/compliance/bin/syft dir:/{% if target == "planner" %}opt/shipped-root{% endif %} \
+      --select-catalogers 'installed,+rust-cargo-lock-cataloger' \
+      --exclude './proc/**' --exclude './sys/**' --exclude './dev/**' \
+      --exclude './tmp/**' --exclude './run/**' --exclude './home/runner/**' \
+      --exclude './__w/**' --exclude './__e/**' --exclude './github/**' \
+      --exclude './opt/compliance/**' --exclude './legal/**' --exclude './sboms/**' \
+      -o syft-json=/tmp/shipped.syft.json
+{% endif %}
 
 # Real crate LICENSE files harvested from the cargo registry in wheel_builder
 # (empty when none were harvested -- the rust generator then falls back to
@@ -108,10 +140,17 @@ ARG TARGETARCH
 # `pip --system`, sglang via `pip --break-system-packages`). Pick the matching
 # generator flag so it always finds the deps — passing an empty
 # `--venv ${VIRTUAL_ENV}` is what broke system-Python images.
-RUN {% if framework == "sglang" %}PKG_ARG="--site-packages $(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"{% else %}if [ -n "${VIRTUAL_ENV:-}" ]; then PKG_ARG="--venv ${VIRTUAL_ENV}"; else PKG_ARG="--site-packages $(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"; fi{% endif %} && \
-    python3 -m compliance.generators \
-    --ecosystem {{ compliance_ecosystems }} \
-    ${PKG_ARG} \
+RUN {% if target == "planner" %}PKG_ARG="--venv /opt/shipped-root/opt/dynamo/venv"{% elif framework == "sglang" %}PKG_ARG="--site-packages $(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"{% else %}if [ -n "${VIRTUAL_ENV:-}" ]; then PKG_ARG="--venv ${VIRTUAL_ENV}"; else PKG_ARG="--site-packages $(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"; fi{% endif %} && \
+    set -- && \
+{% if shipped_inventory %}    for site in {% if target == "planner" %}/opt/shipped-root{% endif %}/usr/local/lib/python*/dist-packages {% if target == "planner" %}/opt/shipped-root{% endif %}/usr/local/lib/python*/site-packages {% if target == "planner" %}/opt/shipped-root{% endif %}/usr/lib/python*/dist-packages; do \
+        if [ -d "$site" ]; then set -- "$@" --site-packages "$site"; fi; \
+    done && \
+{% endif %}    python3 -m compliance.generators \
+{% if shipped_inventory %}    --shipped-sbom /tmp/shipped.syft.json \
+{% if target == "planner" %}    --shipped-root /opt/shipped-root \
+{% endif %}    --supplemental-sources /sboms/supplemental-sources \
+{% endif %}    --ecosystem {{ compliance_ecosystems }} \
+    ${PKG_ARG} "$@" \
 {% if target == "frontend" %}    --rust-sbom /tmp/sbom-rust-epp.cdx.json \
 {% endif %}    --rust-licenses-dir /tmp/rust-licenses \
     --output-dir /legal \
@@ -141,7 +180,7 @@ RUN python3 -m compliance.policy.validate \
 # stack. Enable both together if that changes.
 {% if device == "cuda" %}
 RUN python3 -m compliance.scan_codecs \
-        --root / \
+        --root /{% if target == "planner" %}opt/shipped-root{% endif %} \
         --policy /opt/compliance/policy/codec_policy.yaml \
         --sbom /legal/osrb.cdx.json \
         --image {{ framework }}-{{ target }} \
@@ -180,6 +219,13 @@ ENV PYTHONPATH=/opt
 COPY --from=wheel_builder /tmp/native-sources/ /opt/native-sources/
 COPY --from=go_tools_builder /out/native-sources/ /opt/native-sources/
 COPY --from=wheel_builder /tmp/dynamo-vendor-full/ /opt/dynamo-vendor-full/
+{% if shipped_inventory %}
+# Supplemental copyleft sources follow the existing release source-archive
+# path. They do not inflate runtime images or create recursively scanned
+# dependencies inside /legal. Provenance links each archive to its inventory.
+COPY --from=licenses /sboms/supplemental-sources/ /sources/supplemental/
+COPY --from=licenses /legal/shipped-provenance.json /sources/supplemental/provenance.json
+{% endif %}
 {% if target == "frontend" %}
 # Same SBOM the licenses stage uses, here to select /epp's crates out of the
 # vendor tree. They are already vendored -- wheel_builder runs `cargo vendor`

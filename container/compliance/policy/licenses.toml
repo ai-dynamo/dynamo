@@ -236,8 +236,8 @@ allow = [
   "Libpng",                           # libpng16 — libpng's own permissive license
 ]
 
-# Hard denies: never ship these regardless of any other consideration.
-# Strong copyleft (would force our Apache-2.0 work to relicense if linked).
+# Denied by default; only the component-specific exceptions below can allow them.
+# Review source, notice, and compatibility obligations for the actual distribution.
 deny = [
   "AGPL-1.0-only",
   "AGPL-1.0-or-later",
@@ -2820,3 +2820,29 @@ type = "native"
 name = "CRIU"
 allow = ["GPL-2.0-only"]
 reason = "Mere aggregation: standalone checkpoint/restore binary the snapshot-agent execs as a subprocess, not linked into Dynamo's Apache-2.0 code. COPYING ships at /legal/CRIU/COPYING; source available via the OSRB archive."
+
+
+# --- PuLP's separately distributed CBC solver ---
+# Applies to the native solver, not the unrelated Rust `cbc` cryptography crate.
+# The collector requires a PuLP RECORD owner and the solver's own EPL-1.0 notice;
+# PuLP's MIT package license is not used to license the bundled executable.
+[[exceptions]]
+type = "native"
+name = "cbc"
+allow = ["EPL-1.0"]
+reason = "Mere aggregation: PuLP bundles CBC as a standalone solver executable, not code linked into Dynamo's Apache-2.0 libraries. The solver's own coin-license.txt is reproduced in NOTICES-Native.txt, and shipped-provenance.json records the owning wheel and file locations. CBC source is published at https://github.com/coin-or/Cbc; redistribution retains EPL source-availability and notice obligations. This exception does not allow EPL generally or apply to the Rust cbc crate."
+
+# Python-cataloger identities for the same system libraries already covered by
+# the python3-apt/python3-gi dpkg exceptions above. Keep GPL/LGPL visible in
+# license-review.json; this does not permit these licenses for other packages.
+[[exceptions]]
+type = "python"
+name = "python-apt"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later"]
+reason = "Same system python3-apt component as the existing dpkg exception; separately cataloged Python identity, mere aggregation."
+
+[[exceptions]]
+type = "python"
+name = "pygobject"
+allow = ["LGPL-2.0-only", "LGPL-2.1-or-later"]
+reason = "Same system python3-gi component as the existing dpkg exception; separately cataloged Python identity, mere aggregation."

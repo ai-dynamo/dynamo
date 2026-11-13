@@ -12,6 +12,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from compliance import diff_osrb_csv
 from compliance.diff_osrb_csv import (
     ADDED,
     BASELINE_UNAVAILABLE,
@@ -28,7 +29,12 @@ from compliance.generators.common import Component, write_merged_csv
 
 # CPU-only unit tests; markers are required by .ai/pytest-guidelines.md
 # (lifecycle / test-type / hardware categories).
-pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
+pytestmark = [
+    pytest.mark.parallel,
+    pytest.mark.pre_merge,
+    pytest.mark.unit,
+    pytest.mark.gpu_0,
+]
 
 
 def _write_csv(path: Path, components: list[Component]) -> Path:
@@ -160,3 +166,24 @@ class TestBaselineUnavailable:
             "change,ecosystem,name,old_version,new_version,old_spdx,new_spdx,source_url,notes\n"
         )
         assert BASELINE_UNAVAILABLE in text
+
+
+@pytest.mark.parametrize("base_argument", [[], ["--base", "missing.csv"]])
+def test_cli_requires_baseline(tmp_path, monkeypatch, base_argument):
+    current = _write_csv(tmp_path / "current.csv", [_c("python", "pkg", "1")])
+    output = tmp_path / "diff.csv"
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "diff_osrb_csv",
+            "--current",
+            str(current),
+            "--output",
+            str(output),
+            *base_argument,
+        ],
+    )
+    with pytest.raises(SystemExit) as result:
+        diff_osrb_csv.main()
+    assert result.value.code == 1
+    assert not output.exists()

@@ -410,6 +410,9 @@ jobs:
   # own authorize gate covers the publish path for every caller.
   invoke-release:
     name: Stage release
+    permissions:
+      contents: read
+      actions: read
     needs: [resolve-target, await-post-merge]
     uses: ./.github/workflows/release.yml
     with:

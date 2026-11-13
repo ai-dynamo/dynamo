@@ -12,32 +12,22 @@ from __future__ import annotations
 import pytest
 from compliance import resolve_diff_base
 from compliance.resolve_diff_base import (
-    find_artifact,
+    BaselineError,
+    find_run_artifact,
     is_release_branch,
     parse_release_tuple,
-    pick_commit_with_artifact,
-    pick_previous_run_sha,
     pick_prior_release_tag,
     resolve,
 )
 
 # CPU-only unit tests; markers are required by .ai/pytest-guidelines.md
 # (lifecycle / test-type / hardware categories).
-pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
-
-
-def _run(
-    run_id: int,
-    head_sha: str,
-    conclusion: str | None = "success",
-    event: str = "schedule",
-) -> dict:
-    return {
-        "id": run_id,
-        "head_sha": head_sha,
-        "event": event,
-        "conclusion": conclusion,
-    }
+pytestmark = [
+    pytest.mark.parallel,
+    pytest.mark.pre_merge,
+    pytest.mark.unit,
+    pytest.mark.gpu_0,
+]
 
 
 class TestParseReleaseTuple:
@@ -91,204 +81,274 @@ class TestPickPriorReleaseTag:
         assert pick_prior_release_tag("1.3.0", tags) == "v1.2.9"
 
 
-class TestPickPreviousRunSha:
-    def test_most_recent_prior_success(self):
-        runs = [
-            _run(100, "cur", conclusion=None),  # current, in progress
-            _run(90, "sha90"),
-            _run(80, "sha80"),
-        ]
-        assert pick_previous_run_sha(100, runs) == "sha90"
-
-    def test_skips_failed_runs(self):
-        runs = [_run(90, "sha90", conclusion="failure"), _run(80, "sha80")]
-        assert pick_previous_run_sha(100, runs) == "sha80"
-
-    def test_skips_successful_manual_runs(self):
-        runs = [
-            _run(95, "manual", event="workflow_dispatch"),
-            _run(90, "scheduled"),
-        ]
-        assert pick_previous_run_sha(100, runs) == "scheduled"
-
-    def test_ignores_runs_at_or_after_current(self):
-        runs = [_run(100, "cur"), _run(110, "future")]
-        assert pick_previous_run_sha(100, runs) is None
-
-    def test_empty(self):
-        assert pick_previous_run_sha(100, []) is None
+def _workflow_run(
+    run_id=90,
+    sha="a" * 40,
+    branch="main",
+    event="push",
+    workflow=".github/workflows/post-merge-ci.yml",
+    conclusion="failure",
+):
+    return {
+        "id": run_id,
+        "head_sha": sha,
+        "head_branch": branch,
+        "event": event,
+        "path": workflow,
+        "workflow_id": 123,
+        "head_repository": {"full_name": "org/repo"},
+        "conclusion": conclusion,
+        "status": "completed",
+    }
 
 
-class TestFetchWorkflowRuns:
-    def test_requests_only_successful_scheduled_runs(self, monkeypatch):
-        responses = iter(
-            [
-                "1234",
-                '[{"id": 90, "head_sha": "scheduled", '
-                '"event": "schedule", "conclusion": "success"}]',
-            ]
+def _artifact(run, *, expired=False, artifact_id=7, prefix="vllm-runtime"):
+    return {
+        "id": artifact_id,
+        "name": f"compliance-{run['head_sha']}-{prefix}",
+        "workflow_run": {"id": run["id"], "head_sha": run["head_sha"]},
+        "size_in_bytes": 100,
+        "expired": expired,
+    }
+
+
+class TestNightlyBaseline:
+    def test_red_previous_run_is_selected_and_bound_to_its_artifact(self, monkeypatch):
+        current = _workflow_run(
+            100, event="schedule", workflow=".github/workflows/nightly-ci.yml"
+        )
+        previous = _workflow_run(
+            90, event="schedule", workflow=".github/workflows/nightly-ci.yml"
+        )
+        manual = _workflow_run(
+            95, event="workflow_dispatch", workflow=".github/workflows/nightly-ci.yml"
         )
         calls = []
 
-        def fake_gh(*args):
-            calls.append(args)
-            return next(responses)
+        def api(endpoint):
+            calls.append(endpoint)
+            if endpoint.endswith("/runs/100"):
+                return current
+            if "/workflows/123/runs?" in endpoint:
+                assert "status=success" not in endpoint
+                return {"workflow_runs": [current, manual, previous]}
+            assert "/runs/90/artifacts?" in endpoint
+            return {"total_count": 1, "artifacts": [_artifact(previous)]}
 
-        monkeypatch.setattr(resolve_diff_base, "_gh", fake_gh)
+        monkeypatch.setattr(resolve_diff_base, "_gh_json", api)
+        result = resolve("nightly", "main", "", "", "org/repo", "100", "vllm-runtime")
+        assert result[0] == previous["head_sha"]
+        assert result[2:] == ("7", "90")
+        assert not any("/actions/artifacts?" in path for path in calls)
 
-        assert resolve_diff_base._fetch_workflow_runs("ai-dynamo/dynamo", 100) == [
-            {
-                "id": 90,
-                "head_sha": "scheduled",
-                "event": "schedule",
-                "conclusion": "success",
-            }
+    def test_skips_missing_artifact_but_never_reuses_another_runs_same_sha(
+        self, monkeypatch
+    ):
+        recent, older = _workflow_run(90), _workflow_run(80)
+        monkeypatch.setattr(
+            resolve_diff_base, "_fetch_workflow_runs", lambda *a: [recent, older]
+        )
+        seen = []
+
+        def api(endpoint):
+            seen.append(endpoint)
+            artifacts = [] if "/90/" in endpoint else [_artifact(older, artifact_id=8)]
+            return {"total_count": len(artifacts), "artifacts": artifacts}
+
+        monkeypatch.setattr(resolve_diff_base, "_gh_json", api)
+        assert resolve("nightly", "main", "", "", "org/repo", "100", "vllm-runtime")[
+            2:
+        ] == ("8", "80")
+        assert len(seen) == 2
+
+    @pytest.mark.parametrize("expired", [False, True])
+    def test_missing_or_expired_baseline_fails(self, monkeypatch, expired):
+        run = _workflow_run()
+        monkeypatch.setattr(resolve_diff_base, "_fetch_workflow_runs", lambda *a: [run])
+        artifacts = [_artifact(run, expired=True)] if expired else []
+        monkeypatch.setattr(
+            resolve_diff_base,
+            "_gh_json",
+            lambda *a: {"total_count": len(artifacts), "artifacts": artifacts},
+        )
+        with pytest.raises(BaselineError, match="no prior scheduled"):
+            resolve("nightly", "main", "", "", "org/repo", "100", "vllm-runtime")
+
+    def test_api_failure_is_not_a_bootstrap(self, monkeypatch):
+        def fail(*args):
+            raise BaselineError("API unavailable")
+
+        monkeypatch.setattr(resolve_diff_base, "_fetch_workflow_runs", fail)
+        with pytest.raises(BaselineError, match="API unavailable"):
+            resolve(
+                "nightly",
+                "main",
+                "",
+                "",
+                "org/repo",
+                "100",
+                "vllm-runtime",
+                allow_bootstrap=True,
+            )
+
+    def test_bootstrap_is_explicit_and_expiry_cannot_use_it(self, monkeypatch):
+        monkeypatch.setattr(resolve_diff_base, "_fetch_workflow_runs", lambda *a: [])
+        result = resolve(
+            "nightly",
+            "main",
+            "",
+            "",
+            "org/repo",
+            "100",
+            "vllm-runtime",
+            allow_bootstrap=True,
+        )
+        assert result[0] == "" and "explicit bootstrap" in result[1]
+        run = _workflow_run()
+        monkeypatch.setattr(resolve_diff_base, "_fetch_workflow_runs", lambda *a: [run])
+        monkeypatch.setattr(
+            resolve_diff_base,
+            "_gh_json",
+            lambda *a: {"total_count": 1, "artifacts": [_artifact(run, expired=True)]},
+        )
+        with pytest.raises(BaselineError, match="expired"):
+            resolve(
+                "nightly",
+                "main",
+                "",
+                "",
+                "org/repo",
+                "100",
+                "vllm-runtime",
+                allow_bootstrap=True,
+            )
+
+
+class TestArtifactProvenance:
+    def test_wrong_run_is_rejected(self, monkeypatch):
+        run = _workflow_run()
+        wrong = _artifact(_workflow_run(95))
+        monkeypatch.setattr(
+            resolve_diff_base,
+            "_gh_json",
+            lambda *a: {"total_count": 1, "artifacts": [wrong]},
+        )
+        with pytest.raises(BaselineError, match="provenance"):
+            find_run_artifact("org/repo", run, "vllm-runtime")
+
+    def test_paginates_and_requires_exact_variant(self, monkeypatch):
+        run = _workflow_run()
+        calls = []
+
+        def api(endpoint):
+            calls.append(endpoint)
+            artifacts = (
+                [_artifact(run, prefix="vllm-runtime-efa")]
+                if endpoint.endswith("&page=1")
+                else [_artifact(run)]
+            )
+            return {"total_count": 101, "artifacts": artifacts}
+
+        monkeypatch.setattr(resolve_diff_base, "_gh_json", api)
+        assert find_run_artifact("org/repo", run, "vllm-runtime") == ("7", False)
+        assert len(calls) == 2
+
+    def test_main_rejects_pr_and_unrelated_workflow_runs(self, monkeypatch):
+        sha = "a" * 40
+        allowed = _workflow_run(80)
+        rejected = [
+            _workflow_run(95, branch="pull-request/7"),
+            _workflow_run(94, workflow=".github/workflows/other.yml"),
+            _workflow_run(93, event="workflow_dispatch"),
         ]
-        assert calls[1][0].endswith("?event=schedule&status=success&per_page=50")
-        assert calls[1][2] == ("[.workflow_runs[] | {id, head_sha, event, conclusion}]")
+        seen = []
 
+        def api(endpoint):
+            seen.append(endpoint)
+            if "/workflows/" in endpoint:
+                return {"workflow_runs": rejected + [allowed]}
+            assert "/runs/80/artifacts?" in endpoint
+            return {"total_count": 1, "artifacts": [_artifact(allowed)]}
 
-class TestPickCommitWithArtifact:
-    def test_returns_first_with_artifact(self):
-        # tip (sha_a) has none; walk back to sha_b which does.
-        have = {"sha_b"}
-        chosen, artifact, saw_error = pick_commit_with_artifact(
-            ["sha_a", "sha_b", "sha_c"],
-            lambda s: (("artifact", "run"), False) if s in have else (None, False),
-        )
-        assert chosen == "sha_b"
-        assert artifact == ("artifact", "run")
-        assert saw_error is False
-
-    def test_tip_has_artifact(self):
-        chosen, artifact, saw_error = pick_commit_with_artifact(
-            ["sha_a", "sha_b"], lambda s: (("artifact", "run"), False)
-        )
-        assert chosen == "sha_a"
-        assert artifact == ("artifact", "run")
-        assert saw_error is False
-
-    def test_none_found(self):
-        chosen, artifact, saw_error = pick_commit_with_artifact(
-            ["sha_a", "sha_b"], lambda s: (None, False)
-        )
-        assert chosen is None
-        assert artifact is None
-        assert saw_error is False
-
-    def test_api_error_then_hit(self):
-        results = {
-            "sha_a": (None, True),
-            "sha_b": (("artifact", "run"), False),
-        }
-        chosen, artifact, saw_error = pick_commit_with_artifact(
-            ["sha_a", "sha_b"], lambda s: results[s]
-        )
-        assert chosen == "sha_b"
-        assert artifact == ("artifact", "run")
-        assert saw_error is True
-
-    def test_all_api_error(self):
-        chosen, artifact, saw_error = pick_commit_with_artifact(
-            ["sha_a", "sha_b"], lambda s: (None, True)
-        )
-        assert chosen is None
-        assert artifact is None
-        assert saw_error is True
-
-    def test_empty(self):
-        assert pick_commit_with_artifact([], lambda s: (None, False)) == (
-            None,
-            None,
-            False,
-        )
-
-
-class TestFindArtifact:
-    def test_returns_exact_artifact_and_run_ids(self, monkeypatch):
-        monkeypatch.setattr(resolve_diff_base, "_gh", lambda *args: "123\t456")
-        assert find_artifact("ai-dynamo/dynamo", "sha", "vllm-runtime") == (
-            ("123", "456"),
-            False,
-        )
-
-    def test_distinguishes_absent_from_api_error(self, monkeypatch):
-        monkeypatch.setattr(resolve_diff_base, "_gh", lambda *args: "absent")
-        assert find_artifact("repo", "sha", "prefix") == (None, False)
-        monkeypatch.setattr(resolve_diff_base, "_gh", lambda *args: None)
-        assert find_artifact("repo", "sha", "prefix") == (None, True)
-
-
-class TestIsReleaseBranch:
-    def test_matches(self):
-        assert is_release_branch("release/1.3.0")
-        assert is_release_branch("release/1.3.0-cosmos3-dev.1")
-
-    def test_non_matches(self):
-        assert not is_release_branch("main")
-        assert not is_release_branch("pull-request/42")
-        assert not is_release_branch("")
+        monkeypatch.setattr(resolve_diff_base, "_gh_json", api)
+        assert resolve_diff_base._find_commit_artifact(
+            "org/repo", sha, "vllm-runtime", "main"
+        )[0] == ("7", "80")
+        assert len(seen) == 2
 
 
 class TestResolveDispatch:
-    """Rule dispatch without touching git: assert which branch of resolve() fires
-    by inspecting the label. Rules 1/2/3 hit git; the fallback and the
-    unparseable-version paths do not."""
+    @pytest.mark.parametrize(
+        "context,branch,base,version",
+        [
+            ("push", "feature", "", ""),
+            ("push", "release/1.3.0", "", ""),
+            ("pr", "pull-request/7", "main", ""),
+            ("nightly", "main", "", ""),
+        ],
+    )
+    def test_missing_context_fails_closed(self, context, branch, base, version):
+        with pytest.raises(BaselineError):
+            resolve(
+                context,
+                branch,
+                base,
+                version,
+                repo="org/repo",
+                artifact_prefix="vllm-runtime",
+            )
 
-    def test_fallback_no_baseline(self):
-        sha, label, artifact_id, run_id = resolve("push", "some-feature-branch", "", "")
-        assert sha == ""
-        assert "unrecognized" in label
-        assert artifact_id == run_id == ""
-
-    def test_release_push_without_version(self):
-        # Release context but no parseable version -> no git rev-list, empty sha.
-        sha, label, _, _ = resolve("push", "release/1.3.0", "", "")
-        assert sha == ""
-        assert "no parseable current version" in label
-
-    def test_pr_to_release_without_version(self):
-        sha, label, _, _ = resolve("pr", "pull-request/7", "release/1.3.0", "")
-        assert sha == ""
-        assert "no parseable current version" in label
-
-    def test_nightly_without_run_id(self):
-        # No run id -> no API call, empty sha, descriptive label.
-        sha, label, _, _ = resolve("nightly", "main", "", "", repo="ai-dynamo/dynamo")
-        assert sha == ""
-        assert "no current run id" in label
-
-    def test_pr_to_main_requires_merge_base(self):
-        sha, label, _, _ = resolve("pr", "pull-request/7", "main", "")
-        assert sha == ""
-        assert label == "PR merge-base unavailable"
-
-    def test_pr_to_main_starts_from_merge_base(self, monkeypatch):
+    def test_pr_keeps_stable_merge_base_and_first_parent_walk(self, monkeypatch):
         calls = []
-
-        def fake_resolve(start_ref, repo, prefix, label="main", limit=25):
-            calls.append((start_ref, repo, prefix, label, limit))
-            return "base", label, "artifact", "run"
-
-        monkeypatch.setattr(resolve_diff_base, "_resolve_main_baseline", fake_resolve)
-
+        monkeypatch.setattr(
+            resolve_diff_base, "_git", lambda *args: calls.append(args) or "tip\nparent"
+        )
+        monkeypatch.setattr(
+            resolve_diff_base,
+            "_find_commit_artifact",
+            lambda repo, sha, prefix, branch: (("7", "80"), False)
+            if sha == "parent"
+            else (None, False),
+        )
         result = resolve(
             "pr",
             "pull-request/7",
             "main",
             "",
-            repo="ai-dynamo/dynamo",
+            "org/repo",
             artifact_prefix="vllm-runtime",
             merge_base_sha="fork-point",
         )
+        assert result[0] == "parent"
+        assert calls == [("rev-list", "--first-parent", "-n", "25", "fork-point")]
 
-        assert result == ("base", "PR merge-base", "artifact", "run")
-        assert calls == [
-            (
-                "fork-point",
-                "ai-dynamo/dynamo",
-                "vllm-runtime",
-                "PR merge-base",
-                25,
-            )
-        ]
+    @pytest.mark.parametrize("prior", ["1.2.1", "1.2.1-vendor-dev.2"])
+    def test_release_uses_prior_tag_and_its_own_postmerge_branch(
+        self, monkeypatch, prior
+    ):
+        monkeypatch.setattr(
+            resolve_diff_base, "_tag_dates", lambda: [("v" + prior, 1), ("v1.3.0", 2)]
+        )
+        monkeypatch.setattr(resolve_diff_base, "_git", lambda *a: "a" * 40)
+        calls = []
+        monkeypatch.setattr(
+            resolve_diff_base,
+            "_find_commit_artifact",
+            lambda *a: calls.append(a) or (("7", "80"), False),
+        )
+        result = resolve(
+            "push",
+            "release/1.3.0",
+            "",
+            "1.3.0",
+            "org/repo",
+            artifact_prefix="vllm-runtime",
+        )
+        assert result[2:] == ("7", "80")
+        assert calls == [("org/repo", "a" * 40, "vllm-runtime", "release/" + prior)]
+
+
+def test_is_release_branch():
+    assert is_release_branch("release/1.3.0")
+    assert is_release_branch("release/1.3.0-cosmos3-dev.1")
+    assert not is_release_branch("main")

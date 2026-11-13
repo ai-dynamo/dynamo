@@ -1505,6 +1505,16 @@ jobs:
       - vllm-efa-build
       - sglang-efa-build
       - trtllm-efa-build
+      - vllm-compliance-audit
+      - sglang-compliance-audit
+      - trtllm-compliance-audit
+      - vllm-efa-compliance-audit
+      - sglang-efa-compliance-audit
+      - trtllm-efa-compliance-audit
+      - frontend-compliance-audit
+      - planner-compliance-audit
+      - sidecar-compliance-audit
+      - operator-compliance-audit
     # !cancelled() lets the job evaluate the explicit gates below rather than
     # implicitly requiring every need to succeed (notify-slack-start is
     # best-effort). All three runtime builds and dynamo-pipeline are gated
@@ -1522,6 +1532,9 @@ jobs:
         && needs.vllm-build.result == 'success'
         && needs.sglang-build.result == 'success'
         && needs.trtllm-build.result == 'success'
+        && needs.vllm-compliance-audit.result == 'success'
+        && needs.sglang-compliance-audit.result == 'success'
+        && needs.trtllm-compliance-audit.result == 'success'
         && needs.dynamo-pipeline.result == 'success'
         && needs.planner-test.result == 'success'
         && (needs.manual-release-approval.result == 'success'
@@ -1530,6 +1543,7 @@ jobs:
     with:
       commit_sha: ${{ needs.resolve-source-sha.outputs.source_sha }}
       nightly: true
+      compliance_run_id: ${{ github.run_id }}
       skip_gitlab_pipeline: ${{ inputs.skip_gitlab_pipeline || false }}
       slack_thread_ts:  ${{ needs.notify-slack-start.outputs.thread_ts }}
       dev_date_utc: ${{ needs.compute-dev-version.outputs.date_utc }}
@@ -1789,3 +1803,152 @@ jobs:
       pipeline_name: Nightly
       runs_on: dynamo-cpu-4gi-amd64
     secrets: inherit
+
+  vllm-compliance-audit:
+    name: vllm-runtime compliance
+    needs: [vllm-build]
+    if: ${{ !cancelled() && needs.vllm-build.result == 'success' }}
+    permissions:
+      contents: read
+      actions: read
+    uses: $/.github/workflows/shared-compliance-audit.yml
+    with:
+      target_tag_plain: vllm-runtime
+      image_ref: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ needs.vllm-build.outputs.image_tag }}
+      source_sha: ${{ github.sha }}
+      producer_run_id: ${{ github.run_id }}
+
+
+  sglang-compliance-audit:
+    name: sglang-runtime compliance
+    needs: [sglang-build]
+    if: ${{ !cancelled() && needs.sglang-build.result == 'success' }}
+    permissions:
+      contents: read
+      actions: read
+    uses: $/.github/workflows/shared-compliance-audit.yml
+    with:
+      target_tag_plain: sglang-runtime
+      image_ref: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ needs.sglang-build.outputs.image_tag }}
+      source_sha: ${{ github.sha }}
+      producer_run_id: ${{ github.run_id }}
+
+
+  trtllm-compliance-audit:
+    name: trtllm-runtime compliance
+    needs: [trtllm-build]
+    if: ${{ !cancelled() && needs.trtllm-build.result == 'success' }}
+    permissions:
+      contents: read
+      actions: read
+    uses: $/.github/workflows/shared-compliance-audit.yml
+    with:
+      target_tag_plain: trtllm-runtime
+      image_ref: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ needs.trtllm-build.outputs.image_tag }}
+      source_sha: ${{ github.sha }}
+      producer_run_id: ${{ github.run_id }}
+
+
+  vllm-efa-compliance-audit:
+    name: vllm-runtime-efa compliance
+    needs: [vllm-efa-build]
+    if: ${{ !cancelled() && needs.vllm-efa-build.result == 'success' }}
+    permissions:
+      contents: read
+      actions: read
+    uses: $/.github/workflows/shared-compliance-audit.yml
+    with:
+      target_tag_plain: vllm-runtime-efa
+      image_ref: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ needs.vllm-efa-build.outputs.image_tag }}
+      source_sha: ${{ github.sha }}
+      producer_run_id: ${{ github.run_id }}
+
+
+  sglang-efa-compliance-audit:
+    name: sglang-runtime-efa compliance
+    needs: [sglang-efa-build]
+    if: ${{ !cancelled() && needs.sglang-efa-build.result == 'success' }}
+    permissions:
+      contents: read
+      actions: read
+    uses: $/.github/workflows/shared-compliance-audit.yml
+    with:
+      target_tag_plain: sglang-runtime-efa
+      image_ref: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ needs.sglang-efa-build.outputs.image_tag }}
+      source_sha: ${{ github.sha }}
+      producer_run_id: ${{ github.run_id }}
+
+
+  trtllm-efa-compliance-audit:
+    name: trtllm-runtime-efa compliance
+    needs: [trtllm-efa-build]
+    if: ${{ !cancelled() && needs.trtllm-efa-build.result == 'success' }}
+    permissions:
+      contents: read
+      actions: read
+    uses: $/.github/workflows/shared-compliance-audit.yml
+    with:
+      target_tag_plain: trtllm-runtime-efa
+      image_ref: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ needs.trtllm-efa-build.outputs.image_tag }}
+      source_sha: ${{ github.sha }}
+      producer_run_id: ${{ github.run_id }}
+
+
+  frontend-compliance-audit:
+    name: dynamo-frontend compliance
+    needs: [frontend-build]
+    if: ${{ !cancelled() && needs.frontend-build.result == 'success' }}
+    permissions:
+      contents: read
+      actions: read
+    uses: $/.github/workflows/shared-compliance-audit.yml
+    with:
+      target_tag_plain: dynamo-frontend
+      image_ref: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ needs.frontend-build.outputs.image_tag }}
+      source_sha: ${{ github.sha }}
+      producer_run_id: ${{ github.run_id }}
+
+
+  planner-compliance-audit:
+    name: dynamo-planner compliance
+    needs: [planner-build]
+    if: ${{ !cancelled() && needs.planner-build.result == 'success' }}
+    permissions:
+      contents: read
+      actions: read
+    uses: $/.github/workflows/shared-compliance-audit.yml
+    with:
+      target_tag_plain: dynamo-planner
+      image_ref: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ needs.planner-build.outputs.image_tag }}
+      source_sha: ${{ github.sha }}
+      producer_run_id: ${{ github.run_id }}
+
+
+  sidecar-compliance-audit:
+    name: dynamo-sidecar compliance
+    needs: [sidecar-build]
+    if: ${{ !cancelled() && needs.sidecar-build.result == 'success' }}
+    permissions:
+      contents: read
+      actions: read
+    uses: $/.github/workflows/shared-compliance-audit.yml
+    with:
+      target_tag_plain: dynamo-sidecar
+      image_ref: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ needs.sidecar-build.outputs.image_tag }}
+      source_sha: ${{ github.sha }}
+      producer_run_id: ${{ github.run_id }}
+
+
+  operator-compliance-audit:
+    name: operator compliance
+    needs: [operator-build]
+    if: ${{ !cancelled() && needs.operator-build.result == 'success' }}
+    permissions:
+      contents: read
+      actions: read
+    uses: $/.github/workflows/shared-compliance-audit.yml
+    with:
+      target_tag_plain: operator
+      image_ref: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ github.sha }}-operator-nightly
+      source_sha: ${{ github.sha }}
+      producer_run_id: ${{ github.run_id }}

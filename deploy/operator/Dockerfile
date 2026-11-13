@@ -56,8 +56,10 @@ RUN make test
 # Build stage - depends on successful lint and test
 FROM base AS builder
 
-RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -o manager ./cmd/main.go && \
-    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -o crd-apply ./cmd/crd-apply/main.go && \
+# Package builds retain the first-party import path in Go's embedded build info.
+# Loose-file builds record command-line-arguments, which cannot establish ownership.
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -o manager ./cmd && \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -o crd-apply ./cmd/crd-apply && \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o dgdr-run-publisher ./cmd/dgdr-run-publisher && \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o dgd-apply-overrides ./cmd/dgd-apply-overrides
 
@@ -126,7 +128,8 @@ RUN --mount=type=cache,target=/go/pkg/mod,sharing=shared \
 FROM ${DOCKER_PROXY}library/python:3.12-slim AS licenses
 
 WORKDIR /
-RUN mkdir -p /legal /sboms
+RUN pip install --no-cache-dir PyYAML==6.0.3 \
+    && mkdir -p /legal /sboms
 # Copy the contents of container/compliance/ into /opt/compliance/. With
 # PYTHONPATH=/opt, python3 -m compliance.<sub> resolves to /opt/compliance/<sub>/.
 COPY --from=compliance . /opt/compliance

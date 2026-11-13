@@ -18,6 +18,7 @@ from compliance.check_pynvvideocodec import DEFAULT_POLICY, GuardError, check, m
 from compliance.scan_codecs import CodecPolicy
 
 pytestmark = [
+    pytest.mark.parallel,
     pytest.mark.pre_merge,
     pytest.mark.post_merge,
     pytest.mark.gpu_0,

@@ -12,9 +12,8 @@ The OSRB CSV is the cross-ecosystem ``osrb-deps.csv`` written by
 This tool compares a *current* CSV against a *base* CSV and emits a diff CSV
 that notes exactly four kinds of change: additions, version bumps, license
 changes, and removals (a single dependency may be both a version bump and a
-license change). It never fails on a missing base: when ``--base`` is omitted or
-empty, it writes a single ``baseline_unavailable`` row carrying ``--baseline-label``
-so a diff file always ships alongside the full CSV.
+license change). A missing base fails closed. An intentional first-of-kind
+comparison requires ``--allow-bootstrap`` and records ``baseline_bootstrap``.
 
 Usage:
     diff_osrb_csv.py --current cur.csv --base base.csv --output out.diff.csv
@@ -51,6 +50,7 @@ VERSION_CHANGED = "version_changed"
 LICENSE_CHANGED = "license_changed"
 REMOVED = "removed"
 BASELINE_UNAVAILABLE = "baseline_unavailable"
+BASELINE_BOOTSTRAP = "baseline_bootstrap"
 
 CHANGE_ORDER = {
     ADDED: 0,
@@ -247,7 +247,7 @@ def main() -> None:
     parser.add_argument(
         "--base",
         default="",
-        help="Path to the baseline OSRB CSV (omit/empty for the baseline_unavailable marker)",
+        help="Path to the baseline OSRB CSV; required unless deliberately bootstrapping",
     )
     parser.add_argument(
         "--output", "-o", required=True, help="Path to write the diff CSV"
@@ -256,6 +256,11 @@ def main() -> None:
         "--baseline-label",
         default="",
         help="Human label for the baseline (used in the baseline_unavailable marker row)",
+    )
+    parser.add_argument(
+        "--allow-bootstrap",
+        action="store_true",
+        help="Explicit first-of-kind bootstrap without a --base",
     )
     args = parser.parse_args()
 
@@ -267,11 +272,23 @@ def main() -> None:
     output_path = Path(args.output)
     base_path = Path(args.base) if args.base else None
 
-    if base_path is None or not base_path.is_file():
-        reason = "no --base given" if base_path is None else f"missing: {base_path}"
-        print(f"Baseline unavailable ({reason}); writing marker diff.", file=sys.stderr)
-        write_diff_csv(baseline_unavailable_rows(args.baseline_label), output_path)
+    if base_path is None:
+        if not args.allow_bootstrap:
+            parser.exit(
+                1,
+                "Baseline required; use --allow-bootstrap only for an intentional first-of-kind build.\n",
+            )
+        rows = baseline_unavailable_rows(args.baseline_label)
+        rows[0]["change"] = BASELINE_BOOTSTRAP
+        rows[0][
+            "notes"
+        ] = "Explicit first-of-kind bootstrap; no comparison baseline exists"
+        write_diff_csv(rows, output_path)
         return
+    if not base_path.is_file():
+        parser.exit(1, f"Selected baseline does not exist: {base_path}\n")
+    if args.allow_bootstrap:
+        parser.exit(1, "Bootstrap cannot bypass a selected baseline.\n")
 
     rows = compute_diff(read_osrb_csv(current_path), read_osrb_csv(base_path))
     write_diff_csv(rows, output_path)
