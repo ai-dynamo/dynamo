@@ -252,6 +252,13 @@ repos:
       additional_dependencies: [packaging, pytest]
       pass_filenames: false
       always_run: true
+    - id: mooncake-floor-consistency
+      name: Check the Mooncake transfer engine spec is consistent
+      entry: python3 tests/dependencies/test_mooncake_floor_consistency.py
+      language: python
+      additional_dependencies: [packaging, pytest]
+      pass_filenames: false
+      always_run: true
     - id: ffmpeg-version-consistency
       name: Check the in-tree FFmpeg version is declared consistently
       entry: python3 tests/dependencies/test_ffmpeg_version_consistency.py
