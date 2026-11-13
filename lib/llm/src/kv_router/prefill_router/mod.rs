@@ -15,7 +15,9 @@ use dynamo_runtime::{
     error::{DynamoError, ErrorClass, ErrorType, match_error_chain},
     pipeline::{
         AsyncEngineContextProvider, Context, ManyOut, Operator, ResponseStream, RouterMode,
-        ServerStreamingEngine, SingleIn, async_trait, propagate_first_response_guard,
+        ServerStreamingEngine, SingleIn, async_trait,
+        network::egress::dispatch_observer::propagate_dispatch_observer,
+        propagate_first_response_guard,
     },
     protocols::{EndpointId, annotated::Annotated},
 };
@@ -786,6 +788,7 @@ fn independent_prefill_context(
     let mut prefill =
         Context::with_id_and_metadata(request, source.id().to_string(), source.metadata().clone());
     propagate_first_response_guard(source, &mut prefill)?;
+    propagate_dispatch_observer(source, &mut prefill)?;
     Ok(prefill)
 }
 
@@ -1213,7 +1216,20 @@ mod tests {
             let request = query_only_request();
             let mut source = Context::new(());
             source.insert_metadata("traceparent", "test-trace");
+            let dispatches = Arc::new(AtomicUsize::new(0));
+            let observed = dispatches.clone();
+            dynamo_runtime::pipeline::network::egress::dispatch_observer::attach_dispatch_observer(
+                &mut source,
+                move || {
+                    observed.fetch_add(1, Ordering::SeqCst);
+                },
+            );
             let prefill = independent_prefill_context(request, &source).unwrap();
+            dynamo_runtime::pipeline::network::egress::dispatch_observer::notify_dispatch(&prefill)
+                .unwrap();
+            dynamo_runtime::pipeline::network::egress::dispatch_observer::notify_dispatch(&source)
+                .unwrap();
+            assert_eq!(dispatches.load(Ordering::SeqCst), 1);
             assert_eq!(prefill.id(), source.id());
             assert_eq!(prefill.metadata(), source.metadata());
 

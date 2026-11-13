@@ -2194,6 +2194,16 @@ mod tests {
     };
     use serde::{Deserialize, Serialize};
 
+    fn observed_request() -> (SingleIn<u64>, Arc<AtomicUsize>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = calls.clone();
+        let mut request = SingleIn::new(42u64);
+        super::super::dispatch_observer::attach_dispatch_observer(&mut request, move || {
+            observed.fetch_add(1, Ordering::SeqCst);
+        });
+        (request, calls)
+    }
+
     /// A stand-in for the router-mode plugins, which own and test the real algorithms. It
     /// rotates through the instances, or takes the least loaded (first on ties) when it reads
     /// load, so these tests exercise transport, occupancy and fallback.
@@ -2920,8 +2930,9 @@ mod tests {
             .await
             .unwrap();
         let state = router.occupancy_state.clone().unwrap();
+        let (request, dispatches) = observed_request();
         let result = router
-            .select_and_dispatch_exact(SingleIn::new(42), None, |_, _| {
+            .select_and_dispatch_exact(request, None, |_, _| {
                 Err::<(), _>(anyhow::anyhow!("metadata preparation failed"))
             })
             .await;
@@ -2932,6 +2943,7 @@ mod tests {
             0,
             "preparation failure must release the selected worker"
         );
+        assert_eq!(dispatches.load(Ordering::SeqCst), 0);
         rt.shutdown();
     }
 
@@ -2991,11 +3003,10 @@ mod tests {
             .await
             .unwrap();
 
-        let unary_error = router
-            .direct(SingleIn::new(42), stale_id)
-            .await
-            .unwrap_err();
+        let (request, dispatches) = observed_request();
+        let unary_error = router.direct(request, stale_id).await.unwrap_err();
         assert_cannot_connect(&unary_error);
+        assert_eq!(dispatches.load(Ordering::SeqCst), 0);
 
         let input: ManyIn<u64> =
             Context::new(RequestStream::new(Box::pin(tokio_stream::iter(vec![1u64]))));
@@ -3053,8 +3064,10 @@ mod tests {
             .await
             .unwrap();
 
-        let result = router.generate(SingleIn::new(42u64)).await;
+        let (request, dispatches) = observed_request();
+        let result = router.generate(request).await;
         assert!(result.is_err());
+        assert_eq!(dispatches.load(Ordering::SeqCst), 0);
         let msg = format!("{}", result.unwrap_err());
         // With pre-selection filtering on free_ids, the single-overloaded-worker
         // case is now caught before selection rather than after — the chosen
@@ -3687,6 +3700,7 @@ mod tests {
             &self,
             request: SingleIn<AddressedRequest<u64>>,
         ) -> Result<ManyOut<TestResponse>, Error> {
+            super::super::dispatch_observer::notify_dispatch(&request)?;
             let (addressed, _ctx) = request.transfer(());
             let (payload, address, instance) = addressed.into_parts();
             self.unary
@@ -3749,7 +3763,9 @@ mod tests {
         .unwrap();
 
         // Unary hop reaches the supplied dispatch with the selected worker.
-        let mut stream = router.generate(SingleIn::new(42u64)).await.unwrap();
+        let (request, dispatches) = observed_request();
+        let mut stream = router.generate(request).await.unwrap();
+        assert_eq!(dispatches.load(Ordering::SeqCst), 1);
         while stream.next().await.is_some() {}
         {
             let unary = dispatch.unary.lock().unwrap();

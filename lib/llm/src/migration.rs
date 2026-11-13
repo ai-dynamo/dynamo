@@ -34,7 +34,10 @@ use dynamo_runtime::metrics::prometheus_names::frontend_service;
 use dynamo_runtime::pipeline::{
     AsyncEngineContext, AsyncEngineContextProvider, Context, ManyOut, Operator, PipelineOperator,
     ResponseStream, ServerStreamingEngine, SingleIn, async_trait, attach_first_response_guard,
-    network::egress::route_span::{RouteTraceContext, attach_route_trace_context, error_type_name},
+    network::egress::{
+        dispatch_observer::attach_dispatch_observer,
+        route_span::{RouteTraceContext, attach_route_trace_context, error_type_name},
+    },
 };
 use dynamo_runtime::protocols::annotated::Annotated;
 
@@ -791,11 +794,12 @@ where
             {
                 release.release().await;
             }
-            // Count a migration only when a replacement worker is actually sent the
-            // request, not for failures with no retry budget left.
             if let Some(cause) = migration {
-                self.metrics
-                    .inc_migration(&self.model_name, cause.migration_type);
+                let metrics = self.metrics.clone();
+                let model_name = self.model_name.clone();
+                attach_dispatch_observer(&mut request, move || {
+                    metrics.inc_migration(&model_name, cause.migration_type);
+                });
             }
             let response_stream = self.next_generate.generate(request).await;
             match response_stream {
@@ -1513,6 +1517,9 @@ mod tests {
             &self,
             request: SingleIn<PreprocessedRequest>,
         ) -> Result<ManyOut<Annotated<BackendOutput>>> {
+            dynamo_runtime::pipeline::network::egress::dispatch_observer::notify_dispatch(
+                &request,
+            )?;
             let call_num = self.call_count.fetch_add(1, Ordering::SeqCst);
             if matches!(self.behavior, MockBehavior::FailThenSuccessWithAffinity) {
                 let actual = request
@@ -2053,6 +2060,45 @@ mod tests {
 
         assert!(result.is_err());
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 0);
+        assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 0);
+    }
+
+    #[tokio::test]
+    async fn retry_rejected_before_dispatch_does_not_count_migration() {
+        struct NoWorkers;
+
+        #[async_trait]
+        impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, Error>
+            for NoWorkers
+        {
+            async fn generate(
+                &self,
+                _request: SingleIn<PreprocessedRequest>,
+            ) -> Result<ManyOut<Annotated<BackendOutput>>> {
+                Err(DynamoError::builder()
+                    .error_type(ErrorType::CannotConnect)
+                    .message("no replacement workers available")
+                    .build()
+                    .into())
+            }
+        }
+
+        let metrics = Arc::new(Metrics::new());
+        let result = RetryManager::build(
+            Arc::new(Controller::new("no-workers".to_string())),
+            BTreeMap::new(),
+            create_mock_request(10),
+            Arc::new(NoWorkers),
+            3,
+            None,
+            Arc::new(TEST_MODEL.to_string()),
+            metrics.clone(),
+            None,
+        )
+        .await;
+
+        assert!(result.is_err());
         assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 0);
         assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 0);
     }
@@ -3826,6 +3872,9 @@ mod tests {
                 &self,
                 request: SingleIn<PreprocessedRequest>,
             ) -> Result<ManyOut<Annotated<BackendOutput>>> {
+                dynamo_runtime::pipeline::network::egress::dispatch_observer::notify_dispatch(
+                    &request,
+                )?;
                 let call_num = self.call_count.fetch_add(1, Ordering::SeqCst) as usize;
                 let route_trace = get_route_trace_context(&request)
                     .expect("migration wrapper must attach route trace context");

@@ -4148,6 +4148,7 @@ impl StreamingDispatch<PreprocessedRequest, Annotated<LLMEngineOutput>> for Reje
         &self,
         request: SingleIn<AddressedRequest<PreprocessedRequest>>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+        dynamo_runtime::pipeline::network::egress::dispatch_observer::notify_dispatch(&request)?;
         let (addressed, context) = request.transfer(());
         let (request, _, instance) = addressed.into_parts();
         let worker_id = instance.expect("selected worker instance").id();
@@ -4342,7 +4343,8 @@ async fn worker_overload_stream_migration_releases_and_reselects() {
     let dispatch = Arc::new(RejectFirstDispatch::default());
     let harness =
         two_worker_migration_harness("worker-overload-migration", dispatch.clone(), None).await;
-    let migration = Migration::new(1, None, "test".to_string(), Arc::new(Metrics::new()));
+    let metrics = Arc::new(Metrics::new());
+    let migration = Migration::new(1, None, "test".to_string(), metrics.clone());
 
     let responses: Vec<_> = migration
         .generate(Context::new(request()), harness.engine.clone())
@@ -4354,6 +4356,8 @@ async fn worker_overload_stream_migration_releases_and_reselects() {
     assert_eq!(responses.len(), 1);
     assert!(responses[0].error.is_none());
     assert_eq!(responses[0].data.as_ref().unwrap().token_ids, vec![2]);
+    assert_eq!(metrics.get_migration_ongoing_request_count("test"), 1);
+    assert_eq!(metrics.get_migration_new_request_count("test"), 0);
     let attempts = {
         let attempts = dispatch.attempts.lock().unwrap();
         attempts.clone()
