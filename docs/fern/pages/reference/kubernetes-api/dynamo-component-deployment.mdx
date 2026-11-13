@@ -5,6 +5,10 @@ title: DynamoComponentDeployment (DCD) Reference
 subtitle: Field reference for the DynamoComponentDeployment custom resource — the single Dynamo component that a DynamoGraphDeployment reconciles into pods.
 ---
 
+import { EnumStyles } from "@/components/EnumStyles";
+
+<EnumStyles />
+
 A `DynamoComponentDeployment` (DCD) describes one component of a Dynamo inference graph — a frontend, a worker, a prefill or decode worker, a planner, or an EPP. The [operator](../../kubernetes/installation/install-dynamo.md) reconciles each DCD into a Kubernetes Deployment (or Grove workload) plus its Services, ConfigMaps, and pods.
 
 A DCD is rarely authored on its own. Each entry in a [`DynamoGraphDeployment`](dynamo-graph-deployment.mdx) `spec.components` list is a `DynamoComponentDeploymentSharedSpec`, the same shape documented here under [Shared component spec](#shared-component-spec). The operator creates one child DCD per component. Author a standalone DCD only when you want to manage a single component's lifecycle independently; otherwise define components inside a DGD.
