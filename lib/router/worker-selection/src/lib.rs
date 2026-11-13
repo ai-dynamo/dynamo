@@ -11,7 +11,7 @@
 //! their views, runtime parameter updates, the selection slice of the router config, the
 //! conditional-disaggregation policies, and the LoRA narrowing filter. The kv-transfer source
 //! summary a policy credits fetches with lives in `dynamo-kv-hints`; the kernel builds the
-//! [`WorkerTransferInput`] column from it. The kernel's `WorkerSelector`, its request-to-row
+//! [`WorkerCopyInput`] column from it. The kernel's `WorkerSelector`, its request-to-row
 //! materialization, and the config- and projection-derived columns stay in `lib/router/kv-router`.
 
 pub mod conditional_disagg;
@@ -35,11 +35,12 @@ mod trace;
 pub use context::WorkerSelectionContext;
 pub use error::WorkerSelectionPolicyError;
 pub use hosted::{HostedSelectionRequest, HostedWorkerPicker};
+#[allow(deprecated)]
+pub use inputs::WorkerTransferInput;
 pub use inputs::{
     CacheSnapshot, CandidateData, ResidentBlockSource, ScoredWorkerCandidate, WorkerCacheData,
     WorkerCacheInput, WorkerCacheInputs, WorkerCandidate, WorkerCandidates, WorkerCapacity,
-    WorkerInfo, WorkerInputRows, WorkerInputView, WorkerInputs, WorkerLoadInput,
-    WorkerTransferInput,
+    WorkerCopyInput, WorkerInfo, WorkerInputRows, WorkerInputView, WorkerInputs, WorkerLoadInput,
 };
 pub use policy::{
     CandidatePreparer, CandidateRank, CandidateRowSource, PreparedRows, RankVisitor, RowPick,

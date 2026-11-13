@@ -3,6 +3,9 @@
 
 //! Shared infrastructure for Rust sidecars.
 
+#[cfg(feature = "jemalloc")]
+#[doc(hidden)]
+pub mod allocator;
 mod args;
 mod endpoint;
 mod error;

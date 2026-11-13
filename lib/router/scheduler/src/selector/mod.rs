@@ -37,7 +37,7 @@ use crate::kv_hints::{
 };
 use dynamo_worker_selection::{
     CacheSnapshot, CandidateData, ResidentBlockSource, WorkerCacheData, WorkerCapacity,
-    WorkerInputRows, WorkerTransferInput,
+    WorkerCopyInput, WorkerInputRows,
 };
 pub use dynamo_worker_selection::{
     CandidatePreparer, CandidateRank, CandidateRowSource, PreparedRows, RankVisitor, RowPick,
@@ -50,7 +50,9 @@ use super::types::{KvSchedulerError, SchedulingRequest, SchedulingResponse};
 use crate::protocols::{SelectionLogFields, WorkerConfigLike, WorkerSelectionResult};
 use dynamo_kv_indexer::ResidentBlockCounts;
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
+use dynamo_slot_tracker::WorkerLoadProjection;
 use dynamo_worker_selection::{SelectionTrace, SelectionTraceSpec};
+use rustc_hash::FxHashMap;
 
 /// Low-level selector used by routing hosts.
 ///
@@ -209,6 +211,26 @@ pub struct PreparedCandidates {
     kv_transfer_sources: Option<KvTransferSourceSummary>,
 }
 
+impl PreparedCandidates {
+    /// Fill each row's load from `loads`, a projection the caller read for `request`; see
+    /// [`PreparedRows::fill_loads`].
+    pub(crate) fn fill_loads(
+        &mut self,
+        request: &SchedulingRequest,
+        loads: &FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
+    ) {
+        self.rows.fill_loads(|worker| {
+            WorkerLoadInput::for_worker(loads, worker, || request.unobserved_worker_load())
+        });
+    }
+
+    /// Selection uses the projection [`Self::fill_loads`] read, with the `stale` ranks
+    /// re-read since; see [`PreparedRows::keep_filled_loads`].
+    pub(crate) fn keep_filled_loads(&mut self, stale: &[WorkerWithDpRank]) {
+        self.rows.keep_filled_loads(stale);
+    }
+}
+
 /// Kernel-side preparation: build a policy's rows from the request and worker configuration.
 pub(crate) trait CandidatePreparerExt {
     /// Returns `None` when no rank is eligible, so that selection reports why.
@@ -348,11 +370,7 @@ impl<'a, C: WorkerConfigLike> SelectionRowSource<'a, C> {
     }
 
     /// A row's fetch input; `None` when the request has no transfer candidates.
-    fn kv_transfer_input(
-        &self,
-        worker: WorkerWithDpRank,
-        config: &C,
-    ) -> Option<WorkerTransferInput> {
+    fn kv_transfer_input(&self, worker: WorkerWithDpRank, config: &C) -> Option<WorkerCopyInput> {
         let sources = self.kv_transfer_sources(|| self.eligible_transfer_scope())?;
         let source = config.kv_transfer_keys().target().and_then(|target| {
             sources.source_for(
@@ -361,7 +379,7 @@ impl<'a, C: WorkerConfigLike> SelectionRowSource<'a, C> {
                 self.request.transfer_local_prefix_blocks_for(worker),
             )
         });
-        Some(WorkerTransferInput {
+        Some(WorkerCopyInput {
             source_prefix_blocks: source.map(source_prefix_blocks),
         })
     }
@@ -440,7 +458,7 @@ impl<'a, C: WorkerConfigLike> SelectionRowSource<'a, C> {
             inputs,
             |_, device_overlap_blocks| device_overlap_blocks,
         );
-        if inputs.contains(WorkerInputs::KV_TRANSFER) {
+        if inputs.contains(WorkerInputs::KV_COPY) {
             row.transfer = self.kv_transfer_input(worker, config);
         }
         row

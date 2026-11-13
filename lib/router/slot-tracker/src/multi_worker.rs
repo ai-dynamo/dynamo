@@ -1323,19 +1323,40 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
 
     /// Project every registered rank's load for one request into `projections`. With
     /// `full_ranks`, the pass also counts the ranks past its busy thresholds per worker.
+    /// Returns the load table's version, which changes whenever a rank is added or removed.
     pub fn project_worker_loads_into(
         &self,
         token_sequence: Option<&[SequenceHash]>,
         decay_now: Instant,
         projections: &mut FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
         full_ranks: Option<&mut FullRankCounts>,
-    ) {
+    ) -> u64 {
         self.prompt_registry.project_worker_loads_into(
             token_sequence,
             decay_now,
             projections,
             full_ranks,
-        );
+        )
+    }
+
+    /// Overwrite each of `workers`' entries in `projections` with its entry in
+    /// [`Self::project_worker_loads_into`]. `version` is what that pass returned: false,
+    /// with nothing overwritten, when a rank was added or removed since.
+    pub fn reproject_worker_loads(
+        &self,
+        token_sequence: Option<&[SequenceHash]>,
+        decay_now: Instant,
+        workers: &[WorkerWithDpRank],
+        version: u64,
+        projections: &mut FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
+    ) -> bool {
+        self.prompt_registry.reproject_worker_loads(
+            token_sequence,
+            decay_now,
+            workers,
+            version,
+            projections,
+        )
     }
 
     /// `worker`'s `additional_active_blocks` in a projection of `token_sequence`, computed
@@ -2754,6 +2775,41 @@ mod tests {
                 .copied(),
             Some(Ok(9_000))
         );
+    }
+
+    #[test]
+    fn reprojection_refuses_once_a_rank_is_added_or_removed() {
+        let sequences = make_multi_sequences();
+        let worker = WorkerWithDpRank::new(1, 0);
+        let now = Instant::now();
+        let mut projections = FxHashMap::default();
+        let version = sequences.project_worker_loads_into(None, now, &mut projections, None);
+
+        // A booking changes the rank's load, not the set of ranks.
+        sequences
+            .add_request(
+                SequenceRequest {
+                    request_id: "req".to_string(),
+                    token_sequence: Some(vec![1, 2]),
+                    track_prefill_tokens: true,
+                    expected_output_tokens: None,
+                    prefill_load_hint: None,
+                    worker,
+                    lora_name: None,
+                },
+                now,
+            )
+            .unwrap();
+        assert!(sequences.reproject_worker_loads(None, now, &[worker], version, &mut projections));
+        assert_eq!(projections[&worker].active_requests, 1);
+
+        sequences
+            .register_worker(WorkerDpRange::new(3, 0, 1))
+            .unwrap();
+        assert!(!sequences.reproject_worker_loads(None, now, &[worker], version, &mut projections));
+        // Removing it again does not bring the projected set of ranks back.
+        sequences.unregister_worker(3).unwrap();
+        assert!(!sequences.reproject_worker_loads(None, now, &[worker], version, &mut projections));
     }
 
     #[test]
