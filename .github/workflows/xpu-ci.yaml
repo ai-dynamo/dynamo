@@ -122,6 +122,8 @@ jobs:
             --target test_image \
             --tag "${TEST_IMAGE_TAG}" \
             -f container/Dockerfile.test \
+            --build-context repo-container=container \
+            --build-context repo-github=.github \
             --build-arg BASE_IMAGE=${{ steps.build.outputs.image_tag }} \
             . 2>&1 | tee build-xpu-test.log
 

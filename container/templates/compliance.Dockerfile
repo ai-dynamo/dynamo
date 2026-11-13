@@ -44,6 +44,16 @@
 #   framework, target, make_efa -- already in render context; control
 #                                  ecosystem flags + EFA native attribution.
 
+{% if "dpkg" in compliance_ecosystems.split(",") %}
+# This still executes in the caller's pre-runtime/pre-frontend stage, inherited
+# by the final image. Never trim only the scanner stage: the correction requires
+# these exact packaging changelogs to be absent from the shipped filesystem.
+USER root
+RUN --mount=type=bind,source=./container/compliance,target=/tmp/compliance/compliance,readonly \
+    PYTHONPATH=/tmp/compliance python3 -m compliance.trim_packaging_docs
+USER dynamo
+{% endif %}
+
 #######################################
 ########## Compliance: licenses #######
 #######################################

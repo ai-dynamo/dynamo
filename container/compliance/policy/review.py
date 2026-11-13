@@ -188,11 +188,51 @@ def review_overrides(current: Path, base: Path | None = None) -> dict:
             "overrides"
         ]
         old_grants = {
-            (r["ecosystem"], r["name"], r.get("version"), r["license"]) for r in old
+            (
+                r["ecosystem"],
+                r["name"],
+                r.get("version"),
+                r["license"],
+                r.get("copyright_sha256"),
+                tuple(sorted(r.get("absent_paths", []))),
+            )
+            for r in old
         }
+        current_keys = {row.key for row in records}
+        for previous in old:
+            key = (previous["ecosystem"], previous["name"], previous.get("version"))
+            if (
+                (previous.get("copyright_sha256") or previous.get("absent_paths"))
+                and key not in current_keys
+                and (key[0], key[1], None) in current_keys
+            ):
+                errors.append(
+                    f"Removing scoped override {key} exposes a broader versionless fallback"
+                )
         for row in records:
-            if (*row.key, row.license) not in old_grants:
+            if (
+                *row.key,
+                row.license,
+                row.copyright_sha256,
+                tuple(sorted(row.absent_paths)),
+            ) not in old_grants:
                 missing = scoped_fields(asdict(row))
+                if row.ecosystem == "dpkg" and row.copyright_sha256 is None:
+                    missing.append(
+                        "reviewed copyright_sha256 (predicate removal broadens scope)"
+                    )
+                for previous in old:
+                    if (
+                        previous["ecosystem"],
+                        previous["name"],
+                        previous.get("version"),
+                    ) == row.key and set(previous.get("absent_paths", [])) - set(
+                        row.absent_paths
+                    ):
+                        missing.append(
+                            "preserved absent_paths (predicate removal broadens scope)"
+                        )
+                        break
                 if missing:
                     errors.append(
                         f"Override {row.ecosystem}/{row.name} requires {', '.join(missing)}"

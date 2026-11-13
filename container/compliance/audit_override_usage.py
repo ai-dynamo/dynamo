@@ -228,6 +228,10 @@ def summarize(
             for r in matched
             if r["override_license"] is not None
             and r["override_version"] == record.version
+            and (
+                record.copyright_sha256 is None
+                or r.get("copyright_sha256") == record.copyright_sha256
+            )
         ]
         applied = [r for r in configured if r["applied"]]
         conflicts = []

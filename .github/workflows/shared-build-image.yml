@@ -683,6 +683,8 @@ jobs:
             --platform ${{ inputs.platform }} \
             --target ${TEST_TARGET} \
             -f container/Dockerfile.test \
+            --build-context repo-container=container \
+            --build-context repo-github=.github \
             --build-arg BASE_IMAGE="${IMAGE_URI}" \
             "${TEST_TAG_ARGS[@]}" .
       - name: Show summary

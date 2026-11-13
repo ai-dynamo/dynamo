@@ -1,0 +1,511 @@
+{
+  "schema_version": 1,
+  "review_issue": "https://github.com/ai-dynamo/dynamo/issues/18673",
+  "purpose": "Exact retained binary/header/tool licensing after removing only reviewed non-license packaging changelogs. Full upstream copyright notices remain unchanged. Graphite remains reciprocal; no source-distribution obligation is waived. Third-party notice texts retain their original terms.",
+  "packages": [
+    {
+      "name": "libbpf1",
+      "version": "1:1.3.0-2build2",
+      "license": "LGPL-2.1-only OR BSD-2-Clause",
+      "copyright_sha256": "4d0df00a62374f3992ad0f2ec566838cafb406d11bef776d2667d3aabaa4b430",
+      "copyright_text": "Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/\nUpstream-Name: libbpf\nSource: https://github.com/libbpf/libbpf\n\nFiles:     *\nCopyright: 2013-2015 Alexei Starovoitov <ast@kernel.org>\n           2015 Wang Nan <wangnan0@huawei.com>\n           2015 Huawei Inc.\n           2018, 2019, 2021 Facebook\n           2017 Nicira, Inc.\n           2019 Isovalent, Inc.\n           2019 Netronome Systems, Inc.\n           2003-2013 Thomas Graf <tgraf@suug.ch>\n           2018-2019 Intel Corporation.\n           2022 Meta Platforms, Inc. and affiliates.\nLicense:   LGPL-2.1 or BSD-2-Clause\n\nFiles:     docs/conf.py\n           docs/libbpf_overview.rst\nCopyright: Grant Seltzer <grantseltzer@gmail.com>\nLicense:   GPL-2.0\n\nFiles:     include/uapi/linux/bpf.h\n           include/uapi/linux/bpf_common.h\n           include/uapi/linux/btf.h\n           include/uapi/linux/if_link.h\n           include/uapi/linux/if_xdp.h\n           include/uapi/linux/netlink.h\n           include/uapi/linux/openat2.h\nCopyright: 2011-2014 PLUMgrid, http://plumgrid.com\n           2018 Facebook\n           2018 Intel Corporation.\nLicense:   GPL-2 with Linux-syscall-note exception\n\nFiles:     include/uapi/linux/netdev.h\nCopyright: 1991-2023, Linus Torvalds and many others\nLicense:   GPL-2 with Linux-syscall-note exception OR BSD-3-Clause\n\nFiles:     debian/*\nCopyright: 2018 Ben Hutchings <ben@decadent.org.uk>\n           2018 Hilko Bengen <bengen@debian.org>\n           2018 Luca Boccassi <bluca@debian.org>\n           2020-2023, Sudip Mukherjee <sudipm.mukherjee@gmail.com>\nLicense:   GPL-2+\n\nLicense:   GPL-2.0\n This program is free software; you can redistribute it\n and/or modify it under the terms of the GNU General Public\n License version 2 as published by the Free Software\n Foundation.\n .\n This program is distributed in the hope that it will be\n useful, but WITHOUT ANY WARRANTY; without even the implied\n warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR\n PURPOSE.  See the GNU General Public License for more\n details.\n .\n You should have received a copy of the GNU General Public\n License along with this package; if not, write to the Free\n Software Foundation, Inc., 51 Franklin St, Fifth Floor,\n Boston, MA 02110-1301 USA\n .\n On Debian systems, the full text of the GNU General Public\n License version 2 can be found in the file\n `/usr/share/common-licenses/GPL-2'.\n\nLicense:   GPL-2+\n This package is free software; you can redistribute it and/or modify\n it under the terms of the GNU General Public License as published by\n the Free Software Foundation; either version 2 of the License, or\n (at your option) any later version.\n .\n This package is distributed in the hope that it will be useful,\n but WITHOUT ANY WARRANTY; without even the implied warranty of\n MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the\n GNU General Public License for more details.\n .\n You should have received a copy of the GNU General Public License\n along with this program. If not, see <https://www.gnu.org/licenses/>\n .\n On Debian systems, the complete text of the GNU General\n Public License version 2 can be found in \"/usr/share/common-licenses/GPL-2\".\n\nLicense:   LGPL-2.1\n This program is free software; you can redistribute it and/or\n modify it under the terms of the GNU Lesser General Public\n License as published by the Free Software Foundation;\n version 2.1 of the License (not later!)\n .\n This program is distributed in the hope that it will be useful,\n but WITHOUT ANY WARRANTY; without even the implied warranty of\n MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the\n GNU Lesser General Public License for more details.\n .\n You should have received a copy of the GNU Lesser General Public\n License along with this program; if not,  see <http://www.gnu.org/licenses>\n .\n On Debian systems, the complete text of the GNU Lesser General Public License\n Version 2.1 can be found in `/usr/share/common-licenses/LGPL-2.1'.\n\nLicense:   BSD-2-Clause\n Redistribution and use in source and binary forms, with or without\n modification, are permitted provided that the following conditions\n are met:\n 1. Redistributions of source code must retain the above copyright notice,\n    this list of conditions and the following disclaimer.\n 2. Redistributions in binary form must reproduce the above copyright\n    notice, this list of conditions and the following disclaimer in the\n    documentation and/or other materials provided with the distribution.\n .\n THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS \"AS IS\"\n AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE\n IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE\n ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE\n LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR\n CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF\n SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS\n INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN\n CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)\n ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE\n POSSIBILITY OF SUCH DAMAGE.\n\nLicense:   GPL-2 with Linux-syscall-note exception\n NOTE! This copyright does *not* cover user programs that use kernel services\n by normal system calls - this is merely considered normal use of the kernel,\n and does *not* fall under the heading of \"derived work\". Also note that the\n GPL below is copyrighted by the Free Software Foundation, but the instance of\n code that it refers to (the Linux kernel) is copyrighted by me and others who\n actually wrote it.\n .\n Also note that the only valid version of the GPL as far as the kernel is\n concerned is _this_ particular version of the license (ie v2, not v2.2 or v3.x\n or whatever), unless explicitly otherwise stated.\n .\n Linus Torvalds\n .\n This program is free software; you can redistribute it and/or modify\n it under the terms of the GNU General Public License as published by\n the Free Software Foundation; version 2 of the License.\n .\n This program is distributed in the hope that it will be useful,\n but WITHOUT ANY WARRANTY; without even the implied warranty of\n MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the\n GNU General Public License for more details.\n .\n You should have received a copy of the GNU General Public License\n along with this program; if not, write to the Free Software Foundation, Inc.,\n 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA.\n .\n On Debian and systems the full text of the GNU General Public\n License version 2 can be found in the file\n \"/usr/share/common-licenses/GPL-2\".\n\nLicense:   BSD-3-Clause\n Redistribution and use in source and binary forms, with or without\n modification, are permitted provided that the following conditions are met:\n .\n 1. Redistributions of source code must retain the above copyright notice,\n    this list of conditions and the following disclaimer.\n 2. Redistributions in binary form must reproduce the above copyright notice,\n    this list of conditions and the following disclaimer in the documentation\n    and/or other materials provided with the distribution.\n 3. Neither the name of the copyright holder nor the names of its contributors\n    may be used to endorse or promote products derived from this software without\n    specific prior written permission.\n .\n THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS \"AS IS\" AND\n ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED\n WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.\n IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT,\n INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT\n NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR\n PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,\n WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)\n ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE\n POSSIBILITY OF SUCH DAMAGE.\n",
+      "absent_paths": [
+        "/usr/share/doc/libbpf1/changelog.Debian.gz"
+      ],
+      "binary_packages": [
+        {
+          "architecture": "amd64",
+          "url": "https://archive.ubuntu.com/ubuntu/pool/main/libb/libbpf/libbpf1_1.3.0-2build2_amd64.deb",
+          "deb_sha256": "5654cbb145c2b299472cd208dd06c7dc09bf06cad4c4663fc42a865a51a0d96f",
+          "removed_document": {
+            "path": "/usr/share/doc/libbpf1/changelog.Debian.gz",
+            "sha256": "d43c028a827dad5c03ec4708bba517d98776c96ee1311e9103f1292595201dd8"
+          },
+          "retained_path_count": 3,
+          "retained_paths_sha256": "e0e78d11af9845727c7b61ac6a3606c5f14392597fbb0b934e699e68b8a5ed58",
+          "retained_paths_sample": [
+            "/usr/lib/x86_64-linux-gnu/libbpf.so.1.3.0",
+            "/usr/share/doc/libbpf1/copyright",
+            "/usr/lib/x86_64-linux-gnu/libbpf.so.1"
+          ]
+        },
+        {
+          "architecture": "arm64",
+          "url": "https://ports.ubuntu.com/ubuntu-ports/pool/main/libb/libbpf/libbpf1_1.3.0-2build2_arm64.deb",
+          "deb_sha256": "bd7e0d87cdf6363691abd7b4470b5e43dc8cb91b874f054f6efd9421a7a88099",
+          "removed_document": {
+            "path": "/usr/share/doc/libbpf1/changelog.Debian.gz",
+            "sha256": "d43c028a827dad5c03ec4708bba517d98776c96ee1311e9103f1292595201dd8"
+          },
+          "retained_path_count": 3,
+          "retained_paths_sha256": "7a33f85d116e0644eafcfccba650f005406bcf4b90c359475061a3ec45d39fd2",
+          "retained_paths_sample": [
+            "/usr/lib/aarch64-linux-gnu/libbpf.so.1.3.0",
+            "/usr/share/doc/libbpf1/copyright",
+            "/usr/lib/aarch64-linux-gnu/libbpf.so.1"
+          ]
+        }
+      ],
+      "source_evidence": [
+        {
+          "url": "https://archive.ubuntu.com/ubuntu/pool/main/libb/libbpf/libbpf_1.3.0.orig.tar.gz",
+          "sha256": "11db86acd627e468bc48b7258c1130aba41a12c4d364f78e184fd2f5a913d861",
+          "size": 999282
+        },
+        {
+          "url": "https://archive.ubuntu.com/ubuntu/pool/main/libb/libbpf/libbpf_1.3.0-2build2.debian.tar.xz",
+          "sha256": "cf307f4a37e17847b5cf91b0ed5426c2213a4c0e30a9010a10d4854f23ebe156",
+          "size": 7224
+        }
+      ],
+      "scope_evidence": [
+        "src/Makefile: OBJS and shared-library target",
+        "debian/rules: builds only src/",
+        "debian/libbpf1.install: versioned shared libraries",
+        "include/uapi/linux/bpf.h: Linux-syscall-note"
+      ]
+    },
+    {
+      "name": "libgraphite2-3",
+      "version": "1.3.14-2ubuntu0.24.04.1",
+      "license": "LGPL-2.1-or-later OR MPL-1.1 OR GPL-2.0-or-later",
+      "copyright_sha256": "a33017ba0308c41bdbde4751bff349ab7b26af45fadbb1e3e7ac67c372985572",
+      "copyright_text": "Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/\nUpstream-Name: graphite\nSource: https://github.com/silnrsi/graphite/releases\n\nFiles: *\nCopyright: (C) 2010-2011, SIL International\nLicense: LGPL-2.1+ or MPL-1.1 or GPL-2+\n\nFiles: src/CMakeLists.txt tests/comparerenderer/* tests/featuremap/* tests/nametabletest/* tests/segcache/* tests/graphite.py\nCopyright: (C) 2010-2011, SIL International\nLicense: LGPL-2.1+\n\nFiles: tests/texts/udhr* tests/standards/scheherazade_arb.log tests/standards/charis.log tests/standards/piglatin.log tests/standards/charis_yor.log\nCopyright: © 1996 – 2009 The Office of the High Commissioner for Human Rights\nLicense: public-domain\n\nFiles: contrib/perl/*\nCopyright: Copyright (C) 2011 Simon Cozens <simon@cpan.org>\nLicense: Artistic or GPL-1+\nComment:\n    This program is free software; you can redistribute it and/or modify\n    it under the terms of either:\n    .\n    a) the GNU General Public License as published by the Free Software\n       Foundation; either version 1, or (at your option) any later\n       version, or\n    .\n    b) the \"Artistic License\" which comes with Perl.\n\nFiles: contrib/perl/ppport.h\nCopyright: 2004-2010, Marcus Holland-Moritz <mhx-cpan@gmx.net>\n 2001, Paul Marquess <pmqs@cpan.org> (Version 2.x)\n 1999, Kenneth Albanowski <kjahds@kjahds.com> (Version 1.x)\nLicense: Artistic or GPL-1+\n\nFiles: debian-src/*\nCopyright: 2010 Martin Hosken <martin_hosken@sil.org>\nLicense: LGPL-2.1+\n\nFiles: debian/*\nCopyright: 2010 Martin Hosken <martin_hosken@sil.org>\n           2011 Rene Engelhard <rene@debian.org>\n           2017 Mattia Rizzolo <mattia@debian.org>\nLicense: LGPL-2.1+\n\nFiles: gr2fonttest/gr2FontTest.cpp\nCopyright: Copyright (C) 2005 www.thanlwinsoft.org\nLicense: LGPL-2.1+ or GPL-2+ or MPL-1.1\n\nFiles: tests/fonts/*\nCopyright:\nLicense: custom-sil-open-font-license\n\nLicense: Artistic\n On Debian systems you can find a copy of the Artistic license in\n /usr/share/common-licenses/Artistic\n\nLicense: GPL-1+\n This program is free software; you can redistribute it and/or modify it under\n the terms of the GNU General Public License as published by the Free Software\n Foundation; either version 1, or (at your option) any later version.\n .\n This program is distributed in the hope that it will be useful, but WITHOUT\n ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS\n FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.\n .\n You should have received a copy of the GNU General Public License along with\n this program; if not, write to the Free Software Foundation, Inc., 51 Franklin\n Street Fifth Floor, Boston, MA 02110-1301, USA.\n .\n On Debian systems you can find a local copy of the GNU General Public License\n in /usr/share/common-licenses/GPL-1.\n\nLicense: GPL-2+\n This program is free software; you can redistribute it and/or modify it under\n the terms of the GNU General Public License as published by the Free Software\n Foundation; version 2 of the license, or (at your opinion) any later version.\n .\n This program is distributed in the hope that it will be useful, but WITHOUT\n ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS\n FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.\n .\n You should have received a copy of the GNU General Public License along with\n this program; if not, write to the Free Software Foundation, Inc., 51 Franklin\n Street, Fifth Floor, Boston, MA 02110-1301, USA.\n .\n On Debian systems you can find a local copy of the GNU General Public License\n in /usr/share/common-licenses/GPL-2.\n\nLicense: MPL-1.1\n The contents of this file are subject to the Mozilla Public License Version\n 1.1 (the \"License\"); you may not use this file except in compliance with the\n License. You may obtain a copy of the License at http://www.mozilla.org/MPL/.\n .\n Software distributed under the License is distributed on an \"AS IS\" basis,\n WITHOUT WARRANTY OF ANY KIND, either express or implied. See the License for\n the specific language governing rights and limitations under the License.\n .\n On Debian systems you can find a local copy of the GNU General Public License\n in /usr/share/common-licenses/MPL-1.1.\n\nLicense: LGPL-2.1+\n This library is free software; you can redistribute it and/or modify it under\n the terms of the GNU Lesser General Public License as published by the Free\n Software Foundation; version 2.1 of the license, or (at your option) any later\n version.\n .\n This library is distributed in the hope that it will be useful, but WITHOUT\n ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS\n FOR A PARTICULAR PURPOSE. See the GNU Lesser General Public License for more\n details.\n .\n You should have received a copy of the GNU Lesser General Public License along\n with this library; if not, write to the Free Software Foundation, Inc., 51\n Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.\n .\n On Debian systems you can find a local copy of the GNU Lesser General Public\n License in /usr/share/common-licenses/LGPL-2.1.\n\nLicense: custom-sil-open-font-license\n -----------------------------------------------------------\n SIL OPEN FONT LICENSE Version 1.1 - 26 February 2007\n -----------------------------------------------------------\n .\n PREAMBLE\n The goals of the Open Font License (OFL) are to stimulate worldwide\n development of collaborative font projects, to support the font creation\n efforts of academic and linguistic communities, and to provide a free and\n open framework in which fonts may be shared and improved in partnership\n with others.\n .\n The OFL allows the licensed fonts to be used, studied, modified and\n redistributed freely as long as they are not sold by themselves. The\n fonts, including any derivative works, can be bundled, embedded,\n redistributed and/or sold with any software provided that any reserved\n names are not used by derivative works. The fonts and derivatives,\n however, cannot be released under any other type of license. The\n requirement for fonts to remain under this license does not apply\n to any document created using the fonts or their derivatives.\n .\n DEFINITIONS\n \"Font Software\" refers to the set of files released by the Copyright\n Holder(s) under this license and clearly marked as such. This may\n include source files, build scripts and documentation.\n .\n \"Reserved Font Name\" refers to any names specified as such after the\n copyright statement(s).\n .\n \"Original Version\" refers to the collection of Font Software components as\n distributed by the Copyright Holder(s).\n .\n \"Modified Version\" refers to any derivative made by adding to, deleting,\n or substituting -- in part or in whole -- any of the components of the\n Original Version, by changing formats or by porting the Font Software to a\n new environment.\n .\n \"Author\" refers to any designer, engineer, programmer, technical\n writer or other person who contributed to the Font Software.\n .\n PERMISSION & CONDITIONS\n Permission is hereby granted, free of charge, to any person obtaining\n a copy of the Font Software, to use, study, copy, merge, embed, modify,\n redistribute, and sell modified and unmodified copies of the Font\n Software, subject to the following conditions:\n .\n 1) Neither the Font Software nor any of its individual components,\n in Original or Modified Versions, may be sold by itself.\n .\n 2) Original or Modified Versions of the Font Software may be bundled,\n redistributed and/or sold with any software, provided that each copy\n contains the above copyright notice and this license. These can be\n included either as stand-alone text files, human-readable headers or\n in the appropriate machine-readable metadata fields within text or\n binary files as long as those fields can be easily viewed by the user.\n .\n 3) No Modified Version of the Font Software may use the Reserved Font\n Name(s) unless explicit written permission is granted by the corresponding\n Copyright Holder. This restriction only applies to the primary font name as\n presented to the users.\n .\n 4) The name(s) of the Copyright Holder(s) or the Author(s) of the Font\n Software shall not be used to promote, endorse or advertise any\n Modified Version, except to acknowledge the contribution(s) of the\n Copyright Holder(s) and the Author(s) or with their explicit written\n permission.\n .\n 5) The Font Software, modified or unmodified, in part or in whole,\n must be distributed entirely under this license, and must not be\n distributed under any other license. The requirement for fonts to\n remain under this license does not apply to any document created\n using the Font Software.\n .\n TERMINATION\n This license becomes null and void if any of the above conditions are\n not met.\n .\n DISCLAIMER\n THE FONT SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND,\n EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO ANY WARRANTIES OF\n MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT\n OF COPYRIGHT, PATENT, TRADEMARK, OR OTHER RIGHT. IN NO EVENT SHALL THE\n COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,\n INCLUDING ANY GENERAL, SPECIAL, INDIRECT, INCIDENTAL, OR CONSEQUENTIAL\n DAMAGES, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING\n FROM, OUT OF THE USE OR INABILITY TO USE THE FONT SOFTWARE OR FROM\n OTHER DEALINGS IN THE FONT SOFTWARE.\n",
+      "absent_paths": [
+        "/usr/share/doc/libgraphite2-3/changelog.Debian.gz"
+      ],
+      "binary_packages": [
+        {
+          "architecture": "amd64",
+          "url": "https://archive.ubuntu.com/ubuntu/pool/main/g/graphite2/libgraphite2-3_1.3.14-2ubuntu0.24.04.1_amd64.deb",
+          "deb_sha256": "2413ea0f6670d6610ee7c2f550551d69fa341f4b9c78e20eb397f0d1bbe914cb",
+          "removed_document": {
+            "path": "/usr/share/doc/libgraphite2-3/changelog.Debian.gz",
+            "sha256": "4eaac33f0536d9fb082baba5f20f3b75867c57d3b6eee9c08e796e1d88c33ed5"
+          },
+          "retained_path_count": 4,
+          "retained_paths_sha256": "63fd35d7f5c1b963389028a1dbaacd9a8c92ab655252619ccd3bb6011fecedb8",
+          "retained_paths_sample": [
+            "/usr/lib/x86_64-linux-gnu/libgraphite2.so.3.2.1",
+            "/usr/share/doc/libgraphite2-3/copyright",
+            "/usr/lib/x86_64-linux-gnu/libgraphite2.so.2.0.0",
+            "/usr/lib/x86_64-linux-gnu/libgraphite2.so.3"
+          ]
+        },
+        {
+          "architecture": "arm64",
+          "url": "https://ports.ubuntu.com/ubuntu-ports/pool/main/g/graphite2/libgraphite2-3_1.3.14-2ubuntu0.24.04.1_arm64.deb",
+          "deb_sha256": "52fbc13dfd5e756cda8e033d5f225e733e7b83e908e508703cedeb029bd02a9c",
+          "removed_document": {
+            "path": "/usr/share/doc/libgraphite2-3/changelog.Debian.gz",
+            "sha256": "4eaac33f0536d9fb082baba5f20f3b75867c57d3b6eee9c08e796e1d88c33ed5"
+          },
+          "retained_path_count": 4,
+          "retained_paths_sha256": "bb9447149b65980717562bb865a320652c75eff8ea2433efd7b47edc0b613729",
+          "retained_paths_sample": [
+            "/usr/lib/aarch64-linux-gnu/libgraphite2.so.3.2.1",
+            "/usr/share/doc/libgraphite2-3/copyright",
+            "/usr/lib/aarch64-linux-gnu/libgraphite2.so.2.0.0",
+            "/usr/lib/aarch64-linux-gnu/libgraphite2.so.3"
+          ]
+        }
+      ],
+      "source_evidence": [
+        {
+          "url": "https://archive.ubuntu.com/ubuntu/pool/main/g/graphite2/graphite2_1.3.14.orig.tar.gz",
+          "sha256": "7a3b342c5681921ce2e0c2496509d30b5b078399d5a7bd2358f95166d57d91df",
+          "size": 6629829
+        },
+        {
+          "url": "https://archive.ubuntu.com/ubuntu/pool/main/g/graphite2/graphite2_1.3.14-2ubuntu0.24.04.1.debian.tar.xz",
+          "sha256": "1a860887ab20f97acd841511d2318649cee3a31ad990a150f2999c36afa72693",
+          "size": 15004
+        }
+      ],
+      "scope_evidence": [
+        "COPYING and src/Face.cpp: three alternative licenses",
+        "src/CMakeLists.txt: library C++ source list",
+        "debian/libgraphite2-3.install: versioned shared libraries; CMake/test/Perl sources not installed"
+      ]
+    },
+    {
+      "name": "libibverbs-dev",
+      "version": "50.0-2ubuntu0.2",
+      "license": "(BSD-2-Clause OR GPL-2.0-only) AND (BSD-3-Clause OR GPL-2.0-only) AND MIT AND CC0-1.0",
+      "copyright_sha256": "37f80110080a724e03aa331779884c00860d8a0033cd7ca47030dd0f17794b4b",
+      "copyright_text": "Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/\nUpstream-Name: rdma-core\nUpstream-Contact: Doug Ledford <dledford@redhat.com>,\n                  Leon Romanovsky <Leon@kernel.org>\nSource: https://github.com/linux-rdma/rdma-core\n\nFiles: *\nCopyright: disclaimed\nLicense: BSD-MIT or GPL-2\n\nFiles: debian/*\nCopyright: 2008, Genome Research Ltd\n           2014, Ana Beatriz Guerrero Lopez <ana@debian.org>\n           2015-2016, Jason Gunthorpe <jgunthorpe@obsidianresearch.com>\n           2016-2024, Benjamin Drung <bdrung@ubuntu.com>\n           2016-2017, Talat Batheesh <talatb@mellanox.com>\nLicense: GPL-2+\n This program is free software; you can redistribute it and/or modify\n it under the terms of the GNU General Public License as published by\n the Free Software Foundation; either version 2 of the License, or\n (at your option) any later version.\n .\n This program is distributed in the hope that it will be useful,\n but WITHOUT ANY WARRANTY; without even the implied warranty of\n MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the\n GNU General Public License for more details.\n .\n You should have received a copy of the GNU General Public License along\n with this program; if not, write to the Free Software Foundation, Inc.,\n 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.\n .\n On Debian systems, the full text of the GNU General Public License\n version 2 can be found in the file `/usr/share/common-licenses/GPL-2'.\n\nFiles: CMakeLists.txt\nCopyright: 2015-2017, Obsidian Research Corporation.\nLicense: BSD-MIT or GPL-2\n\nFiles: buildlib/*\nCopyright: 2015-2017, Obsidian Research Corporation.\n           2016-2017 Mellanox Technologies, Inc\nLicense: BSD-MIT or GPL-2\n\nFiles: buildlib/fixup-include/stdatomic.h\nCopyright: 2011 Ed Schouten <ed@FreeBSD.org>\n                David Chisnall <theraven@FreeBSD.org>\nLicense: BSD-2-clause\n\nFiles: ccan/*\nCopyright: unspecified\nLicense: CC0\n\nFiles: ccan/list.*\nCopyright: unspecified\nLicense: MIT\n\nFiles: ibacm/*\nCopyright: 2009-2014, Intel Corporation.\n           2013, Mellanox Technologies LTD.\nLicense: BSD-MIT\n\nFiles: ibacm/man/*\n       ibacm/ibacm.init.in\nCopyright: disclaimed\nLicense: BSD-2-clause\n\nFiles: ibacm/CMakeLists.txt\n       ibacm/ibacm_hosts.data\nCopyright: disclaimed\nLicense: BSD-MIT or GPL-2\n\nFiles: iwpmd/*\nCopyright: 2013-2016, Intel Corporation.\nLicense: BSD-MIT or GPL-2\n\nFiles: kernel-headers/*\nCopyright: disclaimed\nLicense: GPL-2 or BSD-2-clause\n\nFiles: kernel-headers/rdma/rdma_netlink.h\nCopyright: disclaimed\nLicense: GPL-2\n\nFiles: kernel-headers/rdma/hfi/*\nCopyright: disclaimed\nLicense: GPL-2 or BSD-3-clause\n\nFiles: libibumad/*\nCopyright: 2004-2017, Mellanox Technologies Ltd.\n           2004, Infinicon Corporation.\n           2004-2014, Intel Corporation.\n           2004, Topspin Corporation.\n           2004-2009, Voltaire Inc.\n           2013 Lawrence Livermore National Security\n           2013, Oracle and/or its affiliates.\nLicense: BSD-MIT or GPL-2\n\nFiles: libibumad/man/*\nCopyright: disclaimed\nLicense: BSD-2-clause\n\nFiles: libibverbs/*\nCopyright: 2004-2012, Intel Corporation.\n           2004-2005, Topspin Communications.\n           2005-2007, Cisco Systems, Inc.\n           2005, PathScale, Inc.\n           2005, Mellanox Technologies Ltd.\n           2005, Voltaire, Inc.\n           2008, Lawrence Livermore National Laboratory.\nLicense: BSD-MIT or GPL-2\n\nFiles: libibverbs/man/*\n       libibverbs/neigh.h\n       libibverbs/neigh.c\nCopyright: disclaimed\nLicense: BSD-2-clause\n\nFiles: librdmacm/*\nCopyright: 2005-2014, Intel Corporation.\n           2005, Ammasso, Inc.\n           2005, Voltaire Inc.\n           2006, Open Grid Computing, Inc.\n           2014-2015, Mellanox Technologies LTD.\nLicense: BSD-MIT or GPL-2\n\nFiles: librdmacm/examples/cmtime.c\n       librdmacm/examples/rcopy.c\n       librdmacm/examples/rdma_client.c\n       librdmacm/examples/rdma_server.c\n       librdmacm/examples/rdma_xclient.c\n       librdmacm/examples/rdma_xserver.c\n       librdmacm/examples/riostream.c\n       librdmacm/examples/rstream.c\n       librdmacm/examples/udpong.c\nCopyright: 2005-2014, Intel Corporation.\n           2014-2015, Mellanox Technologies LTD.\nLicense: BSD-MIT\n\nFiles: librdmacm/docs/rsocket\nCopyright: disclaimed\nLicense: BSD-2-clause\n\nFiles: librdmacm/man/*\nCopyright: disclaimed\nLicense: BSD-2-clause\n\nFiles: providers/bnxt_re/*\nCopyright: 2015-2017, Broadcom Limited and/or its subsidiaries\nLicense: BSD-2-clause or GPL-2\n\nFiles: providers/cxgb4/*\nCopyright: 2003-2016, Chelsio Communications, Inc.\nLicense: BSD-MIT or GPL-2\n\nFiles: providers/efa/*\n       pyverbs/providers/efa/*\nCopyright: 2019-2024 Amazon.com, Inc. or its affiliates.\nLicense: BSD-2-clause or GPL-2\n\nFiles: providers/erdma/*\nCopyright: 2020-2021, Alibaba Group\nLicense: BSD-MIT or GPL-2\n\nFiles: providers/hfi1verbs/*\nCopyright: 2005 PathScale, Inc.\n           2006-2009 QLogic Corporation\n           2015 Intel Corporation\nLicense: BSD-3-clause or GPL-2\n\nFiles: providers/hns/*\nCopyright: 2016, Hisilicon Limited.\nLicense: BSD-MIT or GPL-2\n\nFiles: providers/ipathverbs/*\nCopyright: 2006-2010, QLogic Corp.\n           2005, PathScale, Inc.\n           2013, Intel Corporation\nLicense: BSD-MIT or GPL-2\n\nFiles: providers/irdma/*\nCopyright: 2015-2023, Intel Corporation.\nLicense: BSD-MIT or GPL-2\n\nFiles: providers/mana/*\nCopyright: 2022, Microsoft Corporation.\nLicense: BSD-MIT or GPL-2\n\nFiles: providers/mlx4/*\nCopyright: 2004-2005, Topspin Communications.\n           2005-2007, Cisco, Inc.\n           2005-2017, Mellanox Technologies Ltd.\nLicense: BSD-MIT or GPL-2\n\nFiles: providers/mlx5/*\nCopyright: 2019, Mellanox Technologies, Inc.\n           2020-2024 Nvidia, Inc.\nLicense: BSD-MIT or GPL-2\n\nFiles: providers/mlx5/man/*.3\n       providers/mlx5/man/*.7\nCopyright: disclaimed\nLicense: BSD-MIT\n\nFiles: providers/mthca/*\nCopyright: 2004-2005, Topspin Communications.\n           2005-2006, Cisco Systems.\n           2005, Mellanox Technologies Ltd.\nLicense: BSD-MIT or GPL-2\n\nFiles: providers/ocrdma/*\nCopyright: 2008-2013, Emulex.\nLicense: BSD-2-clause or GPL-2\n\nFiles: providers/qedr/*\nCopyright: 2015-2016, QLogic Corporation.\nLicense: BSD-MIT or GPL-2\n\nFiles: providers/rxe/*\nCopyright: 2009-2011, System Fabric Works, Inc.\n           2009-2011, Mellanox Technologies Ltd.\n           2006-2007, QLogic Corporation.\n           2005, PathScale, Inc.\nLicense: BSD-MIT or GPL-2\n\nFiles: providers/siw/*\nCopyright: 2008-2019, IBM Corporation.\nLicense: BSD-3-clause or GPL-2\n\nFiles: providers/vmw_pvrdma/*\nCopyright: 2012-2016 VMware, Inc.\nLicense: BSD-2-clause or GPL-2\n\nFiles: rdma-ndd/*\nCopyright: 2004-2016, Intel Corporation.\nLicense: BSD-MIT or GPL-2\n\nFiles: redhat/*\nCopyright: 1996-2013, Red Hat, Inc.\nLicense: GPL-2\n\nFiles: srp_daemon/*\nCopyright: 2005, Topspin Communications.\n           2006, Cisco Systems, Inc.\n           2006, Mellanox Technologies Ltd.\nLicense: BSD-MIT or GPL-2\n\nFiles: srp_daemon/srp_daemon.8.in\nCopyright: 2006 Mellanox Technologies.\nLicense: CPL-1.0 or BSD-2-clause or GPL-2\n\nFiles: srp_daemon/srpd.in\n       srp_daemon/ibsrpdm.8\nCopyright: disclaimed\nLicense: BSD-2-clause\n\nFiles: util/udma_barrier.h\nCopyright: 2005 Topspin Communications.\nLicense: BSD-MIT or GPL-2\n\nLicense: BSD-MIT\n              OpenIB.org BSD license (MIT variant)\n .\n Redistribution and use in source and binary forms, with or without\n modification, are permitted provided that the following conditions are met:\n .\n   - Redistributions of source code must retain the above copyright notice,\n     this list of conditions and the following disclaimer.\n .\n   - Redistributions in binary form must reproduce the above copyright notice,\n     this list of conditions and the following disclaimer in the documentation\n     and/or other materials provided with the distribution.\n .\n THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\n IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\n FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\n AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\n LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\n OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\n SOFTWARE.\n\nLicense: BSD-2-clause\n            OpenIB.org BSD license (FreeBSD Variant)\n .\n Redistribution and use in source and binary forms, with or without\n modification, are permitted provided that the following conditions are met:\n .\n   - Redistributions of source code must retain the above copyright notice,\n     this list of conditions and the following disclaimer.\n .\n   - Redistributions in binary form must reproduce the above copyright notice,\n     this list of conditions and the following disclaimer in the documentation\n     and/or other materials provided with the distribution.\n .\n THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS \"AS IS\"\n AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE\n IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE\n DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE\n FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL\n DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR\n SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER\n CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,\n OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE\n OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.\n\nLicense: BSD-3-clause\n Redistribution and use in source and binary forms, with or without\n modification, are permitted provided that the following conditions\n are met:\n .\n   * Redistributions of source code must retain the above copyright\n     notice, this list of conditions and the following disclaimer.\n   * Redistributions in binary form must reproduce the above copyright\n     notice, this list of conditions and the following disclaimer in\n     the documentation and/or other materials provided with the\n     distribution.\n   * Neither the name of Intel Corporation nor the names of its\n     contributors may be used to endorse or promote products derived\n     from this software without specific prior written permission.\n .\n THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS\n \"AS IS\" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT\n LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR\n A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT\n OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,\n SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT\n LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,\n DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY\n THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT\n (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE\n OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.\n\nLicense: GPL-2\n This program is free software; you can redistribute it and/or modify\n it under the terms of the GNU General Public License as published by\n the Free Software Foundation; version 2 of the License.\n .\n This program is distributed in the hope that it will be useful,\n but WITHOUT ANY WARRANTY; without even the implied warranty of\n MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the\n GNU General Public License for more details.\n .\n You should have received a copy of the GNU General Public License along\n with this program; if not, write to the Free Software Foundation, Inc.,\n 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.\n .\n On Debian systems, the full text of the GNU General Public License\n version 2 can be found in the file `/usr/share/common-licenses/GPL-2'.\n\nLicense: CC0\n The laws of most jurisdictions throughout the world automatically confer\n exclusive Copyright and Related Rights (defined below) upon the creator and\n subsequent owner(s) (each and all, an \"owner\") of an original work of\n authorship and/or a database (each, a \"Work\").\n .\n Certain owners wish to permanently relinquish those rights to a Work for the\n purpose of contributing to a commons of creative, cultural and scientific works\n (\"Commons\") that the public can reliably and without fear of later claims of\n infringement build upon, modify, incorporate in other works, reuse and\n redistribute as freely as possible in any form whatsoever and for any purposes,\n including without limitation commercial purposes. These owners may contribute\n to the Commons to promote the ideal of a free culture and the further\n production of creative, cultural and scientific works, or to gain reputation or\n greater distribution for their Work in part through the use and efforts of\n others.\n .\n For these and/or other purposes and motivations, and without any expectation of\n additional consideration or compensation, the person associating CC0 with a\n Work (the \"Affirmer\"), to the extent that he or she is an owner of Copyright\n and Related Rights in the Work, voluntarily elects to apply CC0 to the Work and\n publicly distribute the Work under its terms, with knowledge of his or her\n Copyright and Related Rights in the Work and the meaning and intended legal\n effect of CC0 on those rights.\n .\n 1. Copyright and Related Rights. A Work made available under CC0 may be\n protected by copyright and related or neighboring rights (\"Copyright and\n Related Rights\"). Copyright and Related Rights include, but are not limited to,\n the following:\n .\n     the right to reproduce, adapt, distribute, perform, display, communicate,\n and translate a Work; moral rights retained by the original author(s) and/or\n performer(s); publicity and privacy rights pertaining to a person's image or\n likeness depicted in a Work; rights protecting against unfair competition in\n regards to a Work, subject to the limitations in paragraph 4(a), below; rights\n protecting the extraction, dissemination, use and reuse of data in a Work;\n database rights (such as those arising under Directive 96/9/EC of the European\n Parliament and of the Council of 11 March 1996 on the legal protection of\n databases, and under any national implementation thereof, including any amended\n or successor version of such directive); and other similar, equivalent or\n corresponding rights throughout the world based on applicable law or treaty,\n and any national implementations thereof.\n .\n 2. Waiver. To the greatest extent permitted by, but not in contravention of,\n applicable law, Affirmer hereby overtly, fully, permanently, irrevocably and\n unconditionally waives, abandons, and surrenders all of Affirmer's Copyright\n and Related Rights and associated claims and causes of action, whether now\n known or unknown (including existing as well as future claims and causes of\n action), in the Work (i) in all territories worldwide, (ii) for the maximum\n duration provided by applicable law or treaty (including future time\n extensions), (iii) in any current or future medium and for any number of\n copies, and (iv) for any purpose whatsoever, including without limitation\n commercial, advertising or promotional purposes (the \"Waiver\"). Affirmer makes\n the Waiver for the benefit of each member of the public at large and to the\n detriment of Affirmer's heirs and successors, fully intending that such Waiver\n shall not be subject to revocation, rescission, cancellation, termination, or\n any other legal or equitable action to disrupt the quiet enjoyment of the Work\n by the public as contemplated by Affirmer's express Statement of Purpose.\n .\n 3. Public License Fallback. Should any part of the Waiver for any reason be\n judged legally invalid or ineffective under applicable law, then the Waiver\n shall be preserved to the maximum extent permitted taking into account\n Affirmer's express Statement of Purpose. In addition, to the extent the Waiver\n is so judged Affirmer hereby grants to each affected person a royalty-free, non\n transferable, non sublicensable, non exclusive, irrevocable and unconditional\n license to exercise Affirmer's Copyright and Related Rights in the Work (i) in\n all territories worldwide, (ii) for the maximum duration provided by applicable\n law or treaty (including future time extensions), (iii) in any current or\n future medium and for any number of copies, and (iv) for any purpose\n whatsoever, including without limitation commercial, advertising or promotional\n purposes (the \"License\"). The License shall be deemed effective as of the date\n CC0 was applied by Affirmer to the Work. Should any part of the License for any\n reason be judged legally invalid or ineffective under applicable law, such\n partial invalidity or ineffectiveness shall not invalidate the remainder of the\n License, and in such case Affirmer hereby affirms that he or she will not (i)\n exercise any of his or her remaining Copyright and Related Rights in the Work\n or (ii) assert any associated claims and causes of action with respect to the\n Work, in either case contrary to Affirmer's express Statement of Purpose.\n .\n 4. Limitations and Disclaimers.\n .\n     No trademark or patent rights held by Affirmer are waived, abandoned,\n surrendered, licensed or otherwise affected by this document.  Affirmer offers\n the Work as-is and makes no representations or warranties of any kind\n concerning the Work, express, implied, statutory or otherwise, including\n without limitation warranties of title, merchantability, fitness for a\n particular purpose, non infringement, or the absence of latent or other\n defects, accuracy, or the present or absence of errors, whether or not\n discoverable, all to the greatest extent permissible under applicable law.\n Affirmer disclaims responsibility for clearing rights of other persons that may\n apply to the Work or any use thereof, including without limitation any person's\n Copyright and Related Rights in the Work. Further, Affirmer disclaims\n responsibility for obtaining any necessary consents, permissions or other\n rights required for any use of the Work.  Affirmer understands and acknowledges\n that Creative Commons is not a party to this document and has no duty or\n obligation with respect to this CC0 or use of the Work.\n\nLicense: MIT\n Permission is hereby granted, free of charge, to any person obtaining a copy\n of this software and associated documentation files (the \"Software\"), to deal\n in the Software without restriction, including without limitation the rights\n to use, copy, modify, merge, publish, distribute, sublicense, and/or sell\n copies of the Software, and to permit persons to whom the Software is\n furnished to do so, subject to the following conditions:\n .\n The above copyright notice and this permission notice shall be included in\n all copies or substantial portions of the Software.\n .\n THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\n IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\n FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\n AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\n LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\n OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN\n THE SOFTWARE.\n\nLicense: CPL-1.0\n THE ACCOMPANYING PROGRAM IS PROVIDED UNDER THE TERMS OF THIS COMMON PUBLIC\n LICENSE (\"AGREEMENT\"). ANY USE, REPRODUCTION OR DISTRIBUTION OF THE PROGRAM\n CONSTITUTES RECIPIENT'S ACCEPTANCE OF THIS AGREEMENT.\n .\n 1. DEFINITIONS\n .\n \"Contribution\" means:\n .\n a) in the case of the initial Contributor, the initial code and\n documentation distributed under this Agreement, and\n .\n b) in the case of each subsequent Contributor:\n .\n i) changes to the Program, and\n .\n ii) additions to the Program;\n .\n where such changes and/or additions to the Program originate from and are\n distributed by that particular Contributor. A Contribution 'originates' from a\n Contributor if it was added to the Program by such Contributor itself or anyone\n acting on such Contributor's behalf. Contributions do not include additions to\n the Program which: (i) are separate modules of software distributed in\n conjunction with the Program under their own license agreement, and (ii) are not\n derivative works of the Program.\n .\n \"Contributor\" means any person or entity that distributes the Program.\n .\n \"Licensed Patents \" mean patent claims licensable by a Contributor which are\n necessarily infringed by the use or sale of its Contribution alone or when\n combined with the Program.\n .\n \"Program\" means the Contributions distributed in accordance with this Agreement.\n .\n \"Recipient\" means anyone who receives the Program under this Agreement,\n including all Contributors.\n .\n 2. GRANT OF RIGHTS\n .\n a) Subject to the terms of this Agreement, each Contributor hereby grants\n Recipient a non-exclusive, worldwide, royalty-free copyright license to\n reproduce, prepare derivative works of, publicly display, publicly perform,\n distribute and sublicense the Contribution of such Contributor, if any, and such\n derivative works, in source code and object code form.\n .\n b) Subject to the terms of this Agreement, each Contributor hereby grants\n Recipient a non-exclusive, worldwide, royalty-free patent license under Licensed\n Patents to make, use, sell, offer to sell, import and otherwise transfer the\n Contribution of such Contributor, if any, in source code and object code form.\n This patent license shall apply to the combination of the Contribution and the\n Program if, at the time the Contribution is added by the Contributor, such\n addition of the Contribution causes such combination to be covered by the\n Licensed Patents. The patent license shall not apply to any other combinations\n which include the Contribution. No hardware per se is licensed hereunder.\n .\n c) Recipient understands that although each Contributor grants the licenses\n to its Contributions set forth herein, no assurances are provided by any\n Contributor that the Program does not infringe the patent or other intellectual\n property rights of any other entity. Each Contributor disclaims any liability to\n Recipient for claims brought by any other entity based on infringement of\n intellectual property rights or otherwise. As a condition to exercising the\n rights and licenses granted hereunder, each Recipient hereby assumes sole\n responsibility to secure any other intellectual property rights needed, if any.\n For example, if a third party patent license is required to allow Recipient to\n distribute the Program, it is Recipient's responsibility to acquire that license\n before distributing the Program.\n .\n d) Each Contributor represents that to its knowledge it has sufficient\n copyright rights in its Contribution, if any, to grant the copyright license set\n forth in this Agreement.\n .\n 3. REQUIREMENTS\n .\n A Contributor may choose to distribute the Program in object code form under its\n own license agreement, provided that:\n .\n a) it complies with the terms and conditions of this Agreement; and\n .\n b) its license agreement:\n .\n i) effectively disclaims on behalf of all Contributors all warranties and\n conditions, express and implied, including warranties or conditions of title and\n non-infringement, and implied warranties or conditions of merchantability and\n fitness for a particular purpose;\n .\n ii) effectively excludes on behalf of all Contributors all liability for\n damages, including direct, indirect, special, incidental and consequential\n damages, such as lost profits;\n .\n iii) states that any provisions which differ from this Agreement are offered\n by that Contributor alone and not by any other party; and\n .\n iv) states that source code for the Program is available from such\n Contributor, and informs licensees how to obtain it in a reasonable manner on or\n through a medium customarily used for software exchange.\n .\n When the Program is made available in source code form:\n .\n a) it must be made available under this Agreement; and\n .\n b) a copy of this Agreement must be included with each copy of the Program.\n .\n Contributors may not remove or alter any copyright notices contained within the\n Program.\n .\n Each Contributor must identify itself as the originator of its Contribution, if\n any, in a manner that reasonably allows subsequent Recipients to identify the\n originator of the Contribution.\n .\n 4. COMMERCIAL DISTRIBUTION\n .\n Commercial distributors of software may accept certain responsibilities with\n respect to end users, business partners and the like. While this license is\n intended to facilitate the commercial use of the Program, the Contributor who\n includes the Program in a commercial product offering should do so in a manner\n which does not create potential liability for other Contributors. Therefore, if\n a Contributor includes the Program in a commercial product offering, such\n Contributor (\"Commercial Contributor\") hereby agrees to defend and indemnify\n every other Contributor (\"Indemnified Contributor\") against any losses, damages\n and costs (collectively \"Losses\") arising from claims, lawsuits and other legal\n actions brought by a third party against the Indemnified Contributor to the\n extent caused by the acts or omissions of such Commercial Contributor in\n connection with its distribution of the Program in a commercial product\n offering. The obligations in this section do not apply to any claims or Losses\n relating to any actual or alleged intellectual property infringement. In order\n to qualify, an Indemnified Contributor must: a) promptly notify the Commercial\n Contributor in writing of such claim, and b) allow the Commercial Contributor to\n control, and cooperate with the Commercial Contributor in, the defense and any\n related settlement negotiations. The Indemnified Contributor may participate in\n any such claim at its own expense.\n .\n For example, a Contributor might include the Program in a commercial product\n offering, Product X. That Contributor is then a Commercial Contributor. If that\n Commercial Contributor then makes performance claims, or offers warranties\n related to Product X, those performance claims and warranties are such\n Commercial Contributor's responsibility alone. Under this section, the\n Commercial Contributor would have to defend claims against the other\n Contributors related to those performance claims and warranties, and if a court\n requires any other Contributor to pay any damages as a result, the Commercial\n Contributor must pay those damages.\n .\n 5. NO WARRANTY\n .\n EXCEPT AS EXPRESSLY SET FORTH IN THIS AGREEMENT, THE PROGRAM IS PROVIDED ON AN\n \"AS IS\" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, EITHER EXPRESS OR\n IMPLIED INCLUDING, WITHOUT LIMITATION, ANY WARRANTIES OR CONDITIONS OF TITLE,\n NON-INFRINGEMENT, MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE. Each\n Recipient is solely responsible for determining the appropriateness of using and\n distributing the Program and assumes all risks associated with its exercise of\n rights under this Agreement, including but not limited to the risks and costs of\n program errors, compliance with applicable laws, damage to or loss of data,\n programs or equipment, and unavailability or interruption of operations.\n .\n 6. DISCLAIMER OF LIABILITY\n .\n EXCEPT AS EXPRESSLY SET FORTH IN THIS AGREEMENT, NEITHER RECIPIENT NOR ANY\n CONTRIBUTORS SHALL HAVE ANY LIABILITY FOR ANY DIRECT, INDIRECT, INCIDENTAL,\n SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING WITHOUT LIMITATION LOST\n PROFITS), HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,\n STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY\n OUT OF THE USE OR DISTRIBUTION OF THE PROGRAM OR THE EXERCISE OF ANY RIGHTS\n GRANTED HEREUNDER, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGES.\n .\n 7. GENERAL\n .\n If any provision of this Agreement is invalid or unenforceable under applicable\n law, it shall not affect the validity or enforceability of the remainder of the\n terms of this Agreement, and without further action by the parties hereto, such\n provision shall be reformed to the minimum extent necessary to make such\n provision valid and enforceable.\n .\n If Recipient institutes patent litigation against a Contributor with respect to\n a patent applicable to software (including a cross-claim or counterclaim in a\n lawsuit), then any patent licenses granted by that Contributor to such Recipient\n under this Agreement shall terminate as of the date such litigation is filed. In\n addition, if Recipient institutes patent litigation against any entity\n (including a cross-claim or counterclaim in a lawsuit) alleging that the Program\n itself (excluding combinations of the Program with other software or hardware)\n infringes such Recipient's patent(s), then such Recipient's rights granted under\n Section 2(b) shall terminate as of the date such litigation is filed.\n .\n All Recipient's rights under this Agreement shall terminate if it fails to\n comply with any of the material terms or conditions of this Agreement and does\n not cure such failure in a reasonable period of time after becoming aware of\n such noncompliance. If all Recipient's rights under this Agreement terminate,\n Recipient agrees to cease use and distribution of the Program as soon as\n reasonably practicable. However, Recipient's obligations under this Agreement\n and any licenses granted by Recipient relating to the Program shall continue and\n survive.\n .\n Everyone is permitted to copy and distribute copies of this Agreement, but in\n order to avoid inconsistency the Agreement is copyrighted and may only be\n modified in the following manner. The Agreement Steward reserves the right to\n publish new versions (including revisions) of this Agreement from time to time.\n No one other than the Agreement Steward has the right to modify this Agreement.\n IBM is the initial Agreement Steward. IBM may assign the responsibility to serve\n as the Agreement Steward to a suitable separate entity. Each new version of the\n Agreement will be given a distinguishing version number. The Program (including\n Contributions) may always be distributed subject to the version of the Agreement\n under which it was received. In addition, after a new version of the Agreement\n is published, Contributor may elect to distribute the Program (including its\n Contributions) under the new version. Except as expressly stated in Sections\n 2(a) and 2(b) above, Recipient receives no rights or licenses to the\n intellectual property of any Contributor under this Agreement, whether\n expressly, by implication, estoppel or otherwise. All rights in the Program not\n expressly granted under this Agreement are reserved.\n .\n This Agreement is governed by the laws of the State of New York and the\n intellectual property laws of the United States of America. No party to this\n Agreement will bring a legal action under this Agreement more than one year\n after the cause of action arose. Each party waives its rights to a jury trial in\n any resulting litigation.\n",
+      "absent_paths": [
+        "/usr/share/doc/libibverbs-dev/changelog.Debian.gz"
+      ],
+      "binary_packages": [
+        {
+          "architecture": "amd64",
+          "url": "https://archive.ubuntu.com/ubuntu/pool/main/r/rdma-core/libibverbs-dev_50.0-2ubuntu0.2_amd64.deb",
+          "deb_sha256": "fb409dc756c1697a83683e43a3ca78cb9eabbc24605391808252b8d8bedf54fc",
+          "removed_document": {
+            "path": "/usr/share/doc/libibverbs-dev/changelog.Debian.gz",
+            "symlink_target": "../libibverbs1/changelog.Debian.gz"
+          },
+          "retained_path_count": 326,
+          "retained_paths_sha256": "d1309f9ad39f7b31687f5a28ca714f88b2a7b6a88db05357ae6c797d72abf9ba",
+          "retained_paths_sample": [
+            "/usr/include/infiniband/arch.h",
+            "/usr/include/infiniband/efadv.h",
+            "/usr/include/infiniband/ib_user_ioctl_verbs.h",
+            "/usr/include/infiniband/manadv.h",
+            "/usr/include/infiniband/mlx4dv.h",
+            "/usr/include/infiniband/mlx5_api.h",
+            "/usr/include/infiniband/mlx5_user_ioctl_verbs.h",
+            "/usr/include/infiniband/mlx5dv.h"
+          ]
+        },
+        {
+          "architecture": "arm64",
+          "url": "https://ports.ubuntu.com/ubuntu-ports/pool/main/r/rdma-core/libibverbs-dev_50.0-2ubuntu0.2_arm64.deb",
+          "deb_sha256": "1880ccb4116c112ccc4e6893f1d53892c0d5c1b307384ad4158c470dbed126e3",
+          "removed_document": {
+            "path": "/usr/share/doc/libibverbs-dev/changelog.Debian.gz",
+            "symlink_target": "../libibverbs1/changelog.Debian.gz"
+          },
+          "retained_path_count": 326,
+          "retained_paths_sha256": "4831caa5e94baebae8560c0d61a0caee287f4881eb27c4ded10a864414ce6098",
+          "retained_paths_sample": [
+            "/usr/include/infiniband/arch.h",
+            "/usr/include/infiniband/efadv.h",
+            "/usr/include/infiniband/ib_user_ioctl_verbs.h",
+            "/usr/include/infiniband/manadv.h",
+            "/usr/include/infiniband/mlx4dv.h",
+            "/usr/include/infiniband/mlx5_api.h",
+            "/usr/include/infiniband/mlx5_user_ioctl_verbs.h",
+            "/usr/include/infiniband/mlx5dv.h"
+          ]
+        }
+      ],
+      "source_evidence": [
+        {
+          "url": "https://archive.ubuntu.com/ubuntu/pool/main/r/rdma-core/rdma-core_50.0.orig.tar.gz",
+          "sha256": "405b9dd551120da9d1b8944c5ad24ab1f478fb13caedf5bf0d47053a6d6e20cc",
+          "size": 1961247
+        },
+        {
+          "url": "https://archive.ubuntu.com/ubuntu/pool/main/r/rdma-core/rdma-core_50.0-2ubuntu0.2.debian.tar.xz",
+          "sha256": "2e061bd7914ff80d8ea82b7fdcd53e8f6da6a401c998c776b5286cd8e6df3224",
+          "size": 45744
+        }
+      ],
+      "scope_evidence": [
+        "COPYING.md: default dual license and library/provider/utility license catalog",
+        "debian/libibverbs-dev.install: headers, archives, pkg-config and upstream manpages",
+        "providers/ipathverbs/ipathverbs.h and providers/hfi1verbs/hfiverbs.h: BSD alternatives",
+        "kernel-headers/rdma/rdma_netlink.h: Linux-syscall-note; not installed by this binary package"
+      ]
+    },
+    {
+      "name": "libfabric1-aws",
+      "version": "2.7.0amzn2.0",
+      "license": "(BSD-2-Clause OR GPL-2.0-only) AND MIT",
+      "copyright_sha256": "5564fb4e70e541a1f33e6ce253aacd727a3b3563631cd9de57e9cf4da04fd9b6",
+      "copyright_text": "Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/\nUpstream-Name: libfabric\nUpstream-Contact: ec2-efa-maintainer <ec2-efa-maintainers@amazon.com>\nSource: https://github.com/aws/libfabric\n\nFiles: *\nCopyright:\n Copyright 2011-2017 Intel Corporation.\n Copyright 2005-2017 Cisco Systems, Inc.\n Copyright 2015-2016, Cray Inc.\n Copyright 2015-2016, Los Alamos National Security, LLC.\n Copyright 2007, Nuova Systems, Inc.\n Copyright 2003-2014, Troy D. Hanson http:troydhanson.github.com/uthash/\n Copyright 2012, Zilong Tan (eric.zltan@gmail.com)\n Copyright 2003-2006, PathScale, Inc.\n Copyright 2006-2012. QLogic Corporation.\n Copyright 2004-2005, Topspin Communications.\n Copyright 2019, Amazon.com, Inc. or its affiliates.\nLicense: BSD-2-clause or GPL-2\n libfabric is licensed under a choice of one of two licenses.  You may\n choose to be licensed under the terms of the GNU General Public\n License (GPL) Version 2, available from the file\n /usr/share/common-licenses/GPL-2 on your Debian system, or the\n BSD license below:\n .\n ==================================================================\n .\n OpenIB.org BSD license\n .\n Redistribution and use in source and binary forms, with or without\n modification, are permitted provided that the following conditions\n are met:\n .\n   * Redistributions of source code must retain the above copyright\n     notice, this list of conditions and the following disclaimer.\n .\n   * Redistributions in binary form must reproduce the above\n     copyright notice, this list of conditions and the following\n     disclaimer in the documentation and/or other materials provided\n     with the distribution.\n .\n THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS\n \"AS IS\" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT\n LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS\n FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE\n COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,\n INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,\n BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;\n LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER\n CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT\n LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN\n ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE\n POSSIBILITY OF SUCH DAMAGE.\n .\n ==================================================================\n\nFiles: include/fasthash.h\n       src/fasthash.c\nCopyright: Copyright (C) 2012 Zilong Tan (eric.zltan@gmail.com)\nLicense: Expat\n Permission is hereby granted, free of charge, to any person\n obtaining a copy of this software and associated documentation\n files (the \"Software\"), to deal in the Software without\n restriction, including without limitation the rights to use, copy,\n modify, merge, publish, distribute, sublicense, and/or sell copies\n of the Software, and to permit persons to whom the Software is\n furnished to do so, subject to the following conditions:\n .\n The above copyright notice and this permission notice shall be\n included in all copies or substantial portions of the Software.\n .\n THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND,\n EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF\n MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND\n NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS\n BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN\n ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN\n CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\n SOFTWARE.\n\nFiles: debian/*\nCopyright: 2016-2017 Q-Leap Networks GmbH <info@q-leap.de>\n           2016 Ana Guerrero López <ana@ekaia.org>\n           2017 Benjamin Drung <bdrung@debian.org>\n           2019 ec2-efa-maintainer <ec2-efa-maintainers@amazon.com>\nLicense: GPL-2+\n This package is free software; you can redistribute it and/or modify\n it under the terms of the GNU General Public License as published by\n the Free Software Foundation; either version 2 of the License, or\n (at your option) any later version.\n .\n This package is distributed in the hope that it will be useful,\n but WITHOUT ANY WARRANTY; without even the implied warranty of\n MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the\n GNU General Public License for more details.\n .\n You should have received a copy of the GNU General Public License\n along with this program. If not, see <http://www.gnu.org/licenses/>\n .\n On Debian systems, the complete text of the GNU General\n Public License version 2 can be found in \"/usr/share/common-licenses/GPL-2\".\n",
+      "absent_paths": [
+        "/usr/share/doc/libfabric1-aws/changelog.gz"
+      ],
+      "binary_packages": [
+        {
+          "architecture": "amd64",
+          "url": "https://efa-installer.amazonaws.com/aws-efa-installer-1.51.0.tar.gz#aws-efa-installer/DEBS/UBUNTU2404/x86_64/libfabric1-aws_2.7.0amzn2.0_amd64.deb",
+          "deb_sha256": "208baccfe201449930a41f1db710b1885388597061c42ff0f50abef162a4a078",
+          "removed_document": {
+            "path": "/usr/share/doc/libfabric1-aws/changelog.gz",
+            "sha256": "ae8ddcdc58d3c5bfb99e8609abb7d8f512d9568c116f86118e0a02a7355e600b"
+          },
+          "retained_path_count": 3,
+          "retained_paths_sha256": "5d07fd7009f13f50e51bd1b0898c602672fb2507f99fe05a1548d416b96f355f",
+          "retained_paths_sample": [
+            "/opt/amazon/efa/lib/libfabric.so.1.33.0",
+            "/usr/share/doc/libfabric1-aws/copyright",
+            "/opt/amazon/efa/lib/libfabric.so.1"
+          ]
+        },
+        {
+          "architecture": "arm64",
+          "url": "https://efa-installer.amazonaws.com/aws-efa-installer-1.51.0.tar.gz#aws-efa-installer/DEBS/UBUNTU2404/aarch64/libfabric1-aws_2.7.0amzn2.0_arm64.deb",
+          "deb_sha256": "5640b249397726583ce233bfaa0ad2d1225a0514bd9ecaae961e891a91f78312",
+          "removed_document": {
+            "path": "/usr/share/doc/libfabric1-aws/changelog.gz",
+            "sha256": "ae8ddcdc58d3c5bfb99e8609abb7d8f512d9568c116f86118e0a02a7355e600b"
+          },
+          "retained_path_count": 3,
+          "retained_paths_sha256": "5d07fd7009f13f50e51bd1b0898c602672fb2507f99fe05a1548d416b96f355f",
+          "retained_paths_sample": [
+            "/opt/amazon/efa/lib/libfabric.so.1.33.0",
+            "/usr/share/doc/libfabric1-aws/copyright",
+            "/opt/amazon/efa/lib/libfabric.so.1"
+          ]
+        }
+      ],
+      "source_evidence": [
+        {
+          "url": "https://github.com/aws/libfabric/blob/4c4ea95fc0b40ef565d030200eb689609bd995db/COPYING",
+          "git_commit": "4c4ea95fc0b40ef565d030200eb689609bd995db"
+        }
+      ],
+      "scope_evidence": [
+        "Upstream COPYING: explicit BSD/GPL choice",
+        "Packaged copyright: MIT fasthash source; GPL2+ scope is debian/*",
+        "Exact data/control archives: upstream library, tools or headers/manpages; no GPL maintainer scripts, only ldconfig trigger for library"
+      ]
+    },
+    {
+      "name": "libfabric-aws-dev",
+      "version": "2.7.0amzn2.0",
+      "license": "(BSD-2-Clause OR GPL-2.0-only) AND MIT",
+      "copyright_sha256": "5564fb4e70e541a1f33e6ce253aacd727a3b3563631cd9de57e9cf4da04fd9b6",
+      "copyright_text": "Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/\nUpstream-Name: libfabric\nUpstream-Contact: ec2-efa-maintainer <ec2-efa-maintainers@amazon.com>\nSource: https://github.com/aws/libfabric\n\nFiles: *\nCopyright:\n Copyright 2011-2017 Intel Corporation.\n Copyright 2005-2017 Cisco Systems, Inc.\n Copyright 2015-2016, Cray Inc.\n Copyright 2015-2016, Los Alamos National Security, LLC.\n Copyright 2007, Nuova Systems, Inc.\n Copyright 2003-2014, Troy D. Hanson http:troydhanson.github.com/uthash/\n Copyright 2012, Zilong Tan (eric.zltan@gmail.com)\n Copyright 2003-2006, PathScale, Inc.\n Copyright 2006-2012. QLogic Corporation.\n Copyright 2004-2005, Topspin Communications.\n Copyright 2019, Amazon.com, Inc. or its affiliates.\nLicense: BSD-2-clause or GPL-2\n libfabric is licensed under a choice of one of two licenses.  You may\n choose to be licensed under the terms of the GNU General Public\n License (GPL) Version 2, available from the file\n /usr/share/common-licenses/GPL-2 on your Debian system, or the\n BSD license below:\n .\n ==================================================================\n .\n OpenIB.org BSD license\n .\n Redistribution and use in source and binary forms, with or without\n modification, are permitted provided that the following conditions\n are met:\n .\n   * Redistributions of source code must retain the above copyright\n     notice, this list of conditions and the following disclaimer.\n .\n   * Redistributions in binary form must reproduce the above\n     copyright notice, this list of conditions and the following\n     disclaimer in the documentation and/or other materials provided\n     with the distribution.\n .\n THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS\n \"AS IS\" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT\n LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS\n FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE\n COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,\n INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,\n BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;\n LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER\n CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT\n LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN\n ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE\n POSSIBILITY OF SUCH DAMAGE.\n .\n ==================================================================\n\nFiles: include/fasthash.h\n       src/fasthash.c\nCopyright: Copyright (C) 2012 Zilong Tan (eric.zltan@gmail.com)\nLicense: Expat\n Permission is hereby granted, free of charge, to any person\n obtaining a copy of this software and associated documentation\n files (the \"Software\"), to deal in the Software without\n restriction, including without limitation the rights to use, copy,\n modify, merge, publish, distribute, sublicense, and/or sell copies\n of the Software, and to permit persons to whom the Software is\n furnished to do so, subject to the following conditions:\n .\n The above copyright notice and this permission notice shall be\n included in all copies or substantial portions of the Software.\n .\n THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND,\n EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF\n MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND\n NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS\n BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN\n ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN\n CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\n SOFTWARE.\n\nFiles: debian/*\nCopyright: 2016-2017 Q-Leap Networks GmbH <info@q-leap.de>\n           2016 Ana Guerrero López <ana@ekaia.org>\n           2017 Benjamin Drung <bdrung@debian.org>\n           2019 ec2-efa-maintainer <ec2-efa-maintainers@amazon.com>\nLicense: GPL-2+\n This package is free software; you can redistribute it and/or modify\n it under the terms of the GNU General Public License as published by\n the Free Software Foundation; either version 2 of the License, or\n (at your option) any later version.\n .\n This package is distributed in the hope that it will be useful,\n but WITHOUT ANY WARRANTY; without even the implied warranty of\n MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the\n GNU General Public License for more details.\n .\n You should have received a copy of the GNU General Public License\n along with this program. If not, see <http://www.gnu.org/licenses/>\n .\n On Debian systems, the complete text of the GNU General\n Public License version 2 can be found in \"/usr/share/common-licenses/GPL-2\".\n",
+      "absent_paths": [
+        "/usr/share/doc/libfabric-aws-dev/changelog.gz"
+      ],
+      "binary_packages": [
+        {
+          "architecture": "amd64",
+          "url": "https://efa-installer.amazonaws.com/aws-efa-installer-1.51.0.tar.gz#aws-efa-installer/DEBS/UBUNTU2404/x86_64/libfabric-aws-dev_2.7.0amzn2.0_amd64.deb",
+          "deb_sha256": "f51fec235714b7c56263623c20181da129ef360e53a2479aeae5b4dee172d4a7",
+          "removed_document": {
+            "path": "/usr/share/doc/libfabric-aws-dev/changelog.gz",
+            "sha256": "ae8ddcdc58d3c5bfb99e8609abb7d8f512d9568c116f86118e0a02a7355e600b"
+          },
+          "retained_path_count": 188,
+          "retained_paths_sha256": "600386700cd9eac3b12da3c3da6d86b913074770f2caf5741028e17d1d811b65",
+          "retained_paths_sample": [
+            "/opt/amazon/efa/include/rdma/fabric.h",
+            "/opt/amazon/efa/include/rdma/fi_atomic.h",
+            "/opt/amazon/efa/include/rdma/fi_cm.h",
+            "/opt/amazon/efa/include/rdma/fi_collective.h",
+            "/opt/amazon/efa/include/rdma/fi_domain.h",
+            "/opt/amazon/efa/include/rdma/fi_endpoint.h",
+            "/opt/amazon/efa/include/rdma/fi_eq.h",
+            "/opt/amazon/efa/include/rdma/fi_errno.h"
+          ]
+        },
+        {
+          "architecture": "arm64",
+          "url": "https://efa-installer.amazonaws.com/aws-efa-installer-1.51.0.tar.gz#aws-efa-installer/DEBS/UBUNTU2404/aarch64/libfabric-aws-dev_2.7.0amzn2.0_arm64.deb",
+          "deb_sha256": "07ff444a7b55c76e480856c0ea7b16dfedf27c79512d701de2f209a87f08cee1",
+          "removed_document": {
+            "path": "/usr/share/doc/libfabric-aws-dev/changelog.gz",
+            "sha256": "ae8ddcdc58d3c5bfb99e8609abb7d8f512d9568c116f86118e0a02a7355e600b"
+          },
+          "retained_path_count": 188,
+          "retained_paths_sha256": "600386700cd9eac3b12da3c3da6d86b913074770f2caf5741028e17d1d811b65",
+          "retained_paths_sample": [
+            "/opt/amazon/efa/include/rdma/fabric.h",
+            "/opt/amazon/efa/include/rdma/fi_atomic.h",
+            "/opt/amazon/efa/include/rdma/fi_cm.h",
+            "/opt/amazon/efa/include/rdma/fi_collective.h",
+            "/opt/amazon/efa/include/rdma/fi_domain.h",
+            "/opt/amazon/efa/include/rdma/fi_endpoint.h",
+            "/opt/amazon/efa/include/rdma/fi_eq.h",
+            "/opt/amazon/efa/include/rdma/fi_errno.h"
+          ]
+        }
+      ],
+      "source_evidence": [
+        {
+          "url": "https://github.com/aws/libfabric/blob/4c4ea95fc0b40ef565d030200eb689609bd995db/COPYING",
+          "git_commit": "4c4ea95fc0b40ef565d030200eb689609bd995db"
+        }
+      ],
+      "scope_evidence": [
+        "Upstream COPYING: explicit BSD/GPL choice",
+        "Packaged copyright: MIT fasthash source; GPL2+ scope is debian/*",
+        "Exact data/control archives: upstream library, tools or headers/manpages; no GPL maintainer scripts, only ldconfig trigger for library"
+      ]
+    },
+    {
+      "name": "libfabric-aws-bin",
+      "version": "2.7.0amzn2.0",
+      "license": "(BSD-2-Clause OR GPL-2.0-only) AND MIT",
+      "copyright_sha256": "5564fb4e70e541a1f33e6ce253aacd727a3b3563631cd9de57e9cf4da04fd9b6",
+      "copyright_text": "Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/\nUpstream-Name: libfabric\nUpstream-Contact: ec2-efa-maintainer <ec2-efa-maintainers@amazon.com>\nSource: https://github.com/aws/libfabric\n\nFiles: *\nCopyright:\n Copyright 2011-2017 Intel Corporation.\n Copyright 2005-2017 Cisco Systems, Inc.\n Copyright 2015-2016, Cray Inc.\n Copyright 2015-2016, Los Alamos National Security, LLC.\n Copyright 2007, Nuova Systems, Inc.\n Copyright 2003-2014, Troy D. Hanson http:troydhanson.github.com/uthash/\n Copyright 2012, Zilong Tan (eric.zltan@gmail.com)\n Copyright 2003-2006, PathScale, Inc.\n Copyright 2006-2012. QLogic Corporation.\n Copyright 2004-2005, Topspin Communications.\n Copyright 2019, Amazon.com, Inc. or its affiliates.\nLicense: BSD-2-clause or GPL-2\n libfabric is licensed under a choice of one of two licenses.  You may\n choose to be licensed under the terms of the GNU General Public\n License (GPL) Version 2, available from the file\n /usr/share/common-licenses/GPL-2 on your Debian system, or the\n BSD license below:\n .\n ==================================================================\n .\n OpenIB.org BSD license\n .\n Redistribution and use in source and binary forms, with or without\n modification, are permitted provided that the following conditions\n are met:\n .\n   * Redistributions of source code must retain the above copyright\n     notice, this list of conditions and the following disclaimer.\n .\n   * Redistributions in binary form must reproduce the above\n     copyright notice, this list of conditions and the following\n     disclaimer in the documentation and/or other materials provided\n     with the distribution.\n .\n THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS\n \"AS IS\" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT\n LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS\n FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE\n COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,\n INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,\n BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;\n LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER\n CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT\n LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN\n ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE\n POSSIBILITY OF SUCH DAMAGE.\n .\n ==================================================================\n\nFiles: include/fasthash.h\n       src/fasthash.c\nCopyright: Copyright (C) 2012 Zilong Tan (eric.zltan@gmail.com)\nLicense: Expat\n Permission is hereby granted, free of charge, to any person\n obtaining a copy of this software and associated documentation\n files (the \"Software\"), to deal in the Software without\n restriction, including without limitation the rights to use, copy,\n modify, merge, publish, distribute, sublicense, and/or sell copies\n of the Software, and to permit persons to whom the Software is\n furnished to do so, subject to the following conditions:\n .\n The above copyright notice and this permission notice shall be\n included in all copies or substantial portions of the Software.\n .\n THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND,\n EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF\n MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND\n NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS\n BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN\n ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN\n CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\n SOFTWARE.\n\nFiles: debian/*\nCopyright: 2016-2017 Q-Leap Networks GmbH <info@q-leap.de>\n           2016 Ana Guerrero López <ana@ekaia.org>\n           2017 Benjamin Drung <bdrung@debian.org>\n           2019 ec2-efa-maintainer <ec2-efa-maintainers@amazon.com>\nLicense: GPL-2+\n This package is free software; you can redistribute it and/or modify\n it under the terms of the GNU General Public License as published by\n the Free Software Foundation; either version 2 of the License, or\n (at your option) any later version.\n .\n This package is distributed in the hope that it will be useful,\n but WITHOUT ANY WARRANTY; without even the implied warranty of\n MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the\n GNU General Public License for more details.\n .\n You should have received a copy of the GNU General Public License\n along with this program. If not, see <http://www.gnu.org/licenses/>\n .\n On Debian systems, the complete text of the GNU General\n Public License version 2 can be found in \"/usr/share/common-licenses/GPL-2\".\n",
+      "absent_paths": [
+        "/usr/share/doc/libfabric-aws-bin/changelog.gz"
+      ],
+      "binary_packages": [
+        {
+          "architecture": "amd64",
+          "url": "https://efa-installer.amazonaws.com/aws-efa-installer-1.51.0.tar.gz#aws-efa-installer/DEBS/UBUNTU2404/x86_64/libfabric-aws-bin_2.7.0amzn2.0_amd64.deb",
+          "deb_sha256": "f74bc6e28baa492f46dac4bfb78474c5ac8901d71d6832f307c61e0d1c4fc3c4",
+          "removed_document": {
+            "path": "/usr/share/doc/libfabric-aws-bin/changelog.gz",
+            "sha256": "ae8ddcdc58d3c5bfb99e8609abb7d8f512d9568c116f86118e0a02a7355e600b"
+          },
+          "retained_path_count": 10,
+          "retained_paths_sha256": "12b4155a394fe8527fa3920b12e420c771101b3e432dfda92e179d0c8b42ffb0",
+          "retained_paths_sample": [
+            "/opt/amazon/efa/bin/fi_info",
+            "/opt/amazon/efa/bin/fi_mon_sampler",
+            "/opt/amazon/efa/bin/fi_pingpong",
+            "/opt/amazon/efa/bin/fi_strerror",
+            "/opt/amazon/efa/share/man/man1/fi_info.1",
+            "/opt/amazon/efa/share/man/man1/fi_mon_sampler.1",
+            "/opt/amazon/efa/share/man/man1/fi_pingpong.1",
+            "/opt/amazon/efa/share/man/man1/fi_strerror.1"
+          ]
+        },
+        {
+          "architecture": "arm64",
+          "url": "https://efa-installer.amazonaws.com/aws-efa-installer-1.51.0.tar.gz#aws-efa-installer/DEBS/UBUNTU2404/aarch64/libfabric-aws-bin_2.7.0amzn2.0_arm64.deb",
+          "deb_sha256": "e607c55813921f10180d64dbf76e27fe5446104f7a8bbe9dec6ebb176112719d",
+          "removed_document": {
+            "path": "/usr/share/doc/libfabric-aws-bin/changelog.gz",
+            "sha256": "ae8ddcdc58d3c5bfb99e8609abb7d8f512d9568c116f86118e0a02a7355e600b"
+          },
+          "retained_path_count": 10,
+          "retained_paths_sha256": "12b4155a394fe8527fa3920b12e420c771101b3e432dfda92e179d0c8b42ffb0",
+          "retained_paths_sample": [
+            "/opt/amazon/efa/bin/fi_info",
+            "/opt/amazon/efa/bin/fi_mon_sampler",
+            "/opt/amazon/efa/bin/fi_pingpong",
+            "/opt/amazon/efa/bin/fi_strerror",
+            "/opt/amazon/efa/share/man/man1/fi_info.1",
+            "/opt/amazon/efa/share/man/man1/fi_mon_sampler.1",
+            "/opt/amazon/efa/share/man/man1/fi_pingpong.1",
+            "/opt/amazon/efa/share/man/man1/fi_strerror.1"
+          ]
+        }
+      ],
+      "source_evidence": [
+        {
+          "url": "https://github.com/aws/libfabric/blob/4c4ea95fc0b40ef565d030200eb689609bd995db/COPYING",
+          "git_commit": "4c4ea95fc0b40ef565d030200eb689609bd995db"
+        }
+      ],
+      "scope_evidence": [
+        "Upstream COPYING: explicit BSD/GPL choice",
+        "Packaged copyright: MIT fasthash source; GPL2+ scope is debian/*",
+        "Exact data/control archives: upstream library, tools or headers/manpages; no GPL maintainer scripts, only ldconfig trigger for library"
+      ]
+    }
+  ],
+  "observed_vllm_image": {
+    "artifact_id": 13981949881,
+    "artifact_sha256": "394948bbfbac8807dc13e798fcaa2158c4f5f901ae7d22c71838271aa5b62acb",
+    "source_sha": "945e422ed2efdedec729401c7929fefd7c9977f4",
+    "copyright_verification": [
+      {
+        "package": "libbpf1",
+        "version": "1:1.3.0-2build2",
+        "arch": "amd64",
+        "package_present": true,
+        "expected_sha256": "4d0df00a62374f3992ad0f2ec566838cafb406d11bef776d2667d3aabaa4b430",
+        "actual_sha256": "4d0df00a62374f3992ad0f2ec566838cafb406d11bef776d2667d3aabaa4b430",
+        "match": true
+      },
+      {
+        "package": "libgraphite2-3",
+        "version": "1.3.14-2ubuntu0.24.04.1",
+        "arch": "amd64",
+        "package_present": true,
+        "expected_sha256": "a33017ba0308c41bdbde4751bff349ab7b26af45fadbb1e3e7ac67c372985572",
+        "actual_sha256": "a33017ba0308c41bdbde4751bff349ab7b26af45fadbb1e3e7ac67c372985572",
+        "match": true
+      },
+      {
+        "package": "libibverbs-dev",
+        "version": "50.0-2ubuntu0.2",
+        "arch": "amd64",
+        "package_present": true,
+        "expected_sha256": "37f80110080a724e03aa331779884c00860d8a0033cd7ca47030dd0f17794b4b",
+        "actual_sha256": "37f80110080a724e03aa331779884c00860d8a0033cd7ca47030dd0f17794b4b",
+        "match": true
+      },
+      {
+        "package": "libbpf1",
+        "version": "1:1.3.0-2build2",
+        "arch": "arm64",
+        "package_present": false,
+        "expected_sha256": "4d0df00a62374f3992ad0f2ec566838cafb406d11bef776d2667d3aabaa4b430",
+        "actual_sha256": null,
+        "match": null
+      },
+      {
+        "package": "libgraphite2-3",
+        "version": "1.3.14-2ubuntu0.24.04.1",
+        "arch": "arm64",
+        "package_present": true,
+        "expected_sha256": "a33017ba0308c41bdbde4751bff349ab7b26af45fadbb1e3e7ac67c372985572",
+        "actual_sha256": "a33017ba0308c41bdbde4751bff349ab7b26af45fadbb1e3e7ac67c372985572",
+        "match": true
+      },
+      {
+        "package": "libibverbs-dev",
+        "version": "50.0-2ubuntu0.2",
+        "arch": "arm64",
+        "package_present": true,
+        "expected_sha256": "37f80110080a724e03aa331779884c00860d8a0033cd7ca47030dd0f17794b4b",
+        "actual_sha256": "37f80110080a724e03aa331779884c00860d8a0033cd7ca47030dd0f17794b4b",
+        "match": true
+      }
+    ]
+  },
+  "observed_efa_image": {
+    "artifact_id": 13982612922,
+    "artifact_sha256": "8284531d6c7469ac9f6c8faef6ca6bfda9ca186b2b269dfea73410e36096ea15",
+    "source_sha": "945e422ed2efdedec729401c7929fefd7c9977f4",
+    "copyright_verification": [
+      {
+        "package": "libfabric1-aws",
+        "version": "2.7.0amzn2.0",
+        "arch": "amd64",
+        "package_present": true,
+        "actual_sha256": "5564fb4e70e541a1f33e6ce253aacd727a3b3563631cd9de57e9cf4da04fd9b6",
+        "expected_sha256": "5564fb4e70e541a1f33e6ce253aacd727a3b3563631cd9de57e9cf4da04fd9b6",
+        "match": true
+      },
+      {
+        "package": "libfabric-aws-dev",
+        "version": "2.7.0amzn2.0",
+        "arch": "amd64",
+        "package_present": true,
+        "actual_sha256": "5564fb4e70e541a1f33e6ce253aacd727a3b3563631cd9de57e9cf4da04fd9b6",
+        "expected_sha256": "5564fb4e70e541a1f33e6ce253aacd727a3b3563631cd9de57e9cf4da04fd9b6",
+        "match": true
+      },
+      {
+        "package": "libfabric-aws-bin",
+        "version": "2.7.0amzn2.0",
+        "arch": "amd64",
+        "package_present": true,
+        "actual_sha256": "5564fb4e70e541a1f33e6ce253aacd727a3b3563631cd9de57e9cf4da04fd9b6",
+        "expected_sha256": "5564fb4e70e541a1f33e6ce253aacd727a3b3563631cd9de57e9cf4da04fd9b6",
+        "match": true
+      },
+      {
+        "package": "libfabric1-aws",
+        "version": "2.7.0amzn2.0",
+        "arch": "arm64",
+        "package_present": true,
+        "actual_sha256": "5564fb4e70e541a1f33e6ce253aacd727a3b3563631cd9de57e9cf4da04fd9b6",
+        "expected_sha256": "5564fb4e70e541a1f33e6ce253aacd727a3b3563631cd9de57e9cf4da04fd9b6",
+        "match": true
+      },
+      {
+        "package": "libfabric-aws-dev",
+        "version": "2.7.0amzn2.0",
+        "arch": "arm64",
+        "package_present": true,
+        "actual_sha256": "5564fb4e70e541a1f33e6ce253aacd727a3b3563631cd9de57e9cf4da04fd9b6",
+        "expected_sha256": "5564fb4e70e541a1f33e6ce253aacd727a3b3563631cd9de57e9cf4da04fd9b6",
+        "match": true
+      },
+      {
+        "package": "libfabric-aws-bin",
+        "version": "2.7.0amzn2.0",
+        "arch": "arm64",
+        "package_present": true,
+        "actual_sha256": "5564fb4e70e541a1f33e6ce253aacd727a3b3563631cd9de57e9cf4da04fd9b6",
+        "expected_sha256": "5564fb4e70e541a1f33e6ce253aacd727a3b3563631cd9de57e9cf4da04fd9b6",
+        "match": true
+      }
+    ]
+  }
+}

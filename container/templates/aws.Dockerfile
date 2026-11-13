@@ -36,6 +36,13 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     cd .. && rm -rf aws-efa-installer* && \
     ldconfig
 
+{% if target == "runtime" %}
+# EFA adds version-scoped Debian packages after the ordinary runtime layer.
+# Apply the same reviewed documentation cleanup to these actual installed files.
+RUN --mount=type=bind,source=./container/compliance,target=/tmp/compliance/compliance,readonly \
+    PYTHONPATH=/tmp/compliance python3 -m compliance.trim_packaging_docs
+{% endif %}
+
 ENV EFA_VERSION="${EFA_VERSION}"
 
 {% if framework == "trtllm" %}

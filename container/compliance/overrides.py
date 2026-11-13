@@ -31,6 +31,17 @@ def exact_version(value) -> bool:
     )
 
 
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+
+
+class OverrideEvidenceUnavailable(ValueError):
+    """A scoped correction cannot be applied without its reviewed artifact bytes."""
+
+
+class OverrideEvidenceMismatch(ValueError):
+    """Artifact evidence differs from the exact metadata reviewed for a correction."""
+
+
 _ECOSYSTEMS = frozenset({"rust", "go", "python", "dpkg", "native"})
 
 
@@ -65,6 +76,8 @@ class Override:
     usage: str | None = None
     evidence: str | None = None
     reason: str | None = None
+    copyright_sha256: str | None = None
+    absent_paths: tuple[str, ...] = ()
 
     @property
     def key(self) -> tuple[str, str, str | None]:
@@ -94,8 +107,43 @@ def load_records(path: Path) -> tuple[Override, ...]:
                 raise ValueError(f"Invalid override {key}: {row!r}")
         if "version" in row and not exact_version(row["version"]):
             raise ValueError(f"Override version must be exact: {row['version']!r}")
+        if "copyright_sha256" in row:
+            if (
+                row["ecosystem"] != "dpkg"
+                or not isinstance(row["copyright_sha256"], str)
+                or not _SHA256.fullmatch(row["copyright_sha256"])
+            ):
+                raise ValueError(
+                    "copyright_sha256 requires a dpkg record and a lowercase SHA256"
+                )
+        paths = row.get("absent_paths", [])
+        if not isinstance(paths, list) or any(
+            not isinstance(path, str) for path in paths
+        ):
+            raise ValueError(
+                "absent_paths must be a list of reviewed package documentation paths"
+            )
+        if paths:
+            if (
+                row["ecosystem"] != "dpkg"
+                or not row.get("copyright_sha256")
+                or not row.get("version")
+            ):
+                raise ValueError(
+                    "absent_paths requires an exact dpkg version and copyright hash"
+                )
+            prefix = f"/usr/share/doc/{row['name']}/"
+            if len(set(paths)) != len(paths) or any(
+                not path.startswith(prefix)
+                or Path(path).name not in {"changelog.Debian.gz", "changelog.gz"}
+                or path != prefix + Path(path).name
+                for path in paths
+            ):
+                raise ValueError(
+                    "Only exact package changelog paths may be absence predicates"
+                )
         parse_spdx(row["license"])
-        record = Override(**row)
+        record = Override(**{**row, "absent_paths": tuple(paths)})
         if record.key in seen:
             raise ValueError(f"Duplicate override identity: {record.key}")
         seen.add(record.key)
@@ -126,6 +174,7 @@ def observe(
     resolved_license: str,
     *,
     applied: bool = False,
+    copyright_sha256: str | None = None,
 ) -> None:
     """Record generator observations before base subtraction; lookup is the only application signal."""
     record = _match(ecosystem, name, version)
@@ -137,6 +186,7 @@ def observe(
         "name": name,
         "version": version,
         "raw_license": raw_license,
+        "copyright_sha256": copyright_sha256 or previous.get("copyright_sha256"),
         "resolved_license": resolved_license,
         "override_version": record.version if record else None,
         "override_license": record.license if record else None,
@@ -150,14 +200,90 @@ def observe(
     }
 
 
+def checked_artifact_path(
+    root: Path, absolute_path: str, *, allow_leaf_symlink: bool = False
+) -> Path:
+    """Resolve a reviewed path without following package/ancestor symlinks."""
+    relative = Path(absolute_path.lstrip("/"))
+    if not absolute_path.startswith("/") or ".." in relative.parts:
+        raise OverrideEvidenceMismatch(
+            f"Invalid reviewed artifact path: {absolute_path}"
+        )
+    current = root.resolve()
+    for part in relative.parts[:-1]:
+        current = current / part
+        if current.is_symlink():
+            raise OverrideEvidenceMismatch(f"Symlinked artifact directory: {current}")
+    candidate = current / relative.name
+    if not allow_leaf_symlink and candidate.is_symlink():
+        raise OverrideEvidenceMismatch(f"Symlinked artifact evidence file: {candidate}")
+    return candidate
+
+
+def correction_copyright_path(
+    ecosystem: str, name: str, version: str, root: Path
+) -> Path | None:
+    record = _match(ecosystem, name, version)
+    if record is not None and record.copyright_sha256 is not None:
+        return checked_artifact_path(root, f"/usr/share/doc/{name}/copyright")
+    return None
+
+
 def lookup(
-    ecosystem: str, name: str, version: str = "", *, raw_license: str | None = None
+    ecosystem: str,
+    name: str,
+    version: str = "",
+    *,
+    raw_license: str | None = None,
+    copyright_sha256: str | None = None,
+    artifact_root: Path | None = None,
 ) -> str | None:
     """Return an exact-version correction first, then a legacy versionless fallback."""
     record = _match(ecosystem, name, version)
     if record is None:
         return None
-    observe(ecosystem, name, version, raw_license, record.license, applied=True)
+    if record.copyright_sha256 is not None:
+        if artifact_root is None:
+            raise OverrideEvidenceUnavailable(
+                f"{ecosystem}/{name}@{version} requires reviewed artifact filesystem evidence"
+            )
+        copyright_path = checked_artifact_path(
+            artifact_root, f"/usr/share/doc/{name}/copyright"
+        )
+        if not copyright_path.is_file():
+            raise OverrideEvidenceUnavailable(
+                f"{ecosystem}/{name}@{version} requires reviewed copyright bytes"
+            )
+        actual_sha256 = hashlib.sha256(copyright_path.read_bytes()).hexdigest()
+        if actual_sha256 != record.copyright_sha256 or (
+            copyright_sha256 is not None and copyright_sha256 != actual_sha256
+        ):
+            raise OverrideEvidenceMismatch(
+                f"{ecosystem}/{name}@{version} copyright does not match reviewed SHA256"
+            )
+        copyright_sha256 = actual_sha256
+    if record.absent_paths:
+        if artifact_root is None:
+            raise OverrideEvidenceUnavailable(
+                f"{ecosystem}/{name}@{version} requires artifact filesystem evidence"
+            )
+        for path in record.absent_paths:
+            candidate = checked_artifact_path(
+                artifact_root, path, allow_leaf_symlink=True
+            )
+            if candidate.exists() or candidate.is_symlink():
+                raise OverrideEvidenceMismatch(
+                    f"{ecosystem}/{name}@{version} still ships reviewed packaging documentation: {path}"
+                )
+    observe(
+        ecosystem,
+        name,
+        version,
+        raw_license,
+        record.license,
+        applied=True,
+        copyright_sha256=copyright_sha256,
+    )
     return record.license
 
 

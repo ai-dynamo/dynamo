@@ -398,15 +398,23 @@ def _resolve_license(pkg_name: str, version: str = "", root: Path = Path("/")) -
          "GPL Version 3" boilerplate, etc.
       4. UNKNOWN — surfaces in the policy gate.
     """
-    raw = _read_package_license(pkg_name, root)
-    overridden = license_overrides.lookup(ECOSYSTEM, pkg_name, version, raw_license=raw)
+    scoped_path = license_overrides.correction_copyright_path(
+        ECOSYSTEM, pkg_name, version, root
+    )
+    raw = _read_package_license(pkg_name, root, copyright_path=scoped_path)
+    overridden = license_overrides.lookup(
+        ECOSYSTEM, pkg_name, version, raw_license=raw, artifact_root=root
+    )
     resolved = overridden or raw
     license_overrides.observe(ECOSYSTEM, pkg_name, version, raw, resolved)
     return resolved
 
 
-def _read_package_license(pkg_name: str, root: Path) -> str:
-    copyright_path = root / _COPYRIGHT_DIR / pkg_name / "copyright"
+def _read_package_license(
+    pkg_name: str, root: Path, *, copyright_path: Path | None = None
+) -> str:
+    if copyright_path is None:
+        copyright_path = root / _COPYRIGHT_DIR / pkg_name / "copyright"
     if not copyright_path.is_file():
         return UNKNOWN
 

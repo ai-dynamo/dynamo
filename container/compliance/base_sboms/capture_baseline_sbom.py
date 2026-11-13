@@ -499,9 +499,24 @@ def validate_delta(delta: list[dict], policy_path: Path) -> tuple[int, list[str]
             # syft emits operating-system components and other non-package
             # entries -- skip those (no ecosystem the policy gates).
             continue
-        # Hand-curated override beats syft's heuristic.
-        override = license_overrides.lookup(ecosystem, name, version)
-        spdx = override if override else _extract_spdx(component)
+        # A registry SBOM has no filesystem copyright bytes. Never apply an
+        # artifact-scoped correction or fall back to a broader override here.
+        # Validate the original scanner expression when evidence is unavailable.
+        raw_spdx = _extract_spdx(component)
+        try:
+            override = license_overrides.lookup(
+                ecosystem, name, version, raw_license=raw_spdx
+            )
+        except license_overrides.OverrideEvidenceUnavailable:
+            logger.warning(
+                "Copyright evidence unavailable for %s/%s@%s; validating original Syft license %r",
+                ecosystem,
+                name,
+                version,
+                raw_spdx,
+            )
+            override = None
+        spdx = override if override else raw_spdx
         v = policy_validate.validate_row(policy, ecosystem, name, version, spdx)
         if v is not None:
             violations.append(str(v))
