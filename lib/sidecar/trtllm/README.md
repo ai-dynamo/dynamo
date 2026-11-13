@@ -29,8 +29,9 @@ supported, even when `--context-length` is supplied.
 > `nvcr.io/nvidia/tensorrt-llm/release:<version>.dev<date>` tags on
 > [NGC](https://catalog.ngc.nvidia.com/orgs/nvidia/tensorrt-llm/containers/release/-).
 > The standalone launch and deployment examples use
-> `nvcr.io/nvidia/tensorrt-llm/release:1.4.0rc3.dev202610290007`, which includes
-> image/video URL passthrough, native KVCM2 event streaming, and OpenEngine routing load support.
+> `nvcr.io/nvidia/tensorrt-llm/release:1.4.0rc4.dev202611130009`, which includes
+> image/video URL passthrough, audio input, native KVCM2 event streaming, OpenEngine routing load support,
+> and image-aware KV routing ([NVIDIA/TensorRT-LLM#21125](https://github.com/NVIDIA/TensorRT-LLM/pull/21125)).
 > The nightly CI job tests image, video, and audio passthrough against the latest regular upstream nightly;
 > it also supports manual dispatch. The examples below stay pinned to the validated version.
 
@@ -69,9 +70,8 @@ curl -s localhost:8000/v1/chat/completions \
 
 ### Audio (Whisper)
 
-Audio requires a runtime containing upstream audio support, such as the validated
-`nvcr.io/nvidia/tensorrt-llm/release:1.4.0rc3.dev202610300406`; the older image/video
-example pin above predates audio. The nightly audio lane runs real Whisper-tiny
+Audio requires a runtime containing upstream audio support, such as the example
+pin above. The nightly audio lane runs real Whisper-tiny
 inference and checks the transcript and authoritative token usage. Full frontend
 HTTP CI is tracked separately from that adapter-to-engine test.
 
@@ -123,7 +123,7 @@ kubectl apply -f lib/sidecar/trtllm/deploy/agg.yaml -n <namespace>
 kubectl port-forward -n <namespace> svc/trtllm-sidecar-agg-frontend 8000:8000
 ```
 
-For KV routing, use `deploy/agg_kv_router.yaml` or `deploy/disagg_kv_router.yaml`. These examples pin matching Dynamo frontend and sidecar nightlies (`20261023-75d0686`) and `nvcr.io/nvidia/tensorrt-llm/release:1.4.0rc3.dev202610290007` for the engine.
+For KV routing, use `deploy/agg_kv_router.yaml` or `deploy/disagg_kv_router.yaml`. These examples pin matching Dynamo frontend and sidecar nightlies (`20261023-75d0686`) and `nvcr.io/nvidia/tensorrt-llm/release:1.4.0rc4.dev202611130009` for the engine.
 
 Multinode deployments use complete `leader` and `worker` role PodTemplates. See
 [`multinode_tp.yaml`](deploy/multinode_tp.yaml), [`multinode_dp.yaml`](deploy/multinode_dp.yaml),

@@ -81,7 +81,7 @@ spec:
             sizeLimit: 10Gi
         containers:
         - name: main
-          image: nvcr.io/nvidia/tensorrt-llm/release:1.4.0rc3.dev202610290007@sha256:14aa63789ee878885c55200c5ae8f44e4d15b90fe84bd869315ae13ef1299ac3
+          image: nvcr.io/nvidia/tensorrt-llm/release:1.4.0rc4.dev202611130009@sha256:b210fb5baf50a5513f5ab9aebeae8c0794aeccf900862fd447dc2593c6f26147
           # Probe Control.Health without importing TensorRT-LLM; field 1 is state, READY = 2.
           startupProbe:
             exec:
@@ -185,7 +185,7 @@ spec:
             sizeLimit: 10Gi
         containers:
         - name: main
-          image: nvcr.io/nvidia/tensorrt-llm/release:1.4.0rc3.dev202610290007@sha256:14aa63789ee878885c55200c5ae8f44e4d15b90fe84bd869315ae13ef1299ac3
+          image: nvcr.io/nvidia/tensorrt-llm/release:1.4.0rc4.dev202611130009@sha256:b210fb5baf50a5513f5ab9aebeae8c0794aeccf900862fd447dc2593c6f26147
           startupProbe:
             exec:
               command: *engineReadyCommand
