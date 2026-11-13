@@ -278,11 +278,24 @@ and any scenario-specific checks registered in
 `upgrade_compatibility_clustertest_test.go`. The golden holds literal origin and
 worker hash values, since a compatibility snapshot asserts fixed historical
 values rather than development bindings. To add a scenario, add its entry to
-the capture script, run the capture, commit the directory, add its input
-digest to `compatibility.lock.json`, and produce `output.yaml` from a replay
-with `DYNAMO_UPGRADE_CAPTURE_DIR` set, through `write_golden` in
-`hack/generate_upgrade_fixtures.py`. Release regeneration rewrites the
-compatibility goldens together with the history goldens.
+the capture script, run the capture, commit the directory, and add its input
+digest to `compatibility.lock.json`. Then seed the golden before the first
+replay, because the fixture preflight rejects a missing `output.yaml` and the
+matcher fails before the replay exports a capture:
+
+```bash
+cd deploy/operator && python3 -c '
+import sys, yaml; sys.path.insert(0, "hack")
+import generate_upgrade_fixtures as g
+d = g.FIXTURES / "compatibility/<scenario>"
+g.write_golden(d / "output.yaml", list(yaml.safe_load_all((d / "input.yaml").read_text())))'
+```
+
+The seed is the released graph with server-owned fields as `$ignore`. Replay
+the scenario; if the development operator changes anything else, the matcher
+writes `output.yaml.new`, and that diff is the semantic review. Accept it only
+after the independent safety assertion has passed. Release regeneration
+rewrites the compatibility goldens together with the history goldens.
 
 Main already reports operator 1.7.0. The complete released-1.6 history replaces the
 one-time 1.7-on-1.5 history exception from #17153; subsequent minor transitions
