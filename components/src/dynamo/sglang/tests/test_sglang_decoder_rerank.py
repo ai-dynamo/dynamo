@@ -12,6 +12,8 @@ import pytest
 pytest.importorskip("sglang.srt.managers.io_struct")
 pytest.importorskip("sglang.srt.speculative.spec_info")
 
+from fastapi import HTTPException  # noqa: E402
+
 from dynamo.llm.exceptions import (  # noqa: E402
     EngineShutdown,
     HttpError,
@@ -244,11 +246,27 @@ def test_accepts_supported_architecture_from_local_model_path():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("status,error", [(400, InvalidArgument), (503, HttpError)])
-async def test_preserves_native_error_status(status, error):
-    reason = {"type": "abort", "status_code": status, "message": "engine error"}
-    handler, _ = _handler([reason, reason])
-    with pytest.raises(error) as caught:
+@pytest.mark.parametrize(
+    "native_error,status,error",
+    [
+        (
+            {"type": "abort", "status_code": 400, "message": "engine error"},
+            400,
+            InvalidArgument,
+        ),
+        (
+            {"type": "abort", "status_code": 503, "message": "engine error"},
+            503,
+            HttpError,
+        ),
+        (ValueError("engine error"), 400, InvalidArgument),
+        (HTTPException(status_code=400, detail="engine error"), 400, InvalidArgument),
+        (HTTPException(status_code=503, detail="engine error"), 503, HttpError),
+    ],
+)
+async def test_preserves_native_error_status(native_error, status, error):
+    handler, _ = _handler([native_error, native_error])
+    with pytest.raises(error, match="engine error") as caught:
         await _generate(handler, _Context())
     if status == 503:
         assert caught.value.code == 503
@@ -264,7 +282,7 @@ async def test_plain_native_abort_is_cancellation():
 @pytest.mark.asyncio
 async def test_scoring_failure_aborts_remaining_candidate():
     handler, manager = _handler([ValueError("engine failed"), None])
-    with pytest.raises(ValueError, match="engine failed"):
+    with pytest.raises(InvalidArgument, match="engine failed"):
         await asyncio.wait_for(_generate(handler, _Context()), timeout=2)
     assert manager.aborts == [manager.requests[1].rid]
     assert manager.rid_to_state == {}

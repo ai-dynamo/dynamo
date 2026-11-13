@@ -8,6 +8,7 @@ import math
 from typing import Any
 from uuid import uuid4
 
+from fastapi import HTTPException
 from sglang.srt.entrypoints.openai.serving_rerank import (
     _is_qwen3_reranker_template,
     _render_jinja_chat_template,
@@ -15,7 +16,7 @@ from sglang.srt.entrypoints.openai.serving_rerank import (
 from sglang.srt.managers.io_struct import GenerateReqInput
 
 from dynamo._core import Context
-from dynamo.llm.exceptions import EngineShutdown
+from dynamo.llm.exceptions import EngineShutdown, HttpError, InvalidArgument
 from dynamo.sglang.protocol import RerankRequest
 from dynamo.sglang.request_handlers.llm.decode_handler import _raise_if_sglang_error
 from dynamo.sglang.request_handlers.rerank.rerank_handler import RerankWorkerHandler
@@ -102,7 +103,14 @@ class DecoderRerankWorkerHandler(RerankWorkerHandler):
                 raise EngineShutdown("Engine shut down during reranking")
             if cancelled in done:
                 raise asyncio.CancelledError
-            result = await inference
+            try:
+                result = await inference
+            except ValueError as error:
+                raise InvalidArgument(str(error)) from error
+            except HTTPException as error:
+                if error.status_code == 400:
+                    raise InvalidArgument(str(error.detail)) from error
+                raise HttpError(error.status_code, str(error.detail)) from error
             completed = True
         finally:
             try:
