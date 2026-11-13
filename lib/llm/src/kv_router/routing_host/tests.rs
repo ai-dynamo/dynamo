@@ -10,7 +10,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use super::builder::hosted_picker;
+use super::builder::{check_hint_policies_route_on_kv_path, hosted_picker};
 use crate::kv_router::SelectionPolicySource;
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::plugins::request_classifier::{
@@ -1319,12 +1319,12 @@ async fn run_kv_hit_attempt(final_frame: LLMEngineOutput) -> (KvHitSnapshot, KvH
 async fn kv_cache_hit_complete_attempt_records_every_stage_once() {
     let (before, after) = run_kv_hit_attempt(LLMEngineOutput {
         finish_reason: Some(FinishReason::Stop),
-        engine_data: Some(serde_json::json!({
+        engine_data: Some(Box::new(serde_json::json!({
             "kv_cache_hit": {
                 "prompt_tokens": 100,
                 "reused_tokens": 85,
             }
-        })),
+        }))),
         ..Default::default()
     })
     .await;
@@ -1351,12 +1351,12 @@ async fn kv_cache_hit_attempt_without_worker_report_contributes_zero() {
 async fn kv_cache_hit_cancelled_attempt_keeps_reported_reuse() {
     let (before, after) = run_kv_hit_attempt(LLMEngineOutput {
         finish_reason: Some(FinishReason::Cancelled),
-        engine_data: Some(serde_json::json!({
+        engine_data: Some(Box::new(serde_json::json!({
             "kv_cache_hit": {
                 "prompt_tokens": 100,
                 "reused_tokens": 85,
             }
-        })),
+        }))),
         ..Default::default()
     })
     .await;
@@ -1407,9 +1407,9 @@ async fn kv_cache_hit_counts_immediately_once_in_selection_phase(#[case] reused:
     let _permit = tracker.set_phase(RequestPhase::Decode).await;
     guard
         .on_item(&Annotated::from_data(LLMEngineOutput {
-            engine_data: Some(serde_json::json!({"kv_cache_hit": {
+            engine_data: Some(Box::new(serde_json::json!({"kv_cache_hit": {
                 "prompt_tokens": 1, "reused_tokens": reused
-            }})),
+            }}))),
             ..Default::default()
         }))
         .await;
@@ -1422,9 +1422,9 @@ async fn kv_cache_hit_counts_immediately_once_in_selection_phase(#[case] reused:
     );
     guard
         .on_item(&Annotated::from_data(LLMEngineOutput {
-            engine_data: Some(serde_json::json!({"kv_cache_hit": {
+            engine_data: Some(Box::new(serde_json::json!({"kv_cache_hit": {
                 "prompt_tokens": 1, "reused_tokens": 9
-            }})),
+            }}))),
             ..Default::default()
         }))
         .await;
@@ -5916,4 +5916,55 @@ async fn committed_session_lease_lives_as_long_as_the_response_stream() {
     assert_eq!(affinity.query_target(&session_id, None).unwrap(), None);
     drop(router);
     runtime.shutdown();
+}
+
+#[test]
+fn listed_hints_reject_every_non_kv_mode() {
+    use dynamo_kv_router::WorkerType;
+
+    let policy_file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(
+        policy_file.path(),
+        r#"
+worker_selection:
+  aggregated:
+    type: dynamo-default-cost-fn
+    hints:
+      - type: some_hint
+  prefill:
+    type: dynamo-default-cost-fn
+    hints: []
+  decode: dynamo-default-cost-fn
+"#,
+    )
+    .unwrap();
+    let config = KvRouterConfig {
+        router_policy_config: Some(policy_file.path().display().to_string()),
+        ..Default::default()
+    };
+    for mode in [
+        RouterMode::RoundRobin,
+        RouterMode::Random,
+        RouterMode::LeastLoaded,
+        RouterMode::Direct,
+        RouterMode::DeviceAwareWeighted,
+    ] {
+        let error = check_hint_policies_route_on_kv_path(mode, &config, &[WorkerType::Aggregated])
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("the hints in worker_selection.aggregated run only on the KV path"),
+            "{mode:?}: {error}"
+        );
+    }
+    check_hint_policies_route_on_kv_path(RouterMode::KV, &config, &[WorkerType::Aggregated])
+        .unwrap();
+    // An empty list, a bare entry and an unlisted role run only the passive defaults.
+    check_hint_policies_route_on_kv_path(
+        RouterMode::RoundRobin,
+        &config,
+        &[WorkerType::Prefill, WorkerType::Decode, WorkerType::Encode],
+    )
+    .unwrap();
 }
