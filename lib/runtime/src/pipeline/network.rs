@@ -1411,6 +1411,7 @@ pub struct Ingress<Req: PipelineIO, Resp: PipelineIO, Adapter = SerdeIngressPayl
     velo_response_owner: OnceLock<std::sync::Weak<velo_response::RuntimeService>>,
     payload_adapter: Arc<Adapter>,
     lifecycle_operation_role: OnceLock<Arc<OnceLock<LifecycleOperationRole>>>,
+    track_response_completion: OnceLock<bool>,
 }
 
 impl<Req: PipelineIO + Sync, Resp: PipelineIO> Ingress<Req, Resp> {
@@ -1461,6 +1462,7 @@ where
             velo_response_owner: OnceLock::new(),
             payload_adapter: Arc::new(payload_adapter),
             lifecycle_operation_role: OnceLock::new(),
+            track_response_completion: OnceLock::new(),
         })
     }
 
@@ -1551,6 +1553,11 @@ where
             endpoint.get_metrics_registry(),
         );
 
+        if endpoint.track_response_completion {
+            let _ = endpoint
+                .inflight_requests
+                .set(metrics.inflight_requests.clone());
+        }
         self.metrics
             .set(Arc::new(metrics))
             .map_err(|_| anyhow::anyhow!("Metrics already set"))
@@ -1589,6 +1596,9 @@ where
 
     fn bind_endpoint_config(&self, endpoint: &crate::component::Endpoint) {
         let _ = self.response_plane.set(endpoint.drt().response_plane());
+        let _ = self
+            .track_response_completion
+            .set(endpoint.track_response_completion);
         // Endpoint tasks retain this ingress. Keep a weak back-reference so
         // those tasks cannot keep their own Tokio runtime alive.
         let _ = self.velo_response_owner.set(Arc::downgrade(
