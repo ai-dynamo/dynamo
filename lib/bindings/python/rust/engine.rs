@@ -39,7 +39,7 @@ use dynamo_runtime::pipeline::ManyIn;
 
 use super::context::{Context, callable_accepts_kwarg};
 use super::errors::{
-    http_like_error_to_dynamo, py_exception_to_backend_error, routed_engine_error_to_dynamo,
+    dynamo_exception_to_error, http_like_error_to_dynamo, routed_engine_error_to_dynamo,
     worker_unavailable_to_dynamo,
 };
 use crate::python_payload::{
@@ -553,14 +553,8 @@ pub(crate) fn map_python_exception(error: PyErr) -> DynamoError {
             return error;
         }
 
-        if let Some((backend_err, message)) = py_exception_to_backend_error(py, &error) {
-            let mut builder = DynamoError::builder()
-                .error_type(ErrorType::Backend(backend_err))
-                .message(message.clone());
-            if backend_err == BackendError::InvalidArgument {
-                builder = builder.public_message(message);
-            }
-            return builder.build();
+        if let Some(error) = dynamo_exception_to_error(py, &error) {
+            return error;
         }
 
         if let Some(error) = http_like_error_to_dynamo(py, &error) {

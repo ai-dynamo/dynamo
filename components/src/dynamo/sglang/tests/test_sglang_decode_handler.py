@@ -16,7 +16,11 @@ from dynamo.common.constants import DisaggregationMode
 from dynamo.common.http.url_validator import UrlValidationError
 from dynamo.common.metadata_upload import MetadataUploader
 from dynamo.llm import HttpError
-from dynamo.llm.exceptions import EngineShutdown, InvalidArgument
+from dynamo.llm.exceptions import (
+    DecodeRejectedBeforeKvReceiver,
+    EngineShutdown,
+    InvalidArgument,
+)
 from dynamo.sglang.engine_generate import (
     build_native_generate_request,
     native_generate_stream,
@@ -517,6 +521,7 @@ async def test_error_abort_preserves_http_error_before_output(
         await anext(stream)
 
     if status_code == 400:
+        assert type(error.value) is InvalidArgument
         assert str(error.value) == message
     else:
         assert error.value.code == status_code
@@ -3171,9 +3176,12 @@ async def test_disagg_parallel_sampling_rejected_before_handoff(handler_type, pa
     context = SimpleNamespace(id=lambda: "request-id", trace_id="trace-id")
     original = deepcopy(payload)
 
-    with pytest.raises(
-        InvalidArgument, match="disaggregated serving supports only n=1"
-    ):
+    error_type = (
+        DecodeRejectedBeforeKvReceiver
+        if handler_type is DecodeWorkerHandler
+        else InvalidArgument
+    )
+    with pytest.raises(error_type, match="disaggregated serving supports only n=1"):
         await anext(handler.generate(payload, context))
 
     handler.engine.async_generate.assert_not_awaited()

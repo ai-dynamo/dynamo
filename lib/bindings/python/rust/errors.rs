@@ -178,7 +178,7 @@ macro_rules! define_dynamo_exceptions {
         /// Returns `Some((BackendError, message))` if the exception is a Dynamo
         /// exception, `None` otherwise. The caller decides how to wrap the
         /// `BackendError` into an `ErrorType`.
-        pub fn py_exception_to_backend_error(
+        fn py_exception_to_backend_error(
             py: Python<'_>,
             err: &PyErr,
         ) -> Option<(BackendError, String)> {
@@ -219,6 +219,10 @@ macro_rules! define_dynamo_exceptions {
                 m.py().get_type::<SelectionServiceError>(),
             )?;
             m.add("WorkerUnavailable", m.py().get_type::<WorkerUnavailable>())?;
+            m.add(
+                "DecodeRejectedBeforeKvReceiver",
+                m.py().get_type::<DecodeRejectedBeforeKvReceiver>(),
+            )?;
             m.add("RoutedEngineError", m.py().get_type::<RoutedEngineError>())?;
             $(
                 m.add(stringify!($name), m.py().get_type::<$name>())?;
@@ -250,6 +254,26 @@ define_dynamo_exceptions!(
     (StreamIncomplete, BackendError::StreamIncomplete),
     (WorkerOverloaded, BackendError::WorkerOverloaded),
 );
+
+pyo3::create_exception!(
+    dynamo._core,
+    DecodeRejectedBeforeKvReceiver,
+    InvalidArgument
+);
+
+pub(crate) fn dynamo_exception_to_error(py: Python<'_>, err: &PyErr) -> Option<DynamoError> {
+    let (backend, message) = py_exception_to_backend_error(py, err)?;
+    if err.is_instance_of::<DecodeRejectedBeforeKvReceiver>(py) {
+        return Some(DynamoError::reject_before_kv_receiver(message));
+    }
+    let mut builder = DynamoError::builder()
+        .error_type(ErrorClass::Backend(backend))
+        .message(message.clone());
+    if backend == BackendError::InvalidArgument {
+        builder = builder.public_message(message);
+    }
+    Some(builder.build())
+}
 
 /// Generic label for an InvalidRequest that carries no explicit
 /// public message.
@@ -381,6 +405,8 @@ fn build_http_like_error(code: u16, message: String) -> DynamoError {
 
 #[cfg(test)]
 mod tests {
+    // `extension-module` does not link libpython into standalone Rust tests.
+    // Exercise Python exception conversion in tests/test_request_plane_python_payload.py.
     use super::*;
     use serde::Deserialize;
 

@@ -3,10 +3,11 @@
 
 import asyncio
 import contextlib
+import uuid
 
 import pytest
 
-from dynamo._core import InvalidArgument
+from dynamo._core import DecodeRejectedBeforeKvReceiver, InvalidArgument
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -19,6 +20,11 @@ async def _generate(request, context):
     assert dict(context.metadata.items()) == request.get("expected_metadata", {})
     if request["kind"] == "error":
         raise ValueError("direct adapter test error")
+    if request["kind"] == "decode-rejection":
+        error_type = (
+            DecodeRejectedBeforeKvReceiver if request["explicit"] else InvalidArgument
+        )
+        raise error_type("invalid sampling options")
     if request["kind"] == "malformed":
         yield object()
         return
@@ -51,7 +57,7 @@ async def _generate(request, context):
 
 @pytest.fixture
 async def request_plane_client(runtime):
-    endpoint = runtime.endpoint("direct-python-msgpack.backend.generate")
+    endpoint = runtime.endpoint(f"direct-python-{uuid.uuid4().hex}.backend.generate")
     health_payload = {
         "kind": "normal",
         "payload": {"health": True},
@@ -73,6 +79,25 @@ async def request_plane_client(runtime):
 @pytest.mark.asyncio
 @pytest.mark.timeout(30)
 @pytest.mark.parametrize("request_plane", ["tcp", "nats"], indirect=True)
+@pytest.mark.parametrize("explicit", [False, True])
+async def test_decode_rejection_preserves_invalid_argument(
+    request_plane_client, explicit
+):
+    assert issubclass(DecodeRejectedBeforeKvReceiver, InvalidArgument)
+    assert not isinstance(InvalidArgument("ordinary"), DecodeRejectedBeforeKvReceiver)
+
+    stream = await request_plane_client.generate(
+        {"kind": "decode-rejection", "explicit": explicit}
+    )
+    with pytest.raises(InvalidArgument, match="^invalid sampling options$") as error:
+        async for _ in stream:
+            pass
+    assert type(error.value) is InvalidArgument
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(30)
+@pytest.mark.parametrize("request_plane", ["tcp", "nats"], indirect=True)
 async def test_client_instances_snapshot(request_plane, request_plane_client):
     """Client.instances() exposes the endpoint's instances with transport
     details on each request plane: "tcp" carries a "host:port/..." address,
@@ -84,7 +109,7 @@ async def test_client_instances_snapshot(request_plane, request_plane_client):
         request_plane_client.instance_ids()
     )
     for instance in instances:
-        assert instance.namespace == "direct-python-msgpack"
+        assert instance.namespace.startswith("direct-python-")
         assert instance.component == "backend"
         assert instance.endpoint == "generate"
         assert instance.device_type in (None, "cpu", "cuda")
