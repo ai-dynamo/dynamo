@@ -1325,7 +1325,7 @@ async fn handler_completions(
             request
                 .nvext
                 .as_ref()
-                .is_some_and(CommonNvExt::has_non_cache_salt_fields)
+                .is_some_and(CommonNvExt::has_non_cache_control_fields)
                 || has_non_cache_salt_routing_headers(&headers),
         );
     }
@@ -2690,7 +2690,7 @@ async fn handler_chat_completions(
             request
                 .nvext
                 .as_ref()
-                .is_some_and(CommonNvExt::has_non_cache_salt_fields)
+                .is_some_and(CommonNvExt::has_non_cache_control_fields)
                 || has_non_cache_salt_routing_headers(&headers),
         );
     }
@@ -4809,7 +4809,7 @@ async fn handler_responses(
             request
                 .nvext
                 .as_ref()
-                .is_some_and(CommonNvExt::has_non_cache_salt_fields)
+                .is_some_and(CommonNvExt::has_non_cache_control_fields)
                 || has_non_cache_salt_routing_headers(&headers),
         );
     }
