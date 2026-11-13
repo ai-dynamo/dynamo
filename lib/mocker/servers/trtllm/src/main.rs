@@ -13,6 +13,8 @@ use dynamo_trtllm_sidecar::proto::control_server::ControlServer;
 use dynamo_trtllm_sidecar::proto::inference_server::InferenceServer;
 use serde_json::{Map, Value};
 
+dynamo_allocator::jemalloc_global_allocator!();
+
 #[derive(Parser, Debug)]
 #[command(
     name = "dynamo-trtllm-mocker-server",

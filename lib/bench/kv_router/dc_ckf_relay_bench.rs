@@ -38,6 +38,9 @@ use dynamo_router_protocol::identity::{
 };
 use serde::Serialize;
 
+#[cfg(not(feature = "system-allocator"))]
+dynamo_allocator::jemalloc_global_allocator!();
+
 const SCHEMA_VERSION: u32 = 1;
 const DEFAULT_REPLAY_GPU_BLOCKS: usize = 65_536;
 const DEFAULT_QUEUE_CAPACITY: usize = 256;

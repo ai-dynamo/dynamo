@@ -39,6 +39,9 @@ use dynamo_router_protocol::identity::{
 use dynamo_router_protocol::worker::WorkerWithDpRank;
 use serde::{Deserialize, Serialize};
 
+#[cfg(not(feature = "system-allocator"))]
+dynamo_allocator::jemalloc_global_allocator!();
+
 const CORPUS_SCHEMA_VERSION: u32 = 4;
 const RESULT_SCHEMA_VERSION: u32 = 2;
 const MAX_LANES: usize = 16;

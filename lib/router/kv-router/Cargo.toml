@@ -80,6 +80,8 @@ reqwest = { version = "0.12.24", default-features = false, features = ["json", "
 tracing-appender = { version = "0.2", optional = true }
 
 [dev-dependencies]
+# For the benches. Path-only, so publishing strips it.
+dynamo-allocator = { path = "../../allocator" }
 dynamo-kv-indexer = { workspace = true, features = ["testing"] }
 dynamo-slot-tracker = { workspace = true, features = ["testing"] }
 dynamo-session-affinity = { workspace = true, features = ["testing"] }

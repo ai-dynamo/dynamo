@@ -288,6 +288,7 @@ areas:
   - lib/sidecar/testkit/
   - lib/bindings/
   - lib/bindings/c/
+  - lib/allocator/
   - lib/bindings/python/
   - lib/error/
   - lib/llm/

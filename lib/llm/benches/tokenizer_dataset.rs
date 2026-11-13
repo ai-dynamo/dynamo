@@ -26,6 +26,8 @@ use std::time::{Duration, Instant};
 
 use dynamo_llm::tokenizers::{FastTokenizer, HuggingFaceTokenizer, traits::Encoder};
 
+dynamo_allocator::jemalloc_global_allocator!();
+
 /// Default HuggingFace model for the tokenizer.
 const DEFAULT_HF_MODEL: &str = "Qwen/Qwen3-0.6B";
 

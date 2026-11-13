@@ -16,6 +16,7 @@ name = "global-frontend"
 path = "src/main.rs"
 
 [dependencies]
+dynamo-allocator = { workspace = true }
 dynamo-global-common = { workspace = true, features = ["grpc"] }
 dynamo-global-view-receiver = { path = "../global-view-receiver" }
 dynamo-global-discovery-client = { workspace = true }

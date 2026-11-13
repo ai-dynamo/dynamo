@@ -17,6 +17,7 @@ name = "dynamo-sglang-mocker-server"
 path = "src/main.rs"
 
 [dependencies]
+dynamo-allocator = { workspace = true }
 dynamo-mocker = { workspace = true, features = ["zmq-events"] }
 dynamo-sglang-sidecar = { path = "../../../sidecar/sglang" }
 

@@ -25,7 +25,7 @@ crate-type = ["cdylib", "rlib"]
 default = ["custom-policy", "jemalloc"]
 # jemalloc as the Rust global allocator (rust/allocator.rs). For the system allocator, build with
 # `--no-default-features --features custom-policy`.
-jemalloc = ["dep:tikv-jemallocator"]
+jemalloc = ["dep:dynamo-allocator"]
 # Links the router plugins Dynamo ships plus the replaceable catalog selected by the
 # dependency alias below. Enabled by default so a deployment can select a shipped policy through
 # router-policy YAML without rebuilding. A private image replaces only the catalog dependency, so
@@ -70,6 +70,8 @@ aisimulate-core = { version = "=0.13.0-dev.202610290000000087", optional = true,
 dynamo-runtime = { path = "../../runtime" }
 dynamo-mocker = { path = "../../mocker" }
 dynamo-parsers = { version = "=11.0.11" }
+# `dlopen`: Python loads this extension with dlopen, so jemalloc must not use initial-exec TLS.
+dynamo-allocator = { path = "../../allocator", optional = true, features = ["dlopen"] }
 dynamo-backend-common = { path = "../../backend-common" }
 dynamo-sidecar-common = { path = "../../sidecar/common" }
 # default-features = false: sidecar defaults (mm-routing, jemalloc) must not reach the wheel.
@@ -145,13 +147,6 @@ dynamo-llm = { path = "../../llm" }
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 dynamo-llm = { path = "../../llm", default-features = false }
-
-# Python loads this extension with dlopen, so jemalloc must not use initial-exec TLS.
-[target.'cfg(all(not(target_env = "msvc"), not(target_env = "musl")))'.dependencies]
-tikv-jemallocator = { version = "0.6", default-features = false, optional = true, features = [
-  "background_threads_runtime_support",
-  "disable_initial_exec_tls",
-] }
 
 [dev-dependencies]
 http = "1"

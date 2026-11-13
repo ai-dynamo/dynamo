@@ -23,6 +23,8 @@ tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+# For the benches. Path-only, so publishing strips it.
+dynamo-allocator = { path = "../../allocator" }
 tokio = { workspace = true, features = ["macros", "rt", "time"] }
 dynamo-kv-router = { workspace = true, features = ["ingest-zmq", "replica-sync-zmq", "peer-recovery", "bench"] }
 dynamo-scheduler = { workspace = true, features = ["bench"] }

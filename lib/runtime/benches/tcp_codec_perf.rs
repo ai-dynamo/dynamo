@@ -9,6 +9,8 @@ use bytes::Bytes;
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use dynamo_runtime::pipeline::network::codec::{TcpRequestMessage, TcpResponseMessage};
 
+dynamo_allocator::jemalloc_global_allocator!();
+
 /// Benchmark request encoding (hot path operation)
 fn bench_request_encoding(c: &mut Criterion) {
     let mut group = c.benchmark_group("tcp_request_encoding");

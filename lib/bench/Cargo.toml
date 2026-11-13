@@ -89,6 +89,13 @@ test-support = [
 ]
 profile = ["offline-replay", "dynamo-mocker/profile"]
 replay-bench = ["offline-replay", "dynamo-mocker/replay-bench"]
+# The bench targets build jemalloc in as their global allocator, with the options in
+# lib/allocator/src/lib.rs. This leaves them on the system allocator, for example to heap-profile
+# with a preloaded jemalloc.
+system-allocator = []
+# Builds jemalloc with statistics, so mooncake_bench can report the lower tier's heap. Production
+# builds have none, so keep it out of timing runs.
+heap-stats = ["dynamo-allocator/stats"]
 
 [[bench]]
 name = "multiturn_bench"
@@ -162,6 +169,7 @@ harness = false
 required-features = ["dc-ckf-relay"]
 
 [dependencies]
+dynamo-allocator = { workspace = true }
 anyhow = { workspace = true }
 blake3 = { workspace = true, optional = true }
 chrono = { workspace = true, optional = true }
