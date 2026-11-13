@@ -3,10 +3,10 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use dynamo_kv_router::identity::{
+use dynamo_kv_indexer::cuckoo::{DcCkfFormatIdentity, ProducerIdentity};
+use dynamo_router_protocol::identity::{
     CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
 };
-use dynamo_kv_router::indexer::cuckoo::{DcCkfFormatIdentity, ProducerIdentity};
 use dynamo_runtime::protocols::EndpointId;
 
 use super::protocol as proto;

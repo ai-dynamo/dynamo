@@ -7,12 +7,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use dynamo_kv_router::identity::{
-    CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
+use dynamo_kv_events::event::{
+    KvCacheEvent, KvCacheEventData, KvCacheStoreData, KvCacheStoredBlockData, RouterEvent,
 };
-use dynamo_kv_router::protocols::{
-    ActiveLoad, ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
-    KvCacheStoredBlockData, LocalBlockHash, RouterEvent,
+use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
+use dynamo_router_protocol::identity::{
+    CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
 };
 use dynamo_runtime::protocols::EndpointId;
 use dynamo_runtime::{
@@ -28,6 +28,7 @@ use super::config::PoolRelayGrpcConfig;
 use super::protocol as proto;
 use super::protocol::wire::images::{self, FilterFormat, ImagesFrame, SnapshotAssembly};
 use super::server::GrpcTransport;
+use crate::kv_router::ActiveLoad;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 use crate::pool_relay::actor::PoolRelayHandle;
 use crate::pool_relay::discovery::{

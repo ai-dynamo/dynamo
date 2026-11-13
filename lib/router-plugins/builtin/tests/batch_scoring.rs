@@ -4,16 +4,13 @@
 //! Exercise the batch scoring contract using only public plugin inputs.
 mod support;
 
+use dynamo_kv_router::plugins::prelude::*;
+use dynamo_scheduler::host::WorkerSelector;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
-use dynamo_kv_router::plugins::worker_selection::{
-    WorkerCandidate, WorkerCandidates, WorkerFilter, WorkerInputView, WorkerInputs, WorkerPicker,
-    WorkerScorer, WorkerSelectionContext, WorkerSelectionPolicy,
-};
-use dynamo_kv_router::{KvRouterConfig, WorkerSelectionPolicyError, WorkerSelector};
 use support::fixture;
 
 #[derive(Debug, PartialEq)]
@@ -101,7 +98,7 @@ fn scores_batches_from_surviving_workers_and_resets_each_selection() {
     request.allowed_worker_ids = Some([1, 2, 3].into_iter().collect());
     let calls = Arc::new(Mutex::new(Vec::new()));
     let policy = WorkerSelectionPolicy::new_with_filters(
-        KvRouterConfig::default(),
+        SelectionConfig::default(),
         "test",
         vec![Box::new(ExcludeWorkerOne)],
         (0..2)
@@ -176,7 +173,7 @@ fn skips_scoring_for_empty_sets_and_aborts_on_error() {
     let (workers, mut request) = fixture(2, 17);
     let calls = Arc::new(Mutex::new(0));
     let policy = WorkerSelectionPolicy::new_with_filters(
-        KvRouterConfig::default(),
+        SelectionConfig::default(),
         "test",
         vec![Box::new(ExcludeWorkerOne)],
         vec![Box::new(FailScoring(calls.clone()))],
@@ -220,7 +217,7 @@ fn rejects_nonfinite_contributions_and_overflow_before_picking() {
         vec![f64::MAX, f64::MAX],
     ] {
         let policy = WorkerSelectionPolicy::new(
-            KvRouterConfig::default(),
+            SelectionConfig::default(),
             "test",
             costs
                 .into_iter()
@@ -286,13 +283,13 @@ fn picker_columns_and_costs_stay_aligned_after_a_scoring_error() {
     }
     let (workers, mut request) = fixture(8, 17);
     let policy = WorkerSelectionPolicy::new_with_filters(
-        KvRouterConfig::default(),
+        SelectionConfig::default(),
         "test",
         vec![Box::new(ExcludeWorkerOne)],
         vec![Box::new(FailSecondScoreOnce(AtomicUsize::new(0)))],
         Box::new(CheckColumns),
     );
-    let select = |request: &dynamo_kv_router::scheduling::SchedulingRequest| {
+    let select = |request: &dynamo_kv_router::plugins::prelude::SchedulingRequest| {
         policy.select_worker(support::selection_input(&workers, request, 16))
     };
     assert!(
@@ -348,7 +345,7 @@ fn unwritten_costs_cannot_reuse_a_previous_selection_or_scorer() {
     }
     let (workers, request) = fixture(2, 17);
     let policy = WorkerSelectionPolicy::new(
-        KvRouterConfig::default(),
+        SelectionConfig::default(),
         "test",
         vec![
             Box::new(Fill),
@@ -361,7 +358,7 @@ fn unwritten_costs_cannot_reuse_a_previous_selection_or_scorer() {
     let error = select().unwrap_err();
     assert!(matches!(
         error,
-        dynamo_kv_router::KvSchedulerError::WorkerSelectionPolicy(
+        dynamo_kv_router::plugins::prelude::KvSchedulerError::WorkerSelectionPolicy(
             WorkerSelectionPolicyError::NonFiniteCost {
                 scorer_index: 1,
                 row: 0

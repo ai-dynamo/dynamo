@@ -402,8 +402,8 @@ lint-fix: golangci-lint ## Run golangci-lint linter and perform fixes
 	$(GOLANGCI_LINT) run --fix
 
 .PHONY: lint-api
-lint-api: kube-api-linter ## Check the v1beta2 API types against Kubernetes API conventions
-	$(KUBE_API_LINTER) run -c .golangci-kal.yml ./api/v1beta2/...
+lint-api: kube-api-linter ## Check the CRD API types against Kubernetes API conventions
+	$(KUBE_API_LINTER) run -c .golangci-kal.yml ./api/...
 
 ##@ Build
 

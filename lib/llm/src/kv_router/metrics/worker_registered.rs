@@ -6,7 +6,7 @@ use std::{
     sync::{Arc, Weak},
 };
 
-use dynamo_kv_router::protocols::WorkerId;
+use dynamo_router_protocol::worker::WorkerId;
 use dynamo_runtime::metrics::PrometheusMetric;
 use parking_lot::Mutex;
 use prometheus::{
