@@ -123,6 +123,10 @@ class DistributedRuntime:
         """
         ...
 
+    def system_status_server_url(self) -> Optional[str]:
+        """Return the system listener URL, or None when it is disabled."""
+        ...
+
     def register_engine_http_handler(
         self,
         name: str,
@@ -177,7 +181,7 @@ class Endpoint:
 
     async def first_token_source(self, worker_type: WorkerType) -> Optional[FirstTokenSource]: ...
 
-    async def serve_endpoint(self, handler: RequestHandler, graceful_shutdown: bool = True, metrics_labels: Optional[List[Tuple[str, str]]] = None, health_check_payload: Optional[Dict[str, Any]] = None) -> None:
+    async def serve_endpoint(self, handler: RequestHandler, graceful_shutdown: bool = True, metrics_labels: Optional[List[Tuple[str, str]]] = None, health_check_payload: Optional[Dict[str, Any]] = None, *, track_response_completion: bool = False) -> None:
         """
         Serve an endpoint discoverable by all connected clients at
         `{{ namespace }}/components/{{ component_name }}/endpoints/{{ endpoint_name }}`
@@ -188,6 +192,7 @@ class Endpoint:
             metrics_labels: Optional list of metrics labels to add to the metrics
             health_check_payload: Optional dict containing the health check request payload
                                   that will be used to verify endpoint health
+            track_response_completion: Keep requests in flight until the TCP writer exits
         """
         ...
 
@@ -242,6 +247,10 @@ class Endpoint:
         Returns:
             A PyRuntimeMetrics object for callback registration
         """
+        ...
+
+    def inflight_requests(self) -> Optional[int]:
+        """Return worker ingress requests through response completion."""
         ...
 
     async def unregister_endpoint_instance(self) -> None:
@@ -579,6 +588,20 @@ class Context:
         deferred ``engine.abort()``. Idempotent; no-op on non-decode
         requests. Engines normally don't need this — the framework
         auto-fires on the first non-empty chunk in the response stream."""
+        ...
+
+    def set_response_header(self, name: str, value: str) -> bool:
+        """Set an HTTP response header from a frontend chat engine.
+
+        Call it before the engine's first yield, or before it raises. Returns
+        ``False`` when this request's response cannot carry the header: the
+        response is already committed (a streaming request without
+        ``DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS``, or a call after the first
+        yield of one with it), or the request is not a ``/v1/chat/completions``
+        request. Otherwise raises ``ValueError`` for a name or value that is
+        not a valid header, or for a header the HTTP layer owns
+        (``content-type``, ``content-length``, ``content-encoding``,
+        ``x-request-id``, hop-by-hop headers)."""
         ...
 
     @property
@@ -2093,6 +2116,20 @@ def _normalize_mocker_config(config: Mapping[str, Any] | str) -> Dict[str, Any]:
     """Validate canonical AISimulate config and materialize Dynamo runtime options."""
     ...
 
+def _convert_preprocessed_request(
+    preprocessed: Dict[str, Any], fast_path: bool
+) -> Optional[Dict[str, Any]]:
+    """Test hook: the fast path's request (None if it declines) or pythonize's, pythonized back."""
+    ...
+
+def _raise_routed_http_error(
+    code: int, message: str, routed_engine: bool = True
+) -> None:
+    """Test hook: raise what a response stream raises for a backend
+    `HttpError(code, message)`: a `RoutedEngine`'s stream by default, any other
+    with `routed_engine=False`."""
+    ...
+
 
 class WorkerType:
     """
@@ -3383,6 +3420,22 @@ class WorkerUnavailable(DynamoException):
 
     Raised by `RoutedEngine.generate`, for example while prefill routing is
     still activating. Re-raise it unchanged to keep the 503.
+    """
+
+    ...
+
+class WorkerDraining(WorkerUnavailable):
+    """The selected worker closed admission for a reversible drain (HTTP 503)."""
+
+    ...
+
+class RoutedEngineError(ValueError):
+    """A backend error raised by `RoutedEngine.generate` and its response stream.
+
+    Raised for every classified error except a validation error, which raises
+    `InvalidArgument`. A chat engine that lets it escape answers with the
+    backend's status, because the original error is restored. `Client` and
+    `KvRouter` streams raise a plain `ValueError` instead.
     """
 
     ...

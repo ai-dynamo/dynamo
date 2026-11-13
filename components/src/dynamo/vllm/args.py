@@ -34,6 +34,7 @@ from dynamo.common.configuration.groups.runtime_args import (
 )
 from dynamo.common.configuration.utils import split_served_model_names
 from dynamo.common.model_fetch import fetch_model, needs_local_model_path
+from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.vllm.backend_args import (
     DynamoVllmArgGroup,
@@ -93,7 +94,25 @@ class Config(DynamoRuntimeConfig, DynamoVllmConfig):
 
     def validate(self) -> None:
         DynamoRuntimeConfig.validate(self)
+        self._resolve_realtime_endpoint_type()
         DynamoVllmConfig.validate(self)
+
+    def _resolve_realtime_endpoint_type(self) -> None:
+        """Move the vLLM-only ``realtime`` endpoint type onto ``realtime``.
+
+        The remaining endpoint types, or ``none``, are served by the same
+        engine. The deprecated ``--realtime`` flag serves realtime alone.
+        """
+        types = [t.strip().lower() for t in self.endpoint_types.split(",")]
+        if "realtime" in types:
+            self.realtime = True
+            types = [t for t in types if t and t != "realtime"]
+        elif self.realtime:
+            types = []
+        else:
+            return
+        self.endpoint_types = ",".join(types) or "none"
+        parse_endpoint_types(self.endpoint_types)
 
 
 @register_encoder(Config)
@@ -302,6 +321,15 @@ def update_dynamo_config_with_engine(
         dynamo_config.endpoint = parsed_ep
 
     if dynamo_config.custom_jinja_template is not None:
+        if dynamo_config.use_vllm_tokenizer:
+            raise ValueError(
+                "Cannot use --custom-jinja-template with --use-vllm-tokenizer: "
+                "the worker renders with the model's own chat template. Remove "
+                "--use-vllm-tokenizer. Then keep --custom-jinja-template to apply "
+                "the template in Dynamo's preprocessor, or start the frontend with "
+                "--dyn-chat-processor vllm --chat-template <file> to render it in "
+                "vLLM."
+            )
         expanded_template_path = os.path.expanduser(
             os.path.expandvars(dynamo_config.custom_jinja_template)
         )
