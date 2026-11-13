@@ -151,10 +151,8 @@ def _snapshot_uses_instrumented_scheduler(vllm_config: VllmConfig) -> bool:
     )
 
 
-# EngineCore's multiprocess executor waits VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS
-# (default 5 s) for its TP workers, then SIGTERMs them and waits 4 s more before
-# SIGKILL. The parent's window must outlast that plus EngineCore's own teardown.
-# Same value vLLM uses on ROCm. A clean exit returns as soon as EngineCore exits.
+# Must outlast the executor's TP-worker shutdown (5 s, then SIGTERM and 4 s more)
+# plus EngineCore's own teardown. vLLM uses the same value on ROCm.
 _ENGINE_CLEANUP_WINDOW_S = 15.0
 
 
@@ -162,10 +160,8 @@ def _engine_shutdown_timeout(vllm_config: VllmConfig) -> float:
     """Seconds EngineCore gets to exit before vLLM force-kills it."""
     if vllm_config.shutdown_timeout > 0:
         return float(vllm_config.shutdown_timeout)
-    # vLLM's default 0 means "abort requests at once" to EngineCore, but
-    # forwarding it also gives the process no time to release GPU and IPC
-    # resources, so vLLM SIGKILLs EngineCore and its TP workers. An explicit
-    # VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS (or ROCm's 15 s) wins, as in vLLM.
+    # Forwarding vLLM's default 0 would SIGKILL EngineCore and its TP workers at
+    # once; VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS (or ROCm's 15 s) still wins.
     window = get_engine_process_shutdown_timeout(0, 0)
     return window if window else _ENGINE_CLEANUP_WINDOW_S
 
