@@ -65,9 +65,6 @@ from dynamo.tokenspeed.kv_events import (
 logger = logging.getLogger(__name__)
 
 LAUNCHER_MODULE = "tokenspeed.runtime.entrypoints.engine"
-STARTUP_TIMEOUT_ENV = "DYN_TOKENSPEED_STARTUP_TIMEOUT_S"
-# Large checkpoints take tens of minutes to load before the ranks register.
-_DEFAULT_STARTUP_TIMEOUT_S = 3600.0
 # How long one message may wait for an engine's socket.
 _SEND_TIMEOUT_S = 60.0
 # The launcher gives its ranks 30 s to exit before it kills them.
@@ -89,10 +86,14 @@ class TokenspeedLLMEngine(LLMEngine):
         server_args: Any,
         engine_argv: list[str] | None = None,
         kv_block_size: int | None = None,
+        engine_startup_timeout: float = 3600.0,
+        bootstrap_host: str | None = None,
     ):
         self.server_args = server_args
         self.engine_argv = list(engine_argv or [])
         self.kv_block_size = kv_block_size
+        self.engine_startup_timeout = engine_startup_timeout
+        self.bootstrap_host = bootstrap_host
         self.disaggregation_mode = resolve_disaggregation_mode(server_args)
         # Attention-DP ranks, one engine each.
         self._dp_size = attention_dp_size(server_args)
@@ -129,6 +130,8 @@ class TokenspeedLLMEngine(LLMEngine):
             config.server_args,
             engine_argv=config.engine_argv,
             kv_block_size=config.kv_block_size,
+            engine_startup_timeout=config.engine_startup_timeout,
+            bootstrap_host=config.bootstrap_host,
         )
         worker_config = WorkerConfig.from_runtime_config(
             config,
@@ -142,7 +145,9 @@ class TokenspeedLLMEngine(LLMEngine):
         del worker_id
         bootstrap_host, bootstrap_port = None, None
         if self.disaggregation_mode == DisaggregationMode.PREFILL:
-            self._bootstrap_endpoint = runtime_disaggregated_endpoint(self.server_args)
+            self._bootstrap_endpoint = runtime_disaggregated_endpoint(
+                self.server_args, self.bootstrap_host
+            )
             bootstrap_host, bootstrap_port = self._bootstrap_endpoint
         engine_overrides = self._configure_kv_events()
 
@@ -164,7 +169,7 @@ class TokenspeedLLMEngine(LLMEngine):
                 if self.disaggregation_mode == DisaggregationMode.AGGREGATED
                 else "bootstrap_room"
             ),
-            handshake_timeout_s=_startup_timeout_s(),
+            handshake_timeout_s=self.engine_startup_timeout,
             send_timeout_s=_SEND_TIMEOUT_S,
         )
         handshake_port = listener.handshake_address.rsplit(":", 1)[1]
@@ -857,11 +862,6 @@ def _tcp_address(host: str, port: int) -> str:
     except ValueError:
         pass  # A hostname.
     return f"tcp://{host}:{port}"
-
-
-def _startup_timeout_s() -> float:
-    value = os.environ.get(STARTUP_TIMEOUT_ENV)
-    return float(value) if value else _DEFAULT_STARTUP_TIMEOUT_S
 
 
 def _start_launcher(argv: list[str]) -> subprocess.Popen:

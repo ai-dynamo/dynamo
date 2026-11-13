@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import ipaddress
-import os
 import secrets
 import socket
 from collections.abc import Mapping
@@ -14,8 +13,6 @@ from typing import Any
 
 from dynamo.common.constants import DisaggregationMode
 from dynamo.llm.exceptions import InvalidArgument
-
-BOOTSTRAP_HOST_ENV = "DYN_TOKENSPEED_BOOTSTRAP_HOST"
 
 
 def resolve_disaggregation_mode(server_args: Any) -> DisaggregationMode:
@@ -41,12 +38,13 @@ def validate_disagg_compatibility(mode: DisaggregationMode, server_args: Any) ->
         raise ValueError("Dynamo TokenSpeed disaggregation requires Mooncake")
 
 
-def runtime_disaggregated_endpoint(server_args: Any) -> tuple[str, int]:
-    """Advertise a peer-reachable host; the environment opts into single-host use."""
+def runtime_disaggregated_endpoint(
+    server_args: Any, explicit_host: str | None = None
+) -> tuple[str, int]:
+    """Advertise a peer-reachable host; --bootstrap-host opts into single-host use."""
     port = getattr(server_args, "disaggregation_bootstrap_port", None)
     if port is None or not 0 < int(port) < 65536:
         raise ValueError("TokenSpeed prefill requires a valid bootstrap port")
-    explicit_host = os.environ.get(BOOTSTRAP_HOST_ENV)
     host = explicit_host or getattr(server_args, "host", None)
     try:
         address = ipaddress.ip_address(host.strip("[]")) if host else None
@@ -66,14 +64,14 @@ def runtime_disaggregated_endpoint(server_args: Any) -> tuple[str, int]:
             host = socket.gethostbyname(socket.gethostname())
         except socket.gaierror as exc:
             raise ValueError(
-                f"Cannot determine TokenSpeed bootstrap host; set {BOOTSTRAP_HOST_ENV} "
+                "Cannot determine TokenSpeed bootstrap host; set --bootstrap-host "
                 "to an address reachable by decode workers"
             ) from exc
         address = ipaddress.ip_address(host)
         if address.is_loopback or address.is_unspecified:
             raise ValueError(
                 "TokenSpeed bootstrap host resolves to a local-only address; "
-                f"set {BOOTSTRAP_HOST_ENV} to an address reachable by decode workers"
+                "set --bootstrap-host to an address reachable by decode workers"
             )
     return str(host), int(port)
 

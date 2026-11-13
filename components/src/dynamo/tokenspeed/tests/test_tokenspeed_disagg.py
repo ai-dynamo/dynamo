@@ -19,7 +19,6 @@ import pytest
 from dynamo.common.constants import DisaggregationMode
 from dynamo.llm.exceptions import InvalidArgument
 from dynamo.tokenspeed import args, disagg, llm_engine
-from dynamo.tokenspeed.disagg import BOOTSTRAP_HOST_ENV
 from dynamo.tokenspeed.llm_engine import TokenspeedLLMEngine
 
 pytestmark = [pytest.mark.unit, pytest.mark.gpu_0, pytest.mark.pre_merge]
@@ -224,7 +223,6 @@ class FakeNative:
 
 @pytest.fixture
 def native(monkeypatch):
-    monkeypatch.delenv(BOOTSTRAP_HOST_ENV, raising=False)
     fake = FakeNative()
     monkeypatch.setattr(llm_engine, "_tokenspeed_engine_module", lambda: fake.module)
     monkeypatch.setattr(llm_engine, "_io_struct_module", lambda: fake.io_struct)
@@ -237,11 +235,12 @@ def native(monkeypatch):
     fake.release()
 
 
-def make_engine(kv_block_size=None, **overrides):
+def make_engine(kv_block_size=None, bootstrap_host=None, **overrides):
     engine = TokenspeedLLMEngine(
         server_args(**overrides),
         engine_argv=["--model", "test-model"],
         kv_block_size=kv_block_size,
+        bootstrap_host=bootstrap_host,
     )
     # abort() waits this long for the engine's final chunk (tokenspeed#3227).
     engine._abort_grace_s = 0
@@ -306,6 +305,37 @@ async def test_cli_registers_worker_role(
     assert engine.kv_block_size == 64
 
 
+@pytest.mark.parametrize("source", ["cli", "env"])
+def test_worker_options_come_from_flags_or_env(monkeypatch, source):
+    class NativeArgs:
+        @staticmethod
+        def add_cli_args(parser):
+            parser.add_argument("--model")
+
+        @staticmethod
+        def from_cli_args(parsed):
+            return server_args(**vars(parsed))
+
+    monkeypatch.setattr(args, "_server_args_cls", lambda: NativeArgs)
+    options = {
+        "--kv-block-size": ("DYN_TOKENSPEED_KV_BLOCK_SIZE", "32"),
+        "--engine-startup-timeout": ("DYN_TOKENSPEED_ENGINE_STARTUP_TIMEOUT", "90"),
+        "--bootstrap-host": ("DYN_TOKENSPEED_BOOTSTRAP_HOST", "prefill.example"),
+    }
+    cli = ["--model", "m"]
+    for flag, (env_var, value) in options.items():
+        if source == "cli":
+            cli += [flag, value]
+        else:
+            monkeypatch.setenv(env_var, value)
+    config = args.parse_args(cli)
+    assert config.kv_block_size == 32
+    assert config.engine_startup_timeout == 90.0
+    assert config.bootstrap_host == "prefill.example"
+    # Dynamo's options never reach the TokenSpeed launcher.
+    assert config.engine_argv == ["--model", "m"]
+
+
 @pytest.mark.parametrize("block_size", ["0", "-16"])
 def test_cli_rejects_non_positive_kv_block_size(monkeypatch, block_size):
     class NativeArgs:
@@ -333,8 +363,9 @@ def test_cli_rejects_non_positive_kv_block_size(monkeypatch, block_size):
 async def test_start_binds_frontend_and_launches_headless_engine(
     monkeypatch, native, mode, routing
 ):
-    monkeypatch.setenv(BOOTSTRAP_HOST_ENV, "prefill.example")
-    engine = make_engine(kv_block_size=64, disaggregation_mode=mode)
+    engine = make_engine(
+        bootstrap_host="prefill.example", kv_block_size=64, disaggregation_mode=mode
+    )
     try:
         registration = await engine.start(worker_id=1)
         [bind] = native.binds
@@ -632,9 +663,12 @@ def handoff(room):
 
 @pytest.mark.parametrize("mode", ["null", "prefill", "decode"])
 async def test_attention_dp_registers_its_ranks(monkeypatch, native, mode):
-    monkeypatch.setenv(BOOTSTRAP_HOST_ENV, "prefill.example")
     with_dp_engines(native, 4)
-    engine = make_engine(disaggregation_mode=mode, mapping=dp_mapping(4))
+    engine = make_engine(
+        bootstrap_host="prefill.example",
+        disaggregation_mode=mode,
+        mapping=dp_mapping(4),
+    )
     try:
         registration = await engine.start(worker_id=1)
         assert native.binds[0]["num_engines"] == 4
@@ -703,9 +737,12 @@ async def test_missing_or_invalid_dp_rank_leaves_placement_to_tokenspeed(
 async def test_prefill_is_placed_by_its_room(monkeypatch, native, routing):
     # TokenSpeed runs a prefill request on rank room % dp_size, where decode
     # looks for its KV cache, so the worker never pins one.
-    monkeypatch.setenv(BOOTSTRAP_HOST_ENV, "prefill.example")
     with_dp_engines(native, 4)
-    engine = make_engine(disaggregation_mode="prefill", mapping=dp_mapping(4))
+    engine = make_engine(
+        bootstrap_host="prefill.example",
+        disaggregation_mode="prefill",
+        mapping=dp_mapping(4),
+    )
     await engine.start(worker_id=1)
     request = {
         "token_ids": [1],
@@ -725,9 +762,12 @@ async def test_prefill_is_placed_by_its_room(monkeypatch, native, routing):
 async def test_prefill_fallback_room_lands_on_the_routed_rank(
     monkeypatch, native, rank
 ):
-    monkeypatch.setenv(BOOTSTRAP_HOST_ENV, "prefill.example")
     with_dp_engines(native, 8)
-    engine = make_engine(disaggregation_mode="prefill", mapping=dp_mapping(8))
+    engine = make_engine(
+        bootstrap_host="prefill.example",
+        disaggregation_mode="prefill",
+        mapping=dp_mapping(8),
+    )
     await engine.start(worker_id=1)
     try:
         chunks = await drain(
@@ -892,7 +932,7 @@ async def test_prefill_rejects_local_only_derived_advertisement(
 ):
     monkeypatch.setattr(disagg.socket, "gethostbyname", lambda _: address)
     engine = make_engine(disaggregation_mode="prefill", host=host)
-    with pytest.raises(ValueError, match=BOOTSTRAP_HOST_ENV):
+    with pytest.raises(ValueError, match="--bootstrap-host"):
         await engine.start(worker_id=1)
     assert native.launches == []
     await engine.cleanup()
@@ -910,8 +950,7 @@ async def test_prefill_derives_non_loopback_advertisement(monkeypatch, native, h
 
 
 async def test_explicit_loopback_prefill_allowed_for_single_host(monkeypatch, native):
-    monkeypatch.setenv(BOOTSTRAP_HOST_ENV, "127.0.0.1")
-    engine = make_engine(disaggregation_mode="prefill")
+    engine = make_engine(bootstrap_host="127.0.0.1", disaggregation_mode="prefill")
     try:
         config = await engine.start(worker_id=1)
         assert config.llm.bootstrap_host == "127.0.0.1"
@@ -1153,9 +1192,10 @@ async def test_only_prefill_reports_quiescence(native, mode):
 
 
 async def test_prefill_is_quiescent_once_its_handoffs_resolve(monkeypatch, native):
-    monkeypatch.setenv(BOOTSTRAP_HOST_ENV, "prefill.example")
     native.respond = lambda request: [wire_output([20])]
-    engine = make_engine(disaggregation_mode="prefill")
+    engine = make_engine(
+        bootstrap_host="prefill.example", disaggregation_mode="prefill"
+    )
     await engine.start(worker_id=1)
     stream = engine.generate({"token_ids": [10]}, context("transferring"))
     try:

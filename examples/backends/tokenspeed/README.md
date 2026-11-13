@@ -110,8 +110,8 @@ Set these variables in every process's environment:
 | `DYN_NAMESPACE` | `tokenspeed` |
 | `MODEL_PATH` | `/models/longcat-flash-fp8` |
 
-On each prefill host, set `DYN_TOKENSPEED_BOOTSTRAP_HOST` to that host's reachable
-address. Use `DISAGG_IB_DEVICE` to select an RDMA device when automatic selection
+On each prefill host, set `DYN_TOKENSPEED_BOOTSTRAP_HOST` (or pass
+`--bootstrap-host`) to that host's reachable address. Use `DISAGG_IB_DEVICE` to select an RDMA device when automatic selection
 does not match the connected fabric. On hosts without `nvidia-peermem`, set
 `WITH_NVIDIA_PEERMEM=0` in the worker containers to use Mooncake
 [DMA-BUF registration](https://github.com/kvcache-ai/Mooncake/blob/main/docs/source/design/transfer-engine/index.md).
@@ -241,7 +241,7 @@ worker IDs, overlap scores, timings, and a `passed` result.
   `--data-parallel-address`, every node dials `--dist-init-addr`'s host on
   `--data-parallel-rpc-port` (default 30500), so that port must be free on the first
   node.
-- KV events also require `--kv-block-size`, set to the engine's KV prefix
+- KV events also require `--kv-block-size` (`DYN_TOKENSPEED_KV_BLOCK_SIZE`), set to the engine's KV prefix
   granularity. Each TokenSpeed model picks its granularity at startup and logs it
   as `prefix_granularity=N` in its `Allocated cache arena` line. Pass the same
   value to the frontend's `--kv-cache-block-size`. With a different value, Dynamo
@@ -257,5 +257,9 @@ worker IDs, overlap scores, timings, and a `passed` result.
 - When specifying an event endpoint manually, use `ipc://...` or
   `tcp://*:PORT`. TokenSpeed connects to a concrete IPv4 TCP address; Dynamo's
   subscriber requires TokenSpeed to bind.
-- `DYN_TOKENSPEED_BOOTSTRAP_HOST` overrides the advertised host without changing
-  TokenSpeed's listening address. It must be reachable from decode hosts.
+- `--bootstrap-host` (`DYN_TOKENSPEED_BOOTSTRAP_HOST`) overrides the advertised
+  host without changing TokenSpeed's listening address. It must be reachable from
+  decode hosts.
+- `--engine-startup-timeout` (`DYN_TOKENSPEED_ENGINE_STARTUP_TIMEOUT`, default
+  3600 s) bounds how long the worker waits for every engine rank to load and
+  register.
