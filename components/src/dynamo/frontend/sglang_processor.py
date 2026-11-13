@@ -995,6 +995,29 @@ class SglangProcessor:
 
                     prompt_logprobs.attach(dynamo_out)
                     envelope["data"] = dynamo_out
+                elif (
+                    request.get("stream", False)
+                    and not finish_reason
+                    and not post.locally_finished
+                ):
+                    # The parser holds the output back (a tool call is emitted only
+                    # once complete). Keep the running count on the wire for
+                    # `continuous_usage_stats`, so a cut stream still reports it.
+                    if usage := response_usage(
+                        request,
+                        latest_usage,
+                        prompt_tokens=input_tokens,
+                        completion_tokens=cumulative_output_tokens,
+                        finished=False,
+                    ):
+                        envelope["data"] = {
+                            "id": request_id,
+                            "choices": [],
+                            "created": created_ts,
+                            "model": request["model"],
+                            "object": "chat.completion.chunk",
+                            "usage": usage,
+                        }
 
                 metrics: dict[str, Any] = {
                     "input_tokens": input_tokens,
