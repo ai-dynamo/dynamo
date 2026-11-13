@@ -247,6 +247,35 @@ async fn chat_custom_unsupported_grammar_and_wrong_choice_do_not_reach_engine() 
     .await;
 }
 
+#[tokio::test]
+#[serial]
+async fn conflicting_top_level_tool_schemas_do_not_reach_engine() {
+    temp_env::async_with_vars(BASE_ENV, async {
+        let svc = HarnessService::start([]).await;
+        let first = json!({"type":"function","function":{
+            "name":"lookup", "parameters":{"type":"object","properties":{"city":{"type":"string"}}}
+        }});
+        let second = json!({"type":"function","function":{
+            "name":"lookup", "parameters":{"type":"object","properties":{"order_id":{"type":"integer"}}}
+        }});
+        for streaming in [false, true] {
+            for tools in [json!([first, second]), json!([second, first])] {
+                assert_openai_error(
+                    post_json(&svc, "/v1/chat/completions", json!({
+                        "model":MODEL, "messages":[{"role":"user","content":"look up the record"}],
+                        "tools":tools, "stream":streaming,
+                        "tool_choice":{"type":"function","function":{"name":"lookup"}}
+                    })).await,
+                    ExpectedError::Validation,
+                    "Conflicting definitions for tool 'lookup' in tools[0] and tools[1]",
+                ).await;
+            }
+        }
+        assert!(svc.engine.take_requests().await.is_empty());
+        svc.shutdown().await;
+    }).await;
+}
+
 #[derive(Clone, Copy)]
 enum ExpectedError {
     Validation,

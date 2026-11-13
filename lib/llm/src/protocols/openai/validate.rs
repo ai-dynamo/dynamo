@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{borrow::Cow, fmt::Display, sync::LazyLock};
+use std::{borrow::Cow, collections::HashMap, fmt::Display, sync::LazyLock};
 
 use dynamo_protocols::types::{
     ChatCompletionRequestMessage, ChatCompletionRequestToolMessageContent,
@@ -552,6 +552,27 @@ pub(crate) fn validated_effective_tools(
     };
 
     validate_tools(&Some(tools.as_ref()))?;
+    // Dynamic system tools can update a definition across turns. Check only the
+    // request-level declarations, whose schemas must not depend on list order.
+    if let Some(request_tools) = request.tools.as_deref().filter(|tools| tools.len() > 1) {
+        let mut definitions: HashMap<&str, (usize, &FunctionObject)> = HashMap::new();
+        for (index, tool) in request_tools.iter().enumerate() {
+            let function = &tool.function;
+            if let Some((first_index, first)) = definitions.get(function.name.as_str()) {
+                if first.parameters != function.parameters || first.strict != function.strict {
+                    anyhow::bail!(
+                        "Conflicting definitions for tool '{}' in tools[{}] and tools[{}]: \
+                         parameter schemas or strict settings differ",
+                        function.name,
+                        first_index,
+                        index,
+                    );
+                }
+            } else {
+                definitions.insert(&function.name, (index, function));
+            }
+        }
+    }
     Ok(tools)
 }
 
@@ -1018,6 +1039,73 @@ mod tests {
     use super::*;
     use crate::engines::ValidateRequest;
     use crate::protocols::openai::completions::NvCreateCompletionRequest;
+
+    #[test]
+    fn conflicting_top_level_tool_definitions_are_rejected() {
+        let first = json!({"type":"function","function":{
+            "name":"lookup", "parameters":{"type":"object","properties":{},"additionalProperties":false,"required":[]}, "strict":false
+        }});
+        for change in [
+            json!({"parameters":{"type":"object","properties":{"city":{"type":"string"}}}}),
+            json!({"strict":true}),
+            json!({"strict":null}),
+            json!({"parameters":null}),
+        ] {
+            let mut second = first.clone();
+            second["function"]
+                .as_object_mut()
+                .unwrap()
+                .extend(change.as_object().unwrap().clone());
+            for tools in [json!([first, second]), json!([second, first])] {
+                let request: CreateChatCompletionRequest = serde_json::from_value(json!({
+                    "model":"test", "messages":[{"role":"user","content":"lookup"}],
+                    "tools":tools
+                }))
+                .unwrap();
+                let error = validated_effective_tools(&request).unwrap_err().to_string();
+                assert!(error.contains("lookup"), "{error}");
+                assert!(
+                    error.contains("tools[0]") && error.contains("tools[1]"),
+                    "{error}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn repeated_top_level_tool_definitions_preserve_compatible_requests() {
+        let first = json!({"type":"function","function":{
+            "name":"lookup", "parameters":{"type":"object","properties":{},"additionalProperties":false,"required":[]}, "strict":false
+        }});
+        let mut renamed = first.clone();
+        renamed["function"]["name"] = json!("other_lookup");
+        let mut described = first.clone();
+        described["function"]["description"] = json!("Look up a record");
+        for tools in [
+            json!([first, first]),
+            json!([first, renamed]),
+            json!([first, described]),
+        ] {
+            let request: CreateChatCompletionRequest = serde_json::from_value(json!({
+                "model":"test", "messages":[{"role":"user","content":"lookup"}], "tools":tools
+            }))
+            .unwrap();
+            assert_eq!(validated_effective_tools(&request).unwrap().len(), 2);
+        }
+    }
+
+    #[test]
+    fn top_level_tool_check_does_not_reject_dynamic_system_updates() {
+        let request: CreateChatCompletionRequest = serde_json::from_value(json!({
+            "model":"test",
+            "tools":[{"type":"function","function":{"name":"lookup","parameters":{"type":"object"}}}],
+            "messages":[
+                {"role":"system","tools":[{"name":"lookup","parameters":{"type":"object","properties":{"city":{"type":"string"}}}}]},
+                {"role":"user","content":"lookup"}
+            ]
+        })).unwrap();
+        assert_eq!(validated_effective_tools(&request).unwrap().len(), 2);
+    }
 
     #[test]
     fn custom_message_content_is_rejected_before_model_validation() {
