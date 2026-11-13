@@ -63,4 +63,4 @@ cudarc = { version = "=0.19.8", features = ["cuda-version-from-build-system", "f
 
 # Release-only AISim 0.14.0 RC3 source pin for Dynamo 1.7.0.
 [patch.crates-io]
-aisim-core = { git = "https://github.com/ai-dynamo/aisimulate.git", rev = "7416ca2870993667f12c52495562c9d4169f0d4d" }
+aisim-core = { git = "https://github.com/ai-dynamo/aisim.git", rev = "7416ca2870993667f12c52495562c9d4169f0d4d" }
