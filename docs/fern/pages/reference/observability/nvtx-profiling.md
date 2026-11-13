@@ -137,7 +137,9 @@ the gap before `worker.egress.chunk` and reads as engine time.
 
 The Python components use `mm:*` and `mm_*` names on the multimodal paths. They are emitted into
 the NVTX domain `dynamo`, while the Rust ranges use the default domain. In the Nsight Systems GUI
-they appear as separate NVTX rows, and `nsys stats --nvtx-domain-include` filters them separately.
+they appear as separate NVTX rows. To capture only one set, pass `--nvtx-domain-include=dynamo`
+(Python ranges) or `--nvtx-domain-include=default` (Rust ranges) to `nsys profile`. These options
+filter events during collection, so `nsys stats` cannot apply them to an existing report.
 
 For the SGLang worker ranges, see [SGLang Multimodal](../../developer-guide/knowledge-base/modular-components/backends/sglang/multimodal.md#profiling).
 The vLLM ranges are not listed yet. They include `mm_frontend:*` in the frontend's vLLM processor
