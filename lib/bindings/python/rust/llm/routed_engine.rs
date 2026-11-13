@@ -13,6 +13,7 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 use dynamo_llm::entrypoint::PrefillRoutedEngine;
 use dynamo_llm::protocols::common::extensions::SESSION_AFFINITY_CONTEXT_KEY;
 use dynamo_llm::protocols::common::preprocessor::PreprocessedRequest;
+use dynamo_llm::protocols::common::timing::RequestTracker;
 use dynamo_runtime::logging::{DistributedTraceContext, otel_parent_context_from_distributed};
 use dynamo_runtime::pipeline::{AsyncEngineContextProvider, SingleIn};
 use dynamo_runtime::protocols::annotated::Annotated as RsAnnotated;
@@ -92,8 +93,11 @@ impl RoutedEngine {
         context: Option<crate::context::Context>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let preprocessed = preprocessed.bind(py);
-        let request = fast_preprocessed_request(preprocessed)
+        let mut request = fast_preprocessed_request(preprocessed)
             .map_or_else(|| depythonize(preprocessed).map_err(to_pyerr), Ok)?;
+        if request.tracker.is_none() {
+            request.tracker = Some(Arc::new(RequestTracker::new()));
+        }
         let request_context = if let Some(parent_context) = context.as_ref() {
             let parent_metadata = parent_context.metadata_snapshot();
             let parent_controller = parent_context.inner();
