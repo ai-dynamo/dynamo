@@ -16,7 +16,6 @@ from pathlib import Path
 from types import TracebackType
 from typing import Any, Optional
 
-import vllm.envs as vllm_envs
 from vllm.config import VllmConfig
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.utils import get_engine_process_shutdown_timeout
@@ -152,17 +151,23 @@ def _snapshot_uses_instrumented_scheduler(vllm_config: VllmConfig) -> bool:
     )
 
 
+# EngineCore's multiprocess executor waits VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS
+# (default 5 s) for its TP workers, then SIGTERMs them and waits 4 s more before
+# SIGKILL. The parent's window must outlast that plus EngineCore's own teardown.
+# Same value vLLM uses on ROCm. A clean exit returns as soon as EngineCore exits.
+_ENGINE_CLEANUP_WINDOW_S = 15.0
+
+
 def _engine_shutdown_timeout(vllm_config: VllmConfig) -> float:
     """Seconds EngineCore gets to exit before vLLM force-kills it."""
     if vllm_config.shutdown_timeout > 0:
         return float(vllm_config.shutdown_timeout)
     # vLLM's default 0 means "abort requests at once" to EngineCore, but
     # forwarding it also gives the process no time to release GPU and IPC
-    # resources, so vLLM SIGKILLs EngineCore and its TP workers. Use vLLM's
-    # own cleanup window instead: an explicit VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS,
-    # then ROCm's 15 s, then that env var's 5 s default.
+    # resources, so vLLM SIGKILLs EngineCore and its TP workers. An explicit
+    # VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS (or ROCm's 15 s) wins, as in vLLM.
     window = get_engine_process_shutdown_timeout(0, 0)
-    return window if window else float(vllm_envs.VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS)
+    return window if window else _ENGINE_CLEANUP_WINDOW_S
 
 
 async def _sync_fpm_worker_id(

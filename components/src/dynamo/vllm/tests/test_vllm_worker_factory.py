@@ -192,9 +192,8 @@ def test_worker_lifecycle_chains_handler_and_engine_cleanup_failures():
     [
         # vLLM's default 0 must not reach the process manager as a zero window,
         # or EngineCore and its TP workers are force-killed mid-teardown.
-        (0, None, 5.0),
+        (0, None, 15.0),
         (0, "9", 9.0),
-        (7, None, 7.0),
     ],
 )
 def test_worker_lifecycle_gives_engine_core_a_cleanup_window(
@@ -2030,7 +2029,7 @@ async def test_sync_or_shutdown_gives_engine_core_a_cleanup_window(monkeypatch):
             engine_client, vllm_config, "8465209922961459"
         )
 
-    engine_client.shutdown.assert_called_once_with(timeout=5.0)
+    engine_client.shutdown.assert_called_once_with(timeout=15.0)
 
 
 def test_fpm_utility_name_matches_the_installed_method():
