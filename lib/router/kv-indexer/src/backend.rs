@@ -284,6 +284,17 @@ impl Indexer {
         matches!(self, Self::Single { .. } | Self::Concurrent { .. })
     }
 
+    /// The local lower-tier indexes; `None` for a remote primary and for routing without
+    /// KV state.
+    pub fn lower_tier(&self) -> Option<&LowerTierIndexers> {
+        match self {
+            Self::Single { lower_tier, .. } | Self::Concurrent { lower_tier, .. } => {
+                Some(lower_tier)
+            }
+            Self::Remote { .. } | Self::None => None,
+        }
+    }
+
     pub fn supports_kv_transfer_chain_retention(&self) -> bool {
         matches!(
             self,

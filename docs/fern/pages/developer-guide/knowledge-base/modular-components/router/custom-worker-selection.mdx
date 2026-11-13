@@ -433,7 +433,7 @@ The [custom policy examples](https://github.com/ai-dynamo/dynamo/blob/main/examp
 | `ScoredWorkerCandidate::cost()` | Sum of all scorer contributions for the picker row |
 | `WorkerInputView::info(row)` | Picker row `WorkerInfo`, or `None` for an out-of-range row |
 
-`WorkerInfo` holds static facts about a worker rank, so no component declares an input group to read it. `worker()` returns the worker ID and data-parallel rank. `max_num_batched_tokens()` and `total_kv_blocks()` return what the worker's runtime config advertises, or `None` when it is unreported or reported as zero (vLLM's Ray data-parallel backend registers a zero placeholder); `total_kv_blocks()` is capacity, not free blocks. The values change only when a worker registers again. For filters, scorers, and pickers Dynamo looks them up in its cached worker configs on each `info()` call, so a component that never calls it pays nothing. Classifier rows outlive that map, so they carry each rank's capacity (32 bytes per rank) whenever a classifier declares an input group.
+`WorkerInfo` holds static facts about a worker rank, so no component declares an input group to read it. `worker()` returns the worker ID and data-parallel rank. `max_num_batched_tokens()` and `total_kv_blocks()` return what the worker's runtime config advertises, or `None` when it is unreported or reported as zero (vLLM's Ray data-parallel backend registers a zero placeholder); `total_kv_blocks()` is capacity, not free blocks. `cache_owner_capacity_blocks()` returns the host-pinned capacity, in KV blocks, of the rank's KVCR instance; see [KVCR Occupancy](#kvcr-occupancy). The values change only when a worker registers again. For filters, scorers, and pickers Dynamo looks them up in its cached worker configs on each `info()` call, so a component that never calls it pays nothing. Classifier rows outlive that map, so they carry each rank's capacity (40 bytes per rank) whenever a classifier declares an input group.
 
 ### Optional Worker Inputs
 
@@ -447,6 +447,7 @@ If a component needs no optional worker data, return `WorkerInputs::NONE`. Combi
 | `CACHE` | `accounting_cache_estimate()` | Accounting estimate as weighted KV blocks and rounded tokens; zero if missing, not clamped to prompt length |
 | `CACHE` | `has_tier_matches()` | Whether the lookup contains any GPU, CPU, or disk matches before filtering; `false` means only accounting estimates or no cache data were supplied |
 | `CACHE` | `shared_hits()` | `None` if no shared result was supplied; otherwise unweighted ranges with `total_hits` and `hits_beyond(prefix)` |
+| `CACHE` | `WorkerCandidate::cache_owner_blocks()`, `WorkerInputView::cache_owner_blocks(row)` | Host-pinned blocks the router has indexed for the worker's KVCR instance; see [KVCR Occupancy](#kvcr-occupancy) |
 | `LOAD` | `is_available()` | Whether the host supplied a load observation; distinguishes missing data from an observed idle worker |
 | `LOAD` | `active_prefill_tokens()` | Tokens currently active in the worker's prefill stage |
 | `LOAD` | `active_decode_blocks()` | KV blocks the worker's active requests hold; excludes this request. Prompt blocks by default, plus the blocks generation adds only with `--router-track-output-blocks`; zero with `--no-router-track-active-blocks` |
@@ -505,6 +506,21 @@ impl WorkerScorer for UncoveredPromptScorer {
     }
 }
 ```
+
+### KVCR Occupancy
+
+A KVCR instance is the host-memory KV cache attached to one worker rank. Its occupancy is `cache_owner_blocks()` divided by `WorkerInfo::cache_owner_capacity_blocks()`:
+
+```rust
+let capacity = candidate.info().cache_owner_capacity_blocks();
+let occupancy = candidate.cache_owner_blocks().zip(capacity)
+    .map(|(blocks, capacity)| (blocks as f64 / capacity as f64).min(1.0));
+```
+
+- `cache_owner_blocks()` needs `CACHE`. It is the number of blocks Dynamo's lower-tier index holds for the instance, built from KVCR's KV events and read live, so two reads in one selection can differ. Events are best effort: blocks KVCR is still filling and non-main KV groups are not counted, and a lost Removed event counts until the instance's next recovery. It is `None` when no instance is attached to the worker, when the router uses a remote indexer, and in a request classifier.
+- `cache_owner_capacity_blocks()` needs no input group. A vLLM worker advertises its KVCR tier's `secondary_g2_slots` times the offload chunk size (the connector's `blocks_per_chunk` or `block_size`), in router blocks; a pool served by `kvcr-service` advertises none.
+
+Dynamo looks a count up only when a component calls the accessor, so a policy that never reads one pays nothing. KVCR evicts least-recently-used blocks, so a warm instance usually reads close to full.
 
 `WorkerCandidate::preferred_taint_multiplier()` and `ScoredWorkerCandidate::preferred_taint_multiplier()` return the optional cost multiplier from preferred routing constraints. A filter, scorer, or picker must request `WorkerInputs::PREFERRED_TAINT` before reading the multiplier. Without that declaration, the component receives `None`, even when another component requested the multiplier. Exact hard-pinned requests also do not materialize it. Required routing constraints remain host-enforced eligibility rules.
 

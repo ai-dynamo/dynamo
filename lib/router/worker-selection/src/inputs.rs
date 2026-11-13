@@ -90,6 +90,25 @@ impl<'a> WorkerCandidate<'a> {
             })
     }
 
+    /// Host-pinned KV blocks the router has indexed for the cache owner (KVCR instance)
+    /// attached to this worker, only when this component declared CACHE. Compare with
+    /// [`WorkerInfo::cache_owner_capacity_blocks`].
+    ///
+    /// The count follows the owner's KV events as the router applies them and is read
+    /// live on each call. Events are best effort, so it can differ from the owner's real
+    /// contents: unannounced filling slots and non-main KV groups are missing, and a lost
+    /// Removed event counts until the owner's next recovery. None when the worker has no
+    /// attached owner, when the router has no local lower-tier index, and in a request
+    /// classifier.
+    pub fn cache_owner_blocks(self) -> Option<u64> {
+        if !self.inputs.contains(WorkerInputs::CACHE) {
+            return None;
+        }
+        self.cache_snapshot
+            .resident_blocks?
+            .cache_owner_blocks(self.data.worker)
+    }
+
     /// Read this worker's load snapshot only when this component declared LOAD.
     #[inline]
     pub fn load(self) -> Option<&'a WorkerLoadInput> {
@@ -226,13 +245,20 @@ pub trait ResidentBlockSource {
     /// Blocks held for `worker` as of the host's last event for it, or `None` when the host has
     /// no count for the rank.
     fn resident_blocks(&self, worker: WorkerWithDpRank) -> Option<u64>;
+
+    /// Host-pinned blocks the host's index holds for the cache owner (KVCR instance) attached
+    /// to `worker`, or `None` when no owner is attached or the host has no count for it.
+    fn cache_owner_blocks(&self, _worker: WorkerWithDpRank) -> Option<u64> {
+        None
+    }
 }
 
 /// Request-wide facts borrowed once for all cache views in a selection.
 pub struct CacheSnapshot<'a> {
     pub shared_hits: Option<&'a SharedCacheHits>,
     pub has_tier_matches: bool,
-    /// Lent only when a component declared RESIDENT_BLOCKS and the host has counts.
+    /// Lent when a component declared RESIDENT_BLOCKS and the host has counts, or when the
+    /// host has cache-owner counts for a component that declared CACHE.
     pub resident_blocks: Option<&'a dyn ResidentBlockSource>,
 }
 
@@ -753,6 +779,13 @@ impl<'a> WorkerInputView<'a> {
                     .map(|&worker_id| active_requests(worker_id))
             }
         }
+    }
+
+    /// [`WorkerCandidate::cache_owner_blocks`] for the candidate at `row`, when the picker
+    /// declared CACHE; None also for an out-of-range row.
+    pub fn cache_owner_blocks(self, row: usize) -> Option<u64> {
+        let counts = self.cache?.snapshot.resident_blocks?;
+        counts.cache_owner_blocks(self.candidates().get(row)?.worker)
     }
 
     /// Backs `experimental::resident_blocks::ResidentBlocksByRow`: the count for candidate `row`

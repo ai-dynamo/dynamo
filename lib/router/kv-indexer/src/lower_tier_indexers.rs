@@ -22,9 +22,9 @@ use crate::prelude::{
     LocalBlockHash, ResidencyProjection, ResidencyRoutingSnapshot, RouterEvent, StorageTier,
 };
 use crate::{
-    KvIndexerMetrics, KvRouterError, LowerTierContinuation, LowerTierIndexer,
-    LowerTierMatchDetails, MatchDetails, ThreadPoolIndexer, WireTieredMatchDetails,
-    record_unsupported_residency_event,
+    CacheOwnerBlockCounts, KvIndexerMetrics, KvRouterError, LowerTierContinuation,
+    LowerTierIndexer, LowerTierMatchDetails, MatchDetails, ThreadPoolIndexer,
+    WireTieredMatchDetails, record_unsupported_residency_event,
 };
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
@@ -137,6 +137,20 @@ impl LowerTierIndexers {
 
     pub fn record_unsupported_residency_event(&self, event: &RouterEvent) {
         record_unsupported_residency_event(self.metrics.as_deref(), event);
+    }
+
+    /// Host-pinned cache-owner block counts under the current owner projection.
+    /// None until a cache owner is projected to a worker and the host-pinned tier
+    /// receives its first event. Without a projected owner this costs one `ArcSwap` load.
+    pub fn cache_owner_block_counts(&self) -> Option<CacheOwnerBlockCounts> {
+        if self.routing_snapshot.load().projection().is_empty() {
+            return None;
+        }
+        let host = self.get(StorageTier::HostPinned)?;
+        Some(
+            host.backend()
+                .cache_owner_block_counts(self.routing_snapshot.load_full()),
+        )
     }
 }
 

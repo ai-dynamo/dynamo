@@ -287,6 +287,11 @@ pub struct ModelRuntimeConfig {
     /// estimate and must not silently become a hard-admission denominator.
     pub total_kv_blocks: Option<u64>,
 
+    /// Host-pinned capacity, in KV blocks, of the cache owner (KVCR instance) attached
+    /// to each router-visible data-parallel rank.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_owner_capacity_blocks: Option<u64>,
+
     pub max_num_seqs: Option<u64>,
 
     pub max_num_batched_tokens: Option<u64>,
@@ -451,6 +456,7 @@ impl Default for ModelRuntimeConfig {
         Self {
             context_length: None,
             total_kv_blocks: None,
+            cache_owner_capacity_blocks: None,
             max_num_seqs: None,
             max_num_batched_tokens: None,
             tool_call_parser: None,
@@ -589,6 +595,10 @@ impl dynamo_scheduler::host::WorkerConfigLike for ModelRuntimeConfig {
             .get("native_offloading_capacity")?
             .get("total_tokens")?
             .as_u64()
+    }
+
+    fn cache_owner_capacity_blocks(&self) -> Option<u64> {
+        self.cache_owner_capacity_blocks
     }
 
     fn taints(&self) -> &HashSet<String> {

@@ -17,7 +17,8 @@ pub struct WorkerInputs(u8);
 impl WorkerInputs {
     /// Request no optional worker inputs.
     pub const NONE: Self = Self(0);
-    /// Request worker KV-cache overlaps and shared-cache lookup results.
+    /// Request worker KV-cache overlaps, shared-cache lookup results, and the blocks held
+    /// by each worker's attached cache owner (KVCR instance).
     pub const CACHE: Self = Self(1 << 0);
     /// Request active-load inputs.
     pub const LOAD: Self = Self(1 << 1);
@@ -119,6 +120,14 @@ impl WorkerInfo {
     #[inline]
     pub fn total_kv_blocks(&self) -> Option<u64> {
         self.capacity.total_kv_blocks()
+    }
+
+    /// Host-pinned capacity, in KV blocks, of the cache owner (KVCR instance) attached to
+    /// this rank, when the worker advertises it. Compare with the worker-selection stage's
+    /// `WorkerCandidate::cache_owner_blocks`.
+    #[inline]
+    pub fn cache_owner_capacity_blocks(&self) -> Option<u64> {
+        self.capacity.cache_owner_capacity_blocks()
     }
 
     /// Both advertised values, as a fullness check takes them.
