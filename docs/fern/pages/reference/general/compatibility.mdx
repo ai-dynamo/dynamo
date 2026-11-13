@@ -63,7 +63,18 @@ The following settings narrow the N-2 guarantee for Dynamo 1.7. Each applies onl
 - **Setting:** `--engine-request-limit` on a worker, or `DYN_BACKEND_ADMISSION_ENGINE_REQUEST_LIMIT` (legacy name `DYN_ENGINE_REQUEST_LIMIT`).
 - **Affected pairing:** 1.5.x or 1.6.x frontend with 1.7 workers.
 
-A 1.7 worker refuses requests over the limit instead of queueing up to 16 of them. A 1.7 frontend returns HTTP 529 and backs off from that worker. An older frontend reads the refusal as a worker fault and stops routing to the worker for `DYN_RUNTIME_INHIBITED_DURATION_SECS` (5 seconds by default). The refused request returns HTTP 529 from a 1.6.x frontend and HTTP 500 from a 1.5.x frontend. Requests that arrive while every worker is inhibited return HTTP 503.
+A 1.7 worker refuses a request that exceeds the limit. A 1.5.x or 1.6.x worker queues up to 16 such requests before it refuses one. What the frontend does with a refusal depends on the frontend version and on request migration. Migration is off when `--migration-limit` is `0`, which is the default.
+
+| Frontend | Migration off | Migration on | Worker that refused |
+| :---- | :---- | :---- | :---- |
+| 1.7.x | Returns HTTP 529. | Retries on another worker. Returns HTTP 529 if every worker refuses. | Marks the worker overloaded for up to 1 second. |
+| 1.6.x | Returns HTTP 529. | Retries on another worker. Returns HTTP 503 if every worker refuses. | Inhibits the worker for 5 seconds by default. |
+| 1.5.x | Returns HTTP 500. | Retries on another worker. Returns HTTP 503 if every worker refuses. | Inhibits the worker for 5 seconds by default. |
+
+A frontend sends no requests to a worker that it has marked overloaded or inhibited, with migration on or off. The two states end differently:
+
+- A 1.7 frontend treats the refusal as backpressure. It clears the overloaded mark as soon as the worker publishes new load data.
+- A 1.5.x or 1.6.x frontend treats the refusal as a worker fault. It keeps the worker inhibited for `DYN_RUNTIME_INHIBITED_DURATION_SECS`, even after the worker has capacity again. While every worker is inhibited, the frontend returns HTTP 503 for every request.
 
 Set the limit on 1.7 workers after every frontend runs 1.7.
 
