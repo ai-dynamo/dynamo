@@ -73,6 +73,11 @@ ignore_missing_imports = true
 check_untyped_defs = true
 
 [tool.pytest.ini_options]
+markers = [
+    "unit: unit tests",
+    "gpu_0: tests requiring no GPU",
+    "pre_merge: tests suitable for pre-merge validation",
+]
 addopts = [
     "-ra",
     "--showlocals",
