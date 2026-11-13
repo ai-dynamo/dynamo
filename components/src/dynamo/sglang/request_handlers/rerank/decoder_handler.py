@@ -88,12 +88,14 @@ class DecoderRerankWorkerHandler(RerankWorkerHandler):
         responses = manager.generate_request(request, None)
         inference = asyncio.create_task(anext(responses))
         cancelled = asyncio.ensure_future(context.async_killed_or_stopped())
-        shutdown = (
+        shutdown: asyncio.Task[bool] | None = (
             asyncio.create_task(self.shutdown_event.wait())
             if self.shutdown_event is not None
             else None
         )
-        signals = [cancelled] if shutdown is None else [cancelled, shutdown]
+        signals: list[asyncio.Future[bool]] = [cancelled]
+        if shutdown is not None:
+            signals.append(shutdown)
         completed = False
         try:
             done, _ = await asyncio.wait(
