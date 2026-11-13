@@ -697,9 +697,9 @@ async def test_image_and_video_request_after_single_modality_requests_passes_trt
             expected.append([token] * input_processor.TOKENS[token])
         assert placed == expected
 
-    # Without the order TRT-LLM counts the first modality's tokens only.
+    # Without the order TRT-LLM rejects mixed-modality inputs.
     inputs.pop("mm_item_order")
-    with pytest.raises(AssertionError, match="does not match sum of per-unit lengths"):
+    with pytest.raises(ValueError, match="require prompt-ordered item metadata"):
         hashed(inputs, SamplingParams())
 
 
