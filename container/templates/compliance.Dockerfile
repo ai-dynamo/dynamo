@@ -197,8 +197,9 @@ COPY --from=epp /sbom-rust-epp.cdx.json /tmp/sbom-rust-epp.cdx.json
 ARG ENABLE_SOURCE_ARCHIVAL=false
 ARG BASELINE_SBOM_FILE="{{ compliance_baseline_sbom }}"
 ARG TARGETARCH
+{#- Dynamo's Rust wheels are in system Python on the enterprise variant, not the NIM venv. #}
 RUN if [ "$ENABLE_SOURCE_ARCHIVAL" = "true" ]; then \
-        {% if framework == "sglang" and device != "xpu" %}RUST_PKG_ARG="--rust-site-packages $(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"{% else %}if [ -n "${VIRTUAL_ENV:-}" ]; then RUST_PKG_ARG="--rust-venv ${VIRTUAL_ENV}"; else RUST_PKG_ARG="--rust-site-packages $(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"; fi{% endif %} && \
+        {% if framework == "sglang" and device != "xpu" %}RUST_PKG_ARG="--rust-site-packages $(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"{% elif variant == "enterprise" %}RUST_PKG_ARG="--rust-site-packages $(/usr/bin/python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"{% else %}if [ -n "${VIRTUAL_ENV:-}" ]; then RUST_PKG_ARG="--rust-venv ${VIRTUAL_ENV}"; else RUST_PKG_ARG="--rust-site-packages $(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"; fi{% endif %} && \
         python3 -m compliance.collect_sources \
             {{ compliance_source_ecosystem_flags }} \
             --output-zip /sources.zip \
