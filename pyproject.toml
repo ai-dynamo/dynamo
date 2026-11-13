@@ -501,6 +501,11 @@ follow_imports = "skip"
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
+# XGrammar comes with the backend extras and is absent from the Dynamo runtime.
+module = ["xgrammar", "xgrammar.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
 module = ["tensorrt_llm", "tensorrt_llm.*"]
 follow_imports = "skip"
 ignore_missing_imports = true

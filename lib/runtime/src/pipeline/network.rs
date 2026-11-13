@@ -1396,7 +1396,11 @@ where
 }
 
 pub struct Ingress<Req: PipelineIO, Resp: PipelineIO, Adapter = SerdeIngressPayloadAdapter> {
-    segment: OnceLock<Arc<SegmentSource<Req, Resp>>>,
+    /// Called directly for each request: the engine's stream is the call's
+    /// return value, so no response map sits between them.
+    engine: OnceLock<ServiceEngine<Req, Resp>>,
+    /// Ids whose engine call has not returned; refuses a second request with one.
+    in_flight_ids: ingress::inflight::InFlightIds,
     metrics: OnceLock<Arc<WorkHandlerMetrics>>,
     /// Endpoint-specific notifier for health check timer resets
     endpoint_health_check_notifier: OnceLock<Arc<tokio::sync::Notify>>,
@@ -1407,6 +1411,7 @@ pub struct Ingress<Req: PipelineIO, Resp: PipelineIO, Adapter = SerdeIngressPayl
     velo_response_owner: OnceLock<std::sync::Weak<velo_response::RuntimeService>>,
     payload_adapter: Arc<Adapter>,
     lifecycle_operation_role: OnceLock<Arc<OnceLock<LifecycleOperationRole>>>,
+    track_response_completion: OnceLock<bool>,
 }
 
 impl<Req: PipelineIO + Sync, Resp: PipelineIO> Ingress<Req, Resp> {
@@ -1447,7 +1452,8 @@ where
 {
     pub fn new_with_adapter(payload_adapter: Adapter) -> Arc<Self> {
         Arc::new(Self {
-            segment: OnceLock::new(),
+            engine: OnceLock::new(),
+            in_flight_ids: Default::default(),
             metrics: OnceLock::new(),
             endpoint_health_check_notifier: OnceLock::new(),
             response_plane: OnceLock::new(),
@@ -1456,6 +1462,7 @@ where
             velo_response_owner: OnceLock::new(),
             payload_adapter: Arc::new(payload_adapter),
             lifecycle_operation_role: OnceLock::new(),
+            track_response_completion: OnceLock::new(),
         })
     }
 
@@ -1475,9 +1482,13 @@ where
     }
 
     pub fn attach(&self, segment: Arc<SegmentSource<Req, Resp>>) -> Result<()> {
-        self.segment
-            .set(segment)
-            .map_err(|_| anyhow::anyhow!("Segment already set"))
+        self.set_engine(segment)
+    }
+
+    fn set_engine(&self, engine: ServiceEngine<Req, Resp>) -> Result<()> {
+        self.engine
+            .set(engine)
+            .map_err(|_| anyhow::anyhow!("Ingress engine already set"))
     }
 
     pub(crate) fn set_quic_response_client_pool(
@@ -1542,6 +1553,11 @@ where
             endpoint.get_metrics_registry(),
         );
 
+        if endpoint.track_response_completion {
+            let _ = endpoint
+                .inflight_requests
+                .set(metrics.inflight_requests.clone());
+        }
         self.metrics
             .set(Arc::new(metrics))
             .map_err(|_| anyhow::anyhow!("Metrics already set"))
@@ -1551,11 +1567,8 @@ where
         engine: ServiceEngine<Req, Resp>,
         payload_adapter: Adapter,
     ) -> Result<Arc<Self>> {
-        let frontend = SegmentSource::<Req, Resp>::new();
-        let backend = ServiceBackend::from_engine(engine);
-        let pipeline = frontend.link(backend)?.link_terminal(frontend)?;
         let ingress = Ingress::new_with_adapter(payload_adapter);
-        ingress.attach(pipeline)?;
+        ingress.set_engine(engine)?;
         Ok(ingress)
     }
 
@@ -1564,14 +1577,8 @@ where
         payload_adapter: Adapter,
         role: LifecycleOperationRole,
     ) -> Result<Arc<Self>> {
-        let frontend = SegmentSource::<Req, Resp>::new();
-        let backend = ServiceBackend::from_engine(engine);
-
-        let pipeline = frontend.link(backend)?.link_terminal(frontend)?;
-
         let ingress = Ingress::new_with_adapter_and_lifecycle_role(payload_adapter, role);
-        ingress.attach(pipeline)?;
-
+        ingress.set_engine(engine)?;
         Ok(ingress)
     }
 
@@ -1589,6 +1596,9 @@ where
 
     fn bind_endpoint_config(&self, endpoint: &crate::component::Endpoint) {
         let _ = self.response_plane.set(endpoint.drt().response_plane());
+        let _ = self
+            .track_response_completion
+            .set(endpoint.track_response_completion);
         // Endpoint tasks retain this ingress. Keep a weak back-reference so
         // those tasks cannot keep their own Tokio runtime alive.
         let _ = self.velo_response_owner.set(Arc::downgrade(
