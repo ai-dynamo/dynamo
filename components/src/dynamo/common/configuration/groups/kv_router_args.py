@@ -241,6 +241,28 @@ class KvRouterConfigBase(ConfigBase):
         except ValidationError as exc:
             raise ValueError(f"invalid router settings: {exc}") from exc
 
+    def hint_policy_roles(self) -> list[str]:
+        """Roles whose worker_selection entry lists hints in --router-policy-config.
+
+        A role whose entry lists ``hints: []`` opts out of the defaults and runs none.
+        """
+        if self.router_policy_config is None:
+            return []
+        with Path(self.router_policy_config).open() as source:
+            document = yaml.safe_load(source)
+        if not isinstance(document, dict):
+            raise ValueError("--router-policy-config must contain a YAML mapping")
+        worker_selection = document.get("worker_selection")
+        if worker_selection is None:
+            return []
+        if not isinstance(worker_selection, dict):
+            raise ValueError("worker_selection must contain a YAML mapping")
+        return [
+            role
+            for role, entry in worker_selection.items()
+            if isinstance(entry, dict) and entry.get("hints")
+        ]
+
     def apply_router_config(self) -> None:
         self.apply_load_aware_preset()
         self.apply_conditional_disagg_config()
@@ -627,7 +649,7 @@ class KvRouterArgGroup(ArgGroup):
             default=None,
             help=(
                 "KV Router: Startup-only YAML configuration for shared router settings, "
-                "policy-class queues, and per-role worker-selection policies. "
+                "policy-class queues, per-role worker-selection policies, and hint policies. "
                 "When omitted, router_queue_threshold and router_queue_policy define "
                 "one synthetic policy class; queueing remains disabled unless "
                 "router_queue_threshold is set."
@@ -766,7 +788,8 @@ class KvRouterArgGroup(ArgGroup):
                 "[EXPERIMENTAL] KV Router: Multiplier for shared cache hits (0.0-1.0). "
                 "Blocks in the shared cache are less valuable than device-local blocks. "
                 "E.g. 0.5 means each shared hit counts as half a device-local hit. "
-                "Also credits blocks a worker can fetch from a peer through a KV fetch hint. "
+                "Under the kvcr worker-selection policy, also credits blocks a worker can "
+                "copy from a peer through a KV fetch hint. "
                 "The default policy uses 0.5 when shared cache is enabled."
             ),
             arg_type=float,

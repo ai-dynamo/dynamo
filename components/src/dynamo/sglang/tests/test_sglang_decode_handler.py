@@ -130,6 +130,7 @@ async def test_prefill_rejects_cache_uuid_before_building_media_kwargs(
     handler.bootstrap_port = 1234
     handler._generate_bootstrap_room = lambda: "room"
     handler._get_input_param = lambda request: {}
+    handler.use_sglang_tokenizer = False
     context = SimpleNamespace(
         id=lambda: "request-id",
         trace_id="trace-id",
@@ -200,6 +201,7 @@ async def test_prefill_forwards_first_token_logprob_options(wrapped, options, ex
     handler.enable_trace = False
     handler._generate_bootstrap_room = lambda: 1
     handler._get_input_param = lambda request: {"input_ids": request["token_ids"]}
+    handler.use_sglang_tokenizer = False
     handler._resolve_lora = lambda request: None
     handler._priority_kwargs = lambda priority: {}
     request = {"token_ids": [1, 2, 3], "output_options": options}
@@ -249,6 +251,7 @@ async def test_prefill_applies_model_default_sampling_params(
     handler.enable_trace = False
     handler._generate_bootstrap_room = lambda: 1
     handler._get_input_param = lambda request: {"input_ids": request["token_ids"]}
+    handler.use_sglang_tokenizer = False
     handler._resolve_lora = lambda request: None
     handler._priority_kwargs = lambda priority: {}
     request = {

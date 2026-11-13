@@ -672,7 +672,7 @@ impl LLMEngineOutputExt for LLMEngineOutput {
         mut self,
         encoder_result: serde_json::Map<String, serde_json::Value>,
     ) -> Self {
-        self.encoder_result = Some(serde_json::Value::Object(encoder_result));
+        self.encoder_result = Some(Box::new(serde_json::Value::Object(encoder_result)));
         self
     }
 }
