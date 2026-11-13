@@ -361,7 +361,7 @@ mod tests {
     }
 
     #[test]
-    fn pool_id_json_stays_readable_across_the_compatibility_window() {
+    fn pool_id_writes_both_field_names_and_reads_either() {
         let pool = PoolId::new(
             IndexerDomainId::new(
                 CacheSemanticsId::new([0xab; 16], IdentitySource::Explicit),
@@ -369,35 +369,50 @@ mod tests {
             ),
             ClusterId::new(7),
         );
-        // v1.5 and v1.6 peers only know `dc_id`, so that is what goes on the wire.
         let json = serde_json::to_value(pool).unwrap();
+        assert_eq!(json["cluster_id"], 7);
         assert_eq!(json["dc_id"], 7);
-        assert!(json.get("cluster_id").is_none());
         assert_eq!(
             serde_json::from_value::<PoolId>(json.clone()).unwrap(),
             pool
         );
-        // A writer that uses `cluster_id` is read the same way.
-        let mut renamed_json = json;
-        let cluster_id = renamed_json
-            .as_object_mut()
-            .unwrap()
-            .remove("dc_id")
-            .unwrap();
-        renamed_json["cluster_id"] = cluster_id;
+
+        // A v1.5 or v1.6 reader knows only `dc_id` and ignores the key it does not know.
+        #[derive(serde::Deserialize)]
+        struct V16PoolId {
+            indexer_domain: IndexerDomainId,
+            dc_id: u64,
+        }
+        let v16: V16PoolId = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(v16.indexer_domain, pool.indexer_domain());
+        assert_eq!(v16.dc_id, 7);
+
+        // A v1.5 or v1.6 writer sends only `dc_id`.
+        let mut only_dc_id = json.clone();
+        only_dc_id.as_object_mut().unwrap().remove("cluster_id");
+        assert_eq!(serde_json::from_value::<PoolId>(only_dc_id).unwrap(), pool);
+
+        // A v1.9 writer sends only `cluster_id`.
+        let mut only_cluster_id = json.clone();
+        only_cluster_id.as_object_mut().unwrap().remove("dc_id");
         assert_eq!(
-            serde_json::from_value::<PoolId>(renamed_json.clone()).unwrap(),
+            serde_json::from_value::<PoolId>(only_cluster_id.clone()).unwrap(),
             pool
         );
 
-        // Event state sources travel as named MessagePack; both names decode there too.
+        // `cluster_id` is authoritative when the two disagree, and one of them is required.
+        let mut disagree = json.clone();
+        disagree["dc_id"] = 9.into();
+        assert_eq!(serde_json::from_value::<PoolId>(disagree).unwrap(), pool);
+        only_cluster_id
+            .as_object_mut()
+            .unwrap()
+            .remove("cluster_id");
+        assert!(serde_json::from_value::<PoolId>(only_cluster_id).is_err());
+
+        // Event state sources travel as named MessagePack.
         let packed = rmp_serde::to_vec_named(&pool).unwrap();
         assert_eq!(rmp_serde::from_slice::<PoolId>(&packed).unwrap(), pool);
-        let renamed_packed = rmp_serde::to_vec_named(&renamed_json).unwrap();
-        assert_eq!(
-            rmp_serde::from_slice::<PoolId>(&renamed_packed).unwrap(),
-            pool
-        );
     }
 
     #[test]
