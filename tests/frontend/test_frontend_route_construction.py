@@ -46,7 +46,7 @@ def test_rejects_unsupported_methods(method):
         FrontendRoute(method, "/ok", _handler)
 
 
-@pytest.mark.parametrize("timeout_s", [0, -1, float("nan"), float("inf")])
+@pytest.mark.parametrize("timeout_s", [0, -1, float("nan"), float("inf"), 2**63])
 def test_rejects_invalid_timeout(timeout_s):
     with pytest.raises(ValueError):
         FrontendRoute("GET", "/ok", _handler, timeout_s=timeout_s)

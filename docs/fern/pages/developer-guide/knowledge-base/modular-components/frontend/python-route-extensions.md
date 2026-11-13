@@ -183,16 +183,15 @@ Synchronous handlers execute in a small, dedicated thread pool, separate from in
 tokenization. That pool also starts each async handler, which then runs on the Frontend's event loop.
 Keep handlers fast and non-blocking:
 
-- A handler that exceeds its route's `timeout_s` (30 seconds by default, measured from request
-  arrival) returns HTTP 503. An async handler is cancelled at the timeout, and a call the event loop
-  picks up after its timeout is dropped without running the handler. A 503 does not mean the handler
-  had no effect: it may have been cancelled partway.
+- A handler that exceeds its route's `timeout_s` (30 seconds by default, counted from when the
+  request body has been read) returns HTTP 503. An async handler is cancelled at the timeout, and a
+  call the event loop picks up after its timeout is dropped without running the handler. A 503 does
+  not mean the handler had no effect: it may have been cancelled partway.
 - A client that disconnects does not cancel a running handler.
 - Each route admits at most 64 calls at once, waiting or running. A request beyond that, or one that
   finds the thread pool's queue full, is rejected with the configured overload status code, HTTP 529
   by default. An async handler holds its slot until it finishes or is cancelled.
-- A handler that raises returns HTTP 500. That includes a `TimeoutError` the handler raises itself
-  before the route's timeout.
+- A handler that raises returns HTTP 500. That includes a `TimeoutError` the handler raises itself.
 - Request bodies are limited by `DYN_HTTP_BODY_LIMIT_MB`, 45 MB by default, the same limit as the
   inference routes.
 - Slow work in a synchronous handler delays other extension routes: it occupies a pool thread, and

@@ -23,6 +23,7 @@ import os
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -177,6 +178,16 @@ def test_frontend_route_extension_serves_custom_route(request, tmp_path, selecto
         # not the route's timeout (503).
         own_timeout = requests.post(f"{base}{OWN_TIMEOUT_PATH}", json={}, timeout=5)
         assert own_timeout.status_code == 500, own_timeout.text
+
+        # A route admits 64 calls at once and sheds the rest (529). The slots
+        # come back when the handlers finish.
+        def call_slow(_=None):
+            return requests.post(f"{base}{SLOW_PATH}", json={}, timeout=10).status_code
+
+        with ThreadPoolExecutor(max_workers=70) as pool:
+            burst = list(pool.map(call_slow, range(70)))
+        assert 529 in burst and set(burst) <= {503, 529}, burst
+        assert call_slow() == 503
 
 
 @pytest.mark.timeout(120)

@@ -62,10 +62,11 @@ impl PyFrontendRoute {
         // `try_from_secs_f64` rejects negative, NaN and infinite values.
         let timeout = Duration::try_from_secs_f64(timeout_s)
             .ok()
-            .filter(|t| !t.is_zero())
+            .filter(|t| !t.is_zero() && *t <= MAX_TIMEOUT)
             .ok_or_else(|| {
                 PyValueError::new_err(format!(
-                    "FrontendRoute timeout_s must be a positive number of seconds, got {timeout_s}"
+                    "FrontendRoute timeout_s must be positive and at most {} seconds, got {timeout_s}",
+                    MAX_TIMEOUT.as_secs()
                 ))
             })?;
         Ok(Self {
@@ -271,14 +272,20 @@ fn frontend_route_extension_from_routes(
 const EXTENSION_POOL_THREADS: usize = 2;
 const EXTENSION_QUEUE_DEPTH: usize = 64;
 const ROUTE_MAX_IN_FLIGHT: usize = 64;
-/// The event loop's timeout can reach the caller before the deadline: uvloop
-/// timers are millisecond-quantized and fire up to 1.5 ms early.
-const DEADLINE_SLACK: Duration = Duration::from_millis(10);
+/// Far above any real handler timeout, and small enough that adding it to an
+/// `Instant` cannot overflow.
+const MAX_TIMEOUT: Duration = Duration::from_secs(365 * 24 * 60 * 60);
 
 type ExtensionJob = Box<dyn FnOnce() + Send + 'static>;
-/// The error is rendered under the GIL where it occurs: formatting a `PyErr`
-/// takes the GIL, which a tokio worker must not wait for.
-type RouteResult = Result<(StatusCode, Value), String>;
+
+enum RouteError {
+    /// The error is rendered under the GIL where it occurs: formatting a
+    /// `PyErr` takes the GIL, which a tokio worker must not wait for.
+    Failed(String),
+    /// The handler was still running at the route's deadline.
+    TimedOut,
+}
+type RouteResult = Result<(StatusCode, Value), RouteError>;
 type RouteSender = tokio::sync::oneshot::Sender<RouteResult>;
 
 /// Dedicated pool for Python extension handlers, kept off tokio's shared
@@ -343,6 +350,7 @@ async fn call_python_frontend_route(
         tx: Some(tx),
         permit: Some(permit),
         deadline: deadline.into_std(),
+        timer: None,
     };
     let job: ExtensionJob = Box::new(move || {
         // Caller already gave up (timed out/disconnected): skip before the GIL.
@@ -354,23 +362,23 @@ async fn call_python_frontend_route(
         return shed();
     }
 
-    let result = tokio::time::timeout_at(deadline, rx)
-        .await
+    let failure = match tokio::time::timeout_at(deadline, rx).await {
+        Ok(Ok(Ok((status, body)))) => return (status, Json(body)).into_response(),
+        Ok(Ok(Err(failure))) => failure,
         // The reply was dropped without a value (handler panicked).
-        .map(|reply| reply.unwrap_or_else(|_| Err("dropped without a response".to_string())));
-    match result {
-        Ok(Ok((status, body))) => (status, Json(body)).into_response(),
-        // Before the deadline an error is the handler's own, a `TimeoutError`
-        // it raised included. At the deadline it is the event loop cancelling
-        // the handler, which shares this timer's deadline.
-        Ok(Err(err)) if tokio::time::Instant::now() + DEADLINE_SLACK < deadline => {
+        Ok(Err(_)) => RouteError::Failed("dropped without a response".to_string()),
+        // A sync handler, or an event loop too busy to cancel an async one.
+        Err(_) => RouteError::TimedOut,
+    };
+    match failure {
+        RouteError::Failed(err) => {
             tracing::error!(error = %err, "Python frontend route extension failed");
             extension_error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "frontend route extension failed",
             )
         }
-        _ => {
+        RouteError::TimedOut => {
             tracing::error!(
                 timeout_s = timeout.as_secs_f64(),
                 "Python frontend route extension timed out"
@@ -393,11 +401,11 @@ fn run_handler(
 ) {
     let result = match Py::new(py, ctx).and_then(|ctx| route.handler.call1(py, (ctx,))) {
         Ok(result) => result.into_bound(py),
-        Err(err) => return reply.finish(Err(err.to_string())),
+        Err(err) => return reply.finish(Err(RouteError::Failed(err.to_string()))),
     };
     if !result.hasattr("__await__").unwrap_or(false) {
         let response = normalize_route_response(py, &result);
-        return reply.finish(response.map_err(|e| e.to_string()));
+        return reply.finish(response.map_err(|e| RouteError::Failed(e.to_string())));
     }
     // On failure `reply` is dropped unanswered; the caller answers 500.
     let Ok(reply) = Py::new(py, reply) else {
@@ -411,7 +419,9 @@ fn run_handler(
     });
     if let Err(err) = scheduled {
         let _ = result.call_method0("close");
-        reply.borrow_mut(py).finish(Err(err.to_string()));
+        reply
+            .borrow_mut(py)
+            .finish(Err(RouteError::Failed(err.to_string())));
     }
 }
 
@@ -422,6 +432,9 @@ struct Reply {
     tx: Option<RouteSender>,
     permit: Option<OwnedSemaphorePermit>,
     deadline: std::time::Instant,
+    /// The event loop's deadline timer for an async handler, until it fires or
+    /// the handler is done.
+    timer: Option<PyObject>,
 }
 
 impl Reply {
@@ -437,44 +450,68 @@ impl Reply {
         (!self.is_closed() && !remaining.is_zero()).then_some(remaining)
     }
 
-    fn finish(&mut self, result: RouteResult) {
-        self.permit = None;
+    /// Answer the caller. The slot stays held until `finish`.
+    fn answer(&mut self, result: RouteResult) {
         if let Some(tx) = self.tx.take() {
             let _ = tx.send(result);
         }
+    }
+
+    fn finish(&mut self, result: RouteResult) {
+        self.permit = None;
+        self.answer(result);
     }
 }
 
 #[pymethods]
 impl Reply {
-    /// On the event loop: run `awaitable` until the deadline. A call the loop
-    /// picks up after its deadline, or whose caller is gone, is skipped.
+    /// On the event loop: run `awaitable` as a task that `expire` cancels at
+    /// the deadline. A call the loop picks up after its deadline, or whose
+    /// caller is gone, is skipped.
     fn start(slf: &Bound<'_, Self>, awaitable: &Bound<'_, PyAny>) {
-        let abort = |err: String| {
+        let abort = |err: RouteError| {
             let _ = awaitable.call_method0("close");
             slf.borrow_mut().finish(Err(err));
         };
         let remaining = slf.borrow().remaining();
         let Some(remaining) = remaining else {
-            return abort("deadline passed before the handler started".to_string());
+            return abort(RouteError::TimedOut);
         };
         let started = slf.py().import("asyncio").and_then(|asyncio| {
-            let bounded = asyncio.call_method1("wait_for", (awaitable, remaining.as_secs_f64()))?;
-            let task = asyncio.call_method1("ensure_future", (bounded,))?;
-            task.call_method1("add_done_callback", (slf.getattr("done")?,))
+            let task = asyncio.call_method1("ensure_future", (awaitable,))?;
+            task.call_method1("add_done_callback", (slf.getattr("done")?,))?;
+            let timer = asyncio.call_method0("get_running_loop")?.call_method1(
+                "call_later",
+                (remaining.as_secs_f64(), slf.getattr("expire")?, task),
+            )?;
+            slf.borrow_mut().timer = Some(timer.unbind());
+            Ok(())
         });
         if let Err(err) = started {
-            abort(err.to_string());
+            abort(RouteError::Failed(err.to_string()));
         }
+    }
+
+    /// On the event loop, at the deadline: cancel the handler and answer the
+    /// caller. A handler that has just finished keeps its own answer.
+    fn expire(&mut self, task: &Bound<'_, PyAny>) -> PyResult<()> {
+        self.timer = None;
+        if task.call_method0("cancel")?.is_truthy()? {
+            self.answer(Err(RouteError::TimedOut));
+        }
+        Ok(())
     }
 
     /// On the event loop: the handler's task finished.
     fn done(&mut self, task: &Bound<'_, PyAny>) {
         let py = task.py();
+        if let Some(timer) = self.timer.take() {
+            let _ = timer.call_method0(py, "cancel");
+        }
         let response = task
             .call_method0("result")
             .and_then(|result| normalize_route_response(py, &result));
-        self.finish(response.map_err(|e| e.to_string()));
+        self.finish(response.map_err(|e| RouteError::Failed(e.to_string())));
     }
 }
 

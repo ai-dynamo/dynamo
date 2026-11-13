@@ -749,7 +749,7 @@ curl -s localhost:8000/metrics | grep dynamo_frontend_inter_token_latency_second
   `has_any_ready_model()`, `is_model_ready_to_serve(name)`, `model_display_names()`, and
   `serving_ready_display_names()`.
 - **Execution limits:** Synchronous handlers run in a small dedicated thread pool. A handler still
-  running when the route's `timeout_s` has passed since the request arrived returns 503; an async
+  running when the route's `timeout_s` has passed since the request body was read returns 503; an async
   handler is cancelled then. Each route admits 64 calls at once, waiting or running; a request
   beyond that, or one that finds the pool's queue full, is rejected with the configured overload
   status code, 529 by default. A handler that raises returns 500. Request bodies are limited by
