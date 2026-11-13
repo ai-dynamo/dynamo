@@ -88,9 +88,8 @@ pub struct SystemHealth {
     /// Endpoints whose owner publishes readiness itself. Transport registration
     /// does not mark these ready; see [`SystemHealth::hold_endpoint_readiness`].
     readiness_holds: Arc<std::sync::RwLock<HashSet<String>>>,
-    /// Maps endpoint subject to the request-plane ingress's count of requests
-    /// in flight. The canary is sent in-process and bypasses the ingress, so it
-    /// is never counted.
+    /// Maps endpoint subject to the ingress's count of requests in flight.
+    /// The in-process canary bypasses the ingress, so it is never counted.
     endpoint_inflight: Arc<std::sync::RwLock<HashMap<String, Arc<AtomicU64>>>>,
     /// Channel for new endpoint registrations
     /// This solves the race condition where HealthCheckManager starts before endpoints are registered
@@ -360,10 +359,8 @@ impl SystemHealth {
         notifiers.get(endpoint_subject).cloned()
     }
 
-    /// Share the ingress's in-flight request counter for `endpoint` with
-    /// [`note_engine_progress`].
-    ///
-    /// [`note_engine_progress`]: SystemHealth::note_engine_progress
+    /// Share the ingress's in-flight request counter for `endpoint`; see
+    /// [`SystemHealth::note_engine_progress`].
     pub fn register_endpoint_inflight(&self, endpoint: &str, counter: Arc<AtomicU64>) {
         self.endpoint_inflight
             .write()
@@ -373,14 +370,10 @@ impl SystemHealth {
 
     /// Report that the engine behind `endpoint` completed a forward pass.
     ///
-    /// While a request is in flight this is endpoint activity, the same as a
-    /// non-error response chunk: it resets the canary timer and marks the
-    /// endpoint ready. A request can run for minutes without a response chunk,
-    /// for example a long prefill, and a canary sent then queues behind it and
-    /// times out on a healthy engine.
-    ///
-    /// With no request in flight the pass served the canary, whose own result
-    /// decides the status, so this does nothing.
+    /// While a request is in flight this is endpoint activity, like a non-error
+    /// response chunk: a long prefill streams nothing until it ends, and a
+    /// canary sent meanwhile would wait behind it and time out. With nothing in
+    /// flight the pass was the canary's own, and the canary's result decides.
     pub fn note_engine_progress(&self, endpoint: &str) {
         let busy = self
             .endpoint_inflight
@@ -629,10 +622,8 @@ mod tests {
         notifier.notified().now_or_never().is_some()
     }
 
-    /// A long prefill streams nothing until it ends, so the engine's forward
-    /// passes are the only sign of progress. They count while a request is in
-    /// flight. With none in flight the pass was the canary's own, and it must
-    /// not override that canary's result.
+    /// A pass counts while a request is in flight. With none in flight it was
+    /// the canary's own and must not override that canary's result.
     #[test]
     fn engine_progress_is_activity_only_while_a_request_is_in_flight() {
         let health = system_health(true);

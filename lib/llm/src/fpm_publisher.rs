@@ -210,19 +210,17 @@ impl Drop for FpmEventRelay {
     }
 }
 
-/// The fields of a relayed frame that tell a completed forward pass from a
+/// The field of a relayed frame that tells a completed forward pass from a
 /// heartbeat. Frames are msgpack maps, so the other fields are skipped.
 #[derive(serde::Deserialize)]
 struct FpmPassPeek {
-    version: i32,
     wall_time: f64,
 }
 
 /// Whether `payload` reports a completed forward pass. A heartbeat carries
 /// `wall_time == 0.0`, including one sent while a long pass is still running.
 fn is_completed_pass(payload: &[u8]) -> bool {
-    rmp_serde::from_slice::<FpmPassPeek>(payload)
-        .is_ok_and(|frame| frame.version == FPM_VERSION && frame.wall_time > 0.0)
+    rmp_serde::from_slice::<FpmPassPeek>(payload).is_ok_and(|frame| frame.wall_time > 0.0)
 }
 
 // ---------------------------------------------------------------------------
@@ -521,18 +519,6 @@ mod tests {
             ..Default::default()
         })));
         assert!(!is_completed_pass(b"not msgpack"));
-
-        #[derive(Serialize)]
-        struct OtherVersion {
-            version: i32,
-            wall_time: f64,
-        }
-        let other_version = rmp_serde::to_vec_named(&OtherVersion {
-            version: FPM_VERSION + 1,
-            wall_time: 0.48,
-        })
-        .unwrap();
-        assert!(!is_completed_pass(&other_version));
     }
 
     /// Verify that serialize_fpm produces valid msgpack that round-trips

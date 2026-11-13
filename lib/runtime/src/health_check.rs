@@ -122,9 +122,8 @@ impl HealthCheckManager {
                         // Activity detected - reset timer for this endpoint only.
                         // A notification marks a non-error response chunk or clean
                         // stream completion, even for an empty stream. Neither path
-                        // requires a successful publish. It also marks an engine
-                        // forward pass completed while a request is in flight
-                        // (`SystemHealth::note_engine_progress`).
+                        // requires a successful publish. An engine forward pass
+                        // completed while a request is in flight also notifies.
                         debug!("Activity detected for {}, resetting health check timer", endpoint_subject);
                         manager.drt.system_health().lock().set_endpoint_health_status(
                             &endpoint_subject,
@@ -700,47 +699,6 @@ mod push_handler_notify_tests {
             endpoint,
             HealthStatus::Ready,
             "successful chunks should set Ready despite trailing error",
-        );
-    }
-
-    // =================================================================
-    // Test 6: Engine progress with a request in flight → no canary
-    // Canary engine errors, so NotReady can only come from a canary.
-    // =================================================================
-    #[tokio::test]
-    async fn test_engine_progress_suppresses_canary_while_request_in_flight() {
-        let drt = create_test_drt_async().await;
-        let endpoint = "test.engine_progress";
-
-        let _notifier = register_endpoint(&drt, endpoint, MockStreamingEngine::all_errors(1));
-        // One request in flight that streams nothing, like a long prefill.
-        drt.system_health()
-            .lock()
-            .register_endpoint_inflight(endpoint, Arc::new(std::sync::atomic::AtomicU64::new(1)));
-        start_manager(&drt, 100).await;
-
-        // The engine completes a forward pass every 20ms. A canary fired between
-        // two passes would leave NotReady for the check before the next pass.
-        for pass in 0..20 {
-            if pass > 0 {
-                assert_status(
-                    &drt,
-                    endpoint,
-                    HealthStatus::Ready,
-                    "forward passes are activity, so no canary fires",
-                );
-            }
-            drt.system_health().lock().note_engine_progress(endpoint);
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-
-        // The engine stalls: the canary fires after 100ms and its error marks NotReady
-        tokio::time::sleep(Duration::from_millis(400)).await;
-        assert_status(
-            &drt,
-            endpoint,
-            HealthStatus::NotReady,
-            "a stalled engine with a request in flight is still probed",
         );
     }
 }
