@@ -673,16 +673,22 @@ pub struct AddressedPushRouter {
     /// The response plane this runtime is configured for.
     response_plane: ResponsePlaneMode,
     responses: ResponseServer,
-    /// Serves a worker that does not serve `response_plane`; see
-    /// [`ResponsePlaneMode::for_worker`].
-    tcp_responses: ResponseServer,
 }
 
 #[derive(Clone)]
 enum ResponseServer {
     Tcp(Arc<tcp::server::TcpStreamServer>),
-    /// QUIC or Velo. Request streams still use `request_callbacks`.
+    /// QUIC or Velo. Request streams still use `request_callbacks`, and so do the
+    /// responses of a worker that does not serve this plane.
     Registered(Arc<dyn RegisteredResponsePlane>),
+}
+
+/// The response server one request registers on; see
+/// [`AddressedPushRouter::responses_for_worker`].
+#[derive(Clone, Copy)]
+enum WorkerResponses<'a> {
+    Tcp(&'a tcp::server::TcpStreamServer),
+    Registered(&'a Arc<dyn RegisteredResponsePlane>),
 }
 
 impl AddressedPushRouter {
@@ -698,8 +704,7 @@ impl AddressedPushRouter {
             req_client,
             request_callbacks: responses.clone(),
             response_plane: ResponsePlaneMode::Tcp,
-            responses: ResponseServer::Tcp(responses.clone()),
-            tcp_responses: ResponseServer::Tcp(responses),
+            responses: ResponseServer::Tcp(responses),
         }))
     }
 
@@ -724,7 +729,6 @@ impl AddressedPushRouter {
     ) -> Arc<Self> {
         Arc::new(Self {
             req_client,
-            tcp_responses: ResponseServer::Tcp(request_callbacks.clone()),
             request_callbacks,
             response_plane,
             responses: ResponseServer::Registered(responses),
@@ -763,10 +767,14 @@ impl AddressedPushRouter {
 
     /// The response server for one worker: this runtime's response plane when the worker
     /// serves it, tcp otherwise.
-    fn responses_for_worker(&self, instance: Option<&Instance>) -> &ResponseServer {
+    fn responses_for_worker(&self, instance: Option<&Instance>) -> WorkerResponses<'_> {
+        let registered = match &self.responses {
+            ResponseServer::Tcp(responses) => return WorkerResponses::Tcp(responses),
+            ResponseServer::Registered(responses) => responses,
+        };
         let advertised = instance.and_then(|instance| instance.response_plane);
         if self.response_plane.for_worker(advertised) == self.response_plane {
-            return &self.responses;
+            return WorkerResponses::Registered(registered);
         }
         static FALLBACK_REPORTED: std::sync::Once = std::sync::Once::new();
         FALLBACK_REPORTED.call_once(|| {
@@ -775,10 +783,10 @@ impl AddressedPushRouter {
                 instance_id = ?instance.map(Instance::id),
                 advertised = ?advertised.map(ResponsePlaneMode::name),
                 "A worker does not serve this runtime's response plane; using tcp for it and \
-                 for every other such worker"
+                 for every other such worker. This is logged once per process"
             );
         });
-        &self.tcp_responses
+        WorkerResponses::Tcp(&self.request_callbacks)
     }
 
     /// Cancel stream registrations for an instance. The TCP and Velo response
@@ -899,7 +907,7 @@ impl AddressedPushRouter {
         if let Some(inst) = instance {
             let instance_id = inst.endpoint_instance_id();
             let associated = match responses {
-                ResponseServer::Tcp(responses) => match response_subject.as_deref() {
+                WorkerResponses::Tcp(responses) => match response_subject.as_deref() {
                     Some(subject) => {
                         responses
                             .associate_instance(subject, send_subject.as_deref(), &instance_id)
@@ -907,7 +915,7 @@ impl AddressedPushRouter {
                     }
                     None => false,
                 },
-                ResponseServer::Registered(responses) => {
+                WorkerResponses::Registered(responses) => {
                     let response_ok = match response_registration {
                         Some(registration_id) => {
                             responses
@@ -1058,7 +1066,7 @@ impl AddressedPushRouter {
     /// Register the optional TCP request callback and selected response stream.
     async fn register_streams(
         &self,
-        responses: &ResponseServer,
+        responses: WorkerResponses<'_>,
         engine_ctx: Arc<dyn crate::engine::AsyncEngineContext>,
         enable_request_stream: bool,
         defer_cancellation_until_prologue: bool,
@@ -1067,7 +1075,7 @@ impl AddressedPushRouter {
         RegisteredStream<StreamReceiver>,
     )> {
         let (send_stream, recv_stream) = match responses {
-            ResponseServer::Tcp(responses) => {
+            WorkerResponses::Tcp(responses) => {
                 let options = StreamOptions::builder()
                     .context(engine_ctx)
                     .enable_request_stream(enable_request_stream)
@@ -1077,7 +1085,7 @@ impl AddressedPushRouter {
                 let pending: PendingConnections = responses.register(options).await;
                 pending.into_parts()
             }
-            ResponseServer::Registered(responses) => {
+            WorkerResponses::Registered(responses) => {
                 let send_stream = if enable_request_stream {
                     let options = StreamOptions::builder()
                         .context(engine_ctx.clone())
@@ -1384,6 +1392,34 @@ mod tests {
     use tokio::sync::{Semaphore, oneshot, oneshot::error::TryRecvError};
     use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 
+    /// Captures the request envelope and ACKs it, so a test can drive the real router and
+    /// response plane and play the worker itself.
+    struct CaptureRequest(tokio::sync::mpsc::Sender<RequestControlMessage>);
+
+    #[async_trait::async_trait]
+    impl RequestPlaneClient for CaptureRequest {
+        async fn send_request(
+            &self,
+            _address: String,
+            payload: bytes::Bytes,
+            _headers: Headers,
+        ) -> anyhow::Result<bytes::Bytes> {
+            let message = TwoPartCodec::default().decode_message(payload)?;
+            self.0
+                .send(serde_json::from_slice(&message.header)?)
+                .await?;
+            Ok(bytes::Bytes::new())
+        }
+
+        fn transport_name(&self) -> &'static str {
+            "test"
+        }
+
+        fn is_healthy(&self) -> bool {
+            true
+        }
+    }
+
     struct DropSignal(Option<oneshot::Sender<()>>);
 
     impl Drop for DropSignal {
@@ -1434,32 +1470,6 @@ mod tests {
         use bytes::Bytes;
         use tokio::sync::mpsc;
         use tokio_util::sync::CancellationToken;
-
-        // Capture the request envelope, but exercise the real router and QUIC response plane.
-        struct CaptureRequest(mpsc::Sender<RequestControlMessage>);
-
-        #[async_trait::async_trait]
-        impl RequestPlaneClient for CaptureRequest {
-            async fn send_request(
-                &self,
-                _address: String,
-                payload: Bytes,
-                _headers: super::super::unified_client::Headers,
-            ) -> anyhow::Result<Bytes> {
-                let message = TwoPartCodec::default().decode_message(payload)?;
-                let control = serde_json::from_slice(&message.header)?;
-                self.0.send(control).await?;
-                Ok(Bytes::new())
-            }
-
-            fn transport_name(&self) -> &'static str {
-                "test"
-            }
-
-            fn is_healthy(&self) -> bool {
-                true
-            }
-        }
 
         let shutdown = CancellationToken::new();
         let _shutdown_guard = shutdown.clone().drop_guard();
@@ -1645,32 +1655,6 @@ mod tests {
         use tokio::sync::mpsc;
         use tokio_util::sync::CancellationToken;
 
-        struct CaptureRequest(mpsc::Sender<RequestControlMessage>);
-
-        #[async_trait::async_trait]
-        impl RequestPlaneClient for CaptureRequest {
-            async fn send_request(
-                &self,
-                _address: String,
-                payload: Bytes,
-                _headers: Headers,
-            ) -> anyhow::Result<Bytes> {
-                let message = TwoPartCodec::default().decode_message(payload)?;
-                self.0
-                    .send(serde_json::from_slice(&message.header)?)
-                    .await?;
-                Ok(Bytes::new())
-            }
-
-            fn transport_name(&self) -> &'static str {
-                "test"
-            }
-
-            fn is_healthy(&self) -> bool {
-                true
-            }
-        }
-
         let shutdown = CancellationToken::new();
         let _shutdown_guard = shutdown.clone().drop_guard();
         tokio::time::timeout(Duration::from_secs(10), async {
@@ -1756,6 +1740,38 @@ mod tests {
                     .unwrap();
                 assert_eq!(response.next().await.unwrap().data, Some(7));
             }
+
+            // A worker served over tcp that leaves discovery has its pending response
+            // cancelled like any other, and stays tombstoned until it reappears.
+            let worker = worker_advertising(Some(ResponsePlaneMode::Tcp));
+            let instance_id = worker.endpoint_instance_id();
+            let dispatch = |router: Arc<AddressedPushRouter>| {
+                let request = SingleIn::new(AddressedRequest::with_instance(
+                    42_u64,
+                    "test".to_string(),
+                    worker.clone(),
+                ));
+                tokio::spawn(async move {
+                    let response: anyhow::Result<ManyOut<Annotated<u64>>> =
+                        router.generate(request).await;
+                    response.map(|_| ())
+                })
+            };
+            let pending = dispatch(router.clone());
+            request_rx.recv().await.unwrap();
+            assert_eq!(router.cancel_instance_streams(&instance_id).await, 1);
+            let error = pending.await.unwrap().unwrap_err();
+            assert!(match_error_chain(
+                error.as_ref(),
+                &[ErrorType::Disconnected],
+                &[]
+            ));
+            let tombstoned = dispatch(router.clone()).await.unwrap().unwrap_err();
+            assert!(tombstoned.to_string().contains("tombstoned"));
+            router.clear_instance_tombstone(&instance_id).await;
+            let cleared = dispatch(router.clone());
+            request_rx.recv().await.unwrap();
+            cleared.abort();
         })
         .await
         .expect("quic router did not serve a worker on another response plane over tcp");
@@ -1917,6 +1933,24 @@ mod tests {
                         } else {
                             AddressedPushRouter::new(client, server).unwrap()
                         };
+                        if velo {
+                            for (advertised, uses_velo) in [
+                                (Some(ResponsePlaneMode::Velo), true),
+                                (Some(ResponsePlaneMode::Tcp), false),
+                                (Some(ResponsePlaneMode::Quic), false),
+                                (None, false),
+                            ] {
+                                let worker = worker_advertising(advertised);
+                                assert_eq!(
+                                    matches!(
+                                        router.responses_for_worker(Some(&worker)),
+                                        super::WorkerResponses::Registered(_)
+                                    ),
+                                    uses_velo,
+                                    "worker advertising {advertised:?}"
+                                );
+                            }
+                        }
                         let (guard_dropped_tx, mut guard_dropped_rx) = oneshot::channel();
                         let worker = worker_advertising(Some(if velo {
                             ResponsePlaneMode::Velo

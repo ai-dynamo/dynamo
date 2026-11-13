@@ -116,13 +116,14 @@ fn response_inactivity_timeout() -> Option<std::time::Duration> {
         .map(std::time::Duration::from_secs)
 }
 
-/// Establish bound a quic or velo frontend applies when the environment sets none.
+/// Establish bound a quic frontend applies when the environment sets none.
 ///
-/// A worker that cannot speak the response transport it is asked for ACKs the request, fails
-/// to open a stream, and sends nothing back. A quic frontend can still pick such a worker:
-/// v1.5 and v1.6 workers do not advertise a transport, and only v1.6 can run quic. Unbounded,
-/// that request waits forever and the worker stays routable.
-const DEFAULT_NON_TCP_ESTABLISH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// v1.5 and v1.6 workers do not advertise a response transport, and only v1.6 can run quic,
+/// so a quic frontend can pick a v1.5 worker. That worker ACKs the request, cannot open a quic
+/// stream, and sends nothing back. Unbounded, the request waits forever and the worker stays
+/// routable.
+// TODO(v1.8): Remove when v1.5 falls outside the N-2 compatibility window.
+const DEFAULT_QUIC_ESTABLISH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Read the response-stream establish timeout from the environment.
 fn response_stream_establish_timeout(
@@ -137,14 +138,14 @@ fn response_stream_establish_timeout(
     )
 }
 
-/// An explicit value wins, and `0` disables the bound. Unset, only tcp stays unbounded.
+/// An explicit value wins, and `0` disables the bound. Unset, only quic is bounded.
 fn resolve_establish_timeout(
     configured: Option<&str>,
     response_plane: crate::pipeline::network::ResponsePlaneMode,
 ) -> Option<std::time::Duration> {
     use crate::config::environment_names::response_plane::DYN_RESPONSE_STREAM_ESTABLISH_TIMEOUT_SECS;
-    let default = (response_plane != crate::pipeline::network::ResponsePlaneMode::Tcp)
-        .then_some(DEFAULT_NON_TCP_ESTABLISH_TIMEOUT);
+    let default = (response_plane == crate::pipeline::network::ResponsePlaneMode::Quic)
+        .then_some(DEFAULT_QUIC_ESTABLISH_TIMEOUT);
     let Some(value) = configured else {
         return default;
     };
@@ -3990,18 +3991,16 @@ mod tests {
     }
 
     #[test]
-    fn establish_timeout_defaults_only_for_non_tcp_response_planes() {
+    fn establish_timeout_defaults_only_for_quic() {
         use crate::pipeline::network::ResponsePlaneMode::{Quic, Tcp, Velo};
         let secs = std::time::Duration::from_secs;
 
+        // Only a quic frontend can pick a worker that accepts a request and never answers.
         assert_eq!(resolve_establish_timeout(None, Tcp), None);
-        assert_eq!(
-            resolve_establish_timeout(None, Velo),
-            Some(DEFAULT_NON_TCP_ESTABLISH_TIMEOUT)
-        );
+        assert_eq!(resolve_establish_timeout(None, Velo), None);
         assert_eq!(
             resolve_establish_timeout(None, Quic),
-            Some(DEFAULT_NON_TCP_ESTABLISH_TIMEOUT)
+            Some(DEFAULT_QUIC_ESTABLISH_TIMEOUT)
         );
         // An explicit value wins on every plane, and 0 turns the bound off.
         for plane in [Tcp, Quic, Velo] {
@@ -4009,10 +4008,10 @@ mod tests {
             assert_eq!(resolve_establish_timeout(Some("0"), plane), None);
         }
         // A value that does not parse leaves the plane's default in place.
-        assert_eq!(resolve_establish_timeout(Some("30s"), Tcp), None);
+        assert_eq!(resolve_establish_timeout(Some("30s"), Velo), None);
         assert_eq!(
-            resolve_establish_timeout(Some("30s"), Velo),
-            Some(DEFAULT_NON_TCP_ESTABLISH_TIMEOUT)
+            resolve_establish_timeout(Some("30s"), Quic),
+            Some(DEFAULT_QUIC_ESTABLISH_TIMEOUT)
         );
     }
 

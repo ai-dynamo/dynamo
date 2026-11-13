@@ -1909,6 +1909,8 @@ mod tests {
         );
 
         // A v1.5 or v1.6 worker does not advertise.
+        metadata["response_plane"] = serde_json::Value::Null;
+        assert_eq!(response_plane(metadata.clone()), None);
         metadata.as_object_mut().unwrap().remove("response_plane");
         assert_eq!(response_plane(metadata), None);
     }

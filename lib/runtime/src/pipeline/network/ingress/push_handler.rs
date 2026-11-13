@@ -1465,6 +1465,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tcp_request_reaches_the_engine_on_any_response_plane() {
+        struct Reached;
+
+        #[async_trait]
+        impl crate::engine::AsyncEngine<SingleIn<TestRequest>, ManyOut<TestResponse>, anyhow::Error>
+            for Reached
+        {
+            async fn generate(
+                &self,
+                _request: SingleIn<TestRequest>,
+            ) -> anyhow::Result<ManyOut<TestResponse>> {
+                anyhow::bail!("reached the engine")
+            }
+        }
+
+        // A tcp frontend, or one that predates this worker's plane, asks for tcp.
+        for configured in [ResponsePlaneMode::Quic, ResponsePlaneMode::Velo] {
+            let ingress = TestIngress::for_engine(Arc::new(Reached)).unwrap();
+            let error = ingress
+                .generate_and_publish(
+                    Context::new(serde_json::json!({})),
+                    RequestPlanePayloadCodec::Json,
+                    Instant::now(),
+                    ResponsePlaneModes {
+                        configured,
+                        advertised: ResponsePlaneMode::Tcp,
+                    },
+                    &LifecycleTrace::new(false),
+                    MismatchPublisher::default(),
+                )
+                .await
+                .expect_err("the test engine fails every request");
+            assert!(
+                error.to_string().contains("reached the engine"),
+                "{configured:?} worker: {error}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn response_plane_mismatch_reports_error_before_generate() {
         for (configured, advertised) in [
             (ResponsePlaneMode::Tcp, ResponsePlaneMode::Quic),

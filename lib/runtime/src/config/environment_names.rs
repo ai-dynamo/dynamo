@@ -958,8 +958,9 @@ pub mod response_plane {
     ///
     /// A worker advertises its transport in discovery and also answers over
     /// tcp. A frontend uses its own transport with workers that advertise the
-    /// same one and tcp with every other worker, so frontends and workers do
-    /// not have to change this setting together.
+    /// same one and tcp with every other worker that advertises. v1.5 and
+    /// v1.6 workers do not advertise: a velo frontend uses tcp with them, and
+    /// a quic frontend uses quic, because v1.6 can run quic.
     ///
     /// Velo has no TLS, so a velo runtime refuses to start while any
     /// `DYN_TCP_TLS_*` path is set or `DYN_TCP_TLS_INSECURE` is truthy.
@@ -982,7 +983,7 @@ pub mod response_plane {
     /// `DYN_RUNTIME_INHIBITED_DURATION_SECS`. Routers without fault detection
     /// and bidirectional (streaming-input) requests do not apply this bound.
     ///
-    /// Unset, a tcp frontend applies no timeout, and a quic or velo frontend
+    /// Unset, a tcp or velo frontend applies no timeout, and a quic frontend
     /// applies 30 seconds: a v1.5 worker behind a quic frontend accepts the
     /// request and never answers. Raise it when a
     /// backend admission queue lets a request wait longer than that before
