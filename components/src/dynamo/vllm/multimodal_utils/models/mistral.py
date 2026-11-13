@@ -9,6 +9,10 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Optional
 
+from PIL import ImageOps
+
+from dynamo.llm.exceptions import InvalidArgument
+
 
 @dataclass(frozen=True)
 class MistralImagePlaceholders:
@@ -42,6 +46,11 @@ class MistralImagePlaceholders:
             or type(img_end) is not int
         ):
             return None
+        if not callable(getattr(encoder, "_image_to_num_tokens", None)):
+            raise RuntimeError(
+                "Mistral image encoder requires a callable _image_to_num_tokens "
+                "method; check mistral-common compatibility."
+            )
         return cls(encoder=encoder, img=img, img_break=img_break, img_end=img_end)
 
     def expand(self, token_ids: list[int], images: Sequence[Any]) -> list[int]:
@@ -65,7 +74,7 @@ class MistralImagePlaceholders:
                 break
 
         if len(positions) != len(images):
-            raise ValueError(
+            raise InvalidArgument(
                 f"Mistral prompt carries {len(positions)} [IMG] placeholder(s) "
                 f"but {len(images)} image(s) were supplied; refusing to expand."
             )
@@ -74,10 +83,13 @@ class MistralImagePlaceholders:
         previous = 0
         for position, image in zip(positions, images):
             if image is None:
-                raise ValueError(
+                raise InvalidArgument(
                     "Mistral image placeholders are sized from the image; "
                     "UUID-only image slots cannot be expanded."
                 )
+            # Stock vLLM normalizes EXIF first; only 5-8 swap the grid axes.
+            if image.getexif().get(274, 1) in (5, 6, 7, 8):
+                image = ImageOps.exif_transpose(image)
             ncols, nrows = self.encoder._image_to_num_tokens(image)
             grid = ([self.img] * ncols + [self.img_break]) * nrows
             grid[-1] = self.img_end

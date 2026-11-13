@@ -3,12 +3,14 @@
 
 """Unit tests for Mistral-format image placeholder expansion."""
 
+from io import BytesIO
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
-from PIL import Image
+from PIL import Image, ImageOps
 
+from dynamo.llm.exceptions import InvalidArgument
 from dynamo.vllm.multimodal_utils.models.mistral import MistralImagePlaceholders
 
 pytestmark = [
@@ -46,6 +48,17 @@ def _placeholders() -> MistralImagePlaceholders:
     return placeholders
 
 
+def _loader_image(orientation: int | None) -> Image.Image:
+    exif = Image.Exif()
+    if orientation is not None:
+        exif[274] = orientation
+    with BytesIO() as image_bytes:
+        Image.new("RGB", (56, 28)).save(image_bytes, format="JPEG", exif=exif)
+        image_bytes.seek(0)
+        with Image.open(image_bytes) as image:
+            return image.convert("RGB")
+
+
 def test_placeholders_expand_to_each_images_grid():
     result = _placeholders().expand(
         [1, _IMG, 7, _IMG, 2],
@@ -73,20 +86,67 @@ def test_grid_matches_mistral_common():
     assert len(result) == 110
 
 
-def test_prompt_expanded_upstream_is_untouched():
+@pytest.mark.parametrize("image", [Image.new("RGB", (56, 56)), None])
+def test_prompt_expanded_upstream_is_untouched(image: Image.Image | None) -> None:
     expanded = [1, *_grid(2, 2), 2]
 
-    assert _placeholders().expand(expanded, [Image.new("RGB", (56, 56))]) is expanded
+    assert _placeholders().expand(expanded, [image]) is expanded
 
 
-def test_placeholder_count_must_match_images():
-    with pytest.raises(ValueError, match="refusing to expand"):
+def test_placeholder_count_must_match_images() -> None:
+    with pytest.raises(InvalidArgument, match="refusing to expand"):
         _placeholders().expand([_IMG], [Image.new("RGB", (28, 28))] * 2)
 
 
-def test_uuid_only_slots_cannot_be_expanded():
-    with pytest.raises(ValueError, match="UUID-only"):
+def test_uuid_only_slots_cannot_be_expanded() -> None:
+    with pytest.raises(InvalidArgument, match="UUID-only"):
         _placeholders().expand([_IMG], [None])
+
+
+@pytest.mark.parametrize("orientation", [None, 1, 2, 3, 4, 5, 6, 7, 8])
+def test_grid_matches_stock_vllm_exif_normalization(orientation: int | None) -> None:
+    image_module = pytest.importorskip("mistral_common.tokens.tokenizers.image")
+    chunk_module = pytest.importorskip("mistral_common.protocol.instruct.chunk")
+    encoder = image_module.ImageEncoder(
+        image_module.ImageConfig(
+            image_patch_size=14, max_image_size=1540, spatial_merge_size=2
+        ),
+        image_module.SpecialImageIDs(img=_IMG, img_break=_IMG_BREAK, img_end=_IMG_END),
+    )
+    placeholders = MistralImagePlaceholders.from_tokenizer(_tokenizer(encoder))
+    assert placeholders is not None
+    image = _loader_image(orientation)
+
+    # Stock vLLM normalizes PIL images before the public mistral-common encoder.
+    expected = encoder(chunk_module.ImageChunk(image=ImageOps.exif_transpose(image)))
+    assert placeholders.expand([_IMG], [image]) == expected.tokens
+    assert image.size == (56, 28)
+    assert image.getexif().get(274) == orientation
+
+
+@pytest.mark.parametrize("orientation", [None, 1])
+def test_unoriented_images_skip_the_exif_pixel_copy(
+    orientation: int | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    transpose = MagicMock(side_effect=AssertionError("unexpected pixel copy"))
+    monkeypatch.setattr(ImageOps, "exif_transpose", transpose)
+
+    assert _placeholders().expand([_IMG], [_loader_image(orientation)]) == _grid(2, 1)
+    transpose.assert_not_called()
+
+
+@pytest.mark.parametrize("sizing_helper", [None, 42], ids=["missing", "not-callable"])
+def test_mistral_encoder_requires_a_callable_sizing_helper(
+    sizing_helper: object,
+) -> None:
+    encoder = SimpleNamespace(
+        special_ids=SimpleNamespace(img=_IMG, img_break=_IMG_BREAK, img_end=_IMG_END)
+    )
+    if sizing_helper is not None:
+        encoder._image_to_num_tokens = sizing_helper
+
+    with pytest.raises(RuntimeError, match="callable _image_to_num_tokens"):
+        MistralImagePlaceholders.from_tokenizer(_tokenizer(encoder))
 
 
 @pytest.mark.parametrize(
