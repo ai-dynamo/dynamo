@@ -91,8 +91,12 @@ metadata:
     nvidia.com/last-applied-hash: 9b9e3c8557b9e5ebd116096955357cfe0615c4ef3ac17b7f571c1e8f2480cf3f
   creationTimestamp: $ignore
   labels:
+    nvidia.com/dynamo-component: "SglangDecode"
+    nvidia.com/dynamo-component-type: "decode"
     nvidia.com/dynamo-discovery-backend: kubernetes
     nvidia.com/dynamo-discovery-enabled: 'true'
+    nvidia.com/dynamo-graph-deployment-name: "workers"
+    nvidia.com/dynamo-namespace: "upgrade-latest-sglang-1-4-workers"
     nvidia.com/dynamo-worker-hash: $var:worker-hash
   name: workers-sglangdecode
   namespace: upgrade-latest-sglang-1-4
@@ -135,8 +139,12 @@ metadata:
     nvidia.com/last-applied-hash: 500cadf9dcbe7a6091f56cc0f755196717a8407be056521b7abd282b35881b33
   creationTimestamp: $ignore
   labels:
+    nvidia.com/dynamo-component: "SglangPrefill"
+    nvidia.com/dynamo-component-type: "prefill"
     nvidia.com/dynamo-discovery-backend: kubernetes
     nvidia.com/dynamo-discovery-enabled: 'true'
+    nvidia.com/dynamo-graph-deployment-name: "workers"
+    nvidia.com/dynamo-namespace: "upgrade-latest-sglang-1-4-workers"
     nvidia.com/dynamo-worker-hash: $var:worker-hash
   name: workers-sglangprefill
   namespace: upgrade-latest-sglang-1-4

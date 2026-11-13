@@ -146,6 +146,7 @@ metadata:
   creationTimestamp: $ignore
   labels:
     nvidia.com/dynamo-component: frontend
+    nvidia.com/dynamo-component-type: "frontend"
     nvidia.com/dynamo-discovery-backend: kubernetes
     nvidia.com/dynamo-discovery-enabled: 'true'
     nvidia.com/dynamo-graph-deployment-name: workers
@@ -192,6 +193,7 @@ metadata:
   creationTimestamp: $ignore
   labels:
     nvidia.com/dynamo-component: worker
+    nvidia.com/dynamo-component-type: "worker"
     nvidia.com/dynamo-discovery-backend: kubernetes
     nvidia.com/dynamo-discovery-enabled: 'true'
     nvidia.com/dynamo-graph-deployment-name: workers
