@@ -162,19 +162,32 @@ plan for frontend replacement, including a possible single-replica Grove Service
 characters. Generated component names longer than 63 characters use a readable prefix
 and a hash of the full name. Shorter generated names stay unchanged.
 
-**Affected:** New DGDs with names longer than 63 characters, and existing DGDs whose
-component names exceed Kubernetes Service or selector label limits.
+**Affected:** New DGDs with names longer than 63 characters. Existing DGDs need shortened
+component names when `<dgd-name>-<component-name>` (plus `-<worker-hash>` for workers)
+exceeds 63 characters. For a component named `frontend`, this happens when the DGD name
+exceeds 54 characters.
 
-**Action:** Keep new DGD names within 63 characters. Update manifests that create longer
-names before upgrading. No rename is required for existing DGDs.
+**Action:** Keep names within 63 characters in manifests used to create or recreate a DGD.
+This includes GitOps prune-and-replace operations and namespace recreation. An existing
+DGD with a longer name can still be updated in place or deleted, but admission rejects
+recreating it with that name. Change the name in its manifest before recreating it.
 
-**Existing deployments:** Existing DGDs with longer names remain updateable and deletable.
-The operator creates components under the shortened names. For single-node workers, it
-waits for the replacement workers to be ready, drains the old DCDs, and deletes them.
-Old DCDs whose invalid Deployments were never created can be deleted after the operator
-confirms the old Deployment and running Pods are absent. Stale frontend DCDs remain until
-the DGD is deleted. The component path's multinode LeaderWorkerSet name still appends
-`-0` to the DCD name and can exceed 63 characters.
+**Existing deployments:** DGDs with names of at most 63 characters that previously failed
+to deploy because their generated component names were too long now use shortened names.
+Existing DGDs with names over 63 characters remain updateable and deletable; shortening
+component names does not fix their overlength DGD-name label.
+
+- For single-node workers, the operator waits for replacement workers to be ready, then
+  drains and deletes the old [DynamoComponentDeployments (DCDs)](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/reference/kubernetes-api/dynamo-component-deployment.mdx).
+- For old worker DCDs whose invalid Deployments were never created, the operator deletes
+  the DCDs once it confirms no old Deployment or running Pods remain.
+- Stale frontend DCDs remain until the DGD is deleted. A stale DCD with no Deployment or
+  Pods does not serve traffic or prevent the replacement frontend from running. You can
+  delete it manually after checking that the replacement frontend is ready and that the
+  stale DCD has no Deployment or Pods; deleting a DCD also deletes its owned resources.
+
+The component path's multinode LeaderWorkerSet name still appends `-0` to the DCD name
+and can exceed 63 characters.
 
 #### Operator behavior breaking changes
 
