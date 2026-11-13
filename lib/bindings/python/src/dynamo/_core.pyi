@@ -581,6 +581,20 @@ class Context:
         auto-fires on the first non-empty chunk in the response stream."""
         ...
 
+    def set_response_header(self, name: str, value: str) -> bool:
+        """Set an HTTP response header from a frontend chat engine.
+
+        Call it before the engine's first yield, or before it raises. Returns
+        ``False`` when this request's response cannot carry the header: the
+        response is already committed (a streaming request without
+        ``DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS``, or a call after the first
+        yield of one with it), or the request is not a ``/v1/chat/completions``
+        request. Otherwise raises ``ValueError`` for a name or value that is
+        not a valid header, or for a header the HTTP layer owns
+        (``content-type``, ``content-length``, ``content-encoding``,
+        ``x-request-id``, hop-by-hop headers)."""
+        ...
+
     @property
     def metadata(self) -> ContextMetadata:
         """
@@ -2099,6 +2113,14 @@ def _convert_preprocessed_request(
     """Test hook: the fast path's request (None if it declines) or pythonize's, pythonized back."""
     ...
 
+def _raise_routed_http_error(
+    code: int, message: str, routed_engine: bool = True
+) -> None:
+    """Test hook: raise what a response stream raises for a backend
+    `HttpError(code, message)`: a `RoutedEngine`'s stream by default, any other
+    with `routed_engine=False`."""
+    ...
+
 
 class WorkerType:
     """
@@ -3389,6 +3411,17 @@ class WorkerUnavailable(DynamoException):
 
     Raised by `RoutedEngine.generate`, for example while prefill routing is
     still activating. Re-raise it unchanged to keep the 503.
+    """
+
+    ...
+
+class RoutedEngineError(ValueError):
+    """A backend error raised by `RoutedEngine.generate` and its response stream.
+
+    Raised for every classified error except a validation error, which raises
+    `InvalidArgument`. A chat engine that lets it escape answers with the
+    backend's status, because the original error is restored. `Client` and
+    `KvRouter` streams raise a plain `ValueError` instead.
     """
 
     ...

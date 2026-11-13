@@ -770,10 +770,16 @@ The `dynamo` chat processor runs Rust parsing in the frontend; workers publish p
 
 <ParamField path="--dyn-chat-processor" type="string" default="dynamo">
   Chat processor. See [Chat Processors](../../use-cases/tool-calling-and-reasoning/chat-processors.mdx) for how this combines with the parser flags.
-
-  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>dynamo</Badge> <Badge intent="note" minimal>vllm</Badge> <Badge intent="note" minimal>sglang</Badge></span>
+  Any value other than `dynamo`, `vllm` or `sglang` loads a [custom chat processor](../../developer-guide/knowledge-base/modular-components/frontend/custom-chat-processors.md):
+  a name registered in the `dynamo.frontend.chat_processors` entry-point group, or a `module:function` path.
 
   Environment variable: `DYN_CHAT_PROCESSOR`
+</ParamField>
+
+<ParamField path="--dyn-chat-processor-config" type="string (JSON object)">
+  Settings passed to a custom chat processor. Rejected with the built-in processors.
+
+  Environment variable: `DYN_CHAT_PROCESSOR_CONFIG`
 </ParamField>
 
 <ParamField path="--dyn-debug-perf" type="boolean" default="false">
