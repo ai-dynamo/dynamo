@@ -18,6 +18,7 @@ from types import SimpleNamespace
 import pytest
 
 from dynamo.health_check import HEALTH_CHECK_KEY
+from dynamo.vllm.handlers import build_sampling_params, build_sampling_params_openai
 from dynamo.vllm.health_check import (
     VllmEmbeddingHealthCheckPayload,
     VllmHealthCheckPayload,
@@ -133,7 +134,6 @@ def _engine(return_sampling_mask: bool) -> SimpleNamespace:
 
 
 def _sampling_values(payload: dict, use_text_input: bool) -> dict:
-    # Text mode flattens sampling options to top-level keys.
     return payload if use_text_input else payload["sampling_options"]
 
 
@@ -141,7 +141,7 @@ def _sampling_values(payload: dict, use_text_input: bool) -> dict:
 @pytest.mark.parametrize("cls", GENERATE_PAYLOAD_CLASSES)
 def test_mask_mode_canary_is_sampled(cls, use_text_input):
     """With --return-sampling-mask, vLLM rejects requests unless temperature > 0
-    and top_k > 0; a greedy canary keeps /live at 503 forever (DYN-5594)."""
+    and top_k > 0; a greedy canary keeps /live at 503 forever."""
     payload = cls(_engine(True), use_text_input=use_text_input).to_dict()
     values = _sampling_values(payload, use_text_input)
     assert values["temperature"] > 0
@@ -152,8 +152,6 @@ def test_mask_mode_canary_is_sampled(cls, use_text_input):
 def test_mask_mode_canary_passes_vllm_sampling_checks(cls):
     """The canary values must survive the request path into vLLM's
     SamplingParams, where input_processor enforces the mask-mode checks."""
-    from dynamo.vllm.handlers import build_sampling_params, build_sampling_params_openai
-
     token_payload = cls(_engine(True), use_text_input=False).to_dict()
     params = build_sampling_params(token_payload, {})
     assert params.temperature > 0

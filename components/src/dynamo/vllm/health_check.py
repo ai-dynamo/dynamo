@@ -62,7 +62,6 @@ def _get_bos_token_id_from_engine(engine_client) -> int:
 
 
 def _sampling_mask_enabled(engine_client) -> bool:
-    """Return True when the engine runs with ``--return-sampling-mask``."""
     vllm_config = getattr(engine_client, "vllm_config", None)
     model_config = getattr(vllm_config, "model_config", None)
     return getattr(model_config, "return_sampling_mask", False) is True
