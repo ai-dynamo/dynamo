@@ -9299,9 +9299,9 @@ checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
 
 [[package]]
 name = "velo"
-version = "0.21.0"
+version = "0.22.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "97c3940b2cf9b4a7a9ea6afd56520ee21eb46272b5442d3105274b4298404b4b"
+checksum = "2b77c610f4271d84ddb00a9921efc54579db028cc30dfe63465fae85b51cb9f4"
 dependencies = [
  "anyhow",
  "async-stream",

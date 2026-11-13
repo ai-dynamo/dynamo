@@ -124,6 +124,7 @@ fn response_mux_config() -> Result<MuxConfig> {
         flush_policy: FlushPolicy::Auto(AutoFlush {
             on_admission: batch_ms == 0,
             max_linger: (batch_ms != 0).then(|| Duration::from_millis(batch_ms)),
+            ..Default::default()
         }),
         ..Default::default()
     })
@@ -1067,7 +1068,10 @@ mod tests {
                     config.flush_policy,
                     FlushPolicy::Auto(AutoFlush {
                         on_admission,
-                        max_linger
+                        max_linger,
+                        // Velo's early-write conditions stay off.
+                        on_complete: false,
+                        at_bytes: None,
                     })
                 );
             });
