@@ -10,7 +10,6 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use axum::Router;
-use axum::extract::DefaultBodyLimit;
 use axum::handler::Handler;
 use axum::http::Method;
 use axum::routing::{MethodFilter, on};
@@ -99,6 +98,20 @@ pub fn validate_extension_route_path(path: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Extension routes serve these five methods; `HEAD` is served by a `GET`
+/// route. Single source of truth, reused by Python.
+pub fn validate_extension_route_method(method: &Method) -> anyhow::Result<()> {
+    if !matches!(
+        *method,
+        Method::GET | Method::POST | Method::PUT | Method::PATCH | Method::DELETE
+    ) {
+        anyhow::bail!(
+            "unsupported frontend route method {method}; expected GET, POST, PUT, PATCH or DELETE"
+        );
+    }
+    Ok(())
+}
+
 /// Registers each route into both the router and its docs atomically; `route`
 /// validates the path and rejects duplicates instead of panicking axum.
 #[derive(Default)]
@@ -119,8 +132,8 @@ impl FrontendRouteSetBuilder {
     }
 
     /// Register a route, recording it in both the router and the docs. Errors
-    /// on an invalid path, a duplicate method and path within this set, or a
-    /// method axum cannot route.
+    /// on an unsupported method, an invalid path, or a duplicate method and
+    /// path within this set.
     pub fn route<H, T>(
         mut self,
         method: Method,
@@ -132,6 +145,7 @@ impl FrontendRouteSetBuilder {
         T: 'static,
     {
         let path = path.into();
+        validate_extension_route_method(&method)?;
         validate_extension_route_path(&path)?;
         if !self.seen_routes.insert((method.clone(), path.clone())) {
             anyhow::bail!("duplicate frontend route registered: {method} {path}");
@@ -142,13 +156,10 @@ impl FrontendRouteSetBuilder {
         Ok(self)
     }
 
-    /// Extension routes may take request bodies; they get the inference
-    /// routes' limit rather than axum's 2 MB default.
     pub fn build(self) -> FrontendRouteSet {
-        let body_limit = DefaultBodyLimit::max(super::openai::get_body_limit());
         FrontendRouteSet {
             route_docs: self.route_docs,
-            router: self.router.layer(body_limit),
+            router: self.router,
         }
     }
 }
@@ -202,6 +213,9 @@ mod tests {
             .expect("GET and POST on one path must both register");
         let dup = set.route(Method::POST, "/a", || async { StatusCode::OK });
         assert!(dup.is_err(), "duplicate POST path within a set must error");
+        let trace =
+            FrontendRouteSet::builder().route(Method::TRACE, "/b", || async { StatusCode::OK });
+        assert!(trace.is_err(), "TRACE must be rejected");
     }
 
     #[test]

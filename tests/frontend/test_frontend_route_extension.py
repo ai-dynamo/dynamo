@@ -30,13 +30,19 @@ import pytest
 import requests
 
 from tests.frontend.route_extension_provider import (
+    BLOCK_LOOP_PATH,
     ECHO_ASYNC_PATH,
+    ECHO_MAX_BODY_BYTES,
     HELLO_BODY,
     HELLO_PATH,
+    HOLD_PATH,
+    LATE_PATH,
     OWN_TIMEOUT_PATH,
     READINESS_PATH,
+    RELEASE_PATH,
     SLOW_PATH,
     STATE_PATH,
+    UNBLOCK_LOOP_PATH,
 )
 from tests.utils.constants import DynamoPortRange
 from tests.utils.managed_process import DynamoFrontendProcess
@@ -94,6 +100,17 @@ def _register_entry_point(
     )
 
 
+def _wait_for_state(base: str, done, what: str) -> None:
+    """Poll the provider's state route until ``done(state)`` holds."""
+    deadline = time.time() + 5
+    while True:
+        response = requests.get(f"{base}{STATE_PATH}", timeout=5)
+        if response.status_code == 200 and done(response.json()):
+            return
+        assert time.time() < deadline, f"timed out waiting for {what}"
+        time.sleep(0.02)
+
+
 @pytest.mark.timeout(120)
 @pytest.mark.parametrize("selector", ["entry_point", "module_path"])
 def test_frontend_route_extension_serves_custom_route(request, tmp_path, selector):
@@ -141,6 +158,10 @@ def test_frontend_route_extension_serves_custom_route(request, tmp_path, selecto
         assert ctx_response.json() == {"ready": False}
 
         base = f"http://localhost:{frontend.frontend_port}"
+
+        def post(path, **kwargs):
+            return requests.post(f"{base}{path}", timeout=15, **kwargs)
+
         payload = [{"ticket_id": "t1"}, {"ticket_id": "t2"}]
         echo_async = requests.post(
             f"{base}{ECHO_ASYNC_PATH}",
@@ -155,34 +176,64 @@ def test_frontend_route_extension_serves_custom_route(request, tmp_path, selecto
             "runtime": "DistributedRuntime",
         }
 
+        # A body over the route's max_body_bytes is rejected with a JSON 413.
+        too_large = post(ECHO_ASYNC_PATH, data=b"x" * (ECHO_MAX_BODY_BYTES + 1))
+        assert too_large.status_code == 413, too_large.text
+        assert "error" in too_large.json()
+
         # The route's own timeout_s (0.5 s) bounds an async handler.
         slow = requests.post(f"{base}{SLOW_PATH}", json={}, timeout=10)
         assert slow.status_code == 503, slow.text
-        # The HTTP timer alone returns that 503; the event loop cancels the
-        # handler separately, and may do so just after the response.
-        cancel_deadline = time.time() + 2
-        while not requests.get(f"{base}{STATE_PATH}", timeout=5).json()[
-            "slow_cancelled"
-        ]:
-            assert (
-                time.time() < cancel_deadline
-            ), "slow handler was not cancelled at its timeout"
-            time.sleep(0.05)
+        # The event loop cancels the handler and answers, but the HTTP timer
+        # can answer first, so the cancellation may land just after the 503.
+        _wait_for_state(
+            base, lambda s: s["slow_cancelled"], "the slow handler's cancellation"
+        )
 
         # A TimeoutError the handler raises itself is a handler failure (500),
         # not the route's timeout (503).
         own_timeout = requests.post(f"{base}{OWN_TIMEOUT_PATH}", json={}, timeout=5)
         assert own_timeout.status_code == 500, own_timeout.text
 
-        # A route admits 64 calls at once and sheds the rest (529). The slots
-        # come back when the handlers finish.
-        def call_slow(_=None):
-            return requests.post(f"{base}{SLOW_PATH}", json={}, timeout=10).status_code
+        # A call the event loop picks up after its deadline never starts.
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            blocked = pool.submit(post, BLOCK_LOOP_PATH)
+            try:
+                _wait_for_state(
+                    base, lambda s: s["loop_blocked"], "the event loop to block"
+                )
+                assert post(LATE_PATH).status_code == 503
+            finally:
+                post(UNBLOCK_LOOP_PATH)
+            assert blocked.result().status_code == 200
+        # One round trip through the loop: a late handler would have run by now.
+        assert post(ECHO_ASYNC_PATH, json={}).status_code == 200
+        assert not requests.get(f"{base}{STATE_PATH}", timeout=5).json()["late_ran"]
 
-        with ThreadPoolExecutor(max_workers=70) as pool:
-            burst = list(pool.map(call_slow, range(70)))
-        assert 529 in burst and set(burst) <= {503, 529}, burst
-        assert call_slow() == 503
+        # A route admits 64 calls at once and sheds the rest (529), while the
+        # other routes keep serving. The slots come back when the handlers end.
+        with ThreadPoolExecutor(max_workers=64) as pool:
+            held = [pool.submit(post, HOLD_PATH) for _ in range(64)]
+            try:
+                _wait_for_state(base, lambda s: s["held"] == 64, "64 held calls")
+                assert post(HOLD_PATH).status_code == 529
+                assert requests.get(url, timeout=5).status_code == 200
+            finally:
+                post(RELEASE_PATH)
+            assert {call.result().status_code for call in held} == {200}
+        assert post(HOLD_PATH).status_code == 200
+
+        # The slots also come back when handlers are cancelled at their timeout.
+        def slow_status(_=None):
+            return post(SLOW_PATH).status_code
+
+        with ThreadPoolExecutor(max_workers=64) as pool:
+            assert set(pool.map(slow_status, range(64))) == {503}
+        admitted_by = time.time() + 5
+        while (status := slow_status()) == 529:
+            assert time.time() < admitted_by, "the slow route's slots never came back"
+            time.sleep(0.05)
+        assert status == 503
 
 
 @pytest.mark.timeout(120)

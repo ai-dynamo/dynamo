@@ -8,6 +8,8 @@ use std::time::Duration;
 use dynamo_llm::http::service::axum::{
     Json,
     body::Bytes,
+    extract::{DefaultBodyLimit, rejection::BytesRejection},
+    handler::Handler,
     http::{HeaderMap, Method, StatusCode},
     response::{IntoResponse, Response},
 };
@@ -28,7 +30,8 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 /// of GET, POST, PUT, PATCH or DELETE. `handler` takes a
 /// `FrontendExtensionContext` and returns a JSON body (200) or a
 /// `FrontendResponse` for a custom status; it may be `async def`, in which case
-/// it runs on the frontend's event loop. `timeout_s` bounds each call.
+/// it runs on the frontend's event loop. `timeout_s` bounds each call and
+/// `max_body_bytes` its request body.
 #[pyclass(name = "FrontendRoute")]
 #[derive(Clone)]
 pub(crate) struct PyFrontendRoute {
@@ -36,34 +39,31 @@ pub(crate) struct PyFrontendRoute {
     path: String,
     handler: PyObject,
     timeout: Duration,
+    max_body_bytes: usize,
 }
 
 #[pymethods]
 impl PyFrontendRoute {
     #[new]
-    #[pyo3(signature = (method, path, handler, timeout_s = 30.0))]
+    #[pyo3(signature = (method, path, handler, timeout_s = 30.0, max_body_bytes = 64 * 1024))]
     pub fn new(
         py: Python<'_>,
         method: String,
         path: String,
         handler: PyObject,
         timeout_s: f64,
+        max_body_bytes: usize,
     ) -> PyResult<Self> {
         if !handler.bind(py).is_callable() {
             return Err(PyTypeError::new_err(
                 "FrontendRoute handler must be callable",
             ));
         }
-        // `HEAD` is served by a `GET` route.
+        // Reuse the core validators so Python and the Rust builder can't drift.
         let method = Method::from_bytes(method.to_ascii_uppercase().as_bytes())
-            .ok()
-            .filter(|m| ["GET", "POST", "PUT", "PATCH", "DELETE"].contains(&m.as_str()))
-            .ok_or_else(|| {
-                PyValueError::new_err(format!(
-                    "unsupported FrontendRoute method {method:?}; expected GET, POST, PUT, PATCH or DELETE"
-                ))
-            })?;
-        // Reuse the core validator so Python and the Rust builder can't drift.
+            .map_err(|e| PyValueError::new_err(format!("FrontendRoute method {method:?}: {e}")))?;
+        dynamo_llm::http::service::validate_extension_route_method(&method)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
         dynamo_llm::http::service::validate_extension_route_path(&path)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         // `try_from_secs_f64` rejects negative, NaN and infinite values.
@@ -81,6 +81,7 @@ impl PyFrontendRoute {
             path,
             handler,
             timeout,
+            max_body_bytes,
         })
     }
 
@@ -209,8 +210,8 @@ pub(crate) fn frontend_route_extensions_from_py(
     for item in iter {
         let item = item?;
         let route = item.extract::<PyRef<'_, PyFrontendRoute>>()?;
-        // All providers fold into one router; Router::route panics on an
-        // overlapping method and path, so reject duplicates cleanly here.
+        // Fail here, with a `ValueError` from `run_input`. The route builder
+        // rejects a duplicate too, but only when the HTTP service is built.
         if !seen.insert((route.method.clone(), route.path.clone())) {
             return Err(PyValueError::new_err(format!(
                 "duplicate frontend route registered: {} {}",
@@ -245,13 +246,12 @@ fn frontend_route_extension_from_routes(
         let mut builder = FrontendRouteSet::builder();
         for route in &routes {
             let (route, context) = (route.clone(), context.clone());
-            builder = builder.route(
-                route.spec.method.clone(),
-                route.spec.path.clone(),
-                move |headers: HeaderMap, body: Bytes| {
-                    call_python_frontend_route(route.clone(), context.clone(), headers, body)
-                },
-            )?;
+            let (method, path) = (route.spec.method.clone(), route.spec.path.clone());
+            let body_limit = DefaultBodyLimit::max(route.spec.max_body_bytes);
+            let handler = move |headers: HeaderMap, body: Result<Bytes, BytesRejection>| {
+                call_python_frontend_route(route.clone(), context.clone(), headers, body)
+            };
+            builder = builder.route(method, path, handler.layer(body_limit))?;
         }
         Ok(builder.build())
     })
@@ -317,37 +317,47 @@ async fn call_python_frontend_route(
     route: Arc<PyRouteHandler>,
     context: RsFrontendExtensionContext,
     headers: HeaderMap,
-    body: Bytes,
+    body: Result<Bytes, BytesRejection>,
 ) -> Response {
     let (method, path) = (&route.spec.method, route.spec.path.as_str());
+    let body = match body {
+        Ok(body) => body,
+        // 413 for a body over the route's `max_body_bytes`.
+        Err(rejection) => {
+            return extension_error_response(rejection.status(), &rejection.body_text());
+        }
+    };
     let deadline = tokio::time::Instant::now() + route.spec.timeout;
     // Bounded: shed with the shared overload code (DYN_HTTP_OVERLOAD_STATUS_CODE).
-    let shed = || {
-        tracing::warn!(%method, path, "frontend extension handlers saturated; shedding request");
+    let shed = |limit: &str| {
+        tracing::warn!(
+            %method, path, limit,
+            "frontend extension handlers saturated; shedding request"
+        );
         extension_error_response(
             dynamo_llm::http::service::error::SanitizedError::Overloaded.status(),
             "frontend route extension busy",
         )
     };
     let Ok(permit) = route.in_flight.clone().try_acquire_owned() else {
-        return shed();
+        return shed("route_in_flight");
     };
     let (tx, rx) = tokio::sync::oneshot::channel();
     let reply = Reply {
+        route: route.clone(),
         tx: Some(tx),
         permit: Some(permit),
         deadline: deadline.into_std(),
         timer: None,
     };
-    let job_route = route.clone();
     let job: ExtensionJob = Box::new(move || {
         // Caller already gave up (timed out/disconnected): skip before the GIL.
         if !reply.is_closed() {
-            Python::with_gil(|py| run_handler(py, &job_route, context, &headers, &body, reply));
+            Python::with_gil(|py| run_handler(py, context, &headers, &body, reply));
         }
     });
     if extension_executor().try_send(job).is_err() {
-        return shed();
+        return shed("pool_queue");
     }
 
     let failure = match tokio::time::timeout_at(deadline, rx).await {
@@ -383,12 +393,16 @@ async fn call_python_frontend_route(
 /// awaitable is handed to the event loop, where `Reply::start` runs it.
 fn run_handler(
     py: Python<'_>,
-    route: &PyRouteHandler,
     context: RsFrontendExtensionContext,
     headers: &HeaderMap,
     body: &[u8],
     mut reply: Reply,
 ) {
+    // The wait for the GIL may have outlasted the deadline.
+    if reply.remaining().is_none() {
+        return reply.finish(Err(RouteError::TimedOut));
+    }
+    let route = reply.route.clone();
     let result = PyFrontendExtensionContext::new(py, context, headers, body, &route.runtime)
         .and_then(|ctx| route.spec.handler.call1(py, (ctx,)));
     let result = match result {
@@ -415,8 +429,11 @@ fn run_handler(
 
 /// Answers one request at most once, and holds its in-flight slot until the
 /// handler is done rather than until the caller stops waiting.
+/// `pyo3_async_runtimes::into_future_with_locals` can do neither that nor
+/// cancel the task at the deadline.
 #[pyclass]
 struct Reply {
+    route: Arc<PyRouteHandler>,
     tx: Option<tokio::sync::oneshot::Sender<RouteResult>>,
     permit: Option<OwnedSemaphorePermit>,
     deadline: std::time::Instant,
@@ -439,8 +456,14 @@ impl Reply {
 
     /// Answer the caller. The slot stays held until `finish`.
     fn answer(&mut self, result: RouteResult) {
-        if let Some(tx) = self.tx.take() {
-            let _ = tx.send(result);
+        let Some(tx) = self.tx.take() else { return };
+        // The caller is gone, so its side will never log this failure.
+        if let Err(Err(RouteError::Failed(err))) = tx.send(result) {
+            let (method, path) = (&self.route.spec.method, self.route.spec.path.as_str());
+            tracing::error!(
+                %method, path, error = %err,
+                "Python frontend route extension failed after its caller stopped waiting"
+            );
         }
     }
 

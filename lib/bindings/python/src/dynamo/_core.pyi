@@ -2327,7 +2327,8 @@ class FrontendRoute:
     ``FrontendExtensionContext`` and returns a JSON-serializable body (implies
     HTTP 200) or a ``FrontendResponse`` to set the status code. An ``async def``
     handler runs on the frontend's event loop. A call that takes longer than
-    ``timeout_s`` seconds returns HTTP 503.
+    ``timeout_s`` seconds returns HTTP 503, and a request body larger than
+    ``max_body_bytes`` returns HTTP 413.
     """
 
     def __init__(
@@ -2336,6 +2337,7 @@ class FrontendRoute:
         path: str,
         handler: Callable[[FrontendExtensionContext], object | Awaitable[object]],
         timeout_s: float = 30.0,
+        max_body_bytes: int = 65536,
     ) -> None: ...
     @property
     def method(self) -> str: ...
