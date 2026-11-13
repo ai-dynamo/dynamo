@@ -6498,9 +6498,9 @@ dependencies = [
 
 [[package]]
 name = "modelexpress-client"
-version = "0.7.0"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d5ea46d6a1be36ff6d52ab9ac1f08ed90c52342d697d2c349c5c5ca9881bfa8"
+checksum = "308b80a5b7794a4d79d46ecd5255450e63e250bcdd982156b5551ba4e2dec279"
 dependencies = [
  "anyhow",
  "clap",
@@ -6519,9 +6519,9 @@ dependencies = [
 
 [[package]]
 name = "modelexpress-common"
-version = "0.7.0"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e19ac9f6a3c3fb57a33c5478c9487d1eb274fd88fc6a6c955dd84db368f3ba0d"
+checksum = "a6789ce0386972f806b2e51ff821236b45ef5686df533a1dacdf870b345a24d7"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -8982,9 +8982,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.45"
+version = "0.23.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
+checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
 dependencies = [
  "aws-lc-rs",
  "log",
