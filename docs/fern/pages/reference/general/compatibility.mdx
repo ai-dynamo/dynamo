@@ -80,12 +80,22 @@ Set the limit on 1.7 workers after every frontend runs 1.7.
 
 #### Response Plane
 
-- **Setting:** `--response-plane` or `DYN_RESPONSE_PLANE` set to `quic` or `velo`.
-- **Affected pairing:** frontend and workers on different values, or a peer older than the response plane. `quic` needs 1.6 and `velo` needs 1.7.
+- **Setting:** `--response-plane` or `DYN_RESPONSE_PLANE` set to `quic`.
+- **Affected pairing:** a `quic` frontend or worker with a peer on another release.
 
-Frontends and workers must use the same response plane. A worker refuses a request whose response plane differs from its own, and the frontend returns HTTP 503. A worker that predates the frontend's response plane accepts the request and never answers. A 1.7 frontend fails that request with HTTP 504 after 30 seconds and stops routing to the worker for `DYN_RUNTIME_INHIBITED_DURATION_SECS`. To change the bound, set [`DYN_RESPONSE_STREAM_ESTABLISH_TIMEOUT_SECS`](../components/runtime-configuration.mdx).
+A 1.7 worker advertises its response plane and also answers over `tcp`. A 1.7 frontend uses its own response plane with workers that advertise the same one, and `tcp` with every other worker. `velo` is new in 1.7, so a 1.7 frontend or worker on `velo` serves every pairing in the window, and you can change frontends and workers to `velo` in any order.
 
-Change the response plane on frontends and workers together, after all of them run a release that has it.
+`quic` has exceptions, because 1.6 runs `quic` without the advertisement. A 1.6.x frontend sends its own response plane to every worker, and a 1.7 `quic` frontend sends `quic` to every worker that does not advertise.
+
+| Frontend | Worker | Result |
+| :---- | :---- | :---- |
+| 1.7 on `quic` | 1.6.x on `quic` | Serves over `quic`. |
+| 1.7 on `quic` | 1.6.x on `tcp` | The worker refuses the request. The frontend returns HTTP 503. |
+| 1.7 on `quic` | 1.5.x | The worker accepts the request and never answers. The frontend returns HTTP 504 after 30 seconds and stops routing to the worker for `DYN_RUNTIME_INHIBITED_DURATION_SECS`. To change the bound, set [`DYN_RESPONSE_STREAM_ESTABLISH_TIMEOUT_SECS`](../components/runtime-configuration.mdx). |
+| 1.6.x on `quic` | 1.7 on `quic` | Serves over `quic`. |
+| 1.6.x on `quic` | 1.7 on `tcp` or `velo` | The worker refuses the request. The frontend returns HTTP 503. |
+
+While a 1.5.x or 1.6.x frontend or worker remains, set `quic` on frontends and workers together.
 
 #### Model Types Added After the Frontend's Release
 
