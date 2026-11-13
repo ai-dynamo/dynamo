@@ -16,6 +16,8 @@ spec:
         - env:
           - name: DYN_ROUTER_MODE
             value: kv
+          - name: DYN_ROUTER_WORKER_SELECTION_POLICY
+            value: kvcr
           image: ${DYNAMO_VLLM_IMAGE}
           name: main
     replicas: 1

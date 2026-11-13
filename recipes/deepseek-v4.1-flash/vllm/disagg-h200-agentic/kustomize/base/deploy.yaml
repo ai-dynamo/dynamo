@@ -44,7 +44,7 @@ spec:
             value: 'true'
           - name: DYN_ROUTER_CONDITIONAL_DISAGG_CONFIG
             value: '{"policy":"isl_bounding","eff_isl_threshold":2048,"eff_isl_ratio_threshold":0.70,"decode_busy_threshold":0.50}'
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0-deepseek-v4.1-flash-dev.2
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0-deepseek-v4.1-flash-dev.2-post.1
           imagePullPolicy: IfNotPresent
           name: main
           ports:
@@ -118,7 +118,7 @@ spec:
             value: '3600'
           - name: DYN_HEALTH_CHECK_REQUEST_TIMEOUT
             value: '300'
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0-deepseek-v4.1-flash-dev.2
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0-deepseek-v4.1-flash-dev.2-post.1
           imagePullPolicy: IfNotPresent
           name: main
           ports:
@@ -216,7 +216,7 @@ spec:
             value: '3600'
           - name: DYN_HEALTH_CHECK_REQUEST_TIMEOUT
             value: '300'
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0-deepseek-v4.1-flash-dev.2
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0-deepseek-v4.1-flash-dev.2-post.1
           imagePullPolicy: IfNotPresent
           name: main
           ports:

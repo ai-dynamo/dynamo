@@ -10,6 +10,7 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, Optional, Sequence, Tuple
 
+from blake3 import blake3
 from gpu_memory_service.common.protocol.messages import GetAllocationResponse
 from gpu_memory_service.common.vmm import get_vmm
 from gpu_memory_service.snapshot.backends.pinned_host import (
@@ -18,6 +19,7 @@ from gpu_memory_service.snapshot.backends.pinned_host import (
     make_pinned_copy_slots,
 )
 from gpu_memory_service.snapshot.model import AllocationEntry, SaveManifest
+from gpu_memory_service.snapshot.transfer import blake3_threads_per_shard
 
 _SAVE_COPY_BUFFERS = 1
 
@@ -59,6 +61,8 @@ class DeviceToFileWriter:
         device: Optional[int] = None,
         buffers: int = _SAVE_COPY_BUFFERS,
         chunk_size: int = PINNED_COPY_CHUNK_SIZE,
+        hash_name: Optional[str] = None,
+        hash_threads: int = 1,
     ) -> None:
         self._file_path = file_path
         buffers = int(buffers)
@@ -67,6 +71,11 @@ class DeviceToFileWriter:
             raise ValueError("buffers must be positive")
         if chunk_size <= 0:
             raise ValueError("chunk_size must be positive")
+        if hash_threads <= 0:
+            raise ValueError("hash_threads must be positive")
+        if hash_name not in (None, "blake3"):
+            raise ValueError(f"unsupported shard hash {hash_name!r}")
+        self._hasher = blake3(max_threads=hash_threads) if hash_name else None
         self._vmm = get_vmm()
         if device is not None:
             self._vmm.runtime_set_device(device)
@@ -100,6 +109,12 @@ class DeviceToFileWriter:
             slot.wait()
             chunk_view = slot.view[:chunk_size]
             try:
+                if self._hasher is not None:
+                    digest_view = chunk_view.cast("B")
+                    try:
+                        self._hasher.update(digest_view)
+                    finally:
+                        digest_view.release()
                 _write_all_from_view(self._fd, chunk_view, self._file_path)
             finally:
                 chunk_view.release()
@@ -130,6 +145,14 @@ class DeviceToFileWriter:
         if error is not None:
             raise error
 
+    def hexdigest(self) -> str:
+        """Return the requested streaming digest after all writes complete."""
+        if self._hasher is None:
+            raise RuntimeError("device writer was created without a hash algorithm")
+        if not self._closed:
+            raise RuntimeError("device writer digest is unavailable before close")
+        return self._hasher.hexdigest()
+
     def __enter__(self) -> "DeviceToFileWriter":
         return self
 
@@ -155,8 +178,9 @@ def write_device_shards(
     shard_size_bytes: int,
     max_workers: int,
     relative_to: Optional[str] = None,
-) -> list[Tuple[str, int]]:
-    """Write ``(device_va, size)`` extents and return their file placements."""
+    blake3: bool = False,
+) -> tuple[list[Tuple[str, int]], dict[str, str]]:
+    """Write device shards; optionally return streaming BLAKE3 digests."""
     if not shard_dirs:
         raise ValueError("at least one shard directory is required")
     if max_workers <= 0:
@@ -173,6 +197,9 @@ def write_device_shards(
         os.makedirs(shard_dir, exist_ok=True)
 
     placements: list[Optional[Tuple[str, int]]] = [None] * len(extents)
+    shard_digests: list[Optional[Tuple[str, str]]] = [None] * len(groups)
+    worker_count = min(max_workers, max(1, len(groups)))
+    hash_threads = blake3_threads_per_shard(worker_count)
 
     def write_shard(shard_index: int, indices: list[int]) -> None:
         path = os.path.join(
@@ -180,13 +207,24 @@ def write_device_shards(
             f"shard_{shard_index:04d}.bin",
         )
         manifest_path = os.path.relpath(path, relative_to) if relative_to else path
-        with DeviceToFileWriter(path, device=device) as writer:
+        if not blake3:
+            writer = DeviceToFileWriter(path, device=device)
+        else:
+            writer = DeviceToFileWriter(
+                path,
+                device=device,
+                hash_name="blake3",
+                hash_threads=hash_threads,
+            )
+        with writer:
             for index in indices:
                 va, size = extents[index]
                 writer.write_device(va, size)
                 placements[index] = (manifest_path, layout[index][1])
+        if blake3:
+            shard_digests[shard_index] = (manifest_path, writer.hexdigest())
 
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
         futures = [
             executor.submit(write_shard, shard_index, indices)
             for shard_index, indices in groups.items()
@@ -196,7 +234,12 @@ def write_device_shards(
 
     if any(placement is None for placement in placements):
         raise RuntimeError("shard writer did not produce every extent")
-    return [placement for placement in placements if placement is not None]
+    if blake3 and any(digest is None for digest in shard_digests):
+        raise RuntimeError("shard writer did not produce every digest")
+    return (
+        [placement for placement in placements if placement is not None],
+        dict(digest for digest in shard_digests if digest is not None),
+    )
 
 
 def _plan_shard_layout(

@@ -76,23 +76,23 @@ func TestPropSyncProjection(t *testing.T) {
 			name: "partial last owner", family: BuildFamilyXT, widths: []uint32{4, 4, 4}, shape: ptr.To(lpxv1alpha1.Xt8888PartitionShapeC16), physicalNodes: 2,
 		},
 		{
-			name: "LP30 2x8c without topology metadata", family: BuildFamilyHX, widths: []uint32{8, 8}, extent: ptr.To([]int64{16, 1, 1, 1}), physicalNodes: 1, omitMetadata: true,
+			name: "LP30 2x8c without topology metadata", family: BuildFamilyHX, widths: []uint32{8, 8}, extent: new([]int64{16, 1, 1, 1}), physicalNodes: 1, omitMetadata: true,
 		},
 		{
-			name: "LP30 4x4c", family: BuildFamilyHX, widths: []uint32{4, 4, 4, 4}, extent: ptr.To([]int64{16, 1, 1, 1}), physicalNodes: 1,
+			name: "LP30 4x4c", family: BuildFamilyHX, widths: []uint32{4, 4, 4, 4}, extent: new([]int64{16, 1, 1, 1}), physicalNodes: 1,
 		},
 		{
-			name: "LP30 partial last node in manifest order", family: BuildFamilyHX, widths: []uint32{8, 8, 8}, ids: []uint32{11, 3, 9}, extent: ptr.To([]int64{16, 2, 1, 1}), physicalNodes: 2,
+			name: "LP30 partial last node in manifest order", family: BuildFamilyHX, widths: []uint32{8, 8, 8}, ids: []uint32{11, 3, 9}, extent: new([]int64{16, 2, 1, 1}), physicalNodes: 2,
 		},
 		{name: "XT single subnode partition", family: BuildFamilyXT, widths: []uint32{2}, shape: ptr.To(lpxv1alpha1.Xt8888PartitionShapeC8), physicalNodes: 1},
-		{name: "LP30 single subnode stage", family: BuildFamilyHX, widths: []uint32{8}, extent: ptr.To([]int64{16, 1, 1, 1}), physicalNodes: 1},
-		{name: "LP30 two hemispheres", family: BuildFamilyHX, widths: slices.Repeat([]uint32{8}, 20), extent: ptr.To([]int64{16, 5, 2, 1}), physicalNodes: 10},
-		{name: "LP30 two racks", family: BuildFamilyHX, widths: slices.Repeat([]uint32{8}, 64), extent: ptr.To([]int64{16, 8, 2, 2}), physicalNodes: 32},
+		{name: "LP30 single subnode stage", family: BuildFamilyHX, widths: []uint32{8}, extent: new([]int64{16, 1, 1, 1}), physicalNodes: 1},
+		{name: "LP30 two hemispheres", family: BuildFamilyHX, widths: slices.Repeat([]uint32{8}, 20), extent: new([]int64{16, 5, 2, 1}), physicalNodes: 10},
+		{name: "LP30 two racks", family: BuildFamilyHX, widths: slices.Repeat([]uint32{8}, 64), extent: new([]int64{16, 8, 2, 2}), physicalNodes: 32},
 		{name: "XT four-chip nodes", family: BuildFamilyXT, widths: []uint32{2, 2, 2}, nodeWidth: 4, shape: ptr.To(lpxv1alpha1.Xt8888PartitionShapeC8), physicalNodes: 2},
 		{name: "XT single stage across four-chip nodes", family: BuildFamilyXT, widths: []uint32{8}, nodeWidth: 4, shape: ptr.To(lpxv1alpha1.Xt8888PartitionShapeC8), physicalNodes: 2},
 		{name: "XT sixteen-node stage", family: BuildFamilyXT, widths: []uint32{128}, shape: ptr.To(lpxv1alpha1.Xt8888PartitionShapeC128), physicalNodes: 16},
 		{name: "XT thirty-two-chip nodes", family: BuildFamilyXT, widths: slices.Repeat([]uint32{4}, 18), nodeWidth: 32, shape: ptr.To(lpxv1alpha1.Xt8888PartitionShapeC96), physicalNodes: 3},
-		{name: "LP30 eight-chip nodes", family: BuildFamilyHX, widths: []uint32{4, 4, 4}, nodeWidth: 8, extent: ptr.To([]int64{8, 2, 1, 1}), physicalNodes: 2},
+		{name: "LP30 eight-chip nodes", family: BuildFamilyHX, widths: []uint32{4, 4, 4}, nodeWidth: 8, extent: new([]int64{8, 2, 1, 1}), physicalNodes: 2},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()

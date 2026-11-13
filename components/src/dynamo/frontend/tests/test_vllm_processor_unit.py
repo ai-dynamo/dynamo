@@ -10,7 +10,7 @@ tool_choice='none' and the exclude_tools_when_tool_choice_none flag.
 import importlib.util
 import json
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from _routed_engine_fakes import FakeRoutedEngine as _FakeRoutedEngine
@@ -25,7 +25,7 @@ from _tool_guidance_parity import (
 )
 from transformers import AutoTokenizer
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
-from vllm.tool_parsers import ToolParser
+from vllm.tool_parsers import ToolParser, ToolParserManager
 
 from dynamo.common.utils.guided_json import admits_only_empty_object
 from dynamo.frontend import prepost as prepost_module
@@ -37,7 +37,7 @@ from dynamo.frontend.prepost import (
 from dynamo.llm.exceptions import HttpError, InvalidArgument, WorkerUnavailable
 
 # NOTE: dynamo.frontend.vllm_processor is imported lazily inside the tests that
-# need it (and via the vllm_processor_module fixture). Importing it at module
+# need it (and via the real_vllm_processor_module fixture). Importing it at module
 # top level would run its `from vllm.tasks import ...` /
 # `from vllm.v1.engine.parallel_sampling import ...` imports during pytest
 # collection, which breaks the pytest-marker-report pre-commit hook (its vllm
@@ -554,52 +554,6 @@ class TestChatTemplateArgsPassthrough:
         )
         # Renderer-managed value wins over the client's nested key (no crash either).
         assert chat_params.chat_template_kwargs["documents"] is None
-
-
-class TestServerDefaultChatTemplateKwargs:
-    """The server-wide --default-chat-template-kwargs must reach the template."""
-
-    def _enable_thinking(self, tokenizer, request_args):
-        """Return the template's enable_thinking under a `{enable_thinking: False}` default."""
-        request = {"model": MODEL, "messages": [{"role": "user", "content": "Hello"}]}
-        if request_args is not None:
-            request["chat_template_args"] = request_args
-        _, _, _, _, chat_params = _prepare_request(
-            request,
-            tokenizer=tokenizer,
-            tool_parser_class=None,
-            default_chat_template_kwargs={"enable_thinking": False},
-        )
-        return chat_params.chat_template_kwargs.get("enable_thinking")
-
-    @pytest.mark.parametrize(
-        "request_args, expected",
-        [
-            (None, False),  # omitted request kwargs: the server default applies
-            ({"enable_thinking": True}, True),  # a request kwarg overrides the default
-            (
-                {"enable_thinking": None},
-                False,
-            ),  # unset (None) request value keeps the default
-        ],
-    )
-    def test_server_default_precedence(self, tokenizer, request_args, expected):
-        assert self._enable_thinking(tokenizer, request_args) is expected
-
-    def test_server_default_is_not_mutated(self, tokenizer):
-        """Processing must not mutate the shared server-default dict."""
-        default = {"enable_thinking": False}
-        _prepare_request(
-            {
-                "model": MODEL,
-                "messages": [{"role": "user", "content": "Hello"}],
-                "reasoning_effort": "high",
-            },
-            tokenizer=tokenizer,
-            tool_parser_class=None,
-            default_chat_template_kwargs=default,
-        )
-        assert default == {"enable_thinking": False}
 
 
 class TestMultimodalFeatureMetadata:
@@ -1239,8 +1193,17 @@ class _FakePostProcessor:
 
 
 @pytest.fixture
-def vllm_processor_module(monkeypatch):
+def real_vllm_processor_module():
+    """Defer real vLLM imports until execution so marker collection stays light."""
     import dynamo.frontend.vllm_processor as module
+
+    return module
+
+
+@pytest.fixture
+def vllm_processor_module(monkeypatch, real_vllm_processor_module):
+    """Replace engine-facing types while retaining real frontend orchestration."""
+    module = real_vllm_processor_module
 
     class FakeEngineCoreOutput:
         __struct_fields__ = ()
@@ -1252,6 +1215,78 @@ def vllm_processor_module(monkeypatch):
     monkeypatch.setattr(module._nvtx, "start_range", lambda *args, **kwargs: object())
     monkeypatch.setattr(module._nvtx, "end_range", lambda rng: None)
     return module
+
+
+@pytest.mark.asyncio
+@pytest.mark.multimodal
+@pytest.mark.parametrize(
+    ("frontend_flags", "expected_options"),
+    [
+        pytest.param({}, {}, id="omitted"),
+        pytest.param(
+            {"renderer_num_workers": None, "mm_processor_cache_gb": None},
+            {},
+            id="unset",
+        ),
+        pytest.param(
+            {"renderer_num_workers": 4},
+            {"renderer_num_workers": 4},
+            id="renderer-only",
+        ),
+        pytest.param(
+            {"mm_processor_cache_gb": 0.0},
+            {"mm_processor_cache_gb": 0.0},
+            id="disable-mm-cache",
+        ),
+        pytest.param(
+            {"renderer_num_workers": 4, "mm_processor_cache_gb": 0.0},
+            {"renderer_num_workers": 4, "mm_processor_cache_gb": 0.0},
+            id="renderer-and-disabled-cache",
+        ),
+        pytest.param(
+            {"renderer_num_workers": 1, "mm_processor_cache_gb": 1.5},
+            {"renderer_num_workers": 1, "mm_processor_cache_gb": 1.5},
+            id="fractional-cache-budget",
+        ),
+        pytest.param(
+            {"renderer_num_workers": 4, "mm_processor_cache_gb": 4.0},
+            {"renderer_num_workers": 4, "mm_processor_cache_gb": 4.0},
+            id="delegate-combination-validation-to-vllm",
+        ),
+    ],
+)
+async def test_chat_factory_forwards_renderer_and_mm_cache_options(
+    vllm_processor_module,
+    monkeypatch,
+    tmp_path,
+    frontend_flags,
+    expected_options,
+):
+    # Stop at the configuration boundary: this test needs no model or renderer.
+    config_error = ValueError("model configuration boundary")
+    model_config = Mock(side_effect=config_error)
+    monkeypatch.setattr(vllm_processor_module, "ModelConfig", model_config)
+    mdc = SimpleNamespace(
+        model_type=lambda: SimpleNamespace(supports_chat=lambda: True),
+        local_dir=lambda: str(tmp_path),
+        runtime_config=lambda: {},
+    )
+    factory = vllm_processor_module.EngineFactory(
+        SimpleNamespace(preprocess_workers=0, trust_remote_code=False),
+        SimpleNamespace(**frontend_flags),
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        await factory.chat_engine_factory(None, mdc, None)
+
+    assert exc_info.value is config_error
+    model_config.assert_called_once_with(
+        model=str(tmp_path),
+        tokenizer_mode="auto",
+        config_format="auto",
+        trust_remote_code=False,
+        **expected_options,
+    )
 
 
 def _logprobs_processor(vllm_processor_module):
@@ -1406,6 +1441,12 @@ async def test_generator_accepts_zero_top_logprobs(
         ({"logprobs": True, "top_logprobs": 1}, 1, None),
         ({"logprobs": True, "top_logprobs": 0, "prompt_logprobs": 0}, 0, 0),
         ({"logprobs": True, "top_logprobs": 1, "prompt_logprobs": 3}, 1, 3),
+        # Explicit ids replace the top-k count, as on the worker.
+        (
+            {"logprobs": True, "top_logprobs": 1, "logprob_token_ids": [5, 6]},
+            None,
+            None,
+        ),
         ({"prompt_logprobs": 0}, None, 0),
         ({"stream": True}, None, None),
         ({"stream": True, "prompt_logprobs": 0}, None, None),
@@ -1442,7 +1483,7 @@ async def test_generator_forwards_chat_logprobs_count(
     generation_config,
 ):
     class RequestForSampling(SimpleNamespace):
-        model_fields = frozenset({"prompt_logprobs"})
+        model_fields = frozenset({"prompt_logprobs", "logprob_token_ids"})
 
     monkeypatch.setattr(
         vllm_processor_module,
@@ -1455,6 +1496,7 @@ async def test_generator_forwards_chat_logprobs_count(
                     logprobs=request_options.get("logprobs"),
                     top_logprobs=request_options.get("top_logprobs"),
                     prompt_logprobs=request_options.get("prompt_logprobs"),
+                    logprob_token_ids=request_options.get("logprob_token_ids"),
                     top_k=None,
                     min_p=None,
                     cache_salt=None,
@@ -1523,6 +1565,12 @@ async def test_generator_forwards_chat_logprobs_count(
     assert (
         captured["dynamo_preproc"]["output_options"]["prompt_logprobs"]
         == expected_prompt_logprobs
+    )
+    sampling_passthrough = (
+        captured["dynamo_preproc"].get("extra_args", {}).get("sampling_options", {})
+    )
+    assert sampling_passthrough.get("logprob_token_ids") == request_options.get(
+        "logprob_token_ids"
     )
 
 
@@ -2269,7 +2317,12 @@ class TestRoutedEnginePath:
                 assert envelopes[-1]["comment"] == ["backend disconnected"]
             assert not any(c["finish_reason"] for c in choices)
             return
-        assert engine.yielded == len(frames)
+        expected_frames = len(frames)
+        if backend_end == "metadata" and all("STOP" in text for text in texts):
+            # Once metadata completes all local stops, release the stream before
+            # reading another worker terminal for an already finished choice.
+            expected_frames -= len(texts) - 1
+        assert engine.yielded == expected_frames
         for index, text in enumerate(texts):
             output = [choice for choice in choices if choice["index"] == index]
             assert "".join(
@@ -2394,6 +2447,191 @@ class TestRoutedEnginePath:
         assert "prompt_logprobs" not in chunks[0]["choices"][0]
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("late_prompt_logprobs", [None, "metadata", "eof"])
+    @pytest.mark.parametrize(
+        "usage_mode", ["unary", "stream", "continuous", "stream-default", "no-usage"]
+    )
+    @pytest.mark.parametrize(
+        "n,other_request,backend_usage,natural_finish_first",
+        [
+            (1, False, False, False),
+            (2, False, False, False),
+            (1, True, False, False),
+            (2, False, True, False),
+            (2, False, True, True),
+        ],
+        ids=[
+            "single-choice",
+            "parallel-choices",
+            "concurrent-request",
+            "backend-usage",
+            "earlier-backend-usage",
+        ],
+    )
+    async def test_local_stop_releases_only_the_completed_request(
+        self,
+        tokenizer,
+        n,
+        other_request,
+        backend_usage,
+        natural_finish_first,
+        late_prompt_logprobs,
+        usage_mode,
+        real_vllm_processor_module,
+    ):
+        """Stopped choices must not inflate usage, even when the worker sends it."""
+        module = real_vllm_processor_module
+
+        sampling_params = SamplingParams(
+            n=n, stop=["STOP"], output_kind=module.RequestOutputKind.DELTA
+        )
+        vllm_request = module.EngineCoreRequest(
+            request_id="local-stop",
+            external_req_id="local-stop",
+            prompt_token_ids=[1],
+            mm_features=None,
+            sampling_params=sampling_params,
+            pooling_params=None,
+            arrival_time=0.0,
+            lora_request=None,
+            cache_salt=None,
+            data_parallel_rank=None,
+        )
+        # Split the stop string across token chunks, as it arrives from a
+        # tokenizer-free worker that leaves string stopping to the frontend.
+        stop_tokens = tokenizer.encode("hello ST", add_special_tokens=False)
+        stop_tokens += tokenizer.encode("OP", add_special_tokens=False)
+        items = [{"token_ids": [token], "index": 0} for token in stop_tokens]
+        expected_tokens = len(stop_tokens)
+        expected_prompt_tokens = 128 if backend_usage else 1
+        if n > 1:
+            # The shared stream may deliver more tokens for the stopped choice
+            # while another choice is still active.
+            items.append({"token_ids": [42, 43], "index": 0})
+            other_tokens = tokenizer.encode("other answer", add_special_tokens=False)
+            items.append(
+                {
+                    "token_ids": other_tokens,
+                    "index": 1,
+                    "finish_reason": "length",
+                }
+            )
+            expected_tokens += len(other_tokens)
+            if backend_usage:
+                items[-1]["completion_usage"] = {
+                    "prompt_tokens": expected_prompt_tokens,
+                    "completion_tokens": expected_tokens + 2,
+                    "total_tokens": expected_prompt_tokens + expected_tokens + 2,
+                    "prompt_tokens_details": {"cached_tokens": 64},
+                }
+            if natural_finish_first:
+                # The natural finish reports usage before the local stop; the
+                # terminal chunk must retain its metadata for aggregation.
+                items.insert(0, items.pop())
+                items.pop()  # No late chunk is consumed after both choices finish.
+        prompt_payload = [None, {"17": {"logprob": -0.25, "rank": 1}}]
+        if late_prompt_logprobs == "metadata":
+            items.append(
+                {"token_ids": [], "engine_data": {"prompt_logprobs": prompt_payload}}
+            )
+            if backend_usage:
+                # A later sparse report must not erase the earlier cache count.
+                items[-1]["completion_usage"] = {
+                    "prompt_tokens": expected_prompt_tokens
+                }
+        expected_chunks = len(items) + (late_prompt_logprobs == "eof")
+        items.append({"token_ids": [42], "index": 0})
+        routed_engine = _FakeRoutedEngine(items)
+        processor = _make_processor(module, routed_engine)
+        processor.output_processor = module.OutputProcessor(tokenizer, log_stats=False)
+        if other_request:
+            processor.output_processor.add_request(
+                module.msgspec_replace(
+                    vllm_request, request_id="unrelated", external_req_id="unrelated"
+                ),
+                None,
+            )
+
+        request = prepost_module.ChatCompletionRequest(
+            model=MODEL, messages=[{"role": "user", "content": "hi"}]
+        )
+        posts = {
+            index: StreamingPostProcessor(
+                tokenizer=tokenizer,
+                request_for_sampling=request,
+                sampling_params=sampling_params,
+                prompt_token_ids=[1],
+                tool_parser=None,
+                reasoning_parser_class=None,
+                chat_template_kwargs={},
+            )
+            for index in range(n)
+        }
+        request_data = {"model": MODEL, "stream": usage_mode != "unary"}
+        if usage_mode in {"stream", "continuous", "no-usage"}:
+            request_data["stream_options"] = {
+                "include_usage": usage_mode != "no-usage",
+                "continuous_usage_stats": usage_mode != "stream",
+            }
+        if late_prompt_logprobs:
+            request_data.update(
+                prompt_logprobs=0,
+                nvext={"extra_fields": ["prompt_logprobs"]},
+            )
+        chunks = [
+            chunk
+            async for chunk in processor._generate_and_stream(
+                "local-stop", request_data, {}, [1], vllm_request, posts
+            )
+        ]
+
+        assert routed_engine.yielded == expected_chunks
+        data = [chunk["data"] for chunk in chunks if "data" in chunk]
+        choices = [choice for frame in data for choice in frame["choices"]]
+        assert {
+            index: "".join(
+                choice["delta"].get("content", "")
+                for choice in choices
+                if choice["index"] == index
+            )
+            for index in range(n)
+        } == ({0: "hello ", 1: "other answer"} if n > 1 else {0: "hello "})
+        assert {
+            choice["index"]: choice["finish_reason"]
+            for choice in choices
+            if choice["finish_reason"]
+        } == ({0: "stop", 1: "length"} if n > 1 else {0: "stop"})
+        if usage_mode in {"stream-default", "no-usage"}:
+            assert all("usage" not in frame for frame in data)
+        else:
+            assert data[-1]["usage"]["completion_tokens"] == expected_tokens
+            assert data[-1]["usage"]["prompt_tokens"] == expected_prompt_tokens
+            assert (
+                data[-1]["usage"]["total_tokens"]
+                == expected_prompt_tokens + expected_tokens
+            )
+            if backend_usage:
+                assert data[-1]["usage"]["prompt_tokens_details"] == {
+                    "cached_tokens": 64
+                }
+        assert [
+            frame["nvext"]["prompt_logprobs"] for frame in data if "nvext" in frame
+        ] == ([prompt_payload] if late_prompt_logprobs == "metadata" else [])
+        metrics = [
+            chunk["data"]["llm_metrics"]
+            if "data" in chunk
+            else json.loads(chunk["comment"][0])
+            for chunk in chunks
+            if "llm_metrics" in chunk.get("data", {})
+            or chunk.get("event") == "llm_metrics"
+        ]
+        assert metrics[-1]["output_tokens"] == expected_tokens
+        assert sum(metric["chunk_tokens"] for metric in metrics) == expected_tokens
+        assert set(processor.output_processor.request_states) == (
+            {"unrelated"} if other_request else set()
+        )
+
+    @pytest.mark.asyncio
     async def test_backend_rejection_keeps_the_backend_status(
         self, vllm_processor_module
     ):
@@ -2417,6 +2655,17 @@ class TestRoutedEnginePath:
         assert "min_p" in excinfo.value.message
         # The serialized envelope must not leak to the client.
         assert "BackendInvalidArgument" not in excinfo.value.message
+
+    @pytest.mark.asyncio
+    async def test_invalid_argument_rejection_propagates(self, vllm_processor_module):
+        class _RefusingEngine(_FakeRoutedEngine):
+            async def generate(self, preprocessed, **kwargs):
+                raise InvalidArgument("use --enable-multimodal")
+
+        processor = _make_processor(vllm_processor_module, _RefusingEngine())
+
+        with pytest.raises(InvalidArgument, match="--enable-multimodal"):
+            await _run_generate(processor, _base_preproc())
 
     @pytest.mark.asyncio
     async def test_genuine_internal_failure_is_still_internal(
@@ -2998,7 +3247,6 @@ _GLM_TWO_CALLS = (
 
 def _assert_two_glm_calls_streamed(tokenizer, steps):
     from vllm.reasoning import ReasoningParserManager
-    from vllm.tool_parsers import ToolParserManager
 
     request, _, _, _, _ = _prepare_request(
         json.loads(json.dumps(TOOL_REQUEST)),
@@ -3073,6 +3321,78 @@ def test_parallel_tool_calls_survive_split_start_marker(tokenizer):
             (_GLM_TWO_CALLS[split:], []),
         ],
     )
+
+
+def test_tool_call_opener_split_at_reasoning_end(tokenizer):
+    split = _GLM_TWO_CALLS.index("</think>") + len("</think><tool")
+    _assert_two_glm_calls_streamed(
+        tokenizer,
+        [(_GLM_TWO_CALLS[:split], []), (_GLM_TWO_CALLS[split:], [])],
+    )
+
+
+@pytest.mark.parametrize(
+    ("suffix_chunks", "expected_content", "expected_finish"),
+    [
+        (
+            [
+                "_ca",
+                'll>{"name":"get_weather","arguments":{"city":"Paris"}}</tool_call>',
+            ],
+            "I can help. ",
+            "tool_calls",
+        ),
+        (["box"], "I can help. <toolbox", "stop"),
+        ([""], "I can help. <tool", "stop"),
+    ],
+    ids=["split-tool-opener", "literal-prefix", "end-of-stream"],
+)
+def test_hermes_split_tool_opener_at_reasoning_end(
+    tokenizer, suffix_chunks, expected_content, expected_finish
+):
+    request, _, _, _, _ = _prepare_request(
+        {**TOOL_REQUEST, "tool_choice": "auto"},
+        tokenizer=tokenizer,
+        tool_parser_class=None,
+    )
+    post = StreamingPostProcessor(
+        tokenizer=tokenizer,
+        request_for_sampling=request,
+        sampling_params=SamplingParams(),
+        prompt_token_ids=[],
+        tool_parser=ToolParserManager.get_tool_parser("hermes")(
+            tokenizer, tools=request.tools
+        ),
+        reasoning_parser_class=_AccountingReasoningParser,
+        chat_template_kwargs={},
+    )
+    post.reasoning_parser.is_reasoning_end_streaming = Mock(return_value=True)
+
+    chunks = ["Think</think>I can help. <tool", *suffix_chunks]
+    choices = []
+    for index, text in enumerate(chunks):
+        choice = post.process_output(
+            SimpleNamespace(
+                index=0,
+                text=text,
+                token_ids=tokenizer.encode(text, add_special_tokens=False),
+                finish_reason="stop" if index == len(chunks) - 1 else None,
+                logprobs=None,
+            )
+        )
+        if choice is not None:
+            choices.append(choice)
+
+    assert choices[0]["delta"]["content"] == "I can help. "
+    assert "".join(c["delta"].get("content", "") for c in choices) == expected_content
+    assert choices[-1]["finish_reason"] == expected_finish
+    calls = [call for c in choices for call in c["delta"].get("tool_calls", [])]
+    if expected_finish == "tool_calls":
+        assert len(calls) == 1
+        assert calls[0]["function"]["name"] == "get_weather"
+        assert json.loads(calls[0]["function"]["arguments"]) == {"city": "Paris"}
+    else:
+        assert calls == []
 
 
 class TestControlMarkerStrip:
@@ -4653,6 +4973,23 @@ def test_sampling_logprobs_count_accepts_chat_bool(vllm_processor_module):
     assert count(False, True) is None
 
 
+@pytest.mark.parametrize(
+    "request_options,expected",
+    [
+        ({"logprobs": True}, 0),
+        ({"logprobs": True, "top_logprobs": 1}, 1),
+        ({"logprobs": True, "logprob_token_ids": [5, 6]}, 3),
+        ({"logprobs": True, "top_logprobs": 1, "logprob_token_ids": [5, 6]}, 3),
+        ({"logprob_token_ids": [5, 6]}, None),
+    ],
+)
+def test_choice_top_logprobs_lists_every_explicit_token(
+    vllm_processor_module, request_options, expected
+):
+    """Explicit ids list the sampled token and every named id, as vLLM does."""
+    assert vllm_processor_module._choice_top_logprobs(request_options) == expected
+
+
 def test_chat_choice_logprobs_from_worker_chunk(vllm_processor_module, tokenizer):
     built = vllm_processor_module._chat_choice_logprobs(
         [
@@ -5219,3 +5556,73 @@ class TestToolCallGrammarReasoningStart:
         )
         assert seen == {"reasoning": True}
         assert result.guided_decoding == {"structural_tag": {"format": {"type": "tag"}}}
+
+
+@pytest.mark.core
+@pytest.mark.parametrize(
+    "native,choice,exclude",
+    [
+        (False, "auto", True),
+        (True, "auto", True),
+        (True, "none", True),
+        (True, "none", False),
+    ],
+    ids=["legacy", "native", "excluded", "retained"],
+)
+def test_prepare_request_preserves_responses_native_tools(native, choice, exclude):
+    template = (
+        "{% set deferred_render_mode = deferred_render_mode | default('tool_name_only') %}"
+        if native
+        else ""
+    ) + "TOOL_USE {{ tools | tojson }}"
+    default = "DEFAULT {{ tools | tojson }}"
+    tokenizer = SimpleNamespace(
+        chat_template=template,
+        get_chat_template=lambda chat_template=None, tools=None: chat_template
+        or (template if tools else default),
+    )
+    function = {"name": "read", "parameters": {"type": "object"}}
+    flat = [{"type": "function", "function": function}]
+    catalog = [
+        {
+            "type": "namespace",
+            "name": "fs",
+            "description": "Files",
+            "defer_loading": True,
+            "tools": [function],
+        }
+    ]
+    request = {
+        "model": MODEL,
+        "messages": [{"role": "user", "content": "Read a file"}],
+        "tool_choice": choice,
+        "tools": flat,
+    }
+    request["responses_native_tools"] = {
+        "tools": [{"type": "function", "function": {**function, "name": "fs.read"}}],
+        "template_tools": catalog,
+        "messages": request["messages"],
+        "tool_choice": choice,
+    }
+    sampling, _, _, _, params = _prepare_request(
+        request,
+        tokenizer=tokenizer,
+        tool_parser_class=None,
+        exclude_tools_when_tool_choice_none=exclude,
+    )
+    excluded = choice == "none" and exclude
+    assert sampling.tools[0].function.name == (
+        "fs.read" if native and not excluded else "read"
+    )
+    rendered_tools = params.chat_template_kwargs["tools"]
+    if excluded:
+        assert rendered_tools is None
+    else:
+        assert rendered_tools == (
+            catalog if native else [tool.model_dump() for tool in sampling.tools]
+        )
+    selected_template = params.chat_template or tokenizer.get_chat_template(
+        tools=rendered_tools
+    )
+    assert selected_template == (default if excluded else template)
+    assert request["tools"][0]["function"]["name"] == "read"

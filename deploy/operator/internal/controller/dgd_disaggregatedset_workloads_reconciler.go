@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"slices"
 	"sort"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -32,7 +33,6 @@ import (
 	"github.com/go-logr/logr"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	disaggregatedsetv1 "sigs.k8s.io/lws/api/disaggregatedset/v1"
@@ -180,7 +180,7 @@ func (r *disaggregatedSetWorkloadsReconciler) Reconcile(
 	}
 
 	resources := append([]Resource{syncedDSResource}, nonSelectedResources...)
-	result := checkResourcesReadiness(resources)
+	result := applyComponentCrashLoops(checkResourcesReadiness(resources), slices.Collect(maps.Values(dcds)))
 	if result.State == nvidiacomv1beta1.DGDStateSuccessful {
 		if err := r.stableResources.DeleteStale(ctx, dgd, selectedServiceNames); err != nil {
 			return ReconcileResult{}, err
@@ -377,7 +377,7 @@ func (r *disaggregatedSetWorkloadsReconciler) applyDisaggregatedSetCheckpointSta
 			return false, fmt.Errorf("generated DynamoComponentDeployment missing for selected component %q", componentName)
 		}
 		if gateSelectedRoles {
-			component.Replicas = ptr.To(int32(0))
+			component.Replicas = new(int32(0))
 		}
 		selection.desiredReplicas[componentName] = desiredComponentReplicas(component)
 	}

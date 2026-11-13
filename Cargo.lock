@@ -34,9 +34,9 @@ dependencies = [
 
 [[package]]
 name = "aisimulate-core"
-version = "0.13.0-dev.202610160000000073"
+version = "0.13.0-dev.202610290000000087"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ede3ff2e2fd29e1c53dc1656ef5e43d4c77c0841483fe37685d3d517566016b2"
+checksum = "eb823782e806dd74cba719906a6b828b86f415aad54c6d5016c29ff278e89319"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
@@ -176,9 +176,6 @@ name = "arbitrary"
 version = "1.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d036a3c4ab069c7b410a2ce876bd74808d2d0888a82667669f8e783a898bf1"
-dependencies = [
- "derive_arbitrary",
-]
 
 [[package]]
 name = "arc-swap"
@@ -516,7 +513,6 @@ dependencies = [
  "aws-credential-types",
  "aws-sigv4",
  "aws-smithy-async",
- "aws-smithy-eventstream",
  "aws-smithy-http",
  "aws-smithy-runtime",
  "aws-smithy-runtime-api",
@@ -525,9 +521,7 @@ dependencies = [
  "bytes",
  "bytes-utils",
  "fastrand",
- "http 0.2.12",
  "http 1.4.1",
- "http-body 0.4.6",
  "http-body 1.0.1",
  "percent-encoding",
  "pin-project-lite",
@@ -536,38 +530,27 @@ dependencies = [
 ]
 
 [[package]]
-name = "aws-sdk-s3"
-version = "1.123.0"
+name = "aws-sdk-dynamodb"
+version = "1.105.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c018f22146966fdd493a664f62ee2483dff256b42a08c125ab6a084bde7b77fe"
+checksum = "82d2214c2ad3a175d3ece5a5af26916c29caa3e12e9e05b3cb8ed5e837b54b67"
 dependencies = [
  "aws-credential-types",
  "aws-runtime",
- "aws-sigv4",
  "aws-smithy-async",
- "aws-smithy-checksums",
- "aws-smithy-eventstream",
  "aws-smithy-http",
  "aws-smithy-json",
  "aws-smithy-observability",
  "aws-smithy-runtime",
  "aws-smithy-runtime-api",
  "aws-smithy-types",
- "aws-smithy-xml",
  "aws-types",
  "bytes",
  "fastrand",
- "hex",
- "hmac 0.12.1",
  "http 0.2.12",
  "http 1.4.1",
- "http-body 1.0.1",
- "lru 0.16.4",
- "percent-encoding",
  "regex-lite",
- "sha2 0.10.9",
  "tracing",
- "url",
 ]
 
 [[package]]
@@ -650,25 +633,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68f6ae9b71597dc5fd115d52849d7a5556ad9265885ad3492ea8d73b93bbc46e"
 dependencies = [
  "aws-credential-types",
- "aws-smithy-eventstream",
  "aws-smithy-http",
  "aws-smithy-runtime-api",
  "aws-smithy-types",
  "bytes",
- "crypto-bigint 0.5.5",
  "form_urlencoded",
  "hex",
  "hmac 0.12.1",
  "http 0.2.12",
  "http 1.4.1",
- "p256",
  "percent-encoding",
- "ring",
  "sha2 0.10.9",
- "subtle",
  "time",
  "tracing",
- "zeroize",
 ]
 
 [[package]]
@@ -683,44 +660,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "aws-smithy-checksums"
-version = "0.64.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a764fa7222922f6c0af8eea478b0ef1ba5ce1222af97e01f33ca5e957bd7f3b9"
-dependencies = [
- "aws-smithy-http",
- "aws-smithy-types",
- "bytes",
- "crc-fast",
- "hex",
- "http 1.4.1",
- "http-body 1.0.1",
- "http-body-util",
- "md-5 0.10.6",
- "pin-project-lite",
- "sha1",
- "sha2 0.10.9",
- "tracing",
-]
-
-[[package]]
-name = "aws-smithy-eventstream"
-version = "0.60.19"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1c0b3e587fbaa5d7f7e870544508af8ce82ea47cd30376e69e1e37c4ac746f79"
-dependencies = [
- "aws-smithy-types",
- "bytes",
- "crc32fast",
-]
-
-[[package]]
 name = "aws-smithy-http"
 version = "0.63.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "af4a8a5fe3e4ac7ee871237c340bbce13e982d37543b65700f4419e039f5d78e"
 dependencies = [
- "aws-smithy-eventstream",
  "aws-smithy-runtime-api",
  "aws-smithy-types",
  "bytes",
@@ -927,6 +871,7 @@ dependencies = [
  "matchit 0.8.4",
  "memchr",
  "mime",
+ "multer",
  "percent-encoding",
  "pin-project-lite",
  "rustversion",
@@ -995,28 +940,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "axum-server"
-version = "0.7.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c1ab4a3ec9ea8a657c72d99a03a824af695bd0fb5ec639ccbd9cd3543b41a5f9"
-dependencies = [
- "arc-swap",
- "bytes",
- "fs-err",
- "http 1.4.1",
- "http-body 1.0.1",
- "hyper 1.10.1",
- "hyper-util",
- "pin-project-lite",
- "rustls",
- "rustls-pemfile",
- "rustls-pki-types",
- "tokio",
- "tokio-rustls",
- "tower-service",
-]
-
-[[package]]
 name = "backon"
 version = "1.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1026,12 +949,6 @@ dependencies = [
  "gloo-timers",
  "tokio",
 ]
-
-[[package]]
-name = "base16ct"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "349a06037c7bf932dd7e7d1f653678b2038b9ad46a74102f1fc7bd7872678cce"
 
 [[package]]
 name = "base64"
@@ -1080,7 +997,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "55524e9467214686afafb60b7cedf28549f0ce964457658842999f6ef7ccbae7"
 dependencies = [
  "chrono",
- "daachorse",
+ "daachorse 1.0.1",
  "fancy-regex 0.17.0",
  "icu_normalizer",
  "icu_properties",
@@ -1269,6 +1186,12 @@ checksum = "cdeb9d870516001442e364c5220d3574d2da8dc765554b4a617230d33fa58ef5"
 dependencies = [
  "objc2",
 ]
+
+[[package]]
+name = "borrow-or-share"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc0b364ead1874514c8c2855ab558056ebfeb775653e7ae45ff72f28f8f3166c"
 
 [[package]]
 name = "bs58"
@@ -1927,28 +1850,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 
 [[package]]
-name = "crypto-bigint"
-version = "0.4.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ef2b4b23cddf68b89b8f8069890e8c270d54e2d5fe1b143820234805e4cb17ef"
-dependencies = [
- "generic-array",
- "rand_core 0.6.4",
- "subtle",
- "zeroize",
-]
-
-[[package]]
-name = "crypto-bigint"
-version = "0.5.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0dc92fb57ca44df6db8059111ab3af99a63d5d0f8375d9972e319a379c6bab76"
-dependencies = [
- "rand_core 0.6.4",
- "subtle",
-]
-
-[[package]]
 name = "crypto-common"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1982,7 +1883,6 @@ version = "0.19.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "42310153e06cf4cd532901f7096beb27504d681736a29ee90728ae4e2d93b2a8"
 dependencies = [
- "half",
  "libloading 0.9.0",
 ]
 
@@ -2017,6 +1917,12 @@ name = "daachorse"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6f55d7153ba3b507595872a3874803f07a8a81d1e888abed8e5db7da0597d6e2"
+
+[[package]]
+name = "daachorse"
+version = "3.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5614204febbc33cc07a2806aa6440b904ac012b68eecc37f4493ea4a76455a3d"
 
 [[package]]
 name = "darling"
@@ -2165,16 +2071,6 @@ checksum = "aafbece59594ed57696a1a69e8bb3ca1683fbc9cdb41d5c02726070b2cd8f19d"
 
 [[package]]
 name = "der"
-version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1a467a65c5e759bce6e65eaf91cc29f466cdc57cb65777bd646872a8a1fd4de"
-dependencies = [
- "const-oid",
- "zeroize",
-]
-
-[[package]]
-name = "der"
 version = "0.7.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e7c1832837b905bbfb5101e07cc24c8deddf52f93225eee6ead5f4d63d53ddcb"
@@ -2210,17 +2106,6 @@ name = "derive-where"
 version = "1.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d08b3a0bcc0d079199cd476b2cae8435016ec11d1c0986c6901c5ac223041534"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.117",
-]
-
-[[package]]
-name = "derive_arbitrary"
-version = "1.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e567bd82dcff979e4b03460c307b3cdc9e96fde3d73bed1496d2bc75d9dd62a"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2290,12 +2175,6 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
 ]
-
-[[package]]
-name = "diff"
-version = "0.1.13"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "56254986775e3233ffa9c4d7d3faaf6d36a2c09d30b20687e9f88bc8bafc16c8"
 
 [[package]]
 name = "digest"
@@ -2403,15 +2282,36 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
+name = "dynamo-admission"
+version = "1.7.0"
+dependencies = [
+ "async-trait",
+ "dynamo-router-protocol",
+ "dynamo-session-affinity",
+ "dynamo-slot-tracker",
+ "dynamo-tokens",
+ "futures-util",
+ "ordered-float 4.6.0",
+ "parking_lot",
+ "rustc-hash 2.1.2",
+ "serde",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "dynamo-backend-common"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "async-stream",
  "async-trait",
  "clap",
+ "dynamo-kv-hints",
  "dynamo-llm",
- "dynamo-protocols",
+ "dynamo-protocols 10.0.1",
  "dynamo-rl",
  "dynamo-runtime",
  "futures",
@@ -2433,7 +2333,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-bench"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2441,8 +2341,13 @@ dependencies = [
  "clap",
  "crossbeam-channel",
  "dynamo-data-gen",
+ "dynamo-kv-events",
+ "dynamo-kv-hashing",
+ "dynamo-kv-indexer",
  "dynamo-kv-router",
  "dynamo-mocker",
+ "dynamo-router-protocol",
+ "dynamo-slot-tracker",
  "dynamo-tokens",
  "flate2",
  "futures-util",
@@ -2456,7 +2361,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
- "tokenizers 0.21.4",
+ "tokenizers",
  "tokio",
  "tokio-util",
  "tracing",
@@ -2474,26 +2379,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "dynamo-custom-policy-builtin"
-version = "1.6.0"
-dependencies = [
- "async-trait",
- "criterion",
- "dynamo-kv-router",
- "fastrand",
- "parking_lot",
- "rustc-hash 2.1.2",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "dynamo-custom-policy-example-catalog"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "dynamo-custom-policy-example-disagg-filter-score-pick",
  "dynamo-custom-policy-example-simple-filter-score-pick",
@@ -2504,15 +2391,16 @@ dependencies = [
 
 [[package]]
 name = "dynamo-custom-policy-example-disagg-filter-score-pick"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "dynamo-kv-router",
+ "dynamo-scheduler",
  "serde",
 ]
 
 [[package]]
 name = "dynamo-custom-policy-example-epp"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "dynamo-custom-policy-example-catalog",
@@ -2523,7 +2411,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-custom-policy-example-simple-filter-score-pick"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "dynamo-kv-router",
  "serde",
@@ -2532,7 +2420,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-custom-policy-example-simple-stacked-score-pick"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "dynamo-kv-router",
  "serde",
@@ -2540,15 +2428,16 @@ dependencies = [
 
 [[package]]
 name = "dynamo-custom-policy-example-soft-pin-repin"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "dynamo-kv-router",
+ "dynamo-scheduler",
  "serde",
 ]
 
 [[package]]
 name = "dynamo-data-gen"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2561,8 +2450,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-decisions"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a45fccc7c4e78332eca3b9d1580bed699db2dea71d0b67a6ae1232472dd6b71f"
+dependencies = [
+ "dynamo-protocols 8.5.0",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "dynamo-epp-sidecar"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2580,19 +2481,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-error"
+version = "1.7.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "dynamo-ext-proc"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "async-trait",
  "axum 0.8.4",
  "bytes",
  "dashmap",
- "dynamo-custom-policy-builtin",
+ "dynamo-kv-events",
  "dynamo-kv-router",
  "dynamo-llm",
- "dynamo-protocols",
+ "dynamo-protocols 10.0.1",
+ "dynamo-router-policies",
+ "dynamo-router-protocol",
  "dynamo-runtime",
+ "dynamo-scheduler",
+ "dynamo-session-affinity",
  "futures",
  "hyper-util",
  "k8s-openapi",
@@ -2623,43 +2537,292 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-generate-format-catalog"
+version = "1.7.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum 0.8.4",
+ "dynamo-llm",
+ "dynamo-runtime",
+ "dynamo-sglang-generate",
+ "dynamo-vllm-generate",
+ "futures",
+ "prometheus",
+ "serde_json",
+ "tokio",
+ "tower 0.5.3",
+ "uuid",
+]
+
+[[package]]
+name = "dynamo-global-common"
+version = "1.7.0"
+dependencies = [
+ "blake3",
+ "prost 0.13.5",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tonic 0.13.1",
+ "tonic-build 0.13.1",
+ "url",
+]
+
+[[package]]
+name = "dynamo-global-discovery-client"
+version = "1.7.0"
+dependencies = [
+ "axum 0.8.4",
+ "dynamo-global-common",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "dynamo-global-discovery-service"
+version = "1.7.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "async-trait",
+ "aws-config",
+ "aws-sdk-dynamodb",
+ "axum 0.8.4",
+ "blake3",
+ "clap",
+ "dynamo-global-common",
+ "dynamo-global-discovery-client",
+ "dynamo-http-server",
+ "dynamo-runtime",
+ "futures",
+ "k8s-openapi",
+ "kube",
+ "reqwest 0.12.28",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "dynamo-global-frontend"
+version = "1.7.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "aws-config",
+ "aws-sdk-dynamodb",
+ "axum 0.8.4",
+ "clap",
+ "dynamo-global-common",
+ "dynamo-global-discovery-client",
+ "dynamo-global-router",
+ "dynamo-global-router-store-dynamodb",
+ "dynamo-global-view-broadcaster",
+ "dynamo-global-view-receiver",
+ "dynamo-llm",
+ "dynamo-runtime",
+ "futures",
+ "hyper-util",
+ "parking_lot",
+ "prometheus",
+ "prost 0.13.5",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tonic 0.13.1",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "dynamo-global-router"
+version = "1.7.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "blake3",
+ "dashmap",
+ "dynamo-global-common",
+ "dynamo-kv-router",
+ "dynamo-router-policies",
+ "dynamo-scheduler",
+ "futures",
+ "parking_lot",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "url",
+ "uuid",
+ "xxhash-rust",
+]
+
+[[package]]
+name = "dynamo-global-router-store-dynamodb"
+version = "1.7.0"
+dependencies = [
+ "async-trait",
+ "aws-sdk-dynamodb",
+ "blake3",
+ "dynamo-global-common",
+ "dynamo-global-router",
+ "serde_json",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "dynamo-global-view-broadcaster"
+version = "1.7.0"
+dependencies = [
+ "parking_lot",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
+name = "dynamo-global-view-receiver"
+version = "1.7.0"
+dependencies = [
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "dynamo-http-server"
+version = "1.7.0"
+dependencies = [
+ "anyhow",
+ "axum 0.8.4",
+ "dynamo-runtime",
+ "futures",
+ "hyper-util",
+ "parking_lot",
+ "prometheus",
+ "rand 0.9.4",
+ "rcgen",
+ "rustls",
+ "serde",
+ "tokio",
+ "tokio-rustls",
+ "tokio-util",
+ "tower 0.5.3",
+ "tracing",
+]
+
+[[package]]
+name = "dynamo-kv-events"
+version = "1.7.0"
+dependencies = [
+ "dynamo-kv-hashing",
+ "dynamo-router-protocol",
+ "rmp-serde",
+ "rstest 0.18.2",
+ "rustc-hash 2.1.2",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
 name = "dynamo-kv-hashing"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "criterion",
  "derive_builder",
  "dynamo-tokens",
  "rmp-serde",
+ "rstest 0.18.2",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "xxhash-rust",
+]
+
+[[package]]
+name = "dynamo-kv-hints"
+version = "1.7.0"
+dependencies = [
+ "dynamo-kv-hashing",
+ "dynamo-kv-indexer",
+ "dynamo-router-protocol",
+ "rustc-hash 2.1.2",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "dynamo-kv-indexer"
+version = "1.7.0"
+dependencies = [
+ "anyhow",
+ "arc-swap",
+ "async-trait",
+ "blake3",
+ "criterion",
+ "dashmap",
+ "dynamo-kv-events",
+ "dynamo-kv-hashing",
+ "dynamo-router-protocol",
+ "dynamo-tokens",
+ "fastrand",
+ "flume",
+ "parking_lot",
+ "prometheus",
+ "rmp-serde",
+ "rstest 0.18.2",
+ "rstest_reuse",
+ "rustc-hash 2.1.2",
+ "serde",
+ "serde_json",
+ "slotmap",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "xxhash-rust",
 ]
 
 [[package]]
 name = "dynamo-kv-router"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
- "arc-swap",
  "async-trait",
  "axum 0.8.4",
  "blake3",
  "chrono",
  "criterion",
- "crossbeam-queue",
- "crossbeam-utils",
  "dashmap",
- "derive_builder",
+ "dynamo-admission",
+ "dynamo-kv-events",
  "dynamo-kv-hashing",
- "dynamo-runtime",
+ "dynamo-kv-hints",
+ "dynamo-kv-indexer",
+ "dynamo-router-protocol",
+ "dynamo-scheduler",
+ "dynamo-session-affinity",
+ "dynamo-slot-tracker",
  "dynamo-tokens",
  "dynamo-truthy",
+ "dynamo-worker-selection",
  "fastrand",
- "flume 0.12.0",
- "futures-util",
- "indexmap 2.14.0",
- "once_cell",
- "ordered-float 4.6.0",
+ "http 1.4.1",
  "parking_lot",
  "prometheus",
  "reqwest 0.12.28",
@@ -2667,11 +2830,9 @@ dependencies = [
  "rstest 0.18.2",
  "rstest_reuse",
  "rustc-hash 2.1.2",
- "seqlock",
  "serde",
  "serde_json",
  "serde_yaml",
- "slotmap",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -2680,14 +2841,13 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "uuid",
- "xxhash-rust",
  "zeroize",
  "zmq",
 ]
 
 [[package]]
 name = "dynamo-llm"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "aligned-vec",
  "anyhow",
@@ -2697,11 +2857,7 @@ dependencies = [
  "async-nats",
  "async-stream",
  "async-trait",
- "aws-config",
- "aws-credential-types",
- "aws-types",
  "axum 0.8.4",
- "axum-server",
  "base64 0.22.1",
  "bincode 2.0.1",
  "bitflags 2.13.2",
@@ -2717,19 +2873,35 @@ dependencies = [
  "derive-getters",
  "derive_builder",
  "dialoguer",
+ "dynamo-admission",
  "dynamo-bench",
- "dynamo-custom-policy-builtin",
+ "dynamo-decisions",
+ "dynamo-global-common",
+ "dynamo-global-discovery-client",
+ "dynamo-global-view-broadcaster",
+ "dynamo-kv-events",
+ "dynamo-kv-hashing",
+ "dynamo-kv-hints",
+ "dynamo-kv-indexer",
  "dynamo-kv-router",
+ "dynamo-lora",
  "dynamo-memory",
  "dynamo-mocker",
+ "dynamo-multimodal",
  "dynamo-parsers",
  "dynamo-parsers-v2",
- "dynamo-protocols",
+ "dynamo-protocols 10.0.1",
  "dynamo-renderer",
  "dynamo-rl",
+ "dynamo-router-policies",
+ "dynamo-router-protocol",
  "dynamo-runtime",
+ "dynamo-scheduler",
+ "dynamo-session-affinity",
+ "dynamo-slot-tracker",
  "dynamo-tokenizers",
  "dynamo-tokens",
+ "dynamo-worker-selection",
  "either",
  "ffmpeg-next",
  "flate2",
@@ -2738,7 +2910,9 @@ dependencies = [
  "galil-seiferas",
  "half",
  "hf-hub 0.4.3",
+ "http-body 1.0.1",
  "http-body-util",
+ "hyper-util",
  "image",
  "indicatif 0.18.4",
  "insta",
@@ -2749,8 +2923,9 @@ dependencies = [
  "libloading 0.8.9",
  "llm-multimodal",
  "llm-tokenizer",
- "lru 0.16.4",
+ "lru",
  "memfile",
+ "mime",
  "minijinja",
  "mockito",
  "modelexpress-client",
@@ -2787,7 +2962,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tmq",
- "tokenizers 0.21.4",
+ "tokenizers",
  "tokio",
  "tokio-rayon",
  "tokio-rustls",
@@ -2803,17 +2978,80 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
- "utoipa",
+ "utoipa 5.5.0",
  "utoipa-swagger-ui",
  "uuid",
  "validator",
  "video-rs",
  "xxhash-rust",
+ "zmq",
+]
+
+[[package]]
+name = "dynamo-lora"
+version = "1.7.0"
+dependencies = [
+ "anyhow",
+ "arc-swap",
+ "async-trait",
+ "aws-config",
+ "aws-credential-types",
+ "aws-types",
+ "blake3",
+ "dashmap",
+ "dynamo-router-protocol",
+ "dynamo-runtime",
+ "dynamo-scheduler",
+ "dynamo-slot-tracker",
+ "dynamo-worker-selection",
+ "futures",
+ "hf-hub 0.4.3",
+ "mockito",
+ "object_store 0.12.5",
+ "parking_lot",
+ "prometheus",
+ "rand 0.9.4",
+ "serde",
+ "serde_json",
+ "serial_test",
+ "sha2 0.10.9",
+ "temp-env",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "dynamo-lpx-sidecar"
+version = "1.7.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "async-trait",
+ "axum 0.8.4",
+ "clap",
+ "dynamo-backend-common",
+ "dynamo-runtime",
+ "dynamo-sidecar-common",
+ "dynamo-trtllm-sidecar",
+ "futures",
+ "prost-types 0.13.5",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tonic 0.13.1",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
 name = "dynamo-memory"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "cudarc",
@@ -2832,16 +3070,28 @@ dependencies = [
 
 [[package]]
 name = "dynamo-mocker"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "aisimulate-core",
  "anyhow",
  "blake3",
  "bytes",
  "dashmap",
- "dynamo-custom-policy-builtin",
+ "dynamo-admission",
+ "dynamo-kv-events",
+ "dynamo-kv-hashing",
+ "dynamo-kv-hints",
+ "dynamo-kv-indexer",
  "dynamo-kv-router",
+ "dynamo-router-policies",
+ "dynamo-router-protocol",
+ "dynamo-scheduler",
+ "dynamo-session-affinity",
+ "dynamo-slot-tracker",
  "dynamo-tokens",
+ "dynamo-worker-selection",
+ "fastrand",
+ "flate2",
  "futures",
  "ndarray 0.16.1",
  "ndarray-interp",
@@ -2861,11 +3111,12 @@ dependencies = [
  "tracing",
  "uuid",
  "validator",
+ "zip",
 ]
 
 [[package]]
 name = "dynamo-mocker-backend"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2885,15 +3136,32 @@ dependencies = [
 ]
 
 [[package]]
-name = "dynamo-parsers"
-version = "10.0.7"
+name = "dynamo-multimodal"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9d16648322cc1b4feb6fd722cb0b3cc23f6a545b7d37e167543a1675fa1c3d4a"
+checksum = "de29c14a8d1952ceb6dbeebfb144be1d7167d333008f3f829c1324c78dde6344"
+dependencies = [
+ "blake3",
+ "gif",
+ "image",
+ "png",
+ "serde",
+ "serde_json",
+ "turbojpeg",
+ "xxhash-rust",
+]
+
+[[package]]
+name = "dynamo-parsers"
+version = "11.0.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f8816a88cab33166978daa5090cea8f50e23519ddcdfd01bfd8463ee32e1032f"
 dependencies = [
  "aho-corasick",
  "anyhow",
  "async-stream",
- "dynamo-protocols",
+ "dynamo-protocols 10.0.1",
+ "dynamo-structural-tag",
  "futures",
  "num-traits",
  "openai-harmony",
@@ -2910,26 +3178,28 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers-v2"
-version = "0.7.24"
+version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8a62c4aea442890712dcdb64e493fac636edad8c9b25f793948800507c41bedc"
+checksum = "dd946b8d59920320e43e2d1b48b2bbb6553d50bc9c23b511293615714008476a"
 dependencies = [
  "anyhow",
+ "dynamo-structural-tag",
  "openai-harmony",
  "percent-encoding",
  "regex",
  "serde",
  "serde_json",
  "serde_yaml",
+ "sha2 0.10.9",
  "tracing",
  "uuid",
 ]
 
 [[package]]
 name = "dynamo-protocols"
-version = "8.2.0"
+version = "8.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "774a621dbee86866def6f59eac858651bf080af0732e9c3c4e46081563749c9a"
+checksum = "834c27ac7acebd32a223e36eec6e17d39abb4b1fc4db7610748d245f51af6b26"
 dependencies = [
  "async-openai",
  "derive_builder",
@@ -2940,19 +3210,38 @@ dependencies = [
  "thiserror 2.0.18",
  "tracing",
  "url",
- "utoipa",
+ "utoipa 5.5.0",
+ "uuid",
+]
+
+[[package]]
+name = "dynamo-protocols"
+version = "10.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f53c5d0072e9d22fd046ff157d1ac14aa36534491d6fad07e314c8255d37873b"
+dependencies = [
+ "async-openai",
+ "derive_builder",
+ "futures",
+ "indexmap 2.14.0",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
+ "url",
+ "utoipa 5.5.0",
  "uuid",
 ]
 
 [[package]]
 name = "dynamo-renderer"
-version = "8.0.3"
+version = "10.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "144979b6e4a9fe44556c02ea92d17413d803b704de73e1f1f8255da9ce9dd99d"
+checksum = "496579bc389ec35a495c9eb64f2d61cd0ec5a322f5aa7e09115b026c0d30eb8a"
 dependencies = [
  "anyhow",
  "chrono",
- "dynamo-protocols",
+ "dynamo-protocols 10.0.1",
  "dynamo-tokenizers",
  "either",
  "minijinja",
@@ -2964,7 +3253,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-rl"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "axum 0.8.4",
@@ -2980,8 +3269,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-router-policies"
+version = "1.7.0"
+dependencies = [
+ "async-trait",
+ "criterion",
+ "dynamo-kv-router",
+ "dynamo-scheduler",
+ "fastrand",
+ "parking_lot",
+ "rustc-hash 2.1.2",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "dynamo-router-protocol"
+version = "1.7.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "dynamo-runtime"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2990,6 +3307,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "axum 0.8.4",
+ "base64 0.22.1",
  "bincode 1.3.3",
  "blake3",
  "bytes",
@@ -3000,6 +3318,7 @@ dependencies = [
  "dashmap",
  "derive-getters",
  "derive_builder",
+ "dynamo-error",
  "dynamo-truthy",
  "educe",
  "either",
@@ -3010,13 +3329,13 @@ dependencies = [
  "futures",
  "h2 0.4.14",
  "humantime",
- "jsonschema",
+ "jsonschema 0.17.1",
  "k8s-openapi",
  "kube",
  "libc",
  "local-ip-address",
  "log",
- "lru 0.16.4",
+ "lru",
  "mio 1.2.2",
  "nix 0.30.1",
  "notify",
@@ -3064,18 +3383,90 @@ dependencies = [
  "url",
  "uuid",
  "validator",
+ "velo",
  "xxhash-rust",
 ]
 
 [[package]]
+name = "dynamo-scheduler"
+version = "1.7.0"
+dependencies = [
+ "anyhow",
+ "arc-swap",
+ "async-trait",
+ "blake3",
+ "crossbeam-queue",
+ "derive_builder",
+ "dynamo-admission",
+ "dynamo-kv-events",
+ "dynamo-kv-hashing",
+ "dynamo-kv-hints",
+ "dynamo-kv-indexer",
+ "dynamo-router-protocol",
+ "dynamo-session-affinity",
+ "dynamo-slot-tracker",
+ "dynamo-tokens",
+ "dynamo-worker-selection",
+ "fastrand",
+ "futures-util",
+ "http 1.4.1",
+ "once_cell",
+ "ordered-float 4.6.0",
+ "parking_lot",
+ "rmp-serde",
+ "rstest 0.18.2",
+ "rstest_reuse",
+ "rustc-hash 2.1.2",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
+name = "dynamo-session-affinity"
+version = "1.7.0"
+dependencies = [
+ "blake3",
+ "dashmap",
+ "dynamo-router-protocol",
+ "serde",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
+name = "dynamo-sglang-generate"
+version = "1.7.0"
+dependencies = [
+ "axum 0.8.4",
+ "base64 0.22.1",
+ "dynamo-llm",
+ "dynamo-protocols 10.0.1",
+ "dynamo-runtime",
+ "proptest",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "dynamo-sglang-mocker"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "async-stream",
  "clap",
  "dynamo-backend-common",
- "dynamo-kv-router",
+ "dynamo-kv-events",
+ "dynamo-kv-hashing",
+ "dynamo-kv-indexer",
  "dynamo-llm",
  "dynamo-mocker",
  "dynamo-runtime",
@@ -3092,16 +3483,17 @@ dependencies = [
 
 [[package]]
 name = "dynamo-sglang-sidecar"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "async-stream",
  "async-trait",
  "clap",
  "dynamo-backend-common",
- "dynamo-kv-router",
+ "dynamo-kv-events",
  "dynamo-llm",
  "dynamo-runtime",
+ "dynamo-sglang-generate",
  "dynamo-sidecar-common",
  "futures",
  "prost 0.13.5",
@@ -3124,7 +3516,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-sidecar-common"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3137,22 +3529,28 @@ dependencies = [
  "prost-types 0.14.3",
  "serde_json",
  "temp-env",
+ "tempfile",
+ "tikv-jemallocator",
  "tokio",
+ "tokio-stream",
  "tokio-util",
  "tonic 0.13.1",
  "tonic 0.14.6",
+ "tonic-health 0.13.1",
+ "tower 0.5.3",
  "tracing",
  "url",
 ]
 
 [[package]]
 name = "dynamo-sidecar-testkit"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "async-stream",
  "dynamo-backend-common",
  "dynamo-llm",
+ "dynamo-lpx-sidecar",
  "dynamo-mocker",
  "dynamo-runtime",
  "dynamo-sglang-mocker",
@@ -3173,14 +3571,53 @@ dependencies = [
  "tokio-util",
  "tonic 0.13.1",
  "tonic 0.14.6",
+ "tonic-health 0.13.1",
  "tonic-health 0.14.6",
 ]
 
 [[package]]
-name = "dynamo-tokenizers"
-version = "3.1.1"
+name = "dynamo-slot-tracker"
+version = "1.7.0"
+dependencies = [
+ "anyhow",
+ "crossbeam-utils",
+ "dashmap",
+ "dynamo-kv-hashing",
+ "dynamo-router-protocol",
+ "dynamo-tokens",
+ "fastrand",
+ "indexmap 2.14.0",
+ "parking_lot",
+ "rmp-serde",
+ "rustc-hash 2.1.2",
+ "seqlock",
+ "serde",
+ "serde_json",
+ "slotmap",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
+name = "dynamo-structural-tag"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "914bc0a92430a2fc39164e21a7849587de190e0fea824f56c5f8bb9f29413658"
+checksum = "8350d3089f5f140c6f8dfcdbdf77b2c1e97b0bcc1b67b4d32a06a41426ea7085"
+dependencies = [
+ "anyhow",
+ "jsonschema 0.29.1",
+ "regex",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "dynamo-tokenizers"
+version = "4.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "24dd8e85a6aea1079e33bd1e82ed0e53127751e472539682edc5a4066f360179"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -3195,13 +3632,13 @@ dependencies = [
  "serde_json",
  "strum",
  "tiktoken-rs 0.9.1",
- "tokenizers 0.21.4",
+ "tokenizers",
  "tracing",
 ]
 
 [[package]]
 name = "dynamo-tokens"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "bs58",
  "bytemuck",
@@ -3219,7 +3656,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-trtllm-mocker"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -3242,43 +3679,70 @@ dependencies = [
 
 [[package]]
 name = "dynamo-trtllm-sidecar"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "async-stream",
  "async-trait",
  "clap",
  "dynamo-backend-common",
+ "dynamo-kv-events",
+ "dynamo-kv-hashing",
+ "dynamo-llm",
+ "dynamo-router-protocol",
+ "dynamo-runtime",
  "dynamo-sidecar-common",
  "futures",
+ "hmac 0.12.1",
  "prost 0.13.5",
  "prost-types 0.13.5",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tokio",
  "tokio-stream",
  "tokio-util",
  "tonic 0.13.1",
  "tonic-build 0.13.1",
+ "tonic-health 0.13.1",
  "tracing",
 ]
 
 [[package]]
 name = "dynamo-truthy"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
 ]
 
 [[package]]
+name = "dynamo-vllm-generate"
+version = "1.7.0"
+dependencies = [
+ "anyhow",
+ "axum 0.8.4",
+ "base64 0.22.1",
+ "dynamo-kv-events",
+ "dynamo-kv-hashing",
+ "dynamo-llm",
+ "dynamo-protocols 10.0.1",
+ "dynamo-runtime",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "dynamo-vllm-mocker"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "async-stream",
  "clap",
  "dynamo-backend-common",
- "dynamo-kv-router",
+ "dynamo-kv-events",
+ "dynamo-kv-hashing",
+ "dynamo-kv-indexer",
  "dynamo-llm",
  "dynamo-mocker",
  "dynamo-runtime",
@@ -3299,7 +3763,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-vllm-sidecar"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -3310,7 +3774,9 @@ dependencies = [
  "dynamo-llm",
  "dynamo-runtime",
  "dynamo-sidecar-common",
+ "dynamo-vllm-generate",
  "futures",
+ "pep440_rs",
  "prost-types 0.14.3",
  "reqwest 0.12.28",
  "serde",
@@ -3326,22 +3792,29 @@ dependencies = [
 ]
 
 [[package]]
-name = "dynamo-worker-selection-policy-catalog"
-version = "1.6.0"
+name = "dynamo-worker-selection"
+version = "1.7.0"
 dependencies = [
- "dynamo-kv-router",
+ "async-trait",
+ "crossbeam-queue",
+ "dynamo-router-protocol",
+ "dynamo-session-affinity",
+ "dynamo-slot-tracker",
+ "fastrand",
+ "parking_lot",
+ "rustc-hash 2.1.2",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
-name = "ecdsa"
-version = "0.14.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "413301934810f597c1d19ca71c8710e99a3f1ba28a0d2ebc01551a2daeea3c5c"
+name = "dynamo-worker-selection-policy-catalog"
+version = "1.7.0"
 dependencies = [
- "der 0.6.1",
- "elliptic-curve",
- "rfc6979",
- "signature 1.6.4",
+ "dynamo-kv-router",
 ]
 
 [[package]]
@@ -3350,7 +3823,7 @@ version = "2.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "115531babc129696a58c64a4fef0a8bf9e9698629fb97e9e40767d235cfbcd53"
 dependencies = [
- "signature 2.2.0",
+ "signature",
 ]
 
 [[package]]
@@ -3362,7 +3835,7 @@ dependencies = [
  "curve25519-dalek",
  "ed25519",
  "sha2 0.10.9",
- "signature 2.2.0",
+ "signature",
  "subtle",
 ]
 
@@ -3388,23 +3861,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "elliptic-curve"
-version = "0.12.3"
+name = "email_address"
+version = "0.2.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e7bb888ab5300a19b8e5bceef25ac745ad065f3c9f7efc6de1b91958110891d3"
+checksum = "e079f19b08ca6239f47f8ba8509c11cf3ea30095831f7fed61441475edd8c449"
 dependencies = [
- "base16ct",
- "crypto-bigint 0.4.9",
- "der 0.6.1",
- "digest 0.10.7",
- "ff",
- "generic-array",
- "group",
- "pkcs8 0.9.0",
- "rand_core 0.6.4",
- "sec1",
- "subtle",
- "zeroize",
+ "serde",
 ]
 
 [[package]]
@@ -3581,6 +4043,17 @@ dependencies = [
 
 [[package]]
 name = "fancy-regex"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6e24cb5a94bcae1e5408b0effca5cd7172ea3c5755049c5f3af4cd283a165298"
+dependencies = [
+ "bit-set 0.8.0",
+ "regex-automata",
+ "regex-syntax",
+]
+
+[[package]]
+name = "fancy-regex"
 version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72cf461f865c862bb7dc573f643dd6a2b6842f7c30b07882b56bd148cc2761b8"
@@ -3611,7 +4084,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a54c07b9d1217010ec476249998b23430d0f4f85a4504114d81f55f2a43d1610"
 dependencies = [
  "aho-corasick",
- "daachorse",
+ "daachorse 1.0.1",
  "fancy-regex 0.17.0",
  "fastrand",
  "hf-hub 0.4.3",
@@ -3662,16 +4135,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e6853b52649d4ac5c0bd02320cddc5ba956bdb407c4b75a2c6b75bf51500f8c"
 dependencies = [
  "simd-adler32",
-]
-
-[[package]]
-name = "ff"
-version = "0.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d013fc25338cc558c5c2cfbad646908fb23591e2404481826742b651c9af7160"
-dependencies = [
- "rand_core 0.6.4",
- "subtle",
 ]
 
 [[package]]
@@ -3756,15 +4219,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "flume"
-version = "0.11.1"
+name = "fluent-uri"
+version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "da0e4dd2a88388a1f4ccc7c9ce104604dab68d9f408dc34cd45823d5a9069095"
+checksum = "1918b65d96df47d3591bed19c5cca17e3fa5d0707318e4b5ef2eae01764df7e5"
 dependencies = [
- "futures-core",
- "futures-sink",
- "nanorand",
- "spin 0.9.8",
+ "borrow-or-share",
+ "ref-cast",
+ "serde",
 ]
 
 [[package]]
@@ -3817,13 +4279,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "fs-err"
-version = "3.3.0"
+name = "fraction"
+version = "0.15.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "73fde052dbfc920003cfd2c8e2c6e6d4cc7c1091538c3a24226cec0665ab08c0"
+checksum = "e076045bb43dac435333ed5f04caf35c7463631d0dae2deb2638d94dd0a5b872"
 dependencies = [
- "autocfg",
- "tokio",
+ "lazy_static",
+ "num",
 ]
 
 [[package]]
@@ -3833,7 +4295,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8640e34b88f7652208ce9e88b1a37a2ae95227d84abec377ccd3c5cfeb141ed4"
 dependencies = [
  "rustix 1.1.4",
- "tokio",
  "windows-sys 0.59.0",
 ]
 
@@ -3946,6 +4407,12 @@ dependencies = [
  "defmac",
  "unchecked-index",
 ]
+
+[[package]]
+name = "gcd"
+version = "2.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d758ba1b47b00caf47f24925c0074ecb20d6dfcffe7f6d53395c0465674841a"
 
 [[package]]
 name = "generic-array"
@@ -4307,17 +4774,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "group"
-version = "0.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5dfbfb3a6cfbd390d5c9564ab283a0349b9b9fcd46a706c1eb10e0db70bfbac7"
-dependencies = [
- "ff",
- "rand_core 0.6.4",
- "subtle",
-]
-
-[[package]]
 name = "h2"
 version = "0.3.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4364,8 +4820,6 @@ dependencies = [
  "cfg-if",
  "crunchy",
  "num-traits",
- "rand 0.9.4",
- "rand_distr",
  "serde",
  "zerocopy",
 ]
@@ -4409,11 +4863,6 @@ name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
-dependencies = [
- "allocator-api2",
- "equivalent",
- "foldhash 0.2.0",
-]
 
 [[package]]
 name = "hashlink"
@@ -4686,7 +5135,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tower-service",
- "webpki-roots 1.0.7",
+ "webpki-roots 1.0.11",
 ]
 
 [[package]]
@@ -5287,7 +5736,7 @@ dependencies = [
  "bytecount",
  "clap",
  "fancy-regex 0.11.0",
- "fraction",
+ "fraction 0.13.1",
  "getrandom 0.2.17",
  "iso8601",
  "itoa",
@@ -5303,6 +5752,30 @@ dependencies = [
  "time",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "jsonschema"
+version = "0.29.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "161c33c3ec738cfea3288c5c53dfcdb32fd4fc2954de86ea06f71b5a1a40bfcd"
+dependencies = [
+ "ahash",
+ "base64 0.22.1",
+ "bytecount",
+ "email_address",
+ "fancy-regex 0.14.0",
+ "fraction 0.15.4",
+ "idna",
+ "itoa",
+ "num-cmp",
+ "once_cell",
+ "percent-encoding",
+ "referencing",
+ "regex-syntax",
+ "serde",
+ "serde_json",
+ "uuid-simd",
 ]
 
 [[package]]
@@ -5457,165 +5930,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "kvbm-common"
-version = "1.6.0"
-dependencies = [
- "dynamo-tokens",
- "serde",
-]
-
-[[package]]
-name = "kvbm-config"
-version = "1.6.0"
-dependencies = [
- "anyhow",
- "dynamo-memory",
- "figment",
- "nix 0.30.1",
- "nvtx",
- "rayon",
- "serde",
- "serde_json",
- "temp-env",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "validator",
- "velo",
-]
-
-[[package]]
-name = "kvbm-consolidator"
-version = "1.6.0"
-dependencies = [
- "anyhow",
- "dynamo-kv-hashing",
- "dynamo-kv-router",
- "dynamo-tokens",
- "futures",
- "insta",
- "kvbm-logical",
- "portpicker",
- "pretty_assertions",
- "proptest",
- "rmp-serde",
- "serde",
- "tmq",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
- "tracing-test",
-]
-
-[[package]]
-name = "kvbm-engine"
-version = "1.6.0"
-dependencies = [
- "anyhow",
- "async-nats",
- "aws-config",
- "aws-sdk-s3",
- "bytes",
- "chrono",
- "clap",
- "crossbeam-queue",
- "cudarc",
- "dashmap",
- "derive_builder",
- "dynamo-memory",
- "figment",
- "flume 0.11.1",
- "futures",
- "kvbm-common",
- "kvbm-config",
- "kvbm-logical",
- "kvbm-physical",
- "libc",
- "nvtx",
- "oneshot",
- "parking_lot",
- "rayon",
- "rmp-serde",
- "serde",
- "serde_json",
- "tokio",
- "tokio-rayon",
- "tokio-stream",
- "tracing",
- "tracing-subscriber",
- "uuid",
- "velo",
-]
-
-[[package]]
-name = "kvbm-kernels"
-version = "1.6.0"
-dependencies = [
- "clap",
- "cudarc",
- "half",
- "ndarray 0.17.2",
- "rand 0.9.4",
-]
-
-[[package]]
-name = "kvbm-logical"
-version = "1.6.0"
-dependencies = [
- "anyhow",
- "async-stream",
- "bincode 2.0.1",
- "bytes",
- "criterion",
- "derive_builder",
- "dynamo-tokens",
- "futures",
- "indexmap 2.14.0",
- "lru 0.16.4",
- "parking_lot",
- "prometheus",
- "proptest",
- "rmp-serde",
- "rstest 0.26.1",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tokio-stream",
- "tracing",
- "tracing-mutex",
- "xxhash-rust",
-]
-
-[[package]]
-name = "kvbm-physical"
-version = "1.6.0"
-dependencies = [
- "aligned-vec",
- "anyhow",
- "bincode 2.0.1",
- "blake3",
- "cudarc",
- "derive-getters",
- "derive_builder",
- "dynamo-memory",
- "futures",
- "kvbm-common",
- "kvbm-kernels",
- "rstest 0.26.1",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "uuid",
- "validator",
- "velo",
-]
-
-[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5641,12 +5955,13 @@ checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 
 [[package]]
 name = "libdynamo_llm"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "async-once-cell",
  "cbindgen",
- "dynamo-kv-router",
+ "dynamo-kv-events",
+ "dynamo-kv-hashing",
  "dynamo-llm",
  "dynamo-runtime",
  "libc",
@@ -5779,7 +6094,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tiktoken-rs 0.12.0",
- "tokenizers 0.23.1",
+ "tokenizers",
  "tokio",
  "tracing",
  "uuid",
@@ -5893,15 +6208,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f66e8d5d03f609abc3a39e6f08e4164ebf1447a732906d39eb9b99b7919ef39"
 dependencies = [
  "hashbrown 0.16.1",
-]
-
-[[package]]
-name = "lru"
-version = "0.18.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5d2f2f9b4ba7e6b24d95e7e899329d35be83bcded72c8540cdd5368932d1d90a"
-dependencies = [
- "hashbrown 0.17.1",
 ]
 
 [[package]]
@@ -6298,19 +6604,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "multer"
+version = "3.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "83e87776546dc87511aa5ee218730c92b666d7264ab6ed41f9d215af9cd5224b"
+dependencies = [
+ "bytes",
+ "encoding_rs",
+ "futures-util",
+ "http 1.4.1",
+ "httparse",
+ "memchr",
+ "mime",
+ "spin 0.9.8",
+ "version_check",
+]
+
+[[package]]
 name = "multimap"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d87ecb2933e8aeadb3e3a02b828fed80a7528047e68b4f424523a0981a3a084"
-
-[[package]]
-name = "nanorand"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6a51313c5820b0b02bd422f4b44776fbf47961755c74ce64afc73bfad10226c3"
-dependencies = [
- "getrandom 0.2.17",
-]
 
 [[package]]
 name = "ndarray"
@@ -6361,10 +6675,8 @@ checksum = "7b313788c468c49141a9d9b6131fc15f403e6ef4e8446a0b2e18f664ddb278a9"
 dependencies = [
  "byteorder",
  "ndarray 0.16.1",
- "num-complex",
  "num-traits",
  "py_literal",
- "zip 2.4.2",
 ]
 
 [[package]]
@@ -7191,17 +7503,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1a80800c0488c3a21695ea981a54918fbb37abf04f4d0720c453632255e2ff0e"
 
 [[package]]
-name = "p256"
-version = "0.11.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "51f44edd08f51e2ade572f141051021c5af22677e42b7dd28a88155151c33594"
-dependencies = [
- "ecdsa",
- "elliptic-curve",
- "sha2 0.10.9",
-]
-
-[[package]]
 name = "parking"
 version = "2.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7486,22 +7787,12 @@ checksum = "8b870d8c151b6f2fb93e84a13146138f05d02ed11c7e7c54f8826aaaf7c9f184"
 
 [[package]]
 name = "pkcs8"
-version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9eca2c590a5f85da82668fa685c09ce2888b9430e83299debf1f34b65fd4a4ba"
-dependencies = [
- "der 0.6.1",
- "spki 0.6.0",
-]
-
-[[package]]
-name = "pkcs8"
 version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f950b2377845cebe5cf8b5165cb3cc1a5e0fa5cfa3e1f7f55707d8fd82e0a7b7"
 dependencies = [
- "der 0.7.10",
- "spki 0.7.3",
+ "der",
+ "spki",
 ]
 
 [[package]]
@@ -7567,15 +7858,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "portpicker"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "be97d76faf1bfab666e1375477b23fde79eccf0276e9b63b92a39d676a889ba9"
-dependencies = [
- "rand 0.8.6",
-]
-
-[[package]]
 name = "potential_utf"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7597,16 +7879,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "85eae3c4ed2f50dcfe72643da4befc30deadb458a9b590d720cde2f2b1e97da9"
 dependencies = [
  "zerocopy",
-]
-
-[[package]]
-name = "pretty_assertions"
-version = "1.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3ae130e2f271fbc2ac3a40fb1d07180839cdbbe443c7a27e1e3c13c5cac0116d"
-dependencies = [
- "diff",
- "yansi",
 ]
 
 [[package]]
@@ -8177,16 +8449,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "63b8176103e19a2643978565ca18b50549f6101881c443590420e4dc998a3c69"
 
 [[package]]
-name = "rand_distr"
-version = "0.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6a8615d50dcf34fa31f7ab52692afec947c4dd0ab803cc87cb3b0b4570ff7463"
-dependencies = [
- "num-traits",
- "rand 0.9.4",
-]
-
-[[package]]
 name = "rand_pcg"
 version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8345,6 +8607,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "referencing"
+version = "0.29.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "40a64b3a635fad9000648b4d8a59c8710c523ab61a23d392a7d91d47683f5adc"
+dependencies = [
+ "ahash",
+ "fluent-uri",
+ "once_cell",
+ "parking_lot",
+ "percent-encoding",
+ "serde_json",
+]
+
+[[package]]
 name = "regex"
 version = "1.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8465,7 +8741,7 @@ dependencies = [
  "wasm-bindgen-futures",
  "wasm-streams 0.4.2",
  "web-sys",
- "webpki-roots 1.0.7",
+ "webpki-roots 1.0.11",
 ]
 
 [[package]]
@@ -8508,17 +8784,6 @@ dependencies = [
  "wasm-bindgen-futures",
  "wasm-streams 0.5.0",
  "web-sys",
-]
-
-[[package]]
-name = "rfc6979"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7743f17af12fa0b03b803ba12cd6a8d9483a587e89c69445e3909655c0b9fabb"
-dependencies = [
- "crypto-bigint 0.4.9",
- "hmac 0.12.1",
- "zeroize",
 ]
 
 [[package]]
@@ -8599,17 +8864,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rstest"
-version = "0.26.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f5a3193c063baaa2a95a33f03035c8a72b83d97a54916055ba22d35ed3839d49"
-dependencies = [
- "futures-timer",
- "futures-util",
- "rstest_macros 0.26.1",
-]
-
-[[package]]
 name = "rstest_macros"
 version = "0.18.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8645,24 +8899,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rstest_macros"
-version = "0.26.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9c845311f0ff7951c5506121a9ad75aec44d083c31583b2ea5a30bcb0b0abba0"
-dependencies = [
- "cfg-if",
- "glob",
- "proc-macro-crate",
- "proc-macro2",
- "quote",
- "regex",
- "relative-path",
- "rustc_version",
- "syn 2.0.117",
- "unicode-ident",
-]
-
-[[package]]
 name = "rstest_reuse"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8671,40 +8907,6 @@ dependencies = [
  "quote",
  "rand 0.8.6",
  "syn 2.0.117",
-]
-
-[[package]]
-name = "rust-embed"
-version = "8.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "04113cb9355a377d83f06ef1f0a45b8ab8cd7d8b1288160717d66df5c7988d27"
-dependencies = [
- "rust-embed-impl",
- "rust-embed-utils",
- "walkdir",
-]
-
-[[package]]
-name = "rust-embed-impl"
-version = "8.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "da0902e4c7c8e997159ab384e6d0fc91c221375f6894346ae107f47dd0f3ccaa"
-dependencies = [
- "proc-macro2",
- "quote",
- "rust-embed-utils",
- "syn 2.0.117",
- "walkdir",
-]
-
-[[package]]
-name = "rust-embed-utils"
-version = "8.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5bcdef0be6fe7f6fa333b1073c949729274b05f123a0ad7efcb8efd878e5c3b1"
-dependencies = [
- "sha2 0.10.9",
- "walkdir",
 ]
 
 [[package]]
@@ -8854,9 +9056,9 @@ checksum = "f87165f0995f63a9fbeea62b64d10b4d9d8e78ec6d7d51fb2125fda7bb36788f"
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.15"
+version = "0.103.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f3c3cf1d8b1e7d4927e2d154c3fcb02979afb9939629c62cd9048d4f07b60ac2"
+checksum = "4443b1b6d39d7c663139942cc4558262562d2c84123bb6282ef177009ca8b281"
 dependencies = [
  "aws-lc-rs",
  "ring",
@@ -9019,20 +9221,6 @@ name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
-
-[[package]]
-name = "sec1"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3be24c1842290c45df0a7bf069e0c268a747ad05a192f2fd7dcfdbc1cba40928"
-dependencies = [
- "base16ct",
- "der 0.6.1",
- "generic-array",
- "pkcs8 0.9.0",
- "subtle",
- "zeroize",
-]
 
 [[package]]
 name = "secrecy"
@@ -9381,20 +9569,10 @@ version = "0.27.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c1e303f8205714074f6068773f0e29527e0453937fe837c9717d066635b65f31"
 dependencies = [
- "pkcs8 0.10.2",
+ "pkcs8",
  "rand_core 0.6.4",
- "signature 2.2.0",
+ "signature",
  "zeroize",
-]
-
-[[package]]
-name = "signature"
-version = "1.6.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "74233d3b3b2f6d4b006dc19dee745e73e2a6bfb6f93607cd3b02bd5b00797d7c"
-dependencies = [
- "digest 0.10.7",
- "rand_core 0.6.4",
 ]
 
 [[package]]
@@ -9525,22 +9703,12 @@ checksum = "d5fe4ccb98d9c292d56fec89a5e07da7fc4cf0dc11e156b41793132775d3e591"
 
 [[package]]
 name = "spki"
-version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "67cf02bbac7a337dc36e4f5a693db6c21e7863f45070f7064577eb4367a3212b"
-dependencies = [
- "base64ct",
- "der 0.6.1",
-]
-
-[[package]]
-name = "spki"
 version = "0.7.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d91ed6c858b01f942cd56b37a94b3e0a1798290327d1236e4d9cf4eaca44d29d"
 dependencies = [
  "base64ct",
- "der 0.7.10",
+ "der",
 ]
 
 [[package]]
@@ -9943,6 +10111,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7b2093cf4c8eb1e67749a6762251bc9cd836b6fc171623bd0a9d324d37af2417"
 
 [[package]]
+name = "tar"
+version = "0.4.46"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f6221d9a6003c78398e3b239969f352578258df48c8eb051caadae0015bc840"
+dependencies = [
+ "filetime",
+ "libc",
+ "xattr",
+]
+
+[[package]]
 name = "target-lexicon"
 version = "0.12.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10065,6 +10244,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "tikv-jemalloc-sys"
+version = "0.6.1+5.3.0-1-ge13ca993e8ccb9ba9847cc330696e02839f328f7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cd8aa5b2ab86a2cefa406d889139c162cbb230092f7d1d7cbc1716405d852a3b"
+dependencies = [
+ "cc",
+ "libc",
+]
+
+[[package]]
+name = "tikv-jemallocator"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0359b4327f954e0567e69fb191cf1436617748813819c94b8cd4a431422d053a"
+dependencies = [
+ "libc",
+ "tikv-jemalloc-sys",
+]
+
+[[package]]
 name = "time"
 version = "0.3.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10165,51 +10364,18 @@ dependencies = [
 
 [[package]]
 name = "tokenizers"
-version = "0.21.4"
+version = "0.23.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a620b996116a59e184c2fa2dfd8251ea34a36d0a514758c6f966386bd2e03476"
+checksum = "7afbf6e88718afcc138bad01d6ccc3051dbbc3b2ce9793d8b8a3aeb610969cfc"
 dependencies = [
  "ahash",
- "aho-corasick",
  "compact_str",
+ "daachorse 3.0.3",
  "dary_heap",
  "derive_builder",
  "esaxx-rs",
  "getrandom 0.3.4",
  "hf-hub 0.4.3",
- "itertools 0.14.0",
- "log",
- "macro_rules_attribute",
- "monostate",
- "onig",
- "paste",
- "rand 0.9.4",
- "rayon",
- "rayon-cond",
- "regex",
- "regex-syntax",
- "serde",
- "serde_json",
- "spm_precompiled",
- "thiserror 2.0.18",
- "unicode-normalization-alignments",
- "unicode-segmentation",
- "unicode_categories",
-]
-
-[[package]]
-name = "tokenizers"
-version = "0.23.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "44e5bea67576e04b6ff8564c5d9e09c2ef0cf476502245f2f120e497769d3112"
-dependencies = [
- "ahash",
- "compact_str",
- "daachorse",
- "dary_heap",
- "derive_builder",
- "esaxx-rs",
- "getrandom 0.3.4",
  "indicatif 0.18.4",
  "itertools 0.14.0",
  "log",
@@ -10319,14 +10485,15 @@ dependencies = [
 
 [[package]]
 name = "tokio-util"
-version = "0.7.18"
+version = "0.7.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9ae9cec805b01e8fc3fd2fe289f89149a9b66dd16786abd8b19cfa7b48cb0098"
+checksum = "494815d09bf52b5548659851081238f0ca39ff638363907596da739561c62c52"
 dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
  "futures-util",
+ "libc",
  "pin-project-lite",
  "slab",
  "tokio",
@@ -10749,17 +10916,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tracing-mutex"
-version = "0.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "64aed473bc9271d160dce1fda5daebec76bb740f9db452bf6c9682344a5e44c0"
-dependencies = [
- "autocfg",
- "lock_api",
- "parking_lot",
-]
-
-[[package]]
 name = "tracing-opentelemetry"
 version = "0.32.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10808,27 +10964,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tracing-test"
-version = "0.2.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "19a4c448db514d4f24c5ddb9f73f2ee71bfb24c526cf0c570ba142d1119e0051"
-dependencies = [
- "tracing-core",
- "tracing-subscriber",
- "tracing-test-macro",
-]
-
-[[package]]
-name = "tracing-test-macro"
-version = "0.2.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ad06847b7afb65c7866a36664b75c40b895e318cea4f71299f013fb22965329d"
-dependencies = [
- "quote",
- "syn 2.0.117",
-]
-
-[[package]]
 name = "transpose"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10872,10 +11007,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "turbojpeg"
+version = "1.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "81313fcd64aaa30ddfd59eaa122968136b2dd9cd41d9619b126cf71e67a01702"
+dependencies = [
+ "gcd",
+ "libc",
+ "thiserror 1.0.69",
+ "turbojpeg-sys",
+]
+
+[[package]]
+name = "turbojpeg-sys"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "49b5a974bc59382d35927e3a07eef2ba9a24fe7227cefe52ec44b508e1b90f86"
+dependencies = [
+ "anyhow",
+ "cmake",
+ "libc",
+]
+
+[[package]]
 name = "twox-hash"
 version = "2.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5283634e518fe9e82c7b20520bb4bc209009fd16c82077c802f8111ecbb0117a"
+
+[[package]]
+name = "typed-path"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9ce898823d8cd0f028662d2f349694b1af0a5cc9be83f1d213a00d3147445e1e"
 
 [[package]]
 name = "typeid"
@@ -10894,6 +11058,17 @@ name = "ucd-trie"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2896d95c02a80c6d6a5d6e953d479f5ddf2dfdb6a244441010e373ac0fb88971"
+
+[[package]]
+name = "ucx-rs"
+version = "0.1.0+ucx.1.22.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b0f69840ad9bf0a2dddb056c1fcc847ea8de16cce0d29dee6a4d164049598b45"
+dependencies = [
+ "flate2",
+ "sha2 0.10.9",
+ "tar",
+]
 
 [[package]]
 name = "unarray"
@@ -11105,7 +11280,19 @@ dependencies = [
  "indexmap 2.14.0",
  "serde",
  "serde_json",
- "utoipa-gen",
+ "utoipa-gen 5.5.0",
+]
+
+[[package]]
+name = "utoipa"
+version = "6.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8765fe27aeff71012a3f90fa474cf1df863a7d0dd81ed25de4e63fff2544994f"
+dependencies = [
+ "indexmap 2.14.0",
+ "serde",
+ "serde_json",
+ "utoipa-gen 6.0.1",
 ]
 
 [[package]]
@@ -11123,21 +11310,31 @@ dependencies = [
 ]
 
 [[package]]
-name = "utoipa-swagger-ui"
-version = "9.0.2"
+name = "utoipa-gen"
+version = "6.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d047458f1b5b65237c2f6dc6db136945667f40a7668627b3490b9513a3d43a55"
+checksum = "d935f1c83fdf8b88f09bbe050d0cea78ea4afee6d7b0317403228c1200b2c8ab"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.3",
+]
+
+[[package]]
+name = "utoipa-swagger-ui"
+version = "10.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4f1fd2f9615838885c6ff4115fde8a2b58825dc7b4617f78d29c167377a15c92"
 dependencies = [
  "axum 0.8.4",
- "base64 0.22.1",
+ "base64 0.23.1",
  "mime_guess",
  "regex",
- "rust-embed",
  "serde",
  "serde_json",
  "url",
- "utoipa",
- "zip 3.0.0",
+ "utoipa 6.0.0",
+ "zip",
 ]
 
 [[package]]
@@ -11150,6 +11347,17 @@ dependencies = [
  "js-sys",
  "serde_core",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "uuid-simd"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "23b082222b4f6619906941c17eb2297fff4c2fb96cb60164170522942a200bd8"
+dependencies = [
+ "outref",
+ "uuid",
+ "vsimd",
 ]
 
 [[package]]
@@ -11207,44 +11415,33 @@ checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 
 [[package]]
 name = "velo"
-version = "0.12.0"
+version = "0.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eceeba617fb6d080b9c91973e188e64592cca714f37bf091e74c5393436de54d"
+checksum = "97c3940b2cf9b4a7a9ea6afd56520ee21eb46272b5442d3105274b4298404b4b"
 dependencies = [
  "anyhow",
- "async-nats",
  "async-stream",
- "axum 0.8.4",
  "bs58",
  "bytes",
  "dashmap",
  "derive-getters",
  "derive_builder",
- "flume 0.12.0",
- "fs4",
+ "flume",
  "futures",
- "http 1.4.1",
- "http-body 1.0.1",
- "http-body-util",
- "hyper 1.10.1",
- "hyper-util",
- "lru 0.18.2",
  "nix 0.31.3",
+ "offset-allocator",
  "parking_lot",
  "prometheus",
- "prost 0.13.5",
  "rmp-serde",
  "serde",
+ "serde_bytes",
  "serde_json",
  "socket2 0.6.4",
  "thiserror 2.0.18",
  "tokio",
- "tokio-stream",
  "tokio-util",
- "tonic 0.13.1",
- "tonic-build 0.13.1",
- "tower 0.5.3",
  "tracing",
+ "ucx-rs",
  "uuid",
  "velo-ext",
  "xxhash-rust",
@@ -11252,13 +11449,13 @@ dependencies = [
 
 [[package]]
 name = "velo-ext"
-version = "0.5.0"
+version = "0.5.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "57410d88c22c8e737d060a8b0a922ffba586e940be28996f187802e955dcfcb1"
+checksum = "c340505e9a3330467664d4ca09ff74b41365d6be3ddca4d6f4046a7c526edfaa"
 dependencies = [
  "anyhow",
  "bytes",
- "flume 0.12.0",
+ "flume",
  "futures",
  "rmp-serde",
  "serde",
@@ -11509,9 +11706,9 @@ dependencies = [
 
 [[package]]
 name = "webpki-root-certs"
-version = "1.0.9"
+version = "1.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b96554aa2acc8ccdb7e1c9a58a7a68dd5d13bccc69cd124cb09406db612a1c9b"
+checksum = "e49d0e65abc00c142e8f9428da991da9f1a250c39be97459901eb12b9b49f62a"
 dependencies = [
  "rustls-pki-types",
 ]
@@ -11522,14 +11719,14 @@ version = "0.26.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "521bc38abb08001b01866da9f51eb7c5d647a19260e00054a8c7fd5f9e57f7a9"
 dependencies = [
- "webpki-roots 1.0.7",
+ "webpki-roots 1.0.11",
 ]
 
 [[package]]
 name = "webpki-roots"
-version = "1.0.7"
+version = "1.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "52f5ee44c96cf55f1b349600768e3ece3a8f26010c05265ab73f945bb1a2eb9d"
+checksum = "f5f280bbb2b287bc8e7de7e3852945a0ff50d1bbcb5ed42b6c7a568c546df171"
 dependencies = [
  "rustls-pki-types",
 ]
@@ -12082,6 +12279,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
 
 [[package]]
+name = "xattr"
+version = "1.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32e45ad4206f6d2479085147f02bc2ef834ac85886624a23575ae137c8aa8156"
+dependencies = [
+ "libc",
+ "rustix 1.1.4",
+]
+
+[[package]]
 name = "xmlparser"
 version = "0.13.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -12240,32 +12447,18 @@ dependencies = [
 
 [[package]]
 name = "zip"
-version = "2.4.2"
+version = "9.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fabe6324e908f85a1c52063ce7aa26b68dcb7eb6dbc83a2d148403c9bc3eba50"
+checksum = "1156b39d142a34b999c2310a50455e0cb3760bf7efad0122f796d813bee26ccb"
 dependencies = [
- "arbitrary",
- "crc32fast",
- "crossbeam-utils",
- "displaydoc",
- "flate2",
- "indexmap 2.14.0",
- "memchr",
- "thiserror 2.0.18",
- "zopfli",
-]
-
-[[package]]
-name = "zip"
-version = "3.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "12598812502ed0105f607f941c386f43d441e00148fce9dec3ca5ffb0bde9308"
-dependencies = [
- "arbitrary",
  "crc32fast",
  "flate2",
+ "getrandom 0.4.2",
  "indexmap 2.14.0",
  "memchr",
+ "nix 0.31.3",
+ "typed-path",
+ "windows-sys 0.61.2",
  "zopfli",
 ]
 

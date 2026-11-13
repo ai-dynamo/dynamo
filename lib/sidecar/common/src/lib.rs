@@ -3,6 +3,9 @@
 
 //! Shared infrastructure for Rust sidecars.
 
+#[cfg(feature = "jemalloc")]
+#[doc(hidden)]
+pub mod allocator;
 mod args;
 mod endpoint;
 mod error;
@@ -15,6 +18,10 @@ pub mod v14 {
     use tonic_v14 as tonic;
 
     pub use crate::error::status_to_dynamo_v14 as status_to_dynamo;
+    pub use crate::error::{
+        is_broken_stream_v14 as is_broken_stream,
+        stream_status_to_dynamo_v14 as stream_status_to_dynamo,
+    };
 
     // Keep connection policy identical across Tonic versions.
     include!("transport.rs");
@@ -24,7 +31,8 @@ pub use args::{GrpcTransportArgs, GrpcTransportConfig, SidecarArgs};
 pub use endpoint::{GrpcEndpoint, HttpEndpoint};
 pub use error::{
     SidecarStartupError, cancelled, cannot_connect, connection_timeout, engine_shutdown,
-    invalid_argument, protocol_error, status_to_dynamo,
+    invalid_argument, is_broken_stream, protocol_error, status_to_dynamo, stream_incomplete,
+    stream_status_to_dynamo,
 };
 pub use json::{json_to_struct, struct_to_json};
 #[cfg(feature = "tonic-v14")]
@@ -33,7 +41,7 @@ pub use transport::{
     DEFAULT_MAX_GRPC_MESSAGE_SIZE, GrpcChannelPool, format_error_chain, startup_deadline,
 };
 
-pub use run::{EngineBootstrapResult, run, run_task};
+pub use run::{EngineBootstrapResult, run, run_task, run_with_drt};
 
 #[cfg(test)]
 #[path = "transport/tests.rs"]

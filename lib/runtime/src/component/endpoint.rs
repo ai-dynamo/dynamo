@@ -14,7 +14,8 @@ use crate::{
     component::{DeviceType, Endpoint, Instance, TransportType},
     distributed::RequestPlaneMode,
     pipeline::network::{
-        PushWorkHandler, RequestPlanePayloadCodec, ingress::push_endpoint::PushEndpoint,
+        PushWorkHandler, RequestPlanePayloadCodec, ResponsePlaneMode,
+        ingress::push_endpoint::PushEndpoint,
     },
     protocols::EndpointId,
     traits::DistributedRuntimeProvider,
@@ -215,6 +216,11 @@ impl EndpointConfig {
             health_check_payload,
             local_engine,
         ) = self.dissolve();
+        if endpoint.track_response_completion
+            && endpoint.drt().response_plane() != ResponsePlaneMode::Tcp
+        {
+            anyhow::bail!("response completion tracking requires the TCP response plane");
+        }
         let connection_id = endpoint.drt().connection_id();
         let endpoint_id = endpoint.id();
 
@@ -450,6 +456,17 @@ pub async fn build_transport_type(
 }
 
 impl Endpoint {
+    /// Keep the ingress metric guard alive until the TCP response writer exits.
+    pub fn track_response_completion(mut self) -> Self {
+        self.track_response_completion = true;
+        self
+    }
+
+    /// Active requests on an endpoint configured to track response completion.
+    pub fn inflight_requests(&self) -> Option<i64> {
+        self.inflight_requests.get().map(prometheus::IntGauge::get)
+    }
+
     /// Unregister this endpoint instance from discovery.
     ///
     /// This removes the endpoint from the instances bucket, preventing the router

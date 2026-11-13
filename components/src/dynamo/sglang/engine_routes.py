@@ -492,14 +492,12 @@ class _ConfiguredEngineRoute:
 def resolve_configured_engine_routes(
     engine: Any,
     values: str | Sequence[str] | None,
-) -> list[tuple[str, Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]]]:
+) -> list[tuple[str, _ConfiguredEngineRoute]]:
     """Resolve every configured route and callable without registering any."""
 
     descriptors = parse_engine_route_descriptors(values)
     engine_state_lock = asyncio.Lock()
-    resolved: list[
-        tuple[str, Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]]
-    ] = []
+    resolved = []
     for descriptor in descriptors:
         target = (
             engine

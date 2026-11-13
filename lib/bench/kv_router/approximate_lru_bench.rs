@@ -3,30 +3,32 @@
 
 use std::collections::{HashMap, HashSet};
 use std::hint::black_box;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::Context;
 use clap::{Parser, ValueEnum};
 use dynamo_bench::kv_router_common::args::CommonArgs;
+use dynamo_bench::kv_router_common::clock::BenchmarkClock;
+use dynamo_bench::kv_router_common::fixed_lane::{EMPTY_OPERATION_ID, FixedLane};
 use dynamo_bench::kv_router_common::issuer::{
     parse_cpu_list, pin_current_thread, pin_current_thread_to_cpus,
 };
 use dynamo_bench::kv_router_common::replay::{WorkerReplayArtifacts, generate_replay_artifacts};
-use dynamo_kv_router::indexer::{
+use dynamo_kv_hashing::LocalBlockHash;
+use dynamo_kv_indexer::host::{
     ApproximateAcquireMode, ApproximateLruBlock, ApproximateLruLease, ApproximateLruStats,
-    ApproximateRetentionConfig, KvIndexerInterface, KvIndexerMetrics,
+    ApproximateRetentionConfig, ConcurrentRadixTreeCompressed, KvIndexerInterface,
+    KvIndexerMetrics, PruneConfig, ThreadPoolIndexer,
 };
-use dynamo_kv_router::protocols::{LocalBlockHash, WorkerWithDpRank};
-use dynamo_kv_router::scheduling::AttemptId;
-use dynamo_kv_router::{ConcurrentRadixTreeCompressed, ThreadPoolIndexer, approx::PruneConfig};
+use dynamo_router_protocol::attempt::AttemptId;
+use dynamo_router_protocol::worker::WorkerWithDpRank;
 use dynamo_tokens::SequenceHash;
 use serde::Serialize;
-use tokio::sync::{Notify, oneshot};
+use tokio::sync::oneshot;
 
 const RESULT_SCHEMA_VERSION: u32 = 1;
-const EMPTY_OPERATION_ID: u32 = u32::MAX;
 const START_LEAD_NS: u64 = 20_000_000;
 const RANK_INCARNATION: u64 = 1;
 
@@ -459,40 +461,6 @@ fn prepare_trial(
     })
 }
 
-struct OperationLane {
-    slots: Box<[AtomicU32]>,
-    published: AtomicUsize,
-    consumed: AtomicUsize,
-    closed: AtomicBool,
-    notify: Notify,
-}
-
-impl OperationLane {
-    fn new(capacity: usize) -> Self {
-        Self {
-            slots: (0..capacity)
-                .map(|_| AtomicU32::new(EMPTY_OPERATION_ID))
-                .collect::<Vec<_>>()
-                .into_boxed_slice(),
-            published: AtomicUsize::new(0),
-            consumed: AtomicUsize::new(0),
-            closed: AtomicBool::new(false),
-            notify: Notify::new(),
-        }
-    }
-
-    fn close(&self) {
-        self.closed.store(true, Ordering::Release);
-        self.notify.notify_one();
-    }
-
-    fn depth(&self) -> usize {
-        self.published
-            .load(Ordering::Acquire)
-            .saturating_sub(self.consumed.load(Ordering::Acquire))
-    }
-}
-
 #[derive(Debug)]
 struct CompletionRecord {
     id: u32,
@@ -590,7 +558,7 @@ async fn execute_payload(
 async fn lane_worker(
     indexer: Arc<ApproximateIndexer>,
     policy: Policy,
-    lane: Arc<OperationLane>,
+    lane: Arc<FixedLane>,
     mut payloads: Box<[LanePayloadSlot]>,
     request_count: usize,
     ready: oneshot::Sender<()>,
@@ -601,9 +569,9 @@ async fn lane_worker(
     let _ = ready.send(());
 
     loop {
-        let published = lane.published.load(Ordering::Acquire);
+        let published = lane.published();
         while consumed < published {
-            let id = lane.slots[consumed].load(Ordering::Relaxed);
+            let id = lane.id(consumed);
             let (mode, failure) = match payloads.get_mut(consumed) {
                 Some(slot) if slot.id == id => match slot.payload.take() {
                     Some(payload) => {
@@ -615,18 +583,11 @@ async fn lane_worker(
             };
             completions.push(CompletionRecord { id, mode, failure });
             consumed += 1;
-            lane.consumed.store(consumed, Ordering::Release);
+            lane.record_consumed(consumed);
         }
 
-        if lane.closed.load(Ordering::Acquire) && consumed == lane.published.load(Ordering::Acquire)
-        {
+        if !lane.wait_for_more(consumed).await {
             break;
-        }
-        let notified = lane.notify.notified();
-        if consumed == lane.published.load(Ordering::Acquire)
-            && !lane.closed.load(Ordering::Acquire)
-        {
-            notified.await;
         }
     }
     drop(leases);
@@ -635,7 +596,7 @@ async fn lane_worker(
 
 fn issue_operations(
     dispatch: Vec<ScheduledOperation>,
-    lanes: Vec<Arc<OperationLane>>,
+    lanes: Vec<Arc<FixedLane>>,
     clock: Arc<BenchmarkClock>,
     start_signal: Arc<AtomicU64>,
     ready: mpsc::SyncSender<()>,
@@ -664,16 +625,15 @@ fn issue_operations(
             failure = Some("issuer lane out of range".to_string());
             break;
         };
-        let cursor = lane_cursors[operation.lane];
-        let Some(slot) = lane.slots.get(cursor) else {
+        if lane
+            .write(lane_cursors[operation.lane], operation.id)
+            .is_err()
+        {
             failure = Some("issuer fixed lane overflow".to_string());
             break;
-        };
-        slot.store(operation.id, Ordering::Relaxed);
+        }
         lane_cursors[operation.lane] += 1;
-        lane.published
-            .store(lane_cursors[operation.lane], Ordering::Release);
-        lane.notify.notify_one();
+        lane.publish(lane_cursors[operation.lane]);
         issued_operations += 1;
     }
 
@@ -822,7 +782,7 @@ async fn run_trial(
     let lanes = trial
         .lane_payloads
         .iter()
-        .map(|payloads| Arc::new(OperationLane::new(payloads.len())))
+        .map(|payloads| Arc::new(FixedLane::new(payloads.len())))
         .collect::<Vec<_>>();
     let mut ready_receivers = Vec::with_capacity(lanes.len());
     let mut tasks = Vec::with_capacity(lanes.len());
@@ -930,8 +890,8 @@ async fn run_trial(
                 push_failure(&mut failure_reasons, "duplicate_completion");
             }
         }
-        let expected = lanes[lane_id].slots.len();
-        let actual = lanes[lane_id].consumed.load(Ordering::Acquire);
+        let expected = lanes[lane_id].capacity();
+        let actual = lanes[lane_id].consumed();
         if expected != actual {
             push_failure(&mut failure_reasons, "lane_incomplete");
         }
@@ -1161,54 +1121,6 @@ fn push_failure(failures: &mut Vec<String>, failure: &str) {
     }
 }
 
-struct BenchmarkClock {
-    epoch: Instant,
-    spin_ns: u64,
-    #[cfg(target_os = "linux")]
-    monotonic_epoch_ns: u64,
-}
-
-impl BenchmarkClock {
-    fn new(spin_ns: u64) -> anyhow::Result<Self> {
-        #[cfg(target_os = "linux")]
-        let monotonic_epoch_ns = clock_time_ns(libc::CLOCK_MONOTONIC)?;
-        Ok(Self {
-            epoch: Instant::now(),
-            spin_ns,
-            #[cfg(target_os = "linux")]
-            monotonic_epoch_ns,
-        })
-    }
-
-    fn now_ns(&self) -> u64 {
-        self.epoch.elapsed().as_nanos().min(u64::MAX as u128) as u64
-    }
-
-    fn wait_until(&self, target_ns: u64) {
-        let sleep_target = target_ns.saturating_sub(self.spin_ns);
-        let now = self.now_ns();
-        #[cfg(target_os = "linux")]
-        if sleep_target > now {
-            sleep_until_monotonic(self.monotonic_epoch_ns.saturating_add(sleep_target));
-        }
-        #[cfg(not(target_os = "linux"))]
-        if sleep_target > now {
-            std::thread::sleep(Duration::from_nanos(sleep_target - now));
-        }
-        while self.now_ns() < target_ns {
-            std::hint::spin_loop();
-        }
-    }
-
-    fn timer_name(&self) -> &'static str {
-        if cfg!(target_os = "linux") {
-            "clock_nanosleep_monotonic_absolute"
-        } else {
-            "portable_sleep_spin_non_authoritative"
-        }
-    }
-}
-
 #[cfg(target_os = "linux")]
 fn clock_time_ns(clock_id: libc::clockid_t) -> anyhow::Result<u64> {
     let mut timestamp = libc::timespec {
@@ -1242,27 +1154,6 @@ fn thread_cpu_time_ns() -> Option<u64> {
 #[cfg(not(target_os = "linux"))]
 fn thread_cpu_time_ns() -> Option<u64> {
     None
-}
-
-#[cfg(target_os = "linux")]
-fn sleep_until_monotonic(target_ns: u64) {
-    let request = libc::timespec {
-        tv_sec: (target_ns / 1_000_000_000) as libc::time_t,
-        tv_nsec: (target_ns % 1_000_000_000) as libc::c_long,
-    };
-    loop {
-        let rc = unsafe {
-            libc::clock_nanosleep(
-                libc::CLOCK_MONOTONIC,
-                libc::TIMER_ABSTIME,
-                &request,
-                std::ptr::null_mut(),
-            )
-        };
-        if rc == 0 || rc != libc::EINTR {
-            return;
-        }
-    }
 }
 
 #[cfg(test)]

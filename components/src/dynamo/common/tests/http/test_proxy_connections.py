@@ -31,7 +31,6 @@ from dynamo.common.http import (
     AiohttpClient,
     HttpConnectionError,
     HttpStatusError,
-    HttpTimeoutError,
     _ssrf_resolver,
 )
 from dynamo.common.http.url_validator import UrlValidationPolicy
@@ -80,19 +79,16 @@ class _LoopbackServer:
 
     With ``redirect``, a request line that starts with its prefix gets a 302
     to its ``Location`` template, where ``{port}`` is this server's port.
-    ``delay`` holds each answer back for that many seconds.
     """
 
     def __init__(
         self,
         redirect: tuple[bytes, str] | None = None,
-        delay: float = 0.0,
         redirect_header: bytes = b"Location",
     ) -> None:
         self.first_lines: list[bytes] = []
         self.authorizations: list[bytes | None] = []
         self._redirect = redirect
-        self._delay = delay
         self._redirect_header = redirect_header
 
     async def _handle(self, reader, writer) -> None:
@@ -113,7 +109,6 @@ class _LoopbackServer:
                     None,
                 )
             )
-            await asyncio.sleep(self._delay)
             if self._redirect and line.startswith(self._redirect[0]):
                 location = self._redirect[1].format(port=self.port).encode()
                 writer.write(
@@ -283,19 +278,33 @@ async def test_a_redirect_from_a_direct_fetch_goes_through_the_proxy(
     assert proxy.first_lines == [b"GET http://origin.test/y HTTP/1.1"]
 
 
-async def test_one_time_budget_covers_every_redirect_hop() -> None:
+async def test_one_time_budget_covers_every_redirect_hop(monkeypatch) -> None:
     """Each hop gets only the time that is left of the request's budget.
 
-    Each hop alone fits in the budget, but the two together do not.
+    The loop clock stands still and moves on half a second per hop, so no
+    timer can fire and the budgets are exact on any runner.
     """
-    async with _LoopbackServer((b"GET /start", "/next"), delay=0.5) as server:
+    loop = asyncio.get_running_loop()
+    now = loop.time()
+    budgets = []
+    real_get = aiohttp.ClientSession.get
+
+    def _get(self, url, **kwargs):
+        nonlocal now
+        budgets.append(kwargs["timeout"].total)
+        now += 0.5
+        return real_get(self, url, **kwargs)
+
+    monkeypatch.setattr(loop, "time", lambda: now)
+    monkeypatch.setattr(aiohttp.ClientSession, "get", _get)
+    async with _LoopbackServer((b"GET /start", "/next")) as server:
         client = AiohttpClient()
         try:
-            with pytest.raises(HttpTimeoutError):
-                await client.fetch_bytes(f"http://127.0.0.1:{server.port}/start", 0.8)
+            await client.fetch_bytes(f"http://127.0.0.1:{server.port}/start", 5.0)
         finally:
             await client.close()
     assert server.first_lines == [b"GET /start HTTP/1.1", b"GET /next HTTP/1.1"]
+    assert budgets == pytest.approx([5.0, 4.5])
 
 
 async def test_redirects_without_a_policy_stop_at_ten() -> None:
