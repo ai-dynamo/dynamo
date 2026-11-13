@@ -971,7 +971,7 @@ where
             .as_nanos() as u64;
         let start_time = std::time::Instant::now();
         // Increment inflight and ensure it's decremented on all exits via RAII guard
-        let _inflight_guard = self.metrics().map(|m| {
+        let mut inflight_guard = self.metrics().map(|m| {
             m.request_counter.inc();
             m.inflight_requests.inc();
             m.request_bytes.inc_by(payload.len() as u64);
@@ -1039,10 +1039,20 @@ where
             ResponsePlaneMode::Tcp => {
                 tracing::trace!("creating tcp response stream");
                 let nvtx_open = dynamo_nvtx_range!("worker.ingress.open_response_stream");
-                let publisher = tcp::client::TcpClient::create_response_stream(
+                // The writer can outlive the publisher or fail before ingress returns.
+                // Keep the same metric guard alive until both are done.
+                let writer_guard = if self.track_response_completion.get() == Some(&true) {
+                    inflight_guard.take().map(Arc::new)
+                } else {
+                    None
+                };
+                let publisher = tcp::client::TcpClient::create_response_stream_with_guard(
                     request.context(),
                     response_connection_info,
                     cancellation_counter,
+                    writer_guard
+                        .clone()
+                        .map(|guard| guard as Arc<dyn Send + Sync>),
                 )
                 .await
                 .map_err(|error| {
@@ -1135,7 +1145,7 @@ where
 
         // Ensure the metrics guard is not dropped until the end of the function.
         // Drop fires "request completed" log via RAII.
-        drop(_inflight_guard);
+        drop(inflight_guard);
 
         Ok(())
     }

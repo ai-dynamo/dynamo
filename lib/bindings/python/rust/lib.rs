@@ -1566,7 +1566,8 @@ impl DistributedRuntime {
             .map(|info| format!("http://{}", info.advertised_socket_addr()))
     }
 
-    /// Register a component handler under `/engine/{name}/...` on the system listener.
+    /// Register a status-aware handler at `/engine/{name}` on the system listener.
+    /// Single-segment names also handle paths below that prefix.
     /// The callback receives `{method, path, body}` and returns `{status, body}`.
     fn register_engine_http_handler(
         &self,
@@ -1728,7 +1729,7 @@ impl Endpoint {
         })
     }
 
-    #[pyo3(signature = (generator, graceful_shutdown = true, metrics_labels = None, health_check_payload = None))]
+    #[pyo3(signature = (generator, graceful_shutdown = true, metrics_labels = None, health_check_payload = None, *, track_response_completion = false))]
     fn serve_endpoint<'p>(
         &self,
         py: Python<'p>,
@@ -1736,6 +1737,7 @@ impl Endpoint {
         graceful_shutdown: Option<bool>,
         metrics_labels: Option<Vec<(String, String)>>,
         health_check_payload: Option<&Bound<'p, PyDict>>,
+        track_response_completion: bool,
     ) -> PyResult<Bound<'p, PyAny>> {
         // The network engines read the role per request, so one recorded later
         // by `register_model` takes effect from then on, through the gate of
@@ -1830,8 +1832,12 @@ impl Endpoint {
             ));
         }
 
-        let mut builder = self
-            .inner
+        let endpoint = if track_response_completion {
+            self.inner.clone().track_response_completion()
+        } else {
+            self.inner.clone()
+        };
+        let mut builder = endpoint
             .endpoint_builder()
             .metrics_labels(metrics_labels)
             .handler(ingress);
@@ -1967,6 +1973,11 @@ impl Endpoint {
     #[getter]
     fn metrics(&self) -> prometheus_metrics::RuntimeMetrics {
         prometheus_metrics::RuntimeMetrics::from_endpoint(self.inner.clone())
+    }
+
+    /// Active requests on an endpoint configured to track response completion.
+    fn inflight_requests(&self) -> Option<i64> {
+        self.inner.inflight_requests()
     }
 
     /// Unregister this endpoint instance from discovery.
