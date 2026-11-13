@@ -14,10 +14,10 @@ pub use crate::plugins::worker_selection::{
     HostedSelectionRequest, HostedWorkerPicker, RuntimePolicyBuilder, RuntimePolicyConfig,
     RuntimePolicyError, RuntimePolicyUpdate, ScoredWorkerCandidate, SelectionConfig,
     SelectionFailure, WorkerCacheInput, WorkerCacheInputs, WorkerCandidate, WorkerCandidates,
-    WorkerCapacity, WorkerFilter, WorkerInfo, WorkerInputView, WorkerInputs, WorkerLoadInput,
-    WorkerPicker, WorkerScorer, WorkerSelectionConfig, WorkerSelectionContext,
+    WorkerCapacity, WorkerCopyInput, WorkerFilter, WorkerInfo, WorkerInputView, WorkerInputs,
+    WorkerLoadInput, WorkerPicker, WorkerScorer, WorkerSelectionConfig, WorkerSelectionContext,
     WorkerSelectionInstance, WorkerSelectionPolicy, WorkerSelectionPolicyError,
-    WorkerSelectionPolicyFactory, WorkerSelectionPolicySelection, WorkerTransferInput,
+    WorkerSelectionPolicyFactory, WorkerSelectionPolicySelection,
 };
 
 // Request-classifier contracts and the request they classify.
@@ -27,6 +27,14 @@ pub use crate::plugins::request_classifier::{
     RequestClassifierProvider, RequestClassifierProviderError, RequestClassifierRegistryError,
     RequestProgress, WorkerView,
 };
+
+// Experimental hint-policy contracts, their registration, and the KV copies they send.
+pub use crate::plugins::hint_policy::{
+    Commitments, HintContext, HintHost, HintPolicy, HintPolicyConstructor, HintPolicyError,
+    HintPolicyParameters, HintPolicyProvider, HintPolicyProviderError, HintPolicyRegistryError,
+    KvHintAction,
+};
+pub use crate::plugins::worker_selection::{KvCopyLocations, KvCopySource};
 
 // Registration and the configuration the registry resolves plugins from.
 pub use crate::config::{KvRouterConfig, SharedCacheType};
@@ -39,8 +47,8 @@ pub use crate::plugins::{
 // Wire vocabulary the signal views carry.
 pub use dynamo_kv_hashing::ExternalSequenceBlockHash;
 pub use dynamo_kv_hints::{
-    KvHintTransferWorkerMetadata, KvTransferEnforcement, WorkerKvTransferKeys,
-    WorkerKvTransferKeysCache,
+    KvHintTransferWorkerMetadata, KvSourceLocationsPayload, KvTransferEnforcement,
+    WorkerKvTransferKeys, WorkerKvTransferKeysCache,
 };
 pub use dynamo_kv_indexer::kv_hints::{KvTransferCandidateSource, KvTransferCandidates};
 pub use dynamo_router_protocol::WorkerType;
