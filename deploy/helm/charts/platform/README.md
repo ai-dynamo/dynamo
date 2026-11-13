@@ -885,7 +885,7 @@ For **production environments**, Kai Scheduler and Grove should be installed sep
 | 1.3.x           | >= v0.13.4    | >= v0.1.0-alpha.8, < v0.1.0-alpha.9 |
 | 1.4.x           | >= v0.13.4    | >= v0.1.0-alpha.12-rc1 |
 | 1.5.x           | >= v0.17.0    | >= v0.1.0-alpha.13 |
-| 1.6.x           | >= v0.17.0    | >= v0.1.0-alpha.15 |
+| 1.6.x           | >= v0.17.0    | >= v0.1.0-alpha.14 |
 | 1.7.x           | >= v0.17.0    | >= v0.2.0-beta1 |
 
 Upgrade Grove in lockstep with Dynamo while Grove APIs are not stable. See the
