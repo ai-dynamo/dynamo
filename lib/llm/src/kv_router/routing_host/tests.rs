@@ -70,6 +70,69 @@ async fn test_load_context(client: &Client) -> Arc<RoutingLoadContext> {
     .unwrap()
 }
 
+#[tokio::test]
+async fn device_aware_host_queries_cache_key_alternatives() {
+    struct Cache {
+        worker: u64,
+        queries: Mutex<Vec<Vec<String>>>,
+    }
+    impl dynamo_runtime::pipeline::MultimodalCacheIndex for Cache {
+        fn workers_with_cache_key_hits(&self, keys: &[String]) -> Vec<(u64, usize)> {
+            self.queries.lock().unwrap().push(keys.to_vec());
+            if keys.iter().any(|key| key == "scoped") {
+                vec![(self.worker, 1)]
+            } else {
+                Vec::new()
+            }
+        }
+
+        fn remove_worker(&self, _: u64) {}
+    }
+
+    let runtime = Runtime::from_current().unwrap();
+    let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+        .await
+        .unwrap();
+    let endpoint = distributed
+        .namespace("multimodal-key-alternatives".to_string())
+        .unwrap()
+        .component("workers".to_string())
+        .unwrap()
+        .endpoint("generate".to_string());
+    let client = endpoint.client().await.unwrap();
+    let load_context = test_load_context(&client).await;
+    endpoint.register_endpoint_instance().await.unwrap();
+    let worker = client.wait_for_instances().await.unwrap()[0].id();
+    let cache = Arc::new(Cache {
+        worker,
+        queries: Mutex::new(Vec::new()),
+    });
+    let dispatch = Arc::new(CompletedBuiltinDispatch::default());
+    let host = RoutingHost::builder(client, RouterMode::DeviceAwareWeighted)
+        .load_context(load_context)
+        .multimodal_cache((
+            cache.clone() as Arc<dyn dynamo_runtime::pipeline::MultimodalCacheIndex>,
+            Arc::new(|_: &PreprocessedRequest| vec!["unused".to_string()])
+                as dynamo_runtime::pipeline::MultimodalCacheKeyExtractor<PreprocessedRequest>,
+        ))
+        .multimodal_cache_key_alternatives(|_| {
+            vec![vec!["global".to_string(), "scoped".to_string()]]
+        })
+        .dispatch(dispatch.clone() as LlmDispatch)
+        .build()
+        .await
+        .unwrap();
+    let mut stream = host.generate(Context::new(request())).await.unwrap();
+    while stream.next().await.is_some() {}
+    assert_eq!(
+        *cache.queries.lock().unwrap(),
+        vec![vec!["global", "scoped"]]
+    );
+    assert_eq!(*dispatch.worker_ids.lock().unwrap(), vec![worker]);
+    drop(host);
+    runtime.shutdown();
+}
+
 #[test]
 fn classify_response_item_separates_terminal_failures_from_healthy_frames() {
     let outcome =
