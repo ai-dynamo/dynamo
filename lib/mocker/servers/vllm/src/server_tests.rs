@@ -741,10 +741,11 @@ async fn streaming_generate_maps_capacity_rejection_to_resource_exhausted() {
 
 #[tokio::test]
 async fn streaming_survives_a_producer_that_outruns_a_stalled_consumer() {
-    // The producer runs instantly while the consumer stalls, so the request
-    // races far past LiveEngine's fixed per-request buffer. The server's pump
-    // must absorb the burst instead of shedding the stream into an INTERNAL.
-    let service = VllmMockerService::new(MockerServerConfig::default(), admitting_args()).unwrap();
+    // speedup_ratio 0.0 runs at unscaled 1x timing and never fills the default
+    // 8-slot buffer during the stall; 1000x overflows it.
+    let mut args = admitting_args();
+    args.speedup_ratio = 1000.0;
+    let service = VllmMockerService::new(MockerServerConfig::default(), args).unwrap();
     let mut bursty = request("bursty");
     bursty.stopping.as_mut().unwrap().max_new_tokens = 50;
 
@@ -754,8 +755,6 @@ async fn streaming_survives_a_producer_that_outruns_a_stalled_consumer() {
             .unwrap()
             .into_inner();
 
-    // Stall the consumer so the instant producer fills and overflows the fixed
-    // per-request buffer before we read anything.
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
     let prompt = stream.next().await.unwrap().unwrap();

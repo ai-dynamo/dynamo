@@ -71,7 +71,7 @@ To replace only the scoring and picking stage with statically linked Rust code, 
 
 When requests wait in policy-class queues, weighted
 [Deficit Round Robin Queue Scheduling](deficit-round-robin.md) selects the
-physical class to dispatch before worker scoring runs.
+class to dispatch before worker scoring runs.
 
 ## Using the KV Cache Router
 
@@ -101,7 +101,6 @@ You can then use the default routing methods exposed by the client class to send
 
 - **Round-robin routing**: Default strategy, available through `client.generate()` on a standard endpoint client or explicitly through `client.round_robin()`
 - **Random routing**: Selects a random worker through `client.random()`
-- **Power-of-two routing**: Samples two workers and selects the less-loaded one through `--router-mode power-of-two`
 - **Direct routing**: Explicitly targets a specific worker via `client.direct(input, component_id)`
 - **Least-loaded routing**: Routes to the worker with fewest active connections via `--router-mode least-loaded`
 - **Device-aware weighted routing**: Routes using CPU/non-CPU ratio budgeting plus least-loaded selection within the selected device group via `--router-mode device-aware-weighted`
@@ -120,6 +119,6 @@ normalized_load = total_inflight(group) / (instance_count(group) x throughput_we
 
 The throughput weight is `1` for CPU workers and `DYN_ENCODER_CUDA_TO_CPU_RATIO` for non-CPU workers. This lets the router route proportionally to device capability instead of permanently starving slower devices.
 
-A full multimodal embedding-cache hit bypasses the CPU-to-non-CPU ratio. The router instead selects the least-loaded worker among those that hold every distinct cache key in the request. Partial hits continue through the weighted group selection. See [Embedding Cache](../../../../use-cases/multimodal-serving/embedding-cache.md#configuration).
+A full multimodal embedding-cache hit bypasses the CPU-to-non-CPU ratio. The router instead selects the least-loaded worker among those that hold every distinct cache key in the request. Partial hits continue through the weighted group selection. See [Embedding Cache](../../../../use-cases/image-understanding/vlm-performance-optimization/embedding-cache.md).
 
 When only one device class is present, the behavior degenerates to standard least-loaded routing.

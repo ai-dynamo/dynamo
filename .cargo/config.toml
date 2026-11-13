@@ -21,3 +21,5 @@ PCRE2_SYS_STATIC = "1"
 # Utoipa's default UI predates OpenAPI 3.2. This release loads the document;
 # rendering itemSchema remains limited (swagger-api/swagger-ui#11065).
 SWAGGER_UI_DOWNLOAD_URL = { value = "https://github.com/swagger-api/swagger-ui/archive/refs/tags/v5.33.1.zip", force = true }
+# Build jemalloc for 64 KiB pages so one aarch64 sidecar runs on 4, 16 and 64 KiB page kernels.
+AARCH64_UNKNOWN_LINUX_GNU_JEMALLOC_SYS_WITH_LG_PAGE = { value = "16", force = true }

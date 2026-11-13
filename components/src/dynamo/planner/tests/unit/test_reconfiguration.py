@@ -2,9 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import dataclasses
 import gzip
 import json
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -19,16 +21,30 @@ from dynamo.planner.core.engine_protocol import (
 )
 from dynamo.planner.core.load.predictors import ARIMAPredictor, KalmanPredictor
 from dynamo.planner.core.types import (
+    EngineCapabilities,
     FpmObservations,
+    RetuneDecision,
+    RetuneParams,
     ScheduledTick,
     TickInput,
     TrafficObservation,
+    WorkerCapabilities,
     WorkerCounts,
+)
+from dynamo.planner.environment.metrics_provider.runtime_provider import (
+    RuntimeFpmProvider,
 )
 from dynamo.planner.plugins.builtins.local_planner import BuiltinLoadPredict
 from dynamo.planner.plugins.clock import VirtualClock
 from dynamo.planner.plugins.orchestrator.engine_adapter import OrchestratorEngineAdapter
-from dynamo.planner.reconfiguration import ConfigurationConflict, ReconfigureRequest
+from dynamo.planner.reconfiguration import (
+    ConfigurationConflict,
+    ReconfigureRequest,
+    candidate_config,
+    prepare_predictor,
+    runtime_candidate_errors,
+    runtime_configuration_errors,
+)
 from dynamo.planner.tests.unit.test_control_api import _planner
 
 pytestmark = [
@@ -576,7 +592,7 @@ async def test_timeout_bounds_preparation_and_shutdown_prevents_late_activation(
 @pytest.mark.parametrize(
     "changes",
     [
-        {"throughput_adjustment_interval_seconds": 60},
+        {"max_num_fpm_samples": 32},
         {"ais_perf_model": None},
         {"ttft_ms": -1.0},
         {"ttft_ms": True},
@@ -601,3 +617,439 @@ async def test_http_contract_rejects_unsupported_or_invalid_updates(changes):
     assert result["status"] == 422
     assert await controller.get_config() == initial["body"]
     await planner._shutdown_runtime()
+
+
+def test_runtime_configuration_errors_skip_unknown_power():
+    capabilities = WorkerCapabilities(
+        prefill=EngineCapabilities(num_gpu=1), decode=EngineCapabilities(num_gpu=1)
+    )
+    assert runtime_configuration_errors(100, 100, -1, -1, 1, capabilities) == []
+
+
+def test_candidate_config_keeps_the_fields_excluded_from_the_dump(monkeypatch):
+    # The Redis URL comes from the config file, not the environment; the dump
+    # excludes it, and non-advisory batch scheduling requires it.
+    monkeypatch.delenv("DYN_PLANNER_BATCH_REDIS_URL", raising=False)
+    config = PlannerConfig(
+        namespace="test-ns",
+        environment="kubernetes",
+        mode="agg",
+        metric_pulling_prometheus_endpoint="http://prometheus.test:9090",
+        batch_scheduling={
+            "enabled": True,
+            "gateway": {"base_url": "http://gateway:8000", "tenant": "tenant"},
+            "metrics": {
+                "frontend_metrics_url": "http://frontend:8000/metrics",
+                "dispatcher_metrics_url": "http://dispatcher:9090/metrics",
+                "online_match_labels": {"model": "test-model"},
+            },
+            "redis": {"url": "redis://valkey:6379/0", "control_key": "drain-limit"},
+            "pool": {
+                "pool_id": "pool",
+                "work_class": "work",
+                "safe_rps_per_ready_replica": 1.0,
+                "max_replicas": 4,
+                "drain_lease_duration_seconds": 600.0,
+            },
+        },
+    )
+    dumped = config.model_dump()
+    assert "url" not in dumped["batch_scheduling"]["redis"]
+    assert "metric_pulling_prometheus_endpoint" not in dumped
+
+    candidate = candidate_config(config, {"min_endpoint": 2})
+
+    assert candidate.min_endpoint == 2
+    redis = candidate.batch_scheduling.redis
+    assert redis is not None and redis.url is not None
+    assert redis.url.get_secret_value() == "redis://valkey:6379/0"
+    assert candidate.metric_pulling_prometheus_endpoint == "http://prometheus.test:9090"
+    assert candidate.namespace == "test-ns"
+
+
+async def test_runtime_candidate_errors_match_runtime_validation():
+    planner = _planner(
+        "disagg", prefill_gpu_cost=2, decode_gpu_cost=1, total_gpu_power_limit=2000
+    )
+    capabilities = planner._build_worker_capabilities()
+    candidate = candidate_config(
+        planner.config, {"prefill_min_endpoint": 8, "max_gpu_budget": 16}
+    )
+    errors = runtime_candidate_errors(candidate, capabilities)
+    assert errors == [
+        "minimum endpoint footprint requires 17 GPUs, exceeding max_gpu_budget=16"
+    ]
+    with pytest.raises(ValueError) as error:
+        planner.validate_runtime_candidate(candidate)
+    assert str(error.value) == errors[0]
+    fitting = candidate_config(planner.config, {"max_gpu_budget": 24})
+    assert runtime_candidate_errors(fitting, capabilities) == []
+    await planner._shutdown_runtime()
+
+
+async def test_prepare_predictor_warms_from_observations_like_the_trace_path(tmp_path):
+    planner = sla_planner(runtime_warmup_trace_dir=str(tmp_path))
+    candidate = candidate_config(planner.config, {"load_predictor": "kalman"})
+    capabilities = planner._build_worker_capabilities()
+    source = trace(tmp_path)
+    observations = reconfiguration._load_runtime_warmup(
+        source,
+        candidate.throughput_adjustment_interval_seconds,
+        candidate.runtime_warmup_trace_dir,
+    )
+
+    from_trace = reconfiguration._prepare_predictor(candidate, capabilities, source)
+    warmed = prepare_predictor(candidate, capabilities, tuple(observations))
+    for name in ("_num_req_predictor", "_isl_predictor", "_osl_predictor"):
+        predictor = getattr(warmed, name)
+        assert isinstance(predictor, KalmanPredictor)
+        assert predictor.data_buffer == getattr(from_trace, name).data_buffer
+        assert len(predictor.data_buffer) >= predictor.minimum_data_points
+    assert warmed._last_observed_isl == from_trace._last_observed_isl
+
+    cold = prepare_predictor(candidate, capabilities, None)
+    assert cold._num_req_predictor.data_buffer == []
+    with pytest.raises(ValueError, match="effective warmup points"):
+        prepare_predictor(candidate, capabilities, observations[:1])
+    await planner._shutdown_runtime()
+
+
+def test_native_planner_rejects_retune_config():
+    with pytest.raises(ValueError, match="planner.retune is replay-only"):
+        _planner(
+            "disagg",
+            enable_load_scaling=False,
+            enable_throughput_scaling=False,
+            retune={
+                "interval_seconds": 600,
+                "router": {"overlap_score_credit": {"choices": [0.0, 1.0]}},
+            },
+        )
+
+
+class _FakeFpmProvider:
+    def __init__(self, age):
+        self.max_fpm_age_seconds = age
+        self.ages = []
+
+    def set_max_fpm_age_seconds(self, age):
+        self.ages.append(age)
+        self.max_fpm_age_seconds = age
+
+
+async def test_scaling_policy_is_a_runtime_field(tmp_path):
+    # SLA, throughput scaling at 180 s, load scaling off, load interval 5 s.
+    planner = sla_planner(runtime_warmup_trace_dir=str(tmp_path))
+    provider = _FakeFpmProvider(planner.config.fpm_max_age_seconds)
+    planner.environment.fpm_provider = provider
+    engine = planner._ensure_engine()
+    predictor = engine._builtins["load_predict"]
+    assert reconfiguration.SCALING_POLICY_FIELDS <= set(
+        (await planner.reconfiguration.get_config())["supported_fields"]
+    )
+
+    # Load scaling on at 10 s: the predictor is kept, the FPM window follows.
+    await planner.reconfiguration.submit(
+        request(
+            planner,
+            {"enable_load_scaling": True, "load_adjustment_interval_seconds": 10},
+        )
+    )
+    assert (await finish(planner))["state"] == "applied"
+    assert engine._builtins["load_predict"] is predictor
+    assert "load_propose" in engine._builtins
+    assert provider.ages == [30.0]
+
+    # Both scaling modes off is not a runtime configuration.
+    off = await planner.reconfiguration.handle_request(
+        {
+            "method": "PATCH",
+            "path": "config",
+            "body": request(
+                planner,
+                {"enable_load_scaling": False, "enable_throughput_scaling": False},
+            )
+            .model_copy(update={"request_id": "off", "expected_revision": 1})
+            .model_dump(),
+        }
+    )
+    assert off["status"] == 422
+    assert "At least one scaling mode must be enabled" in off["body"]["error"]
+
+    # A new throughput interval is a new predictor step: it needs a warmup.
+    second = request(
+        planner, {"throughput_adjustment_interval_seconds": 360}
+    ).model_copy(update={"request_id": "update-2", "expected_revision": 1})
+    with pytest.raises(ValueError, match="predictor replacement requires"):
+        await planner.reconfiguration.submit(second)
+    await planner.reconfiguration.submit(
+        second.model_copy(update={"warmup_trace": trace(tmp_path)})
+    )
+    await asyncio.gather(planner.reconfiguration._task, return_exceptions=True)
+    operation = planner.reconfiguration.get_operation("update-2")
+    assert operation["state"] == "applied", operation
+    assert planner.config.throughput_adjustment_interval_seconds == 360
+    plugin = engine._orchestrator.registry.get_plugin("builtin_load_predict")
+    assert plugin.execution_interval_seconds == 360.0
+    await planner._shutdown_runtime()
+
+
+def test_runtime_fpm_provider_updates_both_subscribers_in_place():
+    class Subscriber:
+        def __init__(self):
+            self.ages = []
+
+        def set_max_age(self, *, max_age_seconds):
+            self.ages.append(max_age_seconds)
+
+    provider = RuntimeFpmProvider(
+        require_prefill=True,
+        require_decode=True,
+        backend="vllm",
+        model_name=None,
+        runtime=None,
+        max_fpm_age_seconds=15.0,
+    )
+    prefill, decode = Subscriber(), Subscriber()
+    provider._prefill_fpm_sub, provider._decode_fpm_sub = prefill, decode
+
+    provider.set_max_fpm_age_seconds(30.0)
+
+    assert (prefill.ages, decode.ages) == ([30.0], [30.0])
+    # A subscriber created later starts with the new age.
+    assert provider.max_fpm_age_seconds == 30.0
+
+
+async def test_run_loop_polls_at_the_current_load_interval(monkeypatch):
+    # The loop sleeps a tenth of the load interval between tick checks; a
+    # runtime change of the interval takes effect at the next check.
+    class FutureTickEngine:
+        def initial_tick(self, start_s):
+            return ScheduledTick(at_s=start_s + 1_000.0)
+
+        async def tick(self, scheduled_tick, tick_input):
+            raise AssertionError("no tick is due")
+
+        async def shutdown(self):
+            pass
+
+    planner = _planner("agg", load_adjustment_interval_seconds=10)
+    planner._engine = FutureTickEngine()
+    sleeps = []
+
+    async def sleep(seconds):
+        sleeps.append(seconds)
+        if len(sleeps) == 1:
+            planner.config.load_adjustment_interval_seconds = 20
+        else:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr("dynamo.planner.core.base.asyncio.sleep", sleep)
+    with pytest.raises(asyncio.CancelledError):
+        await planner.run()
+    assert sleeps == [1.0, 2.0]
+
+
+def _applied(changes, warmup=None):
+    return RetuneDecision(
+        decision_id="retune-w1",
+        outcome="applied",
+        window_index=0,
+        window_start_s=0.0,
+        window_end_s=60.0,
+        as_of_s=65.0,
+        launched_at_s=65.0,
+        decided_at_s=70.0,
+        num_requests=10,
+        num_candidates=2,
+        previous=RetuneParams(),
+        chosen=RetuneParams(planner=dict(changes)),
+        baseline_score=1.0,
+        best_score=2.0,
+        planner_changes=dict(changes),
+        predictor_warmup=warmup,
+    )
+
+
+async def _apply_decisions(planner, decisions):
+    # What the live supervisor does once each decision is persisted.
+    for decision in decisions:
+        planner.retune_decision_persisted(decision)
+    await asyncio.gather(*planner._retune_apply_tasks)
+
+
+async def test_live_retune_applies_planner_changes_through_runtime_reconfiguration():
+    planner = sla_planner(enable_load_scaling=True)
+    engine = planner._ensure_engine()
+    advisory = dataclasses.replace(
+        _applied({"load_scaling_down_sensitivity": 70}), outcome="advisory"
+    )
+
+    await _apply_decisions(
+        planner, [advisory, _applied({"load_scaling_down_sensitivity": 90})]
+    )
+
+    # The advisory decision changes nothing; the applied one is a new revision.
+    assert planner.config.load_scaling_down_sensitivity == 90
+    assert planner._config_generation == 1
+    assert "load_propose" in engine._builtins
+    await planner._shutdown_runtime()
+
+
+async def test_live_retune_drops_a_planner_change_overtaken_while_preparing(
+    monkeypatch,
+):
+    # A decision needs a new predictor for 360 s; while it is prepared, a
+    # control API update activates another revision. The decision is dropped
+    # instead of installing a predictor warmed for another configuration.
+    planner = _planner("disagg", optimization_target="sla", load_predictor="constant")
+    engine = planner._ensure_engine()
+    discarded = []
+
+    class Controller:
+        def discard_planner_changes(self, changes):
+            discarded.append(dict(changes))
+
+    engine._retune = Controller()
+    real_prepare = reconfiguration.prepare_predictor
+
+    def prepare(config, capabilities, observations):
+        predictor = real_prepare(config, capabilities, observations)
+        # The control API's activation, between the two locked sections.
+        planner._config_generation += 1
+        planner.config.load_scaling_down_sensitivity = 70
+        return predictor
+
+    monkeypatch.setattr(reconfiguration, "prepare_predictor", prepare)
+    changes = {"throughput_adjustment_interval_seconds": 360}
+    warmup = tuple(TrafficObservation(360.0, 10.0, 100.0, 10.0) for _ in range(8))
+
+    await _apply_decisions(planner, [_applied(changes, warmup)])
+
+    assert planner.config.throughput_adjustment_interval_seconds == 180
+    assert planner.config.load_scaling_down_sensitivity == 70
+    assert planner._config_generation == 1
+    assert discarded == [changes]
+    engine._retune = None
+    await planner._shutdown_runtime()
+
+
+async def test_live_retune_and_the_control_api_take_turns(monkeypatch):
+    # One update prepares at a time, a control API one or a live decision's:
+    # the other is rejected instead of fitting a second predictor.
+    planner = _planner("disagg", optimization_target="sla", load_predictor="constant")
+    engine = planner._ensure_engine()
+    discarded = []
+
+    class Controller:
+        def discard_planner_changes(self, changes):
+            discarded.append(dict(changes))
+
+    engine._retune = Controller()
+    release = threading.Event()
+    real_prepare = reconfiguration.prepare_predictor
+
+    def slow_prepare(config, capabilities, observations):
+        release.wait(5)
+        return real_prepare(config, capabilities, observations)
+
+    monkeypatch.setattr(reconfiguration, "prepare_predictor", slow_prepare)
+    changes = {"throughput_adjustment_interval_seconds": 360}
+    warmup = tuple(TrafficObservation(360.0, 10.0, 100.0, 10.0) for _ in range(8))
+    planner.retune_decision_persisted(_applied(changes, warmup))
+    while planner.reconfiguration._preparation is None:
+        await asyncio.sleep(0)
+
+    # The decision prepares its predictor: a control API update waits.
+    with pytest.raises(ConfigurationConflict, match="still preparing"):
+        await planner.reconfiguration.submit(request(planner, {"ttft_ms": 250.0}))
+    release.set()
+    await asyncio.gather(*planner._retune_apply_tasks)
+    assert planner.config.throughput_adjustment_interval_seconds == 360
+    assert planner._config_generation == 1
+
+    # A control API update prepares: the decision is dropped.
+    release.clear()
+    await planner.reconfiguration.submit(
+        request(planner, {"load_predictor": "kalman"}, cold_start=True)
+    )
+    other = {"load_scaling_down_sensitivity": 70}
+    await _apply_decisions(planner, [_applied(other)])
+    assert discarded == [other]
+    release.set()
+    assert (await finish(planner))["state"] == "applied"
+    assert planner.config.load_scaling_down_sensitivity != 70
+    engine._retune = None
+    await planner._shutdown_runtime()
+
+
+async def test_live_retune_keeps_the_config_when_a_planner_change_cannot_apply():
+    planner = _planner(
+        "disagg",
+        optimization_target="sla",
+        load_predictor="kalman",
+        kalman_min_points=20,
+    )
+    engine = planner._ensure_engine()
+    discarded = []
+
+    class Controller:
+        def discard_planner_changes(self, changes):
+            discarded.append(dict(changes))
+
+    engine._retune = Controller()
+    # A new throughput interval needs a warmed predictor; one bucket is too
+    # few for a Kalman filter that needs 20.
+    changes = {"throughput_adjustment_interval_seconds": 360}
+    warmup = (TrafficObservation(360.0, 10.0, 100.0, 10.0),)
+
+    await _apply_decisions(planner, [_applied(changes, warmup)])
+
+    assert planner.config.throughput_adjustment_interval_seconds == 180
+    assert planner._config_generation == 0
+    # The controller's current point is the running configuration again.
+    assert discarded == [changes]
+    engine._retune = None
+    await planner._shutdown_runtime()
+
+
+async def test_run_loop_replans_the_pending_tick_after_an_activation(monkeypatch):
+    class Engine:
+        def __init__(self):
+            self.replans = 0
+
+        def initial_tick(self, start_s):
+            return ScheduledTick(at_s=start_s + 1_000.0)
+
+        def next_scheduled_tick(self):
+            self.replans += 1
+            return ScheduledTick(at_s=time.time() + 1_000.0)
+
+        def apply_runtime_configuration(self, candidate, fields, predictor):
+            raise AssertionError("not called")
+
+        async def tick(self, scheduled_tick, tick_input):
+            raise AssertionError("no tick is due")
+
+        async def shutdown(self):
+            pass
+
+    planner = _planner("agg", load_adjustment_interval_seconds=10)
+    engine = Engine()
+    planner._engine = engine
+    sleeps = 0
+
+    async def sleep(seconds):
+        nonlocal sleeps
+        sleeps += 1
+        if sleeps == 1:
+            # An activation between the loop's checks.
+            planner._config_generation += 1
+        elif sleeps == 3:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr("dynamo.planner.core.base.asyncio.sleep", sleep)
+    with pytest.raises(asyncio.CancelledError):
+        await planner.run()
+    # Replanned once, at the first check after the activation.
+    assert engine.replans == 1

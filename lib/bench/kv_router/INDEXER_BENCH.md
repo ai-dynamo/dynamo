@@ -66,7 +66,7 @@ within `1.10 × replay_window`.
 
 ```bash
 ROOT=$(git rev-parse --show-toplevel)
-TRACE="$ROOT/lib/kv-router/traces/mooncake_trace.jsonl"
+TRACE="$ROOT/lib/router/kv-router/traces/mooncake_trace.jsonl"
 
 mkdir -p "$(dirname "$TRACE")"
 curl -L \
@@ -158,6 +158,18 @@ print(f"runs={len(values)} mean={statistics.fmean(values):.3f} median={statistic
 PY
 ```
 
+### Resident block tracking cost
+
+To measure what `RESIDENT_BLOCKS` tracking costs the event threads, run the single
+CRTC trial with `--track-resident-blocks`, which keeps live per-rank block counters,
+and compare `achieved_block_ops_per_sec` against an untracked run. Add
+`--resident-blocks-reader-cpu <CPU>` to also read every counter in a loop from a
+thread pinned to that CPU, as selections do, so the result includes the cache-line
+traffic between event threads and readers. Keep that CPU outside the backend and
+issuer masks. The 128-core binding above uses every CPU, so take one out of the
+backend mask first, for example `--backend-cpus 4-62,69-127
+--resident-blocks-reader-cpu 63`.
+
 ### Sweep
 
 Sweep cells use the same completion-correct implementation. Each cell regenerates
@@ -187,10 +199,63 @@ The versioned Mooncake JSON reports:
   reasons.
 - `provenance`: the command line, binary path and SHA-256, trace path and
   SHA-256, and the trace, corpus, and issuer settings that shaped the replay.
+- `lower_tier`, in the lower-tier mode only (below).
 
 Do not interpret overloaded lookup latency as an iso-throughput latency result.
 At a comfortable common load, report scheduler lag, queue wait, and lookup
 service separately and require negligible queue depth and drain.
+
+### Lower-tier (KVCR host tier) mode
+
+`--num-host-blocks N` adds the host tiers a vLLM worker with KVCR publishes, and
+the router's lower tier (`LowerTierIndexers`) that indexes them. It needs
+`concurrent-radix-tree-compressed`.
+
+- **vLLM's CPU offload tier**, owned by the worker. The mocker writes each
+  computed prompt block through to a host cache of `N` blocks per worker, which
+  evicts LRU. Its copy time comes from `--kv-cache-bytes-per-token`.
+- **KVCR's DRAM tier**, owned by the worker's KVCR cache owner. Every completed
+  CPU-tier store is copied into a tier of `--kvcr-blocks` blocks per worker
+  (default `N`; `0` leaves it out), which evicts LRU, a chain's tail first. Each
+  owner projects to its worker and is a router-hint source.
+
+The run mirrors the router's `Indexer::Concurrent`:
+
+- Device events go to CRTC on the observed path. Host events go to the lower
+  tier with `enqueue_event`, as the router sends them, so a cache owner's events
+  land on the lane its digest picks. The lower tier has one lane per
+  `--num-event-workers`.
+- Every lookup is the router's: the CRTC device match first, then
+  `query_lower_tiers_with_options` seeded with it. The KV transfer chain is kept
+  when KVCR is on, as for workers that advertise router hints. Lookups run
+  concurrently with event application, with no flush.
+- Host events have no per-event completions. The run ends when the lower tier
+  has drained, so a lower tier that falls behind fails `kept_up`.
+- After the run, the lower tier's (block, owner) memberships in each domain must
+  equal the host tiers' live blocks, or the run is invalid. Its heap is the drop
+  in allocated bytes when it alone is dropped, from glibc or a preloaded
+  jemalloc.
+
+```bash
+cargo bench --package dynamo-bench --bench mooncake_bench \
+  --no-default-features --features mooncake -- \
+  "$TRACE" --num-host-blocks 65536 --kvcr-blocks 65536 \
+  --benchmark-duration-ms 12000 --result-json-output /tmp/lower-tier.json \
+  concurrent-radix-tree-compressed --num-event-workers 4
+```
+
+`lower_tier` in the result reports each host tier's events, blocks and live
+memberships against what the lower tier indexed, the lower-tier part of each
+lookup, the lookups that found blocks past the device prefix, the lower tier's
+drain, and its heap per membership. The `total_*` fields and throughputs stay
+device-only. Host offload changes the device stream too (blocks pinned during
+copies, prefixes restored from host), so compare device metrics only between
+runs with the same host settings.
+
+Not modelled: KVCR reads (onboarding from KVCR back to the GPU) and peer
+fetches, which would refresh KVCR recency; Disk/G3 tiers; the worker state
+agent's coalescing of events into chains of up to 128 blocks; and KV-aware
+placement, since sessions are partitioned across workers at random.
 
 ### Choosing a load for A/B comparisons
 

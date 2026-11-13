@@ -231,6 +231,7 @@ mod tests {
         };
 
         let response = NvCreateChatCompletionStreamResponse {
+            message_boundary: None,
             inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                 id: "test-id".to_string(),
                 choices: vec![choice],
@@ -245,6 +246,7 @@ mod tests {
             prompt_logprobs: None,
             llm_metrics: None,
             tool_call_completion: Vec::new(),
+            model_eos: Vec::new(),
         };
 
         Annotated {
@@ -274,6 +276,7 @@ mod tests {
         };
 
         let response = NvCreateChatCompletionStreamResponse {
+            message_boundary: None,
             inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                 id: "test-id".to_string(),
                 choices: vec![choice],
@@ -288,6 +291,7 @@ mod tests {
             prompt_logprobs: None,
             llm_metrics: None,
             tool_call_completion: Vec::new(),
+            model_eos: Vec::new(),
         };
 
         Annotated {
@@ -319,6 +323,7 @@ mod tests {
         };
 
         let response = NvCreateChatCompletionStreamResponse {
+            message_boundary: None,
             inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                 id: "test-id".to_string(),
                 choices: vec![choice],
@@ -333,6 +338,7 @@ mod tests {
             prompt_logprobs: None,
             llm_metrics: None,
             tool_call_completion: Vec::new(),
+            model_eos: Vec::new(),
         };
 
         Annotated {
@@ -364,6 +370,7 @@ mod tests {
         };
 
         let response = NvCreateChatCompletionStreamResponse {
+            message_boundary: None,
             inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                 id: "test-id".to_string(),
                 choices: vec![choice],
@@ -378,6 +385,7 @@ mod tests {
             prompt_logprobs: None,
             llm_metrics: None,
             tool_call_completion: Vec::new(),
+            model_eos: Vec::new(),
         };
 
         Annotated {
@@ -457,6 +465,7 @@ mod tests {
     #[tokio::test]
     async fn test_passthrough_aggregates_reasoning_content_and_tool_calls() {
         let name_chunk = dynamo_protocols::types::ChatCompletionMessageToolCallChunk {
+            custom: None,
             index: 0,
             id: Some("call_weather".to_string()),
             r#type: Some(FunctionType::Function),
@@ -466,6 +475,7 @@ mod tests {
             }),
         };
         let args_chunk = dynamo_protocols::types::ChatCompletionMessageToolCallChunk {
+            custom: None,
             index: 0,
             id: None,
             r#type: None,
@@ -520,6 +530,7 @@ mod tests {
         finish_reason: FinishReason,
     ) -> Vec<Annotated<NvCreateChatCompletionStreamResponse>> {
         let name = dynamo_protocols::types::ChatCompletionMessageToolCallChunk {
+            custom: None,
             index: 0,
             id: Some("call_weather".to_string()),
             r#type: Some(FunctionType::Function),
@@ -529,6 +540,7 @@ mod tests {
             }),
         };
         let arguments = dynamo_protocols::types::ChatCompletionMessageToolCallChunk {
+            custom: None,
             index: 0,
             id: None,
             r#type: None,
@@ -692,6 +704,7 @@ mod tests {
         // Test that metadata (id, event, comment) is preserved through passthrough
         let chunk_with_metadata = Annotated {
             data: Some(NvCreateChatCompletionStreamResponse {
+                message_boundary: None,
                 inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                     id: "test-id".to_string(),
                     choices: vec![{
@@ -723,6 +736,7 @@ mod tests {
                 prompt_logprobs: None,
                 llm_metrics: None,
                 tool_call_completion: Vec::new(),
+                model_eos: Vec::new(),
             }),
             id: Some("correlation-123".to_string()),
             event: Some("test-event".to_string()),

@@ -16,11 +16,13 @@ name = "dynamo-vllm-sidecar"
 path = "src/main.rs"
 
 [features]
-# On for the standalone binary. The Python bindings turn it off by default and
+# On for the standalone binary. The Python bindings turn them off by default and
 # forward their own opt-in `mm-routing` feature, so the default wheel stays lean.
-default = ["mm-routing"]
+default = ["mm-routing", "jemalloc"]
 # Resolve the image placeholder token for exact multimodal KV routing.
 mm-routing = ["dynamo-llm/mm-routing"]
+# jemalloc as the binary's global allocator.
+jemalloc = ["dynamo-sidecar-common/jemalloc"]
 
 [dependencies]
 dynamo-backend-common = { workspace = true }
@@ -34,6 +36,7 @@ async-trait = { workspace = true }
 base64 = "0.22"
 clap = { version = "4", features = ["derive", "env"] }
 futures = { workspace = true }
+pep440_rs = "0.7"
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
@@ -46,6 +49,7 @@ tonic-health-v14 = { workspace = true }
 vllm-proto = { workspace = true }
 
 [dev-dependencies]
+dynamo-vllm-generate = { workspace = true }
 reqwest = { workspace = true }
 dynamo-backend-common = { workspace = true, features = ["testing"] }
 tempfile = { workspace = true }

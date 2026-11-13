@@ -570,6 +570,66 @@ def test_init_kv_event_publish_uses_worker_id_override(monkeypatch):
     assert {call["kv_block_size"] for call in calls} == {32}
 
 
+@pytest.mark.parametrize("engine_owned", [False, True])
+def test_init_kv_event_publish_passes_engine_owned_mm_identity(
+    monkeypatch, engine_owned
+):
+    calls = []
+
+    class FakeKvEventPublisher:
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+
+    monkeypatch.setattr(publisher_mod, "KvEventPublisher", FakeKvEventPublisher)
+    monkeypatch.setattr(
+        publisher_mod, "sglang_has_wide_mm_pad_values", lambda: engine_owned
+    )
+    monkeypatch.setattr(publisher_mod, "get_local_ip_auto", lambda: "127.0.0.1")
+    monkeypatch.setattr(
+        publisher_mod,
+        "ZmqEventPublisher",
+        SimpleNamespace(
+            offset_endpoint_port=staticmethod(
+                lambda base_ep, dp_rank: f"tcp://*:{5557 + dp_rank}"
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        publisher_mod,
+        "format_zmq_endpoint",
+        lambda endpoint, ip_address: endpoint.replace("*", ip_address),
+    )
+    # A non-leader node skips the scheduler metrics sockets.
+    server_args = SimpleNamespace(
+        kv_events_config='{"endpoint": "tcp://*:5557"}',
+        page_size=16,
+        dp_size=4,
+        enable_dp_attention=True,
+        nnodes=2,
+        node_rank=1,
+    )
+    config = SimpleNamespace(
+        server_args=server_args,
+        dynamo_args=SimpleNamespace(
+            enable_local_indexer=True,
+            kv_state_endpoint=None,
+            use_kv_events=True,
+        ),
+    )
+    publisher = DynamoSglangPublisher(
+        engine=SimpleNamespace(),
+        config=config,
+        generate_endpoint=SimpleNamespace(),
+        component_gauges=SimpleNamespace(),
+        kv_worker_id=1234,
+    )
+
+    publisher.init_kv_event_publish()
+
+    assert len(calls) == 2
+    assert [call["engine_owned_mm_identity"] for call in calls] == [engine_owned] * 2
+
+
 def test_init_kv_event_publish_subscribes_to_every_pure_dp_replica(monkeypatch):
     calls = []
 

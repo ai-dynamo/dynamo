@@ -323,6 +323,35 @@ func TestWorkloadProgramResultOwnsReadyAndObservedGeneration(t *testing.T) {
 		assert.Equal(t, int64(8), ready.ObservedGeneration)
 	})
 
+	t.Run("active rolling update does not mask a failed workload", func(t *testing.T) {
+		t.Log("Build a crash-looping workload observation during a rolling update")
+		result := newWorkloadProgramResult(&nvidiacomv1beta1.DynamoGraphDeployment{
+			Status: nvidiacomv1beta1.DynamoGraphDeploymentStatus{
+				RollingUpdate: &nvidiacomv1beta1.RollingUpdateStatus{
+					Phase: nvidiacomv1beta1.RollingUpdatePhaseInProgress,
+				},
+			},
+		})
+		workloads := ReconcileResult{
+			State:   nvidiacomv1beta1.DGDStateFailed,
+			Reason:  reasonComponentCrashLooping,
+			Message: "Component worker is crash-looping: pod worker-a container main restarted 2 times, last exit code 1",
+		}
+
+		t.Log("Apply the workload observation to authoritative program status")
+		result.applyReconcileResult(9, workloads)
+
+		t.Log("Verify the failure owns overall state and Ready while the rollout stays in progress")
+		assert.Equal(t, nvidiacomv1beta1.DGDStateFailed, result.Status.State)
+		assert.Equal(t, nvidiacomv1beta1.RollingUpdatePhaseInProgress, result.Status.RollingUpdate.Phase)
+		assert.Equal(t, int64(9), result.Status.ObservedGeneration)
+		ready := meta.FindStatusCondition(result.Status.Conditions, "Ready")
+		require.NotNil(t, ready)
+		assert.Equal(t, metav1.ConditionFalse, ready.Status)
+		assert.Equal(t, string(reasonComponentCrashLooping), ready.Reason)
+		assert.Equal(t, string(workloads.Message), ready.Message)
+	})
+
 	t.Run("failure preserves the last successfully observed generation", func(t *testing.T) {
 		t.Log("Build status from the last successful generation")
 		result := newWorkloadProgramResult(&nvidiacomv1beta1.DynamoGraphDeployment{
@@ -466,7 +495,7 @@ func TestGroveProgram_ReconcilePreservesResultOnError(t *testing.T) {
 	result, err := program.Reconcile(context.Background(), workloadProgramRequest{DGD: dgd})
 
 	t.Log("Verify the failed shared reconciliation returns failure status without mutating request.DGD.Status")
-	require.ErrorContains(t, err, "RBAC manager not initialized")
+	require.ErrorContains(t, err, "planner ClusterRole name is required")
 	workerStatus := result.Status.Components["worker"]
 	assert.Equal(t, int32(1), workerStatus.Replicas)
 	assert.Nil(t, workerStatus.GPUsPerEngine)
@@ -562,7 +591,7 @@ func TestComponentProgram_ReconcileReturnsPartialRolloutStatusOnLaterError(t *te
 	result, err := program.Reconcile(context.Background(), workloadProgramRequest{DGD: dgd})
 
 	t.Log("Verify rollout status is returned on the later shared-input failure")
-	require.ErrorContains(t, err, "RBAC manager not initialized")
+	require.ErrorContains(t, err, "planner ClusterRole name is required")
 	require.NotNil(t, result.Status.RollingUpdate)
 	assert.Equal(t, nvidiacomv1beta1.RollingUpdatePhasePending, result.Status.RollingUpdate.Phase)
 	assert.Equal(t, nvidiacomv1beta1.DGDStateFailed, result.Status.State)
