@@ -267,7 +267,7 @@ def check(base=None):
             raise ValueError(
                 "Compatibility input inventory or bytes changed; regenerate through production controllers"
             )
-    for path in fixture_inputs("history"):
+    for path in fixture_inputs("history") + fixture_inputs("compatibility"):
         if not path.with_name("output.yaml").exists():
             raise ValueError(f"Missing golden: {path.parent}")
     latest = fixture_inputs("latest")
@@ -546,11 +546,10 @@ def regenerate(release_tag=None, candidate_sha=None, candidate_output=None):
                 destination = stage / relative
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(captured, destination)
-                if relative.parts[0] != "compatibility":
-                    write_golden(
-                        destination.with_name("output.yaml"),
-                        list(yaml.safe_load_all(captured.read_text())),
-                    )
+                write_golden(
+                    destination.with_name("output.yaml"),
+                    list(yaml.safe_load_all(captured.read_text())),
+                )
             # Latest describes the development tree; release capture never rewrites it.
             namespaces = set()
             for historical in (

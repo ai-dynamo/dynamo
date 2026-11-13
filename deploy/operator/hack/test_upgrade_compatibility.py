@@ -54,6 +54,25 @@ class CompatibilityFixtureTest(unittest.TestCase):
                     dgd["metadata"]["annotations"].get(capture.ORIGIN_ANNOTATION),
                 )
 
+    def test_every_scenario_has_a_golden_with_literal_identity(self):
+        for scenario in capture.SCENARIOS.values():
+            with self.subTest(scenario=scenario.name):
+                directory, _, objects, _ = self.fixture(scenario)
+                golden = list(
+                    yaml.safe_load_all((directory / "output.yaml").read_text())
+                )
+                self.assertEqual(
+                    sorted((o["kind"], o["metadata"]["name"]) for o in objects),
+                    sorted((o["kind"], o["metadata"]["name"]) for o in golden),
+                    "the golden covers exactly the released graph",
+                )
+                dgd = capture.dgd_of(golden)
+                annotations = dgd["metadata"]["annotations"]
+                self.assertEqual(
+                    scenario.origin, annotations.get(capture.ORIGIN_ANNOTATION)
+                )
+                self.assertNotIn("$var", annotations[capture.WORKER_HASH_ANNOTATION])
+
     def test_authored_intent_matches_the_scenario(self):
         for scenario in capture.SCENARIOS.values():
             with self.subTest(scenario=scenario.name):
