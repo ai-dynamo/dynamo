@@ -1,46 +1,54 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use dynamo_protocols::types::ResponseFormat;
 use serde_json::{Value, json};
 
 use super::{OpenAIPreprocessor, PromptReasoningPrefill};
 use crate::protocols::{
     common::{
         guided_output::{
-            GUIDED_OUTPUT_REASONING_RUNTIME_KEY, GuidedOutputCapability, GuidedOutputPlan,
-            GuidedReasoningMode,
+            GUIDED_OUTPUT_COHORT_CONFLICT_RUNTIME_KEY, GUIDED_OUTPUT_REASONING_RUNTIME_KEY,
+            GuidedOutputCapability, GuidedOutputPlan, GuidedReasoningMode,
         },
         invalid_argument_error,
         llm_backend::PreprocessedRequest,
     },
-    openai::{
-        GuidedToolConstraint, chat_completions::NvCreateChatCompletionRequest,
-        common_ext::CommonExtProvider, validate,
-    },
+    openai::{GuidedToolConstraint, chat_completions::NvCreateChatCompletionRequest, validate},
 };
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum FinalAnswerConstraint {
-    Json(Value),
-    Choice(Vec<String>),
-    Regex(String),
-    Grammar(String),
+    Json,
+    Choice,
+    Regex,
+    Grammar,
 }
 
 impl FinalAnswerConstraint {
     pub(crate) fn from_request(request: &NvCreateChatCompletionRequest) -> Option<Self> {
-        request
-            .get_guided_json()
-            .map(Self::Json)
-            .or_else(|| request.common.guided_regex.clone().map(Self::Regex))
-            .or_else(|| request.common.guided_grammar.clone().map(Self::Grammar))
+        let json = request.common.guided_json.is_some()
+            || match request.inner.response_format.as_ref() {
+                Some(ResponseFormat::JsonObject) => true,
+                Some(ResponseFormat::JsonSchema { json_schema }) => !json_schema.schema.is_null(),
+                _ => false,
+            };
+        json.then_some(Self::Json)
+            .or_else(|| request.common.guided_regex.as_ref().map(|_| Self::Regex))
+            .or_else(|| {
+                request
+                    .common
+                    .guided_grammar
+                    .as_ref()
+                    .map(|_| Self::Grammar)
+            })
             .or_else(|| {
                 request
                     .common
                     .guided_choice
-                    .clone()
+                    .as_ref()
                     .filter(|choices| !choices.is_empty())
-                    .map(Self::Choice)
+                    .map(|_| Self::Choice)
             })
     }
 }
@@ -102,7 +110,7 @@ impl OpenAIPreprocessor {
             return Ok(None);
         };
         // A forced tool call uses its own argument constraint, just as response_format does.
-        if matches!(constraint, FinalAnswerConstraint::Json(_))
+        if matches!(constraint, FinalAnswerConstraint::Json)
             && matches!(
                 request.inner.tool_choice,
                 Some(
@@ -143,7 +151,6 @@ impl OpenAIPreprocessor {
                         || prompt.unified
                         || Self::reasoning_is_mandatory(family)
                         || (parser.is_none()
-                            && family.is_none()
                             && capability
                                 .as_ref()
                                 .is_some_and(|value| value.reasoner.is_some())
@@ -154,14 +161,14 @@ impl OpenAIPreprocessor {
                                     .and_then(|value| value.reasoner.as_deref()),
                             ) != Some(false))
                         || Self::known_reasoning_enabled(
-                            parser.or(family),
+                            parser,
                             request.chat_template_args.as_ref(),
                         )
                         .unwrap_or_else(|| {
-                            parser.or(family).is_some()
+                            parser.is_some()
                                 && Self::normalize_thinking_aliases(
                                     request.chat_template_args.as_ref(),
-                                    parser.or(family),
+                                    parser,
                                 )
                                 .unwrap_or(true)
                         })
@@ -174,10 +181,20 @@ impl OpenAIPreprocessor {
                 "force_nonempty_content=true cannot be combined with a guided answer constraint and enabled reasoning",
             ));
         }
-        let native_json = matches!(constraint, FinalAnswerConstraint::Json(_))
+        let native_json = matches!(constraint, FinalAnswerConstraint::Json)
             && (installed.uses_structural_tag() || installed.frames_structured_answer());
         if native_json && !common.native_json_requires_reasoning_gate {
             return Ok(Some(GuidedOutputPlan::NativeJson));
+        }
+        if self
+            .runtime_config
+            .runtime_data
+            .get(GUIDED_OUTPUT_COHORT_CONFLICT_RUNTIME_KEY)
+            == Some(&Value::Bool(true))
+        {
+            return Err(invalid_argument_error(
+                "The selected workers cannot preserve this guided-answer reasoning policy because their guided_output_reasoning capabilities disagree. Configure matching workers before retrying.",
+            ));
         }
         let unsupported = || {
             invalid_argument_error(concat!(
@@ -277,6 +294,7 @@ impl OpenAIPreprocessor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocols::openai::common_ext::CommonExtProvider;
 
     fn request(fields: Value) -> NvCreateChatCompletionRequest {
         let mut request = json!({"model":"test", "messages":[{"role":"user","content":"test"}]});
@@ -521,6 +539,60 @@ mod tests {
     }
 
     #[test]
+    fn guided_output_tool_only_deployments_keep_direct_answers() {
+        let immediate = GuidedOutputCapability {
+            mode: GuidedReasoningMode::Immediate,
+            reasoner: None,
+            ..gate()
+        };
+        for tool in ["qwen3_coder", "kimi_k2"] {
+            for capability in [None, Some(immediate.clone())] {
+                let mut processor = processor(capability);
+                let inner = std::sync::Arc::get_mut(&mut processor).unwrap();
+                inner.tool_call_parser = Some(tool.into());
+                inner.runtime_config.reasoning_parser = None;
+                for fields in [
+                    json!({"guided_json":{"type":"object"}}),
+                    json!({"response_format":{"type":"json_schema","json_schema":{"name":"answer","schema":{"type":"object"}}}}),
+                    json!({"guided_choice":["yes","no"]}),
+                    json!({"guided_regex":"yes|no"}),
+                    json!({"guided_grammar":"root ::= \"yes\" | \"no\""}),
+                ] {
+                    let mut request = request(fields);
+                    normalize_guided_json(&mut request).unwrap();
+                    let mut common = processor
+                        .builder_with_lora(&request, None)
+                        .unwrap()
+                        .token_ids(vec![])
+                        .build()
+                        .unwrap();
+                    let result = processor.resolve_guided_output_plan(
+                        &request,
+                        &mut common,
+                        &false.into(),
+                        &GuidedToolConstraint::None,
+                    );
+                    assert_eq!(
+                        result.unwrap_or_else(|error| panic!("{tool}: {error}")),
+                        Some(GuidedOutputPlan::Direct),
+                        "{tool}"
+                    );
+                    assert!(!common.require_reasoning);
+                    assert_eq!(common.extra_args.as_ref().unwrap()["reasoning_ended"], true);
+                    assert!(
+                        common
+                            .extra_args
+                            .as_ref()
+                            .unwrap()
+                            .get("reasoning_parser_kwargs")
+                            .is_none()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn guided_output_rejects_mandatory_beam_reasoning_without_an_explicit_gate() {
         for tool_only in [false, true] {
             let mut processor = processor(None);
@@ -679,51 +751,52 @@ mod tests {
 
     #[test]
     fn guided_output_honors_engine_only_reasoning_and_direct_controls() {
-        for mode in [
-            GuidedReasoningMode::ExplicitGate,
-            GuidedReasoningMode::Unsupported,
-            GuidedReasoningMode::Immediate,
-        ] {
-            let mut capability = gate();
-            capability.mode = mode;
-            let mut processor = processor(Some(capability));
-            std::sync::Arc::get_mut(&mut processor)
-                .unwrap()
-                .runtime_config
-                .reasoning_parser = None;
-            for thinking in [None, Some(true), Some(false)] {
-                let mut request = request(json!({"guided_choice":["yes"]}));
-                request.chat_template_args = thinking.map(|value| {
-                    std::collections::HashMap::from([("enable_thinking".into(), json!(value))])
-                });
-                let mut common = processor
-                    .builder_with_lora(&request, None)
-                    .unwrap()
-                    .token_ids(vec![])
-                    .build()
-                    .unwrap();
-                let result = processor.resolve_guided_output_plan(
-                    &request,
-                    &mut common,
-                    &false.into(),
-                    &GuidedToolConstraint::None,
-                );
-                if thinking == Some(false) {
-                    assert_eq!(result.unwrap(), Some(GuidedOutputPlan::Direct));
-                    assert!(!common.require_reasoning);
-                    assert_eq!(common.extra_args.as_ref().unwrap()["reasoning_ended"], true);
-                } else if mode == GuidedReasoningMode::ExplicitGate {
-                    assert!(matches!(
-                        result.unwrap(),
-                        Some(GuidedOutputPlan::EngineGated(_))
-                    ));
-                    assert!(common.require_reasoning);
-                    assert_eq!(
-                        common.extra_args.as_ref().unwrap()["reasoning_ended"],
-                        false
+        for tool in [None, Some("qwen3_coder"), Some("kimi_k2")] {
+            for mode in [
+                GuidedReasoningMode::ExplicitGate,
+                GuidedReasoningMode::Unsupported,
+                GuidedReasoningMode::Immediate,
+            ] {
+                let mut capability = gate();
+                capability.mode = mode;
+                let mut processor = processor(Some(capability));
+                let inner = std::sync::Arc::get_mut(&mut processor).unwrap();
+                inner.runtime_config.reasoning_parser = None;
+                inner.tool_call_parser = tool.map(str::to_owned);
+                for thinking in [None, Some(true), Some(false)] {
+                    let mut request = request(json!({"guided_choice":["yes"]}));
+                    request.chat_template_args = thinking.map(|value| {
+                        std::collections::HashMap::from([("enable_thinking".into(), json!(value))])
+                    });
+                    let mut common = processor
+                        .builder_with_lora(&request, None)
+                        .unwrap()
+                        .token_ids(vec![])
+                        .build()
+                        .unwrap();
+                    let result = processor.resolve_guided_output_plan(
+                        &request,
+                        &mut common,
+                        &false.into(),
+                        &GuidedToolConstraint::None,
                     );
-                } else {
-                    assert!(result.unwrap_err().to_string().contains("cannot preserve"));
+                    if thinking == Some(false) {
+                        assert_eq!(result.unwrap(), Some(GuidedOutputPlan::Direct));
+                        assert!(!common.require_reasoning);
+                        assert_eq!(common.extra_args.as_ref().unwrap()["reasoning_ended"], true);
+                    } else if mode == GuidedReasoningMode::ExplicitGate {
+                        assert!(matches!(
+                            result.unwrap(),
+                            Some(GuidedOutputPlan::EngineGated(_))
+                        ));
+                        assert!(common.require_reasoning);
+                        assert_eq!(
+                            common.extra_args.as_ref().unwrap()["reasoning_ended"],
+                            false
+                        );
+                    } else {
+                        assert!(result.unwrap_err().to_string().contains("cannot preserve"));
+                    }
                 }
             }
         }

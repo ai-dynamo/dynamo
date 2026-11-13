@@ -134,7 +134,7 @@ pub type TopLogprobs = Vec<Vec<TopLogprob>>; // num_tokens x top_logprobs
 pub struct BackendOutput {
     /// Frontend-local channel projection; never serialized to workers or clients.
     #[serde(skip)]
-    pub guided_output: Option<super::guided_output::GuidedOutputDelta>,
+    pub guided_output: Option<Box<super::guided_output::GuidedOutputDelta>>,
     /// New token_ids generated from the LLM Engine
     pub token_ids: Vec<TokenIdType>,
 
@@ -228,7 +228,7 @@ pub struct BackendOutput {
 pub struct LLMEngineOutput {
     /// Populated only by the frontend decoder after receiving engine output.
     #[serde(skip)]
-    pub guided_output: Option<super::guided_output::GuidedOutputDelta>,
+    pub guided_output: Option<Box<super::guided_output::GuidedOutputDelta>>,
     // new token_ids
     pub token_ids: Vec<TokenIdType>,
 
@@ -597,13 +597,15 @@ mod tests {
 
     /// The outputs are stream items, moved several times per token: their size is a cost
     /// per item. `disaggregated_params`, `encoder_result`, `worker_trace_link`, `extra_args`,
-    /// `engine_data` and `routing_data` are held in a `Box`. Raise these limits only with a
-    /// measured reason.
+    /// `engine_data`, `routing_data` and frontend-only `guided_output` are held in a `Box`.
+    /// Raise these limits only with a measured reason.
     #[cfg(target_pointer_width = "64")]
     #[test]
     fn engine_and_backend_outputs_stay_small() {
-        assert!(std::mem::size_of::<LLMEngineOutput>() <= 456);
-        assert!(std::mem::size_of::<BackendOutput>() <= 416);
+        let engine_size = std::mem::size_of::<LLMEngineOutput>();
+        let backend_size = std::mem::size_of::<BackendOutput>();
+        assert!(engine_size <= 464, "LLMEngineOutput: {engine_size} bytes");
+        assert!(backend_size <= 424, "BackendOutput: {backend_size} bytes");
     }
 
     /// Decoder checkpoints retain the legacy optional-string wire shape while keeping

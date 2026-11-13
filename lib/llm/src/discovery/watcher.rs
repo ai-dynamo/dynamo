@@ -66,7 +66,10 @@ use crate::{
 use super::readiness::normalize_legacy_prefill_topology;
 use super::{
     ModelManager,
-    controller::{ControllerHost, DesiredInstance, GroupKey, GroupSpec, ModelDiscoveryController},
+    controller::{
+        CONFLICTED_GUIDED_OUTPUT_CONTRACT, ControllerHost, DesiredInstance, GroupKey, GroupSpec,
+        ModelDiscoveryController,
+    },
 };
 use crate::namespace::{NamespaceFilter, NamespacePrefixMode};
 use tokio_util::sync::CancellationToken;
@@ -463,11 +466,7 @@ impl ModelWatcher {
                  exact video routing disabled for this group"
             );
         }
-        if spec.guided_output_contract.is_none() {
-            card.runtime_config.runtime_data.remove(
-                crate::protocols::common::guided_output::GUIDED_OUTPUT_REASONING_RUNTIME_KEY,
-            );
-        }
+        prepare_guided_output_cohort(card, spec.guided_output_contract.as_deref());
         // Use per-worker-set router config if the worker provided one in its MDC,
         // otherwise fall back to the frontend-level global config. Policy selections
         // are process-local, so preserve them when the MDC supplies the base config.
@@ -1623,6 +1622,23 @@ pub(super) fn guided_output_contract_digest(card: &ModelDeploymentCard) -> Optio
     Some(blake3::hash(value.to_string().as_bytes()).to_string())
 }
 
+fn prepare_guided_output_cohort(card: &mut ModelDeploymentCard, contract: Option<&str>) {
+    use crate::protocols::common::guided_output::{
+        GUIDED_OUTPUT_COHORT_CONFLICT_RUNTIME_KEY, GUIDED_OUTPUT_REASONING_RUNTIME_KEY,
+    };
+    let runtime = &mut card.runtime_config.runtime_data;
+    runtime.remove(GUIDED_OUTPUT_COHORT_CONFLICT_RUNTIME_KEY);
+    if contract == Some(CONFLICTED_GUIDED_OUTPUT_CONTRACT) {
+        runtime.insert(
+            GUIDED_OUTPUT_COHORT_CONFLICT_RUNTIME_KEY.into(),
+            serde_json::Value::Bool(true),
+        );
+    }
+    if contract.is_none() || contract == Some(CONFLICTED_GUIDED_OUTPUT_CONTRACT) {
+        runtime.remove(GUIDED_OUTPUT_REASONING_RUNTIME_KEY);
+    }
+}
+
 fn worker_set_chat_preprocessor(
     card: &ModelDeploymentCard,
     tokenizer: crate::tokenizers::Tokenizer,
@@ -1652,6 +1668,119 @@ mod tests {
     use dynamo_runtime::pipeline::Error;
     use dynamo_runtime::{Runtime, distributed::DistributedConfig};
     use futures::StreamExt;
+
+    #[test]
+    fn guided_output_mixed_cohort_cannot_use_the_representative_reasoning_policy() {
+        use crate::protocols::{
+            common::{
+                OutputOptions, SamplingOptions, StopConditions,
+                guided_output::{GUIDED_OUTPUT_REASONING_RUNTIME_KEY, GuidedOutputPlan},
+                llm_backend::PreprocessedRequest,
+            },
+            openai::GuidedToolConstraint,
+        };
+
+        let common = || {
+            PreprocessedRequest::builder()
+                .model("test".into())
+                .token_ids(vec![])
+                .stop_conditions(StopConditions::default())
+                .sampling_options(SamplingOptions::default())
+                .output_options(OutputOptions::default())
+                .build()
+                .unwrap()
+        };
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
+        for representative_capability in [
+            serde_json::json!({"version":1,"engine":"vllm","mode":"immediate"}),
+            serde_json::json!({"version":1,"engine":"vllm","mode":"explicit_gate","request_controls":true,"reasoner":"deepseek_r1","end_token_ids":[5],"end_text":"</think>"}),
+        ] {
+            let mut card = ModelDeploymentCard::load_from_disk(&path, None).unwrap();
+            card.runtime_config.reasoning_parser = None;
+            card.runtime_config.tool_call_parser = None;
+            card.runtime_config.runtime_data.insert(
+                GUIDED_OUTPUT_REASONING_RUNTIME_KEY.into(),
+                representative_capability,
+            );
+            prepare_guided_output_cohort(&mut card, Some(CONFLICTED_GUIDED_OUTPUT_CONTRACT));
+            let processor = OpenAIPreprocessor::new(card).unwrap();
+            for thinking in [None, Some(false), Some(true)] {
+                let mut request: NvCreateChatCompletionRequest =
+                    serde_json::from_value(serde_json::json!({
+                        "model":"test","messages":[{"role":"user","content":"Answer yes."}],
+                        "guided_choice":["yes"]
+                    }))
+                    .unwrap();
+                request.chat_template_args = thinking.map(|value| {
+                    HashMap::from([("enable_thinking".into(), serde_json::json!(value))])
+                });
+                let error = processor
+                    .resolve_guided_output_plan(
+                        &request,
+                        &mut common(),
+                        &false.into(),
+                        &GuidedToolConstraint::None,
+                    )
+                    .unwrap_err();
+                assert!(error.to_string().contains("capabilities disagree"));
+
+                request.common.guided_choice = None;
+                assert_eq!(
+                    processor
+                        .resolve_guided_output_plan(
+                            &request,
+                            &mut common(),
+                            &false.into(),
+                            &GuidedToolConstraint::None,
+                        )
+                        .unwrap(),
+                    None,
+                    "ordinary chat must not be disabled"
+                );
+            }
+            let request: NvCreateChatCompletionRequest =
+                serde_json::from_value(serde_json::json!({
+                    "model":"test","messages":[{"role":"user","content":"Answer JSON."}],
+                    "response_format":{"type":"json_object"}
+                }))
+                .unwrap();
+            assert_eq!(
+                processor
+                    .resolve_guided_output_plan(
+                        &request,
+                        &mut common(),
+                        &false.into(),
+                        &GuidedToolConstraint::StructuralTag,
+                    )
+                    .unwrap(),
+                Some(GuidedOutputPlan::NativeJson),
+                "grammar-owned JSON keeps its parser"
+            );
+        }
+
+        let mut legacy = ModelDeploymentCard::load_from_disk(path, None).unwrap();
+        legacy.runtime_config.reasoning_parser = None;
+        legacy.runtime_config.tool_call_parser = None;
+        prepare_guided_output_cohort(&mut legacy, None);
+        let processor = OpenAIPreprocessor::new(legacy).unwrap();
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model":"test","messages":[{"role":"user","content":"Answer yes."}],
+            "guided_choice":["yes"]
+        }))
+        .unwrap();
+        assert_eq!(
+            processor
+                .resolve_guided_output_plan(
+                    &request,
+                    &mut common(),
+                    &false.into(),
+                    &GuidedToolConstraint::None,
+                )
+                .unwrap(),
+            Some(GuidedOutputPlan::Direct)
+        );
+    }
 
     #[test]
     fn direct_routing_gets_a_threshold_handle_that_ignores_thresholds() {

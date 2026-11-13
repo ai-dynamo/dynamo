@@ -621,7 +621,7 @@ where
                 data.guided_output = decoder
                     .guided_output
                     .as_mut()
-                    .map(GuidedOutputState::take_delta);
+                    .map(|state| Box::new(state.take_delta()));
                 if data.guided_output.is_some() && data.finish_reason.is_some() {
                     // This terminal update already flushed the choice. In particular,
                     // EOF must not replace Length/Error with a synthetic Stop.
@@ -689,7 +689,7 @@ where
                                 guided_output: decoder
                                     .guided_output
                                     .as_mut()
-                                    .map(GuidedOutputState::take_delta),
+                                    .map(|state| Box::new(state.take_delta())),
                                 finish_reason: Some(reason),
                                 stop_reason: stop,
                                 ..Default::default()

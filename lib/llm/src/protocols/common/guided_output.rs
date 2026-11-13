@@ -8,6 +8,7 @@ use std::ops::Range;
 use serde::{Deserialize, Serialize};
 
 pub(crate) const GUIDED_OUTPUT_REASONING_RUNTIME_KEY: &str = "guided_output_reasoning";
+pub(crate) const GUIDED_OUTPUT_COHORT_CONFLICT_RUNTIME_KEY: &str = "guided_output_cohort_conflict";
 
 /// Published only after the engine and its tokenizer have initialized.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]

@@ -26,6 +26,8 @@ use super::worker_inventory::{WorkerGroupObservation, WorkerGroupState};
 
 const DEFAULT_MAX_CONCURRENT_BUILDS: usize = 8;
 const RECONCILIATION_INTERVAL: Duration = Duration::from_secs(30);
+// Capability digests are hexadecimal; this frontend-only value cannot be a digest.
+pub(super) const CONFLICTED_GUIDED_OUTPUT_CONTRACT: &str = "mixed";
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
 pub(crate) struct GroupKey {
@@ -74,10 +76,12 @@ fn cohort_video_contract(members: &[DesiredInstance]) -> Option<String> {
 
 fn cohort_guided_output_contract(members: &[DesiredInstance]) -> Option<String> {
     let mut members = members.iter();
-    let agreed = members.next()?.guided_output_contract.clone()?;
-    members
-        .all(|member| member.guided_output_contract.as_deref() == Some(agreed.as_str()))
-        .then_some(agreed)
+    let agreed = members.next()?.guided_output_contract.as_deref();
+    if members.all(|member| member.guided_output_contract.as_deref() == agreed) {
+        agreed.map(str::to_owned)
+    } else {
+        Some(CONFLICTED_GUIDED_OUTPUT_CONTRACT.to_owned())
+    }
 }
 
 /// Identifies a cohort's active contracts without changing its MDC checksum.
@@ -1330,10 +1334,12 @@ fn surviving_commit(
     {
         return None;
     }
-    if let Some(contract) = guided_output_contract
+    // A conflicting pipeline rejects guided answers, so it can retain ordinary chat.
+    // A legacy pipeline may serve only workers that still have no capability.
+    if guided_output_contract != Some(CONFLICTED_GUIDED_OUTPUT_CONTRACT)
         && !surviving
             .iter()
-            .all(|member| member.guided_output_contract.as_deref() == Some(contract))
+            .all(|member| member.guided_output_contract.as_deref() == guided_output_contract)
     {
         return None;
     }
@@ -1795,7 +1801,10 @@ mod tests {
         controller.apply_added(instance(3, "same"));
         controller.start_queued_builds();
         let mixed = starts.recv().await.unwrap();
-        assert!(mixed.guided_output_contract.is_none());
+        assert_eq!(
+            mixed.guided_output_contract.as_deref(),
+            Some(CONFLICTED_GUIDED_OUTPUT_CONTRACT)
+        );
         // A retained worker changes its gate while that replacement is pending.
         // The old pipeline must immediately stop serving its obsolete boundary.
         assert!(controller.apply_added(guided_worker(1, 6)));
@@ -1807,6 +1816,60 @@ mod tests {
             host.members(&group_key()),
             BTreeSet::from([first.key, second.key])
         );
+    }
+
+    #[tokio::test]
+    async fn guided_output_missing_mixed_and_uniform_contracts_rebuild() {
+        for upgraded_id in [1, 2] {
+            let (host, mut starts) = FakeHost::new();
+            let mut controller = ModelDiscoveryController::new(host.clone());
+            controller.apply_added(instance(1, "same"));
+            controller.apply_added(instance(2, "same"));
+            controller.start_queued_builds();
+            let legacy = tokio::time::timeout(Duration::from_secs(5), starts.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(legacy.guided_output_contract.is_none());
+            host.release.add_permits(1);
+            finish_build(&mut controller).await;
+            let legacy_admissions = host.admissions.lock().unwrap()[0].clone();
+
+            // The same worker now has an engine reasoner; its old Direct pipeline is unsafe.
+            controller.apply_added(guided_worker(upgraded_id, 5));
+            assert!(host.members(&group_key()).is_empty());
+            assert!(legacy_admissions.borrow().is_empty());
+            controller.start_queued_builds();
+            let mixed = tokio::time::timeout(Duration::from_secs(5), starts.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                mixed.guided_output_contract.as_deref(),
+                Some(CONFLICTED_GUIDED_OUTPUT_CONTRACT)
+            );
+            assert_ne!(mixed.fingerprint, legacy.fingerprint);
+            host.release.add_permits(1);
+            finish_build(&mut controller).await;
+            assert_eq!(host.members(&group_key()).len(), 2);
+
+            // The mixed pipeline can retain ordinary chat until the matching gate is ready.
+            controller.apply_added(guided_worker(3 - upgraded_id, 5));
+            assert_eq!(host.members(&group_key()).len(), 2);
+            controller.start_queued_builds();
+            let agreed = tokio::time::timeout(Duration::from_secs(5), starts.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                agreed.guided_output_contract,
+                guided_worker(upgraded_id, 5).guided_output_contract
+            );
+            assert_ne!(agreed.fingerprint, mixed.fingerprint);
+            host.release.add_permits(1);
+            finish_build(&mut controller).await;
+            assert_eq!(host.members(&group_key()).len(), 2);
+        }
     }
 
     #[tokio::test]
