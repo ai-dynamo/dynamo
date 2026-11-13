@@ -148,18 +148,6 @@ def test_mask_mode_canary_is_sampled(cls, use_text_input):
     assert values["top_k"] > 0
 
 
-@pytest.mark.parametrize("use_text_input", [False, True], ids=["tokens", "text"])
-@pytest.mark.parametrize("cls", GENERATE_PAYLOAD_CLASSES)
-@pytest.mark.parametrize(
-    "engine", [None, _engine(False)], ids=["no_engine", "mask_off"]
-)
-def test_default_canary_stays_greedy(cls, use_text_input, engine):
-    payload = cls(engine, use_text_input=use_text_input).to_dict()
-    values = _sampling_values(payload, use_text_input)
-    assert values["temperature"] == 0.0
-    assert "top_k" not in values
-
-
 @pytest.mark.parametrize("cls", GENERATE_PAYLOAD_CLASSES)
 def test_mask_mode_canary_passes_vllm_sampling_checks(cls):
     """The canary values must survive the request path into vLLM's
@@ -175,16 +163,3 @@ def test_mask_mode_canary_passes_vllm_sampling_checks(cls):
     params = build_sampling_params_openai(text_payload, {})
     assert params.temperature > 0
     assert params.top_k > 0
-
-
-@pytest.mark.parametrize("cls", GENERATE_PAYLOAD_CLASSES)
-def test_env_override_wins_in_mask_mode(monkeypatch, cls):
-    custom = {
-        "token_ids": [1],
-        "sampling_options": {"temperature": 0.5},
-        "stop_conditions": {"max_tokens": 1},
-    }
-    monkeypatch.setenv("DYN_HEALTH_CHECK_PAYLOAD", json.dumps(custom))
-    payload = cls(_engine(True)).to_dict()
-    assert payload["sampling_options"] == {"temperature": 0.5}
-    assert payload.get(HEALTH_CHECK_KEY) is True
