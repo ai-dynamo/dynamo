@@ -462,6 +462,7 @@ def test_mocker_kv_event_publisher_disabled_diagnostic(
             {"planner_profile_data": PLANNER_PROFILE_DATA_DIR},
             id="kv-planner",
         ),
+        # The old mocker switch without a value: it still works and warns.
         pytest.param(
             "kv",
             {"ais_perf_model": True, "ais_system": "h200_sxm"},
@@ -1541,9 +1542,15 @@ def test_router_decisions_disagg_router_ais(
     logger.info("Starting disaggregated router prefix reuse test with router-side AIC")
 
     router_ais_config = {**_require_router_ais(), "worker_type": "prefill"}
+    # The frontend and the mockers all start with an AIS perf model value. The
+    # mockers share one config without worker_type: each fills in its own.
+    mocker_ais_config = {
+        key: value for key, value in router_ais_config.items() if key != "worker_type"
+    }
     mocker_args = {
         "speedup_ratio": SPEEDUP_RATIO,
         "block_size": BLOCK_SIZE,
+        "ais_perf_model": mocker_ais_config,
     }
 
     run_disagg_router_decisions_test(

@@ -33,7 +33,7 @@ pytestmark = [
     pytest.mark.planner,
 ]
 
-# A router section that takes the AIS load model without ``ais_perf_model`` is
+# A router section that writes the AIS load model without ``ais_perf_model`` is
 # deprecated; its warning names the replacement.
 _OLD_FORM_WARNING = r"router\.ais_perf_model: \{use: engine\}"
 
@@ -169,8 +169,7 @@ def test_public_router_validation_is_owned_by_dynamo_adapter() -> None:
         "policy": "round_robin",
         "prefill_load_model": {"type": "none"},
     }
-    with pytest.warns(FutureWarning, match=_OLD_FORM_WARNING):
-        plan = adapter.compile_recommendation({}, recommendation_context)
+    plan = adapter.compile_recommendation({}, recommendation_context)
     assert plan.fragment.choices_by_branch["agg"] == {
         "mode": ["round_robin", "kv_router"]
     }
@@ -372,17 +371,14 @@ def test_router_public_schema_rejects_internal_fields_and_supports_ranges() -> N
             {"policy": "kv_router", "mode": ["round_robin"]}, context
         )
 
-    with pytest.warns(FutureWarning, match=_OLD_FORM_WARNING):
-        plan = adapter.compile_recommendation(
-            {
-                "policy": "kv_router",
-                "temperature": {"range": {"min": 0.1, "max": 1.0}},
-                "prefill_load_scale": {
-                    "range": {"min": 0.25, "max": 32.0, "scale": "log"}
-                },
-            },
-            context,
-        )
+    plan = adapter.compile_recommendation(
+        {
+            "policy": "kv_router",
+            "temperature": {"range": {"min": 0.1, "max": 1.0}},
+            "prefill_load_scale": {"range": {"min": 0.25, "max": 32.0, "scale": "log"}},
+        },
+        context,
+    )
     assert plan.fragment.float_ranges_by_branch["agg"] == {
         "temperature": (0.1, 1.0),
         "prefill_load_scale": (0.25, 32.0),
@@ -416,17 +412,14 @@ def test_mixed_router_policy_preserves_continuous_and_log_ranges() -> None:
         optimization={},
         sweep=_sweep_context(),
     )
-    with pytest.warns(FutureWarning, match=_OLD_FORM_WARNING):
-        plan = adapter.compile_recommendation(
-            {
-                "policy": {"choices": ["round_robin", "kv_router"]},
-                "temperature": {"range": {"min": 0.1, "max": 1.0}},
-                "prefill_load_scale": {
-                    "range": {"min": 0.25, "max": 32.0, "scale": "log"}
-                },
-            },
-            context,
-        )
+    plan = adapter.compile_recommendation(
+        {
+            "policy": {"choices": ["round_robin", "kv_router"]},
+            "temperature": {"range": {"min": 0.1, "max": 1.0}},
+            "prefill_load_scale": {"range": {"min": 0.25, "max": 32.0, "scale": "log"}},
+        },
+        context,
+    )
 
     conditional = plan.fragment.conditional_by_branch["agg"][0]
     assert conditional.float_ranges == {
@@ -569,20 +562,19 @@ def test_router_rejects_explicit_null_numeric_knobs(
 
 
 def test_router_stepped_float_range_includes_exact_endpoint() -> None:
-    with pytest.warns(FutureWarning, match=_OLD_FORM_WARNING):
-        plan = create_provider().compile_recommendation(
-            {
-                "policy": "kv_router",
-                "temperature": {"range": {"min": 0.1, "max": 0.3, "step": 0.1}},
-            },
-            RecommendationAdapterContext(
-                engine={},
-                traffic={},
-                evaluation={},
-                optimization={},
-                sweep=_sweep_context(),
-            ),
-        )
+    plan = create_provider().compile_recommendation(
+        {
+            "policy": "kv_router",
+            "temperature": {"range": {"min": 0.1, "max": 0.3, "step": 0.1}},
+        },
+        RecommendationAdapterContext(
+            engine={},
+            traffic={},
+            evaluation={},
+            optimization={},
+            sweep=_sweep_context(),
+        ),
+    )
 
     assert plan.fragment.choices_by_branch["agg"]["temperature"] == [
         0.1,
@@ -637,8 +629,7 @@ def test_both_kv_router_plan_shapes_expand_knob_domains_identically() -> None:
         "prefill_load_scale": {"range": {"min": 0, "max": 1, "step": 0.3}},
         "temperature": {"range": {"min": 0.1, "max": 1.0}},
     }
-    with pytest.warns(FutureWarning, match=_OLD_FORM_WARNING):
-        flat = adapter.compile_recommendation({"policy": "kv_router", **knobs}, context)
+    flat = adapter.compile_recommendation({"policy": "kv_router", **knobs}, context)
     mixed = adapter.compile_recommendation(
         {"policy": {"choices": ["round_robin", "kv_router"]}, **knobs}, context
     )

@@ -31,11 +31,12 @@ from aisimulate.sweeper.replay import (
     RunnerCapabilities,
 )
 
-from dynamo.llm import AisPerfConfig, KvRouterConfig
+from dynamo.llm import KvRouterConfig
 from dynamo.mocker.config import normalize_mocker_config, performance_config
 from dynamo.planner.core.types import TrafficObservation
 from dynamo.replay.api import (
     TelemetryOptions,
+    planner_config_already_warned,
     run_synthetic_trace_replay,
     run_trace_replay,
 )
@@ -150,19 +151,17 @@ class DynamoReplayRunner:
         if ais_perf_config_from_engine:
             deployment = spec.backend_deployment
             role = "aggregated" if deployment.deployment_mode == "agg" else "prefill"
-            config = performance_config(self._engine_args(deployment, role))
-            if config is None:
+            ais_perf_config = performance_config(self._engine_args(deployment, role))
+            if ais_perf_config is None:
                 raise ValueError(
                     "router.ais_perf_model: {use: engine} needs an AIS perf model "
                     f"on the {role} engine; it has none"
                 )
-            ais_perf_config = AisPerfConfig(config=config)
         planner_warmup = self._planner_warmup(spec.runtime_hooks)
         common: dict[str, Any] = {
             "router_mode": router_mode,
             "router_config": router_config,
-            # The internal keyword: the public one is deprecated and warns.
-            "_native_ais_perf_config": ais_perf_config,
+            "router_ais_perf_model": ais_perf_config,
             "arrival_speedup_ratio": self._arrival_speedup_ratio(spec),
             "replay_concurrency": self._effective_in_flight_cap(spec),
             "planner_config": planner_config,
@@ -194,11 +193,14 @@ class DynamoReplayRunner:
             if not self._is_trace(spec):
                 raise ValueError("conversation_affinity requires an agentic trace")
             common["conversation_affinity"] = conversation_affinity
-        if self._is_trace(spec):
-            report = self._run_trace(spec, common, execution_model=execution_model)
-        else:
-            common.update(self._synthetic_kwargs(spec))
-            report = self._run_synthetic(spec, common)
+        # A hook with the deprecated keys carries the config of a running
+        # Planner (a retune candidate), and that Planner warned about it.
+        with planner_config_already_warned():
+            if self._is_trace(spec):
+                report = self._run_trace(spec, common, execution_model=execution_model)
+            else:
+                common.update(self._synthetic_kwargs(spec))
+                report = self._run_synthetic(spec, common)
 
         metrics, metadata = self._normalize_report(report, output_requirements)
         trace_format = spec.workload.get("trace_format")
@@ -251,14 +253,14 @@ class DynamoReplayRunner:
         dict[str, JSONValue] | None,
         str,
         KvRouterConfig | None,
-        AisPerfConfig | None,
+        dict[str, JSONValue] | None,
         dict[str, JSONValue] | None,
         bool,
     ]:
         planner_config: dict[str, JSONValue] | None = None
         router_mode = "round_robin"
         router_config: KvRouterConfig | None = None
-        ais_perf_config: AisPerfConfig | None = None
+        ais_perf_config: dict[str, JSONValue] | None = None
         conversation_affinity = None
         # Set when the router takes the perf model of the engine it routes to.
         ais_perf_config_from_engine = False
@@ -310,7 +312,7 @@ class DynamoReplayRunner:
                             "Dynamo Router hook config has both ais_perf_config "
                             "and ais_perf_config_from_engine"
                         )
-                    ais_perf_config = AisPerfConfig(config=raw_ais)
+                    ais_perf_config = raw_ais
                 continue
             raise ValueError(
                 f"unsupported Dynamo runtime hook "

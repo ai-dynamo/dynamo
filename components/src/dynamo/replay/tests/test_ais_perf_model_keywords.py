@@ -22,12 +22,7 @@ pytest.importorskip(
 
 from aisimulate_core.sdk import ForwardPassPerfModelConfig
 
-from dynamo.common.ais_perf_model import (
-    load_document,
-    resolve_entry,
-    router_perf_config,
-    timing_model,
-)
+from dynamo.common.ais_perf_model import router_perf_config, timing_model
 from dynamo.llm import AisPerfConfig, KvRouterConfig
 from dynamo.replay import ReplayReport, api
 from dynamo.router.tests.ais_perf_model_helpers import (
@@ -62,6 +57,19 @@ _WALL_CLOCK_FIELDS = (
 _OLD_KEYWORD_WARNING = (
     "ais_perf_config= is deprecated and will be removed in v1.9; use "
     "router_ais_perf_model=."
+)
+# A planner config that writes ais_perf_model with the deprecated roles key.
+_OLD_PLANNER_CONFIG = {
+    "mode": "agg",
+    "ais_perf_model": {"roles": {"aggregated": CONFIG}},
+}
+_OLD_PLANNER_CONFIG_WARNING = (
+    "ais_perf_model.roles is deprecated and will be removed in v1.9; use "
+    "ais_perf_model with one perf model config or a list of configs (one per "
+    "worker_type)."
+)
+_AIS_LOAD_MODEL_ERROR = (
+    "router_prefill_load_model='ais' requires router_ais_perf_model="
 )
 # What the perf model config class says about a key it does not take.
 _UNKNOWN_KEY_ERROR = (
@@ -154,13 +162,6 @@ def _disaggregated_engine_args():
         "prefill_engine_args": {"engine": {"worker_type": "prefill"}},
         "decode_engine_args": {"engine": {"worker_type": "decode"}},
     }
-
-
-def _resolved(value, worker_type):
-    """The config the engines of one worker type get from a written value."""
-    return resolve_entry(
-        load_document(value).select(worker_type), worker_type=worker_type
-    )
 
 
 @pytest.mark.unit
@@ -263,9 +264,6 @@ def test_router_keyword_builds_native_config(replay, native_calls, tmp_path):
     assert len(native_calls) == len(written_forms)
     for written, call in zip(written_forms, native_calls):
         assert isinstance(call["ais_perf_config"], AisPerfConfig)
-        assert call["ais_perf_config"].to_dict() == router_perf_config(
-            written, "aggregated"
-        )
         assert call["ais_perf_config"].to_dict() == normalized(AGGREGATED_ENTRY)
 
 
@@ -320,9 +318,7 @@ def test_router_keyword_reaches_retune_inputs(planner_replay_calls):
 @pytest.mark.unit
 @_BOTH_FUNCTIONS
 def test_engine_keyword_creates_aggregated_engine_args(replay, native_calls):
-    expected = {
-        "engine": {"timing_model": timing_model(_resolved(CONFIG, "aggregated"))}
-    }
+    expected = {"engine": {"timing_model": timing_model(AGGREGATED_ENTRY)}}
 
     with pytest.raises(_NativeCallRecorded):
         replay(ais_perf_model=CONFIG)
@@ -361,20 +357,25 @@ def test_engine_keyword_sets_timing_model_on_given_args(replay, native_calls):
     aggregated = {
         "engine": {
             "num_gpu_blocks": 1024,
-            "timing_model": timing_model(_resolved(CONFIG, "aggregated")),
+            "timing_model": timing_model(AGGREGATED_ENTRY),
         },
         "planner_profile_data": None,
     }
     assert from_mapping["extra_engine_args"] == aggregated
     assert from_text["extra_engine_args"] == aggregated
-    for call, written in (
-        (from_list, [PREFILL_ENTRY, _DECODE_ENTRY]),
-        (from_one_config, CONFIG),
+    # A list gives each worker type its entry; one config gets the worker type.
+    for call, configs in (
+        (from_list, {"prefill": PREFILL_ENTRY, "decode": _DECODE_ENTRY}),
+        (
+            from_one_config,
+            {
+                "prefill": {**CONFIG, "worker_type": "prefill"},
+                "decode": {**CONFIG, "worker_type": "decode"},
+            },
+        ),
     ):
         assert call["extra_engine_args"] is None
-        for worker_type in ("prefill", "decode"):
-            config = _resolved(written, worker_type)
-            assert config["worker_type"] == worker_type
+        for worker_type, config in configs.items():
             assert call[f"{worker_type}_engine_args"] == {
                 "engine": {
                     "worker_type": worker_type,
@@ -392,9 +393,7 @@ def test_engine_keyword_reaches_planner_adapter_and_retune_inputs(
     planner_replay_calls,
 ):
     adapter_calls, native_calls = planner_replay_calls
-    expected = {
-        "engine": {"timing_model": timing_model(_resolved(CONFIG, "aggregated"))}
-    }
+    expected = {"engine": {"timing_model": timing_model(AGGREGATED_ENTRY)}}
 
     with pytest.raises(_NativeCallRecorded):
         api.run_trace_replay(
@@ -457,23 +456,8 @@ def test_old_router_keyword_with_engine_keyword(replay, native_calls):
     (call,) = native_calls
     assert call["ais_perf_config"] is perf_config
     assert call["extra_engine_args"] == {
-        "engine": {"timing_model": timing_model(_resolved(CONFIG, "aggregated"))}
+        "engine": {"timing_model": timing_model(AGGREGATED_ENTRY)}
     }
-
-
-@pytest.mark.unit
-@_BOTH_FUNCTIONS
-def test_internal_keyword_passes_object_without_warning(replay, native_calls):
-    perf_config = AisPerfConfig(config=AGGREGATED_ENTRY)
-
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")
-        with pytest.raises(_NativeCallRecorded):
-            replay(_native_ais_perf_config=perf_config, **_kv_router())
-
-    (call,) = native_calls
-    assert call["ais_perf_config"] is perf_config
-    assert "_native_ais_perf_config" not in call
 
 
 @pytest.mark.unit
@@ -490,27 +474,6 @@ def test_old_and_new_router_keywords_error(replay, native_calls):
             router_ais_perf_model=CONFIG,
             **_kv_router(),
         )
-
-    assert native_calls == []
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize("public", ["ais_perf_config", "router_ais_perf_model"])
-@_BOTH_FUNCTIONS
-def test_internal_keyword_with_public_router_keyword_error(
-    replay, public, native_calls
-):
-    perf_config = AisPerfConfig(config=AGGREGATED_ENTRY)
-    value = perf_config if public == "ais_perf_config" else CONFIG
-
-    with pytest.raises(
-        ValueError,
-        match=re.escape(
-            "_native_ais_perf_config is internal; it cannot be combined with "
-            "ais_perf_config= or router_ais_perf_model="
-        ),
-    ):
-        replay(_native_ais_perf_config=perf_config, **{public: value}, **_kv_router())
 
     assert native_calls == []
 
@@ -573,8 +536,71 @@ def test_router_keyword_requires_kv_router_and_router_config(replay, native_call
         "router_prefill_load_model='ais'$",
     ):
         replay(router_ais_perf_model=CONFIG, router_mode="kv_router")
+    # A router config that does not select the load model is the same error.
+    with pytest.raises(
+        ValueError,
+        match="^router_ais_perf_model= requires router_config with "
+        "router_prefill_load_model='ais'$",
+    ):
+        replay(
+            router_ais_perf_model=CONFIG,
+            router_mode="kv_router",
+            router_config=KvRouterConfig(),
+        )
 
     assert native_calls == []
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("load_model", ["ais", "aic"])
+@_BOTH_FUNCTIONS
+def test_ais_load_model_requires_router_keyword(replay, load_model, native_calls):
+    router = {
+        "router_mode": "kv_router",
+        "router_config": KvRouterConfig(router_prefill_load_model=load_model),
+    }
+
+    # The engine keyword does not configure the router.
+    for keywords in ({}, {"ais_perf_model": CONFIG}):
+        with pytest.raises(ValueError) as raised:
+            replay(**keywords, **router)
+        assert type(raised.value) is ValueError
+        assert str(raised.value) == _AIS_LOAD_MODEL_ERROR
+
+    assert native_calls == []
+
+
+@pytest.mark.unit
+@_BOTH_FUNCTIONS
+def test_load_model_checks_left_to_native_replay(replay, native_calls):
+    perf_config = AisPerfConfig(config=AGGREGATED_ENTRY)
+    ais_router_config = KvRouterConfig(router_prefill_load_model="ais")
+
+    # Round robin does not read the router config.
+    with pytest.raises(_NativeCallRecorded):
+        replay(router_config=ais_router_config)
+    # A KV router without the load model needs no perf model.
+    with pytest.raises(_NativeCallRecorded):
+        replay(router_mode="kv_router", router_config=KvRouterConfig())
+    # The old keyword keeps the native errors, which name it.
+    with pytest.warns(FutureWarning, match=r"ais_perf_config= is deprecated"):
+        with pytest.raises(_NativeCallRecorded):
+            replay(
+                ais_perf_config=perf_config,
+                router_mode="kv_router",
+                router_config=KvRouterConfig(),
+            )
+    # A router config of another type is for the native replay to reject.
+    other_type = {"router_prefill_load_model": "none"}
+    with pytest.raises(_NativeCallRecorded):
+        replay(
+            router_ais_perf_model=CONFIG,
+            router_mode="kv_router",
+            router_config=other_type,
+        )
+
+    assert len(native_calls) == 4
+    assert native_calls[3]["router_config"] is other_type
 
 
 @pytest.mark.unit
@@ -774,7 +800,7 @@ def test_engine_keyword_with_engine_args_of_one_role(
     assert call[f"{given}_engine_args"] == {
         "engine": {
             "worker_type": given,
-            "timing_model": timing_model(_resolved(CONFIG, given)),
+            "timing_model": timing_model({**CONFIG, "worker_type": given}),
         }
     }
     assert call[f"{not_given}_engine_args"] is None
@@ -956,6 +982,108 @@ def test_old_keyword_warning_names_caller(replay, native_calls):
     (record,) = records
     assert str(record.message) == _OLD_KEYWORD_WARNING
     assert record.filename == __file__
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("as_text", [False, True], ids=["dict", "json"])
+@_BOTH_FUNCTIONS
+def test_old_planner_config_warns_once_and_names_caller(
+    replay, as_text, planner_replay_calls
+):
+    adapter_calls, native_calls = planner_replay_calls
+    planner_config = json.dumps(_OLD_PLANNER_CONFIG) if as_text else _OLD_PLANNER_CONFIG
+
+    with pytest.warns(FutureWarning) as records:
+        with pytest.raises(_NativeCallRecorded):
+            replay(planner_config=planner_config)
+
+    (record,) = records
+    assert str(record.message) == _OLD_PLANNER_CONFIG_WARNING
+    assert record.filename == __file__
+    # The planner adapter gets the config that was read, with the old keys.
+    (adapter_call,) = adapter_calls
+    assert set(adapter_call["planner_config_arg"].ais_perf_model.roles) == {
+        "aggregated"
+    }
+    assert len(native_calls) == 1
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "planner_config",
+    [
+        {"mode": "agg"},
+        {"mode": "agg", "ais_perf_model": CONFIG},
+        {"mode": "agg", "ais_perf_model": [AGGREGATED_ENTRY]},
+    ],
+    ids=["no perf model", "one config", "list"],
+)
+@_BOTH_FUNCTIONS
+def test_planner_config_without_old_keys_does_not_warn(
+    replay, planner_config, planner_replay_calls
+):
+    adapter_calls, _ = planner_replay_calls
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        with pytest.raises(_NativeCallRecorded):
+            replay(planner_config=planner_config)
+
+    (adapter_call,) = adapter_calls
+    assert adapter_call["planner_config_arg"].mode == "agg"
+
+
+@pytest.mark.unit
+@_BOTH_FUNCTIONS
+def test_old_planner_config_error_comes_before_warning(replay, native_calls):
+    roles = {"prefill": CONFIG, "decode": CONFIG}
+    disaggregated = {"mode": "disagg", "ais_perf_model": {"roles": roles}}
+    unknown_key = {
+        "mode": "agg",
+        "ais_perf_model": {"roles": {"aggregated": {**CONFIG, "not_a_field": 1}}},
+    }
+
+    with warnings.catch_warnings(record=True) as records:
+        warnings.simplefilter("always")
+        # The planner adapter rejects a disaggregated planner without the
+        # engine args of both roles.
+        with pytest.raises(ValueError, match="requires prefill and decode engine"):
+            replay(planner_config=disaggregated)
+        with pytest.raises(ValueError, match="invalid AIS config for aggregated"):
+            replay(planner_config=unknown_key)
+
+    # Loading the planner can show warnings of other packages.
+    assert [record for record in records if record.category is FutureWarning] == []
+    assert native_calls == []
+
+
+@pytest.mark.unit
+@_BOTH_FUNCTIONS
+def test_planner_config_already_warned_silences_only_that_warning(
+    replay, planner_replay_calls
+):
+    perf_config = AisPerfConfig(config=AGGREGATED_ENTRY)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        with api.planner_config_already_warned():
+            with pytest.raises(_NativeCallRecorded):
+                replay(planner_config=_OLD_PLANNER_CONFIG)
+            # The warning of the deprecated keyword is another one.
+            with pytest.raises(FutureWarning, match="ais_perf_config= is deprecated"):
+                replay(
+                    planner_config=_OLD_PLANNER_CONFIG,
+                    ais_perf_config=perf_config,
+                    **_kv_router(),
+                )
+        # Outside, the config warns again, also after an error inside.
+        with pytest.raises(FutureWarning, match="ais_perf_model.roles is deprecated"):
+            replay(planner_config=_OLD_PLANNER_CONFIG)
+        with pytest.raises(RuntimeError, match="inside"):
+            with api.planner_config_already_warned():
+                raise RuntimeError("inside")
+        with pytest.raises(FutureWarning, match="ais_perf_model.roles is deprecated"):
+            replay(planner_config=_OLD_PLANNER_CONFIG)
 
 
 @pytest.mark.integration

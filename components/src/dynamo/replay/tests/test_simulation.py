@@ -7,7 +7,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
+import warnings
 from dataclasses import replace
 
 import pytest
@@ -1318,6 +1320,79 @@ def test_router_hook_mapping_reaches_native_synthetic_call(
     )
 
 
+@pytest.mark.parametrize(
+    "workload", [_TRACE_WORKLOAD, _SYNTHETIC_WORKLOAD], ids=["trace", "synthetic"]
+)
+def test_router_hook_mapping_is_passed_as_router_keyword(monkeypatch, workload) -> None:
+    seen: dict = {}
+
+    def fake_replay(**kwargs):
+        seen.update(kwargs)
+        return _report({"completed_requests": 1})
+
+    monkeypatch.setattr(simulation, "run_trace_replay", fake_replay)
+    monkeypatch.setattr(simulation, "run_synthetic_trace_replay", fake_replay)
+    replay = _replay_with_router_hook(
+        _agg_deployment(), workload, ais_perf_config=_AIS_PERF_CONFIG
+    )
+
+    simulation.DynamoReplayRunnerFactory().create(0).run(replay)
+
+    # The mapping goes to the replay as written: the replay reads it.
+    assert seen["router_ais_perf_model"] == _AIS_PERF_CONFIG
+    assert "ais_perf_config" not in seen
+
+
+@pytest.mark.parametrize(
+    "workload", [_TRACE_WORKLOAD, _SYNTHETIC_WORKLOAD], ids=["trace", "synthetic"]
+)
+def test_planner_hook_with_old_perf_model_keys_does_not_warn(
+    monkeypatch, native_replay_kwargs, workload
+) -> None:
+    adapter_calls: list[dict] = []
+
+    @contextlib.contextmanager
+    def adapter(**kwargs):
+        adapter_calls.append(kwargs)
+        yield None
+
+    monkeypatch.setattr(replay_api, "_planner_replay_adapter", lambda: adapter)
+    perf_config = {key: _AIS_PERF_CONFIG[key] for key in ("backend", "system", "model")}
+    # A retune candidate replays the config of the Planner that runs the
+    # sweep, and that Planner warned when it read the config.
+    planner_config = {
+        "mode": "agg",
+        "ais_perf_model": {"roles": {"aggregated": perf_config}},
+    }
+    replay = ReplaySpec(
+        backend_deployment=_agg_deployment(),
+        workload=workload,
+        goal={"target": "throughput"},
+        adapters={
+            "dynamo.planner": AdapterReplaySpec(
+                runtime_hooks=(
+                    RuntimeHookSpec(
+                        provider="dynamo.planner",
+                        kind="scaling_policy",
+                        api_version=1,
+                        config={"planner_config": planner_config},
+                    ),
+                )
+            )
+        },
+    )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        with pytest.raises(_NativeCallRecorded):
+            simulation.DynamoReplayRunnerFactory().create(0).run(replay)
+
+    (adapter_call,) = adapter_calls
+    assert set(adapter_call["planner_config_arg"].ais_perf_model.roles) == {
+        "aggregated"
+    }
+
+
 def _ais_timing_model(worker_type: str) -> dict:
     return {
         "type": "external",
@@ -1382,14 +1457,16 @@ def test_use_engine_marker_fills_router_config_from_engine(
     with pytest.raises(_NativeCallRecorded):
         simulation.DynamoReplayRunnerFactory().create(0).run(replay)
 
+    router_config = native_replay_kwargs["ais_perf_config"].to_dict()
+    # The identity the deployment writes for the engine of that role.
+    for key in ("backend", "system", "model"):
+        assert router_config[key] == _AIS_PERF_CONFIG[key]
+    assert router_config["worker_type"] == role
+    # The rest is the engine's config too.
     engine_config = performance_config(
         simulation.DynamoReplayRunner._engine_args(deployment, role)
     )
-    assert engine_config["worker_type"] == role
-    assert (
-        native_replay_kwargs["ais_perf_config"].to_dict()
-        == AisPerfConfig(config=engine_config).to_dict()
-    )
+    assert router_config == AisPerfConfig(config=engine_config).to_dict()
 
 
 @pytest.mark.parametrize(

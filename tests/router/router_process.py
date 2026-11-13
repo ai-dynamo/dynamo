@@ -110,7 +110,7 @@ class FrontendRouterProcess(ManagedProcess):
                     "--router-track-prefill-tokens",
                     "--router-prefill-load-model",
                     "ais",
-                    "--ais-perf-config",
+                    "--ais-perf-model",
                     json.dumps(router_ais_config),
                 ]
             )

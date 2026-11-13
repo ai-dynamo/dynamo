@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Mapping
 from copy import deepcopy
 
@@ -19,6 +18,7 @@ from aisimulate.sweeper.provider import (
     AdapterSearchPlan,
     CandidateContext,
     ConditionalSearchSpace,
+    InfeasibleCandidate,
     JSONValue,
     RuntimeHookSpec,
     SearchSpaceFragment,
@@ -85,6 +85,17 @@ def _may_select_ais(public: RouterRecommendationConfig) -> bool:
     return "kv_router" in policies and "ais" in load_models
 
 
+def _writes_load_model_type(public: RouterRecommendationConfig) -> bool:
+    """Return whether the section writes ``prefill_load_model.type``.
+
+    A section that does not write it searches the default load models.
+    """
+    return (
+        "prefill_load_model" in public.model_fields_set
+        and "type" in public.prefill_load_model.model_fields_set
+    )
+
+
 def _float_selection(selection: Mapping[str, JSONValue], name: str) -> float:
     value = selection[name]
     if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -101,8 +112,8 @@ def _ais_perf_config_from_candidate(
 ) -> dict[str, JSONValue] | None:
     """Return the router perf config of a candidate with the AIS load model.
 
-    With ``engine_only`` the config must come from the candidate's engine: a
-    candidate whose engine has no AIS perf model is an error.
+    With ``engine_only`` the config must come from the candidate's engine:
+    the result is ``None`` when that engine has no AIS perf model.
     """
     if not enabled:
         return None
@@ -133,11 +144,7 @@ def _ais_perf_config_from_candidate(
                 }
             )
     if engine_only:
-        worker_type = "aggregated" if role == "agg" else role
-        raise ValueError(
-            "router.ais_perf_model: {use: engine} needs an AIS perf model on the "
-            f"{worker_type} engine; it has none"
-        )
+        return None
     # Fixed/polynomial worker timing does not create a worker estimator. The
     # Router may still select an AIS load estimate: use the same Core-owned
     # role request builder, retaining policies, roots and estimator controls.
@@ -241,12 +248,6 @@ class DynamoRouterSweepConfigProvider:
     # recommendation compiles a prediction for each candidate it selects.
     _warned_old_router_section = False
 
-    def __init__(self) -> None:
-        # Router perf configs of a written router.ais_perf_model, by written
-        # value and worker type: the check before a search and every candidate
-        # of that search need the same one.
-        self._written_perf_configs: dict[tuple[str, str], dict[str, JSONValue]] = {}
-
     def compile_prediction(
         self,
         config: Mapping[str, JSONValue],
@@ -318,29 +319,21 @@ class DynamoRouterSweepConfigProvider:
     ) -> AdapterSearchPlan:
         public = RouterRecommendationConfig.model_validate(config)
         plan = self._compile_public_search(public, context.sweep)
-        if (
+        # Only a section that writes the load model type wrote the old form.
+        # Without it ais is a default choice, and those candidates read the
+        # perf model of their engine.
+        old_form = (
             public.ais_perf_model is None
+            and _writes_load_model_type(public)
             and _may_select_ais(public)
-            and not self._warned_old_router_section
-        ):
+        )
+        if old_form and not self._warned_old_router_section:
             # Set after the call, as in compile_prediction.
             Deprecated(_NEW_ROUTER_SECTION, remove_in=REMOVE_IN).warn(
                 _OLD_ROUTER_SECTION, stacklevel=2
             )
             self._warned_old_router_section = True
         return plan
-
-    def _cached_written_perf_config(
-        self, written: JSONValue, worker_type: str
-    ) -> dict[str, JSONValue]:
-        """Return a copy of the router perf config of a written ``router.ais_perf_model``.
-
-        A written value is resolved once per worker type.
-        """
-        key = (json.dumps(written, sort_keys=True), worker_type)
-        if key not in self._written_perf_configs:
-            self._written_perf_configs[key] = router_perf_config(written, worker_type)
-        return deepcopy(self._written_perf_configs[key])
 
     def _compile_public_search(
         self,
@@ -372,6 +365,15 @@ class DynamoRouterSweepConfigProvider:
                     "core_search_space": deepcopy(dict(context.core_search_space)),
                 },
             )
+        # A section that writes neither the key nor the load model type
+        # searches ais as a default choice, as if it wrote {use: engine}.
+        by_default = written is None and not _writes_load_model_type(public)
+        if by_default:
+            written = USE_ENGINE_PERF_MODEL
+        # A written value is read here, once per searched worker type, and
+        # the plan keeps what was read: its candidates stay the same when a
+        # file the value names changes later.
+        perf_configs: dict[str, JSONValue] = {}
         if written is not None and written != USE_ENGINE_PERF_MODEL:
             # A value this read rejects or a searched mode without an entry is
             # an error before the search: otherwise each candidate of that mode
@@ -380,9 +382,13 @@ class DynamoRouterSweepConfigProvider:
             # without a candidate. A value that only the perf model rejects
             # still fails each candidate that reads it.
             for mode in modes:
-                self._cached_written_perf_config(
-                    written, "prefill" if mode == "disagg" else "aggregated"
-                )
+                worker_type = "prefill" if mode == "disagg" else "aggregated"
+                perf_configs[worker_type] = router_perf_config(written, worker_type)
+        perf_model_state: dict[str, JSONValue] = {
+            "ais_perf_model": deepcopy(written),
+            "ais_perf_model_by_default": by_default,
+            "ais_perf_configs": perf_configs,
+        }
 
         # One expansion for both KV-router plan shapes: finite domains become
         # choices, continuous ones go to the sampler's float ranges.
@@ -418,7 +424,7 @@ class DynamoRouterSweepConfigProvider:
                 state={
                     "public_schema": True,
                     "conditional_public": True,
-                    "ais_perf_model": deepcopy(written),
+                    **perf_model_state,
                     "core_search_space": deepcopy(dict(context.core_search_space)),
                 },
                 potential_runtime_hooks=(_HOOK,),
@@ -437,7 +443,7 @@ class DynamoRouterSweepConfigProvider:
             ),
             state={
                 "public_schema": True,
-                "ais_perf_model": deepcopy(written),
+                **perf_model_state,
                 "core_search_space": deepcopy(dict(context.core_search_space)),
             },
             potential_runtime_hooks=(_HOOK,),
@@ -541,7 +547,8 @@ class DynamoRouterSweepConfigProvider:
             concrete_config = {"mode": mode, **router_config}
         uses_ais = public_schema and load_model == "ais"
         # Absent in a plan made by generate_search_space, None when the
-        # router section does not write the key: both keep the old sources.
+        # router section writes the ais load model without the key: both keep
+        # the old sources.
         written = plan.state.get("ais_perf_model")
         ais_perf_config: dict[str, JSONValue] | None
         if not uses_ais or written is None:
@@ -552,6 +559,11 @@ class DynamoRouterSweepConfigProvider:
             )
         else:
             concrete_config["ais_perf_model"] = deepcopy(written)
+            worker_type = (
+                "prefill"
+                if str(context.sample["deployment_mode"]) == "disagg"
+                else "aggregated"
+            )
             if written == USE_ENGINE_PERF_MODEL:
                 ais_perf_config = _ais_perf_config_from_candidate(
                     context,
@@ -559,13 +571,20 @@ class DynamoRouterSweepConfigProvider:
                     core_search_space=plan.state.get("core_search_space", {}),
                     engine_only=True,
                 )
+                if ais_perf_config is None:
+                    if plan.state.get("ais_perf_model_by_default"):
+                        # The section did not ask for the ais load model, so
+                        # the search goes on without this candidate.
+                        raise InfeasibleCandidate(
+                            "router.prefill_load_model.type: ais needs an AIS "
+                            f"perf model on the {worker_type} engine; it has none"
+                        )
+                    raise ValueError(
+                        "router.ais_perf_model: {use: engine} needs an AIS perf "
+                        f"model on the {worker_type} engine; it has none"
+                    )
             else:
-                worker_type = (
-                    "prefill"
-                    if str(context.sample["deployment_mode"]) == "disagg"
-                    else "aggregated"
-                )
-                ais_perf_config = self._cached_written_perf_config(written, worker_type)
+                ais_perf_config = deepcopy(plan.state["ais_perf_configs"][worker_type])
         hook_config: dict[str, JSONValue] = {
             "router_mode": mode,
             "router_config": router_config,

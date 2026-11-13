@@ -249,14 +249,11 @@ class SqueezeEvolveOrchestrator:
         tiers: Optional[list[Tier]] = None,
         runtime: Any = None,
         kv_router_config: Any = None,
-        ais_perf_config: Any = None,
         ais_perf_configs: Optional[Sequence[Any]] = None,
         default_block_size: int = 64,
         transports: Optional[list[Any]] = None,
     ) -> None:
         self._cfg = cfg
-        if ais_perf_config is not None and ais_perf_configs is not None:
-            raise ValueError("ais_perf_config and ais_perf_configs cannot be combined")
         # tiers[0] = cheapest, tiers[-1] = most expensive (Loop 0 generator).
         if transports is not None:
             if not transports:
@@ -265,10 +262,9 @@ class SqueezeEvolveOrchestrator:
         else:
             if not tiers:
                 raise ValueError("tiers required when transports are not injected")
-            # ais_perf_configs has one item per tier; ais_perf_config is one
-            # config that every tier shares.
+            # ais_perf_configs has one item per tier.
             if ais_perf_configs is None:
-                ais_perf_configs = [ais_perf_config] * len(tiers)
+                ais_perf_configs = [None] * len(tiers)
             elif len(ais_perf_configs) != len(tiers):
                 raise ValueError(
                     f"ais_perf_configs has {len(ais_perf_configs)} items for "

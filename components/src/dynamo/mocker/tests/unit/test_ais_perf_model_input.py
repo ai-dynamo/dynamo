@@ -7,6 +7,7 @@ import json
 import sys
 import warnings
 
+import numpy as np
 import pytest
 import yaml
 
@@ -122,6 +123,14 @@ def engine_args_file(tmp_path, engine):
     path = tmp_path / "engine.json"
     path.write_text(json.dumps({"engine": engine}))
     return str(path)
+
+
+def value_argv(source, monkeypatch):
+    """Return the arguments that give ``ENTRY`` through the flag or the variable."""
+    if source == ENV_VAR:
+        monkeypatch.setenv(ENV_VAR, json.dumps(ENTRY))
+        return []
+    return [source, json.dumps(ENTRY)]
 
 
 @pytest.mark.parametrize("mode, worker_type", WORKER_TYPES)
@@ -300,9 +309,10 @@ def test_value_as_inline_json(mode, worker_type):
     args = parse_args(
         ["--ais-perf-model", json.dumps(ENTRY), "--disaggregation-mode", mode]
     )
-    assert args.ais_perf_model is False
+    assert args.ais_perf_model_without_value is False
     assert args.ais_perf_model_value == json.dumps(ENTRY)
     assert args.ais_perf_model_source == "--ais-perf-model"
+    assert not hasattr(args, "ais_perf_model")
     assert not hasattr(args, "ais_perf_model_occurrences")
 
     result = CONFIG.build_mocker_engine_args(args)
@@ -323,7 +333,7 @@ def test_value_as_file(mode, worker_type, tmp_path):
 def test_value_from_env(monkeypatch):
     monkeypatch.setenv(ENV_VAR, json.dumps(ENTRY))
     args = parse_args([])
-    assert args.ais_perf_model is False
+    assert args.ais_perf_model_without_value is False
     assert args.ais_perf_model_value == json.dumps(ENTRY)
     assert args.ais_perf_model_source == ENV_VAR
     assert_perf_config(
@@ -375,17 +385,33 @@ def test_nextn_flag_fills_entry():
         CONFIG.build_mocker_engine_args(args)
 
 
-def test_value_with_planner_profile_data_is_rejected(tmp_path):
-    args = parse_args(
-        [
-            "--ais-perf-model",
-            json.dumps(ENTRY),
-            "--planner-profile-data",
-            str(tmp_path / "profile.npz"),
-        ]
+@pytest.mark.parametrize("source", ["--ais-perf-model", ENV_VAR])
+def test_value_with_planner_profile_data_is_rejected(
+    source, tmp_path, monkeypatch, capsys
+):
+    profile = ["--planner-profile-data", str(tmp_path / "profile.npz")]
+    assert (
+        parser_error([*value_argv(source, monkeypatch), *profile], capsys)
+        == f"{source} cannot be combined with --planner-profile-data"
     )
-    with pytest.raises(ValueError, match=f"^{PLANNER_DATA_CONFLICT}$"):
-        CONFIG.build_mocker_engine_args(args)
+
+
+@pytest.mark.parametrize("source", ["--ais-perf-model", ENV_VAR])
+def test_value_with_planner_profile_data_and_engine_args_file_is_accepted(
+    source, tmp_path, monkeypatch
+):
+    # With an engine args file the profile data is not read, so nothing conflicts.
+    argv = [
+        *value_argv(source, monkeypatch),
+        "--planner-profile-data",
+        str(tmp_path / "profile.npz"),
+        "--extra-engine-args",
+        engine_args_file(tmp_path, {"worker_type": "aggregated"}),
+    ]
+    assert_perf_config(
+        CONFIG.load_mocker_engine_args(parse_args(argv)),
+        {**ENTRY, "worker_type": "aggregated"},
+    )
 
 
 def test_missing_worker_type_entry_reports_loader_text(tmp_path):
@@ -549,7 +575,7 @@ def test_env_value_with_old_flat_flag_is_rejected(monkeypatch, capsys):
     )
 
 
-def test_hand_built_namespace_with_old_and_new_is_rejected():
+def test_hand_built_namespace_with_value_builds_config():
     # The attributes a caller without the parser has to set.
     base = {
         "is_prefill_worker": False,
@@ -557,46 +583,34 @@ def test_hand_built_namespace_with_old_and_new_is_rejected():
         "engine_type": "vllm",
     }
     value = json.dumps(ENTRY)
+    expected = {**ENTRY, "worker_type": "aggregated"}
 
-    args = argparse.Namespace(**base, ais_perf_model_value=value, ais_backend="vllm")
-    with pytest.raises(
-        ValueError, match="^--ais-perf-model cannot be combined with --ais-backend$"
-    ):
-        CONFIG.build_mocker_engine_args(args)
+    args = argparse.Namespace(**base, ais_perf_model_value=value)
+    assert_perf_config(CONFIG.build_mocker_engine_args(args), expected)
 
+    # Old inputs next to a value are an error of parse_args, not of the builder.
     args = argparse.Namespace(
         **base,
         ais_perf_model_value=value,
-        ais_perf_model_source=ENV_VAR,
-        ais_perf_model=True,
-        ais_tp_size=2,
+        ais_perf_model_without_value=True,
+        ais_backend="sglang",
     )
-    with pytest.raises(
-        ValueError,
-        match=f"^{ENV_VAR} cannot be combined with --ais-perf-model without a value "
-        "and --ais-tp-size$",
-    ):
-        CONFIG.build_mocker_engine_args(args)
-
-    args = argparse.Namespace(**base, ais_perf_model_value=value)
-    assert_perf_config(
-        CONFIG.build_mocker_engine_args(args), {**ENTRY, "worker_type": "aggregated"}
-    )
+    assert_perf_config(CONFIG.build_mocker_engine_args(args), expected)
 
 
-def test_hand_built_namespace_without_new_attributes_builds_as_before():
+def test_hand_built_namespace_without_value_builds_as_before():
     args = argparse.Namespace(
         is_prefill_worker=False,
         is_decode_worker=False,
         engine_type="vllm",
-        ais_perf_model=False,
+        ais_perf_model_without_value=False,
     )
     assert CONFIG.performance_config(CONFIG.build_mocker_engine_args(args)) is None
 
 
 def test_bare_then_option_is_the_switch():
     args = parse_old(["--ais-perf-model", "--ais-backend", "vllm"])
-    assert args.ais_perf_model is True
+    assert args.ais_perf_model_without_value is True
     assert args.ais_perf_model_value is None
     assert args.ais_perf_model_source is None
     assert args.ais_backend == "vllm"
@@ -614,13 +628,13 @@ def test_bare_then_option_is_the_switch():
 def test_value_forms(argv, value):
     args = parse_args(argv)
     assert args.ais_perf_model_value == value
-    assert args.ais_perf_model is False
+    assert args.ais_perf_model_without_value is False
 
 
 def test_empty_typed_value_is_a_wrong_value():
     args = parse_args(["--ais-perf-model="])
     assert args.ais_perf_model_value == ""
-    assert args.ais_perf_model is False
+    assert args.ais_perf_model_without_value is False
     with pytest.raises(ValueError, match="^ais_perf_model: the value is empty;"):
         CONFIG.build_mocker_engine_args(args)
 
@@ -632,7 +646,7 @@ def test_aic_spelling_takes_no_value(capsys):
     )
 
     args = parse_old(["--aic-perf-model"])
-    assert args.ais_perf_model is True
+    assert args.ais_perf_model_without_value is True
     assert args.ais_perf_model_value is None
 
 
@@ -663,7 +677,7 @@ def test_bare_with_env_is_rejected(monkeypatch, capsys):
 def test_last_value_wins():
     args = parse_args(["--ais-perf-model", "a.yaml", "--ais-perf-model", "b.yaml"])
     assert args.ais_perf_model_value == "b.yaml"
-    assert args.ais_perf_model is False
+    assert args.ais_perf_model_without_value is False
 
 
 def test_abbreviation_reaches_the_same_option(capsys):
@@ -679,7 +693,7 @@ def test_abbreviation_reaches_the_same_option(capsys):
 
 def test_last_token_bare_switch():
     args = parse_old(["--model-path", MODEL, "--ais-perf-model"])
-    assert args.ais_perf_model is True
+    assert args.ais_perf_model_without_value is True
     assert args.ais_perf_model_value is None
 
 
@@ -804,11 +818,12 @@ def test_relative_paths_inside_file_start_at_file_folder(tmp_path, monkeypatch):
     assert CONFIG.performance_config(result)["systems_paths"] == [str(conf / "sys")]
 
 
-async def run_worker(monkeypatch, argv):
+async def run_worker(monkeypatch, argv, fetched=None):
     """Run the mocker's entry coroutine on ``argv`` up to the worker launch.
 
     Returns the engine config of every launch. The model lookup needs a
-    network and the launch a runtime, so both are replaced.
+    network and the launch a runtime, so both are replaced. Each model the
+    entry looks up is appended to ``fetched`` when it is given.
     """
     # The CLI module sets this process default on import; keep it test-scoped.
     monkeypatch.setenv("DYN_COMPUTE_THREADS", "0")
@@ -816,6 +831,8 @@ async def run_worker(monkeypatch, argv):
     launched = []
 
     async def prefetch_model(model):
+        if fetched is not None:
+            fetched.append(model)
         return model
 
     async def launch_workers(_args, config):
@@ -874,3 +891,36 @@ async def test_worker_entry_takes_value_without_warning(monkeypatch):
 
     assert len(launched) == 1
     assert_perf_config(launched[0], {**ENTRIES["decode"], "worker_type": "decode"})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["--ais-perf-model", ENV_VAR])
+async def test_worker_entry_rejects_planner_profile_data_before_model_lookup(
+    source, tmp_path, monkeypatch, capsys
+):
+    # Profile data the mocker takes as it is, so only the combination is wrong.
+    profile = tmp_path / "profile.npz"
+    np.savez(
+        profile,
+        prefill_isl=np.array([1.0, 100.0]),
+        prefill_ttft_ms=np.array([100.0, 100.0]),
+        decode_active_kv_tokens=np.array([1.0, 100.0]),
+        decode_context_length=np.array([1.0, 100.0]),
+        decode_itl=np.array([[200.0, 200.0], [200.0, 200.0]]),
+    )
+    argv = [
+        *value_argv(source, monkeypatch),
+        "--model-path",
+        MODEL,
+        "--planner-profile-data",
+        str(profile),
+    ]
+    fetched = []
+
+    with pytest.raises(SystemExit) as error:
+        await run_worker(monkeypatch, argv, fetched)
+
+    assert error.value.code == 2
+    message = capsys.readouterr().err.rsplit(": error: ", 1)[1].strip()
+    assert message == f"{source} cannot be combined with --planner-profile-data"
+    assert fetched == []

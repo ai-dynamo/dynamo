@@ -6,7 +6,6 @@
 import argparse
 import json
 import os
-from collections.abc import Sequence
 from pathlib import Path
 
 import yaml
@@ -137,19 +136,14 @@ class AisPerfConfigBase(ConfigBase):
         return value
 
     def validate_ais_perf_inputs(
-        self,
-        *,
-        replacement: str = "--ais-perf-model",
-        other_new_inputs: Sequence[str] = (),
-        stacklevel: int = 3,
+        self, *, replacement: str = "--ais-perf-model", stacklevel: int = 3
     ) -> None:
         """Check which AIS perf model inputs are given together.
 
-        ``other_new_inputs`` names new inputs the caller found outside this
-        group. Old inputs get one deprecation warning that names
-        ``replacement``; ``stacklevel=3`` is the caller of the ``validate()``
-        that calls this method. No value is read here: ``ais_perf_kwargs()``
-        does that.
+        ``replacement`` is what the component reads instead of the old inputs;
+        the one deprecation warning for old inputs names it. ``stacklevel=3``
+        is the caller of the ``validate()`` that calls this method. No value
+        is read here: ``ais_perf_kwargs()`` does that.
         """
         ais = getattr(self, "router_prefill_load_model", None) == "ais"
         value, name = self.new_ais_perf_input()
@@ -168,21 +162,16 @@ class AisPerfConfigBase(ConfigBase):
                     "--router-prefill-load-worker-type requires "
                     "--router-prefill-load-model=ais"
                 )
-            if other_new_inputs:
-                raise ValueError(
-                    f"{other_new_inputs[0]} requires --router-prefill-load-model=ais"
-                )
             # The two environment variables are ignored here, so that processes
             # with and without the AIS load model can share one environment.
         elif old:
-            if value is not None or other_new_inputs:
-                new = name if value is not None else other_new_inputs[0]
-                raise ValueError(f"{new} cannot be combined with {join_names(old)}")
+            if value is not None:
+                raise ValueError(f"{name} cannot be combined with {join_names(old)}")
             if self.router_prefill_load_worker_type is not None:
                 raise ValueError(
-                    "--router-prefill-load-worker-type requires --ais-perf-model"
+                    f"--router-prefill-load-worker-type requires {replacement}"
                 )
-        elif value is not None or other_new_inputs:
+        elif value is not None:
             self.router_worker_type()
         # Last statement: every error above is raised before the warning.
         if old:

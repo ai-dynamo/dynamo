@@ -24,7 +24,11 @@ from aisimulate.config_adapter import (
     PredictionAdapterContext,
     RecommendationAdapterContext,
 )
-from aisimulate.sweeper.provider import CandidateContext, SweepContext
+from aisimulate.sweeper.provider import (
+    CandidateContext,
+    InfeasibleCandidate,
+    SweepContext,
+)
 from aisimulate.sweeper.replay import BackendDeploymentSpec
 
 from dynamo.router.simulation import create_provider
@@ -68,6 +72,16 @@ _NO_ENGINE_PERF_MODEL = (
     "router.ais_perf_model: {{use: engine}} needs an AIS perf model on the "
     "{worker_type} engine; it has none"
 )
+# Router sections that write no load model type: the search takes the default
+# load models, none and ais.
+_DEFAULT_LOAD_MODELS = [
+    pytest.param({}, id="empty"),
+    pytest.param({"policy": "kv_router"}, id="kv_router"),
+    pytest.param(
+        {"policy": "kv_router", "prefill_load_model": {}}, id="empty load model"
+    ),
+]
+_FIXED_TIMING = {"type": "fixed", "prefill_ms": 1.0, "decode_ms": 1.0}
 
 
 def _prediction_context(mode: str = "aggregated") -> PredictionAdapterContext:
@@ -279,6 +293,41 @@ def test_recommend_written_config_is_resolved_once_per_role(search, tmp_path):
     )
 
 
+def test_recommend_reads_written_value_again_for_each_search(tmp_path):
+    template = tmp_path / "template.json"
+    template.write_text(json.dumps(AGGREGATED_ENTRY))
+    section = {
+        **_AIS,
+        **_KNOB_CHOICES,
+        "ais_perf_model": {"from": str(template)},
+    }
+    context = _recommendation_context("agg")
+    provider = create_provider()
+
+    first_plan = provider.compile_recommendation(section, context)
+    template.write_text(json.dumps({**AGGREGATED_ENTRY, "system": "another_system"}))
+    second_plan = provider.compile_recommendation(section, context)
+
+    def candidate_config(plan):
+        result = provider.materialize_candidate(
+            deepcopy(plan), _selection(), _candidate()
+        )
+        return _hook_config(result)["ais_perf_config"]
+
+    # Each search has what it read; a later search does not change an
+    # earlier plan.
+    assert candidate_config(second_plan) == normalized(
+        {**AGGREGATED_ENTRY, "system": "another_system"}
+    )
+    assert candidate_config(first_plan) == normalized(AGGREGATED_ENTRY)
+
+    # The check before a search reads the file again too.
+    template.unlink()
+    with pytest.raises(ValueError):
+        provider.compile_recommendation(section, context)
+    assert candidate_config(first_plan) == normalized(AGGREGATED_ENTRY)
+
+
 def test_recommend_candidate_without_ais_ignores_key():
     provider = create_provider()
     plan = provider.compile_recommendation(
@@ -345,9 +394,28 @@ def test_recommend_written_value_is_checked_before_search(written, text):
 
 
 @pytest.mark.parametrize(
-    "written", [_USE_ENGINE, CONFIG, [PREFILL_ENTRY, AGGREGATED_ENTRY]]
+    ("written", "perf_configs"),
+    [
+        pytest.param(_USE_ENGINE, {}, id="use engine"),
+        pytest.param(
+            CONFIG,
+            {
+                "aggregated": normalized(AGGREGATED_ENTRY),
+                "prefill": normalized({**CONFIG, "worker_type": "prefill"}),
+            },
+            id="one config",
+        ),
+        pytest.param(
+            [PREFILL_ENTRY, AGGREGATED_ENTRY],
+            {
+                "aggregated": normalized(AGGREGATED_ENTRY),
+                "prefill": normalized(PREFILL_ENTRY),
+            },
+            id="list",
+        ),
+    ],
 )
-def test_plan_state_carries_written_value(written):
+def test_plan_state_carries_written_value_and_its_configs(written, perf_configs):
     provider = create_provider()
     context = _recommendation_context()
 
@@ -367,10 +435,14 @@ def test_plan_state_carries_written_value(written):
 
     # Only a search with the AIS load model may write the key.
     assert round_robin_only.state["ais_perf_model"] is None
+    assert "ais_perf_configs" not in round_robin_only.state
     assert mixed.state["conditional_public"] is True
     for plan in (mixed, kv_router_only):
         assert plan.state["ais_perf_model"] == written
         assert plan.state["ais_perf_model"] is not written
+        assert plan.state["ais_perf_model_by_default"] is False
+        # One config for each searched worker type, read when the plan is made.
+        assert plan.state["ais_perf_configs"] == perf_configs
     for plan in (round_robin_only, mixed, kv_router_only):
         assert json.loads(json.dumps(plan.state)) == plan.state
 
@@ -536,12 +608,100 @@ def test_recommend_use_engine_without_engine_perf_model_error(mode, worker_type)
 
     with pytest.raises(ValueError, match=f"^{text}$"):
         provider.materialize_replay(plan, _selection(), _candidate(mode))
-    with pytest.raises(ValueError, match=f"^{text}$"):
+    with pytest.raises(ValueError, match=f"^{text}$") as raised:
         provider.materialize_replay(
             plan,
             _selection(),
             _candidate(mode, **{f"{role}_timing_model": {"type": "polynomial"}}),
         )
+    # The section asked for the engine's perf model, so this is not a
+    # candidate the search may skip.
+    assert type(raised.value) is ValueError
+
+
+@pytest.mark.parametrize("section", _DEFAULT_LOAD_MODELS)
+def test_recommend_default_load_models_read_engine_perf_model(section):
+    provider = create_provider()
+    context = _recommendation_context()
+    estimator = {**AGGREGATED_ENTRY, "systems_paths": ["/first"]}
+    timing = {
+        "type": "external",
+        "provider": "ais",
+        "config": {**AGGREGATED_ENTRY, **_CAPACITY},
+    }
+    candidates = [
+        _candidate(forward_pass_estimators={"agg": {"config": estimator}}),
+        _candidate(agg_timing_model=timing),
+    ]
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        plan = provider.compile_recommendation({**section, **_KNOB_CHOICES}, context)
+        with_ais = [
+            provider.materialize_candidate(deepcopy(plan), _selection(), candidate)
+            for candidate in candidates
+        ]
+        without_load_model = provider.materialize_candidate(
+            deepcopy(plan), _selection("none"), _candidate()
+        )
+        # A recommendation compiles a prediction for the candidate it selects.
+        predicted = provider.compile_prediction(
+            with_ais[0].config, _prediction_context()
+        )
+    with pytest.warns(FutureWarning):
+        written_plan = provider.compile_recommendation(
+            {**_AIS, **_KNOB_CHOICES}, context
+        )
+
+    assert plan.state["ais_perf_model"] == _USE_ENGINE
+    assert plan.state["ais_perf_model_by_default"] is True
+    from_estimator, from_timing = with_ais
+    assert _hook_config(from_estimator)["ais_perf_config"] == estimator
+    assert _hook_config(from_timing)["ais_perf_config"] == AGGREGATED_ENTRY
+    for result, candidate in zip(with_ais, candidates):
+        # The candidate says where its router perf model comes from.
+        assert result.config == {**_AIS, **_KNOBS, "ais_perf_model": _USE_ENGINE}
+        # The same config as from a section that writes type: ais.
+        written = provider.materialize_candidate(
+            deepcopy(written_plan), _selection(), candidate
+        )
+        assert _hook_config(result) == _hook_config(written)
+    assert _hook_config(without_load_model)["ais_perf_config"] is None
+    assert without_load_model.config == {
+        "policy": "kv_router",
+        "prefill_load_model": {"type": "none"},
+        **_KNOBS,
+    }
+    assert _hook_config(predicted)["ais_perf_config_from_engine"] is True
+
+
+@pytest.mark.parametrize(
+    ("mode", "worker_type"), [("agg", "aggregated"), ("disagg", "prefill")]
+)
+@pytest.mark.parametrize("section", _DEFAULT_LOAD_MODELS)
+def test_recommend_default_load_models_skip_ais_without_engine_perf_model(
+    section, mode, worker_type
+):
+    provider = create_provider()
+    plan = provider.compile_recommendation(
+        {**section, **_KNOB_CHOICES}, _recommendation_context()
+    )
+    role = "prefill" if mode == "disagg" else "agg"
+    text = (
+        "router.prefill_load_model.type: ais needs an AIS perf model on the "
+        f"{worker_type} engine; it has none"
+    )
+
+    for timing_model in (_FIXED_TIMING, {"type": "polynomial"}):
+        candidate = _candidate(mode, **{f"{role}_timing_model": timing_model})
+        # Infeasible, not failed: the search goes on with the other candidates.
+        with pytest.raises(InfeasibleCandidate) as raised:
+            provider.materialize_replay(deepcopy(plan), _selection(), candidate)
+        assert str(raised.value) == text
+        without_load_model = provider.materialize_replay(
+            deepcopy(plan), _selection("none"), candidate
+        )
+        assert _hook_config(without_load_model)["ais_perf_config"] is None
 
 
 def test_written_list_without_router_entry_error():
@@ -725,13 +885,16 @@ def test_recommend_without_key_warns_once_per_provider():
     assert record.filename == __file__
 
     with pytest.warns(FutureWarning) as records:
-        # No load model written: the default choices include ais.
-        create_provider().compile_recommendation({"policy": "kv_router"}, context)
+        # ais written as one of the choices is the old form too.
+        create_provider().compile_recommendation(_AIS_AMONG_CHOICES, context)
     (record,) = records
     assert str(record.message) == _OLD_FORM_WARNING
 
     with warnings.catch_warnings():
         warnings.simplefilter("error")
+        # No load model type written: ais is only among the default choices.
+        create_provider().compile_recommendation({"policy": "kv_router"}, context)
+        create_provider().compile_recommendation({}, context)
         create_provider().compile_recommendation(
             {**_AIS, "ais_perf_model": _USE_ENGINE}, context
         )

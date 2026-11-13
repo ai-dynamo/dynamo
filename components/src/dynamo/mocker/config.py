@@ -17,7 +17,6 @@ from dynamo.common.ais_perf_model import (
     set_timing_model,
 )
 from dynamo.common.configuration.groups.ais_perf_args import parse_ais_perf_config
-from dynamo.common.configuration.utils import join_names
 from dynamo.common.utils.topology import apply_topology_config
 from dynamo.llm import ModelRuntimeConfig
 
@@ -80,7 +79,7 @@ def old_ais_perf_inputs(args: argparse.Namespace) -> list[str]:
     that ``args`` does not have counts as not given.
     """
     names = []
-    if getattr(args, "ais_perf_model", None):
+    if getattr(args, "ais_perf_model_without_value", None):
         names.append("--ais-perf-model without a value")
     for attribute, name in (
         ("ais_perf_config", "--ais-perf-config"),
@@ -175,24 +174,18 @@ def build_mocker_engine_args(args: argparse.Namespace) -> dict:
     }
     value = getattr(args, "ais_perf_model_value", None)
     if value is not None:
-        old = old_ais_perf_inputs(args)
-        if old:
-            raise ValueError(
-                f"{_ais_perf_model_source(args)} cannot be combined with "
-                f"{join_names(old)}"
-            )
         nextn = getattr(args, "ais_nextn", None)
         canonical = engine_perf_config(
             value, worker_type, fill=None if nextn is None else {"nextn": nextn}
         )
     elif canonical is not None:
-        if args.ais_perf_model or flat:
+        if args.ais_perf_model_without_value or flat:
             raise ValueError(
                 "--ais-perf-config cannot be combined with flat AIS/AIC identity flags"
             )
         canonical = parse_ais_perf_config(canonical)
         canonical.setdefault("worker_type", worker_type)
-    elif args.ais_perf_model:
+    elif args.ais_perf_model_without_value:
         canonical = {
             "model": args.model_path,
             "backend": args.engine_type,

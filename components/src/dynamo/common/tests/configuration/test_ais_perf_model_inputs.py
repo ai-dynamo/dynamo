@@ -1,7 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""AIS perf model inputs of the frontend, the routers and squeeze_evolve."""
+"""AIS perf model inputs of the frontend, the routers and squeeze_evolve.
+
+They share one argument group, so each rule is checked once, through the
+frontend parser. Two tests run in every component: a new value builds the
+config, and old inputs warn once.
+"""
 
 import argparse
 import json
@@ -48,7 +53,6 @@ OLD_FLAT_ENV = {
 }
 OLD_PERF_CONFIG = json.dumps({**IDENTITY, "worker_type": "prefill"})
 ENDPOINT = ["--endpoint", "dynamo.prefill.generate"]
-ONE_TIER = json.dumps([{"endpoint": "dynamo.small.generate", "model": MODEL}])
 
 # The names a warning lists for OLD_FLAT and OLD_FLAT_ENV, with their verb.
 OLD_FLAT_ARE = "--ais-backend, --ais-system and --ais-model-path are"
@@ -78,16 +82,23 @@ def _thunderagent_router(args):
     return ThunderAgentRouterConfig.from_cli_args(parser.parse_args([*ENDPOINT, *args]))
 
 
-def _squeeze_evolve(args):
+def _squeeze_evolve(args, ais_perf_model=None):
+    """Parse with one tier; ``ais_perf_model`` is written into that tier."""
+    tier = {"endpoint": "dynamo.small.generate", "model": MODEL}
+    if ais_perf_model is not None:
+        tier["ais_perf_model"] = ais_perf_model
     parser = argparse.ArgumentParser()
     SqueezeEvolveArgGroup().add_arguments(parser)
     return SqueezeEvolveRunConfig.from_cli_args(
-        parser.parse_args(["--tiers", ONE_TIER, "--model-name", "squeeze/test", *args])
+        parser.parse_args(
+            ["--tiers", json.dumps([tier]), "--model-name", "squeeze/test", *args]
+        )
     )
 
 
 # Each entry parses the arguments with the component's own parser and returns
-# the config before validate() ran.
+# the config before validate() ran. Only the two tests that check how a
+# component is wired to the shared group run in every component.
 COMPONENTS = {
     "frontend": _frontend,
     "router": _router,
@@ -101,22 +112,17 @@ REPLACEMENT = {
     "frontend": "--ais-perf-model",
     "router": "--ais-perf-model",
     "thunderagent_router": "--ais-perf-model",
-    "squeeze_evolve": (
-        "ais_perf_model in each --tiers entry (or --ais-perf-model with one tier)"
-    ),
+    "squeeze_evolve": "ais_perf_model in each --tiers entry",
 }
 
 
-def _warning_text(component, names):
-    """Return the warning of ``component``; ``names`` ends with ``is`` or ``are``."""
-    return (
-        f"{names} deprecated and will be removed in v1.9; "
-        f"use {REPLACEMENT[component]}."
-    )
+def _warning_text(names, replacement="--ais-perf-model"):
+    """Return the warning; ``names`` ends with ``is`` or ``are``."""
+    return f"{names} deprecated and will be removed in v1.9; use {replacement}."
 
 
-def _warns(component, names):
-    return pytest.warns(FutureWarning, match=exactly(_warning_text(component, names)))
+def _warns(names):
+    return pytest.warns(FutureWarning, match=exactly(_warning_text(names)))
 
 
 def _one(**keys):
@@ -138,7 +144,7 @@ NEW = ["--ais-perf-model", _one(worker_type="aggregated")]
 
 
 def test_router_old_perf_config_builds_same_config():
-    with _warns("router", "--ais-perf-config is"):
+    with _warns("--ais-perf-config is"):
         config = parse_router_args(
             [*ENDPOINT, *AIS, "--ais-perf-config", OLD_PERF_CONFIG]
         )
@@ -146,7 +152,6 @@ def test_router_old_perf_config_builds_same_config():
     assert config.ais_perf_kwargs() == expected(worker_type="prefill")
 
 
-@every_component
 @pytest.mark.parametrize(
     ("flag", "names", "keys"),
     [
@@ -165,20 +170,17 @@ def test_router_old_perf_config_builds_same_config():
         ),
     ],
 )
-def test_old_flat_flags_build_same_config_in_every_component(
-    component, flag, names, keys
-):
-    config = COMPONENTS[component]([*AIS, *OLD_FLAT, *flag])
+def test_old_flat_flags_build_same_config(flag, names, keys):
+    config = _frontend([*AIS, *OLD_FLAT, *flag])
 
-    with _warns(component, names):
+    with _warns(names):
         config.validate()
 
     assert config.ais_perf_kwargs() == expected(**keys)
 
 
-@every_component
-def test_old_perf_config_without_ais_load_model_is_rejected(component):
-    config = COMPONENTS[component]([*NOT_AIS, "--ais-perf-config", OLD_PERF_CONFIG])
+def test_old_perf_config_without_ais_load_model_is_rejected():
+    config = _frontend([*NOT_AIS, "--ais-perf-config", OLD_PERF_CONFIG])
 
     with pytest.raises(
         ValueError,
@@ -187,10 +189,9 @@ def test_old_perf_config_without_ais_load_model_is_rejected(component):
         config.validate()
 
 
-@every_component
-def test_old_perf_config_env_without_ais_load_model_is_rejected(component, monkeypatch):
+def test_old_perf_config_env_without_ais_load_model_is_rejected(monkeypatch):
     monkeypatch.setenv("DYN_AIS_PERF_CONFIG", OLD_PERF_CONFIG)
-    config = COMPONENTS[component](NOT_AIS)
+    config = _frontend(NOT_AIS)
 
     with pytest.raises(
         ValueError,
@@ -199,30 +200,27 @@ def test_old_perf_config_env_without_ais_load_model_is_rejected(component, monke
         config.validate()
 
 
-@every_component
-def test_old_perf_config_env_builds_same_config(component, monkeypatch):
+def test_old_perf_config_env_builds_same_config(monkeypatch):
     monkeypatch.setenv("DYN_AIS_PERF_CONFIG", OLD_PERF_CONFIG)
-    config = COMPONENTS[component](AIS)
+    config = _frontend(AIS)
 
-    with _warns(component, "DYN_AIS_PERF_CONFIG is"):
+    with _warns("DYN_AIS_PERF_CONFIG is"):
         config.validate()
 
     assert config.ais_perf_kwargs() == expected(worker_type="prefill")
 
 
-@every_component
-def test_old_flat_flags_without_ais_load_model_are_ignored(component):
-    config = COMPONENTS[component]([*NOT_AIS, *OLD_FLAT])
+def test_old_flat_flags_without_ais_load_model_are_ignored():
+    config = _frontend([*NOT_AIS, *OLD_FLAT])
 
-    with _warns(component, OLD_FLAT_ARE):
+    with _warns(OLD_FLAT_ARE):
         config.validate()
 
     assert config.router_prefill_load_model == "none"
 
 
-@every_component
-def test_old_perf_config_with_flat_flag_is_rejected(component):
-    config = COMPONENTS[component](
+def test_old_perf_config_with_flat_flag_is_rejected():
+    config = _frontend(
         [*AIS, "--ais-perf-config", OLD_PERF_CONFIG, "--ais-backend", "vllm"]
     )
 
@@ -233,17 +231,16 @@ def test_old_perf_config_with_flat_flag_is_rejected(component):
             "identity flags"
         ),
     ):
-        with _warns(component, "--ais-perf-config and --ais-backend are"):
+        with _warns("--ais-perf-config and --ais-backend are"):
             config.validate()
 
 
-@every_component
-def test_old_flat_env_only_builds_same_config(component, monkeypatch):
+def test_old_flat_env_only_builds_same_config(monkeypatch):
     for name, value in OLD_FLAT_ENV.items():
         monkeypatch.setenv(name, value)
-    config = COMPONENTS[component](AIS)
+    config = _frontend(AIS)
 
-    with _warns(component, OLD_FLAT_ENV_ARE):
+    with _warns(OLD_FLAT_ENV_ARE):
         config.validate()
 
     assert config.ais_perf_kwargs() == expected()
@@ -262,7 +259,7 @@ def test_old_aic_spelling_builds_same_config(capsys):
         ]
     )
 
-    with _warns("frontend", "--aic-backend, --aic-system and --aic-model-path are"):
+    with _warns("--aic-backend, --aic-system and --aic-model-path are"):
         config.validate()
 
     assert config.ais_perf_kwargs() == expected()
@@ -272,42 +269,33 @@ def test_old_aic_spelling_builds_same_config(capsys):
     assert "new and legacy spellings cannot be combined" in capsys.readouterr().err
 
 
-@every_component
-def test_old_flat_flags_without_a_model_keep_their_message(component):
-    config = COMPONENTS[component]([*AIS, "--ais-backend", "vllm"])
+def test_old_flat_flags_without_a_model_keep_their_message():
+    config = _frontend([*AIS, "--ais-backend", "vllm"])
 
     with pytest.raises(
         ValueError, match=exactly("AIS perf config requires system, model")
     ):
-        with _warns(component, "--ais-backend is"):
+        with _warns("--ais-backend is"):
             config.validate()
 
 
-@every_component
-def test_old_perf_config_with_empty_model_keeps_its_message(component):
-    config = COMPONENTS[component](
+def test_old_perf_config_with_empty_model_keeps_its_message():
+    config = _frontend(
         [*AIS, "--ais-perf-config", _one(model="", worker_type="prefill")]
     )
 
     with pytest.raises(
         ValueError, match=exactly("AIS perf config requires model")
     ) as error:
-        with _warns(component, "--ais-perf-config is"):
+        with _warns("--ais-perf-config is"):
             config.validate()
 
     assert type(error.value) is ValueError
 
 
-@every_component
-def test_renamed_environment_variable_is_still_rejected(component, monkeypatch):
+def test_renamed_environment_variable_is_still_rejected(monkeypatch):
     monkeypatch.setenv("DYN_AIC_BACKEND", "vllm")
-    config = COMPONENTS[component]([*AIS, *OLD_FLAT])
-    # squeeze_evolve checks the variable first, the others after the warning.
-    warning = (
-        no_warning()
-        if component == "squeeze_evolve"
-        else _warns(component, OLD_FLAT_ARE)
-    )
+    config = _frontend([*AIS, *OLD_FLAT])
 
     with pytest.raises(
         ValueError,
@@ -316,7 +304,7 @@ def test_renamed_environment_variable_is_still_rejected(component, monkeypatch):
             "use the DYN_AIS_* names"
         ),
     ):
-        with warning:
+        with _warns(OLD_FLAT_ARE):
             config.validate()
 
 
@@ -324,19 +312,26 @@ def test_renamed_environment_variable_is_still_rejected(component, monkeypatch):
 
 
 @every_component
-def test_new_flag_inline_json_builds_config(component):
-    config = COMPONENTS[component]([*AIS, *NEW])
+def test_new_value_builds_config_in_every_component(component):
+    if component == "squeeze_evolve":
+        # squeeze_evolve reads the value from the tier, not from the flag.
+        config = _squeeze_evolve(AIS, ais_perf_model=NEW[1])
+    else:
+        config = COMPONENTS[component]([*AIS, *NEW])
 
     with no_warning():
         config.validate()
+        if component == "squeeze_evolve":
+            (built,) = config.ais_perf_kwargs_by_tier()
+        else:
+            built = config.ais_perf_kwargs()
 
-    assert config.ais_perf_kwargs() == expected()
+    assert built == expected()
 
 
-@every_component
-def test_new_env_builds_config(component, monkeypatch):
+def test_new_env_builds_config(monkeypatch):
     monkeypatch.setenv("DYN_AIS_PERF_MODEL", _one(worker_type="prefill"))
-    config = COMPONENTS[component](AIS)
+    config = _frontend(AIS)
 
     with no_warning():
         config.validate()
@@ -355,18 +350,16 @@ def test_typed_value_wins_over_env(monkeypatch):
     assert config.ais_perf_kwargs() == expected()
 
 
-@every_component
-def test_empty_env_is_unset(component, monkeypatch):
+def test_empty_env_is_unset(monkeypatch):
     monkeypatch.setenv("DYN_AIS_PERF_MODEL", "")
-    config = COMPONENTS[component](AIS)
+    config = _frontend(AIS)
 
     with pytest.raises(ValueError, match=exactly(NOTHING_GIVEN)):
         config.validate()
 
 
-@every_component
-def test_empty_typed_value_reports_loader_error(component):
-    config = COMPONENTS[component]([*AIS, "--ais-perf-model="])
+def test_empty_typed_value_reports_loader_error():
+    config = _frontend([*AIS, "--ais-perf-model="])
 
     with pytest.raises(
         ValueError,
@@ -377,98 +370,19 @@ def test_empty_typed_value_reports_loader_error(component):
         config.validate()
 
 
-@every_component
-@pytest.mark.parametrize(
-    ("value", "error"),
-    [
-        pytest.param(
-            _one(model="", worker_type="prefill"),
-            "ais_perf_model requires model",
-            id="empty-model",
-        ),
-        pytest.param(
-            json.dumps(
-                {"system": "h200_sxm", "backend": "vllm", "worker_type": "prefill"}
-            ),
-            "ais_perf_model requires model",
-            id="no-model",
-        ),
-        pytest.param(
-            _one(model="", backend="", worker_type="prefill"),
-            "ais_perf_model requires backend, model",
-            id="empty-model-and-backend",
-        ),
-    ],
-)
-def test_new_value_without_backend_or_model_is_rejected(component, value, error):
-    config = COMPONENTS[component]([*AIS, "--ais-perf-model", value])
-
-    with pytest.raises(ValueError, match=exactly(error)) as raised, no_warning():
-        config.validate()
-
-    assert type(raised.value) is ValueError
-
-
 def test_new_equals_old_for_same_identity():
     old = _frontend([*AIS, *OLD_FLAT, "--ais-tp-size", "2"])
     new = _frontend([*AIS, "--ais-perf-model", _one(worker_type="aggregated", tp=2)])
 
-    with _warns(
-        "frontend",
-        "--ais-backend, --ais-system, --ais-tp-size and --ais-model-path are",
-    ):
+    with _warns("--ais-backend, --ais-system, --ais-tp-size and --ais-model-path are"):
         old.validate()
     new.validate()
 
     assert new.ais_perf_kwargs() == old.ais_perf_kwargs()
 
 
-# The selection rules have their own table in the tests of
-# dynamo.common.ais_perf_model.
-@pytest.mark.parametrize(
-    ("value", "typed", "worker_type", "error"),
-    [
-        pytest.param(
-            _one(), "prefill", "prefill", None, id="one-config-without-type-prefill"
-        ),
-        pytest.param(
-            _one(worker_type="prefill"),
-            "aggregated",
-            None,
-            "ais_perf_model entry: worker_type is 'prefill' but worker type "
-            "'aggregated' was requested",
-            id="one-prefill-config-aggregated",
-        ),
-        pytest.param(
-            _one(worker_type="decode"),
-            "prefill",
-            None,
-            "ais_perf_model entry: worker_type is 'decode' but worker type "
-            "'prefill' was requested",
-            id="one-decode-config-prefill",
-        ),
-        pytest.param(
-            _several("decode", "aggregated"),
-            None,
-            "aggregated",
-            None,
-            id="list-with-aggregated",
-        ),
-    ],
-)
-def test_router_worker_type_table(value, typed, worker_type, error):
-    args = [*AIS, "--ais-perf-model", value]
-    if typed is not None:
-        args += ["--router-prefill-load-worker-type", typed]
-    config = _frontend(args)
-
-    if error is None:
-        assert config.ais_perf_kwargs() == expected(worker_type=worker_type)
-    else:
-        with pytest.raises(ValueError, match=exactly(error)):
-            config.ais_perf_kwargs()
-
-
+# The rules that select an entry are tested with dynamo.common.ais_perf_model;
+# here the flag and the variable reach them.
 def test_worker_type_env_is_used_and_checked(monkeypatch):
     several = ["--ais-perf-model", _several("prefill", "aggregated")]
     monkeypatch.setenv("DYN_ROUTER_PREFILL_LOAD_WORKER_TYPE", "prefill")
@@ -498,19 +412,17 @@ def test_worker_type_env_is_used_and_checked(monkeypatch):
         _frontend([*AIS, *several]).validate()
 
 
-@every_component
-def test_nothing_given_reports_new_message(component):
-    config = COMPONENTS[component](AIS)
+def test_nothing_given_reports_new_message():
+    config = _frontend(AIS)
 
     with pytest.raises(ValueError, match=exactly(NOTHING_GIVEN)):
         config.validate()
 
 
-@every_component
-def test_env_only_new_value_is_ignored_without_ais_load_model(component, monkeypatch):
+def test_env_only_new_value_is_ignored_without_ais_load_model(monkeypatch):
     monkeypatch.setenv("DYN_AIS_PERF_MODEL", "/not/a/local/file.yaml")
     monkeypatch.setenv("DYN_ROUTER_PREFILL_LOAD_WORKER_TYPE", "decode")
-    config = COMPONENTS[component](NOT_AIS)
+    config = _frontend(NOT_AIS)
 
     with no_warning():
         config.validate()
@@ -518,9 +430,8 @@ def test_env_only_new_value_is_ignored_without_ais_load_model(component, monkeyp
     assert config.router_prefill_load_model == "none"
 
 
-@every_component
-def test_new_flag_without_ais_load_model_is_rejected(component):
-    config = COMPONENTS[component]([*NOT_AIS, *NEW])
+def test_new_flag_without_ais_load_model_is_rejected():
+    config = _frontend([*NOT_AIS, *NEW])
 
     with pytest.raises(
         ValueError,
@@ -529,11 +440,8 @@ def test_new_flag_without_ais_load_model_is_rejected(component):
         config.validate()
 
 
-@every_component
-def test_worker_type_flag_without_ais_load_model_is_rejected(component):
-    config = COMPONENTS[component](
-        [*NOT_AIS, "--router-prefill-load-worker-type", "prefill"]
-    )
+def test_worker_type_flag_without_ais_load_model_is_rejected():
+    config = _frontend([*NOT_AIS, "--router-prefill-load-worker-type", "prefill"])
 
     with pytest.raises(
         ValueError,
@@ -556,11 +464,8 @@ def test_ais_perf_kwargs_twice_is_equal():
     assert first["config"] is not second["config"]
 
 
-@every_component
-def test_new_attributes_do_not_reach_kv_router_kwargs(component):
-    config = COMPONENTS[component](
-        [*AIS, *NEW, "--router-prefill-load-worker-type", "aggregated"]
-    )
+def test_new_attributes_do_not_reach_kv_router_kwargs():
+    config = _frontend([*AIS, *NEW, "--router-prefill-load-worker-type", "aggregated"])
     config.validate()
 
     kwargs = config.kv_router_kwargs()
@@ -586,20 +491,6 @@ def test_accept_rates_checked_with_new_input():
         match="^ais_nextn_accept_rates must be comma-separated floats, got 'abc'$",
     ):
         bad.validate()
-
-
-def test_unknown_key_in_new_value_is_a_value_error():
-    config = _frontend(
-        [*AIS, "--ais-perf-model", _one(worker_type="aggregated", not_a_field=2)]
-    )
-
-    with pytest.raises(
-        ValueError,
-        match="^ais_perf_model: .*unexpected keyword argument 'not_a_field'$",
-    ) as error:
-        config.validate()
-
-    assert isinstance(error.value.__cause__, TypeError)
 
 
 @pytest.mark.parametrize(
@@ -643,7 +534,6 @@ def test_frontend_config_has_two_new_fields_and_no_cache():
 # Old and new inputs together.
 
 
-@every_component
 @pytest.mark.parametrize(
     ("args", "env", "error"),
     [
@@ -652,6 +542,13 @@ def test_frontend_config_has_two_new_fields_and_no_cache():
             {},
             "--ais-perf-model cannot be combined with --ais-backend",
             id="flag-with-flag",
+        ),
+        # A flag typed with the --aic- spelling is named as it was typed.
+        pytest.param(
+            [*NEW, "--aic-backend", "vllm"],
+            {},
+            "--ais-perf-model cannot be combined with --aic-backend",
+            id="flag-with-aic-spelling",
         ),
         pytest.param(
             ["--ais-backend", "vllm", "--ais-tp-size", "2"],
@@ -679,7 +576,7 @@ def test_frontend_config_has_two_new_fields_and_no_cache():
             "--ais-perf-model cannot be combined with DYN_AIS_PERF_CONFIG",
             id="flag-with-perf-config-env",
         ),
-        # Unlike the mocker, these components take no --ais-nextn with the new input.
+        # Unlike the mocker, this group takes no --ais-nextn with the new input.
         pytest.param(
             [*NEW, "--ais-nextn", "2"],
             {},
@@ -700,20 +597,17 @@ def test_frontend_config_has_two_new_fields_and_no_cache():
         ),
     ],
 )
-def test_new_with_old_is_rejected_and_names_both(
-    component, args, env, error, monkeypatch
-):
+def test_new_with_old_is_rejected_and_names_both(args, env, error, monkeypatch):
     for name, value in env.items():
         monkeypatch.setenv(name, value)
-    config = COMPONENTS[component]([*AIS, *args])
+    config = _frontend([*AIS, *args])
 
     with pytest.raises(ValueError, match=exactly(error)), no_warning():
         config.validate()
 
 
-@every_component
-def test_worker_type_flag_with_old_inputs_is_rejected(component):
-    config = COMPONENTS[component](
+def test_worker_type_flag_with_old_inputs_is_rejected():
+    config = _frontend(
         [*AIS, *OLD_FLAT, "--router-prefill-load-worker-type", "prefill"]
     )
 
@@ -728,7 +622,7 @@ def test_worker_type_env_with_old_inputs_is_ignored(monkeypatch):
     monkeypatch.setenv("DYN_ROUTER_PREFILL_LOAD_WORKER_TYPE", "decode")
     config = _frontend([*AIS, *OLD_FLAT])
 
-    with _warns("frontend", OLD_FLAT_ARE):
+    with _warns(OLD_FLAT_ARE):
         config.validate()
 
     assert config.ais_perf_kwargs() == expected()
@@ -737,7 +631,6 @@ def test_worker_type_env_with_old_inputs_is_ignored(monkeypatch):
 # The warning for old inputs.
 
 
-@every_component
 @pytest.mark.parametrize(
     ("args", "env", "names"),
     [
@@ -774,18 +667,30 @@ def test_worker_type_env_with_old_inputs_is_ignored(monkeypatch):
         ),
     ],
 )
-def test_old_inputs_warn_once_with_exact_text(component, args, env, names, monkeypatch):
+def test_old_inputs_warn_once_with_exact_text(args, env, names, monkeypatch):
     for name, value in env.items():
         monkeypatch.setenv(name, value)
-    config = COMPONENTS[component]([*AIS, *args])
+    config = _frontend([*AIS, *args])
 
     with pytest.warns(FutureWarning) as records:
         config.validate()
 
-    assert [str(record.message) for record in records] == [
-        _warning_text(component, names)
-    ]
+    assert [str(record.message) for record in records] == [_warning_text(names)]
     assert records[0].category is FutureWarning
+    assert records[0].filename == __file__
+
+
+@every_component
+def test_old_inputs_warn_once_at_the_caller_in_every_component(component):
+    config = COMPONENTS[component]([*AIS, *OLD_FLAT])
+
+    with pytest.warns(FutureWarning) as records:
+        config.validate()
+        built = config.ais_perf_kwargs()
+
+    assert [str(record.message) for record in records] == [
+        _warning_text(OLD_FLAT_ARE, REPLACEMENT[component])
+    ]
     # The warning points at the code that called the validate() with the check;
     # for thunderagent_router that is its own validate().
     caller = (
@@ -794,12 +699,12 @@ def test_old_inputs_warn_once_with_exact_text(component, args, env, names, monke
         else __file__
     )
     assert records[0].filename == caller
+    assert built == expected()
 
 
-@every_component
-def test_second_ais_perf_kwargs_call_does_not_warn(component):
-    config = COMPONENTS[component]([*AIS, *OLD_FLAT])
-    with _warns(component, OLD_FLAT_ARE):
+def test_second_ais_perf_kwargs_call_does_not_warn():
+    config = _frontend([*AIS, *OLD_FLAT])
+    with _warns(OLD_FLAT_ARE):
         config.validate()
 
     with no_warning():
@@ -817,9 +722,7 @@ def test_router_start_warns_once_for_old_inputs(monkeypatch):
         config = parse_router_args([*ENDPOINT, *AIS, *OLD_FLAT])
         built = router_args.build_ais_perf_config(config)
 
-    assert [str(record.message) for record in records] == [
-        _warning_text("router", OLD_FLAT_ARE)
-    ]
+    assert [str(record.message) for record in records] == [_warning_text(OLD_FLAT_ARE)]
     assert records[0].filename == router_args.__file__
     assert built == expected()
 
@@ -856,19 +759,3 @@ def test_relative_file_value_starts_at_working_directory(tmp_path, monkeypatch):
     missing = Path.cwd() / "cfg.yaml"
     with pytest.raises(ValueError, match="^" + re.escape(f"cannot read {missing}: ")):
         config.ais_perf_kwargs()
-
-
-def test_relative_paths_inside_file_start_at_file_folder(tmp_path, monkeypatch):
-    conf = tmp_path / "conf"
-    run_dir = tmp_path / "run"
-    (conf / "sys").mkdir(parents=True)
-    run_dir.mkdir()
-    (conf / "cfg.yaml").write_text(
-        yaml.safe_dump({**IDENTITY, "worker_type": "prefill", "systems_paths": ["sys"]})
-    )
-    monkeypatch.chdir(run_dir)
-    config = _frontend([*AIS, "--ais-perf-model", str(conf / "cfg.yaml")])
-
-    config.validate()
-
-    assert config.ais_perf_kwargs()["config"]["systems_paths"] == [str(conf / "sys")]

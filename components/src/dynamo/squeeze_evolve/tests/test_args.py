@@ -17,7 +17,6 @@ from dynamo.common.tests.configuration.ais_perf_inputs_helpers import (  # noqa:
     IDENTITY,
     MODEL,
     NOT_AIS,
-    NOTHING_GIVEN,
     OLD_FLAT,
     exactly,
     expected,
@@ -44,8 +43,11 @@ AGGREGATED = {**IDENTITY, "worker_type": "aggregated"}
 
 OLD_FLAT_WARNING = (
     "--ais-backend, --ais-system and --ais-model-path are deprecated and will be "
-    "removed in v1.9; use ais_perf_model in each --tiers entry (or "
-    "--ais-perf-model with one tier)."
+    "removed in v1.9; use ais_perf_model in each --tiers entry."
+)
+TYPED_FLAG_ERROR = (
+    "--ais-perf-model is not read by squeeze_evolve; write ais_perf_model in "
+    "each --tiers entry"
 )
 
 
@@ -70,17 +72,6 @@ def _config(args):
 
 
 # Old inputs only: results and errors stay as they are.
-
-
-def test_squeeze_old_global_env_passes_validation(monkeypatch):
-    monkeypatch.setenv("DYN_AIS_BACKEND", "vllm")
-    monkeypatch.setenv("DYN_AIS_SYSTEM", "h200_sxm")
-    monkeypatch.setenv("DYN_AIS_MODEL_PATH", MODEL)
-
-    with pytest.warns(FutureWarning, match="^DYN_AIS_BACKEND, DYN_AIS_SYSTEM and "):
-        config = parse_args(["--tiers", _tiers(count=2), *MODEL_NAME, *AIS])
-
-    assert config.ais_perf_kwargs() == expected()
 
 
 def test_old_input_errors_come_before_the_tiers_error():
@@ -140,16 +131,6 @@ def test_renamed_environment_variable_is_not_read_without_ais_load_model(
     assert set(config.ais_perf_kwargs_by_tier()) == {None}
 
 
-def test_old_global_warning_names_tier_replacement():
-    config = _config(["--tiers", _tiers(count=2), *MODEL_NAME, *AIS, *OLD_FLAT])
-
-    with pytest.warns(FutureWarning) as records:
-        config.validate()
-
-    assert [str(record.message) for record in records] == [OLD_FLAT_WARNING]
-    assert records[0].filename == __file__
-
-
 def test_start_warns_once_for_old_inputs():
     with pytest.warns(FutureWarning) as records:
         config = parse_args(["--tiers", _tiers(count=2), *MODEL_NAME, *AIS, *OLD_FLAT])
@@ -198,6 +179,12 @@ def test_no_tier_config_without_ais_load_model():
     ("tiers", "error"),
     [
         pytest.param(
+            _tiers(count=1),
+            "--tiers[0] has no ais_perf_model; with "
+            "--router-prefill-load-model=ais every tier needs one",
+            id="one-tier",
+        ),
+        pytest.param(
             _tiers(count=2),
             "--tiers[0] and --tiers[1] have no ais_perf_model; with "
             "--router-prefill-load-model=ais every tier needs one",
@@ -217,72 +204,60 @@ def test_no_tier_config_without_ais_load_model():
         ),
     ],
 )
-def test_several_tiers_need_a_key_each(tiers, error):
+def test_every_tier_needs_a_key(tiers, error):
     config = _config(["--tiers", tiers, *MODEL_NAME, *AIS])
 
     with pytest.raises(ValueError, match=exactly(error)):
         config.validate()
 
 
-@pytest.mark.parametrize("tiers", [_tiers(count=2), _tiers(PREFILL, PREFILL)])
-def test_global_new_value_with_several_tiers_is_rejected(tiers, monkeypatch):
+@pytest.mark.parametrize(
+    "tiers_and_inputs",
+    [
+        pytest.param([_tiers(count=1), *AIS], id="one-tier-without-key"),
+        pytest.param([_tiers(PREFILL, PREFILL), *AIS], id="a-key-in-each-tier"),
+        pytest.param([_tiers(count=2), *AIS], id="several-tiers-without-keys"),
+        pytest.param([_tiers(count=2), *AIS, *OLD_FLAT], id="old-inputs"),
+        pytest.param([_tiers(count=2), *NOT_AIS], id="no-ais-load-model"),
+    ],
+)
+def test_typed_global_flag_is_rejected(tiers_and_inputs):
     value = json.dumps(AGGREGATED)
-    typed = _config(["--tiers", tiers, *MODEL_NAME, *AIS, "--ais-perf-model", value])
+    config = _config(
+        ["--tiers", *tiers_and_inputs, *MODEL_NAME, "--ais-perf-model", value]
+    )
 
-    with pytest.raises(
-        ValueError,
-        match=exactly(
-            "--ais-perf-model applies to one tier only; write ais_perf_model in "
-            "each --tiers entry"
-        ),
-    ):
-        typed.validate()
-
-    monkeypatch.setenv("DYN_AIS_PERF_MODEL", value)
-    from_env = _config(["--tiers", tiers, *MODEL_NAME, *AIS])
-    with pytest.raises(
-        ValueError,
-        match=exactly(
-            "DYN_AIS_PERF_MODEL applies to one tier only; write ais_perf_model in "
-            "each --tiers entry"
-        ),
-    ):
-        from_env.validate()
+    with pytest.raises(ValueError, match=exactly(TYPED_FLAG_ERROR)), no_warning():
+        config.validate()
 
 
-def test_one_tier_takes_global_value_or_key_not_both(monkeypatch):
-    value = json.dumps(AGGREGATED)
-    global_only = ["--tiers", _tiers(count=1), "--ais-perf-model", value]
-    key_only = ["--tiers", _tiers(PREFILL)]
-    both = ["--tiers", _tiers(PREFILL), "--ais-perf-model", value]
+def test_global_environment_variable_is_not_read(monkeypatch):
+    # Other processes may read the variable from the same environment.
+    monkeypatch.setenv("DYN_AIS_PERF_MODEL", "/not/a/local/file.yaml")
+    inputs = [*MODEL_NAME, *AIS]
 
     with no_warning():
-        assert parse_args(
-            [*global_only, *MODEL_NAME, *AIS]
-        ).ais_perf_kwargs_by_tier() == [expected()]
-        assert parse_args([*key_only, *MODEL_NAME, *AIS]).ais_perf_kwargs_by_tier() == [
-            expected(worker_type="prefill")
-        ]
-    with pytest.raises(
-        ValueError,
-        match=exactly(
-            "--ais-perf-model cannot be combined with ais_perf_model in --tiers[0]"
-        ),
-    ):
-        _config([*both, *MODEL_NAME, *AIS]).validate()
+        one = parse_args(["--tiers", _tiers(PREFILL), *inputs])
+        two = parse_args(["--tiers", _tiers(PREFILL, AGGREGATED), *inputs])
+    assert one.ais_perf_kwargs_by_tier() == [expected(worker_type="prefill")]
+    assert two.ais_perf_kwargs_by_tier() == [
+        expected(worker_type="prefill"),
+        expected(),
+    ]
 
-    monkeypatch.setenv("DYN_AIS_PERF_MODEL", value)
     with pytest.raises(
         ValueError,
         match=exactly(
-            "DYN_AIS_PERF_MODEL cannot be combined with ais_perf_model in --tiers[0]"
+            "--tiers[0] has no ais_perf_model; with "
+            "--router-prefill-load-model=ais every tier needs one"
         ),
     ):
-        _config([*key_only, *MODEL_NAME, *AIS]).validate()
-    with no_warning():
-        assert parse_args(
-            ["--tiers", _tiers(count=1), *MODEL_NAME, *AIS]
-        ).ais_perf_kwargs_by_tier() == [expected()]
+        _config(["--tiers", _tiers(count=1), *inputs]).validate()
+
+    with pytest.warns(FutureWarning) as records:
+        old = parse_args(["--tiers", _tiers(count=2), *inputs, *OLD_FLAT])
+    assert [str(record.message) for record in records] == [OLD_FLAT_WARNING]
+    assert old.ais_perf_kwargs_by_tier() == [expected(), expected()]
 
 
 def test_old_global_input_with_tier_key_is_rejected():
@@ -304,6 +279,29 @@ def test_old_global_input_with_tier_key_is_rejected():
         match=exactly(
             "ais_perf_model in --tiers[1] cannot be combined with --ais-backend "
             "and --ais-system"
+        ),
+    ), no_warning():
+        config.validate()
+
+
+def test_worker_type_flag_with_old_inputs_names_the_tier_key():
+    config = _config(
+        [
+            "--tiers",
+            _tiers(count=2),
+            *MODEL_NAME,
+            *AIS,
+            *OLD_FLAT,
+            "--router-prefill-load-worker-type",
+            "prefill",
+        ]
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=exactly(
+            "--router-prefill-load-worker-type requires ais_perf_model in each "
+            "--tiers entry"
         ),
     ), no_warning():
         config.validate()
@@ -414,13 +412,12 @@ def test_tiers_are_read_from_parsed_objects(capsys):
     assert exit_info.value.code == 2
     assert "argument --tiers: invalid parse_tiers value" in capsys.readouterr().err
 
-    # The AIS checks come before the check for tiers, as they did.
-    with pytest.raises(ValueError, match=exactly(NOTHING_GIVEN)):
-        _config([*MODEL_NAME, *AIS]).validate()
-    with pytest.raises(
-        ValueError, match=exactly("--tiers is required (JSON array, cheapest first)")
-    ):
-        _config([*MODEL_NAME, *NOT_AIS]).validate()
+    for load_model in (AIS, NOT_AIS):
+        with pytest.raises(
+            ValueError,
+            match=exactly("--tiers is required (JSON array, cheapest first)"),
+        ):
+            _config([*MODEL_NAME, *load_model]).validate()
 
 
 def test_tier_relative_path_starts_at_working_directory(tmp_path, monkeypatch):
