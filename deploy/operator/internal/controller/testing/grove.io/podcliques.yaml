@@ -17,7 +17,31 @@ spec:
   - name: v1alpha1
     served: true
     storage: true
+    subresources:
+      status: {}
+      scale:
+        specReplicasPath: .spec.replicas
+        statusReplicasPath: .status.replicas
+        labelSelectorPath: .status.hpaPodSelector
     schema:
       openAPIV3Schema:
         type: object
         x-kubernetes-preserve-unknown-fields: true
+        properties:
+          spec:
+            type: object
+            x-kubernetes-preserve-unknown-fields: true
+            properties:
+              replicas:
+                type: integer
+                format: int32
+                minimum: 0
+          status:
+            type: object
+            x-kubernetes-preserve-unknown-fields: true
+            properties:
+              replicas:
+                type: integer
+                format: int32
+              hpaPodSelector:
+                type: string

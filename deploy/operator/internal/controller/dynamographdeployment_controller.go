@@ -49,6 +49,7 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	enginegroupcontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/enginegroup"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/epp"
@@ -68,6 +69,8 @@ const (
 	reasonUnsupportedWorkloadProvider         Reason = "unsupported_workload_provider"
 )
 
+var errEngineGroupRetirementPending = errors.New("Engine Group retirement is required before deleting the DGD")
+
 // DynamoGraphDeploymentReconciler reconciles a DynamoGraphDeployment object
 type DynamoGraphDeploymentReconciler struct {
 	client.Client
@@ -83,6 +86,7 @@ type DynamoGraphDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeployments/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeployments/finalizers,verbs=update
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeploymentscalingadapters,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeploymentenginegroups,verbs=get;list;watch;create;patch;delete
 // +kubebuilder:rbac:groups=grove.io,resources=podcliquesets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=grove.io,resources=podcliques,verbs=get;list;watch
 // +kubebuilder:rbac:groups=grove.io,resources=podcliques/scale,verbs=get;update;patch
@@ -124,6 +128,10 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 	// Finalize deleting resources before validating their now-immutable live configuration.
 	if !dynamoDeployment.GetDeletionTimestamp().IsZero() {
 		_, err = commoncontroller.HandleFinalizer(ctx, dynamoDeployment, r.Client, r)
+		if errors.Is(err, errEngineGroupRetirementPending) {
+			// Child updates and deletion already wake this controller; unsupported retirement must not busy-loop.
+			return ctrl.Result{}, nil
+		}
 		if errors.Is(err, errAutomaticSnapshotCleanupPending) {
 			return ctrl.Result{Requeue: true}, nil
 		}
@@ -244,6 +252,16 @@ func (r *DynamoGraphDeploymentReconciler) persistWorkloadProgramResult(
 }
 
 func (r *DynamoGraphDeploymentReconciler) FinalizeResource(ctx context.Context, dynamoDeployment *nvidiacomv1beta1.DynamoGraphDeployment) error {
+	// Children own engine retirement; keep their graph and native capacity alive until they finish.
+	groups := &enginegroupcontroller.GroveChildrenReconciler{Client: r.Client}
+	pending, err := groups.RequestDeletion(ctx, dynamoDeployment)
+	if err != nil {
+		return err
+	}
+	if pending {
+		return errEngineGroupRetirementPending
+	}
+
 	syncer := newDGDResourceSyncer(r.Client, r.Recorder)
 	return newDGDCheckpointsReconciler(
 		syncer,
@@ -303,6 +321,7 @@ func (r *DynamoGraphDeploymentReconciler) controllerBuilder(mgr ctrl.Manager) (*
 			dgdPrimaryPredicate(),
 		)).
 		Named(consts.ResourceTypeDynamoGraphDeployment).
+		Owns(&nvidiacomv1beta1.DynamoGraphDeploymentEngineGroup{}).
 		Watches(
 			&corev1.Pod{},
 			handler.EnqueueRequestsFromMapFunc(mapDGDWorkerPodToRequests),
