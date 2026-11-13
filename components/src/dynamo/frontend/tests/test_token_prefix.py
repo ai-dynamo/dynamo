@@ -7,6 +7,12 @@ import pytest
 
 from dynamo.frontend.token_prefix import TokenPrefix
 
+pytestmark = [
+    pytest.mark.unit,
+    pytest.mark.gpu_0,
+    pytest.mark.pre_merge,
+]
+
 
 def test_delta_token_is_absent_from_the_previous_view():
     prefix = TokenPrefix()
@@ -65,3 +71,44 @@ def test_unhashable_membership_matches_a_list():
     prefix = TokenPrefix()
     _, current = prefix.append([1])
     assert ([] in current) is False
+    assert current.count([]) == 0
+    _, current = prefix.append([[]])
+    assert current.count([]) == 1
+    assert prefix.view().count([]) == 1
+
+
+def test_reverse_slice_matches_a_list_after_a_later_append():
+    prefix = TokenPrefix()
+    _, current = prefix.append([1, 2, 3])
+    assert current[::-1] == [3, 2, 1]
+    assert current[1::-1] == [2, 1]
+    assert current[::2] == [1, 3]
+    prefix.append([9, 8])
+    assert current[::-1] == [3, 2, 1]
+    assert current[:3] == [1, 2, 3]
+    assert prefix.view()[::-1] == [8, 9, 3, 2, 1]
+
+
+def test_count_on_a_saved_view_ignores_later_tokens():
+    prefix = TokenPrefix()
+    previous, current = prefix.append([7, 1, 7])
+    assert previous.count(7) == 0
+    assert current.count(7) == 2
+    prefix.append([7, 7])
+    assert current.count(7) == 2
+    assert prefix.view().count(7) == 4
+    assert prefix.view().count(1) == 1
+    assert prefix.view().count(999) == 0
+
+
+def test_count_matches_list_concatenation():
+    rng = random.Random(1)
+    prefix = TokenPrefix()
+    accumulated: list[int] = []
+    for _ in range(200):
+        delta = [rng.randrange(20) for _ in range(rng.choice((0, 1, 1, 3)))]
+        previous, current = prefix.append(delta)
+        probe = rng.randrange(25)
+        assert previous.count(probe) == accumulated.count(probe)
+        accumulated = accumulated + delta
+        assert current.count(probe) == accumulated.count(probe)
