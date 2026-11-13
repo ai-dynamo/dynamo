@@ -267,6 +267,7 @@ pub(crate) fn unsupported_family(
     tool_call_parser: Option<&str>,
     reasoning_parser: Option<&str>,
     tokenizer: &dyn Tokenizer,
+    needs_rust_chat_validation: bool,
 ) -> anyhow::Result<Option<&'static str>> {
     let Some(family) = configured_family(tool_call_parser, reasoning_parser) else {
         return Ok(None);
@@ -278,21 +279,70 @@ pub(crate) fn unsupported_family(
                 .map_err(|error| error.context(format!("look up {token} for {family}")))?
                 .is_none()
         {
-            // Only the v1 name has a parser to fall back to.
-            if let Some(selector) = [tool_call_parser, reasoning_parser]
-                .into_iter()
-                .flatten()
-                .find(|selector| *selector != v1_parser)
-            {
-                anyhow::bail!(
-                    "parser `{selector}` needs a tokenizer with {token}; configure \
-                     `{v1_parser}` for this model"
-                );
-            }
-            return Ok(Some(family));
+            return missing_family_token(
+                tool_call_parser,
+                reasoning_parser,
+                family,
+                token,
+                v1_parser,
+                needs_rust_chat_validation,
+            );
         }
     }
     Ok(None)
+}
+
+/// A known pre-v11 Mistral tokenizer has no native `[ARGS]` call syntax.
+pub(crate) fn unsupported_legacy_mistral_family(
+    tool_call_parser: Option<&str>,
+    reasoning_parser: Option<&str>,
+    needs_rust_chat_validation: bool,
+) -> anyhow::Result<Option<&'static str>> {
+    if configured_family(tool_call_parser, reasoning_parser) != Some(MISTRAL_UNIFIED_FAMILY) {
+        return Ok(None);
+    }
+    for &(family, token, v1_parser) in FAMILY_REQUIRED_TOKENS {
+        if family == MISTRAL_UNIFIED_FAMILY {
+            return missing_family_token(
+                tool_call_parser,
+                reasoning_parser,
+                family,
+                token,
+                v1_parser,
+                needs_rust_chat_validation,
+            );
+        }
+    }
+    Ok(None)
+}
+
+fn missing_family_token(
+    tool_call_parser: Option<&str>,
+    reasoning_parser: Option<&str>,
+    family: &'static str,
+    token: &str,
+    v1_parser: &str,
+    needs_rust_chat_validation: bool,
+) -> anyhow::Result<Option<&'static str>> {
+    if needs_rust_chat_validation {
+        // Only the v1 name has a parser to fall back to.
+        if let Some(selector) = [tool_call_parser, reasoning_parser]
+            .into_iter()
+            .flatten()
+            .find(|selector| *selector != v1_parser)
+        {
+            anyhow::bail!(
+                "parser `{selector}` needs a tokenizer with {token}; configure \
+                 `{v1_parser}` for this model"
+            );
+        }
+        anyhow::ensure!(
+            !parsers_v2_selected(),
+            "DYN_PARSER_VERSION=2 selects `{family}`, which needs a tokenizer with {token}; \
+             use auto or 1 for this model"
+        );
+    }
+    Ok(Some(family))
 }
 
 /// Whether the configured family needs the tokenizer vocabulary check of
@@ -308,14 +358,12 @@ pub(crate) fn needs_tokenizer_check(
     })
 }
 
-/// A selected unified family, unless the model's tokenizer cannot serve it: `auto`
-/// then keeps the v1 parser, while an explicit `DYN_PARSER_VERSION=2` keeps the
-/// operator's choice.
+/// A selected unified family, unless the model's tokenizer cannot serve it.
 pub(crate) fn supported_family(
     selected: Option<&'static str>,
     unsupported: Option<&'static str>,
 ) -> Option<&'static str> {
-    selected.filter(|family| Some(*family) != unsupported || parsers_v2_selected())
+    selected.filter(|family| Some(*family) != unsupported)
 }
 
 /// Request facts for parser initialization and response interpretation.
@@ -13779,9 +13827,12 @@ pub(crate) mod tests {
 
         let mistral = Some(MISTRAL_UNIFIED_FAMILY);
         for (tool, reasoning) in [(Some("mistral"), Some("mistral")), (Some("mistral"), None)] {
-            assert_eq!(unsupported_family(tool, reasoning, &tekken).unwrap(), None);
             assert_eq!(
-                unsupported_family(tool, reasoning, &pre_v11).unwrap(),
+                unsupported_family(tool, reasoning, &tekken, true).unwrap(),
+                None
+            );
+            assert_eq!(
+                unsupported_family(tool, reasoning, &pre_v11, true).unwrap(),
                 mistral
             );
         }
@@ -13790,13 +13841,16 @@ pub(crate) mod tests {
             (Some("mistral_4"), None),
             (Some("mistral"), Some("mistral_4")),
         ] {
-            assert_eq!(unsupported_family(tool, reasoning, &tekken).unwrap(), None);
-            let error = unsupported_family(tool, reasoning, &pre_v11).unwrap_err();
+            assert_eq!(
+                unsupported_family(tool, reasoning, &tekken, true).unwrap(),
+                None
+            );
+            let error = unsupported_family(tool, reasoning, &pre_v11, true).unwrap_err();
             assert!(error.to_string().contains("configure `mistral`"), "{error}");
         }
         // Families without required tokens are always supported.
         assert_eq!(
-            unsupported_family(Some("qwen3_coder"), None, &pre_v11).unwrap(),
+            unsupported_family(Some("qwen3_coder"), None, &pre_v11, true).unwrap(),
             None
         );
 

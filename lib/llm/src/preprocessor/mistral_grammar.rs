@@ -98,6 +98,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn json_only_thoughts_follow_model_settings_capability() {
+        let schema = serde_json::json!({"type": "object"});
+        for has_model_settings in [false, true] {
+            let grammar = MistralToolCallGrammar(
+                ForcedToolGrammar::resolve(|token| match token {
+                    "[TOOL_CALLS]" => Some(9),
+                    "[ARGS]" => Some(32),
+                    "[THINK]" => Some(34),
+                    "[/THINK]" => Some(35),
+                    "[MODEL_SETTINGS]" if has_model_settings => Some(36),
+                    _ => None,
+                })
+                .unwrap(),
+            );
+            let rendered = grammar.render_json(&schema);
+            assert!(rendered.starts_with("start: json_grammar\n"), "{rendered}");
+            let json_rule = rendered.lines().nth(1).unwrap();
+            assert_eq!(
+                json_rule.contains("think?"),
+                has_model_settings,
+                "{rendered}"
+            );
+            assert!(
+                rendered.contains("think: <[34]> content <[35]>"),
+                "{rendered}"
+            );
+        }
+    }
+
+    #[test]
     fn resolves_markers_only_for_llguidance_backends() {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),

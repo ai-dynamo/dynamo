@@ -490,8 +490,13 @@ impl ModelWatcher {
             WorkerSet::new(namespace.clone(), spec.mdc_checksum.clone(), card.clone());
         worker_set.set_mistral_disabled_thinking_effort(card.mistral_disabled_thinking_effort()?);
         let mut tokenizer = None;
-        worker_set
-            .set_unsupported_unified_family(unsupported_unified_family(card, &mut tokenizer)?);
+        let needs_rust_chat_validation = should_validate_parser_version(card)
+            && !(card.model_input == ModelInput::Tokens && self.chat_engine_factory.is_some());
+        worker_set.set_unsupported_unified_family(unsupported_unified_family(
+            card,
+            &mut tokenizer,
+            needs_rust_chat_validation,
+        )?);
         let allocator_trim = worker_set.initialize_allocator_trim_on_teardown();
         worker_set.set_lifecycle_cancellation(cancellation.clone());
         if card.model_type.supports_images() {
@@ -1158,15 +1163,29 @@ impl ModelWatcher {
 fn unsupported_unified_family(
     card: &ModelDeploymentCard,
     tokenizer: &mut Option<crate::tokenizers::Tokenizer>,
+    needs_rust_chat_validation: bool,
 ) -> anyhow::Result<Option<&'static str>> {
     use crate::protocols::openai::chat_completions::unified_parser;
     let tool_call_parser = card.runtime_config.tool_call_parser.as_deref();
     let reasoning_parser = card.runtime_config.reasoning_parser.as_deref();
     if !card.model_type.supports_chat()
-        || !card.has_tokenizer()
         || !unified_parser::needs_tokenizer_check(tool_call_parser, reasoning_parser)
     {
         return Ok(None);
+    }
+    if !card.has_tokenizer() {
+        return if card
+            .mistral_tokenizer_version()
+            .is_some_and(|version| version < 11)
+        {
+            unified_parser::unsupported_legacy_mistral_family(
+                tool_call_parser,
+                reasoning_parser,
+                needs_rust_chat_validation,
+            )
+        } else {
+            Ok(None)
+        };
     }
     let tokenizer = match tokenizer {
         Some(tokenizer) => tokenizer,
@@ -1175,7 +1194,12 @@ fn unsupported_unified_family(
                 .context("tokenizer for the unified parser family check")?,
         ),
     };
-    unified_parser::unsupported_family(tool_call_parser, reasoning_parser, tokenizer.as_ref())
+    unified_parser::unsupported_family(
+        tool_call_parser,
+        reasoning_parser,
+        tokenizer.as_ref(),
+        needs_rust_chat_validation,
+    )
 }
 
 #[async_trait]
@@ -1671,6 +1695,59 @@ mod tests {
     use futures::StreamExt;
 
     #[test]
+    fn mistral_family_check_without_native_tokenizer_respects_parser_ownership() {
+        const MODE: &str = "DYNAMO_MISTRAL_FAMILY_CHECK_MODE";
+        let Ok(mode) = std::env::var(MODE) else {
+            for mode in ["auto", "1", "2"] {
+                assert!(crate::test_utils::run_isolated(
+                    concat!(
+                        module_path!(),
+                        "::mistral_family_check_without_native_tokenizer_respects_parser_ownership"
+                    ),
+                    &[("DYN_PARSER_VERSION", mode), (MODE, mode)],
+                ));
+            }
+            return;
+        };
+        for version in [3, 7, 11] {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("params.json"), "{}").unwrap();
+            std::fs::write(
+                dir.path().join("tekken.json"),
+                serde_json::json!({"config": {"version": format!("v{version}")}}).to_string(),
+            )
+            .unwrap();
+            let mut card = ModelDeploymentCard::load_from_disk(dir.path(), None).unwrap();
+            assert!(!card.has_tokenizer());
+            card.model_type = ModelType::Chat;
+            card.model_input = ModelInput::Tokens;
+            card.runtime_config.tool_call_parser = Some("mistral".into());
+            card.runtime_config.reasoning_parser = Some("mistral".into());
+            for needs_rust_chat_validation in [false, true] {
+                let mut tokenizer = None;
+                let result =
+                    unsupported_unified_family(&card, &mut tokenizer, needs_rust_chat_validation);
+                assert!(
+                    tokenizer.is_none(),
+                    "version detection must not build a tokenizer"
+                );
+                if version < 11 && mode == "2" && needs_rust_chat_validation {
+                    let error = result.unwrap_err().to_string();
+                    assert!(error.contains("DYN_PARSER_VERSION=2"), "{error}");
+                } else {
+                    assert_eq!(
+                        result.unwrap(),
+                        (version < 11).then_some(
+                            crate::protocols::openai::chat_completions::unified_parser::MISTRAL_UNIFIED_FAMILY
+                        ),
+                        "version={version}, mode={mode}, Rust chat={needs_rust_chat_validation}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn mistral_family_check_reuses_tokenizer_for_all_input_modes() -> anyhow::Result<()> {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("tekken.json");
@@ -1688,16 +1765,22 @@ mod tests {
             crate::common::checked_file::CheckedFile::from_disk(&path)?,
         ));
         let mut tokenizer = None;
-        assert_eq!(unsupported_unified_family(&card, &mut tokenizer)?, None);
+        assert_eq!(
+            unsupported_unified_family(&card, &mut tokenizer, true)?,
+            None
+        );
         let shared = tokenizer.as_ref().unwrap().clone();
         std::fs::remove_file(&path)?;
 
         for input in [ModelInput::Tokens, ModelInput::Text] {
             card.model_input = input;
-            assert_eq!(unsupported_unified_family(&card, &mut tokenizer)?, None);
+            assert_eq!(
+                unsupported_unified_family(&card, &mut tokenizer, true)?,
+                None
+            );
             assert!(Arc::ptr_eq(tokenizer.as_ref().unwrap(), &shared));
         }
-        assert!(unsupported_unified_family(&card, &mut None).is_err());
+        assert!(unsupported_unified_family(&card, &mut None, true).is_err());
         Ok(())
     }
 
@@ -3641,24 +3724,35 @@ request_classifier:
         use crate::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine;
         use std::sync::atomic::Ordering;
 
-        if crate::test_utils::run_isolated(
-            concat!(
-                module_path!(),
-                "::parser_validation_respects_engine_factory_ownership"
-            ),
-            &[("DYN_PARSER_VERSION", "auto")],
-        ) {
+        const SCENARIO: &str = "DYNAMO_FACTORY_PARSER_SCENARIO";
+        let Ok(scenario) = std::env::var(SCENARIO) else {
+            for (scenario, version) in [("engine_native", "auto"), ("legacy_mistral", "2")] {
+                assert!(crate::test_utils::run_isolated(
+                    concat!(
+                        module_path!(),
+                        "::parser_validation_respects_engine_factory_ownership"
+                    ),
+                    &[("DYN_PARSER_VERSION", version), (SCENARIO, scenario)],
+                ));
+            }
             return;
-        }
+        };
+        let is_legacy_mistral = scenario == "legacy_mistral";
+        let (tool_parser, reasoning_parser) = if is_legacy_mistral {
+            ("mistral", "mistral")
+        } else {
+            ("engine_native_tool", "openai_gptoss")
+        };
         let runtime = Runtime::from_current().unwrap();
         let drt = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
             .await
             .unwrap();
-        for (index, input, factory, completions, accepted) in [
-            (0, ModelInput::Tokens, false, false, false),
-            (1, ModelInput::Text, true, false, false),
-            (2, ModelInput::Tokens, true, false, true),
-            (3, ModelInput::Tokens, true, true, true),
+        for (index, input, factory, completions, is_prefill, accepted) in [
+            (0, ModelInput::Tokens, false, false, false, false),
+            (1, ModelInput::Text, true, false, false, false),
+            (2, ModelInput::Tokens, true, false, false, true),
+            (3, ModelInput::Tokens, true, true, false, true),
+            (4, ModelInput::Tokens, false, false, true, true),
         ] {
             let manager = Arc::new(ModelManager::new());
             let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -3668,11 +3762,11 @@ request_classifier:
                     calls.fetch_add(1, Ordering::SeqCst);
                     assert_eq!(
                         card.runtime_config.tool_call_parser.as_deref(),
-                        Some("engine_native_tool")
+                        Some(tool_parser)
                     );
                     assert_eq!(
                         card.runtime_config.reasoning_parser.as_deref(),
-                        Some("openai_gptoss")
+                        Some(reasoning_parser)
                     );
                     Box::pin(async {
                         Ok(Arc::new(UncalledEngine) as OpenAIChatCompletionsStreamingEngine)
@@ -3707,9 +3801,13 @@ request_classifier:
             } else {
                 ModelType::Chat
             };
-            card.worker_type = Some(WorkerType::Aggregated);
-            card.runtime_config.tool_call_parser = Some("engine_native_tool".to_string());
-            card.runtime_config.reasoning_parser = Some("openai_gptoss".to_string());
+            card.worker_type = Some(if is_prefill {
+                WorkerType::Prefill
+            } else {
+                WorkerType::Aggregated
+            });
+            card.runtime_config.tool_call_parser = Some(tool_parser.to_string());
+            card.runtime_config.reasoning_parser = Some(reasoning_parser.to_string());
             let checksum = card.mdcsum().to_string();
             let worker_id = watcher.drt.discovery().instance_id();
             if accepted {
@@ -3753,6 +3851,22 @@ request_classifier:
                 let prepared = prepared.unwrap();
                 let worker_set = prepared.worker_set.as_ref().unwrap();
                 assert_eq!(worker_set.card().mdcsum(), checksum);
+                if is_legacy_mistral {
+                    let options = worker_set.parsing_options();
+                    assert_eq!(
+                        options.unsupported_unified_family.as_deref(),
+                        Some("mistral_4")
+                    );
+                    assert!(options.resolved_unified_family().is_none());
+                }
+                if is_prefill {
+                    assert!(worker_set.is_prefill_set());
+                    assert!(!worker_set.has_chat_engine());
+                    assert!(!worker_set.has_completions_engine());
+                    assert_eq!(calls.load(Ordering::SeqCst), 0);
+                    assert!(manager.get_model(card.name()).is_none());
+                    continue;
+                }
                 watcher
                     .commit_group(&spec, prepared, &[desired], &[])
                     .unwrap();
@@ -3765,7 +3879,12 @@ request_classifier:
                     .err()
                     .expect("Rust-owned selectors must be rejected")
                     .to_string();
-                assert!(error.contains("--dyn-tool-call-parser"), "{error}");
+                let expected = if is_legacy_mistral {
+                    "DYN_PARSER_VERSION=2"
+                } else {
+                    "--dyn-tool-call-parser"
+                };
+                assert!(error.contains(expected), "{error}");
                 assert!(manager.get_model(card.name()).is_none());
                 assert_eq!(calls.load(Ordering::SeqCst), 0);
             }

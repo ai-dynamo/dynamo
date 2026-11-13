@@ -498,8 +498,7 @@ fn install_mistral_grammar(
     // constraint kind per request.
     guided.json = None;
     guided.grammar = Some(grammar);
-    // The grammar admits the optional thought itself, so a backend reasoning
-    // parser must apply it from the first token.
+    // The grammar owns whether a thought is allowed; apply it from the first token.
     let Value::Object(extra_args) = common_request
         .extra_args
         .get_or_insert_with(|| Value::Object(Default::default()))

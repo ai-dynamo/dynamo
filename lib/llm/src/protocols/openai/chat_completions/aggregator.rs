@@ -192,8 +192,7 @@ struct DeltaChoice {
     // which required id/name/arguments to all be set on the same chunk.
     tool_call_chunks: BTreeMap<u32, dynamo_protocols::types::ChatCompletionMessageToolCallChunk>,
     parser_call_completion: HashMap<u32, bool>,
-    // Ids of finalized calls the parser marked complete. Streaming clients already
-    // received them as-is, so terminal argument validation leaves them alone.
+    // Mistral keeps parser-confirmed calls as streamed, including malformed JSON.
     parser_confirmed_call_ids: HashSet<String>,
     // Optional tool calls for the chat choice, populated *after* fold either
     // by finalizing `tool_call_chunks` above, or by
@@ -253,11 +252,9 @@ fn drop_incomplete_length_tool_calls(choice: &mut DeltaChoice, unified: bool) {
 
 /// A stop or EOF can follow a streamed backend call whose last argument fragment is
 /// not valid JSON. The adapter can normalize that stop to `ToolCalls` before
-/// aggregation, so validate the arguments of calls without parser completion
-/// evidence here. An empty argument string remains valid when the upstream
-/// explicitly completed a parameterless call with `ToolCalls`. A call the parser
-/// confirmed complete keeps its arguments as the model wrote them, as the streaming
-/// response already delivered them.
+/// aggregation, so validate the arguments here. An empty argument string remains
+/// valid when the upstream explicitly completed a parameterless call with
+/// `ToolCalls`. Mistral's parser-confirmed calls keep their streamed raw arguments.
 fn drop_malformed_terminal_tool_calls(
     choice: &mut DeltaChoice,
     require_explicit_tool_terminal: bool,
@@ -636,6 +633,8 @@ impl DeltaAggregator {
         // whole stream are dropped here (they're not a valid tool call in the
         // final schema), but chunks missing only `arguments` get defaulted to
         // "" — the old code dropped those entirely.
+        let is_mistral = parsing_options.resolved_unified_family()
+            == Some(super::unified_parser::MISTRAL_UNIFIED_FAMILY);
         for choice in aggregator.choices.values_mut() {
             if choice.tool_call_chunks.is_empty() {
                 continue;
@@ -651,7 +650,7 @@ impl DeltaAggregator {
                         return None;
                     }
                     let call = finalize_merged_tool_chunk(chunk)?;
-                    if complete == Some(true) {
+                    if is_mistral && complete == Some(true) {
                         choice.parser_confirmed_call_ids.insert(call.id.clone());
                     }
                     Some(call)
@@ -2731,6 +2730,18 @@ mod tests {
     /// malformed call nor its valid sibling may be dropped.
     #[tokio::test]
     async fn mistral_parser_confirmed_call_with_invalid_json_survives_aggregation() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::mistral_parser_confirmed_call_with_invalid_json_survives_aggregation"
+            ),
+            &[(
+                dynamo_runtime::config::environment_names::llm::DYN_PARSER_VERSION,
+                "2",
+            )],
+        ) {
+            return;
+        }
         let tool = |name: &str, parameter: &str| dynamo_parsers::tool_calling::ToolDefinition {
             name: name.to_string(),
             parameters: Some(serde_json::json!({
@@ -2793,6 +2804,82 @@ mod tests {
             ]
         );
         assert!(choice.message.content.is_none());
+    }
+
+    #[tokio::test]
+    async fn mistral_completed_call_exemption_does_not_apply_to_kimi_k2() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::mistral_completed_call_exemption_does_not_apply_to_kimi_k2"
+            ),
+            &[(
+                dynamo_runtime::config::environment_names::llm::DYN_PARSER_VERSION,
+                "2",
+            )],
+        ) {
+            return;
+        }
+        let raw = create_test_delta(
+            0,
+            concat!(
+                "<|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0",
+                "<|tool_call_argument_begin|>not-json-at-all",
+                "<|tool_call_end|><|tool_calls_section_end|>"
+            ),
+            Some(dynamo_protocols::types::Role::Assistant),
+            Some(dynamo_protocols::types::FinishReason::Stop),
+            None,
+            None,
+        );
+        let adapted = super::super::unified_parser::apply_stream(
+            stream::iter(vec![raw]),
+            Some(vec![dynamo_parsers::tool_calling::ToolDefinition {
+                name: "get_weather".into(),
+                parameters: Some(serde_json::json!({
+                    "type": "object", "properties": {"city": {"type": "string"}}
+                })),
+                strict: None,
+            }]),
+            None,
+            false,
+            dynamo_parsers_v2::UnifiedParserStartingState::Response,
+            super::super::unified_parser::KIMI_K2_UNIFIED_FAMILY,
+        )
+        .collect::<Vec<_>>()
+        .await;
+        assert!(
+            adapted
+                .iter()
+                .filter_map(|item| item.data.as_ref())
+                .flat_map(|data| &data.tool_call_completion)
+                .any(|evidence| evidence.choice_index == 0
+                    && evidence.tool_index == 0
+                    && evidence.complete),
+            "the parser must have confirmed the malformed call"
+        );
+        let arguments: String = adapted
+            .iter()
+            .filter_map(|item| item.data.as_ref())
+            .flat_map(|data| &data.inner.choices)
+            .flat_map(|choice| choice.delta.tool_calls.iter().flatten())
+            .filter_map(|call| call.function.as_ref()?.arguments.as_deref())
+            .collect();
+        assert_eq!(arguments, "not-json-at-all");
+
+        let response = NvCreateChatCompletionResponse::from_annotated_stream(
+            stream::iter(adapted),
+            ParsingOptions::new(Some("kimi_k2".into()), Some("kimi_k2".into())),
+        )
+        .await
+        .expect("aggregation should succeed");
+        let choice = &response.inner.choices[0];
+        assert!(choice.message.tool_calls.is_none());
+        assert!(choice.message.content.is_none());
+        assert_eq!(
+            choice.finish_reason,
+            Some(dynamo_protocols::types::FinishReason::Stop)
+        );
     }
 
     #[tokio::test]

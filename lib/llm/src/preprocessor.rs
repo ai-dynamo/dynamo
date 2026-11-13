@@ -2978,6 +2978,7 @@ impl OpenAIPreprocessor {
                 tool_call_parser.as_deref(),
                 mdc.runtime_config.reasoning_parser.as_deref(),
                 tokenizer.as_ref(),
+                validate_chat_parsers,
             )?;
             let unified_family = unified_parser::supported_family(
                 unified_parser::selected_family(
@@ -11256,7 +11257,7 @@ mod tests {
     fn pre_v11_mistral_tokenizer_keeps_v1_under_auto() {
         const CHILD: &str = "DYNAMO_PRE_V11_MISTRAL_CHILD";
         if std::env::var_os(CHILD).is_none() {
-            for version in [None, Some("2")] {
+            for version in [None, Some("1"), Some("2")] {
                 let mut command = crate::test_utils::isolated_command(
                     "preprocessor::tests::pre_v11_mistral_tokenizer_keeps_v1_under_auto",
                 );
@@ -11270,12 +11271,24 @@ mod tests {
             }
             return;
         }
-        let explicit_v2 = std::env::var_os(env_llm::DYN_PARSER_VERSION).is_some();
+        let explicit_v2 = std::env::var(env_llm::DYN_PARSER_VERSION).as_deref() == Ok("2");
         let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
         let mut card = ModelDeploymentCard::load_from_disk(model_path, None).unwrap();
         card.model_type = crate::model_type::ModelType::Chat;
         card.runtime_config.tool_call_parser = Some("mistral".to_string());
+        let tokenizer = card.tokenizer().unwrap();
+        assert!(OpenAIPreprocessor::new_for_completions(card.clone(), tokenizer).is_ok());
+        if explicit_v2 {
+            let error = OpenAIPreprocessor::new(card)
+                .err()
+                .expect("legacy v2 must fail");
+            assert!(
+                error.to_string().contains("DYN_PARSER_VERSION=2"),
+                "{error:#}"
+            );
+            return;
+        }
         let preprocessor = OpenAIPreprocessor::new(card).unwrap();
 
         let route = preprocessor
@@ -11284,16 +11297,8 @@ mod tests {
                 &crate::protocols::openai::GuidedToolConstraint::None,
             )
             .unwrap();
-        assert_eq!(
-            matches!(route, ToolProcessingRoute::Unified(_)),
-            explicit_v2
-        );
-        assert_eq!(
-            preprocessor.unified_family(),
-            explicit_v2.then_some(
-                crate::protocols::openai::chat_completions::unified_parser::MISTRAL_UNIFIED_FAMILY
-            )
-        );
+        assert!(!matches!(route, ToolProcessingRoute::Unified(_)));
+        assert_eq!(preprocessor.unified_family(), None);
     }
 
     #[tokio::test]

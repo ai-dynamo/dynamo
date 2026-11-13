@@ -1593,6 +1593,91 @@ impl ModelDeploymentCard {
         self.tokenizer.is_some()
     }
 
+    /// Identify the Mistral parser format even when Rust cannot load the tokenizer.
+    /// Downloaded artifacts take precedence over local-source fallbacks.
+    pub(crate) fn mistral_tokenizer_version(&self) -> Option<u32> {
+        #[derive(Deserialize)]
+        struct Header {
+            config: Version,
+        }
+        #[derive(Deserialize)]
+        struct Version {
+            version: String,
+        }
+        fn sentencepiece_version(path: &Path) -> Option<u32> {
+            let name = path.file_name()?.to_str()?;
+            let version = name
+                .strip_prefix("tokenizer.model.v")
+                .or_else(|| name.strip_prefix("tokenizer.mm.model.v"))?
+                .parse::<u32>()
+                .ok()?;
+            (version < 11).then_some(version)
+        }
+
+        let directories = [self.local_dir(), PathBuf::from(self.source_path())];
+        let tekken = self
+            .tokenizer
+            .as_ref()
+            .and_then(|kind| match kind {
+                TokenizerKind::TekkenJson(file) => file.path(),
+                _ => None,
+            })
+            .or_else(|| {
+                self.extra_files
+                    .iter()
+                    .filter_map(CheckedFile::path)
+                    .find(|path| path.file_name().is_some_and(|name| name == "tekken.json"))
+            })
+            .map(Path::to_path_buf)
+            .or_else(|| {
+                directories
+                    .iter()
+                    .map(|dir| dir.join("tekken.json"))
+                    .find(|path| path.is_file())
+            });
+        if let Some(path) = tekken {
+            let version = (|| -> Result<u32> {
+                let file = std::fs::File::open(&path)?;
+                let header: Header = serde_json::from_reader(std::io::BufReader::new(file))?;
+                header
+                    .config
+                    .version
+                    .strip_prefix('v')
+                    .context("Mistral tokenizer version must start with v")?
+                    .parse()
+                    .context("invalid Mistral tokenizer version")
+            })();
+            return match version {
+                Ok(version) => Some(version),
+                Err(error) => {
+                    tracing::warn!(path = %path.display(), %error, "Mistral tokenizer version is unknown");
+                    None
+                }
+            };
+        }
+
+        if let Some(version) = self
+            .extra_files
+            .iter()
+            .filter_map(CheckedFile::path)
+            .find_map(sentencepiece_version)
+        {
+            return Some(version);
+        }
+        for dir in directories {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                continue;
+            };
+            if let Some(version) = entries
+                .flatten()
+                .find_map(|entry| sentencepiece_version(&entry.path()))
+            {
+                return Some(version);
+            }
+        }
+        None
+    }
+
     /// Whether prompts render through the native Mistral formatter: a Mistral-native
     /// checkpoint ships `tekken.json` and no chat template (see `prompt_formatter_from_mdc`).
     pub fn uses_native_mistral_renderer(&self) -> bool {
@@ -2902,6 +2987,77 @@ mod tests {
     use super::{CheckedFile, HFConfig, ModelDeploymentCard, TekkenMetadata, TokenizerKind};
     use std::collections::HashSet;
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn mistral_tokenizer_version_reads_sparse_legacy_metadata_from_source() {
+        for version in [3, 7, 11] {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("params.json"), "{}").unwrap();
+            std::fs::write(
+                dir.path().join("tekken.json"),
+                serde_json::json!({"config": {"version": format!("v{version}")}}).to_string(),
+            )
+            .unwrap();
+            let card = ModelDeploymentCard::load_from_disk(dir.path(), None).unwrap();
+            assert!(card.tokenizer.is_none());
+            assert!(card.extra_files.is_empty());
+            assert_eq!(card.mistral_tokenizer_version(), Some(version));
+        }
+    }
+
+    #[test]
+    fn mistral_tokenizer_version_prefers_advertised_metadata_without_bad_file_fallback() {
+        let source = tempfile::tempdir().unwrap();
+        std::fs::write(
+            source.path().join("tekken.json"),
+            r#"{"config":{"version":"v3"}}"#,
+        )
+        .unwrap();
+        let advertised = tempfile::tempdir().unwrap();
+        let path = advertised.path().join("tekken.json");
+        let mut card = ModelDeploymentCard::with_name_only("mistral-advertised-version");
+        card.set_source_path(source.path().to_path_buf());
+        for (contents, expected) in [
+            (r#"{"config":{"version":"v11"}}"#, Some(11)),
+            ("not-json", None),
+            (r#"{"config":{"version":"unknown"}}"#, None),
+        ] {
+            std::fs::write(&path, contents).unwrap();
+            card.extra_files = vec![CheckedFile::from_disk(&path).unwrap()];
+            assert_eq!(card.mistral_tokenizer_version(), expected, "{contents}");
+        }
+    }
+
+    #[test]
+    fn mistral_tokenizer_version_recognizes_legacy_sentencepiece_filenames() {
+        for (filename, expected) in [
+            ("tokenizer.model.v3", Some(3)),
+            ("tokenizer.mm.model.v7", Some(7)),
+            ("tokenizer.model.v11", None),
+            ("other-tokenizer.model.v3", None),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(filename);
+            std::fs::write(&path, b"legacy sentencepiece").unwrap();
+            let mut source_card = ModelDeploymentCard::with_name_only(filename);
+            source_card.set_source_path(dir.path().to_path_buf());
+            assert_eq!(
+                source_card.mistral_tokenizer_version(),
+                expected,
+                "{filename}"
+            );
+
+            let mut advertised_card = ModelDeploymentCard::with_name_only(filename);
+            advertised_card
+                .extra_files
+                .push(CheckedFile::from_disk(&path).unwrap());
+            assert_eq!(
+                advertised_card.mistral_tokenizer_version(),
+                expected,
+                "{filename}"
+            );
+        }
+    }
 
     #[test]
     fn tekken_reasoning_effort_none_follows_the_builder() {
