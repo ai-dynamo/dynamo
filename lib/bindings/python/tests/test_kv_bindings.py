@@ -552,10 +552,10 @@ _EXTRA_ARGS_DIRECT = [
 ]
 
 _EXTRA_ARGS_FALLBACK = [
-    {"s": {1, 2}},
-    {1: "x"},
-    {"big": 2**64},
-    _ExtraArgs(ints=[1, 2]),
+    ({"s": {1, 2}}, None),
+    ({1: "x"}, r"^unexpected type:.*int.*(?:str|String)"),
+    ({"big": 2**64}, r"^JSON number out of range$"),
+    (_ExtraArgs(ints=[1, 2]), None),
 ]
 
 _REQUESTS_DIRECT = [
@@ -570,30 +570,18 @@ _REQUESTS_DIRECT = [
 ]
 
 _REQUESTS_FALLBACK = [
-    {"model": "m", "token_ids": _TokenList([1, 2])},
-    _preprocessed(token_ids=[1, -1]),
-    {"model": "m"},
-    types.MappingProxyType(_preprocessed()),
-    *(_preprocessed(extra_args=extra_args) for extra_args in _EXTRA_ARGS_FALLBACK),
+    ({"model": "m", "token_ids": _TokenList([1, 2])}, None),
+    (
+        _preprocessed(token_ids=[1, -1]),
+        r"^OverflowError: out of range integral type conversion attempted$",
+    ),
+    ({"model": "m"}, r"^missing field `token_ids`$"),
+    (types.MappingProxyType(_preprocessed()), None),
+    *(
+        (_preprocessed(extra_args=value), error)
+        for value, error in _EXTRA_ARGS_FALLBACK
+    ),
 ]
-
-
-def _conversion_error(e):
-    """Return a conversion error as comparison data; re-raise anything else.
-
-    Request conversion raises plain `Exception`, so a subclass means another failure.
-    """
-    if type(e) is not Exception:
-        raise e
-    return e
-
-
-def _pythonized(preprocessed):
-    """pythonize's request, or the exception it raises."""
-    try:
-        return _convert_preprocessed_request(preprocessed, fast_path=False)
-    except Exception as e:
-        return _conversion_error(e)
 
 
 @pytest.fixture
@@ -638,55 +626,70 @@ async def echo_router(temp_file_store, monkeypatch):
             await asyncio.wait_for(server_task, timeout=10)
 
 
-async def _received_or_error(received, call):
-    """The request the worker received for `call`, or the exception `call` raised."""
-    try:
-        stream = await call()
-    except Exception as e:
-        return _conversion_error(e)
+async def _received_request(received, call):
+    """The request the worker received for `call`; all exceptions fail the test."""
+    stream = await call()
     responses = [response async for response in stream]
     assert [response["finish_reason"] for response in responses] == ["stop"]
     return received[-1]
 
 
-def _assert_same(actual, expected):
-    if isinstance(expected, Exception):
-        assert isinstance(actual, Exception), actual
-        assert (type(actual), str(actual)) == (type(expected), str(expected))
-    else:
-        assert not isinstance(actual, Exception), actual
-        # JSON text also pins key order and NaN -> null.
-        assert json.dumps(actual) == json.dumps(expected)
-
-
 @pytest.mark.integration
 @pytest.mark.timeout(30)
-@pytest.mark.parametrize("preprocessed", _REQUESTS_DIRECT + _REQUESTS_FALLBACK)
+@pytest.mark.parametrize(
+    "preprocessed,error",
+    [(value, None) for value in _REQUESTS_DIRECT] + _REQUESTS_FALLBACK,
+)
 async def test_kv_router_generate_from_request_matches_pythonize(
-    echo_router, preprocessed
+    echo_router, preprocessed, error
 ):
     router, received = echo_router
-    expected = _pythonized(preprocessed)
-    actual = await _received_or_error(
+    if error is not None:
+        with pytest.raises(Exception, match=error) as expected:
+            _convert_preprocessed_request(preprocessed, fast_path=False)
+        with pytest.raises(Exception, match=error) as actual:
+            await router.generate_from_request(preprocessed)
+        assert type(actual.value) is type(expected.value) is Exception
+        assert str(actual.value) == str(expected.value)
+        assert not received
+        return
+
+    expected = _convert_preprocessed_request(preprocessed, fast_path=False)
+    actual = await _received_request(
         received, lambda: router.generate_from_request(preprocessed)
     )
-    if isinstance(actual, dict):
-        # The router adds its routing hints on the way to the worker.
-        actual.pop("routing")
-    _assert_same(actual, expected)
+    # The router adds its routing hints on the way to the worker.
+    actual.pop("routing")
+    # JSON text also pins key order and NaN -> null.
+    assert json.dumps(actual) == json.dumps(expected)
 
 
 @pytest.mark.integration
 @pytest.mark.timeout(30)
-@pytest.mark.parametrize("extra_args", _EXTRA_ARGS_DIRECT + _EXTRA_ARGS_FALLBACK)
-async def test_kv_router_generate_extra_args_matches_pythonize(echo_router, extra_args):
+@pytest.mark.parametrize(
+    "extra_args,error",
+    [(value, None) for value in _EXTRA_ARGS_DIRECT] + _EXTRA_ARGS_FALLBACK,
+)
+async def test_kv_router_generate_extra_args_matches_pythonize(
+    echo_router, extra_args, error
+):
     router, received = echo_router
-    expected = _pythonized(_preprocessed(extra_args=extra_args))
-    if not isinstance(expected, Exception):
-        expected = expected.get("extra_args")
-    actual = await _received_or_error(
+    if error is not None:
+        with pytest.raises(Exception, match=error) as expected:
+            _convert_preprocessed_request(
+                _preprocessed(extra_args=extra_args), fast_path=False
+            )
+        with pytest.raises(Exception, match=error) as actual:
+            await router.generate([1, 2, 3], "m", extra_args=extra_args)
+        assert type(actual.value) is type(expected.value) is Exception
+        assert str(actual.value) == str(expected.value)
+        assert not received
+        return
+
+    expected = _convert_preprocessed_request(
+        _preprocessed(extra_args=extra_args), fast_path=False
+    ).get("extra_args")
+    actual = await _received_request(
         received, lambda: router.generate([1, 2, 3], "m", extra_args=extra_args)
     )
-    if isinstance(actual, dict):
-        actual = actual.get("extra_args")
-    _assert_same(actual, expected)
+    assert json.dumps(actual.get("extra_args")) == json.dumps(expected)
