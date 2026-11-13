@@ -23,7 +23,7 @@ from typing import Any, Optional
 from aisimulate_core.datasets import prepare_execution_profile
 from aisimulate_core.sdk import ForwardPassPerfModelConfig
 
-from dynamo.common.ais_perf_model import load_document, resolve_entry
+from dynamo.common.ais_perf_model import engine_perf_config
 from dynamo.common.forward_pass_metrics import (
     FPM_VERSION,
     ForwardPassMetrics,
@@ -255,10 +255,7 @@ class PlannerEnginePerfModel:
             raise ValueError("AIS role configuration is absent")
         if not isinstance(spec, AISPerfModelSpec):
             if self._written_perf_model != spec:
-                entry = resolve_entry(
-                    load_document(spec).select(self._worker_type),
-                    worker_type=self._worker_type,
-                )
+                entry = engine_perf_config(spec, self._worker_type)
                 # The content gets the checks a roles entry gets when the
                 # Planner config is loaded.
                 self._resolved_perf_model = AISPerfModelSpec(

@@ -26,7 +26,8 @@ from aisimulate.sweeper.provider import (
 )
 
 from dynamo.aisimulate.domains import ContinuousDomain, expand_domain
-from dynamo.common.ais_perf_model import router_config, warn_old_inputs
+from dynamo.common.ais_perf_model import REMOVE_IN, router_perf_config
+from dynamo.common.configuration.utils import Deprecated
 
 from .config import (
     ROUTER_KNOB_DEFAULTS,
@@ -70,12 +71,6 @@ def _deployment_modes(
     if not isinstance(raw_modes, list):
         raise TypeError("core deployment_mode must be a list")
     return [str(mode) for mode in raw_modes]
-
-
-def _written_perf_config(value: JSONValue, worker_type: str) -> dict[str, JSONValue]:
-    """Return the router perf config for a config or list at ``router.ais_perf_model``."""
-    # Not called in place: the callers have a local named router_config.
-    return router_config(value, worker_type)
 
 
 def _may_select_ais(public: RouterRecommendationConfig) -> bool:
@@ -286,9 +281,7 @@ class DynamoRouterSweepConfigProvider:
                 if str(context.engine.get("mode", "aggregated")) == "disaggregated"
                 else "aggregated"
             )
-            perf_config = {
-                "ais_perf_config": _written_perf_config(written, worker_type)
-            }
+            perf_config = {"ais_perf_config": router_perf_config(written, worker_type)}
         result = AdapterReplaySpec(
             config=concrete,
             runtime_hooks=(
@@ -312,7 +305,9 @@ class DynamoRouterSweepConfigProvider:
         if old_form and not self._warned_old_router_section:
             # The flag is set after the call: a warning that a filter turns
             # into an error was not shown, and the next compile raises it again.
-            warn_old_inputs([_OLD_ROUTER_SECTION], _NEW_ROUTER_SECTION, stacklevel=2)
+            Deprecated(_NEW_ROUTER_SECTION, remove_in=REMOVE_IN).warn(
+                _OLD_ROUTER_SECTION, stacklevel=2
+            )
             self._warned_old_router_section = True
         return result
 
@@ -329,7 +324,9 @@ class DynamoRouterSweepConfigProvider:
             and not self._warned_old_router_section
         ):
             # Set after the call, as in compile_prediction.
-            warn_old_inputs([_OLD_ROUTER_SECTION], _NEW_ROUTER_SECTION, stacklevel=2)
+            Deprecated(_NEW_ROUTER_SECTION, remove_in=REMOVE_IN).warn(
+                _OLD_ROUTER_SECTION, stacklevel=2
+            )
             self._warned_old_router_section = True
         return plan
 
@@ -342,7 +339,7 @@ class DynamoRouterSweepConfigProvider:
         """
         key = (json.dumps(written, sort_keys=True), worker_type)
         if key not in self._written_perf_configs:
-            self._written_perf_configs[key] = _written_perf_config(written, worker_type)
+            self._written_perf_configs[key] = router_perf_config(written, worker_type)
         return deepcopy(self._written_perf_configs[key])
 
     def _compile_public_search(

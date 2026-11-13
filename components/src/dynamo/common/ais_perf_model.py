@@ -14,12 +14,14 @@ raise ``ImportError`` when it is not installed.
 
 from __future__ import annotations
 
+import atexit
 import copy
+import importlib
 import json
 import os
+import shutil
 import tempfile
-import warnings
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
@@ -35,29 +37,39 @@ ROUTER_WORKER_TYPES = ("prefill", "aggregated")
 _REQUIRED_KEYS = ("backend", "system", "model", "worker_type")
 
 # The folder each process prepares datasets in, by process id. A forked child
-# adds a folder of its own and keeps the entry it inherited: dropping that
-# entry would delete the folder while the parent still uses it.
-_dataset_workspaces: dict[int, tempfile.TemporaryDirectory[str]] = {}
+# makes a folder of its own. It also inherits the parent's exit hook, so the
+# hook removes a folder only in the process that made it: the parent may
+# still use its folder when the child exits.
+_dataset_workspaces: dict[int, str] = {}
 
 
-def _loader():
-    # Imported here: Dynamo must import without AISimulate installed.
-    from aisimulate_core import ais_perf_model
+def _loader() -> Any:
+    # Loaded on first use: Dynamo must import without AISimulate installed.
+    return importlib.import_module("aisimulate_core.ais_perf_model")
 
-    return ais_perf_model
+
+def _sdk() -> Any:
+    # Loaded on first use, as the loader is.
+    return importlib.import_module("aisimulate_core.sdk")
+
+
+def _remove_dataset_workspace(pid: int, folder: str) -> None:
+    """Remove ``folder`` if this process is ``pid``, the process that made it."""
+    if os.getpid() == pid:
+        shutil.rmtree(folder, ignore_errors=True)
 
 
 def _dataset_workspace() -> str:
     """Return the folder this process prepares datasets in.
 
-    The folder is created on first use and removed when the interpreter exits.
+    The folder is created on first use and removed when this process exits.
     """
     pid = os.getpid()
     if pid not in _dataset_workspaces:
-        _dataset_workspaces[pid] = tempfile.TemporaryDirectory(
-            prefix="dynamo-ais-perf-model-"
-        )
-    return _dataset_workspaces[pid].name
+        folder = tempfile.mkdtemp(prefix="dynamo-ais-perf-model-")
+        atexit.register(_remove_dataset_workspace, pid, folder)
+        _dataset_workspaces[pid] = folder
+    return _dataset_workspaces[pid]
 
 
 def env_value(name: str = ENV_VAR) -> str | None:
@@ -164,7 +176,7 @@ def resolve_entry(
     )
 
 
-def router_config(
+def router_perf_config(
     value: Any,
     worker_type: str | None = None,
     *,
@@ -183,6 +195,21 @@ def router_config(
     return normalized_config(resolved)
 
 
+def engine_perf_config(
+    value: Any, worker_type: str, *, fill: Mapping[str, Any] | None = None
+) -> dict[str, Any]:
+    """Return the config of an engine that runs as ``worker_type``.
+
+    The value is read and the entry of ``worker_type`` is selected and
+    resolved; ``fill`` is passed to ``resolve_entry``. The result is the
+    config as resolved: unlike ``router_perf_config`` it is not normalized,
+    so no default is added for a key the value does not give.
+    """
+    return resolve_entry(
+        load_document(value).select(worker_type), worker_type=worker_type, fill=fill
+    )
+
+
 def normalized_config(resolved: Mapping[str, Any]) -> dict[str, Any]:
     """Return a resolved config as ``ForwardPassPerfModelConfig`` normalizes it.
 
@@ -192,11 +219,8 @@ def normalized_config(resolved: Mapping[str, Any]) -> dict[str, Any]:
     missing = [key for key in _REQUIRED_KEYS if not resolved.get(key)]
     if missing:
         raise ValueError(f"ais_perf_model requires {', '.join(missing)}")
-    # Imported here: Dynamo must import without AISimulate installed.
-    from aisimulate_core.sdk import ForwardPassPerfModelConfig
-
     try:
-        config = ForwardPassPerfModelConfig(**resolved)
+        config = _sdk().ForwardPassPerfModelConfig(**resolved)
     except TypeError as error:
         # A key the class does not take is a wrong value in the user's config.
         raise ValueError(f"ais_perf_model: {error}") from error
@@ -281,37 +305,3 @@ def set_timing_model(
     )
     result.setdefault("engine", {})["timing_model"] = timing_model(config)
     return result
-
-
-def join_names(names: Sequence[str]) -> str:
-    """Return ``a``, ``a and b`` or ``a, b and c``."""
-    if len(names) <= 2:
-        return " and ".join(names)
-    return f"{', '.join(names[:-1])} and {names[-1]}"
-
-
-def old_inputs_message(old_names: Sequence[str], replacement: str) -> str:
-    """Return the sentence that says ``old_names`` are deprecated."""
-    if not old_names:
-        raise ValueError("old_names is empty")
-    verb = "is" if len(old_names) == 1 else "are"
-    return (
-        f"{join_names(old_names)} {verb} deprecated and will be removed in "
-        f"{REMOVE_IN}; use {replacement}."
-    )
-
-
-def warn_old_inputs(
-    old_names: Sequence[str], replacement: str, *, stacklevel: int
-) -> None:
-    """Emit one ``FutureWarning`` that names every old input in ``old_names``.
-
-    ``stacklevel=1`` is the line that calls this function, ``2`` the caller of
-    that function, and so on. Earlier calls are not remembered: a component
-    collects its old inputs and calls this once.
-    """
-    warnings.warn(
-        old_inputs_message(old_names, replacement),
-        FutureWarning,
-        stacklevel=stacklevel + 1,
-    )

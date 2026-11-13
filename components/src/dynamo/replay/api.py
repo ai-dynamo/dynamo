@@ -18,12 +18,14 @@ from dynamo._core import (
     run_mocker_synthetic_trace_replay as _run_mocker_synthetic_trace_replay,
 )
 from dynamo._core import run_mocker_trace_replay as _run_mocker_trace_replay
-
-# router_config gets another name here: the public functions have a parameter
-# named router_config.
-from dynamo.common.ais_perf_model import load_document, normalized_config, resolve_entry
-from dynamo.common.ais_perf_model import router_config as _router_perf_config
-from dynamo.common.ais_perf_model import set_timing_model, warn_old_inputs
+from dynamo.common.ais_perf_model import (
+    REMOVE_IN,
+    engine_perf_config,
+    normalized_config,
+    router_perf_config,
+    set_timing_model,
+)
+from dynamo.common.configuration.utils import Deprecated
 from dynamo.replay.report import (
     PlannerReplayDetails,
     ReplayReport,
@@ -173,7 +175,7 @@ def _perf_model_inputs(
             "ais_perf_config= or router_ais_perf_model="
         )
     disaggregated = prefill_engine_args is not None or decode_engine_args is not None
-    router_perf_config = (
+    native_config = (
         ais_perf_config if native_ais_perf_config is None else native_ais_perf_config
     )
     if router_ais_perf_model is not None:
@@ -185,16 +187,15 @@ def _perf_model_inputs(
                 "router_prefill_load_model='ais'"
             )
         try:
-            router_perf_model = _router_perf_config(
+            router_perf_model = router_perf_config(
                 router_ais_perf_model, "prefill" if disaggregated else "aggregated"
             )
         except ValueError as error:
             # ais_perf_model= can raise the same text, so the error says
             # which keyword it is about.
             raise ValueError(f"router_ais_perf_model: {error}") from error
-        router_perf_config = AisPerfConfig(config=router_perf_model)
+        native_config = AisPerfConfig(config=router_perf_model)
     if ais_perf_model is not None:
-        document = load_document(ais_perf_model)
         engine_args = {
             "extra_engine_args": extra_engine_args,
             "prefill_engine_args": prefill_engine_args,
@@ -211,7 +212,7 @@ def _perf_model_inputs(
             # the missing ones.
             if disaggregated and engine_args[name] is None:
                 continue
-            config = resolve_entry(document.select(role), worker_type=role)
+            config = engine_perf_config(ais_perf_model, role)
             # Only a check: the engine gets the config as resolved, without
             # the defaults the normalized form adds.
             normalized_config(config)
@@ -225,9 +226,11 @@ def _perf_model_inputs(
         prefill_engine_args = engine_args["prefill_engine_args"]
         decode_engine_args = engine_args["decode_engine_args"]
     if ais_perf_config is not None:
-        warn_old_inputs(["ais_perf_config="], "router_ais_perf_model=", stacklevel=3)
+        Deprecated("router_ais_perf_model=", remove_in=REMOVE_IN).warn(
+            "ais_perf_config=", stacklevel=3
+        )
     return (
-        router_perf_config,
+        native_config,
         extra_engine_args,
         prefill_engine_args,
         decode_engine_args,

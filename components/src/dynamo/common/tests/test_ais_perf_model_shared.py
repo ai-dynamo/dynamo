@@ -4,6 +4,7 @@
 import copy
 import json
 import os
+import shutil
 import subprocess
 import sys
 import textwrap
@@ -13,7 +14,6 @@ from typing import Any
 import pytest
 
 from dynamo.common import ais_perf_model
-from dynamo.common.configuration.utils import Deprecated
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
 
@@ -51,14 +51,6 @@ def _run_child(script: str, **env: str) -> str:
     return proc.stdout
 
 
-def _report(stacklevel: int) -> None:
-    ais_perf_model.warn_old_inputs(["--ais-backend"], NEW_FLAG, stacklevel=stacklevel)
-
-
-def _validate(stacklevel: int) -> None:
-    _report(stacklevel)
-
-
 class _RecordingLoader:
     """Stands in for the loader and keeps the arguments of every resolve call."""
 
@@ -73,91 +65,11 @@ class _RecordingLoader:
 @pytest.fixture
 def dataset_workspaces(monkeypatch: pytest.MonkeyPatch):
     """Give the test its own, empty set of dataset folders and remove them after."""
-    workspaces: dict[int, Any] = {}
+    workspaces: dict[int, str] = {}
     monkeypatch.setattr(ais_perf_model, "_dataset_workspaces", workspaces)
     yield workspaces
     for folder in workspaces.values():
-        folder.cleanup()
-
-
-def test_old_inputs_message_one_two_three_names() -> None:
-    assert (
-        ais_perf_model.old_inputs_message(["--ais-backend"], NEW_FLAG)
-        == "--ais-backend is deprecated and will be removed in v1.9; "
-        "use --ais-perf-model."
-    )
-    assert (
-        ais_perf_model.old_inputs_message(["--ais-backend", "--ais-system"], NEW_FLAG)
-        == "--ais-backend and --ais-system are deprecated and will be removed in "
-        "v1.9; use --ais-perf-model."
-    )
-    assert (
-        ais_perf_model.old_inputs_message(
-            ["--ais-backend", "--ais-system", "DYN_AIS_MODEL_PATH"], NEW_FLAG
-        )
-        == "--ais-backend, --ais-system and DYN_AIS_MODEL_PATH are deprecated and "
-        "will be removed in v1.9; use --ais-perf-model."
-    )
-    assert ais_perf_model.join_names(["a"]) == "a"
-    assert ais_perf_model.join_names(["a", "b"]) == "a and b"
-    assert ais_perf_model.join_names(("a", "b", "c", "d")) == "a, b, c and d"
-    with pytest.raises(ValueError, match="^old_names is empty$"):
-        ais_perf_model.old_inputs_message([], NEW_FLAG)
-
-
-def test_old_inputs_message_matches_existing_helper_for_one_name() -> None:
-    existing = Deprecated(NEW_FLAG, remove_in=ais_perf_model.REMOVE_IN)
-
-    assert ais_perf_model.old_inputs_message(
-        ["--ais-perf-config"], NEW_FLAG
-    ) == existing.message("--ais-perf-config")
-
-
-def test_warn_old_inputs_is_future_warning_at_caller() -> None:
-    with pytest.warns(FutureWarning) as records:
-        ais_perf_model.warn_old_inputs(["--ais-perf-config"], NEW_FLAG, stacklevel=1)
-
-    assert len(records) == 1
-    assert records[0].category is FutureWarning
-    assert str(records[0].message) == (
-        "--ais-perf-config is deprecated and will be removed in v1.9; "
-        "use --ais-perf-model."
-    )
-    assert records[0].filename == __file__
-
-
-def test_warn_old_inputs_stacklevel_counts_callers() -> None:
-    with pytest.warns(FutureWarning) as reporting_line:
-        _validate(stacklevel=1)
-    with pytest.warns(FutureWarning) as callers_line:
-        _validate(stacklevel=2)
-
-    # Each helper is one line of code directly under its ``def`` line.
-    assert reporting_line[0].lineno == _report.__code__.co_firstlineno + 1
-    assert callers_line[0].lineno == _validate.__code__.co_firstlineno + 1
-    assert callers_line[0].filename == __file__
-
-
-def test_warn_old_inputs_warns_on_every_call() -> None:
-    """Nothing is remembered: one warning per process needs one call per process."""
-    with pytest.warns(FutureWarning) as one_after_the_other:
-        ais_perf_model.warn_old_inputs(["--ais-backend"], NEW_FLAG, stacklevel=1)
-        ais_perf_model.warn_old_inputs(["--ais-system"], NEW_FLAG, stacklevel=1)
-    with pytest.warns(FutureWarning) as together:
-        ais_perf_model.warn_old_inputs(
-            ["--ais-backend", "--ais-system"], NEW_FLAG, stacklevel=1
-        )
-
-    assert [str(record.message) for record in one_after_the_other] == [
-        "--ais-backend is deprecated and will be removed in v1.9; "
-        "use --ais-perf-model.",
-        "--ais-system is deprecated and will be removed in v1.9; "
-        "use --ais-perf-model.",
-    ]
-    assert [str(record.message) for record in together] == [
-        "--ais-backend and --ais-system are deprecated and will be removed in "
-        "v1.9; use --ais-perf-model."
-    ]
+        shutil.rmtree(folder, ignore_errors=True)
 
 
 def test_timing_model_shape_and_copy() -> None:
@@ -281,25 +193,32 @@ def test_import_does_not_load_aisimulate() -> None:
 def test_functions_without_a_value_work_when_aisimulate_is_missing() -> None:
     output = _run_child(
         """
+        import importlib.abc
         import json
         import sys
-        import warnings
 
-        # A None entry makes every import of that name fail in this interpreter.
-        sys.modules["aisimulate_core"] = None
-        sys.modules["aisimulate"] = None
+        class WithoutAISimulate(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split(".")[0] in {"aisimulate", "aisimulate_core"}:
+                    raise ModuleNotFoundError(
+                        f"No module named {fullname!r}", name=fullname
+                    )
+
+        sys.meta_path.insert(0, WithoutAISimulate())
 
         from dynamo.common import ais_perf_model
 
         names = {"engine_args_name": "--extra-engine-args", "perf_model_name": "x"}
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            ais_perf_model.warn_old_inputs(["--ais-backend"], "x", stacklevel=1)
+        config = {"model": "m", "system": "s", "backend": "b", "worker_type": "decode"}
         import_errors = {}
         for name, call in {
-            "load_document": lambda: ais_perf_model.load_document({"model": "m"}),
-            "resolve_entry": lambda: ais_perf_model.resolve_entry({"model": "m"}),
-            "router_config": lambda: ais_perf_model.router_config({"model": "m"}),
+            "load_document": lambda: ais_perf_model.load_document(config),
+            "resolve_entry": lambda: ais_perf_model.resolve_entry(config),
+            "router_perf_config": lambda: ais_perf_model.router_perf_config(config),
+            "engine_perf_config": lambda: ais_perf_model.engine_perf_config(
+                config, "decode"
+            ),
+            "normalized_config": lambda: ais_perf_model.normalized_config(config),
             "uses_relative_paths": lambda: ais_perf_model.uses_relative_paths({}),
         }.items():
             try:
@@ -317,9 +236,6 @@ def test_functions_without_a_value_work_when_aisimulate_is_missing() -> None:
                     "set_timing_model": ais_perf_model.set_timing_model(
                         None, {"model": "m"}, **names
                     ),
-                    "join_names": ais_perf_model.join_names(["a", "b"]),
-                    "old_inputs_message": ais_perf_model.old_inputs_message(["a"], "x"),
-                    "warnings": [str(warning.message) for warning in caught],
                     "import_errors": import_errors,
                 }
             )
@@ -333,21 +249,48 @@ def test_functions_without_a_value_work_when_aisimulate_is_missing() -> None:
         "timing_model": timing,
         "engine_args_as_written": {"a": 1},
         "set_timing_model": {"engine": {"timing_model": timing}},
-        "join_names": "a and b",
-        "old_inputs_message": "a is deprecated and will be removed in v1.9; use x.",
-        "warnings": ["--ais-backend is deprecated and will be removed in v1.9; use x."],
         # The functions that read a value fail with the import error itself.
         "import_errors": {
             "load_document": "aisimulate_core",
             "resolve_entry": "aisimulate_core",
-            "router_config": "aisimulate_core",
+            "router_perf_config": "aisimulate_core",
+            "engine_perf_config": "aisimulate_core",
+            "normalized_config": "aisimulate_core",
             "uses_relative_paths": "aisimulate_core",
         },
     }
 
 
+@pytest.mark.timeout(60)  # one interpreter start, about 1s
+def test_aisimulate_build_without_the_loader_is_an_import_error(
+    tmp_path: Path,
+) -> None:
+    # An aisimulate_core package that has no ais_perf_model module.
+    (tmp_path / "aisimulate_core").mkdir()
+    (tmp_path / "aisimulate_core" / "__init__.py").write_text("")
+
+    output = _run_child(
+        """
+        import os
+        import sys
+
+        sys.path.insert(0, os.environ["PACKAGES_WITHOUT_LOADER"])
+
+        from dynamo.common import ais_perf_model
+
+        try:
+            ais_perf_model.load_document({"model": "m"})
+        except ImportError as error:
+            print(type(error).__name__, error.name)
+        """,
+        PACKAGES_WITHOUT_LOADER=str(tmp_path),
+    )
+
+    assert output.split() == ["ModuleNotFoundError", "aisimulate_core.ais_perf_model"]
+
+
 def test_dataset_workspace_only_for_dataset_entries(
-    monkeypatch: pytest.MonkeyPatch, dataset_workspaces: dict[int, Any]
+    monkeypatch: pytest.MonkeyPatch, dataset_workspaces: dict[int, str]
 ) -> None:
     loader = _RecordingLoader()
     monkeypatch.setattr(ais_perf_model, "_loader", lambda: loader)
@@ -378,10 +321,11 @@ def test_dataset_workspace_only_for_dataset_entries(
 
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="needs os.fork")
 @pytest.mark.timeout(60)  # one interpreter start and one fork, about 1s
-def test_forked_child_gets_its_own_dataset_workspace(tmp_path: Path) -> None:
+def test_each_process_removes_only_its_own_dataset_workspace(tmp_path: Path) -> None:
     output = _run_child(
         """
         import os
+        import sys
 
         from dynamo.common import ais_perf_model
 
@@ -390,18 +334,27 @@ def test_forked_child_gets_its_own_dataset_workspace(tmp_path: Path) -> None:
         pid = os.fork()
         if pid == 0:
             os.write(write_end, ais_perf_model._dataset_workspace().encode())
-            os._exit(0)
-        os.waitpid(pid, 0)
+            # A normal exit: the exit hooks inherited from the parent run here.
+            sys.exit(0)
+        os.close(write_end)
+        _, status = os.waitpid(pid, 0)
         child_folder = os.read(read_end, 4096).decode()
+        print(parent_folder)
+        print(os.waitstatus_to_exitcode(status))
         print(child_folder != parent_folder)
         print(os.path.isdir(parent_folder))
+        print(os.path.exists(child_folder))
         print(ais_perf_model._dataset_workspace() == parent_folder)
         """,
-        # The child of the fork leaves its folder behind; keep it under tmp_path.
+        # The folders are made under tmp_path, so the checks below see them.
         TMPDIR=str(tmp_path),
     )
 
-    assert output.split() == ["True", "True", "True"]
+    parent_folder, *answers = output.split()
+    assert answers == ["0", "True", "True", "False", "True"]
+    assert Path(parent_folder).parent == tmp_path
+    # The interpreter that made the folder has exited.
+    assert not os.path.exists(parent_folder)
 
 
 def test_load_document_accepts_file_inline_json_mapping_list(tmp_path: Path) -> None:
@@ -635,7 +588,7 @@ def test_resolve_entry_twice_is_equal(tmp_path: Path) -> None:
     assert from_template == {"from": str(template), "tp": 4}
 
 
-def test_router_config_equals_forward_pass_config_dict(tmp_path: Path) -> None:
+def test_router_perf_config_equals_forward_pass_config_dict(tmp_path: Path) -> None:
     # Imported here: the tests that read no value run without AISimulate installed.
     from aisimulate_core.sdk import ForwardPassPerfModelConfig
 
@@ -644,17 +597,53 @@ def test_router_config_equals_forward_pass_config_dict(tmp_path: Path) -> None:
     (tmp_path / "cfg.yaml").write_text(_yaml([_config(worker_type="decode"), entry]))
     untyped = {key: value for key, value in entry.items() if key != "worker_type"}
 
-    assert ais_perf_model.router_config(entry) == expected
-    assert ais_perf_model.router_config(entry, "prefill") == expected
-    assert ais_perf_model.router_config(untyped, "prefill") == expected
-    assert ais_perf_model.router_config("cfg.yaml", base_dir=tmp_path) == expected
+    assert ais_perf_model.router_perf_config(entry) == expected
+    assert ais_perf_model.router_perf_config(entry, "prefill") == expected
+    assert ais_perf_model.router_perf_config(untyped, "prefill") == expected
+    assert ais_perf_model.router_perf_config("cfg.yaml", base_dir=tmp_path) == expected
     assert expected["worker_type"] == "prefill"
     assert expected["tp"] == 2
 
 
-def test_router_config_reports_unknown_key_as_value_error() -> None:
+def test_engine_perf_config_is_the_entry_of_the_worker_type(tmp_path: Path) -> None:
+    prefill = _config(worker_type="prefill", tp=2)
+    decode = _config(worker_type="decode")
+    path = tmp_path / "cfg.yaml"
+    path.write_text(_yaml([decode, prefill]))
+
+    # The config as resolved: no key is added but a missing worker_type.
+    assert ais_perf_model.engine_perf_config([decode, prefill], "prefill") == prefill
+    assert ais_perf_model.engine_perf_config(str(path), "decode") == decode
+    assert ais_perf_model.engine_perf_config(_config(), "decode") == decode
+
+
+def test_engine_perf_config_fill_adds_and_conflicts() -> None:
+    fill = {"nextn": 3}
+
+    filled = ais_perf_model.engine_perf_config(_config(), "decode", fill=fill)
+
+    assert filled == _config(worker_type="decode", nextn=3)
+    # A written value that differs from the required one.
+    with pytest.raises(ValueError):
+        ais_perf_model.engine_perf_config(_config(nextn=2), "decode", fill=fill)
+    assert fill == {"nextn": 3}
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param([_config(worker_type="prefill")], id="list without the type"),
+        pytest.param(_config(worker_type="prefill"), id="config of another type"),
+    ],
+)
+def test_engine_perf_config_needs_an_entry_for_the_worker_type(value: Any) -> None:
+    with pytest.raises(ValueError):
+        ais_perf_model.engine_perf_config(value, "decode")
+
+
+def test_router_perf_config_reports_unknown_key_as_value_error() -> None:
     with pytest.raises(ValueError) as error:
-        ais_perf_model.router_config(_config(tp_size=2), "prefill")
+        ais_perf_model.router_perf_config(_config(tp_size=2), "prefill")
 
     assert type(error.value) is ValueError
     assert str(error.value).startswith("ais_perf_model: ")
@@ -676,21 +665,21 @@ def test_router_config_reports_unknown_key_as_value_error() -> None:
         ),
     ],
 )
-def test_router_config_requires_identity_values(
+def test_router_perf_config_requires_identity_values(
     change: dict[str, Any], missing: str
 ) -> None:
     with pytest.raises(ValueError) as error:
-        ais_perf_model.router_config(_config(**change), "prefill")
+        ais_perf_model.router_perf_config(_config(**change), "prefill")
 
     assert type(error.value) is ValueError
     assert str(error.value) == f"ais_perf_model requires {missing}"
 
 
-def test_router_config_requires_a_written_model() -> None:
+def test_router_perf_config_requires_a_written_model() -> None:
     entry = {key: value for key, value in _config().items() if key != "model"}
 
     with pytest.raises(ValueError) as error:
-        ais_perf_model.router_config(entry, "aggregated")
+        ais_perf_model.router_perf_config(entry, "aggregated")
 
     assert str(error.value) == "ais_perf_model requires model"
 

@@ -13,7 +13,7 @@ from __future__ import annotations
 import argparse
 from typing import Optional
 
-from dynamo.common.ais_perf_model import join_names, router_config
+from dynamo.common.ais_perf_model import router_perf_config
 from dynamo.common.configuration.arg_group import ArgGroup
 from dynamo.common.configuration.groups.ais_perf_args import (
     AisPerfArgGroup,
@@ -23,7 +23,7 @@ from dynamo.common.configuration.groups.kv_router_args import (
     KvRouterArgGroup,
     KvRouterConfigBase,
 )
-from dynamo.common.configuration.utils import add_argument
+from dynamo.common.configuration.utils import add_argument, join_names
 from dynamo.squeeze_evolve.orchestrator import SqueezeEvolveConfig, Tier, parse_tiers
 
 _TIERS_EXAMPLE = (
@@ -99,7 +99,7 @@ class SqueezeEvolveRunConfig(KvRouterConfigBase, AisPerfConfigBase):
             by_tier: list[Optional[dict]] = []
             for index, tier in enumerate(tiers):
                 try:
-                    config = router_config(tier.ais_perf_model, worker_type)
+                    config = router_perf_config(tier.ais_perf_model, worker_type)
                 except ValueError as error:
                     raise ValueError(f"--tiers[{index}]: {error}") from error
                 self._check_nextn_accept_rates(config)

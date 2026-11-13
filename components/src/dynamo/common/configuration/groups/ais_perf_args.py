@@ -11,18 +11,18 @@ from pathlib import Path
 
 import yaml
 
+from dynamo._internal.ais import _pad_nextn_accept_rates
 from dynamo.common.ais_perf_model import (
     ENV_VAR,
+    REMOVE_IN,
     ROUTER_WORKER_TYPES,
     WORKER_TYPE_ENV_VAR,
     env_value,
-    join_names,
-    old_inputs_message,
-    router_config,
-    warn_old_inputs,
+    router_perf_config,
 )
 from dynamo.common.configuration.arg_group import ArgGroup
 from dynamo.common.configuration.config_base import ConfigBase
+from dynamo.common.configuration.utils import Deprecated, join_names
 
 _FIELDS = {
     "backend": (str, None, "backend"),
@@ -116,8 +116,9 @@ class AisPerfConfigBase(ConfigBase):
                 continue
             flag = "--ais-" + name.replace("_", "-")
             variable = "DYN_AIS_" + name.upper()
-            typed = getattr(self, "_seen_ais_" + name, None) is not None
-            names.append(flag if typed or variable not in os.environ else variable)
+            # The mark holds the spelling that was typed, --ais- or --aic-.
+            typed = getattr(self, "_seen_ais_" + name, None)
+            names.append(typed or (variable if variable in os.environ else flag))
         return names
 
     def router_worker_type(self) -> str | None:
@@ -185,23 +186,22 @@ class AisPerfConfigBase(ConfigBase):
             self.router_worker_type()
         # Last statement: every error above is raised before the warning.
         if old:
-            warn_old_inputs(old, replacement, stacklevel=stacklevel)
+            Deprecated(replacement, remove_in=REMOVE_IN).warn(
+                old, stacklevel=stacklevel
+            )
 
     def ais_perf_model_kwargs(self, value) -> dict:
         """Return the ``AisPerfConfig`` arguments for one AIS perf model value.
 
         A relative path in ``value`` starts at the working directory.
         """
-        config = router_config(value, self.router_worker_type())
+        config = router_perf_config(value, self.router_worker_type())
         self._check_nextn_accept_rates(config)
         return {"config": config}
 
     def _check_nextn_accept_rates(self, config) -> None:
         rates = getattr(self, "ais_nextn_accept_rates", None)
         if config.get("nextn", 0) and rates is not None:
-            # Imported here: the helper lives in the native bindings package.
-            from dynamo._internal.ais import _pad_nextn_accept_rates
-
             _pad_nextn_accept_rates(rates)
 
     def check_renamed_env_vars(self) -> None:
@@ -219,11 +219,8 @@ class AisPerfConfigBase(ConfigBase):
 
     def ais_perf_kwargs(self) -> dict:
         self.check_renamed_env_vars()
-        value, name = self.new_ais_perf_input()
+        value, _ = self.new_ais_perf_input()
         if value is not None:
-            old = self.old_ais_perf_inputs()
-            if old:
-                raise ValueError(f"{name} cannot be combined with {join_names(old)}")
             return self.ais_perf_model_kwargs(value)
         authored = getattr(self, "ais_perf_config", None)
         shorthand = {
@@ -264,6 +261,7 @@ class AisPerfConfigBase(ConfigBase):
 class AisPerfArgGroup(ArgGroup):
     def add_arguments(self, parser) -> None:
         group = parser.add_argument_group("AISimulate Perf Model Options")
+        deprecated = Deprecated("--ais-perf-model", remove_in=REMOVE_IN)
         # The two environment variables are read when the config is validated.
         group.add_argument(
             "--ais-perf-model",
@@ -292,7 +290,7 @@ class AisPerfArgGroup(ArgGroup):
             type=parse_ais_perf_config,
             default=os.environ.get("DYN_AIS_PERF_CONFIG"),
             help=(
-                old_inputs_message(["--ais-perf-config"], "--ais-perf-model")
+                deprecated.message("--ais-perf-config")
                 + " Complete ForwardPassPerfModelConfig as JSON or a JSON/YAML path."
             ),
         )
@@ -300,11 +298,7 @@ class AisPerfArgGroup(ArgGroup):
             flag = name.replace("_", "-")
             text = f"AISimulate {flag}; DYN_AIS_{name.upper()}. Legacy aic spelling accepted."
             if key is not None:
-                text = (
-                    old_inputs_message(["--ais-" + flag], "--ais-perf-model")
-                    + " "
-                    + text
-                )
+                text = deprecated.message("--ais-" + flag) + " " + text
             group.add_argument(
                 "--ais-" + flag,
                 "--aic-" + flag,

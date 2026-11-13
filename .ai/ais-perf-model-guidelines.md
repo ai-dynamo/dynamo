@@ -21,12 +21,16 @@ APIs, or construct a private native engine to bypass this interface.
   config or a list of configs with one `worker_type` each; on a command line it
   is a file path or inline JSON. Do not add a second input for the same data.
 - Only `dynamo.common.ais_perf_model` calls the AISimulate loader. Read and
-  resolve a value through its functions; select an entry with
-  `select_router_entry` or with the document that `load_document` returns.
+  resolve a value through its functions: a router takes its config from
+  `router_perf_config`, an engine that knows its worker type from
+  `engine_perf_config`. Code that must not open `from` reads the value with
+  `load_document` and selects an entry from the document it returns.
 - Old inputs keep their behavior until `REMOVE_IN` of that module. A component
-  collects the old inputs in use and calls `warn_old_inputs` once, as the last
-  statement of the check that finds them, so that no error of that check follows
-  the warning. An old input together with the new one is an error.
+  collects the old inputs in use and calls
+  `Deprecated(replacement, remove_in=REMOVE_IN).warn(names)` from
+  `dynamo.common.configuration.utils` once, as the last statement of the check
+  that finds them, so that no error of that check follows the warning. An old
+  input together with the new one is an error.
 - AISimulate owns schema, defaults, validation, selection, tuning and prediction.
   Pass complete configurations, including ordered roots and nested estimator
   controls. Reject unknown fields.

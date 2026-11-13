@@ -22,7 +22,8 @@ from typing import Any, Optional
 
 from pydantic import BaseModel
 
-from dynamo.common.ais_perf_model import warn_old_inputs
+from dynamo.common.ais_perf_model import REMOVE_IN
+from dynamo.common.configuration.utils import Deprecated
 from dynamo.planner.config.planner_config import (
     AIS_PERF_MODEL_NEW_FORM,
     PlannerConfig,
@@ -152,7 +153,7 @@ def _parse_config() -> PlannerConfig:
     config = PlannerConfig.from_config_arg(args.config)
     old = ais_perf_model_old_form_names(config.ais_perf_model)
     if old:
-        warn_old_inputs(old, AIS_PERF_MODEL_NEW_FORM, stacklevel=2)
+        Deprecated(AIS_PERF_MODEL_NEW_FORM, remove_in=REMOVE_IN).warn(old, stacklevel=2)
     return config
 
 

@@ -25,7 +25,7 @@ from aisimulate_core.sdk import ForwardPassPerfModelConfig
 from dynamo.common.ais_perf_model import (
     load_document,
     resolve_entry,
-    router_config,
+    router_perf_config,
     timing_model,
 )
 from dynamo.llm import AisPerfConfig, KvRouterConfig
@@ -263,7 +263,9 @@ def test_router_keyword_builds_native_config(replay, native_calls, tmp_path):
     assert len(native_calls) == len(written_forms)
     for written, call in zip(written_forms, native_calls):
         assert isinstance(call["ais_perf_config"], AisPerfConfig)
-        assert call["ais_perf_config"].to_dict() == router_config(written, "aggregated")
+        assert call["ais_perf_config"].to_dict() == router_perf_config(
+            written, "aggregated"
+        )
         assert call["ais_perf_config"].to_dict() == normalized(AGGREGATED_ENTRY)
 
 
@@ -582,7 +584,7 @@ def test_router_keyword_error_names_keyword(replay, native_calls):
         "ais_perf_model: no entry for worker type 'aggregated'; it has: prefill"
     )
     with pytest.raises(ValueError) as from_shared_module:
-        router_config([PREFILL_ENTRY], "aggregated")
+        router_perf_config([PREFILL_ENTRY], "aggregated")
 
     with pytest.raises(ValueError) as raised:
         replay(router_ais_perf_model=[PREFILL_ENTRY], **_kv_router())

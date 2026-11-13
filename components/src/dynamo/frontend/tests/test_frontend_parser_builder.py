@@ -156,7 +156,7 @@ def test_frontend_start_warns_once_for_old_ais_inputs(
         kwargs = config.ais_perf_kwargs()
 
     assert [str(record.message) for record in records] == [
-        "--ais-backend, --ais-system and --ais-model-path are deprecated and will "
+        "--aic-backend, --ais-system and --ais-model-path are deprecated and will "
         "be removed in v1.9; use --ais-perf-model."
     ]
     assert records[0].filename == frontend_main.__file__

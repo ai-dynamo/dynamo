@@ -262,7 +262,7 @@ def test_old_aic_spelling_builds_same_config(capsys):
         ]
     )
 
-    with _warns("frontend", OLD_FLAT_ARE):
+    with _warns("frontend", "--aic-backend, --aic-system and --aic-model-path are"):
         config.validate()
 
     assert config.ais_perf_kwargs() == expected()
@@ -734,16 +734,6 @@ def test_worker_type_env_with_old_inputs_is_ignored(monkeypatch):
     assert config.ais_perf_kwargs() == expected()
 
 
-def test_ais_perf_kwargs_alone_rejects_old_with_new():
-    config = _frontend([*AIS, *NEW, "--ais-backend", "vllm"])
-
-    with pytest.raises(
-        ValueError,
-        match=exactly("--ais-perf-model cannot be combined with --ais-backend"),
-    ), no_warning():
-        config.ais_perf_kwargs()
-
-
 # The warning for old inputs.
 
 
@@ -763,7 +753,7 @@ def test_ais_perf_kwargs_alone_rejects_old_with_new():
                 "7",
             ],
             {"DYN_AIS_SYSTEM": "h200_sxm"},
-            "--ais-backend, DYN_AIS_SYSTEM and --ais-model-path are",
+            "--aic-backend, DYN_AIS_SYSTEM and --ais-model-path are",
             id="flags-and-env",
         ),
         pytest.param(

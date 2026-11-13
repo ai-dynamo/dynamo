@@ -13,12 +13,11 @@ from typing import Any
 
 from dynamo.common.ais_perf_model import (
     engine_args_as_written,
-    join_names,
-    load_document,
-    resolve_entry,
+    engine_perf_config,
     set_timing_model,
 )
 from dynamo.common.configuration.groups.ais_perf_args import parse_ais_perf_config
+from dynamo.common.configuration.utils import join_names
 from dynamo.common.utils.topology import apply_topology_config
 from dynamo.llm import ModelRuntimeConfig
 
@@ -183,10 +182,8 @@ def build_mocker_engine_args(args: argparse.Namespace) -> dict:
                 f"{join_names(old)}"
             )
         nextn = getattr(args, "ais_nextn", None)
-        canonical = resolve_entry(
-            load_document(value).select(worker_type),
-            worker_type=worker_type,
-            fill=None if nextn is None else {"nextn": nextn},
+        canonical = engine_perf_config(
+            value, worker_type, fill=None if nextn is None else {"nextn": nextn}
         )
     elif canonical is not None:
         if args.ais_perf_model or flat:
@@ -261,9 +258,7 @@ def load_mocker_engine_args(args: argparse.Namespace) -> dict:
             }
             written = engine_args_as_written(text, **names)
             worker_type = normalize_mocker_config(written)["engine"]["worker_type"]
-            entry = resolve_entry(
-                load_document(value).select(worker_type), worker_type=worker_type
-            )
+            entry = engine_perf_config(value, worker_type)
             config = _normalize_with_ais_perf_model(
                 set_timing_model(written, entry, **names)
             )

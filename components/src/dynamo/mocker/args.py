@@ -7,18 +7,12 @@ import os
 import tempfile
 from pathlib import Path
 
-from dynamo.common.ais_perf_model import (
-    ENV_VAR,
-    env_value,
-    join_names,
-    old_inputs_message,
-    warn_old_inputs,
-)
+from dynamo.common.ais_perf_model import ENV_VAR, REMOVE_IN, env_value
 from dynamo.common.configuration.groups.router_args import (
     WorkerRouterConfig,
     add_worker_router_arguments,
 )
-from dynamo.common.configuration.utils import Deprecated
+from dynamo.common.configuration.utils import Deprecated, join_names
 from dynamo.common.utils.namespace import get_worker_namespace
 from dynamo.mocker.config import normalize_mocker_config, old_ais_perf_inputs
 
@@ -207,7 +201,8 @@ def _set_ais_perf_model_attributes(
 
 def _old_ais_help(flag: str, text: str) -> str:
     """Return the help of an old AIS input: the deprecation sentence, then ``text``."""
-    return old_inputs_message([flag], "--ais-perf-model VALUE") + " " + text
+    deprecated = Deprecated("--ais-perf-model VALUE", remove_in=REMOVE_IN)
+    return deprecated.message(flag) + " " + text
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -856,5 +851,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             logger.debug(f"Using default endpoint: {args.endpoint}")
     # Last, so that an error above is reported without a warning before it.
     if old_ais_perf:
-        warn_old_inputs(old_ais_perf, "--ais-perf-model VALUE", stacklevel=2)
+        Deprecated("--ais-perf-model VALUE", remove_in=REMOVE_IN).warn(
+            old_ais_perf, stacklevel=2
+        )
     return args

@@ -26,7 +26,8 @@ import numpy as np
 import yaml
 from aisimulate_core.sdk import ForwardPassPerfModelConfig
 
-from dynamo.common.ais_perf_model import REMOVE_IN, join_names, load_document
+from dynamo.common.ais_perf_model import REMOVE_IN, load_document
+from dynamo.common.configuration.utils import join_names
 from dynamo.common.utils.paths import get_workspace_dir
 from dynamo.planner.config.aic_interpolation_spec import AICInterpolationSpec
 from dynamo.planner.config.backend_components import MockerComponentName
