@@ -32,6 +32,8 @@ use dynamo_slot_tracker::host::{
 };
 use tokio::sync::mpsc;
 
+use super::corpus::WorkloadParams;
+
 /// `lib/llm/src/kv_router/sequence.rs` sizes both replica channels this way.
 const REPLICA_EVENT_CHANNEL_CAPACITY: usize = 100_000;
 /// The bench's router identity on the replica channels; distinct from every worker ID.
@@ -88,34 +90,23 @@ fn plugin_registry() -> Result<RouterPluginRegistry> {
     Ok(registry)
 }
 
-#[derive(Clone, Debug)]
-pub struct HostConfig {
-    pub router: KvRouterConfig,
-    pub block_size: u32,
-    pub busy: BusyThresholds,
-}
-
-/// One worker as the frontend registers it from its runtime config.
-pub fn worker_request(
-    worker_id: WorkerId,
-    block_size: u32,
-    dp_size: u32,
-    max_num_batched_tokens: u64,
-    total_kv_blocks: u64,
-) -> WorkerRequest {
-    WorkerRequest {
-        worker_id,
-        model_name: DEFAULT_MODEL_NAME.to_string(),
-        routing_group: DEFAULT_ROUTING_GROUP.to_string(),
-        endpoint: Some(format!("dyn://{worker_id}")),
-        block_size: Some(block_size),
-        data_parallel_start_rank: Some(0),
-        data_parallel_size: Some(dp_size),
-        max_num_batched_tokens: Some(max_num_batched_tokens),
-        total_kv_blocks: Some(total_kv_blocks),
-        is_eagle: Some(false),
-        ..WorkerRequest::default()
-    }
+/// The workload's workers, as the frontend registers them from their runtime configs.
+fn workers(params: &WorkloadParams) -> Vec<WorkerRequest> {
+    (1..=params.workers as u64)
+        .map(|worker_id| WorkerRequest {
+            worker_id,
+            model_name: DEFAULT_MODEL_NAME.to_string(),
+            routing_group: DEFAULT_ROUTING_GROUP.to_string(),
+            endpoint: Some(format!("dyn://{worker_id}")),
+            block_size: Some(params.block_size),
+            data_parallel_start_rank: Some(0),
+            data_parallel_size: Some(params.dp_size),
+            max_num_batched_tokens: Some(params.max_num_batched_tokens as u64),
+            total_kv_blocks: Some(params.num_gpu_blocks as u64),
+            is_eagle: Some(false),
+            ..WorkerRequest::default()
+        })
+        .collect()
 }
 
 pub struct BenchHost {
@@ -131,11 +122,15 @@ pub struct BenchHost {
 }
 
 impl BenchHost {
-    /// Build the service and register `workers`. Call inside the runtime under test,
-    /// so the scheduler actor and replica tasks run on it.
-    pub async fn start(config: &HostConfig, workers: &[WorkerRequest]) -> Result<Self> {
-        let router = &config.router;
+    /// Build the service for `router` and register the workload's workers. Call inside
+    /// the runtime under test, so the scheduler actor and replica tasks run on it.
+    pub async fn start(
+        router: &KvRouterConfig,
+        busy: BusyThresholds,
+        params: &WorkloadParams,
+    ) -> Result<Self> {
         check_modeled(router)?;
+        let workers = workers(params);
         let threads = router.router_event_threads as usize;
 
         // As `lib/llm/src/kv_router/indexer/mod.rs` builds the concurrent index.
@@ -144,12 +139,12 @@ impl BenchHost {
             primary: Arc::new(ThreadPoolIndexer::new_with_metrics(
                 ConcurrentRadixTreeCompressed::new(),
                 threads,
-                config.block_size,
+                params.block_size,
                 Some(Arc::clone(&metrics)),
             )),
             lower_tier: LowerTierIndexers::new_with_metrics(
                 threads,
-                config.block_size,
+                params.block_size,
                 Some(Arc::clone(&metrics)),
             ),
             approx: None,
@@ -159,7 +154,6 @@ impl BenchHost {
 
         let all_workers: Arc<HashSet<WorkerId>> =
             Arc::new(workers.iter().map(|worker| worker.worker_id).collect());
-        let busy = config.busy;
         // The frontend's client reports these on every selection; here none is overloaded.
         let none_overloaded: Arc<HashSet<WorkerId>> = Arc::default();
         let load = HostLoad {
@@ -227,12 +221,12 @@ impl BenchHost {
             .core()
             .ensure_partition(
                 RoutingPartitionId::new(DEFAULT_MODEL_NAME, DEFAULT_ROUTING_GROUP),
-                config.block_size,
+                params.block_size,
                 false,
             )
             .context("create selection partition")?;
         CatalogReconciler::new(Arc::clone(service.core()))
-            .apply(workers)
+            .apply(&workers)
             .await
             .context("register workers")?;
 

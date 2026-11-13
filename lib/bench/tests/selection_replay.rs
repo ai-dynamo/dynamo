@@ -21,7 +21,7 @@ use corpus::{Corpus, TraceFormat, WorkloadParams};
 use dynamo_kv_events::event::{KvCacheEvent, KvCacheEventData};
 use dynamo_kv_router::config::KvRouterConfig;
 use engine::{Action, Lifecycle, Limits, Mode, RunConfig};
-use host::{BenchHost, HostConfig, check_modeled, router_config, worker_request};
+use host::{BenchHost, check_modeled, router_config};
 use kv_cache::{KvCaches, decode_block_hashes};
 
 /// Slots a test request holds in a worker's cache.
@@ -52,29 +52,6 @@ fn params(trace_block_size: usize, lanes: usize) -> WorkloadParams {
 }
 
 fn replay(corpus: &Arc<Corpus>, mode: Mode, queue_threshold: Option<f64>) -> engine::RunResult {
-    let params = &corpus.params;
-    let workers: Vec<_> = (1..=params.workers as u64)
-        .map(|id| worker_request(id, params.block_size, params.dp_size, 8_192, 2_048))
-        .collect();
-    let host_config = HostConfig {
-        router: KvRouterConfig {
-            router_replica_sync: true,
-            router_queue_threshold: queue_threshold,
-            ..KvRouterConfig::default()
-        },
-        block_size: params.block_size,
-        busy: Default::default(),
-    };
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
-        .enable_all()
-        .build()
-        .unwrap();
-    let host = Arc::new(
-        runtime
-            .block_on(BenchHost::start(&host_config, &workers))
-            .unwrap(),
-    );
     let config = RunConfig {
         mode,
         // Also the slack saturation gives engine actions; keep it small.
@@ -82,15 +59,20 @@ fn replay(corpus: &Arc<Corpus>, mode: Mode, queue_threshold: Option<f64>) -> eng
             engine_lag_us: 1_000,
             ..Limits::default()
         },
+        router: KvRouterConfig {
+            router_replica_sync: true,
+            router_queue_threshold: queue_threshold,
+            ..KvRouterConfig::default()
+        },
+        busy: Default::default(),
+        runtime_threads: 2,
         issuer_cpus: Vec::new(),
         engine_issuers: 2,
         prep_threads: 1,
         perf_ctl_fifo: None,
         perf_ack_fifo: None,
     };
-    let result = engine::run(corpus, &host, &runtime, &config).unwrap();
-    runtime.block_on(host.shutdown());
-    result
+    engine::run(corpus, &config).unwrap()
 }
 
 #[test]
@@ -365,17 +347,15 @@ fn the_router_config_picks_the_worker_selection_policy() {
         .unwrap();
         let json = serde_json::json!({ "router_policy_config": file }).to_string();
         let started = router_config(Some(&json)).and_then(|router| {
-            let host_config = HostConfig {
-                router,
-                block_size: 16,
-                busy: Default::default(),
-            };
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(1)
                 .enable_all()
                 .build()?;
             runtime.block_on(async {
-                BenchHost::start(&host_config, &[]).await?.shutdown().await;
+                BenchHost::start(&router, Default::default(), &params(32, 1))
+                    .await?
+                    .shutdown()
+                    .await;
                 Ok(())
             })
         });
@@ -417,7 +397,7 @@ fn removed(event: &KvCacheEvent) -> Vec<u64> {
 fn prefill(caches: &KvCaches, cache: usize, blocks: &[u64]) -> (Vec<KvCacheEvent>, usize, Held) {
     let mut published = Vec::new();
     let mut held = Held::new();
-    let cached = caches.prefill(cache, 0, &prompt(blocks), &mut held, |events| {
+    let cached = caches.prefill(cache, &prompt(blocks), &mut held, |events| {
         published = events
     });
     (published, cached, held)
@@ -460,7 +440,7 @@ fn output_blocks_chain_after_the_prompt() {
     let caches = KvCaches::new(2, 1, 4, 1);
     let (_, _, mut held) = prefill(&caches, 1, &[5]);
     let mut events = Vec::new();
-    let tail = caches.decode_block(1, 0, Some(5), (42, 0), &mut held, |published| {
+    let tail = caches.decode_block(1, Some(5), (42, 0), &mut held, |published| {
         events = published
     });
     let (sequence, _) = decode_block_hashes(5, 42, 0);
@@ -492,7 +472,7 @@ fn runs_within_a_trace_block_are_cached_and_evicted_together() {
     let (events, cached, mut held) = prefill(&caches, 0, &[1, 2, 3]);
     assert_eq!((events.len(), cached), (0, 3));
     let mut events = Vec::new();
-    caches.decode_block(0, 0, Some(3), (7, 0), &mut held, |published| {
+    caches.decode_block(0, Some(3), (7, 0), &mut held, |published| {
         events = published
     });
     assert_eq!(stored(&events[0]).0, Some(3));

@@ -27,7 +27,7 @@ use serde::Serialize;
 
 use corpus::{Corpus, Omitted, WorkloadParams};
 use engine::{Limits, Mode, RunConfig, RunResult};
-use host::{BenchHost, HostConfig, router_config, worker_request};
+use host::router_config;
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum ModeArg {
@@ -176,27 +176,11 @@ fn main() -> Result<()> {
     });
 
     let router = router_config(args.router_config_json.as_deref())?;
-    let params = &corpus.params;
-    let host_config = HostConfig {
-        router: router.clone(),
-        block_size: params.block_size,
-        busy: BusyThresholds {
-            prefill_busy_threshold: args.active_prefill_tokens_threshold,
-            prefill_busy_threshold_frac: args.active_prefill_tokens_threshold_frac,
-            decode_busy_threshold_frac: args.active_decode_blocks_threshold,
-        },
+    let busy = BusyThresholds {
+        prefill_busy_threshold: args.active_prefill_tokens_threshold,
+        prefill_busy_threshold_frac: args.active_prefill_tokens_threshold_frac,
+        decode_busy_threshold_frac: args.active_decode_blocks_threshold,
     };
-    let workers: Vec<_> = (1..=params.workers as u64)
-        .map(|worker_id| {
-            worker_request(
-                worker_id,
-                params.block_size,
-                params.dp_size,
-                params.max_num_batched_tokens as u64,
-                params.num_gpu_blocks as u64,
-            )
-        })
-        .collect();
 
     // The router's runtime and indexer threads inherit this thread's CPUs.
     pin_current_thread_to_cpus(&backend_cpus)?;
@@ -227,21 +211,16 @@ fn main() -> Result<()> {
         let config = RunConfig {
             mode,
             limits,
+            router: router.clone(),
+            busy,
+            runtime_threads,
             issuer_cpus,
             engine_issuers: args.engine_issuers,
             prep_threads: args.prep_threads,
             perf_ctl_fifo: args.perf_ctl_fifo.clone(),
             perf_ack_fifo: args.perf_ack_fifo.clone(),
         };
-        // A fresh runtime and service, so nothing carries over from setup.
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(runtime_threads)
-            .enable_all()
-            .build()?;
-        let host = Arc::new(runtime.block_on(BenchHost::start(&host_config, &workers))?);
-        let result = engine::run(&corpus, &host, &runtime, &config);
-        runtime.block_on(host.shutdown());
-        let result = result?;
+        let result = engine::run(&corpus, &config)?;
         print_summary(&result);
         Some(result)
     };
@@ -267,20 +246,14 @@ fn print_summary(result: &RunResult) {
         Mode::Fixed { scale } => format!("fixed x{scale:.3}"),
         Mode::Saturation { admission_window } => format!("saturation w{admission_window}"),
     };
-    let ms =
-        |percentile: fn(&dynamo_bench::kv_router_common::results::PercentileStats<u64>) -> u64| {
-            result
-                .admission_latency_ns
-                .as_ref()
-                .map_or(0.0, |stats| percentile(stats) as f64 / 1e6)
-        };
+    let (p50_ms, p99_ms) = result.admission_latency_ns.map_or((0.0, 0.0), |stats| {
+        (stats.p50 as f64 / 1e6, stats.p99 as f64 / 1e6)
+    });
     println!(
-        "{mode}: {:.0} req/s admitted, admission p50 {:.3} ms p99 {:.3} ms, \
+        "{mode}: {:.0} req/s admitted, admission p50 {p50_ms:.3} ms p99 {p99_ms:.3} ms, \
          in-flight median {}, index backlog max {} end {}, kept_up={} {}",
         result.achieved_rps,
-        ms(|stats| stats.p50),
-        ms(|stats| stats.p99),
-        result.booked_in_flight.median,
+        result.booked_in_flight.map_or(0, |stats| stats.p50),
         result.max_index_backlog,
         result.index_backlog_at_window_end,
         result.kept_up,

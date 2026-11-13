@@ -601,11 +601,18 @@ impl Simulator<'_> {
 
 /// A digest over everything replayed, so A/B arms can confirm they ran the same corpus.
 fn digest(corpus: &Corpus) -> Result<String> {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(&rmp_serde::to_vec(&corpus.params)?);
-    hasher.update(&corpus.trace_block_size.to_le_bytes());
-    hasher.update(&rmp_serde::to_vec(&corpus.plays)?);
-    hasher.update(&rmp_serde::to_vec(&corpus.lanes)?);
-    hasher.update(&rmp_serde::to_vec(&corpus.requests)?);
+    // Serialized straight into the hasher, without a second copy of the corpus.
+    let mut hasher = std::io::BufWriter::new(blake3::Hasher::new());
+    let replayed = (
+        &corpus.params,
+        corpus.trace_block_size,
+        &corpus.plays,
+        &corpus.lanes,
+        &corpus.requests,
+    );
+    rmp_serde::encode::write(&mut hasher, &replayed).context("hash the corpus")?;
+    let hasher = hasher
+        .into_inner()
+        .map_err(std::io::IntoInnerError::into_error)?;
     Ok(hasher.finalize().to_hex().to_string())
 }

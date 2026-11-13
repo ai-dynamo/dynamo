@@ -96,8 +96,8 @@ impl KvCaches {
             capacity,
             dp_size,
             run_blocks: run_blocks.max(1),
-            workers: (0..workers * dp_size as usize)
-                .map(|_| Mutex::new(WorkerCache::default()))
+            workers: (0..workers as u32 * dp_size)
+                .map(|cache| Mutex::new(WorkerCache::new(cache % dp_size)))
                 .collect(),
         }
     }
@@ -114,7 +114,6 @@ impl KvCaches {
     pub fn prefill(
         &self,
         cache: usize,
-        dp_rank: u32,
         prompt: &PromptBlocks,
         held: &mut Vec<u32>,
         publish: impl FnOnce(Vec<KvCacheEvent>),
@@ -146,7 +145,7 @@ impl KvCaches {
         let new_blocks = sequence.len() - cached;
         let mut events = Vec::new();
         if !evicted.is_empty() {
-            events.push(worker.removed(dp_rank, evicted));
+            events.push(worker.removed(evicted));
         }
         if new_blocks > 0 {
             let blocks = sequence[cached..]
@@ -155,7 +154,7 @@ impl KvCaches {
                 .map(|(&sequence, &local)| (sequence, local))
                 .collect();
             let parent = cached.checked_sub(1).map(|i| sequence[i]);
-            events.push(worker.stored(dp_rank, parent, blocks));
+            events.push(worker.stored(parent, blocks));
         }
         worker.stats.prompt_blocks += sequence.len() as u64;
         worker.stats.prompt_hits += cached as u64;
@@ -170,7 +169,6 @@ impl KvCaches {
     pub fn decode_block(
         &self,
         cache: usize,
-        dp_rank: u32,
         parent: Option<u64>,
         (request, k): (u64, u32),
         held: &mut Vec<u32>,
@@ -182,9 +180,9 @@ impl KvCaches {
         held.push(worker.allocate(&[sequence], self.capacity, self.run_blocks, &mut evicted));
         let mut events = Vec::new();
         if !evicted.is_empty() {
-            events.push(worker.removed(dp_rank, evicted));
+            events.push(worker.removed(evicted));
         }
-        events.push(worker.stored(dp_rank, parent, vec![(sequence, local)]));
+        events.push(worker.stored(parent, vec![(sequence, local)]));
         worker.stats.decode_blocks += 1;
         publish(events);
         sequence
@@ -214,6 +212,8 @@ impl KvCaches {
 const NIL: u32 = u32::MAX;
 
 struct WorkerCache {
+    /// The engine rank this cache belongs to; its events carry it.
+    dp_rank: u32,
     /// Resident entries, by the sequence hash of their first block.
     entries: FxHashMap<u64, u32>,
     nodes: Vec<Node>,
@@ -237,9 +237,10 @@ struct Node {
     next: u32,
 }
 
-impl Default for WorkerCache {
-    fn default() -> Self {
+impl WorkerCache {
+    fn new(dp_rank: u32) -> Self {
         Self {
+            dp_rank,
             entries: FxHashMap::default(),
             nodes: Vec::new(),
             hashes: Vec::new(),
@@ -251,9 +252,7 @@ impl Default for WorkerCache {
             stats: CacheStats::default(),
         }
     }
-}
 
-impl WorkerCache {
     fn pin(&mut self, entry: u32) {
         if self.nodes[entry as usize].pins == 0 {
             self.unlink(entry);
@@ -350,45 +349,34 @@ impl WorkerCache {
         self.tail = entry;
     }
 
-    fn stored(
-        &mut self,
-        dp_rank: u32,
-        parent: Option<u64>,
-        blocks: Vec<(u64, u64)>,
-    ) -> KvCacheEvent {
-        self.event(
-            dp_rank,
-            KvCacheEventData::Stored(KvCacheStoreData {
-                parent_hash: parent.map(ExternalSequenceBlockHash),
-                start_position: None,
-                blocks: blocks
-                    .into_iter()
-                    .map(|(sequence, local)| KvCacheStoredBlockData {
-                        block_hash: ExternalSequenceBlockHash(sequence),
-                        tokens_hash: LocalBlockHash(local),
-                        mm_extra_info: None,
-                    })
-                    .collect(),
-            }),
-        )
+    fn stored(&mut self, parent: Option<u64>, blocks: Vec<(u64, u64)>) -> KvCacheEvent {
+        self.event(KvCacheEventData::Stored(KvCacheStoreData {
+            parent_hash: parent.map(ExternalSequenceBlockHash),
+            start_position: None,
+            blocks: blocks
+                .into_iter()
+                .map(|(sequence, local)| KvCacheStoredBlockData {
+                    block_hash: ExternalSequenceBlockHash(sequence),
+                    tokens_hash: LocalBlockHash(local),
+                    mm_extra_info: None,
+                })
+                .collect(),
+        }))
     }
 
-    fn removed(&mut self, dp_rank: u32, blocks: Vec<u64>) -> KvCacheEvent {
+    fn removed(&mut self, blocks: Vec<u64>) -> KvCacheEvent {
         self.stats.evicted_blocks += blocks.len() as u64;
-        self.event(
-            dp_rank,
-            KvCacheEventData::Removed(KvCacheRemoveData {
-                block_hashes: blocks.into_iter().map(ExternalSequenceBlockHash).collect(),
-            }),
-        )
+        self.event(KvCacheEventData::Removed(KvCacheRemoveData {
+            block_hashes: blocks.into_iter().map(ExternalSequenceBlockHash).collect(),
+        }))
     }
 
-    fn event(&mut self, dp_rank: u32, data: KvCacheEventData) -> KvCacheEvent {
+    fn event(&mut self, data: KvCacheEventData) -> KvCacheEvent {
         self.next_event_id += 1;
         KvCacheEvent {
             event_id: self.next_event_id,
             data,
-            dp_rank,
+            dp_rank: self.dp_rank,
         }
     }
 }

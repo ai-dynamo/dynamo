@@ -31,12 +31,13 @@ use dynamo_bench::kv_router_common::issuer::pin_current_thread;
 use dynamo_bench::kv_router_common::results::PercentileStats;
 use dynamo_kv_events::event::{KvCacheEvent, RouterEvent};
 use dynamo_kv_events::residency::StorageTier;
+use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_scheduler::host::{
     AccountingAttribution, KvSchedulerError, PromptRequest, SelectionAdmission, SelectionError,
     SelectionOperation, SelectionOutcome, SessionBinding,
 };
 use dynamo_slot_tracker::host::{
-    ActiveSequenceEvent, ActiveSequenceEventData, SchedulerBookingDescriptor,
+    ActiveSequenceEvent, ActiveSequenceEventData, BusyThresholds, SchedulerBookingDescriptor,
 };
 use futures_util::FutureExt;
 use serde::Serialize;
@@ -102,6 +103,11 @@ impl Default for Limits {
 pub struct RunConfig {
     pub mode: Mode,
     pub limits: Limits,
+    /// The router under test, and the busy thresholds its frontend would report.
+    pub router: KvRouterConfig,
+    pub busy: BusyThresholds,
+    /// Worker threads of the router's runtime.
+    pub runtime_threads: usize,
     /// One CPU per bench thread, in order: the request issuer, the sampler, the
     /// engine issuers, prompt preparation. Empty leaves them unpinned.
     pub issuer_cpus: Vec<usize>,
@@ -109,12 +115,6 @@ pub struct RunConfig {
     pub prep_threads: usize,
     pub perf_ctl_fifo: Option<PathBuf>,
     pub perf_ack_fifo: Option<PathBuf>,
-}
-
-#[derive(Clone, Copy, Debug, Default, Serialize)]
-pub struct InFlight {
-    pub median: u64,
-    pub max: u64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -148,10 +148,10 @@ pub struct RunResult {
     /// full, as the frontend's ingress drops them: the router did not keep up.
     pub dropped_worker_marks: u64,
     /// Bookings in flight through the window, and at the end of the run.
-    pub booked_in_flight: InFlight,
+    pub booked_in_flight: Option<PercentileStats<u64>>,
     /// Admissions waiting in the router through the window: queued, or not yet
     /// selected.
-    pub admissions_waiting: InFlight,
+    pub admissions_waiting: Option<PercentileStats<u64>>,
     pub booked_at_end: u64,
     /// The index's applied events by `type/outcome` at the end of the run.
     pub index_events_applied: BTreeMap<String, u64>,
@@ -324,11 +324,28 @@ fn pin(cpu: Option<usize>) -> Result<()> {
     pin_current_thread(cpu).with_context(|| format!("pin a bench thread to CPU {cpu:?}"))
 }
 
-/// Replay `corpus` against `host`, which must run on `runtime`.
-pub fn run(
+/// Replay `corpus` through a fresh runtime and selection service, so nothing carries
+/// over from setup or an earlier run. The runtime's threads inherit the caller's CPUs.
+pub fn run(corpus: &Arc<Corpus>, config: &RunConfig) -> Result<RunResult> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(config.runtime_threads)
+        .enable_all()
+        .build()?;
+    let host = runtime.block_on(BenchHost::start(
+        &config.router,
+        config.busy,
+        &corpus.params,
+    ))?;
+    let host = Arc::new(host);
+    let result = replay(corpus, &host, runtime.handle(), config);
+    runtime.block_on(host.shutdown());
+    result
+}
+
+fn replay(
     corpus: &Arc<Corpus>,
     host: &Arc<BenchHost>,
-    runtime: &tokio::runtime::Runtime,
+    handle: &tokio::runtime::Handle,
     config: &RunConfig,
 ) -> Result<RunResult> {
     let params = &corpus.params;
@@ -356,7 +373,7 @@ pub fn run(
     let shared = Arc::new(Shared {
         corpus: Arc::clone(corpus),
         host: Arc::clone(host),
-        handle: runtime.handle().clone(),
+        handle: handle.clone(),
         start_ns: clock.now_ns() + 50_000_000,
         clock,
         mode: config.mode,
@@ -837,7 +854,6 @@ fn prefill_cache(shared: &Shared, index: usize) {
     let worker_id = held.worker_id;
     let cached = shared.caches.prefill(
         shared.caches.index(worker_id, held.dp_rank),
-        held.dp_rank,
         &prompt,
         &mut held.entries,
         |events| publish(shared, worker_id, events),
@@ -855,7 +871,6 @@ fn output_block(shared: &Shared, index: usize, k: u32) {
     let worker_id = held.worker_id;
     let tail = shared.caches.decode_block(
         shared.caches.index(worker_id, held.dp_rank),
-        held.dp_rank,
         held.tail,
         (index as u64, k),
         &mut held.entries,
@@ -1015,7 +1030,6 @@ async fn admit(shared: Arc<Shared>, index: usize, tokens: Vec<u32>, prompt: Prom
     .await;
     slot.answered_ns
         .store(shared.clock.now_ns(), Ordering::Release);
-    drop(request);
     let mut booked = false;
     match run.result {
         Ok(SelectionOutcome::Selected(selected)) => match selected.booking {
@@ -1152,12 +1166,13 @@ fn analyze(
         }
     }
 
+    // The window's deadlines (fixed mode).
+    let window_start_ns = shared.deadline_ns(shared.window_start_us);
+    let window_span_ns = shared.deadline_ns(shared.window_end_us) - window_start_ns;
     let window_wall_ns = match shared.mode {
-        Mode::Fixed { .. } => {
-            let start = shared.deadline_ns(shared.window_start_us);
-            let span = shared.deadline_ns(shared.window_end_us) - start;
-            last_answered.saturating_sub(start).max(span)
-        }
+        Mode::Fixed { .. } => last_answered
+            .saturating_sub(window_start_ns)
+            .max(window_span_ns),
         Mode::Saturation { .. } => last_answered.saturating_sub(first_issued),
     };
     let achieved_rps = admitted as f64 * 1e9 / window_wall_ns.max(1) as f64;
@@ -1193,9 +1208,7 @@ fn analyze(
         if admission_p99_ms > limits.admission_p99_ms {
             failure_reasons.push(format!("admission p99 {admission_p99_ms:.2} ms"));
         }
-        let start = shared.deadline_ns(shared.window_start_us);
-        let span = shared.deadline_ns(shared.window_end_us) - start;
-        if last_answered > start + span + span / 10 {
+        if last_answered > window_start_ns + window_span_ns + window_span_ns / 10 {
             failure_reasons.push("window answers ran past 1.1x the window".to_string());
         }
     }
@@ -1224,13 +1237,8 @@ fn analyze(
     if max_index_backlog > limits.index_backlog {
         failure_reasons.push(format!("the index fell {max_index_backlog} events behind"));
     }
-    let spread = |value: fn(&Sample) -> u64| {
-        let mut values: Vec<u64> = window_samples.iter().map(|sample| value(sample)).collect();
-        values.sort_unstable();
-        InFlight {
-            median: values.get(values.len() / 2).copied().unwrap_or(0),
-            max: values.last().copied().unwrap_or(0),
-        }
+    let over_window = |value: fn(&Sample) -> u64| {
+        percentiles(window_samples.iter().map(|sample| value(sample)).collect())
     };
 
     let cache = shared.caches.stats();
@@ -1250,8 +1258,8 @@ fn analyze(
         harness_wait_share,
         stall_advances: shared.stall_advances.load(Ordering::Relaxed),
         dropped_worker_marks,
-        booked_in_flight: spread(|sample| sample.booked_in_flight),
-        admissions_waiting: spread(|sample| sample.outstanding),
+        booked_in_flight: over_window(|sample| sample.booked_in_flight),
+        admissions_waiting: over_window(|sample| sample.outstanding),
         booked_at_end: shared.booked_in_flight.load(Ordering::Acquire),
         index_events_applied: shared.host.index_events_applied(),
         max_index_backlog,
