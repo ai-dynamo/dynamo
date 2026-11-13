@@ -3110,6 +3110,11 @@ enum FinishedStreamChunk {
 /// projection can keep output-text scores and drop the rest regardless of how
 /// the backend grouped tokens into chunks. Returns the record when it cannot be
 /// split.
+///
+/// A visible text may also occur inside the source of a hidden choice before it
+/// (a tool-call argument equal to the answer, reasoning that repeats it), so each
+/// text is placed at the first occurrence that leaves every hidden choice before
+/// it a source holding what it was parsed from: see [`hidden_source_evidence`].
 fn split_logprobs_by_token_spans(
     raw: &str,
     mut logprobs: ChatChoiceLogprobs,
@@ -3157,29 +3162,35 @@ fn split_logprobs_by_token_spans(
                     .as_ref()
                     .is_some_and(|calls| !calls.is_empty()))
     };
-    // Walk the choices in order. Reasoning text appears verbatim in the chunk, so
-    // it moves the cursor past itself and a later visible text cannot match an
-    // earlier hidden occurrence of the same string.
-    let mut text_spans = Vec::new();
-    let mut cursor = 0;
-    for (index, choice) in choices.iter().enumerate() {
-        if let Some(reasoning) = choice.delta.reasoning_content.as_deref()
-            && !reasoning.is_empty()
-            && let Some(offset) = raw[cursor..].find(reasoning)
-        {
-            cursor += offset + reasoning.len();
-        }
-        if let Some(ChatCompletionMessageContent::Text(text)) = choice.delta.content.as_ref()
-            && !text.is_empty()
-        {
-            let Some(offset) = raw[cursor..].find(text.as_str()) else {
-                return Err(logprobs);
-            };
-            let start = cursor + offset;
-            cursor = start + text.len();
-            text_spans.push((index, start, cursor));
-        }
-    }
+    let texts: Vec<(usize, &str)> = choices
+        .iter()
+        .enumerate()
+        .filter_map(|(index, choice)| match choice.delta.content.as_ref() {
+            Some(ChatCompletionMessageContent::Text(text)) if !text.is_empty() => {
+                Some((index, text.as_str()))
+            }
+            _ => None,
+        })
+        .collect();
+    let evidence: Vec<Vec<String>> = choices
+        .iter()
+        .map(|choice| {
+            if has_text(choice) {
+                Vec::new()
+            } else {
+                hidden_source_evidence(choice)
+            }
+        })
+        .collect();
+    // Without a placement that gives every hidden choice its source (an argument
+    // value the source spells differently, say), the first occurrences stand, as
+    // they did before the evidence was checked.
+    let no_evidence = vec![Vec::new(); choices.len()];
+    let Some(text_spans) = locate_text_spans(raw, &texts, &evidence)
+        .or_else(|| locate_text_spans(raw, &texts, &no_evidence))
+    else {
+        return Err(logprobs);
+    };
     let hidden_choices: Vec<usize> = (0..choices.len())
         .filter(|index| is_hidden_owner(&choices[*index]))
         .collect();
@@ -3259,6 +3270,100 @@ fn split_logprobs_by_token_spans(
         });
     }
     Ok(())
+}
+
+/// What a hidden choice's source text must contain: reasoning appears verbatim,
+/// and a tool call's source carries its function name and its scalar argument
+/// values (a custom tool's name and input). A chunk that holds only an argument
+/// fragment yields nothing, so it constrains nothing.
+fn hidden_source_evidence(choice: &ChatChoiceStream) -> Vec<String> {
+    let mut evidence = Vec::new();
+    if let Some(reasoning) = choice.delta.reasoning_content.as_deref()
+        && !reasoning.is_empty()
+    {
+        evidence.push(reasoning.to_string());
+    }
+    for call in choice.delta.tool_calls.iter().flatten() {
+        if let Some(function) = call.function.as_ref() {
+            if let Some(name) = function.name.as_deref().filter(|name| !name.is_empty()) {
+                evidence.push(name.to_string());
+            }
+            if let Some(serde_json::Value::Object(arguments)) = function
+                .arguments
+                .as_deref()
+                .and_then(|arguments| serde_json::from_str(arguments).ok())
+            {
+                for value in arguments.values() {
+                    match value {
+                        serde_json::Value::String(text) if !text.is_empty() => {
+                            evidence.push(text.clone())
+                        }
+                        serde_json::Value::Number(_) | serde_json::Value::Bool(_) => {
+                            evidence.push(value.to_string())
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        if let Some(custom) = call.custom.as_ref() {
+            if let Some(name) = custom.name.as_deref().filter(|name| !name.is_empty()) {
+                evidence.push(name.to_string());
+            }
+            if let Some(input) = custom.input.as_deref().filter(|input| !input.is_empty()) {
+                evidence.push(input.to_string());
+            }
+        }
+    }
+    evidence
+}
+
+/// Place each visible text in `raw`, in choice order, at the first occurrence
+/// that leaves the choices between it and the previous text a source containing
+/// their `evidence`; the choices after the last text must fit in the tail.
+/// Returns `(choice index, start, end)` per text, or `None` when no placement
+/// exists.
+fn locate_text_spans(
+    raw: &str,
+    texts: &[(usize, &str)],
+    evidence: &[Vec<String>],
+) -> Option<Vec<(usize, usize, usize)>> {
+    fn source_holds(
+        source: &str,
+        choices: std::ops::Range<usize>,
+        evidence: &[Vec<String>],
+    ) -> bool {
+        evidence[choices]
+            .iter()
+            .all(|items| items.iter().all(|item| source.contains(item.as_str())))
+    }
+    fn place(
+        raw: &str,
+        texts: &[(usize, &str)],
+        evidence: &[Vec<String>],
+        cursor: usize,
+        first_choice: usize,
+        spans: &mut Vec<(usize, usize, usize)>,
+    ) -> bool {
+        let Some(&(index, text)) = texts.first() else {
+            return source_holds(&raw[cursor..], first_choice..evidence.len(), evidence);
+        };
+        for (offset, _) in raw[cursor..].match_indices(text) {
+            let start = cursor + offset;
+            if !source_holds(&raw[cursor..start], first_choice..index, evidence) {
+                continue;
+            }
+            let end = start + text.len();
+            spans.push((index, start, end));
+            if place(raw, &texts[1..], evidence, end, index + 1, spans) {
+                return true;
+            }
+            spans.pop();
+        }
+        false
+    }
+    let mut spans = Vec::with_capacity(texts.len());
+    place(raw, texts, evidence, 0, 0, &mut spans).then_some(spans)
 }
 
 fn extend_logprobs(held: &mut ChatChoiceLogprobs, later: ChatChoiceLogprobs) {
@@ -11779,6 +11884,75 @@ pub(crate) mod tests {
         split_choices(&tokens.concat(), &tokens, &mut choices).unwrap();
         assert_eq!(choice_tokens(&choices[0]), ["<think>", "same", "</think>"]);
         assert_eq!(choice_tokens(&choices[1]), ["same"]);
+    }
+
+    /// A tool-call argument equal to the visible text does not capture the visible
+    /// token: the text is placed after a source that holds the call's name and
+    /// argument values.
+    #[test]
+    fn split_searches_visible_text_after_tool_call_source() {
+        let tokens = [
+            "<tool_call>",
+            "<function=get_weather>",
+            "<parameter=city>",
+            "Paris",
+            "</parameter>",
+            "</function>",
+            "</tool_call>",
+            "Paris",
+        ];
+        let mut choices = vec![tool_choice(), text_choice("Paris")];
+        split_choices(&tokens.concat(), &tokens, &mut choices).unwrap();
+        assert_eq!(choice_tokens(&choices[0]), tokens[..7].to_vec());
+        assert_eq!(choice_tokens(&choices[1]), ["Paris"]);
+    }
+
+    /// The same text between two tool calls that both carry it lands on the
+    /// occurrence that leaves each call its own source.
+    #[test]
+    fn split_places_visible_text_between_tool_calls() {
+        let tokens = [
+            "<tool_call>",
+            "<function=get_weather>",
+            "<parameter=city>",
+            "Paris",
+            "</parameter>",
+            "</function>",
+            "</tool_call>",
+            "Paris",
+            "<tool_call>",
+            "<function=get_weather>",
+            "<parameter=city>",
+            "Paris",
+            "</parameter>",
+            "</function>",
+            "</tool_call>",
+        ];
+        let mut choices = vec![tool_choice(), text_choice("Paris"), tool_choice()];
+        split_choices(&tokens.concat(), &tokens, &mut choices).unwrap();
+        assert_eq!(choice_tokens(&choices[0]), tokens[..7].to_vec());
+        assert_eq!(choice_tokens(&choices[1]), ["Paris"]);
+        assert_eq!(choice_tokens(&choices[2]), tokens[8..].to_vec());
+    }
+
+    /// When no placement gives a hidden choice its source (the source spells an
+    /// argument value differently), the first occurrences stand, as before.
+    #[test]
+    fn split_falls_back_to_first_occurrences_without_source_evidence() {
+        let tokens = [
+            "<tool_call>",
+            "<function=get_weather>",
+            "<parameter=city>",
+            "PARIS",
+            "</parameter>",
+            "</function>",
+            "</tool_call>",
+            "Done.",
+        ];
+        let mut choices = vec![tool_choice(), text_choice("Done.")];
+        split_choices(&tokens.concat(), &tokens, &mut choices).unwrap();
+        assert_eq!(choice_tokens(&choices[0]), tokens[..7].to_vec());
+        assert_eq!(choice_tokens(&choices[1]), ["Done."]);
     }
 
     /// A prefix control token with no hidden owner before the text would have to

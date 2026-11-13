@@ -2244,7 +2244,6 @@ mod tests {
         let mut conv = ResponseStreamConverter::new("test-model".into(), logprob_params());
         let _ = conv.emit_start_events();
         conv.process_chunk(&scored(text_chunk("Done."), "A"));
-        // The boundary alone publishes nothing yet.
         assert!(conv.process_chunk(&end).is_empty());
         assert!(conv.process_chunk(&eos).is_empty());
 
