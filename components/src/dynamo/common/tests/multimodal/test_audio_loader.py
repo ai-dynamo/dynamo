@@ -3,6 +3,7 @@
 
 import errno
 import logging
+import sys
 from unittest.mock import AsyncMock
 
 import numpy as np
@@ -272,7 +273,7 @@ async def test_load_audio_batch_server_failure_is_not_client_error(
     not take the ValueError branch, which the bindings map to InvalidArgument."""
     loader = AudioLoader(url_policy=_permissive_http_policy())
     if failure == "vllm_missing":
-        monkeypatch.setattr(audio_loader_module, "AudioMediaIO", None)
+        monkeypatch.setitem(sys.modules, "vllm.multimodal.media.audio", None)
     else:
         monkeypatch.setattr(loader, "_create_vllm_audio_io", lambda: object())
         monkeypatch.setattr(
