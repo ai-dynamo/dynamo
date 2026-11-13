@@ -17,7 +17,12 @@ from typing import Any, Generator
 import pytest
 import requests
 
-from tests.mm_router.utils import COMMON_PROCESS_KWARGS, build_vllm_gpu_mem_args
+from tests.mm_router.utils import (
+    COMMON_PROCESS_KWARGS,
+    MM_KV_CACHE_BYTES,
+    MM_PROFILED_VRAM_GIB,
+    build_vllm_gpu_mem_args,
+)
 from tests.utils.http_checks import check_health_ready, model_registered
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.network_canary import (
@@ -39,8 +44,8 @@ pytestmark = [
     pytest.mark.multimodal,
     pytest.mark.gpu_1,
     pytest.mark.model(VLLM_MM_MODEL),
-    pytest.mark.requested_vllm_kv_cache_bytes(1_719_075_000),
-    pytest.mark.profiled_vram_gib(7.6),
+    pytest.mark.requested_vllm_kv_cache_bytes(MM_KV_CACHE_BYTES),
+    pytest.mark.profiled_vram_gib(MM_PROFILED_VRAM_GIB),
 ]
 
 

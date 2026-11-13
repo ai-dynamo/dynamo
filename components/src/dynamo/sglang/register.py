@@ -667,8 +667,14 @@ async def get_runtime_config(
     # set reasoning parser and tool call parser
     runtime_config.reasoning_parser = dynamo_args.dyn_reasoning_parser
     runtime_config.tool_call_parser = dynamo_args.dyn_tool_call_parser
-    # Multimodal and diffusion handlers do not forward the per-request gate.
-    if llm_handler and not getattr(server_args, "dllm_algorithm", None):
+    # Frontend-decoded media uses the regular LLM handlers, which forward the
+    # reasoning gate. Dedicated multimodal pipelines register through an encoder;
+    # diffusion handlers do not forward the gate.
+    if (
+        not dynamo_args.multimodal_worker
+        and not dynamo_args.multimodal_encode_worker
+        and not getattr(server_args, "dllm_algorithm", None)
+    ):
         publish_sglang_structural_tag_reasoning_policy(
             runtime_config, engine, server_args
         )

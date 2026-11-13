@@ -22,7 +22,8 @@ use tonic_health::pb::health_check_response::ServingStatus;
 use tonic_health::pb::{HealthCheckRequest, health_client::HealthClient};
 
 pub(crate) use dynamo_sidecar_common::{
-    cancelled, engine_shutdown, invalid_argument, status_to_dynamo,
+    cancelled, engine_shutdown, invalid_argument, status_to_dynamo, stream_incomplete,
+    stream_status_to_dynamo,
 };
 
 use crate::proto as pb;
@@ -40,6 +41,14 @@ const LOAD_RPC_TIMEOUT: Duration = Duration::from_secs(2);
 pub(crate) struct SupportedMedia {
     pub(crate) image: bool,
     pub(crate) video: bool,
+    pub(crate) audio: bool,
+}
+
+/// Input forms explicitly advertised by `Control.GetModelInfo`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SupportedInputs {
+    pub(crate) text: bool,
+    pub(crate) token_ids: bool,
 }
 
 impl SupportedMedia {
@@ -47,6 +56,7 @@ impl SupportedMedia {
         match modality {
             "image" => self.image,
             "video" => self.video,
+            "audio" => self.audio,
             _ => false,
         }
     }
@@ -64,15 +74,28 @@ pub(crate) struct ModelLimits {
     /// Cap on generated tokens, when the engine reports one. A context window
     /// alone can imply a larger budget than the engine will accept.
     pub(crate) max_output_tokens: Option<u32>,
+    /// `None` preserves token-ID behavior for older servers that omit both
+    /// optional input-capability fields.
+    pub(crate) supported_inputs: Option<SupportedInputs>,
     /// Modalities advertised by both the portable and engine-specific capabilities.
     /// `None` is unresolved metadata; startup always resolves this.
     pub(crate) supported_media: Option<SupportedMedia>,
+    pub(crate) supports_image_routing: bool,
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct ModelInfo {
     pub(crate) limits: ModelLimits,
     pub(crate) served_model_name: String,
+}
+
+pub(crate) fn has_image_routing_v1(info: &pb::ModelInfo) -> bool {
+    info.extra.as_ref().is_some_and(|extra| {
+        matches!(
+            extra.fields.get("trtllm_image_routing_version").and_then(|value| value.kind.as_ref()),
+            Some(prost_types::value::Kind::NumberValue(version)) if *version == 1.0
+        )
+    })
 }
 
 const TARGET_DP_RANK_METADATA_KEY: &str = "openengine-target-dp-rank";
@@ -178,7 +201,7 @@ impl TrtllmClient {
             .generate(rpc)
             .await
             .map(tonic::Response::into_inner)
-            .map_err(|status| status_to_dynamo("Generate", status))
+            .map_err(|status| stream_status_to_dynamo("Generate", status))
     }
 
     pub(crate) async fn supports_subagent_affinity(&self) -> Result<bool, DynamoError> {
@@ -213,6 +236,15 @@ impl TrtllmClient {
             .await?
             .into_inner();
         let mut supported_media = SupportedMedia::default();
+        let supported_inputs =
+            if info.supports_text_input.is_none() && info.supports_token_ids_input.is_none() {
+                None
+            } else {
+                Some(SupportedInputs {
+                    text: info.supports_text_input == Some(true),
+                    token_ids: info.supports_token_ids_input == Some(true),
+                })
+            };
         if info.supports_multimodal == Some(true)
             && let Some(prost_types::value::Kind::ListValue(modalities)) = info
                 .extra
@@ -228,6 +260,7 @@ impl TrtllmClient {
                 match modality.as_str() {
                     "image" => supported_media.image = true,
                     "video" => supported_media.video = true,
+                    "audio" => supported_media.audio = true,
                     _ => {}
                 }
             }
@@ -237,7 +270,9 @@ impl TrtllmClient {
                 context_length: info.max_context_length.filter(|len| *len > 0),
                 engine_context_length: info.max_context_length.filter(|len| *len > 0),
                 max_output_tokens: info.max_output_tokens.filter(|cap| *cap > 0),
+                supported_inputs,
                 supported_media: Some(supported_media),
+                supports_image_routing: supported_media.image && has_image_routing_v1(&info),
             },
             served_model_name: info.served_model_name,
         })

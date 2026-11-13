@@ -38,6 +38,7 @@ pub mod health;
 pub mod metrics;
 pub mod openapi_docs;
 pub mod realtime;
+pub mod response_headers;
 pub mod router_policy;
 pub mod service_v2;
 pub mod systemone;
@@ -143,6 +144,42 @@ mod tests {
                 .unwrap()
                 .reasoning_disabled
         );
+    }
+
+    #[test]
+    fn frontend_thinking_default_reaches_reasoning_policy() {
+        // Kimi K2.5 reasons unless the request or a default turns thinking off.
+        let options = ParsingOptions::new(None, Some("kimi_k25".to_string()));
+        let reasoning_disabled = |defaults: &crate::frontend_config::ChatTemplateDefaults,
+                                  kwargs: Value| {
+            let mut req = request(json!("auto"));
+            req.chat_template_args = serde_json::from_value(kwargs).unwrap();
+            defaults.apply_to_request(&mut req);
+            req.normalize_reasoning_template_args().unwrap();
+            apply_request_tool_call_parsing_options(options.clone(), &req)
+                .unwrap()
+                .reasoning_disabled
+        };
+        let mut defaults = crate::frontend_config::ChatTemplateDefaults::default();
+        assert!(!reasoning_disabled(&defaults, Value::Null));
+        defaults.set_default_chat_template_kwargs(
+            json!({"enable_thinking": false}).as_object().cloned(),
+        );
+        assert!(reasoning_disabled(&defaults, Value::Null));
+        for unset in [Value::Null, json!("auto")] {
+            assert!(reasoning_disabled(
+                &defaults,
+                json!({"enable_thinking": unset})
+            ));
+            assert!(reasoning_disabled(
+                &defaults,
+                json!({"reasoning_effort": unset})
+            ));
+        }
+        assert!(!reasoning_disabled(
+            &defaults,
+            json!({"enable_thinking": true})
+        ));
     }
 
     #[test]

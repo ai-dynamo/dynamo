@@ -61,6 +61,8 @@ By default, Dynamo handles tokenization and detokenization through its Rust-base
 
 For SGLang-native preprocessing (tool calling, reasoning parsing, chat templates), use `--dyn-chat-processor sglang` on the frontend. See [SGLang Chat Processor](chat-processor.md) for architecture and usage.
 
+Set `--default-chat-template-kwargs` on the frontend, not on the SGLang worker. The frontend renders the chat template, so SGLang's flag has no effect behind Dynamo, and the worker refuses it at startup. The SGLang sidecar logs a warning instead, because its engine can also serve SGLang's own HTTP server. The frontend applies the defaults to every chat request, for workers and sidecars, before it reads the thinking controls. A key in the request's `chat_template_kwargs` takes precedence unless its value is `null` or `"auto"`, and a request thinking control replaces the thinking keys in the defaults. The flag cannot set `chat_template`; use `--custom-jinja-template` to replace the chat template.
+
 > [!WARNING]
 > `--use-sglang-tokenizer` is deprecated. Use `--dyn-chat-processor sglang` on the frontend instead, which provides the same SGLang-native processing with KV router support and the completions endpoint.
 
@@ -178,5 +180,159 @@ Dynamo parses and resolves the complete route list during worker startup. Startu
 
 - **[Examples](../../../../../recipes/cli-templates/sglang.mdx)**: Local deployment launch scripts
 - **[Disaggregation](disaggregation.md)**: P/D architecture and KV transfer
-- **[Diffusion](../../../../../use-cases/diffusion/overview.md)**: LLM, image, and video diffusion models
+- **Diffusion**: [image](../../../../../use-cases/diffusion/workflows/text-to-image.md), [video](../../../../../use-cases/diffusion/workflows/text-to-video.md), and [language](../../../../../use-cases/diffusion/workflows/text-to-text-llm-diffusion.md) diffusion models
 - **[Configuration and Tuning](../../router/configuration-and-tuning.md)**: KV-aware routing configuration
+
+
+## Experimental Worker Drain
+
+**Experimental.** Manual drain currently supports standalone aggregated SGLang
+workers using the TCP response plane. Workers that share an engine across
+multiple Dynamo gateway processes do not expose these controls.
+
+There is no separate drain enable flag. On a supported worker, enabling the
+system listener with `DYN_SYSTEM_PORT` also exposes the lifecycle API below.
+`Experimental` describes the support and validation scope, not an additional
+opt-in requirement. Setting `DYN_SYSTEM_PORT=-1` disables the entire system
+listener, including its health and metrics endpoints; this is the default when
+no system port is configured. Normal SIGTERM shutdown still works without the
+listener.
+
+Use the selected worker's system listener directly and restrict access to
+trusted administrators. The frontend HTTP address does not expose these
+worker-local routes.
+
+| Method | Worker system path | Behavior |
+| --- | --- | --- |
+| `POST` | `/engine/drain` | Withdraw from discovery, allow routing convergence, then close admission |
+| `GET` | `/engine/status` | Report the worker ID, lifecycle state, and reason |
+| `POST` | `/engine/resume` | Cancel drain and restore admission and discovery |
+
+Send no body or an empty JSON object. Drain returns 202 while completion is
+pending. Status and a successful resume return 200. Conflicts return 409,
+and discovery RPC failures return 503.
+Manual drain requires the TCP response plane. Other response planes return 409.
+
+
+### Drain and resume a worker
+
+Start discovery services and the frontend as described in the
+[SGLang launch scripts](../../../../../recipes/cli-templates/sglang.mdx).
+For a standalone aggregated worker, enable its system listener before startup:
+
+```bash
+DYN_SYSTEM_PORT=8081 python3 -m dynamo.sglang \
+  --model-path Qwen/Qwen3-0.6B \
+  --request-plane tcp \
+  --response-plane tcp
+```
+
+When the worker runs locally, set its control address:
+
+```bash
+WORKER_URL=http://127.0.0.1:8081
+```
+
+For Kubernetes, select one worker Pod. Replace `default` and
+`my-sglang-worker` with its namespace and Pod name, and run this command in a
+separate terminal. The worker must already have `DYN_SYSTEM_PORT=8081` in its
+container environment.
+
+```bash
+kubectl -n default port-forward pod/my-sglang-worker 18081:8081
+```
+
+Use `WORKER_URL=http://127.0.0.1:18081` for that forwarded worker. Send the drain
+request:
+
+```bash
+curl --fail-with-body -sS -i -X POST "$WORKER_URL/engine/drain" \
+  -H 'Content-Type: application/json' -d '{}'
+```
+
+With the default routing grace, the response is HTTP 202. Example body:
+
+```json
+{"worker_id":"1234","state":"draining","reason":"routing_grace"}
+```
+
+Poll the same worker's status until `state` is `drained`:
+
+```bash
+curl --fail-with-body -sS "$WORKER_URL/engine/status"
+```
+
+Example completion response:
+
+```json
+{"worker_id":"1234","state":"drained","reason":null}
+```
+
+To cancel an administrative drain or restore the worker after it drains, send:
+
+```bash
+curl --fail-with-body -sS -i -X POST "$WORKER_URL/engine/resume" \
+  -H 'Content-Type: application/json' -d '{}'
+```
+
+A successful resume returns HTTP 200 with `state="serving"`. After discovery
+converges, verify inference through your frontend. For the model above and a
+frontend listening on port 8000:
+
+```bash
+FRONTEND_URL=http://127.0.0.1:8000
+curl --fail-with-body -sS "$FRONTEND_URL/v1/chat/completions" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"Qwen/Qwen3-0.6B","messages":[{"role":"user","content":"Hello"}],"max_tokens":8}'
+```
+
+Expect a successful Chat Completions response with a `choices` array. Polling or
+resuming a different worker does not complete the selected worker's operation.
+
+### Admission and completion semantics
+
+Drain lets previously admitted requests run and keeps internal health probes
+available. During routing convergence the worker can still accept requests.
+Configure that interval with `DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS` (default
+5 seconds). After admission closes, late requests receive a worker-unavailable
+error. Frontend pipelines that support migration can reselect using the existing
+`--migration-limit` and ordinary routing and replay rules. A zero limit disables
+reselection.
+
+The grace period starts after discovery confirms withdrawal. Admission checks
+its deadline at request ingress, even while an engine-control operation holds
+the lifecycle lock. Repeated drain calls do not extend the deadline.
+
+Discovery RPC errors leave the write outcome unconfirmed. A failed drain keeps
+admission open and reports `discovery_unregister_pending`; retry drain to
+confirm withdrawal. Every resume call reasserts discovery registration, including
+when admission is already open. Resume opens admission before registration so
+requests can arrive as soon as the endpoint becomes visible. If registration
+fails, the call returns an error and admission stays open unless shutdown
+supersedes resume. Retry resume to confirm registration.
+
+SGLang's `pause_generation` and drain are mutually exclusive. Continue
+generation before draining a paused worker. Resume a draining or drained worker
+before pausing it. SIGTERM moves the worker to `stopping`, prevents resume, and
+follows the existing shutdown sequence.
+
+Poll status for `drained`. The worker reaches this state after business
+admission closes, worker ingress requests and their response streams finish,
+and the SGLang tokenizer manager has no remaining request IDs. While draining,
+`reason` indicates whether the worker is waiting for routing grace, Dynamo
+ingress, SGLang requests, or an available completion check.
+
+| Reason | Meaning |
+| --- | --- |
+| `routing_grace` | Discovery withdrawal is confirmed; routing convergence is in progress |
+| `discovery_unregister_pending` | Withdrawal is unconfirmed; retry drain |
+| `dynamo_inflight` | Admitted worker requests or their response streams remain |
+| `sglang_inflight` | The tokenizer manager still tracks requests |
+| `completion_check_unavailable` | Completion cannot be confirmed; this does not count as `drained` |
+
+> [!NOTE]
+> `drained` confirms request-level completion. Background scheduler and KV
+> cache operations may still be in progress.
+
+Replacement admission and Pod deletion remain part of the
+[manual Grove OnDelete release workflow](https://github.com/ai-dynamo/dynamo/issues/17568).

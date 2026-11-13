@@ -11,15 +11,12 @@ use std::{
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use validator::{Validate, ValidationError};
 
-use dynamo_kv_router::{
-    kv_hints::{
-        KV_HINT_TRANSFER_CAPABILITY_KEY, KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
-        KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY,
-    },
-    protocols::{KvHintTransferWorkerMetadata, KvTransferEnforcement},
-    sequences::topology::MAX_DATA_PARALLEL_RANKS_PER_WORKER,
+use dynamo_kv_hints::{
+    KV_HINT_TRANSFER_CAPABILITY_KEY, KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
+    KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY, KvHintTransferWorkerMetadata, KvTransferEnforcement,
 };
 use dynamo_runtime::{config::is_truthy, protocols::EndpointId};
+use dynamo_slot_tracker::host::MAX_DATA_PARALLEL_RANKS_PER_WORKER;
 
 use crate::protocols::openai::chat_completions::tool_parser_v2::unified_family_names;
 use dynamo_parsers::tool_calling::parsers::get_available_tool_parsers;
@@ -184,6 +181,13 @@ pub const SGLANG_GENERATE_CAPABILITY: &str = "sglang_generate";
 
 /// Worker-confirmed isolated scheduling for zero-decode candidate scoring.
 pub const SGLANG_SYSTEMONE_SERIAL_V1: &str = "sglang_systemone_serial_v1";
+
+/// Worker-advertised guarantee that disaggregated prefill cancellation is safe
+/// at any point before the prefill stream finishes.
+///
+/// Both prefill and decode workers must advertise this versioned capability.
+/// Absence is conservative and leaves remote prefill cancellation disabled.
+pub const DISAGG_PREFILL_CANCEL_ANYTIME_V1: &str = "disagg_prefill_cancel_anytime_v1";
 
 /// Tokenizer backend used by the Rust preprocessor for BPE tokenizer.json models.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -541,7 +545,7 @@ impl ModelRuntimeConfig {
     }
 }
 
-impl dynamo_kv_router::WorkerConfigLike for ModelRuntimeConfig {
+impl dynamo_scheduler::host::WorkerConfigLike for ModelRuntimeConfig {
     fn data_parallel_start_rank(&self) -> u32 {
         self.data_parallel_start_rank
     }
@@ -1262,7 +1266,7 @@ mod tests {
 
     #[test]
     fn native_offloading_capacity_is_backend_neutral() {
-        use dynamo_kv_router::WorkerConfigLike;
+        use dynamo_scheduler::host::WorkerConfigLike;
 
         let mut config = ModelRuntimeConfig::default();
         config
@@ -1277,7 +1281,7 @@ mod tests {
 
     #[test]
     fn kv_hint_transfer_support_requires_explicit_true() {
-        use dynamo_kv_router::WorkerConfigLike;
+        use dynamo_scheduler::host::WorkerConfigLike;
 
         let mut config = ModelRuntimeConfig::default();
         assert!(config.kv_hint_transfer_metadata_for_dp_rank(0).is_none());

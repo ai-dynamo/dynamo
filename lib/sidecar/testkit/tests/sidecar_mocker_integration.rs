@@ -581,7 +581,7 @@ async fn vllm_teardown_terminates_handlers_with_clients_alive() {
         teardown_with_live_clients::<vllm_fixture::Fixture>(),
     )
     .await;
-    let error = failure(outputs, &tokens, BackendError::Unknown);
+    let error = failure(outputs, &tokens, BackendError::Disconnected);
     assert!(error.to_string().contains("GenerateStream"));
 }
 
@@ -691,7 +691,7 @@ async fn sglang_teardown_terminates_handlers_with_clients_alive() {
         teardown_with_live_clients::<support::sglang::Fixture>(),
     )
     .await;
-    let error = failure(outputs, &tokens, BackendError::Unknown);
+    let error = failure(outputs, &tokens, BackendError::Disconnected);
     assert!(error.to_string().contains("Generate"));
 }
 
@@ -702,7 +702,7 @@ async fn lpx_teardown_terminates_handlers_with_clients_alive() {
         teardown_with_live_clients::<support::lpx::Fixture>(),
     )
     .await;
-    let error = failure(outputs, &tokens, BackendError::Unknown);
+    let error = failure(outputs, &tokens, BackendError::Disconnected);
     assert!(error.to_string().contains("Generate"));
 }
 
@@ -832,7 +832,7 @@ async fn trtllm_teardown_terminates_handlers_with_clients_alive() {
         teardown_with_live_clients::<support::trtllm::Fixture>(),
     )
     .await;
-    let error = failure(outputs, &tokens, BackendError::Unknown);
+    let error = failure(outputs, &tokens, BackendError::Disconnected);
     assert!(error.to_string().contains("Generate"));
 }
 
@@ -952,7 +952,7 @@ fn assert_http_completed(outputs: Outputs, request_id: &str) {
     for (output, expected) in outputs.iter().zip(http::responses(native_id)) {
         assert_eq!(
             output.engine_data,
-            Some(json!({"sglang_response": expected}))
+            Some(Box::new(json!({"sglang_response": expected})))
         );
     }
 }

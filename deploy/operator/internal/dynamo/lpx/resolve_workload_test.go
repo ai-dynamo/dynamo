@@ -13,6 +13,7 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	deploymentcapnpv1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/deployment/v1"
 	manifestcapnp "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/v2"
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 	"github.com/stretchr/testify/require"
@@ -136,12 +137,18 @@ func TestResolveWorkloadDerivesRuntimeShapeFromExecutionDevices(t *testing.T) {
 		require.ErrorContains(t, err, "localPartitions requires a hybrid build with a Cyborg conductor")
 	}
 
-	t.Log("Require resources on the independently authored hybrid conductor")
+	t.Log("Require the LPX sidecar on the hybrid conductor")
 	source := staticModelRegistry{"build": acquireHybridTestSnapshot(t)}
 	_, err = ResolveWorkload(t.Context(), reader, dgd, singleGroupComponents(t, dgd), source)
-	require.ErrorContains(t, err, "requires a positive GPU count")
+	require.ErrorIs(t, err, ErrUnsupportedRuntime)
+	require.EqualError(t, err, `unsupported LPX runtime: component "LPX" conductor of a hybrid build requires the LPX sidecar; declare the "runtime" init container`)
+
+	t.Log("Require resources on the independently authored hybrid conductor")
 	conductor := dgd.Spec.Components[0].ComponentRole(v1beta1.ComponentRoleLPXConductor)
 	conductor.PodTemplate = testLPXPodTemplate("cyborg-runtime")
+	conductor.PodTemplate.Spec.InitContainers = []corev1.Container{
+		{Name: commonconsts.RuntimeContainerName, Image: "sidecar", RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways)},
+	}
 	_, err = ResolveWorkload(t.Context(), reader, dgd, singleGroupComponents(t, dgd), source)
 	require.ErrorContains(t, err, "requires a positive GPU count")
 
@@ -299,12 +306,15 @@ func TestResolveWorkloadSpecDecodeV2AndV3(t *testing.T) {
 	t.Log("Define revision-specific SpecDecode compiler snapshots")
 	reader := fake.NewClientBuilder().Build()
 	tests := []struct {
-		name     string
-		family   BuildFamily
-		wantMode lpxv1alpha1.WorkloadMode
-		packed   [2]bool
+		name         string
+		family       BuildFamily
+		wantMode     lpxv1alpha1.WorkloadMode
+		packed       [2]bool
+		agentSidecar bool
 	}{
 		{name: "v2", family: BuildFamilyXT, wantMode: lpxv1alpha1.WorkloadModeV2LPUOnly},
+		{name: "v2 agent sidecar target", family: BuildFamilyXT, wantMode: lpxv1alpha1.WorkloadModeV2LPUOnly, agentSidecar: true},
+		{name: "v3 agent sidecar target", family: BuildFamilyHX, wantMode: lpxv1alpha1.WorkloadModeV3HxLPUOnly, agentSidecar: true},
 		{name: "v2 packed draft", family: BuildFamilyXT, wantMode: lpxv1alpha1.WorkloadModeV2LPUOnly, packed: [2]bool{true, false}},
 		{name: "v2 packed target", family: BuildFamilyXT, wantMode: lpxv1alpha1.WorkloadModeV2LPUOnly, packed: [2]bool{false, true}},
 		{name: "v3", family: BuildFamilyHX, wantMode: lpxv1alpha1.WorkloadModeV3HxLPUOnly},
@@ -336,9 +346,15 @@ func TestResolveWorkloadSpecDecodeV2AndV3(t *testing.T) {
 				snapshots[1] = snapshots[0]
 			}
 
-			t.Log("Build a selected SpecDecode DGD for the fixture's manifest generation")
+			t.Log("Build a selected SpecDecode DGD whose target serves through its conductor or agent sidecar")
+			targetRoles := []v1beta1.ComponentRoleSpec{{Name: v1beta1.ComponentRoleLPXConductor, PodTemplate: testLPXPodTemplate("conductor-runtime")}, {Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: testLPXPodTemplate("lpu-runtime")}}
+			if test.agentSidecar {
+				agent := testLPXPodTemplate("lpu-runtime")
+				agent.Spec.InitContainers = []corev1.Container{{Name: commonconsts.RuntimeContainerName, Image: "sidecar", RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways)}}
+				targetRoles = []v1beta1.ComponentRoleSpec{{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: agent}}
+			}
 			dgd := newSelectedTestDGD(t, "specdecode",
-				testLPXComponent("lpx", "target-build", v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXConductor, PodTemplate: testLPXPodTemplate("conductor-runtime")}, v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: testLPXPodTemplate("lpu-runtime")}),
+				testLPXComponent("lpx", "target-build", targetRoles...),
 				testLPXComponent("small", "draft-build", v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: testLPXPodTemplate("lpu-runtime")}),
 			)
 			dgd.Spec.Components[1].Replicas = new(int32(2))
@@ -523,7 +539,7 @@ func TestResolveWorkloadPlacesRuntimeSidecarWithTheEngine(t *testing.T) {
 		{name: "agent sidecar serves a multi-Pod XT build", build: "multi-pod-xt", sidecarRole: v1beta1.ComponentRoleLPXAgent, wantAgents: 4},
 		{name: "agent sidecar serves a multi-Pod HX build", build: "multi-pod-hx", sidecarRole: v1beta1.ComponentRoleLPXAgent, wantAgents: 2},
 		{name: "agent sidecar rejects a hybrid build", build: "hybrid", sidecarRole: v1beta1.ComponentRoleLPXAgent,
-			wantErr: `component "lpx" agent "runtime" sidecar requires an LPU-only single-model build; declare the conductor role instead`},
+			wantErr: `component "lpx" agent "runtime" sidecar requires an LPU-only build; declare the conductor role instead`},
 		{name: "conductor sidecar rejects an LPU-only build", build: "hx", sidecarRole: v1beta1.ComponentRoleLPXConductor,
 			wantErr: `component "lpx" conductor Dynamo sidecar mode requires a hybrid build whose conductor runs the GPU engine`},
 	} {
@@ -616,4 +632,41 @@ func acquireHybridTestSnapshot(t *testing.T) *Build {
 	fixture.selectedPropSyncChains = nil
 	fixture.partitions = append(fixture.partitions, testV3CapnpPartition{id: 11, deviceType: manifestcapnp.DeviceType_cuda})
 	return acquireTestSnapshot(t, writeCompilerFixture(t, fixture))
+}
+
+func TestResolveUnitsFormatPerWorkload(t *testing.T) {
+	t.Parallel()
+	bundle := testUnitBundle{architecture: deploymentcapnpv1.LpuArchitecture_lp20, devicesPerNode: 8,
+		partitions: testUnitPartitions(8, nil, 0), units: testSingleUnits(testNodesReservation(1, 0))}
+	units, err := acquireTestUnitBundle(t, bundle)
+	require.NoError(t, err)
+	bundle.units = nil
+	legacy, err := acquireTestUnitBundle(t, bundle)
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		name          string
+		draft, target *Build
+		wantErr       bool
+	}{
+		{"legacy pair", legacy, legacy, false}, {"units pair", units, units, false},
+		{"units draft and legacy target", units, legacy, true}, {"legacy draft and units target", legacy, units, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Log("Resolve the complete pair before rendering any live resource")
+			dgd := newSelectedTestDGD(t, "pair",
+				testLPXComponent("target", "target-build", v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXConductor, PodTemplate: testLPXPodTemplate("runtime")}, v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: testLPXPodTemplate("runtime")}),
+				testLPXComponent("draft", "draft-build", v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: testLPXPodTemplate("runtime")}),
+			)
+			before := dgd.DeepCopy()
+			got, err := ResolveWorkload(t.Context(), fake.NewClientBuilder().Build(), dgd, singleGroupComponents(t, dgd), staticModelRegistry{"draft-build": tc.draft, "target-build": tc.target})
+			require.Equal(t, before, dgd)
+			if tc.wantErr {
+				require.ErrorContains(t, err, "mixes builds with and without lpuUnits")
+				require.Nil(t, got)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tc.target == units, got.placesLPUUnits())
+		})
+	}
 }
