@@ -2,13 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Hand-curated license overrides for packages whose upstream metadata is empty,
-# malformed, or otherwise unhelpful. Consulted by
-# container/compliance/overrides.py via license_overrides.lookup(), which every
-# NOTICES generator calls before falling back to UNKNOWN.
+# malformed, or otherwise unhelpful. Dpkg resolution and Python/Rust fallback
+# paths consult container/compliance/overrides.py via lookup(). Go/native
+# generators report observed matches without applying these corrections.
 #
-# Match is by (ecosystem, name) — version-agnostic. If a package legitimately
-# changes license across versions, add separate entries with the version baked
-# into the name (e.g. cuda-nvcc-12-9 vs cuda-nvcc-13-0).
+# Exact (ecosystem, name, version) entries take priority. Existing entries without
+# version remain legacy review debt; new corrections require an exact version,
+# usage, evidence, and reason. Metadata corrections do not grant distribution rights.
 #
 # Schema:
 #   ecosystem: rust | go | python | dpkg | native
@@ -19,9 +19,8 @@
 #              overriding upstream (e.g. "PyPI metadata empty; verified at <URL>")
 #
 # Add a new entry: confirm the upstream license, paste the URL into source:,
-# pick the SPDX ID, and (if it's a LicenseRef-*) make sure it appears in
-# container/compliance/policy/licenses.toml's [licenses].allow list — otherwise
-# the policy gate will reject it.
+# pick the SPDX expression, and document the exact version, usage, evidence and
+# reason. Restricted terms require a scoped policy exception, not a new global grant.
 
 overrides:
   # --- NVIDIA CUDA Python wheels ---
@@ -341,9 +340,9 @@ overrides:
 
   # --- Sglang cuda12.9 — dpkg additions on top of cuda:12.9.1-cudnn-devel ---
   # X11 / libdrm / common system libs whose syft DEP-5 parse came back UNKNOWN.
-  - { ecosystem: dpkg, name: libdrm-amdgpu1,    license: "MIT",              source: "freedesktop libdrm — https://gitlab.freedesktop.org/mesa/drm/-/blob/main/LICENSE" }
-  - { ecosystem: dpkg, name: libdrm-common,     license: "MIT",              source: "freedesktop libdrm" }
-  - { ecosystem: dpkg, name: libdrm2,           license: "MIT",              source: "freedesktop libdrm" }
+  - {"ecosystem": "dpkg", "name": "libdrm-amdgpu1", "license": "MIT", "source": "freedesktop libdrm — https://gitlab.freedesktop.org/mesa/drm/-/blob/main/LICENSE; X.Org libdrm (MIT); AMDGPU DRM component"}
+  - {"ecosystem": "dpkg", "name": "libdrm-common", "license": "MIT", "source": "freedesktop libdrm; X.Org libdrm (MIT); common data"}
+  - {"ecosystem": "dpkg", "name": "libdrm2", "license": "MIT", "source": "freedesktop libdrm; X.Org libdrm (MIT)"}
   - { ecosystem: dpkg, name: libxau6,           license: "MIT",              source: "X.Org libXau — MIT/X11 style" }
   - { ecosystem: dpkg, name: libxcb1,           license: "MIT",              source: "X.Org libxcb — MIT/X11 style" }
   - { ecosystem: dpkg, name: libxdmcp6,         license: "MIT",              source: "X.Org libXdmcp — MIT/X11 style" }
@@ -1034,11 +1033,8 @@ overrides:
   # --- libdrm family (X.Org DRM; MIT; syft/DEP-5 leaves the per-GPU subpackages
   #     UNKNOWN — libdrm-intel1 is amd64-only so it missed the arm64-derived pass) ---
   - { ecosystem: dpkg, name: libdrm-intel1,   license: "MIT", source: "X.Org libdrm (MIT); Intel DRM component" }
-  - { ecosystem: dpkg, name: libdrm-amdgpu1,  license: "MIT", source: "X.Org libdrm (MIT); AMDGPU DRM component" }
   - { ecosystem: dpkg, name: libdrm-nouveau2, license: "MIT", source: "X.Org libdrm (MIT); Nouveau DRM component" }
   - { ecosystem: dpkg, name: libdrm-radeon1,  license: "MIT", source: "X.Org libdrm (MIT); Radeon DRM component" }
-  - { ecosystem: dpkg, name: libdrm2,         license: "MIT", source: "X.Org libdrm (MIT)" }
-  - { ecosystem: dpkg, name: libdrm-common,   license: "MIT", source: "X.Org libdrm (MIT); common data" }
 
   # --- Plotly Kaleido image-export stack (dynamo-planner; PyPI metadata has
   #     empty license_expression + no classifiers, so the generator reports
@@ -1050,3 +1046,72 @@ overrides:
   - { ecosystem: python, name: instanttensor, license: "Apache-2.0", source: "https://github.com/scitix/InstantTensor/blob/v0.1.9/LICENSE" }
   - { ecosystem: python, name: sigstore-models, license: "MIT", source: "https://github.com/astral-sh/sigstore-models/blob/v0.0.6/LICENSE" }
   - { ecosystem: rust, name: tsp-asn1, license: "Apache-2.0", source: "https://github.com/trailofbits/rfc3161-client/blob/v1.0.8/LICENSE" }
+
+  # Exact retained-payload corrections; versions, notice hashes and removed
+  # packaging-document paths are all enforced before these can apply.
+  - ecosystem: dpkg
+    name: libbpf1
+    version: 1:1.3.0-2build2
+    license: LGPL-2.1-only OR BSD-2-Clause
+    source: https://archive.ubuntu.com/ubuntu/pool/main/libb/libbpf/libbpf_1.3.0.orig.tar.gz
+    usage: Runtime eBPF shared library retained for iproute2; reviewed packaging changelog removed, upstream LGPL/BSD choice preserved.
+    evidence: container/compliance/evidence/dpkg-license-corrections.json#libbpf1
+    reason: Exact source builds the shared library from LGPL/BSD src objects. GPL documentation and Debian build sources are not library code; the shipped Debian changelog is explicitly removed before this correction applies. UAPI headers retain Linux-syscall-note.
+    copyright_sha256: 4d0df00a62374f3992ad0f2ec566838cafb406d11bef776d2667d3aabaa4b430
+    absent_paths:
+    - /usr/share/doc/libbpf1/changelog.Debian.gz
+  - ecosystem: dpkg
+    name: libgraphite2-3
+    version: 1.3.14-2ubuntu0.24.04.1
+    license: LGPL-2.1-or-later OR MPL-1.1 OR GPL-2.0-or-later
+    source: https://archive.ubuntu.com/ubuntu/pool/main/g/graphite2/graphite2_1.3.14.orig.tar.gz
+    usage: Runtime font shaping library used by system HarfBuzz/Pango. LGPL/MPL/GPL choices remain reciprocal; this correction does not waive source or notice duties.
+    evidence: container/compliance/evidence/dpkg-license-corrections.json#libgraphite2-3
+    reason: COPYING and compiled C++ sources offer the three alternatives. Build/test/Perl/packaging sources with their separate licensing are not part of the installed shared library; remove the reviewed packaging changelog and retain the full original copyright.
+    copyright_sha256: a33017ba0308c41bdbde4751bff349ab7b26af45fadbb1e3e7ac67c372985572
+    absent_paths:
+    - /usr/share/doc/libgraphite2-3/changelog.Debian.gz
+  - ecosystem: dpkg
+    name: libibverbs-dev
+    version: 50.0-2ubuntu0.2
+    license: (BSD-2-Clause OR GPL-2.0-only) AND (BSD-3-Clause OR GPL-2.0-only) AND MIT AND CC0-1.0
+    source: https://archive.ubuntu.com/ubuntu/pool/main/r/rdma-core/rdma-core_50.0.orig.tar.gz
+    usage: Installed RDMA headers, static provider libraries and upstream manpages; archive presence is not proof of serving linkage. Only the package changelog symlink is unlinked.
+    evidence: container/compliance/evidence/dpkg-license-corrections.json#libibverbs-dev
+    reason: COPYING.md, provider headers and the binary install manifest establish BSD alternatives plus permissive utility code for the installed headers/archives/manpages. The GPL-only UAPI source has Linux-syscall-note and is not installed by this package; remove only the packaging changelog symlink.
+    copyright_sha256: 37f80110080a724e03aa331779884c00860d8a0033cd7ca47030dd0f17794b4b
+    absent_paths:
+    - /usr/share/doc/libibverbs-dev/changelog.Debian.gz
+  - ecosystem: dpkg
+    name: libfabric1-aws
+    version: 2.7.0amzn2.0
+    license: (BSD-2-Clause OR GPL-2.0-only) AND MIT
+    source: https://github.com/aws/libfabric/blob/4c4ea95fc0b40ef565d030200eb689609bd995db/COPYING
+    usage: EFA libfabric runtime shared library; upstream BSD/GPL choice and MIT fasthash terms retained.
+    evidence: container/compliance/evidence/dpkg-license-corrections.json#libfabric1-aws
+    reason: Exact EFA installer packages carry upstream dual BSD/GPL libfabric with MIT fasthash. The GPL2+ Debian packaging source is separate; the installed packaging changelog is removed, while upstream manpages and full copyright remain.
+    copyright_sha256: 5564fb4e70e541a1f33e6ce253aacd727a3b3563631cd9de57e9cf4da04fd9b6
+    absent_paths:
+    - /usr/share/doc/libfabric1-aws/changelog.gz
+  - ecosystem: dpkg
+    name: libfabric-aws-dev
+    version: 2.7.0amzn2.0
+    license: (BSD-2-Clause OR GPL-2.0-only) AND MIT
+    source: https://github.com/aws/libfabric/blob/4c4ea95fc0b40ef565d030200eb689609bd995db/COPYING
+    usage: EFA headers, static libfabric archive and upstream manpages; upstream BSD/GPL choice and MIT fasthash terms retained.
+    evidence: container/compliance/evidence/dpkg-license-corrections.json#libfabric-aws-dev
+    reason: Exact EFA installer packages carry upstream dual BSD/GPL libfabric with MIT fasthash. The GPL2+ Debian packaging source is separate; the installed packaging changelog is removed, while upstream manpages and full copyright remain.
+    copyright_sha256: 5564fb4e70e541a1f33e6ce253aacd727a3b3563631cd9de57e9cf4da04fd9b6
+    absent_paths:
+    - /usr/share/doc/libfabric-aws-dev/changelog.gz
+  - ecosystem: dpkg
+    name: libfabric-aws-bin
+    version: 2.7.0amzn2.0
+    license: (BSD-2-Clause OR GPL-2.0-only) AND MIT
+    source: https://github.com/aws/libfabric/blob/4c4ea95fc0b40ef565d030200eb689609bd995db/COPYING
+    usage: Separate EFA diagnostic programs; upstream BSD/GPL choice and MIT fasthash terms retained.
+    evidence: container/compliance/evidence/dpkg-license-corrections.json#libfabric-aws-bin
+    reason: Exact EFA installer packages carry upstream dual BSD/GPL libfabric with MIT fasthash. The GPL2+ Debian packaging source is separate; the installed packaging changelog is removed, while upstream manpages and full copyright remain.
+    copyright_sha256: 5564fb4e70e541a1f33e6ce253aacd727a3b3563631cd9de57e9cf4da04fd9b6
+    absent_paths:
+    - /usr/share/doc/libfabric-aws-bin/changelog.gz

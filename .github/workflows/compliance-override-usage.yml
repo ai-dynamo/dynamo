@@ -1,0 +1,57 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+name: Compliance Override Usage
+on:
+  schedule:
+    - cron: '37 12 * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  usage-report:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11  # v4.1.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: '3.12'
+      - name: Install policy parser
+        run: python3 -m pip install PyYAML==6.0.3
+      - name: Analyze actual applications across the nightly matrix
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          PYTHONPATH=container python3 -m compliance.audit_override_usage \
+            --repo "${GITHUB_REPOSITORY}" \
+            --matrix container/compliance/usage_matrix.json \
+            --overrides container/compliance/license_overrides.yaml \
+            --output "${RUNNER_TEMP}/override-usage-review.json"
+      - name: Summarize coverage
+        env:
+          REPORT: ${{ runner.temp }}/override-usage-review.json
+        run: |
+          python3 - <<'PY'
+          import json, os
+          from collections import Counter
+          with open(os.environ['REPORT']) as stream:
+              report = json.load(stream)
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+              summary.write(f"Nightly run: {report['run_id']} at `{report['source_sha']}`\n\n")
+              summary.write(f"Coverage complete: **{report['coverage_complete']}**\n\n")
+              summary.write(f"Observed statuses: {dict(Counter(r['status'] for r in report['overrides']))}\n\n")
+              summary.write('This is a review report. No overrides are removed or approved.\n')
+              for problem in report['coverage_problems']:
+                  summary.write(f'\n- {problem}\n')
+          PY
+      - name: Upload review report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: license-override-usage-review
+          path: ${{ runner.temp }}/override-usage-review.json
+          if-no-files-found: error
+          retention-days: 30

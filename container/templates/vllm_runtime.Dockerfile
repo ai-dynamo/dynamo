@@ -150,11 +150,12 @@ COPY --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wh
 COPY --chown=dynamo:0 --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
 
 # Install RDMA libraries required for UCX to find RDMA devices
+# ibverbs-utils contains diagnostics, not runtime libraries. Keep those tools
+# in wheel_builder instead of adding them to the CPU/XPU serving image.
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         libibverbs1 \
         rdma-core \
-        ibverbs-utils \
         libibumad3 \
         libnuma1 \
         librdmacm1 \
@@ -341,16 +342,16 @@ RUN apt-get update && \
 # safe. dpkg-query keeps the match robust across base-image/arch version
 # suffixes (e.g. libavcodec58 vs 60).
 #
-# This grep is the COMPLETE, auditable set of what leaves the image: there is
+# This grep lists the removals in the codec step; the bounded orphan step below
+# handles the unused GL stack separately. There is
 # deliberately NO apt-get autoremove, so the removal can never cascade into
 # unrelated auto-installed packages. That matters because the base image marks
 # both the gcc/g++/make toolchain (torch.inductor/Triton JIT shell out to it at
 # runtime) and the CUDA math libs (libcublas/libcusolver/libcusparse — the torch
 # wheels here ship no bundled cublas and load the system copies) as
 # auto-installed. A bare `autoremove --purge` sweeps all of those as "orphaned",
-# which broke runtime JIT (missing C compiler) in the 1.3.0 rc image. Any
-# LGPL/BSD media libs left orphaned (libva, libvdpau, ...) are license-clean
-# dead weight, not a compliance issue.
+# which broke runtime JIT (missing C compiler) in the 1.3.0 rc image.
+# Remaining media libraries still need individual license/use review.
 RUN set -eux; \
     purge=$(dpkg-query -W -f='${Package}\n' 2>/dev/null \
         | grep -E '^(ffmpeg|libav[a-z]|libsw[a-z]|libpostproc|libx264|libx265|libmp3lame|libaom|libdav1d|libvpx|libtheora|libvorbis|libopus|libsoxr|libcaca|libcdio|libzvbi|libgme|libvidstab|libdc1394|libraw1394|libiec61883|libtwolame|libshine|libsrt[0-9]|libudfread|libsvtav1|libbs2b|librubberband|libchromaprint|libcodec2|libgsm|libass[0-9]|libbluray|libxvidcore|libflite)' \
@@ -556,12 +557,25 @@ RUN set -eux; \
     ! python3 -c "import decord" 2>/dev/null; \
     ! python3 -c "import torchcodec" 2>/dev/null; \
     ENABLE_HEADLESS=1 ENABLE_CONTRIB=0 MAKEFLAGS="-j$(nproc)" \
-    CMAKE_ARGS="-DWITH_FFMPEG=OFF -DWITH_GSTREAMER=OFF -DVIDEOIO_ENABLE_PLUGINS=OFF -DWITH_1394=OFF -DWITH_V4L=OFF -DBUILD_TESTS=OFF -DBUILD_PERF_TESTS=OFF -DBUILD_EXAMPLES=OFF -DBUILD_opencv_apps=OFF -DENABLE_CCACHE=OFF" \
+    CMAKE_ARGS="-DWITH_FFMPEG=OFF -DWITH_GSTREAMER=OFF -DVIDEOIO_ENABLE_PLUGINS=OFF -DWITH_1394=OFF -DWITH_V4L=OFF -DBUILD_TESTS=OFF -DBUILD_PERF_TESTS=OFF -DBUILD_EXAMPLES=OFF -DBUILD_opencv_apps=OFF -DENABLE_CCACHE=OFF{% if target == "runtime" %} -DWITH_OPENGL=OFF{% endif %}" \
     python3 -m pip install --no-binary opencv-python-headless "opencv-python-headless==${OPENCV_VERSION}"; \
     rm -rf /root/.cache/pip; \
     python3 -c "import cv2; cv2.resize"; \
     ! ls -d "${SITE_PACKAGES}"/opencv_python*.libs 2>/dev/null; \
     python3 -c "import cv2,re,sys; enabled=[name for name,value in re.findall(r'^\s*(FFMPEG|GSTREAMER):\s*(\S+)', cv2.getBuildInformation(), re.M|re.I) if value.upper()=='YES']; sys.exit('ERROR: cv2 was built with video backends: '+', '.join(enabled) if enabled else 0)"
+
+{% if target == "runtime" %}
+# The final CUDA serving image has no external package or ELF consumers of
+# libplacebo or this GL/Mesa chain on either architecture. Headless OpenCV
+# replaces the old GUI wheel above; keep GUI/OpenGL disabled and reject new
+# graphics consumers or any APT removal outside this reviewed set. Do not
+# autoremove libglvnd0, the JIT toolchain, CUDA libraries, or unrelated packages.
+RUN --mount=type=bind,source=./container/deps/vllm/remove_orphaned_package.py,target=/tmp/remove_orphaned_package.py,readonly \
+    python3 /tmp/remove_orphaned_package.py --require-headless-opencv \
+        --package libplacebo338 --package libgl1 --package libglx0 \
+        --package libgbm1 --package libgl1-mesa-dri \
+        --package libglx-mesa0 --package mesa-libgallium
+{% endif %}
 
 # PyNvVideoCodec is KEPT (removed from the purge above) but REPLACED with 2.2.4 by
 # the removal and requirements install above: the base image's 2.0.4 bundles a

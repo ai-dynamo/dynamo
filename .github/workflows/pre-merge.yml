@@ -31,6 +31,7 @@ jobs:
   changed-files:
     runs-on: ubuntu-24.04
     outputs:
+      compliance_policy: ${{ steps.changes.outputs.compliance_policy }}
       docs: ${{ steps.changes.outputs.docs }}
       examples: ${{ steps.changes.outputs.examples }}
       api_docs: ${{ steps.changes.outputs.api_docs }}
@@ -71,9 +72,18 @@ jobs:
     - name: Lint docs structure
       run: python3 docs/fern/scripts/docs_lint.py --scan docs --github
 
+  compliance-policy-review:
+    needs: changed-files
+    if: github.event_name == 'pull_request' && needs.changed-files.outputs.compliance_policy == 'true'
+    uses: ./.github/workflows/compliance-policy-review.yml
+    permissions:
+      contents: read
+    with:
+      base_sha: ${{ github.event.pull_request.base.sha }}
+
   pre-merge-status-check:
     runs-on: ubuntu-24.04
-    needs: [changed-files, pre-commit, planner-gym, recipe-check, api-docs, fern-check, fern-broken-links, docs-lint, operator, rust-tests, rust-feature-builds, rust-clippy, docs-website-composition]
+    needs: [changed-files, compliance-policy-review, pre-commit, planner-gym, recipe-check, api-docs, fern-check, fern-broken-links, docs-lint, operator, rust-tests, rust-feature-builds, rust-clippy, docs-website-composition]
     if: always()
     steps:
       - name: "Check all dependent jobs"

@@ -51,6 +51,8 @@ def _parse_ecosystems(raw: str) -> list[str]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    from .. import overrides
+
     parser = argparse.ArgumentParser(
         prog="compliance.generators",
         description="Generate per-ecosystem NOTICES-*.txt + *-deps.csv into /legal/",
@@ -179,6 +181,7 @@ def main(argv: list[str] | None = None) -> int:
         "-v", "--verbose", action="store_true", help="Enable verbose logging"
     )
     args = parser.parse_args(argv)
+    overrides.reset_caches()
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
@@ -233,7 +236,11 @@ def main(argv: list[str] | None = None) -> int:
                 from . import dpkg as gen  # type: ignore[no-redef]
 
                 comps = gen.generate(
-                    args.output_dir, subtract=subtract, root=args.dpkg_root
+                    args.output_dir,
+                    subtract=gen.baseline_keys(args.subtract_sbom)
+                    if args.subtract_sbom is not None
+                    else None,
+                    root=args.dpkg_root,
                 )
             elif eco == "go":
                 if not args.go_sbom:
@@ -309,6 +316,10 @@ def main(argv: list[str] | None = None) -> int:
         all_components, exception_reasons, args.output_dir / "osrb-deps.csv"
     )
     common.write_cyclonedx(all_components, args.output_dir / "osrb.cdx.json")
+    overrides.ensure_observed(all_components)
+    overrides.write_usage(
+        args.output_dir / "override-usage.json", args.ecosystem, args.subtract_sbom
+    )
     logger.info(
         "Wrote unified osrb-deps.csv + osrb.cdx.json (%d components) to %s",
         len(all_components),

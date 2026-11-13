@@ -386,7 +386,9 @@ def _resolve_spdx(
                 if spdx:
                     return spdx
 
-    overridden = license_overrides.lookup(ECOSYSTEM, name, version)
+    overridden = license_overrides.lookup(
+        ECOSYSTEM, name, version, raw_license="\n".join(license_free or [])
+    )
     if overridden:
         return overridden
 
@@ -427,6 +429,8 @@ def collect_components(search_paths: list[Path]) -> list[Component]:
                 continue
 
             spdx = _resolve_spdx(name, version, license_expr, license_free, classifiers)
+            raw_license = license_expr or "\n".join(license_free or classifiers)
+            license_overrides.observe(ECOSYSTEM, name, version, raw_license, spdx)
             # Prefer the wheel's own bundled LICENSE (PEP 639 / dist-info);
             # when the wheel ships none, fall back to the canonical SPDX text
             # for the identifier (render_notices adds the no-license-file note).

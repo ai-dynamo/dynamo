@@ -27,6 +27,7 @@ import logging
 import re
 from pathlib import Path
 
+from .. import overrides as license_overrides
 from .common import (
     UNKNOWN,
     Component,
@@ -97,6 +98,7 @@ def _component_from_sbom_entry(
         evidence = entry.get("evidence") or {}
         licenses_field = evidence.get("licenses")
     spdx = _normalize_license(licenses_field)
+    license_overrides.observe(ECOSYSTEM, name, str(version), spdx, spdx)
 
     purl = entry.get("purl") or ""
     source_url: str | None = None

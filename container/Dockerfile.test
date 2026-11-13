@@ -6,7 +6,18 @@
 # Usage: docker build -f container/Dockerfile.test --target test_image --build-arg BASE_IMAGE=<runtime-image> .
 # Planner's distroless runtime needs the dedicated test_planner target below.
 # Usage: docker build -f container/Dockerfile.test --target test_planner --build-arg BASE_IMAGE=<planner-image> .
+# Both builds also pass --build-context repo-container=container
+# --build-context repo-github=.github.
 ARG BASE_IMAGE
+
+# Policy contract tests read metadata excluded by the production .dockerignore.
+# Keep these source fixtures in the test image through a separate build context.
+FROM scratch AS compliance_test_sources
+COPY --from=repo-container render.py context.yaml Dockerfile.template /workspace/container/
+COPY --from=repo-container templates/ /workspace/container/templates/
+COPY --from=repo-github workflows/pre-merge.yml workflows/compliance-policy-review.yml /workspace/.github/workflows/
+COPY --from=repo-github actions/changed-files/action.yml /workspace/.github/actions/changed-files/action.yml
+COPY --from=repo-github filters.yaml /workspace/.github/
 
 # Helm is needed by chart tests collected in the runtime test lanes.
 FROM --platform=$BUILDPLATFORM debian:bookworm-slim AS helm_binary
@@ -56,6 +67,10 @@ RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/
 # keep pip inside it rather than on PATH, so expose it. A PATH entry that does
 # not exist is skipped, so this is a no-op on the non-venv images.
 ENV PATH="/opt/dynamo/venv/bin:${PATH}"
+
+COPY --from=compliance_test_sources --chmod=775 --chown=dynamo:0 /workspace/ /workspace/
+# The orphan-removal regression imports this build helper without executing APT.
+COPY --chmod=755 --chown=dynamo:0 container/deps/vllm/remove_orphaned_package.py /workspace/container/deps/vllm/remove_orphaned_package.py
 
 # Copy pytest configuration (markers, filterwarnings, asyncio_mode, etc.)
 COPY --chmod=664 --chown=dynamo:0 pyproject.toml /workspace/pyproject.toml

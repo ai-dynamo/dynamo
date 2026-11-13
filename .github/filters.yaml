@@ -24,6 +24,14 @@
 # Filters for coverage only (no CI triggered):
 #   ignore
 
+# Feeds the required pre-merge aggregate through the reusable policy review.
+compliance_policy:
+  - 'container/compliance/**'
+  - '.github/workflows/compliance-policy-review.yml'
+  - '.github/workflows/pre-merge.yml'
+  - '.github/actions/changed-files/**'
+  - '.github/filters.yaml'
+
 all:
   - '**'
 

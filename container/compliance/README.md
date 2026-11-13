@@ -9,6 +9,8 @@ There is no separate extraction job anymore. Every shipped image builds a `licen
 stage (see `../templates/compliance.Dockerfile`) that runs the generators against its
 own filesystem; CI extracts `/legal` and `/sboms` from that stage with a warm cache.
 
+See [Policy changes and override review](POLICY_REVIEW.md) for scoped exceptions, override-use evidence, and the required PR policy gate.
+
 ## Layout
 
 | Path | Purpose |
@@ -17,7 +19,7 @@ own filesystem; CI extracts `/legal` and `/sboms` from that stage with a warm ca
 | `policy/` | `licenses.toml` (allow/deny SPDX lists + per-package `[[exceptions]]`) and `validate.py` (the build-failing policy gate). |
 | `base_sboms/` | The baseline corpus: `manifest.json`, slim CycloneDX `*.cdx.json`, `capture_baseline_sbom.py`, and `check_drift.py`. |
 | `osrb/` | Release-time OSRB submission packager (`package.py`) and its `distribution.yaml` / `linkage.yaml`. |
-| `overrides.py`, `license_overrides.yaml` | Authoritative `(ecosystem, name) → SPDX` overrides consulted before automatic detection. |
+| `overrides.py`, `license_overrides.yaml` | Exact-version license corrections with legacy fallback; precedence follows each ecosystem resolver. |
 | `native_packages.yaml` | From-source / binary components attributed via a hand-curated overlay (optional `license_text_path`). |
 | `verify_sbom_diff.py` | Cross-checks generated NOTICES against the base SBOM corpus; fails on drift. |
 | `resolve_diff_base.py` | Picks the baseline commit to diff a build's OSRB CSV against (PR→main / post-merge→main / release branch→prior release tag). |
