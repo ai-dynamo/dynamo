@@ -152,6 +152,7 @@ fn log_env_config(config: &KvRouterConfig) {
         overlap_score_credit_decay = config.overlap_score_credit_decay,
         prefill_load_scale = config.prefill_load_scale,
         decode_active_request_weight = config.decode_active_request_weight,
+        prefix_affinity_weight = config.prefix_affinity_weight,
         router_temperature = config.router_temperature,
         use_kv_events = config.use_kv_events,
         router_replica_sync = config.router_replica_sync,
@@ -389,6 +390,7 @@ struct KvRouterConfigSerde {
     overlap_score_credit_decay: f64,
     prefill_load_scale: f64,
     decode_active_request_weight: f64,
+    prefix_affinity_weight: f64,
     overlap_score_weight: Option<f64>,
     host_cache_hit_weight: f64,
     disk_cache_hit_weight: f64,
@@ -441,6 +443,7 @@ impl Default for KvRouterConfigSerde {
             overlap_score_credit_decay: config.overlap_score_credit_decay,
             prefill_load_scale: config.prefill_load_scale,
             decode_active_request_weight: config.decode_active_request_weight,
+            prefix_affinity_weight: config.prefix_affinity_weight,
             overlap_score_weight: None,
             host_cache_hit_weight: config.host_cache_hit_weight,
             disk_cache_hit_weight: config.disk_cache_hit_weight,
@@ -506,6 +509,14 @@ pub struct KvRouterConfig {
     /// compute matters more than resident KV footprint. Defaults to 0.0.
     #[serde(default, skip_serializing_if = "is_default")]
     pub decode_active_request_weight: f64,
+
+    /// Block-equivalent cost added for each prompt block a candidate worker is
+    /// missing from its device cache. Unlike `overlap_score_credit`, this term is
+    /// not capped by the request's own prefill cost, so a worker that holds a
+    /// resumed session's prefix keeps winning against a cold worker with slightly
+    /// lower transient decode load. Defaults to 0.0, which disables it.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub prefix_affinity_weight: f64,
 
     #[serde(default = "default_host_cache_hit_weight")]
     pub host_cache_hit_weight: f64,
@@ -684,6 +695,7 @@ impl Default for KvRouterConfig {
             overlap_score_credit_decay: default_overlap_score_credit_decay(),
             prefill_load_scale: default_prefill_load_scale(),
             decode_active_request_weight: default_decode_active_request_weight(),
+            prefix_affinity_weight: 0.0,
             host_cache_hit_weight: default_host_cache_hit_weight(),
             disk_cache_hit_weight: default_disk_cache_hit_weight(),
             router_temperature: 0.0,
@@ -749,6 +761,7 @@ impl TryFrom<KvRouterConfigSerde> for KvRouterConfig {
             overlap_score_credit_decay: compat.overlap_score_credit_decay,
             prefill_load_scale,
             decode_active_request_weight: compat.decode_active_request_weight,
+            prefix_affinity_weight: compat.prefix_affinity_weight,
             host_cache_hit_weight: compat.host_cache_hit_weight,
             disk_cache_hit_weight: compat.disk_cache_hit_weight,
             router_temperature: compat.router_temperature,
@@ -1131,6 +1144,7 @@ impl KvRouterConfig {
             self.overlap_score_credit_decay,
         )?;
         validate_finite_non_negative("prefill_load_scale", self.prefill_load_scale)?;
+        validate_finite_non_negative("prefix_affinity_weight", self.prefix_affinity_weight)?;
         validate_finite_non_negative(
             "decode_active_request_weight",
             self.decode_active_request_weight,
@@ -1346,6 +1360,7 @@ impl From<&KvRouterConfig> for SelectionConfig {
             overlap_score_credit_decay: config.overlap_score_credit_decay,
             prefill_load_scale: config.prefill_load_scale,
             decode_active_request_weight: config.decode_active_request_weight,
+            prefix_affinity_weight: config.prefix_affinity_weight,
             host_cache_hit_weight: config.host_cache_hit_weight,
             disk_cache_hit_weight: config.disk_cache_hit_weight,
             router_temperature: config.router_temperature,
@@ -2287,6 +2302,7 @@ worker_selection:
         let value = serde_json::to_value(KvRouterConfig::default()).unwrap();
         for post_v1_3_field in [
             "decode_active_request_weight",
+            "prefix_affinity_weight",
             "router_tracking_hash",
             "router_tracking_key_file",
             "router_tracking_key_id",
@@ -2651,6 +2667,13 @@ models:
                     "decode_active_request_weight",
                     KvRouterConfig {
                         decode_active_request_weight: value,
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "prefix_affinity_weight",
+                    KvRouterConfig {
+                        prefix_affinity_weight: value,
                         ..Default::default()
                     },
                 ),

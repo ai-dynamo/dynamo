@@ -629,11 +629,11 @@ Emitted by every process that routes requests: the frontend, which serves them o
 </ParamField>
 
 <ParamField path="dynamo_component_router_non_max_overlap_selections_total" type="counter">
-  Admitted prefill scheduler selections routed to a worker with less KV cache overlap than another eligible worker. [Explicitly pinned requests](../../developer-guide/knowledge-base/modular-components/router/worker-filtering.md#candidate-eligibility) (direct routing or an explicit worker target) and equal-overlap ties are excluded. Session-affinity selections are compared against the best eligible worker when the selection policy has no worker filters of its own (the default); otherwise they are excluded like pinned requests. Labeled by `worker_type` (`prefill`).
+  Admitted prefill or aggregated scheduler selections routed to a worker with less KV cache overlap than another eligible worker. [Explicitly pinned requests](../../developer-guide/knowledge-base/modular-components/router/worker-filtering.md#candidate-eligibility) (direct routing or an explicit worker target) and equal-overlap ties are excluded. Session-affinity selections are compared against the best eligible worker when the selection policy has no worker filters of its own (the default); otherwise they are excluded like pinned requests. Decode routers do not report it. Labeled by `worker_type`.
 </ParamField>
 
 <ParamField path="dynamo_component_router_overlap_blocks_lost" type="histogram">
-  Difference in effective KV cache overlap between the highest-overlap eligible prefill worker and the selected worker for each non-max-overlap selection. Labeled by `worker_type` (`prefill`).
+  Difference in effective KV cache overlap between the highest-overlap eligible worker and the selected worker for each non-max-overlap selection on a prefill or aggregated router. Labeled by `worker_type`.
 </ParamField>
 
 <ParamField path="dynamo_component_router_kv_transfer_estimated_latency_seconds" type="histogram">

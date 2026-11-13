@@ -108,6 +108,8 @@ pub struct SelectionConfig {
     pub prefill_load_scale: f64,
     /// Weight of active decode requests.
     pub decode_active_request_weight: f64,
+    /// Cost per prompt block the worker lacks on device, on top of the capped overlap credit.
+    pub prefix_affinity_weight: f64,
     /// Credit per host-pinned cached block, relative to a device block.
     pub host_cache_hit_weight: f64,
     /// Credit per disk cached block, relative to a device block.
@@ -130,6 +132,7 @@ impl Default for SelectionConfig {
             overlap_score_credit_decay: default_overlap_score_credit_decay(),
             prefill_load_scale: default_prefill_load_scale(),
             decode_active_request_weight: default_decode_active_request_weight(),
+            prefix_affinity_weight: 0.0,
             host_cache_hit_weight: default_host_cache_hit_weight(),
             disk_cache_hit_weight: default_disk_cache_hit_weight(),
             router_temperature: 0.0,
@@ -154,6 +157,7 @@ impl SelectionConfig {
             "decode_active_request_weight",
             self.decode_active_request_weight,
         )?;
+        validate_finite_non_negative("prefix_affinity_weight", self.prefix_affinity_weight)?;
         validate_finite_non_negative("host_cache_hit_weight", self.host_cache_hit_weight)?;
         validate_finite_non_negative("disk_cache_hit_weight", self.disk_cache_hit_weight)?;
         validate_finite_non_negative("router_temperature", self.router_temperature)?;
