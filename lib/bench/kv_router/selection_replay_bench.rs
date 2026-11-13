@@ -29,6 +29,26 @@ use corpus::{Corpus, Omitted, WorkloadParams};
 use engine::{Limits, Mode, RunConfig, RunResult};
 use host::router_config;
 
+// jemalloc as the allocator, with the options the frontend builds in
+// (`lib/bindings/python/rust/allocator.rs`); `_RJEM_MALLOC_CONF` overrides them.
+#[cfg(all(not(target_env = "msvc"), not(target_env = "musl")))]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+#[cfg(all(
+    not(target_os = "macos"),
+    not(target_env = "msvc"),
+    not(target_env = "musl")
+))]
+#[unsafe(export_name = "_rjem_malloc_conf")]
+static MALLOC_CONF: &[u8; 72] =
+    b"background_thread:true,dirty_decay_ms:10000,muzzy_decay_ms:0,narenas:16\0";
+
+// macOS jemalloc has no background threads.
+#[cfg(target_os = "macos")]
+#[unsafe(export_name = "_rjem_malloc_conf")]
+static MALLOC_CONF: &[u8; 49] = b"dirty_decay_ms:10000,muzzy_decay_ms:0,narenas:16\0";
+
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum ModeArg {
     Fixed,

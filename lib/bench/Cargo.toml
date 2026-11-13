@@ -78,6 +78,7 @@ selection-replay = [
   "dep:prometheus",
   "dep:rmp-serde",
   "dep:rustc-hash",
+  "dep:tikv-jemallocator",
   "dep:tracing-subscriber",
 ]
 router-metrics = ["dynamo-kv-router/metrics"]
@@ -225,6 +226,12 @@ dynamo-router-policies = { workspace = true, optional = true }
 dynamo-router-protocol = { workspace = true }
 dynamo-scheduler = { workspace = true, optional = true }
 dynamo-slot-tracker = { workspace = true }
+
+# The selection replay bench's allocator, with the crate features the frontend builds it with.
+[target.'cfg(all(not(target_env = "msvc"), not(target_env = "musl")))'.dependencies]
+tikv-jemallocator = { version = "0.6", default-features = false, optional = true, features = [
+  "background_threads_runtime_support",
+] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = { workspace = true, optional = true }

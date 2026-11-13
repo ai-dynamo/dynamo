@@ -23,6 +23,8 @@ request follows the frontend's calls: `run_selection` with a `Lease` and the
 prompt's token IDs, `commit`, the worker-origin and frontend prefill-complete
 marks at its first output, and the acknowledged release at completion. KV events
 reach the index through `Indexer::try_apply_event`, the frontend's ingestion call.
+The bench binary allocates with jemalloc under the options the frontend builds
+in; `_RJEM_MALLOC_CONF` overrides them.
 
 Event-plane transport, HTTP, tokenization, response streaming, the Prometheus
 load gauges, the lease manager, and peer frontends are not modeled, so the
