@@ -6,9 +6,11 @@
 
 use std::collections::HashSet;
 
-use super::hint::hint_capable_partition;
 use super::reservations::{ReservationIndexObserver, spawn_reservation_index_sweep};
 use super::*;
+use crate::hint_policy::RoleHintPolicies;
+use crate::kv_hints::hint_capable_partition;
+use crate::resolve::resolve_role;
 use dynamo_kv_indexer::ResidentBlockCountsHandle;
 use dynamo_kv_indexer::backend::Indexer;
 use dynamo_slot_tracker::topology::MAX_DATA_PARALLEL_RANKS_PER_WORKER;
@@ -313,6 +315,15 @@ impl SelectionCore {
                     block_size,
                     host_replica,
                 );
+                // Instantiate and check the plugins before any partition task starts, so a
+                // rejected configuration leaves nothing but the partition's index.
+                let KvIndexSource::Owned(ingress) = &self.host.cache.index;
+                let indexer = ingress.open(&self.index_registry, &key, block_size);
+                let responsibilities = self.partition_responsibilities(
+                    &key,
+                    &selector,
+                    indexer.supports_kv_transfer_chain_retention(),
+                )?;
                 let worker_label = self.worker_type.as_str();
                 let slots = Arc::new(ActiveSequencesMultiWorker::new_with_options(
                     scoped_replica_sync
@@ -348,8 +359,6 @@ impl SelectionCore {
                     );
                 }
 
-                let KvIndexSource::Owned(ingress) = &self.host.cache.index;
-                let indexer = ingress.open(&self.index_registry, &key, block_size);
                 let overlap_refresh = indexer.supports_overlap_refresh().then(|| {
                     Arc::new(TieredOverlapRefresher::new(
                         indexer.clone(),
@@ -357,7 +366,6 @@ impl SelectionCore {
                         block_size,
                     ))
                 });
-                let scores_kv_transfer = inputs.contains(WorkerInputs::KV_TRANSFER);
                 let resident_blocks = track_resident_blocks(&key, inputs, &indexer);
                 let scheduler = LocalScheduler::new(
                     slots,
@@ -388,7 +396,8 @@ impl SelectionCore {
                     indexer,
                     workers_tx,
                     hint_capable_workers: AtomicBool::new(false),
-                    scores_kv_transfer,
+                    responsibilities,
+                    copy_sources_warning: std::sync::Once::new(),
                     scheduler,
                     replica_inbox,
                     affinity: OnceCell::new(),
@@ -424,6 +433,29 @@ impl SelectionCore {
     async fn cleanup_indexer_registration(&self, record: &WorkerCatalogRecord) {
         let KvIndexSource::Owned(ingress) = &self.host.cache.index;
         ingress.detach(record).await;
+    }
+
+    /// Construct this partition's hint policies and resolve its role's responsibilities with its
+    /// worker-selection policy.
+    fn partition_responsibilities(
+        &self,
+        key: &RoutingPartitionId,
+        selector: &WorkerSelectionPolicy,
+        kv_chain_retention: bool,
+    ) -> Result<RouterResponsibilities, SelectionError> {
+        let hint_policies = match &self.host.hints.policies {
+            Some(factory) => {
+                factory.instances(&self.config.selection, self.worker_type, key.as_ref())
+            }
+            None => RoleHintPolicies::none(),
+        };
+        resolve_role(
+            self.worker_type,
+            selector,
+            hint_policies,
+            kv_chain_retention,
+        )
+        .map_err(|error| SelectionError::Internal(error.to_string()))
     }
 
     pub(super) fn publish_scheduler_config(&self, key: &RoutingPartitionId) {
