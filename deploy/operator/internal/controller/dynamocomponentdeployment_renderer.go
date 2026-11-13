@@ -668,6 +668,27 @@ func (r *dcdWorkloadRenderer) generateServiceForDGDComponent(
 	}
 	if component.IsMultinode() {
 		service.Spec.Selector[dcdWorkloadRoleLabel] = string(dynamo.RoleLeader)
+
+		// DS Services select the leader, whose complete role template defines identity.
+		if dynamo.HasRolePodTemplates(component) {
+			effective, err := dynamo.EffectiveComponentForRole(component, dynamo.RoleLeader)
+			if err != nil {
+				return nil, false, err
+			}
+			podLabels := dynamo.GetDGDComponentPodLabels(dgd, componentName, effective)
+			effectiveType, err := r.getWorkloadComponentType(ctx, dgd.Namespace, serviceName, string(effective.ComponentType), podLabels)
+			if err != nil {
+				return nil, false, err
+			}
+			if effectiveType != "" {
+				podLabels[commonconsts.KubeLabelDynamoComponentType] = effectiveType
+			}
+			if value, found := podLabels[commonconsts.KubeLabelDynamoComponentType]; found {
+				service.Labels[commonconsts.KubeLabelDynamoComponentType] = value
+			} else {
+				delete(service.Labels, commonconsts.KubeLabelDynamoComponentType)
+			}
+		}
 	}
 	return service, false, nil
 }
