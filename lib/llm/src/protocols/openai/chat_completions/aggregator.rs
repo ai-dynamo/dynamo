@@ -7,8 +7,10 @@ use std::sync::Arc;
 
 use dynamo_parsers::tool_calling::try_tool_call_parse_aggregate_finalize;
 
+use super::tool_call_merge::merge_tool_call_chunk;
 use super::{
-    NvCreateChatCompletionResponse, NvCreateChatCompletionStreamResponse, ResponseOutputEvent,
+    MessageBoundary, NvCreateChatCompletionResponse, NvCreateChatCompletionStreamResponse,
+    ResponseOutputEvent,
 };
 use crate::protocols::{
     Annotated,
@@ -147,6 +149,10 @@ pub struct DeltaAggregator {
     /// Unique identifier for the chat completion.
     response_events: Vec<ResponseOutputEvent>,
     has_message_phases: bool,
+    /// Scores from content-less chunks, classified by the next content chunk.
+    unclassified_scores: usize,
+    /// Whether the last content chunk was reasoning or a tool call.
+    last_scores_hidden: bool,
     recorded_calls: std::collections::HashSet<String>,
     id: String,
     /// Model name used for the chat completion.
@@ -185,7 +191,8 @@ struct DeltaChoice {
     // keyed by `index` so chunks that carry only argument fragments can be
     // merged into the entry created by the initial (id + name) chunk.
     // BTreeMap preserves deterministic iteration order on the index dimension.
-    // See [`merge_tool_call_chunk`] for per-field merge semantics.
+    // See [`super::tool_call_merge::merge_tool_call_chunk`] for per-field merge
+    // semantics, shared with the streaming `tool_call_dispatch` side channel.
     // #8640: replaces the old `Option<Vec<ChatCompletionMessageToolCall>>`
     // which required id/name/arguments to all be set on the same chunk.
     tool_call_chunks: BTreeMap<u32, dynamo_protocols::types::ChatCompletionMessageToolCallChunk>,
@@ -330,63 +337,19 @@ impl Default for DeltaAggregator {
     }
 }
 
-/// Merge an incoming chunk into the per-index accumulator.
-///
-/// #8640: the prior implementation required `id`, `name`, and `arguments`
-/// all on the same chunk, and thus the argument-fragment deltas were dropped
-/// and the client saw `arguments: ""`.
-///
-/// The fix here merges by `index` across deltas: `id`, `type`, `function.name`
-/// first-wins; `function.arguments` concatenated across fragments. This matches
-/// the OpenAI streaming spec and vLLM/SGLang hermes emission:
-///
-/// * delta 1: `{index, id, type, function: { name }}`
-/// * delta 2..N: `{index, function: { arguments: "<fragment>" }}`
-fn merge_tool_call_chunk(
-    existing: &mut dynamo_protocols::types::ChatCompletionMessageToolCallChunk,
-    incoming: dynamo_protocols::types::ChatCompletionMessageToolCallChunk,
-) {
-    if existing.id.is_none()
-        && let Some(id) = incoming.id
-    {
-        existing.id = Some(id);
-    }
-    if existing.r#type.is_none()
-        && let Some(ty) = incoming.r#type
-    {
-        existing.r#type = Some(ty);
-    }
-    // Custom deltas carry freeform input instead of function JSON fragments.
-    if let Some(incoming_custom) = incoming.custom {
-        let custom = existing.custom.get_or_insert_with(Default::default);
-        if custom.name.is_none() {
-            custom.name = incoming_custom.name;
-        }
-        if let Some(input) = incoming_custom.input {
-            custom
-                .input
-                .get_or_insert_with(String::new)
-                .push_str(&input);
-        }
-    }
-    let Some(incoming_fn) = incoming.function else {
-        return;
-    };
-    match &mut existing.function {
-        None => existing.function = Some(incoming_fn),
-        Some(existing_fn) => {
-            if existing_fn.name.is_none()
-                && let Some(name) = incoming_fn.name
-            {
-                existing_fn.name = Some(name);
-            }
-            if let Some(args_fragment) = incoming_fn.arguments {
-                existing_fn
-                    .arguments
-                    .get_or_insert_with(String::new)
-                    .push_str(&args_fragment);
-            }
-        }
+/// The last event that shapes output items, looking past score bookkeeping, so a
+/// reasoning or text run merges the same way whether or not scores were requested.
+fn last_content_event(events: &mut [ResponseOutputEvent]) -> Option<&mut ResponseOutputEvent> {
+    events.iter_mut().rev().find(|event| !event.is_score())
+}
+
+/// Record `count` more scores, folding into a trailing event of the same kind.
+fn push_score_event(events: &mut Vec<ResponseOutputEvent>, count: usize, hidden: bool) {
+    match (events.last_mut(), hidden) {
+        (Some(ResponseOutputEvent::Scores(total)), false)
+        | (Some(ResponseOutputEvent::HiddenScores(total)), true) => *total += count,
+        (_, false) => events.push(ResponseOutputEvent::Scores(count)),
+        (_, true) => events.push(ResponseOutputEvent::HiddenScores(count)),
     }
 }
 
@@ -461,6 +424,8 @@ impl DeltaAggregator {
         Self {
             response_events: Vec::new(),
             has_message_phases: false,
+            unclassified_scores: 0,
+            last_scores_hidden: false,
             recorded_calls: std::collections::HashSet::new(),
             id: "".to_string(),
             model: "".to_string(),
@@ -536,20 +501,29 @@ impl DeltaAggregator {
 
                     merge_response_nvext(&mut aggregator.nvext, delta.nvext);
 
-                    if let Some(boundary) = delta.message_boundary {
+                    // A `Start` boundary opens the message before this chunk's events; an
+                    // `End` boundary closes it after them, so scores carried on the
+                    // ending chunk still belong to the message that ends.
+                    let boundary = delta.message_boundary;
+                    if boundary.is_some() {
                         aggregator.has_message_phases = true;
-                        aggregator.response_events.push(ResponseOutputEvent::Boundary(boundary));
+                    }
+                    if let Some(MessageBoundary::Start(_)) = &boundary {
+                        aggregator.response_events.push(ResponseOutputEvent::Boundary(boundary.clone().unwrap()));
                     }
                     for choice in delta.inner.choices.iter().filter(|choice| choice.index == 0) {
                         if let Some(reasoning) = &choice.delta.reasoning_content {
-                            if let Some(ResponseOutputEvent::Reasoning(previous)) = aggregator.response_events.last_mut() {
+                            if let Some(ResponseOutputEvent::Reasoning(previous)) = last_content_event(&mut aggregator.response_events) {
                                 previous.push_str(reasoning);
                             } else {
                                 aggregator.response_events.push(ResponseOutputEvent::Reasoning(reasoning.clone()));
                             }
                         }
-                        if let Some(ChatCompletionMessageContent::Text(text)) = &choice.delta.content {
-                            if let Some(ResponseOutputEvent::Text(previous)) = aggregator.response_events.last_mut() {
+                        let has_text = matches!(&choice.delta.content, Some(ChatCompletionMessageContent::Text(text)) if !text.is_empty());
+                        if let Some(ChatCompletionMessageContent::Text(text)) = &choice.delta.content
+                            && !text.is_empty()
+                        {
+                            if let Some(ResponseOutputEvent::Text(previous)) = last_content_event(&mut aggregator.response_events) {
                                 previous.push_str(text);
                             } else {
                                 aggregator.response_events.push(ResponseOutputEvent::Text(text.clone()));
@@ -560,6 +534,37 @@ impl DeltaAggregator {
                                 aggregator.response_events.push(ResponseOutputEvent::ToolCall(id.clone()));
                             }
                         }
+                        // Record only the count: the entries themselves are appended to
+                        // the choice's aggregated logprobs below, in the same order.
+                        // Only output text is scored. A content-less chunk (buffered
+                        // parser output, the EOS) takes the class of the next content
+                        // chunk, except on a message-end chunk, whose scores belong to
+                        // the message that ends.
+                        let own = choice
+                            .logprobs
+                            .as_ref()
+                            .and_then(|lp| lp.content.as_ref())
+                            .map_or(0, Vec::len);
+                        let hidden = !has_text
+                            && (choice.delta.reasoning_content.as_deref().is_some_and(|text| !text.is_empty())
+                                || choice.delta.tool_calls.as_ref().is_some_and(|calls| !calls.is_empty()));
+                        if has_text || hidden {
+                            aggregator.last_scores_hidden = hidden;
+                            let count = std::mem::take(&mut aggregator.unclassified_scores) + own;
+                            if count > 0 {
+                                push_score_event(&mut aggregator.response_events, count, hidden);
+                            }
+                        } else if matches!(boundary, Some(MessageBoundary::End)) {
+                            let count = std::mem::take(&mut aggregator.unclassified_scores) + own;
+                            if count > 0 {
+                                push_score_event(&mut aggregator.response_events, count, false);
+                            }
+                        } else {
+                            aggregator.unclassified_scores += own;
+                        }
+                    }
+                    if let Some(MessageBoundary::End) = boundary {
+                        aggregator.response_events.push(ResponseOutputEvent::Boundary(MessageBoundary::End));
                     }
                     if let Some(prompt_logprobs) = delta.prompt_logprobs {
                         aggregator.prompt_logprobs = Some(prompt_logprobs);
@@ -633,7 +638,8 @@ impl DeltaAggregator {
                                             function: None,
                                         }
                                     });
-                                merge_tool_call_chunk(entry, chunk);
+                                // Only the streaming dispatch acts on identity conflicts.
+                                let _ = merge_tool_call_chunk(entry, chunk);
                             }
                         }
 
@@ -965,12 +971,28 @@ impl DeltaAggregator {
 
         choices.sort_by_key(|a| a.index);
 
+        // Trailing content-less scores (the EOS) take the class of the last
+        // content chunk: output text keeps them, a tool call drops them.
+        if aggregator.unclassified_scores > 0 {
+            push_score_event(
+                &mut aggregator.response_events,
+                aggregator.unclassified_scores,
+                aggregator.last_scores_hidden,
+            );
+        }
+
         // Construct the final response object.
         let response = NvCreateChatCompletionResponse {
+            // Without message phases only the score bookkeeping is kept, so a
+            // Responses projection can still drop reasoning and tool-call scores.
             response_events: if aggregator.has_message_phases {
                 aggregator.response_events
             } else {
-                Vec::new()
+                aggregator
+                    .response_events
+                    .into_iter()
+                    .filter(ResponseOutputEvent::is_score)
+                    .collect()
             },
             inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 id: aggregator.id,
@@ -1102,6 +1124,180 @@ mod tests {
     use super::*;
     use crate::protocols::openai::token_to_utf8_bytes;
     use futures::stream;
+
+    /// Score counts are recorded between the message boundaries in arrival order, so a
+    /// Responses projection can give each message the scores generated while it was open.
+    #[tokio::test]
+    async fn phase_boundaries_record_score_counts_in_order() {
+        use crate::protocols::openai::chat_completions::MessageBoundary;
+        use dynamo_protocols::types::responses::MessagePhase;
+
+        let boundary = |mut delta: Annotated<NvCreateChatCompletionStreamResponse>,
+                        boundary: MessageBoundary| {
+            delta.data.as_mut().unwrap().message_boundary = Some(boundary);
+            delta
+        };
+        let reasoning = |text: &str, logprob: f32| {
+            let mut delta = create_test_delta(0, "", None, None, Some(logprob), None);
+            let choice = &mut delta.data.as_mut().unwrap().inner.choices[0];
+            choice.delta.content = None;
+            choice.delta.reasoning_content = Some(text.to_string());
+            delta
+        };
+        let deltas = vec![
+            // Two scored reasoning chunks still merge into one reasoning event.
+            reasoning("Let me ", -0.05),
+            reasoning("think.", -0.06),
+            boundary(
+                create_test_delta(
+                    0,
+                    "Checking.",
+                    Some(dynamo_protocols::types::Role::Assistant),
+                    None,
+                    Some(-0.1),
+                    None,
+                ),
+                MessageBoundary::Start(MessagePhase::Commentary),
+            ),
+            // The ending chunk carries the message's own scores.
+            boundary(
+                create_test_delta(0, "", None, None, Some(-0.15), None),
+                MessageBoundary::End,
+            ),
+            boundary(
+                create_test_delta(0, "Done.", None, None, Some(-0.2), None),
+                MessageBoundary::Start(MessagePhase::FinalAnswer),
+            ),
+            boundary(
+                create_test_delta(0, "", None, None, None, None),
+                MessageBoundary::End,
+            ),
+            create_test_delta(
+                0,
+                "",
+                None,
+                Some(dynamo_protocols::types::FinishReason::Stop),
+                Some(-0.3),
+                None,
+            ),
+        ];
+
+        let resp = DeltaAggregator::apply(stream::iter(deltas), ParsingOptions::default())
+            .await
+            .unwrap();
+        let events: Vec<_> = resp
+            .response_events
+            .into_iter()
+            .filter(|event| !matches!(event, ResponseOutputEvent::Text(text) if text.is_empty()))
+            .collect();
+        assert_eq!(
+            events,
+            vec![
+                ResponseOutputEvent::Reasoning("Let me think.".into()),
+                ResponseOutputEvent::HiddenScores(2),
+                ResponseOutputEvent::Boundary(MessageBoundary::Start(MessagePhase::Commentary)),
+                ResponseOutputEvent::Text("Checking.".into()),
+                ResponseOutputEvent::Scores(2),
+                ResponseOutputEvent::Boundary(MessageBoundary::End),
+                ResponseOutputEvent::Boundary(MessageBoundary::Start(MessagePhase::FinalAnswer)),
+                ResponseOutputEvent::Text("Done.".into()),
+                ResponseOutputEvent::Scores(1),
+                ResponseOutputEvent::Boundary(MessageBoundary::End),
+                ResponseOutputEvent::Scores(1),
+            ]
+        );
+        let scored = resp.inner.choices[0]
+            .logprobs
+            .as_ref()
+            .and_then(|lp| lp.content.as_ref())
+            .map(Vec::len);
+        assert_eq!(scored, Some(6));
+    }
+
+    /// Buffered tool-call scores arrive on content-less chunks before the chunk that
+    /// carries `tool_calls`; they take that chunk's class, and so does a trailing
+    /// control token after the call.
+    #[tokio::test]
+    async fn tool_call_scores_on_content_less_chunks_are_hidden() {
+        let deltas = vec![
+            create_test_delta(
+                0,
+                "Let me check.",
+                Some(dynamo_protocols::types::Role::Assistant),
+                None,
+                Some(-0.1),
+                None,
+            ),
+            create_test_delta(0, "", None, None, Some(-0.2), None),
+            create_test_delta(0, "", None, None, Some(-0.3), None),
+            create_test_delta(
+                0,
+                "",
+                None,
+                None,
+                Some(-0.4),
+                Some(r#"{"name":"get_weather","arguments":{"city":"Paris"}}"#),
+            ),
+            create_test_delta(0, "", None, None, Some(-0.5), None),
+            create_test_delta(
+                0,
+                "",
+                None,
+                Some(dynamo_protocols::types::FinishReason::ToolCalls),
+                Some(-0.6),
+                None,
+            ),
+        ];
+        let resp = DeltaAggregator::apply(stream::iter(deltas), ParsingOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.response_events,
+            vec![
+                ResponseOutputEvent::Scores(1),
+                ResponseOutputEvent::HiddenScores(5),
+            ]
+        );
+    }
+
+    /// Without message phases the response still carries the score bookkeeping, and
+    /// nothing else, so hidden scores can be dropped from a Responses projection.
+    #[tokio::test]
+    async fn plain_responses_keep_only_score_events() {
+        let mut thinking = create_test_delta(0, "", None, None, Some(-0.05), None);
+        let choice = &mut thinking.data.as_mut().unwrap().inner.choices[0];
+        choice.delta.content = None;
+        choice.delta.reasoning_content = Some("Thinking.".to_string());
+        let deltas = vec![
+            thinking,
+            create_test_delta(
+                0,
+                "Hello",
+                Some(dynamo_protocols::types::Role::Assistant),
+                None,
+                Some(-0.1),
+                None,
+            ),
+            create_test_delta(
+                0,
+                "",
+                None,
+                Some(dynamo_protocols::types::FinishReason::Stop),
+                Some(-0.3),
+                None,
+            ),
+        ];
+        let resp = DeltaAggregator::apply(stream::iter(deltas), ParsingOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.response_events,
+            vec![
+                ResponseOutputEvent::HiddenScores(1),
+                ResponseOutputEvent::Scores(2),
+            ]
+        );
+    }
 
     #[tokio::test]
     async fn v2_batch_parser_uses_request_tool_schema() {

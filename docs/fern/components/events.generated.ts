@@ -22,22 +22,9 @@ export interface DynamoEvent {
 }
 
 /** Generation date in Pacific, YYYY-MM-DD. The calendar grid treats this as "today". */
-export const GENERATED_ON = "2026-11-10";
+export const GENERATED_ON = "2026-11-12";
 
 export const UPCOMING_EVENTS: DynamoEvent[] = [
-  {
-    "title": "SIG Frontend — Biweekly Sync",
-    "start": "2026-11-12T21:00:00.000Z",
-    "month": "Nov",
-    "day": "12",
-    "year": "2026",
-    "dateLabel": "Thu, Nov 12, 2026",
-    "timeLabel": "1:00 PM",
-    "isPast": false,
-    "location": null,
-    "locationUrl": null,
-    "addUrl": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=SIG+Frontend+%E2%80%94+Biweekly+Sync&dates=20261112T210000Z%2F20261112T220000Z&details=Join+with+Google+Meet%3A+https%3A%2F%2Fmeet.google.com%2Fkuz-iapc-efd%0AOr+dial%3A+%28US%29+%2B1+929-333-4713+PIN%3A+602380682%23%0AMore+phone+numbers%3A+https%3A%2F%2Ftel.meet%2Fkuz-iapc-efd%3Fpin%3D5046305483125%26hs%3D7%0A%0ALearn+more+about+Meet+at%3A+https%3A%2F%2Fsupport.google.com%2Fa%2Fusers%2Fanswer%2F9282720"
-  },
   {
     "title": "SIG Engines — Biweekly Sync",
     "start": "2026-11-13T01:00:00.000Z",
@@ -63,6 +50,19 @@ export const UPCOMING_EVENTS: DynamoEvent[] = [
     "location": null,
     "locationUrl": null,
     "addUrl": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=SIG+Router&dates=20261119T163000Z%2F20261119T173000Z&details=Join+with+Google+Meet%3A+https%3A%2F%2Fmeet.google.com%2Fwan-wzmn-zfz%0AOr+dial%3A+%28US%29+%2B1+316-789-6527+PIN%3A+316996382%23%0AMore+phone+numbers%3A+https%3A%2F%2Ftel.meet%2Fwan-wzmn-zfz%3Fpin%3D8174162176244%26hs%3D7%0A%0ALearn+more+about+Meet+at%3A+https%3A%2F%2Fsupport.google.com%2Fa%2Fusers%2Fanswer%2F9282720"
+  },
+  {
+    "title": "SIG Frontend — Biweekly Sync",
+    "start": "2026-11-19T21:00:00.000Z",
+    "month": "Nov",
+    "day": "19",
+    "year": "2026",
+    "dateLabel": "Thu, Nov 19, 2026",
+    "timeLabel": "1:00 PM",
+    "isPast": false,
+    "location": null,
+    "locationUrl": null,
+    "addUrl": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=SIG+Frontend+%E2%80%94+Biweekly+Sync&dates=20261119T210000Z%2F20261119T220000Z&details=Join+with+Google+Meet%3A+https%3A%2F%2Fmeet.google.com%2Fkuz-iapc-efd%0AOr+dial%3A+%28US%29+%2B1+929-333-4713+PIN%3A+602380682%23%0AMore+phone+numbers%3A+https%3A%2F%2Ftel.meet%2Fkuz-iapc-efd%3Fpin%3D5046305483125%26hs%3D7%0A%0ALearn+more+about+Meet+at%3A+https%3A%2F%2Fsupport.google.com%2Fa%2Fusers%2Fanswer%2F9282720"
   }
 ];
 

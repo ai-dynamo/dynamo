@@ -39,9 +39,10 @@ use dynamo_runtime::{
     traits::DistributedRuntimeProvider,
 };
 
+use dynamo_kv_router::config::KvRouterConfig;
 #[cfg(feature = "select-service")]
 use dynamo_kv_router::plugins::RouterPluginRegistry;
-use dynamo_kv_router::{KvRouterConfig, plugins::RouterPlugins};
+use dynamo_kv_router::plugins::RouterPlugins;
 use dynamo_llm::entrypoint::RouterConfig;
 use dynamo_llm::{self as llm_rs};
 
@@ -76,6 +77,12 @@ impl From<RouterMode> for RsRouterMode {
     }
 }
 
+#[cfg(all(
+    feature = "jemalloc",
+    not(target_env = "msvc"),
+    not(target_env = "musl")
+))]
+mod allocator;
 mod backend;
 mod context;
 mod engine;
@@ -402,6 +409,7 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
         llm::routed_engine::_convert_preprocessed_request,
         m
     )?)?;
+    m.add_function(wrap_pyfunction!(errors::_raise_routed_http_error, m)?)?;
     #[cfg(feature = "select-service")]
     m.add_class::<llm::kv::SelectionService>()?;
     #[cfg(feature = "select-service")]
@@ -2375,6 +2383,8 @@ async fn process_stream(
 pub(crate) struct AsyncResponseStream {
     rx: Arc<Mutex<tokio::sync::mpsc::Receiver<RsAnnotated<PyObject>>>>,
     annotated: bool,
+    /// The stream of a `RoutedEngine`, whose errors raise `RoutedEngineError`.
+    routed_engine: bool,
 }
 
 impl AsyncResponseStream {
@@ -2385,6 +2395,15 @@ impl AsyncResponseStream {
         Self {
             rx: Arc::new(Mutex::new(rx)),
             annotated,
+            routed_engine: false,
+        }
+    }
+
+    /// The annotated response stream of a `RoutedEngine`.
+    pub(crate) fn routed_engine(rx: tokio::sync::mpsc::Receiver<RsAnnotated<PyObject>>) -> Self {
+        Self {
+            routed_engine: true,
+            ..Self::new(rx, true)
         }
     }
 }
@@ -2401,13 +2420,14 @@ impl AsyncResponseStream {
     fn next<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
         let rx = self.rx.clone();
         let annotated = self.annotated;
+        let routed_engine = self.routed_engine;
 
         crate::future_into_py(py, async move {
             loop {
                 let value = rx.lock().await.recv().await;
                 match value {
                     Some(pyobj) => {
-                        let pyobj = crate::errors::check_response_error(pyobj)?;
+                        let pyobj = crate::errors::check_response_error(pyobj, routed_engine)?;
 
                         if annotated {
                             let object = Annotated { inner: pyobj };

@@ -15,14 +15,24 @@
 //! This crate is intentionally a library, not a service. It contains no async, no
 //! transports, no traits over runtime/scheduler config, and no event types. Those
 //! belong in higher layers (kvbm-connector, consolidator, kv-router).
+//!
+//! The block hash identities the router and engines exchange, [`LocalBlockHash`] and
+//! [`ExternalSequenceBlockHash`], live here beside the functions that compute them.
+//! The multimodal identity both ends of the wire compute (per-block and per-request
+//! metadata, the pad and identifier rules, the vLLM extra-key marker) is the [`multimodal`]
+//! module; consumers name it in full, the root re-exports none of it.
 
 mod block;
+mod block_hash;
 mod compute;
 mod error;
+pub mod multimodal;
 mod request;
+pub mod routing;
 mod salt;
 
 pub use block::UniversalBlock;
+pub use block_hash::{ExternalSequenceBlockHash, LocalBlockHash};
 pub use error::KvHashingError;
 pub use request::{Request, RequestBuilder, RequestMmObjectInfo};
 pub use salt::compute_salt_hash;

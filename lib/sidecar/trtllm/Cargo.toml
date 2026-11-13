@@ -21,14 +21,16 @@ path = "src/main.rs"
 
 [features]
 # On for the sidecar image's SBOMs (its shared build links vLLM's mm-routing here
-# and into LPX). The Python bindings turn it off so the default wheel stays lean.
-default = ["mm-routing"]
+# and into LPX). The Python bindings turn them off so the default wheel stays lean.
+default = ["mm-routing", "jemalloc"]
 mm-routing = ["dynamo-llm/mm-routing"]
+# jemalloc as the binary's global allocator.
+jemalloc = ["dynamo-sidecar-common/jemalloc"]
 
 [dependencies]
 dynamo-backend-common = { workspace = true }
 dynamo-sidecar-common = { workspace = true }
-dynamo-kv-router = { workspace = true }
+dynamo-kv-events = { workspace = true }
 dynamo-llm = { path = "../../llm", default-features = false }
 dynamo-runtime = { workspace = true }
 
@@ -55,4 +57,6 @@ tonic-build = { workspace = true }
 
 [dev-dependencies]
 dynamo-backend-common = { workspace = true, features = ["testing"] }
+dynamo-kv-hashing = { workspace = true }
+dynamo-router-protocol = { workspace = true }
 tokio-stream = { workspace = true, features = ["net"] }
