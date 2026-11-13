@@ -268,10 +268,13 @@ so a faulted pipeline does not recover.
 
 **Change:** Planner resolves the served model name and component identity of native sidecar
 workers from their runtime registration, which requires `list` on `pods` in addition to worker
-metadata access. The chart's Planner Role has granted `pods/list` since v1.5.0.
+metadata access. The chart's Planner Role has granted `pods/list` unconditionally since v1.6.0.
+In v1.5.x the rule is rendered only when `planner.powerAwareness.enabled` is `true`, which is
+not the default.
 
-**Affected:** Planner service accounts managed outside the chart, or from a chart older than
-v1.5.0, that lack Pod list access.
+**Affected:** Planner service accounts managed outside the chart, from a chart older than
+v1.5.0, or from a v1.5.x chart with the default `planner.powerAwareness.enabled=false`, that lack
+Pod list access.
 
 **Action:** Grant `list` on `pods` in the DGD's namespace to enable registered native names,
 models, and capabilities.
