@@ -15,12 +15,14 @@ Usage:
     os.environ["VLLM_MEDIA_CONNECTOR"] = "dynamo"
 """
 
+import asyncio
 import logging
 from typing import Any
 
 from PIL import Image
 
-from dynamo.common.http import HttpConfigurationError, HttpStatusError
+from dynamo.common.http import HttpConfigurationError, HttpStatusError, fetch_bytes
+from dynamo.common.http.media_reference import max_media_bytes
 from dynamo.common.http.url_validator import (
     UrlValidationError,
     UrlValidationPolicy,
@@ -30,6 +32,9 @@ from dynamo.common.http.url_validator import (
 from dynamo.common.multimodal.image_loader import ImageLoader
 
 logger = logging.getLogger(__name__)
+
+# Download timeout when vLLM passes none, as ImageLoader and AudioLoader use.
+_DEFAULT_FETCH_TIMEOUT_S = 30.0
 
 # Shared ImageLoader singleton — survives across connector instances.
 # The MEDIA_CONNECTOR_REGISTRY creates a new connector per request,
@@ -99,20 +104,54 @@ try:
                 img = img.convert(image_mode)
             return img
 
-        # Audio, video and the image fallback download through vLLM's own
-        # client, so the DYN_MM_* URL rules are enforced here, before it. The
-        # async path, which the renderer uses, applies the full check, as
-        # ImageLoader does for images.
+        # The sync path, which the renderer does not use, still downloads
+        # through vLLM's own client, so only DYN_MM_ALLOW_REMOTE_URLS is
+        # checked before it.
         def load_from_url(self, url: str, media_io: Any, **kwargs: Any) -> Any:
             check_remote_url_allowed(url, UrlValidationPolicy.from_env())
             return super().load_from_url(url, media_io, **kwargs)
 
         async def load_from_url_async(
-            self, url: str, media_io: Any, **kwargs: Any
+            self,
+            url: str,
+            media_io: Any,
+            *,
+            fetch_timeout: float | None = None,
         ) -> Any:
-            if not url.lower().startswith("data:"):
-                await validate_media_url(url, UrlValidationPolicy.from_env())
-            return await super().load_from_url_async(url, media_io, **kwargs)
+            """Load audio, video, or an image ImageLoader passed back.
+
+            http(s) media is downloaded with dynamo's fetcher, as AudioLoader
+            does: it applies the DYN_MM_* URL rules to every redirect hop,
+            while vLLM's own client follows redirects without re-checking
+            them. vLLM's media_io still decodes the bytes, so the renderer
+            gets the same objects as from the parent. data: URLs and local
+            files don't touch the network and stay with the parent.
+            """
+            if url[:5].lower() == "data:":
+                return await super().load_from_url_async(
+                    url, media_io, fetch_timeout=fetch_timeout
+                )
+            policy = UrlValidationPolicy.from_env()
+            await validate_media_url(url, policy)
+            url_spec = parse_url(url)
+            if not (url_spec.scheme and url_spec.scheme.lower() in ("http", "https")):
+                return await super().load_from_url_async(
+                    url, media_io, fetch_timeout=fetch_timeout
+                )
+
+            self._assert_url_in_allowed_media_domains(url_spec)
+            limits = [
+                limit
+                for limit in (media_io.get_max_bytes(), max_media_bytes())
+                if limit
+            ]
+            content = await fetch_bytes(
+                url,
+                fetch_timeout or _DEFAULT_FETCH_TIMEOUT_S,
+                policy=policy,
+                max_bytes=min(limits) if limits else None,
+            )
+            return await asyncio.to_thread(media_io.load_bytes, content)
 
     logger.debug("Registered 'dynamo' MediaConnector with vLLM")
 
