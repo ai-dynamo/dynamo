@@ -257,6 +257,7 @@ def lower_request_input(
         _nested_set(underlay, ("optimization", "strict_sla"), True)
     overrides = nested_get(spec, "aisim", "inputOverrides", default={}) or {}
     effective = merge_patch(underlay, overrides)
+    is_pareto = objective.get("mode") == "Pareto"
     reserved = {
         "name": run_name,
         "max_candidates": max_candidates,
@@ -266,6 +267,7 @@ def lower_request_input(
         "runtime_version_override": dynamo_version,
         "derive_runtime_images": True,
         "num_gpus_per_node": gpus_per_node,
+        "is_pareto": is_pareto,
     }
     for key, value in reserved.items():
         _nested_set(effective, ("dgdr_run", key), value)
@@ -290,6 +292,32 @@ def router_points(effective_input: Mapping[str, Any]) -> list[dict[str, float]]:
     ]
 
 
+def planner_points(
+    effective_input: Mapping[str, Any]
+) -> list[Optional[dict[str, Any]]]:
+    """The planner points of an input's ``planner.retune_sweep`` section;
+    ``[None]`` without one (fixed replicas)."""
+
+    section = nested_get(effective_input, "planner", "retune_sweep")
+    if not isinstance(section, Mapping):
+        return [None]
+    return [dict(point) for point in section["points"]]
+
+
+def planner_metrics(
+    point_public: Mapping[str, float], planner: Optional[Mapping[str, Any]]
+) -> dict[str, float]:
+    """``default_metrics`` with a planner point's load sensitivity added to
+    its goodput (for tests: a higher sensitivity scores better)."""
+
+    metrics = default_metrics(point_public)
+    if planner:
+        metrics["goodput_output_throughput_tok_s"] += float(
+            planner.get("load_scaling_down_sensitivity", 0)
+        )
+    return metrics
+
+
 def engine_parameters(effective_input: Mapping[str, Any]) -> dict[str, Any]:
     """The non-router parameters every Candidate of a pinned engine shares."""
 
@@ -309,23 +337,34 @@ def engine_parameters(effective_input: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def candidate_parameters(
-    effective_input: Mapping[str, Any], point_public: Mapping[str, float]
+    effective_input: Mapping[str, Any],
+    point_public: Mapping[str, float],
+    planner: Optional[Mapping[str, Any]] = None,
 ) -> dict[str, Any]:
-    """``Candidate.status.parameters`` of one evaluated router point."""
+    """``Candidate.status.parameters`` of one evaluated router (and planner)
+    point."""
 
     router = effective_input.get("router") or {}
-    return {
-        **engine_parameters(effective_input),
-        "adapters": {
-            ROUTER_ADAPTER: {
-                "policy": router.get("policy", "kv_router"),
-                "prefill_load_model": dict(
-                    router.get("prefill_load_model") or {"type": "none"}
-                ),
-                **{name: float(value) for name, value in point_public.items()},
-            }
-        },
+    adapters: dict[str, Any] = {
+        ROUTER_ADAPTER: {
+            "policy": router.get("policy", "kv_router"),
+            "prefill_load_model": dict(
+                router.get("prefill_load_model") or {"type": "none"}
+            ),
+            **{name: float(value) for name, value in point_public.items()},
+        }
     }
+    if planner is not None:
+        # The adapter's concrete config: the section narrowed to the point.
+        section = nested_get(effective_input, "planner", "retune_sweep")
+        adapters["dynamo.planner"] = {
+            "retune_sweep": {
+                "base": dict(section["base"]),
+                "points": [dict(planner)],
+                "warmup": {},
+            }
+        }
+    return {**engine_parameters(effective_input), "adapters": adapters}
 
 
 def default_metrics(point_public: Mapping[str, float]) -> dict[str, float]:
@@ -525,7 +564,7 @@ class FakeRetuneKube:
         ready: bool = True,
         terminating: bool = False,
         ip: str | None = None,
-        http_port: int | None = 8000,
+        admin_port: int | None = 8002,
         labels: Mapping[str, str] | None = None,
         restarts: int | None = 0,
     ) -> PodInfo:
@@ -541,7 +580,7 @@ class FakeRetuneKube:
             ready=ready,
             terminating=terminating,
             labels=all_labels,
-            http_port=http_port,
+            admin_port=admin_port,
             restarts=restarts,
         )
         with self._lock:
@@ -1087,6 +1126,10 @@ class FakeDgdrOperator:
         self.evaluate: Evaluator = evaluate or (
             lambda _request, point: default_metrics(point)
         )
+        # Scenario 2: metrics of a router point crossed with a planner point.
+        self.evaluate_planner: Callable[
+            ..., Optional[dict[str, float]]
+        ] = lambda _request, point, planner: planner_metrics(point, planner)
         self.runtime_image = runtime_image
         self.dynamo_version = dynamo_version
         self.mutate_input = mutate_input
@@ -1145,10 +1188,18 @@ class FakeDgdrOperator:
                 effective = run["status"]["aisim"]["input"]
                 request = self.kube.requests[name]
                 published = []
-                for point in router_points(effective):
-                    metrics = self.evaluate(copy.deepcopy(request), point)
+                for point, planner in itertools.product(
+                    router_points(effective), planner_points(effective)
+                ):
+                    metrics = (
+                        self.evaluate(copy.deepcopy(request), point)
+                        if planner is None
+                        else self.evaluate_planner(
+                            copy.deepcopy(request), point, planner
+                        )
+                    )
                     if metrics is not None:
-                        parameters = candidate_parameters(effective, point)
+                        parameters = candidate_parameters(effective, point, planner)
                         if self.mutate_parameters is not None:
                             self.mutate_parameters(name, parameters)
                         published.append((parameters, metrics))

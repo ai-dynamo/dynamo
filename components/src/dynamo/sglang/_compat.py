@@ -431,8 +431,13 @@ def supports_external_mm_hashes(engine: Any) -> bool:
     ):
         return True
 
-    # Deferred: schedule_batch imports torch and other SGLang runtime modules.
-    from sglang.srt.managers.schedule_batch import MultimodalProcessorOutput
+    # Deferred: these modules import torch and other SGLang runtime modules.
+    # SGLang moved this class to req_types and dropped the schedule_batch
+    # re-export (sglang#48087); keep the old location for older releases.
+    try:
+        from sglang.srt.managers.req_types import MultimodalProcessorOutput
+    except ImportError:
+        from sglang.srt.managers.schedule_batch import MultimodalProcessorOutput
 
     async def tokenize_with_consistent_mm_padding(obj):
         tokenized = await tokenize_one(obj)
