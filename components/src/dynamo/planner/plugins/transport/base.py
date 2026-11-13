@@ -48,12 +48,13 @@ class PluginTransport(abc.ABC):
     ``grpc://host:port`` for out-of-process. ``make_transport_for_endpoint``
     rejects other schemes."""
 
-    timeout_seconds: float
+    timeout_seconds: float | None
     """Per-RPC timeout. The **transport** enforces this internally — each
     ``call()`` wraps its own dispatch in ``asyncio.wait_for(...,
     timeout_seconds)`` (see ``in_process.py`` / ``_grpc_base.py``). The
     pipeline driver deliberately does NOT wrap calls (it uses a bare
-    ``asyncio.gather``) so the per-plugin deadline isn't double-counted."""
+    ``asyncio.gather``) so the per-plugin deadline isn't double-counted.
+    ``None`` (in-process calls in replay) means no deadline."""
 
     @abc.abstractmethod
     async def call(self, method: str, request: Any) -> Any:

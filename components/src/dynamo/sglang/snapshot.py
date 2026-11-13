@@ -35,18 +35,20 @@ logger = logging.getLogger(__name__)
 class _SGLangSnapshotLifecycle:
     """Adapt SGLang's native controls to the snapshot lifecycle interface."""
 
-    def __init__(self, engine: sgl.Engine):
+    def __init__(self, engine: sgl.Engine, release_tags: list[str] | None = None):
         self._tokenizer_manager = engine.tokenizer_manager
+        # None releases every memory region.
+        self._release_tags = release_tags
 
     async def pause(self) -> None:
         await self._tokenizer_manager.pause_generation(PauseGenerationReqInput())
         await self._tokenizer_manager.release_memory_occupation(
-            ReleaseMemoryOccupationReqInput(), None
+            ReleaseMemoryOccupationReqInput(tags=self._release_tags), None
         )
 
     async def resume(self) -> None:
         await self._tokenizer_manager.resume_memory_occupation(
-            ResumeMemoryOccupationReqInput(), None
+            ResumeMemoryOccupationReqInput(tags=self._release_tags), None
         )
         await self._tokenizer_manager.continue_generation(ContinueGenerationReqInput())
 
@@ -174,10 +176,12 @@ async def prepare_snapshot_engine(
     # on both the GMS V0 and V1 paths.
     snapshot_overrides = {"enable_forward_pass_metrics": False}
 
+    # GMS restores weights outside the checkpoint, so release every region.
+    # Otherwise release only the KV cache: weights stay on the GPU, where
+    # Snapshot captures them, instead of in a CPU backup in the CRIU image.
+    release_tags = None
     if os.environ.get("DYN_GMS_USE_V1") != "true":
         # Enable memory_saver so GPU memory can be released for CRIU.
-        # When using GMS, weights use VA-stable unmap/remap (no CPU backup); GMS
-        # forbids enable_weights_cpu_backup. Otherwise use CPU backup for weights.
         snapshot_overrides["enable_memory_saver"] = True
         try:
             from gpu_memory_service.integrations.sglang import is_gms_active
@@ -186,7 +190,7 @@ async def prepare_snapshot_engine(
         except ImportError:
             _using_gms = False
         if not _using_gms:
-            snapshot_overrides["enable_weights_cpu_backup"] = True
+            release_tags = ["kv_cache"]
 
     override_server_args(server_args, "dynamo.snapshot", **snapshot_overrides)
 
@@ -203,7 +207,7 @@ async def prepare_snapshot_engine(
 
     snapshot_controller = EngineSnapshotController(
         engine=engine,
-        pause_controller=_SGLangSnapshotLifecycle(engine),
+        pause_controller=_SGLangSnapshotLifecycle(engine, release_tags),
         snapshot_config=snapshot_config,
     )
     if not await snapshot_controller.wait_for_restore():

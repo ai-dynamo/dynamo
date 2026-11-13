@@ -30,6 +30,7 @@ import {
   buildRows,
   MigrationStrip,
   ReadingListFooter,
+  UpgradePolicyNotice,
   UpgradePanelStyles,
   type ReadingItem,
 } from "./UpgradePanel";
@@ -207,6 +208,8 @@ export function UpgradeSelector() {
             ))}
           </div>
         </div>
+
+        <UpgradePolicyNotice />
 
         {fromLines.map((line) => (
           <div className="dynref-us-panel" id={`${line.id}-panel`} key={line.id}>

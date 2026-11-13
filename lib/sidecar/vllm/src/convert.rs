@@ -5,11 +5,12 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use dynamo_backend_common::{
-    DisaggregationMode, DynamoError, GuidedDecodingOptions, LLMEngineOutput, MultimodalData,
-    PrefillResult, PreprocessedRequest, StopReason, TopLogprob, usage,
+    CompletionUsage, DisaggregationMode, DynamoError, GuidedDecodingOptions, LLMEngineOutput,
+    MultimodalData, PrefillResult, PreprocessedRequest, PromptTokensDetails, StopReason,
+    TopLogprob, usage,
 };
 use dynamo_llm::protocols::common::{preprocessed_mm_identifier, preprocessed_mm_routing_hash};
-use serde::{Deserialize, de::DeserializeOwned};
+use serde::Deserialize;
 
 use crate::client;
 use dynamo_sidecar_common::{json_to_struct_v14, struct_to_json_v14};
@@ -26,7 +27,7 @@ const MM_HASHES_KEY: &str = "mm_hashes";
 const IMAGE_URL_KEY: &str = "image_url";
 const VIDEO_URL_KEY: &str = "video_url";
 const AUDIO_URL_KEY: &str = "audio_url";
-// Must match DYNAMO_CACHE_SALT_PREFIX in lib/kv-router/src/zmq_wire/extra_keys.rs.
+// Must match DYNAMO_CACHE_SALT_PREFIX in lib/kv-events/src/zmq_wire/extra_keys.rs.
 const DYNAMO_CACHE_SALT_PREFIX: &str = "dynamo-cache-salt:";
 
 const MAX_PREPROCESSED_MM_BYTES: usize = 16 * 1024 * 1024;
@@ -73,19 +74,18 @@ pub(crate) fn request_has_multimodal_input(request: &PreprocessedRequest) -> boo
 }
 
 pub(crate) fn build_generate_request(
-    request: PreprocessedRequest,
+    mut request: PreprocessedRequest,
     request_id: String,
     mode: DisaggregationMode,
 ) -> Result<pb::GenerateRequest, DynamoError> {
-    let mut request = normalize_response_options(request)?;
     validate_request(&request, mode)?;
     validate_multimodal_cache_uuids(&request)?;
-    // Legacy envelopes may only carry controls preserved by the typed request.
+    // Native envelopes may only carry controls preserved by the typed request.
     if !mode.is_prefill()
         && !mode.is_encode()
         && let Some(sampling) = vllm_tito_sampling(&request.extra_args)?
     {
-        if legacy_bool(sampling, "return_token_ids")? == Some(false) {
+        if sampling_bool(sampling, "return_token_ids")? == Some(false) {
             return Err(client::invalid_argument(
                 "extra_args.vllm_tito.sampling_params.return_token_ids must be true for vLLM gRPC",
             ));
@@ -107,6 +107,7 @@ pub(crate) fn build_generate_request(
                     | "ignore_eos"
                     | "logprobs"
                     | "prompt_logprobs"
+                    // Accepted but unused: the frontend decodes output.
                     | "skip_special_tokens"
                     | "return_token_ids"
                     | "skip_reading_prefix_cache"
@@ -156,7 +157,6 @@ pub(crate) fn build_generate_request(
         // supplies the prompt KV.
         strip_multimodal_prompt_token_ids(&mut prefill_result);
     }
-    let skip_special_tokens = request.output_options.skip_special_tokens;
     let prompt_logprobs = request.output_options.prompt_logprobs;
     let output_logprobs = request.output_options.logprobs;
     let max_new_tokens = if mode.is_prefill() || mode.is_encode() {
@@ -187,6 +187,15 @@ pub(crate) fn build_generate_request(
     let stop_conditions = request.stop_conditions;
     let encoder_result = request.encoder_result;
     let mut extra_args = request.extra_args;
+    // The Python worker uses this frontend marker; gRPC keeps its own defaults.
+    if let Some(serde_json::Value::Object(extra)) = extra_args.as_mut()
+        && extra
+            .get("request_type")
+            .and_then(serde_json::Value::as_str)
+            == Some("completions")
+    {
+        extra.remove("request_type");
+    }
     let features = consume_vllm_tito(&mut extra_args)?;
     let routing_hashes = consume_preprocessed_mm_routing_hashes(&mut extra_args)?;
     if features.is_none() && routing_hashes.is_some() {
@@ -220,6 +229,11 @@ pub(crate) fn build_generate_request(
         extra.remove("formatted_prompt");
         extra.remove(MM_HASHES_KEY);
     }
+    let engine_reasoning_gate = take_engine_reasoning_gate(&mut extra_args)?;
+    let SamplingExtensions {
+        bad_words_token_ids,
+        allowed_token_ids,
+    } = take_sampling_extensions(&mut extra_args)?;
     let kv = build_kv_parameters(extra_args, prefill_result, encoder_result, cache_salt, mode)?;
 
     Ok(pb::GenerateRequest {
@@ -232,17 +246,18 @@ pub(crate) fn build_generate_request(
         sampling: Some(pb::RandomSampling {
             num_sequences: 1,
             top_k: normalize_top_k(sampling.top_k)?,
-            top_p: sampling.top_p.unwrap_or(0.0),
-            min_p: sampling.min_p.unwrap_or(0.0),
+            top_p: sampling.top_p,
+            min_p: sampling.min_p,
             seed: sampling.seed,
         }),
         decoding: Some(pb::DecodingParameters {
             presence_penalty: sampling.presence_penalty.unwrap_or(0.0),
             frequency_penalty: sampling.frequency_penalty.unwrap_or(0.0),
             repetition_penalty: sampling.repetition_penalty.unwrap_or(0.0),
-            logit_bias: Default::default(),
-            allowed_token_ids: Vec::new(),
+            logit_bias: sampling.logit_bias.unwrap_or_default(),
+            allowed_token_ids,
             structured_output: structured_output(sampling.guided_decoding)?,
+            bad_words_token_ids,
         }),
         stopping: Some(pb::StoppingCriteria {
             max_new_tokens,
@@ -250,20 +265,25 @@ pub(crate) fn build_generate_request(
             stop_token_ids: stop_token_ids(
                 stop_conditions.stop_token_ids,
                 stop_conditions.stop_token_ids_hidden,
+                stop_conditions.stop_token_ids_visible,
             ),
-            stop_strings: stop_conditions.stop.unwrap_or_default(),
-            include_stop_strings: sampling.include_stop_str_in_output.unwrap_or(false),
+            // Frontend matches stop strings; vLLM must not end output earlier.
+            stop_strings: Vec::new(),
+            include_stop_strings: false,
             ignore_eos: stop_conditions.ignore_eos.unwrap_or(false),
+            thinking_token_budget: stop_conditions.max_thinking_tokens.map(i64::from),
         }),
         response: Some(pb::ResponseOptions {
             prompt_token_ids: prompt_logprobs.is_some() || (has_media && mode.is_prefill()),
             prompt_logprobs: prompt_logprobs.is_some(),
             prompt_candidates: prompt_logprobs.map(top_n_candidates).transpose()?,
-            output_text: Some(true),
+            output_text: Some(false),
             output_token_ids: true,
             output_logprobs: output_logprobs.is_some(),
             output_candidates: output_logprobs.map(top_n_candidates).transpose()?,
-            skip_special_tokens,
+            // Only vLLM's text uses this; the frontend applies the request's
+            // skip_special_tokens when it decodes.
+            skip_special_tokens: None,
         }),
         kv: Some(kv),
         truncate_prompt_tokens: 0,
@@ -272,6 +292,8 @@ pub(crate) fn build_generate_request(
         media,
         lora_name,
         watermarking: None,
+        engine_reasoning_gate,
+        kv_hints: None,
     })
 }
 
@@ -284,124 +306,6 @@ pub(crate) fn data_parallel_rank(
         DisaggregationMode::Prefill => routing.prefill_dp_rank.or(routing.dp_rank),
         DisaggregationMode::Aggregated | DisaggregationMode::Decode => routing.dp_rank,
     })
-}
-
-/// Compatibility with v1.4 frontends during v1.5 and v1.6 rolling upgrades.
-/// TODO(v1.7): Remove after v1.4 falls outside the N-2 compatibility window.
-pub(crate) fn normalize_response_options(
-    mut request: PreprocessedRequest,
-) -> Result<PreprocessedRequest, DynamoError> {
-    let Some(sampling) = vllm_tito_sampling(&request.extra_args)?.cloned() else {
-        return Ok(request);
-    };
-    let legacy_kv_transfer = request
-        .extra_args
-        .as_ref()
-        .and_then(serde_json::Value::as_object)
-        .and_then(|extra| extra.get("vllm_tito"))
-        .and_then(serde_json::Value::as_object)
-        .and_then(|envelope| envelope.get("kv_transfer_params"))
-        .cloned();
-    let legacy_skip_prefix_cache = legacy_bool(&sampling, "skip_reading_prefix_cache")?;
-    hydrate_option(
-        &mut request.sampling_options.temperature,
-        &sampling,
-        "temperature",
-    )?;
-    hydrate_option(&mut request.sampling_options.top_p, &sampling, "top_p")?;
-    hydrate_option(&mut request.sampling_options.top_k, &sampling, "top_k")?;
-    hydrate_option(&mut request.sampling_options.min_p, &sampling, "min_p")?;
-    hydrate_option(&mut request.sampling_options.seed, &sampling, "seed")?;
-    hydrate_option(
-        &mut request.sampling_options.presence_penalty,
-        &sampling,
-        "presence_penalty",
-    )?;
-    hydrate_option(
-        &mut request.sampling_options.frequency_penalty,
-        &sampling,
-        "frequency_penalty",
-    )?;
-    hydrate_option(
-        &mut request.sampling_options.repetition_penalty,
-        &sampling,
-        "repetition_penalty",
-    )?;
-    hydrate_option(
-        &mut request.stop_conditions.max_tokens,
-        &sampling,
-        "max_tokens",
-    )?;
-    hydrate_option(
-        &mut request.stop_conditions.min_tokens,
-        &sampling,
-        "min_tokens",
-    )?;
-    if request.stop_conditions.stop_token_ids.is_none()
-        && request.stop_conditions.stop_token_ids_hidden.is_none()
-    {
-        hydrate_option(
-            &mut request.stop_conditions.stop_token_ids,
-            &sampling,
-            "stop_token_ids",
-        )?;
-    }
-    hydrate_option(
-        &mut request.stop_conditions.ignore_eos,
-        &sampling,
-        "ignore_eos",
-    )?;
-    if request.output_options.logprobs.is_none() {
-        request.output_options.logprobs = legacy_logprob_count(&sampling, "logprobs")?;
-    }
-    if request.output_options.prompt_logprobs.is_none() {
-        request.output_options.prompt_logprobs =
-            legacy_logprob_count(&sampling, "prompt_logprobs")?;
-    }
-    if request.output_options.skip_special_tokens.is_none() {
-        request.output_options.skip_special_tokens = legacy_bool(&sampling, "skip_special_tokens")?;
-    }
-    if let Some(legacy_kv_transfer) = legacy_kv_transfer
-        && let Some(extra) = request
-            .extra_args
-            .as_mut()
-            .and_then(serde_json::Value::as_object_mut)
-        && !extra.contains_key("kv_transfer_params")
-    {
-        extra.insert("kv_transfer_params".to_string(), legacy_kv_transfer);
-    }
-    if let Some(legacy_skip_prefix_cache) = legacy_skip_prefix_cache
-        && let Some(extra) = request
-            .extra_args
-            .as_mut()
-            .and_then(serde_json::Value::as_object_mut)
-        && !extra.contains_key("skip_reading_prefix_cache")
-    {
-        extra.insert(
-            "skip_reading_prefix_cache".to_string(),
-            serde_json::Value::Bool(legacy_skip_prefix_cache),
-        );
-    }
-    Ok(request)
-}
-
-fn hydrate_option<T: DeserializeOwned>(
-    target: &mut Option<T>,
-    sampling: &serde_json::Map<String, serde_json::Value>,
-    field: &str,
-) -> Result<(), DynamoError> {
-    if target.is_some() {
-        return Ok(());
-    }
-    let Some(value) = sampling.get(field).filter(|value| !value.is_null()) else {
-        return Ok(());
-    };
-    *target = Some(serde_json::from_value(value.clone()).map_err(|error| {
-        client::invalid_argument(format!(
-            "extra_args.vllm_tito.sampling_params.{field} is invalid: {error}"
-        ))
-    })?);
-    Ok(())
 }
 
 fn vllm_tito_sampling(
@@ -429,7 +333,7 @@ fn vllm_tito_sampling(
     Ok(Some(sampling))
 }
 
-fn legacy_bool(
+fn sampling_bool(
     sampling: &serde_json::Map<String, serde_json::Value>,
     field: &str,
 ) -> Result<Option<bool>, DynamoError> {
@@ -439,26 +343,6 @@ fn legacy_bool(
         Some(_) => Err(client::invalid_argument(format!(
             "extra_args.vllm_tito.sampling_params.{field} must be a boolean"
         ))),
-    }
-}
-
-fn legacy_logprob_count(
-    sampling: &serde_json::Map<String, serde_json::Value>,
-    field: &str,
-) -> Result<Option<u32>, DynamoError> {
-    match sampling.get(field) {
-        None | Some(serde_json::Value::Null) => Ok(None),
-        Some(value) => match value.as_i64() {
-            Some(-1) => Ok(Some(u32::MAX)),
-            Some(value) if value >= 0 => u32::try_from(value).map(Some).map_err(|_| {
-                client::invalid_argument(format!(
-                    "extra_args.vllm_tito.sampling_params.{field} exceeds u32"
-                ))
-            }),
-            _ => Err(client::invalid_argument(format!(
-                "extra_args.vllm_tito.sampling_params.{field} must be non-negative or -1"
-            ))),
-        },
     }
 }
 
@@ -535,14 +419,177 @@ fn consume_preprocessed_mm_routing_hashes(
     Ok(Some(hashes))
 }
 
-/// The frontend adds these for vLLM's structured-output reasoning gate, which
-/// the gRPC proto cannot carry. Drop them only when vLLM runs no reasoning
-/// parser, so nothing reads them.
-pub(crate) fn consume_reasoning_parser_args(extra_args: &mut Option<serde_json::Value>) {
-    if let Some(serde_json::Value::Object(extra)) = extra_args.as_mut() {
-        extra.remove("reasoning_parser_kwargs");
-        extra.remove("reasoning_ended");
+/// The frontend adds these for vLLM's structured-output reasoning gate. Servers
+/// before vllm-proto 0.6.0 can't confirm they read the gate, so the caller
+/// drops them there. Returns whether the request carried any.
+pub(crate) fn consume_reasoning_parser_args(extra_args: &mut Option<serde_json::Value>) -> bool {
+    let Some(serde_json::Value::Object(extra)) = extra_args.as_mut() else {
+        return false;
+    };
+    let kwargs = extra.remove("reasoning_parser_kwargs");
+    let ended = extra.remove("reasoning_ended");
+    [kwargs, ended]
+        .into_iter()
+        .flatten()
+        .any(|value| !value.is_null())
+}
+
+/// Reject vllm-proto 0.5 generation controls for a server that doesn't report
+/// 0.6.0 or later. Older schemas drop the new fields and read an explicit zero
+/// `top_k` or `min_p` as "use the model default", so the request would succeed
+/// without them.
+pub(crate) fn require_proto_0_6_controls(
+    request: &pb::GenerateRequest,
+    proto_version: &str,
+) -> Result<(), DynamoError> {
+    let sampling = request.sampling.as_ref();
+    let used = [
+        (
+            "bad_words_token_ids",
+            request
+                .decoding
+                .as_ref()
+                .is_some_and(|decoding| !decoding.bad_words_token_ids.is_empty()),
+        ),
+        (
+            "max_thinking_tokens",
+            request
+                .stopping
+                .as_ref()
+                .is_some_and(|stopping| stopping.thinking_token_budget.is_some()),
+        ),
+        (
+            "top_k=-1 or top_k=0",
+            sampling.is_some_and(|sampling| sampling.top_k == Some(0)),
+        ),
+        (
+            "min_p=0",
+            sampling.is_some_and(|sampling| sampling.min_p == Some(0.0)),
+        ),
+    ];
+    let Some((control, _)) = used.into_iter().find(|&(_, used)| used) else {
+        return Ok(());
+    };
+    let reported = match proto_version {
+        "" => "no version".to_string(),
+        version => format!("vllm-proto {version}"),
+    };
+    Err(client::invalid_argument(format!(
+        "{control} requires a vLLM gRPC server that reports vllm-proto 0.6.0 or later; this server reports {reported}"
+    )))
+}
+
+fn take_engine_reasoning_gate(
+    extra_args: &mut Option<serde_json::Value>,
+) -> Result<Option<pb::EngineReasoningGate>, DynamoError> {
+    let Some(serde_json::Value::Object(extra)) = extra_args.as_mut() else {
+        return Ok(None);
+    };
+    let reasoning_ended = bool_extra(Some(extra), "reasoning_ended")?;
+    extra.remove("reasoning_ended");
+    // Keep the frontend's established envelope on the Dynamo wire. Only the
+    // vLLM boundary unwraps it into the transitional proto 0.5 gate. The gate
+    // carries only `chat_template_kwargs`, so other keys from newer frontends
+    // (N-2) are ignored rather than failing every reasoning request.
+    #[derive(Deserialize)]
+    struct ReasoningParserKwargs {
+        chat_template_kwargs: Option<serde_json::Map<String, serde_json::Value>>,
     }
+    let chat_template_kwargs = extra
+        .remove("reasoning_parser_kwargs")
+        .filter(|value| !value.is_null())
+        .map(|value| {
+            serde_json::from_value::<ReasoningParserKwargs>(value).map_err(|error| {
+                client::invalid_argument(format!("reasoning_parser_kwargs is invalid: {error}"))
+            })
+        })
+        .transpose()?
+        .and_then(|kwargs| kwargs.chat_template_kwargs)
+        .map(|kwargs| json_to_struct_v14(kwargs.into(), "chat_template_kwargs"))
+        .transpose()?;
+    Ok(
+        (reasoning_ended.is_some() || chat_template_kwargs.is_some()).then_some(
+            pb::EngineReasoningGate {
+                reasoning_ended,
+                chat_template_kwargs,
+            },
+        ),
+    )
+}
+
+/// vLLM's defaults for `VLLM_MAX_NUM_BAD_WORDS` and
+/// `VLLM_MAX_BAD_WORDS_TOTAL_TOKENS`. Its model runner enforces them inside the
+/// engine worker, where an oversized request can fail the engine.
+/// TODO: Remove these caps once vllm-rs rejects oversized bad-words lists
+/// during request lowering (vllm-project/vllm#61933) and Dynamo's minimum vLLM
+/// includes that check.
+const MAX_BAD_WORDS: usize = 128;
+const MAX_BAD_WORDS_TOKENS: usize = 1024;
+
+#[derive(Default)]
+struct SamplingExtensions {
+    bad_words_token_ids: Vec<pb::TokenIds>,
+    allowed_token_ids: Vec<u32>,
+}
+
+fn take_sampling_extensions(
+    extra_args: &mut Option<serde_json::Value>,
+) -> Result<SamplingExtensions, DynamoError> {
+    let Some(serde_json::Value::Object(extra)) = extra_args.as_mut() else {
+        return Ok(SamplingExtensions::default());
+    };
+    let Some(value) = extra.remove("sampling_options") else {
+        return Ok(SamplingExtensions::default());
+    };
+    // The frontend forwards exactly these vLLM sampling fields.
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Passthrough {
+        bad_words_token_ids: Option<Vec<Vec<u32>>>,
+        allowed_token_ids: Option<Vec<u32>>,
+        // Ignored, as in-process: vLLM never decodes and the frontend does.
+        #[serde(rename = "detokenize")]
+        _detokenize: Option<bool>,
+        logprob_token_ids: Option<serde_json::Value>,
+    }
+    let passthrough: Passthrough = serde_json::from_value(value).map_err(|error| {
+        client::invalid_argument(format!("extra_args.sampling_options is invalid: {error}"))
+    })?;
+    if passthrough.logprob_token_ids.is_some() {
+        return Err(client::invalid_argument(
+            "logprob_token_ids is not supported by vLLM gRPC",
+        ));
+    }
+    if passthrough
+        .allowed_token_ids
+        .as_ref()
+        .is_some_and(Vec::is_empty)
+    {
+        // An empty list would mean "unrestricted" on the wire.
+        return Err(client::invalid_argument(
+            "allowed_token_ids must not be empty",
+        ));
+    }
+    let bad_words = passthrough.bad_words_token_ids.unwrap_or_default();
+    if bad_words.iter().any(Vec::is_empty) {
+        return Err(client::invalid_argument(
+            "bad_words_token_ids sequences must not be empty",
+        ));
+    }
+    if bad_words.len() > MAX_BAD_WORDS
+        || bad_words.iter().map(Vec::len).sum::<usize>() > MAX_BAD_WORDS_TOKENS
+    {
+        return Err(client::invalid_argument(format!(
+            "bad_words_token_ids allows at most {MAX_BAD_WORDS} sequences and {MAX_BAD_WORDS_TOKENS} tokens in total"
+        )));
+    }
+    Ok(SamplingExtensions {
+        bad_words_token_ids: bad_words
+            .into_iter()
+            .map(|ids| pb::TokenIds { ids })
+            .collect(),
+        allowed_token_ids: passthrough.allowed_token_ids.unwrap_or_default(),
+    })
 }
 
 fn consume_redundant_nvext(
@@ -586,12 +633,25 @@ fn consume_redundant_nvext(
                 "extra_args.nvext.token_in must be true when present",
             ));
         }
-        // Worker attribution and timing are produced by the frontend.
+        // These response fields are assembled by the frontend.
         if let Some(fields) = nvext.get_mut("extra_fields") {
             let fields = fields.as_array_mut().ok_or_else(|| {
                 client::invalid_argument("extra_args.nvext.extra_fields must be an array")
             })?;
-            fields.retain(|field| !matches!(field.as_str(), Some("worker_id" | "timing")));
+            fields.retain(|field| {
+                !matches!(
+                    field.as_str(),
+                    Some(
+                        "worker_id"
+                            | "timing"
+                            | "completion_token_ids"
+                            | "prompt_token_ids"
+                            | "prompt_logprobs"
+                            | "detailed_finish_reason"
+                            | "stop_reason"
+                    )
+                )
+            });
             if fields.is_empty() {
                 nvext.remove("extra_fields");
             }
@@ -982,20 +1042,28 @@ fn top_n_candidates(count: u32) -> Result<pb::CandidateTokens, DynamoError> {
     })
 }
 
-fn normalize_top_k(top_k: Option<i32>) -> Result<u32, DynamoError> {
+fn normalize_top_k(top_k: Option<i32>) -> Result<Option<u32>, DynamoError> {
     match top_k {
-        None | Some(-1) | Some(0) => Ok(0),
-        Some(value) if value > 0 => Ok(value as u32),
+        None => Ok(None),
+        Some(-1 | 0) => Ok(Some(0)),
+        Some(value) if value > 0 => Ok(Some(value as u32)),
         Some(value) => Err(client::invalid_argument(format!(
             "top_k must be -1, 0, or positive; got {value}"
         ))),
     }
 }
 
-fn stop_token_ids(visible: Option<Vec<u32>>, hidden: Option<Vec<u32>>) -> Vec<u32> {
-    let mut ids = visible.unwrap_or_default();
+fn stop_token_ids(
+    user: Option<Vec<u32>>,
+    hidden: Option<Vec<u32>>,
+    visible: Option<Vec<u32>>,
+) -> Vec<u32> {
+    let mut ids = user.unwrap_or_default();
     if let Some(hidden) = hidden {
         ids.extend(hidden);
+    }
+    if let Some(visible) = visible {
+        ids.extend(visible);
     }
     ids.sort_unstable();
     ids.dedup();
@@ -1215,21 +1283,6 @@ fn validate_request(
             "Dynamo bootstrap handoff is not supported by the vLLM sidecar",
         ));
     }
-    if request
-        .stop_conditions
-        .stop_token_ids_visible
-        .as_ref()
-        .is_some_and(|ids| !ids.is_empty())
-    {
-        return Err(client::invalid_argument(
-            "visible stop token IDs are not supported by vLLM gRPC",
-        ));
-    }
-    if request.stop_conditions.max_thinking_tokens.is_some() {
-        return Err(client::invalid_argument(
-            "max_thinking_tokens is not supported by vLLM gRPC",
-        ));
-    }
     let sampling = &request.sampling_options;
     if sampling.n.unwrap_or(1) != 1 {
         return Err(client::invalid_argument("n must be 1"));
@@ -1240,17 +1293,11 @@ fn validate_request(
     if sampling.use_beam_search.unwrap_or(false) {
         return Err(client::invalid_argument("beam search is not supported"));
     }
-    if !mode.is_prefill() && !mode.is_encode() {
-        if matches!(sampling.top_k, Some(-1 | 0)) {
-            return Err(client::invalid_argument(
-                "top_k=-1 or top_k=0 cannot be represented by vllm-proto 0.3",
-            ));
-        }
-        if sampling.min_p == Some(0.0) {
-            return Err(client::invalid_argument(
-                "min_p=0 cannot be represented by vllm-proto 0.3",
-            ));
-        }
+    if sampling
+        .top_p
+        .is_some_and(|value| !value.is_finite() || value <= 0.0 || value > 1.0)
+    {
+        return Err(client::invalid_argument("top_p must be in (0, 1]"));
     }
     if let Some(length_penalty) = sampling.length_penalty
         && (length_penalty - 1.0).abs() > f32::EPSILON
@@ -1268,6 +1315,8 @@ pub(crate) struct ResponseState {
     multimodal_prompt_token_ids: Option<Vec<u32>>,
     completion_tokens: u32,
     mode: DisaggregationMode,
+    /// The prefill leg's prefix-cache hit count, when it reported one.
+    prefill_cached_tokens: Option<u32>,
     output_logprobs: Option<u32>,
     expect_prompt_logprobs: bool,
     prompt_info: Option<pb::PromptInfo>,
@@ -1286,6 +1335,11 @@ impl ResponseState {
             multimodal_prompt_token_ids: None,
             completion_tokens: 0,
             mode,
+            prefill_cached_tokens: request
+                .prefill_result
+                .as_ref()
+                .and_then(|prefill| prefill.prompt_tokens_details.as_ref())
+                .and_then(|details| details.cached_tokens),
             output_logprobs: request.output_options.logprobs,
             expect_prompt_logprobs: request.output_options.prompt_logprobs.is_some(),
             prompt_info: None,
@@ -1310,8 +1364,27 @@ impl ResponseState {
         }
     }
 
-    pub(crate) fn prompt_tokens(&self) -> u32 {
-        self.prompt_tokens
+    /// Usage with the engine's prefix-cache hit count, when it reported one.
+    pub(crate) fn completion_usage(
+        &self,
+        completion_tokens: u32,
+        engine_cached_tokens: Option<u32>,
+    ) -> CompletionUsage {
+        // A decode engine counts the KV received from prefill as cached, which
+        // would read as a ~100% hit on every disaggregated request. The prefill
+        // leg is the only source there, even when it reported no count.
+        let cached_tokens = if self.mode.is_decode() {
+            self.prefill_cached_tokens
+        } else {
+            engine_cached_tokens
+        };
+        let mut completion_usage = usage(self.prompt_tokens, completion_tokens);
+        completion_usage.prompt_tokens_details =
+            cached_tokens.map(|cached_tokens| PromptTokensDetails {
+                cached_tokens: Some(cached_tokens.min(self.prompt_tokens)),
+                ..Default::default()
+            });
+        completion_usage
     }
 
     pub(crate) fn convert(
@@ -1353,10 +1426,10 @@ impl ResponseState {
             None
         };
         let pb::SequenceOutput {
-            text,
             num_tokens,
             token_ids,
             finish_info,
+            sampling_mask,
             ..
         } = output;
 
@@ -1367,13 +1440,7 @@ impl ResponseState {
             } else {
                 token_ids
             },
-            text: if self.mode.is_prefill() || self.mode.is_encode() {
-                None
-            } else {
-                // vLLM may buffer text while matching stop strings. Preserve an
-                // empty delta so the frontend does not detokenize its IDs again.
-                Some(text)
-            },
+            // `text` stays `None`: the frontend decodes `token_ids`.
             index: Some(0),
             ..Default::default()
         };
@@ -1383,11 +1450,14 @@ impl ResponseState {
         }
 
         let Some(finish) = finish_info else {
-            return if self.mode.is_prefill() || self.mode.is_encode() || num_tokens == 0 {
-                Ok(None)
-            } else {
-                Ok(Some(mapped))
-            };
+            if self.mode.is_prefill() || self.mode.is_encode() || num_tokens == 0 {
+                return Ok(None);
+            }
+            // Send prompt logprobs with the first token chunk, not the terminal: once
+            // the frontend matches a stop string it cancels the stream, and vLLM's
+            // terminal response never arrives.
+            self.attach_prompt_data(&mut mapped);
+            return Ok(Some(mapped));
         };
         if finish.num_output_tokens != self.completion_tokens {
             return Err(client::protocol_error(format!(
@@ -1425,7 +1495,8 @@ impl ResponseState {
                 .then_some(StopReason::Int(i64::from(id))),
             pb::finish_info::StopReason::StopString(value) => Some(StopReason::String(value)),
         });
-        mapped.completion_usage = Some(usage(self.prompt_tokens, completion_tokens));
+        mapped.completion_usage =
+            Some(self.completion_usage(completion_tokens, finish.num_cached_tokens));
         if self.mode.is_encode() {
             if matches!(
                 mapped.finish_reason,
@@ -1458,7 +1529,7 @@ impl ResponseState {
         }
         mapped.disaggregated_params = finish
             .kv_transfer_params
-            .map(|value| struct_to_json_v14(value, PEER, KV_TRANSFER_PARAMS))
+            .map(|value| struct_to_json_v14(value, PEER, KV_TRANSFER_PARAMS).map(Box::new))
             .transpose()?;
         if self.mode.is_prefill() && mapped.disaggregated_params.is_none() {
             return Err(client::protocol_error(
@@ -1473,7 +1544,7 @@ impl ResponseState {
             })?;
             let params = mapped
                 .disaggregated_params
-                .as_mut()
+                .as_deref_mut()
                 .and_then(serde_json::Value::as_object_mut)
                 .ok_or_else(|| {
                     client::protocol_error("prefill kv_transfer_params is not a JSON object")
@@ -1487,13 +1558,26 @@ impl ResponseState {
                 })?,
             );
         }
+        if !sampling_mask.is_empty() {
+            mapped
+                .engine_data
+                .get_or_insert_with(|| Box::new(serde_json::json!({})))["sampling_mask"] = serde_json::json!(
+                sampling_mask
+                    .into_iter()
+                    .map(|row| row.ids)
+                    .collect::<Vec<_>>()
+            );
+        }
         self.attach_prompt_data(&mut mapped);
         Ok(Some(mapped))
     }
 
     fn attach_prompt_data(&mut self, output: &mut LLMEngineOutput) {
-        if output.engine_data.is_none() {
-            output.engine_data = self.prompt_info.take().map(prompt_logprobs_to_json);
+        if let Some(prompt) = self.prompt_info.take() {
+            output
+                .engine_data
+                .get_or_insert_with(|| Box::new(serde_json::json!({})))["prompt_logprobs"] =
+                prompt_logprobs_to_json(prompt);
         }
     }
 
@@ -1522,10 +1606,17 @@ impl ResponseState {
             return Ok(());
         }
         let count = prompt.num_prompt_tokens as usize;
+        // A single input token has no preceding context to score. vLLM may
+        // omit all three score arrays instead of sending an unscored row.
+        let score_count = if count == 1 && prompt.logprobs.is_empty() {
+            0
+        } else {
+            count
+        };
         if prompt.token_ids.len() != count
-            || prompt.logprobs.len() != count
-            || prompt.ranks.len() != count
-            || prompt.candidate_tokens.len() != count
+            || prompt.logprobs.len() != score_count
+            || prompt.ranks.len() != score_count
+            || prompt.candidate_tokens.len() != score_count
         {
             return Err(client::protocol_error(format!(
                 "prompt logprob array lengths do not match expected count {count}: token_ids={}, logprobs={}, ranks={}, candidate_tokens={}",
@@ -1544,17 +1635,16 @@ impl ResponseState {
 fn prompt_logprobs_to_json(prompt: pb::PromptInfo) -> serde_json::Value {
     let count = prompt.num_prompt_tokens as usize;
     let mut positions = Vec::with_capacity(count);
+    if count > 0 {
+        positions.push(serde_json::Value::Null);
+    }
     let rows = prompt
         .token_ids
         .into_iter()
         .zip(prompt.logprobs)
         .zip(prompt.ranks)
         .zip(prompt.candidate_tokens);
-    for (index, (((token_id, logprob), rank), candidates)) in rows.enumerate() {
-        if index == 0 {
-            positions.push(serde_json::Value::Null);
-            continue;
-        }
+    for (((token_id, logprob), rank), candidates) in rows.skip(1) {
         let mut entries = serde_json::Map::with_capacity(candidates.tokens.len() + 1);
         entries.insert(token_id.to_string(), prompt_logprob_entry(logprob, rank));
         for candidate in candidates.tokens {
@@ -1566,12 +1656,7 @@ fn prompt_logprobs_to_json(prompt: pb::PromptInfo) -> serde_json::Value {
         positions.push(serde_json::Value::Object(entries));
     }
 
-    let mut engine_data = serde_json::Map::with_capacity(1);
-    engine_data.insert(
-        "prompt_logprobs".to_string(),
-        serde_json::Value::Array(positions),
-    );
-    serde_json::Value::Object(engine_data)
+    serde_json::Value::Array(positions)
 }
 
 fn prompt_logprob_entry(logprob: f32, rank: u32) -> serde_json::Value {

@@ -60,7 +60,7 @@ const (
 type CompilationCacheConfig struct {
 	// pvcName references a user-created PVC by name. The PVC must exist in
 	// the same namespace as the DynamoGraphDeployment.
-	// +kubebuilder:validation:Required
+	// +required
 	// +kubebuilder:validation:MinLength=1
 	PVCName string `json:"pvcName"`
 
@@ -78,13 +78,14 @@ type CompilationCacheConfig struct {
 //     `PodCliqueScalingGroupConfig`, according to the field location and
 //     component shape.
 //   - value may set topologyConstraint, and component contexts may set the
-//     native minAvailable field. Availability is not supported at root or role scope.
+//     native minAvailable field and rollingUpdate.maxUnavailable. Availability
+//     and rollout budgets are not supported at root or role scope.
 //
 // All other providers, versions, targets, and fields are rejected.
 type ProviderOverride struct {
 	// apiVersion is the Kubernetes API group and version of the provider schema.
 	// Grove requires `grove.io/v1alpha1`.
-	// +kubebuilder:validation:Required
+	// +required
 	// +kubebuilder:validation:MinLength=1
 	APIVersion string `json:"apiVersion"`
 
@@ -100,7 +101,8 @@ type ProviderOverride struct {
 	// `spec.minAvailable` on PodCliqueTemplateSpec or `minAvailable` on
 	// PodCliqueScalingGroupConfig. The minimum is immutable; migrating from the
 	// deprecated component field preserves its value and leaves the update strategy unchanged.
-	// +kubebuilder:validation:Required
+	// Component contexts also accept rollingUpdate.maxUnavailable.
+	// +required
 	// +kubebuilder:pruning:PreserveUnknownFields
 	// +kubebuilder:validation:Type=object
 	Value apiextensionsv1.JSON `json:"value"`
@@ -122,7 +124,7 @@ const (
 type ComponentRoleSpec struct {
 	// name identifies the role within the enclosing component independently of
 	// generated provider resource names.
-	// +kubebuilder:validation:Required
+	// +required
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
@@ -177,7 +179,7 @@ type MultinodeSpec struct {
 // When specified, a headless service is created for endpoint discovery.
 type ModelReference struct {
 	// name is the base model identifier (e.g. "llama-3-70b-instruct-v1").
-	// +kubebuilder:validation:Required
+	// +required
 	// +kubebuilder:validation:MinLength=1
 	Name string `json:"name"`
 
@@ -191,7 +193,7 @@ type Restart struct {
 	// id is an arbitrary string that triggers a restart when changed. Any
 	// modification to this value initiates a restart of the graph deployment
 	// according to the configured strategy.
-	// +kubebuilder:validation:Required
+	// +required
 	// +kubebuilder:validation:MinLength=1
 	ID string `json:"id"`
 
@@ -361,6 +363,7 @@ type GMSClientPodSpec struct {
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	// +required
 	Name string `json:"name"`
 
 	// podTemplate configures the pod to run as a GMS client.
@@ -445,7 +448,7 @@ type ComponentCheckpointConfig struct {
 	// When true, omit checkpointRef for a DGD-managed automatic checkpoint or
 	// set checkpointRef to restore an existing PodSnapshot in the same namespace.
 	// Omit the checkpoint block, or set enabled=false, to disable checkpointing.
-	// +kubebuilder:validation:Required
+	// +required
 	Enabled bool `json:"enabled"`
 
 	// Deprecated: omit mode. Use enabled=true without checkpointRef for a
@@ -526,13 +529,13 @@ type ComponentCheckpointJobConfig struct {
 type DynamoCheckpointIdentity struct {
 	// model is the model identifier (e.g. "meta-llama/Llama-3-70B").
 	// Deprecated: legacy identity only.
-	// +kubebuilder:validation:Required
+	// +required
 	// +kubebuilder:validation:MinLength=1
 	Model string `json:"model"`
 
 	// backendFramework is the runtime framework (`vllm`, `sglang`, `trtllm`).
 	// Deprecated: legacy identity only.
-	// +kubebuilder:validation:Required
+	// +required
 	// +kubebuilder:validation:Enum=vllm;sglang;trtllm
 	BackendFramework string `json:"backendFramework"`
 
@@ -577,6 +580,7 @@ type SpecTopologyConstraint struct {
 	// clusterTopologyName is the name of the ClusterTopology resource that
 	// defines the topology hierarchy for this deployment.
 	// +kubebuilder:validation:MinLength=1
+	// +required
 	ClusterTopologyName string `json:"clusterTopologyName"`
 
 	// packDomain is the default topology domain to pack pods within.
@@ -591,6 +595,7 @@ type SpecTopologyConstraint struct {
 type TopologyConstraint struct {
 	// packDomain is the topology domain to pack pods within. Must match a
 	// domain defined in the referenced ClusterTopology CR.
+	// +required
 	PackDomain TopologyDomain `json:"packDomain"`
 }
 
@@ -645,6 +650,7 @@ type KvTransferPolicy struct {
 	// domain is the logical name for the topology level to enforce
 	// (e.g. "zone", "rack"). The router uses this to match workers that
 	// share the same value for the label identified by `labelKey`.
+	// +required
 	Domain TopologyDomain `json:"domain"`
 
 	// enforcement controls how the selected prefill worker's topology is
@@ -751,8 +757,10 @@ const (
 // RestartStatus contains the status of a graph-level restart.
 type RestartStatus struct {
 	// observedID is the restart ID currently being processed. Matches `Restart.id` in the spec.
+	// +optional
 	ObservedID string `json:"observedID,omitempty"`
 	// phase is the phase of the restart.
+	// +optional
 	Phase RestartPhase `json:"phase,omitempty"`
 	// inProgress contains the names of the components currently being restarted.
 	// +optional
@@ -813,6 +821,7 @@ type ComponentCheckpointStatus struct {
 type ComponentReplicaStatus struct {
 	// componentKind is the underlying resource kind (e.g. `PodClique`,
 	// `Deployment`, `LeaderWorkerSet`).
+	// +required
 	ComponentKind ComponentKind `json:"componentKind"`
 
 	// componentNames is the list of underlying Kubernetes resource names for
@@ -829,15 +838,17 @@ type ComponentReplicaStatus struct {
 	RuntimeNamespace string `json:"runtimeNamespace,omitempty"`
 
 	// servedModelName is the effective primary model identity exposed by this
-	// component's serving role. During rolling updates, worker status keeps the
-	// old active revision value until cutover completes.
+	// component's serving role in combined mode. Native sidecars omit this field;
+	// Kubernetes Planner reads their registered model identity. During rolling
+	// updates, worker status keeps the old active revision until cutover completes.
 	// +optional
 	ServedModelName string `json:"servedModelName,omitempty"`
 
 	// runtimeComponentName is an explicit Dynamo runtime component identity
-	// resolved from the serving role's endpoint override. Omission means the
-	// backend default applies. During rolling updates, worker status keeps the
-	// old active revision value until cutover completes.
+	// resolved from the serving role's endpoint override in combined mode.
+	// Native sidecars omit this field; Kubernetes Planner reads their registered
+	// component identity. During rolling updates, worker status keeps the old
+	// active revision value until cutover completes.
 	// +optional
 	RuntimeComponentName string `json:"runtimeComponentName,omitempty"`
 
@@ -867,10 +878,12 @@ type ComponentReplicaStatus struct {
 
 	// replicas is the total number of non-terminated replicas.
 	// +kubebuilder:validation:Minimum=0
+	// +required
 	Replicas int32 `json:"replicas"`
 
 	// updatedReplicas is the number of replicas at the current/desired revision.
 	// +kubebuilder:validation:Minimum=0
+	// +required
 	UpdatedReplicas int32 `json:"updatedReplicas"`
 
 	// readyReplicas is the number of ready replicas. Populated for

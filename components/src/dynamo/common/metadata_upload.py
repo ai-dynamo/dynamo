@@ -4,9 +4,12 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass
 from functools import cache
 from typing import Any, cast
+
+logger = logging.getLogger(__name__)
 
 
 def _backend_metadata_upload_settings(request: dict[str, Any]) -> dict[str, Any] | None:
@@ -141,6 +144,7 @@ def _normalize_for_upload(value: Any) -> Any:
 @dataclass(frozen=True)
 class MetadataUploader:
     url: str
+    fallback_url: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.url, str):
@@ -150,17 +154,25 @@ class MetadataUploader:
             raise ValueError("metadata_upload.url must not be empty")
         object.__setattr__(self, "url", url)
 
+        if self.fallback_url is not None:
+            if not isinstance(self.fallback_url, str):
+                raise ValueError("metadata_upload.fallback_url must be a string")
+            fallback_url = self.fallback_url.strip()
+            if not fallback_url:
+                raise ValueError("metadata_upload.fallback_url must not be empty")
+            object.__setattr__(self, "fallback_url", fallback_url)
+
     @classmethod
     def from_settings(cls, settings: dict[str, Any] | None) -> MetadataUploader | None:
         if settings is None:
             return None
-        unexpected = settings.keys() - {"url"}
+        unexpected = settings.keys() - {"url", "fallback_url"}
         if unexpected:
             field = min(unexpected)
             raise ValueError(f"metadata_upload.{field} is not supported")
         if "url" not in settings:
             raise ValueError("metadata_upload.url is required")
-        return cls(url=settings["url"])
+        return cls(url=settings["url"], fallback_url=settings.get("fallback_url"))
 
     @classmethod
     def from_backend_request(cls, request: dict[str, Any]) -> MetadataUploader | None:
@@ -173,6 +185,15 @@ class MetadataUploader:
         storage_path = f"choice_{choice_index}.msgpack.zst"
         data = await asyncio.to_thread(_serialize_metadata, metadata)
         try:
-            await _upload_bytes(self.url, storage_path, data)
+            try:
+                await _upload_bytes(self.url, storage_path, data)
+            except Exception as exc:
+                if self.fallback_url is None:
+                    raise
+                logger.warning(
+                    "Primary metadata upload failed (%s); trying fallback",
+                    type(exc).__name__,
+                )
+                await _upload_bytes(self.fallback_url, storage_path, data)
         finally:
             del data

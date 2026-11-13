@@ -7,11 +7,12 @@
 set -e
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
-export DYNAMO_HOME="${DYNAMO_HOME:-$(readlink -f "$SCRIPT_DIR/../../../..")}"
+# Resolved relative to this script, not via $DYNAMO_HOME: vllm_runtime.Dockerfile
+# bakes DYNAMO_HOME=/opt/dynamo, which has no examples/ directory.
 # shellcheck disable=SC1091 # Resolved relative to this script at runtime.
-source "$DYNAMO_HOME/examples/common/gpu_utils.sh"   # build_vllm_gpu_mem_args
+source "$SCRIPT_DIR/../../../../examples/common/gpu_utils.sh"   # build_vllm_gpu_mem_args
 # shellcheck disable=SC1091 # Resolved relative to this script at runtime.
-source "$DYNAMO_HOME/examples/common/launch_utils.sh" # print_launch_banner, wait_any_exit
+source "$SCRIPT_DIR/../../../../examples/common/launch_utils.sh" # print_launch_banner, wait_any_exit
 
 MODEL="${MODEL:-Qwen/Qwen3-0.6B}"
 LORA_NAME="${LORA_NAME:-codelion/Qwen3-0.6B-accuracy-recovery-lora}"
@@ -44,7 +45,7 @@ while [[ $# -gt 0 ]]; do
             echo "  DYN_HTTP_PORT           Dynamo frontend port (default: 8000)"
             echo "  DYN_SYSTEM_PORT         Dynamo sidecar system port (default: 8081)"
             echo "  VLLM_RS_HTTP_PORT       vLLM HTTP port (default: 8100)"
-            echo "  VLLM_GRPC_PORT          vLLM gRPC port (default: 50051)"
+            echo "  VLLM_GRPC_PORT          vLLM gRPC port (default: 30001)"
             echo "  MAX_MODEL_LEN           Maximum model length (default: 4096)"
             echo "  MAX_CONCURRENT_SEQS     Maximum concurrent sequences (default: 2)"
             echo "  DEFAULT_KV_CACHE_BYTES  KV cache cap when not profiling (default: 1119388000)"
@@ -66,7 +67,7 @@ MAX_CONCURRENT_SEQS="${MAX_CONCURRENT_SEQS:-2}"
 MAX_LORAS="${MAX_LORAS:-4}"
 MAX_LORA_RANK="${MAX_LORA_RANK:-64}"
 VLLM_RS_HTTP_PORT="${VLLM_RS_HTTP_PORT:-8100}"
-VLLM_GRPC_PORT="${VLLM_GRPC_PORT:-50051}"
+VLLM_GRPC_PORT="${VLLM_GRPC_PORT:-30001}"
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
 export DYN_LORA_ENABLED=true

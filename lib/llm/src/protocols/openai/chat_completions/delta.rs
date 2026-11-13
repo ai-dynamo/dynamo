@@ -53,6 +53,7 @@ pub struct DeltaGenerator {
     /// Choice indices for which the assistant role has already been emitted.
     emitted_role_choices: HashSet<u32>,
     suppress_top_logprobs: bool,
+    tool_call_eos_enabled: bool,
     /// Whether the unary response should include prompt logprobs at its root.
     should_return_prompt_logprobs: bool,
     /// Prompt logprobs may arrive before the terminal backend delta.
@@ -71,9 +72,15 @@ impl DeltaGenerator {
             service_tier: None,
             emitted_role_choices: HashSet::new(),
             suppress_top_logprobs: false,
+            tool_call_eos_enabled: false,
             should_return_prompt_logprobs: false,
             prompt_logprobs: None,
         }
+    }
+
+    /// Only the installed native turn grammar permits implicit tool termination.
+    pub(crate) fn enable_tool_call_eos(&mut self, enabled: bool) {
+        self.tool_call_eos_enabled = enabled;
     }
 
     /// Returns the request tracker. Tracking is enabled. For sharing with PreprocessedRequest.
@@ -182,6 +189,7 @@ impl DeltaGenerator {
         // all intermediate chunks should have usage: null
         // The final usage chunk will be sent separately with empty choices
         NvCreateChatCompletionStreamResponse {
+            message_boundary: None,
             inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                 id: self.state.id().to_string(),
                 object: self.state.object().to_string(),
@@ -201,6 +209,7 @@ impl DeltaGenerator {
             prompt_logprobs: None,
             llm_metrics: None,
             tool_call_completion: Vec::new(),
+            model_eos: Vec::new(),
         }
     }
 
@@ -213,6 +222,7 @@ impl DeltaGenerator {
         let usage = self.get_usage();
 
         NvCreateChatCompletionStreamResponse {
+            message_boundary: None,
             inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                 id: self.state.id().to_string(),
                 object: self.state.object().to_string(),
@@ -227,6 +237,7 @@ impl DeltaGenerator {
             prompt_logprobs: None,
             llm_metrics: None,
             tool_call_completion: Vec::new(),
+            model_eos: Vec::new(),
         }
     }
 
@@ -257,6 +268,18 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
         &mut self,
         delta: crate::protocols::common::llm_backend::BackendOutput,
     ) -> anyhow::Result<NvCreateChatCompletionStreamResponse> {
+        if let Err(error) = self
+            .state
+            .options()
+            .response_fields
+            .validate_metadata_upload_result(
+                delta.finish_reason.as_ref(),
+                delta.engine_data.as_deref(),
+            )
+        {
+            self.state.tracker_ref().record_finish();
+            return Err(error);
+        }
         self.state.update_usage_from_backend_output(&delta);
 
         let logprobs = self.create_logprobs(
@@ -289,6 +312,9 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
         // Create the streaming response.
         let index = delta.index.unwrap_or(0);
         let mut stream_response = self.create_choice(index, delta.text, finish_reason, logprobs);
+        if self.tool_call_eos_enabled && delta.finish_reason == Some(common::FinishReason::EoS) {
+            stream_response.model_eos.push(index);
+        }
 
         // Record finish for timing/ITL accounting even when timing is not returned to the client.
         // Kept at call site because it's a side effect on the tracker — not a gating decision.
@@ -305,8 +331,9 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
         if self.prompt_logprobs.is_none()
             && (include_root_prompt_logprobs || include_nvext_prompt_logprobs)
         {
-            self.prompt_logprobs =
-                common::llm_backend::prompt_logprobs_from_engine_data(delta.engine_data.as_ref())?;
+            self.prompt_logprobs = common::llm_backend::prompt_logprobs_from_engine_data(
+                delta.engine_data.as_deref(),
+            )?;
         }
         let prompt_logprobs_payload = finish_reason
             .is_some()
@@ -332,7 +359,7 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
                 .build_response_nvext(NvExtResponseInput {
                     tracker: Some(self.state.tracker_ref()),
                     finish_reason: delta.finish_reason.as_ref(),
-                    engine_data: delta.engine_data,
+                    engine_data: delta.engine_data.map(|data| *data),
                     stop_reason,
                     completion_token_ids: Some(completion_token_ids_slice),
                     prompt_logprobs: nvext_prompt_logprobs,
@@ -428,6 +455,27 @@ mod tests {
     }
 
     #[test]
+    fn model_eos_requires_an_installed_turn_grammar() {
+        for (enabled, reason) in [
+            (false, common::FinishReason::EoS),
+            (true, common::FinishReason::EoS),
+            (true, common::FinishReason::Stop),
+            (true, common::FinishReason::Length),
+            (true, common::FinishReason::Cancelled),
+        ] {
+            let mut generator = create_test_request().response_generator("eos".into());
+            generator.enable_tool_call_eos(enabled);
+            let mut output = final_backend_output();
+            output.finish_reason = Some(reason.clone());
+            let response = generator.choice_from_postprocessor(output).unwrap();
+            assert_eq!(
+                response.model_eos.contains(&0),
+                enabled && reason == common::FinishReason::EoS
+            );
+        }
+    }
+
+    #[test]
     fn test_enable_usage_for_nonstreaming_enables_usage() {
         // Test that non-streaming requests get usage enabled
         let mut request = create_test_request();
@@ -486,9 +534,9 @@ mod tests {
             disaggregated_params: None,
             worker_trace_link: None,
             // routed_experts rides the engine's opaque passthrough.
-            engine_data: Some(serde_json::json!({
+            engine_data: Some(Box::new(serde_json::json!({
                 "routed_experts": {"layer_0": [1, 3]}
-            })),
+            }))),
             encoder_result: None,
             routing_data: None,
             jailed_text: None,
@@ -811,11 +859,11 @@ mod tests {
             disaggregated_params: None,
             encoder_result: None,
             worker_trace_link: None,
-            engine_data: Some(serde_json::json!({
+            engine_data: Some(Box::new(serde_json::json!({
                 "kv_transfer_time_ms": 12.3,
                 "disaggregated_kv_transfer_time_ms": 8.1,
                 "prefill_compute_time_ms": 45.6
-            })),
+            }))),
             routing_data: None,
             jailed_text: None,
         }
@@ -834,6 +882,46 @@ mod tests {
             .expect("choice generation");
 
         assert!(response.nvext.is_none());
+    }
+
+    #[test]
+    fn metadata_upload_chat_result_is_opaque_and_required() {
+        let nvext = serde_json::from_value(serde_json::json!({"metadata_upload": {"kind": "generation_artifact", "contents": [], "mode": "inline_base64"}})).unwrap();
+        let request = make_request_with_nvext(nvext);
+        let mut generator = request.response_generator("artifact-result".into());
+        assert!(generator.tracker().total_time_ms().is_none());
+        assert!(
+            generator
+                .choice_from_postprocessor(final_backend_output())
+                .is_err()
+        );
+        assert!(generator.tracker().total_time_ms().is_some());
+        let mut output = final_backend_output();
+        let result = serde_json::json!({"kind": "generation_artifact", "mode": "inline_base64", "inline": {"encoding": "base64", "data": "AQI="}, "backend_specific": {"a": [1, 2]}});
+        output.engine_data = Some(Box::new(serde_json::json!({"metadata_upload": result})));
+        let response = generator.choice_from_postprocessor(output).unwrap();
+        assert_eq!(response.nvext.unwrap()["metadata_upload"], result);
+
+        let mut malformed = final_backend_output();
+        malformed.engine_data = Some(Box::new(
+            serde_json::json!({"metadata_upload": {"kind": "generation_artifact", "mode": {"inline_base64": null}}}),
+        ));
+        assert!(
+            request
+                .response_generator("artifact-malformed".into())
+                .choice_from_postprocessor(malformed)
+                .is_err()
+        );
+
+        let mut cancelled = final_backend_output();
+        cancelled.finish_reason = Some(common::FinishReason::Cancelled);
+        cancelled.engine_data = None;
+        let response = request
+            .response_generator("artifact-cancelled".into())
+            .choice_from_postprocessor(cancelled)
+            .expect("cancellation must not require an artifact receipt");
+        let wire = serde_json::to_value(response).unwrap();
+        assert_eq!(wire["choices"][0]["finish_reason"], "stop");
     }
 
     #[tokio::test]
@@ -870,9 +958,9 @@ mod tests {
 
             let mut partial_output = final_backend_output();
             partial_output.finish_reason = None;
-            partial_output.engine_data = Some(serde_json::json!({
+            partial_output.engine_data = Some(Box::new(serde_json::json!({
                 "prompt_logprobs": expected.clone()
-            }));
+            })));
             let partial_response = generator
                 .choice_from_postprocessor(partial_output)
                 .expect("partial choice generation");
@@ -936,7 +1024,8 @@ mod tests {
         assert!(absent.prompt_logprobs.is_none());
 
         let mut invalid_output = final_backend_output();
-        invalid_output.engine_data = Some(serde_json::json!({"prompt_logprobs": "invalid"}));
+        invalid_output.engine_data =
+            Some(Box::new(serde_json::json!({"prompt_logprobs": "invalid"})));
         let error = request
             .response_generator("req-prompt-logprobs-invalid".to_string())
             .choice_from_postprocessor(invalid_output)
@@ -946,6 +1035,67 @@ mod tests {
                 .to_string()
                 .contains("invalid prompt_logprobs payload")
         );
+    }
+
+    #[tokio::test]
+    async fn test_python_prompt_logprobs_survive_aggregation_but_not_sse() {
+        let payload = serde_json::json!([
+            null,
+            {"17": {"logprob": -0.25, "rank": 1, "decoded_token": " hello"}}
+        ]);
+        let mut wire = serde_json::json!({
+            "data": {
+                "id": "python-chat",
+                "object": "chat.completion.chunk",
+                "created": 0,
+                "model": "test-model",
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]
+            }
+        });
+
+        for include_payload in [false, true] {
+            if include_payload {
+                wire["data"]["prompt_logprobs"] = payload.clone();
+            }
+            let chunk: crate::protocols::Annotated<NvCreateChatCompletionStreamResponse> =
+                serde_json::from_value(wire.clone()).expect("deserialize Python chunk");
+            let data = chunk.data.as_ref().expect("chunk data");
+            assert_eq!(data.prompt_logprobs.is_some(), include_payload);
+            assert!(
+                serde_json::to_value(data)
+                    .expect("serialize SSE chunk")
+                    .get("prompt_logprobs")
+                    .is_none()
+            );
+
+            let response = crate::protocols::openai::chat_completions::DeltaAggregator::apply(
+                futures::stream::iter(vec![chunk]),
+                crate::protocols::openai::ParsingOptions::default(),
+            )
+            .await
+            .expect("aggregate Python chunk");
+            let response = serde_json::to_value(response).expect("serialize unary response");
+            if include_payload {
+                assert_eq!(response["prompt_logprobs"], payload);
+            } else {
+                assert!(response.get("prompt_logprobs").is_none());
+            }
+        }
+
+        for invalid in [
+            serde_json::json!("invalid"),
+            serde_json::json!([{"not-a-token": {"logprob": -0.25}}]),
+            serde_json::json!([{"-1": {"logprob": -0.25}}]),
+            serde_json::json!([{"4294967296": {"logprob": -0.25}}]),
+        ] {
+            wire["data"]["prompt_logprobs"] = invalid;
+            assert!(
+                serde_json::from_value::<
+                    crate::protocols::Annotated<NvCreateChatCompletionStreamResponse>,
+                >(wire.clone())
+                .is_err()
+            );
+        }
     }
 
     #[test]

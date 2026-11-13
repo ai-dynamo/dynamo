@@ -3,8 +3,9 @@
 #[path = "../tests/support/mod.rs"]
 mod support;
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
-use dynamo_custom_policy_builtin::default_policy;
-use dynamo_kv_router::{KvRouterConfig, WorkerSelector};
+use dynamo_kv_router::plugins::prelude::*;
+use dynamo_router_policies::default_policy;
+use dynamo_scheduler::host::{WorkerKvTransferKeysExt, WorkerSelector};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
@@ -61,9 +62,11 @@ fn bench(c: &mut Criterion) {
                 overlap_score_credit_decay: decay,
                 ..Default::default()
             };
-            let reference =
-                dynamo_kv_router::DefaultWorkerSelector::new(Some(config.clone()), "prefill");
-            let plugin = default_policy(config, "prefill");
+            let reference = dynamo_scheduler::host::DefaultWorkerSelector::new(
+                Some(SelectionConfig::from(&config)),
+                "prefill",
+            );
+            let plugin = default_policy(SelectionConfig::from(&config), "prefill");
             let reference_allocs = allocations(|| {
                 black_box(
                     reference
@@ -102,19 +105,70 @@ fn bench(c: &mut Criterion) {
         }
         group.finish();
     }
+
+    // Selection-trace capture (`DYN_REQUEST_TRACE_RECORDS=router_selection`): the disabled arm
+    // is the production default and must match `plugin` above; `top16` is the default capture.
+    let mut group = c.benchmark_group("default_selection/trace");
+    group
+        .warm_up_time(Duration::from_millis(200))
+        .measurement_time(Duration::from_millis(500))
+        .sample_size(30)
+        .nresamples(1_000);
+    for count in [64, 1024, 4096] {
+        for (arm, spec) in [
+            ("off", None),
+            ("top16", Some(SelectionTraceSpec { top_k: 16 })),
+            ("all", Some(SelectionTraceSpec { top_k: 0 })),
+        ] {
+            let (workers, request) = support::fixture(count, 2048);
+            let plugin = default_policy(
+                SelectionConfig::from(&KvRouterConfig {
+                    router_temperature: 0.0,
+                    ..Default::default()
+                }),
+                "prefill",
+            );
+            let allocs = allocations(|| {
+                black_box(
+                    plugin
+                        .select_worker_traced(
+                            support::selection_input(&workers, &request, 16),
+                            spec,
+                        )
+                        .unwrap(),
+                );
+            });
+            eprintln!(
+                "allocations per 100 warm selections: trace={arm} workers={count} plugin={allocs}"
+            );
+            group.bench_function(BenchmarkId::new(arm, count), |b| {
+                b.iter(|| {
+                    black_box(
+                        plugin
+                            .select_worker_traced(
+                                support::selection_input(&workers, &request, 16),
+                                spec,
+                            )
+                            .unwrap(),
+                    )
+                })
+            });
+        }
+    }
+    group.finish();
 }
 
 struct LoadScorer(f64);
-impl dynamo_kv_router::WorkerScorer for LoadScorer {
-    fn required_worker_inputs(&self) -> dynamo_kv_router::WorkerInputs {
-        dynamo_kv_router::WorkerInputs::LOAD
+impl dynamo_kv_router::plugins::prelude::WorkerScorer for LoadScorer {
+    fn required_worker_inputs(&self) -> dynamo_kv_router::plugins::prelude::WorkerInputs {
+        dynamo_kv_router::plugins::prelude::WorkerInputs::LOAD
     }
     fn score(
-        &mut self,
-        _: &dynamo_kv_router::WorkerSelectionContext<'_>,
-        candidates: dynamo_kv_router::WorkerCandidates<'_>,
+        &self,
+        _: &dynamo_kv_router::plugins::prelude::WorkerSelectionContext<'_>,
+        candidates: dynamo_kv_router::plugins::prelude::WorkerCandidates<'_>,
         costs: &mut [f64],
-    ) -> Result<(), dynamo_kv_router::WorkerSelectionPolicyError> {
+    ) -> Result<(), dynamo_kv_router::plugins::prelude::WorkerSelectionPolicyError> {
         for (candidate, cost) in candidates.iter().zip(costs) {
             *cost = candidate.load().unwrap().active_requests() as f64 * self.0;
         }
@@ -123,12 +177,12 @@ impl dynamo_kv_router::WorkerScorer for LoadScorer {
 }
 
 struct MinimumPicker;
-impl dynamo_kv_router::WorkerPicker for MinimumPicker {
+impl dynamo_kv_router::plugins::prelude::WorkerPicker for MinimumPicker {
     fn pick(
-        &mut self,
-        _: &dynamo_kv_router::WorkerSelectionContext<'_>,
-        input: dynamo_kv_router::WorkerInputView<'_>,
-    ) -> Result<usize, dynamo_kv_router::WorkerSelectionPolicyError> {
+        &self,
+        _: &dynamo_kv_router::plugins::prelude::WorkerSelectionContext<'_>,
+        input: dynamo_kv_router::plugins::prelude::WorkerInputView<'_>,
+    ) -> Result<usize, dynamo_kv_router::plugins::prelude::WorkerSelectionPolicyError> {
         Ok(input
             .candidates()
             .iter()
@@ -152,11 +206,11 @@ fn stacked(c: &mut Criterion) {
             let scorers = (0..scorer_count)
                 .map(|index| {
                     Box::new(LoadScorer((index + 1) as f64))
-                        as Box<dyn dynamo_kv_router::WorkerScorer>
+                        as Box<dyn dynamo_kv_router::plugins::prelude::WorkerScorer>
                 })
                 .collect();
-            let policy = dynamo_kv_router::WorkerSelectionPolicy::new(
-                KvRouterConfig::default(),
+            let policy = dynamo_kv_router::plugins::prelude::WorkerSelectionPolicy::new(
+                SelectionConfig::default(),
                 "prefill",
                 scorers,
                 Box::new(MinimumPicker),
@@ -196,16 +250,17 @@ fn shared_cache(c: &mut Criterion) {
                     if !tier_matches {
                         request.overlap.tier_overlap_blocks = Default::default();
                     }
-                    request.shared_cache_hits =
-                        Some(dynamo_kv_router::SharedCacheHits::from_ranges(
+                    request.shared_cache_hits = Some(
+                        dynamo_kv_router::plugins::prelude::SharedCacheHits::from_ranges(
                             (0..range_count).map(|i| i * 4..i * 4 + 2).collect(),
-                        ));
+                        ),
+                    );
                     let policy = default_policy(
-                        KvRouterConfig {
+                        SelectionConfig::from(&KvRouterConfig {
                             shared_cache_multiplier: Some(credit),
                             overlap_score_credit_decay: 0.6,
                             ..Default::default()
-                        },
+                        }),
                         "prefill",
                     );
                     let mut select = || {
@@ -228,5 +283,125 @@ fn shared_cache(c: &mut Criterion) {
     }
 }
 
-criterion_group!(benches, bench, stacked, shared_cache);
+/// A KVCR-style worker: hint capable, a source, and in an island of eight.
+/// Like the selection service's config, it caches its hashed keys.
+struct HintWorker {
+    topology: std::collections::HashMap<String, String>,
+    keys: dynamo_kv_router::plugins::prelude::WorkerKvTransferKeysCache,
+}
+impl dynamo_kv_router::plugins::prelude::WorkerConfigLike for HintWorker {
+    fn data_parallel_start_rank(&self) -> u32 {
+        0
+    }
+    fn data_parallel_size(&self) -> u32 {
+        2
+    }
+    fn max_num_batched_tokens(&self) -> Option<u64> {
+        None
+    }
+    fn total_kv_blocks(&self) -> Option<u64> {
+        Some(16384)
+    }
+    fn kv_hint_transfer_metadata_for_dp_rank(
+        &self,
+        _dp_rank: u32,
+    ) -> Option<dynamo_kv_router::plugins::prelude::KvHintTransferWorkerMetadata<'_>> {
+        Some(
+            dynamo_kv_router::plugins::prelude::KvHintTransferWorkerMetadata {
+                worker_type: "prefill",
+                source_control_endpoint: Some("tcp://worker:23280"),
+            },
+        )
+    }
+    fn topology_domains(&self) -> Option<&std::collections::HashMap<String, String>> {
+        Some(&self.topology)
+    }
+    fn kv_transfer_domain(&self) -> Option<&str> {
+        Some("rdma-island")
+    }
+    fn kv_transfer_keys(
+        &self,
+    ) -> std::borrow::Cow<'_, dynamo_kv_router::plugins::prelude::WorkerKvTransferKeys> {
+        std::borrow::Cow::Borrowed(self.keys.get_or_init(|| WorkerKvTransferKeys::of(self)))
+    }
+}
+
+// Every worker rank is a fetch source (S = 2W). `none` carries no transfer
+// candidates (no KVCR). `credit0.5` is the worst case: every source holds a
+// different prefix, so the summary keeps nearly all of them. In
+// `credit0.5_shared_prompt` every rank holds the same system prompt and one
+// worker in eight also holds a longer session prefix, so sources no longer
+// than every rank's own prefix are skipped.
+fn kv_transfer(c: &mut Criterion) {
+    for (name, credit, candidates, shared_prompt) in [
+        ("none", 0.5, false, false),
+        ("credit0", 0.0, true, false),
+        ("credit0.5", 0.5, true, false),
+        ("credit0.5_shared_prompt", 0.5, true, true),
+    ] {
+        let mut group = c.benchmark_group(format!("kv_transfer/{name}"));
+        group
+            .warm_up_time(Duration::from_millis(200))
+            .measurement_time(Duration::from_millis(500))
+            .sample_size(30)
+            .nresamples(1_000);
+        for count in [256, 1024, 4096] {
+            let (_, mut request) = support::fixture(count, 2048);
+            let workers: std::collections::HashMap<u64, HintWorker> = (0..count as u64)
+                .map(|id| {
+                    let island = format!("island-{}", id / 8);
+                    let topology = [("rdma-island".to_string(), island)].into();
+                    let keys = Default::default();
+                    (id, HintWorker { topology, keys })
+                })
+                .collect();
+            if shared_prompt {
+                for blocks in request.overlap.tier_overlap_blocks.device.values_mut() {
+                    *blocks = 16;
+                }
+            }
+            if candidates {
+                let mut sources: Vec<_> = request
+                    .overlap
+                    .tier_overlap_blocks
+                    .device
+                    .iter()
+                    .map(|(&worker, &blocks)| {
+                        let session = shared_prompt && worker.worker_id % 8 == 0;
+                        (worker.into(), if session { 40 } else { blocks + 2 })
+                    })
+                    .collect();
+                sources.sort_unstable();
+                request.kv_transfer_candidates =
+                    Some(dynamo_kv_router::plugins::prelude::KvTransferCandidates {
+                        block_hashes: (0..128)
+                            .map(dynamo_kv_router::plugins::prelude::ExternalSequenceBlockHash)
+                            .collect(),
+                        owner_prefix_blocks: sources,
+                        source_intervals: Vec::new(),
+                        routing_snapshot: None,
+                    });
+            }
+            let policy = default_policy(
+                SelectionConfig::from(&KvRouterConfig {
+                    shared_cache_multiplier: Some(credit),
+                    overlap_score_credit_decay: 0.6,
+                    ..Default::default()
+                }),
+                "prefill",
+            );
+            let mut select = || {
+                black_box(
+                    policy
+                        .select_worker(support::selection_input(&workers, &request, 16))
+                        .unwrap(),
+                );
+            };
+            group.bench_function(BenchmarkId::new("plugin", count), |b| b.iter(&mut select));
+        }
+        group.finish();
+    }
+}
+
+criterion_group!(benches, bench, stacked, shared_cache, kv_transfer);
 criterion_main!(benches);

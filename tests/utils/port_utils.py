@@ -46,6 +46,11 @@ class ServicePorts:
     # Per-worker VLLM_NIXL_SIDE_CHANNEL_PORT values; unique per deployment so
     # parallel (xdist) deployments on one host don't collide.
     nixl_side_channel_ports: list[int] = field(default_factory=list)
+    # Per-worker HTTP and gRPC listeners of an out-of-process engine (sidecar
+    # launches). Empty unless the test carries @pytest.mark.engine_ports.
+    engine_http_ports: list[int] = field(default_factory=list)
+    engine_grpc_ports: list[int] = field(default_factory=list)
+    engine_kv_replay_ports: list[int] = field(default_factory=list)
 
 
 def _load_port_registry() -> dict:

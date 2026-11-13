@@ -15,11 +15,11 @@
 
 """Post-process api-reference.md after crd-ref-docs generation.
 
-crd-ref-docs generates anchors solely from type names, so types that exist in both
+crd-ref-docs generates anchors solely from type names, so types that exist in multiple
 API versions get identical anchors (e.g. #dynamographdeploymentrequest). In standard
-Markdown renderers the first occurrence wins, meaning v1beta1 links resolve to the
-v1alpha1 section. This script prepends "v1beta1 " to the affected headings in the
-v1beta1 section. crd-ref-docs-config.yaml supplies package-aware links to them.
+Markdown renderers the first occurrence wins. This script gives duplicate v1beta1 and
+v1beta2 headings version-specific anchors and rewrites same-package links to them.
+crd-ref-docs-config.yaml supplies package-aware links to v1beta1 types.
 
 crd-ref-docs also renders links for some external dangerous types that are referenced
 from the CRD but not emitted as sections. Strip those links so the published
@@ -33,7 +33,11 @@ import re
 import sys
 from pathlib import Path
 
-TYPE_HEADING_RE = re.compile(r"^####\s+(?:v1beta1\s+)?(?P<name>\S+)\s*$")
+TYPE_HEADING_RE = re.compile(
+    r"^####\s+(?:(?:v1beta1|v1beta2)\s+)?(?P<name>\S+)\s*$",
+    re.MULTILINE,
+)
+PACKAGE_HEADING_RE = re.compile(r"^##\s+(?P<name>\S+)\s*$", re.MULTILINE)
 DCD_SPEC = "DynamoComponentDeploymentSpec"
 DGD_ONLY_DCD_REFERENCES = {
     "DynamoComponentDeploymentSharedSpec",
@@ -42,6 +46,59 @@ DGD_ONLY_DCD_REFERENCES = {
     "LPXConfig",
 }
 DCD_REFERENCE_RE = re.compile(r"^- \[DynamoComponentDeploymentSpec\]\(#[^)]+\)\s*$")
+
+
+def prefix_duplicate_type_anchors(
+    markdown: str, target_package: str, prefix: str
+) -> str:
+    """Give types duplicated from earlier API packages package-specific anchors."""
+    package_matches = list(PACKAGE_HEADING_RE.finditer(markdown))
+    target_index = next(
+        (
+            index
+            for index, match in enumerate(package_matches)
+            if match.group("name") == target_package
+        ),
+        None,
+    )
+    if target_index is None:
+        return markdown
+
+    target_match = package_matches[target_index]
+    target_end = (
+        package_matches[target_index + 1].start()
+        if target_index + 1 < len(package_matches)
+        else len(markdown)
+    )
+    target_part = markdown[target_match.start() : target_end]
+    target_types = {
+        match.group("name") for match in TYPE_HEADING_RE.finditer(target_part)
+    }
+
+    earlier_types = set()
+    for index, package_match in enumerate(package_matches[:target_index]):
+        if not package_match.group("name").startswith("nvidia.com/"):
+            continue
+        package_end = package_matches[index + 1].start()
+        package_part = markdown[package_match.start() : package_end]
+        earlier_types.update(
+            match.group("name") for match in TYPE_HEADING_RE.finditer(package_part)
+        )
+
+    for type_name in sorted(target_types & earlier_types):
+        target_part = re.sub(
+            rf"^(####\s+)(?:{re.escape(prefix)}\s+)?{re.escape(type_name)}(\s*)$",
+            rf"\1{prefix} {type_name}\2",
+            target_part,
+            flags=re.MULTILINE,
+        )
+        anchor = type_name.lower()
+        target_part = target_part.replace(
+            f"](#{anchor})",
+            f"](#{prefix}-{anchor})",
+        )
+
+    return markdown[: target_match.start()] + target_part + markdown[target_end:]
 
 
 def project_standalone_dcd_schema(markdown: str) -> str:
@@ -99,11 +156,23 @@ if idx == -1:
     sys.exit(0)
 
 alpha_part = content[:idx]
-beta_part = content[idx:]
+
+# Keep the v1beta1 heading rewrite inside that package. The generated reference
+# now contains later API packages with the same Go type names, and renaming their
+# headings would recreate ambiguous or missing cross-version anchors.
+next_package_idx = content.find("\n## ", idx + len(marker))
+if next_package_idx == -1:
+    beta_part = content[idx:]
+    remaining_packages = ""
+else:
+    beta_part = content[idx:next_package_idx]
+    remaining_packages = content[next_package_idx:]
 
 # Match the package-qualified links in crd-ref-docs-config.yaml.
 duplicate_types = [
     "DynamoGraphDeploymentRequest",
+    "DynamoGraphDeploymentRequestNativeSpec",
+    "DynamoGraphDeploymentRequestNativeStatus",
     "DynamoGraphDeploymentRequestSpec",
     "DynamoGraphDeploymentRequestStatus",
     "DynamoGraphDeploymentStatus",
@@ -120,8 +189,10 @@ for t in duplicate_types:
         flags=re.MULTILINE,
     )
 
-content = alpha_part + beta_part
+content = alpha_part + beta_part + remaining_packages
 content = project_standalone_dcd_schema(content)
+
+content = prefix_duplicate_type_anchors(content, "nvidia.com/v1beta2", "v1beta2")
 
 external_types_without_sections = [
     "EndpointPickerConfig",

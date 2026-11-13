@@ -28,14 +28,13 @@ func TestProjectModelV3HybridBuildProjectsSelectedPropSyncWithoutGlobalCoupling(
 
 	t.Log("Project hybrid while keeping manifest-selected links independent of global prop sync")
 	intent := ModelProjectionInput{
-		Pipeline:      PipelineLPX,
-		Models:        []string{"default"},
-		BuildSnapshot: normalizeTestSnapshot(t, acquireTestSnapshot(t, buildDir)),
+		Pipeline: PipelineHybrid,
+		Models:   []string{"default"},
+		Build:    acquireTestSnapshot(t, buildDir),
 	}
 	projectionBatch, err := appendModelProjections(nil, intent)
 	require.NoError(t, err)
 	projection := projectionBatch[0]
-	require.Equal(t, BuildCompilationModeHybrid, projection.configuredBuild.CompilationMode)
 	digest, err := workloadSetDigest([]*ModelProjection{projection})
 	require.NoError(t, err)
 	require.Equal(t, projection.Digest(), digest, "one model is the aggregate digest base case")
@@ -75,7 +74,7 @@ func TestProjectModelV3HybridBuildProjectsSelectedPropSyncWithoutGlobalCoupling(
 	t.Log("Remove the manifest's selected chain without synthesizing hybrid connectors")
 	fixture.selectedPropSyncChains = nil
 	writeTestV3CapnpManifest(t, buildDir, fixture)
-	intent.BuildSnapshot = normalizeTestSnapshot(t, acquireTestSnapshot(t, buildDir))
+	intent.Build = acquireTestSnapshot(t, buildDir)
 	projectionBatch, err = appendModelProjections(nil, intent)
 	require.NoError(t, err)
 	projection = projectionBatch[0]
@@ -85,46 +84,45 @@ func TestProjectModelV3HybridBuildProjectsSelectedPropSyncWithoutGlobalCoupling(
 func TestProjectModelV3RejectsInvalidPropSyncChains(t *testing.T) {
 	t.Log("Define invalid selected chains on otherwise valid HX builds")
 	tests := []struct {
-		name        string
-		partitions  int
-		numLPUNodes uint32
-		chains      [][]uint32
-		wantErr     string
+		name       string
+		partitions int
+		chains     [][]uint32
+		wantErr    string
 	}{
 		{
 			name:       "selected prop-sync chain references missing partition",
-			partitions: 1, numLPUNodes: 2, chains: [][]uint32{{1, 2}},
+			partitions: 1, chains: [][]uint32{{1, 2}},
 			wantErr: "references missing partition ID 2",
 		},
 		{
 			name:       "selected prop-sync chain is not forward-adjacent",
-			partitions: 3, numLPUNodes: 6, chains: [][]uint32{{1, 3}},
+			partitions: 3, chains: [][]uint32{{1, 3}},
 			wantErr: "is not forward-adjacent at partition ID 3",
 		},
 		{
 			name:       "missing edge evidence precedes overlap validation",
-			partitions: 2, numLPUNodes: 4, chains: [][]uint32{{1, 1}, {1, 3}},
+			partitions: 2, chains: [][]uint32{{1, 1}, {1, 3}},
 			wantErr: "selected V3 prop-sync chain 1 references missing partition ID 3",
 		},
 		{
 			name:       "selected prop-sync chains overlap",
-			partitions: 3, numLPUNodes: 6, chains: [][]uint32{{1, 2}, {2, 3}},
+			partitions: 3, chains: [][]uint32{{1, 2}, {2, 3}},
 			wantErr: "overlaps partition ID 2",
 		},
 		{
 			name:       "selected prop-sync chain repeats a partition",
-			partitions: 1, numLPUNodes: 2, chains: [][]uint32{{1, 1}},
+			partitions: 1, chains: [][]uint32{{1, 1}},
 			wantErr: "overlaps partition ID 1",
 		},
 		{
 			name:       "selected prop-sync chain is incomplete",
-			partitions: 3, numLPUNodes: 6, chains: [][]uint32{{1, 2}},
+			partitions: 3, chains: [][]uint32{{1, 2}},
 			wantErr: "complete adjacent prop-sync connector chain",
 		},
 		{
 			name:       "LPU-only partitions require a complete prop-sync chain",
-			partitions: 2, numLPUNodes: 2,
-			wantErr: "complete adjacent prop-sync connector chain",
+			partitions: 2,
+			wantErr:    "complete adjacent prop-sync connector chain",
 		},
 	}
 
@@ -137,13 +135,12 @@ func TestProjectModelV3RejectsInvalidPropSyncChains(t *testing.T) {
 				partition.id = uint32(id)
 				fixture.partitions = append(fixture.partitions, partition)
 			}
-			fixture.numLPUNodes = test.numLPUNodes
 			fixture.selectedPropSyncChains = test.chains
-			normalized := normalizeTestSnapshot(t, acquireTestSnapshot(t, writeCompilerFixture(t, fixture)))
+			normalized := acquireTestSnapshot(t, writeCompilerFixture(t, fixture))
 
 			t.Log("Reject the selected chain at the projector boundary")
 			_, err := appendModelProjections(nil, ModelProjectionInput{
-				Pipeline: PipelineSingle, Models: []string{"default"}, BuildSnapshot: normalized,
+				Pipeline: PipelineSingle, Models: []string{"default"}, Build: normalized,
 			})
 			require.ErrorContains(t, err, test.wantErr)
 		})
@@ -156,12 +153,11 @@ func TestProjectModelV3ProjectsSelectedPropSyncChain(t *testing.T) {
 	second := fixture.partitions[0]
 	second.id = 2
 	fixture.partitions = append(fixture.partitions, second)
-	fixture.numLPUNodes = 4
 	fixture.selectedPropSyncChains = [][]uint32{{1, 2}}
 	buildDir := writeCompilerFixture(t, fixture)
 	snapshot := acquireTestSnapshot(t, buildDir)
 	intent := ModelProjectionInput{
-		Pipeline: PipelineSingle, Models: []string{"default"}, BuildSnapshot: normalizeTestSnapshot(t, snapshot),
+		Pipeline: PipelineSingle, Models: []string{"default"}, Build: snapshot,
 	}
 
 	t.Log("Project the selected chain through the LPU-only runtime")
@@ -206,7 +202,7 @@ func TestProjectModelV3ProjectsSelectedPropSyncChain(t *testing.T) {
 
 	t.Log("Reject a multi-partition LPU-only build without its complete manifest-selected chain")
 	fixture.selectedPropSyncChains = nil
-	intent.BuildSnapshot = normalizeTestSnapshot(t, acquireTestSnapshot(t, writeCompilerFixture(t, fixture)))
+	intent.Build = acquireTestSnapshot(t, writeCompilerFixture(t, fixture))
 	_, err = appendModelProjections(nil, intent)
 	require.ErrorContains(t, err, "LPU-only workloads require a complete adjacent prop-sync connector chain")
 
@@ -214,10 +210,9 @@ func TestProjectModelV3ProjectsSelectedPropSyncChain(t *testing.T) {
 	third := fixture.partitions[0]
 	third.id, third.topology = 3, "other-opaque-hx-topology"
 	fixture.partitions = append(fixture.partitions, third)
-	fixture.numLPUNodes = 6
 	fixture.selectedPropSyncChains = [][]uint32{{1, 2, 3}}
 	writeTestV3CapnpManifest(t, buildDir, fixture)
-	intent.BuildSnapshot = normalizeTestSnapshot(t, acquireTestSnapshot(t, buildDir))
+	intent.Build = acquireTestSnapshot(t, buildDir)
 	projectionBatch, err = appendModelProjections(nil, intent)
 	require.NoError(t, err)
 	projection = projectionBatch[0]
@@ -241,13 +236,12 @@ func TestProjectModelV3UsesMultiNodePropSyncBoundary(t *testing.T) {
 	fixture.partitions[0].partitionShape = []uint32{16, 2, 1, 1}
 	fixture.partitions[0].numChips = 32
 	fixture.partitions = append(fixture.partitions, second)
-	fixture.numLPUNodes = 3
 	fixture.selectedPropSyncChains = [][]uint32{{1, 2}}
 	buildDir := writeCompilerFixture(t, fixture)
 	snapshot := acquireTestSnapshot(t, buildDir)
 
 	t.Log("Project the multi-node prop-sync chain")
-	projection := projectTestBuild(t, normalizeTestSnapshot(t, snapshot), PipelineSingle)
+	projection := projectTestBuild(t, snapshot, PipelineSingle)
 
 	t.Log("Project logical connections from the source partition's final node")
 	spec := projection.RequestSpec(&MaterializationPlan{}, "agents")
@@ -263,19 +257,18 @@ func TestProjectModelV3UsesTopologyMetadataAndTracksManifestDigest(t *testing.T)
 	fixture.partitions[0].topology = v3HXTopologyFamily
 	fixture.partitions[0].topologyFamily = v3HXTopologyFamily
 	fixture.partitions[0].partitionShape = []uint32{16, 1, 1, 1}
-	fixture.numLPUNodes = 1
 	buildDir := writeCompilerFixture(t, fixture)
 	firstSnapshot := acquireTestSnapshot(t, buildDir)
 	intent := ModelProjectionInput{
-		Pipeline: PipelineSingle, Models: []string{"default"}, BuildSnapshot: normalizeTestSnapshot(t, firstSnapshot),
+		Pipeline: PipelineSingle, Models: []string{"default"}, Build: firstSnapshot,
 	}
 	firstBatch, err := appendModelProjections(nil, intent)
 	require.NoError(t, err)
 	first := firstBatch[0]
 
 	t.Log("Retain the acquired locator and exact single-partition allocation metadata")
-	require.Equal(t, "file://"+buildDir, intent.BuildSnapshot.build.Path)
-	require.Equal(t, intent.BuildSnapshot.build.Path, first.configuredBuild.Path)
+	require.Equal(t, "file://"+buildDir, intent.Build.path)
+	require.Equal(t, intent.Build.path, first.configuredBuild.path)
 	firstSpec := first.RequestSpec(&MaterializationPlan{}, "agents")
 	require.JSONEq(t, `{
 		"arch":"lp30",
@@ -291,10 +284,9 @@ func TestProjectModelV3UsesTopologyMetadataAndTracksManifestDigest(t *testing.T)
 	t.Log("Change the immutable manifest to a two-node topology and project again")
 	fixture.partitions[0].partitionShape = []uint32{16, 2, 1, 1}
 	fixture.partitions[0].numChips = 32
-	fixture.numLPUNodes = 2
 	writeTestV3CapnpManifest(t, buildDir, fixture)
 	secondSnapshot := acquireTestSnapshot(t, buildDir)
-	intent.BuildSnapshot = normalizeTestSnapshot(t, secondSnapshot)
+	intent.Build = secondSnapshot
 	secondBatch, err := appendModelProjections(nil, intent)
 	require.NoError(t, err)
 	second := secondBatch[0]
@@ -309,7 +301,6 @@ func TestProjectModelV3UsesTopologyMetadataAndTracksManifestDigest(t *testing.T)
 	require.Equal(t, []int64{16, 2, 1, 1}, *secondSpec.Partitions[0].Extent)
 	data := resolvedPartitionData([]*ModelProjection{second})
 	require.Equal(t, "part-1", data["partition_paths"])
-	require.Equal(t, v3HXTopologyFamily, data["topologies"])
 	require.Empty(t, firstSpec.PropSyncConnectors)
 	require.Empty(t, secondSpec.PropSyncConnectors)
 }
