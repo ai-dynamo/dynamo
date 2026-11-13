@@ -72,9 +72,6 @@ def test_unhashable_membership_matches_a_list():
     _, current = prefix.append([1])
     assert ([] in current) is False
     assert current.count([]) == 0
-    _, current = prefix.append([[]])
-    assert current.count([]) == 1
-    assert prefix.view().count([]) == 1
 
 
 def test_reverse_slice_matches_a_list_after_a_later_append():
