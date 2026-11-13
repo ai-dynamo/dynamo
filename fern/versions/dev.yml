@@ -425,6 +425,8 @@ navigation:
                     path: ../pages-dev/developer-guide/knowledge-base/modular-components/frontend/frontend-guide.md
                   - page: Python Route Extensions
                     path: ../pages-dev/developer-guide/knowledge-base/modular-components/frontend/python-route-extensions.md
+                  - page: Custom Chat Processors
+                    path: ../pages-dev/developer-guide/knowledge-base/modular-components/frontend/custom-chat-processors.md
                   - page: Tokenizer
                     path: ../pages-dev/developer-guide/knowledge-base/modular-components/frontend/tokenizer.md
                   - section: Tool Calling & Reasoning

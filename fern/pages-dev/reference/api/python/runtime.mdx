@@ -248,6 +248,26 @@ Fire the first-token signal so the framework can release any deferred ``engine.a
 
 [source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L577)
 
+<h4 id="api-dynamo-core-context-set-response-header">set_response_header</h4>
+
+```python
+set_response_header(name: str, value: str) -> bool
+```
+
+Set an HTTP response header from a frontend chat engine.
+
+Call it before the engine's first yield, or before it raises. Returns
+``False`` when this request's response cannot carry the header: the
+response is already committed (a streaming request without
+``DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS``, or a call after the first
+yield of one with it), or the request is not a ``/v1/chat/completions``
+request. Otherwise raises ``ValueError`` for a name or value that is
+not a valid header, or for a header the HTTP layer owns
+(``content-type``, ``content-length``, ``content-encoding``,
+``x-request-id``, hop-by-hop headers).
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L584)
+
 <h4 id="api-dynamo-core-context-trace-headers">trace_headers</h4>
 
 ```python
@@ -263,7 +283,7 @@ Build W3C trace headers for propagating to downstream inference engines.
 - `Optional[dict[str, str]]` — ``x-request-id``, ``request-id`` when upstream propagated them.
 - `Optional[dict[str, str]]` — Forward unchanged to the inference engine's ``trace_headers`` kwarg.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L624)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L638)
 
 <h4 id="api-dynamo-core-context-current-span">current_span</h4>
 
@@ -276,7 +296,7 @@ Handle on the framework's ``engine.generate`` span. Use it to ``set_attribute`` 
 Engines normally reach this through
 ``dynamo.common.backend.telemetry.current_span(context)``.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L636)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L650)
 
 <h4 id="api-dynamo-core-context-start-span">start_span</h4>
 
@@ -289,7 +309,7 @@ Open a child span under ``engine.generate`` with a dynamic name. The returned ``
 Engines normally reach this through
 ``dynamo.common.backend.telemetry.start_span(context, name)``.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L648)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L662)
 </Accordion>
 
 <Accordion id="api-dynamo-core-distributedruntime" title="DistributedRuntime (class)">
