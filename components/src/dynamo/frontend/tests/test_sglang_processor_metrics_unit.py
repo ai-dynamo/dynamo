@@ -474,7 +474,6 @@ def test_held_output_still_reports_continuous_usage(
     held = items[1:3]
     for count, item in zip([2, 3], held):
         if usage_while_held:
-            # A usage-only chunk keeps the running count on the wire.
             data = item["data"]
             assert data["choices"] == []
             assert data["usage"]["completion_tokens"] == count
