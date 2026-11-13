@@ -21,8 +21,8 @@ use clap::{Parser, ValueEnum};
 use dynamo_bench::kv_router_common::issuer::{
     parse_cpu_list, pin_current_thread_to_cpus, validate_cpu_partition,
 };
-use dynamo_kv_router::KvRouterConfig;
-use dynamo_kv_router::scheduling::policy_config::BusyThresholds;
+use dynamo_kv_router::config::KvRouterConfig;
+use dynamo_slot_tracker::host::BusyThresholds;
 use serde::Serialize;
 
 use corpus::{Corpus, Omitted, WorkloadParams};

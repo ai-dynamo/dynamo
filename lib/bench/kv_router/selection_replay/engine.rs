@@ -29,14 +29,14 @@ use anyhow::{Context, Result, bail, ensure};
 use dynamo_bench::kv_router_common::clock::BenchmarkClock;
 use dynamo_bench::kv_router_common::issuer::pin_current_thread;
 use dynamo_bench::kv_router_common::results::PercentileStats;
-use dynamo_kv_router::KvSchedulerError;
-use dynamo_kv_router::protocols::{
-    ActiveSequenceEvent, ActiveSequenceEventData, KvCacheEvent, RouterEvent, StorageTier,
+use dynamo_kv_events::event::{KvCacheEvent, RouterEvent};
+use dynamo_kv_events::residency::StorageTier;
+use dynamo_scheduler::host::{
+    AccountingAttribution, KvSchedulerError, PromptRequest, SelectionAdmission, SelectionError,
+    SelectionOperation, SelectionOutcome, SessionBinding,
 };
-use dynamo_kv_router::scheduling::queue::SchedulerBookingDescriptor;
-use dynamo_kv_router::services::selection::{
-    PromptRequest, SelectionAdmission, SelectionError, SelectionOperation, SelectionOutcome,
-    SessionBinding,
+use dynamo_slot_tracker::host::{
+    ActiveSequenceEvent, ActiveSequenceEventData, SchedulerBookingDescriptor,
 };
 use futures_util::FutureExt;
 use serde::Serialize;
@@ -987,6 +987,7 @@ async fn admit(shared: Arc<Shared>, index: usize, tokens: Vec<u32>, prompt: Prom
             .core()
             .run_selection(SelectionOperation {
                 key: shared.host.partition.key().clone(),
+                accounting_attribution: AccountingAttribution::default(),
                 prompt: request.view(),
                 router_config_override: None,
                 expected_output_tokens: None,

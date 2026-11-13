@@ -22,11 +22,13 @@
 
 use std::sync::Mutex;
 
-use dynamo_kv_router::protocols::{
-    BlockHashOptions, ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheRemoveData,
-    KvCacheStoreData, KvCacheStoredBlockData, LocalBlockHash, compute_block_hash_for_seq,
-    compute_seq_hash_for_block,
+use dynamo_kv_events::event::{
+    KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData,
 };
+use dynamo_kv_hashing::routing::{
+    BlockHashOptions, compute_block_hash_for_seq, compute_seq_hash_for_block,
+};
+use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
 use rustc_hash::FxHashMap;
 use serde::Serialize;
 

@@ -2348,6 +2348,7 @@ dependencies = [
  "dynamo-mocker",
  "dynamo-router-policies",
  "dynamo-router-protocol",
+ "dynamo-scheduler",
  "dynamo-slot-tracker",
  "dynamo-tokens",
  "flate2",

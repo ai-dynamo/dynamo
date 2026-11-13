@@ -18,8 +18,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use corpus::{Corpus, TraceFormat, WorkloadParams};
-use dynamo_kv_router::KvRouterConfig;
-use dynamo_kv_router::protocols::{KvCacheEvent, KvCacheEventData};
+use dynamo_kv_events::event::{KvCacheEvent, KvCacheEventData};
+use dynamo_kv_router::config::KvRouterConfig;
 use engine::{Action, Lifecycle, Limits, Mode, RunConfig};
 use host::{BenchHost, HostConfig, router_config, worker_request};
 use kv_cache::{KvCaches, decode_block_hashes};

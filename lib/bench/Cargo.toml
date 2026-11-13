@@ -68,10 +68,10 @@ router-bench = ["dynamo-kv-router/bench", "dynamo-kv-indexer/bench", "dynamo-slo
 # Must not enable `router-bench`: kv-router's `bench` feature changes the code under test.
 selection-replay = [
   "router-metrics",
-  "dynamo-kv-router/standalone-selection",
   "dep:blake3",
   "dep:dynamo-mocker",
   "dep:dynamo-router-policies",
+  "dep:dynamo-scheduler",
   "dep:futures-util",
   "dep:indicatif",
   "dep:libc",
@@ -223,6 +223,7 @@ dynamo-kv-indexer = { workspace = true }
 dynamo-kv-router = { workspace = true }
 dynamo-router-policies = { workspace = true, optional = true }
 dynamo-router-protocol = { workspace = true }
+dynamo-scheduler = { workspace = true, optional = true }
 dynamo-slot-tracker = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]

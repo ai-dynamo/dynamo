@@ -10,28 +10,27 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, bail, ensure};
-use dynamo_kv_router::identity::RoutingPartitionId;
-use dynamo_kv_router::indexer::{KvIndexerMetrics, LowerTierIndexers};
+use dynamo_kv_indexer::host::{
+    ConcurrentRadixTreeCompressed, IndexRegistry, Indexer, KvIndexerMetrics, LowerTierIndexers,
+    ThreadPoolIndexer,
+};
+use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::plugins::RouterPluginRegistry;
-use dynamo_kv_router::protocols::{ActiveSequenceEvent, WorkerId};
-use dynamo_kv_router::scheduling::policy_config::{BusyThresholds, RejectThresholdsProvider};
-use dynamo_kv_router::scheduling::queue::SchedulerBookingDescriptor;
-use dynamo_kv_router::sequences::{
-    ReplicaRequestLeaseObserver, ReplicaWorkerPolicy, SchedulerLoadSnapshot,
-};
-use dynamo_kv_router::services::indexer::backend::Indexer;
-use dynamo_kv_router::services::indexer::registry::WorkerRegistry;
-use dynamo_kv_router::services::selection::{
-    CatalogReconciler, DEFAULT_MODEL_NAME, HostCache, HostEligibility, HostLoad,
-    HostReplicaChannels, HostReplicaSyncFactory, HostReplication, HostTelemetry, KvEventIngress,
-    KvIndexSource, SchedulerLoadSink, SelectionHost, SelectionPartition, SelectionService,
-    SelectionServiceBuilder, WorkerRequest,
-};
-use dynamo_kv_router::{
-    ConcurrentRadixTreeCompressed, DEFAULT_ROUTING_GROUP, KvRouterConfig, ThreadPoolIndexer,
-    WorkerType,
-};
+use dynamo_kv_router::services::selection::{SelectionService, SelectionServiceBuilder};
 use dynamo_router_policies::default_factory;
+use dynamo_router_protocol::identity::{DEFAULT_ROUTING_GROUP, RoutingPartitionId};
+use dynamo_router_protocol::worker::WorkerId;
+use dynamo_router_protocol::worker_type::WorkerType;
+use dynamo_scheduler::host::{
+    CatalogReconciler, DEFAULT_MODEL_NAME, HostCache, HostEligibility, HostHints, HostLoad,
+    HostReplicaChannels, HostReplicaSyncFactory, HostReplication, HostTelemetry, KvEventIngress,
+    KvIndexSource, RejectThresholdsProvider, SchedulerLoadSink, SelectionHost, SelectionPartition,
+    WorkerRequest,
+};
+use dynamo_slot_tracker::host::{
+    ActiveSequenceEvent, BusyThresholds, ReplicaRequestLeaseObserver, ReplicaWorkerPolicy,
+    SchedulerBookingDescriptor, SchedulerLoadSnapshot,
+};
 use tokio::sync::mpsc;
 
 /// `lib/llm/src/kv_router/sequence.rs` sizes both replica channels this way.
@@ -199,6 +198,7 @@ impl BenchHost {
                 request_leases: Some(Arc::new(NoopLeases)),
                 replica_worker_policy: ReplicaWorkerPolicy::LazyRegister,
             },
+            hints: HostHints::default(),
         })
         .build()
         .await
@@ -250,7 +250,7 @@ impl BenchHost {
 struct HostIngress(Indexer);
 
 impl KvEventIngress for HostIngress {
-    fn open(&self, _: &WorkerRegistry, _: &RoutingPartitionId, _: u32) -> Indexer {
+    fn open(&self, _: &IndexRegistry, _: &RoutingPartitionId, _: u32) -> Indexer {
         self.0.clone()
     }
 }
