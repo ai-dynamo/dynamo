@@ -91,11 +91,9 @@ SLA 模式通过唯一构造接口 `aisimulate_core.sdk.RustForwardPassPerfModel
 
 各角色可传入完整上游配置，包括有序 `systems_paths`、`database_mode`、`transfer_policy`、量化和推测解码参数，以及嵌套 `estimator_config`。显式 estimator 设置覆盖 Planner 的采样默认值；`fpm_sample_bucket_size: 16` 对应 `[4, 4]`，regression 和 correction 可以分别配置网格。未知字段及角色身份冲突会报错。
 
-对于启用投机解码的 `op_level` 模型，Planner 在 AIS 查询边界将逻辑 decode 请求转换为配置的验证工作量。负载指标和物理 KV 容量保持逻辑单位。vLLM 每个 attention-DP rank 的 target 工作量必须满足已发布的 `max_num_batched_tokens`：三个 draft token 对应每条 decode 请求的四个验证位置。这些完整轮次估算不会推断更严格的 scheduler 上限或各方法额外的 drafting 槽。
+使用投机解码的 `op_level` 估算时，在对应的 `ais_perf_model.roles` 中配置投机参数，并发布 worker 的 token 上限。对于 vLLM，三个 draft token 会为每条 decode 请求在每个 attention-DP rank 上预留四个验证位置。估算使用配置的完整轮次，不涵盖部分轮次或额外 drafting 槽。
 
-当前 FPM 没有实际 decode query 宽度。因此，包含投机 decode 的轮次不参与 OP 校准，纯 prefill 校准仍可使用。Regression 和实测完整轮次 FPM 模型保留逻辑输入及训练。原始遥测仍更新负载均值。验证宽度变化会清除保留的时长反馈；执行身份和宽度不变时，limits 或 estimator 的变化可以重放历史。每个 Planner 角色应对应稳定的 worker 执行身份。
-
-如果旧版 Planner 曾用投机 decode FPM 调优快照，请重新生成其中的 OP 校准。使用 packed telemetry 在 AIS 外部完成校准的快照保留原有约定。
+每个 Planner 角色应对应稳定的 worker 执行身份。验证宽度变化会清除所有 estimator 模式的时长反馈：regression 需要重新预热，interpolation 会丢失已学习的校准。宽度不变时，limit 或 estimator 的变化保留反馈。当前 FPM 没有实际验证宽度，包含投机 decode 的轮次无法校准 OP；纯 prefill 校准仍然可用。
 
 通过 `ais_perf_model.roles` 配置模型身份和 estimator 参数。旧 `aic_perf_model` 字段及 `hf_id` / parallel-pick 格式不再支持，使用时会报错。
 

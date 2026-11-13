@@ -18,6 +18,7 @@ from dynamo.planner.core.perf_model import engine_query
 from dynamo.planner.core.perf_model.engine_query import (
     AISCoreEnginePerfModel,
     EngineCapacityRequest,
+    EngineLoadStatus,
     EnginePerfLimits,
 )
 
@@ -228,6 +229,8 @@ def test_speculative_op_withholds_decode_iterations_but_keeps_raw_load(monkeypat
         for x in native.tuned_iterations[0]
     )
     model.get_scheduled_decode_itl([_decode_fpm(rank=rank) for rank in range(2)])
+    # The busiest-rank samples have 8 and 100 prefill tokens. Their mean,
+    # (8 + 100) / 2 = 54, is synthesized for each rank, not divided by DP.
     assert [
         x["scheduled_requests"]["sum_prefill_tokens"] for x in native.estimate_calls[-1]
     ] == [54, 54]
@@ -257,7 +260,10 @@ def test_speculative_queue_drain_uses_rank_local_headroom(
 def test_speculative_queue_reports_no_headroom_but_empty_queue_is_zero(monkeypatch):
     model, native = _configured_spec_model(monkeypatch, budget=8)
     assert model.get_queued_prefill_time([_decode_fpm(2)]) == 0
-    assert model.get_queued_prefill_time([_decode_fpm(2, queued=1)]) is None
+    assert (
+        model.get_queued_prefill_time([_decode_fpm(2, queued=1)])
+        is EngineLoadStatus.SATURATED
+    )
     assert not native.estimate_calls
 
 
@@ -294,7 +300,7 @@ def test_speculative_packing_rejects_u32_overflow_before_native_call(
     values[field] = (1 << 32) - 1
     fpm = ForwardPassMetrics(scheduled_requests=ScheduledRequestMetrics(**values))
     with pytest.raises(ValueError, match="overflow"):
-        model._estimate_forward_pass_seconds([fpm])
+        model.get_scheduled_decode_itl([fpm])
     assert not native.estimate_calls
 
 
@@ -345,8 +351,21 @@ def test_speculative_itl_crops_only_the_learned_prefill_mix(
             sum_decode_kv_tokens=decode * 128,
         )
     )
-    assert model.get_scheduled_decode_itl([actual]) is None
+    assert model.get_scheduled_decode_itl([actual]) is EngineLoadStatus.SATURATED
     assert len(native.estimate_calls) == count
+
+
+@pytest.mark.parametrize("role", ["decode", "aggregated", "prefill"])
+def test_speculative_width_must_fit_one_verification_round(monkeypatch, role):
+    if role != "prefill":
+        with pytest.raises(ValueError, match="width exceeds the per-rank token budget"):
+            _configured_spec_model(monkeypatch, budget=3, worker_type=role)
+    else:
+        # A prefill-only worker has no decode verification round to reserve.
+        model, _ = _configured_spec_model(monkeypatch, budget=3, worker_type=role)
+        assert model.get_queued_prefill_time(
+            [_decode_fpm(0, queued=8)]
+        ) == pytest.approx(0.03)
 
 
 def test_other_backends_do_not_inherit_vllm_verification_budget(monkeypatch):
@@ -364,7 +383,10 @@ def test_speculative_ttft_reserves_full_verification_work(
     monkeypatch, decode, expected
 ):
     model, native = _configured_spec_model(monkeypatch)
-    assert model._aggregated_ttft(20, decode, decode * 128) == pytest.approx(expected)
+    # B16: no decode leaves chunks 16+4; three W4 decodes leave five chunks of 4.
+    assert model.get_queued_prefill_time(
+        [_decode_fpm(decode, queued=20)]
+    ) == pytest.approx(expected)
     assert all(
         x["scheduled_requests"]["sum_prefill_tokens"]
         + x["scheduled_requests"]["num_decode_requests"]

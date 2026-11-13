@@ -90,7 +90,7 @@ def fake_engine_factory(monkeypatch):
         def best_available(cls, **kwargs):
             assert cls.next_model is not None
             cls.last_kwargs = kwargs
-            cls.next_model.decode_query_width = kwargs["ais_config"].get("nextn", 0) + 1
+            cls.next_model.verify_width = kwargs["ais_config"].get("nextn", 0) + 1
             return cls.next_model
 
     monkeypatch.setattr(ais_adapter, "AISCoreEnginePerfModel", FakeEngineFactory)

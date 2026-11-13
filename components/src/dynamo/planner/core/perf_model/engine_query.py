@@ -59,6 +59,19 @@ class EnginePerfLimits:
                 raise ValueError(f"{name} exceeds u32::MAX")
 
 
+class EngineLoadStatus(Enum):
+    """A modeled load outcome without a finite latency estimate."""
+
+    SATURATED = "verification_budget_saturated"
+
+
+LoadEstimate = Optional[float | EngineLoadStatus]
+
+
+class _VerificationBudgetExceeded(Exception):
+    pass
+
+
 class OptimizationTarget(str, Enum):
     """Capacity-search objective."""
 
@@ -197,9 +210,9 @@ class AISCoreEnginePerfModel:
         limits: EnginePerfLimits,
         attention_dp_size: int,
         max_observations: int,
-        decode_query_width: int = 1,
+        verify_width: int = 1,
         pack_decode_queries: bool = False,
-        budget_decode_width: int = 1,
+        enforce_verification_budget: bool = False,
     ) -> None:
         if worker_type not in ("prefill", "decode", "aggregated"):
             raise ValueError(f"invalid worker_type {worker_type!r}")
@@ -207,28 +220,22 @@ class AISCoreEnginePerfModel:
             raise ValueError(
                 f"attention_dp_size must be positive, got {attention_dp_size}"
             )
-        for name, value in (
-            ("decode_query_width", decode_query_width),
-            ("budget_decode_width", budget_decode_width),
-        ):
-            if (
-                isinstance(value, bool)
-                or not isinstance(value, int)
-                or not 1 <= value <= _U32_MAX
-            ):
-                raise ValueError(f"{name} must be a positive u32, got {value}")
+        if not 1 <= verify_width <= _U32_MAX:
+            raise ValueError(f"verify_width must be a positive u32, got {verify_width}")
+        if enforce_verification_budget and verify_width > limits.max_num_batched_tokens:
+            raise ValueError("verification width exceeds the per-rank token budget")
         self._model = model
         self._worker_type = worker_type
         self._limits = limits
         self._attention_dp_size = attention_dp_size
         self._load_averages = _AggLoadAverages(max_observations)
-        self._decode_query_width = decode_query_width
-        self._packing_width = decode_query_width if pack_decode_queries else 1
-        self._budget_decode_width = budget_decode_width
+        self._verify_width = verify_width
+        self._pack_decode_queries = pack_decode_queries
+        self._enforce_verification_budget = enforce_verification_budget
 
     @property
-    def decode_query_width(self) -> int:
-        return self._decode_query_width
+    def verify_width(self) -> int:
+        return self._verify_width
 
     @classmethod
     def best_available(
@@ -244,15 +251,12 @@ class AISCoreEnginePerfModel:
             raise ValueError("AIS worker_type must match the Planner deployment role")
         model = AISForwardPassPerfModel.best_available(ais_config)
         diagnostics = model.diagnostics()
-        provenance = (
-            diagnostics.get("provenance") if isinstance(diagnostics, dict) else None
-        )
-        provenance = provenance if isinstance(provenance, dict) else {}
+        provenance = diagnostics.get("provenance") or {}
         resolved = provenance.get("config")
-        config = resolved if isinstance(resolved, dict) else ais_config
+        config = resolved or ais_config
         width = _configured_decode_width(config)
         mode = provenance.get("selected_estimation_mode")
-        if width > 1 and (mode is None or not isinstance(resolved, dict)):
+        if width > 1 and (mode is None or resolved is None):
             raise ValueError(
                 "Speculative AIS estimates require resolved estimator provenance"
             )
@@ -269,18 +273,18 @@ class AISCoreEnginePerfModel:
             limits=limits,
             attention_dp_size=attention_dp_size,
             max_observations=max_observations,
-            decode_query_width=width,
+            verify_width=width,
             pack_decode_queries=packed,
-            budget_decode_width=width
-            if packed and config.get("backend") == "vllm"
-            else 1,
+            enforce_verification_budget=(
+                packed and config.get("backend") == "vllm" and worker_type != "prefill"
+            ),
         )
 
     def tune_with_fpms(self, iterations: list[list[ForwardPassMetrics]]) -> None:
         for metrics_by_rank in iterations:
             self._validate_metrics_by_rank(metrics_by_rank)
         native_iterations = iterations
-        if self._packing_width > 1:
+        if self._pack_decode_queries and self._verify_width > 1:
             # Aggregate telemetry does not identify draftless or partial rounds.
             native_iterations = [
                 group
@@ -309,8 +313,16 @@ class AISCoreEnginePerfModel:
 
     def get_queued_prefill_time(
         self, metrics_by_rank: list[ForwardPassMetrics]
+    ) -> LoadEstimate:
+        """Estimate queued-prefill drain time in seconds, or report budget saturation."""
+        try:
+            return self._queued_prefill_time(metrics_by_rank)
+        except _VerificationBudgetExceeded:
+            return EngineLoadStatus.SATURATED
+
+    def _queued_prefill_time(
+        self, metrics_by_rank: list[ForwardPassMetrics]
     ) -> Optional[float]:
-        """Estimate queued-prefill drain time in seconds."""
         if self._worker_type == "decode":
             return None
         self._validate_metrics_by_rank(metrics_by_rank)
@@ -320,14 +332,19 @@ class AISCoreEnginePerfModel:
         ):
             return 0.0
         chunk_sizes = [self._limits.max_num_batched_tokens] * len(metrics_by_rank)
-        if self._budget_decode_width > 1 and self._worker_type == "aggregated":
+        if (
+            self._enforce_verification_budget
+            and self._verify_width > 1
+            and self._worker_type == "aggregated"
+        ):
             for index, metrics in enumerate(metrics_by_rank):
                 headroom = self._limits.max_num_batched_tokens - (
-                    metrics.scheduled_requests.num_decode_requests
-                    * self._budget_decode_width
+                    metrics.scheduled_requests.num_decode_requests * self._verify_width
                 )
-                if metrics.queued_requests.sum_prefill_tokens and headroom <= 0:
-                    return None
+                if headroom < 0 or (
+                    metrics.queued_requests.sum_prefill_tokens and headroom == 0
+                ):
+                    raise _VerificationBudgetExceeded
                 chunk_sizes[index] = max(1, headroom)
         plans = [
             _PrefillChunkPlan.build(
@@ -386,8 +403,16 @@ class AISCoreEnginePerfModel:
 
     def get_scheduled_decode_itl(
         self, metrics_by_rank: list[ForwardPassMetrics]
+    ) -> LoadEstimate:
+        """Estimate one scheduled decode iteration in seconds, or report budget saturation."""
+        try:
+            return self._scheduled_decode_itl(metrics_by_rank)
+        except _VerificationBudgetExceeded:
+            return EngineLoadStatus.SATURATED
+
+    def _scheduled_decode_itl(
+        self, metrics_by_rank: list[ForwardPassMetrics]
     ) -> Optional[float]:
-        """Estimate one scheduled decode iteration in seconds."""
         if self._worker_type == "prefill":
             return None
         self._validate_metrics_by_rank(metrics_by_rank)
@@ -408,9 +433,9 @@ class AISCoreEnginePerfModel:
                         prefill_requests,
                         prefill_tokens,
                     ) = self._load_averages.typical_prefill_for_mixed_itl()
-                    if self._budget_decode_width > 1:
+                    if self._enforce_verification_budget and self._verify_width > 1:
                         headroom = self._limits.max_num_batched_tokens - (
-                            source.num_decode_requests * self._budget_decode_width
+                            source.num_decode_requests * self._verify_width
                         )
                         prefill_tokens = min(prefill_tokens, max(0, headroom))
                         prefill_requests = min(prefill_requests, prefill_tokens)
@@ -530,7 +555,9 @@ class AISCoreEnginePerfModel:
                 batch_size,
                 self._limits.max_num_batched_tokens,
                 accept_length,
-                decode_query_width=self._budget_decode_width,
+                decode_query_width=(
+                    self._verify_width if self._enforce_verification_budget else 1
+                ),
                 attention_dp_size=self._attention_dp_size,
             ):
                 continue
@@ -545,20 +572,25 @@ class AISCoreEnginePerfModel:
                     accept_length,
                 ),
             )
-            forward_s = self._mixed_time(prefill_per_iteration, batch_size, decode_kv)
-            if forward_s is None:
-                return None
-            itl_s = forward_s / accept_length
-            if itl_s == 0:
-                continue
+            try:
+                forward_s = self._mixed_time(
+                    prefill_per_iteration, batch_size, decode_kv
+                )
+                if forward_s is None:
+                    return None
+                itl_s = forward_s / accept_length
+                if itl_s == 0:
+                    continue
 
-            ttft_s = self._aggregated_ttft(
-                min(_U32_MAX, prefill_per_iteration + prefill_isl),
-                batch_size,
-                decode_kv,
-            )
-            if ttft_s is None:
-                return None
+                ttft_s = self._aggregated_ttft(
+                    min(_U32_MAX, prefill_per_iteration + prefill_isl),
+                    batch_size,
+                    decode_kv,
+                )
+                if ttft_s is None:
+                    return None
+            except _VerificationBudgetExceeded:
+                continue
             decode_tail_s = _checked_duration_mul(
                 itl_s,
                 max(0, request.osl - 1),
@@ -619,13 +651,13 @@ class AISCoreEnginePerfModel:
         current_decode_kv: int,
     ) -> Optional[float]:
         max_chunk = self._limits.max_num_batched_tokens
-        if self._budget_decode_width > 1:
+        if self._enforce_verification_budget and self._verify_width > 1:
             headroom = self._limits.max_num_batched_tokens - (
                 _split_total(current_decode_requests, self._attention_dp_size, 0)
-                * self._budget_decode_width
+                * self._verify_width
             )
             if queued_prefill_tokens and headroom <= 0:
-                return None
+                raise _VerificationBudgetExceeded
             max_chunk = min(max_chunk, max(1, headroom * self._attention_dp_size))
         return self._prefill_chunk_time(
             queued_prefill_tokens,
@@ -680,10 +712,10 @@ class AISCoreEnginePerfModel:
             self._limits.max_num_seqs,
             self._limits.max_kv_tokens // context_length,
         )
-        if self._budget_decode_width > 1:
+        if self._enforce_verification_budget and self._verify_width > 1:
             maximum = min(
                 maximum,
-                (self._limits.max_num_batched_tokens // self._budget_decode_width)
+                (self._limits.max_num_batched_tokens // self._verify_width)
                 * self._attention_dp_size,
             )
         return maximum
@@ -717,16 +749,22 @@ class AISCoreEnginePerfModel:
     def _estimate_forward_pass_seconds(
         self, metrics_by_rank: list[ForwardPassMetrics]
     ) -> Optional[float]:
-        if self._budget_decode_width > 1 and any(
-            metrics.scheduled_requests.sum_prefill_tokens
-            + metrics.scheduled_requests.num_decode_requests * self._budget_decode_width
-            > self._limits.max_num_batched_tokens
-            for metrics in metrics_by_rank
+        if (
+            self._enforce_verification_budget
+            and self._verify_width > 1
+            and any(
+                metrics.scheduled_requests.sum_prefill_tokens
+                + metrics.scheduled_requests.num_decode_requests * self._verify_width
+                > self._limits.max_num_batched_tokens
+                for metrics in metrics_by_rank
+            )
         ):
-            return None
+            raise _VerificationBudgetExceeded
         estimate_ms = self._model.estimate_forward_pass_time_ms(
             [
-                _fpm_to_ais_dict(metrics, self._packing_width)
+                _fpm_to_ais_dict(
+                    metrics, self._verify_width if self._pack_decode_queries else 1
+                )
                 for metrics in metrics_by_rank
             ]
         )
@@ -746,22 +784,13 @@ def _fpm_to_ais_dict(
     metrics: ForwardPassMetrics, decode_width: int = 1
 ) -> dict[str, Any]:
     payload = msgspec.to_builtins(metrics)
-    if not isinstance(payload, dict):
-        raise TypeError(
-            f"ForwardPassMetrics must serialize to a mapping, got {type(payload).__name__}"
-        )
     if metrics.version == 0:
         payload["version"] = FPM_VERSION
     if decode_width > 1:
         scheduled = payload["scheduled_requests"]
         for key in ("num_decode_requests", "sum_decode_kv_tokens"):
             value = scheduled[key]
-            if (
-                isinstance(value, bool)
-                or not isinstance(value, int)
-                or value < 0
-                or value > _U32_MAX // decode_width
-            ):
+            if value < 0 or value > _U32_MAX // decode_width:
                 raise ValueError(f"packed {key} overflow")
             scheduled[key] = value * decode_width
     return payload

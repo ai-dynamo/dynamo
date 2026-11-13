@@ -113,24 +113,17 @@ Planner's sampling defaults. `fpm_sample_bucket_size: 16` corresponds to a
 `[4, 4]` grid; regression and correction may use separate grids. Unknown fields
 and conflicting worker identities are rejected.
 
-For speculative `op_level` models, Planner converts logical decode requests to
-the configured verification work at the AIS query boundary. Load metrics and
-physical KV capacity remain logical. For vLLM, each attention-DP rank's target
-work must fit the published `max_num_batched_tokens`: three draft tokens mean
-four verification positions per decode request. These full-round estimates do
-not infer tighter scheduler limits or method-specific extra drafting slots.
+For speculative `op_level` estimates, configure speculation in the matching
+`ais_perf_model.roles` entry and publish the worker's token limit. With vLLM,
+three draft tokens reserve four verification positions per decode request on each
+attention-DP rank. Estimates use full configured rounds; partial rounds and extra
+drafting slots are not modeled.
 
-Current FPMs do not report actual decode query widths. Iterations containing
-speculative decode therefore do not calibrate OP estimates; pure-prefill
-correction remains available. Regression and measured complete-round FPM models
-keep their logical inputs and training. Raw telemetry still updates load
-averages. Changing verification width clears retained duration feedback;
-same-execution, same-width limit or estimator changes can replay it. Keep each
-Planner role tied to a stable worker execution identity.
-
-Regenerate OP corrections in snapshots that older Planner versions tuned from
-speculative decode FPMs. Externally calibrated AIS snapshots with packed
-telemetry retain their existing convention.
+Keep each Planner role tied to a stable worker execution identity. Changing the
+verification width clears duration feedback in every estimator mode; regression
+must warm up again and interpolation loses learned correction. Same-width limit
+or estimator changes retain feedback. Speculative decode FPMs cannot calibrate OP
+estimates without actual-width telemetry; pure-prefill correction remains active.
 
 Configure model identity and estimator controls through `ais_perf_model.roles`.
 The retired `aic_perf_model` field and `hf_id` / parallel-pick shape are rejected.
