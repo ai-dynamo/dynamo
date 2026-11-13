@@ -737,9 +737,9 @@ curl -s localhost:8000/metrics | grep dynamo_frontend_inter_token_latency_second
   If no registered name matches, a value containing `:` is resolved as `module:function`. Unknown
   names fail startup and report the available registered extensions.
 - **Provider return:** The provider callable returns one `FrontendRoute` or an iterable of routes.
-- **Route shape:** `FrontendRoute(method, path, handler, timeout_s=30.0)`. The method is `GET`,
-  `POST`, `PUT`, `PATCH`, or `DELETE`, and the path is static. Path parameters, wildcards, other
-  methods, and duplicates of a built-in method and path are rejected.
+- **Route shape:** `FrontendRoute(method, path, handler, timeout_s=30.0, max_body_bytes=65536)`.
+  The method is `GET`, `POST`, `PUT`, `PATCH`, or `DELETE`, and the path is static. Path
+  parameters, wildcards, other methods, and duplicates of a built-in method and path are rejected.
 - **Handler signature:** `handler(ctx: FrontendExtensionContext)` returns a JSON-serializable body
   for HTTP 200, or `FrontendResponse(status_code, body)` to override the status code. The handler can
   be an `async def`, which runs on the Frontend's event loop.
@@ -748,9 +748,9 @@ curl -s localhost:8000/metrics | grep dynamo_frontend_inter_token_latency_second
 - **Live state:** `FrontendExtensionContext` exposes `is_ready()`, `is_cancelled()`,
   `has_any_ready_model()`, `is_model_ready_to_serve(name)`, `model_display_names()`, and
   `serving_ready_display_names()`.
-- **Execution limits:** A handler that exceeds its route's `timeout_s` returns 503. A route with 64
-  calls in flight, or a full handler pool, rejects new requests with the configured overload status
-  code, 529 by default. See
+- **Execution limits:** A handler that exceeds its route's `timeout_s` returns 503. A request body
+  over the route's `max_body_bytes` returns 413. A route with 64 calls in flight, or a full handler
+  pool, rejects new requests with the configured overload status code, 529 by default. See
   [Handler limits](../../developer-guide/knowledge-base/modular-components/frontend/python-route-extensions.md#handler-limits)
   for the full rules.
 - **Multiple providers:** Repeating the CLI option or listing whitespace-separated environment

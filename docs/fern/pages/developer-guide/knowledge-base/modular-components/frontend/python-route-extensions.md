@@ -136,6 +136,11 @@ runtime:
 - `runtime`: the Frontend's own `DistributedRuntime`, for clients to worker endpoints. Its async
   methods need the event loop, so call them from an `async def` handler.
 
+> [!WARNING]
+> The Frontend does not authenticate requests to extension routes, and it serves them on the same
+> port as the inference API. A route that changes state must check credentials itself, as the
+> following example does.
+
 The following route takes a JSON body, checks a bearer token, sends the body to every instance of a
 worker endpoint, and returns the replies:
 
@@ -175,7 +180,8 @@ def control_routes():
     return [FrontendRoute("POST", "/control/broadcast", _broadcast, timeout_s=120)]
 ```
 
-`timeout_s` sets the route's handler timeout. It defaults to 30 seconds.
+`timeout_s` sets the route's handler timeout. It defaults to 30 seconds. `max_body_bytes` sets the
+largest request body the route accepts. It defaults to 65536 (64 KiB).
 
 ## Handler limits
 
@@ -184,16 +190,17 @@ tokenization. That pool also starts each async handler, which then runs on the F
 Keep handlers fast and non-blocking:
 
 - A handler that exceeds its route's `timeout_s` (30 seconds by default, counted from when the
-  request body has been read) returns HTTP 503. An async handler is cancelled at the timeout, and a
-  call the event loop picks up after its timeout is dropped without running the handler. A 503 does
-  not mean the handler had no effect: it may have been cancelled partway.
+  request body has been read) returns HTTP 503. An async handler is cancelled at the timeout. A call
+  that a pool thread or the event loop picks up after its timeout is dropped without running the
+  handler. A 503 does not mean the handler had no effect: it may have been cancelled partway.
 - A client that disconnects does not cancel a running handler.
 - Each route admits at most 64 calls at once, waiting or running. A request beyond that, or one that
   finds the thread pool's queue full, is rejected with the configured overload status code, HTTP 529
-  by default. An async handler holds its slot until it finishes or is cancelled.
+  by default. An async handler holds its slot until its task ends, so a handler that catches the
+  cancellation at the timeout keeps the slot until it returns.
 - A handler that raises returns HTTP 500. That includes a `TimeoutError` the handler raises itself.
-- Request bodies are limited by `DYN_HTTP_BODY_LIMIT_MB`, 45 MB by default, the same limit as the
-  inference routes.
+- A request body larger than the route's `max_body_bytes`, 64 KiB by default, is rejected with
+  HTTP 413. `DYN_HTTP_BODY_LIMIT_MB` does not apply to extension routes.
 - Slow work in a synchronous handler delays other extension routes: it occupies a pool thread, and
   Python code holds the Global Interpreter Lock (GIL). In an async handler, a blocking call stalls
   the Frontend's event loop, which also runs Python chat processors (`--dyn-chat-processor vllm` or
