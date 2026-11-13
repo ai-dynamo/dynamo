@@ -24,6 +24,7 @@ gate rejects by default — fix via license_overrides.yaml.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -463,7 +464,38 @@ def _conffiles_on_disk(name: str, root: Path) -> list[str] | None:
     return [path for path in listed if os.path.lexists(root / path.lstrip("/"))]
 
 
-def collect_components(root: Path = Path("/")) -> list[Component]:
+def baseline_keys(path: Path) -> set[tuple[str, str]]:
+    """Read only exact dpkg identities from the selected architecture's baseline."""
+    document = json.loads(path.read_text(encoding="utf-8"))
+    components = document.get("components") if isinstance(document, dict) else None
+    if not isinstance(components, list):
+        raise ValueError(f"Malformed baseline component list: {path}")
+    keys = set()
+    for component in components:
+        if not isinstance(component, dict):
+            raise ValueError(f"Malformed baseline component: {path}")
+        purl = component.get("purl", "")
+        if purl is None:
+            continue
+        if not isinstance(purl, str):
+            raise ValueError(f"Malformed baseline package URL: {path}")
+        if not purl.startswith("pkg:deb/"):
+            continue
+        name, version = component.get("name"), component.get("version")
+        if (
+            not isinstance(name, str)
+            or not name
+            or not isinstance(version, str)
+            or not version
+        ):
+            raise ValueError(f"Incomplete dpkg baseline identity: {path}")
+        keys.add((name, version))
+    return keys
+
+
+def collect_components(
+    root: Path = Path("/"), *, subtract: set[tuple[str, str]] | None = None
+) -> list[Component]:
     """Run dpkg-query, resolve licenses, return Components.
 
     Returns an empty list (with a warning) when dpkg-query is unavailable —
@@ -511,6 +543,11 @@ def collect_components(root: Path = Path("/")) -> list[Component]:
             leftovers.append(
                 f"{name}@{version} ({', '.join(left or ['conffiles not listed'])})"
             )
+        if subtract and (name, version) in subtract:
+            # Baseline ownership is resolved before scoped overrides need bytes.
+            # Inherited packages may deliberately have no documentation files.
+            license_overrides.observe_baseline(ECOSYSTEM, name, version)
+            continue
         spdx = _resolve_license(name, version, root)
         if spdx == UNKNOWN:
             unresolved += 1
@@ -556,9 +593,7 @@ def generate(
     """
     from . import common
 
-    components = collect_components(root)
-    if subtract:
-        components = common.subtract_baseline(components, subtract)
+    components = collect_components(root, subtract=subtract)
     common.write_notices(ECOSYSTEM, components, output_dir)
     common.write_deps_csv(ECOSYSTEM, components, output_dir)
     return components

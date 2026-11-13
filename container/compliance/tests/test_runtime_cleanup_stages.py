@@ -64,6 +64,16 @@ def test_packaging_cleanup_changes_a_runtime_ancestor(framework, target, efa):
     expected = "pre_frontend" if target == "frontend" else "pre_runtime"
     assert expected in cleanup_stages
     assert set(cleanup_stages) <= {expected, "aws"}
+    context = yaml.safe_load((ROOT / "container/context.yaml").read_text())
+    stem = (
+        context["dynamo"]["frontend_baseline_sbom"]
+        if target == "frontend"
+        else context[framework]["cuda13.1" if framework == "trtllm" else "cuda13.0"][
+            "baseline_sbom"
+        ]
+    )
+    argument = f"--baseline-sbom /tmp/compliance/compliance/base_sboms/{stem}-${{TARGETARCH}}.cdx.json"
+    assert text.count(argument) == len(cleanup_stages)
     if efa:
         assert "aws" in cleanup_stages
     assert f"FROM {expected} AS " in text

@@ -3,6 +3,8 @@
 """Only reviewed artifact bytes may activate a version-scoped license correction."""
 
 import hashlib
+import json
+import subprocess
 
 import pytest
 import yaml
@@ -182,3 +184,52 @@ def test_deleting_scoped_record_cannot_expose_versionless_fallback(
     assert (
         "broader versionless fallback" in review_overrides(current, base)["errors"][0]
     )
+
+
+def test_exact_baseline_excludes_before_missing_copyright_resolution(
+    tmp_path, scoped_catalog, monkeypatch
+):
+    monkeypatch.setattr(
+        dpkg.subprocess,
+        "run",
+        lambda command, **kwargs: subprocess.CompletedProcess(
+            command, 0, stdout="example\t1\tinstalled\n"
+        ),
+    )
+    assert dpkg.collect_components(tmp_path, subtract={("example", "1")}) == []
+    observed = overrides._observations[("dpkg", "example", "1")]
+    assert observed["status"] == "baseline_owned"
+    assert observed["evaluation"] == "not_evaluated"
+    assert observed["applied"] is False
+    with pytest.raises(overrides.OverrideEvidenceUnavailable):
+        dpkg.collect_components(tmp_path, subtract={("example", "0")})
+
+
+def test_baseline_identity_is_dpkg_and_exact_version_only(tmp_path):
+    path = tmp_path / "baseline.json"
+    path.write_text(
+        json.dumps(
+            {
+                "components": [
+                    {"name": "example", "version": "1", "purl": "pkg:deb/example@1"},
+                    {
+                        "name": "different",
+                        "version": "1",
+                        "purl": "pkg:cargo/different@1",
+                    },
+                ]
+            }
+        )
+    )
+    assert dpkg.baseline_keys(path) == {("example", "1")}
+    path.write_text(
+        '{"components": [{"name": "example", "purl": "pkg:deb/example@1"}]}'
+    )
+    with pytest.raises(ValueError, match="Incomplete"):
+        dpkg.baseline_keys(path)
+    path.write_text("{}")
+    with pytest.raises(ValueError, match="Malformed"):
+        dpkg.baseline_keys(path)
+    path.unlink()
+    with pytest.raises(FileNotFoundError):
+        dpkg.baseline_keys(path)

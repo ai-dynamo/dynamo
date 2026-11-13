@@ -192,3 +192,14 @@ def test_empty_or_duplicate_matrix_cannot_claim_complete_coverage(tmp_path, imag
     path.write_text(json.dumps({"schema_version": 1, "images": images}))
     with pytest.raises(ValueError):
         audit_override_usage.load_matrix(path)
+
+
+def test_baseline_owned_is_not_an_application_or_unused_correction():
+    record = Override("python", "pkg", "MIT", "upstream")
+    row = observation(
+        applied=False, status="baseline_owned", evaluation="not_evaluated"
+    )
+    report = summarize((record,), [row], [row], [])
+    assert report["overrides"][0]["status"] == "baseline_owned"
+    assert report["overrides"][0]["applied"] is False
+    assert report["overrides"][0]["cleanup_review_candidate"] is False

@@ -236,7 +236,11 @@ def main(argv: list[str] | None = None) -> int:
                 from . import dpkg as gen  # type: ignore[no-redef]
 
                 comps = gen.generate(
-                    args.output_dir, subtract=subtract, root=args.dpkg_root
+                    args.output_dir,
+                    subtract=gen.baseline_keys(args.subtract_sbom)
+                    if args.subtract_sbom is not None
+                    else None,
+                    root=args.dpkg_root,
                 )
             elif eco == "go":
                 if not args.go_sbom:

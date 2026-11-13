@@ -227,6 +227,7 @@ def summarize(
             r
             for r in matched
             if r["override_license"] is not None
+            and r.get("status") != "baseline_owned"
             and r["override_version"] == record.version
             and (
                 record.copyright_sha256 is None
@@ -256,6 +257,8 @@ def summarize(
             if applied
             else "matched_unused"
             if configured
+            else "baseline_owned"
+            if matched and all(row.get("status") == "baseline_owned" for row in matched)
             else "incomplete_coverage"
             if present
             else "unobserved"

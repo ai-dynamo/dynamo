@@ -49,8 +49,10 @@
 # by the final image. Never trim only the scanner stage: the correction requires
 # these exact packaging changelogs to be absent from the shipped filesystem.
 USER root
+ARG TARGETARCH
 RUN --mount=type=bind,source=./container/compliance,target=/tmp/compliance/compliance,readonly \
-    PYTHONPATH=/tmp/compliance python3 -m compliance.trim_packaging_docs
+    PYTHONPATH=/tmp/compliance python3 -m compliance.trim_packaging_docs{% if compliance_baseline_sbom %} \
+        --baseline-sbom /tmp/compliance/compliance/base_sboms/{{ compliance_baseline_sbom }}-${TARGETARCH}.cdx.json{% endif %}
 USER dynamo
 {% endif %}
 

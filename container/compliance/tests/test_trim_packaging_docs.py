@@ -150,3 +150,20 @@ def test_exact_committed_payload_evidence_matches_all_six_corrections(tmp_path):
         assert " OR " in resolved
         if entry["name"] == "libgraphite2-3":
             assert classify(resolved) == "reciprocal"
+
+
+def test_baseline_owned_missing_docs_remain_untouched(tmp_path, prepared):
+    copyright_path, changelog, catalog, evidence, _ = prepared
+    copyright_path.unlink()
+    assert (
+        trim_reviewed_docs(
+            tmp_path, {"example": "1"}, catalog, evidence, baseline={("example", "1")}
+        )
+        == []
+    )
+    assert changelog.exists()
+    with pytest.raises(ValueError, match="copyright"):
+        trim_reviewed_docs(
+            tmp_path, {"example": "1"}, catalog, evidence, baseline={("example", "0")}
+        )
+    assert changelog.exists()

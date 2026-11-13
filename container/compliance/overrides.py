@@ -200,6 +200,25 @@ def observe(
     }
 
 
+def observe_baseline(ecosystem: str, name: str, version: str) -> None:
+    """Record inherited inventory without evaluating or applying a correction."""
+    record = _match(ecosystem, name, version)
+    _observations[(ecosystem, name, version)] = {
+        "ecosystem": ecosystem,
+        "name": name,
+        "version": version,
+        "raw_license": None,
+        "resolved_license": None,
+        "copyright_sha256": None,
+        "override_version": record.version if record else None,
+        "override_license": record.license if record else None,
+        "legacy_unversioned": bool(record and record.version is None),
+        "applied": False,
+        "status": "baseline_owned",
+        "evaluation": "not_evaluated",
+    }
+
+
 def checked_artifact_path(
     root: Path, absolute_path: str, *, allow_leaf_symlink: bool = False
 ) -> Path:

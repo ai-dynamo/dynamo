@@ -17,12 +17,18 @@ import subprocess
 from pathlib import Path
 
 from . import overrides
+from .generators.dpkg import baseline_keys
 
 _DEFAULT_EVIDENCE = Path(__file__).parent / "evidence/dpkg-license-corrections.json"
 
 
 def trim_reviewed_docs(
-    root: Path, installed: dict[str, str], catalog: Path, evidence_path: Path
+    root: Path,
+    installed: dict[str, str],
+    catalog: Path,
+    evidence_path: Path,
+    *,
+    baseline: set[tuple[str, str]] | None = None,
 ) -> list[str]:
     root = root.resolve()
     records = {
@@ -38,6 +44,11 @@ def trim_reviewed_docs(
         name, version = review["name"], review["version"]
         if installed.get(name) != version:
             continue  # Unsupported/new versions retain all files and get no correction.
+        if baseline and (name, version) in baseline:
+            print(
+                f"Retained baseline-owned package without correction: {name}@{version}"
+            )
+            continue
         record = records.get((name, version))
         if record is None:
             raise ValueError(
@@ -103,6 +114,7 @@ def main() -> None:
         default=Path(__file__).parent / "license_overrides.yaml",
     )
     parser.add_argument("--evidence", type=Path, default=_DEFAULT_EVIDENCE)
+    parser.add_argument("--baseline-sbom", type=Path)
     args = parser.parse_args()
     command = ["dpkg-query", "-W", "-f=${Package}\t${Version}\t${db:Status-Status}\n"]
     if args.root != Path("/"):
@@ -115,7 +127,15 @@ def main() -> None:
             if name in installed and installed[name] != version:
                 raise ValueError(f"Ambiguous multiarch package version: {name}")
             installed[name] = version
-    trim_reviewed_docs(args.root, installed, args.overrides, args.evidence)
+    trim_reviewed_docs(
+        args.root,
+        installed,
+        args.overrides,
+        args.evidence,
+        baseline=baseline_keys(args.baseline_sbom)
+        if args.baseline_sbom is not None
+        else None,
+    )
 
 
 if __name__ == "__main__":
