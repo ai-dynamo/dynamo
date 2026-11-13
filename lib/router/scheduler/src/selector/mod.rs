@@ -48,7 +48,7 @@ use dynamo_worker_selection::{RuntimePolicyConfig, RuntimePolicyError, RuntimePo
 use super::filter::{RoutingEligibility, WorkerEligibilityError};
 use super::types::{KvSchedulerError, SchedulingRequest, SchedulingResponse};
 use crate::protocols::{SelectionLogFields, WorkerConfigLike, WorkerSelectionResult};
-use dynamo_kv_indexer::ResidentBlockCounts;
+use dynamo_kv_indexer::{CacheOwnerBlockCounts, LowerTierIndexers, ResidentBlockCounts};
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 use dynamo_slot_tracker::WorkerLoadProjection;
 use dynamo_worker_selection::{SelectionTrace, SelectionTraceSpec};
@@ -137,6 +137,9 @@ pub enum WorkerSelectionInput<'a, C: WorkerConfigLike> {
         /// The partition's live resident block counts, lent by the host for a policy that
         /// declared [`WorkerInputs::RESIDENT_BLOCKS`]; `None` otherwise.
         resident_blocks: Option<&'a ResidentBlockCounts>,
+        /// The partition's lower-tier indexes, lent by the host for a policy that declared
+        /// [`WorkerInputs::CACHE`]; `None` otherwise.
+        cache_owner_blocks: Option<&'a LowerTierIndexers>,
     },
 }
 
@@ -160,6 +163,7 @@ impl<'a, C: WorkerConfigLike> WorkerSelectionInput<'a, C> {
             eligibility,
             block_size,
             resident_blocks: None,
+            cache_owner_blocks: None,
         }
     }
 
@@ -172,6 +176,7 @@ impl<'a, C: WorkerConfigLike> WorkerSelectionInput<'a, C> {
             request,
             eligibility,
             block_size,
+            cache_owner_blocks,
             ..
         } = self;
         Self::Configured {
@@ -180,7 +185,18 @@ impl<'a, C: WorkerConfigLike> WorkerSelectionInput<'a, C> {
             eligibility,
             block_size,
             resident_blocks,
+            cache_owner_blocks,
         }
+    }
+
+    /// Lend the partition's lower-tier indexes to this selection, so a component that
+    /// declared [`WorkerInputs::CACHE`] can read each worker's cache-owner block count.
+    pub fn with_cache_owner_blocks(mut self, lower_tier: Option<&'a LowerTierIndexers>) -> Self {
+        let Self::Configured {
+            cache_owner_blocks, ..
+        } = &mut self;
+        *cache_owner_blocks = lower_tier;
+        self
     }
 
     /// The resident block counts lent to this selection, if any.
@@ -275,6 +291,10 @@ pub(super) struct SelectionRowSource<'a, C: WorkerConfigLike> {
     pub(super) block_size: u32,
     /// The partition's live resident block counts, when the host lent them for this selection.
     resident_blocks: Option<&'a ResidentBlockCounts>,
+    /// The partition's lower-tier indexes, when the host lent them, and the cache-owner block
+    /// counts pinned from them on the first read: a selection that reads none pins nothing.
+    cache_owner_blocks: Option<&'a LowerTierIndexers>,
+    cache_owner_counts: OnceCell<Option<CacheOwnerBlockCounts>>,
     /// Only tracked requests report cache reuse, so only their rows carry raw cached tokens.
     tracked: bool,
     pub(super) kv_transfer_sources: OnceCell<KvTransferSourceSummary>,
@@ -296,6 +316,8 @@ impl<'a, C: WorkerConfigLike> SelectionRowSource<'a, C> {
             eligibility,
             block_size,
             resident_blocks: None,
+            cache_owner_blocks: None,
+            cache_owner_counts: OnceCell::new(),
             tracked: request.mode.is_tracked(),
             kv_transfer_sources: OnceCell::new(),
             #[cfg(any(test, feature = "testing", feature = "bench"))]
@@ -306,6 +328,9 @@ impl<'a, C: WorkerConfigLike> SelectionRowSource<'a, C> {
     /// The source for a host's selection input, once its pinned worker is validated.
     fn from_input(input: WorkerSelectionInput<'a, C>) -> Result<Self, KvSchedulerError> {
         let resident_blocks = input.resident_blocks();
+        let WorkerSelectionInput::Configured {
+            cache_owner_blocks, ..
+        } = input;
         let (workers, request, eligibility, block_size) = input.into_configured();
         eligibility.validate_pinned_worker_allowed()?;
         if let Some(worker) = eligibility.pinned_worker() {
@@ -321,6 +346,7 @@ impl<'a, C: WorkerConfigLike> SelectionRowSource<'a, C> {
         }
         let mut source = Self::new(request, workers, eligibility, block_size);
         source.resident_blocks = resident_blocks;
+        source.cache_owner_blocks = cache_owner_blocks;
         Ok(source)
     }
 
@@ -330,8 +356,7 @@ impl<'a, C: WorkerConfigLike> SelectionRowSource<'a, C> {
         selection_context(self.request, self.block_size)
             .with_pinned_worker(self.eligibility.pinned_worker())
             .with_resident_blocks(
-                self.resident_blocks
-                    .is_some()
+                (self.resident_blocks.is_some() || self.cache_owner_blocks.is_some())
                     .then_some(self as &dyn ResidentBlockSource),
             )
     }
@@ -549,6 +574,13 @@ impl<C: WorkerConfigLike> ResidentBlockSource for SelectionRowSource<'_, C> {
     #[inline(always)]
     fn resident_blocks(&self, worker: WorkerWithDpRank) -> Option<u64> {
         self.resident_blocks.and_then(|counts| counts.get(worker))
+    }
+
+    fn cache_owner_blocks(&self, worker: WorkerWithDpRank) -> Option<u64> {
+        self.cache_owner_counts
+            .get_or_init(|| self.cache_owner_blocks?.cache_owner_block_counts())
+            .as_ref()?
+            .get(worker)
     }
 }
 

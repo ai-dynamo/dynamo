@@ -41,7 +41,7 @@ use dynamo_admission::placement::WorkerPlacement;
 use dynamo_admission::queue::{PolicyQueue, QueueMetadata, QueueSnapshot};
 use dynamo_admission::{PolicyClassConfig, PolicyProfile};
 use dynamo_kv_hashing::LocalBlockHash;
-use dynamo_kv_indexer::ResidentBlockCountsHandle;
+use dynamo_kv_indexer::{LowerTierIndexers, ResidentBlockCountsHandle};
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 use dynamo_slot_tracker::busy::{BusyThresholds, FullRankCounts};
 use dynamo_slot_tracker::wire::PrefillLoadHint;
@@ -941,6 +941,9 @@ struct SchedulerQueueActor<
     /// The partition's live resident block counts, installed once by the host for a policy
     /// that declared RESIDENT_BLOCKS.
     resident_blocks: Arc<OnceLock<ResidentBlockCountsHandle>>,
+    /// The partition's lower-tier indexes, installed once by the host for a policy that
+    /// declared CACHE, which reads cache-owner block counts from them.
+    cache_owner_blocks: Arc<OnceLock<LowerTierIndexers>>,
     reject_thresholds: Option<RejectThresholdsProvider>,
 }
 
@@ -982,6 +985,9 @@ pub struct SchedulerQueue<
     /// The partition's live resident block counts, installed once by the host for a policy
     /// that declared RESIDENT_BLOCKS.
     resident_blocks: Arc<OnceLock<ResidentBlockCountsHandle>>,
+    /// The partition's lower-tier indexes, installed once by the host for a policy that
+    /// declared CACHE, which reads cache-owner block counts from them.
+    cache_owner_blocks: Arc<OnceLock<LowerTierIndexers>>,
     reject_thresholds: Option<RejectThresholdsProvider>,
     /// Read by callers to project their request's load before the actor selects.
     slots: Arc<ActiveSequencesMultiWorker<P>>,
@@ -1113,6 +1119,7 @@ impl<
         let non_max_overlap_selection_observer = Arc::new(OnceLock::new());
         let selection_trace = Arc::new(OnceLock::new());
         let resident_blocks = Arc::new(OnceLock::new());
+        let cache_owner_blocks = Arc::new(OnceLock::new());
         let start_time = Instant::now();
         let capacity_updates = queueing_enabled.then(|| Arc::new(CapacityUpdates::new()));
         let direct_release: DirectBookingRelease = {
@@ -1174,6 +1181,7 @@ impl<
             non_max_overlap_selection_observer: Arc::clone(&non_max_overlap_selection_observer),
             selection_trace: Arc::clone(&selection_trace),
             resident_blocks: Arc::clone(&resident_blocks),
+            cache_owner_blocks: Arc::clone(&cache_owner_blocks),
             reject_thresholds: reject_thresholds.clone(),
         };
         tokio::spawn(actor.run());
@@ -1199,6 +1207,7 @@ impl<
             non_max_overlap_selection_observer,
             selection_trace,
             resident_blocks,
+            cache_owner_blocks,
             reject_thresholds,
             slots: caller_slots,
             actor_writes,
@@ -1240,6 +1249,14 @@ impl<
     /// Returns `false` when counts are already installed.
     pub fn set_resident_block_counts(&self, counts: ResidentBlockCountsHandle) -> bool {
         self.resident_blocks.set(counts).is_ok()
+    }
+
+    /// Lend the partition's lower-tier indexes to every selection, for a policy that declared
+    /// `WorkerInputs::CACHE` and may read cache-owner block counts.
+    ///
+    /// Returns `false` when they are already installed.
+    pub fn set_cache_owner_block_counts(&self, lower_tier: LowerTierIndexers) -> bool {
+        self.cache_owner_blocks.set(lower_tier).is_ok()
     }
 
     /// Enqueue a new request through the router-owned policy queue.
@@ -2738,7 +2755,8 @@ impl<
                         eligibility,
                         self.block_size,
                     )
-                    .with_resident_blocks(resident_blocks.as_deref().map(|counts| &**counts)),
+                    .with_resident_blocks(resident_blocks.as_deref().map(|counts| &**counts))
+                    .with_cache_owner_blocks(self.cache_owner_blocks.get()),
                     prepared,
                     trace,
                 )
@@ -4759,6 +4777,7 @@ mod tests {
             ),
             selection_trace: Arc::clone(&queue.selection_trace),
             resident_blocks: Arc::clone(&queue.resident_blocks),
+            cache_owner_blocks: Arc::clone(&queue.cache_owner_blocks),
             reject_thresholds: queue.reject_thresholds.clone(),
         }
     }

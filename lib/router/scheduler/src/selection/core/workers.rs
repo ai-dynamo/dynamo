@@ -389,6 +389,12 @@ impl SelectionCore {
                 if let Some(counts) = resident_blocks {
                     scheduler.set_resident_block_counts(counts);
                 }
+                // A policy that declared CACHE may read cache-owner block counts.
+                if inputs.contains(WorkerInputs::CACHE)
+                    && let Some(lower_tier) = indexer.lower_tier()
+                {
+                    scheduler.set_cache_owner_block_counts(lower_tier.clone());
+                }
                 Ok(Arc::new(SelectionEntry {
                     key: key.clone(),
                     block_size,
