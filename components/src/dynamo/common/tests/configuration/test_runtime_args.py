@@ -88,7 +88,7 @@ def test_response_plane_defaults_to_unset_and_accepts_quic(monkeypatch):
     monkeypatch.delenv("DYN_RESPONSE_PLANE")
 
     default_config, help_text = _parse_runtime_args([])
-    # Unset leaves the choice, including the TLS fallback, to the Rust runtime.
+    # Unset leaves the choice of plane to the Rust runtime.
     assert "DYN_RESPONSE_PLANE" not in os.environ
     quic_config, _ = _parse_runtime_args(["--response-plane", "quic"])
     velo_config, _ = _parse_runtime_args(["--response-plane", "velo"])

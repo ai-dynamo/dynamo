@@ -148,7 +148,8 @@ pub(crate) fn tcp_tls_settings() -> Vec<&'static str> {
 }
 
 /// Velo has no TLS, so refuse to build a service while TLS is configured
-/// for the TCP planes.
+/// for the TCP planes. A runtime with TLS settings never selects Velo, so
+/// this is reached only when a frontend asks such a worker for Velo.
 fn reject_tls_settings() -> Result<()> {
     let set = tcp_tls_settings();
     ensure!(

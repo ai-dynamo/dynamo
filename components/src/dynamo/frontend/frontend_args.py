@@ -783,7 +783,8 @@ class FrontendArgGroup(ArgGroup):
             default=None,
             help=(
                 "Select the response transport. Frontend and workers must match. "
-                "When unset, the runtime uses tcp."
+                "When unset, the runtime uses tcp. velo has no TLS, so it falls "
+                "back to tcp while any DYN_TCP_TLS_* setting is present."
             ),
             choices=["tcp", "quic", "velo"],
             env=self.env,
