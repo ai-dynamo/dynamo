@@ -34,7 +34,7 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
-dynamo-llm = { path = "../../../llm", default-features = false }
+dynamo-llm = { path = "../../../llm", version = "1.6.1", default-features = false }
 dynamo-kv-router = { workspace = true }
 dynamo-runtime = { workspace = true }
 dynamo-backend-common = { workspace = true, features = ["testing"] }
