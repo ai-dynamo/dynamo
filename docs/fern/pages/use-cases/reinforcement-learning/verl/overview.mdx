@@ -10,7 +10,7 @@ import { TerminalDemo } from "@/components/TerminalDemo";
 Integrations with external RL frameworks are under development/testing and subject to change.
 </Warning>
 
-[verl](https://github.com/verl-project/verl) is an RL framework that supports training through FSDP, FSDP2, and Megatron-LM, rollout inference through vLLM and SGLang, and orchestration with Ray. The Dynamo integration is a verl recipe that integrates both the Dynamo frontend and Dynamo vLLM/SGLang backend in the standard RL loop. Dynamo handles the inference and rollouts and is started through the same Ray job as the trainer. 
+[verl](https://github.com/verl-project/verl) is an RL framework that supports training through FSDP, FSDP2, and Megatron-LM, rollout inference through vLLM and SGLang, and orchestration with Ray. The Dynamo integration is a verl recipe that integrates both the Dynamo frontend and Dynamo vLLM/SGLang backend in the standard RL loop. Dynamo handles the inference and rollouts and is started through the same Ray job as the trainer.
 
 ## Tutorial: Train Qwen2.5-7B-Instruct with verl + Dynamo
 
