@@ -6,14 +6,17 @@ import functools
 import logging
 import os
 import random
+from contextlib import aclosing
 from types import SimpleNamespace
 from typing import (
     Any,
     AsyncGenerator,
     AsyncIterator,
     Callable,
+    Coroutine,
     Dict,
     Optional,
+    TypeVar,
     Union,
     cast,
 )
@@ -26,6 +29,7 @@ from vllm_omni.inputs.data import OmniDiffusionSamplingParams, OmniTextPrompt
 from vllm_omni.model_extras import build_image_to_image_prompt, get_model_class_name
 
 from dynamo._core import Context
+from dynamo.common.backend.health_check import is_probe
 from dynamo.common.multimodal import ImageLoader
 from dynamo.common.protocols import sanitize_media_passthrough
 from dynamo.common.protocols.audio_protocol import NvCreateAudioSpeechRequest
@@ -57,6 +61,8 @@ from dynamo.vllm.omni.base_handler import BaseOmniHandler
 # Re-exported: EngineInputs moved to its own module so the per-modality
 # builders can annotate it without importing this handler.
 from dynamo.vllm.omni.engine_inputs import EngineInputs
+from dynamo.vllm.omni.health_check import generation_error, has_completed_output
+from dynamo.vllm.omni.image_edit import ImageEditLimits, load_image_edit_references
 from dynamo.vllm.omni.output_formatter import (
     AudioAggregateState,
     AudioStreamState,
@@ -66,6 +72,7 @@ from dynamo.vllm.omni.output_formatter import (
 from dynamo.vllm.omni.utils import (
     audio_output_is_cumulative,
     build_image_generation_prompt,
+    ensure_awaited,
     image_generation_negative_prompt_from_request,
     image_generation_sampling_overrides,
     image_generation_size_from_request,
@@ -74,6 +81,8 @@ from dynamo.vllm.omni.utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+_T = TypeVar("_T")
 
 DEFAULT_VIDEO_FPS = 16
 
@@ -215,6 +224,7 @@ class OmniHandler(BaseOmniHandler):
             media_output_fs: Filesystem for storing generated images/videos.
             media_output_http_url: Base URL for rewriting media paths in responses.
         """
+        self._image_edit_limits = ImageEditLimits.from_env()
         super().__init__(
             runtime=runtime,
             config=config,
@@ -224,6 +234,7 @@ class OmniHandler(BaseOmniHandler):
         self.media_output_fs = media_output_fs
         self.media_output_http_url = media_output_http_url
         self._image_loader = ImageLoader()
+        self._image_edit_loader = ImageLoader(max_pixels=self._image_edit_limits.pixels)
         self.generate_endpoint = generate_endpoint
 
         # Keep parity with BaseWorkerHandler LoRA resolver contract.
@@ -322,54 +333,86 @@ class OmniHandler(BaseOmniHandler):
         assert request_id is not None, "Request ID is required"
         logger.debug(f"Omni Request ID: {request_id}")
 
-        async for chunk in self._generate_openai_mode(request, context, request_id):
-            yield chunk
+        if is_probe(request):
+            await self._check_health(request, context, request_id)
+            yield {}
+            return
+
+        async with aclosing(
+            self._generate_openai_mode(request, context, request_id)
+        ) as response:
+            async for chunk in response:
+                if error := generation_error(chunk):
+                    raise RuntimeError(f"Omni generation failed: {error}")
+                yield chunk
+
+    async def _check_health(
+        self, request: Dict[str, Any], context: Context, request_id: str
+    ) -> None:
+        await ensure_awaited(self.engine_client.check_health())
+        if len(request) == 1:
+            return
+
+        # A probe acknowledges a complete protocol result, never progress. This
+        # also protects releases whose runtime checks only the first response.
+        _, request_type = parse_request_type(request, self.config.output_modalities)
+        has_output = False
+        async with aclosing(
+            self._generate_openai_mode(request, context, request_id)
+        ) as response:
+            async for chunk in response:
+                if not chunk:
+                    continue
+                if error := generation_error(chunk):
+                    raise RuntimeError(f"Omni health check failed: {error}")
+                has_output |= has_completed_output(chunk, request_type)
+        if not has_output:
+            raise RuntimeError("Omni health check produced no completed output")
+        await ensure_awaited(self.engine_client.check_health())
 
     async def _generate_openai_mode(
         self, request: Dict[str, Any], context: Context, request_id: str
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Single generation path for all request protocols and output modalities."""
 
-        parsed_request_raw, request_type = parse_request_type(
-            request, self.config.output_modalities
-        )
+        try:
+            parsed_request_raw, request_type = parse_request_type(
+                request, self.config.output_modalities
+            )
+        except ValueError as error:
+            raise InvalidArgument(str(error)) from error
         parsed_request = cast(
             Union[NvCreateImageRequest, NvCreateVideoRequest, Dict[str, Any]],
             parsed_request_raw,
         )
 
-        # Pre-load input image for I2V requests (async I/O before sync build)
-        image = None
-        if (
-            request_type == RequestType.VIDEO_GENERATION
-            and isinstance(parsed_request, NvCreateVideoRequest)
-            and parsed_request.input_reference
-        ):
-            try:
-                image = await self._image_loader.load_image(
-                    parsed_request.input_reference
-                )
-            except (ValueError, PIL.Image.DecompressionBombError) as e:
-                # Keep URLs and inline image data out of the client error.
-                raise InvalidArgument("Failed to load input_reference") from e
-
-        try:
-            inputs = await self.build_engine_inputs(
-                parsed_request, request_type, image=image, request_id=request_id
-            )
-        except (ValueError, NotImplementedError, RuntimeError) as e:
-            logger.error(f"Invalid request {request_id}: {e}")
-            if isinstance(e, ValueError) and request_type in (
-                RequestType.IMAGE_GENERATION,
-                RequestType.VIDEO_GENERATION,
+        async def preload_inputs() -> EngineInputs:
+            """Load request media and build the inputs before generation starts."""
+            # Pre-load input image for I2V requests (async I/O before sync build)
+            image = None
+            if (
+                request_type == RequestType.VIDEO_GENERATION
+                and isinstance(parsed_request, NvCreateVideoRequest)
+                and parsed_request.input_reference is not None
             ):
-                # Media endpoints cannot interpret the chat.completion.chunk
-                # returned by _error_chunk as a request rejection. Re-raise as
-                # the registered binding exception so the HTTP layer returns a
-                # 400 with the validation reason before generation begins.
-                raise InvalidArgument(str(e)) from e
-            yield self._error_chunk(request_id, str(e), request_type)
-            return
+                try:
+                    image = await self._image_loader.load_image(
+                        parsed_request.input_reference
+                    )
+                except (ValueError, PIL.Image.DecompressionBombError) as e:
+                    # Keep URLs and inline image data out of the client error.
+                    raise InvalidArgument("Failed to load input_reference") from e
+
+            try:
+                return await self.build_engine_inputs(
+                    parsed_request, request_type, image=image, request_id=request_id
+                )
+            except ValueError as error:
+                raise InvalidArgument(str(error)) from error
+
+        inputs = await self._run_until_context_stops(
+            preload_inputs(), context, request_id
+        )
 
         generate_kwargs: Dict[str, Any] = {
             "prompt": inputs.prompt,
@@ -476,9 +519,42 @@ class OmniHandler(BaseOmniHandler):
             except EngineShutdown:
                 logger.info(f"Request {request_id} aborted due to shutdown")
                 raise
+            except InvalidArgument:
+                # Client-input failure (e.g. unknown or unloaded LoRA adapter):
+                # surface it as a public 400, not an in-band error chunk.
+                raise
             except Exception as e:
-                logger.error(f"Error during generation for request {request_id}: {e}")
-                yield self._error_chunk(request_id, str(e), inputs.request_type)
+                logger.error(
+                    "Error during generation for request %s: %s", request_id, e
+                )
+                raise
+
+    @staticmethod
+    async def _run_until_context_stops(
+        work: Coroutine[Any, Any, _T], context: Context | None, request_id: str
+    ) -> _T:
+        """Await ``work``, cancelling it if the request context stops first.
+
+        Reference downloads need their own stop watcher because preloading
+        runs before ``_abort_monitor`` starts.
+        """
+        if context is None:
+            return await work
+        stopped = asyncio.ensure_future(context.async_killed_or_stopped())
+        task = asyncio.create_task(work)
+        try:
+            await asyncio.wait((task, stopped), return_when=asyncio.FIRST_COMPLETED)
+            if stopped.done() and not task.done():
+                logger.debug("Request %s cancelled during input preloading", request_id)
+                raise asyncio.CancelledError
+            return await task
+        finally:
+            # Await the cancelled download so its connection and any partially
+            # loaded references are released before the request ends.
+            for future in (task, stopped):
+                if not future.done():
+                    future.cancel()
+            await asyncio.gather(task, stopped, return_exceptions=True)
 
     async def _generate_with_lora_admission_lock(
         self,
@@ -548,7 +624,7 @@ class OmniHandler(BaseOmniHandler):
                     "rejecting the request",
                     lora_request.lora_name,
                 )
-                raise ValueError(
+                raise InvalidArgument(
                     f"unknown model or LoRA adapter: '{lora_request.lora_name}'"
                 )
 
@@ -613,24 +689,26 @@ class OmniHandler(BaseOmniHandler):
             inputs = self._engine_inputs_from_image(
                 parsed_request, dimensions=dimensions
             )
+            model_class_name = get_model_class_name(self.engine_client)
+            images = [image] if image is not None else []
             if parsed_request.input_reference is not None:
-                try:
-                    image = await self._image_loader.load_image(
-                        parsed_request.input_reference
-                    )
-                except (ValueError, PIL.Image.DecompressionBombError) as e:
-                    # Keep URLs and inline image data out of the client error.
-                    raise ValueError("Failed to load input_reference") from e
-            if image is not None:
-                inputs.input_images = 1
+                images = await load_image_edit_references(
+                    parsed_request.input_reference,
+                    image_loader=self._image_edit_loader,
+                    model_class_name=model_class_name,
+                    operator_limit=self._image_edit_limits.images,
+                    max_total_pixels=self._image_edit_limits.total_pixels,
+                )
+            if images:
+                inputs.input_images = len(images)
                 inputs.prompt.update(
                     build_image_to_image_prompt(
-                        model_class_name=get_model_class_name(self.engine_client),
+                        model_class_name=model_class_name,
                         prompt=parsed_request.prompt,
                         negative_prompt=(
                             parsed_request.nvext or ImageNvExt()
                         ).negative_prompt,
-                        input_image=[image],
+                        input_image=images,
                         height=dimensions[1],
                         width=dimensions[0],
                     )
@@ -758,14 +836,11 @@ class OmniHandler(BaseOmniHandler):
         req: NvCreateVideoRequest,
         nvext: VideoNvExt,
     ) -> None:
-        """Overlay only fields explicitly supplied by a video request."""
-        if nvext.num_frames is not None and nvext.num_frames <= 0:
-            raise ValueError("nvext.num_frames must be greater than zero")
-        if nvext.fps is not None and nvext.fps <= 0:
-            raise ValueError("nvext.fps must be greater than zero")
-        if req.seconds is not None and req.seconds <= 0:
-            raise ValueError("seconds must be greater than zero")
+        """Overlay only fields explicitly supplied by a video request.
 
+        `num_frames`, `fps`, and `seconds` arrive at least 1: the shared
+        request model bounds them as the frontend does.
+        """
         if req.size is not None:
             width, height = parse_size(req.size)
             sp.width = width

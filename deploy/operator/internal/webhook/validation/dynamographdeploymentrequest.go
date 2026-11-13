@@ -28,6 +28,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dgdoverride"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/runtimeversion"
+	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
@@ -46,41 +47,46 @@ func NewDynamoGraphDeploymentRequestValidator() *DynamoGraphDeploymentRequestVal
 // dynamoGraphDeploymentRequestValidation carries DGDR-specific request state.
 // API values, paths, and accumulated errors remain explicit validator arguments.
 type dynamoGraphDeploymentRequestValidation struct {
-	ctx      context.Context
-	warnings admission.Warnings
+	sharedValidation
+	// requestVersion is the API version the client used, resolved once from the admission
+	// request. Every object delivered to the webhook is a converted v1beta1 object;
+	// spec.v1beta2 says which represented spec it carries.
+	requestVersion string
 }
 
-func (v *dynamoGraphDeploymentRequestValidation) warn(message string) {
-	v.warnings = append(v.warnings, message)
-}
-
-// Validate performs stateless validation on request. ctx and request must not be nil.
+// Validate performs stateless validation on request. ctx must carry the admission request and
+// request must not be nil.
 func (v *DynamoGraphDeploymentRequestValidator) Validate(
 	ctx context.Context,
 	request *nvidiacomv1beta1.DynamoGraphDeploymentRequest,
 ) (admission.Warnings, error) {
-	// Legacy v1beta1 rules do not apply to a converted v1beta2 carrier.
-	if request.Spec.V1Beta2 != nil {
-		return nil, nil
+	req, err := admission.RequestFromContext(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("get admission request: %w", err)
 	}
-
-	validation := &dynamoGraphDeploymentRequestValidation{ctx: ctx}
+	validation := &dynamoGraphDeploymentRequestValidation{
+		requestVersion: internalwebhook.RequestedVersion(req),
+	}
+	validation.ctx = ctx
 	allErrs := validation.validateDynamoGraphDeploymentRequest(request)
 	return validation.warnings, invalidDynamoGraphDeploymentRequestError(request, allErrs)
 }
 
-// ValidateUpdate validates newRequest against oldRequest. ctx, oldRequest, and newRequest must not be nil.
+// ValidateUpdate validates newRequest against oldRequest. ctx must carry the admission request;
+// oldRequest and newRequest must not be nil.
 func (v *DynamoGraphDeploymentRequestValidator) ValidateUpdate(
 	ctx context.Context,
 	oldRequest *nvidiacomv1beta1.DynamoGraphDeploymentRequest,
 	newRequest *nvidiacomv1beta1.DynamoGraphDeploymentRequest,
 ) (admission.Warnings, error) {
-	// Legacy v1beta1 rules do not apply to a converted v1beta2 carrier.
-	if newRequest.Spec.V1Beta2 != nil {
-		return nil, nil
+	req, err := admission.RequestFromContext(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("get admission request: %w", err)
 	}
-
-	validation := &dynamoGraphDeploymentRequestValidation{ctx: ctx}
+	validation := &dynamoGraphDeploymentRequestValidation{
+		requestVersion: internalwebhook.RequestedVersion(req),
+	}
+	validation.ctx = ctx
 	allErrs := validation.validateDynamoGraphDeploymentRequestUpdate(newRequest, oldRequest)
 	validation.warnDeprecatedDGDOverrideTargets(&newRequest.Spec)
 	validation.warnDeprecatedGPUSKU(&newRequest.Spec)
@@ -99,6 +105,26 @@ func (v *dynamoGraphDeploymentRequestValidation) validateDynamoGraphDeploymentRe
 	spec *nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec,
 	fldPath *field.Path,
 ) field.ErrorList {
+	// The requested API version decides what spec.v1beta2 means. A spec that only conversion
+	// may produce is rejected on CREATE.
+	if v.requestVersion == internalwebhook.VersionV1Beta2 && spec.V1Beta2 == nil {
+		// A hub/v1beta1 representation was submitted through v1beta2.
+		return foreignCreateErrors(fldPath, false)
+	}
+	if v.requestVersion != internalwebhook.VersionV1Beta2 && spec.V1Beta2 != nil {
+		// A v1beta2 carrier was submitted through v1alpha1 or v1beta1.
+		return foreignCreateErrors(fldPath, true)
+	}
+	// A v1beta2 Request reaches this webhook as a v1beta1 object carrying spec.v1beta2;
+	// the v1beta1 rules below do not apply to it.
+	if spec.V1Beta2 != nil {
+		typedSpec, err := decodeDynamoGraphDeploymentRequestSpecV1beta2(spec.V1Beta2)
+		if err != nil {
+			return field.ErrorList{field.Invalid(fldPath.Child("v1beta2"), "<redacted>", "must be a valid v1beta2 spec: "+err.Error())}
+		}
+		return v.validateDynamoGraphDeploymentRequestSpecV1beta2(typedSpec, field.NewPath("spec"))
+	}
+
 	allErrs := field.ErrorList{}
 
 	if !features.MustGateFrom(v.ctx).Enabled(features.GPUDiscovery) && !hasManualDGDRHardware(spec.Hardware) {
@@ -251,6 +277,35 @@ func (v *dynamoGraphDeploymentRequestValidation) validateDynamoGraphDeploymentRe
 	fldPath *field.Path,
 	oldPhase nvidiacomv1beta1.DGDRPhase,
 ) field.ErrorList {
+	// A spec viewed through the API version that does not own it is read-only: an unchanged
+	// spec round-trips, any other write is rejected.
+	if v.requestVersion == internalwebhook.VersionV1Beta2 && newSpec.V1Beta2 == nil {
+		return foreignUpdateVerdict(fldPath, newSpec, oldSpec)
+	}
+	if v.requestVersion != internalwebhook.VersionV1Beta2 && newSpec.V1Beta2 != nil {
+		return foreignUpdateVerdict(fldPath, newSpec, oldSpec)
+	}
+	// A native v1beta2 spec is unconstrained by phase. Stateless validation of the new typed
+	// spec runs on every CREATE and UPDATE. Only the generated AISimulate schema check is
+	// ratcheted when the complete spec stays unchanged.
+	if newSpec.V1Beta2 != nil {
+		typedSpec, err := decodeDynamoGraphDeploymentRequestSpecV1beta2(newSpec.V1Beta2)
+		if err != nil {
+			return field.ErrorList{field.Invalid(fldPath.Child("v1beta2"), "<redacted>", "must be a valid v1beta2 spec: "+err.Error())}
+		}
+		if oldSpec.V1Beta2 == nil {
+			return v.validateDynamoGraphDeploymentRequestSpecV1beta2(typedSpec, field.NewPath("spec"))
+		}
+
+		// Stored carriers originate from typed conversion. A decode failure is a data-consistency
+		// error and must fail the update; only the AISimulate input-schema check may be ratcheted.
+		oldTypedSpec, err := decodeDynamoGraphDeploymentRequestSpecV1beta2(oldSpec.V1Beta2)
+		if err != nil {
+			return field.ErrorList{field.InternalError(fldPath.Child("v1beta2"), fmt.Errorf("decode previous v1beta2 spec: %w", err))}
+		}
+		return v.validateDynamoGraphDeploymentRequestSpecUpdateV1beta2(typedSpec, oldTypedSpec, field.NewPath("spec"))
+	}
+
 	allErrs := field.ErrorList{}
 
 	gpuDiscoveryEnabled := features.MustGateFrom(v.ctx).Enabled(features.GPUDiscovery)

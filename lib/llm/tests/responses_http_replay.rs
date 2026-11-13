@@ -61,7 +61,7 @@ async fn responses_sse_requires_terminal_event_without_trailers() {
 }
 
 /// Unsupported tool definitions return HTTP 400 before backend dispatch for both
-/// unary and streaming requests, including mixed tools and namespace members.
+/// unary and streaming requests, including mixed function/hosted tool lists.
 #[tokio::test]
 #[serial]
 async fn unsupported_hosted_tools_fail_before_dispatch_or_streaming() {
@@ -73,13 +73,6 @@ async fn unsupported_hosted_tools_fail_before_dispatch_or_streaming() {
                 (
                     json!([tool("read_file"), {"type": "web_search"}]),
                     "web_search",
-                ),
-                (
-                    json!([{
-                        "type": "namespace", "name": "custom", "description": "Custom tools",
-                        "tools": [{"type": "custom", "name": "run", "format": {"type": "text"}}]
-                    }]),
-                    "custom",
                 ),
             ] {
                 let body = json!({
@@ -102,6 +95,40 @@ async fn unsupported_hosted_tools_fail_before_dispatch_or_streaming() {
 
 /// Unsupported choices return HTTP 400 without dispatch for unary and streaming
 /// requests even when the supplied function tool definitions are valid.
+/// Custom tools now share the function-template adapter while retaining their
+/// namespace and custom identity in the public Responses surface.
+#[tokio::test]
+#[serial]
+async fn namespaced_custom_tools_are_accepted_and_echoed() {
+    temp_env::async_with_vars(ENV, async {
+        let script = load_agent_fixture("text.sse").await.unwrap();
+        let svc = HarnessService::start([script.clone(), script]).await;
+        for stream in [false, true] {
+            let response = post_responses(
+                &svc,
+                &json!({
+                    "model": MODEL, "input":"ping", "stream":stream,
+                    "tools":[{"type":"namespace","name":"custom","description":"Custom tools",
+                        "tools":[{"type":"custom","name":"run","format":{"type":"text"}}]}]
+                }),
+            )
+            .await;
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            let body = response.text().await.unwrap();
+            if stream {
+                assert!(body.contains("response.completed"));
+            } else {
+                let body: Value = serde_json::from_str(&body).unwrap();
+                assert_eq!(body["tools"][0]["type"], "namespace");
+                assert_eq!(body["tools"][0]["tools"][0]["type"], "custom");
+            }
+        }
+        assert_eq!(svc.engine.take_requests().await.len(), 2);
+        svc.shutdown().await;
+    })
+    .await;
+}
+
 #[tokio::test]
 #[serial]
 async fn unsupported_tool_choices_fail_before_dispatch_or_streaming() {
@@ -227,6 +254,142 @@ async fn disallowed_streamed_function_call_kills_backend_context() {
         svc.shutdown().await;
     })
     .await;
+}
+
+/// `allowed_tools` restricts calls, not context: every declared definition
+/// reaches the prompt renderer while the backend sees only the allowed subset,
+/// and calls outside that subset fail in both transports.
+#[tokio::test]
+#[serial]
+async fn allowed_tools_keep_declared_catalog_and_enforce_calls() {
+    use dynamo_renderer::OAIChatLikeRequest;
+
+    fn sentinel_tool(name: &str, sentinel: &str) -> Value {
+        json!({
+            "type": "function",
+            "name": name,
+            "description": format!("Return the current value for a city. {sentinel}"),
+            "parameters": {
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"],
+                "additionalProperties": false
+            },
+            "strict": true
+        })
+    }
+    let allowed = |names: &[&str]| {
+        let tools: Vec<_> = names
+            .iter()
+            .map(|name| json!({"type": "function", "name": name}))
+            .collect();
+        json!({"type": "allowed_tools", "mode": "auto", "tools": tools})
+    };
+    let both = ["get_weather", "get_time"];
+    let choices = [
+        (json!("auto"), &both[..]),
+        (allowed(&both), &both[..]),
+        (allowed(&["get_weather"]), &both[..1]),
+        (allowed(&["get_time"]), &both[1..]),
+    ];
+    let body = |stream: bool, choice: &Value| {
+        json!({
+            "model": MODEL,
+            "input": "Reply only with OK.",
+            "stream": stream,
+            "tools": [
+                sentinel_tool("get_weather", "WEATHER_CATALOG_SENTINEL"),
+                sentinel_tool("get_time", "TIME_CATALOG_SENTINEL")
+            ],
+            "tool_choice": choice
+        })
+    };
+
+    temp_env::async_with_vars(ENV, async {
+        for stream in [false, true] {
+            for (choice, names) in &choices {
+                let svc =
+                    HarnessService::start([load_agent_fixture("text.sse").await.unwrap()]).await;
+                let response = post_responses(&svc, &body(stream, choice)).await;
+                assert_eq!(response.status(), reqwest::StatusCode::OK);
+                let _ = response.bytes().await.unwrap();
+                let requests = svc.engine.take_requests().await;
+                assert_eq!(requests.len(), 1);
+                let backend: Vec<_> = requests[0]
+                    .inner
+                    .tools
+                    .iter()
+                    .flatten()
+                    .map(|tool| tool.function.name.as_str())
+                    .collect();
+                assert_eq!(backend, *names, "stream={stream} choice={choice}");
+                let rendered = requests[0].tools().unwrap().to_string();
+                for sentinel in ["WEATHER_CATALOG_SENTINEL", "TIME_CATALOG_SENTINEL"] {
+                    assert!(
+                        rendered.contains(sentinel),
+                        "stream={stream} choice={choice}: {sentinel} missing from {rendered}"
+                    );
+                }
+                svc.shutdown().await;
+            }
+
+            for (choice, names) in &choices[2..] {
+                let forbidden = both.into_iter().find(|name| *name != names[0]).unwrap();
+                for (call, permitted) in [(names[0], true), (forbidden, false)] {
+                    let svc = HarnessService::start([tool_call_script(call).await]).await;
+                    let response = post_responses(&svc, &body(stream, choice)).await;
+                    let context = format!("stream={stream} choice={choice} call={call}");
+                    if stream {
+                        assert_eq!(response.status(), reqwest::StatusCode::OK, "{context}");
+                        let events = parse_responses_sse(&response.text().await.unwrap())
+                            .await
+                            .unwrap();
+                        let called = events.iter().any(|event| {
+                            event.event == "response.output_item.done"
+                                && event.data["item"]["type"] == "function_call"
+                                && event.data["item"]["name"] == call
+                        });
+                        let failed = events.iter().any(|event| event.event == "response.failed");
+                        assert_eq!((called, failed), (permitted, !permitted), "{context}");
+                    } else if permitted {
+                        assert_eq!(response.status(), reqwest::StatusCode::OK, "{context}");
+                        let body: Value = response.json().await.unwrap();
+                        assert!(
+                            body["output"].as_array().unwrap().iter().any(|item| {
+                                item["type"] == "function_call" && item["name"] == call
+                            }),
+                            "{context}: {body}"
+                        );
+                    } else {
+                        // Unary enforcement surfaces as a conversion failure.
+                        assert_eq!(
+                            response.status(),
+                            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+                            "{context}"
+                        );
+                    }
+                    svc.shutdown().await;
+                }
+            }
+        }
+    })
+    .await;
+}
+
+/// A one-call backend script that invokes `name`.
+async fn tool_call_script(name: &str) -> scripted_chat_engine::Script {
+    let mut script = load_agent_fixture("fragmented-tool.sse").await.unwrap();
+    for call in script
+        .iter_mut()
+        .filter_map(|chunk| chunk.data.as_mut())
+        .flat_map(|data| data.inner.choices.iter_mut())
+        .flat_map(|choice| choice.delta.tool_calls.iter_mut().flatten())
+    {
+        if let Some(function) = call.function.as_mut().filter(|f| f.name.is_some()) {
+            function.name = Some(name.to_owned());
+        }
+    }
+    script
 }
 
 /// Exercise the production handler's shared name map, including historical
@@ -586,6 +749,140 @@ async fn streaming_text_baseline() {
             "responses_streaming_text",
             canonicalize(serde_json::to_value(events).unwrap())
         );
+
+        assert_eq!(svc.engine.remaining_scripts().await, 0);
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+fn logprob_tokens(logprobs: &Value) -> Vec<&str> {
+    logprobs
+        .as_array()
+        .expect("logprobs is an array")
+        .iter()
+        .map(|entry| entry["token"].as_str().unwrap())
+        .collect()
+}
+
+/// `include: message.output_text.logprobs` turns on backend scoring and puts every
+/// chat token record, including the hidden EOS score on the finish chunk, on the
+/// output text part; the response echoes the requested `top_logprobs`.
+#[tokio::test]
+#[serial]
+async fn unary_text_logprobs_reach_output_text() {
+    temp_env::async_with_vars(ENV, async {
+        let svc = HarnessService::start([
+            load_agent_fixture("text-logprobs.sse").await.unwrap(),
+            load_agent_fixture("text-logprobs.sse").await.unwrap(),
+        ])
+        .await;
+
+        let response = post_responses(
+            &svc,
+            &json!({
+                "model": MODEL,
+                "input": "ping",
+                "stream": false,
+                "max_output_tokens": 64,
+                "include": ["message.output_text.logprobs"],
+                "top_logprobs": 2
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let body: Value = response.json().await.unwrap();
+        let text = &body["output"][0]["content"][0];
+        assert_eq!(text["text"], "Pong.");
+        assert_eq!(logprob_tokens(&text["logprobs"]), ["Pong", ".", ""]);
+        assert_eq!(text["logprobs"][0]["logprob"], -0.25);
+        assert_eq!(text["logprobs"][0]["bytes"], json!([80, 111, 110, 103]));
+        assert_eq!(text["logprobs"][0]["top_logprobs"][1]["token"], "Ping");
+        assert_eq!(text["logprobs"][2]["bytes"], json!([]));
+        assert_eq!(body["top_logprobs"], 2);
+
+        // Without the include selector the arrays stay empty and nothing is
+        // requested from the backend.
+        let response = post_responses(
+            &svc,
+            &json!({
+                "model": MODEL,
+                "input": "ping",
+                "stream": false,
+                "max_output_tokens": 64,
+                "top_logprobs": 2
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let body: Value = response.json().await.unwrap();
+        assert_eq!(body["output"][0]["content"][0]["logprobs"], json!([]));
+        assert_eq!(body["top_logprobs"], 2);
+
+        let requests = svc.engine.take_requests().await;
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].inner.logprobs, Some(true));
+        assert_eq!(requests[0].inner.top_logprobs, Some(2));
+        assert_eq!(requests[1].inner.logprobs, None);
+        assert_eq!(requests[1].inner.top_logprobs, None);
+        assert_eq!(svc.engine.remaining_scripts().await, 0);
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+/// Each text delta carries the scores received since the previous delta; the
+/// EOS score on the finish chunk completes the record on `output_text.done`
+/// and on the completed output.
+#[tokio::test]
+#[serial]
+async fn streaming_text_logprobs_ride_on_deltas_and_done() {
+    temp_env::async_with_vars(ENV, async {
+        let svc =
+            HarnessService::start([load_agent_fixture("text-logprobs.sse").await.unwrap()]).await;
+        let response = post_responses(
+            &svc,
+            &json!({
+                "model": MODEL,
+                "input": "ping",
+                "stream": true,
+                "max_output_tokens": 64,
+                "include": ["message.output_text.logprobs"],
+                "top_logprobs": 2
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let raw = response.text().await.unwrap();
+        let events = parse_responses_sse(&raw).await.unwrap();
+
+        let deltas: Vec<_> = events
+            .iter()
+            .filter(|event| event.event == "response.output_text.delta")
+            .collect();
+        assert_eq!(deltas.len(), 2);
+        assert_eq!(logprob_tokens(&deltas[0].data["logprobs"]), ["Pong"]);
+        assert_eq!(
+            deltas[0].data["logprobs"][0]["top_logprobs"][1]["token"],
+            "Ping"
+        );
+        assert_eq!(logprob_tokens(&deltas[1].data["logprobs"]), ["."]);
+
+        let done = events
+            .iter()
+            .find(|event| event.event == "response.output_text.done")
+            .expect("output_text.done");
+        assert_eq!(done.data["text"], "Pong.");
+        assert_eq!(logprob_tokens(&done.data["logprobs"]), ["Pong", ".", ""]);
+
+        let completed = events
+            .iter()
+            .find(|event| event.event == "response.completed")
+            .expect("response.completed");
+        let text = &completed.data["response"]["output"][0]["content"][0];
+        assert_eq!(logprob_tokens(&text["logprobs"]), ["Pong", ".", ""]);
+        assert_eq!(text["logprobs"][2]["bytes"], json!([]));
+        assert_eq!(completed.data["response"]["top_logprobs"], 2);
 
         assert_eq!(svc.engine.remaining_scripts().await, 0);
         svc.shutdown().await;

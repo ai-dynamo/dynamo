@@ -10,7 +10,7 @@ use dynamo_backend_common::{
     TopLogprob, usage,
 };
 use dynamo_llm::protocols::common::{preprocessed_mm_identifier, preprocessed_mm_routing_hash};
-use serde::{Deserialize, de::DeserializeOwned};
+use serde::Deserialize;
 
 use crate::client;
 use dynamo_sidecar_common::{json_to_struct_v14, struct_to_json_v14};
@@ -27,7 +27,7 @@ const MM_HASHES_KEY: &str = "mm_hashes";
 const IMAGE_URL_KEY: &str = "image_url";
 const VIDEO_URL_KEY: &str = "video_url";
 const AUDIO_URL_KEY: &str = "audio_url";
-// Must match DYNAMO_CACHE_SALT_PREFIX in lib/kv-router/src/zmq_wire/extra_keys.rs.
+// Must match DYNAMO_CACHE_SALT_PREFIX in lib/kv-events/src/zmq_wire/extra_keys.rs.
 const DYNAMO_CACHE_SALT_PREFIX: &str = "dynamo-cache-salt:";
 
 const MAX_PREPROCESSED_MM_BYTES: usize = 16 * 1024 * 1024;
@@ -73,29 +73,19 @@ pub(crate) fn request_has_multimodal_input(request: &PreprocessedRequest) -> boo
     request_has_raw_media(request) || request_has_preprocessed_media(request)
 }
 
-fn requires_frontend_decode(request: &PreprocessedRequest) -> bool {
-    request
-        .stop_conditions
-        .stop_token_ids_visible
-        .as_ref()
-        .is_some_and(|ids| !ids.is_empty())
-}
-
 pub(crate) fn build_generate_request(
-    request: PreprocessedRequest,
+    mut request: PreprocessedRequest,
     request_id: String,
     mode: DisaggregationMode,
 ) -> Result<pb::GenerateRequest, DynamoError> {
-    let mut request = normalize_response_options(request)?;
     validate_request(&request, mode)?;
-    let output_text = !requires_frontend_decode(&request);
     validate_multimodal_cache_uuids(&request)?;
-    // Legacy envelopes may only carry controls preserved by the typed request.
+    // Native envelopes may only carry controls preserved by the typed request.
     if !mode.is_prefill()
         && !mode.is_encode()
         && let Some(sampling) = vllm_tito_sampling(&request.extra_args)?
     {
-        if legacy_bool(sampling, "return_token_ids")? == Some(false) {
+        if sampling_bool(sampling, "return_token_ids")? == Some(false) {
             return Err(client::invalid_argument(
                 "extra_args.vllm_tito.sampling_params.return_token_ids must be true for vLLM gRPC",
             ));
@@ -117,6 +107,7 @@ pub(crate) fn build_generate_request(
                     | "ignore_eos"
                     | "logprobs"
                     | "prompt_logprobs"
+                    // Accepted but unused: the frontend decodes output.
                     | "skip_special_tokens"
                     | "return_token_ids"
                     | "skip_reading_prefix_cache"
@@ -166,7 +157,6 @@ pub(crate) fn build_generate_request(
         // supplies the prompt KV.
         strip_multimodal_prompt_token_ids(&mut prefill_result);
     }
-    let skip_special_tokens = request.output_options.skip_special_tokens;
     let prompt_logprobs = request.output_options.prompt_logprobs;
     let output_logprobs = request.output_options.logprobs;
     let max_new_tokens = if mode.is_prefill() || mode.is_encode() {
@@ -197,6 +187,15 @@ pub(crate) fn build_generate_request(
     let stop_conditions = request.stop_conditions;
     let encoder_result = request.encoder_result;
     let mut extra_args = request.extra_args;
+    // The Python worker uses this frontend marker; gRPC keeps its own defaults.
+    if let Some(serde_json::Value::Object(extra)) = extra_args.as_mut()
+        && extra
+            .get("request_type")
+            .and_then(serde_json::Value::as_str)
+            == Some("completions")
+    {
+        extra.remove("request_type");
+    }
     let features = consume_vllm_tito(&mut extra_args)?;
     let routing_hashes = consume_preprocessed_mm_routing_hashes(&mut extra_args)?;
     if features.is_none() && routing_hashes.is_some() {
@@ -255,7 +254,7 @@ pub(crate) fn build_generate_request(
             presence_penalty: sampling.presence_penalty.unwrap_or(0.0),
             frequency_penalty: sampling.frequency_penalty.unwrap_or(0.0),
             repetition_penalty: sampling.repetition_penalty.unwrap_or(0.0),
-            logit_bias: Default::default(),
+            logit_bias: sampling.logit_bias.unwrap_or_default(),
             allowed_token_ids,
             structured_output: structured_output(sampling.guided_decoding)?,
             bad_words_token_ids,
@@ -268,8 +267,9 @@ pub(crate) fn build_generate_request(
                 stop_conditions.stop_token_ids_hidden,
                 stop_conditions.stop_token_ids_visible,
             ),
-            stop_strings: stop_conditions.stop.unwrap_or_default(),
-            include_stop_strings: sampling.include_stop_str_in_output.unwrap_or(false),
+            // Frontend matches stop strings; vLLM must not end output earlier.
+            stop_strings: Vec::new(),
+            include_stop_strings: false,
             ignore_eos: stop_conditions.ignore_eos.unwrap_or(false),
             thinking_token_budget: stop_conditions.max_thinking_tokens.map(i64::from),
         }),
@@ -277,11 +277,13 @@ pub(crate) fn build_generate_request(
             prompt_token_ids: prompt_logprobs.is_some() || (has_media && mode.is_prefill()),
             prompt_logprobs: prompt_logprobs.is_some(),
             prompt_candidates: prompt_logprobs.map(top_n_candidates).transpose()?,
-            output_text: Some(output_text),
+            output_text: Some(false),
             output_token_ids: true,
             output_logprobs: output_logprobs.is_some(),
             output_candidates: output_logprobs.map(top_n_candidates).transpose()?,
-            skip_special_tokens,
+            // Only vLLM's text uses this; the frontend applies the request's
+            // skip_special_tokens when it decodes.
+            skip_special_tokens: None,
         }),
         kv: Some(kv),
         truncate_prompt_tokens: 0,
@@ -304,124 +306,6 @@ pub(crate) fn data_parallel_rank(
         DisaggregationMode::Prefill => routing.prefill_dp_rank.or(routing.dp_rank),
         DisaggregationMode::Aggregated | DisaggregationMode::Decode => routing.dp_rank,
     })
-}
-
-/// Compatibility with v1.4 frontends during v1.5 and v1.6 rolling upgrades.
-/// TODO(v1.7): Remove after v1.4 falls outside the N-2 compatibility window.
-pub(crate) fn normalize_response_options(
-    mut request: PreprocessedRequest,
-) -> Result<PreprocessedRequest, DynamoError> {
-    let Some(sampling) = vllm_tito_sampling(&request.extra_args)?.cloned() else {
-        return Ok(request);
-    };
-    let legacy_kv_transfer = request
-        .extra_args
-        .as_ref()
-        .and_then(serde_json::Value::as_object)
-        .and_then(|extra| extra.get("vllm_tito"))
-        .and_then(serde_json::Value::as_object)
-        .and_then(|envelope| envelope.get("kv_transfer_params"))
-        .cloned();
-    let legacy_skip_prefix_cache = legacy_bool(&sampling, "skip_reading_prefix_cache")?;
-    hydrate_option(
-        &mut request.sampling_options.temperature,
-        &sampling,
-        "temperature",
-    )?;
-    hydrate_option(&mut request.sampling_options.top_p, &sampling, "top_p")?;
-    hydrate_option(&mut request.sampling_options.top_k, &sampling, "top_k")?;
-    hydrate_option(&mut request.sampling_options.min_p, &sampling, "min_p")?;
-    hydrate_option(&mut request.sampling_options.seed, &sampling, "seed")?;
-    hydrate_option(
-        &mut request.sampling_options.presence_penalty,
-        &sampling,
-        "presence_penalty",
-    )?;
-    hydrate_option(
-        &mut request.sampling_options.frequency_penalty,
-        &sampling,
-        "frequency_penalty",
-    )?;
-    hydrate_option(
-        &mut request.sampling_options.repetition_penalty,
-        &sampling,
-        "repetition_penalty",
-    )?;
-    hydrate_option(
-        &mut request.stop_conditions.max_tokens,
-        &sampling,
-        "max_tokens",
-    )?;
-    hydrate_option(
-        &mut request.stop_conditions.min_tokens,
-        &sampling,
-        "min_tokens",
-    )?;
-    if request.stop_conditions.stop_token_ids.is_none()
-        && request.stop_conditions.stop_token_ids_hidden.is_none()
-    {
-        hydrate_option(
-            &mut request.stop_conditions.stop_token_ids,
-            &sampling,
-            "stop_token_ids",
-        )?;
-    }
-    hydrate_option(
-        &mut request.stop_conditions.ignore_eos,
-        &sampling,
-        "ignore_eos",
-    )?;
-    if request.output_options.logprobs.is_none() {
-        request.output_options.logprobs = legacy_logprob_count(&sampling, "logprobs")?;
-    }
-    if request.output_options.prompt_logprobs.is_none() {
-        request.output_options.prompt_logprobs =
-            legacy_logprob_count(&sampling, "prompt_logprobs")?;
-    }
-    if request.output_options.skip_special_tokens.is_none() {
-        request.output_options.skip_special_tokens = legacy_bool(&sampling, "skip_special_tokens")?;
-    }
-    if let Some(legacy_kv_transfer) = legacy_kv_transfer
-        && let Some(extra) = request
-            .extra_args
-            .as_mut()
-            .and_then(serde_json::Value::as_object_mut)
-        && !extra.contains_key("kv_transfer_params")
-    {
-        extra.insert("kv_transfer_params".to_string(), legacy_kv_transfer);
-    }
-    if let Some(legacy_skip_prefix_cache) = legacy_skip_prefix_cache
-        && let Some(extra) = request
-            .extra_args
-            .as_mut()
-            .and_then(serde_json::Value::as_object_mut)
-        && !extra.contains_key("skip_reading_prefix_cache")
-    {
-        extra.insert(
-            "skip_reading_prefix_cache".to_string(),
-            serde_json::Value::Bool(legacy_skip_prefix_cache),
-        );
-    }
-    Ok(request)
-}
-
-fn hydrate_option<T: DeserializeOwned>(
-    target: &mut Option<T>,
-    sampling: &serde_json::Map<String, serde_json::Value>,
-    field: &str,
-) -> Result<(), DynamoError> {
-    if target.is_some() {
-        return Ok(());
-    }
-    let Some(value) = sampling.get(field).filter(|value| !value.is_null()) else {
-        return Ok(());
-    };
-    *target = Some(serde_json::from_value(value.clone()).map_err(|error| {
-        client::invalid_argument(format!(
-            "extra_args.vllm_tito.sampling_params.{field} is invalid: {error}"
-        ))
-    })?);
-    Ok(())
 }
 
 fn vllm_tito_sampling(
@@ -449,7 +333,7 @@ fn vllm_tito_sampling(
     Ok(Some(sampling))
 }
 
-fn legacy_bool(
+fn sampling_bool(
     sampling: &serde_json::Map<String, serde_json::Value>,
     field: &str,
 ) -> Result<Option<bool>, DynamoError> {
@@ -459,26 +343,6 @@ fn legacy_bool(
         Some(_) => Err(client::invalid_argument(format!(
             "extra_args.vllm_tito.sampling_params.{field} must be a boolean"
         ))),
-    }
-}
-
-fn legacy_logprob_count(
-    sampling: &serde_json::Map<String, serde_json::Value>,
-    field: &str,
-) -> Result<Option<u32>, DynamoError> {
-    match sampling.get(field) {
-        None | Some(serde_json::Value::Null) => Ok(None),
-        Some(value) => match value.as_i64() {
-            Some(-1) => Ok(Some(u32::MAX)),
-            Some(value) if value >= 0 => u32::try_from(value).map(Some).map_err(|_| {
-                client::invalid_argument(format!(
-                    "extra_args.vllm_tito.sampling_params.{field} exceeds u32"
-                ))
-            }),
-            _ => Err(client::invalid_argument(format!(
-                "extra_args.vllm_tito.sampling_params.{field} must be non-negative or -1"
-            ))),
-        },
     }
 }
 
@@ -683,17 +547,14 @@ fn take_sampling_extensions(
     struct Passthrough {
         bad_words_token_ids: Option<Vec<Vec<u32>>>,
         allowed_token_ids: Option<Vec<u32>>,
-        detokenize: Option<bool>,
+        // Ignored, as in-process: vLLM never decodes and the frontend does.
+        #[serde(rename = "detokenize")]
+        _detokenize: Option<bool>,
         logprob_token_ids: Option<serde_json::Value>,
     }
     let passthrough: Passthrough = serde_json::from_value(value).map_err(|error| {
         client::invalid_argument(format!("extra_args.sampling_options is invalid: {error}"))
     })?;
-    if passthrough.detokenize == Some(false) {
-        return Err(client::invalid_argument(
-            "detokenize=false is not supported by vLLM gRPC",
-        ));
-    }
     if passthrough.logprob_token_ids.is_some() {
         return Err(client::invalid_argument(
             "logprob_token_ids is not supported by vLLM gRPC",
@@ -1461,7 +1322,6 @@ pub(crate) struct ResponseState {
     prompt_info: Option<pb::PromptInfo>,
     user_stop_token_ids: Vec<u32>,
     hidden_stop_token_ids: Vec<u32>,
-    use_native_text: bool,
 }
 
 impl ResponseState {
@@ -1483,9 +1343,6 @@ impl ResponseState {
             output_logprobs: request.output_options.logprobs,
             expect_prompt_logprobs: request.output_options.prompt_logprobs.is_some(),
             prompt_info: None,
-            // Native text excludes terminal stop tokens, but token IDs retain
-            // them. Use Dynamo's existing decoder when a parser needs one.
-            use_native_text: !requires_frontend_decode(request),
             user_stop_token_ids: request
                 .stop_conditions
                 .stop_token_ids
@@ -1569,10 +1426,10 @@ impl ResponseState {
             None
         };
         let pb::SequenceOutput {
-            text,
             num_tokens,
             token_ids,
             finish_info,
+            sampling_mask,
             ..
         } = output;
 
@@ -1583,13 +1440,7 @@ impl ResponseState {
             } else {
                 token_ids
             },
-            text: if self.mode.is_prefill() || self.mode.is_encode() || !self.use_native_text {
-                None
-            } else {
-                // vLLM may buffer text while matching stop strings. Preserve an
-                // empty delta so the frontend does not detokenize its IDs again.
-                Some(text)
-            },
+            // `text` stays `None`: the frontend decodes `token_ids`.
             index: Some(0),
             ..Default::default()
         };
@@ -1599,11 +1450,14 @@ impl ResponseState {
         }
 
         let Some(finish) = finish_info else {
-            return if self.mode.is_prefill() || self.mode.is_encode() || num_tokens == 0 {
-                Ok(None)
-            } else {
-                Ok(Some(mapped))
-            };
+            if self.mode.is_prefill() || self.mode.is_encode() || num_tokens == 0 {
+                return Ok(None);
+            }
+            // Send prompt logprobs with the first token chunk, not the terminal: once
+            // the frontend matches a stop string it cancels the stream, and vLLM's
+            // terminal response never arrives.
+            self.attach_prompt_data(&mut mapped);
+            return Ok(Some(mapped));
         };
         if finish.num_output_tokens != self.completion_tokens {
             return Err(client::protocol_error(format!(
@@ -1675,7 +1529,7 @@ impl ResponseState {
         }
         mapped.disaggregated_params = finish
             .kv_transfer_params
-            .map(|value| struct_to_json_v14(value, PEER, KV_TRANSFER_PARAMS))
+            .map(|value| struct_to_json_v14(value, PEER, KV_TRANSFER_PARAMS).map(Box::new))
             .transpose()?;
         if self.mode.is_prefill() && mapped.disaggregated_params.is_none() {
             return Err(client::protocol_error(
@@ -1690,7 +1544,7 @@ impl ResponseState {
             })?;
             let params = mapped
                 .disaggregated_params
-                .as_mut()
+                .as_deref_mut()
                 .and_then(serde_json::Value::as_object_mut)
                 .ok_or_else(|| {
                     client::protocol_error("prefill kv_transfer_params is not a JSON object")
@@ -1704,13 +1558,26 @@ impl ResponseState {
                 })?,
             );
         }
+        if !sampling_mask.is_empty() {
+            mapped
+                .engine_data
+                .get_or_insert_with(|| Box::new(serde_json::json!({})))["sampling_mask"] = serde_json::json!(
+                sampling_mask
+                    .into_iter()
+                    .map(|row| row.ids)
+                    .collect::<Vec<_>>()
+            );
+        }
         self.attach_prompt_data(&mut mapped);
         Ok(Some(mapped))
     }
 
     fn attach_prompt_data(&mut self, output: &mut LLMEngineOutput) {
-        if output.engine_data.is_none() {
-            output.engine_data = self.prompt_info.take().map(prompt_logprobs_to_json);
+        if let Some(prompt) = self.prompt_info.take() {
+            output
+                .engine_data
+                .get_or_insert_with(|| Box::new(serde_json::json!({})))["prompt_logprobs"] =
+                prompt_logprobs_to_json(prompt);
         }
     }
 
@@ -1739,10 +1606,17 @@ impl ResponseState {
             return Ok(());
         }
         let count = prompt.num_prompt_tokens as usize;
+        // A single input token has no preceding context to score. vLLM may
+        // omit all three score arrays instead of sending an unscored row.
+        let score_count = if count == 1 && prompt.logprobs.is_empty() {
+            0
+        } else {
+            count
+        };
         if prompt.token_ids.len() != count
-            || prompt.logprobs.len() != count
-            || prompt.ranks.len() != count
-            || prompt.candidate_tokens.len() != count
+            || prompt.logprobs.len() != score_count
+            || prompt.ranks.len() != score_count
+            || prompt.candidate_tokens.len() != score_count
         {
             return Err(client::protocol_error(format!(
                 "prompt logprob array lengths do not match expected count {count}: token_ids={}, logprobs={}, ranks={}, candidate_tokens={}",
@@ -1761,17 +1635,16 @@ impl ResponseState {
 fn prompt_logprobs_to_json(prompt: pb::PromptInfo) -> serde_json::Value {
     let count = prompt.num_prompt_tokens as usize;
     let mut positions = Vec::with_capacity(count);
+    if count > 0 {
+        positions.push(serde_json::Value::Null);
+    }
     let rows = prompt
         .token_ids
         .into_iter()
         .zip(prompt.logprobs)
         .zip(prompt.ranks)
         .zip(prompt.candidate_tokens);
-    for (index, (((token_id, logprob), rank), candidates)) in rows.enumerate() {
-        if index == 0 {
-            positions.push(serde_json::Value::Null);
-            continue;
-        }
+    for (((token_id, logprob), rank), candidates) in rows.skip(1) {
         let mut entries = serde_json::Map::with_capacity(candidates.tokens.len() + 1);
         entries.insert(token_id.to_string(), prompt_logprob_entry(logprob, rank));
         for candidate in candidates.tokens {
@@ -1783,12 +1656,7 @@ fn prompt_logprobs_to_json(prompt: pb::PromptInfo) -> serde_json::Value {
         positions.push(serde_json::Value::Object(entries));
     }
 
-    let mut engine_data = serde_json::Map::with_capacity(1);
-    engine_data.insert(
-        "prompt_logprobs".to_string(),
-        serde_json::Value::Array(positions),
-    );
-    serde_json::Value::Object(engine_data)
+    serde_json::Value::Array(positions)
 }
 
 fn prompt_logprob_entry(logprob: f32, rank: u32) -> serde_json::Value {

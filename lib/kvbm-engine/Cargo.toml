@@ -15,7 +15,7 @@ kvbm-common = { workspace = true }
 kvbm-config = { workspace = true }
 kvbm-logical = { workspace = true }
 kvbm-physical = { workspace = true }
-velo = { workspace = true }
+velo = { workspace = true, features = ["services"] }
 
 # Workspace deps
 dynamo-memory = { workspace = true }
