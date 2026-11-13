@@ -125,6 +125,48 @@ def test_build_dgd_config_preserves_type_meta(backend: str, mode: str) -> None:
 
 
 @pytest.mark.parametrize("backend", ["vllm", "sglang"])
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["--http-port", "9000"],
+        ["--http-port=9000"],
+        ["--http-port", "8000", "--http-port=9000"],
+        ["--http-port=8000", "--http-port", "9000"],
+        ["--http-port", "8000", "--http-port", "9000"],
+    ],
+)
+def test_get_port_preserves_frontend_cli_port(backend: str, args: list[str]) -> None:
+    config = {
+        "metadata": {"name": "test"},
+        "spec": {"components": [_make_component("Frontend", "frontend", args=args)]},
+    }
+
+    assert CONFIG_MODIFIERS[backend].get_port(config) == 9000
+
+
+@pytest.mark.parametrize("backend", ["vllm", "sglang"])
+@pytest.mark.parametrize(
+    "args",
+    [
+        [],
+        ["--http-port"],
+        ["--http-port", "9000", "--http-port"],
+        ["--http-port=invalid"],
+        ["--http-port", "invalid"],
+    ],
+)
+def test_get_port_defaults_when_port_is_unavailable(
+    backend: str, args: list[str]
+) -> None:
+    config = {
+        "metadata": {"name": "test"},
+        "spec": {"components": [_make_component("Frontend", "frontend", args=args)]},
+    }
+
+    assert CONFIG_MODIFIERS[backend].get_port(config) == DYNAMO_RUN_DEFAULT_PORT
+
+
+@pytest.mark.parametrize("backend", ["vllm", "sglang"])
 def test_get_port_defaults_when_frontend_has_no_main_container(backend: str) -> None:
     config = {
         "metadata": {"name": "test"},
