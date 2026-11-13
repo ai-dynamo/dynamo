@@ -1,5 +1,9 @@
 {
   "repository": "nvcr.io/nvidia/tensorrt-llm/release",
   "model": "Qwen/Qwen3-VL-2B-Instruct",
-  "model_revision": "89644892e4d85e24eaac8bacfd4f463576704203"
+  "model_revision": "89644892e4d85e24eaac8bacfd4f463576704203",
+  "audio": {
+    "model": "openai/whisper-tiny",
+    "model_revision": "169d4a4341b33bc18d8881c4b69c2e104e1cc0af"
+  }
 }

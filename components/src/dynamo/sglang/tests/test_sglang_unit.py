@@ -630,6 +630,26 @@ async def test_parse_args_rejects_dcp_on_backend_without_dcp_support(
 
 
 @pytest.mark.asyncio
+async def test_parse_args_rejects_default_chat_template_kwargs(
+    monkeypatch, mock_sglang_cli, tmp_path
+):
+    monkeypatch.setattr(
+        "dynamo.sglang.args.ServerArgs.from_cli_args",
+        lambda _: _dcp_server_args_stub(
+            default_chat_template_kwargs={"clear_thinking": False}
+        ),
+    )
+    mock_sglang_cli(model=str(tmp_path))
+
+    with pytest.raises(ValueError) as excinfo:
+        await parse_args(sys.argv[1:])
+
+    message = str(excinfo.value)
+    assert "has no effect on a Dynamo worker" in message
+    assert "python -m dynamo.frontend" in message
+
+
+@pytest.mark.asyncio
 async def test_parse_args_rejects_dcp_on_decode_only_unsupported_backend(
     monkeypatch, mock_sglang_cli, tmp_path
 ):
@@ -2073,6 +2093,8 @@ def test_systemone_serial_capability_registration_gate(
         ("0.5.20", False),
         ("0.5.22", True),
         ("0.5.22+cu130", True),
+        ("0.5.23", True),
+        ("0.5.23+cu130", True),
         ("0.5.19+debug", False),
         ("0.5.22+debug", False),
         ("0.5.22+cu130.debug", False),
@@ -2138,8 +2160,15 @@ def test_systemone_serial_profile_covers_pinned_sglang_version(monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("serial", [False, True])
-@pytest.mark.parametrize("installed", ["0.5.19", "0.5.22+cu130"])
+@pytest.mark.parametrize(
+    ("serial", "installed"),
+    [
+        (False, "0.5.19"),
+        (True, "0.5.19"),
+        (True, "0.5.22+cu130"),
+        (True, "0.5.23"),
+    ],
+)
 async def test_systemone_serial_capability_published_only_when_isolated(
     monkeypatch, caplog, serial, installed
 ):

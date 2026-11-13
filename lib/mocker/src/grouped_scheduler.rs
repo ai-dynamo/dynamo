@@ -22,7 +22,7 @@ use aisimulate_core::engine::{
 };
 use anyhow::{Context, Result, anyhow, ensure};
 #[cfg(test)]
-use dynamo_kv_router::protocols::{KvCacheEvent, KvCacheEventData};
+use dynamo_kv_events::event::{KvCacheEvent, KvCacheEventData};
 use futures::stream::{FuturesUnordered, StreamExt};
 use parking_lot::Mutex;
 use tokio::sync::{mpsc, oneshot, watch};

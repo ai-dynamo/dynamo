@@ -1,0 +1,59 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "dynamo-kv-indexer"
+description = "KV events in, prefix knowledge out: the Dynamo router's KV indexer stage"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords.workspace = true
+readme = "README.md"
+
+[features]
+default = []
+# Transitional: Prometheus counter vectors as metric fields. Replaced by atomics + stats().
+export = ["dep:prometheus"]
+bench = ["dynamo-router-protocol/bench"]
+testing = ["dynamo-router-protocol/testing"]
+profile = []
+
+[dependencies]
+dynamo-kv-events = { workspace = true }
+dynamo-kv-hashing = { workspace = true }
+dynamo-router-protocol = { workspace = true }
+dynamo-tokens = { workspace = true }
+
+anyhow = { workspace = true }
+arc-swap = "1.9.1"
+async-trait = { workspace = true }
+blake3 = { workspace = true }
+dashmap = { workspace = true }
+fastrand = "2"
+flume = "0.12.0"
+parking_lot = { workspace = true }
+prometheus = { workspace = true, optional = true }
+rustc-hash = "2.1.1"
+serde = { workspace = true }
+serde_json = { workspace = true }
+slotmap = "1"
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+xxhash-rust = { workspace = true }
+
+[dev-dependencies]
+dynamo-router-protocol = { workspace = true, features = ["testing"] }
+criterion = "0.5"
+rmp-serde = { workspace = true }
+rstest = "0.18.2"
+rstest_reuse = "0.7.0"
+tokio = { workspace = true, features = ["rt", "macros", "time", "test-util"] }
+
+[[bench]]
+name = "indexer_delegate"
+harness = false
