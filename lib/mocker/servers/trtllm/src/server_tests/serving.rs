@@ -412,8 +412,7 @@ async fn unsupported_request_features_are_refused() {
         }),
         ("encoder handoffs", |r| {
             r.encoder = Some(pb::EncoderOptions {
-                encode_only: true,
-                ..Default::default()
+                mode: Some(pb::encoder_options::Mode::EncodeOnly(pb::EncodeOnly {})),
             });
         }),
         ("LoRA selection", |r| r.lora_name = "adapter".to_string()),

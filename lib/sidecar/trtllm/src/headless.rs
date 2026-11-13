@@ -26,13 +26,14 @@ pub(crate) async fn relay(
     args: Args,
     node: NodeMetadata,
     cancel: CancellationToken,
+    supervision: RoutingSupervision,
 ) -> Result<()> {
     ensure!(
         !args.sidecar.common.enable_rl,
         "Telemetry-only sidecars cannot register RL routes"
     );
+    let is_encoder = args.sidecar.common.disaggregation_mode.is_encode();
     let transport = args.sidecar.grpc.config();
-    let supervision = RoutingSupervision::PRODUCTION;
     let initialization = async {
         let client = TrtllmClient::connect(&args.sidecar.grpc_endpoint, transport).await?;
         let info = client
@@ -43,9 +44,11 @@ pub(crate) async fn relay(
             NodeMetadata::from_info(Some(&info))?.as_ref() == Some(&node),
             "Engine incarnation changed during startup"
         );
-        let mut sources = client.kv_event_sources().await?;
-        node.select_local_sources(&mut sources)?;
-        sources.sort_by_key(|source| source.data_parallel_rank);
+        let mut sources = if is_encoder {
+            Vec::new()
+        } else {
+            client.kv_event_sources().await?
+        };
         let block_size = info
             .capacity
             .as_ref()
@@ -56,11 +59,15 @@ pub(crate) async fn relay(
             .as_ref()
             .and_then(|p| p.data_parallel_size)
             .unwrap_or(1);
-        validate_local_sources(&sources, dp_size)?;
-        ensure!(
-            sources.is_empty() || block_size > 0,
-            "Local publisher has no KV block size"
-        );
+        if !is_encoder {
+            node.select_local_sources(&mut sources)?;
+            sources.sort_by_key(|source| source.data_parallel_rank);
+            validate_local_sources(&sources, dp_size)?;
+            ensure!(
+                sources.is_empty() || block_size > 0,
+                "Local publisher has no KV block size"
+            );
+        }
         let common = &args.sidecar.common;
         let component = if common.disaggregation_mode == DisaggregationMode::Aggregated {
             common.component.as_str()
@@ -91,9 +98,10 @@ pub(crate) async fn relay(
             configs.changed().await.context("Leader discovery closed")?;
         }
     };
+    let monitored_sources = (!is_encoder).then_some(sources.as_slice());
     let leader = tokio::select! {
         result = tokio::time::timeout(transport.startup_deadline, wait) => result.context("Timed out waiting for engine leader")??,
-        result = monitor_engine(&client, &node, &sources, supervision) => { result?; unreachable!() },
+        result = monitor_engine(&client, &node, monitored_sources, supervision) => { result?; unreachable!() },
         _ = cancel.cancelled() => return Ok(()),
     };
     let (worker_id, leader_config) = leader;
@@ -165,7 +173,7 @@ pub(crate) async fn relay(
         _ = terminations.next(), if !terminations.is_empty() => {
             bail!("Local KV event publisher stopped; restarting the telemetry sidecar is required")
         }
-        result = monitor_engine(&client, &node, &sources, supervision) => result,
+        result = monitor_engine(&client, &node, monitored_sources, supervision) => result,
         result = monitor_leader(&mut configs, &node, worker_id, &leader_config) => result,
         _ = cancel.cancelled() => Ok(()),
     }
@@ -225,7 +233,7 @@ async fn monitor_leader(
 pub(crate) async fn monitor_engine(
     client: &TrtllmClient,
     node: &NodeMetadata,
-    sources: &[pb::KvEventSource],
+    sources: Option<&[pb::KvEventSource]>,
     supervision: RoutingSupervision,
 ) -> Result<()> {
     let recovery_limit = supervision.metadata_recovery_limit;
@@ -244,13 +252,15 @@ pub(crate) async fn monitor_engine(
                 NodeMetadata::from_info(Some(&info))?.as_ref() == Some(node),
                 "Local engine changed; restart engine and sidecars together"
             );
-            let mut current_sources = client.kv_event_sources().await?;
-            node.select_local_sources(&mut current_sources)?;
-            current_sources.sort_by_key(|source| source.data_parallel_rank);
-            ensure!(
-                current_sources == sources,
-                "Local event sources changed; restart engine and sidecars together"
-            );
+            if let Some(sources) = sources {
+                let mut current_sources = client.kv_event_sources().await?;
+                node.select_local_sources(&mut current_sources)?;
+                current_sources.sort_by_key(|source| source.data_parallel_rank);
+                ensure!(
+                    current_sources == sources,
+                    "Local event sources changed; restart engine and sidecars together"
+                );
+            }
             Ok::<_, anyhow::Error>(())
         };
         let attempt_deadline =

@@ -253,6 +253,13 @@ async fn run(disaggregated: bool) {
     } else {
         None
     };
+    let mut probe = image_requests(&model).remove(0);
+    probe.is_probe = true;
+    let probe_outputs = collect(&encoder, probe).await;
+    assert_eq!(probe_outputs.len(), 1);
+    assert_eq!(probe_outputs[0].finish_reason, Some(FinishReason::Stop));
+    assert!(probe_outputs[0].token_ids.is_empty());
+    assert!(probe_outputs[0].encoder_result.is_none());
     let mut cases = Vec::new();
     for (mut request, expected) in image_requests(&model).into_iter().zip(baseline.cases) {
         let encoder_wire = build_generate_request(
@@ -278,8 +285,8 @@ async fn run(disaggregated: bool) {
         assert_eq!(handoff["transfer_backend"], NIXL_BACKEND);
         assert!(
             !handoff["opaque_state"]
-                .as_array()
-                .expect("opaque reference bytes")
+                .as_str()
+                .expect("base64 opaque reference")
                 .is_empty()
         );
         request.encoder_result = Some(handoff);

@@ -547,7 +547,8 @@ fn encoder_roles(
         return Ok((false, false));
     }
     let compatible_backend = if producer {
-        capabilities.transfer_backend.as_deref() == Some(crate::convert::NIXL_ENCODER_BACKEND)
+        capabilities.transfer_backend.as_deref()
+            == Some(crate::encoder_handoff::NIXL_ENCODER_BACKEND)
             && capabilities.supported_transfer_backends.is_empty()
             && capabilities.supports_abort_cleanup == Some(true)
     } else {
@@ -556,7 +557,7 @@ fn encoder_roles(
             && capabilities
                 .supported_transfer_backends
                 .iter()
-                .any(|backend| backend == crate::convert::NIXL_ENCODER_BACKEND)
+                .any(|backend| backend == crate::encoder_handoff::NIXL_ENCODER_BACKEND)
     };
     if producer == consumer
         || capabilities.schema_version != Some(1)
@@ -597,9 +598,10 @@ mod encoder_capability_tests {
                     "backend" => caps.supported_transfer_backends.clear(),
                     "direction" if role == "encode" => caps
                         .supported_transfer_backends
-                        .push(crate::convert::NIXL_ENCODER_BACKEND.into()),
+                        .push(crate::encoder_handoff::NIXL_ENCODER_BACKEND.into()),
                     "direction" => {
-                        caps.transfer_backend = Some(crate::convert::NIXL_ENCODER_BACKEND.into())
+                        caps.transfer_backend =
+                            Some(crate::encoder_handoff::NIXL_ENCODER_BACKEND.into())
                     }
                     _ => unreachable!(),
                 }

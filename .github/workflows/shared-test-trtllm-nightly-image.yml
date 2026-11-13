@@ -30,7 +30,7 @@ jobs:
           persist-credentials: false
       - name: Test nightly selection and media harness
         run: |
-          python3 -m pip install 'PyYAML==6.0.3'
+          python3 -m pip install 'PyYAML==6.0.3' 'psutil==7.0.0' 'requests==2.33.1'
           python3 -m unittest discover -s lib/sidecar/trtllm/ci/tests -v
       - name: Resolve latest upstream nightly
         id: config
@@ -73,6 +73,7 @@ jobs:
       image: ${{ needs.build.outputs.image }}
       env:
         HOME: /__w/dynamo/dynamo
+        PYTHONPATH: ${{ github.workspace }}
         USER: dynamo
         PRTE_ALLOW_RUN_AS_ROOT: '1'
         PRTE_ALLOW_RUN_AS_ROOT_CONFIRM: '1'
@@ -88,6 +89,9 @@ jobs:
         with:
           name: trtllm-image-tests-${{ github.sha }}
           path: trtllm-image-tests
+      - name: Install shared test process dependencies
+        if: startsWith(matrix.scenario, 'image-epd')
+        run: python3 -m pip install 'psutil==7.0.0' 'requests==2.33.1'
       - name: Install pinned OpenEngine bindings
         shell: bash
         run: |

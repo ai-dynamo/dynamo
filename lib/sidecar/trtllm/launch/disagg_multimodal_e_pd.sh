@@ -14,7 +14,8 @@ if [[ "${1:-}" == "--help" ]]; then
     echo "Usage: MODEL=Qwen/Qwen3-VL-2B-Instruct $0"
     echo "Requires the TRT-LLM encoder-handoff build and matching native sidecar."
     echo "MODEL_REVISION: required full checkpoint commit SHA; NIXL/UCX must be available."
-    echo "EPD_MODE: e_pd (default) or e_p_d; E/P/D disables conditional prefill bypass."
+    echo "EPD_MODE: e_pd (default) or e_p_d."
+    echo "Mandatory image handoffs disable prefill bypass; text and optional handoffs retain normal policy."
     echo "TRTLLM_PYTHON: engine Python."
     echo "ENCODER_GPU/PD_GPU/PREFILL_GPU/DECODE_GPU: explicit CUDA device IDs."
     echo "Defaults use the first inherited CUDA_VISIBLE_DEVICES entry; otherwise E/PD=0, P=1, D=2."
@@ -75,7 +76,19 @@ if [[ "$EPD_MODE" == e_p_d ]]; then
     DECODE_SYSTEM_PORT=$(dyn_port DYN_SYSTEM_PORT 3 8083)
 fi
 TRTLLM_PYTHON="${TRTLLM_PYTHON:-python3}"
-"$TRTLLM_PYTHON" -c 'from tensorrt_llm.grpc.openengine.bindings import generation_pb2; assert "encoder" in generation_pb2.GenerateRequest.DESCRIPTOR.fields_by_name, "Install the encoder-handoff TRT-LLM build"'
+"$TRTLLM_PYTHON" -c '
+from tensorrt_llm.grpc.openengine.bindings import generation_pb2
+options = generation_pb2.DESCRIPTOR.message_types_by_name.get("EncoderOptions")
+if (
+    "encoder" not in generation_pb2.GenerateRequest.DESCRIPTOR.fields_by_name
+    or options is None
+    or "mode" not in options.oneofs_by_name
+    or "handoff" not in options.fields_by_name
+    or "encode_only" not in options.fields_by_name
+    or options.fields_by_name["encode_only"].message_type is None
+):
+    raise RuntimeError("Install the matching encoder-handoff TRT-LLM build")
+'
 # Resolve once, before launching children: all engines, sidecar tokenizers and
 # frontend-discovered templates must read the same immutable snapshot.
 MODEL_PATH=$("$TRTLLM_PYTHON" - "$MODEL" "$MODEL_REVISION" <<'PY'

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context as _, Result};
 use tokio::sync::{oneshot, watch};
@@ -23,8 +23,10 @@ pub(super) enum ActivationSnapshot {
     Active(Arc<PrefillBinding>),
     /// A target is set but its binding is not published yet: fail closed.
     Pending,
-    /// No prefill target (never set, or cleared): passthrough to decode is safe.
-    Untargeted,
+    /// No target; retain its policy for handoffs that still require prefill.
+    Untargeted {
+        encoder_result_requires_prefill: bool,
+    },
 }
 use crate::{
     discovery::{LoadThresholdHandle, ModelManager, WorkerSetTarget},
@@ -45,7 +47,7 @@ struct PrefillAdvertisement {
     /// merging with it. `None` here when nothing was advertised at all.
     session_affinity_ttl: Option<Option<std::time::Duration>>,
     is_eagle: bool,
-    requires_encoder_result: bool,
+    encoder_result_requires_prefill: bool,
     /// The prefill workers' own block size, which is what their KV events are
     /// keyed on. The decode set's value would index this pool at the wrong
     /// granularity if the two ever differ.
@@ -81,7 +83,9 @@ fn resolve_advertisement_from_cards(
                 .map(std::time::Duration::from_secs)
         }),
         is_eagle: first.runtime_config.enable_eagle,
-        requires_encoder_result: cards.iter().any(ModelManager::requires_encoder_result),
+        encoder_result_requires_prefill: cards
+            .iter()
+            .any(ModelManager::encoder_result_requires_prefill),
         kv_cache_block_size: first.kv_cache_block_size,
     };
 
@@ -166,6 +170,7 @@ impl PrefillRouter {
     ) -> Arc<Self> {
         Arc::new(Self {
             binding: arc_swap::ArcSwapOption::empty(),
+            encoder_result_requires_prefill: AtomicBool::new(false),
             target: parking_lot::Mutex::new(None),
             target_tx: None,
             decode_routing_host: std::sync::OnceLock::new(),
@@ -220,6 +225,7 @@ impl PrefillRouter {
 
         let router = Arc::new(Self {
             binding: arc_swap::ArcSwapOption::empty(),
+            encoder_result_requires_prefill: AtomicBool::new(false),
             target: parking_lot::Mutex::new(None),
             target_tx: Some(target_tx),
             decode_routing_host: std::sync::OnceLock::new(),
@@ -423,7 +429,7 @@ impl PrefillRouter {
             endpoint_id,
             router,
             prefill_router_mode,
-            requires_encoder_result: advertisement.requires_encoder_result,
+            encoder_result_requires_prefill: advertisement.encoder_result_requires_prefill,
         })
     }
 
@@ -597,21 +603,21 @@ impl PrefillRouter {
         }
     }
 
-    /// Update the desired Prefill endpoint. Clearing is synchronous so requests
-    /// holding an older catalog snapshot bypass a removed endpoint before the
-    /// replacement catalog is published.
+    /// Retire a removed endpoint before publishing the replacement catalog.
     pub(crate) fn set_target(&self, target: Option<WorkerSetTarget>) {
         let target_id = target.as_ref().map(WorkerSetTarget::id);
         let mut current = self.target.lock();
         if *current == target_id {
             return;
         }
+        let binding = self.binding.load_full();
+        if let Some(binding) = &binding {
+            self.encoder_result_requires_prefill
+                .store(binding.encoder_result_requires_prefill, Ordering::Relaxed);
+        }
         *current = target_id.clone();
         let reuses_binding = target_id.is_some()
-            && self
-                .binding
-                .load_full()
-                .is_some_and(|binding| Some(&binding.target_id) == target_id.as_ref());
+            && binding.is_some_and(|binding| Some(&binding.target_id) == target_id.as_ref());
         let lifecycle = if target.is_none() {
             PrefillLifecycleState::Unavailable
         } else if reuses_binding {
@@ -637,18 +643,24 @@ impl PrefillRouter {
     /// way two separate lock-free reads can.
     pub(super) fn activation_snapshot(&self) -> ActivationSnapshot {
         let target = self.target.lock();
+        let binding = self.binding.load_full();
+        let encoder_result_requires_prefill = binding.as_ref().map_or_else(
+            || self.encoder_result_requires_prefill.load(Ordering::Relaxed),
+            |binding| binding.encoder_result_requires_prefill,
+        );
+        let untargeted = || ActivationSnapshot::Untargeted {
+            encoder_result_requires_prefill,
+        };
         match self.lifecycle_state() {
-            PrefillLifecycleState::Active => match self.binding.load_full() {
+            PrefillLifecycleState::Active => match binding {
                 Some(binding) => ActivationSnapshot::Active(binding),
                 // The binding is stored before `Active` under this lock, so this
                 // arm is not expected; resolve by target rather than panicking.
                 None if target.is_some() => ActivationSnapshot::Pending,
-                None => ActivationSnapshot::Untargeted,
+                None => untargeted(),
             },
             PrefillLifecycleState::Pending if target.is_some() => ActivationSnapshot::Pending,
-            PrefillLifecycleState::Pending | PrefillLifecycleState::Unavailable => {
-                ActivationSnapshot::Untargeted
-            }
+            PrefillLifecycleState::Pending | PrefillLifecycleState::Unavailable => untargeted(),
         }
     }
 
@@ -736,7 +748,7 @@ mod tests {
         assert!(
             !resolve_advertisement_from_cards(std::slice::from_ref(&selected), RouterMode::KV)
                 .unwrap()
-                .requires_encoder_result
+                .encoder_result_requires_prefill
         );
         selected.runtime_config.runtime_data.insert(
             crate::protocols::common::preprocessor::REQUIRES_ENCODER_RESULT.into(),
@@ -745,7 +757,21 @@ mod tests {
         assert!(
             resolve_advertisement_from_cards(std::slice::from_ref(&selected), RouterMode::KV)
                 .unwrap()
-                .requires_encoder_result
+                .encoder_result_requires_prefill
+        );
+        selected.runtime_config.runtime_data.insert(
+            crate::protocols::common::preprocessor::REQUIRES_ENCODER_RESULT.into(),
+            serde_json::json!(false),
+        );
+        selected.runtime_config.runtime_data.insert(
+            crate::protocols::common::preprocessor::ENCODER_RESULT_REQUIRES_PREFILL.into(),
+            serde_json::json!(true),
+        );
+        assert!(!ModelManager::requires_encoder_result(&selected));
+        assert!(
+            resolve_advertisement_from_cards(std::slice::from_ref(&selected), RouterMode::KV)
+                .unwrap()
+                .encoder_result_requires_prefill
         );
         let optional = card(None);
         for cards in [
@@ -755,7 +781,7 @@ mod tests {
             assert!(
                 resolve_advertisement_from_cards(&cards, RouterMode::KV)
                     .unwrap()
-                    .requires_encoder_result
+                    .encoder_result_requires_prefill
             );
         }
     }

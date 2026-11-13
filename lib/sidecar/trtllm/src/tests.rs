@@ -10,8 +10,8 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use dynamo_backend_common::{
-    DisaggregationMode, ErrorType, FinishReason, GenerateContext, LLMEngine, OutputOptions,
-    PrefillResult, PreprocessedRequest, SamplingOptions, StopConditions, StopReason,
+    DisaggregationMode, ErrorType, FinishReason, GenerateContext, LLMEngine, MultimodalData,
+    OutputOptions, PrefillResult, PreprocessedRequest, SamplingOptions, StopConditions, StopReason,
 };
 use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportConfig};
 use futures::{Stream, StreamExt};
@@ -44,6 +44,11 @@ struct FakeTrtllm {
     affinity_headers: Arc<Mutex<Vec<(String, String)>>>,
     aborts: Arc<Mutex<Vec<String>>>,
     released_encoder_handoffs: Arc<Mutex<Vec<pb::EncoderHandoffRef>>>,
+    encoder_release_error: Arc<Mutex<Option<tonic::Code>>>,
+    encoder_release_started: Arc<tokio::sync::Notify>,
+    encoder_release_resume: Arc<tokio::sync::Notify>,
+    encoder_release_completions: Arc<Mutex<Vec<oneshot::Receiver<()>>>>,
+    hang_encoder_release: Arc<AtomicBool>,
     peers: Arc<Mutex<Vec<SocketAddr>>>,
     hang: Arc<AtomicBool>,
     /// Simulates a server that has not yet accepted the request, so the RPC
@@ -60,6 +65,7 @@ struct FakeTrtllm {
     served_model_name: Arc<Mutex<Option<String>>>,
     kv_routing: Arc<AtomicBool>,
     server_info_error: Arc<Mutex<Option<tonic::Code>>>,
+    server_info_calls: Arc<AtomicUsize>,
     kv_sources_error: Arc<Mutex<Option<tonic::Code>>>,
     /// Injected metadata errors returned by either RPC.
     metadata_errors_served: Arc<AtomicUsize>,
@@ -280,7 +286,20 @@ impl pb::control_server::Control for FakeTrtllm {
                 self.aborts.lock().await.push(id);
             }
             Some(pb::abort_request::Target::EncoderHandoff(cache)) => {
+                // Closing the sender also observes handlers cancelled by gRPC.
+                let (_handler, completion) = oneshot::channel();
+                self.encoder_release_completions
+                    .lock()
+                    .await
+                    .push(completion);
                 self.released_encoder_handoffs.lock().await.push(cache);
+                self.encoder_release_started.notify_one();
+                if self.hang_encoder_release.load(Ordering::SeqCst) {
+                    self.encoder_release_resume.notified().await;
+                }
+                if let Some(code) = self.encoder_release_error.lock().await.take() {
+                    return Err(Status::new(code, "encoder release failed"));
+                }
             }
             other => {
                 return Err(Status::invalid_argument(format!(
@@ -298,6 +317,7 @@ impl pb::control_server::Control for FakeTrtllm {
         &self,
         _request: Request<pb::GetServerInfoRequest>,
     ) -> Result<Response<pb::ServerInfo>, Status> {
+        self.server_info_calls.fetch_add(1, Ordering::SeqCst);
         if let Some(code) = *self.server_info_error.lock().await {
             self.metadata_errors_served.fetch_add(1, Ordering::SeqCst);
             return Err(Status::new(code, "temporary metadata failure"));
@@ -562,7 +582,7 @@ fn request_with_encoder_result() -> PreprocessedRequest {
     let mut req = request();
     add_images(&mut req, ["https://example.com/image.png"]);
     req.encoder_result = Some(json!({
-        "transfer_backend": "trtllm-nixl-encoder-v1", "opaque_state": [1, 2, 3]
+        "transfer_backend": "trtllm-nixl-encoder-v1", "opaque_state": "AQID"
     }));
     req
 }
@@ -954,6 +974,163 @@ async fn encoder_release_uses_abort_without_generating_or_aborting_a_request() {
     })
     .await
     .expect("encoder handoff release must finish promptly");
+}
+
+#[tokio::test]
+async fn encoder_rejects_invalid_sampling_before_export() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let service = FakeTrtllm::default();
+        *service.encoder_role.lock().await = Some("encode".into());
+        let server = FakeServer::start(service).await;
+        let encoder = engine_in_mode(&server.endpoint, 1, DisaggregationMode::Encode);
+        encoder.start(0).await.unwrap();
+        for invalid_seed in [false, true] {
+            let mut req = request();
+            add_images(&mut req, ["https://example.com/image.png"]);
+            if invalid_seed {
+                req.sampling_options.seed = Some(-1);
+            } else {
+                req.sampling_options.top_k = Some(-5);
+            }
+            let error = encoder
+                .generate(
+                    req,
+                    GenerateContext::new(dynamo_backend_common::testing::mock_context(), None),
+                )
+                .await
+                .err()
+                .expect("invalid sampling must fail before dispatch");
+            assert!(error.to_string().contains(if invalid_seed {
+                "seed must be non-negative"
+            } else {
+                "top_k must be"
+            }));
+        }
+        assert!(server.service.requests.lock().await.is_empty());
+        encoder.cleanup().await.unwrap();
+    })
+    .await
+    .expect("encoder validation must finish promptly");
+}
+
+#[tokio::test]
+async fn encoder_probe_releases_export_before_success_without_changing_normal_encodes() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let service = FakeTrtllm::default();
+        *service.encoder_role.lock().await = Some("encode".into());
+        let server = FakeServer::start(service).await;
+        let encoder = engine_in_mode(&server.endpoint, 1, DisaggregationMode::Encode);
+        encoder.start(0).await.unwrap();
+        for is_probe in [false, true] {
+            let mut req = request();
+            add_images(&mut req, ["https://example.com/image.png"]);
+            req.is_probe = is_probe;
+            let outputs = collect(&encoder, req).await;
+            assert_eq!(outputs.len(), 1);
+            assert_eq!(outputs[0].finish_reason, Some(FinishReason::Stop));
+            assert_eq!(outputs[0].encoder_result.is_none(), is_probe);
+            assert_eq!(
+                server.service.released_encoder_handoffs.lock().await.len(),
+                usize::from(is_probe)
+            );
+        }
+        assert_eq!(server.service.requests.lock().await.len(), 2);
+        assert!(server.service.aborts.lock().await.is_empty());
+        encoder.cleanup().await.unwrap();
+    })
+    .await
+    .expect("encoder canary must release its export before succeeding");
+}
+
+#[tokio::test]
+async fn encoder_probe_release_survives_cancellation_and_stream_drop_during_cleanup() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let service = FakeTrtllm::default();
+        *service.encoder_role.lock().await = Some("encode".into());
+        service.hang_encoder_release.store(true, Ordering::SeqCst);
+        let server = FakeServer::start(service).await;
+        let encoder = engine_in_mode(&server.endpoint, 1, DisaggregationMode::Encode);
+        encoder.start(0).await.unwrap();
+        let mut req = request();
+        add_images(&mut req, ["https://example.com/image.png"]);
+        req.is_probe = true;
+        let context = dynamo_backend_common::testing::mock_context();
+        let mut stream = encoder
+            .generate(req, GenerateContext::new(context.clone(), None))
+            .await
+            .unwrap();
+        let mut next = Box::pin(stream.next());
+        tokio::select! {
+            _ = server.service.encoder_release_started.notified() => {},
+            _ = &mut next => panic!("probe completed before its release RPC"),
+        }
+        context.stop_generating();
+        drop(next);
+        drop(stream);
+        server
+            .service
+            .hang_encoder_release
+            .store(false, Ordering::SeqCst);
+        server.service.encoder_release_resume.notify_one();
+        server.service.encoder_release_started.notified().await;
+        assert_eq!(
+            server.service.released_encoder_handoffs.lock().await.len(),
+            2
+        );
+        let completions =
+            std::mem::take(&mut *server.service.encoder_release_completions.lock().await);
+        assert_eq!(completions.len(), 2);
+        for completion in completions {
+            assert!(
+                completion.await.is_err(),
+                "release handler is still running"
+            );
+        }
+        encoder.cleanup().await.unwrap();
+    })
+    .await
+    .expect("dropped encoder canary must release its export");
+}
+
+#[tokio::test]
+async fn encoder_probe_reports_release_failure_and_retries_cleanup() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let service = FakeTrtllm::default();
+        *service.encoder_role.lock().await = Some("encode".into());
+        *service.encoder_release_error.lock().await = Some(tonic::Code::Unavailable);
+        let server = FakeServer::start(service).await;
+        let encoder = engine_in_mode(&server.endpoint, 1, DisaggregationMode::Encode);
+        encoder.start(0).await.unwrap();
+        let mut req = request();
+        add_images(&mut req, ["https://example.com/image.png"]);
+        req.is_probe = true;
+        let mut stream = encoder
+            .generate(
+                req,
+                GenerateContext::new(dynamo_backend_common::testing::mock_context(), None),
+            )
+            .await
+            .unwrap();
+        assert!(
+            stream
+                .next()
+                .await
+                .unwrap()
+                .unwrap_err()
+                .to_string()
+                .contains("Abort")
+        );
+        server.service.encoder_release_started.notified().await;
+        drop(stream);
+        server.service.encoder_release_started.notified().await;
+        assert_eq!(
+            server.service.released_encoder_handoffs.lock().await.len(),
+            2
+        );
+        encoder.cleanup().await.unwrap();
+    })
+    .await
+    .expect("failed encoder canary cleanup must not report healthy");
 }
 
 #[tokio::test]
@@ -1494,6 +1671,126 @@ async fn optional_encoder_consumers_can_start_without_encoder_routing() {
     })
     .await
     .expect("consumer capability discovery must finish promptly");
+}
+
+#[tokio::test]
+async fn optional_encoder_routing_keeps_inline_consumer_policy() {
+    use dynamo_llm::protocols::common::preprocessor::{
+        ENCODER_RESULT_REQUIRES_PREFILL, REQUIRES_ENCODER_RESULT,
+    };
+
+    tokio::time::timeout(Duration::from_secs(10), async {
+        for mode in [AGG, PREFILL, DisaggregationMode::Decode] {
+            for required in [false, true] {
+                let mut info = encoder_model_info("consume");
+                info.encoder.as_mut().unwrap().requires_handoff = Some(required);
+                info.extra = Some(
+                    dynamo_sidecar_common::json_to_struct(
+                        json!({"trtllm_supported_modalities": ["image", "video"]}),
+                        "test",
+                    )
+                    .unwrap(),
+                );
+                let service = FakeTrtllm::default();
+                *service.model_info_override.lock().await = Some(info);
+                let server = FakeServer::start(service).await;
+                let mut args = vec![
+                    "sidecar".into(),
+                    "--grpc-endpoint".into(),
+                    server.endpoint.clone(),
+                    "--model-path".into(),
+                    "model-source".into(),
+                ];
+                if mode != AGG {
+                    args.extend([
+                        "--disaggregation-mode".into(),
+                        if mode == PREFILL {
+                            "prefill".into()
+                        } else {
+                            "decode".into()
+                        },
+                    ]);
+                }
+                if !mode.is_decode() {
+                    args.push("--route-to-encoder".into());
+                }
+                let consumer = TrtllmSidecarEngine::from_args(args).unwrap().0;
+                let config = consumer.start(0).await.unwrap();
+                assert_eq!(
+                    config
+                        .runtime_data
+                        .get(REQUIRES_ENCODER_RESULT)
+                        .and_then(serde_json::Value::as_bool),
+                    (required && !mode.is_decode()).then_some(true)
+                );
+                assert_eq!(
+                    config
+                        .runtime_data
+                        .get(ENCODER_RESULT_REQUIRES_PREFILL)
+                        .and_then(serde_json::Value::as_bool),
+                    mode.is_prefill().then_some(true),
+                    "prefill must consume its handoff even when inline encoding is available"
+                );
+                if !required && mode != DisaggregationMode::Decode {
+                    let mut req = request();
+                    req.multi_modal_data = Some(std::collections::HashMap::from([(
+                        "video_url".into(),
+                        vec![MultimodalData::RawUrl(
+                            "https://example.com/video.mp4".into(),
+                        )],
+                    )]));
+                    collect(&consumer, req).await;
+                    let requests = server.service.requests.lock().await;
+                    assert_eq!(requests.len(), 1);
+                    assert!(requests[0].encoder.is_none());
+                    assert_eq!(requests[0].media[0].modality, pb::Modality::Video as i32);
+                }
+                let requests_before_handoff = server.service.requests.lock().await.len();
+                let mut handoff = request();
+                add_images(&mut handoff, ["https://example.com/image.png"]);
+                handoff.encoder_result = Some(json!({
+                    "transfer_backend": "trtllm-nixl-encoder-v1",
+                    "opaque_state": "AQID",
+                }));
+                if mode.is_decode() {
+                    let context = dynamo_backend_common::testing::mock_context();
+                    let error = match consumer
+                        .generate(handoff, GenerateContext::new(context, None))
+                        .await
+                    {
+                        Err(error) => error,
+                        Ok(_) => panic!("decode cannot consume an unclaimed encoder handoff"),
+                    };
+                    assert_eq!(
+                        error.class(),
+                        dynamo_runtime::error::ErrorClass::InvalidRequest
+                    );
+                    assert!(
+                        error
+                            .to_string()
+                            .contains("encoder_result requires an aggregated or prefill worker")
+                    );
+                    assert_eq!(
+                        server.service.requests.lock().await.len(),
+                        requests_before_handoff,
+                        "invalid decode handoff must be rejected before native dispatch"
+                    );
+                } else {
+                    collect(&consumer, handoff).await;
+                    let requests = server.service.requests.lock().await;
+                    assert_eq!(requests.len(), requests_before_handoff + 1);
+                    assert!(matches!(
+                        requests.last().unwrap().encoder.as_ref().unwrap().mode.as_ref(),
+                        Some(pb::encoder_options::Mode::Handoff(reference))
+                            if reference.opaque_state == [1, 2, 3]
+                    ));
+                }
+                consumer.cleanup().await.unwrap();
+            }
+        }
+    })
+    .await
+    .expect("consumer metadata and inline fallback stay bounded");
 }
 
 #[tokio::test]

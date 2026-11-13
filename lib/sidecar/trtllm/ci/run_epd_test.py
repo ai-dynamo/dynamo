@@ -7,15 +7,13 @@
 import contextlib
 import json
 import os
-import select
-import signal
 import socket
 import subprocess
 import sys
-import time
-from pathlib import Path
 
 import run_image_test as image_test
+
+from tests.utils.managed_process import ManagedProcess
 
 BACKEND = "trtllm-nixl-encoder-v1"
 FATAL_LOG_MESSAGES = (
@@ -27,73 +25,25 @@ FATAL_LOG_MESSAGES = (
 )
 
 
-def _child_pidfds(parent):
-    # MPI workers may outlive the CLI's successful shutdown return briefly.
-    processes = {}
-    for path in Path("/proc").glob("[0-9]*/stat"):
-        try:
-            fields = path.read_text().rsplit(") ", 1)[1].split()
-            processes[int(path.parent.name)] = int(fields[1])
-        except (FileNotFoundError, ProcessLookupError):
-            continue
-    owned = {parent}
-    while children := {pid for pid, ppid in processes.items() if ppid in owned} - owned:
-        owned.update(children)
-    descriptors = []
-    for pid in owned - {parent}:
-        try:
-            descriptors.append(os.pidfd_open(pid))
-        except ProcessLookupError:
-            continue
-    return descriptors
-
-
-def _wait_pidfds(descriptors, timeout):
-    pending = descriptors[:]
-    deadline = time.monotonic() + timeout
-    while pending:
-        ready, _, _ = select.select(
-            pending, [], [], max(0, deadline - time.monotonic())
-        )
-        if not ready:
-            raise subprocess.TimeoutExpired("engine descendants", timeout)
-        pending = [fd for fd in pending if fd not in ready]
-
-
-def _stop_engine(process, log):
-    descriptors = _child_pidfds(process.pid)
+def _stop_engine(process):
     try:
-        if process.poll() is None:
-            process.send_signal(signal.SIGTERM)
-        try:
-            returncode = process.wait(timeout=60)
-            _wait_pidfds(descriptors, 30)
-        except subprocess.TimeoutExpired as error:
-            try:
-                image_test.stop_engine(process)
-            finally:
-                # These stable handles still identify workers if their parent exited.
-                for descriptor in descriptors:
-                    try:
-                        signal.pidfd_send_signal(descriptor, signal.SIGKILL)
-                    except ProcessLookupError:
-                        continue
-                _wait_pidfds(descriptors, 10)
-            raise RuntimeError(f"Engine required forced shutdown; see {log}") from error
-        if returncode != 0:
-            image_test.stop_engine(process)
-            raise RuntimeError(f"Engine exited with {returncode}; see {log}")
-        text = log.read_text()
-        for message in FATAL_LOG_MESSAGES:
-            if message in text:
-                raise RuntimeError(f"Native engine failure: {message}; see {log}")
-    finally:
-        for descriptor in descriptors:
-            os.close(descriptor)
+        process.__exit__(None, None, None)
+    except RuntimeError as error:
+        raise RuntimeError(f"{error}; see {process.log_path}") from error
+    text = process.read_logs()
+    for message in FATAL_LOG_MESSAGES:
+        if message in text:
+            raise RuntimeError(
+                f"Native engine failure: {message}; see {process.log_path}"
+            )
 
 
 def require_encoder_support(info, role):
-    capability = getattr(info, "encoder", None)
+    if not info.HasField("encoder"):
+        raise RuntimeError(
+            f"Published nightly lacks the required {role} NIXL encoder capability"
+        )
+    capability = info.encoder
     encoder = role == "encoder"
     required = ("schema_version", "encoder_only", "accepts_handoff") + (
         ("supports_abort_cleanup", "transfer_backend")
@@ -101,12 +51,16 @@ def require_encoder_support(info, role):
         else ("requires_handoff",)
     )
     if (
-        capability is None
-        or any(not capability.HasField(name) for name in required)
+        any(not capability.HasField(name) for name in required)
         or capability.schema_version != 1
         or capability.encoder_only != encoder
         or capability.accepts_handoff == encoder
         or (encoder and not capability.supports_abort_cleanup)
+        or (
+            encoder
+            and capability.HasField("requires_handoff")
+            and capability.requires_handoff
+        )
         or (not encoder and not capability.requires_handoff)
         or (encoder and capability.transfer_backend != BACKEND)
         or (encoder and capability.supported_transfer_backends)
@@ -179,33 +133,34 @@ def _start_engine(model_path, model, revision, role, split, results, cleanup):
         )
         if role == "encoder":
             env["TRTLLM_OPENENGINE_ENCODER_ENDPOINT"] = f"127.0.0.1:{port}"
-    log = results / f"{role}-engine.log"
-    with log.open("w") as output:
-        process = subprocess.Popen(
-            [
-                sys.executable,
-                "-m",
-                "tensorrt_llm.commands.serve",
-                str(model_path),
-                "--grpc",
-                "--grpc-protocol",
-                "openengine",
-                "--host",
-                "127.0.0.1",
-                "--port",
-                str(port),
-                "--max_seq_len",
-                "2048",
-                "--extra_llm_api_options",
-                str(config),
-            ],
-            env=env,
-            stdout=output,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
-    cleanup.callback(_stop_engine, process, log)
-    image_test.wait_for_engine(process, port)
+    process = ManagedProcess(
+        command=[
+            sys.executable,
+            "-m",
+            "tensorrt_llm.commands.serve",
+            str(model_path),
+            "--grpc",
+            "--grpc-protocol",
+            "openengine",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(port),
+            "--max_seq_len",
+            "2048",
+            "--extra_llm_api_options",
+            str(config),
+        ],
+        env=env,
+        health_check_ports=[port],
+        timeout=600,
+        log_dir=str(results),
+        display_name=f"{role}-engine",
+        terminate_all_matching_process_names=False,
+        graceful_shutdown=True,
+    )
+    cleanup.callback(_stop_engine, process)
+    process.__enter__()
     if role != "baseline":
         _check_capabilities(port, model, role, results)
     return f"http://127.0.0.1:{port}"

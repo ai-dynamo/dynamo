@@ -25,6 +25,7 @@ use dynamo_runtime::{
 
 use crate::discovery::{WorkerSetTarget, WorkerSetTargetId};
 use crate::protocols::common::{
+    FinishReason,
     llm_backend::{LLMEngineOutput, PreprocessedRequest},
     preprocessor::TraceLink,
 };
@@ -320,7 +321,7 @@ impl EncoderRouter {
 
     fn unavailable(&self, message: &str) -> anyhow::Error {
         DynamoError::builder()
-            .class(ErrorClass::Unavailable)
+            .class(ErrorClass::WorkerUnavailable)
             .message(format!(
                 "Required encoder for model {} in namespace {}: {message}",
                 self.model_name, self.namespace
@@ -367,6 +368,7 @@ impl EncoderRouter {
 
     fn should_encode(request: &PreprocessedRequest) -> bool {
         !request.is_probe
+            && request.get_annotation_value("query_instance_id").is_none()
             && request.encoder_result.is_none()
             && request
                 .multi_modal_data
@@ -422,17 +424,6 @@ impl
             return next.generate(context.map(|_| request)).await;
         }
         let required = self.is_required();
-        if required
-            && request.multi_modal_data.as_ref().is_some_and(|media| {
-                media
-                    .iter()
-                    .any(|(kind, items)| kind != "image_url" && !items.is_empty())
-            })
-        {
-            return Err(DynamoError::builder().class(ErrorClass::InvalidRequest)
-                .message("This deployment supports image encoder handoffs only; video and audio are unsupported")
-                .build().into());
-        }
         if self.lifecycle_state() != EncoderLifecycleState::Active {
             if required {
                 return Err(self.unavailable("no active encoder is available"));
@@ -457,16 +448,10 @@ impl
             let binding = self
                 .binding
                 .load_full()
-                .context("Encoder router is active but not initialized")?;
-            let worker_id = binding
-                .router
-                .select_next_worker()
-                .context("No encoder worker is available")?;
+                .ok_or_else(|| self.unavailable("encoder binding changed during activation"))?;
             let (worker_id, response) = binding
                 .router
-                .direct_within_prepared(encode_context, worker_id, None, |_, worker_id| {
-                    Ok(worker_id)
-                })
+                .select_and_dispatch(encode_context, |_, worker_id| Ok(worker_id))
                 .await?;
             let mut cleanup = EncoderResultCleanup {
                 router: binding.router.clone(),
@@ -487,14 +472,7 @@ impl
             }
             Err(error) => {
                 if required {
-                    let invalid = error
-                        .downcast_ref::<DynamoError>()
-                        .is_some_and(|error| error.class() == ErrorClass::InvalidRequest);
-                    return Err(if invalid {
-                        error
-                    } else {
-                        self.unavailable("encoder hop failed").context(error)
-                    });
+                    return Err(error.context("Required encoder hop failed"));
                 }
                 tracing::error!(
                     %error,
@@ -510,8 +488,11 @@ impl
         let stream = async_stream::stream! {
             let mut cleanup = cleanup;
             while let Some(item) = response.next().await {
-                if item.data.as_ref().is_some_and(|output| !output.token_ids.is_empty()) {
-                    // A generated token proves the consumer claimed the handoff.
+                if item.data.as_ref().is_some_and(|output| {
+                    !output.token_ids.is_empty()
+                        || matches!(output.finish_reason, Some(FinishReason::EoS | FinishReason::Length | FinishReason::Stop))
+                }) {
+                    // Tokens or successful completion prove the consumer claimed the handoff.
                     cleanup.request = None;
                 }
                 yield item;

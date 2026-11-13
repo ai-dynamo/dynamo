@@ -49,6 +49,8 @@ enum DownstreamBehavior {
     SetupError,
     TypedError,
     Terminal,
+    ErrorTerminal,
+    CancelledTerminal,
     Token,
     Pending,
 }
@@ -80,6 +82,18 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                         Annotated::from_data(LLMEngineOutput::stop()),
                     ]))
                 }
+                DownstreamBehavior::ErrorTerminal | DownstreamBehavior::CancelledTerminal => {
+                    Box::pin(stream::iter([Annotated::from_data(LLMEngineOutput {
+                        finish_reason: Some(
+                            if matches!(self.behavior, DownstreamBehavior::ErrorTerminal) {
+                                FinishReason::Error("rejected before consuming handoff".into())
+                            } else {
+                                FinishReason::Cancelled
+                            },
+                        ),
+                        ..Default::default()
+                    })]))
+                }
                 DownstreamBehavior::Token => Box::pin(stream::iter([
                     Annotated::from_data(LLMEngineOutput {
                         token_ids: vec![42],
@@ -94,11 +108,15 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
 }
 
 fn multimodal_request() -> PreprocessedRequest {
+    media_request("image_url")
+}
+
+fn media_request(kind: &str) -> PreprocessedRequest {
     PreprocessedRequest::builder()
         .model("model".to_string())
         .token_ids(vec![1, 2, 3])
         .multi_modal_data(Some(HashMap::from([(
-            "image_url".to_string(),
+            kind.to_string(),
             vec![MultimodalData::RawUrl(
                 "data:image/png;base64,cGF5bG9hZA==".to_string(),
             )],
@@ -146,13 +164,23 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 request.context(),
             ));
         }
-        if request.sampling_options.n == Some(2) {
+        if matches!(request.sampling_options.n, Some(2 | 4 | 5 | 6))
+            || request
+                .multi_modal_data
+                .as_ref()
+                .is_some_and(|media| media.contains_key("unsupported_url"))
+        {
             return Ok(ResponseStream::new(
                 Box::pin(stream::iter([Annotated {
                     error: Some(
                         DynamoError::builder()
-                            .class(ErrorClass::InvalidRequest)
-                            .message("encoder accepts n=1 only")
+                            .class(match request.sampling_options.n {
+                                Some(4) => ErrorClass::WorkerOverloaded,
+                                Some(5) => ErrorClass::WorkerUnavailable,
+                                Some(6) => ErrorClass::Cancelled,
+                                _ => ErrorClass::InvalidRequest,
+                            })
+                            .message("encoder rejected request")
                             .build(),
                     ),
                     data: None,
@@ -421,10 +449,30 @@ async fn committed_encoder_admission_survives_membership_changes_and_endpoint_re
         .is_err()
     );
 
+    router.set_required(true);
+    for kind in ["video_url", "audio_url", "unsupported_url"] {
+        let downstream = Arc::new(CaptureEngine::default());
+        let result = router
+            .generate(SingleIn::new(media_request(kind)), downstream.clone())
+            .await;
+        if kind == "unsupported_url" {
+            let error = result.unwrap_err();
+            let typed = error.downcast_ref::<DynamoError>().unwrap();
+            assert_eq!(typed.class(), ErrorClass::InvalidRequest);
+            assert!(error.to_string().contains("Required encoder hop failed"));
+            assert!(format!("{error:#}").contains("encoder rejected request"));
+            assert!(downstream.request.lock().unwrap().is_none());
+        } else {
+            drop(result.unwrap());
+            let seen = downstream.request.lock().unwrap();
+            let seen = seen.as_ref().unwrap();
+            assert_eq!(seen.encoder_result.as_ref().unwrap()["worker_id"], ids[2]);
+            assert!(seen.multi_modal_data.as_ref().unwrap().contains_key(kind));
+        }
+    }
     let downstream = Arc::new(CaptureEngine::default());
     let mut invalid = multimodal_request();
     invalid.sampling_options.n = Some(2);
-    router.set_required(true);
     let error = router
         .generate(SingleIn::new(invalid.clone()), downstream.clone())
         .await
@@ -434,6 +482,45 @@ async fn committed_encoder_admission_survives_membership_changes_and_endpoint_re
         ErrorClass::InvalidRequest
     );
     assert!(downstream.request.lock().unwrap().is_none());
+    for (n, expected, migratable) in [
+        (4, dynamo_runtime::error::ErrorType::ResourceExhausted, true),
+        (6, dynamo_runtime::error::ErrorType::Cancelled, false),
+    ] {
+        let mut request = multimodal_request();
+        request.sampling_options.n = Some(n);
+        let error = router
+            .generate(SingleIn::new(request), downstream.clone())
+            .await
+            .unwrap_err();
+        assert!(
+            dynamo_runtime::error::match_error_chain(error.as_ref(), &[expected], &[]),
+            "n={n}: {error:#}"
+        );
+        if n == 4 {
+            let typed = error.downcast_ref::<DynamoError>().unwrap();
+            assert_eq!(typed.class(), ErrorClass::CapacityExhausted);
+            assert_eq!(typed.reason().as_str(), "capacity.worker_overloaded");
+        }
+        assert_eq!(
+            crate::migration::is_migratable(error.as_ref()),
+            migratable,
+            "n={n}: {error:#}"
+        );
+        assert!(downstream.request.lock().unwrap().is_none());
+    }
+    let binding = router.binding.load_full().unwrap();
+    binding.router.client.set_overloaded_instances(&[ids[2]]);
+    let error = router
+        .generate(SingleIn::new(multimodal_request()), downstream.clone())
+        .await
+        .unwrap_err();
+    assert!(dynamo_runtime::error::match_error_chain(
+        error.as_ref(),
+        &[dynamo_runtime::error::ErrorType::ResourceExhausted],
+        &[]
+    ));
+    assert!(downstream.request.lock().unwrap().is_none());
+    binding.router.client.set_overloaded_instances(&[]);
     router.set_required(false);
     let response = router
         .generate(SingleIn::new(invalid), downstream.clone())
@@ -458,6 +545,8 @@ async fn committed_encoder_admission_survives_membership_changes_and_endpoint_re
         DownstreamBehavior::SetupError,
         DownstreamBehavior::TypedError,
         DownstreamBehavior::Terminal,
+        DownstreamBehavior::ErrorTerminal,
+        DownstreamBehavior::CancelledTerminal,
         DownstreamBehavior::Token,
         DownstreamBehavior::Empty,
         DownstreamBehavior::Pending,
@@ -528,7 +617,10 @@ async fn committed_encoder_admission_survives_membership_changes_and_endpoint_re
             }
             drop(response);
         }
-        if matches!(behavior, DownstreamBehavior::Token) {
+        if matches!(
+            behavior,
+            DownstreamBehavior::Token | DownstreamBehavior::Terminal
+        ) {
             assert!(
                 tokio::time::timeout(Duration::from_millis(500), async {
                     loop {
@@ -544,7 +636,7 @@ async fn committed_encoder_admission_survives_membership_changes_and_endpoint_re
                 })
                 .await
                 .is_err(),
-                "a token-confirmed handoff must not send producer release"
+                "a consumed handoff must not send producer release"
             );
             continue;
         }
@@ -585,6 +677,27 @@ async fn committed_encoder_admission_survives_membership_changes_and_endpoint_re
             Some(json!({RELEASE_ENCODER_RESULT: true}))
         );
     }
+
+    // A worker-unavailable stream quarantines its producer. Check it last so
+    // the real transport's health tracking cannot poison subsequent fixtures.
+    router.set_required(true);
+    let downstream = Arc::new(CaptureEngine::default());
+    let mut request = multimodal_request();
+    request.sampling_options.n = Some(5);
+    let error = router
+        .generate(SingleIn::new(request), downstream.clone())
+        .await
+        .unwrap_err();
+    assert!(
+        dynamo_runtime::error::match_error_chain(
+            error.as_ref(),
+            &[dynamo_runtime::error::ErrorType::WorkerUnavailable],
+            &[]
+        ),
+        "{error:#}"
+    );
+    assert!(crate::migration::is_migratable(error.as_ref()), "{error:#}");
+    assert!(downstream.request.lock().unwrap().is_none());
 
     drop(router);
     for worker in workers {
@@ -746,55 +859,78 @@ async fn pending_activation_does_not_keep_router_alive() {
 }
 
 #[tokio::test]
-async fn required_encoder_fails_closed_when_unavailable_or_failing() {
-    for active in [false, true] {
+async fn required_encoder_pending_error_is_migratable() {
+    for state in [
+        EncoderLifecycleState::Pending,
+        EncoderLifecycleState::Active,
+    ] {
         let router = EncoderRouter::disabled();
         router.set_required(true);
-        if active {
-            router
-                .lifecycle
-                .store(EncoderLifecycleState::Active as u8, Ordering::Release);
-        }
+        router.lifecycle.store(state as u8, Ordering::Release);
         let downstream = Arc::new(CaptureEngine::default());
         let error = router
             .generate(SingleIn::new(multimodal_request()), downstream.clone())
             .await
-            .expect_err("vision-disabled consumers must not receive inline media");
-        assert!(error.chain().any(|error| {
-            error
-                .downcast_ref::<DynamoError>()
-                .is_some_and(|error| error.class() == ErrorClass::Unavailable)
-        }));
+            .unwrap_err();
+        assert!(dynamo_runtime::error::match_error_chain(
+            error.as_ref(),
+            &[dynamo_runtime::error::ErrorType::WorkerUnavailable],
+            &[]
+        ));
+        assert!(crate::migration::is_migratable(error.as_ref()));
         assert!(downstream.request.lock().unwrap().is_none());
     }
 }
 
 #[tokio::test]
-async fn required_encoder_rejects_unsupported_media_before_dispatch_but_passes_text() {
+async fn multimodal_query_only_bypasses_required_encoder_in_every_lifecycle() {
+    for state in [
+        EncoderLifecycleState::Pending,
+        EncoderLifecycleState::Active,
+        EncoderLifecycleState::Unavailable,
+    ] {
+        let router = EncoderRouter::disabled();
+        router.set_required(true);
+        router.lifecycle.store(state as u8, Ordering::Release);
+        for kind in ["image_url", "video_url", "audio_url"] {
+            let mut request = media_request(kind);
+            request.annotations.push("query_instance_id:".into());
+            let downstream = Arc::new(CaptureEngine::default());
+            drop(
+                router
+                    .generate(SingleIn::new(request), downstream.clone())
+                    .await
+                    .unwrap(),
+            );
+            let seen = downstream.request.lock().unwrap();
+            assert!(seen.as_ref().unwrap().encoder_result.is_none());
+            assert!(
+                seen.as_ref()
+                    .unwrap()
+                    .multi_modal_data
+                    .as_ref()
+                    .unwrap()
+                    .contains_key(kind)
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn unavailable_required_encoder_rejects_media_but_passes_text() {
     let router = EncoderRouter::disabled();
     router.set_required(true);
-    for modality in ["video_url", "audio_url"] {
-        let mut request = multimodal_request();
-        let images = request
-            .multi_modal_data
-            .as_mut()
-            .unwrap()
-            .remove("image_url")
-            .unwrap();
-        request
-            .multi_modal_data
-            .as_mut()
-            .unwrap()
-            .insert(modality.into(), images);
+    for modality in ["image_url", "video_url", "audio_url"] {
         let downstream = Arc::new(CaptureEngine::default());
         let error = router
-            .generate(SingleIn::new(request), downstream.clone())
+            .generate(SingleIn::new(media_request(modality)), downstream.clone())
             .await
             .unwrap_err();
-        assert_eq!(
-            error.downcast_ref::<DynamoError>().unwrap().class(),
-            ErrorClass::InvalidRequest
-        );
+        assert!(dynamo_runtime::error::match_error_chain(
+            error.as_ref(),
+            &[dynamo_runtime::error::ErrorType::WorkerUnavailable],
+            &[],
+        ));
         assert!(downstream.request.lock().unwrap().is_none());
     }
     let downstream = Arc::new(CaptureEngine::default());

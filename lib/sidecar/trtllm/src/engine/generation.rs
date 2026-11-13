@@ -8,12 +8,50 @@ use dynamo_backend_common::{
 };
 use dynamo_llm::protocols::common::preprocessor::RELEASE_ENCODER_RESULT;
 use futures::stream::BoxStream;
+use tracing::Instrument;
 
 use super::TrtllmSidecarEngine;
 use crate::client;
 use crate::convert::{
     ResponseState, build_generate_request_with_routing, validate_remote_media_urls,
 };
+use crate::proto as pb;
+
+struct EncoderProbeCleanup {
+    client: client::TrtllmClient,
+    handoff: Option<pb::EncoderHandoffRef>,
+}
+
+impl EncoderProbeCleanup {
+    async fn release(&mut self) -> Result<(), DynamoError> {
+        if let Some(handoff) = self.handoff.as_ref() {
+            self.client.release_encoder_handoff(handoff.clone()).await?;
+            self.handoff = None;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for EncoderProbeCleanup {
+    fn drop(&mut self) {
+        let Some(handoff) = self.handoff.take() else {
+            return;
+        };
+        let client = self.client.clone();
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(
+                async move {
+                    if let Err(error) = client.release_encoder_handoff(handoff).await {
+                        tracing::warn!(%error, "Unable to release encoder probe handoff");
+                    }
+                }
+                .in_current_span(),
+            );
+        } else {
+            tracing::warn!("Runtime stopped before encoder probe handoff release");
+        }
+    }
+}
 
 /// Terminal output emitted when a request is cancelled, carrying the usage
 /// accumulated so far.
@@ -49,7 +87,7 @@ impl TrtllmSidecarEngine {
                 client::invalid_argument("encoder handoff release requires a reference")
             })?;
             client
-                .release_encoder_handoff(crate::convert::encoder_handoff_from_result(result)?)
+                .release_encoder_handoff(crate::encoder_handoff::from_result(result)?)
                 .await?;
             ctx.notify_first_token();
             return Ok(Box::pin(futures::stream::once(async {
@@ -107,6 +145,7 @@ impl TrtllmSidecarEngine {
             ));
         }
         let mut state = ResponseState::new(&request, self.mode);
+        let probe_client = (self.mode.is_encode() && request.is_probe).then(|| client.clone());
         let needs_cancellation_deferral = self.mode.is_decode() && request.prefill_result.is_some();
         let stopped_ctx = ctx.inner_arc();
         // Hoisted: `stopped()` is an async-trait method, so re-creating it per
@@ -158,18 +197,38 @@ impl TrtllmSidecarEngine {
                     }
                     message = stream.message() => {
                         match message {
-                            Ok(Some(response)) => match state.convert(response) {
-                                Ok(Some(output)) => {
-                                    is_transfer_settled |= !output.token_ids.is_empty();
-                                    let terminal = output.finish_reason.is_some();
-                                    yield Ok(output);
-                                    if terminal {
+                            Ok(Some(response)) => {
+                                if let Some(client) = probe_client.as_ref()
+                                    && let Some(pb::generate_response::Event::EncodeReady(ready)) = response.event.as_ref()
+                                    && let Some(handoff) = ready.handoff.as_ref()
+                                {
+                                    // A canary has no downstream consumer. Release before reporting
+                                    // success; Drop retries if the probe disappears during the RPC.
+                                    let mut cleanup = EncoderProbeCleanup {
+                                        client: client.clone(),
+                                        handoff: Some(handoff.clone()),
+                                    };
+                                    if let Err(error) = cleanup.release().await {
+                                        yield Err(error);
                                         break;
                                     }
                                 }
-                                Ok(None) => {}
-                                Err(error) => {
-                                    yield Err(error);
+                                let mut output = match state.convert(response) {
+                                    Ok(Some(output)) => output,
+                                    Ok(None) => continue,
+                                    Err(error) => {
+                                        yield Err(error);
+                                        break;
+                                    }
+                                };
+                                if probe_client.is_some() {
+                                    output.encoder_result = None;
+                                    output.extra_args = None;
+                                }
+                                is_transfer_settled |= !output.token_ids.is_empty();
+                                let terminal = output.finish_reason.is_some();
+                                yield Ok(output);
+                                if terminal {
                                     break;
                                 }
                             },

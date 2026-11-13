@@ -53,9 +53,9 @@ impl PrefillRouter {
             let Some(binding) = self
                 .binding
                 .load_full()
-                .filter(|binding| !binding.requires_encoder_result)
+                .filter(|binding| !binding.encoder_result_requires_prefill)
             else {
-                // Mandatory encoder handoffs must be consumed by prefill first.
+                // Some decoders cannot consume encoder handoffs, even with optional encoding.
                 return Ok(None);
             };
             Some(binding)

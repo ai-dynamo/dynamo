@@ -326,8 +326,8 @@ async fn discovery_keeps_events_load_and_dp_targeting_independent() {
 
 /// Drives `monitor` until `observed` holds; the monitor must not finish first.
 /// The timeout only bounds a failure.
-async fn drive_monitor_until(
-    monitor: &mut (impl Future<Output = dynamo_backend_common::DynamoError> + Unpin),
+async fn drive_monitor_until<T: std::fmt::Debug>(
+    monitor: &mut (impl Future<Output = T> + Unpin),
     what: &str,
     observed: impl Fn() -> bool,
 ) {
@@ -419,46 +419,142 @@ async fn leader_monitor_rejects_restarted_native_engine() {
 }
 
 #[tokio::test]
-async fn encoder_publishes_leader_identity_without_kv_telemetry() {
+async fn encoder_publishes_and_monitors_identity_without_kv_telemetry() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        for failure in [Some(tonic::Code::InvalidArgument), None] {
+            let service = FakeTrtllm::default();
+            *service.encoder_role.lock().await = Some("encode".into());
+            service.kv_routing.store(true, Ordering::SeqCst);
+            service.dp_size.store(2, Ordering::SeqCst);
+            service.hang_load.store(true, Ordering::SeqCst);
+            *service.kv_sources_error.lock().await = failure;
+            let node = crate::node::NodeMetadata {
+                version: 1,
+                engine_id: "encoder-engine".into(),
+                node_id: "leader".into(),
+                leader: true,
+                node_count: 2,
+                kv_block_size: 0,
+                local_dp_ranks: vec![],
+                source_owners: Default::default(),
+            };
+            *service.node_metadata.lock().await = Some(node.clone());
+            let server = FakeServer::start(service.clone()).await;
+            let encoder = engine_in_mode(&server.endpoint, 1, DisaggregationMode::Encode)
+                .with_supervision(RoutingSupervision::default());
+            let config = encoder.start(0).await.expect("start encoder leader");
+            assert_eq!(
+                config.runtime_data[crate::node::NODE_METADATA_KEY],
+                serde_json::to_value(node).unwrap()
+            );
+            assert!(encoder.kv_event_sources().await.unwrap().is_empty());
+            let registration = config.llm.unwrap();
+            assert_eq!(registration.data_parallel_size, Some(2));
+            assert_eq!(registration.data_parallel_start_rank, Some(0));
+            assert!(registration.kv_cache_block_size.is_none());
+            assert!(registration.total_kv_blocks.is_none());
+            let before = service.server_info_calls.load(Ordering::SeqCst);
+            let monitor = encoder.engine_lost();
+            tokio::pin!(monitor);
+            drive_monitor_until(&mut monitor, "two encoder identity polls", || {
+                service.server_info_calls.load(Ordering::SeqCst) >= before + 2
+            })
+            .await;
+            assert_eq!(service.kv_sources_served.load(Ordering::SeqCst), 0);
+            assert_eq!(service.metadata_errors_served.load(Ordering::SeqCst), 0);
+            service
+                .node_metadata
+                .lock()
+                .await
+                .as_mut()
+                .unwrap()
+                .engine_id = "restarted".into();
+            let error = tokio::time::timeout(Duration::from_secs(1), &mut monitor)
+                .await
+                .expect("encoder identity fence");
+            assert!(error.to_string().contains("Local engine changed"));
+            encoder.cleanup().await.unwrap();
+        }
+    })
+    .await
+    .expect("encoder supervision must skip KV telemetry RPCs");
+}
+
+#[tokio::test]
+async fn encoder_follower_monitors_identity_without_kv_telemetry() {
+    use clap::Parser;
+    use dynamo_runtime::distributed::DistributedConfig;
+    use dynamo_runtime::{DistributedRuntime, Runtime};
+    use tokio_util::sync::CancellationToken;
+
     tokio::time::timeout(Duration::from_secs(5), async {
         let service = FakeTrtllm::default();
         *service.encoder_role.lock().await = Some("encode".into());
         service.kv_routing.store(true, Ordering::SeqCst);
         service.dp_size.store(2, Ordering::SeqCst);
-        service.hang_load.store(true, Ordering::SeqCst);
         *service.kv_sources_error.lock().await = Some(tonic::Code::InvalidArgument);
         let node = crate::node::NodeMetadata {
             version: 1,
             engine_id: "encoder-engine".into(),
-            node_id: "leader".into(),
-            leader: true,
+            node_id: "follower".into(),
+            leader: false,
             node_count: 2,
-            kv_block_size: 0,
-            local_dp_ranks: vec![],
-            source_owners: Default::default(),
+            kv_block_size: 16,
+            local_dp_ranks: vec![1],
+            source_owners: [(0, "leader".into()), (1, "follower".into())].into(),
         };
         *service.node_metadata.lock().await = Some(node.clone());
-        let server = FakeServer::start(service).await;
-        let encoder = engine_in_mode(&server.endpoint, 1, DisaggregationMode::Encode);
-        let config = encoder.start(0).await.expect("start encoder leader");
-        assert_eq!(
-            config.runtime_data[crate::node::NODE_METADATA_KEY],
-            serde_json::to_value(node).unwrap()
+        let server = FakeServer::start(service.clone()).await;
+        let args = crate::args::Args::try_parse_from([
+            "sidecar",
+            "--grpc-endpoint",
+            &server.endpoint,
+            "--model-path",
+            "model-source",
+            "--disaggregation-mode",
+            "encode",
+            "--namespace",
+            &format!(
+                "encoder-follower-{}",
+                server.endpoint.rsplit(':').next().unwrap()
+            ),
+        ])
+        .unwrap();
+        let drt = DistributedRuntime::new(
+            Runtime::from_current().unwrap(),
+            DistributedConfig::process_local(),
+        )
+        .await
+        .unwrap();
+        let relay = crate::headless::relay(
+            drt,
+            args,
+            node,
+            CancellationToken::new(),
+            RoutingSupervision::default(),
         );
-        assert!(encoder.kv_event_sources().await.unwrap().is_empty());
-        assert_eq!(
-            server.service.metadata_errors_served.load(Ordering::SeqCst),
-            0
-        );
-        let registration = config.llm.unwrap();
-        assert_eq!(registration.data_parallel_size, Some(2));
-        assert_eq!(registration.data_parallel_start_rank, Some(0));
-        assert!(registration.kv_cache_block_size.is_none());
-        assert!(registration.total_kv_blocks.is_none());
-        encoder.cleanup().await.unwrap();
+        tokio::pin!(relay);
+        drive_monitor_until(&mut relay, "follower identity polling", || {
+            service.server_info_calls.load(Ordering::SeqCst) >= 3
+        })
+        .await;
+        assert_eq!(service.kv_sources_served.load(Ordering::SeqCst), 0);
+        assert_eq!(service.metadata_errors_served.load(Ordering::SeqCst), 0);
+        service
+            .node_metadata
+            .lock()
+            .await
+            .as_mut()
+            .unwrap()
+            .engine_id = "restarted".into();
+        let error = tokio::time::timeout(Duration::from_secs(1), &mut relay)
+            .await
+            .expect("follower identity fence")
+            .unwrap_err();
+        assert!(error.to_string().contains("Local engine changed"));
     })
     .await
-    .expect("encoder startup must skip KV telemetry RPCs");
+    .expect("encoder follower must supervise identity without querying KV");
 }
 
 #[tokio::test]
@@ -531,7 +627,7 @@ async fn follower_accepts_consumer_route_flag_and_cancels_initial_reconnect() {
     };
     let cancel = CancellationToken::new();
     let shutdown = cancel.clone();
-    let relay = crate::headless::relay(drt, args, node, cancel);
+    let relay = crate::headless::relay(drt, args, node, cancel, RoutingSupervision::default());
     let signal = async move {
         tokio::time::sleep(Duration::from_millis(25)).await;
         shutdown.cancel();

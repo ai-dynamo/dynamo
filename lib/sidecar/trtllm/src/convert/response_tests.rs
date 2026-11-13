@@ -4,6 +4,7 @@
 //! Reducing the server's streamed events into `LLMEngineOutput`s.
 
 use super::*;
+use crate::encoder_handoff::NIXL_ENCODER_BACKEND;
 use crate::test_fixtures::*;
 use dynamo_backend_common::ErrorType;
 
@@ -617,7 +618,7 @@ fn encode_ready_is_a_tokenless_terminal_with_an_opaque_handoff() {
     );
     assert_eq!(
         result.encoder_result.unwrap(),
-        serde_json::json!({"transfer_backend": NIXL_ENCODER_BACKEND, "opaque_state": [1, 2, 3]})
+        serde_json::json!({"transfer_backend": NIXL_ENCODER_BACKEND, "opaque_state": "AQID"})
     );
     let mut with_usage = response.clone();
     with_usage.usage = Some(pb::Usage::default());

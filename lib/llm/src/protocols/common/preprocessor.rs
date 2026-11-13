@@ -33,6 +33,8 @@ pub const ENCODER_RESULT_RELEASE_SUPPORTED: &str = "encoder_result_release";
 pub const RELEASE_ENCODER_RESULT: &str = "release_encoder_result";
 /// Deployment metadata for consumers that cannot encode media inline.
 pub const REQUIRES_ENCODER_RESULT: &str = "requires_encoder_result";
+/// Encoder handoffs must be consumed by Prefill before reaching Decode.
+pub const ENCODER_RESULT_REQUIRES_PREFILL: &str = "encoder_result_requires_prefill";
 
 /// Routing hints for directing requests to specific workers.
 /// These fields are extracted from nvext and used by the router to determine

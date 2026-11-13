@@ -231,6 +231,7 @@ def routing_fixture():
 
 def run(args, results):
     if args.scenario in EPD_TESTS:
+        # Defer this import: the EPD runner imports our shared fixtures.
         from run_epd_test import run as run_epd
 
         return run_epd(args, results)

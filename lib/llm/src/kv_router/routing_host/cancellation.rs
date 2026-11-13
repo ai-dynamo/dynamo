@@ -157,7 +157,7 @@ fn cleanup_budget_exhausted(context_id: &str, stage: &'static str) -> Error {
         .into()
 }
 
-pub(super) fn cancelled_error(context_id: &str) -> Error {
+pub(in crate::kv_router) fn cancelled_error(context_id: &str) -> Error {
     DynamoError::builder()
         .error_type(ErrorType::Cancelled)
         .message(format!("Request {context_id} was cancelled"))

@@ -7,6 +7,7 @@ use std::collections::HashMap;
 
 use super::*;
 use crate::client::{SupportedInputs, SupportedMedia};
+use crate::encoder_handoff::NIXL_ENCODER_BACKEND;
 use crate::test_fixtures::*;
 use dynamo_backend_common::MultimodalItemRef;
 use serde_json::json;

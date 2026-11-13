@@ -13,7 +13,9 @@ use dynamo_backend_common::{
     GenerateContext, KvEventSource, LLMEngine, LLMEngineOutput, MetricsBindings, MetricsCtx,
     PreprocessedRequest, RuntimeConfig, WorkerConfig,
 };
-use dynamo_llm::protocols::common::preprocessor::REQUIRES_ENCODER_RESULT;
+use dynamo_llm::protocols::common::preprocessor::{
+    ENCODER_RESULT_REQUIRES_PREFILL, REQUIRES_ENCODER_RESULT,
+};
 use dynamo_sidecar_common::{
     EngineBootstrapResult, GrpcEndpoint, GrpcTransportConfig, SidecarStartupError, startup_deadline,
 };
@@ -151,7 +153,8 @@ impl TrtllmSidecarEngine {
                     if let (Some((client, _)), Some(routing)) = (self.connection.get(), self.routing.get())
                         && let Some(node) = &routing.node
                     {
-                        return crate::headless::monitor_engine(client, node, &routing.sources, self.supervision).await;
+                        let sources = (!self.mode.is_encode()).then_some(routing.sources.as_slice());
+                        return crate::headless::monitor_engine(client, node, sources, self.supervision).await;
                     }
                 }
             } => result,
@@ -484,7 +487,13 @@ impl LLMEngine for TrtllmSidecarEngine {
         );
         let mut config = model.engine_config();
         config.served_model_name = Some(info.served_model_name.clone());
-        if self.route_to_encoder {
+        if self.mode.is_prefill() && self.route_to_encoder {
+            config.runtime_data.insert(
+                ENCODER_RESULT_REQUIRES_PREFILL.into(),
+                serde_json::Value::Bool(true),
+            );
+        }
+        if self.route_to_encoder && limits.requires_encoder_handoff {
             config.runtime_data.insert(
                 REQUIRES_ENCODER_RESULT.into(),
                 serde_json::Value::Bool(true),

@@ -75,6 +75,65 @@ def snapshot_download(*, repo_id, revision):
 
 
 class EpdLaunchTests(unittest.TestCase):
+    def test_preflight_rejects_old_contract_even_with_python_optimization(self):
+        for shape in (
+            "missing-encoder",
+            "bool-encode-only",
+            "missing-mode",
+            "missing-options",
+        ):
+            with self.subTest(shape=shape), tempfile.TemporaryDirectory() as tmp:
+                directory = Path(tmp)
+                package = directory / "tensorrt_llm/grpc/openengine"
+                package.mkdir(parents=True)
+                for level in (package, package.parent, package.parent.parent):
+                    (level / "__init__.py").touch()
+                fields = {} if shape == "missing-encoder" else {"encoder": None}
+                mode = {} if shape == "missing-mode" else {"mode": None}
+                descriptor = (
+                    "SimpleNamespace(fields_by_name={'handoff': None, 'encode_only': "
+                    "SimpleNamespace(message_type="
+                    + ("None" if shape == "bool-encode-only" else "object()")
+                    + ")}, "
+                    f"oneofs_by_name={mode!r})"
+                )
+                descriptors = (
+                    "{}"
+                    if shape == "missing-options"
+                    else f"{{'EncoderOptions': {descriptor}}}"
+                )
+                (package / "bindings.py").write_text(
+                    "from types import SimpleNamespace\n"
+                    "generation_pb2 = SimpleNamespace("
+                    f"GenerateRequest=SimpleNamespace(DESCRIPTOR=SimpleNamespace(fields_by_name={fields!r})),"
+                    "DESCRIPTOR=SimpleNamespace(message_types_by_name="
+                    f"{descriptors}))\n"
+                )
+                result = subprocess.run(
+                    [
+                        "bash",
+                        str(
+                            ROOT / "lib/sidecar/trtllm/launch/disagg_multimodal_e_pd.sh"
+                        ),
+                    ],
+                    env={
+                        **os.environ,
+                        "TRTLLM_PYTHON": sys.executable,
+                        "MODEL_REVISION": REVISION,
+                        "PYTHONPATH": str(directory),
+                        "PYTHONOPTIMIZE": "1",
+                    },
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(
+                    "RuntimeError: Install the matching encoder-handoff TRT-LLM build",
+                    result.stderr,
+                )
+                self.assertNotIn("AssertionError", result.stderr)
+
     def run_launcher(self, mode, overrides=None, *, shutdown="failure"):
         with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp)

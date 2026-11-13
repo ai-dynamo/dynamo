@@ -64,8 +64,8 @@ ENCODER_GPU=0 PREFILL_GPU=1 DECODE_GPU=2 \
 ```
 
 The E+P+D launcher enables the native KV transceiver on P and D. The router
-keeps image encoder handoffs on the mandatory prefill path because D requires
-P-produced KV. Conditional prefill bypass remains available for text requests.
+keeps image encoder handoffs on the prefill path because D requires P-produced KV,
+even when P can encode inline. Conditional prefill bypass remains available for text requests.
 Use `--help` for port and device overrides. Managed launches use numbered
 `DYN_ENGINE_GRPC_PORT1/2/3` and `DYN_SYSTEM_PORT1/2/3` for E, P/PD, and D.
 Ordinary text requests bypass the encoder.
@@ -122,3 +122,9 @@ These tests exercise the Rust sidecar adapters and native engines directly;
 Dynamo HTTP routing and cross-host transfers require separate validation.
 Missing runtime capabilities fail the job rather than skipping it. The EPD
 prerequisites must be published in the upstream nightly before these jobs can pass.
+
+Engine cleanup uses the shared process manager: graceful shutdown waits for
+observed descendants and remaining session members, including reparented workers.
+A timeout or forced cleanup fails validation. A process that starts a separate
+session and loses its parent before observation cannot be proven owned by this
+tracker; the test does not claim to audit arbitrary detached processes.

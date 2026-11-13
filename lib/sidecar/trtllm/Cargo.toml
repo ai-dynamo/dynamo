@@ -30,6 +30,7 @@ dynamo-llm = { path = "../../llm", default-features = false, features = ["mm-rou
 dynamo-runtime = { workspace = true }
 
 anyhow = { workspace = true }
+base64 = "0.22"
 async-stream = { workspace = true }
 async-trait = { workspace = true }
 clap = { version = "4", features = ["derive", "env"] }

@@ -134,8 +134,13 @@ hops.
    admission and pinned to it), and `dispatch_kv_plan` sends the request with the bypass
    annotation. Otherwise the request takes the remote prefill path.
 
-An encoder handoff to a prefill set declaring `requires_encoder_result` always takes remote
-prefill. Text requests and optional encoder handoffs retain conditional bypass.
+An encoder handoff to a prefill set declaring `encoder_result_requires_prefill` always takes
+remote prefill, even when that worker can encode inline. `requires_encoder_result` also
+retains this restriction. Text requests and handoffs without this policy retain conditional bypass. If a binding
+changes after conditional admission, the abandoned decode booking is released and its classifier
+lifecycle is parked for the later decode selection. A late untargeted fallback restores the
+request's prior phase before forwarding. Cancelled handoffs fail before starting an
+independently cancellable prefill; staged-KV cleanup still reaches its worker.
 
 A failed decision falls back to remote prefill, except for `Cancelled` and `InvalidArgument`
 errors, which return to the client.
@@ -153,7 +158,7 @@ errors, which return to the client.
 | Scoring and accounting overrides | `PreprocessedRequest::router_config_override` |
 | Excluded workers, parked classifier lifecycle | `PreprocessedRequest::migration_state` |
 | Staged KV that only this decode can release | `PreprocessedRequest::staged_kv_cleanup` |
-| Encoder handoff / mandatory prefill | `PreprocessedRequest::encoder_result` and `requires_encoder_result` from the admitted prefill card |
+| Encoder handoff / mandatory prefill | `PreprocessedRequest::encoder_result` and `encoder_result_requires_prefill` (or `requires_encoder_result`) from the admitted prefill card |
 | Query-only selection (KV plane) | annotation `query_instance_id` in `PreprocessedRequest::annotations` |
 
 The frontend's prefill operator owns the handoff bypass decision. Runtime EPP query and
@@ -214,7 +219,8 @@ newer booking that reused the same request id and worker.
   `encoder_result_release` on its terminal output, the encoder hop owns a cleanup guard. It sends
   a separate `release_encoder_result` request with the unchanged opaque payload back to that
   exact producer when the guard drops after dispatch failure, stream completion, or abandonment.
-  A generated token proves consumption and disarms release. Otherwise cleanup runs in the
+  Tokens or successful completion (EOS, stop, or length) prove consumption and disarm release.
+  Error/cancelled terminals and uncertain failures retain cleanup, which runs in the
   background with a fresh controller and a two-second deadline, without delaying response
   delivery or forcing a cancelled request into its consumer. It never reselects another encoder
   or carries generation sampling constraints or KV state. Producer release is idempotent after
@@ -236,10 +242,10 @@ exactly one prefill worker set and one decode worker set. The encoder target fol
 admission and succession.
 
 Encoder routing policy also comes from the committed consumer card. A consumer declaring
-`requires_encoder_result` cannot encode inline: image requests fail when the encoder is absent,
-activating, or returns an error, and video/audio requests fail before the encoder hop. Text
-requests bypass the encoder. Decode pipelines inherit this requirement from the unique capable
-Prefill target even before an Encode target exists. Consumers without the declaration retain
+`requires_encoder_result` cannot encode inline: media requests fail when the encoder is absent,
+activating, or returns an error. The encoder worker validates its supported modalities before
+allocation. Text requests bypass the encoder. Decode pipelines inherit this requirement from
+committed Prefill groups even when no unique target is available. Consumers without the declaration retain
 optional inline fallback. Dynamo's native TensorRT-LLM handoff requires producers to advertise
 NIXL as their single backend; consumers may list additional compatible backends.
 Shared-safetensors helpers are outside this integration.

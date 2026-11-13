@@ -22,9 +22,11 @@ use dynamo_backend_common::{
 };
 
 use dynamo_kv_router::zmq_wire::IMAGE_ROUTING_UUID_PREFIX;
+use dynamo_llm::protocols::common::preprocessor::ENCODER_RESULT_RELEASE_SUPPORTED;
 
 use crate::client::{self, ModelLimits};
 use crate::disagg;
+use crate::encoder_handoff;
 use crate::proto as pb;
 
 /// A chunk's delta token IDs, the selected-token logprob sequence, and the
@@ -107,6 +109,8 @@ pub(crate) fn build_generate_request_with_routing(
         (!mode.is_encode() && has_visible_stop_tokens(&request)).then_some(true);
     let input = request_input(&mut request, limits)?;
     let sampling = &request.sampling_options;
+    let top_k = normalize_top_k(sampling.top_k)?;
+    let seed = normalize_seed(sampling.seed)?;
     let stop = &request.stop_conditions;
     let output = &request.output_options;
 
@@ -122,12 +126,12 @@ pub(crate) fn build_generate_request_with_routing(
             Some(pb::SamplingParams {
                 temperature: sampling.temperature.map(f64::from),
                 top_p: sampling.top_p.map(f64::from),
-                top_k: normalize_top_k(sampling.top_k)?,
+                top_k,
                 min_p: sampling.min_p.map(f64::from),
                 frequency_penalty: sampling.frequency_penalty.map(f64::from),
                 presence_penalty: sampling.presence_penalty.map(f64::from),
                 repetition_penalty: sampling.repetition_penalty.map(f64::from),
-                seed: normalize_seed(sampling.seed)?,
+                seed,
                 num_sequences: Some(1),
             })
         },
@@ -1010,19 +1014,11 @@ impl ResponseState {
                 let handoff = ready
                     .handoff
                     .ok_or_else(|| client::protocol_error("EncodeReady has no handoff"))?;
-                validate_encoder_handoff(&handoff)
+                let result = encoder_handoff::to_result(handoff)
                     .map_err(|error| client::protocol_error(error.to_string()))?;
-                let mut result = serde_json::Map::new();
-                result.insert(
-                    "transfer_backend".into(),
-                    serde_json::json!(handoff.transfer_backend),
-                );
-                result.insert(
-                    "opaque_state".into(),
-                    serde_json::json!(handoff.opaque_state),
-                );
                 let mut output = LLMEngineOutput::encode_terminal(result);
-                output.extra_args = Some(serde_json::json!({"encoder_result_release": true}));
+                output.extra_args =
+                    Some(serde_json::json!({ENCODER_RESULT_RELEASE_SUPPORTED: true}));
                 Ok(Some(output))
             }
             pb::generate_response::Event::Token(token) => self.convert_token(token),
@@ -1371,54 +1367,6 @@ pub(crate) fn engine_error(error: pb::EngineError) -> DynamoError {
     }
 }
 
-#[cfg(test)]
-mod request_tests;
-#[cfg(test)]
-mod response_tests;
-
-pub(crate) const NIXL_ENCODER_BACKEND: &str = "trtllm-nixl-encoder-v1";
-
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct EncoderHandoff {
-    transfer_backend: String,
-    opaque_state: Vec<u8>,
-}
-
-fn validate_encoder_handoff(handoff: &pb::EncoderHandoffRef) -> Result<(), DynamoError> {
-    if handoff.transfer_backend != NIXL_ENCODER_BACKEND
-        || handoff.opaque_state.is_empty()
-        || handoff.opaque_state.len() > 64 * 1024
-    {
-        return Err(client::invalid_argument(
-            "unsupported or oversized encoder handoff reference",
-        ));
-    }
-    Ok(())
-}
-
-pub(crate) fn encoder_handoff_from_result(
-    result: &serde_json::Value,
-) -> Result<pb::EncoderHandoffRef, DynamoError> {
-    if result
-        .get("opaque_state")
-        .and_then(serde_json::Value::as_array)
-        .is_none_or(|bytes| bytes.len() > 64 * 1024)
-    {
-        return Err(client::invalid_argument(
-            "invalid or oversized encoder_result",
-        ));
-    }
-    let handoff: EncoderHandoff = serde::Deserialize::deserialize(result)
-        .map_err(|error| client::invalid_argument(format!("invalid encoder_result: {error}")))?;
-    let reference = pb::EncoderHandoffRef {
-        transfer_backend: handoff.transfer_backend,
-        opaque_state: handoff.opaque_state,
-    };
-    validate_encoder_handoff(&reference)?;
-    Ok(reference)
-}
-
 fn encoder_options(
     request: &PreprocessedRequest,
     limits: Option<ModelLimits>,
@@ -1473,8 +1421,13 @@ fn encoder_options(
             "encoder_result requires an aggregated or prefill worker and a capable consumer",
         ));
     }
-    let handoff = encoder_handoff_from_result(result)?;
+    let handoff = encoder_handoff::from_result(result)?;
     Ok(Some(pb::EncoderOptions {
         mode: Some(pb::encoder_options::Mode::Handoff(handoff)),
     }))
 }
+
+#[cfg(test)]
+mod request_tests;
+#[cfg(test)]
+mod response_tests;

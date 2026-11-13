@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::atomic::AtomicU8;
+use std::sync::atomic::{AtomicBool, AtomicU8};
 use std::sync::{Arc, OnceLock};
 
 use anyhow::Result;
@@ -27,7 +27,10 @@ use futures::stream::{self, StreamExt};
 
 use crate::{
     discovery::{ModelManager, WorkerSetTarget, WorkerSetTargetId},
-    kv_router::{RoutingHost, SelectionPolicySource, routing_host::PrefillDispatch},
+    kv_router::{
+        RoutingHost, SelectionPolicySource,
+        routing_host::{PrefillDispatch, cancelled_error},
+    },
     local_model::runtime_config::DISAGG_PREFILL_CANCEL_ANYTIME_V1,
     protocols::common::{
         extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
@@ -265,6 +268,8 @@ pub(crate) const BYPASS_REMOTE_PREFILL_ANNOTATION: &str = "x-bypass-remote-prefi
 /// channel.
 pub struct PrefillRouter {
     binding: ArcSwapOption<PrefillBinding>,
+    // Preserve binding policy while its replacement is still pending.
+    encoder_result_requires_prefill: AtomicBool,
     target: Mutex<Option<WorkerSetTargetId>>,
     target_tx: Option<watch::Sender<Option<WorkerSetTarget>>>,
     /// Decode routing owns conditional-disagg planning and dispatch. This is
@@ -307,7 +312,7 @@ struct PrefillBinding {
     /// `PrefillRouter` because it is unknowable until a target is discovered,
     /// and changes when the binding is rebuilt.
     prefill_router_mode: RouterMode,
-    requires_encoder_result: bool,
+    encoder_result_requires_prefill: bool,
 }
 
 struct PrefillBuildContext {
@@ -443,9 +448,14 @@ impl
         // Query-only requests are owned by the decode RoutingHost. In particular,
         // do not turn an advisory worker lookup into conditional local execution.
         let query_only = req.get_annotation_value("query_instance_id").is_some();
+        if !query_only
+            && req.encoder_result.is_some()
+            && !req.staged_kv_cleanup
+            && engine_ctx.is_stopped()
+        {
+            return Err(cancelled_error(&request_id));
+        }
 
-        // Hot path: an active router with a published binding never takes the
-        // target lock. Anything else is resolved from one locked snapshot.
         if self.lifecycle_state() != PrefillLifecycleState::Active {
             match self.activation_snapshot() {
                 // Activation completed between the lock-free read and the snapshot:
@@ -476,7 +486,13 @@ impl
                 // Query-only previews never reach the engine. Otherwise no prefill
                 // target was ever set (aggregated-capable deployment) or every prefill
                 // worker left (target cleared): route directly to the backend.
-                ActivationSnapshot::Pending | ActivationSnapshot::Untargeted => {
+                ActivationSnapshot::Pending => {
+                    return next.generate(context.map(|_| req)).await;
+                }
+                ActivationSnapshot::Untargeted {
+                    encoder_result_requires_prefill,
+                } => {
+                    self.validate_passthrough(&req, encoder_result_requires_prefill)?;
                     return next.generate(context.map(|_| req)).await;
                 }
             }
@@ -529,6 +545,10 @@ impl
                             .await?;
                         return with_bypass_marker(response_stream, client_requested_bypass_marker);
                     }
+                    decision
+                        .plan
+                        .release_for_replan(&mut conditional_request)
+                        .await;
                     (req, context) = conditional_request.into_parts();
                 }
                 Ok(None) => {
@@ -554,6 +574,7 @@ impl
             }
         }
 
+        let passthrough_phase = req.phase();
         // Ensure tracker exists for routing decisions in disaggregated mode.
         // Create one if not provided by the upstream DeltaGenerator.
         if req.tracker.is_none() {
@@ -574,6 +595,9 @@ impl
             .and_then(|r| r.prefill_worker_id);
 
         let tracker = prefill_req.tracker.clone();
+        if req.encoder_result.is_some() && !req.staged_kv_cleanup && engine_ctx.is_stopped() {
+            return Err(cancelled_error(&request_id));
+        }
         let mut prefill_context = independent_prefill_context(prefill_req, &context)?;
         let prefill_ctx = prefill_context.context();
         if let Some(session_affinity) = session_affinity {
@@ -583,25 +607,25 @@ impl
             );
         }
         let prefill_engine_ctx = prefill_context.context();
-        let binding = match self.binding.load_full() {
-            Some(binding) => binding,
-            // The target was replaced after the gate above (a WorkerSet succession
-            // while this request awaited the phase barrier): `set_target` cleared the
-            // binding. Resolve from one locked snapshot: the successor may already
-            // have activated, in which case serve through it; if it is still
-            // building, fail closed rather than forward to decode without a prefill hop.
-            None => match self.activation_snapshot() {
-                ActivationSnapshot::Active(binding) => binding,
-                ActivationSnapshot::Pending => {
-                    return Err(prefill_activation_pending_error(
-                        &self.model_name,
-                        &self.namespace,
-                    ));
+        // Awaiting admission may have retired the target but retained its binding.
+        let binding = match self.activation_snapshot() {
+            ActivationSnapshot::Active(binding) => binding,
+            ActivationSnapshot::Pending => {
+                return Err(prefill_activation_pending_error(
+                    &self.model_name,
+                    &self.namespace,
+                ));
+            }
+            ActivationSnapshot::Untargeted {
+                encoder_result_requires_prefill,
+            } => {
+                self.validate_passthrough(&req, encoder_result_requires_prefill)?;
+                drop(prefill_phase_barrier);
+                if let Some(tracker) = &req.tracker {
+                    let _permit = tracker.set_phase(passthrough_phase).await;
                 }
-                ActivationSnapshot::Untargeted => {
-                    return next.generate(context.map(|_| req)).await;
-                }
-            },
+                return next.generate(context.map(|_| req)).await;
+            }
         };
 
         // Keyed on the prefill mode, not the decode set's, and checked after
@@ -623,6 +647,19 @@ impl
                 booking,
             } = router
                 .select_and_dispatch_prefill(prefill_context, |request, target| {
+                    if request.encoder_result.is_some() && !request.staged_kv_cleanup {
+                        if engine_ctx.is_stopped() {
+                            return Err(cancelled_error(&request_id));
+                        }
+                        if !matches!(self.activation_snapshot(), ActivationSnapshot::Active(current)
+                            if Arc::ptr_eq(&current, &binding))
+                        {
+                            return Err(prefill_activation_pending_error(
+                                &self.model_name,
+                                &self.namespace,
+                            ));
+                        }
+                    }
                     let prepared = self.prepare_prefill_dispatch(request, target, endpoint_id)?;
                     let prefill_supports_cancellation =
                         self.model_manager.worker_supports_runtime_capability(
@@ -794,6 +831,28 @@ fn independent_prefill_context(
 }
 
 impl PrefillRouter {
+    fn validate_passthrough(
+        &self,
+        request: &PreprocessedRequest,
+        encoder_result_requires_prefill: bool,
+    ) -> Result<()> {
+        if encoder_result_requires_prefill
+            && request.encoder_result.is_some()
+            && !request.staged_kv_cleanup
+            && request.get_annotation_value("query_instance_id").is_none()
+        {
+            return Err(DynamoError::builder()
+                .class(ErrorClass::WorkerUnavailable)
+                .message(format!(
+                    "Prefill worker required to consume the encoder handoff for model {} in namespace {} is unavailable",
+                    self.model_name, self.namespace
+                ))
+                .build()
+                .into());
+        }
+        Ok(())
+    }
+
     pub(crate) fn conditional_disagg_enabled(&self) -> bool {
         self.conditional_disagg_policy.is_enabled()
     }
@@ -1123,7 +1182,7 @@ mod tests {
         let router = fresh_decode_router();
         assert!(matches!(
             router.activation_snapshot(),
-            ActivationSnapshot::Untargeted
+            ActivationSnapshot::Untargeted { .. }
         ));
 
         let host = Arc::new(CountingDecodeHost::default());
@@ -1142,7 +1201,7 @@ mod tests {
         assert_eq!(router.lifecycle_state(), PrefillLifecycleState::Unavailable);
         assert!(matches!(
             router.activation_snapshot(),
-            ActivationSnapshot::Untargeted
+            ActivationSnapshot::Untargeted { .. }
         ));
 
         let host = Arc::new(CountingDecodeHost::default());
@@ -1151,6 +1210,138 @@ mod tests {
             .await
             .expect("a deactivated router passes through");
         assert_eq!(host.requests.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn retired_prefill_enforces_handoff_consumption_policy() {
+        use crate::kv_router::{RouterLoadSource, RoutingLoadContext};
+        use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
+
+        let runtime = Runtime::from_current().unwrap();
+        let distributed =
+            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+                .await
+                .unwrap();
+        let endpoint = distributed
+            .namespace("retired-encoder-prefill")
+            .unwrap()
+            .component("workers")
+            .unwrap()
+            .endpoint("generate");
+        let replacement = distributed
+            .namespace("retired-encoder-prefill")
+            .unwrap()
+            .component("workers")
+            .unwrap()
+            .endpoint("replacement");
+        let client = endpoint.client().await.unwrap();
+        let load_context = RoutingLoadContext::start(
+            client.clone(),
+            RouterLoadSource::Prefill,
+            crate::discovery::LoadThresholdHandle::new(Default::default()),
+            &distributed.child_token(),
+            None,
+        )
+        .await
+        .unwrap();
+        let prefill_host = Arc::new(
+            RoutingHost::builder(client, RouterMode::RoundRobin)
+                .load_context(load_context)
+                .build()
+                .await
+                .unwrap(),
+        );
+        tokio::time::pause();
+        for (requires_prefill, handoff, staged, query) in [
+            (true, true, false, false),
+            (false, true, false, false),
+            (true, false, false, false),
+            (true, true, true, false),
+            (true, true, false, true),
+        ] {
+            for (retire_after_entry, replace_before_retirement) in
+                [(false, false), (true, false), (true, true)]
+            {
+                let router = fresh_decode_router();
+                if !requires_prefill {
+                    router
+                        .encoder_result_requires_prefill
+                        .store(true, Ordering::Relaxed);
+                }
+                let mut card =
+                    crate::model_card::ModelDeploymentCard::with_name_only("optional-prefill");
+                card.runtime_config.runtime_data.insert(
+                    crate::protocols::common::preprocessor::ENCODER_RESULT_REQUIRES_PREFILL.into(),
+                    serde_json::json!(requires_prefill),
+                );
+                assert!(!ModelManager::requires_encoder_result(&card));
+                let binding = Arc::new(PrefillBinding {
+                    target_id: WorkerSetTargetId::Legacy(endpoint.id()),
+                    endpoint_id: endpoint.id(),
+                    router: prefill_host.clone(),
+                    prefill_router_mode: RouterMode::RoundRobin,
+                    encoder_result_requires_prefill: ModelManager::encoder_result_requires_prefill(
+                        &card,
+                    ),
+                });
+                *router.target.lock() = Some(binding.target_id.clone());
+                router.binding.store(Some(binding));
+                router
+                    .lifecycle
+                    .store(PrefillLifecycleState::Active as u8, Ordering::Release);
+                let mut request = if query {
+                    query_only_request()
+                } else {
+                    inference_request()
+                };
+                request.encoder_result = handoff.then(|| serde_json::json!({"opaque": "handoff"}));
+                request.staged_kv_cleanup = staged;
+                let host = Arc::new(CountingDecodeHost::default());
+                let result = if retire_after_entry && !query {
+                    let tracker = Arc::new(RequestTracker::new());
+                    let barrier = tracker.set_phase(RequestPhase::Decode).await;
+                    request.tracker = Some(tracker);
+                    let in_flight = tokio::spawn({
+                        let router = router.clone();
+                        let host = host.clone();
+                        async move { router.generate(SingleIn::new(request), host).await }
+                    });
+                    // Paused time advances after generate parks at the phase barrier.
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                    if replace_before_retirement {
+                        router.set_target(Some(WorkerSetTarget::Legacy(replacement.clone())));
+                    }
+                    router.set_target(None);
+                    drop(barrier);
+                    tokio::time::timeout(std::time::Duration::from_secs(5), in_flight)
+                        .await
+                        .expect("retired prefill must resolve the waiting request")
+                        .unwrap()
+                } else {
+                    router.set_target(None);
+                    router.generate(SingleIn::new(request), host.clone()).await
+                };
+                assert_eq!(
+                    router.binding.load_full().is_none(),
+                    replace_before_retirement && !query
+                );
+                if requires_prefill && handoff && !staged && !query {
+                    let error = result.unwrap_err();
+                    assert!(crate::migration::is_migratable(error.as_ref()), "{error}");
+                    assert!(match_error_chain(
+                        error.as_ref(),
+                        &[ErrorType::WorkerUnavailable],
+                        &[]
+                    ));
+                    assert_eq!(host.requests.load(Ordering::Relaxed), 0);
+                } else {
+                    drop(result.unwrap());
+                    assert_eq!(host.requests.load(Ordering::Relaxed), 1);
+                }
+            }
+        }
+        tokio::time::resume();
+        runtime.shutdown();
     }
 
     #[tokio::test]
@@ -1208,6 +1399,49 @@ mod tests {
             "expected WorkerUnavailable after a mid-flight target replacement, got: {error}"
         );
         assert_eq!(host.requests.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancelled_encoder_handoff_never_starts_independent_prefill() {
+        for stop_before_routing in [true, false] {
+            for kill in [false, true] {
+                let router = active_conditional_router();
+                let tracker = Arc::new(RequestTracker::new());
+                let barrier = tracker.set_phase(RequestPhase::Prefill).await;
+                let mut request = inference_request();
+                request.encoder_result = Some(serde_json::json!({"opaque": "handoff"}));
+                request.tracker = Some(tracker);
+                let request = SingleIn::new(request);
+                let context = request.context();
+                let host = Arc::new(CountingDecodeHost::default());
+                let cancel = || {
+                    if kill {
+                        context.kill()
+                    } else {
+                        context.stop_generating()
+                    }
+                };
+                if stop_before_routing {
+                    cancel();
+                }
+                let task = tokio::spawn({
+                    let router = router.clone();
+                    let host = host.clone();
+                    async move { router.generate(request, host).await }
+                });
+                if !stop_before_routing {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    cancel();
+                }
+                drop(barrier);
+                let error = task.await.unwrap().unwrap_err();
+                assert!(
+                    match_error_chain(error.as_ref(), &[ErrorType::Cancelled], &[]),
+                    "{error}"
+                );
+                assert_eq!(host.requests.load(Ordering::Relaxed), 0);
+            }
+        }
     }
 
     #[test]
@@ -1476,6 +1710,7 @@ mod tests {
     #[derive(Default)]
     struct RecordingDecodeDispatch {
         annotations: Mutex<Vec<Vec<String>>>,
+        phases: Mutex<Vec<RequestPhase>>,
     }
 
     #[async_trait]
@@ -1490,6 +1725,7 @@ mod tests {
             let (addressed, context) = request.transfer(());
             let (request, _, _) = addressed.into_parts();
             self.annotations.lock().push(request.annotations.clone());
+            self.phases.lock().push(request.phase());
             let output = Annotated::from_data(LLMEngineOutput {
                 token_ids: vec![7],
                 finish_reason: Some(FinishReason::Stop),
@@ -1508,6 +1744,61 @@ mod tests {
             _input: dynamo_runtime::pipeline::ManyIn<PreprocessedRequest>,
         ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
             unreachable!("the routing host dispatches unary requests")
+        }
+    }
+
+    struct ReplanClassifier {
+        classifications: Arc<AtomicUsize>,
+        aborts: Arc<AtomicUsize>,
+        completions: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl dynamo_kv_router::plugins::request_classifier::RequestClassifier for ReplanClassifier {
+        fn classify(
+            &mut self,
+            request: dynamo_kv_router::plugins::request_classifier::ClassifyRequest,
+            _: dynamo_kv_router::plugins::worker_selection::WorkerCandidates<'_>,
+        ) -> dynamo_kv_router::plugins::request_classifier::ClassifyFuture {
+            self.classifications.fetch_add(1, Ordering::Relaxed);
+            Box::pin(async move { Ok(request) })
+        }
+        async fn on_event(
+            &mut self,
+            event: dynamo_kv_router::plugins::request_classifier::ClassifyEvent,
+        ) {
+            match event {
+                dynamo_kv_router::plugins::request_classifier::ClassifyEvent::Aborted {
+                    ..
+                } => {
+                    self.aborts.fetch_add(1, Ordering::Relaxed);
+                }
+                dynamo_kv_router::plugins::request_classifier::ClassifyEvent::Completed {
+                    ..
+                } => {
+                    self.completions.fetch_add(1, Ordering::Relaxed);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    #[derive(Default)]
+    struct CaptureHandoffHost {
+        request: Mutex<Option<SingleIn<PreprocessedRequest>>>,
+    }
+
+    #[async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+        for CaptureHandoffHost
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+            let context = request.context();
+            self.request.lock().replace(request);
+            Ok(ResponseStream::new(Box::pin(stream::empty()), context))
         }
     }
 
@@ -1556,10 +1847,26 @@ mod tests {
         )
         .await
         .unwrap();
+        let classifications = Arc::new(AtomicUsize::new(0));
+        let aborts = Arc::new(AtomicUsize::new(0));
+        let completions = Arc::new(AtomicUsize::new(0));
+        let chooser = chooser
+            .with_request_classifier(ReplanClassifier {
+                classifications: classifications.clone(),
+                aborts: aborts.clone(),
+                completions: completions.clone(),
+            })
+            .unwrap();
         let dispatch = Arc::new(RecordingDecodeDispatch::default());
+        let affinity = crate::session_affinity::AffinityCoordinator::new(
+            std::time::Duration::from_secs(60),
+            SessionAffinityMode::Hard,
+        )
+        .unwrap();
         let host = Arc::new(
             RoutingHost::builder(client, RouterMode::KV)
                 .kv_router(Arc::new(chooser))
+                .affinity_coordinator(Some(affinity.clone()))
                 .dispatch(Arc::clone(&dispatch) as LlmDispatch)
                 .build()
                 .await
@@ -1573,13 +1880,22 @@ mod tests {
             ..Default::default()
         });
         assert!(router.decode_routing_host.set(host.clone()).is_ok());
-        let binding = |required| {
+        let binding = |requires_prefill| {
+            let mut card =
+                crate::model_card::ModelDeploymentCard::with_name_only("optional-prefill");
+            card.runtime_config.runtime_data.insert(
+                crate::protocols::common::preprocessor::ENCODER_RESULT_REQUIRES_PREFILL.into(),
+                serde_json::json!(requires_prefill),
+            );
+            assert!(!ModelManager::requires_encoder_result(&card));
             Arc::new(PrefillBinding {
                 target_id: WorkerSetTargetId::Legacy(endpoint.id()),
                 endpoint_id: endpoint.id(),
                 router: host.clone(),
                 prefill_router_mode: RouterMode::KV,
-                requires_encoder_result: required,
+                encoder_result_requires_prefill: ModelManager::encoder_result_requires_prefill(
+                    &card,
+                ),
             })
         };
         router.binding.store(Some(binding(false)));
@@ -1632,6 +1948,167 @@ mod tests {
             );
         }
         assert_eq!(downstream.requests.load(Ordering::Relaxed), 0);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while completions.load(Ordering::Relaxed) != 4 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let loads = host
+                    .kv_router()
+                    .get_potential_loads(&[], None, None, None, None)
+                    .await
+                    .unwrap();
+                if loads.iter().all(|load| load.active_requests == 0) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        // Hold the real generate path after admission, then remove its prefill
+        // binding. Falling back must release the decode booking without ending
+        // or registering the logical classifier lifecycle a second time.
+        router.binding.store(Some(binding(false)));
+        let baseline_calls = classifications.load(Ordering::Relaxed);
+        let baseline_aborts = aborts.load(Ordering::Relaxed);
+        let tracker = Arc::new(RequestTracker::new());
+        let barrier = tracker.set_phase(RequestPhase::Prefill).await;
+        let mut request = inference_request();
+        request.encoder_result = Some(serde_json::json!({"opaque": "replan"}));
+        request.tracker = Some(tracker);
+        let fallback = Arc::new(CaptureHandoffHost::default());
+        let task = tokio::spawn({
+            let router = router.clone();
+            let fallback = fallback.clone();
+            async move { router.generate(SingleIn::new(request), fallback).await }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let loads = host
+                    .kv_router()
+                    .get_potential_loads(&[], None, None, None, None)
+                    .await
+                    .unwrap();
+                if loads.iter().any(|load| load.active_requests == 1) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        router.set_target(None);
+        assert!(router.binding.load_full().is_some());
+        drop(barrier);
+        drop(task.await.unwrap().unwrap());
+        let loads = host
+            .kv_router()
+            .get_potential_loads(&[], None, None, None, None)
+            .await
+            .unwrap();
+        assert!(
+            loads.iter().all(|load| load.active_requests == 0),
+            "abandoned decode booking leaked: {loads:?}"
+        );
+        let request = fallback.request.lock().take().unwrap();
+        assert_eq!(request.phase(), RequestPhase::Decode);
+        let migration = request
+            .migration_state
+            .as_ref()
+            .expect("declined conditional plan must park its lifecycle");
+        let lifecycle = migration
+            .take_request_lifecycle()
+            .expect("fallback request must retain the admitted classifier lifecycle");
+        let parked = format!("{lifecycle:?}");
+        migration.store_request_lifecycle(lifecycle);
+        assert_eq!(
+            aborts.load(Ordering::Relaxed),
+            baseline_aborts,
+            "parked={parked}, classifier calls before={baseline_calls}, now={}",
+            classifications.load(Ordering::Relaxed)
+        );
+        let mut stream = host.generate(request).await.unwrap();
+        while stream.next().await.is_some() {}
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while completions.load(Ordering::Relaxed) != 5 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(classifications.load(Ordering::Relaxed), baseline_calls + 1);
+        assert_eq!(aborts.load(Ordering::Relaxed), baseline_aborts);
+        router.binding.store(Some(binding(false)));
+        router.set_target(Some(WorkerSetTarget::Legacy(endpoint.clone())));
+
+        let replacement = distributed
+            .namespace("conditional-bypass-marker")
+            .unwrap()
+            .component("replacement")
+            .unwrap()
+            .endpoint("generate");
+        // Change cancellation or topology while affinity admission is held.
+        for action in ["stop", "kill", "remove", "replace"] {
+            router.binding.store(Some(binding(true)));
+            router.set_target(Some(WorkerSetTarget::Legacy(endpoint.clone())));
+            let session = SessionAffinityId::new("encoder-held-prefill-admission");
+            let leader = affinity.acquire(&session, None).await.unwrap();
+            let mut request = SingleIn::new(inference_request());
+            request.encoder_result = Some(serde_json::json!({"opaque": "held-admission"}));
+            request.insert(SESSION_AFFINITY_CONTEXT_KEY, session);
+            let context = request.context();
+            let dispatches_before = dispatch.annotations.lock().len();
+            let task = tokio::spawn({
+                let router = router.clone();
+                let downstream = downstream.clone();
+                async move { router.generate(request, downstream).await }
+            });
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                affinity.wait_for_initializing_waiter(),
+            )
+            .await
+            .unwrap();
+            match action {
+                "stop" => context.stop_generating(),
+                "kill" => context.kill(),
+                "remove" => router.set_target(None),
+                "replace" => router.set_target(Some(WorkerSetTarget::Legacy(replacement.clone()))),
+                _ => unreachable!(),
+            }
+            drop(leader);
+            let error = tokio::time::timeout(std::time::Duration::from_secs(5), task)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap_err();
+            let expected = if matches!(action, "stop" | "kill") {
+                ErrorType::Cancelled
+            } else {
+                ErrorType::WorkerUnavailable
+            };
+            assert!(
+                match_error_chain(error.as_ref(), &[expected], &[]),
+                "{action}: {error}"
+            );
+            assert_eq!(dispatch.annotations.lock().len(), dispatches_before);
+            let loads = host
+                .kv_router()
+                .get_potential_loads(&[], None, None, None, None)
+                .await
+                .unwrap();
+            assert!(
+                loads.iter().all(|load| load.active_requests == 0),
+                "cancelled prefill booking leaked: {loads:?}"
+            );
+        }
+        router.binding.store(Some(binding(false)));
+        router.set_target(Some(WorkerSetTarget::Legacy(endpoint.clone())));
         for required in [true, false] {
             router.binding.store(Some(binding(required)));
             for has_encoder in [false, true] {
@@ -1645,7 +2122,7 @@ mod tests {
                 assert_eq!(
                     decision.is_some(),
                     !required || !has_encoder,
-                    "only mandatory encoder handoffs must run remote prefill"
+                    "handoffs follow the prefill consumption policy; text can bypass"
                 );
             }
         }
@@ -1678,6 +2155,31 @@ mod tests {
             "a removed prefill target must invalidate held handoff decisions"
         );
         drop(decision);
+
+        router.binding.store(Some(binding(true)));
+        router.set_target(Some(WorkerSetTarget::Legacy(endpoint.clone())));
+        for has_encoder in [true, false] {
+            let mut request = inference_request();
+            request.encoder_result =
+                has_encoder.then(|| serde_json::json!({"opaque": "prefill-only"}));
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                let mut stream = router
+                    .generate(SingleIn::new(request), downstream.clone())
+                    .await
+                    .unwrap();
+                while stream.next().await.is_some() {}
+            })
+            .await
+            .unwrap();
+            assert_eq!(
+                dispatch.phases.lock().last(),
+                Some(&if has_encoder {
+                    RequestPhase::Prefill
+                } else {
+                    RequestPhase::Decode
+                })
+            );
+        }
         drop(router);
         drop(host);
         runtime.shutdown();

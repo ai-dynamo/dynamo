@@ -178,6 +178,11 @@ class ManagedProcess:
     straggler_commands: List[str] = field(default_factory=list)
     log_dir: str = os.getcwd()
     display_name: Optional[str] = None
+    # Engines that release shared GPU buffers must shut down before their workers.
+    graceful_shutdown: bool = False
+    _owned_children: dict[int, psutil.Process] = field(
+        default_factory=dict, init=False, repr=False
+    )
 
     # Ensure attributes exist even if startup fails early
     proc: Optional[subprocess.Popen] = None
@@ -239,6 +244,8 @@ class ManagedProcess:
             elapsed = self._check_ports(self.timeout)
             self._check_urls(self.timeout - elapsed)
             self._check_funcs(self.timeout - elapsed)
+            if self.graceful_shutdown:
+                self._remember_children()
 
             return self
 
@@ -338,14 +345,100 @@ class ManagedProcess:
            per-process.
         2. Clean up data directory if configured.
         3. Run name-based straggler cleanup (only when not in xdist-safe mode).
+
+        With graceful_shutdown=True, wait for parent-owned shutdown before
+        releasing workers and log helpers; forced cleanup raises an error.
         """
         try:
-            self._stop_started_processes()
+            if self.graceful_shutdown:
+                self.stop_gracefully()
+            else:
+                self._stop_started_processes()
 
             if self.data_dir:
                 self._remove_directory(self.data_dir)
         finally:
             self._cleanup_stragglers()
+
+    def _remember_children(self) -> None:
+        if self.proc is None or self.proc.poll() is not None:
+            return
+        try:
+            children = psutil.Process(self.proc.pid).children(recursive=True)
+            for child in children:
+                # Cache creation time so psutil's signal methods reject PID reuse.
+                child.create_time()
+                self._owned_children[child.pid] = child
+        except psutil.NoSuchProcess:
+            return
+
+    def _owned_processes(self) -> list[psutil.Process]:
+        self._remember_children()
+        if self._pgid is not None:
+            for process in psutil.process_iter():
+                try:
+                    if os.getsid(process.pid) == self._pgid:
+                        process.create_time()
+                        self._owned_children.setdefault(process.pid, process)
+                except (ProcessLookupError, psutil.NoSuchProcess):
+                    continue
+        alive = []
+        for process in self._owned_children.values():
+            try:
+                if process.is_running() and process.status() != psutil.STATUS_ZOMBIE:
+                    alive.append(process)
+            except psutil.NoSuchProcess:
+                continue
+        return alive
+
+    def _wait_owned_processes(self, timeout: float) -> None:
+        deadline = time.monotonic() + timeout
+        while self._owned_processes():
+            if time.monotonic() >= deadline:
+                raise subprocess.TimeoutExpired("managed engine workers", timeout)
+            time.sleep(min(0.05, max(0, deadline - time.monotonic())))
+
+    def stop_gracefully(self, timeout: float = 60, worker_timeout: float = 30) -> None:
+        """Stop the parent first and require observed/session-owned workers to exit.
+
+        Session membership survives reparenting. Separate sessions are covered
+        only if their processes were observed before detaching from the parent.
+        Any forced cleanup is reported as failure rather than a clean shutdown.
+        """
+        process = self.proc
+        if process is None:
+            self._stop_started_processes()
+            return
+        self._remember_children()
+        try:
+            if process.poll() is None:
+                process.terminate()
+            returncode = process.wait(timeout=timeout)
+            self._wait_owned_processes(worker_timeout)
+            for helper in (self._sed_proc, self._tee_proc):
+                if helper is not None:
+                    helper.wait(timeout=worker_timeout)
+            if returncode != 0:
+                raise ManagedProcessStopError(
+                    "proc", process.pid, f"exited with {returncode}"
+                )
+            # The original session and observed workers are settled; avoid another signal.
+            self._pgid = None
+        except subprocess.TimeoutExpired as error:
+            owned = self._owned_processes()
+            for child in owned:
+                try:
+                    child.kill()
+                except psutil.NoSuchProcess:
+                    continue
+            self._wait_owned_processes(10)
+            self._pgid = None
+            raise ManagedProcessStopError(
+                "proc", process.pid, "required forced shutdown"
+            ) from error
+        finally:
+            self._stop_started_processes()
+            self._owned_children.clear()
 
     def _stop_started_processes(self, wait_timeout: float = 10.0):
         """Terminate launched subprocesses and close any open pipe handles.
@@ -663,6 +756,8 @@ class ManagedProcess:
     def _check_process_alive(self, context=""):
         """Check if the main process is still alive. Raises RuntimeError if dead."""
         self._check_startup_cancelled()
+        if self.graceful_shutdown:
+            self._remember_children()
         if self.proc and self.proc.poll() is not None:
             returncode = self.proc.returncode
             self._logger.error(

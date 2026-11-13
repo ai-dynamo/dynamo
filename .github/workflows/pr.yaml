@@ -355,7 +355,9 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - name: Test nightly selection
-        run: python3 -m unittest discover -s lib/sidecar/trtllm/ci/tests -v
+        run: |
+          python3 -m pip install 'psutil==7.0.0' 'requests==2.33.1'
+          python3 -m unittest discover -s lib/sidecar/trtllm/ci/tests -v
 
   sidecar-build:
     name: dynamo-sidecar
