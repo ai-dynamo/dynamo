@@ -1,9 +1,10 @@
 #  SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #  SPDX-License-Identifier: Apache-2.0
 
-"""Metrics-focused SGLang processor tests with lightweight SGLang stubs."""
+"""SGLang processor metrics and import tests with lightweight backend stubs."""
 
 import asyncio
+import builtins
 import importlib
 import sys
 import types
@@ -14,6 +15,7 @@ from _routed_engine_fakes import FakeRoutedEngine
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.sglang,
+    pytest.mark.core,
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
 ]
@@ -54,7 +56,9 @@ def _install_module(install_module, name: str, **attrs):
     return install_module(name, **attrs)
 
 
-def _install_sglang_stubs(install_module):
+def _install_sglang_stubs(install_module, tokenizer_module):
+    """Install lightweight backend modules with the selected tokenizer layout."""
+
     class _Function:
         pass
 
@@ -136,7 +140,7 @@ def _install_sglang_stubs(install_module):
     _install_module(install_module, "sglang.srt.utils")
     _install_module(
         install_module,
-        "sglang.srt.utils.hf_transformers_utils",
+        tokenizer_module,
         get_tokenizer=lambda *args, **kwargs: None,
     )
 
@@ -154,9 +158,17 @@ class _PostProcessor:
         }
 
 
-def _load_processor_module(module_stubs):
+def _load_processor_module(
+    module_stubs, tokenizer_module="sglang.srt.utils.hf_transformers"
+):
+    """Import a fresh processor against the selected SGLang module layout."""
     install_module, remove_module = module_stubs
-    _install_sglang_stubs(install_module)
+    for name in (
+        "sglang.srt.hf_transformers",
+        "sglang.srt.utils.hf_transformers",
+    ):
+        remove_module(name)
+    _install_sglang_stubs(install_module, tokenizer_module)
     _install_module(install_module, "dynamo._internal", ModelDeploymentCard=object)
     # Importing common.utils initializes native bindings absent from this fixture.
     _install_module(
@@ -489,3 +501,41 @@ def test_held_output_still_reports_continuous_usage(
     assert ("usage" in final) == (
         not stream or bool((stream_options or {}).get("include_usage"))
     )
+
+
+@pytest.mark.parametrize(
+    "tokenizer_module",
+    [
+        "sglang.srt.hf_transformers",
+        "sglang.srt.utils.hf_transformers",
+    ],
+)
+def test_tokenizer_import_layouts(module_stubs, tokenizer_module):
+    """Resolve the tokenizer from current sources and the pinned releases."""
+    module = _load_processor_module(module_stubs, tokenizer_module)
+    assert module.get_tokenizer is sys.modules[tokenizer_module].get_tokenizer
+
+
+@pytest.mark.parametrize(
+    "tokenizer_module",
+    ["sglang.srt.hf_transformers", "sglang.srt.utils.hf_transformers"],
+)
+def test_tokenizer_import_preserves_dependency_error(
+    module_stubs, monkeypatch, tokenizer_module
+):
+    """Preserve missing dependencies instead of treating them as a layout move."""
+    original_import = builtins.__import__
+    error = ModuleNotFoundError(
+        "No module named 'tokenizer_dependency'", name="tokenizer_dependency"
+    )
+
+    def import_with_missing_dependency(name, *args, **kwargs):
+        """Fail inside the selected tokenizer module while importing others normally."""
+        if name == tokenizer_module:
+            raise error
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", import_with_missing_dependency)
+    with pytest.raises(ModuleNotFoundError) as caught:
+        _load_processor_module(module_stubs)
+    assert caught.value is error
