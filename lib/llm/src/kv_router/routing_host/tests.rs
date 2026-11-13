@@ -666,6 +666,7 @@ async fn runtime_lora_pin_is_rechecked_after_transport_fallback() {
             )),
             device_type: None,
             request_plane_codec: None,
+            response_plane: None,
         })
         .collect::<Vec<_>>();
     let (source_tx, source_rx) = watch::channel(instances.clone());
@@ -927,6 +928,7 @@ async fn builtin_soft_affinity_clears_dp_rank_after_worker_fallback() {
                 )),
                 device_type: None,
                 request_plane_codec: None,
+                response_plane: None,
             })
             .collect();
         let (source_tx, source_rx) = watch::channel(instances.clone());
@@ -1045,6 +1047,7 @@ async fn builtin_soft_affinity_rebinds_after_worker_exit() {
                 )),
                 device_type: None,
                 request_plane_codec: None,
+                response_plane: None,
             })
             .collect();
         let (source_tx, source_rx) = watch::channel(instances.clone());

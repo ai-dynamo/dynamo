@@ -55,7 +55,9 @@ pub(crate) const ACK_UNAVAILABLE_PREFIX: &str = "Server unavailable:";
 static REQUEST_PLANE_PAYLOAD_CODEC: OnceLock<RequestPlanePayloadCodec> = OnceLock::new();
 static RESPONSE_PLANE_MODE: OnceLock<ResponsePlaneMode> = OnceLock::new();
 
-/// Process-wide response transport. Frontends and workers must use the same mode.
+/// Process-wide response transport. A worker serves tcp and its own mode, and advertises
+/// that mode in discovery, so a frontend picks the transport per worker with
+/// [`ResponsePlaneMode::for_worker`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ResponsePlaneMode {
     #[default]
@@ -77,15 +79,51 @@ impl ResponsePlaneMode {
     }
 
     fn from_config_value(value: Option<&str>) -> Result<Self> {
-        match value {
-            None | Some("tcp") => Ok(Self::Tcp),
-            Some("quic") => Ok(Self::Quic),
-            Some("velo") => Ok(Self::Velo),
-            Some(other) => anyhow::bail!(
-                "invalid {} value '{other}'; expected 'tcp', 'quic', or 'velo'",
+        let Some(name) = value else {
+            return Ok(Self::Tcp);
+        };
+        Self::from_name(name).ok_or_else(|| {
+            anyhow::anyhow!(
+                "invalid {} value '{name}'; expected 'tcp', 'quic', or 'velo'",
                 crate::config::environment_names::response_plane::DYN_RESPONSE_PLANE
-            ),
+            )
+        })
+    }
+
+    fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "tcp" => Some(Self::Tcp),
+            "quic" => Some(Self::Quic),
+            "velo" => Some(Self::Velo),
+            _ => None,
         }
+    }
+
+    /// The response plane a frontend configured for `self` uses with one worker, given the
+    /// plane that worker advertises in [`Instance::response_plane`](crate::component::Instance).
+    ///
+    /// A worker that advertises serves its advertised plane and tcp, so every pairing other
+    /// than a match falls back to tcp.
+    pub const fn for_worker(self, advertised: Option<Self>) -> Self {
+        match (self, advertised) {
+            (Self::Quic, Some(Self::Quic)) => Self::Quic,
+            (Self::Velo, Some(Self::Velo)) => Self::Velo,
+            (_, Some(_)) => Self::Tcp,
+            // v1.6 workers can run quic and predate the advertisement.
+            // TODO(v1.9): Use tcp when v1.6 falls outside the N-2 compatibility window.
+            (Self::Quic, None) => Self::Quic,
+            // Velo and the advertisement ship in the same release, so a worker without one
+            // cannot serve velo.
+            (Self::Tcp | Self::Velo, None) => Self::Tcp,
+        }
+    }
+
+    /// Whether a worker configured for `self` can answer a request that names `requested`.
+    pub const fn serves(self, requested: Self) -> bool {
+        matches!(
+            (self, requested),
+            (_, Self::Tcp) | (Self::Quic, Self::Quic) | (Self::Velo, Self::Velo)
+        )
     }
 
     pub fn from_transport_name(transport: &str) -> Result<Self> {
@@ -103,6 +141,31 @@ impl ResponsePlaneMode {
             Self::Quic => "quic",
             Self::Velo => "velo",
         }
+    }
+}
+
+/// Serde for [`Instance::response_plane`](crate::component::Instance).
+pub(crate) mod advertised_response_plane {
+    use super::ResponsePlaneMode;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(
+        plane: &Option<ResponsePlaneMode>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        match plane {
+            Some(plane) => serializer.serialize_str(plane.name()),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    /// A newer worker can advertise a plane this version does not know. Every advertising
+    /// worker also serves tcp, so an unknown plane reads as tcp.
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<ResponsePlaneMode>, D::Error> {
+        let name = Option::<String>::deserialize(deserializer)?;
+        Ok(name.map(|name| ResponsePlaneMode::from_name(&name).unwrap_or(ResponsePlaneMode::Tcp)))
     }
 }
 
@@ -952,6 +1015,46 @@ mod tests {
         assert_eq!(error.class(), ErrorType::Internal);
         assert_eq!(error.reason().as_str(), "runtime.invalid_error");
         assert!(error.public_details().is_none());
+    }
+
+    #[test]
+    fn frontend_picks_the_response_plane_each_worker_serves() {
+        use ResponsePlaneMode::{Quic, Tcp, Velo};
+        for (frontend, advertised, expected) in [
+            // A tcp frontend never uses another plane.
+            (Tcp, None, Tcp),
+            (Tcp, Some(Velo), Tcp),
+            // A match uses the frontend's plane; any other advertisement means tcp.
+            (Velo, Some(Velo), Velo),
+            (Velo, Some(Tcp), Tcp),
+            (Velo, Some(Quic), Tcp),
+            (Quic, Some(Quic), Quic),
+            (Quic, Some(Tcp), Tcp),
+            (Quic, Some(Velo), Tcp),
+            // No advertisement: a v1.6 worker can run quic, and no such worker runs velo.
+            (Quic, None, Quic),
+            (Velo, None, Tcp),
+        ] {
+            assert_eq!(
+                frontend.for_worker(advertised),
+                expected,
+                "{frontend:?} frontend, worker advertising {advertised:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn worker_serves_tcp_and_its_own_response_plane() {
+        use ResponsePlaneMode::{Quic, Tcp, Velo};
+        for worker in [Tcp, Quic, Velo] {
+            for requested in [Tcp, Quic, Velo] {
+                assert_eq!(
+                    worker.serves(requested),
+                    requested == Tcp || requested == worker,
+                    "{worker:?} worker, {requested:?} requested"
+                );
+            }
+        }
     }
 
     #[test]

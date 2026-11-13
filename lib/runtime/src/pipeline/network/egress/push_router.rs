@@ -118,9 +118,10 @@ fn response_inactivity_timeout() -> Option<std::time::Duration> {
 
 /// Establish bound a quic or velo frontend applies when the environment sets none.
 ///
-/// A worker that cannot speak the frontend's response transport (a v1.5 or v1.6 worker behind
-/// a frontend configured for velo) ACKs the request, fails to open a stream, and sends
-/// nothing back. Unbounded, that request waits forever and the worker stays routable.
+/// A worker that cannot speak the response transport it is asked for ACKs the request, fails
+/// to open a stream, and sends nothing back. A quic frontend can still pick such a worker:
+/// v1.5 and v1.6 workers do not advertise a transport, and only v1.6 can run quic. Unbounded,
+/// that request waits forever and the worker stays routable.
 const DEFAULT_NON_TCP_ESTABLISH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Read the response-stream establish timeout from the environment.

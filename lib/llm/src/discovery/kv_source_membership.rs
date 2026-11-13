@@ -524,6 +524,7 @@ mod tests {
                 transport: TransportType::Tcp("tcp://127.0.0.1:1234".to_string()),
                 device_type: None,
                 request_plane_codec: None,
+                response_plane: None,
             }),
             ..source(endpoint, worker_id, rank, publisher_id)
         }

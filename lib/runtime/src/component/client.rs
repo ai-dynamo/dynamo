@@ -1179,6 +1179,7 @@ mod tests {
                 transport: TransportType::Tcp(format!("127.0.0.1:{}", 9000 + instance_id)),
                 device_type: None,
                 request_plane_codec: None,
+                response_plane: None,
             })
             .collect();
         let (tx, rx) = tokio::sync::watch::channel(instances.clone());
@@ -1277,6 +1278,7 @@ mod tests {
             transport: TransportType::Nats("test.subject".into()),
             device_type: None,
             request_plane_codec: None,
+            response_plane: None,
         };
         let (source_tx, source_rx) = tokio::sync::watch::channel(vec![instance.clone()]);
         let source =
@@ -1391,6 +1393,7 @@ mod tests {
             transport: TransportType::Tcp(format!("127.0.0.1:{}", 8000 + instance_id)),
             device_type: None,
             request_plane_codec: None,
+            response_plane: None,
         }
     }
 

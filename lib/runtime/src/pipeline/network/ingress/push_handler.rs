@@ -810,7 +810,9 @@ where
             advertised: advertised_mode,
         } = response_modes;
 
-        if configured_mode != advertised_mode {
+        // A worker answers over tcp as well as its own response plane, so a frontend
+        // on another plane, or one that predates this worker's plane, is still served.
+        if !configured_mode.serves(advertised_mode) {
             let message = format!(
                 "response plane mismatch: frontend requested {}, worker configured {}",
                 advertised_mode.name(),
@@ -867,7 +869,7 @@ where
                         }
                         PipelineError::Generic(format!(
                             "Failed to open {} response stream: {error}",
-                            configured_mode.name()
+                            advertised_mode.name()
                         ))
                     })?;
                 }
@@ -926,7 +928,7 @@ where
         finish.map_err(|error| {
             PipelineError::Generic(format!(
                 "Failed to finish {} response stream: {error}",
-                configured_mode.name()
+                advertised_mode.name()
             ))
         })
     }
@@ -1466,7 +1468,9 @@ mod tests {
     async fn response_plane_mismatch_reports_error_before_generate() {
         for (configured, advertised) in [
             (ResponsePlaneMode::Tcp, ResponsePlaneMode::Quic),
-            (ResponsePlaneMode::Quic, ResponsePlaneMode::Tcp),
+            (ResponsePlaneMode::Tcp, ResponsePlaneMode::Velo),
+            (ResponsePlaneMode::Quic, ResponsePlaneMode::Velo),
+            (ResponsePlaneMode::Velo, ResponsePlaneMode::Quic),
         ] {
             let ingress = TestIngress::new();
             let publisher = MismatchPublisher::default();

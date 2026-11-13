@@ -1558,6 +1558,7 @@ mod tests {
                 transport: TransportType::Nats(String::new()),
                 device_type: None,
                 request_plane_codec: None,
+                response_plane: None,
             }),
         )
     }
@@ -3244,6 +3245,7 @@ mod tests {
                     transport: TransportType::Tcp("tcp://127.0.0.1:1".to_string()),
                     device_type: None,
                     request_plane_codec: None,
+                    response_plane: None,
                 })
                 .await
                 .unwrap();
@@ -3292,6 +3294,7 @@ mod tests {
                 transport: TransportType::Nats(String::new()),
                 device_type: None,
                 request_plane_codec: None,
+                response_plane: None,
             };
 
             let mut node_0_sources = Vec::new();

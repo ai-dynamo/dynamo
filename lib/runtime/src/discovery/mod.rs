@@ -29,7 +29,7 @@ pub use kube::{KubeDiscoveryClient, hash_container_name, hash_pod_name};
 pub mod utils;
 use crate::{
     component::{DeviceType, Instance, TransportType},
-    pipeline::network::RequestPlanePayloadCodec,
+    pipeline::network::{RequestPlanePayloadCodec, ResponsePlaneMode},
 };
 pub use utils::watch_and_extract_field;
 
@@ -564,6 +564,9 @@ pub enum DiscoverySpec {
         /// Payload codec accepted by this endpoint's request-plane worker.
         /// `None` represents a legacy JSON-only worker.
         request_plane_codec: Option<RequestPlanePayloadCodec>,
+        /// Response plane this endpoint's worker serves in addition to tcp.
+        /// `None` represents a worker that predates the advertisement.
+        response_plane: Option<ResponsePlaneMode>,
     },
     Model {
         namespace: String,
@@ -653,6 +656,7 @@ impl DiscoverySpec {
                 transport,
                 device_type,
                 request_plane_codec,
+                response_plane,
             } => DiscoveryInstance::Endpoint(crate::component::Instance {
                 namespace,
                 component,
@@ -661,6 +665,7 @@ impl DiscoverySpec {
                 transport,
                 device_type,
                 request_plane_codec,
+                response_plane,
             }),
             Self::Model {
                 namespace,
@@ -1869,6 +1874,46 @@ mod tests {
     }
 
     #[test]
+    fn endpoint_response_plane_metadata_tolerates_older_and_newer_workers() {
+        let instance = DiscoverySpec::Endpoint {
+            namespace: "default".to_string(),
+            component: "worker".to_string(),
+            endpoint: "generate".to_string(),
+            transport: TransportType::Nats("worker.generate".to_string()),
+            device_type: None,
+            request_plane_codec: None,
+            response_plane: Some(ResponsePlaneMode::Velo),
+        }
+        .into_instance(42);
+        let response_plane = |metadata: serde_json::Value| match serde_json::from_value::<
+            DiscoveryInstance,
+        >(metadata)
+        .unwrap()
+        {
+            DiscoveryInstance::Endpoint(instance) => instance.response_plane,
+            _ => panic!("expected endpoint discovery metadata"),
+        };
+
+        let mut metadata = serde_json::to_value(&instance).unwrap();
+        assert_eq!(metadata["response_plane"], "velo");
+        assert_eq!(
+            response_plane(metadata.clone()),
+            Some(ResponsePlaneMode::Velo)
+        );
+
+        // A newer worker on a plane this version does not know still serves tcp.
+        metadata["response_plane"] = "a-later-plane".into();
+        assert_eq!(
+            response_plane(metadata.clone()),
+            Some(ResponsePlaneMode::Tcp)
+        );
+
+        // A v1.5 or v1.6 worker does not advertise.
+        metadata.as_object_mut().unwrap().remove("response_plane");
+        assert_eq!(response_plane(metadata), None);
+    }
+
+    #[test]
     fn endpoint_codec_metadata_round_trips_and_defaults_when_omitted() {
         let instance = DiscoverySpec::Endpoint {
             namespace: "default".to_string(),
@@ -1877,6 +1922,7 @@ mod tests {
             transport: TransportType::Nats("worker.generate".to_string()),
             device_type: None,
             request_plane_codec: Some(RequestPlanePayloadCodec::Msgpack),
+            response_plane: None,
         }
         .into_instance(42);
 
@@ -1914,6 +1960,7 @@ mod tests {
             transport: TransportType::Tcp("127.0.0.1:1234".to_string()),
             device_type: None,
             request_plane_codec: None,
+            response_plane: None,
         });
         let model = DiscoveryInstance::Model {
             namespace: "ns".to_string(),

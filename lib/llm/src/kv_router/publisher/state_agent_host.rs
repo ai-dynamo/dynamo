@@ -1044,6 +1044,7 @@ mod tests {
             transport: TransportType::Tcp(format!("tcp://127.0.0.1:{}", 10_000 + instance_id)),
             device_type: None,
             request_plane_codec: None,
+            response_plane: None,
         }
     }
 

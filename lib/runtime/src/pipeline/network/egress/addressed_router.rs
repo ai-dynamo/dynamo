@@ -670,7 +670,12 @@ pub struct AddressedPushRouter {
     req_client: Arc<dyn RequestPlaneClient>,
 
     request_callbacks: Arc<tcp::server::TcpStreamServer>,
+    /// The response plane this runtime is configured for.
+    response_plane: ResponsePlaneMode,
     responses: ResponseServer,
+    /// Serves a worker that does not serve `response_plane`; see
+    /// [`ResponsePlaneMode::for_worker`].
+    tcp_responses: ResponseServer,
 }
 
 #[derive(Clone)]
@@ -692,7 +697,9 @@ impl AddressedPushRouter {
         Ok(Arc::new(Self {
             req_client,
             request_callbacks: responses.clone(),
-            responses: ResponseServer::Tcp(responses),
+            response_plane: ResponsePlaneMode::Tcp,
+            responses: ResponseServer::Tcp(responses.clone()),
+            tcp_responses: ResponseServer::Tcp(responses),
         }))
     }
 
@@ -701,9 +708,25 @@ impl AddressedPushRouter {
         request_callbacks: Arc<tcp::server::TcpStreamServer>,
         responses: Arc<quic_response::QuicResponseServer>,
     ) -> Arc<Self> {
-        Arc::new(Self {
+        Self::new_registered(
             req_client,
             request_callbacks,
+            ResponsePlaneMode::Quic,
+            responses,
+        )
+    }
+
+    fn new_registered(
+        req_client: Arc<dyn RequestPlaneClient>,
+        request_callbacks: Arc<tcp::server::TcpStreamServer>,
+        response_plane: ResponsePlaneMode,
+        responses: Arc<dyn RegisteredResponsePlane>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            req_client,
+            tcp_responses: ResponseServer::Tcp(request_callbacks.clone()),
+            request_callbacks,
+            response_plane,
             responses: ResponseServer::Registered(responses),
         })
     }
@@ -724,17 +747,38 @@ impl AddressedPushRouter {
             ResponsePlaneMode::Tcp => Self::new(req_client, request_callbacks),
             ResponsePlaneMode::Velo => {
                 let responses = provider.drt().velo_response_service().await?;
-                Ok(Arc::new(Self {
+                Ok(Self::new_registered(
                     req_client,
                     request_callbacks,
-                    responses: ResponseServer::Registered(responses),
-                }))
+                    ResponsePlaneMode::Velo,
+                    responses,
+                ))
             }
             ResponsePlaneMode::Quic => {
                 let responses = provider.drt().quic_response_server().await?;
                 Ok(Self::new_quic(req_client, request_callbacks, responses))
             }
         }
+    }
+
+    /// The response server for one worker: this runtime's response plane when the worker
+    /// serves it, tcp otherwise.
+    fn responses_for_worker(&self, instance: Option<&Instance>) -> &ResponseServer {
+        let advertised = instance.and_then(|instance| instance.response_plane);
+        if self.response_plane.for_worker(advertised) == self.response_plane {
+            return &self.responses;
+        }
+        static FALLBACK_REPORTED: std::sync::Once = std::sync::Once::new();
+        FALLBACK_REPORTED.call_once(|| {
+            tracing::warn!(
+                response_plane = self.response_plane.name(),
+                instance_id = ?instance.map(Instance::id),
+                advertised = ?advertised.map(ResponsePlaneMode::name),
+                "A worker does not serve this runtime's response plane; using tcp for it and \
+                 for every other such worker"
+            );
+        });
+        &self.tcp_responses
     }
 
     /// Cancel stream registrations for an instance. The TCP and Velo response
@@ -830,12 +874,14 @@ impl AddressedPushRouter {
 
         let enable_request_stream = input_stream.is_some();
         let payload_codec = payload_codec_for_worker(instance);
+        let responses = self.responses_for_worker(instance);
 
         // Keep registration cleanup armed through dispatch errors. The response
         // registration also stays armed while waiting for the response prologue;
         // the request-stream registration is handed off to its forwarder below.
         let (send_registered, recv_registered) = self
             .register_streams(
+                responses,
                 engine_ctx.clone(),
                 enable_request_stream,
                 defer_cancellation_until_prologue,
@@ -852,7 +898,7 @@ impl AddressedPushRouter {
             .and_then(|r| tcp_subject_of(&r.connection_info));
         if let Some(inst) = instance {
             let instance_id = inst.endpoint_instance_id();
-            let associated = match &self.responses {
+            let associated = match responses {
                 ResponseServer::Tcp(responses) => match response_subject.as_deref() {
                     Some(subject) => {
                         responses
@@ -1012,6 +1058,7 @@ impl AddressedPushRouter {
     /// Register the optional TCP request callback and selected response stream.
     async fn register_streams(
         &self,
+        responses: &ResponseServer,
         engine_ctx: Arc<dyn crate::engine::AsyncEngineContext>,
         enable_request_stream: bool,
         defer_cancellation_until_prologue: bool,
@@ -1019,7 +1066,7 @@ impl AddressedPushRouter {
         Option<RegisteredStream<StreamSender>>,
         RegisteredStream<StreamReceiver>,
     )> {
-        let (send_stream, recv_stream) = match &self.responses {
+        let (send_stream, recv_stream) = match responses {
             ResponseServer::Tcp(responses) => {
                 let options = StreamOptions::builder()
                     .context(engine_ctx)
@@ -1313,9 +1360,10 @@ mod tests {
     use super::{
         AddressedPushRouter, AddressedRequest, CONTROL_MESSAGE_MAX_BYTES, ConnectionInfo,
         FIRST_RESPONSE_GUARD_CONTEXT_KEY, FirstResponseGuard, RequestControlMessage,
-        RequestPlaneClient, RequestPlanePayloadCodec, RequestType, ResponseType, TwoPartCodec,
-        attach_first_response_guard, build_request_envelope, dispatch_with_first_response_guard,
-        payload_codec_for_worker, propagate_first_response_guard, serialize_control_message,
+        RequestPlaneClient, RequestPlanePayloadCodec, RequestType, ResponsePlaneMode, ResponseType,
+        TwoPartCodec, attach_first_response_guard, build_request_envelope,
+        dispatch_with_first_response_guard, payload_codec_for_worker,
+        propagate_first_response_guard, serialize_control_message,
         try_acquire_retained_dispatch_permit,
     };
     use crate::{
@@ -1564,6 +1612,155 @@ mod tests {
         runtime.velo_response_service().shutdown().await;
     }
 
+    fn worker_advertising(response_plane: Option<ResponsePlaneMode>) -> Instance {
+        Instance {
+            component: "worker".to_string(),
+            endpoint: "generate".to_string(),
+            namespace: "default".to_string(),
+            instance_id: 42,
+            transport: TransportType::Tcp("127.0.0.1:1/2a/default/worker/generate".to_string()),
+            device_type: None,
+            request_plane_codec: Some(RequestPlanePayloadCodec::Msgpack),
+            response_plane,
+        }
+    }
+
+    /// A quic frontend reaches a worker that advertises another plane over tcp: the request
+    /// names the tcp response server, and a tcp response stream delivers the data.
+    #[tokio::test]
+    async fn quic_router_uses_tcp_for_a_worker_on_another_response_plane() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::quic_router_uses_tcp_for_a_worker_on_another_response_plane"
+            ),
+            &[],
+        ) {
+            return;
+        }
+
+        use super::{quic_response, tcp};
+        use crate::pipeline::SingleIn;
+        use bytes::Bytes;
+        use tokio::sync::mpsc;
+        use tokio_util::sync::CancellationToken;
+
+        struct CaptureRequest(mpsc::Sender<RequestControlMessage>);
+
+        #[async_trait::async_trait]
+        impl RequestPlaneClient for CaptureRequest {
+            async fn send_request(
+                &self,
+                _address: String,
+                payload: Bytes,
+                _headers: Headers,
+            ) -> anyhow::Result<Bytes> {
+                let message = TwoPartCodec::default().decode_message(payload)?;
+                self.0
+                    .send(serde_json::from_slice(&message.header)?)
+                    .await?;
+                Ok(Bytes::new())
+            }
+
+            fn transport_name(&self) -> &'static str {
+                "test"
+            }
+
+            fn is_healthy(&self) -> bool {
+                true
+            }
+        }
+
+        let shutdown = CancellationToken::new();
+        let _shutdown_guard = shutdown.clone().drop_guard();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let address = "127.0.0.1:0".parse().unwrap();
+            let responses =
+                quic_response::QuicResponseServer::new(address, address, shutdown).unwrap();
+            let callbacks = temp_env::async_with_vars(
+                [
+                    ("DYN_TCP_TLS_CERT_PATH", None::<&str>),
+                    ("DYN_TCP_TLS_KEY_PATH", None),
+                    ("DYN_TCP_TLS_CLIENT_CA_CERT_PATH", None),
+                ],
+                tcp::server::TcpStreamServer::new(
+                    tcp::server::ServerOptions::builder()
+                        .interface(Some("127.0.0.1".to_string()))
+                        .build()
+                        .unwrap(),
+                ),
+            )
+            .await
+            .unwrap();
+            let (request_tx, mut request_rx) = mpsc::channel(1);
+            let router = AddressedPushRouter::new_quic(
+                Arc::new(CaptureRequest(request_tx)),
+                callbacks,
+                responses,
+            );
+
+            for (advertised, transport) in [
+                (Some(ResponsePlaneMode::Tcp), "tcp_server"),
+                (Some(ResponsePlaneMode::Velo), "tcp_server"),
+                (Some(ResponsePlaneMode::Quic), quic_response::TRANSPORT_NAME),
+                // A v1.6 worker can run quic and does not advertise.
+                (None, quic_response::TRANSPORT_NAME),
+            ] {
+                let request = SingleIn::new(AddressedRequest::with_instance(
+                    42_u64,
+                    "test".to_string(),
+                    worker_advertising(advertised),
+                ));
+                let generation = tokio::spawn({
+                    let router = router.clone();
+                    async move {
+                        let response: anyhow::Result<ManyOut<Annotated<u64>>> =
+                            router.generate(request).await;
+                        response
+                    }
+                });
+                let control = request_rx.recv().await.unwrap();
+                assert_eq!(
+                    control.connection_info.transport, transport,
+                    "worker advertising {advertised:?}"
+                );
+                if transport != "tcp_server" {
+                    // No worker answers here; dropping the dispatch releases its registration.
+                    generation.abort();
+                    continue;
+                }
+
+                let worker_context =
+                    Context::with_id_and_metadata((), control.id, control.metadata).context();
+                let mut sender = TcpClient::create_response_stream(
+                    worker_context,
+                    control.connection_info,
+                    None,
+                )
+                .await
+                .unwrap();
+                sender.send_prologue(None).await.unwrap();
+                let mut response = generation.await.unwrap().unwrap();
+                sender
+                    .send(
+                        control
+                            .payload_codec
+                            .encode(&super::NetworkStreamWrapper {
+                                data: Some(Annotated::from_data(7_u64)),
+                                complete_final: true,
+                            })
+                            .unwrap()
+                            .into(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.next().await.unwrap().data, Some(7));
+            }
+        })
+        .await
+        .expect("quic router did not serve a worker on another response plane over tcp");
+    }
+
     #[test]
     fn legacy_worker_without_codec_metadata_receives_json() {
         let worker = Instance {
@@ -1574,6 +1771,7 @@ mod tests {
             transport: TransportType::Nats("worker.generate".to_string()),
             device_type: None,
             request_plane_codec: None,
+            response_plane: None,
         };
         let payload_codec = payload_codec_for_worker(Some(&worker));
         assert_eq!(payload_codec, RequestPlanePayloadCodec::Json);
@@ -1710,17 +1908,26 @@ mod tests {
                         let (connection_tx, mut connection_rx) = tokio::sync::mpsc::channel(1);
                         let client = Arc::new(CapturingClient(connection_tx));
                         let router = if let Some(service) = &service {
-                            Arc::new(AddressedPushRouter {
-                                req_client: client,
-                                request_callbacks: server,
-                                responses: super::ResponseServer::Registered(service.clone()),
-                            })
+                            AddressedPushRouter::new_registered(
+                                client,
+                                server,
+                                ResponsePlaneMode::Velo,
+                                service.clone(),
+                            )
                         } else {
                             AddressedPushRouter::new(client, server).unwrap()
                         };
                         let (guard_dropped_tx, mut guard_dropped_rx) = oneshot::channel();
-                        let mut request =
-                            Context::new(AddressedRequest::new(1_u64, "worker".into()));
+                        let worker = worker_advertising(Some(if velo {
+                            ResponsePlaneMode::Velo
+                        } else {
+                            ResponsePlaneMode::Tcp
+                        }));
+                        let mut request = Context::new(AddressedRequest::with_instance(
+                            1_u64,
+                            "worker".into(),
+                            worker,
+                        ));
                         attach_first_response_guard(
                             &mut request,
                             Arc::new(DropSignal(Some(guard_dropped_tx))),

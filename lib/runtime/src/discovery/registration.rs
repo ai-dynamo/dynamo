@@ -257,6 +257,7 @@ mod tests {
             transport: TransportType::Tcp("127.0.0.1:1/7/router".to_string()),
             device_type: None,
             request_plane_codec: None,
+            response_plane: None,
         }
     }
 
