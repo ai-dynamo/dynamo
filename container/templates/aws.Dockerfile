@@ -42,12 +42,11 @@ ENV EFA_VERSION="${EFA_VERSION}"
 # Upstream NIXL ships UCX/GDS but no LIBFABRIC backend. Add only the missing
 # API-compatible plugin, preserving its native libraries and Python
 # bindings. The EFA installer above supplies libfabric at runtime.
-# The qualified 1.5.0/1.5.2 pair shares plugin API 1; 1.5.2 fixes CUDA VMM
-# registration and EFA endpoint synchronization. New version pairs fail closed.
+# Upstream and plugin NIXL versions must match.
 ARG NIXL_REF
 ARG TARGETARCH
 RUN --mount=from=wheel_builder,source=/opt/nvidia/nvda_nixl/lib64/plugins/libplugin_LIBFABRIC.so,target=/tmp/libplugin_LIBFABRIC.so \
-    python3 -c 'import importlib.metadata as m, os; versions = (m.version("nixl"), os.environ["NIXL_REF"].removeprefix("v")); assert versions[0] == versions[1] or versions == ("1.5.0", "1.5.2"), f"Unqualified upstream/plugin NIXL versions: {versions}"' && \
+    python3 -c 'import importlib.metadata as m, os; versions = (m.version("nixl"), os.environ["NIXL_REF"].removeprefix("v")); assert versions[0] == versions[1], f"Unqualified upstream/plugin NIXL versions: {versions}"' && \
     ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64") && \
     plugin_dir="/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu/plugins" && \
     test -d "${plugin_dir}" && \

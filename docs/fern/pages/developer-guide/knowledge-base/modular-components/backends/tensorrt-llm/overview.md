@@ -69,7 +69,7 @@ The matrix below shows which TensorRT-LLM feature pairs are validated to work to
 
 The Dynamo TensorRT-LLM container uses the NIXL library and Python bindings provided by its upstream TensorRT-LLM release image. Multimodal embedding transfers still use those bindings. Do not install a second NIXL distribution or preload `libnixl` globally.
 
-The AWS EFA variant adds the missing LIBFABRIC plugin without replacing upstream's NIXL libraries or Python bindings. Its `trtllm.nixl_ref` build setting selects the plugin source. NIXL 1.5.2's plugin is qualified with the upstream 1.5.0 runtime using plugin API 1, including CUDA context-independent allocations. Updating either version requires compatibility validation; the build rejects unqualified version pairs.
+The AWS EFA variant adds the missing LIBFABRIC plugin without replacing upstream's NIXL libraries or Python bindings. Its `trtllm.nixl_ref` build setting selects the plugin source. The plugin and the upstream runtime are both NIXL 1.5.2 and use plugin API 1. Updating either version requires compatibility validation; the build rejects unqualified version pairs.
 
 The deprecated KVBM connector and event consolidator have been removed. Remove `--connector kvbm` and KVBM-specific settings from existing deployments. Native KV-event publishing through `--publish-kv-events` and KV-aware routing remain supported.
 
