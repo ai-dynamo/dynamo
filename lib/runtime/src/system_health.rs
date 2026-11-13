@@ -17,7 +17,10 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, OnceLock},
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Instant,
 };
 use tokio::sync::mpsc;
@@ -85,6 +88,10 @@ pub struct SystemHealth {
     /// Endpoints whose owner publishes readiness itself. Transport registration
     /// does not mark these ready; see [`SystemHealth::hold_endpoint_readiness`].
     readiness_holds: Arc<std::sync::RwLock<HashSet<String>>>,
+    /// Maps endpoint subject to the request-plane ingress's count of requests
+    /// in flight. The canary is sent in-process and bypasses the ingress, so it
+    /// is never counted.
+    endpoint_inflight: Arc<std::sync::RwLock<HashMap<String, Arc<AtomicU64>>>>,
     /// Channel for new endpoint registrations
     /// This solves the race condition where HealthCheckManager starts before endpoints are registered
     /// Using a channel ensures no registrations are lost.
@@ -126,6 +133,7 @@ impl SystemHealth {
             health_check_targets: Arc::new(std::sync::RwLock::new(HashMap::new())),
             health_check_notifiers: Arc::new(std::sync::RwLock::new(HashMap::new())),
             readiness_holds: Arc::new(std::sync::RwLock::new(HashSet::new())),
+            endpoint_inflight: Arc::new(std::sync::RwLock::new(HashMap::new())),
             new_endpoint_tx: tx,
             new_endpoint_rx: Arc::new(parking_lot::Mutex::new(Some(rx))),
             use_endpoint_health_status,
@@ -350,6 +358,42 @@ impl SystemHealth {
     ) -> Option<Arc<tokio::sync::Notify>> {
         let notifiers = self.health_check_notifiers.read().unwrap();
         notifiers.get(endpoint_subject).cloned()
+    }
+
+    /// Share the ingress's in-flight request counter for `endpoint` with
+    /// [`note_engine_progress`].
+    ///
+    /// [`note_engine_progress`]: SystemHealth::note_engine_progress
+    pub fn register_endpoint_inflight(&self, endpoint: &str, counter: Arc<AtomicU64>) {
+        self.endpoint_inflight
+            .write()
+            .unwrap()
+            .insert(endpoint.to_string(), counter);
+    }
+
+    /// Report that the engine behind `endpoint` completed a forward pass.
+    ///
+    /// While a request is in flight this is endpoint activity, the same as a
+    /// non-error response chunk: it resets the canary timer and marks the
+    /// endpoint ready. A request can run for minutes without a response chunk,
+    /// for example a long prefill, and a canary sent then queues behind it and
+    /// times out on a healthy engine.
+    ///
+    /// With no request in flight the pass served the canary, whose own result
+    /// decides the status, so this does nothing.
+    pub fn note_engine_progress(&self, endpoint: &str) {
+        let busy = self
+            .endpoint_inflight
+            .read()
+            .unwrap()
+            .get(endpoint)
+            .is_some_and(|inflight| inflight.load(Ordering::Relaxed) > 0);
+        if !busy {
+            return;
+        }
+        if let Some(notifier) = self.get_endpoint_health_check_notifier(endpoint) {
+            notifier.notify_one();
+        }
     }
 
     /// Take the receiver for new endpoint registrations (can only be called once)
@@ -577,5 +621,39 @@ mod tests {
             health.get_health_status().0,
             "after the canary marks it ready the worker is healthy"
         );
+    }
+
+    /// Whether `notifier` holds a notification. Consumes it.
+    fn notified(notifier: &tokio::sync::Notify) -> bool {
+        use futures::FutureExt;
+        notifier.notified().now_or_never().is_some()
+    }
+
+    /// A long prefill streams nothing until it ends, so the engine's forward
+    /// passes are the only sign of progress. They count while a request is in
+    /// flight. With none in flight the pass was the canary's own, and it must
+    /// not override that canary's result.
+    #[test]
+    fn engine_progress_is_activity_only_while_a_request_is_in_flight() {
+        let health = system_health(true);
+        health.register_health_check_target(ENDPOINT, instance(), serde_json::json!({}));
+        let notifier = health
+            .get_endpoint_health_check_notifier(ENDPOINT)
+            .expect("a health check target has a notifier");
+
+        health.note_engine_progress(ENDPOINT);
+        assert!(
+            !notified(&notifier),
+            "no ingress has registered a counter for the endpoint"
+        );
+
+        let inflight = Arc::new(AtomicU64::new(0));
+        health.register_endpoint_inflight(ENDPOINT, inflight.clone());
+        health.note_engine_progress(ENDPOINT);
+        assert!(!notified(&notifier), "nothing in flight");
+
+        inflight.store(1, Ordering::Relaxed);
+        health.note_engine_progress(ENDPOINT);
+        assert!(notified(&notifier), "one request in flight");
     }
 }

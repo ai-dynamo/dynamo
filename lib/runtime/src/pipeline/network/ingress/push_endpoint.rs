@@ -50,9 +50,11 @@ impl PushEndpoint {
         let endpoint_name_local: Arc<String> = Arc::from(endpoint_name);
         let namespace_local: Arc<String> = Arc::from(namespace);
 
-        system_health
-            .lock()
-            .set_endpoint_registered(endpoint_name_local.as_str());
+        {
+            let health = system_health.lock();
+            health.set_endpoint_registered(endpoint_name_local.as_str());
+            health.register_endpoint_inflight(endpoint_name_local.as_str(), inflight.clone());
+        }
 
         loop {
             let req = tokio::select! {

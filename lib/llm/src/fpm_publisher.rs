@@ -21,6 +21,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use dynamo_mocker::common::protocols::{ForwardPassSnapshot, FpmPublisher, FpmSink};
+use dynamo_runtime::SystemHealth;
 use dynamo_runtime::component::{Component, Endpoint};
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::transports::event_plane::EventPublisher;
@@ -114,12 +115,22 @@ impl FpmEventRelay {
         let cancel_clone = cancel.clone();
 
         let trace = rt.block_on(init_fpm_trace(component));
+        let system_health = component.drt().system_health();
+        let endpoint_name = endpoint.name().to_string();
 
         let publisher =
             rt.block_on(async { EventPublisher::for_endpoint(&endpoint, FPM_TOPIC).await })?;
 
         rt.spawn(async move {
-            Self::relay_loop(zmq_endpoint, publisher, cancel_clone, trace).await;
+            Self::relay_loop(
+                zmq_endpoint,
+                publisher,
+                cancel_clone,
+                trace,
+                system_health,
+                endpoint_name,
+            )
+            .await;
         });
 
         Ok(Self { cancel })
@@ -135,6 +146,8 @@ impl FpmEventRelay {
         publisher: EventPublisher,
         cancel: CancellationToken,
         trace: Option<crate::fpm_trace::FpmTrace>,
+        system_health: Arc<parking_lot::Mutex<SystemHealth>>,
+        endpoint_name: String,
     ) {
         let socket = match connect_sub_socket(&zmq_endpoint, None).await {
             Ok(socket) => socket,
@@ -160,6 +173,11 @@ impl FpmEventRelay {
                             // ZMQ multipart: [topic, seq, payload]
                             if frames.len() == 3 {
                                 let payload = bytes::Bytes::from(frames.swap_remove(2));
+                                // The health check counts a completed pass as activity:
+                                // a long prefill streams no response chunk until it ends.
+                                if is_completed_pass(&payload) {
+                                    system_health.lock().note_engine_progress(&endpoint_name);
+                                }
                                 tap_relay_fpm(&payload, trace.as_ref());
                                 if let Err(e) = publisher.publish_bytes_ref(&payload).await {
                                     tracing::warn!("FPM relay: event plane publish failed: {e}");
@@ -190,6 +208,21 @@ impl Drop for FpmEventRelay {
     fn drop(&mut self) {
         self.cancel.cancel();
     }
+}
+
+/// The fields of a relayed frame that tell a completed forward pass from a
+/// heartbeat. Frames are msgpack maps, so the other fields are skipped.
+#[derive(serde::Deserialize)]
+struct FpmPassPeek {
+    version: i32,
+    wall_time: f64,
+}
+
+/// Whether `payload` reports a completed forward pass. A heartbeat carries
+/// `wall_time == 0.0`, including one sent while a long pass is still running.
+fn is_completed_pass(payload: &[u8]) -> bool {
+    rmp_serde::from_slice::<FpmPassPeek>(payload)
+        .is_ok_and(|frame| frame.version == FPM_VERSION && frame.wall_time > 0.0)
 }
 
 // ---------------------------------------------------------------------------
@@ -465,6 +498,41 @@ mod tests {
         // Trace persistence is auxiliary. Reporting an initialization failure
         // must not turn it into a constructor error for either FPM publisher.
         assert!(report_fpm_trace_init(Err(anyhow::anyhow!("unwritable trace path"))).is_none());
+    }
+
+    /// The health check counts a completed pass as engine progress. A stalled
+    /// engine keeps sending heartbeats, so a heartbeat must not look like one.
+    #[test]
+    fn is_completed_pass_excludes_heartbeats() {
+        let frame = |snapshot: ForwardPassSnapshot| serialize_fpm(&snapshot, "w", 0, 1).unwrap();
+
+        assert!(is_completed_pass(&frame(ForwardPassSnapshot {
+            wall_time_secs: 0.48,
+            num_prefill_requests: 1,
+            sum_prefill_tokens: 2048,
+            ..Default::default()
+        })));
+        // Idle heartbeat.
+        assert!(!is_completed_pass(&frame(ForwardPassSnapshot::default())));
+        // Heartbeat sent during a long pass: it reports only the waiting queue.
+        assert!(!is_completed_pass(&frame(ForwardPassSnapshot {
+            num_queued_prefill: 1,
+            sum_queued_prefill_tokens: 1,
+            ..Default::default()
+        })));
+        assert!(!is_completed_pass(b"not msgpack"));
+
+        #[derive(Serialize)]
+        struct OtherVersion {
+            version: i32,
+            wall_time: f64,
+        }
+        let other_version = rmp_serde::to_vec_named(&OtherVersion {
+            version: FPM_VERSION + 1,
+            wall_time: 0.48,
+        })
+        .unwrap();
+        assert!(!is_completed_pass(&other_version));
     }
 
     /// Verify that serialize_fpm produces valid msgpack that round-trips

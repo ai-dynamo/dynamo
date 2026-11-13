@@ -462,6 +462,7 @@ impl SharedTcpServer {
         system_health: Arc<Mutex<SystemHealth>>,
     ) -> Result<()> {
         let fqn_endpoint = format!("{namespace}.{component_name}.{endpoint_name}");
+        let inflight = Arc::new(AtomicU64::new(0));
 
         let handler = Arc::new(EndpointHandler {
             service_handler,
@@ -470,14 +471,18 @@ impl SharedTcpServer {
             component_name,
             endpoint_name: endpoint_name.clone(),
             system_health: system_health.clone(),
-            inflight: Arc::new(AtomicU64::new(0)),
+            inflight: inflight.clone(),
             notify: Arc::new(Notify::new()),
         });
 
         // Insert handler FIRST to ensure it's ready to receive requests
         self.handlers.insert(endpoint_path, handler);
 
-        system_health.lock().set_endpoint_registered(&endpoint_name);
+        {
+            let health = system_health.lock();
+            health.set_endpoint_registered(&endpoint_name);
+            health.register_endpoint_inflight(&endpoint_name, inflight);
+        }
 
         tracing::info!(
             "Registered endpoint '{fqn_endpoint}' with shared TCP server on {}",

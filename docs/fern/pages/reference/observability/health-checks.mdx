@@ -161,8 +161,12 @@ selection in the current runtime.
 
 LLM backends supply a minimal inference request that Dynamo sends through the registered worker
 endpoint. Successful response chunks from normal traffic reset the idle timer, including when client
-delivery fails. This reports engine progress, not completion of every request. For the lifecycle and
-rationale, see
+delivery fails. This reports engine progress, not completion of every request. When forward-pass
+metrics are on (`DYN_FORWARDPASS_METRIC_PORT`, which the operator sets on worker pods), each forward
+pass the engine completes while a request is in flight also resets the idle timer, so a request that
+streams nothing for a long time, such as a long prefill, does not trigger a canary. Without
+forward-pass metrics, a canary sent during such a request waits behind it and can time out on a
+healthy worker. For the lifecycle and rationale, see
 [Observability Architecture](../../developer-guide/knowledge-base/concepts/observability-architecture.md#active-worker-health-checks).
 
 For vLLM-Omni workers, see [vLLM-Omni Health Checks](#vllm-omni-health-checks).
