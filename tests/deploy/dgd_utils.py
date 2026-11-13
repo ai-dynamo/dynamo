@@ -1451,12 +1451,20 @@ class ManagedDeployment:
 
         try:
             assert self._custom_api is not None, "Kubernetes API not initialized"
-            await self._custom_api.create_namespaced_custom_object(
-                group="nvidia.com",
-                version=self.deployment_spec.api_version,
-                namespace=self.namespace,
-                plural="dynamographdeployments",
-                body=self.deployment_spec.spec(),
+            # A retry after a dropped POST that was committed gets the 409
+            # below, which already counts as success.
+            await retry_vcluster_api_async(
+                f"creating deployment {self.namespace}/{self._deployment_name}",
+                partial(
+                    self._custom_api.create_namespaced_custom_object,
+                    group="nvidia.com",
+                    version=self.deployment_spec.api_version,
+                    namespace=self.namespace,
+                    plural="dynamographdeployments",
+                    body=self.deployment_spec.spec(),
+                ),
+                (aiohttp.ClientConnectionError,),
+                self._logger,
             )
             self._logger.info(self.deployment_spec.spec())
             self._logger.info(f"Deployment Started {self._deployment_name}")
