@@ -147,7 +147,7 @@ impl TcpClient {
         // the forwarder task will capture the alive_rx half of the oneshot channel; this will close the alive channel
         // so the holder of the alive_tx half will be notified that the stream is closed; the alive_tx channel will be
         // captured by the monitor task
-        let (alive_tx, alive_rx) = tokio::sync::oneshot::channel::<()>();
+        let (alive_tx, alive_rx) = tokio::sync::oneshot::channel::<Option<IntCounter>>();
 
         let reader_span = tracing::Span::current();
         let reader_task = tokio::spawn(
@@ -595,10 +595,11 @@ async fn wait_for_server_shutdown(
     Ok(())
 }
 
+/// Read peer controls and hand unexpected EOF accounting to the active writer.
 async fn handle_reader(
     framed_reader: FramedRead<BoxRead, TwoPartCodec>,
     context: Arc<dyn AsyncEngineContext>,
-    alive_tx: tokio::sync::oneshot::Sender<()>,
+    alive_tx: tokio::sync::oneshot::Sender<Option<IntCounter>>,
     cancellation_counter: Option<IntCounter>,
 ) -> FramedRead<BoxRead, TwoPartCodec> {
     let mut framed_reader = framed_reader;
@@ -672,6 +673,11 @@ async fn handle_reader(
                     }
                     None => {
                         tracing::debug!("tcp stream closed by server");
+                        if !cancellation_seen {
+                            // A completed writer drops this notification without counting it.
+                            let _ = alive_tx.send(cancellation_counter);
+                            return framed_reader;
+                        }
                         break;
                     }
                 }
@@ -687,10 +693,11 @@ async fn handle_reader(
     framed_reader
 }
 
+/// Forward responses; reader exit cancels only a still-live context.
 async fn handle_writer(
     mut framed_writer: FramedWrite<BoxWrite, TwoPartCodec>,
     mut bytes_rx: tokio::sync::mpsc::Receiver<TwoPartMessage>,
-    alive_rx: tokio::sync::oneshot::Receiver<()>,
+    mut alive_rx: tokio::sync::oneshot::Receiver<Option<IntCounter>>,
     context: Arc<dyn AsyncEngineContext>,
 ) -> Result<FramedWrite<BoxWrite, TwoPartCodec>> {
     // Keep one cancellation future per stream. Recreating these futures for every queued
@@ -714,6 +721,17 @@ async fn handle_writer(
 
             _ = &mut stopped => {
                 tracing::trace!("context stop signal received; shutting down");
+                send_sentinel = false;
+                break;
+            }
+
+            reader_exit = &mut alive_rx => {
+                if !context.is_stopped() {
+                    context.kill();
+                    if let Ok(Some(counter)) = reader_exit {
+                        counter.inc();
+                    }
+                }
                 send_sentinel = false;
                 break;
             }
@@ -845,8 +863,8 @@ mod tests {
         framed_writer: FramedWrite<BoxWrite, TwoPartCodec>,
         bytes_tx: mpsc::Sender<TwoPartMessage>,
         bytes_rx: mpsc::Receiver<TwoPartMessage>,
-        alive_tx: oneshot::Sender<()>,
-        alive_rx: oneshot::Receiver<()>,
+        alive_tx: oneshot::Sender<Option<IntCounter>>,
+        alive_rx: oneshot::Receiver<Option<IntCounter>>,
         controller: Arc<Controller>,
     }
 
@@ -858,7 +876,7 @@ mod tests {
             FramedWrite::new(Box::new(write_half) as BoxWrite, TwoPartCodec::default());
 
         let (bytes_tx, bytes_rx) = mpsc::channel(64);
-        let (alive_tx, alive_rx) = oneshot::channel::<()>();
+        let (alive_tx, alive_rx) = oneshot::channel::<Option<IntCounter>>();
         let controller = Arc::new(Controller::default());
 
         WriterHarness {
@@ -929,6 +947,162 @@ mod tests {
         );
     }
 
+    /// EOF cancels live requests once; an upstream Stop or Kill keeps its state.
+    #[tokio::test]
+    async fn test_peer_eof_cancels_idle_response_writer() {
+        for (index, control) in [None, Some(ControlMessage::Stop), Some(ControlMessage::Kill)]
+            .into_iter()
+            .enumerate()
+        {
+            let (client, server) = create_tcp_pair().await;
+            let (read_half, write_half) = tokio::io::split(client);
+            let reader = FramedRead::new(Box::new(read_half) as BoxRead, TwoPartCodec::default());
+            let writer =
+                FramedWrite::new(Box::new(write_half) as BoxWrite, TwoPartCodec::default());
+            let (bytes_tx, bytes_rx) = mpsc::channel(64);
+            let (alive_tx, alive_rx) = oneshot::channel();
+            let controller = Arc::new(Controller::default());
+            let counter =
+                IntCounter::new(format!("tcp_peer_eof_{index}"), "EOF regression").unwrap();
+            let reader_task = tokio::spawn(handle_reader(
+                reader,
+                controller.clone(),
+                alive_tx,
+                Some(counter.clone()),
+            ));
+            let writer_task = tokio::spawn(handle_writer(
+                writer,
+                bytes_rx,
+                alive_rx,
+                controller.clone(),
+            ));
+            let mut server = FramedWrite::new(server, TwoPartCodec::default());
+            if let Some(control) = &control {
+                server.send(control_message(control)).await.unwrap();
+            }
+            server.close().await.unwrap();
+            let mut server = server.into_inner();
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                reader_task.await.unwrap();
+                drop(writer_task.await.unwrap().unwrap());
+                assert_eq!(server.read(&mut [0]).await.unwrap(), 0);
+            })
+            .await
+            .expect("peer EOF must wake an idle writer");
+            assert_eq!(
+                controller.is_killed(),
+                !matches!(control, Some(ControlMessage::Stop))
+            );
+            assert!(bytes_tx.is_closed());
+            assert_eq!(counter.get(), 1);
+        }
+    }
+
+    /// A Stop arriving between select polls must not become an EOF-triggered Kill.
+    #[tokio::test]
+    async fn test_peer_eof_preserves_stop_between_select_polls() {
+        #[derive(Debug)]
+        struct StopDuringPoll {
+            controller: Arc<Controller>,
+            reader_exit: Mutex<Option<oneshot::Sender<Option<IntCounter>>>>,
+            counter: IntCounter,
+        }
+
+        #[async_trait::async_trait]
+        impl AsyncEngineContext for StopDuringPoll {
+            fn id(&self) -> &str {
+                self.controller.id()
+            }
+
+            fn is_stopped(&self) -> bool {
+                self.controller.is_stopped()
+            }
+
+            fn is_killed(&self) -> bool {
+                self.controller.is_killed()
+            }
+
+            async fn stopped(&self) {
+                use std::future::Future;
+
+                let stopped = self.controller.stopped();
+                tokio::pin!(stopped);
+                futures::future::poll_fn(|cx| {
+                    let result = stopped.as_mut().poll(cx);
+                    if result.is_pending()
+                        && let Some(reader_exit) = self.reader_exit.lock().unwrap().take()
+                    {
+                        // Return the observed Pending even though Stop and EOF are now ready.
+                        self.controller.stop();
+                        reader_exit.send(Some(self.counter.clone())).unwrap();
+                    }
+                    result
+                })
+                .await;
+            }
+
+            async fn killed(&self) {
+                self.controller.killed().await;
+            }
+
+            fn stop_generating(&self) {
+                self.controller.stop_generating();
+            }
+
+            fn stop(&self) {
+                self.controller.stop();
+            }
+
+            fn kill(&self) {
+                self.controller.kill();
+            }
+
+            fn link_child(&self, child: Arc<dyn AsyncEngineContext>) {
+                self.controller.link_child(child);
+            }
+        }
+
+        let WriterHarness {
+            mut server,
+            framed_writer,
+            bytes_tx,
+            bytes_rx,
+            alive_tx,
+            alive_rx,
+            controller,
+        } = writer_harness().await;
+        let counter = IntCounter::new("tcp_stop_eof_race", "EOF regression").unwrap();
+        let context = Arc::new(StopDuringPoll {
+            controller: controller.clone(),
+            reader_exit: Mutex::new(Some(alive_tx)),
+            counter: counter.clone(),
+        });
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            drop(
+                handle_writer(framed_writer, bytes_rx, alive_rx, context.clone())
+                    .await
+                    .unwrap(),
+            );
+            assert_eq!(server.read(&mut [0]).await.unwrap(), 0);
+        })
+        .await
+        .expect("Stop racing with EOF must wake an idle writer");
+
+        assert!(context.reader_exit.lock().unwrap().is_none());
+        assert!(controller.is_stopped());
+        assert!(
+            !controller.is_killed(),
+            "EOF must preserve the existing Stop"
+        );
+        assert_eq!(
+            counter.get(),
+            0,
+            "EOF must not count an existing Stop again"
+        );
+        assert!(bytes_tx.is_closed());
+    }
+
     /// Test that handle_writer forwards messages from the channel to the framed writer
     #[tokio::test]
     async fn test_handle_writer_forwards_messages() {
@@ -937,6 +1111,7 @@ mod tests {
             framed_writer,
             bytes_tx,
             bytes_rx,
+            alive_tx: _alive_tx,
             alive_rx,
             controller,
             ..
@@ -971,6 +1146,7 @@ mod tests {
             framed_writer,
             bytes_tx,
             bytes_rx,
+            alive_tx: _alive_tx,
             alive_rx,
             controller,
             ..
@@ -1012,7 +1188,7 @@ mod tests {
         let framed_writer =
             FramedWrite::new(Box::new(write_half) as BoxWrite, TwoPartCodec::default());
         let (bytes_tx, bytes_rx) = mpsc::channel(64);
-        let (alive_tx, alive_rx) = oneshot::channel::<()>();
+        let (alive_tx, alive_rx) = oneshot::channel::<Option<IntCounter>>();
         let controller = Arc::new(Controller::default());
         let cancellation_counter = IntCounter::new(
             "tcp_client_normal_completion_cancellations_test",
@@ -1058,6 +1234,7 @@ mod tests {
             mut server,
             framed_writer,
             bytes_rx,
+            alive_tx: _alive_tx,
             alive_rx,
             controller,
             ..
@@ -1096,6 +1273,7 @@ mod tests {
             mut server,
             framed_writer,
             bytes_rx,
+            alive_tx: _alive_tx,
             alive_rx,
             controller,
             ..
@@ -1135,6 +1313,7 @@ mod tests {
             framed_writer,
             bytes_tx,
             bytes_rx,
+            alive_tx: _alive_tx,
             alive_rx,
             controller,
             ..
@@ -1196,6 +1375,7 @@ mod tests {
             framed_writer,
             bytes_tx,
             bytes_rx,
+            alive_tx: _alive_tx,
             alive_rx,
             controller,
             ..
@@ -1229,6 +1409,7 @@ mod tests {
             framed_writer,
             bytes_tx,
             bytes_rx,
+            alive_tx: _alive_tx,
             alive_rx,
             controller,
             ..
@@ -1306,7 +1487,7 @@ mod tests {
         let framed_writer =
             FramedWrite::new(Box::new(write_half) as BoxWrite, TwoPartCodec::default());
         let (_bytes_tx, bytes_rx) = mpsc::channel(64);
-        let (alive_tx, alive_rx) = oneshot::channel::<()>();
+        let (alive_tx, alive_rx) = oneshot::channel::<Option<IntCounter>>();
         let controller = Arc::new(Controller::default());
 
         let reader_context = controller.clone();
@@ -1413,8 +1594,8 @@ mod tests {
     struct ReaderHarness {
         framed_server: FramedWrite<BoxWrite, TwoPartCodec>,
         framed_reader: FramedRead<BoxRead, TwoPartCodec>,
-        alive_tx: oneshot::Sender<()>,
-        alive_rx: oneshot::Receiver<()>,
+        alive_tx: oneshot::Sender<Option<IntCounter>>,
+        alive_rx: oneshot::Receiver<Option<IntCounter>>,
         controller: Arc<Controller>,
     }
 
@@ -1428,7 +1609,7 @@ mod tests {
             FramedRead::new(Box::new(read_half) as BoxRead, TwoPartCodec::default());
         let framed_server =
             FramedWrite::new(Box::new(server_write) as BoxWrite, TwoPartCodec::default());
-        let (alive_tx, alive_rx) = oneshot::channel::<()>();
+        let (alive_tx, alive_rx) = oneshot::channel::<Option<IntCounter>>();
         let controller = Arc::new(Controller::default());
 
         ReaderHarness {
