@@ -54,8 +54,7 @@ def _packaged_hardware_skus() -> list[str]:
     system_files = [
         path
         for path in distribution.files or []
-        if path.parent.as_posix() == "aisimulate_core/systems"
-        and path.suffix == ".yaml"
+        if path.parent.as_posix() == "aisim_core/systems" and path.suffix == ".yaml"
     ]
     result = []
     for packaged_path in system_files:
