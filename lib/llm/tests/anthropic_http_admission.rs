@@ -127,6 +127,9 @@ async fn duplicate_request_fields_are_rejected_before_generation() {
         let script = load_agent_fixture("text.sse").await.unwrap();
         let svc = HarnessService::start([script]).await;
         let model = serde_json::to_string(MODEL).unwrap();
+        let thread = r#""thread":{"type":"continue","previous_message_id":"msg_01"}"#;
+        // Parsed as a `serde_json::Value`, this object reads as its payload, `null`.
+        let masked = r#""thread":{"$serde_json::private::RawValue":"null"}"#;
         // Keep raw JSON: constructing a Value would discard the duplicate keys.
         let fields = [
             format!(
@@ -144,6 +147,22 @@ async fn duplicate_request_fields_are_rejected_before_generation() {
             format!(
                 r#""model":{model},"messages":[{{"role":"user","content":"ping"}}],"system":null,"system":null"#
             ),
+            // The typed request ignores `thread`, so admission rejects its repeat.
+            format!(
+                r#""model":{model},"messages":[{{"role":"user","content":"ping"}}],{masked},{thread}"#
+            ),
+            format!(
+                r#""model":{model},"messages":[{{"role":"user","content":"ping"}}],{thread},{masked}"#
+            ),
+            format!(
+                r#""model":{model},"messages":[{{"role":"user","content":"ping"}}],{thread},"thread":null"#
+            ),
+            format!(
+                r#""model":{model},"messages":[{{"role":"user","content":"ping"}}],"thread":null,{thread}"#
+            ),
+            format!(
+                r#""model":{model},"messages":[{{"role":"user","content":"ping"}}],"thread":null,"thr\u0065ad":null"#
+            ),
         ];
         for path in ["/v1/messages", "/v1/messages/count_tokens"] {
             for fields in &fields {
@@ -157,7 +176,16 @@ async fn duplicate_request_fields_are_rejected_before_generation() {
                     .send()
                     .await
                     .unwrap();
-                assert_error(response, StatusCode::BAD_REQUEST, "invalid_request_error").await;
+                let error =
+                    assert_error(response, StatusCode::BAD_REQUEST, "invalid_request_error").await;
+                // A repeated `thread` is rejected as a repeat, not refused as a thread.
+                if fields.contains(r#""thread""#) {
+                    let message = error["error"]["message"].as_str().unwrap();
+                    assert!(
+                        message.contains("duplicate field `thread`"),
+                        "{path}: {error}"
+                    );
+                }
             }
         }
         assert!(svc.engine.take_requests().await.is_empty());
@@ -440,8 +468,12 @@ async fn message_threads_are_refused_before_generation() {
         let mut follow_up = request();
         follow_up["stream"] = true.into();
         follow_up["thread"] = json!({"type": "continue", "previous_message_id": "msg_01"});
+        // Any value but a literal `null` names a thread, also the object that a
+        // `serde_json::Value` parse reads as its payload, `null`.
+        let mut masked = request();
+        masked["thread"] = json!({"$serde_json::private::RawValue": "null"});
         for path in ["/v1/messages", "/v1/messages/count_tokens"] {
-            for body in [&create, &follow_up] {
+            for body in [&create, &follow_up, &masked] {
                 let response = svc
                     .client
                     .post(format!("{}{path}", svc.base_url))
@@ -459,32 +491,6 @@ async fn message_threads_are_refused_before_generation() {
                     "{path}: {error}"
                 );
             }
-        }
-        // A repeated key must not hide the thread: the typed request ignores both.
-        let named = serde_json::to_string(&follow_up).unwrap();
-        let named = named.strip_suffix('}').unwrap();
-        let unnamed = serde_json::to_string(&request()).unwrap();
-        let unnamed = unnamed.strip_suffix('}').unwrap();
-        let thread = r#""thread":{"type":"continue","previous_message_id":"msg_01"}"#;
-        for body in [
-            format!(r#"{named},"thread":null}}"#),
-            format!(r#"{unnamed},"thread":null,{thread}}}"#),
-        ] {
-            let response = svc
-                .client
-                .post(format!("{}/v1/messages", svc.base_url))
-                .timeout(Duration::from_secs(10))
-                .header("content-type", "application/json")
-                .body(body.clone())
-                .send()
-                .await
-                .unwrap();
-            let error =
-                assert_error(response, StatusCode::BAD_REQUEST, "invalid_request_error").await;
-            assert_eq!(
-                error["error"]["details"]["error_code"], "thread_unsupported_request",
-                "{body}: {error}"
-            );
         }
         let mut unthreaded = request();
         unthreaded["thread"] = Value::Null;
