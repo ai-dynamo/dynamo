@@ -152,7 +152,7 @@ def test_frontend_start_warns_once_for_old_ais_inputs(
 
     # The frontend reads the config when it parses and again when it starts.
     with pytest.warns(FutureWarning) as records:
-        config, _, _ = frontend_main.parse_args()
+        config, *_ = frontend_main.parse_args()
         kwargs = config.ais_perf_kwargs()
 
     assert [str(record.message) for record in records] == [
