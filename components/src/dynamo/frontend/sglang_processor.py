@@ -22,6 +22,7 @@ from sglang.srt.utils.hf_transformers_utils import get_tokenizer
 
 from dynamo._internal import ModelDeploymentCard
 from dynamo.common.multimodal.cache_uuid import reject_unsupported_multimodal_uuids
+from dynamo.common.token_budget import TOKEN_BUDGET_RUNTIME_KEY, TokenBudget
 from dynamo.common.utils.input_params import resolve_thinking_token_budget
 from dynamo.frontend.frontend_args import FrontendConfig
 from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine
@@ -252,6 +253,59 @@ def _runtime_config_parser_name(
         return None
     value = runtime_config.get(key)
     return value if isinstance(value, str) and value else None
+
+
+def _runtime_token_budget(mdc: ModelDeploymentCard) -> TokenBudget | None:
+    runtime_config = mdc.runtime_config()
+    if not isinstance(runtime_config, dict):
+        return None
+    runtime_data = runtime_config.get("runtime_data")
+    if not isinstance(runtime_data, dict):
+        return None
+    value = runtime_data.get(TOKEN_BUDGET_RUNTIME_KEY)
+    if value is None:
+        return None
+
+    if isinstance(value, dict):
+        combined_limit = value.get("combined_limit")
+        reject_prompt = value.get("reject_prompt_overflow", False)
+        reject_total = value.get("reject_total_overflow", False)
+        if (
+            type(combined_limit) is int
+            and 0 <= combined_limit <= _U32_MAX
+            and isinstance(reject_prompt, bool)
+            and isinstance(reject_total, bool)
+        ):
+            return TokenBudget(combined_limit, reject_prompt, reject_total)
+
+    logger.warning("Ignoring invalid %s runtime metadata", TOKEN_BUDGET_RUNTIME_KEY)
+    return None
+
+
+def _validate_requested_token_budget(
+    prompt_len: int, max_tokens: int | None, token_budget: TokenBudget
+) -> None:
+    limit = token_budget.combined_limit
+    if prompt_len >= limit:
+        if token_budget.reject_prompt_overflow:
+            raise InvalidArgument(
+                f"The prompt has {prompt_len} input tokens, leaving no room for "
+                f"generation within the {limit}-token context window. "
+                "Please reduce the input length."
+            )
+        # Backend truncation can change the prompt length.
+        return
+
+    if (
+        token_budget.reject_total_overflow
+        and max_tokens is not None
+        and prompt_len + max_tokens > limit
+    ):
+        raise InvalidArgument(
+            f"This model accepts at most {limit} combined input and output tokens. "
+            f"The request has {prompt_len} input tokens and asks for {max_tokens} "
+            "output tokens. Please reduce the input length or requested output length."
+        )
 
 
 def _guided_json_is_content(preproc: dict[str, Any]) -> bool:
@@ -600,6 +654,7 @@ class SglangProcessor:
         structural_tag_scope: str = "auto",
         structural_tag_schema: str = "auto",
         prompt_renderer: PromptRenderer | None = None,
+        token_budget: TokenBudget | None = None,
     ):
         self.tokenizer = tokenizer
         # Detect force_reasoning once from the chat template, matching
@@ -628,6 +683,7 @@ class SglangProcessor:
         self.structural_tag_scope = structural_tag_scope
         self.structural_tag_schema = structural_tag_schema
         self.prompt_renderer = prompt_renderer
+        self.token_budget = token_budget
         self.preprocess_pool = preprocess_pool
         if preprocess_pool is not None:
             self._worker_semaphore: asyncio.Semaphore | None = asyncio.Semaphore(
@@ -863,6 +919,13 @@ class SglangProcessor:
         context: Any | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Shared streaming logic for both single-process and pool paths."""
+        # Media expansion is backend-owned on this path, so only text-only
+        # requests have an exact frontend-visible prompt length.
+        if self.token_budget is not None and not dynamo_preproc.get("multi_modal_data"):
+            stop_conditions = dynamo_preproc.get("stop_conditions") or {}
+            _validate_requested_token_budget(
+                len(tokens), stop_conditions.get("max_tokens"), self.token_budget
+            )
         token_count = 0
         post_proc_total_ms = 0.0
         created_ts = int(time.time())
@@ -1353,6 +1416,7 @@ class SglangEngineFactory:
             structural_tag_scope=structural_tag_scope,
             structural_tag_schema=structural_tag_schema,
             prompt_renderer=prompt_renderer,
+            token_budget=_runtime_token_budget(mdc),
         )
         gen.exclude_tools_when_tool_choice_none = (
             self.config.exclude_tools_when_tool_choice_none
