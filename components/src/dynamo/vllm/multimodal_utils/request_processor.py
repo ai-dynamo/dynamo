@@ -155,7 +155,7 @@ def _build_user_mm_uuids(
 ) -> Optional[dict[str, list[str | None]]]:
     """Map Dynamo media keys to vLLM cache identities."""
     if use_audio_in_video and (explicit_audio_count is None or video_count is None):
-        raise InvalidArgument(
+        raise ValueError(
             "explicit_audio_count and video_count are required when "
             "use_audio_in_video is enabled"
         )
@@ -231,7 +231,7 @@ def _placeholder_range_from_extra_arg(value: Any) -> PlaceholderRange:
             else torch.as_tensor(is_embed_raw, dtype=torch.bool)
         )
         if is_embed is not None and is_embed.numel() != length:
-            raise InvalidArgument(
+            raise ValueError(
                 "forwarded mm placeholder is_embed length "
                 f"{is_embed.numel()} does not match placeholder length {length}"
             )
@@ -256,7 +256,7 @@ def compute_mm_uuids(
         if not isinstance(chunks, list):
             chunks = [chunks]
         if not all(chunk is None or isinstance(chunk, dict) for chunk in chunks):
-            raise InvalidArgument("vision_chunk entries must be objects or null")
+            raise ValueError("vision_chunk entries must be objects or null")
         images = [None if chunk is None else chunk.get("image") for chunk in chunks]
     elif isinstance(images, dict):
         # Pre-computed embedding dictionaries do not have a stable raw-image
