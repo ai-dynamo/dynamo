@@ -148,6 +148,10 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
 
 <ParamField path="multinode" type="MultinodeSpec">
   Configures a `worker`, `prefill`, or `decode` component that spans multiple pods. Other component types reject this field. A pre-existing unsupported combination can remain unchanged during unrelated updates or remove `multinode`, but cannot change or reintroduce it. See [Multinode Orchestration](../../kubernetes/installation/multinode-orchestration.md).
+
+  With LeaderWorkerSet orchestration, new resource names are limited to 45 characters so StatefulSet revision labels fit at every supported group index. Longer names use a deterministic hash. Existing `<component deployment name>-0` resources of 50 characters or fewer keep their names across operator upgrades and scaling. Longer legacy resources also keep their names while they have ready groups; a non-serving oversized resource is removed only after its replacement syncs and only when this component controls it. If legacy groups become ready during migration, reconciliation keeps managing the legacy resource and removes the unused replacement only when this component controls it.
+
+  Preserved legacy names of 46 to 50 characters can still exceed the revision label limit at higher group indexes. A 50-character name can exceed the limit from the 11th replica. Legacy `worker` pod labels and `DYN_COMPONENT` values are preserved when the component API uses `prefill` or `decode`.
 </ParamField>
 
 <Indent>

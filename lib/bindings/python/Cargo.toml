@@ -148,6 +148,11 @@ http = "1"
 opentelemetry_sdk = { version = "0.31.0", features = ["trace"] }
 tracing-subscriber = { version = "0.3", features = ["registry"] }
 
+# At opt-level 2+, LLVM does not finish compiling the fast_image_resize code in this crate
+# when SVE is on (for example target-cpu=native on Grace).
+[profile.release.package.llm-multimodal]
+opt-level = 1
+
 [profile.profiling]
 inherits = "release"
 debug = true

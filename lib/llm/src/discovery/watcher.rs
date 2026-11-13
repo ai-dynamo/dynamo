@@ -1453,8 +1453,11 @@ impl ControllerHost for ModelWatcher {
         drop(prepared);
     }
 
-    async fn list_instances(&self) -> anyhow::Result<Vec<DiscoveryInstance>> {
-        self.drt.discovery().list(DiscoveryQuery::AllModels).await
+    async fn list_instances(
+        &self,
+        query: DiscoveryQuery,
+    ) -> anyhow::Result<Vec<DiscoveryInstance>> {
+        self.drt.discovery().list(query).await
     }
 }
 
