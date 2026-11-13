@@ -22,6 +22,19 @@ pytestmark = [
 ]
 
 
+async def _start_waiter(cache, compute):
+    """Return after a same-key caller has entered its coalesced wait."""
+    entered = asyncio.Event()
+
+    async def wait_for_result():
+        entered.set()
+        return await cache.get_or_compute("key1", compute)
+
+    task = asyncio.create_task(wait_for_result())
+    await asyncio.wait_for(entered.wait(), 1)
+    return task
+
+
 class TestAsyncEncoderCacheBasicOperations:
     """Tests for basic operations."""
 
@@ -215,6 +228,76 @@ class TestAsyncEncoderCacheExceptionHandling:
 
         result = await cache.get_or_compute("key1", working_compute)
         assert torch.equal(result.tensor, tensor)
+
+    @pytest.mark.asyncio
+    async def test_cancelled_waiter_does_not_cancel_shared_result(self, cache):
+        embedding = CachedEmbedding(torch.arange(4))
+        compute_started = asyncio.Event()
+        compute_proceed = asyncio.Event()
+
+        async def compute():
+            compute_started.set()
+            await asyncio.wait_for(compute_proceed.wait(), 5)
+            return embedding
+
+        tasks = [asyncio.create_task(cache.get_or_compute("key1", compute))]
+        try:
+            await asyncio.wait_for(compute_started.wait(), 1)
+            tasks.append(await _start_waiter(cache, compute))
+            tasks.append(await _start_waiter(cache, compute))
+            tasks[1].cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await tasks[1]
+
+            compute_proceed.set()
+            results = await asyncio.wait_for(
+                asyncio.gather(tasks[0], tasks[2], return_exceptions=True), 1
+            )
+            assert results[0] is embedding
+            assert results[1] is embedding
+            assert cache.get("key1") is embedding
+            assert cache.stats["in_flight"] == 0
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    @pytest.mark.asyncio
+    async def test_cancelled_owner_releases_waiters_and_allows_retry(self, cache):
+        embedding = CachedEmbedding(torch.arange(4))
+        compute_started = asyncio.Event()
+        compute_proceed = asyncio.Event()
+
+        async def compute():
+            compute_started.set()
+            await asyncio.wait_for(compute_proceed.wait(), 5)
+            return embedding
+
+        tasks = [asyncio.create_task(cache.get_or_compute("key1", compute))]
+        try:
+            await asyncio.wait_for(compute_started.wait(), 1)
+            tasks.append(await _start_waiter(cache, compute))
+            tasks.append(await _start_waiter(cache, compute))
+            tasks[0].cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await tasks[0]
+
+            done, pending = await asyncio.wait(tasks[1:], timeout=1)
+            assert not pending, "cancelled computation left coalesced callers waiting"
+            assert len(done) == 2
+            assert all(task.cancelled() for task in done)
+            assert cache.stats["in_flight"] == 0
+            assert cache.get("key1") is None
+
+            async def retry():
+                return embedding
+
+            assert await cache.get_or_compute("key1", retry) is embedding
+            assert cache.get("key1") is embedding
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
 
 class TestAsyncEncoderCacheStats:
