@@ -472,7 +472,7 @@ impl LLMEngine for SglangSidecarEngine {
                 // Publish the handoff only after the gRPC transport opens the
                 // response stream so decode can rendezvous while prefill runs.
                 yield Ok(LLMEngineOutput {
-                    disaggregated_params: Some(handoff),
+                    disaggregated_params: Some(Box::new(handoff)),
                     ..Default::default()
                 });
             }
@@ -570,7 +570,7 @@ impl LLMEngine for SglangSidecarEngine {
                             terminal.token_ids = token_ids;
                             terminal.log_probs = log_probs;
                             terminal.top_logprobs = top_logprobs;
-                            terminal.engine_data = engine_data;
+                            terminal.engine_data = engine_data.map(Box::new);
                             yield Ok(terminal);
                             break;
                         }
@@ -587,7 +587,7 @@ impl LLMEngine for SglangSidecarEngine {
                                 token_ids,
                                 log_probs,
                                 top_logprobs,
-                                engine_data,
+                                engine_data: engine_data.map(Box::new),
                                 ..Default::default()
                             });
                         }

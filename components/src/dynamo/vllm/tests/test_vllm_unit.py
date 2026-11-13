@@ -160,6 +160,27 @@ def test_custom_jinja_template_valid_path(mock_vllm_cli):
     )
 
 
+def test_custom_jinja_template_rejects_vllm_tokenizer(mock_vllm_cli):
+    mock_vllm_cli(
+        "--model",
+        "Qwen/Qwen3-0.6B",
+        "--custom-jinja-template",
+        JINJA_TEMPLATE_PATH,
+        "--use-vllm-tokenizer",
+    )
+
+    with pytest.raises(ValueError) as excinfo:
+        parse_args()
+
+    assert str(excinfo.value) == (
+        "Cannot use --custom-jinja-template with --use-vllm-tokenizer: the worker "
+        "renders with the model's own chat template. Remove --use-vllm-tokenizer. "
+        "Then keep --custom-jinja-template to apply the template in Dynamo's "
+        "preprocessor, or start the frontend with --dyn-chat-processor vllm "
+        "--chat-template <file> to render it in vLLM."
+    )
+
+
 def test_custom_jinja_template_env_var_expansion(monkeypatch, mock_vllm_cli):
     """Test that environment variables in paths are expanded by Python code."""
     jinja_dir = str(TEST_DIR / "serve" / "fixtures")

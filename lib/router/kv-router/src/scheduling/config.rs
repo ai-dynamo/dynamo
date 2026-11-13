@@ -1201,7 +1201,7 @@ impl KvRouterConfig {
     }
 
     /// Whether the KV index built from this config can retain the block chain
-    /// that KV fetch hints need: a local, event-driven primary with no
+    /// that KV copy sources need: a local, event-driven primary with no
     /// predict-on-route side indexer. Offline replay, which cannot build that
     /// index, relies on this matching `Indexer::supports_kv_transfer_chain_retention`.
     pub fn supports_kv_transfer_chain_retention(&self) -> bool {
@@ -2598,29 +2598,6 @@ models:
     }
 
     #[test]
-    fn test_router_config_override_rejects_out_of_range_shared_cache_multiplier() {
-        let too_small = RouterConfigOverride {
-            overlap_score_credit: None,
-            prefill_load_scale: None,
-            router_temperature: None,
-            assume_kv_reuse: None,
-            track_prefill_tokens: None,
-            shared_cache_multiplier: Some(-0.1),
-        };
-        let too_large = RouterConfigOverride {
-            overlap_score_credit: None,
-            prefill_load_scale: None,
-            router_temperature: None,
-            assume_kv_reuse: None,
-            track_prefill_tokens: None,
-            shared_cache_multiplier: Some(1.1),
-        };
-
-        assert!(too_small.validate().is_err());
-        assert!(too_large.validate().is_err());
-    }
-
-    #[test]
     fn test_router_config_override_accepts_credit_above_one() {
         let amplified = RouterConfigOverride {
             overlap_score_credit: Some(1.1),
@@ -2628,7 +2605,6 @@ models:
             router_temperature: None,
             assume_kv_reuse: None,
             track_prefill_tokens: None,
-            shared_cache_multiplier: None,
         };
 
         assert!(amplified.validate().is_ok());
@@ -2639,7 +2615,6 @@ models:
                 router_temperature: None,
                 assume_kv_reuse: None,
                 track_prefill_tokens: None,
-                shared_cache_multiplier: None,
             };
             assert!(invalid.validate().is_err());
         }
