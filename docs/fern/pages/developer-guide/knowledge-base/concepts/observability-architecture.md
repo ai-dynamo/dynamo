@@ -28,7 +28,9 @@ them through the system-status server when `DYN_SYSTEM_PORT` is enabled.
 
 Traces and logs use a push model. Each participating process exports OTLP records to a collector.
 `OTEL_EXPORT_ENABLED` intentionally controls both signals so their trace context stays aligned. The
-collector can route the records to different backends, such as Tempo and Loki.
+collector can route the records to different backends, such as Tempo and Loki. If your collector
+accepts traces only, set `OTEL_EXPORT_LOGS_ENABLED=false` to turn off runtime log export and keep
+trace export.
 
 ## Trace and Log Correlation
 

@@ -57,6 +57,8 @@ Every Dynamo process reads its own environment at startup, so set these on each 
           value: "true"
         - name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
           value: "http://tempo.observability.svc.cluster.local:4317"
+        - name: OTEL_EXPORT_LOGS_ENABLED   # no logs endpoint; only traces go to Tempo
+          value: "false"
       services:
         Frontend:
           componentType: frontend
@@ -134,6 +136,10 @@ Every Dynamo process reads its own environment at startup, so set these on each 
 
 <ParamField path="OTEL_EXPORT_ENABLED" type="boolean" default="false">
   Master switch for OTLP export. Gates both traces and runtime logs. Request trace records require the separate `otel` request-trace sink.
+</ParamField>
+
+<ParamField path="OTEL_EXPORT_LOGS_ENABLED" type="boolean" default="true">
+  Export runtime logs when `OTEL_EXPORT_ENABLED` is enabled. Set this to a falsy value (`false`, `0`, `off`, or `no`) to export traces without creating the runtime log exporter.
 </ParamField>
 
 <ParamField path="OTEL_EXPORTER_OTLP_ENDPOINT" type="string">
