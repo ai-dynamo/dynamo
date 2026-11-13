@@ -96,7 +96,7 @@ fn early_prompt_frames_retain_exact_native_metadata() {
             // ends the stream before vLLM's terminal cannot drop them.
             let first = first.unwrap();
             assert!(first.finish_reason.is_none());
-            assert_eq!(first.engine_data, expected);
+            assert_eq!(first.engine_data.as_deref(), expected.as_ref());
         } else {
             assert!(first.is_none());
         }
@@ -130,7 +130,10 @@ fn early_prompt_frames_retain_exact_native_metadata() {
                 result.engine_data = None;
             }
         }
-        assert_eq!(result.engine_data, if has_output { None } else { expected });
+        assert_eq!(
+            result.engine_data.as_deref(),
+            if has_output { None } else { expected.as_ref() }
+        );
     }
 }
 
@@ -431,11 +434,11 @@ fn prefill_handoff_is_required_only_for_successful_native_terminals() {
                 assert!(terminal.disaggregated_params.is_none());
                 assert_eq!(
                     terminal.engine_data,
-                    Some(json!({"prompt_logprobs": [
+                    Some(Box::new(json!({"prompt_logprobs": [
                         null,
                         {"22": {"logprob": -0.25, "rank": 1}, "23": {"logprob": -0.75, "rank": 2}},
                         {"33": {"logprob": -0.5, "rank": 2}}
-                    ]}))
+                    ]})))
                 );
                 if !include_handoff {
                     assert!(terminal.token_ids.is_empty());
@@ -451,7 +454,7 @@ fn prefill_handoff_is_required_only_for_successful_native_terminals() {
                     );
                 }
             } else {
-                assert_eq!(terminal.disaggregated_params, Some(handoff));
+                assert_eq!(terminal.disaggregated_params, Some(Box::new(handoff)));
             }
         }
     }

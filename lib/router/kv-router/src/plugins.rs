@@ -3,13 +3,14 @@
 
 //! Public contracts, configuration, and registration for statically linked router plugins.
 //!
-//! Plugin authors implement [`worker_selection`] or [`request_classifier`] and register their
-//! providers with [`RouterPluginRegistry`]. Signal accessors and callback signatures are unchanged.
+//! Plugin authors implement [`worker_selection`], [`request_classifier`], or the experimental
+//! [`hint_policy`] contract and register their providers with [`RouterPluginRegistry`].
 //! Scheduling owns execution, eligibility, lifecycle synchronization, and capacity accounting.
 //!
-//! Plugins import [`prelude`]; [`worker_selection`] and [`request_classifier`] are the
-//! per-contract modules behind it.
+//! Plugins import [`prelude`]; [`worker_selection`], [`request_classifier`], and [`hint_policy`]
+//! are the per-contract modules behind it.
 
+pub mod hint_policy;
 pub mod prelude;
 mod registry;
 pub mod request_classifier;
@@ -21,6 +22,28 @@ pub use registry::{
     WorkerSelectionPolicyProviderError, WorkerSelectionPolicyRegistryError,
 };
 
+pub use dynamo_scheduler::hint_policy::PluginConfigError;
+
+/// Check, for a routing host building a router, that one role's plugins fit together, and return
+/// the worker inputs whose resources the router starts for that role: the worker-selection
+/// policy's, plus those of the role's configured hint policies.
+///
+/// Rejects the same configurations as the router's own setup, with a message that names the fix.
+pub fn check_role(
+    role: dynamo_router_protocol::WorkerType,
+    selection: &worker_selection::WorkerSelectionPolicy,
+    hint_policies: hint_policy::RoleHintPolicies,
+    config: &crate::config::KvRouterConfig,
+) -> Result<worker_selection::WorkerInputs, PluginConfigError> {
+    dynamo_scheduler::hint_policy::check_role(
+        role,
+        selection,
+        hint_policies,
+        config.supports_kv_transfer_chain_retention(),
+    )
+}
+
+use hint_policy::HintPolicyRegistryError;
 use request_classifier::{RequestClassifierFactory, RequestClassifierRegistryError};
 use worker_selection::WorkerSelectionPolicyFactory;
 
@@ -74,4 +97,6 @@ pub enum RouterPluginRegistryError {
     WorkerSelection(#[from] WorkerSelectionPolicyRegistryError),
     #[error(transparent)]
     RequestClassifier(#[from] RequestClassifierRegistryError),
+    #[error(transparent)]
+    HintPolicy(#[from] HintPolicyRegistryError),
 }

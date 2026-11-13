@@ -963,6 +963,10 @@ Emitted by the Global Frontend at `/metrics` on its serving port. It forwards ea
   **Experimental.** Requests this Global Frontend has sent to each pool and not yet finished. Other replicas count their own. Labeled by `pool` and `region`; read at scrape time, so a pool removed from the configuration loses its series.
 </ParamField>
 
+<ParamField path="dynamo_global_frontend_overhead_selection_ms" type="histogram">
+  **Experimental.** Time to select a pool for a request, in milliseconds, with either selection path (`--use-selection-core` or not) and any `--router-policy`. Counts every request that reaches selection, also one that no pool can take. No labels: a process runs one path and one policy, so compare paths across runs. Unit and buckets match the router's `dynamo_router_overhead_*_ms` histograms.
+</ParamField>
+
 ## Mocker Metrics
 
 The mocker (`python -m dynamo.mocker`) simulates an inference engine. It emits imitation engine metrics with simulated values on `DYN_SYSTEM_PORT`, choosing the set by `--engine-type`. They carry the engine's usual labels plus `dynamo_namespace`, `dynamo_component`, `dynamo_endpoint`, `worker_id`, `model`, and `model_name`. These imitate engine metrics, so this table has no Labels, Description, or Status column; each metric means what it means in the engine it imitates.
