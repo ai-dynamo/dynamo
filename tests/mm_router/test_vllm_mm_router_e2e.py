@@ -26,6 +26,8 @@ import requests
 
 from tests.mm_router.utils import (
     COMMON_PROCESS_KWARGS,
+    MM_KV_CACHE_BYTES,
+    MM_PROFILED_VRAM_GIB,
     build_vllm_gpu_mem_args,
     make_png_bytes,
 )
@@ -264,10 +266,8 @@ def _assert_nearly_full_repeat_overlap(
 
 
 @pytest.mark.pre_merge
-@pytest.mark.profiled_vram_gib(7.6)
-@pytest.mark.requested_vllm_kv_cache_bytes(
-    1_719_075_000
-)  # KV cache cap (2x safety over min=859_537_408)
+@pytest.mark.profiled_vram_gib(MM_PROFILED_VRAM_GIB)
+@pytest.mark.requested_vllm_kv_cache_bytes(MM_KV_CACHE_BYTES)
 @pytest.mark.timeout(1800)
 def test_vllm_mm_overlap_all(
     start_vllm_mm_services, predownload_models, http_image_server
