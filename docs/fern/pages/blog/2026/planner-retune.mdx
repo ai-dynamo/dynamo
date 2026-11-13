@@ -189,8 +189,11 @@ nothing changed and nothing was lost. Carrying reasoning-tuned settings into the
 
 The last RAG day gains +12.7 % in a different way: retune switched the router to credit 2, scale 1 and the Planner's
 load predictor from ARIMA to Kalman, and the deployment ran 26 % fewer GPUs while SLA attainment fell from 75 % to
-62 %. Goodput per GPU rewards that trade. If SLA attainment matters more than GPU count for your service, keep an eye
-on it when choosing the objective.
+62 %. Goodput per GPU rewards that trade. This is a recovery rather than a better RAG setting: after two reasoning
+days the deployment without retune, whose load predictor was fitted to reasoning traffic, stays at about 32 GPUs
+through both RAG days, and retune brings the fleet back to where the starting settings run when RAG comes first (about
+22 GPUs on the same day, with goodput per GPU within 1 % of the retuned run). If SLA attainment matters more than GPU
+count for your service, keep an eye on it when choosing the objective.
 
 ### Tuning the router and the Planner together
 
