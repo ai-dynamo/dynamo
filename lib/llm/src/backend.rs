@@ -469,7 +469,7 @@ where
                         if self.migration_possible
                             && let Some(data) = &mut output.data
                         {
-                            data.jailed_text = decoder.checkpoint();
+                            data.jailed_text = decoder.checkpoint().map(Box::new);
                         }
                     }
                     return Poll::Ready(Some(output));
@@ -618,7 +618,7 @@ where
                 // Skipped when migration can't happen: nothing will ever read this
                 // checkpoint, so there is no reason to allocate a snapshot of it.
                 if self.migration_possible {
-                    data.jailed_text = decoder.checkpoint();
+                    data.jailed_text = decoder.checkpoint().map(Box::new);
                 }
 
                 Poll::Ready(Some(output))
@@ -2982,7 +2982,7 @@ mod tests {
             .collect();
 
         assert_eq!(
-            data[0].jailed_text.as_deref(),
+            data[0].jailed_text.as_deref().map(|c| &**c),
             Some("o"),
             "the decoder-driven chunk must publish what it withheld"
         );
@@ -2991,7 +2991,7 @@ mod tests {
         // still reflect the still-withheld "o" -- not look resolved just because this
         // particular chunk skipped the decoder.
         assert_eq!(
-            data[1].jailed_text.as_deref(),
+            data[1].jailed_text.as_deref().map(|c| &**c),
             Some("o"),
             "a non-terminal bypass chunk must not erase the withheld-text checkpoint"
         );

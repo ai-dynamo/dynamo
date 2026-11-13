@@ -206,7 +206,7 @@ pub struct BackendOutput {
     /// representation remains the historical optional `jailed_text` string; pending token
     /// IDs are in-memory-only and let the retry reconstruct incremental decoding state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub jailed_text: Option<DecoderCheckpoint>,
+    pub jailed_text: Option<Box<DecoderCheckpoint>>,
 }
 
 /// The LLM engine and backnd with manage it's own state, specifically translating how a
@@ -309,7 +309,7 @@ pub struct LLMEngineOutput {
     /// it; `Backend` populates it after worker deserialization. The legacy optional-string
     /// wire shape is retained, while pending token IDs are kept in memory only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub jailed_text: Option<DecoderCheckpoint>,
+    pub jailed_text: Option<Box<DecoderCheckpoint>>,
 }
 
 impl LLMEngineOutput {
@@ -521,7 +521,7 @@ mod tests {
             worker_trace_link: None,
             engine_data: None,
             routing_data: None,
-            jailed_text: checkpoint,
+            jailed_text: checkpoint.map(Box::new),
         }
     }
 
@@ -585,13 +585,13 @@ mod tests {
 
     /// The outputs are stream items, moved several times per token: their size is a cost
     /// per item. `disaggregated_params`, `encoder_result`, `worker_trace_link`, `extra_args`,
-    /// `engine_data` and `routing_data` are held in a `Box`. Raise these limits only with a
-    /// measured reason.
+    /// `engine_data`, `routing_data` and `jailed_text` are held in a `Box`. Raise these limits
+    /// only with a measured reason.
     #[cfg(target_pointer_width = "64")]
     #[test]
     fn engine_and_backend_outputs_stay_small() {
-        assert!(std::mem::size_of::<LLMEngineOutput>() <= 456);
-        assert!(std::mem::size_of::<BackendOutput>() <= 416);
+        assert!(std::mem::size_of::<LLMEngineOutput>() <= 416);
+        assert!(std::mem::size_of::<BackendOutput>() <= 376);
     }
 
     /// Decoder checkpoints retain the legacy optional-string wire shape while keeping
@@ -615,7 +615,7 @@ mod tests {
         );
         let decoded_legacy: BackendOutput = serde_json::from_value(legacy).unwrap();
         let checkpoint = decoded_legacy.jailed_text.unwrap();
-        assert_eq!(&*checkpoint, "ST");
+        assert_eq!(&**checkpoint, "ST");
         assert!(checkpoint.into_parts().1.is_empty());
 
         let populated = serde_json::to_value(checkpoint_output(Some(DecoderCheckpoint::new(
