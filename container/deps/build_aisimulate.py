@@ -21,7 +21,7 @@ def build(root: Path, source: Path, output: Path) -> None:
     with (root / "Cargo.toml").open("rb") as handle:
         patch = tomllib.load(handle)["patch"]["crates-io"]["aisim-core"]
     repository, revision = patch["git"], patch["rev"]
-    if repository != "https://github.com/ai-dynamo/aisimulate.git" or not re.fullmatch(
+    if repository != "https://github.com/ai-dynamo/aisim.git" or not re.fullmatch(
         r"[0-9a-f]{40}", revision
     ):
         raise ValueError(
