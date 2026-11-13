@@ -16,7 +16,9 @@ engine:
       parallelism:
         preset:
           - {replicas: 1, tensor: 1, pipeline: 1, attention_data: 1, moe_tensor: 1, moe_expert: 1}
-      scheduler: {max_batched_tokens: 32, max_sequences: {choices: [1, 4]}}
+      # A multiple of 64: the generator rounds token budgets up to one, and the
+      # test compares the rendered argument with the candidate's value.
+      scheduler: {max_batched_tokens: 64, max_sequences: {choices: [1, 4]}}
       kv_cache: {block_size: 64, prefix_caching: true, capacity: {type: fixed, blocks: 256}}
       timing: {type: fixed, prefill_ms: 1, decode_ms: 1}
 optimization:

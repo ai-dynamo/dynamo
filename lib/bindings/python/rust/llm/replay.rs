@@ -1688,8 +1688,11 @@ fn parse_weka_import_options(
         trace_format == TraceFileFormat::Weka,
         "weka_nested_timestamp_basis requires trace_format='weka'"
     );
+    // The other options keep the recorded client and the trace's own token
+    // counts, which is how the importer behaved before it had them.
     Ok(WekaImportOptions {
         nested_timestamp_basis,
+        ..Default::default()
     })
 }
 

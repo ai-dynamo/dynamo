@@ -425,7 +425,9 @@ pub fn run_offline_handoff_conformance(
                 "decode_speedup_ratio": 1000.0,
                 "kv_transfer_bandwidth": 1.0,
                 "kv_transfer_bytes_per_token": 1_000_000,
-                "kv_transfer_timing_mode": transfer_timing_mode
+                "kv_transfer_timing_mode": transfer_timing_mode,
+                // This pool is smaller than SGLang's default decode reservation.
+                "sglang": {"num_reserved_decode_tokens": 0}
             }
         }))
     };

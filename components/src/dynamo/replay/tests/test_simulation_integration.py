@@ -276,7 +276,8 @@ def _fixed_engine_args(backend: str, role: str, dp_size: int = 1) -> dict:
         "worker_type": role,
         "dp_size": dp_size,
         "block_size": 4,
-        "num_gpu_blocks": 64,
+        # Large enough for the 512 decode tokens SGLang reserves per handoff.
+        "num_gpu_blocks": 256,
         "timing_model": {"type": "fixed", "prefill_ms": 1.0, "decode_ms": 1.0},
     }
 

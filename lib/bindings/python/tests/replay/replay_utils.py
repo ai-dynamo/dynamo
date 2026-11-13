@@ -39,7 +39,7 @@ MOONCAKE_TRACE_FIRST20 = """{"timestamp": 0, "input_length": 6755, "output_lengt
 
 def _require_aisimulate_distribution(*, allow_module_level: bool = False) -> None:
     try:
-        distribution("aisimulate")
+        distribution("aisim")
     except PackageNotFoundError:
         pytest.skip(
             "Dynamo replay integration tests require the optional AISimulate distribution",

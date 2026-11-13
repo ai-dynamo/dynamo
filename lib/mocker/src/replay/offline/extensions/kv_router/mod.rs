@@ -2206,6 +2206,7 @@ mod tests {
             policy_class: None,
             replay_context: None,
             images: Vec::new(),
+            cache_salt: None,
         }
     }
 

@@ -37,14 +37,22 @@ def test_estimator_loader_does_not_import_application_layer(monkeypatch):
 
     def reject_upper_package(name, *args, **kwargs):
         """Reject accidental imports of the AISimulate application layer."""
-        if name.startswith(("aisimulate.sdk", "aisimulate.legacy_cli")):
+        if name.startswith(
+            (
+                "aisim.sdk",
+                "aisim.legacy_cli",
+                "aisimulate.sdk",
+                "aisimulate.legacy_cli",
+            )
+        ):
             raise AssertionError(f"planner imported upper package: {name}")
         return real_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", reject_upper_package)
     loaded = aic_estimator._try_import_aisimulate_core()
 
-    assert loaded.__name__ == "aisimulate_core"
+    # aisimulate_core is an alias; the module that loads is aisim_core.
+    assert loaded.__name__ == "aisim_core"
 
 
 def test_estimator_passes_backend_name_to_model_factory():

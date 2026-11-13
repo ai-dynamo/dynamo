@@ -424,7 +424,7 @@ def execution_signature(config: MatchConfig) -> dict[str, Any]:
         "autoscaling-arena",
         "ai-dynamo",
         "ai-dynamo-runtime",
-        "aisimulate",
+        "aisim",
     ):
         try:
             versions[package] = importlib.metadata.version(package)

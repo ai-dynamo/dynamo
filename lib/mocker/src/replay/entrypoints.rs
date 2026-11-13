@@ -3104,7 +3104,9 @@ mod tests {
                     "worker_type": worker_type,
                     "block_size": 4,
                     "num_gpu_blocks": 64,
-                    "speedup_ratio": 1000.0
+                    "speedup_ratio": 1000.0,
+                    // This pool is smaller than SGLang's default decode reservation.
+                    "sglang": {"num_reserved_decode_tokens": 0}
                 }
             }))
             .unwrap()
@@ -3495,7 +3497,7 @@ mod tests {
     }
 
     #[test]
-    fn one_worker_sglang_impossible_request_returns_dead_end_error() {
+    fn one_worker_sglang_rejects_a_request_that_cannot_fit() {
         let args = MockerConfig::from_value(serde_json::json!({
             "engine": {
                 "backend": EngineType::Sglang,
@@ -3518,7 +3520,9 @@ mod tests {
             ..Default::default()
         };
 
-        let err = simulate_trace_requests_with_router_mode(
+        // SGLang refuses the request at admission, so the replay ends instead
+        // of stalling on a request that can never run.
+        let report = simulate_trace_requests_with_router_mode_and_runtime_observers(
             args,
             None,
             None,
@@ -3526,13 +3530,18 @@ mod tests {
             1,
             1.0,
             ReplayRouterMode::RoundRobin,
+            true,
             SlaThresholds::default(),
+            ReplayRuntimeObservers::default(),
         )
-        .unwrap_err();
+        .unwrap();
 
+        assert_eq!(report.request_counts.num_requests, 1);
+        assert_eq!(report.request_counts.completed_requests, 0);
+        assert_eq!(report.per_request.len(), 1);
         assert_eq!(
-            err.to_string(),
-            "replay invariant violated: offline replay detected an effect-free zero-duration pass with 1 in-flight requests remaining"
+            report.per_request[0].terminal_status,
+            aisimulate_core::replay::ReplayTerminalStatus::Rejected
         );
     }
 

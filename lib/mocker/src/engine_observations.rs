@@ -131,6 +131,7 @@ mod tests {
                     })
                     .collect(),
                 session_id: Some("session-1".to_owned()),
+                cache_salt: None,
             }),
         }
     }

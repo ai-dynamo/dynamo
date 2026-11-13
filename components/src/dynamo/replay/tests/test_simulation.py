@@ -886,7 +886,13 @@ def test_agentic_speculation_capability_does_not_bypass_g2_scope(nested, alias):
         goal={"target": "throughput"},
     )
     capabilities = simulation.DynamoReplayRunnerFactory().capabilities()
-    with pytest.raises(ValueError, match="requires speculative decoding disabled"):
+    # The engine words the refusal by how the speculation depth is written.
+    refusal = (
+        "requires speculative decoding disabled"
+        if alias == "speculation"
+        else "requires canonical mtp speculation"
+    )
+    with pytest.raises(ValueError, match=refusal):
         capabilities.require_compatible(spec)
     rank.pop("native_host_offload")
     capabilities.require_compatible(spec)

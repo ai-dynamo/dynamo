@@ -25,22 +25,22 @@ def generated_files(root: Path) -> dict[Path, str]:
     """Return deterministic exports for the installed, repository-pinned version."""
     requirements = root / "container/deps/requirements.aisimulate.txt"
     pins = re.findall(
-        r"^aisimulate==([a-zA-Z0-9.+-]+)\s*$", requirements.read_text(), re.MULTILINE
+        r"^aisim==([a-zA-Z0-9.+-]+)\s*$", requirements.read_text(), re.MULTILINE
     )
     if len(pins) != 1:
-        raise ValueError(f"{requirements} must contain exactly one aisimulate== pin")
+        raise ValueError(f"{requirements} must contain exactly one aisim== pin")
     pinned = pins[0]
     project = tomllib.loads((root / "pyproject.toml").read_text())
     python_pins = [
         dependency.split(";", 1)[0].strip()
         for dependency in project["project"]["dependencies"]
-        if re.match(r"^aisimulate\b", dependency)
+        if re.match(r"^aisim\b", dependency)
     ]
-    if python_pins != [f"aisimulate=={pinned}"]:
+    if python_pins != [f"aisim=={pinned}"]:
         raise ValueError(
             "pyproject.toml and requirements.aisimulate.txt must pin the same AISimulate version"
         )
-    installed = importlib.metadata.version("aisimulate")
+    installed = importlib.metadata.version("aisim")
     if installed != pinned:
         raise ValueError(
             f"installed AISimulate {installed} differs from the repository pin {pinned}"

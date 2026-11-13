@@ -14,7 +14,7 @@ license-files = ["LICENSE"]
 requires-python = ">=3.11"
 dependencies = [
     "ai-dynamo-runtime==1.7.0",
-    "aisimulate==0.13.0.dev202610290000000087 ; python_version >= '3.11' and python_version < '3.14'",
+    "aisim==0.15.0.dev202611130000000104 ; python_version >= '3.11' and python_version < '3.14'",
     "aiohttp>=3.14.3,<4.0",
     # Set the CA bundle floor for transitive HTTP clients outside containers too.
     "certifi>=2026.10.23",
@@ -272,7 +272,7 @@ filterwarnings = [
     'default:^Kubernetes version v1\.36\.\d+ is not supported\. Supported versions for kr8s 0\.20\.13 are 1\.28 to 1\.34\.$:UserWarning:kr8s\._api$',
     # DGDR still uses AISimulate's supported legacy sweep API until its
     # migration to the new Sweeper API is implemented.
-    'ignore:`aisimulate\.sdk\.sweep\.sweep_(agg|disagg)\(\)` is a deprecated sweep API:DeprecationWarning',
+    'ignore:`aisim\.sdk\.sweep\.sweep_(agg|disagg)\(\)` is a deprecated sweep API:DeprecationWarning',
     # chardet 6.x is pulled in transitively but requests 2.32.x only supports chardet <6;
     # charset_normalizer is used at runtime so the warning is benign.
     "ignore:.*doesn't match a supported version",
@@ -337,10 +337,10 @@ filterwarnings = [
     # pandas 2.3 emits this from AISimulate pareto filtering under filterwarnings=error.
     "ignore:Downcasting behavior in `replace` is deprecated.*:FutureWarning",
     # pandas 2.3 emits this from the bundled compatibility report path on fillna.
-    "ignore:Downcasting object dtype arrays on .fillna.*:FutureWarning:aisimulate.legacy_cli.report_and_save",
+    "ignore:Downcasting object dtype arrays on .fillna.*:FutureWarning:aisim.legacy_cli.report_and_save",
     # pandas 3.1 deprecates DataFrame.drop(inplace=...) with Pandas4Warning, a DeprecationWarning
-    # subclass; AISimulate still passes it in aisimulate.sdk.pareto_analysis, which picking calls.
-    "ignore:The inplace keyword in DataFrame.drop is deprecated.*:DeprecationWarning:aisimulate",
+    # subclass; AISimulate still passes it in aisim.sdk.pareto_analysis, which picking calls.
+    "ignore:The inplace keyword in DataFrame.drop is deprecated.*:DeprecationWarning:aisim",
 ]
 
 

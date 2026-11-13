@@ -49,7 +49,7 @@ def _python_requirement(pyproject: dict) -> Requirement:
     matches = [
         Requirement(requirement)
         for requirement in pyproject["project"]["dependencies"]
-        if canonicalize_name(Requirement(requirement).name) == "aisimulate"
+        if canonicalize_name(Requirement(requirement).name) == "aisim"
     ]
     assert len(matches) == 1, "ai-dynamo must declare one AISimulate dependency"
     return matches[0]
@@ -62,7 +62,7 @@ def _requirements_file_aisimulate_requirement(path: Path) -> Requirement:
         if not requirement or requirement.startswith("--"):
             continue
         parsed = Requirement(requirement)
-        if canonicalize_name(parsed.name) == "aisimulate":
+        if canonicalize_name(parsed.name) == "aisim":
             matches.append(parsed)
     assert len(matches) == 1, f"{path} must declare one AISimulate dependency"
     return matches[0]
@@ -80,16 +80,16 @@ def _exact_version(requirement: Requirement) -> Version:
 def _locked_cargo_version(path: Path) -> Version:
     with path.open("rb") as handle:
         packages = tomllib.load(handle)["package"]
-    matches = [package for package in packages if package["name"] == "aisimulate-core"]
-    assert len(matches) == 1, f"expected one aisimulate-core package in {path}"
+    matches = [package for package in packages if package["name"] == "aisim-core"]
+    assert len(matches) == 1, f"expected one aisim-core package in {path}"
 
     package = matches[0]
     assert package.get("source") == (
         "registry+https://github.com/rust-lang/crates.io-index"
-    ), f"aisimulate-core must resolve from crates.io in {path}"
+    ), f"aisim-core must resolve from crates.io in {path}"
     assert re.fullmatch(
         r"[0-9a-f]{64}", str(package.get("checksum", ""))
-    ), f"aisimulate-core must have a registry checksum in {path}"
+    ), f"aisim-core must have a registry checksum in {path}"
     return Version(str(package["version"]))
 
 
@@ -118,21 +118,23 @@ def test_dynamo_pins_matching_published_aisimulate_releases() -> None:
     with (ROOT / "benchmarks/pyproject.toml").open("rb") as handle:
         benchmarks = tomllib.load(handle)
     assert _exact_version(_python_requirement(benchmarks)) == python_version
-    assert "aisimulate" not in pyproject.get("tool", {}).get("uv", {}).get(
-        "sources", {}
-    )
+    assert "aisim" not in pyproject.get("tool", {}).get("uv", {}).get("sources", {})
 
+    # The crate is published as aisim-core; the dependency keeps its former key,
+    # so Rust code still names it aisimulate_core.
     cargo_dependency = cargo["workspace"]["dependencies"]["aisimulate-core"]
+    assert cargo_dependency["package"] == "aisim-core"
     assert not {"path", "git", "rev", "branch", "tag"} & cargo_dependency.keys()
     cargo_requirement = str(cargo_dependency["version"])
     assert cargo_requirement.startswith(
         "="
-    ), "aisimulate-core must use one exact crates.io version"
+    ), "aisim-core must use one exact crates.io version"
     cargo_version = Version(cargo_requirement.removeprefix("="))
 
     with (ROOT / "lib/bindings/python/Cargo.toml").open("rb") as handle:
         bindings = tomllib.load(handle)
     bindings_dependency = bindings["dependencies"]["aisimulate-core"]
+    assert bindings_dependency["package"] == "aisim-core"
     assert not {"path", "git", "rev", "branch", "tag"} & bindings_dependency.keys()
     assert bindings_dependency["version"] == cargo_requirement
 
@@ -159,7 +161,7 @@ def test_container_stages_the_published_aisimulate_wheel() -> None:
     assert "--only-binary=:all:" in wheel_builder
     assert "--no-deps" in wheel_builder
     assert "--no-index" in wheel_builder
-    assert AISIMULATE_FIND_LINKS == "https://pypi.nvidia.com/aisimulate/"
+    assert AISIMULATE_FIND_LINKS == "https://pypi.nvidia.com/aisim/"
     assert f"--find-links {AISIMULATE_FIND_LINKS}" in wheel_builder
     assert "COPY aisimulate" not in wheel_builder
     assert "/opt/dynamo/aisimulate" not in wheel_builder
@@ -182,7 +184,7 @@ def test_installed_aisimulate_matches_the_declared_release() -> None:
     pyproject, _ = _root_configs()
     expected = _exact_version(_python_requirement(pyproject))
 
-    assert Version(metadata.version("aisimulate")) == expected
+    assert Version(metadata.version("aisim")) == expected
 
 
 def test_ai_dynamo_registers_only_its_aisimulate_providers() -> None:

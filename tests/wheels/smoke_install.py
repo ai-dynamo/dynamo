@@ -257,7 +257,7 @@ def create_venv(python_spec: str) -> Path:
 
 
 # Stage the pinned AISimulate wheel directly from NVIDIA's package index.
-AISIMULATE_FIND_LINKS = "https://pypi.nvidia.com/aisimulate/"
+AISIMULATE_FIND_LINKS = "https://pypi.nvidia.com/aisim/"
 
 
 def pip_install(venv_python: Path, wheelhouse: Path, requirements: list[str]) -> None:
@@ -267,11 +267,11 @@ def pip_install(venv_python: Path, wheelhouse: Path, requirements: list[str]) ->
     for path in (wheelhouse, wheelhouse / "nixl"):
         if path.exists():
             find_links.extend(["--find-links", str(path)])
-    # Planner and framework runtime wheelhouses stage their own aisimulate wheel. Offer
+    # Planner and framework runtime wheelhouses stage their own aisim wheel. Offer
     # NVIDIA's index only when that staged wheel is absent: pip ranks equal candidates
     # without regard to where they came from, so registering both risks installing the
     # remote copy in place of the artifact the image actually ships.
-    if not find_wheels(wheelhouse, "aisimulate"):
+    if not find_wheels(wheelhouse, "aisim"):
         find_links.extend(["--find-links", AISIMULATE_FIND_LINKS])
     run(
         [
@@ -280,7 +280,7 @@ def pip_install(venv_python: Path, wheelhouse: Path, requirements: list[str]) ->
             "pip",
             "install",
             "--only-binary",
-            "aisimulate",
+            "aisim",
             *find_links,
             *requirements,
         ]

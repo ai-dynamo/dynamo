@@ -42,7 +42,7 @@ aisimulate predict --stack dynamo --config prediction.yaml
   not supported.
 </ParamField>
 
-<ParamField path="--output-dir" type="path" default="./aisimulate-output">
+<ParamField path="--output-dir" type="path" default="./aisim-output">
   Directory for `prediction.json` and optional per-request output.
 </ParamField>
 
@@ -222,7 +222,9 @@ Use `json.dumps` and `json.loads` to save and restore configuration mappings. Ke
 `num_gpu_blocks_is_explicit` when saving a normalized configuration: `false` preserves automatic
 AISimulate capacity estimation. Providing `engine.num_gpu_blocks` without that marker selects an
 explicit capacity. Set `engine.max_num_seqs` or `engine.max_num_batched_tokens` to `null` (`None` in Python)
-for an unlimited scheduler limit; omit the field to use the engine default.
+for an unlimited scheduler limit; omit the field to use the engine default. With the SGLang
+backend, a `null` `engine.max_num_seqs` is not unlimited: the engine derives the limit from the KV
+capacity and the context length.
 
 ### Typed agentic replay through the Dynamo API
 
@@ -411,7 +413,7 @@ configuration shape, such as `traffic.source`.
 The output directory contains:
 
 ```text
-aisimulate-output/
+aisim-output/
 ├── prediction.json
 ├── requests.jsonl
 ├── resource-runtime.json

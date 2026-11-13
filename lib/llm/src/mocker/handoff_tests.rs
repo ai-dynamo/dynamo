@@ -40,7 +40,9 @@ fn args_with_mode(
             "decode_speedup_ratio": 1000.0,
             "kv_transfer_bandwidth": 1.0,
             "kv_transfer_bytes_per_token": 1_000_000,
-            "kv_transfer_timing_mode": transfer_timing_mode
+            "kv_transfer_timing_mode": transfer_timing_mode,
+            // This pool is smaller than SGLang's default decode reservation.
+            "sglang": {"num_reserved_decode_tokens": 0}
         }
     }))
     .unwrap()
@@ -683,8 +685,8 @@ async fn active_handoff_shutdown_releases_scheduler_and_session_ownership() {
         destination_engine.register_handoff(handoff_id).unwrap();
     drop(destination_replacement);
     drop(destination_replacement_events);
-    assert!(probe_engine_drained(&source_engine).await);
-    assert!(probe_engine_drained(&destination_engine).await);
+    assert!(probe_engine_drained(&source_engine, engine_type).await);
+    assert!(probe_engine_drained(&destination_engine, engine_type).await);
     source_engine.shutdown().await.unwrap();
     destination_engine.shutdown().await.unwrap();
 }
@@ -820,10 +822,16 @@ async fn wait_for_idle(engine: &LiveEngine) {
     }
 }
 
-async fn probe_engine_drained(engine: &LiveEngine) -> bool {
+async fn probe_engine_drained(engine: &LiveEngine, engine_type: EngineType) -> bool {
+    // A prompt that fits only when the whole pool is free. SGLang admits a
+    // shorter one: 62 of the 64 blocks is its largest block-aligned prompt.
+    let probe_tokens: u32 = match engine_type {
+        EngineType::Sglang => 248,
+        _ => 252,
+    };
     let mut probe = engine
         .submit(dynamo_mocker::common::protocols::DirectRequest {
-            tokens: (10_000..10_252).collect(),
+            tokens: (10_000..10_000 + probe_tokens).collect(),
             max_output_tokens: 1,
             output_token_ids: Some(vec![42]),
             uuid: Some(Uuid::new_v4()),
@@ -834,7 +842,8 @@ async fn probe_engine_drained(engine: &LiveEngine) -> bool {
     let completed = tokio::time::timeout(Duration::from_secs(2), async {
         while let Some(signal) = probe.recv().await {
             if signal.completed {
-                return true;
+                // A rejected probe did not run, so it says nothing about the pool.
+                return !signal.rejected;
             }
         }
         false
@@ -983,8 +992,9 @@ async fn live_and_offline_handoff_surfaces_share_one_conformance_report() {
                 assert!(!drain_stored_hashes(&mut source_kv).is_empty());
                 wait_for_idle(&source_engine).await;
                 wait_for_idle(&destination_engine).await;
-                let source_drained = probe_engine_drained(&source_engine).await;
-                let destination_drained = probe_engine_drained(&destination_engine).await;
+                let source_drained = probe_engine_drained(&source_engine, engine_type).await;
+                let destination_drained =
+                    probe_engine_drained(&destination_engine, engine_type).await;
                 let source_route_reusable = source_engine.register_handoff(handoff_id).is_ok();
                 let destination_route_reusable =
                     destination_engine.register_handoff(handoff_id).is_ok();
