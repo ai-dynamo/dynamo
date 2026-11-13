@@ -425,9 +425,8 @@ class ManagedDGDR:
                     body=manifest,
                 )
             except exceptions.ApiException as error:
-                # A retry only runs after a connection error. The name is
-                # unique and was absent, so a conflict now means the dropped
-                # POST was committed.
+                # Retries follow only connection errors and the name was absent,
+                # so a 409 on a retry means the dropped POST was committed.
                 if error.status != 409 or attempts == 1:
                     raise
                 existing = await self.get(name)
