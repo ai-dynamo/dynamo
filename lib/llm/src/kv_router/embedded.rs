@@ -440,6 +440,11 @@ impl EmbeddedSelection {
     pub(crate) fn scheduler(&self) -> &SelectionScheduler {
         self.partition.scheduler()
     }
+
+    /// The partition's index, as built by the ingress the router installed.
+    pub(crate) fn indexer(&self) -> &crate::kv_router::indexer::Indexer {
+        self.partition.indexer()
+    }
 }
 
 /// The runtime-config watch as worker membership for the partition.
@@ -498,11 +503,27 @@ pub(crate) fn worker_request_from_runtime_config(
             }
         }
     }
+    // An engine the frontend dials directly names its own KV-event publishers,
+    // which the ZMQ ingress subscribes to per rank.
+    let kv_events_endpoints: HashMap<u32, String> = config
+        .runtime_data
+        .get(crate::local_model::runtime_config::DIRECT_KV_EVENTS_ENDPOINTS_RUNTIME_KEY)
+        .and_then(serde_json::Value::as_object)
+        .map(|endpoints| {
+            endpoints
+                .iter()
+                .filter_map(|(rank, endpoint)| {
+                    Some((rank.parse().ok()?, endpoint.as_str()?.to_string()))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     WorkerRequest {
         worker_id,
         model_name: key.model_name.clone(),
         routing_group: key.routing_group.clone(),
         endpoint: Some(format!("dyn://{worker_id}")),
+        kv_events_endpoints,
         block_size: Some(block_size),
         data_parallel_start_rank: Some(dp_start),
         data_parallel_size: Some(dp_size),
@@ -633,6 +654,27 @@ mod tests {
         assert_eq!(
             request.max_num_batched_tokens,
             Some(DEFAULT_MAX_BATCHED_TOKENS)
+        );
+    }
+
+    #[test]
+    fn direct_kv_publishers_reach_the_catalog_record() {
+        let key = RoutingPartitionId::new("model", DEFAULT_ROUTING_GROUP);
+        let mut config = ModelRuntimeConfig {
+            data_parallel_size: 2,
+            ..ModelRuntimeConfig::default()
+        };
+        config.runtime_data.insert(
+            crate::local_model::runtime_config::DIRECT_KV_EVENTS_ENDPOINTS_RUNTIME_KEY.to_string(),
+            serde_json::json!({"0": "tcp://engine:5557", "1": "tcp://engine:5558"}),
+        );
+        let request = worker_request_from_runtime_config(7, &config, &key, 16, false);
+        assert_eq!(
+            request.kv_events_endpoints,
+            HashMap::from([
+                (0, "tcp://engine:5557".to_string()),
+                (1, "tcp://engine:5558".to_string())
+            ])
         );
     }
 

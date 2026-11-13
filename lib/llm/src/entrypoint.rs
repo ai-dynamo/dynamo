@@ -96,6 +96,10 @@ pub enum EngineConfig {
         model: Box<LocalModel>,
         chat_engine_factory: Option<ChatEngineFactoryCallback>,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+        /// Set when the frontend dials the engines itself instead of reaching
+        /// sidecars over the request plane. Discovery and routing are unchanged;
+        /// every router dispatches through this final hop.
+        direct_dispatch: Option<crate::kv_router::LlmDispatch>,
     },
 
     /// A Text engine receives text, does it's own tokenization and prompt formatting.
