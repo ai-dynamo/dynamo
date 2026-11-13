@@ -5330,6 +5330,10 @@ func TestManagedWorkerRollout_CleansStaleSameHashDCD(t *testing.T) {
 			status.RollingUpdate = &nvidiacomv1beta1.RollingUpdateStatus{Phase: phase}
 
 			t.Log("Reconcile the migration without changing the desired worker hash")
+			require.NoError(t, program.reconcileManagedWorkerRollout(t.Context(), dgd, &status))
+			require.NotNil(t, status.RollingUpdate)
+			assert.Equal(t, nvidiacomv1beta1.RollingUpdatePhasePending, status.RollingUpdate.Phase)
+			assert.Nil(t, dgd.Status.RollingUpdate, "the program must return status without changing the input DGD status")
 			for range 3 {
 				require.NoError(t, program.reconcileManagedWorkerRollout(t.Context(), dgd, &status))
 			}
@@ -5339,6 +5343,12 @@ func TestManagedWorkerRollout_CleansStaleSameHashDCD(t *testing.T) {
 			require.NoError(t, r.Get(t.Context(), types.NamespacedName{
 				Name: canonical.Name, Namespace: canonical.Namespace,
 			}, &nvidiacomv1beta1.DynamoComponentDeployment{}))
+
+			t.Log("Keep the completed rollout unchanged once the stale DCD is gone")
+			assert.Equal(t, nvidiacomv1beta1.RollingUpdatePhaseCompleted, status.RollingUpdate.Phase)
+			completed := status.DeepCopy()
+			require.NoError(t, program.reconcileManagedWorkerRollout(t.Context(), dgd, &status))
+			assert.Equal(t, *completed, status)
 		})
 	}
 }

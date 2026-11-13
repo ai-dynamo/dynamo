@@ -32,6 +32,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -511,6 +512,37 @@ func isRollingUpdateInProgress(
 	phase := status.RollingUpdate.Phase
 	return phase == nvidiacomv1beta1.RollingUpdatePhasePending ||
 		phase == nvidiacomv1beta1.RollingUpdatePhaseInProgress
+}
+
+// restartRollingUpdateForNamingMigration reopens an inactive rollout when a
+// same-hash worker DCD still uses its old name. dgd and status must be non-nil;
+// callers must first rule out an active rollout and a worker spec change.
+func (r *dgdWorkerRolloutReconciler) restartRollingUpdateForNamingMigration(
+	ctx context.Context,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	status *nvidiacomv1beta1.DynamoGraphDeploymentStatus,
+) (bool, error) {
+	// Find DCDs that need a new name while retaining the active worker hash.
+	desired, err := desiredWorkerHashes(dgd)
+	if err != nil {
+		return false, err
+	}
+	workerHash := activeWorkerHashForDCDGeneration(dgd, desired)
+	oldDCDs, err := r.listOldWorkerDCDs(ctx, dgd, workerHash)
+	if err != nil {
+		return false, err
+	}
+
+	// Start a fresh cycle only for a stale name in the unchanged generation.
+	for i := range oldDCDs {
+		if oldDCDs[i].Labels[consts.KubeLabelDynamoWorkerHash] == workerHash {
+			status.RollingUpdate = &nvidiacomv1beta1.RollingUpdateStatus{
+				Phase: nvidiacomv1beta1.RollingUpdatePhaseNone,
+			}
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // reconcileRollingUpdate handles the rolling update lifecycle.
@@ -1014,6 +1046,19 @@ func oldWorkerPodsTerminated(dcds []*nvidiacomv1beta1.DynamoComponentDeployment,
 	return true
 }
 
+// isFailedCreationNamingMigration reports whether a zero-target legacy DCD
+// can use workload absence instead of replica status to prove it is drained.
+// dgd must be non-nil; a nil dcd is ineligible.
+func isFailedCreationNamingMigration(
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
+) bool {
+	return dcd != nil && dcd.Spec.Replicas != nil && *dcd.Spec.Replicas == 0 &&
+		dcd.Status.Component == nil && !dgd.HasAnyMultinodeComponent() && !dcd.IsMultinode() &&
+		len(dcd.Name) > k8svalidation.LabelValueMaxLength &&
+		isNonCanonicalWorkerDCD(dgd, dcd, dcd.Labels[consts.KubeLabelDynamoWorkerHash])
+}
+
 // oldWorkerComponentDrained reports whether componentName's old worker DCDs
 // are at zero replicas and all their Pods are terminal.
 func (r *dgdWorkerRolloutReconciler) oldWorkerComponentDrained(
@@ -1027,9 +1072,7 @@ func (r *dgdWorkerRolloutReconciler) oldWorkerComponentDrained(
 		if oldWorkerDCDsAtZero([]*nvidiacomv1beta1.DynamoComponentDeployment{dcd}) {
 			continue
 		}
-		if dcd == nil || dcd.Spec.Replicas == nil || *dcd.Spec.Replicas != 0 ||
-			dcd.Status.Component != nil || dgd.HasAnyMultinodeComponent() || dcd.IsMultinode() || len(dcd.Name) <= 63 ||
-			!isNonCanonicalWorkerDCD(dgd, dcd, dcd.Labels[consts.KubeLabelDynamoWorkerHash]) {
+		if !isFailedCreationNamingMigration(dgd, dcd) {
 			return false, nil
 		}
 
