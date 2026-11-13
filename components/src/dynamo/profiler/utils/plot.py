@@ -21,6 +21,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib import cm
 from scipy.interpolate import griddata
+from scipy.spatial import QhullError
 
 from dynamo.profiler.utils.defaults import DEFAULT_GPU_COST_PER_HOUR
 from dynamo.profiler.utils.pareto import compute_pareto
@@ -222,18 +223,19 @@ def plot_decode_3d_surface(
     yi = np.linspace(min(y_context_length), max(y_context_length), 100)
     X, Y = np.meshgrid(xi, yi)
 
-    # Try cubic interpolation first, fallback to linear if Qhull error occurs
-    try:
-        Z_itl = griddata((x_kv_usage, y_context_length), z_itl, (X, Y), method="cubic")
-        Z_thpt = griddata(
-            (x_kv_usage, y_context_length), z_thpt_per_gpu, (X, Y), method="cubic"
+    points = (x_kv_usage, y_context_length)
+    for method in ("cubic", "linear"):
+        try:
+            Z_itl = griddata(points, z_itl, (X, Y), method=method)
+            Z_thpt = griddata(points, z_thpt_per_gpu, (X, Y), method=method)
+        except QhullError:
+            continue
+        break
+    else:
+        logger.warning(
+            "Skipping decode surface plots because the samples cannot be triangulated."
         )
-    except Exception as e:
-        logger.warning(f"Cubic interpolation failed: {e}. Falling back to linear.")
-        Z_itl = griddata((x_kv_usage, y_context_length), z_itl, (X, Y), method="linear")
-        Z_thpt = griddata(
-            (x_kv_usage, y_context_length), z_thpt_per_gpu, (X, Y), method="linear"
-        )
+        return
 
     # Plot ITL surface
     fig = plt.figure(figsize=(12, 10))
