@@ -10,6 +10,8 @@ import (
 	"net/url"
 	"path/filepath"
 	"strings"
+
+	deploymentcapnpv1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/deployment/v1"
 )
 
 // BuildFamily identifies the physical LPU target family of a normalized build.
@@ -24,8 +26,8 @@ const (
 
 // Build is the registry's source-independent view of an LPU build.
 //
-// The validated compiler contract populates this shape before deployment code
-// derives placement and replica counts.
+// GBuild establishes placement validity. Consumers decode the contract and
+// check the execution and scheduling shapes they support.
 type Build struct {
 	// contentID identifies the exact compiler contract used to acquire this build.
 	contentID      string
@@ -40,6 +42,9 @@ type Build struct {
 	partitions []buildPartition
 	// selectedPropSyncChains contains source partition IDs grouped into selected prop-sync chains.
 	selectedPropSyncChains [][]int
+	// lpuUnits retains generated readers and their message through projection.
+	// An empty list selects legacy placement from partitions and chains.
+	lpuUnits deploymentcapnpv1.LpuUnit_List
 	// standaloneTokenEmbeddings reports whether token embeddings occupy a standalone partition.
 	standaloneTokenEmbeddings bool
 	// supportsCPUEmbeddings reports whether standalone token embeddings may run on the CPU.
@@ -57,6 +62,8 @@ type Build struct {
 
 // buildPartition describes one normalized physical compiler partition.
 type buildPartition struct {
+	// family is explicit for units artifacts, whose legacy topology is not read.
+	family BuildFamily
 	// sourcePartitionID is the compiler partition id used in artifacts and
 	// selected prop-sync chains. It is not the slice index after sorting/filtering.
 	sourcePartitionID int

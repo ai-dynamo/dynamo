@@ -98,9 +98,12 @@ def register_gms_v1_plugin() -> None:
         lambda _scheduler: _adapter()._publish_weights(),
         HookType.BEFORE,
     )
+    # Graph backends ask for a disabled adapter unless
+    # SGLANG_MEMORY_SAVER_CUDA_GRAPH is set, and the breakable prefill backend
+    # rejects an enabled one.
     HookRegistry.register(
         "sglang.srt.utils.torch_memory_saver_adapter.TorchMemorySaverAdapter.create",
-        lambda _original, *_args, **_kwargs: _adapter(),
+        lambda original, enable: _adapter() if enable else original(enable=enable),
         HookType.AROUND,
     )
     HookRegistry.register(

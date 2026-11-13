@@ -8,8 +8,9 @@ use aisimulate_core::replay::{
     ReplayComposition, ReplayDeterminism, ReplayScalingPolicy, ReplaySpec, WorkerTopology,
 };
 use anyhow::{Context, Result, bail};
-use dynamo_kv_router::WorkerType;
-use dynamo_kv_router::config::{KvRouterConfig, RouterPrefillLoadModel};
+use dynamo_kv_router::config::KvRouterConfig;
+use dynamo_router_protocol::WorkerType;
+use dynamo_scheduler::host::RouterPrefillLoadModel;
 use std::collections::HashSet;
 
 use super::{KvReplayMetadata, KvRouterPlacement};
@@ -215,7 +216,7 @@ impl ReplayComposition for KvReplayComposition {
             args,
             self.router_config.take(),
             self.prefill_load_estimator.take(),
-            topology.len(),
+            &topology,
             self.determinism.selector_seed(),
         )?
         .with_kv_event_lag_ms(self.kv_event_lag_ms)?
@@ -262,7 +263,7 @@ impl ReplayComposition for KvReplayComposition {
                 router_config.clone(),
             )),
             self.prefill_load_estimator.take(),
-            prefill_topology.len(),
+            &prefill_topology,
             self.determinism.selector_seed(),
         )
         .context("constructing prefill KV Router placement")?
@@ -272,7 +273,7 @@ impl ReplayComposition for KvReplayComposition {
             decode_args,
             Some(derive_decode_router_config(decode_args, router_config)),
             None,
-            decode_topology.len(),
+            &decode_topology,
             self.determinism.selector_seed(),
         )
         .context("constructing decode KV Router placement")?
@@ -653,6 +654,65 @@ mod tests {
         assert_eq!(decode.router.kv_event_lag_ms, 25.0);
     }
 
+    #[test]
+    fn only_prefill_placements_carry_kv_fetch_hints() {
+        use super::super::tests::{
+            fetch_hint, kv_fetch_target, occupy_worker_1, place_now, target_prefix_in_g2, topology,
+        };
+
+        let args =
+            MockerConfig::from_value(serde_json::json!({"engine": {"block_size": 64}})).unwrap();
+        let mut composition =
+            KvReplayComposition::disaggregated(args.clone(), args, 2, 2, None, None, None);
+        let (mut prefill, mut decode) = composition
+            .create_disaggregated_placements(1, topology(2, 1, true), 1, topology(2, 1, true))
+            .unwrap();
+
+        occupy_worker_1(&mut prefill, 0);
+        prefill
+            .router
+            .on_kv_events(vec![target_prefix_in_g2(1, 0)])
+            .unwrap();
+        let placed = place_now(&mut prefill, &kv_fetch_target(1), 0.0);
+        assert_eq!((placed.scheduler_id, placed.kv_hints), (0, fetch_hint(1)));
+
+        // Decode workers accept hints too, but the P/D decode router forces
+        // overlap credit 0, so its policy reads no KV index and, as in production,
+        // retains no transfer chain. Decode balances the two targets over both
+        // workers, so one of them lands away from worker 1's G2 prefix unhinted.
+        assert!(!decode.router.indexer.retain_kv_transfer_chain);
+        assert!(decode.router.kv_transfer_gate_warned);
+        decode
+            .router
+            .on_kv_events(vec![target_prefix_in_g2(1, 0)])
+            .unwrap();
+        let placed = [1, 2].map(|uuid| place_now(&mut decode, &kv_fetch_target(uuid), 0.0));
+        assert!(placed.iter().any(|placement| placement.scheduler_id == 0));
+        assert!(placed.iter().all(|placement| placement.kv_hints.is_none()));
+    }
+
+    #[test]
+    fn aggregated_placements_carry_kv_fetch_hints() {
+        use super::super::tests::{
+            fetch_hint, kv_fetch_target, occupy_worker_1, place_now, target_prefix_in_g2, topology,
+        };
+
+        let args =
+            MockerConfig::from_value(serde_json::json!({"engine": {"block_size": 64}})).unwrap();
+        let mut composition = KvReplayComposition::aggregated(args, 2, None, None, None);
+        let mut placement = composition
+            .create_aggregated_placement(1, topology(2, 1, true))
+            .unwrap();
+
+        occupy_worker_1(&mut placement, 0);
+        placement
+            .router
+            .on_kv_events(vec![target_prefix_in_g2(1, 0)])
+            .unwrap();
+        let placed = place_now(&mut placement, &kv_fetch_target(1), 0.0);
+        assert_eq!((placed.scheduler_id, placed.kv_hints), (0, fetch_hint(1)));
+    }
+
     fn retune_router_config() -> KvRouterConfig {
         KvRouterConfig {
             overlap_score_credit: 1.5,
@@ -701,7 +761,7 @@ mod tests {
     /// no-op at the first tick.
     #[test]
     fn registered_router_controls_match_startup_policy_parameters() {
-        use dynamo_custom_policy_builtin::startup_policy_parameters;
+        use dynamo_router_policies::startup_policy_parameters;
 
         let config = retune_router_config();
         let registry = ReplayRouterControls::new();
@@ -726,7 +786,10 @@ mod tests {
             registered_parameters(&registry),
             [(
                 WorkerType::Aggregated,
-                startup_policy_parameters(&config, WorkerType::Aggregated)
+                startup_policy_parameters(
+                    &dynamo_worker_selection::host::SelectionConfig::from(&config),
+                    WorkerType::Aggregated
+                )
             )]
         );
 
@@ -757,11 +820,17 @@ mod tests {
             [
                 (
                     WorkerType::Prefill,
-                    startup_policy_parameters(&config, WorkerType::Prefill)
+                    startup_policy_parameters(
+                        &dynamo_worker_selection::host::SelectionConfig::from(&config),
+                        WorkerType::Prefill
+                    )
                 ),
                 (
                     WorkerType::Decode,
-                    startup_policy_parameters(&config, WorkerType::Decode)
+                    startup_policy_parameters(
+                        &dynamo_worker_selection::host::SelectionConfig::from(&config),
+                        WorkerType::Decode
+                    )
                 ),
             ]
         );

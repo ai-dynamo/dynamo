@@ -54,7 +54,7 @@ def test_frontend_passes_batch_gateway_explicitly(
     # Change the environment AFTER parsing: the binding must receive the parsed
     # value (including explicit None), not re-read a different environment value.
     monkeypatch.setenv("DYN_BATCH_GATEWAY_URL", "http://later-environment")
-    monkeypatch.setattr(frontend, "parse_args", lambda: (config, None, None))
+    monkeypatch.setattr(frontend, "parse_args", lambda: (config, None, None, None))
     monkeypatch.setattr(frontend, "_export_transport_tls_env", Mock())
     monkeypatch.setattr(frontend, "dump_config", Mock())
     monkeypatch.setattr(

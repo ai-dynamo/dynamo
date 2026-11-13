@@ -4,14 +4,14 @@
 use std::ffi::OsString;
 
 use anyhow::Result;
-use dynamo_kv_router::protocols::{
-    ActiveSequenceEvent, ActiveSequenceEventBatch, MAX_REPLICA_BATCH_EVENTS,
-};
 use dynamo_runtime::{
     component::Endpoint,
     config::parse_bool_opt,
     discovery::EventTransportKind,
     transports::event_plane::{Codec, uses_direct_zmq},
+};
+use dynamo_slot_tracker::host::{
+    ActiveSequenceEvent, ActiveSequenceEventBatch, MAX_REPLICA_BATCH_EVENTS,
 };
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -154,11 +154,12 @@ pub(super) async fn start(
 mod tests {
     use std::time::Duration;
 
-    use dynamo_kv_router::protocols::{ActiveSequenceEventData, WorkerWithDpRank};
+    use dynamo_router_protocol::worker::WorkerWithDpRank;
     use dynamo_runtime::{
         DistributedRuntime, Runtime, distributed::DistributedConfig,
         transports::event_plane::EventPublisher,
     };
+    use dynamo_slot_tracker::host::ActiveSequenceEventData;
 
     use super::*;
 
