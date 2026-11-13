@@ -12,17 +12,17 @@ so the Job needs outbound access and no token.
 
 ## Variants
 
-The endpoint is `http://<dgd-name>-frontend:8000` in the namespace you deploy to. Concurrency is the operating point at
-which the published number was measured.
+The endpoint is `http://<dgd-name>-frontend:8000` in the namespace you deploy to. Set `CONCURRENCY` to the value below
+for the variant to reproduce its published result.
 
-| Recipe | DGD name | GPUs | Published concurrency | tok/s/GPU (synthetic acceptance) |
-|---|---|---|---|---|
-| `agg-h200-agentx` | `dsv41-flash-h200-agg` | 4 | 108 | 482.1 |
-| `disagg-h200-agentx` | `dsv41-flash-h200-disagg` | 20 | 480 | 384.8 |
-| `agg-b200-agentx` | `dsv41-flash-b200-agg` | 4 | 400 | 1,552.4 |
-| `disagg-b200-agentx` | `dsv41-flash-b200-disagg` | 16 | 1408 | 1,478.4 |
-| `agg-gb300-agentx` | `dsv41-flash-gb300-agg` | 4 | 616 | 2,320.1 |
-| `disagg-gb300-agentx` | `dsv41-flash-gb300-disagg` | 8 | 920 | 2,162.3 |
+| Recipe | DGD name | GPUs | `CONCURRENCY` |
+|---|---|---|---|
+| `agg-h200-agentx` | `dsv41-flash-h200-agg` | 4 | 108 |
+| `disagg-h200-agentx` | `dsv41-flash-h200-disagg` | 20 | 480 |
+| `agg-b200-agentx` | `dsv41-flash-b200-agg` | 4 | 400 |
+| `disagg-b200-agentx` | `dsv41-flash-b200-disagg` | 16 | 1408 |
+| `agg-gb300-agentx` | `dsv41-flash-gb300-agg` | 4 | 616 |
+| `disagg-gb300-agentx` | `dsv41-flash-gb300-disagg` | 8 | 920 |
 
 tok/s/GPU is the total output tokens per second printed in the aiperf summary, divided by the GPU count. A point passes
 when decode p50 is at least 50 tok/s/user, TTFT p50 is under 2 s and errors are under 5%.
