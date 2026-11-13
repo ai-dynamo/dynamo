@@ -22,35 +22,9 @@ export interface DynamoEvent {
 }
 
 /** Generation date in Pacific, YYYY-MM-DD. The calendar grid treats this as "today". */
-export const GENERATED_ON = "2026-11-12";
+export const GENERATED_ON = "2026-11-13";
 
 export const UPCOMING_EVENTS: DynamoEvent[] = [
-  {
-    "title": "SIG Frontend — Biweekly Sync",
-    "start": "2026-11-12T21:00:00.000Z",
-    "month": "Nov",
-    "day": "12",
-    "year": "2026",
-    "dateLabel": "Thu, Nov 12, 2026",
-    "timeLabel": "1:00 PM",
-    "isPast": false,
-    "location": null,
-    "locationUrl": null,
-    "addUrl": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=SIG+Frontend+%E2%80%94+Biweekly+Sync&dates=20261112T210000Z%2F20261112T220000Z&details=Join+with+Google+Meet%3A+https%3A%2F%2Fmeet.google.com%2Fkuz-iapc-efd%0AOr+dial%3A+%28US%29+%2B1+929-333-4713+PIN%3A+602380682%23%0AMore+phone+numbers%3A+https%3A%2F%2Ftel.meet%2Fkuz-iapc-efd%3Fpin%3D5046305483125%26hs%3D7%0A%0ALearn+more+about+Meet+at%3A+https%3A%2F%2Fsupport.google.com%2Fa%2Fusers%2Fanswer%2F9282720"
-  },
-  {
-    "title": "SIG Engines — Biweekly Sync",
-    "start": "2026-11-13T01:00:00.000Z",
-    "month": "Nov",
-    "day": "12",
-    "year": "2026",
-    "dateLabel": "Thu, Nov 12, 2026",
-    "timeLabel": "5:00 PM",
-    "isPast": false,
-    "location": null,
-    "locationUrl": null,
-    "addUrl": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=SIG+Engines+%E2%80%94+Biweekly+Sync&dates=20261113T010000Z%2F20261113T020000Z&details=Join+with+Google+Meet%3A+https%3A%2F%2Fmeet.google.com%2Fhha-vzes-szx%0AOr+dial%3A+%28US%29+%2B1+724-505-2767+PIN%3A+501573420%23%0AMore+phone+numbers%3A+https%3A%2F%2Ftel.meet%2Fhha-vzes-szx%3Fpin%3D9222789232381%26hs%3D7%0A%0ALearn+more+about+Meet+at%3A+https%3A%2F%2Fsupport.google.com%2Fa%2Fusers%2Fanswer%2F9282720"
-  },
   {
     "title": "SIG Router",
     "start": "2026-11-19T16:30:00.000Z",
@@ -63,10 +37,36 @@ export const UPCOMING_EVENTS: DynamoEvent[] = [
     "location": null,
     "locationUrl": null,
     "addUrl": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=SIG+Router&dates=20261119T163000Z%2F20261119T173000Z&details=Join+with+Google+Meet%3A+https%3A%2F%2Fmeet.google.com%2Fwan-wzmn-zfz%0AOr+dial%3A+%28US%29+%2B1+316-789-6527+PIN%3A+316996382%23%0AMore+phone+numbers%3A+https%3A%2F%2Ftel.meet%2Fwan-wzmn-zfz%3Fpin%3D8174162176244%26hs%3D7%0A%0ALearn+more+about+Meet+at%3A+https%3A%2F%2Fsupport.google.com%2Fa%2Fusers%2Fanswer%2F9282720"
+  },
+  {
+    "title": "SIG Frontend — Biweekly Sync",
+    "start": "2026-11-19T21:00:00.000Z",
+    "month": "Nov",
+    "day": "19",
+    "year": "2026",
+    "dateLabel": "Thu, Nov 19, 2026",
+    "timeLabel": "1:00 PM",
+    "isPast": false,
+    "location": null,
+    "locationUrl": null,
+    "addUrl": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=SIG+Frontend+%E2%80%94+Biweekly+Sync&dates=20261119T210000Z%2F20261119T220000Z&details=Join+with+Google+Meet%3A+https%3A%2F%2Fmeet.google.com%2Fkuz-iapc-efd%0AOr+dial%3A+%28US%29+%2B1+929-333-4713+PIN%3A+602380682%23%0AMore+phone+numbers%3A+https%3A%2F%2Ftel.meet%2Fkuz-iapc-efd%3Fpin%3D5046305483125%26hs%3D7%0A%0ALearn+more+about+Meet+at%3A+https%3A%2F%2Fsupport.google.com%2Fa%2Fusers%2Fanswer%2F9282720"
   }
 ];
 
 export const PAST_EVENTS: DynamoEvent[] = [
+  {
+    "title": "SIG Engines — Biweekly Sync",
+    "start": "2026-11-13T01:00:00.000Z",
+    "month": "Nov",
+    "day": "12",
+    "year": "2026",
+    "dateLabel": "Thu, Nov 12, 2026",
+    "timeLabel": "5:00 PM",
+    "isPast": true,
+    "location": null,
+    "locationUrl": null,
+    "addUrl": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=SIG+Engines+%E2%80%94+Biweekly+Sync&dates=20261113T010000Z%2F20261113T020000Z&details=Join+with+Google+Meet%3A+https%3A%2F%2Fmeet.google.com%2Fhha-vzes-szx%0AOr+dial%3A+%28US%29+%2B1+724-505-2767+PIN%3A+501573420%23%0AMore+phone+numbers%3A+https%3A%2F%2Ftel.meet%2Fhha-vzes-szx%3Fpin%3D9222789232381%26hs%3D7%0A%0ALearn+more+about+Meet+at%3A+https%3A%2F%2Fsupport.google.com%2Fa%2Fusers%2Fanswer%2F9282720"
+  },
   {
     "title": "Dynamo SIG RL",
     "start": "2026-11-06T02:00:00.000Z",
@@ -131,18 +131,5 @@ export const PAST_EVENTS: DynamoEvent[] = [
     "location": null,
     "locationUrl": null,
     "addUrl": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=Dynamo+Engineering+Sync&dates=20261013T160000Z%2F20261013T170000Z&details=%3Ca+href%3D%22https%3A%2F%2Fdocs.google.com%2Fdocument%2Fd%2F1uR8xD_hlYGwV6QspvSc36k1H-wo1BUcVmFbHH9xlXd8%2Fview%3Fpli%3D1%26amp%3Btab%3Dt.pgw0qvggnec%22+class%3D%22pastedDriveLink-0%22%3EDynamo+Engineering+Sync+Meeting+Notes+-+Google+Docs%3C%2Fa%3E%0A%0AJoin+with+Google+Meet%3A+https%3A%2F%2Fmeet.google.com%2Fzyn-hfqk-asm%0AOr+dial%3A+%28US%29+%2B1+347-486-6566+PIN%3A+403835665%23%0AMore+phone+numbers%3A+https%3A%2F%2Ftel.meet%2Fzyn-hfqk-asm%3Fpin%3D5772284027174%26hs%3D7%0A%0ALearn+more+about+Meet+at%3A+https%3A%2F%2Fsupport.google.com%2Fa%2Fusers%2Fanswer%2F9282720"
-  },
-  {
-    "title": "Dynamo community meeting",
-    "start": "2026-09-23T17:30:00.000Z",
-    "month": "Sep",
-    "day": "23",
-    "year": "2026",
-    "dateLabel": "Wed, Sep 23, 2026",
-    "timeLabel": "10:30 AM",
-    "isPast": true,
-    "location": "Online",
-    "locationUrl": "https://meet.google.com/heb-demu-qok",
-    "addUrl": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=Dynamo+community+meeting&dates=20260923T173000Z%2F20260923T181500Z&location=https%3A%2F%2Fmeet.google.com%2Fheb-demu-qok"
   }
 ];

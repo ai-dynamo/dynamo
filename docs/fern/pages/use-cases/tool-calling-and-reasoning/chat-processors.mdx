@@ -12,6 +12,8 @@ You have three options, selected with the `--dyn-chat-processor` **Frontend** fl
 - **`dynamo` (default)** — Dynamo's framework-agnostic Rust processor. It works on every backend (vLLM, SGLang, TRT-LLM), supports disaggregated serving, and ships built-in parsers for a broad set of model formats. **Use this whenever Dynamo has a parser for your model** — which is most of the time.
 - **`vllm` / `sglang` (engine fallback)** — hand parsing back to the engine's own Python parser. Use these **only** when Dynamo does not ship a parser for your model's format.
 
+To serve chat with your own Python code instead, see [Custom Chat Processors](../../developer-guide/knowledge-base/modular-components/frontend/custom-chat-processors.md).
+
 All three retain Dynamo routing and disaggregated serving; the selected processor owns request preprocessing and response parsing. Your choice also decides the parser flag names and which component carries them; the tabs below show exactly where they go.
 
 New here? Read the [Overview](overview.mdx) first for how the chat processor relates to the tool-call and reasoning parsers.

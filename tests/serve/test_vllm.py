@@ -38,6 +38,8 @@ from tests.utils.payload_builder import (
     lora_chat_payload,
     metric_payload_default,
     pooling_payload,
+    responses_payload_with_logprobs,
+    responses_stream_payload_with_logprobs,
     router_cached_tokens_chat_payload,
     router_selection_chat_payload_default,
 )
@@ -308,6 +310,23 @@ vllm_configs = {
                 max_tokens=30,
                 temperature=0.0,
                 logprobs=5,
+            ),
+            # Responses API scores ride on output_text. Thinking is disabled so the
+            # budget produces visible text, and the budget lets the answer finish,
+            # since the Responses payload requires status "completed".
+            responses_payload_with_logprobs(
+                expected_response=["AI", "knock", "joke"],
+                max_tokens=200,
+                temperature=0.0,
+                top_logprobs=3,
+                extra_body={"chat_template_args": {"enable_thinking": False}},
+            ),
+            responses_stream_payload_with_logprobs(
+                expected_response=["AI", "knock", "joke"],
+                max_tokens=200,
+                temperature=0.0,
+                top_logprobs=3,
+                extra_body={"chat_template_args": {"enable_thinking": False}},
             ),
         ],
     ),

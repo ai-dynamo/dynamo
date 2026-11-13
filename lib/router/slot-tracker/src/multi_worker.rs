@@ -1359,6 +1359,12 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         )
     }
 
+    /// Count full ranks from derived snapshots without materializing request load rows.
+    pub fn record_full_worker_ranks_at(&self, decay_now: Instant, full_ranks: &mut FullRankCounts) {
+        self.prompt_registry
+            .record_full_worker_ranks_at(decay_now, full_ranks);
+    }
+
     /// `worker`'s `additional_active_blocks` in a projection of `token_sequence`, computed
     /// for that rank alone.
     pub fn additional_active_blocks(
