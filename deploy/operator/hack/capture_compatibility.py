@@ -107,6 +107,28 @@ def dgd_of(objects):
     return next(o for o in objects if o["kind"] == "DynamoGraphDeployment")
 
 
+def safe_members(archive, destination):
+    """Accept only regular files and directories that resolve inside destination.
+
+    This is the subset of the tarfile data filter that matters for a git archive:
+    no links, no devices, and no path that escapes the checkout.
+    """
+    root = destination.resolve()
+    members = []
+    for member in archive.getmembers():
+        if not (member.isfile() or member.isdir()):
+            raise ValueError(
+                f"Refusing archive member of unexpected type: {member.name}"
+            )
+        target = (root / member.name).resolve()
+        if target != root and root not in target.parents:
+            raise ValueError(
+                f"Refusing archive member outside the checkout: {member.name}"
+            )
+        members.append(member)
+    return members
+
+
 def render_harness(scenario, version):
     """Render the bootstrap observer for one released stage of scenario."""
     template = (OPERATOR / "hack/upgrade_capture_test.go.tmpl").read_text()
@@ -195,7 +217,7 @@ def prepare_release_tree(scenario, version, revision, work, provenance):
         if hasattr(tarfile, "data_filter"):
             archive.extractall(checkout, filter="data")
         else:
-            archive.extractall(checkout)
+            archive.extractall(checkout, members=safe_members(archive, checkout))
     operator = checkout / "deploy/operator"
     rendered, barrier = render_harness(scenario, version)
     (operator / "internal/controller/zz_capture_upgrade_test.go").write_text(rendered)
