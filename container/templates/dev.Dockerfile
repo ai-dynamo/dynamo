@@ -305,17 +305,7 @@ ARG WORKSPACE_DIR=/workspace
 
 # Dev environment variables (aligned with framework dev stages)
 # Framework-specific PATH additions are handled in /etc/profile.d/50-framework-paths.sh
-{% if device == "xpu" and framework == "sglang" %}
-# XPU SGLang: reuse the conda env created in the framework stage
-ENV WORKSPACE_DIR=${WORKSPACE_DIR} \
-    DYNAMO_HOME=${WORKSPACE_DIR} \
-    RUSTUP_HOME=/home/dynamo/.rustup \
-    CARGO_HOME=/usr/local/cargo \
-    CARGO_TARGET_DIR=/workspace/target \
-    CONDA_DIR=/opt/miniforge3 \
-    VIRTUAL_ENV=/opt/miniforge3/envs/sglang \
-    PATH=/opt/miniforge3/envs/sglang/bin:/opt/miniforge3/bin:/usr/local/cargo/bin:$PATH
-{% elif device == "cuda" or framework != "vllm" %}
+{% if device == "cuda" or framework not in ("vllm", "sglang") %}
 ENV WORKSPACE_DIR=${WORKSPACE_DIR} \
     DYNAMO_HOME=${WORKSPACE_DIR} \
     RUSTUP_HOME=/home/dynamo/.rustup \
@@ -324,6 +314,7 @@ ENV WORKSPACE_DIR=${WORKSPACE_DIR} \
     VIRTUAL_ENV=/opt/dynamo/venv \
     PATH=/opt/dynamo/venv/bin:/usr/local/cargo/bin:$PATH
 {% else %}
+{# CPU/XPU vLLM and XPU SGLang share this: both use the runtime's upstream /opt/venv. #}
 # CPU/XPU vLLM: Use runtime's /opt/venv
 ENV WORKSPACE_DIR=${WORKSPACE_DIR} \
     DYNAMO_HOME=${WORKSPACE_DIR} \
@@ -343,13 +334,17 @@ COPY --from=wheel_builder --chown=dynamo:0 --chmod=775 /workspace/.venv/bin/matu
 
 {% if framework == "sglang" %}
 {% if device == "xpu" %}
-# SGLang XPU: conda env from framework stage; install uv and maturin.
-# uv doesn't natively recognize conda envs (no pyvenv.cfg), so we use
-# --python to target the conda interpreter explicitly.
+# SGLang XPU: reuse the upstream /opt/venv rather than a --system-site-packages
+# /opt/dynamo/venv, which would miss its sglang/torch/nixl. The python wrapper
+# (not a symlink) preserves the venv context; uv must match every other stage.
 COPY --from=ghcr.io/astral-sh/uv:{{ context.dynamo.uv_version }} /uv /tmp/uv-binary
-RUN cp /tmp/uv-binary ${VIRTUAL_ENV}/bin/uv && \
-    chmod +x ${VIRTUAL_ENV}/bin/uv && \
-    pip install maturin[patchelf]
+RUN chown -R dynamo:0 /opt/venv && \
+    cp /tmp/uv-binary /opt/venv/bin/uv && \
+    chmod +x /opt/venv/bin/uv && \
+    rm -f /usr/local/bin/python && \
+    echo '#!/bin/bash' > /usr/local/bin/python && \
+    echo 'exec /opt/venv/bin/python "$@"' >> /usr/local/bin/python && \
+    chmod +x /usr/local/bin/python
 {% else %}
 # SGLang CUDA: Create a writable Dynamo venv and seed it from the upstream
 # SGLang venv. The runtime keeps its packages outside the system Python's
