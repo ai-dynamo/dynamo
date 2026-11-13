@@ -1639,6 +1639,16 @@ pub trait Discovery: Send + Sync {
     /// Backend-specific raw registration implementation.
     async fn register_internal(&self, spec: DiscoverySpec) -> Result<DiscoveryInstance>;
 
+    /// Register `instance` under its own instance id instead of this client's.
+    ///
+    /// A process that serves engines it does not run (the frontend's direct-engine
+    /// mode) publishes one endpoint and model card per engine this way. Backends
+    /// that only publish their own identity reject it.
+    async fn register_instance(&self, instance: DiscoveryInstance) -> Result<DiscoveryInstance> {
+        let _ = instance;
+        anyhow::bail!("this discovery backend registers only its own instance id")
+    }
+
     /// Replace the caller-managed taints of this worker's existing base model card.
     async fn update_model_taints(
         &self,
