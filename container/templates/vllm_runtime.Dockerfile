@@ -150,11 +150,12 @@ COPY --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wh
 COPY --chown=dynamo:0 --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
 
 # Install RDMA libraries required for UCX to find RDMA devices
+# ibverbs-utils contains diagnostics, not runtime libraries. Keep those tools
+# in wheel_builder instead of adding them to the CPU/XPU serving image.
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         libibverbs1 \
         rdma-core \
-        ibverbs-utils \
         libibumad3 \
         libnuma1 \
         librdmacm1 \
