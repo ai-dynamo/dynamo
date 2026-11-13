@@ -9,7 +9,7 @@ subtitle: Extend Sweeper without adding application dependencies to its core
 > **Experimental.** The provider ABI is versioned but may change before AISimulate stabilizes.
 
 A `SweepConfigProvider` lets an optional feature package contribute search dimensions without
-making `aisimulate` depend on that package.
+making `aisim` depend on that package.
 
 ## Contract
 

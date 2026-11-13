@@ -424,6 +424,18 @@ mod tests {
     }
 
     #[test]
+    fn native_request_carries_the_cache_salt() {
+        let state = CompatibilityState::new(MockerConfig::default());
+        let native = state
+            .native_request(DirectRequest {
+                cache_salt: Some("tenant".to_owned()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(native.cache_salt.as_deref(), Some("tenant"));
+    }
+
+    #[test]
     fn unhandled_request_fields_do_not_mutate_compatibility_state() {
         let state = CompatibilityState::new(MockerConfig::default());
         let mut request = DirectRequest {

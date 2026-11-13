@@ -346,6 +346,12 @@ For the timing-model design, see [Mocker Engine Architecture](../../developer-gu
 
 Apply only when `--engine-type sglang`. Set the radix-cache page size with `--block-size`.
 
+The SGLang scheduler keeps one token of the context for itself, admits a prompt only when more
+than five further tokens stay free, and caps the output by the free KV capacity. A decode worker
+reserves 512 tokens for each handoff and keeps no prefix cache. To change these two defaults, set
+`engine.sglang.num_reserved_decode_tokens` or
+`engine.sglang.disaggregation_decode_enable_radix_cache` in the `--extra-engine-args` file.
+
 <ParamField path="--sglang-schedule-policy" type="string" default="fifo">
   SGLang scheduling policy. `fifo` is the default; `lpm` is longest prefix match.
   The deprecated `fcfs` alias maps to `fifo` and prints a warning when used.

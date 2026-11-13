@@ -749,6 +749,38 @@ async fn decode_admission_reserves_kv_without_recomputing_the_prompt() {
 }
 
 #[tokio::test]
+async fn sglang_destination_refuses_a_pool_smaller_than_its_decode_reservation() {
+    // 128 blocks of 4 tokens: one block short of a 4-token prompt plus the
+    // 512 decode tokens that SGLang reserves for each handoff by default.
+    let args = MockerConfig::from_value(serde_json::json!({
+        "dp_size": 1,
+        "engine": {
+            "backend": EngineType::Sglang,
+            "worker_type": WorkerType::Decode,
+            "block_size": 4,
+            "num_gpu_blocks": 128,
+            "speedup_ratio": 1000.0
+        }
+    }))
+    .unwrap();
+    let engine = LiveEngine::start(args, 0).unwrap();
+    let (control, _events) = engine.register_handoff(HandoffId::new()).unwrap();
+    let (registration, _request) = engine
+        .prepare_request(DirectRequest {
+            tokens: vec![1, 2, 3, 4],
+            max_output_tokens: 1,
+            ..Default::default()
+        })
+        .unwrap();
+    let error = control.reserve_destination(registration).await.unwrap_err();
+    assert!(
+        format!("{error:#}").contains("reserved decode tokens exceed the KV pool capacity"),
+        "{error:#}"
+    );
+    engine.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn dropping_reserved_destination_releases_scheduler_capacity() {
     for engine_type in [EngineType::Vllm, EngineType::Sglang] {
         let engine = LiveEngine::start(handoff_args(engine_type, WorkerType::Decode), 0).unwrap();

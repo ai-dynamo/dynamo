@@ -3497,6 +3497,47 @@ mod tests {
     }
 
     #[test]
+    fn disagg_sglang_fails_a_handoff_into_a_pool_smaller_than_its_decode_reservation() {
+        // 64 blocks of 4 tokens hold less than the 512 decode tokens that an
+        // SGLang destination reserves for each handoff by default.
+        let role_args = |worker_type: WorkerType| {
+            MockerConfig::from_value(serde_json::json!({
+                "engine": {
+                    "backend": EngineType::Sglang,
+                    "worker_type": worker_type,
+                    "block_size": 4,
+                    "num_gpu_blocks": 64,
+                    "speedup_ratio": 1000.0
+                }
+            }))
+            .unwrap()
+        };
+        let report = simulate_trace_requests_disagg_with_router_mode_and_runtime_observers(
+            OfflineDisaggReplayConfig {
+                prefill_args: role_args(WorkerType::Prefill),
+                decode_args: role_args(WorkerType::Decode),
+                num_prefill_workers: 1,
+                num_decode_workers: 1,
+            },
+            None,
+            None,
+            attention_dp_requests(2, 10.0),
+            1.0,
+            ReplayRouterMode::RoundRobin,
+            true,
+            SlaThresholds::default(),
+            ReplayRuntimeObservers::default(),
+        )
+        .unwrap();
+
+        assert_eq!(report.request_counts.completed_requests, 0);
+        assert_eq!(report.per_request.len(), 2);
+        assert!(report.per_request.iter().all(|record| {
+            record.terminal_status == aisim_core::replay::ReplayTerminalStatus::Failed
+        }));
+    }
+
+    #[test]
     fn one_worker_sglang_rejects_a_request_that_cannot_fit() {
         let args = MockerConfig::from_value(serde_json::json!({
             "engine": {

@@ -2385,11 +2385,15 @@ class ReplaySchedulerMetricsSnapshot(TypedDict):
     waiting_requests: int
 
 class ReplaySchedulerIntervalMetrics(TypedDict):
+    g1_prefix_cache_lookup: Optional[dict[str, int]]
     cache_hit_tokens: int
     cache_total_tokens: int
     preemptions: int
 
 class ReplayTrafficMetricsSnapshot(TypedDict):
+    delivered_output_tokens: int
+    committed_prefill_tokens: int
+    first_admission: dict[str, int]
     duration_s: float
     arriving_requests: int
     completed_requests: int
@@ -2405,6 +2409,7 @@ class ReplayTrafficMetricsSnapshot(TypedDict):
     accept_length_forward_count: int
 
 class ReplayTelemetrySnapshot(TypedDict):
+    host_caches: list[dict[str, Any]]
     sample_ordinal: int
     kind: Literal["baseline", "periodic", "final"]
     interval_start_ms: float

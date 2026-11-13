@@ -188,8 +188,9 @@ common forward-pass query API. This integration pins Python
 `0.15.0.dev202611130000000104` and Rust `0.15.0-dev.202611130000000104`,
 which include that support. Use version-2 execution profiles; version 1 retains
 its legacy direct-phase queries and must be explicitly migrated and repinned.
-An execution profile works only with the AISimulate release that produced it, so
-download or generate the dataset again when the pinned release changes.
+An execution profile is accepted only when its engine spec schema version matches the
+pinned AISimulate release. The move from 0.13 to 0.15 changes that version, so download
+or generate the dataset again.
 
 The following configuration illustrates the paths to supply for a prefill role:
 

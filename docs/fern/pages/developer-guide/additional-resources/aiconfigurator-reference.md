@@ -6,7 +6,7 @@ subtitle: Compare aggregated and disaggregated layouts before deployment
 ---
 
 This page is the full reference for the `aiconfigurator` compatibility command shipped in the
-[AISimulate](https://pypi.org/project/aisimulate/) Python distribution: sizing aggregated and
+[AISimulate](https://pypi.org/project/aisim/) Python distribution: sizing aggregated and
 disaggregated Dynamo deployments, generating deployment artifacts, and validating them. Dynamo does
 not depend on the separate `aiconfigurator` or `aiconfigurator-core` distributions. The AISimulate
 wheel exposes the `aisim` and `aisim_core` Python namespaces and retains the
@@ -674,7 +674,7 @@ For balanced workloads (ISL/OSL ratio between 2:1 and 10:1), aggregated is often
 
 ## Learn More
 
-- [AISimulate package](https://pypi.org/project/aisimulate/)
+- [AISimulate package](https://pypi.org/project/aisim/)
 - [AIConfigurator compatibility support matrix](https://ai-dynamo.github.io/aiconfigurator/support-matrix/)
 - [Dynamo Installation Guide](../../kubernetes/installation/install-dynamo.md)
 - [Benchmarking Guide](../../recipes/feature-benchmarks/benchmarking-guide.md)
