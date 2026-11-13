@@ -7,16 +7,16 @@
 //! outage does not drop what a caller already knows.
 
 use std::collections::{HashMap, HashSet};
-use std::error::Error;
 use std::future::Future;
 use std::time::Duration;
 
-use dynamo_global_common::{PoolKey, PoolListing, PoolsResponse, RouterReplica};
+use dynamo_global_common::{PoolKey, PoolListing, PoolsResponse, RouterReplica, RoutersResponse};
 use tokio::sync::watch;
 use tokio::time::{Interval, MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
 
+use crate::client::error_chain;
 use crate::{DiscoveryClientError, GlobalDiscoveryClient};
 
 /// Whether a cache holds the service's current list. A cache that has stopped
@@ -33,7 +33,8 @@ pub enum Freshness {
 }
 
 /// The Global Router replicas from `GET /routers`, refreshed until cancelled
-/// or dropped.
+/// or dropped. Partial lists add and update replicas; only complete lists
+/// remove missing replicas.
 #[derive(Debug)]
 #[must_use = "dropping the cache stops its refresh task"]
 pub struct RouterCache {
@@ -97,16 +98,15 @@ impl RouterCache {
 
 /// What a [`RouterCache`] reads. The client implements it; tests use a fake.
 trait RouterSource: Send + Sync {
-    fn routers(
-        &self,
-    ) -> impl Future<Output = Result<Vec<RouterReplica>, DiscoveryClientError>> + Send;
+    fn routers(&self)
+    -> impl Future<Output = Result<RoutersResponse, DiscoveryClientError>> + Send;
 }
 
 impl RouterSource for GlobalDiscoveryClient {
     fn routers(
         &self,
-    ) -> impl Future<Output = Result<Vec<RouterReplica>, DiscoveryClientError>> + Send {
-        GlobalDiscoveryClient::routers(self)
+    ) -> impl Future<Output = Result<RoutersResponse, DiscoveryClientError>> + Send {
+        GlobalDiscoveryClient::router_listing(self)
     }
 }
 
@@ -115,8 +115,8 @@ async fn refresh_routers(
     routers: &watch::Sender<HashSet<RouterReplica>>,
     freshness: &watch::Sender<Freshness>,
 ) {
-    let listed = match source.routers().await {
-        Ok(listed) => listed.into_iter().collect::<HashSet<_>>(),
+    let response = match source.routers().await {
+        Ok(response) => response,
         Err(error) => {
             let reason = error_chain(&error);
             if mark_stale(freshness, &reason) {
@@ -126,17 +126,31 @@ async fn refresh_routers(
             return;
         }
     };
+    let listed = response.routers.into_iter().collect::<HashSet<_>>();
     // Publish the set before marking it current, so a reader never sees
     // `Current` next to the previous set.
     let mut added = Vec::new();
     let mut removed = Vec::new();
     routers.send_if_modified(|current| {
-        if *current == listed {
+        let mut next = listed;
+        if !response.complete {
+            let listed_ids = next
+                .iter()
+                .map(|router| router.replica.clone())
+                .collect::<HashSet<_>>();
+            next.extend(
+                current
+                    .iter()
+                    .filter(|router| !listed_ids.contains(&router.replica))
+                    .cloned(),
+            );
+        }
+        if *current == next {
             return false;
         }
-        added = described(listed.difference(current));
-        removed = described(current.difference(&listed));
-        *current = listed;
+        added = described(next.difference(current));
+        removed = described(current.difference(&next));
+        *current = next;
         true
     });
     if mark_current(freshness) {
@@ -359,18 +373,6 @@ fn described<'a>(routers: impl Iterator<Item = &'a RouterReplica>) -> Vec<String
     described
 }
 
-/// The error and each of its causes, joined with `: `.
-fn error_chain(error: &dyn Error) -> String {
-    let mut chain = error.to_string();
-    let mut source = error.source();
-    while let Some(cause) = source {
-        chain.push_str(": ");
-        chain.push_str(&cause.to_string());
-        source = cause.source();
-    }
-    chain
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
@@ -382,16 +384,19 @@ mod tests {
 
     /// A source whose answer the test sets; `None` is an outage.
     #[derive(Clone, Default)]
-    struct FakeSource(Arc<Mutex<Option<Vec<RouterReplica>>>>);
+    struct FakeSource(Arc<Mutex<Option<RoutersResponse>>>);
 
     impl FakeSource {
         fn answer(&self, ids: Option<&[&str]>) {
-            *self.0.lock().unwrap() = ids.map(|ids| ids.iter().map(|id| router(id)).collect());
+            *self.0.lock().unwrap() = ids.map(|ids| RoutersResponse {
+                routers: ids.iter().map(|id| router(id)).collect(),
+                complete: true,
+            });
         }
     }
 
     impl RouterSource for FakeSource {
-        async fn routers(&self) -> Result<Vec<RouterReplica>, DiscoveryClientError> {
+        async fn routers(&self) -> Result<RoutersResponse, DiscoveryClientError> {
             self.0
                 .lock()
                 .unwrap()
@@ -417,24 +422,6 @@ mod tests {
             .collect::<Vec<_>>();
         ids.sort();
         ids
-    }
-
-    #[test]
-    fn error_chain_joins_every_cause() {
-        #[derive(Debug, thiserror::Error)]
-        #[error("request failed")]
-        struct Outer(#[source] Middle);
-        #[derive(Debug, thiserror::Error)]
-        #[error("connect failed")]
-        struct Middle(#[source] std::io::Error);
-        let error = Outer(Middle(std::io::Error::new(
-            std::io::ErrorKind::ConnectionRefused,
-            "connection refused",
-        )));
-        assert_eq!(
-            error_chain(&error),
-            "request failed: connect failed: connection refused"
-        );
     }
 
     async fn next_set(routers: &mut watch::Receiver<HashSet<RouterReplica>>) -> Vec<String> {
@@ -483,6 +470,26 @@ mod tests {
         cancel.cancel();
         let closed = tokio::time::timeout(Duration::from_secs(5), routers.changed()).await;
         assert!(closed.expect("the channel did not close").is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn partial_router_lists_keep_missing_replicas_until_complete() {
+        let source = FakeSource::default();
+        source.answer(Some(&["a", "b"]));
+        let cache = RouterCache::spawn_from(
+            source.clone(),
+            Duration::from_secs(1),
+            CancellationToken::new(),
+        );
+        let mut routers = cache.subscribe();
+        assert_eq!(next_set(&mut routers).await, ["a", "b"]);
+        *source.0.lock().unwrap() = Some(RoutersResponse {
+            routers: vec![router("c")],
+            complete: false,
+        });
+        assert_eq!(next_set(&mut routers).await, ["a", "b", "c"]);
+        source.answer(Some(&["c"]));
+        assert_eq!(next_set(&mut routers).await, ["c"]);
     }
 
     #[tokio::test(start_paused = true)]

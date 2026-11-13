@@ -61,6 +61,8 @@ By default, Dynamo handles tokenization and detokenization through its Rust-base
 
 For SGLang-native preprocessing (tool calling, reasoning parsing, chat templates), use `--dyn-chat-processor sglang` on the frontend. See [SGLang Chat Processor](chat-processor.md) for architecture and usage.
 
+Set `--default-chat-template-kwargs` on the frontend, not on the SGLang worker. The frontend renders the chat template, so SGLang's flag has no effect behind Dynamo, and the worker refuses it at startup. The SGLang sidecar logs a warning instead, because its engine can also serve SGLang's own HTTP server. The frontend applies the defaults to every chat request, for workers and sidecars, before it reads the thinking controls. A key in the request's `chat_template_kwargs` takes precedence unless its value is `null` or `"auto"`, and a request thinking control replaces the thinking keys in the defaults. The flag cannot set `chat_template`; use `--custom-jinja-template` to replace the chat template.
+
 > [!WARNING]
 > `--use-sglang-tokenizer` is deprecated. Use `--dyn-chat-processor sglang` on the frontend instead, which provides the same SGLang-native processing with KV router support and the completions endpoint.
 
@@ -178,5 +180,5 @@ Dynamo parses and resolves the complete route list during worker startup. Startu
 
 - **[Examples](../../../../../recipes/cli-templates/sglang.mdx)**: Local deployment launch scripts
 - **[Disaggregation](disaggregation.md)**: P/D architecture and KV transfer
-- **[Diffusion](../../../../../use-cases/diffusion/overview.md)**: LLM, image, and video diffusion models
+- **Diffusion**: [image](../../../../../use-cases/diffusion/workflows/text-to-image.md), [video](../../../../../use-cases/diffusion/workflows/text-to-video.md), and [language](../../../../../use-cases/diffusion/workflows/text-to-text-llm-diffusion.md) diffusion models
 - **[Configuration and Tuning](../../router/configuration-and-tuning.md)**: KV-aware routing configuration

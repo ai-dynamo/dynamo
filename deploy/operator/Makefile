@@ -1,6 +1,7 @@
 
 # Image URL to use all building/pushing image targets
 IMG ?= controller:latest
+PYTHON ?= python3
 
 # ENVTEST_K8S_VERSION refers to the version of kubebuilder assets to be downloaded by envtest binary.
 ENVTEST_K8S_VERSION = 1.30.0
@@ -216,7 +217,7 @@ docker-push-all: docker-push-planner docker-push-frontend docker-push-vllm docke
 ##@ Development
 
 .PHONY: check
-check: generate manifests generate-api-docs generate-helm-docs
+check: generate manifests generate-api-docs generate-helm-docs check-aisimulate-schema
 	@echo "> Checking for uncommitted changes"
 	@if [ -n "$$(git status --porcelain)" ]; then \
 		echo "ERROR: Git tree is dirty after running validation steps."; \
@@ -226,6 +227,14 @@ check: generate manifests generate-api-docs generate-helm-docs
 		exit 1; \
 	fi
 	@echo "> Check complete"
+
+.PHONY: generate-aisimulate-schema
+generate-aisimulate-schema: ## Export the pinned AISimulate Pydantic schema and active Go version.
+	$(PYTHON) hack/generate_aisimulate_schema.py
+
+.PHONY: check-aisimulate-schema
+check-aisimulate-schema: ## Reject a missing or stale AISimulate schema after dependency changes.
+	$(PYTHON) hack/generate_aisimulate_schema.py --check
 
 
 .PHONY: tilt-up
@@ -385,12 +394,16 @@ integration: envtest setup-clustertest ## Run envtests and clustertests, creatin
 		$(MAKE) clustertest
 
 .PHONY: lint
-lint: golangci-lint ## Run golangci-lint linter & yamllint
+lint: golangci-lint lint-api ## Run golangci-lint linter, the Kubernetes API linter & yamllint
 	$(GOLANGCI_LINT) run
 
 .PHONY: lint-fix
 lint-fix: golangci-lint ## Run golangci-lint linter and perform fixes
 	$(GOLANGCI_LINT) run --fix
+
+.PHONY: lint-api
+lint-api: kube-api-linter ## Check the CRD API types against Kubernetes API conventions
+	$(KUBE_API_LINTER) run -c .golangci-kal.yml ./api/...
 
 ##@ Build
 
@@ -579,6 +592,8 @@ YQ_VERSION ?= v4.45.4
 CONTROLLER_TOOLS_VERSION ?= v0.17.3
 ENVTEST_VERSION ?= release-0.19
 GOLANGCI_LINT_VERSION ?= v2.15.0
+# kube-api-linter publishes no tags; this pseudo-version is its 2026-10-12 main.
+KUBE_API_LINTER_VERSION ?= v0.0.0-20261012124120-79b557aa8c8d
 
 ## Tool Binaries
 KUBECTL ?= $(LOCALBIN)/kubectl-$(KUBECTL_VERSION)
@@ -588,6 +603,7 @@ YQ ?= $(LOCALBIN)/yq-$(YQ_VERSION)
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen-$(CONTROLLER_TOOLS_VERSION)
 ENVTEST ?= $(LOCALBIN)/setup-envtest-$(ENVTEST_VERSION)
 GOLANGCI_LINT = $(LOCALBIN)/golangci-lint-$(GOLANGCI_LINT_VERSION)
+KUBE_API_LINTER = $(LOCALBIN)/golangci-lint-kube-api-linter-$(KUBE_API_LINTER_VERSION)
 
 ## ---------- Binary download targets ----------
 
@@ -650,6 +666,11 @@ $(ENVTEST): $(LOCALBIN)
 golangci-lint: $(GOLANGCI_LINT) ## Download golangci-lint locally if necessary.
 $(GOLANGCI_LINT): $(LOCALBIN)
 	$(call go-install-tool,$(GOLANGCI_LINT),github.com/golangci/golangci-lint/v2/cmd/golangci-lint,${GOLANGCI_LINT_VERSION})
+
+.PHONY: kube-api-linter
+kube-api-linter: $(KUBE_API_LINTER) ## Build the golangci-lint that includes kube-api-linter locally if necessary.
+$(KUBE_API_LINTER): $(LOCALBIN)
+	$(call go-install-tool,$(KUBE_API_LINTER),sigs.k8s.io/kube-api-linter/cmd/golangci-lint-kube-api-linter,${KUBE_API_LINTER_VERSION})
 
 # go-install-tool will 'go install' any package with custom target and name of binary, if it doesn't exist
 # $1 - target path with name of binary (ideally with version)

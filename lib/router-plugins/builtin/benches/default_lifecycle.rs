@@ -3,11 +3,12 @@
 
 //! Includes load projection, selection, booking, and release in the shared core.
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use dynamo_kv_router::services::selection::{
-    PromptRequest, SelectAndReserveRequest, SelectionCacheConfig, SelectionCore, WorkerRequest,
-};
-use dynamo_kv_router::{KvRouterConfig, WorkerSelectionPolicy, WorkerSelectionPolicyFactory};
+use dynamo_kv_router::plugins::prelude::*;
+use dynamo_kv_router::services::selection::local_selection_core;
 use dynamo_router_policies::default_factory;
+use dynamo_scheduler::host::{
+    PromptRequest, SelectAndReserveRequest, SelectionCacheConfig, WorkerRequest,
+};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -28,7 +29,7 @@ fn bench(c: &mut Criterion) {
             WorkerSelectionPolicy::reference(config.clone(), role.default_selector_label())
         });
         for (label, factory) in [("reference", reference), ("plugin", default_factory())] {
-            let core = SelectionCore::try_new_local(
+            let core = local_selection_core(
                 KvRouterConfig {
                     use_kv_events: false,
                     router_queue_threshold: None,
