@@ -3200,10 +3200,14 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
             let message = error_payload
                 .message
                 .unwrap_or_else(|| status_message.to_string());
+            // Keep the typed error when it carries a public message, so the
+            // unary response renders it. Other messages stay diagnostic.
+            let keep_semantic = overloaded
+                || semantic.is_some_and(|error| error.public_message().is_some());
             return Some(BackendErrorInfo {
                 message,
                 status: code,
-                semantic: if overloaded { semantic.cloned() } else { None },
+                semantic: if keep_semantic { semantic.cloned() } else { None },
                 sanitized: overloaded.then_some(SanitizedError::Overloaded),
                 metric_error_type,
             });
@@ -3480,10 +3484,11 @@ fn backend_error_response(backend_error: BackendErrorInfo, record_failure: bool)
     }
 
     if let Some(error) = &semantic {
-        let is_classified = !matches!(
-            error.reason().as_str(),
-            "backend.unknown" | "runtime.unclassified"
-        );
+        let is_classified = error.public_message().is_some()
+            || !matches!(
+                error.reason().as_str(),
+                "backend.unknown" | "runtime.unclassified"
+            );
         if is_classified
             && let Some(response) =
                 ErrorMessage::from_semantic_error_with_recording(error, record_failure)

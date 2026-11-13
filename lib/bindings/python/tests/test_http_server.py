@@ -29,9 +29,6 @@ import numpy as np
 import pytest
 
 from dynamo._core import Context, _raise_routed_http_error
-from dynamo.common.multimodal import video_loader as video_loader_module
-from dynamo.common.multimodal.media_source import decode_data_uri
-from dynamo.common.multimodal.video_loader import VideoLoader
 from dynamo.frontend.utils import PromptLogprobsAccumulator
 from dynamo.llm import HttpAsyncEngine, HttpError, HttpService
 from dynamo.runtime import DistributedRuntime
@@ -51,6 +48,10 @@ class _OpenIfCodec:
     """Software-decode stand-in: a probed codec plays, anything else fails open."""
 
     def load_bytes(self, content: bytes):
+        # Imported here: the multimodal package imports torch, which the
+        # Triton CPU image does not install.
+        from dynamo.common.multimodal import video_loader as video_loader_module
+
         if video_loader_module.probe_video_codec(content) is None:
             raise ValueError("Could not open video stream")
         frames = np.zeros((1, 2, 2, 3), dtype=np.uint8)
@@ -59,6 +60,9 @@ class _OpenIfCodec:
 
 async def _decode_request_videos(content: list) -> None:
     """Run each video part through the real loader before the mock completion."""
+    from dynamo.common.multimodal.media_source import decode_data_uri
+    from dynamo.common.multimodal.video_loader import VideoLoader
+
     loader = VideoLoader()
     for part in content:
         if not isinstance(part, dict) or part.get("type") != "video_url":
