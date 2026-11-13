@@ -3,6 +3,8 @@
 
 //! Worker and rank identities, and the capacity a worker advertises about itself.
 
+use std::num::NonZeroU64;
+
 use serde::{Deserialize, Serialize};
 
 /// A worker identifier.
@@ -45,6 +47,7 @@ pub const DEFAULT_MAX_BATCHED_TOKENS: u64 = 10_000_000;
 pub struct WorkerCapacity {
     max_num_batched_tokens: Option<u64>,
     total_kv_blocks: Option<u64>,
+    cache_owner_capacity_blocks: Option<NonZeroU64>,
 }
 
 impl WorkerCapacity {
@@ -54,7 +57,15 @@ impl WorkerCapacity {
         Self {
             max_num_batched_tokens: max_num_batched_tokens.filter(|&value| value > 0),
             total_kv_blocks: total_kv_blocks.filter(|&value| value > 0),
+            cache_owner_capacity_blocks: None,
         }
+    }
+
+    /// Set the host-pinned capacity of the cache owner (KVCR instance) attached to the rank;
+    /// a reported zero means unreported.
+    pub fn with_cache_owner_capacity_blocks(mut self, blocks: Option<u64>) -> Self {
+        self.cache_owner_capacity_blocks = blocks.and_then(NonZeroU64::new);
+        self
     }
 
     /// Prefill tokens the rank batches per engine step, when reported.
@@ -67,6 +78,12 @@ impl WorkerCapacity {
     /// the process total divided by the rank count), so treat it as approximate.
     pub fn total_kv_blocks(self) -> Option<u64> {
         self.total_kv_blocks
+    }
+
+    /// Host-pinned capacity, in KV blocks, of the cache owner (KVCR instance) attached to
+    /// this rank, when the worker advertises it.
+    pub fn cache_owner_capacity_blocks(self) -> Option<u64> {
+        self.cache_owner_capacity_blocks.map(NonZeroU64::get)
     }
 
     /// The budget fractional prefill thresholds are taken of: `max_num_batched_tokens`, or

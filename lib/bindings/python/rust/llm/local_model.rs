@@ -109,6 +109,11 @@ impl ModelRuntimeConfig {
     }
 
     #[setter]
+    fn set_cache_owner_capacity_blocks(&mut self, blocks: Option<u64>) {
+        self.inner.cache_owner_capacity_blocks = blocks;
+    }
+
+    #[setter]
     fn set_max_num_seqs(&mut self, max_num_seqs: u64) {
         self.inner.max_num_seqs = Some(max_num_seqs);
     }
@@ -209,6 +214,11 @@ impl ModelRuntimeConfig {
     #[getter]
     fn total_kv_blocks(&self) -> Option<u64> {
         self.inner.total_kv_blocks
+    }
+
+    #[getter]
+    fn cache_owner_capacity_blocks(&self) -> Option<u64> {
+        self.inner.cache_owner_capacity_blocks
     }
 
     #[getter]
