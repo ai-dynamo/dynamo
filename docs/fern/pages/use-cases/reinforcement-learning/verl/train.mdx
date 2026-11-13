@@ -21,8 +21,9 @@ The entrypoint runs verl's trainer. verl-recipe's Dynamo backend starts etcd, NA
 <Steps toc={true}>
   <Step title="Submit the RayJob" id="submit-the-rayjob">
 
-```bash
-kubectl apply -n "$NAMESPACE" -f - <<'EOF'
+Save the RayJob as `verl-grpo.yaml`:
+
+```yaml title="verl-grpo.yaml"
 apiVersion: ray.io/v1
 kind: RayJob
 metadata:
@@ -153,10 +154,15 @@ spec:
               emptyDir:
                 medium: Memory
                 sizeLimit: 256Gi
-EOF
 ```
 
 The entrypoint loads the recipe's `dynamo_trainer_v1_colocate` preset, which runs verl's V1 trainer with the engines and the trainer on the same GPUs. `actor_rollout_ref.rollout.name=dynamo` sends the rollouts through the recipe's Dynamo backend, and the `engine_kwargs.dynamo` keys configure it: KV-aware routing, the generated token IDs in every response, and engines that sleep while FSDP trains. These keys need the `++` prefix, which adds a key that the preset doesn't declare. The other overrides set up GRPO on GSM8K: 64 prompts per step with 8 answers each, 15 steps, and the test accuracy before training and every 5 steps. Because the entrypoint can't hold comments, [verl Configuration](../../../reference/reinforcement-learning/verl-configuration.mdx) describes each override.
+
+Apply the RayJob:
+
+```bash
+kubectl apply -n "$NAMESPACE" -f verl-grpo.yaml
+```
 
   </Step>
   <Step title="Follow the training log" id="follow-the-training-log">
