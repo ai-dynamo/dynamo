@@ -304,6 +304,19 @@ def make_backend_error(engine_response: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def finish_reason_error_message(
+    raw_reason: str | dict[str, Any] | None,
+) -> str | None:
+    """Extract a backend error before OpenAI finish-reason projection."""
+    if isinstance(raw_reason, dict):
+        error_message = raw_reason.get("error")
+        return error_message if isinstance(error_message, str) else None
+    if isinstance(raw_reason, str) and raw_reason.startswith("error"):
+        _, separator, detail = raw_reason.partition(":")
+        return detail.strip() if separator and detail.strip() else raw_reason
+    return None
+
+
 def make_internal_error(request_id: str, detail: str | None = None) -> dict[str, Any]:
     """Build an OpenAI-style internal error dict with request-specific fallback."""
     message = detail or f"Invalid engine response for request {request_id}"

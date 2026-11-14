@@ -49,6 +49,7 @@ from .utils import (
     PromptLogprobsAccumulator,
     as_error_envelope,
     extract_mm_urls,
+    finish_reason_error_message,
     handle_engine_error,
     make_internal_error,
     nvext_extra_field_requested,
@@ -283,19 +284,6 @@ _FINISH_REASON_MAP: dict[str, str] = {
     "cancelled": "stop",
     "content_filter": "stop",
 }
-
-
-def _finish_reason_error_message(
-    raw_reason: str | dict[str, Any] | None,
-) -> str | None:
-    """Extract a backend error before OpenAI finish-reason projection."""
-    if isinstance(raw_reason, dict):
-        error_message = raw_reason.get("error")
-        return error_message if isinstance(error_message, str) else None
-    if isinstance(raw_reason, str) and raw_reason.startswith("error"):
-        _, separator, detail = raw_reason.partition(":")
-        return detail.strip() if separator and detail.strip() else raw_reason
-    return None
 
 
 def _map_finish_reason(raw: str | dict[str, Any] | None) -> str | None:
@@ -1079,7 +1067,7 @@ class SglangProcessor:
                 raw_finish_reason = engine_response.get("finish_reason")
                 # Backend errors (structured or legacy "error: ..." strings)
                 # end the stream before OpenAI finish-reason projection.
-                error_message = _finish_reason_error_message(raw_finish_reason)
+                error_message = finish_reason_error_message(raw_finish_reason)
                 if error_message is not None:
                     logger.error(
                         "Router reported a generation error for request %s: %s",
