@@ -2661,7 +2661,7 @@ def _test_disagg_topology_required_prefill_pin_match_and_mismatch(
                 await post_expect_status(
                     session,
                     zone_b_payload,
-                    500,
+                    503,
                     "Expected required KV-transfer topology mismatch to fail",
                 )
 

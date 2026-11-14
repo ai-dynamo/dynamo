@@ -587,8 +587,8 @@ impl std::fmt::Display for UnknownPolicyClassRefusal {
 fn map_scheduler_error(error: dynamo_scheduler::host::KvSchedulerError) -> anyhow::Error {
     // Keep the two overload cases apart. A single overloaded worker can be
     // retried elsewhere; a pool with no free worker cannot, and migrating it
-    // would just bounce the request around. A filter rejection is unavailable,
-    // not overload, and becomes HTTP 503.
+    // would just bounce the request around. A filter rejection or an empty
+    // candidate set is unavailable, not overload, and becomes HTTP 503.
     let unknown_policy_class = matches!(
         error,
         dynamo_scheduler::host::KvSchedulerError::UnknownPolicyClass(_)
@@ -603,7 +603,8 @@ fn map_scheduler_error(error: dynamo_scheduler::host::KvSchedulerError) -> anyho
         dynamo_scheduler::host::KvSchedulerError::DeadlineExceeded => {
             (ErrorType::DeadlineExceeded, false)
         }
-        dynamo_scheduler::host::KvSchedulerError::AllEligibleWorkersFiltered => {
+        dynamo_scheduler::host::KvSchedulerError::NoEndpoints
+        | dynamo_scheduler::host::KvSchedulerError::AllEligibleWorkersFiltered => {
             (ErrorType::Unavailable, false)
         }
         dynamo_scheduler::host::KvSchedulerError::UnknownPolicyClass(_) => {
@@ -2076,6 +2077,15 @@ mod tests {
     use crate::local_model::runtime_config::ModelRuntimeConfig;
 
     #[test]
+    fn no_endpoints_maps_to_unavailable() {
+        let error = map_scheduler_error(KvSchedulerError::NoEndpoints);
+        assert!(
+            crate::http::service::metrics::request_was_unavailable(error.as_ref()),
+            "no eligible worker must reach HTTP as 503, got an untyped error: {error:#}"
+        );
+    }
+
+    #[test]
     fn all_filtered_workers_map_to_unavailable() {
         let error = map_scheduler_error(KvSchedulerError::AllEligibleWorkersFiltered);
         let dynamo_error = error
@@ -3406,13 +3416,13 @@ mod tests {
                     );
                     router.free("queued").await.unwrap();
                 }
-                None => assert!(matches!(
-                    result
-                        .err()
-                        .expect("no eligible worker")
-                        .downcast_ref::<KvSchedulerError>(),
-                    Some(KvSchedulerError::NoEndpoints)
-                )),
+                None => {
+                    let error = result.err().expect("no eligible worker");
+                    let dynamo_error = error
+                        .downcast_ref::<DynamoError>()
+                        .expect("no eligible worker should produce a DynamoError");
+                    assert_eq!(dynamo_error.error_type(), ErrorType::Unavailable);
+                }
             }
             assert_eq!(router.pending_count(), 0);
             for id in ["busy-a", "busy-b"] {

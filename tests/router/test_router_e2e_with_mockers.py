@@ -1800,7 +1800,7 @@ def test_update_model_taints_replaces_worker_routing_constraints(
             before_removed_a = read_count(workers.cpu_count_file)
             before_removed_b = read_count(workers.gpu_count_file)
             status, body = await post_chat(session, fast_payload)
-            assert status == 500, (
+            assert status == 503, (
                 "capacity/fast should have been replaced, not retained; "
                 f"status={status} body={body}"
             )
