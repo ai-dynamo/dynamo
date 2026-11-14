@@ -2676,6 +2676,230 @@ class TestRoutedEnginePath:
             {"unrelated"} if other_request else set()
         )
 
+    async def _run_requested_token_id_stream(
+        self,
+        module,
+        tokenizer,
+        items,
+        request_data,
+        *,
+        n=1,
+        stop=None,
+        wrap_post=None,
+        processed_prompt_ids=None,
+    ):
+        """Process routed token chunks with real vLLM and return response data."""
+        if processed_prompt_ids is None:
+            processed_prompt_ids = [1]
+        sampling_params = SamplingParams(
+            n=n, stop=stop, output_kind=module.RequestOutputKind.DELTA
+        )
+        vllm_request = module.EngineCoreRequest(
+            request_id="token-ids",
+            external_req_id="token-ids",
+            prompt_token_ids=processed_prompt_ids,
+            mm_features=None,
+            sampling_params=sampling_params,
+            pooling_params=None,
+            arrival_time=0.0,
+            lora_request=None,
+            cache_salt=None,
+            data_parallel_rank=None,
+        )
+        processor = _make_processor(module, _FakeRoutedEngine(items))
+        processor.output_processor = module.OutputProcessor(tokenizer, log_stats=False)
+        chat_request = prepost_module.ChatCompletionRequest(
+            model=MODEL, messages=[{"role": "user", "content": "hi"}]
+        )
+        posts = {}
+        for index in range(n):
+            post = StreamingPostProcessor(
+                tokenizer=tokenizer,
+                request_for_sampling=chat_request,
+                sampling_params=sampling_params,
+                prompt_token_ids=processed_prompt_ids,
+                tool_parser=None,
+                reasoning_parser_class=None,
+                chat_template_kwargs={},
+            )
+            posts[index] = wrap_post(post) if wrap_post else post
+        chunks = [
+            chunk
+            async for chunk in processor._generate_and_stream(
+                "token-ids", request_data, {}, [1], vllm_request, posts
+            )
+        ]
+        return [chunk["data"] for chunk in chunks if "data" in chunk]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("late_prompt_logprobs", [False, True])
+    async def test_requested_token_ids_stop_at_local_stop(
+        self, tokenizer, late_prompt_logprobs, real_vllm_processor_module
+    ):
+        """Generated IDs end at the token completing a local stop; prompt IDs once."""
+        prefix_tokens = tokenizer.encode("hello ST", add_special_tokens=False)
+        op_tokens = tokenizer.encode("OP", add_special_tokens=False)
+        items = [{"token_ids": [token], "index": 0} for token in prefix_tokens]
+        # The stop completes mid-chunk; the surplus 42 and the late chunk are
+        # generated after the stop and must not be reported.
+        items.append({"token_ids": [*op_tokens, 42], "index": 0})
+        prompt_payload = [None, {"17": {"logprob": -0.25, "rank": 1}}]
+        request_data = {
+            "model": MODEL,
+            "stream": True,
+            "nvext": {"extra_fields": ["completion_token_ids", "prompt_token_ids"]},
+        }
+        if late_prompt_logprobs:
+            # The terminal chunk waits for this metadata in pending_terminals.
+            items.append(
+                {"token_ids": [], "engine_data": {"prompt_logprobs": prompt_payload}}
+            )
+            request_data["prompt_logprobs"] = 0
+            request_data["nvext"]["extra_fields"].append("prompt_logprobs")
+        items.append({"token_ids": [42], "index": 0})
+
+        data = await self._run_requested_token_id_stream(
+            real_vllm_processor_module,
+            tokenizer,
+            items,
+            request_data,
+            stop=["STOP"],
+        )
+
+        content = "".join(
+            choice["delta"].get("content", "")
+            for frame in data
+            for choice in frame["choices"]
+        )
+        assert content == "hello "
+        assert data[-1]["choices"][-1]["finish_reason"] == "stop"
+        completion_ids = [
+            token_id
+            for frame in data
+            for token_id in frame["nvext"]["completion_token_ids"]
+        ]
+        assert completion_ids == prefix_tokens + op_tokens
+        assert [frame["nvext"].get("prompt_token_ids") for frame in data] == [None] * (
+            len(data) - 1
+        ) + [[1]]
+        assert [frame["nvext"].get("prompt_logprobs") for frame in data] == [None] * (
+            len(data) - 1
+        ) + [prompt_payload if late_prompt_logprobs else None]
+
+    @pytest.mark.asyncio
+    async def test_requested_token_ids_survive_buffered_output_and_hidden_eos(
+        self, tokenizer, real_vllm_processor_module
+    ):
+        """IDs held while the parser emits nothing reach the next chunk in order."""
+
+        class _HoldingPost:
+            # Emits nothing for the first chunks, as a tool parser does while
+            # it holds a possible marker, then releases the held text.
+            def __init__(self, inner, held_chunks):
+                self.inner = inner
+                self.held_chunks = held_chunks
+                self.held_text = ""
+
+            def __getattr__(self, name):
+                return getattr(self.inner, name)
+
+            def process_output(self, output):
+                """Hold initial output, then release its text with the next choice."""
+                choice = self.inner.process_output(output)
+                if self.held_chunks:
+                    self.held_chunks -= 1
+                    if choice is not None:
+                        self.held_text += choice["delta"].get("content", "")
+                    return None
+                if choice is not None and self.held_text:
+                    choice["delta"]["content"] = self.held_text + choice["delta"].get(
+                        "content", ""
+                    )
+                    self.held_text = ""
+                return choice
+
+        visible = tokenizer.encode("hello big world", add_special_tokens=False)
+        generated = [*visible, tokenizer.eos_token_id]
+        items = [{"token_ids": [token], "index": 0} for token in generated]
+        items[-1]["finish_reason"] = "stop"
+        held_chunks = 2
+
+        data = await self._run_requested_token_id_stream(
+            real_vllm_processor_module,
+            tokenizer,
+            items,
+            {
+                "model": MODEL,
+                "stream": True,
+                "nvext": {"extra_fields": ["completion_token_ids", "prompt_token_ids"]},
+            },
+            wrap_post=lambda post: _HoldingPost(post, held_chunks),
+        )
+
+        assert all(frame["choices"] for frame in data)
+        content = "".join(
+            choice["delta"].get("content", "")
+            for frame in data
+            for choice in frame["choices"]
+        )
+        assert content == "hello big world"
+        assert data[-1]["choices"][-1]["finish_reason"] == "stop"
+        assert data[0]["nvext"]["completion_token_ids"] == generated[: held_chunks + 1]
+        completion_ids = [
+            token_id
+            for frame in data
+            for token_id in frame["nvext"]["completion_token_ids"]
+        ]
+        assert completion_ids == generated
+        assert [frame["nvext"].get("prompt_token_ids") for frame in data] == [None] * (
+            len(data) - 1
+        ) + [[1]]
+
+    @pytest.mark.asyncio
+    # Multimodal preprocessing can expand the helper's raw [1] prompt.
+    @pytest.mark.parametrize("processed_prompt_ids", [[1], [1, 99, 99, 2]])
+    async def test_prompt_token_ids_sent_once_with_parallel_choices(
+        self, tokenizer, real_vllm_processor_module, processed_prompt_ids
+    ):
+        """Send processed prompt IDs once without adding completion IDs."""
+        first = tokenizer.encode("first answer", add_special_tokens=False)
+        second = tokenizer.encode("second answer", add_special_tokens=False)
+        items = [
+            {"token_ids": first, "index": 0, "finish_reason": "length"},
+            {"token_ids": second, "index": 1, "finish_reason": "length"},
+        ]
+
+        data = await self._run_requested_token_id_stream(
+            real_vllm_processor_module,
+            tokenizer,
+            items,
+            {
+                "model": MODEL,
+                "stream": True,
+                "n": 2,
+                "nvext": {"extra_fields": ["prompt_token_ids"]},
+            },
+            n=2,
+            processed_prompt_ids=processed_prompt_ids,
+        )
+
+        finished = {
+            choice["index"]
+            for frame in data
+            for choice in frame["choices"]
+            if choice["finish_reason"]
+        }
+        assert finished == {0, 1}
+        prompt_frames = [
+            frame for frame in data if "prompt_token_ids" in frame.get("nvext", {})
+        ]
+        assert len(prompt_frames) == 1
+        assert prompt_frames[0]["nvext"]["prompt_token_ids"] == processed_prompt_ids
+        assert prompt_frames[0]["choices"][0]["finish_reason"] == "length"
+        assert all(
+            "completion_token_ids" not in frame.get("nvext", {}) for frame in data
+        )
+
     @pytest.mark.asyncio
     async def test_backend_rejection_keeps_the_backend_status(
         self, vllm_processor_module
