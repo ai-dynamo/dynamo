@@ -1,0 +1,322 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Train with Slime and Megatron-LM on KubeRay
+subtitle: Run a Slime GRPO job in a KubeRay RayJob that sends its rollouts through Dynamo
+---
+
+A KubeRay `RayJob` describes a Ray cluster and the job to run on it. KubeRay creates the cluster, here a single head Pod in the Slime image, then starts a submitter Pod that runs `ray job submit` with the job's entrypoint and streams the driver log. When the job ends, KubeRay deletes the Ray cluster and frees its GPU.
+
+Each training step sends a batch of rollouts through the Dynamo frontend, trains the policy with Megatron-LM, and syncs the new weights to both engines through the shared volume.
+
+## Prerequisites
+
+- Complete [Serve Inference with Dynamo](serve-inference.mdx), so that both engines are ready.
+- Have one free GPU for the Ray head, on a node with 16 CPUs and 200 GiB of memory free.
+
+## Start Training
+
+<Steps toc={true}>
+  <Step title="Add the Slime custom functions" id="add-the-slime-custom-functions">
+
+Slime accepts Python functions that replace or extend parts of its loop. This ConfigMap holds the two that the integration needs. The RayJob mounts it at `/opt/slime-functions`.
+
+- `dynamo_generate.py` sends rollouts to Dynamo. Slime starts its own SGLang router and normally sends each generation request to it. Slime's `--custom-generate-function-path` flag replaces the function that sends one sample's request. This one copies Slime's arguments, replaces the router address with the Dynamo frontend address in `DYNAMO_ROLLOUT_URL`, and calls Slime's streaming generator. `abort_mode = "request"` tells Slime to cancel in-flight requests one stream at a time instead of calling each engine's server-wide abort API.
+- `weight_permissions.py` lets the engines read each weight update. Slime runs as root and writes the update's safetensors files readable only by their owner. The Dynamo SGLang engines run as a non-root user (UID 1000), so they can't load those files. Slime calls this function after it writes each update and before the engines load it.
+
+```bash
+kubectl apply -n "$NAMESPACE" -f - <<'EOF'
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: slime-functions
+data:
+  dynamo_generate.py: |
+    import copy
+    import os
+    from urllib.parse import urlsplit
+
+    from slime.rollout.sglang_streaming_rollout import generate_streaming as slime_generate_streaming
+
+
+    async def generate_streaming(args, sample, sampling_params):
+        frontend = urlsplit(os.environ["DYNAMO_ROLLOUT_URL"])
+        frontend_args = copy.copy(args)
+        frontend_args.sglang_router_ip = frontend.hostname
+        frontend_args.sglang_router_port = frontend.port
+        return await slime_generate_streaming(frontend_args, sample, sampling_params)
+
+
+    generate_streaming.abort_mode = "request"
+  weight_permissions.py: |
+    import os
+
+
+    def make_weights_readable(args, version_dir, rollout_engines):
+        for root, dirs, files in os.walk(version_dir):
+            for name in dirs:
+                os.chmod(os.path.join(root, name), 0o755)
+            for name in files:
+                os.chmod(os.path.join(root, name), 0o644)
+        os.chmod(version_dir, 0o755)
+EOF
+```
+
+[`examples/rl/slime/dynamo_generate.py`](https://github.com/ai-dynamo/dynamo/blob/main/examples/rl/slime/dynamo_generate.py) has the same generate function with validation of `DYNAMO_ROLLOUT_URL`.
+
+  </Step>
+  <Step title="Submit the RayJob" id="submit-the-rayjob">
+
+```bash
+kubectl apply -n "$NAMESPACE" -f - <<'EOF'
+apiVersion: ray.io/v1
+kind: RayJob
+metadata:
+  name: slime-grpo
+spec:
+  entrypoint: >-
+    python3 /root/slime/train.py
+    --rollout-external-engine-addrs slime-sglang-engine-0:30000 slime-sglang-engine-1:30000
+    --custom-generate-function-path dynamo_generate.generate_streaming
+    --sglang-incremental-streaming-output
+    --update-weight-transport disk
+    --update-weight-disk-dir /data/weight-updates
+    --custom-update-weight-post-write-path weight_permissions.make_weights_readable
+    --hf-checkpoint /data/models/Qwen3-0.6B
+    --ref-load /data/models/Qwen3-0.6B_torch_dist
+    --swiglu
+    --num-layers 28
+    --hidden-size 1024
+    --ffn-hidden-size 3072
+    --num-attention-heads 16
+    --group-query-attention
+    --num-query-groups 8
+    --use-rotary-position-embeddings
+    --disable-bias-linear
+    --normalization RMSNorm
+    --norm-epsilon 1e-6
+    --rotary-base 1000000
+    --vocab-size 151936
+    --kv-channels 128
+    --qk-layernorm
+    --prompt-data /data/datasets/gsm8k/train.parquet
+    --input-key messages
+    --label-key label
+    --apply-chat-template
+    --apply-chat-template-kwargs '{"enable_thinking": false}'
+    --rollout-shuffle
+    --rm-type math
+    --num-rollout 10
+    --rollout-batch-size 8
+    --n-samples-per-prompt 8
+    --global-batch-size 64
+    --rollout-max-response-len 1024
+    --actor-num-nodes 1
+    --actor-num-gpus-per-node 1
+    --use-dynamic-batch-size
+    --max-tokens-per-gpu 9216
+    --advantage-estimator grpo
+    --eps-clip-high 0.28
+    --optimizer adam
+    --lr 1e-6
+    --lr-decay-style constant
+    --weight-decay 0.1
+    --adam-beta1 0.9
+    --adam-beta2 0.98
+    --attention-dropout 0.0
+    --hidden-dropout 0.0
+    --accumulate-allreduce-grads-in-fp32
+    --attention-softmax-in-fp32
+    --attention-backend flash
+  runtimeEnvYAML: |
+    env_vars:
+      PYTHONPATH: "/root/Megatron-LM:/root/slime:/opt/slime-functions"
+      DYNAMO_ROLLOUT_URL: "http://slime-sglang-frontend:8000"
+      CUDA_DEVICE_MAX_CONNECTIONS: "1"
+  shutdownAfterJobFinishes: true
+  ttlSecondsAfterFinished: 60
+  rayClusterSpec:
+    rayVersion: "2.59.0"
+    headGroupSpec:
+      rayStartParams: {}
+      template:
+        spec:
+          containers:
+            - name: ray-head
+              image: slimerl/slime:nightly-dev-20261027a-cu130
+              resources:
+                requests:
+                  cpu: "16"
+                  memory: 200Gi
+                  nvidia.com/gpu: "1"
+                limits:
+                  memory: 200Gi
+                  nvidia.com/gpu: "1"
+              volumeMounts:
+                - name: slime-data
+                  mountPath: /data
+                - name: slime-functions
+                  mountPath: /opt/slime-functions
+                - name: dshm
+                  mountPath: /dev/shm
+          volumes:
+            - name: slime-data
+              persistentVolumeClaim:
+                claimName: slime-data
+            - name: slime-functions
+              configMap:
+                name: slime-functions
+            - name: dshm
+              emptyDir:
+                medium: Memory
+                sizeLimit: 64Gi
+EOF
+```
+
+The RayJob has three parts:
+
+- **The job.** `entrypoint` is the training command: Slime's `train.py` and its flags. `runtimeEnvYAML` sets environment variables for every process in the job. The Ray actors that Slime starts don't inherit the driver's shell environment, so the variables have to be set here. `PYTHONPATH` adds Megatron-LM, Slime, and the custom functions. `DYNAMO_ROLLOUT_URL` tells `dynamo_generate.py` where the frontend is. Megatron-LM expects `CUDA_DEVICE_MAX_CONNECTIONS=1`.
+- **The Ray cluster.** The cluster has only a head Pod, which runs the Slime driver and the 1-GPU Megatron-LM trainer. The head needs a GPU even without the trainer, because the driver imports Transformer Engine, which loads `libcuda`. `rayVersion` matches the Ray version in the Slime image, and KubeRay uses it to pick version-specific behavior such as the head's health checks. KubeRay fills in the `ray start` options, including the CPU and GPU counts, from the Pod. `/dev/shm` is memory-backed for the Ray object store.
+- **Cleanup.** `shutdownAfterJobFinishes` and `ttlSecondsAfterFinished` delete the Ray cluster 60 seconds after the job ends. The RayJob keeps the job status, and its submitter keeps the driver log.
+
+These flags connect Slime to Dynamo:
+
+| Flag | Purpose |
+|---|---|
+| `--rollout-external-engine-addrs` | Uses the two Dynamo-managed engines instead of launching SGLang. Slime reads each engine's `/server_info` and registers the engine with its own router. |
+| `--custom-generate-function-path` | Loads `dynamo_generate.generate_streaming`, so rollouts go to the Dynamo frontend instead of that router. |
+| `--sglang-incremental-streaming-output` | Matches the engines' `--incremental-streaming-output` setting. |
+| `--update-weight-transport disk` | Syncs weights through files instead of NCCL. For each sync, Slime writes a full Hugging Face checkpoint, about 1.2 GB for this model, and each engine reloads it through `/update_weights_from_disk`. The default NCCL transport fails with the SGLang 0.5.21 engines in Dynamo 1.6 images. See [Known Issues](../../../reference/general/releases/known-issues.mdx#v160). |
+| `--update-weight-disk-dir` | Writes each sync to a new directory under `/data/weight-updates`, which the engines also mount. Slime deletes the directory after the engines load it. |
+| `--custom-update-weight-post-write-path` | Runs `weight_permissions.make_weights_readable` after each sync is written. |
+
+The other flags are standard Slime settings. See the [Slime usage guide](https://github.com/THUDM/slime/blob/main/docs/en/get_started/usage.md) for each one.
+
+| Flags | Setting |
+|---|---|
+| `--hf-checkpoint`, `--ref-load` | Start from the converted Megatron-LM checkpoint. Slime reads the tokenizer and the Hugging Face model layout for weight syncs from `--hf-checkpoint`. |
+| `--swiglu` through `--qk-layernorm` | The Qwen3-0.6B architecture: the same `MODEL_ARGS` that the setup Job used. |
+| `--prompt-data` through `--rm-type` | Read GSM8K prompts from the `messages` column and answers from `label`, apply the chat template with Qwen3 thinking turned off so that answers fit in 1,024 tokens, and score answers with Slime's rule-based math reward. |
+| `--num-rollout` through `--rollout-max-response-len` | Run 10 rollouts of 8 prompts with 8 samples each, and train on each rollout in one step. |
+| `--actor-num-nodes` through `--max-tokens-per-gpu` | Train with Megatron-LM on one GPU, packing up to 9,216 tokens into each micro-batch. |
+| `--advantage-estimator` through `--attention-backend` | Use GRPO with an upper clip range of 0.28, Adam at a constant learning rate of 1e-6, no dropout, FP32 gradient accumulation and softmax, and FlashAttention. |
+
+  </Step>
+  <Step title="Follow the training log" id="follow-the-training-log">
+
+Wait for Ray to start the job, then stream the driver log. The submitter is a Kubernetes Job with the same name as the RayJob:
+
+```bash
+kubectl wait -n "$NAMESPACE" --for=jsonpath='{.status.jobStatus}'=RUNNING rayjob/slime-grpo --timeout=30m
+kubectl logs -n "$NAMESPACE" -f job/slime-grpo
+```
+
+The log is long. These lines trace the integration, in order:
+
+```text
+[2026-11-05 00:58:43] external.py:147 - Detected external SGLang engines: [{'url': 'http://slime-sglang-engine-0:30000', ...}, {'url': 'http://slime-sglang-engine-1:30000', ...}]
+(RolloutManager pid=2377) [2026-11-05 00:58:56] deployment.py:61 - Router launched at 10.244.5.20:3880, Prometheus port: 4381
+(MegatronTrainRayActor pid=2378) [2026-11-05 00:59:17] hf_checkpoint_saver.py:56 - Saving model in HuggingFace format to /data/weight-updates/weight_v000001
+(MegatronTrainRayActor pid=2378) [2026-11-05 00:59:23] train_metric_utils.py:135 - rollout 0: {'rollout/response_lengths': 137.765625, ..., 'rollout/raw_reward': 0.640625, ...}
+(MegatronTrainRayActor pid=2378) [2026-11-05 00:59:29] model.py:976 - step 0: {..., 'train/train_rollout_logprob_abs_diff': 0.010109774768352509, 'train/grad_norm': 2.381645679473877, ...}
+(MegatronTrainRayActor pid=2378) [2026-11-05 00:59:29] hf_checkpoint_saver.py:56 - Saving model in HuggingFace format to /data/weight-updates/weight_v000002
+...
+SUCC cli.py:67 -- Job 'slime-grpo-d5tcx' succeeded
+```
+
+1. Slime reads `/server_info` from both engines.
+2. Slime starts its own SGLang router. The router only tracks the engines; rollouts go to the Dynamo frontend.
+3. Slime syncs its weights to both engines once before the first rollout, so the engines start from the trainer's exact weights.
+4. `rollout 0` reports the 64 samples generated through Dynamo. `rollout/raw_reward` is the fraction of correct answers.
+5. `step 0` reports the training step. `train/train_rollout_logprob_abs_diff` compares the token log-probabilities that the engines returned with the ones that Megatron-LM computes. A value near 0.01 at every step shows that the engines generated with the weights that Slime synced before that rollout. An engine left on older weights would make the value grow.
+6. The sync, rollout, and step lines repeat for steps 1 through 9. A last sync follows step 9, and the job succeeds.
+
+With 8 prompts per step, the reward moves between about 0.4 and 0.8 from step to step. Ten steps at this learning rate test the pipeline; they don't show learning.
+
+  </Step>
+</Steps>
+
+## Verify the Run
+
+<Steps toc={true}>
+  <Step title="Check the job status" id="check-the-job-status">
+
+```bash
+kubectl get rayjob slime-grpo -n "$NAMESPACE"
+```
+
+```text
+NAME         JOB STATUS   DEPLOYMENT STATUS   RAY CLUSTER NAME   START TIME             END TIME               AGE
+slime-grpo   SUCCEEDED    Complete            slime-grpo-6gsc7   2026-11-05T00:57:54Z   2026-11-05T01:00:30Z   2m40s
+```
+
+  </Step>
+  <Step title="Check that Dynamo routed the rollouts" id="check-that-dynamo-routed-the-rollouts">
+
+The frontend logs one `Selected worker` line for each request that it routes. Ten rollouts of 64 samples make 640 requests:
+
+```bash
+kubectl logs -n "$NAMESPACE" -l dynamo.nvidia.com/slime-role=frontend --tail=-1 \
+  | grep -c 'Selected worker'
+```
+
+```text
+640
+```
+
+Each line also shows the router mode, `round-robin`, and the worker that the frontend picked, so each engine served 320 of the requests.
+
+  </Step>
+  <Step title="Check that both engines loaded every update" id="check-that-both-engines-loaded-every-update">
+
+Count the successful weight reloads in each engine's log:
+
+```bash
+for worker in worker-0 worker-1; do
+  echo "$worker: $(kubectl logs -n "$NAMESPACE" -l dynamo.nvidia.com/slime-role=$worker --tail=-1 \
+    | grep -c 'POST /update_weights_from_disk HTTP/1.1" 200')"
+done
+```
+
+```text
+worker-0: 11
+worker-1: 11
+```
+
+Each engine reloads the weights once before the first rollout and once after each of the 10 training steps.
+
+  </Step>
+</Steps>
+
+## Clean Up
+
+Delete the namespace. This removes the RayJob, the DGD and its Services, the setup Job, the ConfigMap, and the PersistentVolumeClaim. If the StorageClass uses the `Delete` reclaim policy, the storage provider also deletes the volume with the downloaded model:
+
+```bash
+kubectl delete namespace "$NAMESPACE"
+```
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| The job fails at the first weight sync with `HTTPError: 500 Server Error` for `/update_weights_from_disk`, both engine containers restart, and the engine logs show `FileNotFoundError` for a `.safetensors` file | The engines can't read the weight files. Check that the RayJob passes `--custom-update-weight-post-write-path` and that the `slime-functions` ConfigMap includes `weight_permissions.py`. |
+| `update_weights_from_distributed` returns HTTP 400 | Slime is using NCCL weight updates, which the SGLang 0.5.21 engines reject. Keep `--update-weight-transport disk`. |
+| The job fails with `ModuleNotFoundError: No module named 'dynamo_generate'` | Check that the ConfigMap is mounted at `/opt/slime-functions` and that `PYTHONPATH` in `runtimeEnvYAML` includes that path. A variable set only in the entrypoint doesn't reach the Ray actors. |
+| The driver log shows `OSError: libcuda.so.1: cannot open shared object file` | The Ray head has no GPU. Keep the `nvidia.com/gpu` request on the head container. |
+| The job fails during startup with an `AssertionError` that names an engine setting, such as `name='enable_memory_saver'` | Slime checks each engine's `/server_info` against the settings that it would have launched the engine with. Remove Slime flags that change engine settings, such as `--offload-rollout`, or apply the same setting to the DGD workers. |
+| An engine Pod restarts during training | Slime doesn't recover external engines. Delete the RayJob, wait for the DGD to become ready, and apply the RayJob again. |
+
+## Current Limitations
+
+- Weight syncs write full checkpoints to disk. Slime's default NCCL transport fails with the SGLang 0.5.21 engines in Dynamo 1.6 images; see [Known Issues](../../../reference/general/releases/known-issues.mdx#v160). Delta disk updates need the `/pull_weights` route from Slime's SGLang patch, which the Dynamo images don't include.
+- The engines and the trainer use separate GPUs, so Slime's `--colocate` mode doesn't apply.
+- Slime's streaming generator, which `dynamo_generate.py` calls, doesn't support score centering (`--use-score-centering`).
+
+## Next Steps
+
+- **Add engines.** Add `worker-2` and later components to the DGD, each with one replica and its own engine Service, and list every engine address in `--rollout-external-engine-addrs`.
+- **Train on more GPUs.** Add a `workerGroupSpecs` group to the RayJob with the same image and volumes, and raise `--actor-num-nodes` or `--actor-num-gpus-per-node` to match. Keep the GPU on the head.
+- **Keep the trained model.** Add `--save` with a directory on `/data` and `--save-interval`. Slime also saves after the last rollout.
+- **Compare routing.** The frontend uses round-robin routing, although the 8 samples for each prompt share a prefix. See [Routing](serve-inference.mdx#routing) to decide whether KV-aware routing suits your rollouts.
+- **Compare weight-update transports.** Slime's [external rollout engine guide](https://github.com/THUDM/slime/blob/main/docs/en/advanced/external-rollout-engines.md) covers NCCL, full-checkpoint disk, and delta disk updates.

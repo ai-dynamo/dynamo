@@ -1,0 +1,49 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: verl Configuration
+subtitle: Hydra overrides and environment variables that run verl rollouts through Dynamo
+---
+
+The [verl tutorial](../../use-cases/reinforcement-learning/verl/train.mdx) runs verl's PPO trainer, `verl.trainer.main_ppo`, with the Dynamo rollout backend from [verl-recipe](https://github.com/verl-project/verl-recipe/tree/main/dynamo). This page describes the Hydra overrides and the recipe's environment variables that the tutorial's RayJob sets. The recipe's README lists the backend's other options, and the [verl configuration guide](https://verl.readthedocs.io/en/latest/examples/config.html) describes verl's own.
+
+## Dynamo Rollout Backend
+
+These overrides select the recipe's Dynamo backend and configure the frontend and the vLLM engines that it starts. In the table, `rollout.` stands for `actor_rollout_ref.rollout.`, and `dynamo.` stands for `actor_rollout_ref.rollout.engine_kwargs.dynamo.`.
+
+| Override | Tutorial value | Description |
+|---|---|---|
+| `--config-path`, `--config-name` | `/data/verl/recipe/dynamo/config`, `dynamo_trainer_v1_colocate` | Loads the recipe's preset: verl's V1 trainer in `colocate_async` mode, with the engines and the trainer on the same GPUs. |
+| `rollout.name`, `rollout.mode` | `dynamo`, `async` | Generates rollouts with the recipe's asynchronous Dynamo backend. |
+| `rollout.tensor_model_parallel_size` | `2` | Runs one vLLM engine per two GPUs: four engines on a node's 8 GPUs. |
+| `rollout.gpu_memory_utilization` | `0.6` | Caps each engine at 60% of its GPUs' memory while it's awake. |
+| `rollout.calculate_log_probs` | `True` | Returns the engines' token log-probabilities, which verl compares with the trainer's. |
+| `++dynamo.router_mode` | `kv` | Routes requests with Dynamo's KV router. The recipe also accepts `round-robin`, `random`, and `least-loaded`. |
+| `++dynamo.thunderagent.enabled` | `false` | Routes with the router that `router_mode` selects instead of ThunderAgent. |
+| `++dynamo.request_engine_data`, `++dynamo.request_completion_token_ids` | `true` | Returns the token IDs that the engines generated, so verl trains on the exact tokens. Because `rollout.calculate_log_probs` is `True`, the recipe never trains on re-encoded text: a finished response without token IDs raises a `RuntimeError`, and an aborted one returns no tokens. The startup probe fails the job if its finished response has no token IDs. During training, the error fails only its request and can leave the trainer waiting instead of ending the job. |
+| `++dynamo.request_timeout_s` | `1800` | Allows each rollout request up to 30 minutes. |
+| `++dynamo.free_engine_on_train` | `true` | Puts the engines to sleep while FSDP trains. It must match `rollout.free_cache_engine`, which the preset sets to `true`. |
+
+The keys under `engine_kwargs.dynamo` need the `++` prefix, which adds a key that the preset doesn't declare. Without it, Hydra fails with `Key 'router_mode' is not in struct`.
+
+## Environment Variables
+
+| Variable | Tutorial value | Description |
+|---|---|---|
+| `VERL_USE_EXTERNAL_MODULES` | `recipe.dynamo.register` | Registers the recipe's `dynamo` rollout backend when verl starts. The preset passes it on to the Ray workers. |
+| `VERL_DYNAMO_REFIT_STRICT` | `1` | Stops the run if the recipe's weight-update self-test fails, instead of logging a warning. |
+| `VERL_DYNAMO_LOG_DIR` | `/data/runs/verl-grpo/dynamo-logs` | Writes the frontend and engine logs to this directory. The tutorial passes it to every Ray process with the override `++ray_kwargs.ray_init.runtime_env.env_vars.VERL_DYNAMO_LOG_DIR`. |
+| `DYN_TCP_RPC_HOST` | The Pod IP | Binds Dynamo's request plane to this address. See [Runtime Configuration](../components/runtime-configuration.mdx). |
+
+## Training Overrides
+
+The tutorial's other overrides are standard verl settings.
+
+| Overrides | Tutorial setting |
+|---|---|
+| `algorithm.*` | Use GRPO advantages, without a KL penalty in the reward. |
+| `data.*` | Train on 64 GSM8K prompts per step, with up to 512 prompt tokens and 1,024 response tokens. Drop longer prompts. |
+| `actor_rollout_ref.model.*` | Train Qwen2.5-7B-Instruct with padding removal and gradient checkpointing. |
+| `actor_rollout_ref.actor.*`, `actor_rollout_ref.ref.*` | Update the policy 4 times per step, 16 prompts at a time, with a learning rate of 1e-6, a `low_var_kl` loss against the reference model with a coefficient of 0.001, and no entropy bonus. Keep the reference model's parameters in CPU memory. |
+| `rollout.n`, `*.log_prob_micro_batch_size_per_gpu` | Sample 8 answers per prompt, and compute log-probabilities 8 sequences at a time per GPU. |
+| `trainer.*`, `hydra.run.dir` | Log to the console only, because verl's default also logs to Weights & Biases, which asks for a login. Train on one node with 8 GPUs for 15 steps, score the GSM8K test split before training and every 5 steps, and save no checkpoints. Write Hydra's run directory, the rollouts, and the validation answers under `/data/runs/verl-grpo`. |
