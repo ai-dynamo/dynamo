@@ -124,17 +124,17 @@ def test_terminate_all_reaps_children(monkeypatch, ignore_sigterm, returncode):
     if ignore_sigterm:
         code += "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
     code += "print('ready', flush=True)\ntime.sleep(60)\n"
-    child = subprocess.Popen(
+    with subprocess.Popen(
         [sys.executable, "-c", code], stdout=subprocess.PIPE, text=True
-    )
-    try:
-        assert child.stdout.readline() == "ready\n"
-        server._terminate_all([child])
-        assert child.poll() == returncode
-    finally:
-        child.kill()
-        child.wait()
-        child.stdout.close()
+    ) as child:
+        try:
+            assert child.stdout.readline() == "ready\n"
+            server._terminate_all([child])
+            # returncode is set only by a reap, so check it before anything
+            # here could reap the child.
+            assert child.returncode == returncode
+        finally:
+            child.kill()
 
 
 @pytest.mark.timeout(10)

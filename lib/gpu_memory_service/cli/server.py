@@ -72,11 +72,15 @@ def _terminate_all(processes: list[subprocess.Popen]) -> None:
             process.wait()
 
 
+def _ignore_stop_signals() -> None:
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+
+
 def _exit_on_signal(*_args) -> None:
     # Leave stopping to the caller's finally: this may interrupt Popen.poll()
     # holding its non-reentrant waitpid lock. Ignore repeats to protect that stop.
-    signal.signal(signal.SIGTERM, signal.SIG_IGN)
-    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    _ignore_stop_signals()
     raise SystemExit(0)
 
 
@@ -130,9 +134,11 @@ def _run_v1_ranks(loader_argv: list[str] | None, confine: bool) -> int:
     signal.signal(signal.SIGTERM, _exit_on_signal)
     signal.signal(signal.SIGINT, _exit_on_signal)
     try:
-        processes.extend(ranks.start_ranks(_v1_gpus(), command, confine=confine))
+        ranks.start_ranks(_v1_gpus(), command, processes, confine=confine)
         return _supervise(processes)
     finally:
+        # A signal must not cut the stop short, even when an exception got us here.
+        _ignore_stop_signals()
         _terminate_all(processes)
 
 
@@ -244,6 +250,7 @@ def main(argv: list[str] | None = None) -> None:
 
         raise SystemExit(_supervise(servers, loaders))
     finally:
+        _ignore_stop_signals()
         _terminate_all([*servers, *loaders])
 
 
