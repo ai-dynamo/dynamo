@@ -59,11 +59,27 @@ fn build_preprocessor(
     reasoning_parser: Option<&str>,
     tool_call_parser: Option<&str>,
 ) -> Arc<OpenAIPreprocessor> {
+    build_preprocessor_with_native_reasoning_gate(reasoning_parser, tool_call_parser, None)
+}
+
+fn build_preprocessor_with_native_reasoning_gate(
+    reasoning_parser: Option<&str>,
+    tool_call_parser: Option<&str>,
+    native_reasoning_gate: Option<bool>,
+) -> Arc<OpenAIPreprocessor> {
     let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
     let mut mdc = ModelDeploymentCard::load_from_disk(model_path, None).unwrap();
     mdc.runtime_config.reasoning_parser = reasoning_parser.map(ToString::to_string);
     mdc.runtime_config.tool_call_parser = tool_call_parser.map(ToString::to_string);
+    if let Some(enabled) = native_reasoning_gate {
+        mdc.runtime_config
+            .set_engine_specific(
+                dynamo_llm::local_model::runtime_config::TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY,
+                enabled,
+            )
+            .unwrap();
+    }
     OpenAIPreprocessor::new(mdc).unwrap()
 }
 
@@ -3824,6 +3840,234 @@ async fn all_unified_families_honor_normalized_request_controls_for_all_selector
                     );
                 }
             }
+        }
+    }
+}
+
+/// A correct final aggregate can hide buffering; require progress while the
+/// producer withholds later fragments and the finish chunk.
+#[tokio::test]
+async fn glm_immediate_json_streams_before_finish() {
+    if test_utils::run_isolated(
+        concat!(module_path!(), "::glm_immediate_json_streams_before_finish"),
+        &[(env_llm::DYN_PARSER_VERSION, "2")],
+    ) {
+        return;
+    }
+
+    let json = r#"{"country":"France","capital":"París </think> <think>"}"#;
+    for (reasoning, tool) in [
+        (Some("glm45"), None),
+        (None, Some("glm47")),
+        (Some("glm45"), Some("glm47")),
+    ] {
+        let preprocessor =
+            build_preprocessor_with_native_reasoning_gate(reasoning, tool, Some(false));
+        for mut request in [
+            streaming_json_object_request(false),
+            streaming_json_schema_request(false),
+        ] {
+            for control in ["enable_thinking", "thinking"] {
+                request.chat_template_args = Some(HashMap::from([(
+                    control.to_string(),
+                    serde_json::json!(false),
+                )]));
+                request.normalize_reasoning_template_args().unwrap();
+                let (tx, rx) = mpsc::unbounded();
+                let output = preprocessor
+                    .postprocessor_parsing_stream(rx, &request, true, false)
+                    .unwrap();
+                tokio::pin!(output);
+                let mut chunks = Vec::new();
+                let mut content = String::new();
+                let mut expected = String::new();
+                for fragment in [
+                    r#"{"country":"#,
+                    r#""France","capital":"Parí"#,
+                    "s </th",
+                    "ink> <thi",
+                    "nk>\"}",
+                ] {
+                    tx.unbounded_send(Annotated::from_data(mock_content_chunk(fragment)))
+                        .unwrap();
+                    expected.push_str(fragment);
+                    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                        while content != expected {
+                            let chunk = output.next().await.expect("input remains open");
+                            if let Some(data) = &chunk.data {
+                                for choice in &data.inner.choices {
+                                    assert!(choice.finish_reason.is_none());
+                                    assert!(
+                                        choice
+                                            .delta
+                                            .reasoning_content
+                                            .as_deref()
+                                            .is_none_or(str::is_empty)
+                                    );
+                                    if let Some(text) = &choice.delta.content {
+                                        content.push_str(get_text(text));
+                                        assert!(expected.starts_with(&content));
+                                    }
+                                }
+                            }
+                            chunks.push(chunk);
+                        }
+                    })
+                    .await
+                    .unwrap_or_else(|_| {
+                        panic!(
+                            "{reasoning:?} {tool:?} {control}: JSON held until more input or finish; expected={expected:?}, received={content:?}"
+                        )
+                    });
+                    assert_eq!(content, expected);
+                }
+                assert_eq!(content, json);
+
+                tx.unbounded_send(Annotated::from_data(mock_final_chunk()))
+                    .unwrap();
+                drop(tx);
+                chunks.extend(
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(1),
+                        output.collect::<Vec<_>>(),
+                    )
+                    .await
+                    .expect("postprocessor must finish after EOF"),
+                );
+                let mut options =
+                    ParsingOptions::new(tool.map(str::to_owned), reasoning.map(str::to_owned));
+                options.structured_response = true;
+                let batch = NvCreateChatCompletionResponse::from_annotated_stream(
+                    stream::iter(chunks.clone()),
+                    options,
+                )
+                .await
+                .unwrap();
+                let choice = &batch.inner.choices[0];
+                assert_eq!(
+                    choice
+                        .message
+                        .content
+                        .as_ref()
+                        .map(get_text)
+                        .unwrap_or_default(),
+                    json
+                );
+                assert!(
+                    choice
+                        .message
+                        .reasoning_content
+                        .as_deref()
+                        .unwrap_or_default()
+                        .is_empty()
+                );
+                assert_eq!(choice.finish_reason, Some(FinishReason::Stop));
+                let out = drain_stream(stream::iter(chunks)).await;
+                assert_eq!(out.content, json);
+                assert!(out.reasoning.is_empty());
+                assert_eq!(out.finish_reasons, vec![FinishReason::Stop]);
+            }
+        }
+    }
+}
+
+/// JSON syntax does not prove an answer when the native gate delays grammar
+/// activation; JSON-shaped thought must remain in the reasoning channel.
+#[tokio::test]
+async fn glm_deferred_json_preserves_json_shaped_reasoning() {
+    if test_utils::run_isolated(
+        concat!(
+            module_path!(),
+            "::glm_deferred_json_preserves_json_shaped_reasoning"
+        ),
+        &[(env_llm::DYN_PARSER_VERSION, "2")],
+    ) {
+        return;
+    }
+
+    let preprocessor =
+        build_preprocessor_with_native_reasoning_gate(Some("glm45"), Some("glm47"), Some(true));
+    let request = streaming_json_object_request(false);
+    let reasoning = r#"{"plan":"check"}"#;
+    let answer = r#"{"answer":"hello"}"#;
+    let raw = format!("{reasoning}</think>{answer}");
+    for split in 0..=raw.len() {
+        let input = stream::iter(
+            [
+                mock_content_chunk(&raw[..split]),
+                mock_content_chunk(&raw[split..]),
+                mock_final_chunk(),
+            ]
+            .into_iter()
+            .map(Annotated::from_data),
+        );
+        let output = preprocessor
+            .postprocessor_parsing_stream(input, &request, true, false)
+            .unwrap();
+        let out = drain_stream(output).await;
+        assert_eq!(out.reasoning, reasoning, "split {split}");
+        assert_eq!(out.content, answer, "split {split}");
+        assert_eq!(out.finish_reasons, vec![FinishReason::Stop]);
+    }
+}
+
+/// An immediate JSON grammar must not bypass a required or named tool envelope
+/// when the request also contains a response format.
+#[tokio::test]
+async fn glm_immediate_json_keeps_forced_tool_framing() {
+    if test_utils::run_isolated(
+        concat!(
+            module_path!(),
+            "::glm_immediate_json_keeps_forced_tool_framing"
+        ),
+        &[(env_llm::DYN_PARSER_VERSION, "2")],
+    ) {
+        return;
+    }
+
+    let preprocessor =
+        build_preprocessor_with_native_reasoning_gate(Some("glm45"), Some("glm47"), Some(false));
+    for (choice, raw) in [
+        (
+            ChatCompletionToolChoiceOption::Named(ChatCompletionNamedToolChoice {
+                r#type: ChatCompletionToolType::Function,
+                function: FunctionName {
+                    name: "get_weather".into(),
+                },
+            }),
+            r#"{"location":"San Francisco"}"#,
+        ),
+        (
+            ChatCompletionToolChoiceOption::Required,
+            r#"{"name":"get_weather","parameters":{"location":"San Francisco"}}"#,
+        ),
+    ] {
+        let mut request = streaming_tool_request(choice);
+        request.inner.response_format = streaming_json_object_request(false).inner.response_format;
+        request.chat_template_args = Some(HashMap::from([(
+            "enable_thinking".into(),
+            serde_json::json!(false),
+        )]));
+        request.normalize_reasoning_template_args().unwrap();
+        for split in 0..=raw.len() {
+            let input = stream::iter(
+                [
+                    mock_content_chunk(&raw[..split]),
+                    mock_content_chunk(&raw[split..]),
+                    mock_final_chunk(),
+                ]
+                .into_iter()
+                .map(Annotated::from_data),
+            );
+            let output = preprocessor
+                .postprocessor_parsing_stream(input, &request, true, false)
+                .unwrap();
+            let out = drain_stream(output).await;
+            let case = format!("forced GLM tool with response_format, split {split}");
+            assert!(out.reasoning.is_empty(), "{case}");
+            assert!(out.content.is_empty(), "{case}: {}", out.content);
+            assert_clean_tool_call(&case, &out.content, &out.tool_calls, "San Francisco");
+            assert_eq!(out.finish_reasons, vec![FinishReason::ToolCalls], "{case}");
         }
     }
 }
