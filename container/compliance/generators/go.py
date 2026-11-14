@@ -28,9 +28,9 @@ import re
 from pathlib import Path
 
 from .common import (
-    UNKNOWN,
     Component,
     dedupe_by_name_version,
+    normalize_cyclonedx_licenses,
     read_harvested_license,
     spdx_license_text,
 )
@@ -48,40 +48,10 @@ def _escape_go_module_path(path: str) -> str:
     return re.sub(r"[A-Z]", lambda m: "!" + m.group(0).lower(), path)
 
 
-def _normalize_license(licenses_field: list[dict] | None) -> str:
-    """Render a CycloneDX `licenses[]` array to a single SPDX expression.
-
-    Same shape as cargo-cyclonedx output (see rust.py); cyclonedx-gomod uses
-    the same CycloneDX schema.
-    """
-    if not licenses_field:
-        return UNKNOWN
-
-    parts: list[str] = []
-    for entry in licenses_field:
-        if "expression" in entry:
-            parts.append(entry["expression"])
-        elif "license" in entry:
-            inner = entry["license"]
-            if "id" in inner:
-                parts.append(inner["id"])
-            elif "name" in inner:
-                parts.append(f"LicenseRef-{inner['name'].replace(' ', '-')}")
-            else:
-                continue
-        else:
-            continue
-
-    if not parts:
-        return UNKNOWN
-    if len(parts) == 1:
-        return parts[0]
-    return " AND ".join(f"({p})" if " " in p else p for p in parts)
-
-
 def _component_from_sbom_entry(
     entry: dict, licenses_dir: Path | None = None
 ) -> Component | None:
+    """Convert a Go SBOM entry, using evidence when top-level licenses are absent."""
     name = entry.get("name")
     version = entry.get("version")
     if not name or not version:
@@ -96,7 +66,7 @@ def _component_from_sbom_entry(
     if not licenses_field:
         evidence = entry.get("evidence") or {}
         licenses_field = evidence.get("licenses")
-    spdx = _normalize_license(licenses_field)
+    spdx = normalize_cyclonedx_licenses(licenses_field)
 
     purl = entry.get("purl") or ""
     source_url: str | None = None
