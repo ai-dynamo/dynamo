@@ -1,0 +1,108 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# The Slime tutorial's RayJob ("Submit the RayJob"): 10 GRPO steps on a one-GPU
+# Ray head, with rollouts sent to the Dynamo frontend and weights synced to the
+# engines through the shared volume. test_slime_kuberay.py reads the expected
+# request, step, and weight-sync counts from these flags.
+apiVersion: ray.io/v1
+kind: RayJob
+metadata:
+  name: slime-grpo
+spec:
+  entrypoint: >-
+    python3 /root/slime/train.py
+    --rollout-external-engine-addrs slime-sglang-engine-0:30000 slime-sglang-engine-1:30000
+    --custom-generate-function-path dynamo_generate.generate_streaming
+    --sglang-incremental-streaming-output
+    --update-weight-transport disk
+    --update-weight-disk-dir /data/weight-updates
+    --custom-update-weight-post-write-path weight_permissions.make_weights_readable
+    --hf-checkpoint /data/models/Qwen3-0.6B
+    --ref-load /data/models/Qwen3-0.6B_torch_dist
+    --swiglu
+    --num-layers 28
+    --hidden-size 1024
+    --ffn-hidden-size 3072
+    --num-attention-heads 16
+    --group-query-attention
+    --num-query-groups 8
+    --use-rotary-position-embeddings
+    --disable-bias-linear
+    --normalization RMSNorm
+    --norm-epsilon 1e-6
+    --rotary-base 1000000
+    --vocab-size 151936
+    --kv-channels 128
+    --qk-layernorm
+    --prompt-data /data/datasets/gsm8k/train.parquet
+    --input-key messages
+    --label-key label
+    --apply-chat-template
+    --apply-chat-template-kwargs '{"enable_thinking": false}'
+    --rollout-shuffle
+    --rm-type math
+    --num-rollout 10
+    --rollout-batch-size 8
+    --n-samples-per-prompt 8
+    --global-batch-size 64
+    --rollout-max-response-len 1024
+    --actor-num-nodes 1
+    --actor-num-gpus-per-node 1
+    --use-dynamic-batch-size
+    --max-tokens-per-gpu 9216
+    --advantage-estimator grpo
+    --eps-clip-high 0.28
+    --optimizer adam
+    --lr 1e-6
+    --lr-decay-style constant
+    --weight-decay 0.1
+    --adam-beta1 0.9
+    --adam-beta2 0.98
+    --attention-dropout 0.0
+    --hidden-dropout 0.0
+    --accumulate-allreduce-grads-in-fp32
+    --attention-softmax-in-fp32
+    --attention-backend flash
+  runtimeEnvYAML: |
+    env_vars:
+      PYTHONPATH: "/root/Megatron-LM:/root/slime:/opt/slime-functions"
+      DYNAMO_ROLLOUT_URL: "http://slime-sglang-frontend:8000"
+      CUDA_DEVICE_MAX_CONNECTIONS: "1"
+  shutdownAfterJobFinishes: true
+  ttlSecondsAfterFinished: 60
+  rayClusterSpec:
+    rayVersion: "2.59.0"
+    headGroupSpec:
+      rayStartParams: {}
+      template:
+        spec:
+          containers:
+            - name: ray-head
+              image: slimerl/slime:nightly-dev-20261027a-cu130
+              resources:
+                requests:
+                  cpu: "16"
+                  memory: 200Gi
+                  nvidia.com/gpu: "1"
+                limits:
+                  memory: 200Gi
+                  nvidia.com/gpu: "1"
+              volumeMounts:
+                - name: slime-data
+                  mountPath: /data
+                - name: slime-functions
+                  mountPath: /opt/slime-functions
+                - name: dshm
+                  mountPath: /dev/shm
+          volumes:
+            - name: slime-data
+              persistentVolumeClaim:
+                claimName: slime-data
+            - name: slime-functions
+              configMap:
+                name: slime-functions
+            - name: dshm
+              emptyDir:
+                medium: Memory
+                sizeLimit: 64Gi
