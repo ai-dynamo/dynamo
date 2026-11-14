@@ -87,6 +87,8 @@ class AsyncEncoderCache:
         If the key is in cache, returns immediately.
         If another coroutine is already computing this key, waits for that result.
         Otherwise, computes and caches the result.
+        Cancelling a waiter leaves the shared computation running. Cancelling
+        the computing caller cancels its waiters and permits a later retry.
 
         Args:
             key: Cache key (typically content hash).
@@ -106,7 +108,7 @@ class AsyncEncoderCache:
         # Wait if already in-flight
         if key in self._in_flight:
             logger.debug(f"Waiting for in-flight computation: key={key[:16]}...")
-            return await self._in_flight[key]
+            return await asyncio.shield(self._in_flight[key])
 
         # Compute with coalescing
         future: asyncio.Future[CachedEmbedding] = asyncio.Future()
@@ -117,6 +119,9 @@ class AsyncEncoderCache:
             self._cache.set(key, embedding)
             future.set_result(embedding)
             return embedding
+        except asyncio.CancelledError:
+            future.cancel()
+            raise
         except Exception as e:
             future.set_exception(e)
             raise
