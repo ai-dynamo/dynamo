@@ -60,13 +60,14 @@ func TestLPXCyborgPlacementGateOnAPIServer(t *testing.T) {
 	held.Spec.SchedulingGates = []corev1.PodSchedulingGate{placementGate}
 	require.NoError(t, r.Patch(ctx, held, client.MergeFrom(observed)))
 
-	t.Log("The pin sets the node selector and removes the last gate in one write")
-	placed, err := r.placeCyborgPod(ctx, held, "a", selector)
+	t.Log("The pin sets the node selector, records the rank and the replica index, and removes the last gate in one write")
+	placed, err := r.placeCyborgPod(ctx, held, "a", 1, 3, selector)
 	require.NoError(t, err)
 	require.True(t, placed)
 	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(held), held))
 	require.Equal(t, selector, held.Spec.NodeSelector)
 	require.Equal(t, "a", held.Labels[cyborgFabricPodLabel])
+	require.Equal(t, []string{"1/3"}, testCyborgRanks([]*corev1.Pod{held}), "the containers of the Pod read these labels when they start")
 	require.Empty(t, held.Spec.SchedulingGates)
 
 	t.Log("The pin keeps the gate of another controller")
@@ -74,7 +75,7 @@ func TestLPXCyborgPlacementGateOnAPIServer(t *testing.T) {
 	shared.Spec.SchedulingGates = []corev1.PodSchedulingGate{quotaGate}
 	require.NoError(t, r.Create(ctx, shared))
 	require.Equal(t, []corev1.PodSchedulingGate{quotaGate, placementGate}, shared.Spec.SchedulingGates)
-	placed, err = r.placeCyborgPod(ctx, shared, "a", selector)
+	placed, err = r.placeCyborgPod(ctx, shared, "a", 0, 0, selector)
 	require.NoError(t, err)
 	require.True(t, placed)
 	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(shared), shared))
@@ -87,11 +88,12 @@ func TestLPXCyborgPlacementGateOnAPIServer(t *testing.T) {
 	current := stale.DeepCopy()
 	current.Annotations = map[string]string{"changed": "after-the-observation"}
 	require.NoError(t, r.Patch(ctx, current, client.MergeFrom(stale)))
-	placed, err = r.placeCyborgPod(ctx, stale, "a", selector)
+	placed, err = r.placeCyborgPod(ctx, stale, "a", 0, 0, selector)
 	require.NoError(t, err)
 	require.False(t, placed)
 	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(current), current))
 	require.Empty(t, current.Spec.NodeSelector)
+	require.Equal(t, []string{"/"}, testCyborgRanks([]*corev1.Pod{current}))
 	require.Equal(t, []corev1.PodSchedulingGate{groveGate, placementGate}, current.Spec.SchedulingGates)
 
 	t.Log("A Pod without the placement label gets no placement gate; the pin then succeeds only while Grove's gate holds the Pod")
@@ -99,7 +101,7 @@ func TestLPXCyborgPlacementGateOnAPIServer(t *testing.T) {
 	ungated := newTestAPIServerCyborgPod(clique, 3)
 	require.NoError(t, r.Create(ctx, ungated))
 	require.Equal(t, []corev1.PodSchedulingGate{groveGate}, ungated.Spec.SchedulingGates)
-	placed, err = r.placeCyborgPod(ctx, ungated, "a", selector)
+	placed, err = r.placeCyborgPod(ctx, ungated, "a", 0, 0, selector)
 	require.NoError(t, err)
 	require.True(t, placed)
 	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(ungated), ungated))
@@ -112,7 +114,7 @@ func TestLPXCyborgPlacementGateOnAPIServer(t *testing.T) {
 	observed = floating.DeepCopy()
 	floating.Spec.SchedulingGates = nil
 	require.NoError(t, r.Patch(ctx, floating, client.MergeFrom(observed)))
-	placed, err = r.placeCyborgPod(ctx, floating, "a", selector)
+	placed, err = r.placeCyborgPod(ctx, floating, "a", 0, 0, selector)
 	require.True(t, apierrors.IsInvalid(err), "%v", err)
 	require.False(t, placed)
 	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(floating), floating))

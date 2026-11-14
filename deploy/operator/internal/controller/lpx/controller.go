@@ -306,7 +306,7 @@ func (r *graphReconciler) reconcileWorkloads(
 
 		// A fabric-pod placement reports its own Cyborg capacity changes.
 		for name, placement := range cyborgPlacements {
-			scalingRequired = scalingRequired || placement.capacityPending(pclqs[name].Spec.Replicas)
+			scalingRequired = scalingRequired || pclqs[name].Spec.Replicas != placement.total()
 		}
 	}
 
