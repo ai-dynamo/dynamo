@@ -259,6 +259,13 @@ repos:
       additional_dependencies: [pytest, pyyaml]
       pass_filenames: false
       always_run: true
+    - id: os-upgrade-list
+      name: Check the OS package refresh lists carry the required packages
+      entry: python3 tests/dependencies/test_os_upgrade_list.py
+      language: python
+      additional_dependencies: [pytest]
+      pass_filenames: false
+      always_run: true
     - id: validate-agent-instructions
       name: Validate AGENTS.md and CLAUDE.md pairs
       entry: python3 scripts/validate_agent_instructions.py
