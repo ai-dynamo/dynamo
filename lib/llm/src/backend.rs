@@ -65,6 +65,20 @@ pub struct Backend {
     validate_engine_decode: bool,     // Enable validation of engine decoding
 }
 
+/// Whether the engine still needs telling to stop: every choice has ended, and
+/// at least one ended here, which the engine cannot know about.
+fn needs_engine_stop(
+    locally_finished: &HashSet<u32>,
+    engine_finished: &HashSet<u32>,
+    choices: usize,
+) -> bool {
+    locally_finished
+        .difference(engine_finished)
+        .next()
+        .is_some()
+        && locally_finished.union(engine_finished).count() >= choices
+}
+
 /// Internal state for managing token decoding and stream processing
 /// Supports n>1 (multiple choices) by maintaining per-choice decoders.
 #[allow(dead_code)]
@@ -72,10 +86,14 @@ struct DecoderState<S> {
     stream: S,
     decoders: HashMap<u32, Decoder>,
     finished_choices: HashSet<u32>,
+    /// Choices the engine finished itself. `finished_choices` also drops a choice's
+    /// later chunks, so of these it holds only the ones finished with decoded text.
+    engine_finished_choices: HashSet<u32>,
     validate_engine_decode: bool,
     no_stop_trim: bool,
     retain_model_stop_token_text: bool,
-    /// Set to true when all expected choices are finished locally, causing the stream to end
+    /// Set to true when every expected choice has ended and at least one ended locally,
+    /// causing the stream to end
     finished: bool,
     /// Tokenizer used to decode top-logprob token_ids when the backend omits text
     /// (e.g. SGLang with --skip-tokenizer-init forcibly drops it).
@@ -220,6 +238,7 @@ impl Backend {
             stream,
             decoders,
             finished_choices: HashSet::new(),
+            engine_finished_choices: HashSet::new(),
             validate_engine_decode: self.validate_engine_decode,
             no_stop_trim: params.no_stop_trim,
             retain_model_stop_token_text: params.retain_model_stop_token_text,
@@ -423,6 +442,15 @@ where
                     let has_finish = data.finish_reason.is_some();
                     if has_finish {
                         self.finished_choices.insert(choice_idx);
+                        self.engine_finished_choices.insert(choice_idx);
+                        if needs_engine_stop(
+                            &self.finished_choices,
+                            &self.engine_finished_choices,
+                            self.decoders.len(),
+                        ) {
+                            self.stream.context().stop_generating();
+                            self.finished = true;
+                        }
                     }
                     // This path bypasses the decoder entirely (the engine pre-decoded
                     // its own text for this chunk), but the decoder for this choice is
@@ -513,7 +541,11 @@ where
                     Err(e) => {
                         tracing::error!("Failed to process token_ids for choice {choice_idx}: {e}");
                         self.finished_choices.insert(choice_idx);
-                        if self.finished_choices.len() >= decoders_count {
+                        if needs_engine_stop(
+                            &self.finished_choices,
+                            &self.engine_finished_choices,
+                            decoders_count,
+                        ) {
                             self.stream.context().stop_generating();
                             self.finished = true;
                         }
@@ -548,11 +580,17 @@ where
                     })
                     .unwrap_or((None, None));
 
-                // If we detected a local stop condition, mark this choice as finished.
-                // Once all expected choices are finished, stop the upstream generator.
-                if finish_reason.is_some() && data.finish_reason.is_none() {
-                    self.finished_choices.insert(choice_idx);
-                    if self.finished_choices.len() >= decoders_count {
+                if finish_reason.is_some() || data.finish_reason.is_some() {
+                    if data.finish_reason.is_some() {
+                        self.engine_finished_choices.insert(choice_idx);
+                    } else {
+                        self.finished_choices.insert(choice_idx);
+                    }
+                    if needs_engine_stop(
+                        &self.finished_choices,
+                        &self.engine_finished_choices,
+                        decoders_count,
+                    ) {
                         self.stream.context().stop_generating();
                         self.finished = true;
                     }
@@ -2528,6 +2566,109 @@ mod tests {
             .output_options(OutputOptions::default())
             .build()
             .expect("valid preprocessed request")
+    }
+
+    struct ScriptedChoicesEngine {
+        chunks: std::sync::Mutex<Vec<Annotated<LLMEngineOutput>>>,
+        yielded: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+        for ScriptedChoicesEngine
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+            let chunks = std::mem::take(&mut *self.chunks.lock().unwrap());
+            let yielded = self.yielded.clone();
+            let chunks = futures::stream::iter(chunks).inspect(move |_| {
+                yielded.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            });
+            Ok(ResponseStream::new(Box::pin(chunks), request.context()))
+        }
+    }
+
+    /// Runs `n=2` with a stop string. Token 2 matches it.
+    /// Returns (engine told to stop, chunks read from the engine, chunks sent on).
+    async fn run_scripted(chunks: Vec<Annotated<LLMEngineOutput>>) -> (bool, usize, usize) {
+        let tokenizer: Arc<dyn traits::Tokenizer> = Arc::new(JailingTokenizer);
+        let backend = Backend::from_tokenizer(Tokenizer::from(tokenizer));
+        let mut request = jailing_request(2);
+        request.stop_conditions.stop = Some(vec!["STOP".to_string()]);
+        let yielded = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let engine: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
+            Arc::new(ScriptedChoicesEngine {
+                chunks: std::sync::Mutex::new(chunks),
+                yielded: yielded.clone(),
+            });
+        let stream = Operator::generate(backend.as_ref(), SingleIn::new(request), engine)
+            .await
+            .expect("backend generation succeeds");
+        let context = stream.context();
+        let outputs: Vec<_> = stream.collect().await;
+        (
+            context.is_stopped(),
+            yielded.load(std::sync::atomic::Ordering::SeqCst),
+            outputs.len(),
+        )
+    }
+
+    fn scripted(
+        token: u32,
+        index: u32,
+        finish: Option<FinishReason>,
+    ) -> Annotated<LLMEngineOutput> {
+        Annotated::from_data(LLMEngineOutput {
+            token_ids: vec![token],
+            finish_reason: finish,
+            index: Some(index),
+            ..Default::default()
+        })
+    }
+
+    fn decoded_text_finish(index: u32) -> Annotated<LLMEngineOutput> {
+        Annotated::from_data(LLMEngineOutput {
+            text: Some("done".into()),
+            finish_reason: Some(FinishReason::Stop),
+            index: Some(index),
+            ..Default::default()
+        })
+    }
+
+    #[rstest::rstest]
+    #[case::engine_finish_then_local_stop(vec![
+        scripted(1, 0, Some(FinishReason::Stop)),
+        scripted(2, 1, None),
+    ])]
+    #[case::local_stop_then_engine_finish(vec![
+        scripted(2, 1, None),
+        scripted(1, 0, Some(FinishReason::Stop)),
+    ])]
+    #[case::every_choice_stops_locally(vec![scripted(2, 0, None), scripted(2, 1, None)])]
+    #[case::local_stop_then_decoded_text_finish(vec![
+        scripted(2, 1, None),
+        decoded_text_finish(0),
+    ])]
+    #[tokio::test]
+    async fn backend_stops_engine_once_every_choice_has_finished(
+        #[case] finishes: Vec<Annotated<LLMEngineOutput>>,
+    ) {
+        let mut chunks = finishes;
+        chunks.extend((0..50).map(|_| scripted(1, 1, None)));
+        assert_eq!(run_scripted(chunks).await, (true, 2, 2));
+    }
+
+    #[rstest::rstest]
+    #[case::token_ids(scripted(1, 0, Some(FinishReason::Stop)))]
+    #[case::decoded_text(decoded_text_finish(0))]
+    #[tokio::test]
+    async fn backend_leaves_engine_alone_when_it_finishes_every_choice(
+        #[case] first_finish: Annotated<LLMEngineOutput>,
+    ) {
+        let chunks = vec![first_finish, scripted(1, 1, Some(FinishReason::Stop))];
+        assert_eq!(run_scripted(chunks).await, (false, 2, 2));
     }
 
     /// Wraps an inner stream and flips a shared flag if it is ever polled again after
