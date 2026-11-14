@@ -132,6 +132,10 @@ Read across a row to confirm that latency meets your requirements, then use **Fr
 
 The manifests, scripts, and step-by-step guides for every configuration are in the [`examples/gpu-sharing`](https://github.com/ai-dynamo/dynamo/tree/main/examples/gpu-sharing) directory on GitHub. Start with its [README](https://github.com/ai-dynamo/dynamo/blob/main/examples/gpu-sharing/README.md), which covers the shared workload, the files, and the commands.
 
+## One Frontend for Many Models
+
+The configurations above deploy one `DynamoGraphDeployment` and one frontend per model, so each model has its own endpoint. The same workers can also run in a single deployment behind one frontend, which lists every model and routes each request to the worker serving the model it names. [Serve Many Models Behind One Frontend](https://github.com/ai-dynamo/dynamo/blob/main/examples/gpu-sharing/docs/deploy-one-frontend-many-models.md) walks through it and includes a script that verifies the routing. It was tested with Dynamo 1.5.0 and 1.6.2.
+
 ## Appendix: Node Throughput at Equal Per-Model Concurrency
 
 This table compares total node output throughput (tok/s) with every configuration at the same per-model concurrency. The shared configurations run 16 models on 8 GPUs, so each GPU carries twice as many in-flight requests as in the vanilla configuration at the same `c/model`.

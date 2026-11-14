@@ -53,6 +53,8 @@ load generator runs in a pod on another node.
 | [`kai-gpu-fractions/gen-dgds.sh`](kai-gpu-fractions/gen-dgds.sh), [`kai-gpu-fractions/dgds-16x.yaml`](kai-gpu-fractions/dgds-16x.yaml) | Generator and rendered manifests for the 16-DGD GPU fractions run |
 | [`kai-gpu-fractions/smoke-test-half-gpu.yaml`](kai-gpu-fractions/smoke-test-half-gpu.yaml) | Two idle pods sharing one GPU at 50% each, to verify the caps before deploying models |
 | [`kai-gpu-fractions/microk8s-gpu-fractioning-config.yaml`](kai-gpu-fractions/microk8s-gpu-fractioning-config.yaml) | Reference copy of the MicroK8s `GpuFractioningConfig` that the chart's socket-path flags produce; not meant to be applied |
+| [`one-frontend-many-models/gen-dgd.sh`](one-frontend-many-models/gen-dgd.sh), [`one-frontend-many-models/dgd-2-models.yaml`](one-frontend-many-models/dgd-2-models.yaml) | Generator and rendered manifest for one DGD with one frontend and two model workers sharing a GPU; `NUM_MODELS` sets the count |
+| [`one-frontend-many-models/verify-routing.sh`](one-frontend-many-models/verify-routing.sh) | Checks that the one frontend lists every model and that each request reaches the worker of the model it names |
 
 The checked-in `dgds-*.yaml` files are the generators' default output: namespace
 `default`, the model at `/opt/hf-cache/hub/models--Qwen--Qwen3-4B/snapshots/<revision>`,
@@ -131,6 +133,14 @@ Also confirm the per-worker caps:
 - **KAI + GPU fractions:** the environment has `CUDA_MPS_ACTIVE_THREAD_PERCENTAGE=50`
   and `CUDA_MPS_PINNED_DEVICE_MEM_LIMIT=0=19968M`.
 
+## One Frontend for Many Models
+
+The three experiments deploy one DGD and one frontend per model. To put the same
+GPU-fraction workers behind a single frontend instead, so that clients use one endpoint
+and select a model by name, see
+[Serve Many Models Behind One Frontend](docs/deploy-one-frontend-many-models.md). It uses
+Dynamo platform and runtime 1.6.2, and was also tested with 1.5.0.
+
 ## Known Issues
 
 - **Models never appear on the frontend.** With platform 1.4.x defaults (no etcd or
@@ -162,3 +172,4 @@ Also confirm the per-worker caps:
 - [Build the KAI-Scheduler and GPU Fractioning Forks](docs/build-gpu-fractioning-forks.md)
 - [Deploy the KAI + GPU Fractions Experiment](docs/deploy-kai-gpu-fractions.md)
 - [Per-GPU Compute and Memory Limits with MPS](docs/mps-per-gpu-limits.md)
+- [Serve Many Models Behind One Frontend](docs/deploy-one-frontend-many-models.md)
