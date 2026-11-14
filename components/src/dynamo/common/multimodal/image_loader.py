@@ -601,12 +601,40 @@ class ImageLoader:
             Exception: If any image fails to load for any other reason
             ValueError: If enable_frontend_decoding=True but nixl_connector is None
             ValueError: If a UUID-only slot is received without opting in
+
+        The item checks above run for the whole batch before any load
+        coroutine is created.
         """
         image_futures: list[Coroutine[Any, Any, Image.Image]] = []
         slot_to_future_idx: list[int | None] = []
 
+        # Validate the whole batch before creating coroutines so an invalid
+        # later item cannot leave earlier load coroutines unawaited.
         for idx, item in enumerate(image_mm_items):
             if isinstance(item, dict) and URL_VARIANT_KEY in item:
+                continue
+            if isinstance(item, dict) and DECODED_VARIANT_KEY in item:
+                if not self._enable_frontend_decoding:
+                    logger.error(
+                        "Received Decoded multimodal data but enable_frontend_decoding=False. "
+                        "Set enable_frontend_decoding=True to enable NIXL RDMA image transfer."
+                    )
+                    raise ValueError("Could not load decoded media from frontend")
+                if self._nixl_connector is None:
+                    raise RuntimeError("NIXL connector is not initialized")
+            elif isinstance(item, dict) and UUID_ONLY_VARIANT_KEY in item:
+                if not preserve_uuid_slots:
+                    raise ValueError(
+                        "UUID-only image slots require preserve_uuid_slots=True"
+                    )
+            else:
+                raise ValueError(
+                    f"Invalid image multimodal item at index {idx}. "
+                    "Expected dict with 'Url', 'Decoded', or 'UuidOnly' key."
+                )
+
+        for item in image_mm_items:
+            if URL_VARIANT_KEY in item:
                 # URL path: download and decode in Python backend
                 url = item[URL_VARIANT_KEY]
                 slot_to_future_idx.append(len(image_futures))
@@ -616,30 +644,13 @@ class ImageLoader:
                         "Preparing to load image from URL: %s",
                         describe_media_source(url),
                     )
-            elif isinstance(item, dict) and DECODED_VARIANT_KEY in item:
-                if self._enable_frontend_decoding:
-                    metadata = item[DECODED_VARIANT_KEY]
-                    if self._nixl_connector is None:
-                        raise RuntimeError("NIXL connector is not initialized")
-                    slot_to_future_idx.append(len(image_futures))
-                    image_futures.append(self._read_and_convert_nixl_image(metadata))
-                else:
-                    logger.error(
-                        "Received Decoded multimodal data but enable_frontend_decoding=False. "
-                        "Set enable_frontend_decoding=True to enable NIXL RDMA image transfer."
-                    )
-                    raise ValueError("Could not load decoded media from frontend")
-            elif isinstance(item, dict) and UUID_ONLY_VARIANT_KEY in item:
-                if not preserve_uuid_slots:
-                    raise ValueError(
-                        "UUID-only image slots require preserve_uuid_slots=True"
-                    )
-                slot_to_future_idx.append(None)
+            elif DECODED_VARIANT_KEY in item:
+                metadata = item[DECODED_VARIANT_KEY]
+                slot_to_future_idx.append(len(image_futures))
+                image_futures.append(self._read_and_convert_nixl_image(metadata))
             else:
-                raise ValueError(
-                    f"Invalid image multimodal item at index {idx}. "
-                    "Expected dict with 'Url', 'Decoded', or 'UuidOnly' key."
-                )
+                # UuidOnly, accepted above only when preserve_uuid_slots is set.
+                slot_to_future_idx.append(None)
 
         # Process images in parallel
         results = await asyncio.gather(*image_futures, return_exceptions=True)

@@ -249,11 +249,32 @@ class AudioLoader:
 
         Returns:
             List of (waveform, sample_rate) tuples.
+
+        Raises:
+            ValueError: For a malformed item, or a decoded item when frontend
+                decoding is disabled. The whole batch is validated before any
+                load coroutine is created.
         """
         audio_futures: List[Awaitable[tuple[np.ndarray, float]]] = []
 
+        # Validate the whole batch before creating coroutines so an invalid
+        # later item cannot leave earlier load coroutines unawaited.
         for idx, item in enumerate(audio_mm_items):
-            if isinstance(item, dict) and URL_VARIANT_KEY in item:
+            if not isinstance(item, dict) or not (
+                URL_VARIANT_KEY in item or DECODED_VARIANT_KEY in item
+            ):
+                raise ValueError(
+                    f"Invalid audio multimodal item at index {idx}. "
+                    "Expected dict with 'Url' or 'Decoded' key."
+                )
+            if URL_VARIANT_KEY not in item and not self._enable_frontend_decoding:
+                raise ValueError(
+                    "Received decoded audio data but enable_frontend_decoding=False. "
+                    "Enable frontend decoding to transfer decoded audio via NIXL."
+                )
+
+        for item in audio_mm_items:
+            if URL_VARIANT_KEY in item:
                 url = item[URL_VARIANT_KEY]
                 audio_futures.append(self.load_audio(url))
                 if logger.isEnabledFor(logging.DEBUG):
@@ -261,20 +282,9 @@ class AudioLoader:
                         "Preparing to load audio from URL: %s",
                         describe_media_source(url),
                     )
-            elif isinstance(item, dict) and DECODED_VARIANT_KEY in item:
-                if self._enable_frontend_decoding:
-                    metadata = item[DECODED_VARIANT_KEY]
-                    audio_futures.append(self._load_decoded_audio(metadata))
-                else:
-                    raise ValueError(
-                        "Received decoded audio data but enable_frontend_decoding=False. "
-                        "Enable frontend decoding to transfer decoded audio via NIXL."
-                    )
             else:
-                raise ValueError(
-                    f"Invalid audio multimodal item at index {idx}. "
-                    "Expected dict with 'Url' or 'Decoded' key."
-                )
+                metadata = item[DECODED_VARIANT_KEY]
+                audio_futures.append(self._load_decoded_audio(metadata))
 
         results = await asyncio.gather(*audio_futures, return_exceptions=True)
         loaded_audio: list[tuple[np.ndarray, float]] = []
