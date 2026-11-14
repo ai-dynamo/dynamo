@@ -21,7 +21,12 @@ from tests.utils.managed_process import (
 from tests.utils.managed_process import ManagedProcess, terminate_process_tree
 from tests.utils.prometheus import sum_metric_samples
 
-from .request_utils import start_request, validate_response, wait_for_response
+from .request_utils import (
+    MigrationResponse,
+    start_request,
+    validate_response,
+    wait_for_response,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -234,6 +239,48 @@ def wait_for_worker_request_id(
         f"Replacement worker did not log {expected!r} within {max_wait_time}s; "
         f"last_error={last_error}"
     )
+
+
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
+# No metric exposes the fault point, so read it from the frontend's retry log.
+_MIGRATION_RETRY_TOKENS_RE = re.compile(
+    r"migration retry scheduled.*?migration\.tokens_completed=(?P<tokens>\d+)"
+)
+
+
+def wait_for_migration_tokens_completed(
+    frontend: ManagedProcess,
+    log_offset: int = 0,
+    max_wait_time: float = 30.0,
+) -> int:
+    """Return the token count the frontend replayed for the only migration retry.
+
+    The migration layer appends exactly this many delivered token IDs to the
+    retry prompt, so it marks the fault boundary in the client-visible stream.
+    """
+    deadline = time.monotonic() + max_wait_time
+    poll_event = threading.Event()
+    matches: list[int] = []
+    while time.monotonic() < deadline:
+        try:
+            with open(frontend.log_path, "r", errors="ignore") as log_file:
+                log_file.seek(log_offset)
+                text = _ANSI_ESCAPE_RE.sub("", log_file.read())
+        except FileNotFoundError:
+            text = ""
+        matches = [
+            int(match.group("tokens"))
+            for match in _MIGRATION_RETRY_TOKENS_RE.finditer(text)
+        ]
+        if matches:
+            break
+        poll_event.wait(timeout=0.1)
+
+    assert len(matches) == 1, (
+        "Expected exactly one 'migration retry scheduled' frontend log record "
+        f"with migration.tokens_completed within {max_wait_time}s, got {matches}"
+    )
+    return matches[0]
 
 
 def wait_for_endpoint_instances(
@@ -537,6 +584,7 @@ def run_migration_test(
     before_worker_fault: Callable[[], None] | None = None,
     force_max_output_tokens: bool = False,
     expected_output_prefix: str | None = None,
+    response: MigrationResponse | None = None,
 ) -> tuple[ManagedProcess, str | None]:
     """
     Run the common migration test flow after frontend and workers are started.
@@ -572,6 +620,8 @@ def run_migration_test(
             an early EOS.
         expected_output_prefix: Stable fault-free output prefix used to prove
             the content oracle extends beyond the fault boundary.
+        response: Optional caller-owned response object for the migrated
+            request, for example one that collects token IDs.
 
     Returns:
         The surviving replacement worker and the completed response output.
@@ -593,6 +643,7 @@ def run_migration_test(
         max_tokens=max_tokens,
         long_prompt_repetitions=long_prompt_repetitions,
         force_max_output_tokens=force_max_output_tokens,
+        response=response,
     )
 
     # Step 2: Determine which worker received the request

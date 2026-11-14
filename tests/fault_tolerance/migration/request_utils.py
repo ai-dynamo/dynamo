@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 
 import pytest
 from openai import OpenAI
+from pydantic import BaseModel
 
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
 
@@ -29,6 +30,18 @@ class MigrationResponse:
     )
     finish_reason: str | None = None
     completion_tokens: int | None = None
+    # Opt-in: request nvext token IDs so a caller can rebuild the exact prompt a
+    # migration retry replays (prompt IDs plus the IDs streamed before the fault).
+    collect_token_ids: bool = False
+    prompt_token_ids: list[int] | None = None
+    completion_token_ids: list[int] = field(default_factory=list)
+
+    def record_nvext(self, payload: BaseModel) -> None:
+        """Accumulate token IDs from one OpenAI response object or chunk."""
+        nvext = (payload.model_extra or {}).get("nvext") or {}
+        if nvext.get("prompt_token_ids") is not None:
+            self.prompt_token_ids = list(nvext["prompt_token_ids"])
+        self.completion_token_ids.extend(nvext.get("completion_token_ids") or [])
 
 
 def _make_client(frontend_port: int) -> OpenAI:
@@ -48,7 +61,9 @@ def _request_args(
     stream: bool,
     max_tokens: int | None,
     force_max_output_tokens: bool,
+    collect_token_ids: bool = False,
 ) -> dict:
+    """Build greedy request options, with optional fixed length and token IDs."""
     args = {
         "model": FAULT_TOLERANCE_MODEL_NAME,
         "stream": stream,
@@ -67,6 +82,10 @@ def _request_args(
         args["extra_body"] = {"ignore_eos": True, "min_tokens": max_tokens}
         if stream:
             args["stream_options"] = {"include_usage": True}
+    if collect_token_ids:
+        args.setdefault("extra_body", {})["nvext"] = {
+            "extra_fields": ["prompt_token_ids", "completion_token_ids"]
+        }
     return args
 
 
@@ -79,11 +98,18 @@ def start_request(
     max_tokens: int | None = None,
     long_prompt_repetitions: int = 8_000,
     force_max_output_tokens: bool = False,
+    response: MigrationResponse | None = None,
 ) -> tuple[threading.Thread, MigrationResponse]:
-    """Start one completion or chat-completion request in a background thread."""
-    response = MigrationResponse()
+    """Start one completion or chat-completion request in a background thread.
+
+    Pass ``response`` to receive the result in a caller-owned object, for
+    example one built with ``collect_token_ids=True``.
+    """
+    if response is None:
+        response = MigrationResponse()
 
     def send_request() -> None:
+        """Collect response text, token IDs, and errors for the waiting caller."""
         prompt = "Tell me a long long long story about yourself?"
         if use_long_prompt:
             prompt += " Make sure it is" + " long" * long_prompt_repetitions + "!"
@@ -105,6 +131,7 @@ def start_request(
                 stream=stream,
                 max_tokens=max_tokens,
                 force_max_output_tokens=force_max_output_tokens,
+                collect_token_ids=response.collect_token_ids,
             )
             if stream:
                 chunks = (
@@ -113,6 +140,7 @@ def start_request(
                     else client.completions.create(**args)
                 )
                 for chunk in chunks:
+                    response.record_nvext(chunk)
                     if chunk.usage is not None:
                         response.completion_tokens = chunk.usage.completion_tokens
                     choice = chunk.choices[0] if chunk.choices else None
@@ -127,6 +155,7 @@ def start_request(
                         response.observations.append((content, time.monotonic()))
             elif use_chat_completion:
                 result = client.chat.completions.create(**args)
+                response.record_nvext(result)
                 choice = result.choices[0]
                 response.finish_reason = choice.finish_reason
                 if result.usage is not None:
@@ -134,6 +163,7 @@ def start_request(
                 response.observations.append((choice.message.content, time.monotonic()))
             else:
                 result = client.completions.create(**args)
+                response.record_nvext(result)
                 choice = result.choices[0]
                 response.finish_reason = choice.finish_reason
                 if result.usage is not None:
@@ -256,3 +286,37 @@ def request_to_completion(frontend_port: int, **request_options) -> str:
     return validate_response(
         thread, response, expected_completion_tokens=expected_tokens
     )
+
+
+def token_prompt_completion(
+    frontend_port: int, prompt_token_ids: list[int], max_tokens: int
+) -> tuple[str, list[int]]:
+    """Run one forced-length greedy completion from a token-ID prompt.
+
+    Returns the completion text and its token IDs.
+    """
+    client = _make_client(frontend_port)
+    result = client.completions.create(
+        model=FAULT_TOLERANCE_MODEL_NAME,
+        prompt=prompt_token_ids,
+        max_tokens=max_tokens,
+        temperature=0,
+        seed=0,
+        extra_body={
+            "ignore_eos": True,
+            "min_tokens": max_tokens,
+            "nvext": {"extra_fields": ["completion_token_ids"]},
+        },
+    )
+    collected = MigrationResponse()
+    collected.record_nvext(result)
+    choice = result.choices[0]
+    assert choice.finish_reason == "length", (
+        "Token-prompt reference terminated unexpectedly: "
+        f"finish_reason={choice.finish_reason!r}"
+    )
+    assert len(collected.completion_token_ids) == max_tokens, (
+        "Token-prompt reference returned the wrong number of token IDs: "
+        f"expected={max_tokens}, actual={len(collected.completion_token_ids)}"
+    )
+    return choice.text, collected.completion_token_ids
