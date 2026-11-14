@@ -1997,6 +1997,16 @@ pub struct OpenAIPreprocessor {
     lora_name: Option<String>,
     /// Per-model runtime configuration propagated to response generator (e.g., reasoning/tool parser)
     runtime_config: crate::local_model::runtime_config::ModelRuntimeConfig,
+    /// Live per-worker view of `runtime_data` for this model, when it is served
+    /// by discovered workers.
+    ///
+    /// `runtime_config` above is one representative worker's card, and
+    /// `runtime_config` does not participate in `mdcsum`, so a fleet running two
+    /// versions shares a single WorkerSet and a single representative. A
+    /// capability read that shapes a request *before* it is routed must
+    /// therefore consult the whole fleet, not the representative. `None` for
+    /// local and static engines, which are single-worker by construction.
+    worker_runtime_configs: Option<crate::discovery::RuntimeConfigWatch>,
     structural_tag_reasoning_boundary: structural_tag::ResolvedReasoningBoundary,
     /// KV cache block size published in the model deployment card.
     kv_cache_block_size: usize,
@@ -2893,6 +2903,7 @@ impl OpenAIPreprocessor {
             tokenizer,
             Some(embedding_tokenizers),
             None,
+            None,
             false,
         )
     }
@@ -2901,8 +2912,26 @@ impl OpenAIPreprocessor {
         mdc: ModelDeploymentCard,
         tokenizer: crate::tokenizers::Tokenizer,
     ) -> Result<Arc<Self>> {
+        Self::new_for_completions_with_worker_configs(mdc, tokenizer, None)
+    }
+
+    /// As `new_for_completions`, with the live per-worker `runtime_data` view.
+    /// See `worker_runtime_configs`.
+    pub(crate) fn new_for_completions_with_worker_configs(
+        mdc: ModelDeploymentCard,
+        tokenizer: crate::tokenizers::Tokenizer,
+        worker_runtime_configs: Option<crate::discovery::RuntimeConfigWatch>,
+    ) -> Result<Arc<Self>> {
         let PromptFormatter::OAI(formatter) = PromptFormatter::no_op();
-        Self::new_with_parts_inner(mdc, formatter, tokenizer, None, None, false)
+        Self::new_with_parts_inner(
+            mdc,
+            formatter,
+            tokenizer,
+            None,
+            worker_runtime_configs,
+            None,
+            false,
+        )
     }
 
     pub fn new_with_parts(
@@ -2925,6 +2954,27 @@ impl OpenAIPreprocessor {
             formatter,
             tokenizer,
             None,
+            None,
+            speculative_prefill_cancel,
+            true,
+        )
+    }
+
+    /// As `new_with_parts_and_cancel`, with the live per-worker `runtime_data`
+    /// view that pre-routing capability reads consult. See `worker_runtime_configs`.
+    pub fn new_with_parts_and_worker_configs(
+        mdc: ModelDeploymentCard,
+        formatter: Arc<dyn OAIPromptFormatter>,
+        tokenizer: crate::tokenizers::Tokenizer,
+        worker_runtime_configs: Option<crate::discovery::RuntimeConfigWatch>,
+        speculative_prefill_cancel: Option<CancellationToken>,
+    ) -> Result<Arc<Self>> {
+        Self::new_with_parts_inner(
+            mdc,
+            formatter,
+            tokenizer,
+            None,
+            worker_runtime_configs,
             speculative_prefill_cancel,
             true,
         )
@@ -2935,6 +2985,7 @@ impl OpenAIPreprocessor {
         formatter: Arc<dyn OAIPromptFormatter>,
         tokenizer: crate::tokenizers::Tokenizer,
         embedding_tokenizers: Option<EmbeddingTokenizerState>,
+        worker_runtime_configs: Option<crate::discovery::RuntimeConfigWatch>,
         speculative_prefill_cancel: Option<CancellationToken>,
         validate_chat_parsers: bool,
     ) -> Result<Arc<Self>> {
@@ -3324,6 +3375,7 @@ impl OpenAIPreprocessor {
             mdcsum,
             lora_name,
             runtime_config,
+            worker_runtime_configs,
             structural_tag_reasoning_boundary,
             kv_cache_block_size,
             tool_call_parser,
