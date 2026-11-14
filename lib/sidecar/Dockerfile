@@ -121,12 +121,13 @@ RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry-${TARGETARCH},target=/us
         -p dynamo-vllm-sidecar \
         -p dynamo-sglang-sidecar \
         -p dynamo-trtllm-sidecar \
+        -p dynamo-triton-sidecar \
         -p dynamo-lpx-sidecar; \
-    for pkg in dynamo-vllm-sidecar dynamo-sglang-sidecar dynamo-trtllm-sidecar dynamo-lpx-sidecar; do \
+    for pkg in dynamo-vllm-sidecar dynamo-sglang-sidecar dynamo-trtllm-sidecar dynamo-triton-sidecar dynamo-lpx-sidecar; do \
         strip "target/release/${pkg}"; \
         install -D "target/release/${pkg}" "/out/bin/${pkg}"; \
     done; \
-    for pkg in dynamo-vllm-sidecar dynamo-sglang-sidecar dynamo-trtllm-sidecar dynamo-lpx-sidecar; do \
+    for pkg in dynamo-vllm-sidecar dynamo-sglang-sidecar dynamo-trtllm-sidecar dynamo-triton-sidecar dynamo-lpx-sidecar; do \
         manifest="lib/sidecar/${pkg#dynamo-}"; \
         manifest="${manifest%-sidecar}/Cargo.toml"; \
         cargo cyclonedx \

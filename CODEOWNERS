@@ -137,6 +137,7 @@
 /components/src/dynamo/sglang/request_handlers/                                                         @ai-dynamo/dynamo-backend-sglang-codeowners
 
 # === backend-triton  (@ai-dynamo/dynamo-backend-triton-codeowners) ===
+/lib/sidecar/triton/                                                                                    @ai-dynamo/dynamo-backend-triton-codeowners
 /components/src/dynamo/triton/**                                                                        @ai-dynamo/dynamo-backend-triton-codeowners
 
 # === kv-memory  (@ai-dynamo/dynamo-kv-memory-codeowners) ===
@@ -647,6 +648,7 @@ requirements.txt                                                                
 /lib/mocker/servers/                                                                                    @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-sidecar-codeowners
 /lib/sidecar/common/                                                                                    @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-sidecar-codeowners
 /lib/sidecar/sglang/                                                                                    @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-sidecar-codeowners
+/lib/sidecar/triton/                                                                                    @ai-dynamo/dynamo-backend-triton-codeowners @ai-dynamo/dynamo-sidecar-codeowners
 /lib/sidecar/trtllm/                                                                                    @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-sidecar-codeowners
 /tests/serve/trtllm/                                                                                    @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-backend-trtllm-codeowners
 /container/deps/vllm/                                                                                   @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners
