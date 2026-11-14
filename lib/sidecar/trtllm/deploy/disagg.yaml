@@ -73,7 +73,7 @@ spec:
         - name: main
           # 1.4.0 or newer: the 1.3.0 router fails a disaggregated request
           # whose one-token prefill stops on EOS or a stop match.
-          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend-nightly:20261013-2210b07
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend-nightly:20261113-b43cd4a
 
   - name: TRTLLMPrefillWorker
     type: prefill
@@ -92,7 +92,7 @@ spec:
             sizeLimit: 10Gi
         containers:
         - name: main
-          image: nvcr.io/nvidia/tensorrt-llm/release:1.4.0rc3.dev202610290007@sha256:14aa63789ee878885c55200c5ae8f44e4d15b90fe84bd869315ae13ef1299ac3
+          image: nvcr.io/nvidia/tensorrt-llm/release:1.4.0rc4.dev202611130009@sha256:b210fb5baf50a5513f5ab9aebeae8c0794aeccf900862fd447dc2593c6f26147
           # Readiness via the OpenEngine Control.Health RPC, which reports the
           # engine's own state rather than just a connectable socket.
           # The pinned engine ships OpenEngine bindings under tensorrt_llm,
@@ -193,7 +193,7 @@ spec:
         # Dynamo runtime starts first and receives discovery env and probes.
         # Replace this nightly image with a matching release when available.
         - name: runtime
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime-nightly:20261013-2210b07
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime-nightly:20261113-b43cd4a
           restartPolicy: Always
           command:
           - python3
@@ -229,7 +229,7 @@ spec:
             sizeLimit: 10Gi
         containers:
         - name: main
-          image: nvcr.io/nvidia/tensorrt-llm/release:1.4.0rc3.dev202610290007@sha256:14aa63789ee878885c55200c5ae8f44e4d15b90fe84bd869315ae13ef1299ac3
+          image: nvcr.io/nvidia/tensorrt-llm/release:1.4.0rc4.dev202611130009@sha256:b210fb5baf50a5513f5ab9aebeae8c0794aeccf900862fd447dc2593c6f26147
           startupProbe:
             exec:
               command: *engineReadyCommand
@@ -291,7 +291,7 @@ spec:
           - /config/config.yaml
         initContainers:
         - name: runtime
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime-nightly:20261013-2210b07
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime-nightly:20261113-b43cd4a
           restartPolicy: Always
           command:
           - python3
