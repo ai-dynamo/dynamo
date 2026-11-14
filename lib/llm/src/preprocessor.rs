@@ -2263,6 +2263,12 @@ impl OpenAIPreprocessor {
                     serde_json::json!(metadata_upload),
                 );
             }
+            if let Some(ref retained_prefix) = nvext.trtllm_retained_prefix {
+                nvext_passthrough.insert(
+                    "trtllm_retained_prefix".to_string(),
+                    serde_json::json!(retained_prefix),
+                );
+            }
             if nvext.token_data.is_some() {
                 nvext_passthrough.insert("token_in".to_string(), serde_json::Value::Bool(true));
             }
@@ -15009,6 +15015,47 @@ responses_tools: None,
                 "FAILED: {desc}",
             );
         }
+    }
+
+    #[test]
+    fn trtllm_retained_prefix_options_reach_backend_without_changing_sampling() {
+        let reference = serde_json::json!({
+            "version": 1, "peer_id": "decoder-a", "engine_generation": "a".repeat(32),
+            "export_id": "b".repeat(64), "prefix_tokens": 128, "identity": "c".repeat(64)
+        });
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model", "messages": [{"role": "user", "content": "hi"}],
+            "temperature": 0, "max_tokens": 128,
+            "nvext": {"cache_salt": "tenant-a", "trtllm_retained_prefix": {
+                "retain_prefix": true, "retained_prefix": reference
+            }}
+        }))
+        .unwrap();
+        let args = OpenAIPreprocessor::backend_extra_args(&request, false, None).unwrap();
+        assert_eq!(
+            args["nvext"]["trtllm_retained_prefix"]["retained_prefix"],
+            reference
+        );
+        assert_eq!(
+            args["nvext"]["trtllm_retained_prefix"]["retain_prefix"],
+            true
+        );
+        assert_eq!(args["nvext"]["cache_salt"], "tenant-a");
+        assert!(args.get("sampling_options").is_none());
+        assert!(
+            serde_json::from_value::<NvCreateChatCompletionRequest>(serde_json::json!({
+                "model": "test-model", "messages": [],
+                "nvext": {"trtllm_retained_prefix": {"retain_prefix": "yes"}}
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<NvCreateChatCompletionRequest>(serde_json::json!({
+                "model": "test-model", "messages": [],
+                "nvext": {"trtllm_retained_prefix": {"address": 123}}
+            }))
+            .is_err()
+        );
     }
 
     #[test]
