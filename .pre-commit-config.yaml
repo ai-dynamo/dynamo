@@ -233,6 +233,12 @@ repos:
       # be a second copy to keep in sync. Full scan is well under 0.1s.
       files: ^\.github/
       pass_filenames: false
+    - id: frontend-replay-publication-tests
+      name: Verify frontend replay publication provenance and reporting
+      entry: python3 .github/scripts/test_frontend_replay_publication.py
+      language: python
+      files: ^\.github/scripts/(test_)?frontend_replay_publication\.py$
+      pass_filenames: false
     - id: compliance-extract-selftest
       name: Test compliance export retries
       entry: python3 .github/actions/compliance-extract/test_extract_with_retry.py
