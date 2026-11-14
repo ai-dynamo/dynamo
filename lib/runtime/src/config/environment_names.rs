@@ -591,6 +591,20 @@ pub mod llm {
     /// `HttpServiceConfigBuilder::streaming_backend_error_check` replaces it.
     pub const DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS: &str = "DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS";
 
+    /// Policy for client-supplied `mm_processor_kwargs` and `media_io_kwargs` on
+    /// `/v1/chat/completions`: `allow` (default) forwards them unchanged, `deny`
+    /// rejects any non-empty value, `allowlist` accepts only the top-level keys
+    /// named by `DYN_MM_REQUEST_KWARGS_ALLOWLIST`. Violations are rejected with
+    /// HTTP 400 before dispatch. An unrecognized value fails closed as `deny`.
+    ///
+    /// Read once when the HTTP service is built.
+    pub const DYN_MM_REQUEST_KWARGS_POLICY: &str = "DYN_MM_REQUEST_KWARGS_POLICY";
+
+    /// Comma-separated top-level keys accepted under
+    /// `DYN_MM_REQUEST_KWARGS_POLICY=allowlist`, for example `use_audio_in_video`.
+    /// An empty list rejects every non-empty value.
+    pub const DYN_MM_REQUEST_KWARGS_ALLOWLIST: &str = "DYN_MM_REQUEST_KWARGS_ALLOWLIST";
+
     /// Enable the LoRA allocation controller (set to "true" to enable)
     pub const DYN_LORA_ALLOCATION_ENABLED: &str = "DYN_LORA_ALLOCATION_ENABLED";
 
@@ -1272,6 +1286,8 @@ mod tests {
             llm::DYN_HTTP_OVERLOAD_STATUS_CODE,
             llm::DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS,
             llm::DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS,
+            llm::DYN_MM_REQUEST_KWARGS_POLICY,
+            llm::DYN_MM_REQUEST_KWARGS_ALLOWLIST,
             llm::DYN_LORA_ENABLED,
             llm::DYN_LORA_RUNTIME_LOAD_ENABLED,
             llm::DYN_LORA_DOWNLOADER_PLUGIN,

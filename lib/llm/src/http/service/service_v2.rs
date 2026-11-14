@@ -248,6 +248,7 @@ pub struct State {
     nvext_enabled: bool,
     sse_keep_alive: Option<Duration>,
     streaming_backend_error_check: BackendErrorCheck,
+    mm_request_kwargs_policy: MmRequestKwargsPolicy,
     pub(super) migration_limit: u32,
     systemone_admission: Arc<Semaphore>,
     systemone_preflight_admission: Arc<Semaphore>,
@@ -314,6 +315,7 @@ struct StateConfig {
     nvext_enabled: bool,
     sse_keep_alive: Option<Duration>,
     streaming_backend_error_check: BackendErrorCheck,
+    mm_request_kwargs_policy: MmRequestKwargsPolicy,
     migration_limit: u32,
 }
 
@@ -427,6 +429,124 @@ impl BackendErrorCheck {
                 );
                 Self::Skip
             }
+        }
+    }
+}
+
+/// Whether the frontend trusts `mm_processor_kwargs` and `media_io_kwargs` sent
+/// by the client on chat completions.
+///
+/// A client value overrides the worker's `--mm-processor-kwargs`, so a limit
+/// such as `max_pixels` is only enforced when the frontend refuses to forward a
+/// raised one. The default keeps the existing behavior.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum MmRequestKwargsPolicy {
+    /// Forward client kwargs unchanged.
+    #[default]
+    Allow,
+    /// Reject any non-empty client kwargs.
+    Deny,
+    /// Accept only these top-level keys; reject the request if it has any other.
+    Allowlist(Vec<String>),
+}
+
+impl MmRequestKwargsPolicy {
+    /// Policy from `DYN_MM_REQUEST_KWARGS_POLICY` and
+    /// `DYN_MM_REQUEST_KWARGS_ALLOWLIST`. Unset is `Allow`. An unrecognized
+    /// policy is `Deny` and logs an error: a typo in a restriction must not
+    /// silently remove it.
+    fn from_env() -> Self {
+        Self::parse(
+            std::env::var(env_llm::DYN_MM_REQUEST_KWARGS_POLICY),
+            std::env::var(env_llm::DYN_MM_REQUEST_KWARGS_ALLOWLIST),
+        )
+    }
+
+    /// Builds the policy from the raw values of the policy and allowlist
+    /// environment variables.
+    fn parse(
+        policy: Result<String, std::env::VarError>,
+        allowlist: Result<String, std::env::VarError>,
+    ) -> Self {
+        let policy = match policy {
+            Ok(value) => value,
+            Err(std::env::VarError::NotPresent) => return Self::Allow,
+            Err(error @ std::env::VarError::NotUnicode(_)) => {
+                tracing::error!(
+                    env = env_llm::DYN_MM_REQUEST_KWARGS_POLICY,
+                    %error,
+                    "invalid multimodal request kwargs policy; rejecting client kwargs"
+                );
+                return Self::Deny;
+            }
+        };
+
+        match policy.trim().to_ascii_lowercase().as_str() {
+            "" | "allow" => Self::Allow,
+            "deny" => Self::Deny,
+            "allowlist" => {
+                let raw = match allowlist {
+                    Ok(value) => value,
+                    Err(std::env::VarError::NotPresent) => String::new(),
+                    Err(error @ std::env::VarError::NotUnicode(_)) => {
+                        tracing::error!(
+                            env = env_llm::DYN_MM_REQUEST_KWARGS_ALLOWLIST,
+                            %error,
+                            "invalid multimodal request kwargs allowlist; rejecting client kwargs"
+                        );
+                        String::new()
+                    }
+                };
+                let keys: Vec<String> = raw
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|key| !key.is_empty())
+                    .map(str::to_owned)
+                    .collect();
+                if keys.is_empty() {
+                    tracing::warn!(
+                        env = env_llm::DYN_MM_REQUEST_KWARGS_ALLOWLIST,
+                        "multimodal request kwargs allowlist is empty; rejecting client kwargs"
+                    );
+                }
+                Self::Allowlist(keys)
+            }
+            other => {
+                tracing::error!(
+                    env = env_llm::DYN_MM_REQUEST_KWARGS_POLICY,
+                    value = other,
+                    "unrecognized multimodal request kwargs policy; rejecting client kwargs"
+                );
+                Self::Deny
+            }
+        }
+    }
+
+    /// `Ok(())` when the policy accepts `value`. `Err(Some(key))` names the
+    /// first rejected top-level key; `Err(None)` means the value as a whole is
+    /// rejected (a non-object, or any non-empty value under `Deny`).
+    pub fn check(&self, value: Option<&serde_json::Value>) -> Result<(), Option<String>> {
+        use serde_json::Value;
+        let object = match value {
+            None | Some(Value::Null) => return Ok(()),
+            Some(Value::Object(map)) if map.is_empty() => return Ok(()),
+            Some(Value::Object(map)) => map,
+            // The schema expects an object; fail closed for any other shape,
+            // as `has_mm_processor_override` does.
+            Some(_) => {
+                return match self {
+                    Self::Allow => Ok(()),
+                    _ => Err(None),
+                };
+            }
+        };
+        match self {
+            Self::Allow => Ok(()),
+            Self::Deny => Err(None),
+            Self::Allowlist(keys) => match object.keys().find(|key| !keys.contains(key)) {
+                Some(key) => Err(Some(key.clone())),
+                None => Ok(()),
+            },
         }
     }
 }
@@ -736,6 +856,7 @@ impl State {
             generate_api_enabled: config.generate_api_enabled,
             sse_keep_alive: config.sse_keep_alive,
             streaming_backend_error_check: config.streaming_backend_error_check,
+            mm_request_kwargs_policy: config.mm_request_kwargs_policy,
             migration_limit: config.migration_limit,
             systemone_admission: Arc::new(Semaphore::new(systemone_max_inflight_branches)),
             systemone_preflight_admission: Arc::new(Semaphore::new(
@@ -911,6 +1032,12 @@ impl State {
     /// status.
     pub fn streaming_backend_error_check(&self) -> BackendErrorCheck {
         self.streaming_backend_error_check
+    }
+
+    /// Whether the chat completions handler forwards client-supplied
+    /// `mm_processor_kwargs` and `media_io_kwargs`.
+    pub fn mm_request_kwargs_policy(&self) -> &MmRequestKwargsPolicy {
+        &self.mm_request_kwargs_policy
     }
 
     /// Returns true if Anthropic billing preamble stripping is enabled.
@@ -1131,6 +1258,12 @@ pub struct HttpServiceConfig {
     /// explicitly.
     #[builder(default = "BackendErrorCheck::from_env()")]
     streaming_backend_error_check: BackendErrorCheck,
+
+    /// Whether chat completions forward client-supplied `mm_processor_kwargs`
+    /// and `media_io_kwargs`. Defaults to `DYN_MM_REQUEST_KWARGS_POLICY` and
+    /// `DYN_MM_REQUEST_KWARGS_ALLOWLIST` when not set explicitly.
+    #[builder(default = "MmRequestKwargsPolicy::from_env()")]
+    mm_request_kwargs_policy: MmRequestKwargsPolicy,
 }
 
 fn default_rl_port() -> u16 {
@@ -1668,6 +1801,7 @@ impl HttpServiceConfigBuilder {
                 nvext_enabled,
                 sse_keep_alive: config.sse_keep_alive,
                 streaming_backend_error_check: config.streaming_backend_error_check,
+                mm_request_kwargs_policy: config.mm_request_kwargs_policy.clone(),
                 migration_limit: config.migration_limit,
             },
         ));
@@ -4136,6 +4270,90 @@ mod tests {
             BackendErrorCheck::parse(Ok("500".to_string())),
             BackendErrorCheck::Bounded(Duration::from_millis(500))
         );
+    }
+
+    fn mm_policy(policy: Option<&str>, allowlist: Option<&str>) -> MmRequestKwargsPolicy {
+        let var = |value: Option<&str>| {
+            value
+                .map(str::to_string)
+                .ok_or(std::env::VarError::NotPresent)
+        };
+        MmRequestKwargsPolicy::parse(var(policy), var(allowlist))
+    }
+
+    #[test]
+    fn test_mm_request_kwargs_policy_parse() {
+        assert_eq!(mm_policy(None, None), MmRequestKwargsPolicy::Allow);
+        assert_eq!(mm_policy(Some("allow"), None), MmRequestKwargsPolicy::Allow);
+        assert_eq!(mm_policy(Some(" DENY "), None), MmRequestKwargsPolicy::Deny);
+        assert_eq!(
+            mm_policy(Some("allowlist"), Some(" use_audio_in_video, ,fps ")),
+            MmRequestKwargsPolicy::Allowlist(vec!["use_audio_in_video".into(), "fps".into()])
+        );
+        // An empty allowlist accepts no key.
+        assert_eq!(
+            mm_policy(Some("allowlist"), None),
+            MmRequestKwargsPolicy::Allowlist(Vec::new())
+        );
+        // A typo fails closed.
+        assert_eq!(mm_policy(Some("denny"), None), MmRequestKwargsPolicy::Deny);
+        // A non-unicode allowlist is an empty allowlist, not an unrestricted one.
+        assert_eq!(
+            MmRequestKwargsPolicy::parse(
+                Ok("allowlist".into()),
+                Err(std::env::VarError::NotUnicode("fps".into()))
+            ),
+            MmRequestKwargsPolicy::Allowlist(Vec::new())
+        );
+        assert_eq!(
+            MmRequestKwargsPolicy::parse(
+                Err(std::env::VarError::NotUnicode("deny".into())),
+                Err(std::env::VarError::NotPresent)
+            ),
+            MmRequestKwargsPolicy::Deny
+        );
+    }
+
+    #[test]
+    fn test_mm_request_kwargs_policy_check() {
+        use serde_json::json;
+        let allowlist = MmRequestKwargsPolicy::Allowlist(vec!["use_audio_in_video".into()]);
+        for policy in [
+            MmRequestKwargsPolicy::Allow,
+            MmRequestKwargsPolicy::Deny,
+            allowlist.clone(),
+        ] {
+            // Absent, null, and empty values are never penalized.
+            assert_eq!(policy.check(None), Ok(()));
+            assert_eq!(policy.check(Some(&json!(null))), Ok(()));
+            assert_eq!(policy.check(Some(&json!({}))), Ok(()));
+        }
+
+        let override_ = json!({"max_pixels": 1});
+        assert_eq!(MmRequestKwargsPolicy::Allow.check(Some(&override_)), Ok(()));
+        assert_eq!(
+            MmRequestKwargsPolicy::Deny.check(Some(&override_)),
+            Err(None)
+        );
+        assert_eq!(
+            allowlist.check(Some(&override_)),
+            Err(Some("max_pixels".to_string()))
+        );
+        assert_eq!(
+            allowlist.check(Some(&json!({"use_audio_in_video": true}))),
+            Ok(())
+        );
+        assert_eq!(
+            allowlist.check(Some(&json!({"use_audio_in_video": true, "max_pixels": 1}))),
+            Err(Some("max_pixels".to_string()))
+        );
+
+        // Non-object shapes fail closed unless the policy allows everything.
+        for odd in [json!([1]), json!("x"), json!(3)] {
+            assert_eq!(MmRequestKwargsPolicy::Allow.check(Some(&odd)), Ok(()));
+            assert_eq!(MmRequestKwargsPolicy::Deny.check(Some(&odd)), Err(None));
+            assert_eq!(allowlist.check(Some(&odd)), Err(None));
+        }
     }
 
     #[test]
