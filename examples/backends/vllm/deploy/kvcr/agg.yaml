@@ -47,6 +47,8 @@ spec:
             if [ -n "${DYN_NAMESPACE_WORKER_SUFFIX:-}" ]; then
               state_namespace="${state_namespace}-${DYN_NAMESPACE_WORKER_SUFFIX}"
             fi
+            # Each worker Pod runs its own state agent; the engine attaches to it by name.
+            state_agent_component="kv_state_agent_$POD_INDEX"
 
             state_agent_pid=
             vllm_pid=
@@ -58,29 +60,28 @@ spec:
             }
             trap cleanup EXIT INT TERM
 
-            if [ "$POD_INDEX" = "0" ]; then
-              env -u DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS \
-                DYN_COMPONENT=kv_state_agent \
-                DYN_DISCOVERY_BACKEND=etcd \
-                DYN_HEALTH_CHECK_ENABLED=false \
-                DYN_NAMESPACE="$state_namespace" \
-                DYN_SYSTEM_PORT=9091 \
-                python3 -m dynamo.kv_state_agent \
-                  --max-slots "$KVCR_CACHE_SLOT_COUNT" &
-              state_agent_pid=$!
+            env -u DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS \
+              DYN_COMPONENT=kv_state_agent \
+              DYN_DISCOVERY_BACKEND=etcd \
+              DYN_HEALTH_CHECK_ENABLED=false \
+              DYN_NAMESPACE="$state_namespace" \
+              DYN_SYSTEM_PORT=9091 \
+              python3 -m dynamo.kv_state_agent \
+                --component "$state_agent_component" \
+                --max-slots 1 &
+            state_agent_pid=$!
 
-              state_agent_ready=false
-              for _ in $(seq 1 60); do
-                if python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9091/live', timeout=1).read()" >/dev/null 2>&1; then
-                  state_agent_ready=true
-                  break
-                fi
-                sleep 1
-              done
-              if [ "$state_agent_ready" != true ]; then
-                echo "KV state agent did not become ready" >&2
-                exit 1
+            state_agent_ready=false
+            for _ in $(seq 1 60); do
+              if python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9091/live', timeout=1).read()" >/dev/null 2>&1; then
+                state_agent_ready=true
+                break
               fi
+              sleep 1
+            done
+            if [ "$state_agent_ready" != true ]; then
+              echo "KV state agent did not become ready" >&2
+              exit 1
             fi
 
             kv_transfer_config=$(
@@ -131,14 +132,11 @@ spec:
             )
             python3 -m dynamo.vllm \
               --model Qwen/Qwen3-0.6B \
+              --kv-state-agent-component "$state_agent_component" \
               --kv-transfer-config "$kv_transfer_config" \
               --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:23080","enable_kv_cache_events":true}' &
             vllm_pid=$!
-            if [ -n "$state_agent_pid" ]; then
-              wait -n "$state_agent_pid" "$vllm_pid"
-            else
-              wait "$vllm_pid"
-            fi
+            wait -n "$state_agent_pid" "$vllm_pid"
           command:
           - /bin/bash
           - -c

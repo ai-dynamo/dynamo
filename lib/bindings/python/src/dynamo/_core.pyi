@@ -2935,8 +2935,13 @@ class KvStateAgentHost:
 
 class KvStateAttachmentOwner:
     def __init__(
-        self, endpoint: Endpoint, worker_id: int, descriptors: List[Dict[str, Any]]
+        self,
+        endpoint: Endpoint,
+        worker_id: int,
+        descriptors: List[Dict[str, Any]],
+        host_component: Optional[str] = None,
     ) -> None:
+        """None for `host_component` selects the `kv_state_agent` host."""
         ...
 
     async def start(self) -> None:

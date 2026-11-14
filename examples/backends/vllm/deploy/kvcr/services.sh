@@ -13,13 +13,12 @@ if [ -f "$SCRIPT_DIR/kvcr.whl" ]; then
     export PYTHONPATH="$SCRIPT_DIR/kvcr.whl${PYTHONPATH:+:$PYTHONPATH}"
 fi
 
-health_args=()
-if [ "$POD_INDEX" = "0" ]; then
-    state_namespace="${DYN_NAMESPACE}${DYN_NAMESPACE_WORKER_SUFFIX:+-${DYN_NAMESPACE_WORKER_SUFFIX}}"
-    env DYN_NAMESPACE="$state_namespace" DYN_HEALTH_CHECK_ENABLED=false \
-        python3 -m dynamo.kv_state_agent --max-slots "$KVCR_CACHE_SLOT_COUNT" &
-    health_args+=(--health-dependency-url "http://127.0.0.1:${DYN_SYSTEM_PORT:-9091}/live")
-fi
+# Each worker Pod runs its own state agent; the engine in `main` attaches to it
+# by the same component name.
+state_namespace="${DYN_NAMESPACE}${DYN_NAMESPACE_WORKER_SUFFIX:+-${DYN_NAMESPACE_WORKER_SUFFIX}}"
+env DYN_NAMESPACE="$state_namespace" DYN_HEALTH_CHECK_ENABLED=false \
+    python3 -m dynamo.kv_state_agent \
+    --component "kv_state_agent_$POD_INDEX" --max-slots 1 &
 
 python3 -m kvcr.service.server \
     --socket-path /run/kvcr/memory.sock \
@@ -29,7 +28,7 @@ python3 -m kvcr.service.server \
     --startup-timeout-seconds "$KVCR_GUARD_STARTUP_TIMEOUT_SECONDS" \
     --compatibility-digest "$DYNAMO_KVCR_COMPATIBILITY_DIGEST" \
     --health-host 0.0.0.0 --health-port 9092 \
-    "${health_args[@]}" &
+    --health-dependency-url "http://127.0.0.1:${DYN_SYSTEM_PORT:-9091}/live" &
 
 # Use Dynamo's first-child-exit and process-group cleanup semantics. Kubernetes'
 # terminationGracePeriodSeconds is the final bound for unresponsive children.

@@ -68,6 +68,9 @@ class DynamoRuntimeConfig(ConfigBase):
     # Exact endpoint that owns this worker's KV event and recovery state. None
     # maps KV state to the serving endpoint and does not change request routing.
     kv_state_endpoint: Optional[str] = None
+    # Component of the KV state-agent host this worker attaches to. None
+    # selects the default host component, `kv_state_agent`.
+    kv_state_agent_component: Optional[str] = None
     discovery_backend: str
     request_plane: str
     response_plane: str = "tcp"
@@ -269,6 +272,13 @@ class DynamoRuntimeArgGroup(ArgGroup):
             env_var="DYN_KV_STATE_ENDPOINT",
             default=None,
             help="Endpoint identity that owns this worker's KV event and recovery state. Defaults to the serving endpoint.",
+        )
+        add_argument(
+            g,
+            flag_name="--kv-state-agent-component",
+            env_var="DYN_KV_STATE_AGENT_COMPONENT",
+            default=None,
+            help="Component of the KV state-agent host this worker attaches to, in the worker's namespace. Start the host with the same `--component`. Defaults to `kv_state_agent`. Only workers in KV state-agent mode use it.",
         )
         add_argument(
             g,

@@ -196,7 +196,12 @@ class StateAgentLifecycle:
         descriptors = state_agent_descriptors(engine, config)
         if not descriptors:
             return
-        owner = KvStateAttachmentOwner(endpoint, endpoint.connection_id(), descriptors)
+        owner = KvStateAttachmentOwner(
+            endpoint,
+            endpoint.connection_id(),
+            descriptors,
+            host_component=config.dynamo_args.kv_state_agent_component,
+        )
         startup = asyncio.ensure_future(owner.start())
         try:
             await asyncio.shield(startup)

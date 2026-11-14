@@ -45,6 +45,7 @@ def _clear_deployment_options(monkeypatch):
         ("0", "dynamo.kv_state_agent", 0, "600"),
         ("0", None, 0, "30"),
         ("1", "kvcr.service.server", 7, "30"),
+        ("1", "dynamo.kv_state_agent", 0, "30"),
     ],
 )
 def test_services_supervises_children(
@@ -73,7 +74,6 @@ signal.pause()
         "PATH": f"{tmp_path}:{os.environ['PATH']}",
         "POD_INDEX": worker,
         "DYN_NAMESPACE": "test",
-        "KVCR_CACHE_SLOT_COUNT": "2",
         "DYN_NAMESPACE_WORKER_SUFFIX": "",
         "DYNAMO_KVCR_COMPATIBILITY_DIGEST": "test",
         "TEST_EXIT_CODE": str(exit_code),
@@ -90,7 +90,8 @@ signal.pause()
     )
     children = {}
     try:
-        for _ in range(2 if worker == "0" else 1):
+        # Every worker Pod runs its own state agent beside the memory service.
+        for _ in range(2):
             assert select.select([process.stdout], [], [], 5)[0], "child did not start"
             info = json.loads(process.stdout.readline())
             children[info["module"]] = info
@@ -101,7 +102,13 @@ signal.pause()
             == guard_timeout
         )
         assert guard_args[guard_args.index("--health-port") + 1] == "9092"
-        assert ("--health-dependency-url" in guard_args) == (worker == "0")
+        assert "--health-dependency-url" in guard_args
+        agent_args = children["dynamo.kv_state_agent"]["args"]
+        assert (
+            agent_args[agent_args.index("--component") + 1]
+            == f"kv_state_agent_{worker}"
+        )
+        assert agent_args[agent_args.index("--max-slots") + 1] == "1"
         if exit_module is None:
             process.terminate()
         else:
@@ -217,12 +224,16 @@ def test_process_local_variant_couples_state_agent_and_vllm() -> None:
     assert "initContainers" not in pod_spec
     assert "python3 -m dynamo.kv_state_agent" in command
     assert "python3 -m dynamo.vllm" in command
-    assert 'if [ "$POD_INDEX" = "0" ]' in command
+    # Every worker runs its own agent, and its engine attaches to it by name.
+    assert 'if [ "$POD_INDEX" = "0" ]' not in command
+    assert 'state_agent_component="kv_state_agent_$POD_INDEX"' in command
+    assert '--component "$state_agent_component"' in command
+    assert '--kv-state-agent-component "$state_agent_component"' in command
     assert "env -u DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS" in command
     assert "DYN_DISCOVERY_BACKEND=etcd" in command
     assert "DYN_SYSTEM_PORT=9091" in command
     assert "DYN_HEALTH_CHECK_ENABLED=false" in command
-    assert '--max-slots "$KVCR_CACHE_SLOT_COUNT"' in command
+    assert "--max-slots 1" in command
     assert 'wait -n "$state_agent_pid" "$vllm_pid"' in command
     assert "kvcr.service.server" not in command
     assert 'case "$POD_INDEX" in' not in command
@@ -255,14 +266,24 @@ def test_memory_service_variant_keeps_guard_in_sidecar() -> None:
     assert "python3 -m dynamo.kv_state_agent" in sidecar_command
     assert "--guard-count 1" in sidecar_command
     assert '--pool-sizes-gb "$KVCR_POOL_SIZE_GIB"' in sidecar_command
-    assert 'if [ "$POD_INDEX" = "0" ]' in sidecar_command
+    # The sidecar's agent and the engine in `main` name the same component,
+    # derived from the same replica index.
+    assert 'if [ "$POD_INDEX" = "0" ]' not in sidecar_command
+    assert '--component "kv_state_agent_$POD_INDEX" --max-slots 1' in sidecar_command
+    assert '--kv-state-agent-component "kv_state_agent_$POD_INDEX"' in main_command
+    for container in (main, sidecar):
+        pod_index = next(
+            item for item in container["env"] if item["name"] == "POD_INDEX"
+        )
+        assert pod_index["valueFrom"]["fieldRef"]["fieldPath"] == (
+            "metadata.labels['grove.io/podclique-pod-index']"
+        )
     assert "DYN_HEALTH_CHECK_ENABLED=false" in sidecar_command
     assert "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS" not in sidecar_command
     assert all(
         item["name"] != "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"
         for item in sidecar["env"]
     )
-    assert '--max-slots "$KVCR_CACHE_SLOT_COUNT"' in sidecar_command
     assert "wait_any_exit" in sidecar_command
     assert (
         'wait_for_ready http://127.0.0.1:9092/ready "${KVCR_READY_TIMEOUT_SECONDS}"'

@@ -97,8 +97,10 @@ spec:
             }))
             PY
             )
+            # The kvcr-services sidecar in this Pod runs the state agent under this name.
             exec python3 -m dynamo.vllm \
               --model Qwen/Qwen3-0.6B \
+              --kv-state-agent-component "kv_state_agent_$POD_INDEX" \
               --kv-transfer-config "$kv_transfer_config" \
               --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:23080","enable_kv_cache_events":true}'
           command:
@@ -184,8 +186,6 @@ spec:
                 fieldPath: metadata.labels['nvidia.com/dynamo-worker-hash']
           - name: DYN_SYSTEM_PORT
             value: "9091"
-          - name: KVCR_CACHE_SLOT_COUNT
-            value: "2"
           - name: POD_INDEX
             valueFrom:
               fieldRef:

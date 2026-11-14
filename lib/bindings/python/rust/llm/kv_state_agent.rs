@@ -116,13 +116,20 @@ pub struct KvStateAttachmentOwner {
     endpoint: dynamo_runtime::component::Endpoint,
     worker_id: u64,
     descriptors: Arc<Vec<llm_rs::kv_router::publisher::KvStateAttachmentDescriptor>>,
+    host_component: Option<String>,
     inner: Arc<OnceCell<Arc<llm_rs::kv_router::publisher::KvStateAttachmentOwner>>>,
 }
 
 #[pymethods]
 impl KvStateAttachmentOwner {
     #[new]
-    fn new(endpoint: Endpoint, worker_id: u64, descriptors: &Bound<'_, PyAny>) -> PyResult<Self> {
+    #[pyo3(signature = (endpoint, worker_id, descriptors, host_component=None))]
+    fn new(
+        endpoint: Endpoint,
+        worker_id: u64,
+        descriptors: &Bound<'_, PyAny>,
+        host_component: Option<String>,
+    ) -> PyResult<Self> {
         let inputs: Vec<AttachmentDescriptorInput> =
             pythonize::depythonize(descriptors).map_err(to_pyerr)?;
         let descriptors = inputs
@@ -154,6 +161,7 @@ impl KvStateAttachmentOwner {
             endpoint: endpoint.inner,
             worker_id,
             descriptors: Arc::new(descriptors),
+            host_component,
             inner: Arc::new(OnceCell::new()),
         })
     }
@@ -162,6 +170,7 @@ impl KvStateAttachmentOwner {
         let endpoint = self.endpoint.clone();
         let worker_id = self.worker_id;
         let descriptors = self.descriptors.clone();
+        let host_component = self.host_component.clone();
         let inner = self.inner.clone();
         crate::future_into_py(py, async move {
             inner
@@ -170,6 +179,7 @@ impl KvStateAttachmentOwner {
                         endpoint,
                         worker_id,
                         descriptors.as_ref().clone(),
+                        host_component,
                     )
                     .await
                 })
