@@ -14,9 +14,6 @@ This guide demonstrates how to deploy Llama 4 Maverick Instruct with Eagle Specu
     - One node runs the decode worker.
     - The other node runs the prefill worker.
 
-## Notes
-* Make sure the (`eagle3_one_model: true`) is set in the LLM API config inside the `examples/backends/trtllm/engine_configs/llama4/eagle` folder.
-
 ## Setup
 
 Assuming you have already allocated your nodes via `salloc`, and are
