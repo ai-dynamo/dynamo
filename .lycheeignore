@@ -85,6 +85,11 @@
 # the page is live.
 ^https://docs\.nvidia\.com/dynamo/dev/recipes/deepseek-v4-1-flash$
 
+# The DeepSeek-V4.1-Flash-1017 recipe and docs page are introduced by the same PR as these
+# links, so the URLs return 404 until merge and the docs deploy. Remove these entries after.
+^https://docs\.nvidia\.com/dynamo/dev/recipes/deepseek-v4-1-flash-1017$
+^https://github\.com/ai-dynamo/dynamo/(tree|blob)/main/recipes/deepseek-v4\.1-flash-1017
+
 # Introduced by the same PR as its docs link: the K-EXAONE 2.0 recipe does not exist on main
 # until this PR merges, so these blob/main URLs 404 during review. Remove after merge.
 ^https://github\.com/ai-dynamo/dynamo/(tree|blob)/main/recipes/k-exaone-2\.0
