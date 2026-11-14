@@ -135,13 +135,51 @@ SGLang workers expose operational endpoints via Dynamo's system server:
 |-------|-------------|
 | `/engine/control/start_profile` | Start PyTorch profiling |
 | `/engine/control/stop_profile` | Stop profiling and save traces |
-| `/engine/control/release_memory_occupation` | Release GPU memory for maintenance |
-| `/engine/control/resume_memory_occupation` | Resume GPU memory after release |
+| `/engine/pause_generation` | Pause generation and remove the worker from routing |
+| `/engine/continue_generation` | Continue generation and return the worker to routing |
+| `/engine/release_memory_occupation` | Release GPU memory while generation is paused |
+| `/engine/resume_memory_occupation` | Restore GPU memory before generation continues |
 | `/engine/control/update_weights_from_disk` | Update model weights from disk |
 | `/engine/control/update_weights_from_tensor` | Update model weights from tensor payload |
 | `/engine/control/update_weights_from_distributed` | Update model weights from distributed source |
 | `/engine/control/update_weights_from_ipc` | Update model weights from IPC payload |
 | `/engine/control/update_weight_version` | Update weight version metadata |
+
+Profiling and weight-update routes use the `/engine/control/` prefix. The four generation and memory routes have no `control/` segment. Workers do not register the memory routes under `/engine/control/`, and requests to those older paths return HTTP 404.
+
+### Release and Resume GPU Memory
+
+Workers expose `pause_generation`, `continue_generation`, `release_memory_occupation`, and `resume_memory_occupation` by default, without `--engine-route`. Each route calls the SGLang tokenizer-manager method of the same name. An `--engine-route` or `DYN_SGLANG_ENGINE_ROUTES` descriptor with the same path replaces the default route.
+
+Releasing memory needs SGLang's memory saver. Start SGLang with `--enable-memory-saver`; `--load-format gms` turns it on for you. Without it, `release_memory_occupation` returns but frees no GPU memory.
+
+With an empty `tags` list, release and resume cover the weights, the KV cache, and CUDA graphs. With `--load-format gms`, the GPU Memory Service keeps the weights, and resume maps them back. Without GMS, releasing memory discards the weights. To keep them, start SGLang with `--enable-weights-cpu-backup`. Otherwise, load the weights again with an `/engine/control/update_weights_from_*` route after you resume memory and before you continue generation.
+
+Call the routes in this order:
+
+1. **Pause generation.** `pause_generation` pauses SGLang and removes the worker from discovery, so the router stops sending it new requests. Use `"mode": "retract"`. It moves running requests back to SGLang's waiting queue. SGLang releases memory only when no request is running, so do not use an `in_place` pause here. The XPU image pins SGLang 0.5.19, which also requires an empty waiting queue before release. On that version, pause with `"mode": "abort"`, which aborts all in-flight requests.
+2. **Release memory.** `release_memory_occupation` frees GPU memory. The worker stays out of discovery.
+3. **Resume memory.** `resume_memory_occupation` restores GPU memory. The worker stays out of discovery.
+4. **Continue generation.** `continue_generation` resumes SGLang and registers the worker in discovery again.
+
+After each of these routes, Dynamo checks SGLang's pause state and updates discovery to match. Release and resume do not change discovery on their own.
+
+Send the requests to the worker's system server, set by `DYN_SYSTEM_PORT`:
+
+```bash
+WORKER_URL=http://localhost:8081
+
+curl --fail-with-body -X POST "$WORKER_URL/engine/pause_generation" \
+  -H 'Content-Type: application/json' -d '{"mode": "retract"}' &&
+curl --fail-with-body -X POST "$WORKER_URL/engine/release_memory_occupation" \
+  -H 'Content-Type: application/json' -d '{}' &&
+curl --fail-with-body -X POST "$WORKER_URL/engine/resume_memory_occupation" \
+  -H 'Content-Type: application/json' -d '{}' &&
+curl --fail-with-body -X POST "$WORKER_URL/engine/continue_generation" \
+  -H 'Content-Type: application/json' -d '{}'
+```
+
+The request bodies follow the SGLang request schemas for the installed SGLang version. For example, the release and resume bodies accept SGLang's optional `tags` list, such as `{"tags": ["weights", "kv_cache"]}`. `--fail-with-body` makes curl exit with an error on an HTTP error status, and `&&` stops the sequence there. A failed resume leaves the worker paused and out of discovery.
 
 ### Configurable SGLang Method Routes
 
