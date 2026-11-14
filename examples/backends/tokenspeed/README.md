@@ -12,8 +12,9 @@ Mooncake; Dynamo selects workers and forwards the bootstrap rendezvous.
 This example uses
 [`meituan-longcat/LongCat-Flash-Chat-FP8`](https://huggingface.co/meituan-longcat/LongCat-Flash-Chat-FP8).
 TokenSpeed revision
-[`1b859c107b1d`](https://github.com/lightseekorg/tokenspeed/tree/1b859c107b1d8450b750403f9c2e00251ecc59f3)
-registers its `LongcatFlashForCausalLM` architecture. The
+[`0e6ee353d7bd`](https://github.com/lightseekorg/tokenspeed/tree/0e6ee353d7bdc7afeb1c5795d839533eab7ecb9a),
+the November 2, 2026 nightly build, registers its `LongcatFlashForCausalLM`
+architecture. The
 [official TokenSpeed recipe catalog](https://lightseek.org/tokenspeed/recipes/models)
 does not list LongCat. This is an experimental Dynamo integration example.
 
@@ -21,14 +22,14 @@ does not list LongCat. This is an experimental Dynamo integration example.
 
 - Three hosts, with either eight H200 GPUs or four GB300 GPUs per host: one
   host per replica. TokenSpeed lists both among its
-  [supported GPUs](https://github.com/lightseekorg/tokenspeed/blob/1b859c107b1d8450b750403f9c2e00251ecc59f3/.github/ISSUE_TEMPLATE/1-bug-report.yml#L13-L15),
+  [supported GPUs](https://github.com/lightseekorg/tokenspeed/blob/0e6ee353d7bdc7afeb1c5795d839533eab7ecb9a/.github/ISSUE_TEMPLATE/1-bug-report.yml#L13-L15),
   with CUDA 13 and driver 580 or newer recommended. This is general hardware
   support, not a LongCat-specific recipe. The model owner's
   [deployment guide](https://github.com/meituan-longcat/LongCat-Flash-Chat/blob/main/docs/deployment_guide.md)
   describes FP8 on eight 141 GB H20 GPUs with SGLang or vLLM.
 - GB300 requires the native LongCat routing fix in
-  [TokenSpeed PR #1582](https://github.com/lightseekorg/tokenspeed/pull/1582).
-  The build instructions below apply the exact tested source.
+  [TokenSpeed PR #1582](https://github.com/lightseekorg/tokenspeed/pull/1582),
+  which the pinned revision includes.
 - A working RDMA fabric between hosts, with GPU memory registration available to
   Mooncake. Expose `/dev/infiniband` to containers and use unlimited locked memory.
 - Shared etcd and NATS services reachable from all processes. See
@@ -36,64 +37,40 @@ does not list LongCat. This is an experimental Dynamo integration example.
 - The same model checkpoint and TokenSpeed revision on every worker. Reserve at
   least 900 GB of disk per host; the pinned checkpoint contains about 748 GB of weights.
 
-Attention data parallelism must be one inside each worker. Scale with independent
-replicas. Both prefill and decode must use matching tensor/expert parallelism and
-cache geometry. The launcher's H200 default uses `flashinfer_cutlass`. GB300 uses
+A worker can run attention data parallelism (`--data-parallel-size N
+--attn-tp-size 1`), including across nodes; decode finds a request's prefill rank
+from its bootstrap room, so the two roles' attention-DP sizes may differ. Both
+must use matching attention tensor parallelism and cache geometry. The launcher's H200 default uses `flashinfer_cutlass`. GB300 uses
 `flashinfer_trtllm` with the native routing fix and the flags below.
 
 ## Build the Image
 
-### H200
+From the Dynamo repository root, use the shared TokenSpeed image builder. It
+installs the pinned TokenSpeed nightly wheels and builds Dynamo's Rust extension
+from the current checkout.
 
-From the Dynamo repository root, use the shared TokenSpeed image builder:
+For x86 H200 hosts:
 
 ```bash
 docker build \
   -f recipes/kimi-k2.5/tokenspeed/agg/nvidia/Dockerfile \
   --target runtime \
-  --build-arg BASE_IMAGE=lightseekorg/tokenspeed-runner@sha256:8187a564ba7fd3cb8b13dfa7fe697c61b894b518b5ee57fde7ca845ffb17c3ef \
-  --build-arg TOKENSPEED_GIT_REF=1b859c107b1d8450b750403f9c2e00251ecc59f3 \
   -t dynamo-tokenspeed:longcat-flash .
 ```
 
-This pins the upstream NVIDIA runner for x86 H200 hosts. It installs TokenSpeed
-from source and builds Dynamo's Rust extension from the current checkout.
-Make the resulting image available on all three hosts.
-
-### GB300
-
-Build on an ARM64 host with the matching runner:
+For GB300, build on an ARM64 host:
 
 ```bash
 docker build \
   -f recipes/kimi-k2.5/tokenspeed/agg/nvidia/Dockerfile \
   --target runtime \
-  --build-arg BASE_IMAGE=lightseekorg/tokenspeed-runner@sha256:2d9477bc2417572be8740676e8e038b564938c9ab466421f23daca441c97b153 \
-  --build-arg TOKENSPEED_GIT_REF=1b859c107b1d8450b750403f9c2e00251ecc59f3 \
+  --build-arg ARCH=arm64 \
   --build-arg CARGO_BUILD_JOBS=32 \
-  -t dynamo-tokenspeed:longcat-flash-gb300-base .
+  -t dynamo-tokenspeed:longcat-flash-gb300 .
 ```
 
-Apply the pinned native LongCat fix. It selects precomputed SwiGLU expert
-routing, which LongCat's zero-expert path requires. The base revision selects an
-incompatible MoE plan for the Blackwell FP8 backend.
-
-```bash
-patch_dir=$(mktemp -d)
-curl --fail --location \
-  https://raw.githubusercontent.com/nv-yna/tokenspeed/a8a41686835e3b255670857424f9f8f9b70c0205/python/tokenspeed/runtime/models/longcat_flash.py \
-  --output "$patch_dir/longcat_flash.py"
-printf '%s  %s\n' \
-  949c96de91cdc85312d2d6b9e596a02f8822a676d6dcdd454321483e91a411ee \
-  "$patch_dir/longcat_flash.py" | sha256sum --check
-cat > "$patch_dir/Dockerfile" <<'DOCKERFILE'
-FROM dynamo-tokenspeed:longcat-flash-gb300-base
-COPY longcat_flash.py /opt/tokenspeed/python/tokenspeed/runtime/models/longcat_flash.py
-DOCKERFILE
-docker build -t dynamo-tokenspeed:longcat-flash-gb300 "$patch_dir"
-```
-
-Make this patched image available on all three GB300 hosts.
+The pinned revision includes the native LongCat routing fix, so no source patch is
+needed. Make the image available on all three hosts.
 
 ## Download the Checkpoint
 
@@ -133,8 +110,8 @@ Set these variables in every process's environment:
 | `DYN_NAMESPACE` | `tokenspeed` |
 | `MODEL_PATH` | `/models/longcat-flash-fp8` |
 
-On each prefill host, set `DYN_TOKENSPEED_BOOTSTRAP_HOST` to that host's reachable
-address. Use `DISAGG_IB_DEVICE` to select an RDMA device when automatic selection
+On each prefill host, set `DYN_TOKENSPEED_BOOTSTRAP_HOST` (or pass
+`--bootstrap-host`) to that host's reachable address. Use `DISAGG_IB_DEVICE` to select an RDMA device when automatic selection
 does not match the connected fabric. On hosts without `nvidia-peermem`, set
 `WITH_NVIDIA_PEERMEM=0` in the worker containers to use Mooncake
 [DMA-BUF registration](https://github.com/kvcache-ai/Mooncake/blob/main/docs/source/design/transfer-engine/index.md).
@@ -160,10 +137,11 @@ export DYN_SYSTEM_PORT=8080
 bash examples/backends/tokenspeed/launch_disagg.sh frontend
 ```
 
-The launcher sets attention TP=8, EP=8, an 8,192-token context limit, and prefix
-granularity 64, with a 32,768-token cache capacity. It enables native KV events and gives each worker a unique local
-IPC socket. Additional command-line arguments are forwarded to the selected
-process. Use `ENGINE_PORT`, `BOOTSTRAP_PORT`, and `HTTP_PORT` to change ports.
+The launcher sets attention TP=8, EP=8, an 8,192-token context limit, and a
+32,768-token cache capacity, and tells Dynamo that the engine's KV prefix
+granularity is 64 tokens (`KV_BLOCK_SIZE`; see the configuration notes). It
+enables native KV events and gives each worker a unique local IPC socket.
+Additional command-line arguments are forwarded to the selected process. Use `ENGINE_PORT`, `BOOTSTRAP_PORT`, and `HTTP_PORT` to change ports.
 
 ### GB300 Worker Options
 
@@ -205,7 +183,8 @@ KV allocation, so insufficient decode capacity can queue prefill work. The
 `trtllm_mla` attention backend addresses the measured long-context decode slowdown;
 `flashinfer_trtllm` selects the separate MoE backend.
 
-A recorded 20-minute AgentX run at concurrency 16 with these settings delivered
+A recorded 20-minute AgentX run, taken with TokenSpeed revision `1b859c107b1d`
+before the worker moved to TokenSpeed's msgpack wire, at concurrency 16 with these settings delivered
 208.38 output tokens/s, 0.735 s median time to first token, and 11.7 ms median
 inter-token latency. It completed 405 successful requests and recorded one
 empty-response error. These are single-run measurements for this model and
@@ -236,9 +215,51 @@ worker IDs, overlap scores, timings, and a `passed` result.
 - Prefill generates one token for the native handoff. Decode retains the client's
   generation budget.
 - `--kv-events-config '{"enable_kv_cache_events":true}'` enables native cache
-  mutation events. Prefix caching must remain enabled.
+  mutation events. Prefix caching must remain enabled. KV events require attention
+  DP=1. With attention DP > 1, turn them off on the workers and the router.
+  `launch_disagg.sh` enables them by default, so set `KV_EVENTS_CONFIG` for the
+  workers and pass `--no-router-kv-events` to the frontend:
+
+  ```bash
+  KV_EVENTS_CONFIG='{"enable_kv_cache_events":false}' \
+    bash examples/backends/tokenspeed/launch_disagg.sh prefill --data-parallel-size 4
+  KV_EVENTS_CONFIG='{"enable_kv_cache_events":false}' \
+    bash examples/backends/tokenspeed/launch_disagg.sh decode --data-parallel-size 4
+  bash examples/backends/tokenspeed/launch_disagg.sh frontend --no-router-kv-events
+  ```
+
+  A non-KV router mode also works.
+- With attention DP > 1, the worker registers its DP size, and a KV-mode router
+  picks a rank per request. A prefill request always runs on rank
+  `bootstrap_room % dp_size`, where decode looks for its KV cache; the router mints
+  rooms to match the rank it picks, and the worker drops a prefill rank that
+  disagrees with its room. Decode runs on the router's rank. Without a router-chosen
+  rank, TokenSpeed places prefill and decode by the room.
+- A multi-node worker runs `python -m dynamo.tokenspeed` with the same arguments
+  and its own `--node-rank` on every node. The first node registers the worker; the
+  others run only their engine ranks. With the default loopback
+  `--data-parallel-address`, every node dials `--dist-init-addr`'s host on
+  `--data-parallel-rpc-port` (default 30500), so that port must be free on the first
+  node.
+- KV events also require `--kv-block-size` (`DYN_TOKENSPEED_KV_BLOCK_SIZE`), set to the engine's KV prefix
+  granularity. Each TokenSpeed model picks its granularity at startup and logs it
+  as `prefix_granularity=N` in its `Allocated cache arena` line. Pass the same
+  value to the frontend's `--kv-cache-block-size`. With a different value, Dynamo
+  drops every KV event (`Block not published` warnings) and routing loses cache
+  awareness.
+- The worker starts TokenSpeed's headless engine
+  (`python -m tokenspeed.runtime.entrypoints.engine`) as a child process and
+  serves it over TokenSpeed's msgpack ZMQ wire. It binds the wire's sockets on
+  `--data-parallel-address`, at free ports on a single node.
+- Guided decoding (JSON schema, regex, grammar, structural tags) requires
+  `--grammar-backend xgrammar` on checkpoints whose default backend is `none`.
+  Without it, TokenSpeed refuses such requests with HTTP 400.
 - When specifying an event endpoint manually, use `ipc://...` or
   `tcp://*:PORT`. TokenSpeed connects to a concrete IPv4 TCP address; Dynamo's
   subscriber requires TokenSpeed to bind.
-- `DYN_TOKENSPEED_BOOTSTRAP_HOST` overrides the advertised host without changing
-  TokenSpeed's listening address. It must be reachable from decode hosts.
+- `--bootstrap-host` (`DYN_TOKENSPEED_BOOTSTRAP_HOST`) overrides the advertised
+  host without changing TokenSpeed's listening address. It must be reachable from
+  decode hosts.
+- `--engine-startup-timeout` (`DYN_TOKENSPEED_ENGINE_STARTUP_TIMEOUT`, default
+  3600 s) bounds how long the worker waits for every engine rank to load and
+  register.
