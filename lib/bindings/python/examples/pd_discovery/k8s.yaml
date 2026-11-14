@@ -1,0 +1,137 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Runs two decode and two prefill workers with Kubernetes discovery
+# (DYN_DISCOVERY_BACKEND=kubernetes) and without the Dynamo operator. It creates
+# by hand what the operator creates for a DynamoGraphDeployment:
+# - RBAC for DynamoWorkerMetadata resources and EndpointSlices.
+# - A Service with the discovery labels, which its EndpointSlices inherit.
+# - The pod name, namespace, and UID in each pod's environment.
+# The DynamoWorkerMetadata CRD must be installed. See README.md.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: pd-discovery
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: pd-discovery
+  namespace: pd-discovery
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: pd-discovery
+  namespace: pd-discovery
+rules:
+  - apiGroups: ["nvidia.com"]
+    resources: ["dynamoworkermetadatas"]
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["endpoints", "pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: pd-discovery
+  namespace: pd-discovery
+subjects:
+  - kind: ServiceAccount
+    name: pd-discovery
+    namespace: pd-discovery
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: pd-discovery
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pd-discovery
+  namespace: pd-discovery
+  labels:
+    nvidia.com/dynamo-discovery-backend: kubernetes
+    nvidia.com/dynamo-discovery-enabled: "true"
+spec:
+  selector:
+    app: pd-discovery
+  # A Service needs a port; discovery does not use it.
+  ports:
+    - port: 9999
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: decode
+  namespace: pd-discovery
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: pd-discovery
+      role: decode
+  template:
+    metadata:
+      labels:
+        app: pd-discovery
+        role: decode
+        nvidia.com/dynamo-discovery-backend: kubernetes
+        nvidia.com/dynamo-discovery-enabled: "true"
+    spec:
+      serviceAccountName: pd-discovery
+      containers:
+        - name: main
+          image: pd-discovery:latest
+          imagePullPolicy: IfNotPresent
+          command: ["python3", "/example/decode.py"]
+          env:
+            - { name: DYN_DISCOVERY_BACKEND, value: kubernetes }
+            - { name: DYN_LOG, value: warn }
+            - { name: PYTHONUNBUFFERED, value: "1" }
+            - name: POD_NAME
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+            - name: POD_NAMESPACE
+              valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
+            - name: POD_UID
+              valueFrom: { fieldRef: { fieldPath: metadata.uid } }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prefill
+  namespace: pd-discovery
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: pd-discovery
+      role: prefill
+  template:
+    metadata:
+      labels:
+        app: pd-discovery
+        role: prefill
+        nvidia.com/dynamo-discovery-backend: kubernetes
+        nvidia.com/dynamo-discovery-enabled: "true"
+    spec:
+      serviceAccountName: pd-discovery
+      containers:
+        - name: main
+          image: pd-discovery:latest
+          imagePullPolicy: IfNotPresent
+          command: ["python3", "/example/prefill.py"]
+          env:
+            - { name: DYN_DISCOVERY_BACKEND, value: kubernetes }
+            - { name: DYN_LOG, value: warn }
+            - { name: PYTHONUNBUFFERED, value: "1" }
+            - name: POD_NAME
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+            - name: POD_NAMESPACE
+              valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
+            - name: POD_UID
+              valueFrom: { fieldRef: { fieldPath: metadata.uid } }

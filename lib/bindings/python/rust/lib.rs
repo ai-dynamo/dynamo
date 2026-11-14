@@ -1969,6 +1969,55 @@ impl Endpoint {
         self.inner.drt().connection_id()
     }
 
+    /// The model card that each instance of this endpoint registered, keyed by
+    /// instance ID, as discovery lists them now. LoRA adapter cards are left
+    /// out.
+    fn model_cards<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
+        let endpoint = self.inner.clone();
+        crate::future_into_py(py, async move {
+            let id = endpoint.id();
+            let instances = endpoint
+                .drt()
+                .discovery()
+                .list(rs::discovery::DiscoveryQuery::EndpointModels {
+                    namespace: id.namespace,
+                    component: id.component,
+                    endpoint: id.name,
+                })
+                .await
+                .map_err(to_pyerr)?;
+
+            let mut cards = std::collections::HashMap::new();
+            for instance in instances {
+                let rs::discovery::DiscoveryInstanceId::Model(model_id) = instance.id() else {
+                    continue;
+                };
+                if model_id.model_suffix.is_some() {
+                    continue;
+                }
+                // Skip a card this version cannot read rather than fail the whole list.
+                let card =
+                    match instance.deserialize_model::<llm_rs::model_card::ModelDeploymentCard>() {
+                        Ok(card) if card.lora.is_none() => card,
+                        Ok(_) => continue,
+                        Err(error) => {
+                            tracing::warn!(
+                                instance_id = model_id.instance_id,
+                                %error,
+                                "Skipping a model card that does not deserialize"
+                            );
+                            continue;
+                        }
+                    };
+                cards.insert(
+                    model_id.instance_id,
+                    llm::model_card::ModelDeploymentCard { inner: card },
+                );
+            }
+            Ok(cards)
+        })
+    }
+
     /// Get a RuntimeMetrics helper for creating Prometheus metrics
     #[getter]
     fn metrics(&self) -> prometheus_metrics::RuntimeMetrics {
