@@ -163,6 +163,72 @@ async def test_snapshot_prepare_failure_leaves_controller_unpaused():
     assert controller.is_paused is False
 
 
+def _lifecycle_controller(*states):
+    """An engine with vLLM's process checkpoint lifecycle and its controller."""
+    engine_client = AsyncMock()
+    engine_client.checkpoint_prepare.return_value = None
+    engine_client.checkpoint_state.side_effect = list(states)
+    controller = VllmEnginePauseController(
+        engine_client,
+        prepare_for_process_checkpoint=True,
+        checkpoint_lifecycle=True,
+    )
+    return engine_client, controller
+
+
+@pytest.mark.asyncio
+async def test_snapshot_with_checkpoint_lifecycle_neither_sleeps_nor_wakes(
+    monkeypatch,
+):
+    """vLLM's checkpoint_prepare releases the KV cache itself and refuses an
+    engine that sleeps; its checkpoint_restore wakes the KV cache again."""
+    monkeypatch.setattr("dynamo.vllm.handlers._CHECKPOINT_STATE_POLL_INTERVAL_SEC", 0)
+    engine_client, controller = _lifecycle_controller(
+        ("preparing", None), ("prepared", None)
+    )
+
+    assert await controller.pause(None) is True
+    assert await controller.resume() is True
+
+    assert engine_client.mock_calls == [
+        call.pause_generation(),
+        call.checkpoint_prepare(),
+        call.checkpoint_state(),
+        call.checkpoint_state(),
+        call.checkpoint_restore(),
+        call.resume_generation(),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_snapshot_with_checkpoint_lifecycle_prepare_refusal_is_raised():
+    """A refused prepare changes nothing in vLLM, so generation resumes."""
+    engine_client, controller = _lifecycle_controller()
+    engine_client.checkpoint_prepare.return_value = (
+        "Preparing for a checkpoint requires an awake engine"
+    )
+
+    with pytest.raises(RuntimeError, match="requires an awake engine"):
+        await controller.pause(None)
+
+    engine_client.checkpoint_state.assert_not_awaited()
+    engine_client.resume_generation.assert_awaited_once()
+    assert controller.is_paused is False
+    assert controller.needs_resume_recovery is False
+
+
+@pytest.mark.asyncio
+async def test_snapshot_with_checkpoint_lifecycle_failed_prepare_is_raised():
+    engine_client, controller = _lifecycle_controller(("failed", "discard failed"))
+
+    with pytest.raises(RuntimeError, match="failed: discard failed"):
+        await controller.pause(None)
+
+    engine_client.sleep.assert_not_awaited()
+    engine_client.resume_generation.assert_awaited_once()
+    assert controller.is_paused is False
+
+
 @pytest.mark.asyncio
 async def test_wake_up_passes_explicit_tags_from_request():
     handler = _make_handler()

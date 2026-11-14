@@ -85,6 +85,9 @@ async def prepare_snapshot_engine(
             "snapshotting without communicator checkpointing. "
             "Requires vLLM 0.27.0 or newer."
         )
+    # vLLM's process checkpoint lifecycle releases the KV cache in
+    # checkpoint_prepare() and refuses an engine that sleeps.
+    checkpoint_lifecycle = checkpoint_hooks and hasattr(engine[0], "checkpoint_state")
     # GMS restores weights outside the checkpoint, so they must be released,
     # and vLLM before 0.31.0 can release them only by sleeping.
     engine_client = engine[0]
@@ -101,6 +104,7 @@ async def prepare_snapshot_engine(
         pause_controller=VllmEnginePauseController(
             engine_client,
             prepare_for_process_checkpoint=checkpoint_hooks,
+            checkpoint_lifecycle=checkpoint_lifecycle,
         ),
         snapshot_config=snapshot_config,
         pause_args=(None,),
