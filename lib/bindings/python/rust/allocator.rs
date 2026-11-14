@@ -2,23 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! jemalloc as the Rust global allocator. Its symbols are prefixed (`_rjem_`), so CPython and C
-//! code keep the system allocator.
+//! code keep the system allocator. The options are in `lib/allocator/src/lib.rs`.
 
-#[global_allocator]
-static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
-
-/// Built-in options, overridden one by one by `_RJEM_MALLOC_CONF`. The background thread returns
-/// freed pages while idle, the decay values pin jemalloc 5.3's defaults, and `narenas` caps the
-/// default of four arenas per CPU.
-#[cfg(not(target_os = "macos"))]
-#[unsafe(export_name = "_rjem_malloc_conf")]
-pub static MALLOC_CONF: &[u8; 72] =
-    b"background_thread:true,dirty_decay_ms:10000,muzzy_decay_ms:0,narenas:16\0";
-
-/// macOS jemalloc has no background threads; requesting one leaves every allocation on a lock.
-#[cfg(target_os = "macos")]
-#[unsafe(export_name = "_rjem_malloc_conf")]
-pub static MALLOC_CONF: &[u8; 49] = b"dirty_decay_ms:10000,muzzy_decay_ms:0,narenas:16\0";
+dynamo_allocator::jemalloc_global_allocator!();
 
 #[cfg(test)]
 mod tests {

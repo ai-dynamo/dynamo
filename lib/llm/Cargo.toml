@@ -256,6 +256,8 @@ llm-tokenizer = { version = "=1.6.0", optional = true }
 sysinfo = { workspace = true }
 
 [dev-dependencies]
+# For the benches. Path-only, so publishing strips it.
+dynamo-allocator = { path = "../allocator" }
 dynamo-lora = { workspace = true, features = ["testing"] }
 dynamo-kv-router = { workspace = true, features = ["testing"] }
 dynamo-runtime = { workspace = true, features = ["testing"] }

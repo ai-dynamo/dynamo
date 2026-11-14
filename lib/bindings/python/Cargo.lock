@@ -2104,6 +2104,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-allocator"
+version = "1.7.0"
+dependencies = [
+ "tikv-jemalloc-sys",
+ "tikv-jemallocator",
+]
+
+[[package]]
 name = "dynamo-backend-common"
 version = "1.7.0"
 dependencies = [
@@ -2633,6 +2641,7 @@ dependencies = [
  "clap",
  "dashmap",
  "dynamo-admission",
+ "dynamo-allocator",
  "dynamo-backend-common",
  "dynamo-generate-format-catalog",
  "dynamo-kv-events",
@@ -2668,7 +2677,6 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tikv-jemalloc-ctl",
- "tikv-jemallocator",
  "tokio",
  "tokio-stream",
  "tokio-util",

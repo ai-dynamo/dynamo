@@ -12,6 +12,8 @@ use dynamo_llm::preprocessor::media::{
 use image::{ImageBuffer, Rgb, codecs::jpeg::JpegEncoder};
 use rayon::{ThreadPoolBuilder, prelude::*};
 
+dynamo_allocator::jemalloc_global_allocator!();
+
 const RUN_CONCURRENT_SWEEP_ENV: &str = "RUN_IMAGE_DECODE_SWEEP";
 const REQUIRE_LIBJPEG_TURBO_ENV: &str = "DYNAMO_REQUIRE_LIBJPEG_TURBO_TEST";
 const CONCURRENT_DECODE_WIDTH: u32 = 3840;

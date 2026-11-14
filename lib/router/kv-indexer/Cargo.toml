@@ -47,6 +47,8 @@ tracing = { workspace = true }
 xxhash-rust = { workspace = true }
 
 [dev-dependencies]
+# For the benches. Path-only, so publishing strips it.
+dynamo-allocator = { path = "../../allocator" }
 dynamo-router-protocol = { workspace = true, features = ["testing"] }
 criterion = "0.5"
 rmp-serde = { workspace = true }

@@ -23,6 +23,8 @@ use dynamo_runtime::protocols::annotated::Annotated;
 use futures::StreamExt;
 use futures::stream;
 
+dynamo_allocator::jemalloc_global_allocator!();
+
 const STREAM_CHUNKS: usize = 256;
 const TOOL_CALL_SIZES: &[usize] = &[1, 8, 64, 512, 4096];
 

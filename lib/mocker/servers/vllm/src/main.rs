@@ -14,6 +14,8 @@ use dynamo_vllm_mocker::{MockerServerConfig, ServerMode, VllmMockerService};
 use dynamo_vllm_sidecar::proto::control_server::ControlServer;
 use dynamo_vllm_sidecar::proto::inference_server::InferenceServer;
 
+dynamo_allocator::jemalloc_global_allocator!();
+
 #[derive(Parser, Debug)]
 #[command(
     name = "dynamo-vllm-mocker-server",

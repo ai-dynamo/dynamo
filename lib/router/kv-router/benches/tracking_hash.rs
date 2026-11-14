@@ -11,6 +11,8 @@ use dynamo_router_protocol::identity::RoutingPartitionRef;
 use dynamo_scheduler::tracking_hash::{TrackingHashAlgorithm, TrackingHashScope};
 use tempfile::NamedTempFile;
 
+dynamo_allocator::jemalloc_global_allocator!();
+
 const BENCHMARK_KEY: [u8; 32] = [0x5a; 32];
 const BLAKE3_SCOPE_DOMAIN: &[u8] = b"dynamo.router.tracking-hash/benchmark-blake3-scope\0";
 const BLAKE3_BLOCK_DOMAIN: &[u8] = b"dynamo.router.tracking-hash/benchmark-blake3-block\0";

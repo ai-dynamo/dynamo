@@ -62,6 +62,8 @@ use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
+dynamo_allocator::jemalloc_global_allocator!();
+
 /// The longest lease the service grants. `Lease` itself has no upper bound,
 /// and the registration storage adds the lease to the current time, which a
 /// lease near `u64::MAX` seconds would overflow.

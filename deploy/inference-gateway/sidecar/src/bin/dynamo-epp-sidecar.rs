@@ -6,6 +6,8 @@ use std::sync::Arc;
 use dynamo_epp_sidecar::{Config, UnavailablePdAdapter};
 use tracing_subscriber::EnvFilter;
 
+dynamo_allocator::jemalloc_global_allocator!();
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()

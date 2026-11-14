@@ -10,6 +10,7 @@ members = [
     "lib/tokens",
     "lib/truthy",
     "lib/error",
+    "lib/allocator",
     "lib/data-gen",
     "lib/kv-hashing",
     "lib/mocker",
@@ -92,6 +93,7 @@ dynamo-renderer = { version = "=10.1.0" }
 dynamo-tokens = { path = "lib/tokens", version = "1.7.0" }
 dynamo-truthy = { path = "lib/truthy", version = "1.7.0" }
 dynamo-error = { path = "lib/error", version = "1.7.0" }
+dynamo-allocator = { path = "lib/allocator", version = "1.7.0" }
 dynamo-data-gen = { path = "lib/data-gen", version = "1.7.0" }
 dynamo-admission = { path = "lib/router/admission", version = "1.7.0" }
 dynamo-kv-events = { path = "lib/kv-events", version = "1.7.0" }

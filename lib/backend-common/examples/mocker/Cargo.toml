@@ -16,6 +16,7 @@ name = "dynamo-mocker-backend"
 path = "src/main.rs"
 
 [dependencies]
+dynamo-allocator = { workspace = true }
 dynamo-backend-common = { workspace = true }
 dynamo-mocker = { workspace = true }
 

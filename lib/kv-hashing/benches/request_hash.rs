@@ -14,6 +14,8 @@ use std::time::Duration;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use dynamo_kv_hashing::{Request, RequestMmObjectInfo};
 
+dynamo_allocator::jemalloc_global_allocator!();
+
 fn request(token_count: usize, mm_info: Vec<RequestMmObjectInfo>) -> Request {
     Request::builder()
         .tokens((0..token_count).map(|i| i as u32).collect::<Vec<_>>())

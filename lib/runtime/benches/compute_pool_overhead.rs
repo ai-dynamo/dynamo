@@ -5,6 +5,8 @@ use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_ma
 use dynamo_runtime::compute::ComputePool;
 use std::sync::Arc;
 
+dynamo_allocator::jemalloc_global_allocator!();
+
 /// Compute-intensive function: sum of all primes up to n
 fn compute_primes_sum(n: u64) -> u64 {
     let mut sum = 0u64;

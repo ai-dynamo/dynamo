@@ -12,6 +12,8 @@ use dynamo_sglang_mocker::{MockerServerConfig, ServerMode, SglangMockerService};
 use dynamo_sglang_sidecar::proto::sglang_service_server::SglangServiceServer;
 use serde_json::{Map, Value};
 
+dynamo_allocator::jemalloc_global_allocator!();
+
 #[derive(Parser, Debug)]
 #[command(
     name = "dynamo-sglang-mocker-server",

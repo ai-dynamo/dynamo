@@ -225,6 +225,7 @@
 /tests/utils/                                                                                           @ai-dynamo/dynamo-runtime-codeowners
 /lib/bindings/                                                                                          @ai-dynamo/dynamo-runtime-codeowners
 /tests/parity/                                                                                          @ai-dynamo/dynamo-runtime-codeowners
+/lib/allocator/                                                                                         @ai-dynamo/dynamo-runtime-codeowners
 /lib/llm/tests/                                                                                         @ai-dynamo/dynamo-runtime-codeowners
 /lib/bindings/c/                                                                                        @ai-dynamo/dynamo-runtime-codeowners
 /tests/CLAUDE.md                                                                                        @ai-dynamo/dynamo-runtime-codeowners

@@ -1,0 +1,28 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "dynamo-allocator"
+description = "jemalloc as the global allocator of Dynamo binaries, with one set of options"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[features]
+# For an artifact loaded with dlopen (the Python extension): jemalloc must not use
+# initial-exec TLS.
+dlopen = ["tikv-jemallocator/disable_initial_exec_tls"]
+# Build jemalloc with statistics, which `allocated()` reads. Production builds leave it off.
+stats = ["tikv-jemallocator/stats"]
+
+[target.'cfg(all(not(target_env = "msvc"), not(target_env = "musl")))'.dependencies]
+tikv-jemallocator = { version = "0.6", default-features = false, features = [
+  "background_threads_runtime_support",
+] }
+tikv-jemalloc-sys = { version = "0.6", default-features = false }
+
+[target.'cfg(all(not(target_env = "msvc"), not(target_env = "musl")))'.dev-dependencies]
+tikv-jemalloc-ctl = { version = "0.6", default-features = false }

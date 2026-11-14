@@ -28,6 +28,9 @@ use dynamo_tokens::SequenceHash;
 use serde::Serialize;
 use tokio::sync::oneshot;
 
+#[cfg(not(feature = "system-allocator"))]
+dynamo_allocator::jemalloc_global_allocator!();
+
 const RESULT_SCHEMA_VERSION: u32 = 1;
 const START_LEAD_NS: u64 = 20_000_000;
 const RANK_INCARNATION: u64 = 1;
@@ -1106,7 +1109,9 @@ fn main() -> anyhow::Result<()> {
 }
 
 async fn quiesce(milliseconds: u64) {
-    #[cfg(target_os = "linux")]
+    #[cfg(not(feature = "system-allocator"))]
+    dynamo_allocator::purge();
+    #[cfg(all(feature = "system-allocator", target_os = "linux"))]
     unsafe {
         libc::malloc_trim(0);
     }

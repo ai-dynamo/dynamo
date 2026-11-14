@@ -606,6 +606,7 @@ jobs:
         lint_bench request-trace-to-mooncake --bin request_trace_to_mooncake
         lint_bench offline-replay --bench offline_replay_bench
         lint_bench mooncake --bench mooncake_bench
+        lint_bench mooncake,system-allocator --bench mooncake_bench
         lint_bench active-sequences --bench active_sequences_bench
         lint_bench dc-ckf-consumer --bin dc_ckf_consumer_bench
         lint_bench dc-ckf-relay --bench dc_ckf_relay_bench

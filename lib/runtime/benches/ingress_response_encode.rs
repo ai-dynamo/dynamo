@@ -17,6 +17,8 @@ use dynamo_runtime::pipeline::network::{
 use dynamo_runtime::protocols::annotated::Annotated;
 use serde::Serialize;
 
+dynamo_allocator::jemalloc_global_allocator!();
+
 /// Stand-in for what a Rust-native engine streams during decode: some token ids
 /// and their position. A typed struct rather than a `serde_json::Value`, because
 /// the engines that reach `SerdeIngressPayloadAdapter` hand it typed responses —
