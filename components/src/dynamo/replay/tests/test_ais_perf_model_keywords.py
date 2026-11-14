@@ -103,9 +103,18 @@ def _simulated(report: ReplayReport) -> dict:
     }
 
 
+# For a test of what each public function does itself: it hands the keywords
+# to the shared code and the results to its native call, and the warnings name
+# the line that called it.
 _BOTH_FUNCTIONS = pytest.mark.parametrize(
     "replay", [_trace_replay, _synthetic_replay], ids=["trace", "synthetic"]
 )
+
+
+@pytest.fixture
+def replay():
+    """One public function, for a test of the code that both of them call."""
+    return _trace_replay
 
 
 @pytest.fixture
@@ -184,7 +193,6 @@ def test_old_router_keyword_reaches_native_call(replay, native_calls):
 
 
 @pytest.mark.unit
-@_BOTH_FUNCTIONS
 def test_old_router_keyword_unknown_key_keeps_type_error(replay, native_calls):
     unknown_key = {**AGGREGATED_ENTRY, "not_a_field": 1}
 
@@ -213,7 +221,6 @@ def test_old_router_keyword_unknown_key_keeps_type_error(replay, native_calls):
 
 
 @pytest.mark.unit
-@_BOTH_FUNCTIONS
 def test_no_perf_model_keyword_passes_none(replay, native_calls):
     with pytest.raises(_NativeCallRecorded):
         replay()
@@ -244,7 +251,6 @@ def test_old_router_keyword_reaches_retune_inputs(planner_adapter_calls):
 
 
 @pytest.mark.unit
-@_BOTH_FUNCTIONS
 def test_router_keyword_builds_native_config(replay, native_calls, tmp_path):
     written_file = tmp_path / "perf_model.json"
     written_file.write_text(json.dumps(IDENTITY))
@@ -267,7 +273,6 @@ def test_router_keyword_builds_native_config(replay, native_calls, tmp_path):
 
 
 @pytest.mark.unit
-@_BOTH_FUNCTIONS
 def test_router_keyword_uses_prefill_entry_when_disaggregated(replay, native_calls):
     written = [PREFILL_ENTRY, _DECODE_ENTRY, AGGREGATED_ENTRY]
 
@@ -315,7 +320,6 @@ def test_router_keyword_reaches_retune_inputs(planner_replay_calls):
 
 
 @pytest.mark.unit
-@_BOTH_FUNCTIONS
 def test_engine_keyword_creates_aggregated_engine_args(replay, native_calls):
     expected = {"engine": {"timing_model": timing_model(AGGREGATED_ENTRY)}}
 
@@ -336,7 +340,6 @@ def test_engine_keyword_creates_aggregated_engine_args(replay, native_calls):
 
 
 @pytest.mark.unit
-@_BOTH_FUNCTIONS
 def test_engine_keyword_sets_timing_model_on_given_args(replay, native_calls):
     as_mapping = {"engine": {"num_gpu_blocks": 1024}, "planner_profile_data": None}
     as_text = json.dumps(as_mapping)
@@ -420,7 +423,6 @@ def test_engine_keyword_reaches_planner_adapter_and_retune_inputs(
 
 
 @pytest.mark.unit
-@_BOTH_FUNCTIONS
 def test_router_and_engine_keywords_together(replay, native_calls):
     with pytest.raises(_NativeCallRecorded):
         replay(
@@ -441,7 +443,6 @@ def test_router_and_engine_keywords_together(replay, native_calls):
 
 
 @pytest.mark.unit
-@_BOTH_FUNCTIONS
 def test_old_router_keyword_with_engine_keyword(replay, native_calls):
     perf_config = AisPerfConfig(config=AGGREGATED_ENTRY)
 
@@ -460,7 +461,6 @@ def test_old_router_keyword_with_engine_keyword(replay, native_calls):
 
 
 @pytest.mark.unit
-@_BOTH_FUNCTIONS
 def test_old_and_new_router_keywords_error(replay, native_calls):
     perf_config = AisPerfConfig(config=AGGREGATED_ENTRY)
 
@@ -481,7 +481,6 @@ def test_old_and_new_router_keywords_error(replay, native_calls):
 @pytest.mark.parametrize(
     "name", ["extra_engine_args", "prefill_engine_args", "decode_engine_args"]
 )
-@_BOTH_FUNCTIONS
 def test_engine_keyword_with_written_timing_model_error(replay, name, native_calls):
     engine_args = (
         {"extra_engine_args": {"engine": {}}}
@@ -502,7 +501,6 @@ def test_engine_keyword_with_written_timing_model_error(replay, name, native_cal
 
 @pytest.mark.unit
 @pytest.mark.parametrize("keyword", ["router_ais_perf_model", "ais_perf_model"])
-@_BOTH_FUNCTIONS
 def test_new_keywords_reject_other_objects(replay, keyword, native_calls):
     other_objects = [
         AisPerfConfig(config=AGGREGATED_ENTRY),
@@ -522,7 +520,6 @@ def test_new_keywords_reject_other_objects(replay, keyword, native_calls):
 
 
 @pytest.mark.unit
-@_BOTH_FUNCTIONS
 def test_router_keyword_requires_kv_router_and_router_config(replay, native_calls):
     with pytest.raises(
         ValueError,
@@ -552,7 +549,6 @@ def test_router_keyword_requires_kv_router_and_router_config(replay, native_call
 
 @pytest.mark.unit
 @pytest.mark.parametrize("load_model", ["ais", "aic"])
-@_BOTH_FUNCTIONS
 def test_ais_load_model_requires_router_keyword(replay, load_model, native_calls):
     router = {
         "router_mode": "kv_router",
@@ -570,7 +566,6 @@ def test_ais_load_model_requires_router_keyword(replay, load_model, native_calls
 
 
 @pytest.mark.unit
-@_BOTH_FUNCTIONS
 def test_load_model_checks_left_to_native_replay(replay, native_calls):
     perf_config = AisPerfConfig(config=AGGREGATED_ENTRY)
     ais_router_config = KvRouterConfig(router_prefill_load_model="ais")
@@ -603,7 +598,6 @@ def test_load_model_checks_left_to_native_replay(replay, native_calls):
 
 
 @pytest.mark.unit
-@_BOTH_FUNCTIONS
 def test_router_keyword_error_names_keyword(replay, native_calls):
     with pytest.raises(ValueError) as from_shared_module:
         router_perf_config([PREFILL_ENTRY], "aggregated")
@@ -635,7 +629,6 @@ def test_router_keyword_error_names_keyword(replay, native_calls):
     ],
 )
 @pytest.mark.parametrize("disaggregated", [False, True], ids=["agg", "disagg"])
-@_BOTH_FUNCTIONS
 def test_router_keyword_config_error_names_keyword(
     replay, disaggregated, written, pattern, native_calls
 ):
@@ -655,7 +648,6 @@ def test_router_keyword_config_error_names_keyword(
 
 
 @pytest.mark.unit
-@_BOTH_FUNCTIONS
 def test_engine_keyword_missing_role_entry_error(replay, native_calls):
     # The loader reports each missing entry, in its own words.
     with pytest.raises(ValueError):
@@ -669,7 +661,6 @@ def test_engine_keyword_missing_role_entry_error(replay, native_calls):
 
 
 @pytest.mark.unit
-@_BOTH_FUNCTIONS
 def test_engine_keyword_unknown_key_error(replay, native_calls):
     with pytest.raises(ValueError) as raised:
         replay(ais_perf_model={**IDENTITY, "not_a_field": 1})
@@ -697,7 +688,6 @@ def test_engine_keyword_unknown_key_error(replay, native_calls):
         ),
     ],
 )
-@_BOTH_FUNCTIONS
 def test_engine_keyword_identity_value_error(replay, written, message, native_calls):
     with pytest.raises(ValueError) as raised:
         replay(ais_perf_model=written)
@@ -720,7 +710,6 @@ def test_engine_keyword_identity_value_error(replay, written, message, native_ca
     ],
 )
 @pytest.mark.parametrize("wrong_role", ["prefill", "decode"])
-@_BOTH_FUNCTIONS
 def test_engine_keyword_config_error_in_one_disaggregated_entry(
     replay, wrong_role, changed, pattern, native_calls
 ):
@@ -740,7 +729,6 @@ def test_engine_keyword_config_error_in_one_disaggregated_entry(
 
 
 @pytest.mark.unit
-@_BOTH_FUNCTIONS
 def test_engine_keyword_passes_config_on_as_resolved(replay, native_calls):
     written = {**IDENTITY, "backend_version": "0.11.0", "tp": 2}
     as_resolved = {**written, "worker_type": "aggregated"}
@@ -768,7 +756,6 @@ def test_engine_keyword_passes_config_on_as_resolved(replay, native_calls):
 @pytest.mark.parametrize(
     ("given", "not_given"), [("prefill", "decode"), ("decode", "prefill")]
 )
-@_BOTH_FUNCTIONS
 def test_engine_keyword_with_engine_args_of_one_role(
     replay, given, not_given, native_calls
 ):
@@ -791,7 +778,6 @@ def test_engine_keyword_with_engine_args_of_one_role(
 
 
 @pytest.mark.unit
-@_BOTH_FUNCTIONS
 def test_error_comes_before_warning(replay, native_calls):
     perf_config = AisPerfConfig(config=AGGREGATED_ENTRY)
 
@@ -816,7 +802,6 @@ def test_error_comes_before_warning(replay, native_calls):
 
 
 @pytest.mark.unit
-@_BOTH_FUNCTIONS
 def test_engine_keyword_does_not_configure_router(replay, native_calls):
     with pytest.raises(_NativeCallRecorded):
         replay(ais_perf_model=IDENTITY)
@@ -828,7 +813,6 @@ def test_engine_keyword_does_not_configure_router(replay, native_calls):
 
 
 @pytest.mark.unit
-@_BOTH_FUNCTIONS
 def test_router_keyword_does_not_change_engine_args(replay, native_calls):
     engine_args = {"engine": {"num_gpu_blocks": 1024}}
     disaggregated = _disaggregated_engine_args()
@@ -876,7 +860,6 @@ def test_same_list_for_engines_and_router(replay, native_calls):
 
 
 @pytest.mark.unit
-@_BOTH_FUNCTIONS
 def test_relative_file_starts_at_working_directory(
     replay, native_calls, tmp_path, monkeypatch
 ):
@@ -906,7 +889,6 @@ def test_relative_file_starts_at_working_directory(
 
 
 @pytest.mark.unit
-@_BOTH_FUNCTIONS
 def test_relative_paths_in_mapping_start_at_working_directory(
     replay, native_calls, tmp_path, monkeypatch
 ):
@@ -944,13 +926,19 @@ def test_old_keyword_warning_names_caller(replay, native_calls):
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("as_text", [False, True], ids=["dict", "json"])
-@_BOTH_FUNCTIONS
+@pytest.mark.parametrize(
+    ("replay", "planner_config"),
+    [
+        pytest.param(_trace_replay, _OLD_PLANNER_CONFIG, id="trace-dict"),
+        pytest.param(_trace_replay, json.dumps(_OLD_PLANNER_CONFIG), id="trace-json"),
+        # Each function reads the config and warns in its own planner path.
+        pytest.param(_synthetic_replay, _OLD_PLANNER_CONFIG, id="synthetic-dict"),
+    ],
+)
 def test_old_planner_config_warns_once_and_names_caller(
-    replay, as_text, planner_replay_calls
+    replay, planner_config, planner_replay_calls
 ):
     adapter_calls, native_calls = planner_replay_calls
-    planner_config = json.dumps(_OLD_PLANNER_CONFIG) if as_text else _OLD_PLANNER_CONFIG
 
     with pytest.warns(FutureWarning) as records:
         with pytest.raises(_NativeCallRecorded):
@@ -977,7 +965,6 @@ def test_old_planner_config_warns_once_and_names_caller(
     ],
     ids=["no perf model", "one config", "list"],
 )
-@_BOTH_FUNCTIONS
 def test_planner_config_without_old_keys_does_not_warn(
     replay, planner_config, planner_replay_calls
 ):
@@ -1017,7 +1004,6 @@ def test_old_planner_config_error_comes_before_warning(replay, native_calls):
 
 
 @pytest.mark.unit
-@_BOTH_FUNCTIONS
 def test_planner_config_already_warned_silences_only_that_warning(
     replay, planner_replay_calls
 ):

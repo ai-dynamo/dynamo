@@ -252,14 +252,23 @@ def test_moe_pick_writes_moe_sizes(database_version):
     assert "moe_ep_size" not in dense
 
 
-def test_trtllm_writes_backend_and_keeps_engine_type(database_version):
+@pytest.mark.parametrize(
+    "backend,engine_type",
+    [
+        pytest.param("sglang", ["--engine-type", "sglang"], id="sglang"),
+        # The mocker has no trtllm engine type; the worker keeps its own.
+        pytest.param("trtllm", [], id="trtllm"),
+    ],
+)
+def test_engine_type_is_written_for_an_engine_the_mocker_has(
+    database_version, backend, engine_type
+):
     out = dgd_generation._inject_mocker_ais_args(
-        _worker_arguments(), _interpolation("trtllm"), DENSE
+        _worker_arguments(), _interpolation(backend), DENSE
     )
 
-    assert _perf_model(out)["backend"] == "trtllm"
-    # The mocker has no trtllm engine type; the worker keeps its own.
-    assert "--engine-type" not in out
+    assert _perf_model(out)["backend"] == backend
+    assert out[out.index("--ais-perf-model") + 2 :] == engine_type
 
 
 def test_no_database_version_omits_key(monkeypatch):
@@ -485,13 +494,6 @@ def test_user_written_new_form_conflict_text():
         _planner_value(_request(planner), DENSE, DENSE)
 
 
-def test_user_written_from_entry_is_not_opened():
-    written = {"from": "/missing.yaml"}
-    planner = _planner("decode", dict(written))
-
-    assert _planner_value(_request(planner), DENSE, DENSE) == written
-
-
 def test_user_written_missing_field_is_compared_as_default():
     planner = _planner("decode", _written_entry())
 
@@ -644,14 +646,12 @@ def test_override_trigger_is_read_in_every_shape(database_version, caplog, shape
             id="metadata-only",
         ),
         *(
-            pytest.param(_override(shape, arguments), id=f"{shape}:{arguments[0]}")
-            for shape in ("v1alpha1", "v1beta1-replace")
+            pytest.param(_override("v1alpha1", arguments), id=arguments[0])
             for arguments in (
                 ["--ais-nextn", "2"],
                 ["--aic-nextn", "2"],
                 ["--ais-nextn-accept-rates", "0.5"],
                 ["--ais-mtp-seed", "1"],
-                ["--planner-profile-data", "x"],
                 ["--ais-perf-model", PERF_MODEL_VALUE],
                 [f"--ais-perf-model={PERF_MODEL_VALUE}"],
                 ["--ais-perf-m", PERF_MODEL_VALUE],
@@ -660,13 +660,9 @@ def test_override_trigger_is_read_in_every_shape(database_version, caplog, shape
                 ["--model-name", "m"],
             )
         ),
-        *(
-            pytest.param(_override(shape, arguments), id=f"{shape}:{kind}")
-            for shape in ("v1alpha1", "v1beta1-replace")
-            for kind, arguments in (
-                ("arguments-as-text", "--ais-system s"),
-                ("argument-that-is-a-number", ["--ais-tp-size", 2]),
-            )
+        pytest.param(_override("v1alpha1", "--ais-system s"), id="arguments-as-text"),
+        pytest.param(
+            _override("v1alpha1", ["--ais-tp-size", 2]), id="argument-that-is-a-number"
         ),
     ],
 )

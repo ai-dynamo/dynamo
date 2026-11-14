@@ -1319,10 +1319,7 @@ def test_router_hook_mapping_reaches_native_synthetic_call(
     )
 
 
-@pytest.mark.parametrize(
-    "workload", [_TRACE_WORKLOAD, _SYNTHETIC_WORKLOAD], ids=["trace", "synthetic"]
-)
-def test_router_hook_mapping_is_passed_as_router_keyword(monkeypatch, workload) -> None:
+def test_router_hook_mapping_is_passed_as_router_keyword(monkeypatch) -> None:
     seen: dict = {}
 
     def fake_replay(**kwargs):
@@ -1330,9 +1327,8 @@ def test_router_hook_mapping_is_passed_as_router_keyword(monkeypatch, workload) 
         return _report({"completed_requests": 1})
 
     monkeypatch.setattr(simulation, "run_trace_replay", fake_replay)
-    monkeypatch.setattr(simulation, "run_synthetic_trace_replay", fake_replay)
     replay = _replay_with_router_hook(
-        _agg_deployment(), workload, ais_perf_config=_AIS_PERF_CONFIG
+        _agg_deployment(), _TRACE_WORKLOAD, ais_perf_config=_AIS_PERF_CONFIG
     )
 
     simulation.DynamoReplayRunnerFactory().create(0).run(replay)

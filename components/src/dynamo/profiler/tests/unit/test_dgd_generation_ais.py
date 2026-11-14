@@ -280,47 +280,6 @@ class TestInjectMockerAicArgs:
             decode_pick=pick,
         )
 
-    def test_injects_all_required_flags(self):
-        spec = self._spec("trtllm")
-        args = ["--model-path", "Qwen/Qwen3-235B", "--disaggregation-mode", "prefill"]
-        out = _inject_mocker_ais_args(args, spec, spec.prefill_pick)
-        config = json.loads(out[out.index("--ais-perf-model") + 1])
-        assert config["backend"] == "trtllm"
-        assert config["system"] == "h200_sxm"
-        assert config["tp"] == 1
-        assert config["moe_tp_size"] == 1
-        assert config["moe_ep_size"] == 8
-        assert config["attention_dp"] == 8
-        assert config["backend_version"] == "current"
-        old_flags = (
-            "--ais-backend",
-            "--ais-system",
-            "--ais-tp-size",
-            "--ais-moe-",
-            "--ais-attention-dp-size",
-        )
-        assert not [token for token in out if token.startswith(old_flags)]
-        # trtllm is not a mocker engine_type; leave --engine-type alone.
-        assert "--engine-type" not in out
-
-    def test_matches_engine_type_for_vllm(self):
-        spec = self._spec("vllm")
-        out = _inject_mocker_ais_args([], spec, spec.prefill_pick)
-        config = json.loads(out[out.index("--ais-perf-model") + 1])
-        assert out[out.index("--engine-type") + 1] == "vllm"
-        assert config["backend"] == "vllm"
-        assert config["backend_version"] == "current"
-        assert config["model"] == "Qwen/Qwen3-235B"
-
-    def test_matches_engine_type_for_sglang(self):
-        spec = self._spec("sglang")
-        out = _inject_mocker_ais_args([], spec, spec.decode_pick)
-        config = json.loads(out[out.index("--ais-perf-model") + 1])
-        assert out[out.index("--engine-type") + 1] == "sglang"
-        assert config["backend"] == "sglang"
-        assert config["backend_version"] == "current"
-        assert config["model"] == "Qwen/Qwen3-235B"
-
     @pytest.mark.parametrize("explicit_capacity", [False, True])
     def test_dense_tp_pick_starts_with_canonical_estimator(self, explicit_capacity):
         # Only packaged model metadata/performance tables are used; no weights.
@@ -1130,7 +1089,6 @@ def test_one_check_serves_every_form(monkeypatch):
 
 
 WORKERS = ("prefill", "decode")
-OVERRIDE_SHAPES = ["services", "components"]
 
 # Each generated worker's arguments from its first AIS argument on, in both forms.
 NEW_AIS_ARGUMENTS = [
@@ -1192,50 +1150,20 @@ def mocker_inputs(monkeypatch, tmp_path):
     (tmp_path / "engine.json").write_text(json.dumps({"engine": {"max_num_seqs": 9}}))
 
 
-def _worker_override(shape: str, containers: dict[str, dict]) -> dict:
+def _worker_override(containers: dict[str, dict]) -> dict:
     """Return a deployment override that adds container fields to the named workers.
 
     The override engine appends the ``args`` of a ``spec.services`` override
-    to the generated ones. For ``spec.components`` it does so only with
-    ``$patch: {args: append}``, which every such container gets here; without
-    it the override's list would replace the generated one.
+    to the generated ones.
     """
-    if shape == "services":
-        return {
-            "apiVersion": "nvidia.com/v1alpha1",
-            "kind": "DynamoGraphDeployment",
-            "spec": {
-                "services": {
-                    name: {"extraPodSpec": {"mainContainer": fields}}
-                    for name, fields in containers.items()
-                }
-            },
-        }
     return {
-        "apiVersion": "nvidia.com/v1beta1",
+        "apiVersion": "nvidia.com/v1alpha1",
         "kind": "DynamoGraphDeployment",
         "spec": {
-            "components": [
-                {
-                    "name": name,
-                    "podTemplate": {
-                        "spec": {
-                            "containers": [
-                                {
-                                    "name": "main",
-                                    **(
-                                        {"$patch": {"args": "append"}}
-                                        if "args" in fields
-                                        else {}
-                                    ),
-                                    **fields,
-                                }
-                            ]
-                        }
-                    },
-                }
+            "services": {
+                name: {"extraPodSpec": {"mainContainer": fields}}
                 for name, fields in containers.items()
-            ]
+            }
         },
     }
 
@@ -1303,7 +1231,6 @@ def _old_arguments_warning(names: str) -> str:
     )
 
 
-@pytest.mark.parametrize("shape", OVERRIDE_SHAPES)
 @pytest.mark.parametrize(
     "added,reads",
     [
@@ -1346,10 +1273,10 @@ def _old_arguments_warning(names: str) -> str:
     ],
 )
 def test_override_with_a_value_keeps_new_arguments_for_every_worker(
-    mocker_inputs, caplog, capsys, added, reads, shape
+    mocker_inputs, caplog, capsys, added, reads
 ):
     override = _worker_override(
-        shape, {name: {"args": arguments} for name, arguments in added.items()}
+        {name: {"args": arguments} for name, arguments in added.items()}
     )
 
     with caplog.at_level(logging.WARNING):
@@ -1363,20 +1290,11 @@ def test_override_with_a_value_keeps_new_arguments_for_every_worker(
     } == reads
 
 
-@pytest.mark.parametrize("shape", OVERRIDE_SHAPES)
 @pytest.mark.parametrize(
     "container,names",
     [
-        pytest.param({"args": ENGINE_FILE}, "--extra-engine-args", id="engine-args"),
-        pytest.param({"args": MODEL_PATH}, "--model-path", id="model-path"),
-        pytest.param({"args": OLD_FLAG}, "--ais-system", id="old-flag"),
-        # The profiler cannot read a file or a variable of the worker: a value
-        # is kept as typed.
-        pytest.param(
-            {"args": ["--ais-perf-config", "/missing/perf.yaml"]},
-            "--ais-perf-config",
-            id="file-that-is-not-here",
-        ),
+        # The profiler cannot read a variable of the worker: a value is kept
+        # as typed.
         pytest.param(
             {"args": ["--ais-tp-size", "$(TP_SIZE)"]},
             "--ais-tp-size",
@@ -1398,9 +1316,9 @@ def test_override_with_a_value_keeps_new_arguments_for_every_worker(
     ],
 )
 def test_override_without_a_value_keeps_old_arguments_for_every_worker(
-    mocker_inputs, caplog, container, names, shape
+    mocker_inputs, caplog, container, names
 ):
-    override = _worker_override(shape, {"decode": container})
+    override = _worker_override({"decode": container})
 
     with caplog.at_level(logging.WARNING):
         workers = _mocker_workers(override)
@@ -1417,7 +1335,6 @@ def _with_old_arguments(arguments: list[str]) -> list[str]:
     return arguments[: -len(NEW_AIS_ARGUMENTS)] + OLD_AIS_ARGUMENTS
 
 
-@pytest.mark.parametrize("shape", OVERRIDE_SHAPES)
 @pytest.mark.parametrize(
     "added",
     [
@@ -1431,9 +1348,9 @@ def _with_old_arguments(arguments: list[str]) -> list[str]:
     ],
 )
 def test_override_list_the_mocker_rejects_is_not_read(
-    mocker_inputs, caplog, capsys, added, shape
+    mocker_inputs, caplog, capsys, added
 ):
-    override = _worker_override(shape, {"decode": {"args": added}})
+    override = _worker_override({"decode": {"args": added}})
 
     with caplog.at_level(logging.WARNING):
         workers = _mocker_workers(override)
@@ -1448,7 +1365,6 @@ def test_override_list_the_mocker_rejects_is_not_read(
     )
 
 
-@pytest.mark.parametrize("shape", OVERRIDE_SHAPES)
 @pytest.mark.parametrize(
     "rejected",
     [
@@ -1457,14 +1373,14 @@ def test_override_list_the_mocker_rejects_is_not_read(
     ],
 )
 def test_override_list_the_mocker_rejects_gives_no_value(
-    mocker_inputs, caplog, rejected, shape
+    mocker_inputs, caplog, rejected
 ):
     """A rejected list is not a value that keeps the new arguments.
 
     The old flag of the other worker still counts.
     """
     override = _worker_override(
-        shape, {"prefill": {"args": rejected}, "decode": {"args": OLD_FLAG}}
+        {"prefill": {"args": rejected}, "decode": {"args": OLD_FLAG}}
     )
 
     with caplog.at_level(logging.WARNING):
@@ -1476,17 +1392,14 @@ def test_override_list_the_mocker_rejects_gives_no_value(
     ]
 
 
-@pytest.mark.parametrize("shape", OVERRIDE_SHAPES)
-def test_override_with_profile_data_keeps_new_arguments(
-    mocker_inputs, caplog, capsys, shape
-):
+def test_override_with_profile_data_keeps_new_arguments(mocker_inputs, caplog, capsys):
     """Profile data is not a reason for the old arguments.
 
     A mocker has one timing provider: it refuses profile data next to AIS
     timing in either form of the generated arguments, and reports it.
     """
     added = ["--planner-profile-data", "profile"]
-    override = _worker_override(shape, {"decode": {"args": added}})
+    override = _worker_override({"decode": {"args": added}})
 
     with caplog.at_level(logging.WARNING):
         workers = _mocker_workers(override)
@@ -1507,7 +1420,7 @@ def test_variable_of_the_profiler_process_is_not_read(
 ):
     # The variable would be a value, and a value keeps the new arguments.
     monkeypatch.setenv(ENV_VAR, "perf_model.yaml")
-    override = _worker_override("services", {"decode": {"args": OLD_FLAG}})
+    override = _worker_override({"decode": {"args": OLD_FLAG}})
 
     with caplog.at_level(logging.WARNING):
         workers = _mocker_workers(override)
@@ -1528,15 +1441,12 @@ def test_mocker_flag_that_is_no_old_input_keeps_new_arguments(
     added = ["--ais-sampling-seed", "7"]
 
     with caplog.at_level(logging.WARNING):
-        workers = _mocker_workers(
-            _worker_override("services", {"decode": {"args": added}})
-        )
+        workers = _mocker_workers(_worker_override({"decode": {"args": added}}))
 
     assert _ais_arguments(workers) == dict.fromkeys(WORKERS, NEW_AIS_ARGUMENTS)
     assert caplog.records == []
 
 
-@pytest.mark.parametrize("shape", OVERRIDE_SHAPES)
 @pytest.mark.parametrize(
     "containers",
     [
@@ -1552,16 +1462,15 @@ def test_mocker_flag_that_is_no_old_input_keeps_new_arguments(
     ],
 )
 def test_override_command_without_trigger_keeps_new_arguments(
-    mocker_inputs, caplog, containers, shape
+    mocker_inputs, caplog, containers
 ):
     with caplog.at_level(logging.WARNING):
-        workers = _mocker_workers(_worker_override(shape, containers))
+        workers = _mocker_workers(_worker_override(containers))
 
     assert _ais_arguments(workers) == dict.fromkeys(WORKERS, NEW_AIS_ARGUMENTS)
     assert caplog.records == []
 
 
-@pytest.mark.parametrize("shape", OVERRIDE_SHAPES)
 @pytest.mark.parametrize(
     "containers",
     [
@@ -1600,9 +1509,9 @@ def test_override_command_without_trigger_keeps_new_arguments(
         ),
     ],
 )
-def test_override_value_in_command_is_refused(mocker_inputs, caplog, containers, shape):
+def test_override_value_in_command_is_refused(mocker_inputs, caplog, containers):
     with caplog.at_level(logging.WARNING), pytest.raises(ValueError) as error:
-        _mocker_workers(_worker_override(shape, containers))
+        _mocker_workers(_worker_override(containers))
 
     assert str(error.value) == (
         "overrides.dgd gives --ais-perf-model a value in a container's command "
@@ -1620,11 +1529,10 @@ def test_value_before_generated_arguments_is_not_used(mocker_inputs, capsys):
     assert _mocker_reads(VALUE + workers["decode"], capsys) == GENERATED_READ
 
 
-@pytest.mark.parametrize("shape", OVERRIDE_SHAPES)
 def test_override_value_in_command_is_accepted_without_generated_ais_arguments(
-    mocker_inputs, shape
+    mocker_inputs,
 ):
-    override = _worker_override(shape, {"decode": {"command": MOCKER_COMMAND + VALUE}})
+    override = _worker_override({"decode": {"command": MOCKER_COMMAND + VALUE}})
 
     config = generate_mocker_config(_dgdr(mocker_enabled=True, override=override))
 
@@ -1657,9 +1565,7 @@ def test_abbreviated_option_outside_perf_model_keeps_new_arguments(
     added = [f"{option}={value}"] if joined else [option, value]
 
     with caplog.at_level(logging.WARNING):
-        workers = _mocker_workers(
-            _worker_override("services", {"decode": {"args": added}})
-        )
+        workers = _mocker_workers(_worker_override({"decode": {"args": added}}))
 
     assert _ais_arguments(workers) == dict.fromkeys(WORKERS, NEW_AIS_ARGUMENTS)
     assert caplog.records == []

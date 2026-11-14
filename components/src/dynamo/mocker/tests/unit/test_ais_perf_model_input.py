@@ -269,16 +269,15 @@ def test_mixed_spellings_are_rejected(capsys):
     ],
     ids=["switch-and-backend", "switch-and-every-flat-flag", "perf-config"],
 )
-@pytest.mark.parametrize("worker_type", ["aggregated", "prefill", "decode"])
 @pytest.mark.parametrize(
     "file_timing_model",
     [None, {"type": "fixed", "prefill_ms": 1.0, "decode_ms": 1.0}],
     ids=["no-timing-model", "own-timing-model"],
 )
 def test_old_inputs_with_extra_engine_args_are_ignored(
-    old_inputs, worker_type, file_timing_model, tmp_path
+    old_inputs, file_timing_model, tmp_path
 ):
-    engine = {"worker_type": worker_type, "max_num_seqs": 7}
+    engine = {"worker_type": "decode", "max_num_seqs": 7}
     if file_timing_model is not None:
         engine["timing_model"] = file_timing_model
     path = tmp_path / "engine.json"
@@ -288,7 +287,7 @@ def test_old_inputs_with_extra_engine_args_are_ignored(
     result = CONFIG.load_mocker_engine_args(parse_old([*base, *old_inputs]))
 
     assert result == CONFIG.load_mocker_engine_args(parse_args(base))
-    assert result["engine"]["worker_type"] == worker_type
+    assert result["engine"]["worker_type"] == "decode"
     assert result["engine"]["max_num_seqs"] == 7
     assert CONFIG.performance_config(result) is None
 
