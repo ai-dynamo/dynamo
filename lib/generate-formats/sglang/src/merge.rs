@@ -472,6 +472,7 @@ mod tests {
                 experts: Vec::new(),
                 cuts,
                 cached_tokens: 0,
+                rust_server: false,
                 prompt,
             };
             let simulated = sim::stream(
