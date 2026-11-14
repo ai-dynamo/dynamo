@@ -128,6 +128,7 @@ prometheus = { workspace = true }
 rand = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true, features = ["raw_value"] }
+serde_yaml = "0.9.34"
 sha2 = "0.10"
 strum = { workspace = true }
 tempfile = { workspace = true }

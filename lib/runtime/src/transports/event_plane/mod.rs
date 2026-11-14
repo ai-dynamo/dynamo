@@ -306,7 +306,7 @@ impl Stream for DeduplicatingStream {
 }
 
 /// Bind a direct-ZMQ PUB socket and return it with its advertised endpoint.
-fn bind_direct_zmq_publisher(topic: &str) -> Result<(ZmqPubTransport, String)> {
+fn bind_direct_zmq_publisher(topic: &str, sndhwm: i32) -> Result<(ZmqPubTransport, String)> {
     let advertised_host = event_plane_host_from_env()?;
     let bind_endpoint = if advertised_host.is_ipv4() {
         "tcp://0.0.0.0:0"
@@ -321,7 +321,7 @@ fn bind_direct_zmq_publisher(topic: &str) -> Result<(ZmqPubTransport, String)> {
                 .build()
                 .context("Failed to create Tokio runtime for ZMQ")?;
 
-            rt.block_on(ZmqPubTransport::bind(bind_endpoint, &topic))
+            rt.block_on(ZmqPubTransport::bind_with_sndhwm(bind_endpoint, &topic, sndhwm))
                 .with_context(|| {
                     format!(
                         "Failed to bind direct ZMQ publisher at {bind_endpoint} for advertised address {advertised_host}; check DYN_EVENT_PLANE_HOST and host IP support"
@@ -352,7 +352,8 @@ pub struct SharedZmqPublisherSocket {
 impl SharedZmqPublisherSocket {
     pub fn bind(topic: impl Into<String>) -> Result<Self> {
         let topic = topic.into();
-        let (pub_transport, endpoint) = bind_direct_zmq_publisher(&topic)?;
+        let (pub_transport, endpoint) =
+            bind_direct_zmq_publisher(&topic, zmq_transport::DEFAULT_SNDHWM)?;
         Ok(Self {
             tx: Arc::new(pub_transport),
             topic,
@@ -408,6 +409,7 @@ impl EventPublisher {
             },
             topic.into(),
             transport_kind,
+            None,
         )
         .await
     }
@@ -436,6 +438,7 @@ impl EventPublisher {
             },
             topic.into(),
             transport_kind,
+            None,
         )
         .await
     }
@@ -463,7 +466,7 @@ impl EventPublisher {
             namespace: comp.namespace().name(),
             component: comp.name().to_string(),
         };
-        Self::new_internal(drt, scope, topic.into(), transport_kind).await
+        Self::new_internal(drt, scope, topic.into(), transport_kind, None).await
     }
 
     /// Create a publisher for a namespace-scoped topic.
@@ -486,7 +489,26 @@ impl EventPublisher {
     ) -> Result<Self> {
         let drt = ns.drt();
         let scope = EventScope::Namespace { name: ns.name() };
-        Self::new_internal(drt, scope, topic.into(), transport_kind).await
+        Self::new_internal(drt, scope, topic.into(), transport_kind, None).await
+    }
+
+    /// Create a namespace publisher whose ZMQ socket queues at most
+    /// `zmq_send_hwm` messages for each subscriber that has stopped reading.
+    ///
+    /// The default mark suits small events. A publisher of large messages
+    /// lowers it, because the queue lives in the publishing process: one
+    /// stalled subscriber otherwise holds the default 100,000 messages of
+    /// memory there. The mark has no effect on the NATS transport, where the
+    /// server owns the subscriber queues.
+    pub async fn for_namespace_with_zmq_send_hwm(
+        ns: &Namespace,
+        topic: impl Into<String>,
+        zmq_send_hwm: i32,
+    ) -> Result<Self> {
+        let drt = ns.drt();
+        let scope = EventScope::Namespace { name: ns.name() };
+        let transport_kind = drt.default_event_transport_kind();
+        Self::new_internal(drt, scope, topic.into(), transport_kind, Some(zmq_send_hwm)).await
     }
 
     /// Create an endpoint-identity publisher on a PUB socket shared with other
@@ -505,6 +527,7 @@ impl EventPublisher {
             socket.topic.clone(),
             EventTransportKind::Zmq,
             Some(socket),
+            None,
         )
         .await
     }
@@ -514,8 +537,9 @@ impl EventPublisher {
         scope: EventScope,
         topic: String,
         transport_kind: EventTransportKind,
+        zmq_send_hwm: Option<i32>,
     ) -> Result<Self> {
-        Self::new_on_transport(drt, scope, topic, transport_kind, None).await
+        Self::new_on_transport(drt, scope, topic, transport_kind, None, zmq_send_hwm).await
     }
 
     async fn new_on_transport(
@@ -524,7 +548,9 @@ impl EventPublisher {
         topic: String,
         transport_kind: EventTransportKind,
         shared_socket: Option<&SharedZmqPublisherSocket>,
+        zmq_send_hwm: Option<i32>,
     ) -> Result<Self> {
+        let zmq_send_hwm = zmq_send_hwm.unwrap_or(zmq_transport::DEFAULT_SNDHWM);
         // Publishers are discovery objects in their own right. A single process
         // can host multiple publishers for the same scope/topic, each with its
         // own ZMQ endpoint and sequence space, so the process ID is not unique
@@ -566,16 +592,13 @@ impl EventPublisher {
                 // Check for broker mode
                 if let Some(broker) = resolve_zmq_broker(drt, &scope).await? {
                     // BROKER MODE: Connect to broker (single or multiple endpoints)
-                    let pub_transport = if broker.xsub_endpoints.len() == 1 {
-                        zmq_transport::ZmqPubTransport::connect(&broker.xsub_endpoints[0], &subject)
-                            .await?
-                    } else {
-                        zmq_transport::ZmqPubTransport::connect_multiple(
+                    let pub_transport =
+                        zmq_transport::ZmqPubTransport::connect_multiple_with_sndhwm(
                             &broker.xsub_endpoints,
                             &subject,
+                            zmq_send_hwm,
                         )
-                        .await?
-                    };
+                        .await?;
 
                     let codec = Arc::new(Codec::Msgpack(MsgpackCodec));
                     TransportSetup::ZmqBroker(
@@ -584,7 +607,8 @@ impl EventPublisher {
                     )
                 } else {
                     // DIRECT MODE: Bind PUB socket
-                    let (pub_transport, public_endpoint) = bind_direct_zmq_publisher(&topic)?;
+                    let (pub_transport, public_endpoint) =
+                        bind_direct_zmq_publisher(&topic, zmq_send_hwm)?;
                     let codec = Arc::new(Codec::Msgpack(MsgpackCodec));
                     TransportSetup::ZmqDirect(
                         Arc::new(pub_transport) as Arc<dyn EventTransportTx>,
