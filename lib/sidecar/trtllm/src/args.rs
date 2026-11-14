@@ -40,8 +40,9 @@ pub(crate) struct Args {
     /// argument is omitted, and a disagreement is logged at WARN. Supply this
     /// whenever the engine was started without `--max_seq_len`, because
     /// TensorRT-LLM then leaves `max_context_length` unset and the sidecar has
-    /// no window to register. With neither source, requests that omit
-    /// `max_tokens` are rejected.
+    /// no window to register. With neither source supplying a positive length,
+    /// the sidecar fails at startup before the worker registers, so it serves
+    /// no requests; setting `max_tokens` on requests does not work around it.
     #[arg(long, env = "TRTLLM_CONTEXT_LENGTH", value_parser = clap::value_parser!(u32).range(1..))]
     pub context_length: Option<u32>,
 }
