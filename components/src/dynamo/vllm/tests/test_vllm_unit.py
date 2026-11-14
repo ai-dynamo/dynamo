@@ -1099,9 +1099,37 @@ class TestBenchmarkConfig:
             "decode_max_batch_size_samples": 128,
             "prefix_max_batch_size_samples": 3,
             "collect_imbalanced": False,
+            "power_window_s": 0.0,
             "worker_extension_installed": True,
             "cudagraph_metrics_auto_enabled": True,
         }
+
+    def test_benchmark_power_window_reaches_scheduler_config(self, mock_vllm_cli):
+        mock_vllm_cli(
+            "--model",
+            "Qwen/Qwen3-0.6B",
+            "--benchmark-mode",
+            "agg",
+            "--benchmark-power-window-s",
+            "2.5",
+        )
+        config = parse_args()
+        assert config._benchmark_additional_config["power_window_s"] == 2.5
+
+    @pytest.mark.parametrize("value", ["0.5", "1.5", "-1", "inf"])
+    def test_benchmark_power_window_rejects_a_window_below_the_minimum(
+        self, mock_vllm_cli, value
+    ):
+        mock_vllm_cli(
+            "--model",
+            "Qwen/Qwen3-0.6B",
+            "--benchmark-mode",
+            "agg",
+            "--benchmark-power-window-s",
+            value,
+        )
+        with pytest.raises(ValueError, match="--benchmark-power-window-s"):
+            parse_args()
 
     def test_random_kda_config_selects_worker_and_reaches_scheduler(
         self, mock_vllm_cli
@@ -1837,6 +1865,7 @@ def _make_dynamo_config(**overrides):
         "benchmark_randomize_kda_state": False,
         "benchmark_hybrid_live_state": False,
         "benchmark_max_batch_size": None,
+        "benchmark_power_window_s": 0.0,
         "benchmark_warmup_iterations": 5,
         "benchmark_output_path": "/tmp/benchmark_results.json",
         "benchmark_timeout": 900,
