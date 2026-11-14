@@ -311,7 +311,7 @@ def render(
             "### Equivalent representations",
             "",
             "Only supported equivalent encodings are normalized. Other union/allOf changes remain "
-            "unresolved structural groups with complete nested deltas. See "
+            "unresolved composition fragments; recognized request siblings have separate findings. See "
             + evidence_link(
                 "request normalization", "normalization.json", prefix=evidence_prefix
             )

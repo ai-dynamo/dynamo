@@ -5,22 +5,25 @@ SPDX-License-Identifier: Apache-2.0
 
 # Protocol Compatibility Tooling
 
-Compare local, versioned NVIDIA Dynamo and framework OpenAPI 3.1/3.2 specifications for
-`/v1/chat/completions` and `/v1/completions`. Inputs can be source exports, published
-specifications, or previous server captures. The tool does not generate or fetch them
-and requires no running server. Schema agreement does not prove runtime compatibility.
+Compare NVIDIA Dynamo's declared request and response schemas with a framework's
+OpenAPI 3.1/3.2 specification for `/v1/chat/completions` and `/v1/completions`.
+Run `assess` on local files, then read `report.md` for differences and coverage gaps:
+parts of the contract the tool cannot fully compare. Schema findings guide investigation;
+they do not establish runtime compatibility.
+
+Inputs can be source exports, published specifications, or previous server captures.
+The tool does not generate or fetch them and requires no running server. Choose files
+that describe the full declared contract for both endpoints. The tool cannot recover
+variants missing from an input or verify that it is complete. Scope and configuration
+labels are retained as metadata; they do not filter the comparison.
+
+Before comparing requests and responses separately, `assess` fills dependency placeholders
+in Dynamo's export from a pinned OpenAI specification. This step, called **composition**,
+creates a separate document; it does not modify the frontend's `/openapi.json` or `/docs`.
 See the [comparison guide](../../docs/fern/pages/developer-guide/knowledge-base/modular-components/frontend/openapi-request-contract-comparison.md)
-for scope, provenance, normalization, aliases, and interpretation.
-
-Use inputs that describe the full declared request/response contract for those endpoints,
-not only one deployment's enabled features. Supplied scope and configuration labels are
-retained, not used to filter differences. The tool cannot recover variants missing from
-an input or attest its completeness.
-
-The `assess` command fills dependency placeholders in Dynamo's native export, then
-compares requests and responses separately. The guide explains the temporary
-[async-openai annotation gap and removal condition](../../docs/fern/pages/developer-guide/knowledge-base/modular-components/frontend/openapi-request-contract-comparison.md#schema-inputs-and-provenance).
-Composition does not modify the running frontend's `/openapi.json` or `/docs`.
+for input provenance, normalization, aliases, and the
+[dependency annotation gap](../../docs/fern/pages/developer-guide/knowledge-base/modular-components/frontend/openapi-request-contract-comparison.md#schema-inputs-and-provenance)
+that makes composition necessary.
 
 For the current source pin and SSE adapter recipe, see the
 [upstream vLLM response assessment](../../lib/llm/docs/dynamo-vllm-response-assessment.md).
@@ -124,36 +127,38 @@ An explicit `serde_json::Value` is intentionally untyped. Record excluded Dynamo
 
 ## Outputs and Exit Codes
 
-The `assess` command retains inputs under `dynamo/` and `framework/`. Each directory contains:
+Start with `assessment/report.md`. Scripts and agents should read
+`report.json.finding_inventory` instead of parsing Markdown. Retain the entire assessment
+directory so the report's evidence links remain usable.
 
-- `openapi.raw`: the exact input bytes, including JSON/YAML formatting.
-- `acquisition.json`: the source path, input identity, SHA-256 checksum, read time
-  (`captured_at`), and optional unverified `caller_metadata`.
-
-Despite its name, `acquisition.json` records local file loading, not a server fetch.
-Its timestamp does not identify when the schema was generated. To reuse an input, pass
-its raw file to `--dynamo` or `--framework`. Supply provenance labels separately through
-the corresponding metadata option.
-
-Start with `assessment/report.md`. Retain the entire assessment directory:
+The tool creates **projections**: copies containing only the request or response schemas
+selected for comparison. It then normalizes supported equivalent representations before
+passing those copies to the comparator. A **delta** is a difference the comparator reports.
 
 | Output | Purpose |
 | --- | --- |
 | `report.md` | Human-readable findings, category counts, specific checks, and evidence links |
 | `report.json` | Full machine-readable assessment: deltas, gaps, input metadata, comparator commands, and `finding_inventory` |
 | `dynamo.composed.json` | Dynamo document after pinned imports and guarded corrections |
-| `*.requests.json` | Original request projections |
-| `*.requests.normalized.json`, `normalization.json` | Comparison inputs and equivalent-representation audit |
+| `*.requests.json` | Request projections before normalization |
+| `*.requests.normalized.json`, `normalization.json` | Request comparison inputs and a record of normalization changes |
 | `oasdiff.json` | Complete comparator delta on normalized inputs |
 | `*.responses.json`, `*.responses.normalized.json` | Response projections and comparator inputs |
-| `response-oasdiff.json`, `response-normalization.json` | Response deltas and equivalent-representation audit |
+| `response-oasdiff.json`, `response-normalization.json` | Response deltas and a record of normalization changes |
 | `response-sources.json`, `response-adapters.yaml` | Source pointers and interpretations; adapter YAML is retained when supplied |
 | `response-chunk-probes.json`, `chunk-probes/` | Separate selected-chunk comparisons when a source declares chunks only |
 | `alias-matches.json` | Alias-name matches, parent constraints, and value-schema comparison results |
 
-The `assess` command also saves the pinned OpenAI document, composition manifest, and coverage catalog.
-Checksum mismatches and unresolved Dynamo imports stop the command with an error.
-A later failure can leave partial output; use a new output directory for a retry.
+The `assess` command also saves the pinned OpenAI document, composition manifest, and
+coverage catalog. It retains each original input under `dynamo/` or `framework/`:
+
+- `openapi.raw`: the exact input bytes, including JSON/YAML formatting.
+- `acquisition.json`: the source path, input identity, SHA-256 checksum, read time
+  (`captured_at`), and optional unverified `caller_metadata`.
+
+`captured_at` records when the tool read the local file, not when the schema was generated.
+To reuse an input, pass its raw file to `--dynamo` or `--framework`. Supply provenance labels
+separately through the corresponding metadata option.
 
 The `assess` command returns these exit codes:
 
@@ -163,23 +168,46 @@ The `assess` command returns these exit codes:
 | `1` | Differences or coverage gaps require review |
 | `2` | Invalid inputs or tooling failure |
 
-No exit code proves runtime compatibility. The current coverage catalog contains
-known gaps, so a completed assessment returns `1` even if the comparator finds no differences.
+Exit `1` means the assessment completed and needs review; it is not a tooling failure.
+The current coverage catalog contains known gaps, so a completed assessment returns `1`
+even if the comparator finds no differences. No exit code proves runtime compatibility.
+
+Checksum mismatches and unresolved Dynamo imports are errors. A failure can leave partial
+output; use a new output directory for a retry.
 
 ### Using the Findings
 
-Use `report.md` to review findings; it omits repeated generic checks and empty category sections.
-For programmatic use, read `report.json` and its `finding_inventory`. Each finding includes
-its category, declarations, interpretation, suggested action, raw delta, and evidence
-pointers. Raw deltas and provenance remain supporting evidence in the same report.
-Agents and scripts do not need to parse Markdown.
-
-Finding IDs identify locations and change kinds, not unchanged content or confirmed defects.
-The accounting check assigns each raw delta terminal to one finding. Unresolved union or
-`allOf` changes remain whole findings. Suggested actions are investigation guidance, not
-approved fixes. See the guide's
+Each finding includes a category, declarations, an interpretation, a suggested action,
+and pointers to supporting evidence. The report retains raw deltas and input provenance.
+Read the linked declarations before deciding whether a finding needs a code change.
+Suggested actions are investigation guidance, not approved fixes. See the
 [review workflow](../../docs/fern/pages/developer-guide/knowledge-base/modular-components/frontend/openapi-request-contract-comparison.md#from-generated-findings-to-reviewed-actions)
-for deciding and validating changes.
+for how to investigate and validate findings.
+
+Unsupported constructs such as `prefixItems` produce explicit coverage gaps. For comparison,
+**flattening** combines constraints from `allOf` branches into one schema. The tool disables
+this step when either request projection has coverage gaps. The reporter still processes
+recognized request-field deltas alongside unresolved `allOf`, `anyOf`, or `oneOf` changes.
+It looks for each field in both schemas, including through local references and composition
+branches.
+
+For example, suppose the reference framework declares `value`, `extra`, and a tuple using
+`prefixItems`. Dynamo declares `value` and the tuple inside `allOf`, but has no declaration
+for `extra`. The report distinguishes these observations:
+
+| Observation | Finding |
+| --- | --- |
+| `extra` is declared only by the reference | `target_only`: inspect the missing Dynamo declaration; this does not prove runtime rejection |
+| `value` appears as added/deleted because it moved into `allOf` | `representation_ambiguity`: both sides declare it, but the delta does not establish equivalent or different accepted values |
+| The tuple uses unsupported `prefixItems` | `missing_coverage`: tuple constraints remain unresolved |
+
+The report status remains `incomplete_coverage` while gaps remain. Recognized findings
+are still usable, but the reporter does not discover additional field differences absent
+from the comparator delta. Response deltas containing composition changes remain grouped.
+
+Finding IDs identify locations and change kinds; an unchanged ID does not guarantee
+unchanged content. An accounting check ensures that every terminal in the raw delta
+(a leaf value or empty container) belongs to exactly one finding.
 
 ### Re-render Saved Evidence
 
