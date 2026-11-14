@@ -14,12 +14,8 @@ from typing import Any, Optional
 
 import huggingface_hub
 from vllm.transformers_utils.repo_utils import get_model_path
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm_omni.engine.arg_utils import OmniEngineArgs
-
-try:
-    from vllm.utils import FlexibleArgumentParser
-except ImportError:
-    from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 from dynamo.common.configuration.arg_group import ArgGroup
 from dynamo.common.configuration.groups.runtime_args import (
