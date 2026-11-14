@@ -90,7 +90,12 @@ from dynamo.llm import (
     register_model,
     unregister_model,
 )
-from dynamo.llm.exceptions import EngineShutdown, InvalidArgument, WorkerOverloaded
+from dynamo.llm.exceptions import (
+    Cancelled,
+    EngineShutdown,
+    InvalidArgument,
+    WorkerOverloaded,
+)
 from dynamo.runtime import Client
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.kv_connector_protocols import (
@@ -4751,8 +4756,9 @@ class EmbeddingWorkerHandler:
     Does NOT inherit BaseWorkerHandler. The base class does generation-only
     init (media loaders, KV-block lookup via get_dp_range_for_worker, embedding
     cache manager) that would either fail or be meaningless on a pooling
-    engine. Embedding inference is a single forward pass with no KV cache, no
-    multimodal data, and no streamed decode.
+    engine. Embedding inference is a single forward pass with no KV cache and
+    no streamed decode. Multimodal input arrives as vLLM's chat-style
+    ``messages`` and is rendered by vLLM's own renderer, which loads the media.
     """
 
     def __init__(
@@ -4863,6 +4869,117 @@ class EmbeddingWorkerHandler:
                 # Re-raise EngineShutdown if the monitor task raised it.
                 task.result()
 
+    async def _render_chat_embedding_input(self, request: dict) -> list[Any]:
+        """Render chat-style ``messages`` into one engine prompt per conversation.
+
+        Uses vLLM's own embedding request model and renderer, as ``vllm serve``
+        does for ``/v1/embeddings``: the model's chat template (or
+        ``--custom-jinja-template``) and multimodal processor see the same
+        conversation, and vLLM loads the media of every content part it
+        accepts (``image_url``, ``video_url``, ``audio_url``, ``input_audio``),
+        subject to the engine's media limits and allowed media sources.
+
+        Input vLLM rejects is a client error rather than a 500. vLLM's typed
+        client errors go through ``vllm_client_error_to_http_error``, as on the
+        other vLLM request paths: the worker raises their status (422 for
+        media that can't be loaded), and the frontend maps it to its error
+        class and keeps the message private, since it can name the media URL.
+        Other validation failures (a text-only model given media, a malformed
+        message) raise ``InvalidArgument``, a 400 with vLLM's message.
+        """
+        from vllm.entrypoints.pooling.embed.protocol import (
+            EmbeddingBatchChatRequest,
+            EmbeddingChatRequest,
+        )
+        from vllm.exceptions import VLLMClientError
+        from vllm.renderers.chat_utils import load_chat_template
+        from vllm.utils.mistral import is_mistral_tokenizer
+
+        from .errors import vllm_client_error_to_http_error
+
+        messages = request["messages"]
+        batched = (
+            isinstance(messages, list)
+            and bool(messages)
+            and isinstance(messages[0], list)
+        )
+        request_cls = EmbeddingBatchChatRequest if batched else EmbeddingChatRequest
+        model_config = self.engine_client.model_config
+        renderer = self.engine_client.renderer
+        mm_config = model_config.multimodal_config
+        try:
+            chat_request = request_cls.model_validate(
+                {
+                    key: request[key]
+                    for key in _CHAT_EMBEDDING_REQUEST_FIELDS
+                    if request.get(key) is not None
+                }
+            )
+            # ``--custom-jinja-template``, or None for the model's own, as with
+            # ``vllm serve`` without ``--chat-template``. vLLM caches the load.
+            chat_params = chat_request.build_chat_params(
+                load_chat_template(self.config.custom_jinja_template), "auto"
+            ).with_defaults(
+                {"tokenize": is_mistral_tokenizer(renderer.tokenizer)},
+                default_media_io_kwargs=(
+                    mm_config.media_io_kwargs if mm_config else None
+                ),
+            )
+            conversations = (
+                list(chat_request.messages) if batched else [chat_request.messages]
+            )
+            _, engine_prompts = await renderer.render_chat_async(
+                conversations,
+                chat_params,
+                chat_request.build_tok_params(model_config),
+            )
+        except VLLMClientError as e:
+            raise vllm_client_error_to_http_error(e) from e
+        # The other errors vLLM's server answers with 400 (pydantic's
+        # ValidationError is a ValueError).
+        except (ValueError, TypeError) as e:
+            raise InvalidArgument(str(e)) from e
+        return list(engine_prompts)
+
+    async def _render_chat_embedding_input_until_stopped(
+        self, request: dict, context: Context
+    ) -> list[Any]:
+        """Render chat-style input unless the request stops first.
+
+        Rendering can download media before any engine request exists, so
+        ``_abort_monitor`` has nothing to abort yet. Instead the render is
+        raced against the request stopping and the worker shutting down; when
+        either wins, the render is canceled and nothing is encoded. Media
+        already handed to vLLM's decode thread pool finishes decoding in the
+        background. Raises Cancelled if the request stopped (an empty stream
+        would aggregate to a successful response with no embeddings), and
+        EngineShutdown on shutdown.
+        """
+        render_task = asyncio.create_task(self._render_chat_embedding_input(request))
+        stopped = context.async_killed_or_stopped()
+        waiters: list[Any] = [render_task, stopped]
+        shutdown_task: Optional[asyncio.Task] = None
+        if self.shutdown_event is not None:
+            shutdown_task = asyncio.create_task(self.shutdown_event.wait())
+            waiters.append(shutdown_task)
+
+        done: set[Any] = set()
+        try:
+            done, _ = await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for waiter in waiters:
+                if not waiter.done():
+                    waiter.cancel()
+            # Also collects a render error nobody will read, so asyncio
+            # doesn't log it as never retrieved.
+            await asyncio.gather(*waiters, return_exceptions=True)
+
+        if shutdown_task is not None and shutdown_task in done:
+            raise EngineShutdown("Engine was shut down during embedding.")
+        if stopped in done:
+            raise Cancelled("Embedding request stopped while rendering its input")
+        return render_task.result()
+
     async def generate(
         self, request: dict, context: Context
     ) -> AsyncIterator[Dict[str, Any]]:
@@ -4882,14 +4999,21 @@ class EmbeddingWorkerHandler:
         ``add_special_tokens`` is also forwarded for raw text; when omitted,
         vLLM's embedding default is retained. Rust-preprocessed and
         caller-supplied token IDs are never modified.
+
+        Instead of ``input``, the request can carry vLLM's chat-style
+        ``messages`` (one conversation, or a list of conversations), which may
+        contain image, video and audio content parts; see
+        ``_render_chat_embedding_input``. Each conversation yields one vector.
         """
         model_name = request.get("model") or self.config.served_model_name or ""
-        # Raw OpenAI requests carry 'input'. Rust-preprocessed embedding
-        # requests carry the same logical batch as 'token_ids'.
+        # Raw OpenAI requests carry 'input' (or chat-style 'messages').
+        # Rust-preprocessed embedding requests carry the same logical batch as
+        # 'token_ids'.
         token_ids_batch = request.get("token_ids")
         is_tokens_path = token_ids_batch is not None
+        messages = None if is_tokens_path else request.get("messages")
         input_field = token_ids_batch if is_tokens_path else request.get("input")
-        if input_field is None:
+        if input_field is None and messages is None:
             raise InvalidArgument(
                 "Embedding request missing required 'input' or 'token_ids' field"
             )
@@ -4902,7 +5026,10 @@ class EmbeddingWorkerHandler:
         # Token-id forms must be passed to vLLM as TokensPrompt so the engine
         # skips its own tokenizer; the previous str()-coercion path turned
         # `[1, 2, 3]` into three text prompts ("1", "2", "3") instead of one.
-        prompts: list[Any] = _classify_embedding_input(input_field)
+        # Chat-style input is rendered below, once its options are validated.
+        prompts: list[Any] = (
+            [] if messages is not None else _classify_embedding_input(input_field)
+        )
 
         dimensions = request.get("dimensions")
         if dimensions is not None and (
@@ -4975,6 +5102,10 @@ class EmbeddingWorkerHandler:
         if dimensions is not None:
             pooling_kwargs["dimensions"] = dimensions
         pooling_params = PoolingParams(**pooling_kwargs)
+        if messages is not None:
+            prompts = await self._render_chat_embedding_input_until_stopped(
+                request, context
+            )
         # Use the per-request context id (same as the chat/completion paths
         # in this file) so concurrent embeddings never collide inside
         # ``AsyncLLM``. ``context.trace_id`` is a distributed-trace id
@@ -4985,11 +5116,14 @@ class EmbeddingWorkerHandler:
 
         async def _encode_one(idx: int, prompt: Any):
             request_id = f"{base_request_id}-{idx}"
-            encode_arg: Any = (
-                prompt
-                if isinstance(prompt, str)
-                else TokensPrompt(prompt_token_ids=prompt)
-            )
+            encode_arg: Any
+            if isinstance(prompt, str):
+                encode_arg = prompt
+            elif isinstance(prompt, list):
+                encode_arg = TokensPrompt(prompt_token_ids=prompt)
+            else:
+                # Already rendered by vLLM (chat-style input).
+                encode_arg = prompt
             final_output = None
             async with self._abort_monitor(context, request_id):
                 encode_kwargs: dict[str, Any] = {
@@ -5000,7 +5134,11 @@ class EmbeddingWorkerHandler:
                 if tokenization_kwargs and isinstance(encode_arg, str):
                     encode_kwargs["tokenization_kwargs"] = tokenization_kwargs
 
-                async for out in self.engine_client.encode(**encode_kwargs):
+                # Input vLLM rejects here (e.g. a conversation that renders
+                # to an empty prompt) is a client error, as with ``vllm serve``.
+                async for out in _translate_vllm_client_errors(
+                    self.engine_client.encode(**encode_kwargs)
+                ):
                     final_output = out
             if final_output is None:
                 raise RuntimeError(
@@ -5095,6 +5233,17 @@ class EmbeddingWorkerHandler:
                 "total_tokens": prompt_tokens,
             },
         }
+
+
+# Fields of a chat-style embedding request that vLLM's request model consumes
+# while rendering. ``dimensions`` and ``encoding_format`` are applied by the
+# handler itself.
+_CHAT_EMBEDDING_REQUEST_FIELDS = (
+    "model",
+    "messages",
+    "add_special_tokens",
+    "truncate_prompt_tokens",
+)
 
 
 def _is_token_id(x: Any) -> bool:
