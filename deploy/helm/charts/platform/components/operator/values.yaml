@@ -22,6 +22,19 @@
 # the cluster-wide operator.
 upgradeCRD: true
 
+# RDMA authorization plugins for QP creation and NIXL connection gating.
+# When set, the operator injects IBV_AUTH_PLUGIN and/or NIXL_AUTH_PLUGIN
+# environment variables into every DGD component container.  The plugin
+# shared library must be present on each node (e.g. via a DaemonSet or
+# host volume mount).
+rdmaAuth:
+  # -- Filesystem path to a shared library implementing ibv_auth_check_qp_create().
+  # Injected as IBV_AUTH_PLUGIN into all DGD component pods.
+  ibvAuthPlugin: ""
+  # -- Filesystem path to a shared library implementing nixl_auth_check_connect().
+  # Injected as NIXL_AUTH_PLUGIN into all DGD component pods.
+  nixlAuthPlugin: ""
+
 # The LPX scheduler and its CRDs must be installed separately.
 lpx:
   # -- EXPERIMENTAL: Enable the Dynamo operator's LPX integration. Startup requires the

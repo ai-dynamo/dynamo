@@ -67,6 +67,7 @@ type ComponentContext struct {
 	ParentGraphDeploymentNamespace string
 	Discovery                      DiscoveryContext
 	Infrastructure                 configv1alpha1.InfrastructureConfiguration
+	Security                       configv1alpha1.SecurityConfiguration
 	EPPConfig                      *v1beta1.EPPConfig
 	WorkerHashSuffix               string
 	RuntimeVersion                 *runtimeversion.Version
@@ -101,6 +102,7 @@ func (b *BaseComponentDefaults) getCommonContainer(context ComponentContext) cor
 	// Every Dynamo component receives infrastructure and transport defaults.
 	AddStandardEnvVars(&container, context.Infrastructure)
 	AddTransportTLSEnvVars(&container, context.Infrastructure)
+	AddRDMAAuthEnvVars(&container, context.Security)
 
 	// Runtime identity is independent of the infrastructure configuration.
 	container.Env = append(container.Env, []corev1.EnvVar{
@@ -273,4 +275,27 @@ func AddTransportTLSEnvVars(container *corev1.Container, infrastructure configv1
 		})
 	}
 	container.Env = MergeEnvs(tlsEnvVars, container.Env)
+}
+
+// AddRDMAAuthEnvVars injects IBV_AUTH_PLUGIN and NIXL_AUTH_PLUGIN environment
+// variables from SecurityConfiguration. These tell libibverbs and NIXL to load
+// an authorization plugin before creating queue pairs or connections.
+// container must not be nil; existing environment values take precedence.
+func AddRDMAAuthEnvVars(container *corev1.Container, security configv1alpha1.SecurityConfiguration) {
+	var authEnvVars []corev1.EnvVar
+	if security.IBVAuthPlugin != "" {
+		authEnvVars = append(authEnvVars, corev1.EnvVar{
+			Name:  "IBV_AUTH_PLUGIN",
+			Value: security.IBVAuthPlugin,
+		})
+	}
+	if security.NIXLAuthPlugin != "" {
+		authEnvVars = append(authEnvVars, corev1.EnvVar{
+			Name:  "NIXL_AUTH_PLUGIN",
+			Value: security.NIXLAuthPlugin,
+		})
+	}
+	if len(authEnvVars) > 0 {
+		container.Env = MergeEnvs(authEnvVars, container.Env)
+	}
 }

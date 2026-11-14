@@ -517,10 +517,24 @@ type LoggingConfiguration struct {
 	Format string `json:"format"`
 }
 
-// SecurityConfiguration holds HTTP/2 and TLS settings.
+// SecurityConfiguration holds HTTP/2, TLS and RDMA authorization settings.
 type SecurityConfiguration struct {
 	// EnableHTTP2 enables HTTP/2 for metrics and webhook servers
 	// +kubebuilder:default=false
 	// +optional
 	EnableHTTP2 bool `json:"enableHTTP2"`
+	// IBVAuthPlugin is the filesystem path to a shared library implementing
+	// ibv_auth_check_qp_create(). When set, the operator injects
+	// IBV_AUTH_PLUGIN into every DGD component container. The plugin is
+	// loaded by libibverbs at ibv_create_qp() time to gate RDMA queue pair
+	// creation. An empty value (the default) disables the hook.
+	// +optional
+	IBVAuthPlugin string `json:"ibvAuthPlugin,omitempty"`
+	// NIXLAuthPlugin is the filesystem path to a shared library implementing
+	// nixl_auth_check_connect(). When set, the operator injects
+	// NIXL_AUTH_PLUGIN into every DGD component container. The plugin is
+	// loaded by NIXL at makeConnection() time to gate cross-agent connections.
+	// An empty value (the default) disables the hook.
+	// +optional
+	NIXLAuthPlugin string `json:"nixlAuthPlugin,omitempty"`
 }

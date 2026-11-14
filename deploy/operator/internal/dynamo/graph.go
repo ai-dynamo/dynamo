@@ -1779,7 +1779,7 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 			runtimeImage = main.Image
 		}
 	}
-	componentContext, err := generateComponentContext(component, parentGraphDeploymentName, namespace, numberOfNodes, NewDiscoveryContext(operatorConfig.Discovery.Backend, annotations), operatorConfig.Infrastructure, runtimeImage, nativeSidecar)
+	componentContext, err := generateComponentContext(component, parentGraphDeploymentName, namespace, numberOfNodes, NewDiscoveryContext(operatorConfig.Discovery.Backend, annotations), operatorConfig.Infrastructure, operatorConfig.Security, runtimeImage, nativeSidecar)
 	if err != nil {
 		return nil, err
 	}
@@ -2180,6 +2180,7 @@ func mergeFrontendSidecarDefaults(podSpec *corev1.PodSpec, sidecarName string, p
 			ParentGraphDeploymentNamespace: parentContext.ParentGraphDeploymentNamespace,
 			Discovery:                      parentContext.Discovery,
 			Infrastructure:                 parentContext.Infrastructure,
+			Security:                       parentContext.Security,
 			DynamoNamespace:                parentContext.DynamoNamespace,
 			RuntimeVersion:                 resolvedRuntimeVersion,
 			Annotations:                    parentContext.Annotations,
@@ -2251,7 +2252,7 @@ func setMetricsLabels(labels map[string]string, dynamoGraphDeployment *v1beta1.D
 
 // generateComponentContext resolves Dynamo defaults independently of native engine images.
 // component must not be nil. runtimeImage and nativeSidecar are resolved by the caller.
-func generateComponentContext(component *v1beta1.DynamoComponentDeploymentSharedSpec, parentGraphDeploymentName string, namespace string, numberOfNodes int32, discovery DiscoveryContext, infrastructure configv1alpha1.InfrastructureConfiguration, runtimeImage string, nativeSidecar bool) (ComponentContext, error) {
+func generateComponentContext(component *v1beta1.DynamoComponentDeploymentSharedSpec, parentGraphDeploymentName string, namespace string, numberOfNodes int32, discovery DiscoveryContext, infrastructure configv1alpha1.InfrastructureConfiguration, security configv1alpha1.SecurityConfiguration, runtimeImage string, nativeSidecar bool) (ComponentContext, error) {
 	dynamoNamespace := v1beta1.ComputeDynamoNamespace(component.GlobalDynamoNamespace, namespace, parentGraphDeploymentName)
 	var workerHashSuffix string
 	labels := GetPodTemplateLabels(component)
@@ -2275,6 +2276,7 @@ func generateComponentContext(component *v1beta1.DynamoComponentDeploymentShared
 		ParentGraphDeploymentNamespace: namespace,
 		Discovery:                      discovery,
 		Infrastructure:                 infrastructure,
+		Security:                       security,
 		DynamoNamespace:                dynamoNamespace,
 		EPPConfig:                      component.EPPConfig,
 		WorkerHashSuffix:               workerHashSuffix,
