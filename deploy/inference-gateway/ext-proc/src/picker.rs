@@ -126,10 +126,9 @@ pub struct PickTimings {
     pub template: Option<Duration>,
     /// Tokenizing the prompt, unless the request carried token ids.
     pub tokenize: Option<Duration>,
-    /// Choosing the prefill and decode workers, including router queueing.
+    /// Choosing the prefill and decode workers and booking their load, including
+    /// router queueing.
     pub select: Duration,
-    /// Registering the request with the router's load bookkeeping.
-    pub book: Duration,
 }
 
 /// Resolve the request's cache namespace with the canonical precedence:

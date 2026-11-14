@@ -2499,6 +2499,7 @@ dependencies = [
  "bytes",
  "dashmap",
  "dynamo-kv-events",
+ "dynamo-kv-hashing",
  "dynamo-kv-router",
  "dynamo-llm",
  "dynamo-protocols 10.0.1",
