@@ -75,6 +75,9 @@ impl CompatibilityState {
                 .and_then(|context| context.session_id().map(str::to_owned)),
             images: Vec::new(),
             kv_hint: None,
+            // The engine publishes a salted prompt's KV blocks under AISim's
+            // salted hashes. A router fed by those events must look the
+            // request up by `ReplayRequestHashes::from_tokens_with_cache_salt`.
             cache_salt: request.cache_salt,
         })
     }

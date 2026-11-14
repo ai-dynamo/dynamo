@@ -3279,6 +3279,103 @@ mod tests {
         assert_eq!(repeat_route.reported_overlap_tokens, Some(8));
     }
 
+    /// Six one-second-apart copies of one 10-token prompt (two complete
+    /// 4-token blocks), in the cache namespaces `a, a, b, none, none, c`.
+    fn cache_salt_requests() -> Vec<DirectRequest> {
+        [Some("a"), Some("a"), Some("b"), None, None, Some("c")]
+            .into_iter()
+            .enumerate()
+            .map(|(index, cache_salt)| DirectRequest {
+                cache_salt: cache_salt.map(str::to_owned),
+                ..prompt_request(index as u128 + 1, 1, index as f64 * 1_000.0, 1)
+            })
+            .collect()
+    }
+
+    fn cache_salt_args(worker_type: WorkerType) -> MockerConfig {
+        MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "backend": EngineType::Sglang,
+                "worker_type": worker_type,
+                "block_size": 4,
+                "num_gpu_blocks": 512,
+                "speedup_ratio": 1000.0
+            }
+        }))
+        .unwrap()
+    }
+
+    /// Asserts, for each of `cache_salt_requests`, the best and the selected
+    /// overlap in blocks that the KV router of `pool` saw, and the prompt
+    /// tokens the engine reused at admission.
+    fn assert_cache_salt_namespaces(report: &TraceSimulationReport, pool: ReplayRequestPool) {
+        assert_eq!(report.request_counts.completed_requests, 6);
+        let observed = (1..=6)
+            .map(|id| {
+                let record = record(report, id);
+                let route = record
+                    .routing_history
+                    .iter()
+                    .find(|route| route.pool == pool)
+                    .expect("request was routed in the pool");
+                (
+                    route.best_available_overlap_blocks,
+                    route.selected_overlap_blocks,
+                    record.first_admission_reused_input_tokens,
+                )
+            })
+            .collect::<Vec<_>>();
+        let cold = (Some(0), Some(0), 0);
+        let warm = (Some(2), Some(2), 8);
+        assert_eq!(
+            observed,
+            [
+                cold, // a: first use of the namespace
+                warm, // a: same salt
+                cold, // b: a's blocks are another namespace
+                cold, // unsalted: no salted block is visible
+                warm, // unsalted: as before cache salts existed
+                cold, // c: the unsalted blocks are another namespace
+            ]
+        );
+    }
+
+    /// The SGLang engine hashes a salted prompt in its own cache namespace and
+    /// publishes those hashes. A request list reaches the KV router without
+    /// precomputed hashes, so the router has to derive the same identities.
+    #[test]
+    fn offline_kv_router_sees_engine_cache_salt_namespaces() {
+        let report = replay_with_records(
+            cache_salt_args(WorkerType::Aggregated),
+            cache_salt_requests(),
+            1,
+        );
+        assert_cache_salt_namespaces(&report, ReplayRequestPool::Agg);
+    }
+
+    /// The prefill pool's router indexes its engines' KV events the same way.
+    #[test]
+    fn offline_disagg_prefill_router_sees_engine_cache_salt_namespaces() {
+        let report = simulate_trace_requests_disagg_with_router_mode_and_runtime_observers(
+            OfflineDisaggReplayConfig {
+                prefill_args: cache_salt_args(WorkerType::Prefill),
+                decode_args: cache_salt_args(WorkerType::Decode),
+                num_prefill_workers: 1,
+                num_decode_workers: 1,
+            },
+            None,
+            None,
+            cache_salt_requests(),
+            1.0,
+            ReplayRouterMode::KvRouter,
+            true,
+            SlaThresholds::default(),
+            ReplayRuntimeObservers::default(),
+        )
+        .unwrap();
+        assert_cache_salt_namespaces(&report, ReplayRequestPool::Prefill);
+    }
+
     fn attention_dp_requests(count: u32, spacing_ms: f64) -> Vec<DirectRequest> {
         (0..count)
             .map(|index| DirectRequest {

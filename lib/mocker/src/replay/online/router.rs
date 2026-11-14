@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use anyhow::{Context, Result, anyhow};
 use dynamo_kv_events::event::RouterEvent;
 use dynamo_kv_events::residency::StorageTier;
+use dynamo_kv_hashing::LocalBlockHash;
 use dynamo_kv_hashing::routing::{BlockHashOptions, compute_block_hash_for_seq};
 use dynamo_kv_indexer::host::{
     ConcurrentRadixTreeCompressed, KvIndexer, KvIndexerInterface, KvIndexerMetrics,
@@ -32,6 +33,7 @@ use uuid::Uuid;
 use crate::common::protocols::{
     DirectRequest, KvCacheEventSink, KvEventPublishers, MockerConfig, RawKvEvent,
 };
+use crate::loadgen::{ReplayRequestHashes, local_block_hashes};
 use crate::replay::router_shared::{
     ReplayScheduler, replay_router_config, replay_selector, replay_slots,
     replay_workers_with_configs,
@@ -103,6 +105,35 @@ impl ReplayIndexer {
                 ..Default::default()
             },
         );
+        self.find_tiered_matches(sequence).await
+    }
+
+    /// Look up block hashes the caller already derived, for a request whose
+    /// identities are not Dynamo's own token hashes.
+    async fn find_matches_for_hashes(
+        &self,
+        sequence: Vec<LocalBlockHash>,
+    ) -> Result<TieredMatchDetails> {
+        if self.lower_tier.all().is_empty() {
+            let overlap_scores = match &self.primary {
+                PrimaryIndexer::Single(indexer) => indexer.find_matches(sequence).await?,
+                PrimaryIndexer::Concurrent(indexer) => indexer.find_matches(sequence).await?,
+            };
+            return Ok(TieredMatchDetails {
+                device: MatchDetails {
+                    overlap_scores,
+                    ..MatchDetails::default()
+                },
+                lower_tier: Default::default(),
+            });
+        }
+        self.find_tiered_matches(sequence).await
+    }
+
+    async fn find_tiered_matches(
+        &self,
+        sequence: Vec<LocalBlockHash>,
+    ) -> Result<TieredMatchDetails> {
         let device = match &self.primary {
             PrimaryIndexer::Single(indexer) => indexer.find_match_details(sequence.clone()).await?,
             PrimaryIndexer::Concurrent(indexer) => indexer
@@ -331,20 +362,33 @@ impl KvReplayRouter {
         })
     }
 
-    async fn select_worker(&self, request: &DirectRequest) -> Result<ReplayPlacement> {
-        let uuid = request
-            .uuid
-            .ok_or_else(|| anyhow!("online replay requires requests to have stable UUIDs"))?;
-        let tiered = self
-            .indexer
-            .find_matches_for_request(&request.tokens, None)
-            .await?;
-        let overlap = OverlapAnalysis::new(
-            &CacheHitWeights::from(&self.config),
-            self.block_size,
-            &tiered,
-        )
-        .signals();
+    /// The request's cached-prefix matches and its active-block tracking
+    /// identities, both in the request's cache namespace.
+    async fn request_identities(
+        &self,
+        request: &DirectRequest,
+    ) -> Result<(TieredMatchDetails, Option<Vec<u64>>)> {
+        // The engine hashes a salted prompt in AISim's cache namespace and its
+        // KV events carry those hashes, so derive the request's by the same
+        // contract: the block seed behind `BlockHashOptions::cache_namespace`
+        // is a different one.
+        let cache_salt = request
+            .cache_salt
+            .as_deref()
+            .filter(|salt| !salt.is_empty());
+        let salted_hashes = cache_salt.map(|cache_salt| {
+            local_block_hashes(
+                ReplayRequestHashes::from_tokens_with_cache_salt(
+                    &request.tokens,
+                    self.block_size,
+                    Some(cache_salt),
+                )
+                .local_block_hashes,
+            )
+        });
+        // Public tracking chains the salted block hashes, as the engine does.
+        // Keyed identities never meet engine hashes; their namespace only
+        // keeps one salt's active blocks apart from another's.
         let token_seq = self.config.compute_seq_hashes_for_tracking_with_context(
             &self.tracking_hash,
             TrackingHashScope {
@@ -353,9 +397,34 @@ impl KvReplayRouter {
             },
             &request.tokens,
             None,
-            BlockHashOptions::default(),
-            None,
+            BlockHashOptions {
+                cache_namespace: cache_salt,
+                ..Default::default()
+            },
+            salted_hashes.as_deref(),
         );
+        let tiered = match salted_hashes {
+            Some(hashes) => self.indexer.find_matches_for_hashes(hashes).await?,
+            None => {
+                self.indexer
+                    .find_matches_for_request(&request.tokens, None)
+                    .await?
+            }
+        };
+        Ok((tiered, token_seq))
+    }
+
+    async fn select_worker(&self, request: &DirectRequest) -> Result<ReplayPlacement> {
+        let uuid = request
+            .uuid
+            .ok_or_else(|| anyhow!("online replay requires requests to have stable UUIDs"))?;
+        let (tiered, token_seq) = self.request_identities(request).await?;
+        let overlap = OverlapAnalysis::new(
+            &CacheHitWeights::from(&self.config),
+            self.block_size,
+            &tiered,
+        )
+        .signals();
         let (priority_jump, strict_priority) = request.router_priorities();
         let response = self
             .scheduler
@@ -587,8 +656,16 @@ mod tests {
     use dynamo_kv_hashing::routing::compute_block_hash_for_seq;
     use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
     use dynamo_router_protocol::worker::WorkerWithDpRank;
+    use dynamo_scheduler::host::TrackingHashAlgorithm;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
 
     use super::*;
+    use crate::common::protocols::EngineType;
+    use crate::live::LiveEngine;
+    use crate::replay::online::live_runtime::LiveRuntime;
+    use crate::replay::online::state::LiveReplayMode;
+    use crate::replay::online::{OnlineReplayConfig, OnlineReplayOptions};
 
     #[test]
     fn round_robin_cycles_logical_workers_before_attention_dp_ranks() {
@@ -1073,6 +1150,332 @@ policy_classes:
             }
         );
         router.on_complete(request.uuid.unwrap()).await.unwrap();
+        router.shutdown().await.unwrap();
+    }
+
+    const CACHE_SALT_BLOCK_SIZE: u32 = 4;
+
+    fn cache_salt_args() -> MockerConfig {
+        MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "backend": EngineType::Sglang,
+                "block_size": CACHE_SALT_BLOCK_SIZE,
+                "num_gpu_blocks": 512,
+                "speedup_ratio": 1000.0
+            }
+        }))
+        .unwrap()
+    }
+
+    /// One 10-token prompt (two complete 4-token blocks) in a cache namespace.
+    fn cache_salt_request(uuid: u128, cache_salt: Option<&str>) -> DirectRequest {
+        DirectRequest {
+            tokens: (1..=10).collect(),
+            max_output_tokens: 1,
+            uuid: Some(Uuid::from_u128(uuid)),
+            arrival_timestamp_ms: Some(0.0),
+            cache_salt: cache_salt.map(str::to_owned),
+            ..Default::default()
+        }
+    }
+
+    /// Run `request` on a grouped live engine until its completion effects are
+    /// published. Returns the prompt tokens the engine reused.
+    async fn run_on_engine(engine: &LiveEngine, request: DirectRequest) -> usize {
+        let mut live = engine.submit(request).await.unwrap();
+        let mut cached_tokens = None;
+        loop {
+            let output = live.recv().await.expect("terminal output");
+            assert!(!output.rejected);
+            cached_tokens = cached_tokens.or(output.cached_tokens);
+            if output.completed {
+                break;
+            }
+        }
+        engine.drain_completion_boundary().await.unwrap();
+        cached_tokens.expect("the engine reports its cache usage")
+    }
+
+    /// Wait until the engine's KV events for the prompt in one cache namespace
+    /// reach the replay indexer. The probe names the published hashes itself.
+    async fn wait_until_indexed(
+        router: &KvReplayRouter,
+        cache_salt: Option<&str>,
+        worker_id: WorkerId,
+    ) {
+        let hashes = local_block_hashes(
+            ReplayRequestHashes::from_tokens_with_cache_salt(
+                &cache_salt_request(0, cache_salt).tokens,
+                CACHE_SALT_BLOCK_SIZE,
+                cache_salt,
+            )
+            .local_block_hashes,
+        );
+        let worker = WorkerWithDpRank::new(worker_id, 0);
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let tiered = router
+                    .indexer
+                    .find_matches_for_hashes(hashes.clone())
+                    .await
+                    .unwrap();
+                if tiered.device.overlap_scores.scores.get(&worker) == Some(&2) {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("the engine's KV events reach the replay indexer");
+    }
+
+    /// Device overlap in blocks, per worker, that routing sees for the prompt
+    /// in one cache namespace.
+    async fn routed_overlap(router: &KvReplayRouter, cache_salt: Option<&str>) -> Vec<(u64, u32)> {
+        let (tiered, _) = router
+            .request_identities(&cache_salt_request(0, cache_salt))
+            .await
+            .unwrap();
+        let mut overlap = tiered
+            .device
+            .overlap_scores
+            .scores
+            .iter()
+            .map(|(worker, blocks)| (worker.worker_id, *blocks))
+            .collect::<Vec<_>>();
+        overlap.sort_unstable();
+        overlap
+    }
+
+    /// The SGLang engine hashes a salted prompt in its own cache namespace and
+    /// publishes those hashes; routing has to look the request up in the same
+    /// one, whichever device indexer the event thread count selects.
+    #[rstest::rstest]
+    #[case::single_indexer(1)]
+    #[case::concurrent_indexer(4)]
+    #[tokio::test]
+    async fn online_kv_router_sees_engine_cache_salt_namespaces(#[case] router_event_threads: u32) {
+        let runtime = LiveRuntime::new(
+            OnlineReplayConfig::new(
+                cache_salt_args(),
+                Some(KvRouterConfig {
+                    router_event_threads,
+                    ..KvRouterConfig::default()
+                }),
+                None,
+                2,
+                ReplayRouterMode::KvRouter,
+                OnlineReplayOptions::default(),
+            ),
+            Default::default(),
+            LiveReplayMode::Trace,
+            CancellationToken::new(),
+        )
+        .unwrap();
+        let engines = runtime.engines();
+        let router = runtime.router();
+        let ReplayRouter::Kv(kv_router) = router.as_ref() else {
+            unreachable!("test constructed a KV replay router")
+        };
+        assert_eq!(
+            matches!(kv_router.indexer.primary, PrimaryIndexer::Single(_)),
+            router_event_threads == 1
+        );
+
+        // Warm worker 1 under salt "a" and worker 0 without a salt, on the
+        // engines whose KV events feed this router.
+        assert_eq!(
+            run_on_engine(&engines[1], cache_salt_request(1, Some("a"))).await,
+            0
+        );
+        assert_eq!(
+            run_on_engine(&engines[0], cache_salt_request(2, None)).await,
+            0
+        );
+        wait_until_indexed(kv_router, Some("a"), 1).await;
+        wait_until_indexed(kv_router, None, 0).await;
+
+        assert_eq!(routed_overlap(kv_router, Some("a")).await, [(1, 2)]);
+        assert_eq!(routed_overlap(kv_router, Some("b")).await, []);
+        assert_eq!(routed_overlap(kv_router, None).await, [(0, 2)]);
+        // An empty salt is the unsalted namespace, as in the engine.
+        assert_eq!(routed_overlap(kv_router, Some("")).await, [(0, 2)]);
+
+        // Placement follows the warm worker of each namespace.
+        for (uuid, cache_salt, worker_idx) in [(3, Some("a"), 1), (4, None, 0)] {
+            let request = cache_salt_request(uuid, cache_salt);
+            assert_eq!(
+                router.select_worker(&request, 2, 1).await.unwrap(),
+                ReplayPlacement {
+                    worker_idx,
+                    dp_rank: 0,
+                },
+                "{cache_salt:?}"
+            );
+            router.on_complete(request.uuid.unwrap()).await.unwrap();
+        }
+
+        // The engines agree with what routing saw: only the same salt reuses.
+        assert_eq!(
+            run_on_engine(&engines[1], cache_salt_request(5, Some("a"))).await,
+            8
+        );
+        assert_eq!(
+            run_on_engine(&engines[1], cache_salt_request(6, Some("b"))).await,
+            0
+        );
+        assert_eq!(
+            run_on_engine(&engines[0], cache_salt_request(7, None)).await,
+            8
+        );
+
+        for engine in engines.iter() {
+            engine.shutdown().await.unwrap();
+        }
+        router.shutdown().await.unwrap();
+    }
+
+    /// A salted prefix in a lower tier takes the detailed lookup; it matches
+    /// by the same published hashes.
+    #[tokio::test]
+    async fn online_kv_router_finds_a_cache_salt_prefix_in_host_pinned() {
+        let router = ReplayRouter::new(
+            ReplayRouterMode::KvRouter,
+            &cache_salt_args(),
+            None,
+            None,
+            2,
+        )
+        .unwrap();
+        let ReplayRouter::Kv(kv_router) = &router else {
+            unreachable!("test constructed a KV replay router")
+        };
+        let published = local_block_hashes(
+            ReplayRequestHashes::from_tokens_with_cache_salt(
+                &cache_salt_request(0, Some("a")).tokens,
+                CACHE_SALT_BLOCK_SIZE,
+                Some("a"),
+            )
+            .local_block_hashes,
+        );
+        kv_router
+            .indexer
+            .apply_event(store_event(1, 1, 0, published[0], StorageTier::HostPinned))
+            .await;
+        kv_router.indexer.flush().await;
+
+        let worker = WorkerWithDpRank::new(1, 0);
+        for (cache_salt, host_blocks) in [(Some("a"), Some(1)), (Some("b"), None), (None, None)] {
+            let (tiered, _) = kv_router
+                .request_identities(&cache_salt_request(0, cache_salt))
+                .await
+                .unwrap();
+            assert!(tiered.device.overlap_scores.scores.is_empty());
+            assert_eq!(
+                tiered
+                    .lower_tier
+                    .get(&StorageTier::HostPinned)
+                    .and_then(|matches| matches.hits.get(&worker))
+                    .copied(),
+                host_blocks,
+                "{cache_salt:?}"
+            );
+        }
+        router.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn online_kv_router_tracks_active_blocks_per_cache_salt() {
+        let router = ReplayRouter::new(
+            ReplayRouterMode::KvRouter,
+            &cache_salt_args(),
+            None,
+            None,
+            1,
+        )
+        .unwrap();
+        let ReplayRouter::Kv(kv_router) = &router else {
+            unreachable!("test constructed a KV replay router")
+        };
+
+        // Active copies of one two-block prompt share blocks only inside a
+        // namespace; an empty salt is the unsalted one.
+        let namespaces = [None, None, Some("a"), Some("a"), Some("b"), Some("")];
+        let mut active_blocks = Vec::new();
+        for (index, cache_salt) in namespaces.into_iter().enumerate() {
+            router
+                .select_worker(&cache_salt_request(index as u128 + 1, cache_salt), 1, 1)
+                .await
+                .unwrap();
+            active_blocks.push(router.debug_potential_loads(0, false)[0].potential_decode_blocks);
+        }
+        assert_eq!(active_blocks, [2, 2, 4, 4, 6, 6]);
+
+        // Public tracking identities are the engine's sequence hashes.
+        for cache_salt in [None, Some(""), Some("a"), Some("b")] {
+            let request = cache_salt_request(0, cache_salt);
+            let (_, token_seq) = kv_router.request_identities(&request).await.unwrap();
+            assert_eq!(
+                token_seq,
+                Some(
+                    ReplayRequestHashes::from_tokens_with_cache_salt(
+                        &request.tokens,
+                        CACHE_SALT_BLOCK_SIZE,
+                        cache_salt,
+                    )
+                    .sequence_hashes
+                ),
+                "{cache_salt:?}"
+            );
+        }
+
+        for index in 0..namespaces.len() {
+            router
+                .on_complete(Uuid::from_u128(index as u128 + 1))
+                .await
+                .unwrap();
+        }
+        router.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn online_keyed_tracking_separates_cache_salts() {
+        let mut key_file = NamedTempFile::new().unwrap();
+        key_file.write_all(&[0x39; 32]).unwrap();
+        let config = KvRouterConfig {
+            router_tracking_hash: TrackingHashAlgorithm::KeyedXxh3V1,
+            router_tracking_key_file: Some(key_file.path().to_path_buf()),
+            router_tracking_key_id: Some("2026-01".to_string()),
+            ..KvRouterConfig::default()
+        };
+        let router = ReplayRouter::new(
+            ReplayRouterMode::KvRouter,
+            &cache_salt_args(),
+            Some(config),
+            None,
+            1,
+        )
+        .unwrap();
+        let ReplayRouter::Kv(kv_router) = &router else {
+            unreachable!("test constructed a KV replay router")
+        };
+        let mut identities = Vec::new();
+        for cache_salt in [None, Some(""), Some("a"), Some("a"), Some("b")] {
+            let (_, token_seq) = kv_router
+                .request_identities(&cache_salt_request(0, cache_salt))
+                .await
+                .unwrap();
+            identities.push(token_seq.expect("active blocks are tracked"));
+        }
+        let [unsalted, empty, a, a_again, b] = identities.as_slice() else {
+            unreachable!("five namespaces were hashed")
+        };
+        assert_eq!(unsalted.len(), 2);
+        assert_eq!(unsalted, empty);
+        assert_eq!(a, a_again);
+        assert_ne!(a, unsalted);
+        assert_ne!(a, b);
+        assert_ne!(b, unsalted);
         router.shutdown().await.unwrap();
     }
 }
