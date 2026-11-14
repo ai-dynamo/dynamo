@@ -107,7 +107,9 @@ from .constants import MX_LOAD_FORMATS, DisaggregationMode, EmbeddingTransferMod
 from .dp_topology import get_dp_range_for_worker
 from .engine_generate import (
     adapt_engine_generate_request,
+    prompt_response_fields,
     publish_engine_generate_capability,
+    render_content_parts,
 )
 from .engine_monitor import VllmEngineMonitor
 from .lora_state import LoRAState
@@ -4056,6 +4058,13 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             multi_modal_data = None
             mm_processor_kwargs = None
             pre_rendered = engine_generate_input.prompt
+            if engine_generate_input.content_parts:
+                pre_rendered = await render_content_parts(
+                    self.engine_client.renderer,
+                    self.engine_client.vllm_config.model_config,
+                    pre_rendered,
+                    engine_generate_input.content_parts,
+                )
         elif (
             mode == DisaggregationMode.AGGREGATED
             and self._custom_encoder is not None
@@ -4306,6 +4315,13 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     )
                     accumulated_token_ids: dict[int, list[int]] = {}
                     accumulated_log_probs: dict[int, list[float]] = {}
+                    # vLLM's Generate API returns the expanded prompt once.
+                    prompt_fields = (
+                        prompt_response_fields(prompt)
+                        if engine_generate_input is not None
+                        and engine_generate_input.return_token_ids
+                        else None
+                    )
                     try:
                         async for tok in self.generate_tokens(
                             prompt,
@@ -4360,6 +4376,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                                     accumulated_token_ids,
                                     accumulated_log_probs,
                                 )
+                            if prompt_fields is not None:
+                                tok.setdefault("engine_data", {}).update(prompt_fields)
+                                prompt_fields = None
                             yield tok
                     except EngineDeadError as e:
                         logger.error(f"vLLM EngineDeadError: {e}")
