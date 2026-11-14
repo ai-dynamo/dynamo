@@ -11,10 +11,59 @@ use crate::protocols::{ExternalSequenceBlockHash, WorkerWithDpRank};
 /// One known hybrid candidate waiting for its resume point.
 struct Pending {
     worker: WorkerWithDpRank,
+    /// The worker's Device filter bit.
+    bit: u64,
     /// Attention coverage end, capped by the query limit.
     bound: u32,
     /// Index into the recorded chain of the settled checkpoint.
     resolved: Option<u32>,
+}
+
+/// One bit per candidate slot. Up to 256 slots stay on the stack, and a larger
+/// set is sized up front, so marking a slot never allocates.
+struct SlotBitmap {
+    inline: [u64; 4],
+    spilled: Vec<u64>,
+    marked: usize,
+}
+
+impl SlotBitmap {
+    fn new(slots: usize) -> Self {
+        let words = slots.div_ceil(64);
+        Self {
+            inline: [0; 4],
+            spilled: if words > 4 {
+                vec![0; words]
+            } else {
+                Vec::new()
+            },
+            marked: 0,
+        }
+    }
+
+    /// Mark a slot that is not marked yet.
+    fn mark(&mut self, slot: usize) {
+        let words: &mut [u64] = if self.spilled.is_empty() {
+            &mut self.inline
+        } else {
+            &mut self.spilled
+        };
+        words[slot / 64] |= 1 << (slot % 64);
+        self.marked += 1;
+    }
+
+    fn is_marked(&self, slot: usize) -> bool {
+        let words: &[u64] = if self.spilled.is_empty() {
+            &self.inline
+        } else {
+            &self.spilled
+        };
+        (words[slot / 64] >> (slot % 64)) & 1 == 1
+    }
+
+    fn marked(&self) -> usize {
+        self.marked
+    }
 }
 
 /// Resolve hybrid resume points once the attention walk has finished.
@@ -26,8 +75,14 @@ struct Pending {
 /// candidates all hold a checkpoint at their attention end therefore reads
 /// one record per distinct end rather than one per matched block.
 ///
+/// A read first asks the Device filter whether the record can hold any worker
+/// that is still unsettled, so positions without one cost a single atomic
+/// load and never touch the directory.
+///
 /// Reads take a directory shard guard and see current state. Like attention
-/// coverage, results are best-effort during concurrent updates.
+/// coverage, results are best-effort during concurrent updates. Nothing
+/// allocates while a guard is held: readers of one record otherwise collapse
+/// under concurrency.
 pub(crate) struct ForwardDeviceEvaluator<'a> {
     residency: &'a KvCacheGroupResidency,
     legacy: Option<Box<HybridPrefixEvaluator>>,
@@ -71,11 +126,12 @@ impl<'a> ForwardDeviceEvaluator<'a> {
         }
     }
 
-    /// `None` for a worker that was unknown when the walk started.
-    fn device_checkpoints(&self, worker: WorkerWithDpRank) -> Option<usize> {
+    /// Device checkpoint count and filter bit; `None` for a worker that was
+    /// unknown when the walk started.
+    fn device_summary(&self, worker: WorkerWithDpRank) -> Option<(usize, u64)> {
         self.view
             .as_ref()
-            .and_then(|view| view.device_checkpoints(worker))
+            .and_then(|view| view.device_summary(worker))
     }
 
     fn record_block(&mut self, position: usize, hash: ExternalSequenceBlockHash) {
@@ -107,9 +163,14 @@ impl<'a> ForwardDeviceEvaluator<'a> {
         // Slots that have reached their bound; settled ones are dropped lazily.
         let mut open: Vec<u32> = Vec::with_capacity(pending.len());
         let mut unsettled = 0usize;
+        // Filter bits of the open slots: a superset once some have settled,
+        // rebuilt after each read that settles one.
+        let mut open_bits = 0u64;
         let mut next = 0usize;
-        // Built only when a record with few holders meets many open slots.
+        // Built after the first record with few holders meets many open
+        // slots, outside its shard guard, and used from the next record on.
         let mut slots: Option<FxHashMap<WorkerWithDpRank, u32>> = None;
+        let mut sparse = false;
         // Members of the last populated record that every open slot was
         // checked against. An equal set cannot hold any of them.
         let mut checked = None;
@@ -122,6 +183,7 @@ impl<'a> ForwardDeviceEvaluator<'a> {
                 && entry.bound as usize >= position
             {
                 open.push(next as u32);
+                open_bits |= entry.bit;
                 next += 1;
                 unsettled += 1;
                 checked = None;
@@ -134,47 +196,61 @@ impl<'a> ForwardDeviceEvaluator<'a> {
                 let bound = entry.bound as usize;
                 index = self.chain[..index - 1].partition_point(|&(position, _)| position <= bound);
                 open.clear();
+                open_bits = 0;
                 continue;
             }
             let at = (index - 1) as u32;
-            self.residency.visit_checkpoint_workers(hash, |workers| {
-                let signature = workers.signature();
-                if checked == Some(signature) {
-                    return;
-                }
-                checked = Some(signature);
-                if workers.len() * 2 < unsettled {
-                    let slots = slots.get_or_insert_with(|| {
-                        pending
-                            .iter()
-                            .enumerate()
-                            .map(|(slot, entry)| (entry.worker, slot as u32))
-                            .collect()
-                    });
-                    for worker in workers.iter() {
-                        if let Some(&slot) = slots.get(worker)
-                            && (slot as usize) < next
-                            && pending[slot as usize].resolved.is_none()
-                        {
-                            pending[slot as usize].resolved = Some(at);
-                            unsettled -= 1;
-                        }
+            let before = unsettled;
+            self.residency
+                .visit_checkpoint_workers(hash, open_bits, |workers| {
+                    let signature = workers.signature();
+                    if checked == Some(signature) {
+                        return;
                     }
-                } else {
-                    open.retain(|&slot| {
-                        let entry = &mut pending[slot as usize];
-                        if entry.resolved.is_some() {
-                            return false;
+                    checked = Some(signature);
+                    let few_holders = workers.len() * 2 < unsettled;
+                    if few_holders && let Some(slots) = &slots {
+                        for worker in workers.iter() {
+                            if let Some(&slot) = slots.get(worker)
+                                && (slot as usize) < next
+                                && pending[slot as usize].resolved.is_none()
+                            {
+                                pending[slot as usize].resolved = Some(at);
+                                unsettled -= 1;
+                            }
                         }
-                        if workers.contains(&entry.worker) {
-                            entry.resolved = Some(at);
-                            unsettled -= 1;
-                            return false;
-                        }
-                        true
-                    });
-                }
-            });
+                    } else {
+                        sparse |= few_holders;
+                        open.retain(|&slot| {
+                            let entry = &mut pending[slot as usize];
+                            if entry.resolved.is_some() {
+                                return false;
+                            }
+                            if workers.contains(&entry.worker) {
+                                entry.resolved = Some(at);
+                                unsettled -= 1;
+                                return false;
+                            }
+                            true
+                        });
+                    }
+                });
+            if sparse && slots.is_none() {
+                slots = Some(
+                    pending
+                        .iter()
+                        .enumerate()
+                        .map(|(slot, entry)| (entry.worker, slot as u32))
+                        .collect(),
+                );
+            }
+            if unsettled != before {
+                open_bits = open
+                    .iter()
+                    .map(|&slot| &pending[slot as usize])
+                    .filter(|entry| entry.resolved.is_none())
+                    .fold(0, |bits, entry| bits | entry.bit);
+            }
             index -= 1;
         }
     }
@@ -197,7 +273,7 @@ impl<'a> ForwardDeviceEvaluator<'a> {
         // scored; the known ones join the confirmed scope below.
         let mut earlier = Vec::new();
         for (&worker, &blocks) in &details.overlap_scores.scores {
-            if let Some(count) = self.device_checkpoints(worker) {
+            if let Some((count, bit)) = self.device_summary(worker) {
                 earlier.push(worker);
                 let bound = blocks.min(limit);
                 if count == 0 || bound == 0 {
@@ -205,6 +281,7 @@ impl<'a> ForwardDeviceEvaluator<'a> {
                 } else {
                     pending.push(Pending {
                         worker,
+                        bit,
                         bound,
                         resolved: None,
                     });
@@ -215,9 +292,10 @@ impl<'a> ForwardDeviceEvaluator<'a> {
         let scores = &mut details.overlap_scores.scores;
         // Known workers that survived the whole walk share one bound.
         let bound = raw_end.min(limit);
-        let mut survivors = Vec::with_capacity(active.len());
+        let mut survivors: Vec<(WorkerWithDpRank, u64)> = Vec::with_capacity(active.len());
+        let mut survivor_bits = 0u64;
         active.retain(|worker| {
-            let Some(count) = self.device_checkpoints(*worker) else {
+            let Some((count, bit)) = self.device_summary(*worker) else {
                 scores.insert(*worker, raw_end);
                 if let Some(hash) = raw_hash {
                     last_hashes.insert(*worker, hash);
@@ -227,34 +305,40 @@ impl<'a> ForwardDeviceEvaluator<'a> {
             if count == 0 || bound == 0 {
                 uncredited.push(*worker);
             } else {
-                survivors.push(*worker);
+                survivors.push((*worker, bit));
+                survivor_bits |= bit;
             }
             true
         });
 
         // Read the record at the survivors' shared bound once. In the common
         // case it settles all of them and no further bookkeeping is needed.
+        // The read is skipped when the filter rules every survivor out.
         let top = self
             .chain
             .partition_point(|&(position, _)| position <= bound as usize)
             .checked_sub(1)
             .filter(|_| !survivors.is_empty());
-        // Survivor slots the top record does not hold, in ascending order.
-        let mut missed: Vec<u32> = Vec::new();
+        // Survivor slots the top record does not hold. Sized before the read
+        // so the visitor never allocates under the shard guard.
+        let mut missed = SlotBitmap::new(survivors.len());
         let mut top_read = false;
         if let Some(index) = top {
-            self.residency
-                .visit_checkpoint_workers(self.chain[index].1, |workers| {
+            self.residency.visit_checkpoint_workers(
+                self.chain[index].1,
+                survivor_bits,
+                |workers| {
                     top_read = true;
-                    for (slot, worker) in survivors.iter().enumerate() {
+                    for (slot, (worker, _)) in survivors.iter().enumerate() {
                         if !workers.contains(worker) {
-                            missed.push(slot as u32);
+                            missed.mark(slot);
                         }
                     }
-                });
+                },
+            );
         }
         let settled_at_top = if top_read {
-            survivors.len() - missed.len()
+            survivors.len() - missed.marked()
         } else {
             0
         };
@@ -263,19 +347,28 @@ impl<'a> ForwardDeviceEvaluator<'a> {
             // survivors it did not settle.
             Some(index) => {
                 let below = (self.chain[index].0 - 1) as u32;
-                let unsettled = |slot: usize| Pending {
-                    worker: survivors[slot],
-                    bound: below,
-                    resolved: None,
+                let unsettled = |slot: usize| {
+                    let (worker, bit) = survivors[slot];
+                    Pending {
+                        worker,
+                        bit,
+                        bound: below,
+                        resolved: None,
+                    }
                 };
-                if top_read {
-                    pending.extend(missed.iter().map(|&slot| unsettled(slot as usize)));
-                } else {
+                if !top_read {
                     pending.extend((0..survivors.len()).map(unsettled));
+                } else if missed.marked() > 0 {
+                    pending.reserve(missed.marked());
+                    pending.extend(
+                        (0..survivors.len())
+                            .filter(|&slot| missed.is_marked(slot))
+                            .map(unsettled),
+                    );
                 }
             }
             // No recorded position lies within the bound.
-            None => uncredited.extend(survivors.iter().copied()),
+            None => uncredited.extend(survivors.iter().map(|&(worker, _)| worker)),
         }
         pending.retain(|entry| {
             if entry.bound == 0 {
@@ -315,10 +408,9 @@ impl<'a> ForwardDeviceEvaluator<'a> {
             && let Some(index) = top
         {
             let hash = self.chain[index].1;
-            let mut skip = missed.iter().copied().peekable();
-            for (slot, &worker) in survivors.iter().enumerate() {
-                if skip.peek() == Some(&(slot as u32)) {
-                    skip.next();
+            let any_missed = missed.marked() > 0;
+            for (slot, &(worker, _)) in survivors.iter().enumerate() {
+                if any_missed && missed.is_marked(slot) {
                     continue;
                 }
                 scores.insert(worker, top_cap);
@@ -388,8 +480,8 @@ impl MatchObserver for ForwardDeviceEvaluator<'_> {
                     .iter()
                     .chain(edge.worker_cutoffs.keys())
                     .any(|&worker| {
-                        self.device_checkpoints(worker)
-                            .is_some_and(|count| count > 0)
+                        self.device_summary(worker)
+                            .is_some_and(|(count, _)| count > 0)
                     });
             if self.needs_checkpoints {
                 self.chain.reserve(64);

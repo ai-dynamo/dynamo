@@ -16,7 +16,7 @@
 
 use std::ops::Deref;
 use std::sync::{
-    Arc,
+    Arc, OnceLock,
     atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
 };
 
@@ -158,12 +158,121 @@ impl CheckpointPresence {
     }
 }
 
+/// Slots in the Device filter: a power of two, sixteen bytes each.
+const DEVICE_FILTER_SLOTS: usize = 1 << 18;
+const DEVICE_FILTER_SHIFT: u32 = u64::BITS - DEVICE_FILTER_SLOTS.trailing_zeros();
+
+/// One Device filter slot. Queries load `workers` and nothing else.
+#[derive(Default)]
+struct DeviceFilterSlot {
+    /// Union of the filter bits of the workers in every Device set that maps
+    /// here. Bits are cleared only when the last such set empties.
+    workers: AtomicU64,
+    /// Number of nonempty Device sets that map here. The top bit serializes
+    /// this slot's writers, which hold it for a few instructions.
+    records: AtomicU64,
+}
+
+impl DeviceFilterSlot {
+    const BUSY: u64 = 1 << 63;
+
+    /// Returns the record count once no other writer is in this slot.
+    fn lock(&self) -> u64 {
+        loop {
+            let records = self.records.load(Ordering::Relaxed) & !Self::BUSY;
+            if self
+                .records
+                .compare_exchange_weak(
+                    records,
+                    records | Self::BUSY,
+                    Ordering::Acquire,
+                    Ordering::Relaxed,
+                )
+                .is_ok()
+            {
+                return records;
+            }
+            std::hint::spin_loop();
+        }
+    }
+
+    /// A worker joined a Device set that maps here; `first` when the set was
+    /// empty before.
+    fn joined(&self, bit: u64, first: bool) {
+        // A set that was already nonempty keeps this slot from being cleared
+        // while its shard guard is held, so a bit seen here stays.
+        if !first && self.workers.load(Ordering::Relaxed) & bit != 0 {
+            return;
+        }
+        let records = self.lock();
+        self.workers.fetch_or(bit, Ordering::Release);
+        self.records
+            .store(records + u64::from(first), Ordering::Release);
+    }
+
+    /// A Device set that maps here lost its last worker.
+    fn emptied(&self) {
+        let records = self.lock().saturating_sub(1);
+        if records == 0 {
+            self.workers.store(0, Ordering::Release);
+        }
+        self.records.store(records, Ordering::Release);
+    }
+}
+
+/// A fixed table that tells a query, without touching the directory, that no
+/// record at a hash can hold the workers it is looking for.
+///
+/// Every registered worker has one of 64 filter bits. A slot's bits are a
+/// superset of the workers held by the Device sets that map to it, so a clear
+/// answer is exact and a set bit only means "read the record". Writers update
+/// a slot under the record's shard guard, before the change is visible.
+struct DeviceFilter {
+    slots: Box<[DeviceFilterSlot]>,
+}
+
+impl std::fmt::Debug for DeviceFilter {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("DeviceFilter")
+            .field("slots", &self.slots.len())
+            .finish()
+    }
+}
+
+impl DeviceFilter {
+    fn new() -> Self {
+        Self {
+            slots: (0..DEVICE_FILTER_SLOTS)
+                .map(|_| DeviceFilterSlot::default())
+                .collect(),
+        }
+    }
+
+    /// One multiply keeps the slot independent of the directory's buckets.
+    fn index(hash: u64) -> usize {
+        (hash.wrapping_mul(0x9e37_79b9_7f4a_7c15) >> DEVICE_FILTER_SHIFT) as usize
+    }
+
+    fn slot(&self, hash: u64) -> &DeviceFilterSlot {
+        &self.slots[Self::index(hash)]
+    }
+
+    /// Whether a Device set at `hash` may hold a worker with one of `bits`.
+    fn may_hold(&self, hash: u64, bits: u64) -> bool {
+        self.slot(hash).workers.load(Ordering::Acquire) & bits != 0
+    }
+}
+
 /// The directory's shard guard protects record reads, publication, and removal.
 /// A box keeps each hash-table value small without a per-record lock or shared
 /// reference count. Queries release the guard before matching or callbacks.
 #[derive(Debug, Default)]
 struct CheckpointDirectory {
     entries: DashMap<u64, Box<CheckpointPresence>, FxBuildHasher>,
+    /// Built on the first Device join; a deployment without one never pays
+    /// for it.
+    filter: OnceLock<DeviceFilter>,
 }
 
 impl CheckpointDirectory {
@@ -175,19 +284,21 @@ impl CheckpointDirectory {
     /// Directory-only publication for tests that do not read the owner count.
     #[cfg(test)]
     fn publish(&self, owner: ResidencyOwner, updates: Vec<(u64, u8)>, alignment: usize) {
-        self.publish_counted(owner, updates, alignment, &AtomicUsize::new(0));
+        self.publish_counted(owner, updates, alignment, &AtomicUsize::new(0), 1);
     }
 
     /// `device_checkpoints` counts the records whose Device worker set holds
     /// this owner. It is raised before any record can gain the owner and
     /// lowered only after records lose it, so a reader that sees zero knows
     /// no record credits the owner; a nonzero value may be briefly stale-high.
+    /// `filter_bit` is the owner's bit in the Device filter.
     fn publish_counted(
         &self,
         owner: ResidencyOwner,
         updates: Vec<(u64, u8)>,
         alignment: usize,
         device_checkpoints: &AtomicUsize,
+        filter_bit: u64,
     ) {
         let may_join = if owner.as_worker().is_some() && alignment == 1 {
             updates.iter().filter(|(_, mask)| mask & 1 != 0).count()
@@ -207,7 +318,10 @@ impl CheckpointDirectory {
                 Entry::Occupied(mut entry) => {
                     let (change, empty) = {
                         let record = entry.get_mut();
-                        (record.update(owner, mask, alignment), record.is_empty())
+                        let change = record.update(owner, mask, alignment);
+                        let holders = record.device_workers.len();
+                        self.track_filter(hash, filter_bit, change, holders);
+                        (change, record.is_empty())
                     };
                     if empty {
                         entry.remove();
@@ -217,6 +331,8 @@ impl CheckpointDirectory {
                 Entry::Vacant(entry) if mask != 0 => {
                     let mut record = CheckpointPresence::default();
                     let change = record.update(owner, mask, alignment);
+                    let holders = record.device_workers.len();
+                    self.track_filter(hash, filter_bit, change, holders);
                     entry.insert(Box::new(record));
                     change
                 }
@@ -235,13 +351,41 @@ impl CheckpointDirectory {
         }
     }
 
+    /// Mirror one record's Device membership change into the filter. Runs
+    /// under the record's shard guard, with `holders` the set's new size.
+    fn track_filter(&self, hash: u64, bit: u64, change: DeviceMembership, holders: usize) {
+        match change {
+            DeviceMembership::Joined => self
+                .filter
+                .get_or_init(DeviceFilter::new)
+                .slot(hash)
+                .joined(bit, holders == 1),
+            DeviceMembership::Left if holders == 0 => {
+                if let Some(filter) = self.filter.get() {
+                    filter.slot(hash).emptied();
+                }
+            }
+            DeviceMembership::Left | DeviceMembership::Unchanged => {}
+        }
+    }
+
     /// Run `visit` on this hash's nonempty Device worker set under the shard
-    /// read guard. The visitor must only touch query-local state.
+    /// read guard. `bits` are the filter bits of the workers the caller is
+    /// looking for; the directory is not touched when the filter rules all of
+    /// them out. The visitor must only touch query-local state.
     fn visit_device_workers(
         &self,
         hash: ExternalSequenceBlockHash,
+        bits: u64,
         visit: impl FnOnce(&CheckpointWorkerSet),
     ) {
+        if !self
+            .filter
+            .get()
+            .is_some_and(|filter| filter.may_hold(hash.0, bits))
+        {
+            return;
+        }
         if let Some(record) = self.entries.get(&hash.0)
             && !record.device_workers.is_empty()
         {
@@ -305,6 +449,9 @@ struct OwnerPresence {
     /// Shared with the registry snapshot so queries can read it without
     /// taking this owner's lock. See [`CheckpointDirectory::publish_counted`].
     device_checkpoints: Arc<AtomicUsize>,
+    /// This owner's bit in the Device filter; zero for a cache owner, which
+    /// never joins a Device set.
+    filter_bit: u64,
 }
 
 impl OwnerPresence {
@@ -436,8 +583,19 @@ pub struct CheckpointLayout {
 struct OwnerRegistry {
     owners: FxHashMap<ResidencyOwner, Arc<RwLock<OwnerPresence>>>,
     cache_owners: FxHashMap<ResidencyOwnerKey, ResidencyOwner>,
-    /// Each registered worker's Device checkpoint counter, keyed like `owners`.
-    device_checkpoints: FxHashMap<WorkerWithDpRank, Arc<AtomicUsize>>,
+    /// What queries read about each registered worker, keyed like `owners`.
+    workers: FxHashMap<WorkerWithDpRank, WorkerSummary>,
+    /// Workers registered so far; the next one takes filter bit `n % 64`.
+    filter_bits_assigned: u32,
+}
+
+/// What a query reads about one registered worker without taking its lock.
+#[derive(Debug, Clone)]
+struct WorkerSummary {
+    /// See [`CheckpointDirectory::publish_counted`].
+    device_checkpoints: Arc<AtomicUsize>,
+    /// The worker's bit in the Device filter.
+    filter_bit: u64,
 }
 
 #[derive(Debug)]
@@ -455,14 +613,17 @@ impl KnownWorkerRead {
             .contains_key(&ResidencyOwner::worker(worker))
     }
 
-    /// How many checkpoint records currently credit this worker on Device;
-    /// `None` for a worker that was unknown when this view was captured. Zero
-    /// is exact; a nonzero value may be briefly stale-high.
-    pub(crate) fn device_checkpoints(&self, worker: WorkerWithDpRank) -> Option<usize> {
-        self.registry
-            .device_checkpoints
-            .get(&worker)
-            .map(|count| count.load(Ordering::Relaxed))
+    /// How many checkpoint records currently credit this worker on Device,
+    /// and the worker's Device filter bit; `None` for a worker that was
+    /// unknown when this view was captured. A zero count is exact; a nonzero
+    /// one may be briefly stale-high.
+    pub(crate) fn device_summary(&self, worker: WorkerWithDpRank) -> Option<(usize, u64)> {
+        self.registry.workers.get(&worker).map(|summary| {
+            (
+                summary.device_checkpoints.load(Ordering::Relaxed),
+                summary.filter_bit,
+            )
+        })
     }
 }
 
@@ -629,15 +790,18 @@ impl KvCacheGroupResidency {
     }
 
     /// Visit this hash's complete, alignment-one Device workers in place.
-    /// The visitor runs under the directory shard read guard, so it must be
-    /// short and touch only query-local state.
+    /// `bits` are the Device filter bits of the workers the caller is looking
+    /// for; a record that cannot hold any of them is skipped without a
+    /// directory read. The visitor runs under the directory shard read guard,
+    /// so it must be short and touch only query-local state.
     #[cfg_attr(not(feature = "standalone-indexer"), allow(dead_code))]
     pub(crate) fn visit_checkpoint_workers(
         &self,
         hash: ExternalSequenceBlockHash,
+        bits: u64,
         visit: impl FnOnce(&CheckpointWorkerSet),
     ) {
-        self.checkpoints.visit_device_workers(hash, visit);
+        self.checkpoints.visit_device_workers(hash, bits, visit);
     }
 
     #[cfg(test)]
@@ -698,6 +862,7 @@ impl KvCacheGroupResidency {
             updates,
             state.alignment_blocks.max(1),
             &state.device_checkpoints,
+            state.filter_bit,
         );
     }
 
@@ -720,10 +885,17 @@ impl KvCacheGroupResidency {
             return state.clone();
         }
         let mut next = (*current).clone();
-        let presence = OwnerPresence::default();
+        let mut presence = OwnerPresence::default();
         if let Some(worker) = owner.as_worker() {
-            next.device_checkpoints
-                .insert(worker, presence.device_checkpoints.clone());
+            presence.filter_bit = 1u64 << (next.filter_bits_assigned % u64::BITS);
+            next.filter_bits_assigned = next.filter_bits_assigned.wrapping_add(1);
+            next.workers.insert(
+                worker,
+                WorkerSummary {
+                    device_checkpoints: presence.device_checkpoints.clone(),
+                    filter_bit: presence.filter_bit,
+                },
+            );
         }
         let state = Arc::new(RwLock::new(presence));
         next.owners.insert(owner, state.clone());
@@ -863,6 +1035,7 @@ impl KvCacheGroupResidency {
                         updates,
                         state.alignment_blocks.max(1),
                         &state.device_checkpoints,
+                        state.filter_bit,
                     );
                 }
             }
@@ -894,6 +1067,7 @@ impl KvCacheGroupResidency {
                         updates,
                         state.alignment_blocks.max(1),
                         &state.device_checkpoints,
+                        state.filter_bit,
                     );
                 }
             }
@@ -956,7 +1130,7 @@ impl KvCacheGroupResidency {
             }
         });
         let owners = &next.owners;
-        next.device_checkpoints
+        next.workers
             .retain(|worker, _| owners.contains_key(&ResidencyOwner::worker(*worker)));
         self.active
             .store(!next.owners.is_empty(), Ordering::Relaxed);
@@ -1687,6 +1861,75 @@ mod tests {
             table.checkpoint_workers(second_hash).unwrap(),
             FxHashSet::from_iter([first, second])
         );
+    }
+
+    #[test]
+    fn device_filter_is_a_superset_and_clears_when_the_slot_empties() {
+        let directory = CheckpointDirectory::default();
+        let first = ResidencyOwner::worker(WorkerWithDpRank::new(7, 0));
+        let second = ResidencyOwner::worker(WorkerWithDpRank::new(8, 0));
+        let count = AtomicUsize::new(0);
+        let may_hold = |hash, bits| {
+            directory
+                .filter
+                .get()
+                .is_some_and(|filter| filter.may_hold(hash, bits))
+        };
+        // No Device set anywhere: nothing can hold anyone.
+        assert!(!may_hold(11, u64::MAX));
+        directory.publish_counted(first, vec![(11, 1)], 1, &count, 0b01);
+        assert!(may_hold(11, 0b01));
+        assert!(!may_hold(11, 0b10));
+        directory.publish_counted(second, vec![(11, 1)], 1, &count, 0b10);
+        assert!(may_hold(11, 0b10));
+        // A departed worker's bit may linger, but a holder's bit never drops.
+        directory.publish_counted(first, vec![(11, 0)], 1, &count, 0b01);
+        assert!(may_hold(11, 0b10));
+        // Other tiers and coarser alignments never enter the filter.
+        assert_ne!(DeviceFilter::index(11), DeviceFilter::index(12));
+        assert_ne!(DeviceFilter::index(11), DeviceFilter::index(13));
+        directory.publish_counted(first, vec![(12, 2)], 1, &count, 0b01);
+        directory.publish_counted(first, vec![(13, 1)], 2, &count, 0b01);
+        assert!(!may_hold(12, u64::MAX));
+        assert!(!may_hold(13, u64::MAX));
+        // The last Device set leaving the slot clears every bit.
+        directory.publish_counted(second, vec![(11, 0)], 1, &count, 0b10);
+        assert!(!may_hold(11, u64::MAX));
+        assert_eq!(count.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn device_filter_keeps_a_held_bit_through_concurrent_slot_clears() {
+        let directory = CheckpointDirectory::default();
+        // Two hashes that share a filter slot but not a record.
+        let first_hash = 1u64;
+        let second_hash = (2u64..)
+            .find(|&hash| DeviceFilter::index(hash) == DeviceFilter::index(first_hash))
+            .unwrap();
+        let first = ResidencyOwner::worker(WorkerWithDpRank::new(7, 0));
+        let second = ResidencyOwner::worker(WorkerWithDpRank::new(8, 0));
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let count = AtomicUsize::new(0);
+                for _ in 0..50_000 {
+                    directory.publish_counted(first, vec![(first_hash, 1)], 1, &count, 0b01);
+                    directory.publish_counted(first, vec![(first_hash, 0)], 1, &count, 0b01);
+                }
+            });
+            scope.spawn(|| {
+                let count = AtomicUsize::new(0);
+                for _ in 0..50_000 {
+                    directory.publish_counted(second, vec![(second_hash, 1)], 1, &count, 0b10);
+                    // The record holds the worker, so its bit must be visible.
+                    assert!(directory.filter.get().unwrap().may_hold(second_hash, 0b10));
+                    directory.publish_counted(second, vec![(second_hash, 0)], 1, &count, 0b10);
+                }
+            });
+        });
+        assert!(directory.is_empty());
+        let filter = directory.filter.get().unwrap();
+        assert!(!filter.may_hold(first_hash, u64::MAX));
+        assert_eq!(filter.slot(first_hash).records.load(Ordering::Relaxed), 0);
     }
 
     #[test]
