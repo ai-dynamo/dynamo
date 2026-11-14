@@ -20,15 +20,15 @@ Extensions add routes but cannot override built-in routes. A duplicate method an
 causes Frontend startup to fail.
 
 > [!NOTE]
-> Python route extensions currently support synchronous handlers on static-path `GET` routes only.
-> Path parameters, wildcards, other HTTP methods, and asynchronous handlers are rejected.
+> Routes use static paths and one of the `GET`, `POST`, `PUT`, `PATCH`, or `DELETE` methods. Path
+> parameters and wildcards are rejected.
 
 ## Add a route extension
 
 ### Define a route provider
 
-A provider is a callable that returns a `FrontendRoute` or an iterable of routes. Each synchronous
-handler receives a `FrontendExtensionContext` and returns either:
+A provider is a callable that returns a `FrontendRoute` or an iterable of routes. Each handler
+receives a `FrontendExtensionContext` and returns either:
 
 - A JSON-serializable body, which produces HTTP 200.
 - A `FrontendResponse` with an explicit status code and body.
@@ -124,17 +124,87 @@ def _health_ready(ctx):
 - `model_display_names()`
 - `serving_ready_display_names()`
 
+## Read the request and call workers
+
+A handler can be an `async def`. Async handlers run on the Frontend's asyncio event loop, so they can
+await request-plane calls to workers. The context also carries the request and the Frontend's
+runtime:
+
+- `body`: the raw request body as `bytes`, empty when the request has none.
+- `headers`: the request headers as a `dict` with lower-case names. Repeated headers are joined
+  with `", "`.
+- `runtime`: the Frontend's own `DistributedRuntime`, for clients to worker endpoints. Its async
+  methods need the event loop, so call them from an `async def` handler.
+
+> [!WARNING]
+> The Frontend does not authenticate requests to extension routes, and it serves them on the same
+> port as the inference API. A route that changes state must check credentials itself, as the
+> following example does.
+
+The following route takes a JSON body, checks a bearer token, sends the body to every instance of a
+worker endpoint, and returns the replies:
+
+```python
+import hmac
+import json
+import os
+
+from dynamo.llm import FrontendExtensionContext, FrontendResponse, FrontendRoute
+
+_BEARER = f"Bearer {os.environ['MY_CONTROL_TOKEN']}".encode()
+_client = None
+
+
+async def _broadcast(ctx: FrontendExtensionContext):
+    supplied = ctx.headers.get("authorization", "").encode()
+    if not hmac.compare_digest(supplied, _BEARER):
+        return FrontendResponse(401, {"error": "invalid bearer"})
+    try:
+        request = json.loads(ctx.body)
+    except ValueError:
+        return FrontendResponse(400, {"error": "body must be JSON"})
+
+    global _client
+    if _client is None:
+        _client = await ctx.runtime.endpoint("dynamo.backend.control").client()
+
+    replies = {}
+    for instance_id in await _client.wait_for_instances():
+        stream = await _client.direct(request, instance_id)
+        async for reply in stream:
+            replies[str(instance_id)] = reply.data()
+    return {"replies": replies}
+
+
+def control_routes():
+    return [FrontendRoute("POST", "/control/broadcast", _broadcast, timeout_s=120)]
+```
+
+`timeout_s` sets the route's handler timeout. It defaults to 30 seconds. `max_body_bytes` sets the
+largest request body the route accepts. It defaults to 65536 (64 KiB).
+
 ## Handler limits
 
-Handlers execute in a small, dedicated thread pool, separate from inference tokenization. Keep them
-fast and non-blocking:
+Synchronous handlers execute in a small, dedicated thread pool, separate from inference
+tokenization. That pool also starts each async handler, which then runs on the Frontend's event loop.
+Keep handlers fast and non-blocking:
 
-- A handler that exceeds 30 seconds returns HTTP 503.
-- A saturated extension pool rejects new requests with the configured overload status code, HTTP
-  529 by default.
-- Handler failures return HTTP 500.
-- Network, disk, or compute-heavy operations can block other extension routes because Python
-  handlers contend for the Global Interpreter Lock (GIL).
+- A handler that exceeds its route's `timeout_s` (30 seconds by default, counted from when the
+  request body has been read) returns HTTP 503. An async handler is cancelled at the timeout. A call
+  that a pool thread or the event loop picks up after its timeout is dropped without running the
+  handler. A 503 does not mean the handler had no effect: it may have been cancelled partway.
+- A client that disconnects does not cancel a running handler.
+- Each route admits at most 64 calls at once, waiting or running. A request beyond that, or one that
+  finds the thread pool's queue full, is rejected with the configured overload status code, HTTP 529
+  by default. An async handler holds its slot until its task ends, so a handler that catches the
+  cancellation at the timeout keeps the slot until it returns.
+- A handler that raises returns HTTP 500. That includes a `TimeoutError` the handler raises itself.
+- A request body larger than the route's `max_body_bytes`, 64 KiB by default, is rejected with
+  HTTP 413. `DYN_HTTP_BODY_LIMIT_MB` does not apply to extension routes.
+- Slow work in a synchronous handler delays other extension routes: it occupies a pool thread, and
+  Python code holds the Global Interpreter Lock (GIL). In an async handler, a blocking call stalls
+  the Frontend's event loop, which also runs Python chat processors (`--dyn-chat-processor vllm` or
+  `sglang`) and shutdown handling. Await the work or move it to a thread.
 
 ## Load multiple providers
 

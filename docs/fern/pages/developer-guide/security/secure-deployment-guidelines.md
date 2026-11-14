@@ -205,6 +205,12 @@ reachable.
   authentication. If you widen the bind with
   `DYN_FRONTEND_ADMIN_HOST`, restrict the admin port to trusted operators with a network
   policy or firewall.
+- **Python route extensions.** Routes added with `--frontend-route-extension` or
+  `DYN_FRONTEND_ROUTE_EXTENSIONS` are off unless you select a provider. The frontend serves
+  them on the inference port and does not authenticate them, and the provider's code runs
+  inside the frontend process. Load only providers you trust, and make any route that
+  changes state check credentials itself. See
+  [Python Route Extensions](../knowledge-base/modular-components/frontend/python-route-extensions.md).
 - **Metrics endpoint.** The `/metrics` endpoint is intended for scraping by
   trusted monitoring systems; scope it to your observability stack rather than
   exposing it to untrusted networks.
