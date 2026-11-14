@@ -784,6 +784,9 @@ navigation:
               - page: Run the ThunderAgent Python Router
                 slug: thunder-agent-python-router
                 path: pages/use-cases/agents/thunderagent-python-router.md
+          - page: Regulate Decode for Interactive Deadlines
+            slug: decode-regulation
+            path: pages/use-cases/agents/decode-regulation.md
 
       # ==================== Image Understanding ====================
       - section: Image Understanding
