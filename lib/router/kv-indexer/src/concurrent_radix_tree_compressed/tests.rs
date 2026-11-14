@@ -687,6 +687,9 @@ mod race_tests {
             cleanup.join().unwrap();
             let _lookup = store.join().unwrap();
 
+            assert_direct_score(&index, &[1, 2, 3, 4, 5], worker, 5);
+            // A busy shape gate can defer dead-child removal until the next sweep.
+            index.run_cleanup_for_test();
             let edge_lengths = index.edge_lengths_for_test();
             assert!(
                 edge_lengths == vec![5] || edge_lengths == vec![2, 3],
