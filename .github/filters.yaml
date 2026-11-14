@@ -164,6 +164,9 @@ ignore:
   # CODEOWNERS generation tooling (data + scripts). Validated by its own
   # codeowners.yml workflow (triggers on '**'); no backend CI needed here.
   - '.github/codeowners/**'
+  # Cursor Cloud Agent environment (install/start/Dockerfile); validated via
+  # environment builds, not framework CI.
+  - '.cursor/**'
   # Excluded from `sidecar` (no image build) and from `docs` (not on the Fern site).
   - 'lib/sidecar/**/*.md'
   - 'lib/sidecar/**/*.rst'
