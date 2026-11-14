@@ -122,10 +122,11 @@ targets:
     asset: recipes/deepseek-v4/perf/perf.yaml
   expected_performance:
     available: true
-    summary: Floor-pick c128 = 201.9 system tok/s/GPU @ user 51.8 (4P3D); decode-ITL bound.
+    summary: Floor-pick c128 = 201.9 system tok/s/GPU @ user 51.8 (4P3D); decode-ITL bound. Measured with MTP-1 on decode only.
 related_benchmarks: []
 maintainer: null
 gaps:
 - B200 targets agg-b200-agentic and disagg-b200-agentic are unvalidated on vllm-runtime:1.6.0. Their performance was measured on 1.3.0; H200 validation is unchanged.
+- disagg-h200-agentic now runs MTP-1 on prefill as well as decode, which vLLM 0.28+ requires for the NIXL handshake. Its performance was measured with decode-only MTP and has not been re-measured.
 - maintainer unknown
 - Day-0 / GB200 SGLang variants (experimental, dev images) are intentionally excluded from this customer page.

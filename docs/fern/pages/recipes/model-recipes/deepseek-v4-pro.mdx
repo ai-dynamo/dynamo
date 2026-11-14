@@ -37,7 +37,7 @@ Each target below is an agentic-workload vLLM deployment of DeepSeek-V4-Pro — 
 <div className="dynamo-target-picker-summary" data-sku="b200" data-variant="disagg" data-usecase="agentic">
 <span><b>Checkpoint</b> nvidia/DeepSeek-V4-Pro-NVFP4 <span className="dynamo-target-picker-hint">Recommended</span></span>
 <span><b>GPUs</b> 16x B200 — 1P1D (TP8 + EP per worker)</span>
-<span><b>MoE / spec</b> FLASHINFER_TRTLLM, decode MTP-2</span>
+<span><b>MoE / spec</b> FLASHINFER_TRTLLM, MTP-2 on prefill and decode</span>
 <span><b>Transfer</b> NIXL over RDMA/GDR</span>
 <span><b>Context</b> 1,048,576</span>
 </div>
@@ -213,7 +213,7 @@ kubectl apply -f recipes/deepseek-v4/perf/perf.yaml -n ${NAMESPACE}
 | Target | GPUs | Parallelism | MoE backend | Spec. decode | max_model_len | Transfer |
 |---|---|---|---|---|---|---|
 | agg-b200 | 8x B200 | TP8 + EP | FLASHINFER_TRTLLM | MTP-2 | 1,048,576 | — |
-| disagg-b200 (1P1D) | 16x B200 | TP8 + EP | FLASHINFER_TRTLLM | decode MTP-2 | 1,048,576 | NIXL GDR |
+| disagg-b200 (1P1D) | 16x B200 | TP8 + EP | FLASHINFER_TRTLLM | MTP-2 on prefill and decode | 1,048,576 | NIXL GDR |
 | agg-h200 | 8x H200 | TP8 + EP | MARLIN | none | 86,016 | — |
 | disagg-h200 (1P3D) | 32x H200 | TP8 + EP | MARLIN | none | 86,016 | NIXL GDR |
 
