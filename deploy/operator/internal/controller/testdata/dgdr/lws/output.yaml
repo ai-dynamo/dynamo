@@ -38,16 +38,7 @@ spec:
                 - --disaggregation-mode
                 - decode
                 - --ais-perf-model
-                - --ais-backend
-                - vllm
-                - --ais-backend-version
-                - 0.24.0
-                - --ais-system
-                - h100_sxm
-                - --ais-tp-size
-                - "1"
-                - --ais-attention-dp-size
-                - "1"
+                - '{"attention_dp":1,"backend":"vllm","backend_version":"0.24.0","model":"Qwen/Qwen3-0.6B","system":"h100_sxm","tp":1}'
                 - --engine-type
                 - vllm
               command:
@@ -77,16 +68,7 @@ spec:
                 - --disaggregation-mode
                 - prefill
                 - --ais-perf-model
-                - --ais-backend
-                - vllm
-                - --ais-backend-version
-                - 0.24.0
-                - --ais-system
-                - h100_sxm
-                - --ais-tp-size
-                - "1"
-                - --ais-attention-dp-size
-                - "1"
+                - '{"attention_dp":1,"backend":"vllm","backend_version":"0.24.0","model":"Qwen/Qwen3-0.6B","system":"h100_sxm","tp":1}'
                 - --engine-type
                 - vllm
               command:
@@ -132,16 +114,7 @@ spec:
             - --disaggregation-mode
             - decode
             - --ais-perf-model
-            - --ais-backend
-            - vllm
-            - --ais-backend-version
-            - 0.24.0
-            - --ais-system
-            - h100_sxm
-            - --ais-tp-size
-            - "1"
-            - --ais-attention-dp-size
-            - "1"
+            - '{"attention_dp":1,"backend":"vllm","backend_version":"0.24.0","model":"Qwen/Qwen3-0.6B","system":"h100_sxm","tp":1}'
             - --engine-type
             - vllm
           command:
@@ -308,16 +281,7 @@ spec:
               - --disaggregation-mode
               - decode
               - --ais-perf-model
-              - --ais-backend
-              - vllm
-              - --ais-backend-version
-              - 0.24.0
-              - --ais-system
-              - h100_sxm
-              - --ais-tp-size
-              - "1"
-              - --ais-attention-dp-size
-              - "1"
+              - '{"attention_dp":1,"backend":"vllm","backend_version":"0.24.0","model":"Qwen/Qwen3-0.6B","system":"h100_sxm","tp":1}'
               - --engine-type
               - vllm
             command:
@@ -440,16 +404,7 @@ spec:
               - --disaggregation-mode
               - decode
               - --ais-perf-model
-              - --ais-backend
-              - vllm
-              - --ais-backend-version
-              - 0.24.0
-              - --ais-system
-              - h100_sxm
-              - --ais-tp-size
-              - "1"
-              - --ais-attention-dp-size
-              - "1"
+              - '{"attention_dp":1,"backend":"vllm","backend_version":"0.24.0","model":"Qwen/Qwen3-0.6B","system":"h100_sxm","tp":1}'
               - --engine-type
               - vllm
             command:
@@ -598,16 +553,7 @@ spec:
             - --disaggregation-mode
             - prefill
             - --ais-perf-model
-            - --ais-backend
-            - vllm
-            - --ais-backend-version
-            - 0.24.0
-            - --ais-system
-            - h100_sxm
-            - --ais-tp-size
-            - "1"
-            - --ais-attention-dp-size
-            - "1"
+            - '{"attention_dp":1,"backend":"vllm","backend_version":"0.24.0","model":"Qwen/Qwen3-0.6B","system":"h100_sxm","tp":1}'
             - --engine-type
             - vllm
           command:
@@ -772,16 +718,7 @@ spec:
             - --disaggregation-mode
             - prefill
             - --ais-perf-model
-            - --ais-backend
-            - vllm
-            - --ais-backend-version
-            - 0.24.0
-            - --ais-system
-            - h100_sxm
-            - --ais-tp-size
-            - "1"
-            - --ais-attention-dp-size
-            - "1"
+            - '{"attention_dp":1,"backend":"vllm","backend_version":"0.24.0","model":"Qwen/Qwen3-0.6B","system":"h100_sxm","tp":1}'
             - --engine-type
             - vllm
           command:

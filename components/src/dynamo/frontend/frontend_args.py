@@ -343,10 +343,7 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
                 f"--tokenizer: invalid value '{self.tokenizer_backend}' "
                 f"(choose from {sorted(self._VALID_TOKENIZER_BACKENDS)})"
             )
-        if self.ais_perf_config is not None and self.router_prefill_load_model != "ais":
-            raise ValueError(
-                "--ais-perf-config requires --router-prefill-load-model=ais"
-            )
+        self.validate_ais_perf_inputs()
         if self.router_prefill_load_model == "ais":
             if self.router_mode != "kv":
                 raise ValueError(

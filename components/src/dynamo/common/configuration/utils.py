@@ -7,28 +7,51 @@ import argparse
 import os
 import re
 import warnings
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional, TypeVar, Union
 
 T = TypeVar("T")
 
 
+def join_names(names: Sequence[str]) -> str:
+    """Return ``a``, ``a and b`` or ``a, b and c``."""
+    if len(names) <= 2:
+        return " and ".join(names)
+    return f"{', '.join(names[:-1])} and {names[-1]}"
+
+
 @dataclass(frozen=True)
 class Deprecated:
-    """Opt-in CLI/env deprecation; declare the replacement and removal release once."""
+    """Opt-in deprecation of flags, environment variables, config keys or keywords.
+
+    Declare the replacement and the removal release once. ``names`` is one
+    name or every deprecated name in use: one sentence, and one warning,
+    names them all.
+    """
 
     replacement: str
     remove_in: str
 
-    def message(self, name: str) -> str:
+    def message(self, names: str | Sequence[str]) -> str:
+        if isinstance(names, str):
+            names = [names]
+        if not names:
+            raise ValueError("names is empty")
+        verb = "is" if len(names) == 1 else "are"
         return (
-            f"{name} is deprecated and will be removed in {self.remove_in}; "
-            f"use {self.replacement}."
+            f"{join_names(names)} {verb} deprecated and will be removed in "
+            f"{self.remove_in}; use {self.replacement}."
         )
 
-    def warn(self, name: str) -> None:
-        warnings.warn(self.message(name), FutureWarning, stacklevel=3)
+    def warn(self, names: str | Sequence[str], *, stacklevel: int = 2) -> None:
+        """Emit one ``FutureWarning`` that names every item of ``names``.
+
+        ``stacklevel=1`` is the line that calls this method, ``2`` the caller
+        of that function, and so on. Earlier calls are not remembered: a
+        component collects what is in use and calls this once.
+        """
+        warnings.warn(self.message(names), FutureWarning, stacklevel=stacklevel + 1)
 
 
 @dataclass

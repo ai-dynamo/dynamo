@@ -224,6 +224,87 @@ AISimulate capacity estimation. Providing `engine.num_gpu_blocks` without that m
 explicit capacity. Set `engine.max_num_seqs` or `engine.max_num_batched_tokens` to `null` (`None` in Python)
 for an unlimited scheduler limit; omit the field to use the engine default.
 
+### AIS perf model inputs of the Python replay API
+
+`run_trace_replay(...)` and `run_synthetic_trace_replay(...)` take an AIS perf model through two
+keywords, `ais_perf_model` for the engines and `router_ais_perf_model` for the KV router.
+Available since v1.8. Each value is one perf model config, a list of configs with one
+`worker_type` each, a path to a YAML or JSON file, or inline JSON (text that starts with `{` or
+`[`). For the keys of a config, see
+[Unified perf-model input](https://github.com/ai-dynamo/aisimulate/blob/main/docs/perf-model/configuration.md#unified-perf-model-input)
+in the AISimulate documentation.
+
+```python
+from dynamo.llm import KvRouterConfig
+from dynamo.replay import run_synthetic_trace_replay
+
+perf_model = {"model": "Qwen/Qwen3-32B", "system": "h200_sxm", "backend": "vllm"}
+
+report = run_synthetic_trace_replay(
+    1024,
+    128,
+    16,
+    num_workers=2,
+    replay_concurrency=4,
+    ais_perf_model=perf_model,
+    router_ais_perf_model=perf_model,
+    router_mode="kv_router",
+    router_config=KvRouterConfig(router_prefill_load_model="ais"),
+)
+```
+
+- `ais_perf_model` sets `engine.timing_model` in the engine args of every role the replay runs:
+  `prefill` and `decode` when prefill or decode engine args are given, `aggregated` otherwise. It
+  creates aggregated engine args when none are given. A disaggregated replay needs both
+  `prefill_engine_args` and `decode_engine_args`: the keyword does not create engine args for a
+  role that has none. Engine args that already write `engine.timing_model` are an error, for
+  example
+  `extra_engine_args already sets engine.timing_model; it cannot be combined with ais_perf_model`.
+  It does not configure the router.
+- `router_ais_perf_model` gives the KV router the perf model that its `ais` prefill load model
+  reads. It requires `router_mode="kv_router"` and a `router_config` with
+  `router_prefill_load_model="ais"`. It reads the `prefill` config of a disaggregated replay and
+  the `aggregated` config otherwise. A KV router replay whose `router_config` sets
+  `router_prefill_load_model="ais"` needs this keyword. Without it, and without the deprecated
+  `ais_perf_config`, both functions raise a `ValueError`:
+  `router_prefill_load_model='ais' requires router_ais_perf_model=`. With
+  `router_mode="kv_router"`, the keyword without a `router_config`, or with one that does not
+  set that load model, is a `ValueError` too:
+  `router_ais_perf_model= requires router_config with router_prefill_load_model='ais'`.
+
+Both functions read a value before the replay starts and check each config the replay uses:
+`ais_perf_model` the config of every role the replay runs, `router_ais_perf_model` the one config
+the router reads. A value they cannot read, a list without such a config, and such a config with
+an unknown top-level key or without `backend`, `system` or `model` are each a `ValueError`. The
+other configs of a list are checked only for their form: `systems_paths` written as text or an
+empty `from` is still a `ValueError`, while an unknown top-level key or a missing `backend`,
+`system` or `model` is not. A top-level key written with a `null` value is the same as a key left
+out. For `ais_perf_model` the message of such an error starts with `ais_perf_model`, with
+`cannot read`, or with the absolute path of the file the value names, for example
+`ais_perf_model requires model`. For `router_ais_perf_model` it starts with
+`router_ais_perf_model`, for example
+`router_ais_perf_model: ais_perf_model: no entry for worker type 'aggregated'; it has: prefill`.
+
+The replay itself makes further checks, for example of the `backend` name and of the keys inside
+`estimator_config` and `speculation`. It reports an error in its own words, without these
+prefixes, and the words depend on the value. An unknown `backend` name, for example, is a
+`ValueError` whose message starts with `invalid AIS performance config` for `ais_perf_model` and
+with `invalid AIS perf config` for `router_ais_perf_model`; `tp: 0` in a `router_ais_perf_model`
+value is a `RuntimeError` whose message starts with `AIS model construction failed`.
+
+<Warning>
+**Deprecated.** Use `router_ais_perf_model=`. Removed in v1.9. The `ais_perf_config` keyword of
+both functions still works and emits a `FutureWarning`:
+`ais_perf_config= is deprecated and will be removed in v1.9; use router_ais_perf_model=.`
+Passing both keywords is an error: `ais_perf_config= cannot be combined with router_ais_perf_model=`.
+A mistake made with the deprecated keyword is still reported by the replay itself, which names
+`ais_perf_config`, for example `ais_perf_config requires router_mode='kv_router'`.
+
+A `planner_config` that writes `ais_perf_model` with the `roles` or `dataset_profiles` keys still
+works too, and both functions emit one `FutureWarning` for it, for example
+`ais_perf_model.roles is deprecated and will be removed in v1.9; use ais_perf_model with one perf model config or a list of configs (one per worker_type).`
+</Warning>
+
 ### Typed agentic replay through the Dynamo API
 
 AISimulate owns public Weka ingestion, validation, and lowering into the canonical
@@ -349,7 +430,54 @@ hardware offload recipe.
   wheel. `fixed` requires both `prefill_ms` and `decode_ms`; `polynomial` selects the built-in
   polynomial model.
 - `router.policy: kv_router` supports one or more routable workers. Set
-  `router.prefill_load_model.type` to `none` or `aic`.
+  `router.prefill_load_model.type` to `none` or `ais`. A `recommend` router section that does not
+  write `router.prefill_load_model.type` searches both for its KV router candidates. Its `ais`
+  candidates read the perf model of their engine, as with `router.ais_perf_model: {use: engine}`,
+  and a recommended config with the `ais` load model writes that key. With `fixed` or
+  `polynomial` engine timing the engine has no AIS perf model: those `ais` candidates are
+  infeasible, with a reason such as
+  `router.prefill_load_model.type: ais needs an AIS perf model on the aggregated engine; it has none`,
+  and the search goes on with the other candidates.
+- With `router.prefill_load_model.type: ais`, `router.ais_perf_model` names the AIS perf model the
+  router predicts prefill durations with. Available since v1.8. Write `{use: engine}` to read the
+  perf model of the engine the router routes to, or write one perf model config or a list of
+  configs with one `worker_type` each under the key. The router takes the `prefill` config in
+  disaggregated mode and the `aggregated` config otherwise. A string is not accepted, and `null`
+  is the same as leaving the key out. `from`, the items of `systems_paths`, and the path fields
+  under `estimator_config` must be absolute paths. The key without
+  `router.prefill_load_model.type: ais` is an error, and `retune.router` does not accept the key.
+- `router.ais_perf_model: {use: engine}` needs an engine with an AIS perf model. With `fixed` or
+  `polynomial` engine timing a prediction fails with
+  `router.ais_perf_model: {use: engine} needs an AIS perf model on the aggregated engine; it has none`;
+  write a perf model config under the key for such an engine. In a recommendation that writes
+  `{use: engine}` each such candidate fails with the same message.
+- A perf model config or list written under `router.ais_perf_model` is read before the replay of
+  a prediction or the search of a recommendation starts. A prediction reads the config of its
+  `engine.mode`, and a recommendation reads the config of every searched mode: the `prefill`
+  config for `disaggregated` and the `aggregated` config for `aggregated`. In a config that is
+  read, an unknown top-level key or a missing `backend`, `system` or `model` ends the run with a
+  configuration error, and so does a list with no config for such a mode, for example
+  `ais_perf_model: no entry for worker type 'prefill'; it has: aggregated`. The other configs of
+  a list are checked only for their form and for two rules: `systems_paths` written as text, a
+  relative path, or the key `use` is still a configuration error there, while an unknown
+  top-level key or a missing `backend`, `system` or `model` is not. The key `use` is accepted
+  only as `{use: engine}` written alone, so `use: null` is a configuration error too; any other
+  top-level key written with a `null` value is the same as a key left out.
+- The perf model itself makes further checks during a prediction or a candidate's replay, for
+  example of the `backend` name and of the keys inside `estimator_config` and `speculation`. A
+  config it does not accept fails a prediction; the message depends on the value and contains
+  `invalid AIS perf config` for an unknown `backend` name. In a recommendation such a config
+  fails each candidate that reads it: with one config, each candidate that runs the KV router
+  with the `ais` prefill load model, and with a list, each such candidate of the mode that reads
+  the config. No prediction and no candidate reads a `decode` config. Candidates that read a
+  config the perf model accepts and candidates with `router.prefill_load_model.type: none` still
+  run. When no candidate is feasible, the run ends with `no feasible candidate found`; otherwise
+  it writes a recommendation from the feasible candidates.
+- **Deprecated.** Use `router.ais_perf_model: {use: engine}` or a perf model config. Removed in
+  v1.9. A section that writes `router.prefill_load_model.type: ais`, alone or among `choices`,
+  without `router.ais_perf_model` still works and prints one warning:
+  `router.prefill_load_model.type: ais without router.ais_perf_model is deprecated and will be removed in v1.9; use router.ais_perf_model: {use: engine} (or a perf model config when the engine does not use an AIS perf model).`
+  A `recommend` section that does not write the type is not this form and prints no warning.
 - With `router.policy: kv_router`, each vLLM aggregated or prefill worker that sets
   `engine.workers.<role>.kv_cache.kvcr` gets the `kv.fetch` hint that the production
   [KV router](../../developer-guide/knowledge-base/modular-components/router/topology-aware-kv-transfer.md#kv-fetch-hints)

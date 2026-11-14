@@ -85,13 +85,16 @@ advisory 模式仅提供建议。Planner 会计算建议副本数、记录日志
 |-------|------|---------|-------------|
 | `pre_deployment_sweeping_mode` | string | `rapid` | 如何生成可选的性能模型启动数据：`rapid`（AIC 仿真，约 30 秒）、`thorough`（真实 GPU，2-4 小时）或 `none`（跳过）。 |
 
-SLA 模式通过唯一构造接口 `aisimulate_core.sdk.RustForwardPassPerfModel.best_available(config)` 为每个 worker 角色创建模型。`ais_perf_model.roles` 中，分离式部署配置 `prefill` 和 `decode`，聚合式部署配置 `aggregated`；角色键必须与 `worker_type` 一致。
+SLA 模式通过唯一构造接口 `aisimulate_core.sdk.RustForwardPassPerfModel.best_available(config)` 为每个 worker 角色创建模型。在 `ais_perf_model` 中为每种已部署的 worker 类型写一份配置：分离式部署写一个包含 `prefill` 和 `decode` 配置的列表，聚合式部署写一份 `aggregated` 配置。列表中的每份配置都要写明 `worker_type`。一份不带 `worker_type` 的配置适用于所有 worker 类型。配置的各个键见 AISimulate 文档中的 [Unified perf-model input](https://github.com/ai-dynamo/aisimulate/blob/main/docs/perf-model/configuration.md#unified-perf-model-input)。
 
 新配置默认使用 `estimation_mode: auto` 和 `fallback_policy: deny`。Auto 依次查找 `op_level`、`fpm_interpolation`、`fpm_regression`；`deny` 只禁止显式指定模式后的回退。没有配置 `ais_perf_model` 时，Planner 创建未训练的 `fpm_regression` 模型，并用自基准测试或在线 FPM 训练。
 
-各角色可传入完整上游配置，包括有序 `systems_paths`、`database_mode`、`transfer_policy`、量化和推测解码参数，以及嵌套 `estimator_config`。显式 estimator 设置覆盖 Planner 的采样默认值；`fpm_sample_bucket_size: 16` 对应 `[4, 4]`，regression 和 correction 可以分别配置网格。未知字段及角色身份冲突会报错。
+每份配置可传入完整上游配置，包括有序 `systems_paths`、`database_mode`、`transfer_policy`、量化和推测解码参数，以及嵌套 `estimator_config`。显式 estimator 设置覆盖 Planner 的采样默认值；`fpm_sample_bucket_size: 16` 对应 `[4, 4]`，regression 和 correction 可以分别配置网格。未知字段会报错，同一 worker 类型出现两次也会报错。
 
-通过 `ais_perf_model.roles` 配置模型身份和 estimator 参数。旧 `aic_perf_model` 字段及 `hf_id` / parallel-pick 格式不再支持，使用时会报错。
+通过 `ais_perf_model` 配置模型身份和 estimator 参数。旧 `aic_perf_model` 字段及 `hf_id` / parallel-pick 格式不再支持，使用时会报错。
+
+> [!WARNING]
+> **已弃用。** 请改用配置列表。将在 v1.9 中移除。`ais_perf_model` 的 `roles` 和 `dataset_profiles` 键仍然可用，并会打印一条警告。`dynamo.replay.run_trace_replay` 和 `run_synthetic_trace_replay` 在 `planner_config` 使用这种写法时也会打印这条警告。`roles` 和 `dataset_profiles` 可以同时使用，只要各自对应不同的 worker 类型；二者之一与 `ais_perf_model` 的任何其他键同时出现会报错。
 
 启动时，planner 总会先尝试从 `get_perf_metrics` Dynamo 端点获取自基准测试结果。如果不可用，则在配置存在时回退到 rapid 模式 AIC interpolation 数据或 `profile_results_dir` 中 profiler 生成的数据（npz 或 JSON）。这些数据都会转换为 ForwardPassMetrics，并用于调优或启动性能模型。当 `pre_deployment_sweeping_mode: none` 时，planner 仍然可以启动；吞吐量决策会在原生 AISimulate 可用或在线 FPM 足够之前报告 `model_not_ready`。
 
@@ -104,30 +107,30 @@ spec:
       optimization_target: sla
       mode: disagg
       ais_perf_model:
-        roles:
-          prefill:
-            model: Qwen/Qwen3-32B
-            system: h200_sxm
-            backend: vllm
-            worker_type: prefill
-            estimation_mode: auto
-            fallback_policy: deny
-            tp: 1
-          decode:
-            model: Qwen/Qwen3-32B
-            system: h200_sxm
-            backend: vllm
-            worker_type: decode
-            estimation_mode: auto
-            fallback_policy: deny
-            tp: 1
-            estimator_config:
-              fpm_regression:
-                sampling:
-                  bins_per_axis: [4, 4]
-                  max_observations: 64
-                min_observations: 5
+        - worker_type: prefill
+          model: Qwen/Qwen3-32B
+          system: h200_sxm
+          backend: vllm
+          estimation_mode: auto
+          fallback_policy: deny
+          tp: 1
+        - worker_type: decode
+          model: Qwen/Qwen3-32B
+          system: h200_sxm
+          backend: vllm
+          estimation_mode: auto
+          fallback_policy: deny
+          tp: 1
+          estimator_config:
+            fpm_regression:
+              sampling:
+                bins_per_axis: [4, 4]
+                max_observations: 64
+              min_observations: 5
 ```
+
+> [!NOTE]
+> 当 `optimization_target: sla` 时，profiler 会把每份配置的 `model`、`system`、`backend`、`tp` 以及其他并行度相关的键与它选定的部署进行比较。没有写出的键按默认值参与比较，因此不写 `tp` 等同于 `tp: 1`。只要有差异，请求就会失败，例如 `ais_perf_model entry for prefill: tp=1 conflicts with selected deployment tp=2`。不设置 `ais_perf_model` 时，由 profiler 写入该字段。完整规则见 [DynamoGraphDeploymentRequest 参考中的 `ais_perf_model`](../../../../../../../pages/reference/kubernetes-api/dynamo-graph-deployment-request.mdx#performance-model-and-pre-deployment-sweeping)。
 
 ### 基于吞吐量的扩缩容设置
 

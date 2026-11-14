@@ -34,6 +34,12 @@ from pathlib import Path
 
 import yaml
 
+from dynamo.common.ais_perf_model import REMOVE_IN
+from dynamo.common.configuration.utils import Deprecated
+from dynamo.planner.config.planner_config import (
+    AIS_PERF_MODEL_NEW_FORM,
+    ais_perf_model_old_form_names,
+)
 from dynamo.profiler.utils.dgdr_v1beta1_types import DynamoGraphDeploymentRequestSpec
 
 from .profile_sla import run_profile
@@ -215,6 +221,12 @@ def main() -> None:
     )
     logging.getLogger().addHandler(log_file_handler)
 
+    planner = dgdr.features.planner if dgdr.features is not None else None
+    old = ais_perf_model_old_form_names(
+        planner.ais_perf_model if planner is not None else None
+    )
+    if old:
+        Deprecated(AIS_PERF_MODEL_NEW_FORM, remove_in=REMOVE_IN).warn(old, stacklevel=1)
     asyncio.run(run_profile(dgdr, ops))
 
 

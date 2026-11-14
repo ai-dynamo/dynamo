@@ -16,6 +16,8 @@ import yaml
 from aisimulate.config.cli import CorePredictionConfig
 from aisimulate.config.common import split_config_sections
 
+from dynamo.common.ais_perf_model import REMOVE_IN
+
 pytestmark = [
     # Release-gating CPU smoke for plugin discovery, replay composition, and
     # recommendation-to-prediction round trips in the shipped Planner image.
@@ -106,6 +108,12 @@ def test_dynamo_predict_cli_cases(config_path: Path, tmp_path: Path) -> None:
         assert report["planner"]["metadata"]["bootstrap"]["status"] == "installed"
         assert "falling back to load-based scaling only" not in result.stderr
 
+    if config_path.name == "07-synthetic-ais-router.yaml":
+        # This case writes router.ais_perf_model, so no old AIS input is left.
+        assert (
+            f" deprecated and will be removed in {REMOVE_IN}; use " not in result.stderr
+        )
+
 
 @pytest.mark.parametrize("config_path", _RECOMMEND_CASES, ids=lambda path: path.stem)
 def test_dynamo_recommend_cli_cases_round_trip(
@@ -125,6 +133,12 @@ def test_dynamo_recommend_cli_cases_round_trip(
     )
 
     rows = json.loads(result.stdout)
+    if config_path.name == "05-router-planner-pareto.yaml":
+        # This case keeps the old form on purpose: it must still warn.
+        assert (
+            "router.prefill_load_model.type: ais without router.ais_perf_model "
+            "is deprecated" in result.stderr
+        )
     recommendation_paths = sorted((output / "recommendations").glob("*.yaml"))
     assert rows
     assert len(recommendation_paths) == len(rows)

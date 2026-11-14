@@ -81,6 +81,7 @@ from dynamo.planner.simulation.load_predictor import (
     predictor_fields,
 )
 from dynamo.replay import run_trace_replay
+from dynamo.replay.api import _old_inputs_already_warned
 
 logger = logging.getLogger(__name__)
 
@@ -522,19 +523,22 @@ def evaluate_candidate(
             warmup = _read_observations(warmup_path)
     elif params.planner:
         raise ValueError("planner parameters need an inner planner (base_planner)")
-    report = run_trace_replay(
-        [window_path],
-        trace_format="dynamo",
-        arrival_speedup_ratio=arrival_speedup_ratio,
-        planner_config=planner_config,
-        _planner_warmup_observations=warmup,
-        _deterministic=True,
-        sla_ttft_ms=sla_ttft_ms,
-        sla_itl_ms=sla_itl_ms,
-        capture_per_request=False,
-        capture_planner_details=False,
-        **kwargs,
-    )
+    # The replay or Planner that runs the sweep already warned about its
+    # deprecated inputs.
+    with _old_inputs_already_warned():
+        report = run_trace_replay(
+            [window_path],
+            trace_format="dynamo",
+            arrival_speedup_ratio=arrival_speedup_ratio,
+            planner_config=planner_config,
+            _planner_warmup_observations=warmup,
+            _deterministic=True,
+            sla_ttft_ms=sla_ttft_ms,
+            sla_itl_ms=sla_itl_ms,
+            capture_per_request=False,
+            capture_planner_details=False,
+            **kwargs,
+        )
     return score_summary(report.summary, window_s, objective)
 
 

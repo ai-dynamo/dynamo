@@ -202,7 +202,7 @@ def prepare_planner_replay(
     extra_engine_args: dict[str, Any] | None,
     prefill_engine_args: dict[str, Any] | None,
     decode_engine_args: dict[str, Any] | None,
-    planner_config_arg: str,
+    planner_config_arg: str | PlannerConfig,
     benchmark_granularity: int = 8,
     capture_details: bool = True,
     performance_model_metadata: dict[str, Any] | None = None,
@@ -211,6 +211,8 @@ def prepare_planner_replay(
 ):
     """Create and bootstrap the scaling component for an offline replay.
 
+    ``planner_config_arg`` is a file path, inline JSON or a config that is
+    already read.
     ``retune_inputs_factory`` builds the retune inputs (trace, time axis and
     pinned engine) from the parsed planner config. It is required when the
     config sets ``retune``; only trace replay entry points that support
@@ -227,7 +229,11 @@ def prepare_planner_replay(
         extract_traffic_observations_from_trace,
     )
 
-    planner_config = PlannerConfig.from_config_arg(planner_config_arg)
+    planner_config = (
+        planner_config_arg
+        if isinstance(planner_config_arg, PlannerConfig)
+        else PlannerConfig.from_config_arg(planner_config_arg)
+    )
 
     if planner_config.mode == "agg":
         extra_engine_args = normalize_mocker_config(extra_engine_args)
@@ -404,7 +410,7 @@ def planner_replay_adapter(
     extra_engine_args: dict[str, Any] | None,
     prefill_engine_args: dict[str, Any] | None,
     decode_engine_args: dict[str, Any] | None,
-    planner_config_arg: str,
+    planner_config_arg: str | PlannerConfig,
     benchmark_granularity: int = 8,
     capture_details: bool = True,
     performance_model_metadata: dict[str, Any] | None = None,

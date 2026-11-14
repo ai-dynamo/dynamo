@@ -3,30 +3,37 @@
 
 """Unit tests for AISimulate and AIConfigurator interpolation in profiler DGD generation."""
 
+import json
+import logging
 from pathlib import Path
 
 import pytest
 import yaml
 
+from dynamo.common.ais_perf_model import ENV_VAR
+from dynamo.mocker.args import build_mocker_parser, parse_args
+from dynamo.mocker.config import load_mocker_engine_args, performance_config
 from dynamo.planner.config.aic_interpolation_spec import AICInterpolationSpec
 from dynamo.planner.config.parallelization import PickedParallelConfig
 from dynamo.planner.config.planner_config import (
     PlannerConfig,
     PlannerPreDeploymentSweepMode,
 )
+from dynamo.profiler.utils import dgd_generation
 from dynamo.profiler.utils.dgd_generation import (
     _build_planner_config,
     _inject_mocker_ais_args,
-    _load_latest_database_version,
     build_aic_interpolation_spec,
     build_ais_perf_model_spec,
     enable_vllm_benchmark_mode,
+    generate_mocker_config,
 )
 from dynamo.profiler.utils.dgd_template import load_dgd_template
 from dynamo.profiler.utils.dgdr_v1beta1_types import (
     DynamoGraphDeploymentRequestSpec,
     FeaturesSpec,
     MockerSpec,
+    OverridesSpec,
 )
 from dynamo.profiler.utils.profile_common import needs_profile_data
 
@@ -37,44 +44,12 @@ pytestmark = [
 ]
 
 
-def test_aic_import_treats_missing_root_package_as_optional(monkeypatch):
-    def raise_missing_root(_):
-        raise ModuleNotFoundError(name="aisimulate_core")
-
-    monkeypatch.setattr(
-        "dynamo.profiler.utils.dgd_generation.importlib.import_module",
-        raise_missing_root,
-    )
-
-    assert _load_latest_database_version() is None
-
-
-@pytest.mark.parametrize(
-    "missing_module",
-    ["aisimulate_core.sdk.operations.attention", "unrelated_dependency"],
-)
-def test_aic_import_propagates_internal_or_unrelated_missing_module(
-    monkeypatch, missing_module
-):
-    def raise_missing_dependency(_):
-        raise ModuleNotFoundError(name=missing_module)
-
-    monkeypatch.setattr(
-        "dynamo.profiler.utils.dgd_generation.importlib.import_module",
-        raise_missing_dependency,
-    )
-
-    with pytest.raises(ModuleNotFoundError) as exc_info:
-        _load_latest_database_version()
-
-    assert exc_info.value.name == missing_module
-
-
 def _dgdr(
     planner: PlannerConfig | None = None,
     model: str = "Qwen/Qwen3-32B",
     mocker_enabled: bool = False,
     search_strategy: str = "rapid",
+    override: dict | None = None,
 ) -> DynamoGraphDeploymentRequestSpec:
     features = None
     if planner is not None or mocker_enabled:
@@ -86,6 +61,7 @@ def _dgdr(
         model=model,
         features=features,
         searchStrategy=search_strategy,
+        overrides=OverridesSpec(dgd=override) if override is not None else None,
     )
 
 
@@ -304,35 +280,6 @@ class TestInjectMockerAicArgs:
             decode_pick=pick,
         )
 
-    def test_injects_all_required_flags(self):
-        spec = self._spec("trtllm")
-        args = ["--model-path", "Qwen/Qwen3-235B", "--disaggregation-mode", "prefill"]
-        out = _inject_mocker_ais_args(args, spec, spec.prefill_pick)
-        assert "--ais-perf-model" in out
-        assert out[out.index("--ais-backend") + 1] == "trtllm"
-        assert out[out.index("--ais-system") + 1] == "h200_sxm"
-        assert out[out.index("--ais-tp-size") + 1] == "1"
-        assert out[out.index("--ais-moe-tp-size") + 1] == "1"
-        assert out[out.index("--ais-moe-ep-size") + 1] == "8"
-        assert out[out.index("--ais-attention-dp-size") + 1] == "8"
-        # trtllm is not a mocker engine_type; leave --engine-type alone.
-        assert "--engine-type" not in out
-        assert out[out.index("--ais-backend-version") + 1] == "current"
-
-    def test_matches_engine_type_for_vllm(self):
-        spec = self._spec("vllm")
-        out = _inject_mocker_ais_args([], spec, spec.prefill_pick)
-        assert out[out.index("--engine-type") + 1] == "vllm"
-        assert out[out.index("--ais-backend") + 1] == "vllm"
-        assert out[out.index("--ais-backend-version") + 1] == "current"
-
-    def test_matches_engine_type_for_sglang(self):
-        spec = self._spec("sglang")
-        out = _inject_mocker_ais_args([], spec, spec.decode_pick)
-        assert out[out.index("--engine-type") + 1] == "sglang"
-        assert out[out.index("--ais-backend") + 1] == "sglang"
-        assert out[out.index("--ais-backend-version") + 1] == "current"
-
     @pytest.mark.parametrize("explicit_capacity", [False, True])
     def test_dense_tp_pick_starts_with_canonical_estimator(self, explicit_capacity):
         # Only packaged model metadata/performance tables are used; no weights.
@@ -450,12 +397,13 @@ class TestBuildPlannerConfigEmbedsAicSpec:
         assert cfg.model_name == dgdr.model
         assert "aic_perf_model" not in cfg.model_dump()
         assert cfg.ais_perf_model is not None
-        assert cfg.ais_perf_model.roles["decode"]["model"] == dgdr.model
-        assert cfg.ais_perf_model.roles["decode"]["system"] == "h200_sxm"
-        assert cfg.ais_perf_model.roles["decode"]["backend"] == "vllm"
-        assert cfg.ais_perf_model.roles["decode"]["backend_version"] == "0.24.0"
-        assert cfg.ais_perf_model.roles["prefill"]["tp"] == prefill_pick.tp
-        assert cfg.ais_perf_model.roles["decode"]["tp"] == decode_pick.tp
+        entries = {entry["worker_type"]: entry for entry in cfg.ais_perf_model}
+        assert entries["decode"]["model"] == dgdr.model
+        assert entries["decode"]["system"] == "h200_sxm"
+        assert entries["decode"]["backend"] == "vllm"
+        assert entries["decode"]["backend_version"] == "0.24.0"
+        assert entries["prefill"]["tp"] == prefill_pick.tp
+        assert entries["decode"]["tp"] == decode_pick.tp
         assert resolved_versions == [("h200_sxm", "vllm")]
 
     def test_ais_perf_model_falls_back_when_database_is_unavailable(self, monkeypatch):
@@ -479,31 +427,6 @@ class TestBuildPlannerConfigEmbedsAicSpec:
         )
 
         assert spec is None
-
-    def test_ais_perf_model_falls_back_when_sdk_is_unavailable(
-        self, monkeypatch, caplog
-    ):
-        monkeypatch.setattr(
-            "dynamo.profiler.utils.dgd_generation.get_latest_database_version",
-            None,
-        )
-        planner = PlannerConfig(
-            enable_throughput_scaling=True,
-            enable_load_scaling=False,
-            optimization_target="sla",
-        )
-        dgdr = _dgdr(planner=planner)
-
-        spec = build_ais_perf_model_spec(
-            dgdr,
-            best_prefill_pick=PickedParallelConfig(tp=1),
-            best_decode_pick=PickedParallelConfig(tp=2),
-            resolved_backend="vllm",
-            system="h200_sxm",
-        )
-
-        assert spec is None
-        assert "AISimulate perf model is unavailable" in caplog.text
 
     @pytest.mark.parametrize(
         ("mode", "prefill_pick", "decode_pick"),
@@ -846,3 +769,804 @@ def test_profiler_rejects_estimator_identity_that_disagrees_with_deployment(
             resolved_backend=backend,
             system=system,
         )
+
+
+def _written_planner(mode: str, ais_perf_model) -> PlannerConfig:
+    return PlannerConfig(
+        mode=mode, optimization_target="sla", ais_perf_model=ais_perf_model
+    )
+
+
+def _checked_value(planner: PlannerConfig, prefill_pick=None, decode_pick=None):
+    return build_ais_perf_model_spec(
+        _dgdr(planner=planner),
+        best_prefill_pick=prefill_pick,
+        best_decode_pick=decode_pick,
+        resolved_backend="vllm",
+        system="h200_sxm",
+    )
+
+
+@pytest.mark.parametrize(
+    "written,conflict",
+    [
+        pytest.param(
+            {"model": "Qwen/Qwen3-235B-A22B"},
+            "model='Qwen/Qwen3-235B-A22B' conflicts with selected deployment "
+            "model='Qwen/Qwen3-32B'",
+            id="model",
+        ),
+        pytest.param(
+            {"system": "b200_sxm"},
+            "system='b200_sxm' conflicts with selected deployment system='h200_sxm'",
+            id="system",
+        ),
+        pytest.param(
+            {"system": "b200_sxm", "model": "Qwen/Qwen3-235B-A22B"},
+            "model='Qwen/Qwen3-235B-A22B' conflicts with selected deployment "
+            "model='Qwen/Qwen3-32B'",
+            id="model-and-system",
+        ),
+        pytest.param(
+            {"backend": "sglang"},
+            "backend='sglang' conflicts with selected deployment backend='vllm'",
+            id="backend",
+        ),
+        pytest.param(
+            {"tp": 8}, "tp=8 conflicts with selected deployment tp=2", id="tp"
+        ),
+        pytest.param(
+            {"pp": 2}, "pp=2 conflicts with selected deployment pp=1", id="pp"
+        ),
+        pytest.param(
+            {"attention_dp": 4},
+            "attention_dp=4 conflicts with selected deployment attention_dp=1",
+            id="attention-dp",
+        ),
+        pytest.param(
+            {"moe_tp_size": 2},
+            "moe_tp_size=2 conflicts with selected deployment moe_tp_size=1",
+            id="moe-tp-size",
+        ),
+        pytest.param(
+            {"moe_ep_size": 8},
+            "moe_ep_size=8 conflicts with selected deployment moe_ep_size=1",
+            id="moe-ep-size",
+        ),
+    ],
+)
+def test_entry_with_from_is_refused_for_a_key_it_writes(tmp_path, written, conflict):
+    entry = {"from": str(tmp_path / "missing.yaml"), **written}
+    planner = _written_planner("decode", entry)
+
+    with pytest.raises(ValueError) as caught:
+        _checked_value(planner, decode_pick=PickedParallelConfig(tp=2))
+
+    assert type(caught.value) is ValueError
+    assert str(caught.value) == f"ais_perf_model entry for decode: {conflict}"
+
+
+@pytest.mark.parametrize(
+    "written",
+    [
+        pytest.param({}, id="from-alone"),
+        pytest.param(
+            {
+                "model": "Qwen/Qwen3-32B",
+                "system": "h200_sxm",
+                "backend": "vllm",
+                "worker_type": "decode",
+                "tp": 2,
+                "pp": 1,
+                "attention_dp": 1,
+                "moe_tp_size": 1,
+                "moe_ep_size": 1,
+            },
+            id="same-values",
+        ),
+        pytest.param(
+            {"tp": 2, "moe_tp_size": None, "moe_ep_size": None}, id="null-moe-sizes"
+        ),
+    ],
+)
+def test_entry_with_from_that_agrees_is_returned_as_written(tmp_path, written):
+    # The file an entry names is read by the Planner; here it does not exist.
+    entry = {"from": str(tmp_path / "missing.yaml"), **written}
+    planner = _written_planner("decode", dict(entry))
+
+    value = _checked_value(planner, decode_pick=PickedParallelConfig(tp=2))
+
+    assert value == entry
+    assert value is not planner.ais_perf_model
+
+
+@pytest.mark.parametrize(
+    "prefill_keys,decode_tp,conflict",
+    [
+        pytest.param(
+            {},
+            8,
+            "ais_perf_model entry for decode: tp=8 conflicts with selected "
+            "deployment tp=2",
+            id="entry-without-from",
+        ),
+        pytest.param(
+            {"tp": 8},
+            2,
+            "ais_perf_model entry for prefill: tp=8 conflicts with selected "
+            "deployment tp=2",
+            id="entry-with-from",
+        ),
+    ],
+)
+def test_list_reports_the_entry_that_conflicts(
+    tmp_path, prefill_keys, decode_tp, conflict
+):
+    planner = _written_planner(
+        "disagg",
+        [
+            {
+                "from": str(tmp_path / "missing.yaml"),
+                "worker_type": "prefill",
+                **prefill_keys,
+            },
+            {
+                "model": "Qwen/Qwen3-32B",
+                "system": "h200_sxm",
+                "backend": "vllm",
+                "worker_type": "decode",
+                "tp": decode_tp,
+            },
+        ],
+    )
+    pick = PickedParallelConfig(tp=2)
+
+    with pytest.raises(ValueError) as caught:
+        _checked_value(planner, prefill_pick=pick, decode_pick=pick)
+
+    assert type(caught.value) is ValueError
+    assert str(caught.value) == conflict
+
+
+_TEMPLATE = "/missing/template.yaml"
+_DATASET_PROFILE = {"root": "/not-mounted-yet/dataset", "manifest": "profile.json"}
+_COMPLETE = {"model": "Qwen/Qwen3-32B", "system": "h200_sxm", "backend": "vllm"}
+_EVERY_FIELD = (
+    "model, system, backend, tp, pp, attention_dp, moe_tp_size and moe_ep_size"
+)
+
+
+def _generation_warnings(caplog) -> list[str]:
+    """Return what the DGD generation logged; loading a Planner config logs too."""
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == dgd_generation.logger.name
+    ]
+
+
+@pytest.mark.parametrize(
+    "mode,written,not_compared",
+    [
+        pytest.param(
+            "decode", {"from": _TEMPLATE}, f"decode: {_EVERY_FIELD}", id="from-alone"
+        ),
+        pytest.param(
+            "decode",
+            {"from": _TEMPLATE, "model": "Qwen/Qwen3-32B", "tp": 2},
+            "decode: system, backend, pp, attention_dp, moe_tp_size and moe_ep_size",
+            id="from-next-to-two-fields",
+        ),
+        pytest.param(
+            "disagg",
+            {"from": _TEMPLATE},
+            f"prefill: {_EVERY_FIELD}; decode: {_EVERY_FIELD}",
+            id="one-config-for-two-worker-types",
+        ),
+        pytest.param(
+            "disagg",
+            [
+                {"worker_type": "prefill", "from": _TEMPLATE, "pp": 1},
+                {**_COMPLETE, "worker_type": "decode", "tp": 2},
+            ],
+            "prefill: model, system, backend, tp, attention_dp, moe_tp_size and "
+            "moe_ep_size",
+            id="list-with-one-from-entry",
+        ),
+        pytest.param(
+            "decode",
+            {"from": {"state_snapshot": {"path": "/missing/snapshot"}}},
+            f"decode: {_EVERY_FIELD}",
+            id="state-snapshot",
+        ),
+        pytest.param(
+            "decode",
+            {"dataset_profiles": {"decode": _DATASET_PROFILE}},
+            f"decode: {_EVERY_FIELD}",
+            id="old-dataset-profile",
+        ),
+        pytest.param(
+            "disagg",
+            {
+                "roles": {"prefill": {**_COMPLETE, "tp": 2}},
+                "dataset_profiles": {"decode": _DATASET_PROFILE},
+            },
+            f"decode: {_EVERY_FIELD}",
+            id="old-roles-and-dataset-profile",
+        ),
+    ],
+)
+def test_fields_taken_from_a_source_are_named_in_one_warning(
+    caplog, mode, written, not_compared
+):
+    planner = _written_planner(mode, written)
+    pick = PickedParallelConfig(tp=2)
+
+    with caplog.at_level(logging.WARNING):
+        value = _checked_value(planner, prefill_pick=pick, decode_pick=pick)
+
+    assert value == planner.ais_perf_model
+    assert value is not planner.ais_perf_model
+    assert _generation_warnings(caplog) == [
+        "ais_perf_model: the profiler does not read the source a config takes keys "
+        "from, so it did not compare these fields with the selected deployment: "
+        f"{not_compared}. The Planner takes them from the source without a "
+        "comparison."
+    ]
+
+
+@pytest.mark.parametrize(
+    "written",
+    [
+        pytest.param({**_COMPLETE, "tp": 2}, id="config-without-from"),
+        pytest.param(
+            {
+                "from": _TEMPLATE,
+                **_COMPLETE,
+                "tp": 2,
+                "pp": 1,
+                "attention_dp": 1,
+                "moe_tp_size": 1,
+                "moe_ep_size": 1,
+            },
+            id="from-next-to-every-field",
+        ),
+        pytest.param({"roles": {"decode": {**_COMPLETE, "tp": 2}}}, id="old-roles"),
+    ],
+)
+def test_no_warning_when_every_field_is_compared(caplog, written):
+    planner = _written_planner("decode", written)
+
+    with caplog.at_level(logging.WARNING):
+        _checked_value(planner, decode_pick=PickedParallelConfig(tp=2))
+
+    assert _generation_warnings(caplog) == []
+
+
+@pytest.mark.parametrize(
+    "written,name",
+    [
+        pytest.param(
+            {"roles": {"decode": _COMPLETE}}, "ais_perf_model.roles.decode", id="old"
+        ),
+        pytest.param(dict(_COMPLETE), "ais_perf_model entry for decode", id="config"),
+        pytest.param(
+            {"from": _TEMPLATE}, "ais_perf_model entry for decode", id="from-entry"
+        ),
+    ],
+)
+def test_written_value_needs_a_selected_deployment(written, name):
+    planner = _written_planner("decode", written)
+
+    with pytest.raises(ValueError) as caught:
+        _checked_value(planner, decode_pick=None)
+
+    assert str(caught.value) == f"cannot validate {name} without a selected deployment"
+
+
+def test_one_check_serves_every_form(monkeypatch):
+    """A config without ``from`` is compared as the Planner reads it."""
+    calls = []
+
+    def record(worker_type, config):
+        calls.append(worker_type)
+        return real(worker_type, config)
+
+    real = dgd_generation.ais_perf_model_role_config
+    planner = _written_planner(
+        "disagg",
+        [
+            {"worker_type": "prefill", "from": _TEMPLATE},
+            {**_COMPLETE, "worker_type": "decode", "tp": 2},
+        ],
+    )
+    monkeypatch.setattr(dgd_generation, "ais_perf_model_role_config", record)
+    pick = PickedParallelConfig(tp=2)
+
+    _checked_value(planner, prefill_pick=pick, decode_pick=pick)
+
+    assert calls == ["decode"]
+
+
+WORKERS = ("prefill", "decode")
+
+# Each generated worker's arguments from its first AIS argument on, in both forms.
+NEW_AIS_ARGUMENTS = [
+    "--ais-perf-model",
+    '{"attention_dp":1,"backend":"vllm","backend_version":"0.24.0",'
+    '"model":"Qwen/Qwen3-32B","system":"h200_sxm","tp":2}',
+    "--engine-type",
+    "vllm",
+]
+OLD_AIS_ARGUMENTS = [
+    "--ais-perf-model",
+    "--ais-backend",
+    "vllm",
+    "--ais-backend-version",
+    "0.24.0",
+    "--ais-system",
+    "h200_sxm",
+    "--ais-tp-size",
+    "2",
+    "--ais-attention-dp-size",
+    "1",
+    "--engine-type",
+    "vllm",
+]
+
+# Arguments an override adds to a worker.
+MOCKER_COMMAND = ["python3", "-m", "dynamo.mocker"]
+ENGINE_FILE = ["--extra-engine-args", "engine.json"]
+MODEL_PATH = ["--model-path", "Qwen/Qwen3-235B-A22B"]
+OLD_FLAG = ["--ais-system", "h100_sxm"]
+VALUE = [
+    "--ais-perf-model",
+    json.dumps(
+        {"model": "Qwen/Qwen3-32B", "system": "h100_sxm", "backend": "vllm", "tp": 4}
+    ),
+]
+
+# What the mocker makes of a worker's command line: of the generated one, of
+# one where the override's value comes last, and of one with an old flag.
+GENERATED_READ = {
+    "model_path": "Qwen/Qwen3-32B",
+    "max_num_seqs": 256,
+    "perf_model": ("Qwen/Qwen3-32B", "h200_sxm", 2),
+}
+REPLACED_READ = {**GENERATED_READ, "perf_model": ("Qwen/Qwen3-32B", "h100_sxm", 4)}
+OLD_FLAG_ERROR = {"error": "--ais-perf-model cannot be combined with --ais-system"}
+
+
+@pytest.fixture
+def mocker_inputs(monkeypatch, tmp_path):
+    """Pin what the generated arguments and the mocker parser read from outside."""
+    monkeypatch.setattr(
+        "dynamo.profiler.utils.dgd_generation.get_latest_database_version",
+        lambda **kwargs: "0.24.0",
+    )
+    monkeypatch.delenv(ENV_VAR, raising=False)
+    # ENGINE_FILE names this file.
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "engine.json").write_text(json.dumps({"engine": {"max_num_seqs": 9}}))
+
+
+def _worker_override(containers: dict[str, dict]) -> dict:
+    """Return a deployment override that adds container fields to the named workers.
+
+    The override engine appends the ``args`` of a ``spec.services`` override
+    to the generated ones.
+    """
+    return {
+        "apiVersion": "nvidia.com/v1alpha1",
+        "kind": "DynamoGraphDeployment",
+        "spec": {
+            "services": {
+                name: {"extraPodSpec": {"mainContainer": fields}}
+                for name, fields in containers.items()
+            }
+        },
+    }
+
+
+def _mocker_workers(override: dict | None = None) -> dict[str, list[str]]:
+    """Return the argument list of each generated mocker worker."""
+    pick = PickedParallelConfig(tp=2)
+    interpolation = AICInterpolationSpec(
+        hf_id="Qwen/Qwen3-32B",
+        system="h200_sxm",
+        backend="vllm",
+        isl=1000,
+        osl=100,
+        sweep_max_context_length=4096,
+        prefill_interpolation_granularity=8,
+        decode_interpolation_granularity=4,
+        prefill_pick=pick,
+        decode_pick=pick,
+    )
+    config = generate_mocker_config(
+        _dgdr(mocker_enabled=True, override=override), aic_spec=interpolation
+    )
+    return {
+        name: _main_container(component)["args"]
+        for name, component in _component_map(config).items()
+        if name in WORKERS
+    }
+
+
+def _ais_arguments(workers: dict[str, list[str]]) -> dict[str, list[str]]:
+    """Return each worker's arguments from its first AIS argument on."""
+    return {
+        name: arguments[
+            next(
+                index
+                for index, token in enumerate(arguments)
+                if token.startswith(("--ais-", "--aic-"))
+            ) :
+        ]
+        for name, arguments in workers.items()
+    }
+
+
+def _mocker_reads(arguments: list[str], capsys) -> dict:
+    """Return what the mocker makes of one worker's command line, or its error."""
+    try:
+        args = parse_args(arguments)
+    except SystemExit:
+        return {"error": capsys.readouterr().err.rsplit(": error: ", 1)[1].strip()}
+    config = load_mocker_engine_args(args)
+    perf_model = performance_config(config)
+    return {
+        "model_path": args.model_path,
+        "max_num_seqs": config["engine"]["max_num_seqs"],
+        "perf_model": (perf_model["model"], perf_model["system"], perf_model["tp"]),
+    }
+
+
+def _old_arguments_warning(names: str) -> str:
+    return (
+        f"overrides.dgd sets {names}: the generated mocker workers keep the old AIS "
+        "arguments (--ais-perf-model without a value plus --ais-* flags), which are "
+        "deprecated and will be removed in v1.9; to end this, write --ais-perf-model "
+        "VALUE in the override and remove its old --ais-* arguments"
+    )
+
+
+@pytest.mark.parametrize(
+    "added,reads",
+    [
+        pytest.param(
+            {"decode": ENGINE_FILE + VALUE},
+            {"prefill": GENERATED_READ, "decode": {**REPLACED_READ, "max_num_seqs": 9}},
+            id="engine-args-same-worker",
+        ),
+        pytest.param(
+            {"prefill": ENGINE_FILE, "decode": VALUE},
+            {"prefill": {**GENERATED_READ, "max_num_seqs": 9}, "decode": REPLACED_READ},
+            id="engine-args-other-worker",
+        ),
+        pytest.param(
+            {"decode": MODEL_PATH + VALUE},
+            {
+                "prefill": GENERATED_READ,
+                "decode": {**REPLACED_READ, "model_path": "Qwen/Qwen3-235B-A22B"},
+            },
+            id="model-path-same-worker",
+        ),
+        pytest.param(
+            {"prefill": MODEL_PATH, "decode": VALUE},
+            {
+                "prefill": {**GENERATED_READ, "model_path": "Qwen/Qwen3-235B-A22B"},
+                "decode": REPLACED_READ,
+            },
+            id="model-path-other-worker",
+        ),
+        pytest.param(
+            {"decode": OLD_FLAG + VALUE},
+            {"prefill": GENERATED_READ, "decode": OLD_FLAG_ERROR},
+            id="old-flag-same-worker",
+        ),
+        pytest.param(
+            {"prefill": OLD_FLAG, "decode": VALUE},
+            {"prefill": OLD_FLAG_ERROR, "decode": REPLACED_READ},
+            id="old-flag-other-worker",
+        ),
+    ],
+)
+def test_override_with_a_value_keeps_new_arguments_for_every_worker(
+    mocker_inputs, caplog, capsys, added, reads
+):
+    override = _worker_override(
+        {name: {"args": arguments} for name, arguments in added.items()}
+    )
+
+    with caplog.at_level(logging.WARNING):
+        workers = _mocker_workers(override)
+
+    assert caplog.records == []
+    assert _ais_arguments(workers) == dict.fromkeys(WORKERS, NEW_AIS_ARGUMENTS)
+    assert {
+        name: _mocker_reads(workers[name] + added.get(name, []), capsys)
+        for name in WORKERS
+    } == reads
+
+
+@pytest.mark.parametrize(
+    "container,names",
+    [
+        # The profiler cannot read a variable of the worker: a value is kept
+        # as typed.
+        pytest.param(
+            {"args": ["--ais-tp-size", "$(TP_SIZE)"]},
+            "--ais-tp-size",
+            id="value-from-a-variable",
+        ),
+        pytest.param(
+            {"args": ["--disaggregation-mode", "$(MODE)", *OLD_FLAG]},
+            "--ais-system",
+            id="choice-from-a-variable",
+        ),
+        pytest.param(
+            {"command": MOCKER_COMMAND + OLD_FLAG}, "--ais-system", id="command"
+        ),
+        pytest.param(
+            {"args": MODEL_PATH, "command": MOCKER_COMMAND + OLD_FLAG},
+            "--ais-system and --model-path",
+            id="command-then-args",
+        ),
+    ],
+)
+def test_override_without_a_value_keeps_old_arguments_for_every_worker(
+    mocker_inputs, caplog, container, names
+):
+    override = _worker_override({"decode": container})
+
+    with caplog.at_level(logging.WARNING):
+        workers = _mocker_workers(override)
+
+    assert _ais_arguments(workers) == dict.fromkeys(WORKERS, OLD_AIS_ARGUMENTS)
+    assert [record.getMessage() for record in caplog.records] == [
+        _old_arguments_warning(names)
+    ]
+
+
+def _with_old_arguments(arguments: list[str]) -> list[str]:
+    """Return a generated worker's arguments with the old AIS arguments instead."""
+    assert arguments[-len(NEW_AIS_ARGUMENTS) :] == NEW_AIS_ARGUMENTS
+    return arguments[: -len(NEW_AIS_ARGUMENTS)] + OLD_AIS_ARGUMENTS
+
+
+@pytest.mark.parametrize(
+    "added",
+    [
+        pytest.param(["--ais-next", "2"], id="ambiguous-nextn"),
+        pytest.param(["--aic-m", "5"], id="ambiguous-mtp-seed"),
+        pytest.param(["--model", "m", *OLD_FLAG], id="ambiguous-model"),
+        pytest.param(["--ais-system"], id="flag-without-its-value"),
+        pytest.param(["--aic-perf-model", "perf_model.yaml"], id="aic-name-with-value"),
+        pytest.param(["--ais-perf-model", *VALUE], id="with-and-without-a-value"),
+        pytest.param(["--", *OLD_FLAG], id="after-double-dash"),
+    ],
+)
+def test_override_list_the_mocker_rejects_is_not_read(
+    mocker_inputs, caplog, capsys, added
+):
+    override = _worker_override({"decode": {"args": added}})
+
+    with caplog.at_level(logging.WARNING):
+        workers = _mocker_workers(override)
+
+    assert _ais_arguments(workers) == dict.fromkeys(WORKERS, NEW_AIS_ARGUMENTS)
+    assert caplog.records == []
+    # The worker that gets the list does not start, and the old arguments
+    # would not change that.
+    assert "error" in _mocker_reads(workers["decode"] + added, capsys)
+    assert "error" in _mocker_reads(
+        _with_old_arguments(workers["decode"]) + added, capsys
+    )
+
+
+@pytest.mark.parametrize(
+    "rejected",
+    [
+        pytest.param(["--aic-perf-model", "perf_model.yaml"], id="aic-name-with-value"),
+        pytest.param(["--ais-perf-model", *VALUE], id="with-and-without-a-value"),
+    ],
+)
+def test_override_list_the_mocker_rejects_gives_no_value(
+    mocker_inputs, caplog, rejected
+):
+    """A rejected list is not a value that keeps the new arguments.
+
+    The old flag of the other worker still counts.
+    """
+    override = _worker_override(
+        {"prefill": {"args": rejected}, "decode": {"args": OLD_FLAG}}
+    )
+
+    with caplog.at_level(logging.WARNING):
+        workers = _mocker_workers(override)
+
+    assert _ais_arguments(workers) == dict.fromkeys(WORKERS, OLD_AIS_ARGUMENTS)
+    assert [record.getMessage() for record in caplog.records] == [
+        _old_arguments_warning("--ais-system")
+    ]
+
+
+def test_override_with_profile_data_keeps_new_arguments(mocker_inputs, caplog, capsys):
+    """Profile data is not a reason for the old arguments.
+
+    A mocker has one timing provider: it refuses profile data next to AIS
+    timing in either form of the generated arguments, and reports it.
+    """
+    added = ["--planner-profile-data", "profile"]
+    override = _worker_override({"decode": {"args": added}})
+
+    with caplog.at_level(logging.WARNING):
+        workers = _mocker_workers(override)
+
+    assert _ais_arguments(workers) == dict.fromkeys(WORKERS, NEW_AIS_ARGUMENTS)
+    assert caplog.records == []
+    assert _mocker_reads(workers["decode"] + added, capsys) == {
+        "error": "--ais-perf-model cannot be combined with --planner-profile-data"
+    }
+    with pytest.warns(FutureWarning, match=r"use --ais-perf-model VALUE\.$"):
+        old = parse_args(_with_old_arguments(workers["decode"]) + added)
+    with pytest.raises(ValueError, match="^choose one timing provider: "):
+        load_mocker_engine_args(old)
+
+
+def test_variable_of_the_profiler_process_is_not_read(
+    mocker_inputs, caplog, monkeypatch
+):
+    # The variable would be a value, and a value keeps the new arguments.
+    monkeypatch.setenv(ENV_VAR, "perf_model.yaml")
+    override = _worker_override({"decode": {"args": OLD_FLAG}})
+
+    with caplog.at_level(logging.WARNING):
+        workers = _mocker_workers(override)
+
+    assert _ais_arguments(workers) == dict.fromkeys(WORKERS, OLD_AIS_ARGUMENTS)
+    assert [record.getMessage() for record in caplog.records] == [
+        _old_arguments_warning("--ais-system")
+    ]
+
+
+def test_mocker_flag_that_is_no_old_input_keeps_new_arguments(
+    mocker_inputs, caplog, monkeypatch
+):
+    """What counts as an old input is the mocker's list, not the flag's name."""
+    parser = build_mocker_parser({}, dgd_generation._OverrideArguments(add_help=False))
+    parser.add_argument("--ais-sampling-seed")
+    monkeypatch.setattr(dgd_generation, "_mocker_parser", lambda: parser)
+    added = ["--ais-sampling-seed", "7"]
+
+    with caplog.at_level(logging.WARNING):
+        workers = _mocker_workers(_worker_override({"decode": {"args": added}}))
+
+    assert _ais_arguments(workers) == dict.fromkeys(WORKERS, NEW_AIS_ARGUMENTS)
+    assert caplog.records == []
+
+
+@pytest.mark.parametrize(
+    "containers",
+    [
+        pytest.param({"decode": {"command": MOCKER_COMMAND}}, id="no-ais-argument"),
+        pytest.param(
+            {"decode": {"command": " ".join(MOCKER_COMMAND + OLD_FLAG)}},
+            id="command-as-text",
+        ),
+        pytest.param(
+            {"decode": {"command": ["sh", "-c", " ".join(MOCKER_COMMAND + OLD_FLAG)]}},
+            id="shell-script",
+        ),
+    ],
+)
+def test_override_command_without_trigger_keeps_new_arguments(
+    mocker_inputs, caplog, containers
+):
+    with caplog.at_level(logging.WARNING):
+        workers = _mocker_workers(_worker_override(containers))
+
+    assert _ais_arguments(workers) == dict.fromkeys(WORKERS, NEW_AIS_ARGUMENTS)
+    assert caplog.records == []
+
+
+@pytest.mark.parametrize(
+    "containers",
+    [
+        pytest.param({"decode": {"command": MOCKER_COMMAND + VALUE}}, id="value"),
+        pytest.param(
+            {"decode": {"command": [*MOCKER_COMMAND, "=".join(VALUE)]}},
+            id="equals-sign",
+        ),
+        pytest.param(
+            {"decode": {"command": [*MOCKER_COMMAND, "--ais-perf-m", VALUE[1]]}},
+            id="abbreviated",
+        ),
+        pytest.param(
+            # The mocker reads a number as the value.
+            {"decode": {"command": [*MOCKER_COMMAND, "--ais-perf-model", "-1"]}},
+            id="value-that-starts-with-a-dash",
+        ),
+        pytest.param(
+            {"decode": {"command": MOCKER_COMMAND + VALUE, "args": OLD_FLAG}},
+            id="value-then-old-flag",
+        ),
+        pytest.param(
+            {
+                "prefill": {"command": MOCKER_COMMAND + OLD_FLAG},
+                "decode": {"command": MOCKER_COMMAND + VALUE},
+            },
+            id="old-flag-then-value",
+        ),
+        pytest.param(
+            {"prefill": {"args": VALUE}, "decode": {"command": MOCKER_COMMAND + VALUE}},
+            id="args-value-then-command-value",
+        ),
+        pytest.param(
+            {"decode": {"command": MOCKER_COMMAND + VALUE, "args": VALUE}},
+            id="value-in-both-lists",
+        ),
+    ],
+)
+def test_override_value_in_command_is_refused(mocker_inputs, caplog, containers):
+    with caplog.at_level(logging.WARNING), pytest.raises(ValueError) as error:
+        _mocker_workers(_worker_override(containers))
+
+    assert str(error.value) == (
+        "overrides.dgd gives --ais-perf-model a value in a container's command "
+        "list; a generated mocker worker would use its generated value instead, "
+        "because the generated args come after the command. Write --ais-perf-model "
+        "VALUE in the container's args list"
+    )
+    assert caplog.records == []
+
+
+def test_value_before_generated_arguments_is_not_used(mocker_inputs, capsys):
+    """A worker reads a value typed in ``command`` first and the generated one last."""
+    workers = _mocker_workers()
+
+    assert _mocker_reads(VALUE + workers["decode"], capsys) == GENERATED_READ
+
+
+def test_override_value_in_command_is_accepted_without_generated_ais_arguments(
+    mocker_inputs,
+):
+    override = _worker_override({"decode": {"command": MOCKER_COMMAND + VALUE}})
+
+    config = generate_mocker_config(_dgdr(mocker_enabled=True, override=override))
+
+    assert [
+        token
+        for name, component in _component_map(config).items()
+        if name in WORKERS
+        for token in _main_container(component)["args"]
+        if token.startswith("--ais-")
+    ] == []
+
+
+@pytest.mark.parametrize("joined", [False, True], ids=["two-tokens", "equals-sign"])
+@pytest.mark.parametrize(
+    "option,value,attribute,parsed",
+    [
+        pytest.param(f"--{family}-{name}", *row, id=f"{family}-{name}")
+        for family in ("ais", "aic")
+        for name, *row in (
+            ("mt", "5", "ais_mtp_seed", 5),
+            ("mtp-se", "5", "ais_mtp_seed", 5),
+            ("nextn-", "0.5", "ais_nextn_accept_rates", "0.5"),
+            ("nextn-accept-r", "0.5", "ais_nextn_accept_rates", "0.5"),
+        )
+    ],
+)
+def test_abbreviated_option_outside_perf_model_keeps_new_arguments(
+    mocker_inputs, caplog, option, value, attribute, parsed, joined
+):
+    added = [f"{option}={value}"] if joined else [option, value]
+
+    with caplog.at_level(logging.WARNING):
+        workers = _mocker_workers(_worker_override({"decode": {"args": added}}))
+
+    assert _ais_arguments(workers) == dict.fromkeys(WORKERS, NEW_AIS_ARGUMENTS)
+    assert caplog.records == []
+    assert getattr(parse_args(workers["decode"] + added), attribute) == parsed

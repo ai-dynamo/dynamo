@@ -96,9 +96,12 @@ At least one scaling mode must be enabled when using `optimization_target: sla`.
 
 SLA mode constructs each role's model through
 `aisimulate_core.sdk.RustForwardPassPerfModel.best_available(config)`. Set
-`ais_perf_model.roles` to the complete AISimulate configuration for each deployed
-role: `prefill` and `decode` for disaggregated deployments, or `aggregated` for an
-aggregated deployment. Each role key must match its `worker_type`.
+`ais_perf_model` to one config per deployed worker type: a list with a `prefill` and a
+`decode` config for disaggregated deployments, or an `aggregated` config for an
+aggregated deployment. Each config in a list names its `worker_type`. One config
+without `worker_type` covers every worker type. For the keys of a config, see
+[Unified perf-model input](https://github.com/ai-dynamo/aisimulate/blob/main/docs/perf-model/configuration.md#unified-perf-model-input)
+in the AISimulate documentation.
 
 New configurations default to `estimation_mode: auto` and `fallback_policy: deny`.
 Auto searches `op_level`, `fpm_interpolation`, then `fpm_regression`; `deny` prevents
@@ -106,15 +109,23 @@ fallback only when you explicitly select a mode. Without `ais_perf_model`, the
 Planner creates a cold `fpm_regression` model and trains it from self-benchmark
 or live forward-pass metrics (FPM).
 
-Each role accepts the complete upstream schema, including ordered `systems_paths`,
+Each config accepts the complete upstream schema, including ordered `systems_paths`,
 `database_mode`, `transfer_policy`, quantization and speculation settings, and
 nested `estimator_config` controls. Explicit estimator controls override the
 Planner's sampling defaults. `fpm_sample_bucket_size: 16` corresponds to a
 `[4, 4]` grid; regression and correction may use separate grids. Unknown fields
-and conflicting worker identities are rejected.
+are rejected, and so is a worker type that appears twice.
 
-Configure model identity and estimator controls through `ais_perf_model.roles`.
+Configure model identity and estimator controls through `ais_perf_model`.
 The retired `aic_perf_model` field and `hf_id` / parallel-pick shape are rejected.
+
+> [!WARNING]
+> **Deprecated.** Use a list of configs. Removed in v1.9. The `roles` and
+> `dataset_profiles` keys of `ais_perf_model` still work and print one warning.
+> `dynamo.replay.run_trace_replay` and `run_synthetic_trace_replay` print it too for a
+> `planner_config` written this way. `roles` and `dataset_profiles` can be written
+> together when they name different worker types. Either of them next to any other key
+> of `ais_perf_model` is an error.
 
 At startup, the planner always tries to fetch self-benchmark results from the `get_perf_metrics` Dynamo endpoint. If unavailable, it falls back to rapid-mode AIC interpolation data or profiler-generated data (npz or JSON) at `profile_results_dir` when configured. These sources are converted to ForwardPassMetrics and used to tune or bootstrap the perf model. With `pre_deployment_sweeping_mode: none`, the planner can still start; throughput decisions report `model_not_ready` until native AIS estimates are available or enough live FPMs have warmed the regression fallback.
 
@@ -127,30 +138,36 @@ spec:
       optimization_target: sla
       mode: disagg
       ais_perf_model:
-        roles:
-          prefill:
-            model: Qwen/Qwen3-32B
-            system: h200_sxm
-            backend: vllm
-            worker_type: prefill
-            estimation_mode: auto
-            fallback_policy: deny
-            tp: 1
-          decode:
-            model: Qwen/Qwen3-32B
-            system: h200_sxm
-            backend: vllm
-            worker_type: decode
-            estimation_mode: auto
-            fallback_policy: deny
-            tp: 1
-            estimator_config:
-              fpm_regression:
-                sampling:
-                  bins_per_axis: [4, 4]
-                  max_observations: 64
-                min_observations: 5
+        - worker_type: prefill
+          model: Qwen/Qwen3-32B
+          system: h200_sxm
+          backend: vllm
+          estimation_mode: auto
+          fallback_policy: deny
+          tp: 1
+        - worker_type: decode
+          model: Qwen/Qwen3-32B
+          system: h200_sxm
+          backend: vllm
+          estimation_mode: auto
+          fallback_policy: deny
+          tp: 1
+          estimator_config:
+            fpm_regression:
+              sampling:
+                bins_per_axis: [4, 4]
+                max_observations: 64
+              min_observations: 5
 ```
+
+> [!NOTE]
+> With `optimization_target: sla`, the profiler compares `model`, `system`, `backend`,
+> `tp`, and the other parallelism keys of each config with the deployment it selects. A
+> key you leave out counts with its default, so no `tp` means `tp: 1`. A difference fails
+> the request, for example
+> `ais_perf_model entry for prefill: tp=1 conflicts with selected deployment tp=2`.
+> Leave `ais_perf_model` unset to let the profiler write it. For the full rule, see
+> [`ais_perf_model` in the DynamoGraphDeploymentRequest reference](../../../../reference/kubernetes-api/dynamo-graph-deployment-request.mdx#performance-model-and-pre-deployment-sweeping).
 
 ### Throughput-Based Scaling Settings
 

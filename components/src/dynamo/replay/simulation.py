@@ -31,8 +31,8 @@ from aisimulate.sweeper.replay import (
     RunnerCapabilities,
 )
 
-from dynamo.llm import AisPerfConfig, KvRouterConfig
-from dynamo.mocker.config import normalize_mocker_config
+from dynamo.llm import KvRouterConfig
+from dynamo.mocker.config import normalize_mocker_config, performance_config
 from dynamo.planner.core.types import TrafficObservation
 from dynamo.replay.api import (
     TelemetryOptions,
@@ -147,12 +147,22 @@ class DynamoReplayRunner:
             router_config,
             ais_perf_config,
             conversation_affinity,
+            ais_perf_config_from_engine,
         ) = self._resolve_hooks(spec.runtime_hooks)
+        if ais_perf_config_from_engine:
+            deployment = spec.backend_deployment
+            role = "aggregated" if deployment.deployment_mode == "agg" else "prefill"
+            ais_perf_config = performance_config(self._engine_args(deployment, role))
+            if ais_perf_config is None:
+                raise ValueError(
+                    "router.ais_perf_model: {use: engine} needs an AIS perf model "
+                    f"on the {role} engine; it has none"
+                )
         planner_warmup = self._planner_warmup(spec.runtime_hooks)
         common: dict[str, Any] = {
             "router_mode": router_mode,
             "router_config": router_config,
-            "ais_perf_config": ais_perf_config,
+            "router_ais_perf_model": ais_perf_config,
             "arrival_speedup_ratio": self._arrival_speedup_ratio(spec),
             "replay_concurrency": self._effective_in_flight_cap(spec),
             "planner_config": planner_config,
@@ -241,14 +251,17 @@ class DynamoReplayRunner:
         dict[str, JSONValue] | None,
         str,
         KvRouterConfig | None,
-        AisPerfConfig | None,
         dict[str, JSONValue] | None,
+        dict[str, JSONValue] | None,
+        bool,
     ]:
         planner_config: dict[str, JSONValue] | None = None
         router_mode = "round_robin"
         router_config: KvRouterConfig | None = None
-        ais_perf_config: AisPerfConfig | None = None
+        ais_perf_config: dict[str, JSONValue] | None = None
         conversation_affinity = None
+        # Set when the router takes the perf model of the engine it routes to.
+        ais_perf_config_from_engine = False
         planner_seen = False
         router_seen = False
         for hook in hooks:
@@ -280,12 +293,24 @@ class DynamoReplayRunner:
                     )
                 router_config = KvRouterConfig.from_json(json.dumps(raw_config))
                 raw_ais = hook.config.get("ais_perf_config")
+                raw_from_engine = hook.config.get("ais_perf_config_from_engine")
+                if raw_from_engine is not None and raw_from_engine is not True:
+                    raise TypeError(
+                        "Dynamo Router ais_perf_config_from_engine must be true "
+                        "or absent"
+                    )
+                ais_perf_config_from_engine = raw_from_engine is True
                 if raw_ais is not None:
                     if not isinstance(raw_ais, dict):
                         raise TypeError(
                             "Dynamo Router AIS config must be a mapping or null"
                         )
-                    ais_perf_config = AisPerfConfig(config=raw_ais)
+                    if ais_perf_config_from_engine:
+                        raise ValueError(
+                            "Dynamo Router hook config has both ais_perf_config "
+                            "and ais_perf_config_from_engine"
+                        )
+                    ais_perf_config = raw_ais
                 continue
             raise ValueError(
                 f"unsupported Dynamo runtime hook "
@@ -297,6 +322,7 @@ class DynamoReplayRunner:
             router_config,
             ais_perf_config,
             conversation_affinity,
+            ais_perf_config_from_engine,
         )
 
     @staticmethod

@@ -20,6 +20,7 @@ import inspect
 import json
 import multiprocessing
 import os
+import warnings
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
@@ -30,7 +31,7 @@ pytest.importorskip(
     reason="AI Simulate is an optional Dynamo simulation dependency",
 )
 
-from dynamo.llm import KvRouterConfig
+from dynamo.llm import AisPerfConfig, KvRouterConfig
 from dynamo.mocker.config import normalize_mocker_config
 from dynamo.planner.config.planner_config import PlannerConfig, RetuneEngineSpec
 from dynamo.planner.core.types import RetuneParams, TrafficObservation
@@ -774,7 +775,12 @@ def test_only_a_throughput_planner_reads_the_warmup_trace_as_history(tmp_path):
 
 # Every run_trace_replay kwarg, classified for retune candidate replays, so a
 # new kwarg cannot silently replay candidates on another engine.
-_PINNED = set(RetuneEngineSpec.model_fields)  # from the outer replay
+# From the outer replay. A candidate takes the pinned router perf config
+# under the keyword that is not deprecated, unless only the deprecated one
+# takes it (see test_engine_spec_returns_old_keyword_config_of_another_worker_type).
+_PINNED = (set(RetuneEngineSpec.model_fields) - {"ais_perf_config"}) | {
+    "router_ais_perf_model"
+}
 _PER_CANDIDATE = {  # set by sweep.evaluate_candidate
     "num_workers",
     "num_prefill_workers",
@@ -809,11 +815,16 @@ _IGNORED = {  # no effect on a candidate's engine or score
     "trace_num_prefix_groups",
     "weka_nested_timestamp_basis",
 }
+# The outer replay resolves these into the pinned engine fields.
+_RESOLVED_BY_OUTER_REPLAY = {
+    "ais_perf_config",
+    "ais_perf_model",
+}
 
 
 @pytest.mark.unit
 def test_every_replay_kwarg_is_classified_for_retune(tmp_path, monkeypatch):
-    groups = [_PINNED, _PER_CANDIDATE, _REJECTED, _IGNORED]
+    groups = [_PINNED, _PER_CANDIDATE, _REJECTED, _IGNORED, _RESOLVED_BY_OUTER_REPLAY]
     params = set(inspect.signature(run_trace_replay).parameters) - {"trace_files"}
     assert set().union(*groups) == params
     assert sum(len(group) for group in groups) == len(params)
@@ -874,3 +885,205 @@ def test_run_trace_replay_hands_the_warmup_to_the_inner_planner(monkeypatch):
         )
 
     assert received["warmup_observations"] is warmup
+
+
+@pytest.mark.unit
+def test_sweep_candidate_engine_perf_config_reaches_native_call(monkeypatch):
+    calls: list[dict] = []
+
+    def recording_native_replay(_trace_files, **kwargs):
+        calls.append(kwargs)
+        raise RuntimeError("recorded")
+
+    monkeypatch.setattr(api, "_run_mocker_trace_replay", recording_native_replay)
+    pinned = AisPerfConfig(
+        config={
+            "backend": "vllm",
+            "system": "h200_sxm",
+            "model": "example/model",
+            "worker_type": "aggregated",
+        }
+    ).to_dict()
+    engine = RetuneEngineSpec(
+        router_config={"router_prefill_load_model": "ais"}, ais_perf_config=pinned
+    )
+
+    with pytest.raises(RuntimeError, match="recorded"):
+        sweep.evaluate_candidate(
+            "window.jsonl",
+            engine,
+            1.0,
+            RetuneParams(router={}, planner={}),
+            {"aggregated": 1},
+            None,
+            None,
+            100.0,
+            10.0,
+            60.0,
+            "GoodputPerGPU",
+        )
+
+    (call,) = calls
+    assert call["ais_perf_config"].to_dict() == pinned
+
+
+def _evaluate_candidate(engine, base_planner=None):
+    return sweep.evaluate_candidate(
+        "window.jsonl",
+        engine,
+        1.0,
+        RetuneParams(router={}, planner={}),
+        {"aggregated": 1},
+        base_planner,
+        None,
+        100.0,
+        10.0,
+        60.0,
+        "GoodputPerGPU",
+    )
+
+
+def _pinned_router_perf_config(worker_type: str) -> dict:
+    return AisPerfConfig(
+        config={
+            "backend": "vllm",
+            "system": "h200_sxm",
+            "model": "example/model",
+            "worker_type": worker_type,
+        }
+    ).to_dict()
+
+
+_DISAGGREGATED = {"prefill_engine_args": {}, "decode_engine_args": {}}
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "engine_args,worker_type",
+    [
+        pytest.param({}, "aggregated", id="aggregated-replay"),
+        pytest.param(_DISAGGREGATED, "prefill", id="disaggregated-replay"),
+    ],
+)
+def test_engine_spec_returns_pinned_perf_config_as_router_keyword(
+    engine_args, worker_type
+):
+    # The worker type the replay's router reads.
+    pinned = _pinned_router_perf_config(worker_type)
+
+    kwargs = RetuneEngineSpec(ais_perf_config=pinned, **engine_args).replay_kwargs()
+
+    # The mapping as pinned, under the keyword that reads a mapping.
+    assert kwargs["router_ais_perf_model"] == pinned
+    assert set(kwargs) == _PINNED
+    assert (
+        RetuneEngineSpec(**engine_args).replay_kwargs()["router_ais_perf_model"] is None
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "engine_args,worker_type",
+    [
+        pytest.param({}, "prefill", id="aggregated-replay-prefill"),
+        pytest.param({}, "decode", id="aggregated-replay-decode"),
+        pytest.param(
+            _DISAGGREGATED, "aggregated", id="disaggregated-replay-aggregated"
+        ),
+        pytest.param(_DISAGGREGATED, "decode", id="disaggregated-replay-decode"),
+    ],
+)
+def test_engine_spec_returns_old_keyword_config_of_another_worker_type(
+    engine_args, worker_type
+):
+    # The deprecated ais_perf_config= of the outer replay takes any worker
+    # type; router_ais_perf_model= would refuse this one.
+    pinned = _pinned_router_perf_config(worker_type)
+
+    kwargs = RetuneEngineSpec(ais_perf_config=pinned, **engine_args).replay_kwargs()
+
+    assert isinstance(kwargs["ais_perf_config"], AisPerfConfig)
+    assert kwargs["ais_perf_config"].to_dict() == pinned
+    assert set(kwargs) == (_PINNED - {"router_ais_perf_model"}) | {"ais_perf_config"}
+
+
+@pytest.mark.unit
+def test_sweep_candidate_passes_engine_perf_config_as_router_keyword(monkeypatch):
+    calls: list[dict] = []
+
+    def recording_replay(trace_files, **kwargs):
+        calls.append(kwargs)
+        raise RuntimeError("recorded")
+
+    monkeypatch.setattr(sweep, "run_trace_replay", recording_replay)
+    pinned = _pinned_router_perf_config("aggregated")
+    engine = RetuneEngineSpec(
+        router_config={"router_prefill_load_model": "ais"}, ais_perf_config=pinned
+    )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        with pytest.raises(RuntimeError, match="recorded"):
+            _evaluate_candidate(engine)
+
+    (call,) = calls
+    assert call["router_ais_perf_model"] == pinned
+    assert "ais_perf_config" not in call
+
+
+@pytest.mark.unit
+def test_sweep_candidate_replays_old_keyword_config_of_another_worker_type(
+    monkeypatch,
+):
+    calls: list[dict] = []
+
+    def recording_native_replay(_trace_files, **kwargs):
+        calls.append(kwargs)
+        raise RuntimeError("recorded")
+
+    monkeypatch.setattr(api, "_run_mocker_trace_replay", recording_native_replay)
+    # The outer replay can pin such a config only through the deprecated
+    # ais_perf_config= keyword, which takes any worker type.
+    pinned = _pinned_router_perf_config("prefill")
+    engine = RetuneEngineSpec(
+        router_mode="kv_router",
+        router_config={"router_prefill_load_model": "ais"},
+        ais_perf_config=pinned,
+    )
+
+    # The outer replay warned about the keyword; its candidates do not.
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        with pytest.raises(RuntimeError, match="recorded"):
+            _evaluate_candidate(engine)
+
+    (call,) = calls
+    assert call["ais_perf_config"].to_dict() == pinned
+
+
+@pytest.mark.unit
+def test_sweep_candidate_does_not_warn_about_old_planner_config(monkeypatch):
+    adapter_calls: list[dict] = []
+
+    def recording_adapter(**kwargs):
+        adapter_calls.append(kwargs)
+        raise RuntimeError("recorded")
+
+    monkeypatch.setattr(api, "_planner_replay_adapter", lambda: recording_adapter)
+    perf_config = {"backend": "vllm", "system": "h200_sxm", "model": "example/model"}
+    # What a running Planner written with the deprecated keys hands its sweep.
+    base_planner = {
+        "mode": "agg",
+        "ais_perf_model": {"roles": {"aggregated": perf_config}},
+    }
+
+    # The Planner warned when it read its config; its candidates do not.
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        with pytest.raises(RuntimeError, match="recorded"):
+            _evaluate_candidate(RetuneEngineSpec(), base_planner)
+
+    (adapter_call,) = adapter_calls
+    assert set(adapter_call["planner_config_arg"].ais_perf_model.roles) == {
+        "aggregated"
+    }

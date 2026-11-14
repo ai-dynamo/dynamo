@@ -33,6 +33,10 @@ pytestmark = [
     pytest.mark.planner,
 ]
 
+# A router section that writes the AIS load model without ``ais_perf_model`` is
+# deprecated; its warning names the replacement.
+_OLD_FORM_WARNING = r"router\.ais_perf_model: \{use: engine\}"
+
 
 def _sweep_context() -> SweepContext:
     return SweepContext(
@@ -257,33 +261,34 @@ def test_public_router_prediction_materializes_runtime_hook() -> None:
 
 
 def test_public_router_ais_load_model_reaches_runtime_config() -> None:
-    replay_spec = create_provider().compile_prediction(
-        {
-            "policy": "kv_router",
-            "prefill_load_model": {"type": "ais"},
-        },
-        PredictionAdapterContext(
-            engine={
-                "mode": "aggregated",
-                "model": "example/model",
-                "hardware": "h200_sxm",
-                "backend": "vllm",
-                "backend_version": "0.11.0",
-                "workers": {
-                    "aggregated": {
-                        "parallelism": {
-                            "tensor": 1,
-                            "attention_data": 1,
-                            "moe_tensor": 1,
-                            "moe_expert": 1,
-                        }
-                    }
-                },
+    with pytest.warns(FutureWarning, match=_OLD_FORM_WARNING):
+        replay_spec = create_provider().compile_prediction(
+            {
+                "policy": "kv_router",
+                "prefill_load_model": {"type": "ais"},
             },
-            traffic={},
-            evaluation={},
-        ),
-    )
+            PredictionAdapterContext(
+                engine={
+                    "mode": "aggregated",
+                    "model": "example/model",
+                    "hardware": "h200_sxm",
+                    "backend": "vllm",
+                    "backend_version": "0.11.0",
+                    "workers": {
+                        "aggregated": {
+                            "parallelism": {
+                                "tensor": 1,
+                                "attention_data": 1,
+                                "moe_tensor": 1,
+                                "moe_expert": 1,
+                            }
+                        }
+                    },
+                },
+                traffic={},
+                evaluation={},
+            ),
+        )
 
     hook_config = replay_spec.runtime_hooks[0].config
     assert hook_config["router_config"]["router_prefill_load_model"] == "ais"
@@ -339,7 +344,8 @@ def test_public_router_preserves_external_fpm_path_and_controls(
         with pytest.raises(ValueError, match="conflicting fpm_parquet_path"):
             create_provider().compile_prediction(public, context)
     else:
-        replay_spec = create_provider().compile_prediction(public, context)
+        with pytest.warns(FutureWarning, match=_OLD_FORM_WARNING):
+            replay_spec = create_provider().compile_prediction(public, context)
         perf_config = replay_spec.runtime_hooks[0].config["ais_perf_config"]
         assert perf_config["worker_type"] == "prefill"
         assert perf_config["systems_paths"] == [str(root) for root in roots]
@@ -456,19 +462,20 @@ def test_candidate_ais_materialization_preserves_independent_router_controls(
     tmp_path,
 ) -> None:
     adapter = create_provider()
-    plan = adapter.compile_recommendation(
-        {
-            "policy": "kv_router",
-            "prefill_load_model": {"type": "ais"},
-        },
-        RecommendationAdapterContext(
-            engine={},
-            traffic={},
-            evaluation={},
-            optimization={},
-            sweep=_sweep_context(),
-        ),
-    )
+    with pytest.warns(FutureWarning, match=_OLD_FORM_WARNING):
+        plan = adapter.compile_recommendation(
+            {
+                "policy": "kv_router",
+                "prefill_load_model": {"type": "ais"},
+            },
+            RecommendationAdapterContext(
+                engine={},
+                traffic={},
+                evaluation={},
+                optimization={},
+                sweep=_sweep_context(),
+            ),
+        )
     selection = {
         name: values[0]
         for name, values in plan.fragment.choices_by_branch["agg"].items()

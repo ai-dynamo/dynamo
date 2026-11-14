@@ -126,3 +126,36 @@ def test_parse_tiers_basic():
 def test_parse_tiers_rejects_bad_input(raw):
     with pytest.raises(ValueError):
         parse_tiers(raw)
+
+
+# -- AIS perf model configs -------------------------------------------------
+
+
+def test_orchestrator_gives_each_tier_its_own_config():
+    tiers = parse_tiers(
+        '[{"endpoint":"dynamo.cheap.generate","model":"Q/c"},'
+        '{"endpoint":"dynamo.exp.generate","model":"Q/e"}]'
+    )
+    cfg = SqueezeEvolveConfig()
+    cheap_config, exp_config = object(), object()
+
+    orch = SqueezeEvolveOrchestrator(
+        cfg=cfg, tiers=tiers, ais_perf_configs=[cheap_config, exp_config]
+    )
+    assert [transport._ais_perf_config for transport in orch._transports] == [
+        cheap_config,
+        exp_config,
+    ]
+
+    # Left out: no tier has a config.
+    plain = SqueezeEvolveOrchestrator(cfg=cfg, tiers=tiers)
+    assert [transport._ais_perf_config for transport in plain._transports] == [
+        None,
+        None,
+    ]
+
+    # The list is the only way in: there is no one config for every tier.
+    with pytest.raises(TypeError, match="ais_perf_config"):
+        SqueezeEvolveOrchestrator(cfg=cfg, tiers=tiers, ais_perf_config=cheap_config)
+    with pytest.raises(ValueError, match="^ais_perf_configs has 1 items for 2 tiers$"):
+        SqueezeEvolveOrchestrator(cfg=cfg, tiers=tiers, ais_perf_configs=[cheap_config])

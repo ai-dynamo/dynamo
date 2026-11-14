@@ -48,7 +48,9 @@ def test_operator_schemas_do_not_load_aisimulate_runtime() -> None:
                     raise ModuleNotFoundError('AIS runtime is unavailable', name=fullname)
 
         sys.meta_path.insert(0, WithoutAIS())
-        namespace = runpy.run_path(sys.argv[1], run_name='__main__')
+        # Run as '__main__' the file ends in sys.exit() and the cases below never run.
+        namespace = runpy.run_path(sys.argv[1])
+        assert namespace['main']() == 0
         try:
             namespace['PlannerConfig'](
                 mode='decode',
@@ -60,6 +62,32 @@ def test_operator_schemas_do_not_load_aisimulate_runtime() -> None:
             assert error.name == 'aisimulate_core'
         else:
             raise AssertionError('Explicit AIS configuration requires its runtime')
+        try:
+            namespace['PlannerConfig'](
+                mode='decode',
+                ais_perf_model={
+                    'dataset_profiles': {'decode': {
+                        'root': '/dataset', 'manifest': 'profile.json',
+                    }},
+                    'model': 'model',
+                },
+            )
+        except namespace['pydantic'].ValidationError as error:
+            assert 'ais_perf_model.model' in str(error)
+            assert 'Extra inputs are not permitted' in str(error)
+        else:
+            raise AssertionError('A key next to dataset_profiles is rejected')
+        try:
+            namespace['PlannerConfig'](
+                mode='decode',
+                ais_perf_model={
+                    'model': 'Qwen/Qwen3-32B', 'system': 'system', 'backend': 'vllm',
+                },
+            )
+        except ModuleNotFoundError as error:
+            assert error.name == 'aisimulate_core'
+        else:
+            raise AssertionError('A perf model config requires the AIS runtime')
         """
     )
     result = subprocess.run(
