@@ -264,6 +264,14 @@ func TestComputeSnapshotCompatibilityHashRejectsProcessContractChanges(t *testin
 			gmsMode: "disabled",
 		},
 		{
+			name: "offline policy",
+			mutate: func(template *corev1.PodTemplateSpec) {
+				template.Spec.Containers[0].Env = append(template.Spec.Containers[0].Env, corev1.EnvVar{Name: "HF_HUB_OFFLINE", Value: "1"})
+			},
+			backend: "vllm",
+			gmsMode: "disabled",
+		},
+		{
 			name: "GPU node selector",
 			mutate: func(template *corev1.PodTemplateSpec) {
 				template.Spec.NodeSelector = map[string]string{"nvidia.com/gpu.product": "H100"}
@@ -399,8 +407,11 @@ func TestSnapshotRestoreEnvironmentNamesMatchPythonRuntime(t *testing.T) {
 		}
 	}
 
+	// Refresh the offline policy without changing the persisted v2 hash contract.
+	require.Contains(t, pythonNames, "HF_HUB_OFFLINE")
+	delete(pythonNames, "HF_HUB_OFFLINE")
 	assert.Equal(t, pythonNames, snapshotRestoreEnvironmentNames,
-		"Go compatibility filtering must track the Python restore-context allowlist")
+		"Go compatibility filtering must track Python restore env except HF_HUB_OFFLINE, retained in v2")
 }
 
 func snapshotCompatibilityTestPodTemplate(dgdName, namespace, workerSuffix string) corev1.PodTemplateSpec {
