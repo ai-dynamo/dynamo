@@ -5,6 +5,7 @@ use tonic_health_v14 as tonic_health;
 use tonic_v14 as tonic;
 
 use std::future::Future;
+use std::sync::Arc;
 use std::time::Duration;
 
 use dynamo_backend_common::DynamoError;
@@ -27,8 +28,10 @@ pub(crate) const CONTROL_SERVICE: &str = "vllm.Control";
 pub(crate) const INFERENCE_SERVICE: &str = "vllm.Inference";
 const DATA_PARALLEL_RANK_METADATA_KEY: &str = "x-data-parallel-rank";
 
+/// Cheap to clone, so a response stream can send `Control.Abort` itself.
+#[derive(Clone)]
 pub(crate) struct VllmClient {
-    pool: GrpcChannelPool,
+    pool: Arc<GrpcChannelPool>,
 }
 
 impl VllmClient {
@@ -50,7 +53,9 @@ impl VllmClient {
                 "vLLM gRPC connection pool to {endpoint} exceeded the total startup deadline"
             ))
         })??;
-        Ok(Self { pool })
+        Ok(Self {
+            pool: Arc::new(pool),
+        })
     }
 
     pub(crate) fn connection_count(&self) -> usize {

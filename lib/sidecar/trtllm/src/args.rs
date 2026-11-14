@@ -3,6 +3,9 @@
 
 use dynamo_sidecar_common::SidecarArgs;
 
+/// TensorRT-LLM 1.4.0rc2's default `CacheTransceiverConfig.kv_transfer_timeout_ms`, in seconds.
+pub(crate) const DEFAULT_DECODE_CANCEL_DRAIN_TIMEOUT_SECS: u64 = 60;
+
 #[derive(clap::Parser, Clone, Debug)]
 #[command(
     name = "dynamo-trtllm-sidecar",
@@ -44,6 +47,25 @@ pub(crate) struct Args {
     /// `max_tokens` are rejected.
     #[arg(long, env = "TRTLLM_CONTEXT_LENGTH", value_parser = clap::value_parser!(u32).range(1..))]
     pub context_length: Option<u32>,
+
+    /// Seconds a cancelled decode request that took a KV handoff waits for
+    /// TensorRT-LLM's response headers and first token before the sidecar
+    /// sends `Control.Abort` and releases it.
+    ///
+    /// The wait lets the KV transfer land, because the cache transceiver
+    /// releases transferred blocks when the engine finishes the request, not
+    /// when the client goes away. The default matches the default
+    /// `cache_transceiver_config.kv_transfer_timeout_ms` (60 000 ms), after
+    /// which the transceiver gives up on the transfer itself, and the abort
+    /// then finishes the request so the engine frees its blocks. If you raise
+    /// `kv_transfer_timeout_ms`, raise this to match.
+    #[arg(
+        long,
+        env = "DYN_TRTLLM_DECODE_CANCEL_DRAIN_TIMEOUT_SECS",
+        default_value_t = DEFAULT_DECODE_CANCEL_DRAIN_TIMEOUT_SECS,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    pub decode_cancel_drain_timeout_secs: u64,
 }
 
 /// Match the shared media policy's enabled default, rejecting invalid startup configuration.
