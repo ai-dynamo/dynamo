@@ -554,7 +554,12 @@ class ManagedDGDR:
     async def assert_profiling_job_succeeded(self, name: str) -> None:
         self._require_clients()
         assert self.batch is not None
-        job = await self.batch.read_namespaced_job(name, self.config.namespace)
+        job = await self._retry_vcluster_api(
+            f"reading profiling Job {self.config.namespace}/{name}",
+            self.batch.read_namespaced_job,
+            name,
+            self.config.namespace,
+        )
         assert (job.status.succeeded or 0) >= 1, (
             f"profiling job {name} did not succeed: "
             f"succeeded={job.status.succeeded}, failed={job.status.failed}"
@@ -567,7 +572,21 @@ class ManagedDGDR:
         deadline = time.monotonic() + timeout
         last_state = None
         while time.monotonic() < deadline:
-            dgd = await self.get_dgd(name)
+            # Connection retries can outlast the deploy timeout, so stop them at
+            # the deadline and report the deploy timeout instead.
+            try:
+                dgd = await asyncio.wait_for(
+                    self._retry_vcluster_api(
+                        f"reading DGD {self.config.namespace}/{name}",
+                        self.get_dgd,
+                        name,
+                    ),
+                    timeout=deadline - time.monotonic(),
+                )
+            except TimeoutError:
+                if time.monotonic() < deadline:
+                    raise
+                break
             last_state = dgd.get("status", {}).get("state") if dgd else None
             if last_state and last_state.lower() == "successful":
                 return dgd
@@ -580,8 +599,11 @@ class ManagedDGDR:
     async def assert_dgd_pods_ready(self, dgd_name: str) -> None:
         self._require_clients()
         assert self.core is not None
-        pods = await self.core.list_namespaced_pod(
-            self.config.namespace, label_selector=f"{DGD_LABEL}={dgd_name}"
+        pods = await self._retry_vcluster_api(
+            f"listing pods for DGD {self.config.namespace}/{dgd_name}",
+            self.core.list_namespaced_pod,
+            self.config.namespace,
+            label_selector=f"{DGD_LABEL}={dgd_name}",
         )
         assert pods.items, f"DGD {dgd_name} should own at least one pod"
         for pod in pods.items:
@@ -598,7 +620,11 @@ class ManagedDGDR:
     async def assert_services(
         self, dgd_name: str, expectations: dict[str, int]
     ) -> None:
-        dgd = await self.get_dgd(dgd_name)
+        dgd = await self._retry_vcluster_api(
+            f"reading DGD {self.config.namespace}/{dgd_name}",
+            self.get_dgd,
+            dgd_name,
+        )
         assert dgd is not None
         dgd_status = dgd.get("status", {})
         statuses = dgd_status.get("components") or dgd_status.get("services", {})

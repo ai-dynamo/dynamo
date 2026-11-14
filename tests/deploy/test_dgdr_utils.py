@@ -417,6 +417,83 @@ async def test_validation_read_retries_vcluster_connection_refusal(
     sleep.assert_awaited_once_with(5)
 
 
+@pytest.mark.parametrize(
+    ("client_name", "method_name", "response", "check"),
+    [
+        (
+            "batch",
+            "read_namespaced_job",
+            SimpleNamespace(status=SimpleNamespace(succeeded=1, failed=0)),
+            lambda manager: manager.assert_profiling_job_succeeded("job"),
+        ),
+        (
+            "custom",
+            "get_namespaced_custom_object",
+            {"status": {"state": "successful"}},
+            lambda manager: manager.wait_for_dgd_successful("dgd", timeout=60),
+        ),
+        (
+            "core",
+            "list_namespaced_pod",
+            SimpleNamespace(
+                items=[
+                    SimpleNamespace(
+                        metadata=SimpleNamespace(name="pod"),
+                        status=SimpleNamespace(phase="Running", container_statuses=[]),
+                    )
+                ]
+            ),
+            lambda manager: manager.assert_dgd_pods_ready("dgd"),
+        ),
+        (
+            "custom",
+            "get_namespaced_custom_object",
+            {"status": {"components": {"Frontend": {"replicas": 1}}}},
+            lambda manager: manager.assert_services("dgd", {"Frontend": 1}),
+        ),
+    ],
+    ids=[
+        "assert_profiling_job_succeeded",
+        "wait_for_dgd_successful",
+        "assert_dgd_pods_ready",
+        "assert_services",
+    ],
+)
+async def test_deployment_check_retries_vcluster_connection_refusal(
+    monkeypatch, client_name, method_name, response, check
+) -> None:
+    manager = initialized_manager()
+    request = AsyncMock(side_effect=[vcluster_connection_error(), response])
+    setattr(getattr(manager, client_name), method_name, request)
+    sleep = AsyncMock()
+    monkeypatch.setattr("tests.deploy.vcluster_utils.asyncio.sleep", sleep)
+
+    await check(manager)
+
+    assert request.await_count == 2
+    sleep.assert_awaited_once_with(5)
+
+
+@pytest.mark.timeout(30)
+async def test_wait_for_dgd_successful_stops_connection_retries_at_deadline(
+    monkeypatch,
+) -> None:
+    manager = initialized_manager()
+    manager.get_dgd = AsyncMock(side_effect=vcluster_connection_error())
+    real_sleep = asyncio.sleep
+
+    # Twelve 0.05 s retry sleeps take longer than the 0.25 s deploy timeout.
+    async def short_sleep(_delay: float) -> None:
+        await real_sleep(0.05)
+
+    monkeypatch.setattr("tests.deploy.vcluster_utils.asyncio.sleep", short_sleep)
+
+    with pytest.raises(TimeoutError, match="Timed out after 0.25s"):
+        await manager.wait_for_dgd_successful("dgd", timeout=0.25)
+
+    assert manager.get_dgd.await_count < VCLUSTER_CONNECTION_RETRY_LIMIT + 1
+
+
 async def test_cleanup_retries_vcluster_connection_failures(monkeypatch) -> None:
     manager = initialized_manager()
     assert manager.custom is not None
