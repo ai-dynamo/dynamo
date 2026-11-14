@@ -4,62 +4,38 @@
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::hybrid_prefix::HybridPrefixEvaluator;
-use super::kv_cache_groups::{CheckpointWorkerSet, CheckpointWorkers};
 use super::{KvCacheGroupResidency, MatchDetails, MatchEdge, MatchFirstEdge, MatchObserver};
 use crate::kv_hints::{KvTransferCandidateSource, KvTransferCandidates};
 use crate::protocols::{ExternalSequenceBlockHash, WorkerWithDpRank};
 
-#[derive(Clone, Copy, Debug)]
-struct Checkpoint {
-    position: usize,
-    hash: ExternalSequenceBlockHash,
+/// One known hybrid candidate waiting for its resume point.
+struct Pending {
+    worker: WorkerWithDpRank,
+    /// Attention coverage end, capped by the query limit.
+    bound: u32,
+    /// Index into the recorded chain of the settled checkpoint.
+    resolved: Option<u32>,
 }
 
-impl Checkpoint {
-    const ZERO: Self = Self {
-        position: 0,
-        hash: ExternalSequenceBlockHash(0),
-    };
-}
-
-struct CurrentCheckpoint {
-    workers: CheckpointWorkerSet,
-    latest: Checkpoint,
-}
-
-#[derive(Clone, Copy)]
-enum ForwardOverride {
-    Live(Checkpoint),
-    Frozen(Checkpoint),
-}
-
-impl ForwardOverride {
-    fn is_frozen(self) -> bool {
-        matches!(self, Self::Frozen(_))
-    }
-
-    fn point(self) -> Checkpoint {
-        match self {
-            Self::Live(point) | Self::Frozen(point) => point,
-        }
-    }
-}
-
-/// Consume current checkpoint worker sets during the forward attention walk.
-/// Presence reads use a directory shard guard; subsequent matching uses owned
-/// query-local sets. Like attention coverage, accumulated results are best-effort
-/// during concurrent updates.
+/// Resolve hybrid resume points once the attention walk has finished.
+///
+/// The walk only records the matched external hashes. When every candidate's
+/// attention bound is known, checkpoint records are read from the deepest
+/// bound downward: one read settles every unsettled worker present at that
+/// hash, and reading stops as soon as no candidate is left. A query whose
+/// candidates all hold a checkpoint at their attention end therefore reads
+/// one record per distinct end rather than one per matched block.
+///
+/// Reads take a directory shard guard and see current state. Like attention
+/// coverage, results are best-effort during concurrent updates.
 pub(crate) struct ForwardDeviceEvaluator<'a> {
     residency: &'a KvCacheGroupResidency,
     legacy: Option<Box<HybridPrefixEvaluator>>,
     view: Option<super::kv_cache_groups::KnownWorkerRead>,
     max_blocks: usize,
-    current: Option<CurrentCheckpoint>,
-    overrides: FxHashMap<WorkerWithDpRank, ForwardOverride>,
-    cutoffs: Vec<(usize, WorkerWithDpRank)>,
+    /// Matched `(position, hash)` pairs in ascending one-based positions.
+    chain: Vec<(usize, ExternalSequenceBlockHash)>,
     needs_checkpoints: bool,
-    candidate_count: usize,
-    default_cap_hint: u32,
     emitted: bool,
 }
 
@@ -72,20 +48,13 @@ impl<'a> ForwardDeviceEvaluator<'a> {
                 .then(|| Box::new(HybridPrefixEvaluator::new(residency, max_blocks))),
             view: None,
             max_blocks: max_blocks.unwrap_or(usize::MAX),
-            current: None,
-            overrides: FxHashMap::default(),
-            cutoffs: Vec::new(),
+            chain: Vec::new(),
             needs_checkpoints: true,
-            candidate_count: 0,
-            default_cap_hint: 0,
             emitted: false,
         }
     }
 
     fn start(&mut self, count: usize) {
-        if self.candidate_count == 0 {
-            self.candidate_count = count;
-        }
         if self.view.is_none()
             && self.legacy.is_none()
             && self.residency.requires_general_device_eval()
@@ -102,184 +71,112 @@ impl<'a> ForwardDeviceEvaluator<'a> {
         }
     }
 
-    fn known(&self, worker: WorkerWithDpRank) -> bool {
+    /// `None` for a worker that was unknown when the walk started.
+    fn device_checkpoints(&self, worker: WorkerWithDpRank) -> Option<usize> {
         self.view
             .as_ref()
-            .is_some_and(|view| view.is_known_worker(worker))
+            .and_then(|view| view.device_checkpoints(worker))
     }
 
-    fn accumulated_point(&self, worker: WorkerWithDpRank) -> Option<Checkpoint> {
-        self.overrides
-            .get(&worker)
-            .map(|entry| entry.point())
-            .or_else(|| {
-                self.current.as_ref().and_then(|worker_set| {
-                    worker_set
-                        .workers
-                        .contains(&worker)
-                        .then_some(worker_set.latest)
-                })
-            })
-    }
-
-    fn freeze_worker(&mut self, worker: WorkerWithDpRank) {
-        if self
-            .overrides
-            .get(&worker)
-            .is_some_and(|entry| entry.is_frozen())
-        {
+    fn record_block(&mut self, position: usize, hash: ExternalSequenceBlockHash) {
+        if !self.needs_checkpoints || position > self.max_blocks {
             return;
         }
-        if let Some(point) = self.accumulated_point(worker) {
-            self.overrides
-                .insert(worker, ForwardOverride::Frozen(point));
+        // Positions arrive in ascending order; keep that true if a tree ever
+        // revisits one, because resolution searches the chain by position.
+        while self.chain.last().is_some_and(|&(last, _)| last >= position) {
+            self.chain.pop();
         }
+        self.chain.push((position, hash));
     }
 
-    fn transition_worker(
-        overrides: &mut FxHashMap<WorkerWithDpRank, ForwardOverride>,
-        previous: &CurrentCheckpoint,
-        next: &FxHashSet<WorkerWithDpRank>,
-        worker: WorkerWithDpRank,
-    ) {
-        if overrides
-            .get(&worker)
-            .is_some_and(|entry| entry.is_frozen())
-        {
+    /// Settle candidates against current checkpoint records, deepest bound
+    /// first. A worker's resume point is its deepest recorded position within
+    /// its bound whose record holds the worker; unsettled workers get none.
+    fn resolve(&self, pending: &mut [Pending]) {
+        let Some(first) = pending.first() else {
             return;
+        };
+        // Candidates that survive the whole walk share one bound, so the
+        // input is usually uniform already.
+        let first_bound = first.bound;
+        if pending.iter().any(|entry| entry.bound != first_bound) {
+            pending.sort_unstable_by_key(|entry| std::cmp::Reverse(entry.bound));
         }
-        if next.contains(&worker) {
-            overrides.remove(&worker);
-        } else if previous.workers.contains(&worker) {
-            overrides.insert(worker, ForwardOverride::Live(previous.latest));
-        }
-    }
-
-    fn for_each_covered(
-        edge: &MatchEdge<'_>,
-        position: usize,
-        mut visit: impl FnMut(WorkerWithDpRank),
-    ) {
-        let relative = position - edge.prefix_depth;
-        if edge.first_node {
-            for &worker in edge.full_workers {
-                visit(worker);
+        let deepest = pending[0].bound as usize;
+        // Slots that have reached their bound; settled ones are dropped lazily.
+        let mut open: Vec<u32> = Vec::with_capacity(pending.len());
+        let mut unsettled = 0usize;
+        let mut next = 0usize;
+        // Built only when a record with few holders meets many open slots.
+        let mut slots: Option<FxHashMap<WorkerWithDpRank, u32>> = None;
+        // Members of the last populated record that every open slot was
+        // checked against. An equal set cannot hold any of them.
+        let mut checked = None;
+        let mut index = self
+            .chain
+            .partition_point(|&(position, _)| position <= deepest);
+        while index > 0 {
+            let (position, hash) = self.chain[index - 1];
+            while let Some(entry) = pending.get(next)
+                && entry.bound as usize >= position
+            {
+                open.push(next as u32);
+                next += 1;
+                unsettled += 1;
+                checked = None;
             }
-            for (&worker, &cutoff) in edge.worker_cutoffs {
-                if relative <= cutoff {
-                    visit(worker);
-                }
+            if unsettled == 0 {
+                let Some(entry) = pending.get(next) else {
+                    break;
+                };
+                // Nobody can use the positions above the next candidate's bound.
+                let bound = entry.bound as usize;
+                index = self.chain[..index - 1].partition_point(|&(position, _)| position <= bound);
+                open.clear();
+                continue;
             }
-        } else {
-            for &worker in edge.incoming_workers {
-                if edge.full_workers.contains(&worker)
-                    || edge
-                        .worker_cutoffs
-                        .get(&worker)
-                        .is_some_and(|&cutoff| relative <= cutoff)
-                {
-                    visit(worker);
-                }
-            }
-        }
-    }
-
-    fn is_covered(edge: &MatchEdge<'_>, position: usize, worker: WorkerWithDpRank) -> bool {
-        (edge.first_node || edge.incoming_workers.contains(&worker))
-            && (edge.full_workers.contains(&worker)
-                || edge
-                    .worker_cutoffs
-                    .get(&worker)
-                    .is_some_and(|&cutoff| position - edge.prefix_depth <= cutoff))
-    }
-
-    fn observe_checkpoint(
-        &mut self,
-        position: usize,
-        hash: ExternalSequenceBlockHash,
-        coverage: Option<&MatchEdge<'_>>,
-    ) {
-        while self
-            .cutoffs
-            .last()
-            .is_some_and(|&(bound, _)| bound < position)
-        {
-            if let Some((_, worker)) = self.cutoffs.pop() {
-                self.freeze_worker(worker);
-            }
-        }
-        if position > self.max_blocks || !self.needs_checkpoints {
-            return;
-        }
-        let current = &mut self.current;
-        let overrides = &mut self.overrides;
-        let default_cap_hint = &mut self.default_cap_hint;
-        let majority = self.candidate_count.div_ceil(2);
-        if let Some(update) = self
-            .residency
-            .checkpoint_workers_since(hash, current.as_ref().map(|current| &current.workers))
-        {
-            let point = Checkpoint { position, hash };
-            let workers = match update {
-                CheckpointWorkers::Unchanged => {
-                    let previous = current
-                        .as_mut()
-                        .expect("unchanged membership requires a previous checkpoint");
-                    if previous.workers.len() >= majority {
-                        *default_cap_hint = position as u32;
-                    }
-                    previous.latest = point;
+            let at = (index - 1) as u32;
+            self.residency.visit_checkpoint_workers(hash, |workers| {
+                let signature = workers.signature();
+                if checked == Some(signature) {
                     return;
                 }
-                CheckpointWorkers::Changed(workers) => workers,
-            };
-            if workers.len() >= majority {
-                *default_cap_hint = position as u32;
-            }
-            if let Some(previous) = current.as_ref() {
-                let mut visit =
-                    |worker| Self::transition_worker(overrides, previous, &workers, worker);
-                if let Some(edge) = coverage {
-                    let candidates = if edge.first_node {
-                        edge.full_workers.len() + edge.worker_cutoffs.len()
-                    } else {
-                        edge.incoming_workers.len()
-                    };
-                    if previous.workers.len().saturating_add(workers.len()) < candidates {
-                        for &worker in previous.workers.iter().chain(workers.iter()) {
-                            if Self::is_covered(edge, position, worker) {
-                                visit(worker);
-                            }
+                checked = Some(signature);
+                if workers.len() * 2 < unsettled {
+                    let slots = slots.get_or_insert_with(|| {
+                        pending
+                            .iter()
+                            .enumerate()
+                            .map(|(slot, entry)| (entry.worker, slot as u32))
+                            .collect()
+                    });
+                    for worker in workers.iter() {
+                        if let Some(&slot) = slots.get(worker)
+                            && (slot as usize) < next
+                            && pending[slot as usize].resolved.is_none()
+                        {
+                            pending[slot as usize].resolved = Some(at);
+                            unsettled -= 1;
                         }
-                    } else {
-                        Self::for_each_covered(edge, position, visit);
                     }
                 } else {
-                    for &worker in previous.workers.iter().chain(workers.iter()) {
-                        visit(worker);
-                    }
+                    open.retain(|&slot| {
+                        let entry = &mut pending[slot as usize];
+                        if entry.resolved.is_some() {
+                            return false;
+                        }
+                        if workers.contains(&entry.worker) {
+                            entry.resolved = Some(at);
+                            unsettled -= 1;
+                            return false;
+                        }
+                        true
+                    });
                 }
-            }
-            *current = Some(CurrentCheckpoint {
-                workers,
-                latest: point,
             });
+            index -= 1;
         }
-    }
-
-    fn bounded_point(&self, worker: WorkerWithDpRank, raw_end: u32) -> Option<Checkpoint> {
-        if !self.known(worker) {
-            return None;
-        }
-        let Some(point) = self.accumulated_point(worker) else {
-            return Some(Checkpoint::ZERO);
-        };
-        let bound = (raw_end as usize).min(self.max_blocks);
-        Some(if point.position <= bound {
-            point
-        } else {
-            Checkpoint::ZERO
-        })
     }
 
     fn emit_supported(
@@ -290,48 +187,169 @@ impl<'a> ForwardDeviceEvaluator<'a> {
         details: &mut MatchDetails,
     ) {
         self.emitted = true;
-        let default_cap = self.default_cap_hint;
-        let mut prior_known = Vec::new();
-        let mut overrides = Vec::new();
+        let limit = u32::try_from(self.max_blocks).unwrap_or(u32::MAX);
+        // Candidates that need the general downward search.
+        let mut pending: Vec<Pending> = Vec::new();
+        // Known workers that cannot have a resume point: no Device checkpoint
+        // anywhere, or no attention coverage within the limit.
+        let mut uncredited = Vec::new();
+        // Workers whose coverage ended before the final depth are already
+        // scored; the known ones join the confirmed scope below.
+        let mut earlier = Vec::new();
+        for (&worker, &blocks) in &details.overlap_scores.scores {
+            if let Some(count) = self.device_checkpoints(worker) {
+                earlier.push(worker);
+                let bound = blocks.min(limit);
+                if count == 0 || bound == 0 {
+                    uncredited.push(worker);
+                } else {
+                    pending.push(Pending {
+                        worker,
+                        bound,
+                        resolved: None,
+                    });
+                }
+            }
+        }
         let last_hashes = &mut details.last_matched_hashes;
-        details.overlap_scores.scores.retain(|worker, blocks| {
-            let Some(point) = self.bounded_point(*worker, *blocks) else {
-                return true;
-            };
-            prior_known.push(*worker);
-            let cap = point.position as u32;
-            if cap != default_cap {
-                overrides.push((*worker, cap));
-            }
-            *blocks = cap;
-            if cap == 0 {
-                last_hashes.remove(worker);
-            } else {
-                last_hashes.insert(*worker, point.hash);
-            }
-            cap > 0
-        });
+        let scores = &mut details.overlap_scores.scores;
+        // Known workers that survived the whole walk share one bound.
+        let bound = raw_end.min(limit);
+        let mut survivors = Vec::with_capacity(active.len());
         active.retain(|worker| {
-            let Some(point) = self.bounded_point(*worker, raw_end) else {
-                details.overlap_scores.scores.insert(*worker, raw_end);
+            let Some(count) = self.device_checkpoints(*worker) else {
+                scores.insert(*worker, raw_end);
                 if let Some(hash) = raw_hash {
                     last_hashes.insert(*worker, hash);
                 }
                 return false;
             };
-            let cap = point.position as u32;
-            if cap != default_cap {
-                overrides.push((*worker, cap));
-            }
-            if cap > 0 {
-                details.overlap_scores.scores.insert(*worker, cap);
-                last_hashes.insert(*worker, point.hash);
+            if count == 0 || bound == 0 {
+                uncredited.push(*worker);
             } else {
-                last_hashes.remove(worker);
+                survivors.push(*worker);
             }
             true
         });
-        active.extend(prior_known);
+
+        // Read the record at the survivors' shared bound once. In the common
+        // case it settles all of them and no further bookkeeping is needed.
+        let top = self
+            .chain
+            .partition_point(|&(position, _)| position <= bound as usize)
+            .checked_sub(1)
+            .filter(|_| !survivors.is_empty());
+        // Survivor slots the top record does not hold, in ascending order.
+        let mut missed: Vec<u32> = Vec::new();
+        let mut top_read = false;
+        if let Some(index) = top {
+            self.residency
+                .visit_checkpoint_workers(self.chain[index].1, |workers| {
+                    top_read = true;
+                    for (slot, worker) in survivors.iter().enumerate() {
+                        if !workers.contains(worker) {
+                            missed.push(slot as u32);
+                        }
+                    }
+                });
+        }
+        let settled_at_top = if top_read {
+            survivors.len() - missed.len()
+        } else {
+            0
+        };
+        match top {
+            // Everything at or above the top position is ruled out for the
+            // survivors it did not settle.
+            Some(index) => {
+                let below = (self.chain[index].0 - 1) as u32;
+                let unsettled = |slot: usize| Pending {
+                    worker: survivors[slot],
+                    bound: below,
+                    resolved: None,
+                };
+                if top_read {
+                    pending.extend(missed.iter().map(|&slot| unsettled(slot as usize)));
+                } else {
+                    pending.extend((0..survivors.len()).map(unsettled));
+                }
+            }
+            // No recorded position lies within the bound.
+            None => uncredited.extend(survivors.iter().copied()),
+        }
+        pending.retain(|entry| {
+            if entry.bound == 0 {
+                uncredited.push(entry.worker);
+            }
+            entry.bound > 0
+        });
+
+        self.resolve(&mut pending);
+
+        // The most common cap becomes the default so few overrides are stored.
+        let top_cap = top.map_or(0, |index| self.chain[index].0 as u32);
+        let cap_of = |entry: &Pending| {
+            entry
+                .resolved
+                .map_or(0, |index| self.chain[index as usize].0 as u32)
+        };
+        let mut default_cap = top_cap;
+        let mut votes = settled_at_top;
+        let mut vote = |cap: u32, count: usize| {
+            if cap == default_cap {
+                votes += count;
+            } else if votes >= count {
+                votes -= count;
+            } else {
+                default_cap = cap;
+                votes = count - votes;
+            }
+        };
+        vote(0, uncredited.len());
+        for entry in &pending {
+            vote(cap_of(entry), 1);
+        }
+
+        let mut overrides = Vec::new();
+        if settled_at_top > 0
+            && let Some(index) = top
+        {
+            let hash = self.chain[index].1;
+            let mut skip = missed.iter().copied().peekable();
+            for (slot, &worker) in survivors.iter().enumerate() {
+                if skip.peek() == Some(&(slot as u32)) {
+                    skip.next();
+                    continue;
+                }
+                scores.insert(worker, top_cap);
+                last_hashes.insert(worker, hash);
+                if top_cap != default_cap {
+                    overrides.push((worker, top_cap));
+                }
+            }
+        }
+        for entry in &pending {
+            match entry.resolved {
+                Some(index) => {
+                    let (position, hash) = self.chain[index as usize];
+                    let cap = position as u32;
+                    scores.insert(entry.worker, cap);
+                    last_hashes.insert(entry.worker, hash);
+                    if cap != default_cap {
+                        overrides.push((entry.worker, cap));
+                    }
+                }
+                None => uncredited.push(entry.worker),
+            }
+        }
+        for worker in uncredited {
+            scores.remove(&worker);
+            last_hashes.remove(&worker);
+            if default_cap != 0 {
+                overrides.push((worker, 0));
+            }
+        }
+        active.extend(earlier);
         self.view = None;
         details.hybrid_resume_caps =
             super::HybridResumeCaps::sparse_confirmed(active, default_cap, overrides);
@@ -362,33 +380,21 @@ impl MatchObserver for ForwardDeviceEvaluator<'_> {
             return false;
         }
         if edge.first_node {
+            self.chain.clear();
+            // Nothing to record unless some candidate can hold a checkpoint.
             self.needs_checkpoints = self.max_blocks > 0
                 && edge
                     .full_workers
                     .iter()
                     .chain(edge.worker_cutoffs.keys())
-                    .any(|&worker| self.known(worker));
-        }
-        self.cutoffs.clear();
-        if !self.needs_checkpoints {
-            return true;
-        }
-        if !edge.first_node && !edge.all_workers_continue {
-            for &worker in edge.incoming_workers {
-                if !edge.full_workers.contains(&worker)
-                    && !edge.worker_cutoffs.contains_key(&worker)
-                {
-                    self.freeze_worker(worker);
-                }
+                    .any(|&worker| {
+                        self.device_checkpoints(worker)
+                            .is_some_and(|count| count > 0)
+                    });
+            if self.needs_checkpoints {
+                self.chain.reserve(64);
             }
         }
-        for (&worker, &cutoff) in edge.worker_cutoffs {
-            if edge.first_node || edge.incoming_workers.contains(&worker) {
-                self.cutoffs.push((edge.prefix_depth + cutoff, worker));
-            }
-        }
-        self.cutoffs
-            .sort_unstable_by_key(|entry| std::cmp::Reverse(entry.0));
         true
     }
 
@@ -425,7 +431,7 @@ impl MatchObserver for ForwardDeviceEvaluator<'_> {
         if let Some(legacy) = &mut self.legacy {
             legacy.observe_block(position, hash);
         } else {
-            self.observe_checkpoint(position, hash, None);
+            self.record_block(position, hash);
         }
     }
 
@@ -433,13 +439,9 @@ impl MatchObserver for ForwardDeviceEvaluator<'_> {
         &mut self,
         position: usize,
         hash: ExternalSequenceBlockHash,
-        edge: &MatchEdge<'_>,
+        _edge: &MatchEdge<'_>,
     ) {
-        if let Some(legacy) = &mut self.legacy {
-            legacy.observe_block(position, hash);
-        } else {
-            self.observe_checkpoint(position, hash, Some(edge));
-        }
+        self.observe_block(position, hash);
     }
 
     fn emit_match_details(
@@ -506,7 +508,7 @@ mod tests {
     use crate::protocols::{ResidencyOwner, StorageTier};
 
     #[test]
-    fn already_observed_checkpoint_uses_attention_best_effort_semantics() {
+    fn checkpoints_are_read_at_emission_with_current_state_semantics() {
         let table = KvCacheGroupResidency::new();
         let worker = WorkerWithDpRank::new(1, 0);
         table.declare_groups(ResidencyOwner::worker(worker), &[0]);
@@ -515,16 +517,19 @@ mod tests {
         let mut observer = ForwardDeviceEvaluator::new(&table, None);
         begin_forward(&mut observer, &raw, 1);
         observer.observe_block(1, ExternalSequenceBlockHash(1));
-        table.clear_worker(worker);
-        let mut already_read = raw.clone();
-        observer.finish(&mut already_read);
-        assert_eq!(already_read.hybrid_resume_caps.get(&worker), Some(&1));
 
-        // A later query reads the cleared record; an earlier observation is
-        // not a lease on the physical checkpoint, just like attention coverage.
-        let (after_clear, _) = forward_and_legacy(&table, &raw, None, 1);
-        assert_eq!(after_clear.hybrid_resume_caps.get(&worker), Some(&0));
-        assert!(!after_clear.overlap_scores.scores.contains_key(&worker));
+        // The walk only records the path. A record cleared before emission
+        // gives no credit: a matched hash is not a lease on the checkpoint,
+        // just like attention coverage.
+        table.clear_worker(worker);
+        let mut cleared = raw.clone();
+        observer.finish(&mut cleared);
+        assert_eq!(cleared.hybrid_resume_caps.get(&worker), Some(&0));
+        assert!(!cleared.overlap_scores.scores.contains_key(&worker));
+
+        store_device_checkpoint(&table, worker, 1, 1);
+        let (restored, _) = forward_and_legacy(&table, &raw, None, 1);
+        assert_eq!(restored.hybrid_resume_caps.get(&worker), Some(&1));
     }
 
     #[test]
@@ -861,7 +866,6 @@ mod tests {
                 &last,
             );
         }
-        assert_eq!(evaluator.overrides.capacity(), 0);
         let mut raw = raw_device([(dropped, 4), (surviving, 8)].into_iter());
         evaluator.finish(&mut raw);
         assert_eq!(raw.hybrid_resume_caps.get(&dropped), Some(&0));
@@ -1213,7 +1217,7 @@ mod tests {
                     assert!(actual.hybrid_resume_caps.is_empty());
                     assert!(actual.kv_transfer_candidates.is_none());
                     assert!(forward.view.is_none());
-                    assert!(forward.current.is_none());
+                    assert!(forward.chain.is_empty());
                 }
             }
         }

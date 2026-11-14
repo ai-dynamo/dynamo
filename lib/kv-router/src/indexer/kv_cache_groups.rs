@@ -17,7 +17,7 @@
 use std::ops::Deref;
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
 };
 
 use arc_swap::{ArcSwap, Guard};
@@ -63,8 +63,16 @@ impl CheckpointWorkerSet {
     }
 
     /// Constant-time comparison, subject to the documented collision risk.
+    #[cfg(test)]
     fn same_members(&self, other: &Self) -> bool {
         self.workers.len() == other.workers.len() && self.fingerprint == other.fingerprint
+    }
+
+    /// Size and fingerprint. Equal signatures mean equal members, subject to
+    /// the documented collision risk.
+    #[cfg_attr(not(feature = "standalone-indexer"), allow(dead_code))]
+    pub(crate) fn signature(&self) -> (usize, u64) {
+        (self.workers.len(), self.fingerprint)
     }
 }
 
@@ -111,12 +119,20 @@ struct CheckpointPresence {
     device_workers: CheckpointWorkerSet,
 }
 
+/// How one record update changed the owner's Device worker-set membership.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeviceMembership {
+    Unchanged,
+    Joined,
+    Left,
+}
+
 impl CheckpointPresence {
-    fn update(&mut self, owner: ResidencyOwner, mask: u8, alignment: usize) {
+    fn update(&mut self, owner: ResidencyOwner, mask: u8, alignment: usize) -> DeviceMembership {
         if self.owners.iter().enumerate().all(|(index, owners)| {
             owners.get(&owner).copied() == (mask & (1 << index) != 0).then_some(alignment)
         }) {
-            return;
+            return DeviceMembership::Unchanged;
         }
         for (index, owners) in self.owners.iter_mut().enumerate() {
             if mask & (1 << index) != 0 {
@@ -127,11 +143,14 @@ impl CheckpointPresence {
         }
         if let Some(worker) = owner.as_worker() {
             if mask & 1 != 0 && alignment == 1 {
-                self.device_workers.insert(worker);
-            } else {
-                self.device_workers.remove(&worker);
+                if self.device_workers.insert(worker) {
+                    return DeviceMembership::Joined;
+                }
+            } else if self.device_workers.remove(&worker) {
+                return DeviceMembership::Left;
             }
         }
+        DeviceMembership::Unchanged
     }
 
     fn is_empty(&self) -> bool {
@@ -153,29 +172,80 @@ impl CheckpointDirectory {
         self.entries.is_empty()
     }
 
+    /// Directory-only publication for tests that do not read the owner count.
+    #[cfg(test)]
     fn publish(&self, owner: ResidencyOwner, updates: Vec<(u64, u8)>, alignment: usize) {
+        self.publish_counted(owner, updates, alignment, &AtomicUsize::new(0));
+    }
+
+    /// `device_checkpoints` counts the records whose Device worker set holds
+    /// this owner. It is raised before any record can gain the owner and
+    /// lowered only after records lose it, so a reader that sees zero knows
+    /// no record credits the owner; a nonzero value may be briefly stale-high.
+    fn publish_counted(
+        &self,
+        owner: ResidencyOwner,
+        updates: Vec<(u64, u8)>,
+        alignment: usize,
+        device_checkpoints: &AtomicUsize,
+    ) {
+        let may_join = if owner.as_worker().is_some() && alignment == 1 {
+            updates.iter().filter(|(_, mask)| mask & 1 != 0).count()
+        } else {
+            0
+        };
+        if may_join > 0 {
+            device_checkpoints.fetch_add(may_join, Ordering::Relaxed);
+        }
+        let mut joined = 0;
+        let mut left = 0;
         for (hash, mask) in updates {
             // Update and remove under one entry guard so concurrent writers
             // cannot publish into a detached record. No owner lock is acquired
             // while holding this guard, and each iteration releases it.
-            match self.entries.entry(hash) {
+            let change = match self.entries.entry(hash) {
                 Entry::Occupied(mut entry) => {
-                    let empty = {
+                    let (change, empty) = {
                         let record = entry.get_mut();
-                        record.update(owner, mask, alignment);
-                        record.is_empty()
+                        (record.update(owner, mask, alignment), record.is_empty())
                     };
                     if empty {
                         entry.remove();
                     }
+                    change
                 }
                 Entry::Vacant(entry) if mask != 0 => {
                     let mut record = CheckpointPresence::default();
-                    record.update(owner, mask, alignment);
+                    let change = record.update(owner, mask, alignment);
                     entry.insert(Box::new(record));
+                    change
                 }
-                Entry::Vacant(_) => {}
+                Entry::Vacant(_) => DeviceMembership::Unchanged,
+            };
+            match change {
+                DeviceMembership::Joined => joined += 1,
+                DeviceMembership::Left => left += 1,
+                DeviceMembership::Unchanged => {}
             }
+        }
+        // Every join was pre-counted, so `may_join >= joined`.
+        let surplus = may_join - joined + left;
+        if surplus > 0 {
+            device_checkpoints.fetch_sub(surplus, Ordering::Relaxed);
+        }
+    }
+
+    /// Run `visit` on this hash's nonempty Device worker set under the shard
+    /// read guard. The visitor must only touch query-local state.
+    fn visit_device_workers(
+        &self,
+        hash: ExternalSequenceBlockHash,
+        visit: impl FnOnce(&CheckpointWorkerSet),
+    ) {
+        if let Some(record) = self.entries.get(&hash.0)
+            && !record.device_workers.is_empty()
+        {
+            visit(&record.device_workers);
         }
     }
 
@@ -232,6 +302,9 @@ struct OwnerPresence {
     alignment_blocks: usize,
     retired: bool,
     published_general_device_eval: bool,
+    /// Shared with the registry snapshot so queries can read it without
+    /// taking this owner's lock. See [`CheckpointDirectory::publish_counted`].
+    device_checkpoints: Arc<AtomicUsize>,
 }
 
 impl OwnerPresence {
@@ -363,6 +436,8 @@ pub struct CheckpointLayout {
 struct OwnerRegistry {
     owners: FxHashMap<ResidencyOwner, Arc<RwLock<OwnerPresence>>>,
     cache_owners: FxHashMap<ResidencyOwnerKey, ResidencyOwner>,
+    /// Each registered worker's Device checkpoint counter, keyed like `owners`.
+    device_checkpoints: FxHashMap<WorkerWithDpRank, Arc<AtomicUsize>>,
 }
 
 #[derive(Debug)]
@@ -373,10 +448,21 @@ pub(crate) struct KnownWorkerRead {
 
 #[cfg_attr(not(feature = "standalone-indexer"), allow(dead_code))]
 impl KnownWorkerRead {
+    #[cfg(test)]
     pub(crate) fn is_known_worker(&self, worker: WorkerWithDpRank) -> bool {
         self.registry
             .owners
             .contains_key(&ResidencyOwner::worker(worker))
+    }
+
+    /// How many checkpoint records currently credit this worker on Device;
+    /// `None` for a worker that was unknown when this view was captured. Zero
+    /// is exact; a nonzero value may be briefly stale-high.
+    pub(crate) fn device_checkpoints(&self, worker: WorkerWithDpRank) -> Option<usize> {
+        self.registry
+            .device_checkpoints
+            .get(&worker)
+            .map(|count| count.load(Ordering::Relaxed))
     }
 }
 
@@ -480,6 +566,7 @@ impl CheckpointReadView {
 
 /// A query keeps its own worker set. Matching size and fingerprint reuse that
 /// query-local set; otherwise return an independent copy of this hash's workers.
+#[cfg(test)]
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum CheckpointWorkers {
     Unchanged,
@@ -521,7 +608,7 @@ impl KvCacheGroupResidency {
     /// current set under the shard read guard, copying when they differ. This
     /// uses the probabilistic equality contract of `CheckpointWorkerSet`.
     /// The returned set owns its storage; matching runs after all guards drop.
-    #[cfg_attr(not(feature = "standalone-indexer"), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn checkpoint_workers_since(
         &self,
         hash: ExternalSequenceBlockHash,
@@ -539,6 +626,18 @@ impl KvCacheGroupResidency {
             return Some(CheckpointWorkers::Unchanged);
         }
         Some(CheckpointWorkers::Changed(workers.clone()))
+    }
+
+    /// Visit this hash's complete, alignment-one Device workers in place.
+    /// The visitor runs under the directory shard read guard, so it must be
+    /// short and touch only query-local state.
+    #[cfg_attr(not(feature = "standalone-indexer"), allow(dead_code))]
+    pub(crate) fn visit_checkpoint_workers(
+        &self,
+        hash: ExternalSequenceBlockHash,
+        visit: impl FnOnce(&CheckpointWorkerSet),
+    ) {
+        self.checkpoints.visit_device_workers(hash, visit);
     }
 
     #[cfg(test)]
@@ -594,8 +693,12 @@ impl KvCacheGroupResidency {
                 .filter(|hash| !state.complete_checkpoints.contains_key(hash))
                 .map(|hash| (hash, 0)),
         );
-        self.checkpoints
-            .publish(owner, updates, state.alignment_blocks.max(1));
+        self.checkpoints.publish_counted(
+            owner,
+            updates,
+            state.alignment_blocks.max(1),
+            &state.device_checkpoints,
+        );
     }
 
     fn clear_owner(&self, owner: ResidencyOwner, state: &mut OwnerPresence) {
@@ -617,7 +720,12 @@ impl KvCacheGroupResidency {
             return state.clone();
         }
         let mut next = (*current).clone();
-        let state = Arc::new(RwLock::new(OwnerPresence::default()));
+        let presence = OwnerPresence::default();
+        if let Some(worker) = owner.as_worker() {
+            next.device_checkpoints
+                .insert(worker, presence.device_checkpoints.clone());
+        }
+        let state = Arc::new(RwLock::new(presence));
         next.owners.insert(owner, state.clone());
         if matches!(owner, ResidencyOwner::CacheOwner(_)) {
             next.cache_owners.insert(owner.compact_key(), owner);
@@ -750,8 +858,12 @@ impl KvCacheGroupResidency {
                     state.refresh_general_requirement(&self.general_device_eval_layouts);
                     self.publish_reset(owner, previous, &state);
                 } else {
-                    self.checkpoints
-                        .publish(owner, updates, state.alignment_blocks.max(1));
+                    self.checkpoints.publish_counted(
+                        owner,
+                        updates,
+                        state.alignment_blocks.max(1),
+                        &state.device_checkpoints,
+                    );
                 }
             }
             KvCacheEventData::Removed(data) => {
@@ -777,8 +889,12 @@ impl KvCacheGroupResidency {
                             updates.push((hash.0, new));
                         }
                     }
-                    self.checkpoints
-                        .publish(owner, updates, state.alignment_blocks.max(1));
+                    self.checkpoints.publish_counted(
+                        owner,
+                        updates,
+                        state.alignment_blocks.max(1),
+                        &state.device_checkpoints,
+                    );
                 }
             }
             KvCacheEventData::Cleared => self.clear_event(event),
@@ -839,6 +955,9 @@ impl KvCacheGroupResidency {
                 true
             }
         });
+        let owners = &next.owners;
+        next.device_checkpoints
+            .retain(|worker, _| owners.contains_key(&ResidencyOwner::worker(*worker)));
         self.active
             .store(!next.owners.is_empty(), Ordering::Relaxed);
         self.registry.store(Arc::new(next));
