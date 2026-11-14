@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import copy
 import json
+from functools import partial
 from typing import Any, Protocol
 
 from jinja2.exceptions import TemplateError
@@ -13,6 +14,7 @@ from sglang.srt.parser.jinja_template_utils import (
     process_content_for_template_format,
 )
 
+from .reasoning import normalize_reasoning_content
 from .sglang_deepseek import (
     RecipeRequestError,
     recipe_renderer,
@@ -69,6 +71,19 @@ class JinjaPromptRenderer:
         if (reasoning_effort := request.get("reasoning_effort")) is not None:
             template_kwargs["reasoning_effort"] = reasoning_effort
 
+        normalize_reasoning_content(
+            messages,
+            render_template=partial(
+                self._tokenizer.apply_chat_template,
+                **{
+                    **template_kwargs,
+                    "tokenize": False,
+                    "return_dict": False,
+                    "return_assistant_tokens_mask": False,
+                },
+            ),
+            tools=template_kwargs.get("tools"),
+        )
         template_messages = _normalize_messages_for_template(messages, self._tokenizer)
 
         try:
@@ -480,6 +495,7 @@ def _render_deepseek_v4_prompt_token_ids(
         ) from exc
 
     encoding_messages = copy.deepcopy(messages)
+    normalize_reasoning_content(encoding_messages, string_only=True)
     for msg in encoding_messages:
         content = msg.get("content")
         if content is None:
