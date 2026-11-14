@@ -45,6 +45,8 @@ mod cancellation;
 mod conditional_bypass;
 mod handoff;
 mod query;
+mod retained_kv;
+mod retained_kv_flow;
 use activation::ActivationSnapshot;
 use handoff::PrefillTask;
 pub use query::PrefillReservation;
@@ -262,11 +264,12 @@ pub(crate) const BYPASS_REMOTE_PREFILL_ANNOTATION: &str = "x-bypass-remote-prefi
 /// which is an engine-owned KV handoff contract rather than a public response
 /// channel.
 pub struct PrefillRouter {
-    binding: ArcSwapOption<PrefillBinding>,
+    binding: Arc<ArcSwapOption<PrefillBinding>>,
+    retained_kv: Option<Arc<retained_kv::Catalog>>,
     target: Mutex<Option<WorkerSetTargetId>>,
     target_tx: Option<watch::Sender<Option<WorkerSetTarget>>>,
-    /// Decode routing owns conditional-disagg planning and dispatch. This is
-    /// installed after the frontend constructs its one decode `RoutingHost`.
+    /// Admitted decoder membership and conditional-disagg dispatch.
+    /// Installed after the frontend constructs its decode `RoutingHost`.
     decode_routing_host: OnceLock<Arc<RoutingHost>>,
     selection_policy: Option<SelectionPolicySource>,
     model_manager: Arc<ModelManager>,
@@ -420,6 +423,7 @@ impl
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>> {
         // Extract request data while preserving context
         let (mut req, mut context) = request.into_parts();
+        retained_kv_flow::strip_private_request(&mut req);
         let request_id = context.id().to_string();
         let engine_ctx = context.context();
 
@@ -609,6 +613,14 @@ impl
             ));
         }
 
+        let retained_flow = self.prepare_retained_kv(&mut req, &binding, &request_id);
+        if let Some(flow) = &retained_flow {
+            prefill_context = prefill_context.map(|mut request| {
+                flow.prepare_prefill(&mut request);
+                request
+            });
+        }
+
         let router = &binding.router;
         let endpoint_id = &binding.endpoint_id;
         let mut prefill_completion = None;
@@ -619,6 +631,9 @@ impl
                 booking,
             } = router
                 .select_and_dispatch_prefill(prefill_context, |request, target| {
+                    if let Some(flow) = &retained_flow {
+                        flow.revalidate_prefill(request);
+                    }
                     let prepared = self.prepare_prefill_dispatch(request, target, endpoint_id)?;
                     let prefill_supports_cancellation =
                         self.model_manager.worker_supports_runtime_capability(
@@ -766,14 +781,18 @@ impl
             (true, true) => PrefillNeed::BeforeFirst,
         };
         let decode = next.generate(context.map(|_| decode_req));
-        match prefill_completion {
+        let response = match prefill_completion {
             Some(completion) => {
                 completion
                     .forward_decode(decode, engine_ctx, output, prefill_engine_ctx)
                     .await
             }
             None => decode.await,
-        }
+        }?;
+        Ok(match retained_flow {
+            Some(flow) => flow.observe(response),
+            None => response,
+        })
     }
 }
 
@@ -790,6 +809,10 @@ fn independent_prefill_context(
 }
 
 impl PrefillRouter {
+    pub(crate) fn retained_kv_enabled(&self) -> bool {
+        self.retained_kv.is_some()
+    }
+
     pub(crate) fn conditional_disagg_enabled(&self) -> bool {
         self.conditional_disagg_policy.is_enabled()
     }
