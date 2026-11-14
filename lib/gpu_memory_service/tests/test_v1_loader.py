@@ -31,6 +31,17 @@ from gpu_memory_service.snapshot.transfer import (
 )
 from gpu_memory_service.v1.snapshot import loader, mx_source
 
+try:
+    from modelexpress import p2p_pb2
+    from modelexpress.adapter import StrategyFailed
+    from modelexpress.load_strategy import base as strategy_base
+    from modelexpress.load_strategy.rdma_strategy import RdmaStrategy
+    from modelexpress.metadata import client_factory, publish
+    from modelexpress.nixl_transfer import NixlTransferManager
+except ImportError:  # The ModelExpress tests skip without the package.
+    p2p_pb2 = StrategyFailed = strategy_base = RdmaStrategy = None
+    client_factory = publish = NixlTransferManager = None
+
 pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.unit,
@@ -223,8 +234,6 @@ def test_mx_source_stops_advertising_before_releasing_its_weights(
     import threading
 
     import torch
-    from modelexpress.load_strategy import base
-    from modelexpress.metadata import publish
 
     events = []
     ctx = SimpleNamespace(
@@ -271,9 +280,9 @@ def test_mx_source_stops_advertising_before_releasing_its_weights(
     )
     monkeypatch.setattr(mx_source, "byte_tensors", lambda *_args: {})
     monkeypatch.setattr(mx_source, "mx_load_context", lambda *_args: ctx)
-    monkeypatch.setattr(base, "register_tensors", register)
+    monkeypatch.setattr(strategy_base, "register_tensors", register)
     monkeypatch.setattr(
-        base, "unpublish_metadata", lambda _ctx: events.append("unpublish")
+        strategy_base, "unpublish_metadata", lambda _ctx: events.append("unpublish")
     )
     monkeypatch.setattr(publish, "publish_metadata_and_ready", publish_and_ready)
     stop = threading.Event()
@@ -322,10 +331,6 @@ class _FakeAgent:
 )
 def test_mx_restore_retries_the_next_source_on_its_listen_port(monkeypatch):
     import torch
-    from modelexpress import p2p_pb2
-    from modelexpress.adapter import StrategyFailed
-    from modelexpress.load_strategy.rdma_strategy import RdmaStrategy
-    from modelexpress.metadata import client_factory
 
     agents: list[_FakeAgent] = []
 
@@ -393,8 +398,6 @@ class _CatalogAgent:
     """A NIXL manager that runs ModelExpress's real tensor matching."""
 
     def __init__(self, port: int) -> None:
-        from modelexpress.nixl_transfer import NixlTransferManager
-
         self.port = port
         self.prepared: list = []
         self.tensor_descriptors: list = []
@@ -439,9 +442,6 @@ class _CatalogAgent:
 )
 def test_mx_restore_rejects_a_peer_with_other_allocations(monkeypatch, peer_sizes):
     import torch
-    from modelexpress import p2p_pb2
-    from modelexpress.load_strategy.rdma_strategy import RdmaStrategy
-    from modelexpress.metadata import client_factory
 
     agents: list[_CatalogAgent] = []
 
@@ -462,6 +462,8 @@ def test_mx_restore_rejects_a_peer_with_other_allocations(monkeypatch, peer_size
     monkeypatch.setattr(torch.cuda, "synchronize", lambda _device: None)
     monkeypatch.setattr(client_factory, "create_metadata_client", lambda **_: None)
     monkeypatch.setattr(RdmaStrategy, "is_available", lambda _self, _ctx: True)
+    # Registration checks NIXL on its own, apart from is_available.
+    monkeypatch.setattr(strategy_base, "is_nixl_available", lambda: True)
     monkeypatch.setattr(
         RdmaStrategy,
         "_find_source_instances",
@@ -497,7 +499,7 @@ def test_mx_restore_rejects_a_peer_with_other_allocations(monkeypatch, peer_size
     )
     ids = ["a0", "a1", "a2"]
     session = backend.start_restore([FileTransferSource(a, "", 0, 64) for a in ids])
-    with pytest.raises(Exception, match="mismatch"):
+    with pytest.raises(StrategyFailed, match="mismatch"):
         session.restore(
             {
                 a: GMSTransferTarget(a, 0x1000 * (i + 1), 0, 64)
