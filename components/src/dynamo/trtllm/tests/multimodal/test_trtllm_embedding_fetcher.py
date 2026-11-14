@@ -3,8 +3,10 @@
 
 """Unit tests for fetch_embeddings_from_encoder."""
 
+from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 import torch
@@ -220,3 +222,56 @@ class TestFetchEmbeddingsFromEncoder:
 
         with pytest.raises(ValueError, match="image_urls must not be empty"):
             await fetch_embeddings_from_encoder([], {}, mock_client, encoder_cache)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("versioned", [False, True])
+async def test_encoder_export_keeps_legacy_backend_fallback(monkeypatch, versioned):
+    from dynamo.trtllm.encode_helper import EncodeHelper
+
+    @dataclass
+    class Params:
+        multimodal: dict
+        opaque_state: bytes | None = None
+
+    loader = SimpleNamespace(load_image_batch=AsyncMock(return_value=[object()]))
+    monkeypatch.setattr(EncodeHelper, "_get_image_loader", staticmethod(lambda: loader))
+    legacy = DisaggregatedParams(
+        multimodal_embedding_handles=[{"tensor_size": [2, 16]}],
+        multimodal_hashes=[[1] * 8],
+    )
+    result = SimpleNamespace(disaggregated_params=legacy)
+    payload = {
+        "schema_version": 1,
+        "items": [],
+        "request_layout": {"prompt_token_ids": [1, 99, 99]},
+    }
+    if versioned:
+        result.export_multimodal_handoff = lambda: Params(multimodal=payload)
+    engine = SimpleNamespace(llm=SimpleNamespace(generate=Mock(return_value=[result])))
+    tokenizer = SimpleNamespace(decode=Mock(return_value="legacy-prompt"))
+    responses = [
+        response
+        async for response in EncodeHelper._process_full_epd_flow(
+            [1],
+            ["https://example.com/image.png"],
+            tokenizer,
+            "unused",
+            "unused",
+            engine,
+        )
+    ]
+    assert len(responses) == 1
+    response = responses[0]
+    if versioned:
+        assert response["ep_disaggregated_params"]["multimodal"] == payload
+        assert "processed_prompt" not in response
+        assert "prompt_token_ids" not in response
+        tokenizer.decode.assert_not_called()
+    else:
+        assert (
+            response["ep_disaggregated_params"]["multimodal_embedding_handles"]
+            == legacy.multimodal_embedding_handles
+        )
+        assert response["processed_prompt"] == "legacy-prompt"
+        assert response["prompt_token_ids"] == [1]
