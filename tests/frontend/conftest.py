@@ -23,6 +23,30 @@ from tests.utils.port_utils import allocate_port, deallocate_port
 logger = logging.getLogger(__name__)
 
 
+def pytest_addoption(parser):
+    parser.addoption(
+        "--run-strict-schema-upgrade",
+        action="store_true",
+        help="Run strict-schema upgrade acceptance for N-2 or explicit image pairs.",
+    )
+    for role in ("baseline", "target"):
+        parser.addoption(
+            f"--schema-upgrade-{role}-image",
+            default=None,
+            help=f"SGLang runtime image for the {role} (version tag, optionally pinned with @sha256).",
+        )
+    parser.addoption(
+        "--schema-upgrade-model-cache-pvc",
+        default=None,
+        help="Prepared model-cache PVC for the manual upgrade comparison.",
+    )
+    parser.addoption(
+        "--schema-upgrade-model-cache-mount",
+        default=None,
+        help="Model-cache mount override for an explicit image comparison (default: /models).",
+    )
+
+
 def pytest_ignore_collect(collection_path, config):
     """Skip collecting test files if required dependencies aren't installed."""
     filename = collection_path.name
