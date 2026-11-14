@@ -1176,6 +1176,82 @@ mod tests {
         );
     }
 
+    /// Recovery replaces a rank by resetting it and admitting the source's dump
+    /// (`replace_rank`). Recurrent presence has to come back with it, or a
+    /// restarted router scores hybrid workers as dense.
+    #[tokio::test]
+    async fn recurrent_presence_survives_dump_and_rank_replacement() {
+        use crate::prelude::{
+            ExternalSequenceBlockHash, KvCacheGroupKind, KvCacheGroupTag, KvCacheStoreData,
+            KvCacheStoredBlockData, ResidencyOwner,
+        };
+
+        let worker = WorkerWithDpRank::new(9, 0);
+        let owner = ResidencyOwner::worker(worker);
+        let tagged = |event_id: u64, group_idx: u32, hashes: &[u64]| {
+            RouterEvent::with_storage_tier(
+                worker.worker_id,
+                KvCacheEvent {
+                    event_id,
+                    data: KvCacheEventData::Stored(KvCacheStoreData {
+                        parent_hash: None,
+                        start_position: None,
+                        blocks: hashes
+                            .iter()
+                            .map(|&hash| KvCacheStoredBlockData {
+                                block_hash: ExternalSequenceBlockHash(hash),
+                                tokens_hash: LocalBlockHash(0),
+                                mm_extra_info: None,
+                            })
+                            .collect(),
+                    }),
+                    dp_rank: worker.dp_rank,
+                },
+                StorageTier::Device,
+            )
+            .with_kv_cache_group(KvCacheGroupTag {
+                group_idx,
+                kind: KvCacheGroupKind::Mamba,
+                expected_group_count: Some(2),
+                alignment_blocks: Some(1),
+            })
+        };
+        let has_checkpoint = |indexer: &Indexer, hash: u64| {
+            let Indexer::Single { lower_tier, .. } = indexer else {
+                panic!("single indexer");
+            };
+            let mut view = lower_tier.group_residency().read_view();
+            view.track_owner(owner);
+            view.owners_at(ExternalSequenceBlockHash(hash), StorageTier::Device)
+                .any(|known| known == owner)
+        };
+
+        let source = create_indexer(4, 1);
+        for event in [tagged(1, 0, &[77]), tagged(2, 1, &[77, 88])] {
+            source.try_apply_event(event).await.unwrap();
+        }
+        assert!(has_checkpoint(&source, 77));
+        assert!(!has_checkpoint(&source, 88));
+        let dump = source.dump_events().await.unwrap();
+
+        let target = create_indexer(4, 1);
+        for event in [tagged(1, 0, &[99]), tagged(2, 1, &[99])] {
+            target.try_apply_event(event).await.unwrap();
+        }
+        assert!(has_checkpoint(&target, 99));
+
+        target
+            .reset_worker_dp_rank_and_wait(worker.worker_id, worker.dp_rank)
+            .await
+            .unwrap();
+        for event in dump {
+            target.try_apply_event(event).await.unwrap();
+        }
+        assert!(has_checkpoint(&target, 77));
+        assert!(!has_checkpoint(&target, 88));
+        assert!(!has_checkpoint(&target, 99));
+    }
+
     /// Tagged events on the recovery ingest path go to recurrent presence,
     /// not into the attention tree, and a rank reset forgets them.
     #[tokio::test]
