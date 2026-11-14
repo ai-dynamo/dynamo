@@ -4107,6 +4107,7 @@ fn accumulate_reasoning_dispatch(
     }
 }
 
+#[allow(deprecated)]
 fn apply_chat_completions_request_template(
     request: &mut dynamo_protocols::types::CreateChatCompletionRequest,
     template: Option<&RequestTemplate>,
@@ -4118,7 +4119,14 @@ fn apply_chat_completions_request_template(
         if request.temperature.is_none() {
             request.temperature = Some(template.temperature);
         }
-        if request.max_completion_tokens.unwrap_or(0) == 0 {
+        // `max_completion_tokens` wins over the deprecated `max_tokens` downstream, so
+        // filling it here would discard a limit the client sent as `max_tokens`.
+        if request
+            .max_completion_tokens
+            .or(request.max_tokens)
+            .unwrap_or(0)
+            == 0
+        {
             request.max_completion_tokens = Some(template.max_completion_tokens);
         }
     }
@@ -6983,6 +6991,31 @@ mod tests {
         request.temperature = None;
         apply_chat_completions_request_template(&mut request, Some(&template));
         assert_eq!(request.temperature, Some(0.7));
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn test_chat_completions_template_preserves_client_max_tokens() {
+        let template = RequestTemplate {
+            model: "template-model".to_string(),
+            temperature: 0.7,
+            max_completion_tokens: 128,
+        };
+        let mut request = CreateChatCompletionRequest {
+            max_tokens: Some(16),
+            ..Default::default()
+        };
+
+        apply_chat_completions_request_template(&mut request, Some(&template));
+
+        // `max_completion_tokens` wins over `max_tokens` downstream, so filling it
+        // from the template would discard the limit the client asked for.
+        assert_eq!(request.max_tokens, Some(16));
+        assert_eq!(request.max_completion_tokens, None);
+
+        request.max_tokens = None;
+        apply_chat_completions_request_template(&mut request, Some(&template));
+        assert_eq!(request.max_completion_tokens, Some(128));
     }
 
     #[test]
