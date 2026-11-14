@@ -126,14 +126,6 @@ ARG AWS_SDK_CPP_VERSION={{ context.vllm.aws_sdk_cpp_version }}
 ARG MODELEXPRESS_VERSION={{ context[framework].modelexpress_version }}
 {%- endif -%}
 
-{% if framework == "sglang" and device == "xpu" -%}
-# SGLang XPU build: clone and build from source (no pre-built runtime image)
-ARG SGLANG_GIT_URL={{ context.sglang.xpu.sglang_git_url }}
-ARG SGLANG_REF={{ context.sglang.xpu.sglang_ref }}
-ARG SGLANG_KERNEL_GIT_URL={{ context.sglang.xpu.sglang_kernel_git_url }}
-ARG SGLANG_KERNEL_REF={{ context.sglang.xpu.sglang_kernel_ref }}
-{%- endif -%}
-
 {% if make_efa == true %}
 ARG EFA_VERSION={{ context.dynamo.efa_version }}
 ARG EFA_BASE_IMAGE={{ "runtime" if target=="runtime" else "dev" }}
