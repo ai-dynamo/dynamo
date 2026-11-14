@@ -15,7 +15,7 @@
 #       vLLM:   _PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES → --kv-cache-memory-bytes N --gpu-memory-utilization 0.01
 #
 #   build_sglang_gpu_mem_args
-#       SGLang: _PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS → --max-total-tokens N
+#       SGLang: _PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS → token and Mamba cache caps
 #
 #       Note: TensorRT-LLM uses build_trtllm_override_args_with_mem() instead (requires JSON merging)
 #
@@ -77,7 +77,9 @@ build_sglang_gpu_mem_args() {
         # smaller GPUs (e.g. L4 24 GiB) even when the token cap would fit.
         # Setting 0.9 maximises the pool headroom; the token cap controls the
         # actual allocation.
-        echo "--max-total-tokens ${_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS} --mem-fraction-static 0.9"
+        # Hybrid models size the Mamba state cache from free VRAM independently
+        # of the token cap; bound it so parallel tests cannot starve each other.
+        echo "--max-total-tokens ${_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS} --mem-fraction-static 0.9 --max-mamba-cache-size 64"
         return 0
     fi
 
@@ -192,7 +194,7 @@ _gpu_utils_self_test() {
     echo "=== sglang: token cap env ==="
     result=$(_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS=1024 \
         build_sglang_gpu_mem_args)
-    _assert "token cap" "--max-total-tokens 1024 --mem-fraction-static 0.9" "$result"
+    _assert "token and Mamba caps" "--max-total-tokens 1024 --mem-fraction-static 0.9 --max-mamba-cache-size 64" "$result"
 
     echo ""
     echo "=== sglang: no override = empty ==="
