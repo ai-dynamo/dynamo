@@ -75,7 +75,7 @@ a microservice behind a dedicated gateway or proxy that provides:
 On Kubernetes, place a standard ingress or Gateway that you configure for
 authentication and TLS in front of the Dynamo Frontend service. End-user
 authentication and authorization remain the gateway's responsibility. If you
-adopt Dynamo's optional [Gateway API routing topology](../../kubernetes/installation/gateway-api-routing.mdx),
+adopt Dynamo's optional [Gateway API Inference Extension (GAIE) routing topology](../../kubernetes/installation/gateway-api-routing.mdx),
 note that its Endpoint Picker selects a backend for load and KV-cache reasons and
 does not authenticate clients, so it still sits behind your authenticating
 gateway.
