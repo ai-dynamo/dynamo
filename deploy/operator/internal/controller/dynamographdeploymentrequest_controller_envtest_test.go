@@ -46,6 +46,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -2348,6 +2349,36 @@ var _ = Describe("DGDR Helper Functions", func() {
 				Name: "test-dgdr",
 			}
 			Expect(getProfilingJobName(dgdr)).Should(Equal("profile-test-dgdr"))
+		})
+
+		It("Should return a valid, stable Job name for every admitted DGDR name", func() {
+			name55 := strings.Repeat("a", 55)
+			// The cut keeps the first 46 name characters; put a "." at the cut point.
+			dotted := strings.Repeat("a", 45) + "." + strings.Repeat("b", 20)
+			cases := []struct {
+				name string
+				want string // exact Job name, when the name is not shortened
+			}{
+				{name: name55, want: "profile-" + name55},
+				{name: strings.Repeat("a", 56)},
+				{name: "llama-3-3-70b-instruct-fp8-production-us-east-1-profiling"},
+				{name: strings.Repeat("a", 63)},
+				{name: strings.Repeat("a", 253)},
+				{name: dotted},
+			}
+			for _, tc := range cases {
+				dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+					Name: tc.name,
+				}
+				jobName := getProfilingJobName(dgdr)
+				Expect(validation.IsValidLabelValue(jobName)).To(BeEmpty(), "DGDR name %q gave Job name %q", tc.name, jobName)
+				Expect(validation.IsDNS1123Subdomain(jobName)).To(BeEmpty(), "DGDR name %q gave Job name %q", tc.name, jobName)
+				Expect(getProfilingJobName(dgdr)).To(Equal(jobName), "Job name must be stable")
+				Expect(jobName).To(HavePrefix("profile-"))
+				if tc.want != "" {
+					Expect(jobName).To(Equal(tc.want))
+				}
+			}
 		})
 	})
 
