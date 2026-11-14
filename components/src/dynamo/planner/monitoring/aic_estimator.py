@@ -3,7 +3,7 @@
 
 """AIConfigurator performance estimator used by the planner (and the profiler).
 
-This thin wrapper around the ``aisimulate_core`` SDK lets callers estimate
+This thin wrapper around the ``aisim_core`` SDK lets callers estimate
 prefill / decode latency and KV-cache capacity for a given model + system +
 backend + parallelism config without spinning up a real engine. The planner
 uses it to bootstrap regression models from an AIC spec in rapid mode.
@@ -23,15 +23,15 @@ console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 
 
-def _try_import_aisimulate_core():
+def _try_import_aisim_core():
     """Load the AISimulate core estimator SDK on demand."""
     # Lazy-import AISimulate because it is an optional dependency.
-    import aisimulate_core.sdk.backends.factory
-    import aisimulate_core.sdk.config
-    import aisimulate_core.sdk.models
-    import aisimulate_core.sdk.perf_database
+    import aisim_core.sdk.backends.factory
+    import aisim_core.sdk.config
+    import aisim_core.sdk.models
+    import aisim_core.sdk.perf_database
 
-    return aisimulate_core
+    return aisim_core
 
 
 class AIConfiguratorPerfEstimator:
@@ -48,14 +48,14 @@ class AIConfiguratorPerfEstimator:
         system: str,  # e.g. "h200_sxm"
         backend: str,  # e.g. "trtllm"
     ):
-        aisimulate_core = _try_import_aisimulate_core()
+        aisim_core = _try_import_aisim_core()
 
         logger.info("Loading AISimulate database. This might take a few seconds...")
-        version = aisimulate_core.sdk.perf_database.get_latest_database_version(
+        version = aisim_core.sdk.perf_database.get_latest_database_version(
             system,
             backend,
         )
-        self.database = aisimulate_core.sdk.perf_database.get_database(
+        self.database = aisim_core.sdk.perf_database.get_database(
             system=system,
             backend=backend,
             version=version,
@@ -67,15 +67,15 @@ class AIConfiguratorPerfEstimator:
         logger.info("AISimulate database loaded.")
 
         self.backend_name = backend
-        self.backend = aisimulate_core.sdk.backends.factory.get_backend(backend)
+        self.backend = aisim_core.sdk.backends.factory.get_backend(backend)
         self.hf_id = hf_id
 
     def _get_model(self, **model_config_kwargs):
-        aisimulate_core = _try_import_aisimulate_core()
+        aisim_core = _try_import_aisim_core()
 
         # NOTE: MOE models error out unless moe_tp_size and moe_ep_size are provided.
-        model_config = aisimulate_core.sdk.config.ModelConfig(**model_config_kwargs)
-        model = aisimulate_core.sdk.models.get_model(
+        model_config = aisim_core.sdk.config.ModelConfig(**model_config_kwargs)
+        model = aisim_core.sdk.models.get_model(
             self.hf_id, model_config, self.backend_name
         )
         return model
@@ -106,7 +106,7 @@ class AIConfiguratorPerfEstimator:
         Returns:
             dict: Perf metrics returned by aiconfigurator
         """
-        aisimulate_core = _try_import_aisimulate_core()
+        aisim_core = _try_import_aisim_core()
 
         mode_to_aic_mode = {
             "full": "static",
@@ -118,7 +118,7 @@ class AIConfiguratorPerfEstimator:
                 f"Invalid mode: {mode}. Must be one of {list(mode_to_aic_mode.keys())}."
             )
 
-        self.runtime_config = aisimulate_core.sdk.config.RuntimeConfig(
+        self.runtime_config = aisim_core.sdk.config.RuntimeConfig(
             batch_size=batch_size,
             beam_width=1,
             isl=isl,

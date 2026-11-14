@@ -10,11 +10,11 @@ from __future__ import annotations
 import pytest
 
 pytest.importorskip(
-    "aisimulate.config.common",
+    "aisim.config.common",
     reason="AI Simulate is an optional Dynamo simulation dependency",
 )
 
-from aisimulate.config.common import Choices, IntegerRange, NumericRange
+from aisim.config.common import Choices, IntegerRange, NumericRange
 
 from dynamo.aisimulate.domains import (
     ContinuousDomain,

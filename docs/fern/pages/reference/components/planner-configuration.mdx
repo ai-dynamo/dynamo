@@ -119,7 +119,7 @@ When `optimization_target` is `throughput`, `latency`, or `load`, the Planner fo
 
 <ParamField path="ais_perf_model" type="AISPerfModelSpec" default="null">
   Role-indexed AISimulate forward-pass configurations. Constructs each model through
-  `aisimulate_core.sdk.RustForwardPassPerfModel.best_available(config)` without an
+  `aisim_core.sdk.RustForwardPassPerfModel.best_available(config)` without an
   interpolation sweep. Configure model identity and estimator controls through
   `ais_perf_model.roles`, or select local dataset manifests with `dataset_profiles`;
   the retired `aic_perf_model` and `hf_id` / pick shape
@@ -185,9 +185,12 @@ build, or mount a local copy before starting Planner. Use the
 generic AISimulate wheel; measurements do not belong inside the wheel. Use matching
 AISimulate Python and Rust releases that support execution profiles through the
 common forward-pass query API. This integration pins Python
-`0.13.0.dev202610290000000087` and Rust `0.13.0-dev.202610290000000087`,
+`0.15.0.dev202611130000000104` and Rust `0.15.0-dev.202611130000000104`,
 which include that support. Use version-2 execution profiles; version 1 retains
 its legacy direct-phase queries and must be explicitly migrated and repinned.
+An execution profile is accepted only when its engine spec schema version matches the
+pinned AISimulate release. The move from 0.13 to 0.15 changes that version, so download
+or generate the dataset again.
 
 The following configuration illustrates the paths to supply for a prefill role:
 

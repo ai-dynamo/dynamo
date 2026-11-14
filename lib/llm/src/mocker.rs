@@ -844,6 +844,23 @@ fn invalid_argument(message: impl Into<String>, public_message: impl Into<String
         .build()
 }
 
+/// The fewest output tokens after which the SGLang scheduler's own output cap can have ended a
+/// request with `prompt_tokens` prompt tokens.
+///
+/// The scheduler lowers a request's output limit to keep prompt and output inside the context
+/// and the KV pool, and nothing it reports says that it did. Every limit it applies ends the
+/// sequence within two KV blocks of the smaller of the two, so the cap does not explain a
+/// completion with fewer tokens than this. With a block size of 1 this is the cap itself; with
+/// larger blocks it is up to `2 * block_size - 2` tokens below the cap.
+/// `sglang_scheduler_cap_never_fails_a_request` holds the scheduler to that distance.
+fn sglang_capped_output_floor(args: &MockerConfig, prompt_tokens: usize) -> usize {
+    let pool_tokens = args.num_gpu_blocks.saturating_mul(args.block_size);
+    let limit = args
+        .max_model_len
+        .map_or(pool_tokens, |max_model_len| max_model_len.min(pool_tokens));
+    limit.saturating_sub(prompt_tokens.saturating_add(args.block_size.saturating_mul(2)))
+}
+
 /// A stream whose only item is `error`, so the request fails without marking the worker down.
 fn error_stream(
     ctx: &impl AsyncEngineContextProvider,
@@ -947,6 +964,10 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 .map_or(max_output_tokens, |max_model_len| {
                     max_output_tokens.min(max_model_len.saturating_sub(request.token_ids.len()))
                 });
+        // A completion before that budget is an error, unless the SGLang scheduler's own cap
+        // on output, by context and KV headroom, can explain it.
+        let capped_output_floor = (self.engine_args.backend == EngineType::Sglang)
+            .then(|| sglang_capped_output_floor(&self.engine_args, request.token_ids.len()));
         if let Some(metadata) = native_sglang.as_ref()
             && let Err(message) =
                 metadata.validate_candidate_output_budget(effective_max_output_tokens)
@@ -1257,7 +1278,10 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                             ..Default::default()
                         };
 
-                        if signal.completed && token_count < effective_max_output_tokens {
+                        if signal.completed
+                            && token_count < effective_max_output_tokens
+                            && capped_output_floor.is_none_or(|floor| token_count < floor)
+                        {
                             let _ = send_response(
                                 &stream_tx,
                                 LLMEngineOutput::error(
@@ -2179,7 +2203,10 @@ mod tests {
         })]);
         for (max_model_len, candidates, expected_tokens) in [
             (None, true, None),
-            (Some(4), true, Some(1)),
+            // A 3-token prompt does not fit a 4-token context once SGLang
+            // reserves room for the request; with 10 it leaves 5 output tokens.
+            (Some(4), true, Some(0)),
+            (Some(10), true, Some(5)),
             (None, false, Some(258)),
         ] {
             let args = MockerConfig::from_value(serde_json::json!({
@@ -2202,10 +2229,24 @@ mod tests {
             let mut stream = engine.generate(SingleIn::new(request)).await.unwrap();
             if let Some(expected) = expected_tokens {
                 let mut tokens = Vec::new();
+                let mut finish = None;
                 while let Some(output) = stream.next().await {
-                    tokens.extend(output.data.unwrap().token_ids);
+                    let output = output.data.unwrap();
+                    tokens.extend(output.token_ids);
+                    if output.finish_reason.is_some() {
+                        finish = output.finish_reason;
+                    }
                 }
                 assert_eq!(tokens, vec![7; expected]);
+                if expected == 0 {
+                    assert!(matches!(
+                        finish,
+                        Some(FinishReason::Error(message))
+                            if message.contains("request exceeds worker admission limits")
+                    ));
+                } else {
+                    assert_eq!(finish, Some(FinishReason::Length));
+                }
             } else {
                 let item = stream.next().await.unwrap();
                 assert!(
@@ -2225,6 +2266,218 @@ mod tests {
                 assert!(stream.next().await.is_none());
                 assert_eq!(live.active_request_count(), 0);
             }
+        }
+    }
+
+    fn sglang_config(
+        worker_type: WorkerType,
+        block_size: usize,
+        num_gpu_blocks: usize,
+        max_model_len: Option<usize>,
+    ) -> MockerConfig {
+        MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "backend": "sglang", "worker_type": worker_type,
+                "max_model_len": max_model_len,
+                "block_size": block_size, "num_gpu_blocks": num_gpu_blocks,
+                "max_num_batched_tokens": 64, "speedup_ratio": 1000.0,
+                // These pools are smaller than SGLang's default decode reservation.
+                "sglang": {"num_reserved_decode_tokens": 0}
+            }
+        }))
+        .unwrap()
+    }
+
+    /// Runs one request on a scheduler started from `scheduler` while the mocker computes its
+    /// limits from `mocker`. Returns the output token count and the finish reason, or `None`
+    /// when the scheduler of a decode worker refuses to reserve KV for the prompt.
+    async fn run_to_finish(
+        scheduler: MockerConfig,
+        mocker: MockerConfig,
+        prompt_tokens: usize,
+        max_tokens: u32,
+    ) -> Option<(usize, Option<FinishReason>)> {
+        use crate::protocols::common::preprocessor::PrefillResult;
+
+        let is_decode = mocker.is_decode();
+        let live = LiveEngine::start(scheduler, 0).unwrap();
+        let engine = MockerExecutionContext::new(mocker);
+        assert!(engine.engines.set(vec![live.clone()]).is_ok());
+        let mut request = decode_request(prompt_tokens, max_tokens);
+        if is_decode {
+            // A decode worker takes the prompt KV as transferred. The scheduler gets
+            // `ReserveDestination`, as it does for a bootstrap handoff from a prefill worker.
+            request.prefill_result = Some(PrefillResult {
+                disaggregated_params: serde_json::json!({}),
+                prompt_tokens_details: None,
+            });
+        }
+        let outcome = tokio::time::timeout(Duration::from_secs(60), async {
+            let mut stream = match engine.generate(SingleIn::new(request)).await {
+                Ok(stream) => stream,
+                Err(error) => {
+                    // `generate` reports the refusal only as a failed scheduler command.
+                    assert!(
+                        is_decode && error.to_string().contains("applying command"),
+                        "{error}"
+                    );
+                    return None;
+                }
+            };
+            let mut tokens = 0;
+            let mut finish = None;
+            while let Some(output) = stream.next().await {
+                let output = output.data.unwrap();
+                tokens += output.token_ids.len();
+                if output.finish_reason.is_some() {
+                    finish = output.finish_reason;
+                }
+            }
+            Some((tokens, finish))
+        })
+        .await
+        .expect("request must finish");
+        live.shutdown().await.unwrap();
+        outcome
+    }
+
+    #[tokio::test]
+    async fn sglang_completion_before_budget_fails_unless_the_scheduler_cap_explains_it() {
+        // A 3-token prompt asks for 100 tokens, with 4-token blocks. The scheduler ends it after
+        // `scheduled` tokens, and the mocker computes its limits from its own configuration.
+        // Each configuration is a pool in blocks and a context.
+        let aggregated = |(num_gpu_blocks, max_model_len)| {
+            sglang_config(WorkerType::Aggregated, 4, num_gpu_blocks, max_model_len)
+        };
+        for (scheduler, mocker, scheduled, explained) in [
+            // The scheduler has a 64-token pool. The mocker has the same, then a 512-token one.
+            ((16, None), (16, None), 55, true),
+            ((16, None), (128, None), 55, false),
+            // The scheduler has a 20-token context. The mocker has the same, then none.
+            ((128, Some(20)), (128, Some(20)), 15, true),
+            ((128, Some(20)), (128, None), 15, false),
+            // The mocker has a 60-token context, so its floor is 60 - 3 - 2 * 4 = 49 tokens.
+            ((128, Some(54)), (128, Some(60)), 49, true),
+            ((128, Some(53)), (128, Some(60)), 48, false),
+        ] {
+            let (scheduler, mocker) = (aggregated(scheduler), aggregated(mocker));
+            let (tokens, finish) = run_to_finish(scheduler, mocker, 3, 100).await.unwrap();
+            if explained {
+                assert_eq!((tokens, finish), (scheduled, Some(FinishReason::Length)));
+            } else {
+                assert!(
+                    matches!(&finish, Some(FinishReason::Error(message))
+                        if message.contains("before max tokens reached")),
+                    "{tokens} tokens, {finish:?}"
+                );
+                // The error takes the place of the last token.
+                assert_eq!(tokens, scheduled - 1);
+            }
+        }
+    }
+
+    /// The floor must explain every completion the scheduler's cap causes, and the cap must
+    /// reach it: on each worker type and block size, for every prompt length up to the pool,
+    /// with the context below and above the pool.
+    #[tokio::test]
+    async fn sglang_scheduler_cap_never_fails_a_request() {
+        const POOL_TOKENS: usize = 32;
+        for worker_type in [
+            WorkerType::Aggregated,
+            WorkerType::Prefill,
+            WorkerType::Decode,
+        ] {
+            for block_size in [1, 4] {
+                let mut finished = 0;
+                // The fewest tokens above the floor among the completions before the budget.
+                let mut closest_to_floor = None;
+                for max_model_len in [None, Some(20), Some(40)] {
+                    for prompt_tokens in 1..=POOL_TOKENS + 1 {
+                        for max_tokens in [2, 1000] {
+                            let config = sglang_config(
+                                worker_type,
+                                block_size,
+                                POOL_TOKENS / block_size,
+                                max_model_len,
+                            );
+                            let floor = sglang_capped_output_floor(&config, prompt_tokens);
+                            let Some((tokens, finish)) =
+                                run_to_finish(config.clone(), config, prompt_tokens, max_tokens)
+                                    .await
+                            else {
+                                continue;
+                            };
+                            // The budget `generate` computes for this request.
+                            let requested = match worker_type {
+                                WorkerType::Prefill => 1,
+                                _ => max_tokens as usize,
+                            };
+                            let budget = max_model_len.map_or(requested, |max_model_len| {
+                                requested.min(max_model_len.saturating_sub(prompt_tokens))
+                            });
+                            let case = format!(
+                                "{worker_type:?} block_size={block_size} \
+                                 max_model_len={max_model_len:?} prompt_tokens={prompt_tokens} \
+                                 max_tokens={max_tokens}: {tokens} tokens, {finish:?}"
+                            );
+                            match finish {
+                                Some(FinishReason::Length) => {
+                                    finished += 1;
+                                    // Skip a floor of zero: it accepts every completion.
+                                    if tokens < budget && floor > 0 {
+                                        let above = tokens.checked_sub(floor).expect(&case);
+                                        closest_to_floor = Some(
+                                            closest_to_floor
+                                                .map_or(above, |closest: usize| closest.min(above)),
+                                        );
+                                    }
+                                }
+                                Some(FinishReason::Error(message)) => {
+                                    assert!(message.contains("request rejected"), "{case}");
+                                }
+                                _ => panic!("{case}"),
+                            }
+                        }
+                    }
+                }
+                let sweep = format!("{worker_type:?} block_size={block_size}");
+                assert!(finished > 0, "{sweep}: no request finished");
+                // A prefill worker generates one token, so no cap can end it early. On the
+                // others some capped completion must end exactly on the floor, or the floor
+                // accepts more than the scheduler needs.
+                let expected = (worker_type != WorkerType::Prefill).then_some(0);
+                assert_eq!(
+                    closest_to_floor, expected,
+                    "{sweep}: tokens above the floor"
+                );
+            }
+        }
+    }
+
+    /// vLLM and TensorRT-LLM get no such floor: a completion one token before the budget is an
+    /// error, although the same completion is inside the two blocks an SGLang worker accepts.
+    #[tokio::test]
+    async fn completion_before_budget_fails_on_backends_without_a_scheduler_cap() {
+        for backend in ["vllm", "trtllm"] {
+            let config = |max_model_len: usize| {
+                MockerConfig::from_value(serde_json::json!({
+                    "engine": {
+                        "backend": backend, "max_model_len": max_model_len,
+                        "block_size": 4, "num_gpu_blocks": 128,
+                        "max_num_batched_tokens": 64, "speedup_ratio": 1000.0
+                    }
+                }))
+                .unwrap()
+            };
+            // The scheduler's context is one token shorter than the mocker's, so it ends the
+            // 3-token prompt after 56 tokens and the mocker's budget is 57.
+            let (tokens, finish) = run_to_finish(config(59), config(60), 3, 100).await.unwrap();
+            assert!(
+                matches!(&finish, Some(FinishReason::Error(message))
+                    if message.contains("before max tokens reached")),
+                "{backend}: {tokens} tokens, {finish:?}"
+            );
+            assert_eq!(tokens, 55, "{backend}");
         }
     }
 

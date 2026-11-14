@@ -60,8 +60,8 @@ use crate::replay::router_shared::{
 use crate::replay::{
     ConversationAffinityConfig, ConversationAffinityMode, ReplayPrefillLoadEstimator,
 };
-use aisimulate_core::replay::loadgen::{ReplayRequestHashes, ReplayRequestPayload};
-use aisimulate_core::replay::{
+use aisim_core::replay::loadgen::{ReplayRequestHashes, ReplayRequestPayload};
+use aisim_core::replay::{
     KvFetchAction, KvHints, Placement, PlacementCacheSample, PlacementDecision, PlacementEffects,
     PlacementPolicy, ProviderSpec, ReplayAdmissionMetadata, WorkerTopology,
 };
@@ -919,8 +919,7 @@ impl OfflineReplayRouter {
                     .and_then(|identity| identity.lineage.as_ref())
                     .context("sibling affinity requires unambiguous conversation lineage")?;
                 anyhow::ensure!(
-                    lineage.schema
-                        == aisimulate_core::replay::AGENTIC_CONVERSATION_LINEAGE_SCHEMA_V1
+                    lineage.schema == aisim_core::replay::AGENTIC_CONVERSATION_LINEAGE_SCHEMA_V1
                         && !lineage.root_conversation_id.is_empty(),
                     "unsupported conversation lineage"
                 );
@@ -1329,6 +1328,21 @@ impl OfflineReplayRouter {
         let retain_hashes = self.affinity.is_some()
             || (self.indexer.session_prefix_index.is_some() && session_id.is_some());
         let mut block_hashes = None;
+        // A request list arrives without replay hashes. A salted request needs
+        // AISim's, which the engine's KV events carry: the block seed behind
+        // `BlockHashOptions::cache_namespace` is a different one.
+        let cache_salt = request
+            .cache_salt
+            .as_deref()
+            .filter(|salt| !salt.is_empty());
+        let replay_hashes = match (replay_hashes, cache_salt) {
+            (None, Some(_)) => Some(ReplayRequestHashes::from_tokens_with_cache_salt(
+                &request_view.prompt_tokens_for_placement()?,
+                self.block_size,
+                cache_salt,
+            )),
+            (replay_hashes, _) => replay_hashes,
+        };
         let (tiered, token_seq) = match replay_hashes {
             Some(replay_hashes) => {
                 let local_hashes =
@@ -1348,12 +1362,17 @@ impl OfflineReplayRouter {
                         .random_seq_hashes_for_tracking(input_length / self.block_size as usize)
                 } else {
                     let tokens = request_view.prompt_tokens_for_placement()?;
+                    // Keyed identities never meet engine hashes; the namespace
+                    // only keeps one salt's active blocks apart from another's.
                     self.config.compute_seq_hashes_for_tracking_with_context(
                         &self.tracking_hash,
                         self.tracking_hash_scope(),
                         &tokens,
                         None,
-                        BlockHashOptions::default(),
+                        BlockHashOptions {
+                            cache_namespace: cache_salt,
+                            ..Default::default()
+                        },
                         None,
                     )
                 };
@@ -1671,7 +1690,7 @@ mod tests {
     };
     use crate::common::protocols::{DirectRequest, MockerConfig};
     use crate::replay::ReplayPrefillLoadEstimator;
-    use aisimulate_core::replay::{
+    use aisim_core::replay::{
         KvFetchAction, KvHints, Placement, PlacementDecision, PlacementPolicy,
         ReplayPromptTokenSource, ReplayRequestContext, WorkerTopology,
     };
@@ -1685,7 +1704,7 @@ mod tests {
         #[case] dp_size: u32,
     ) {
         use super::KvRouterPlacement as Policy;
-        use aisimulate_core::replay::PlacementPolicy;
+        use aisim_core::replay::PlacementPolicy;
         let mut args = queueing_args();
         args.dp_size = dp_size;
         let mut policy = Policy::new_with_selector_seed(
@@ -1784,7 +1803,7 @@ mod tests {
     #[test]
     fn unknown_policy_class_fails_at_class_entry_and_releases_session_affinity() {
         use super::KvRouterPlacement as Policy;
-        use aisimulate_core::replay::PlacementPolicy;
+        use aisim_core::replay::PlacementPolicy;
         use dynamo_scheduler::host::KvSchedulerError;
         let mut policy = Policy::new_with_selector_seed(
             &queueing_args(),
@@ -1842,7 +1861,7 @@ mod tests {
 
     #[test]
     fn affinity_queue_cost_uses_only_the_bound_rank_cache() {
-        use aisimulate_core::replay::PlacementPolicy;
+        use aisim_core::replay::PlacementPolicy;
         let mut args = queueing_args();
         args.dp_size = 2;
         let mut policy = super::KvRouterPlacement::new_with_selector_seed(
@@ -1919,7 +1938,7 @@ mod tests {
         #[case] evict: bool,
         #[case] authored_hashes: bool,
     ) {
-        use aisimulate_core::replay::PlacementPolicy;
+        use aisim_core::replay::PlacementPolicy;
         let mut policy = super::KvRouterPlacement::new_with_selector_seed(
             &queueing_args(),
             Some(queueing_router_config()),
@@ -2004,7 +2023,7 @@ mod tests {
     #[case(false)]
     #[case(true)]
     fn affinity_clock_does_not_drain_on_decay_and_abort_releases_capacity(#[case] affinity: bool) {
-        use aisimulate_core::replay::PlacementPolicy;
+        use aisim_core::replay::PlacementPolicy;
         let mut config = queueing_router_config();
         config.router_prefill_load_model = RouterPrefillLoadModel::Ais;
         let mut policy = super::KvRouterPlacement::new_with_selector_seed(
@@ -2072,7 +2091,7 @@ mod tests {
     #[test]
     fn affinity_table_full_routes_without_affinity() {
         use super::{KvRouterPlacement as Policy, SessionAffinity, SessionAffinityConfig};
-        use aisimulate_core::replay::PlacementPolicy;
+        use aisim_core::replay::PlacementPolicy;
         let mut policy = Policy::new_with_selector_seed(
             &replay_args(),
             None,
@@ -2206,6 +2225,7 @@ mod tests {
             policy_class: None,
             replay_context: None,
             images: Vec::new(),
+            cache_salt: None,
         }
     }
 
@@ -2213,7 +2233,7 @@ mod tests {
     fn unhandled_request_fields_are_rejected_instead_of_dropped() {
         let mut router = OfflineReplayRouter::new(&replay_args(), None, None, 1).unwrap();
         let mut request = request(1, 7);
-        request.kv_hints = Some(aisimulate_core::replay::AuthoredKvHints {
+        request.kv_hints = Some(aisim_core::replay::AuthoredKvHints {
             source_worker: 0,
             source_dp_rank: 0,
         });
@@ -2221,11 +2241,11 @@ mod tests {
         assert!(error.to_string().contains("authored KV fetch hints"));
         assert_eq!(router.pending_count(), 0);
         request.kv_hints = None;
-        request.images.push(aisimulate_core::engine::ImageSpec {
+        request.images.push(aisim_core::engine::ImageSpec {
             identity: 1,
             token_start: 0,
             token_end: 1,
-            encoder: aisimulate_core::engine::EncoderShape {
+            encoder: aisim_core::engine::EncoderShape {
                 sequences: 1,
                 patch_tokens: 1,
                 transformer_tokens: 1,
@@ -2364,6 +2384,101 @@ mod tests {
 
         assert_eq!(pending.token_seq, expected);
         assert_ne!(pending.token_seq, Some(replay_hashes.sequence_hashes));
+    }
+
+    fn cache_salt_request(uuid: u128, cache_salt: Option<&str>) -> DirectRequest {
+        DirectRequest {
+            cache_salt: cache_salt.map(str::to_owned),
+            ..request(uuid, 7)
+        }
+    }
+
+    /// A request list reaches the router without replay hashes. Its salted
+    /// requests still have to match what the engine publishes for the salt.
+    #[test]
+    fn request_list_cache_salt_selects_the_engine_cache_namespace() {
+        let mut router = OfflineReplayRouter::new(&replay_args(), None, None, 1).unwrap();
+        let block_size = router.block_size;
+        let published = |cache_salt| {
+            ReplayRequestHashes::from_tokens_with_cache_salt(
+                &request(0, 7).tokens,
+                block_size,
+                cache_salt,
+            )
+        };
+        // The worker holds the one-block prompt under salt "a".
+        router
+            .on_kv_events(vec![store_event(
+                0,
+                1,
+                published(Some("a")).local_block_hashes[0],
+                StorageTier::Device,
+            )])
+            .unwrap();
+
+        // Routing overlap and the worker's active blocks after each arrival.
+        // Active blocks are shared only inside a namespace, and an empty salt
+        // is the unsalted one.
+        let namespaces = [Some("a"), Some("b"), None, Some(""), Some("a")];
+        let mut observed = Vec::new();
+        for (index, cache_salt) in namespaces.into_iter().enumerate() {
+            let request = cache_salt_request(index as u128 + 1, cache_salt);
+            let effects = router.on_request_arrival(&request, None, 0.0).unwrap();
+            observed.push((
+                effects.admissions[0].best_available_overlap_blocks,
+                router.debug_snapshot(0.0).active_blocks_by_worker[0].1,
+            ));
+        }
+        assert_eq!(observed, [(1, 1), (0, 2), (0, 3), (0, 3), (1, 3)]);
+
+        // Public tracking identities are the engine's sequence hashes.
+        for cache_salt in namespaces {
+            let request = cache_salt_request(9, cache_salt);
+            let pending = router
+                .build_pending_request(&request, request.max_output_tokens, None, None)
+                .unwrap();
+            assert_eq!(
+                pending.token_seq,
+                Some(published(cache_salt).sequence_hashes),
+                "{cache_salt:?}"
+            );
+        }
+    }
+
+    #[rstest::rstest]
+    #[case::request_list(false)]
+    #[case::replay_hashes(true)]
+    fn keyed_tracking_identities_follow_the_cache_salt(#[case] with_replay_hashes: bool) {
+        let mut key_file = NamedTempFile::new().unwrap();
+        key_file.write_all(&[0x39; 32]).unwrap();
+        let config = KvRouterConfig {
+            router_tracking_hash: TrackingHashAlgorithm::KeyedXxh3V1,
+            router_tracking_key_file: Some(key_file.path().to_path_buf()),
+            router_tracking_key_id: Some("2026-01".to_string()),
+            ..Default::default()
+        };
+        let router = OfflineReplayRouter::new(&replay_args(), Some(config), None, 1).unwrap();
+        let identities = |cache_salt: Option<&str>| {
+            let request = cache_salt_request(1, cache_salt);
+            let replay_hashes = with_replay_hashes.then(|| {
+                ReplayRequestHashes::from_tokens_with_cache_salt(
+                    &request.tokens,
+                    router.block_size,
+                    cache_salt,
+                )
+            });
+            router
+                .build_pending_request(&request, request.max_output_tokens, replay_hashes, None)
+                .unwrap()
+                .token_seq
+                .expect("active blocks are tracked")
+        };
+        let unsalted = identities(None);
+        assert_eq!(unsalted.len(), 1);
+        assert_eq!(identities(Some("")), unsalted);
+        assert_eq!(identities(Some("a")), identities(Some("a")));
+        assert_ne!(identities(Some("a")), unsalted);
+        assert_ne!(identities(Some("a")), identities(Some("b")));
     }
 
     #[test]

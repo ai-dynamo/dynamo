@@ -26,7 +26,13 @@ pytestmark = [
 ]
 
 ROOT = Path(__file__).resolve().parents[2]
-LEGACY_DISTRIBUTIONS = {"aiconfigurator", "aiconfigurator-core"}
+LEGACY_DISTRIBUTIONS = {
+    "aiconfigurator",
+    "aiconfigurator-core",
+    # Installed next to aisim, the former distribution breaks the import.
+    "aisimulate",
+    "aisimulate-core",
+}
 CARGO_LOCKFILES = (
     ROOT / "Cargo.lock",
     ROOT / "lib/bindings/python/Cargo.lock",
@@ -44,7 +50,7 @@ def test_operator_schemas_do_not_load_aisimulate_runtime() -> None:
 
         class WithoutAIS(importlib.abc.MetaPathFinder):
             def find_spec(self, fullname, path=None, target=None):
-                if fullname.split('.')[0] in {'aisimulate', 'aisimulate_core'}:
+                if fullname.split('.')[0] in {'aisim', 'aisim_core'}:
                     raise ModuleNotFoundError('AIS runtime is unavailable', name=fullname)
 
         sys.meta_path.insert(0, WithoutAIS())
@@ -57,7 +63,7 @@ def test_operator_schemas_do_not_load_aisimulate_runtime() -> None:
                 }}},
             )
         except ModuleNotFoundError as error:
-            assert error.name == 'aisimulate_core'
+            assert error.name == 'aisim_core'
         else:
             raise AssertionError('Explicit AIS configuration requires its runtime')
         """
@@ -133,13 +139,11 @@ def test_no_manifest_installs_retired_aic_distributions() -> None:
         with lockfile.open("rb") as handle:
             packages = tomllib.load(handle)["package"]
         assert all(package["name"] != "aiconfigurator-core" for package in packages)
-    assert features["ais-forward-pass"] == ["dep:aisimulate-core"]
+    assert features["ais-forward-pass"] == ["dep:aisim-core"]
     assert "aic-forward-pass" not in features
     with (ROOT / "Cargo.toml").open("rb") as handle:
-        canonical_core = tomllib.load(handle)["workspace"]["dependencies"][
-            "aisimulate-core"
-        ]
-    assert dependencies["aisimulate-core"] == {
+        canonical_core = tomllib.load(handle)["workspace"]["dependencies"]["aisim-core"]
+    assert dependencies["aisim-core"] == {
         **canonical_core,
         "optional": True,
         "features": ["python"],
@@ -147,7 +151,7 @@ def test_no_manifest_installs_retired_aic_distributions() -> None:
     requirement = next(
         Requirement(item)
         for item in root_project["dependencies"]
-        if canonicalize_name(Requirement(item).name) == "aisimulate"
+        if canonicalize_name(Requirement(item).name) == "aisim"
     )
     if "git" in canonical_core:
         assert requirement.url == (
@@ -165,30 +169,35 @@ def test_aisimulate_wheel_uses_canonical_import_namespaces() -> None:
     if sys.version_info < (3, 11) or sys.version_info >= (3, 14):
         pytest.skip("AISimulate supports Python 3.11 through 3.13")
 
-    release = metadata.distribution("aisimulate")
+    release = metadata.distribution("aisim")
     release_requirements = _requirement_names(release.requires or [])
     release_files = {str(path) for path in release.files or []}
 
     assert not (release_requirements & LEGACY_DISTRIBUTIONS)
-    assert "aisimulate/__init__.py" in release_files
-    assert "aisimulate_core/__init__.py" in release_files
+    assert "aisim/__init__.py" in release_files
+    assert "aisim_core/__init__.py" in release_files
     assert not any(
         path.split("/", 1)[0] in {"aiconfigurator", "aiconfigurator_core"}
         for path in release_files
     )
 
-    from aisimulate.sdk.task_v2 import Task
-    from aisimulate_core.sdk import RustForwardPassPerfModel
+    from aisim.sdk.task_v2 import Task
+    from aisim_core.sdk import RustForwardPassPerfModel
 
     assert Task is not None
     assert callable(RustForwardPassPerfModel.best_available)
-    core_root = resources.files("aisimulate_core")
+    core_root = resources.files("aisim_core")
     assert core_root.joinpath("model_configs/Qwen--Qwen3-32B_config.json").is_file()
     assert core_root.joinpath("systems/h200_sxm.yaml").is_file()
     legacy_cli = next(
         entry for entry in release.entry_points if entry.name == "aiconfigurator"
     )
-    assert legacy_cli.value == "aisimulate.legacy_cli.entrypoint:main"
+    assert legacy_cli.value == "aisim.legacy_cli.entrypoint:main"
+    # The operator's Run Job starts the simulator through this command name.
+    assert any(
+        entry.group == "console_scripts" and entry.name == "aisimulate"
+        for entry in release.entry_points
+    )
 
 
 def test_pinned_aisimulate_materializes_shared_host_offload() -> None:
@@ -197,7 +206,7 @@ def test_pinned_aisimulate_materializes_shared_host_offload() -> None:
 
     # Adapters consume the public launch contract; layout identity remains
     # owned by AISimulate rather than a private helper imported by Dynamo.
-    from aisimulate.runner import materialize_engine_launch_config
+    from aisim.runner import materialize_engine_launch_config
 
     config = materialize_engine_launch_config(
         "vllm",

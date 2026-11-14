@@ -3,7 +3,7 @@
 
 //! Conversion from neutral replay metadata to Dynamo Router wire identities.
 
-use aisimulate_core::replay::loadgen::Trace;
+use aisim_core::replay::loadgen::Trace;
 use anyhow::{Context, Result};
 use dynamo_kv_hashing::routing::{
     BlockHashOptions, compute_block_hash_for_seq, compute_seq_hash_for_block,

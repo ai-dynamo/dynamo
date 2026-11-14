@@ -25,29 +25,29 @@ def generated_files(root: Path) -> dict[Path, str]:
     """Return deterministic exports for the installed, repository-pinned version."""
     requirements = root / "container/deps/requirements.aisimulate.txt"
     pins = re.findall(
-        r"^aisimulate==([a-zA-Z0-9.+-]+)\s*$", requirements.read_text(), re.MULTILINE
+        r"^aisim==([a-zA-Z0-9.+-]+)\s*$", requirements.read_text(), re.MULTILINE
     )
     if len(pins) != 1:
-        raise ValueError(f"{requirements} must contain exactly one aisimulate== pin")
+        raise ValueError(f"{requirements} must contain exactly one aisim== pin")
     pinned = pins[0]
     project = tomllib.loads((root / "pyproject.toml").read_text())
     python_pins = [
         dependency.split(";", 1)[0].strip()
         for dependency in project["project"]["dependencies"]
-        if re.match(r"^aisimulate\b", dependency)
+        if re.match(r"^aisim\b", dependency)
     ]
-    if python_pins != [f"aisimulate=={pinned}"]:
+    if python_pins != [f"aisim=={pinned}"]:
         raise ValueError(
             "pyproject.toml and requirements.aisimulate.txt must pin the same AISimulate version"
         )
-    installed = importlib.metadata.version("aisimulate")
+    installed = importlib.metadata.version("aisim")
     if installed != pinned:
         raise ValueError(
             f"installed AISimulate {installed} differs from the repository pin {pinned}"
         )
 
     # Match the public CLI envelope; Python-only validators remain runtime-owned.
-    from aisimulate.config import CoreRecommendationConfig
+    from aisim.config import CoreRecommendationConfig
 
     schema = CoreRecommendationConfig.model_json_schema(mode="validation")
     schema["$schema"] = "https://json-schema.org/draft/2020-12/schema"
@@ -61,10 +61,10 @@ def generated_files(root: Path) -> dict[Path, str]:
     entry_points = project["project"]["entry-points"]
     sections = {
         name.removeprefix("dynamo.")
-        for name in entry_points.get("aisimulate.config_adapters", {})
+        for name in entry_points.get("aisim.config_adapters", {})
         if name.startswith("dynamo.")
     }
-    if "dgdr_run" not in entry_points.get("aisimulate.output_adapters", {}):
+    if "dgdr_run" not in entry_points.get("aisim.output_adapters", {}):
         raise ValueError(
             "the operator's selected dgdr_run output adapter is not registered"
         )

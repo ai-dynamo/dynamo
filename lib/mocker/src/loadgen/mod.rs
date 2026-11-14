@@ -5,7 +5,7 @@
 
 mod router;
 
-pub use aisimulate_core::replay::loadgen::*;
+pub use aisim_core::replay::loadgen::*;
 pub(crate) use router::local_block_hashes;
 pub use router::{DynamoTraceRouterExt, RouterSequence, SequenceHashMode, to_router_sequences};
 

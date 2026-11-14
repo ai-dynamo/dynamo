@@ -30,7 +30,7 @@ Dynamo serves [vLLM](https://github.com/vllm-project/vllm),
 [TokenSpeed](https://github.com/lightseekorg/tokenspeed). Related projects:
 [NIXL](https://github.com/ai-dynamo/nixl) (KV-cache transfer),
 [AIPerf](https://github.com/ai-dynamo/aiperf) (load generation),
-[AISimulate](https://pypi.org/project/aisimulate/) (offline configuration search),
+[AISimulate](https://pypi.org/project/aisim/) (offline configuration search),
 [ModelExpress](https://github.com/ai-dynamo/modelexpress) (GPU-to-GPU weight streaming), and
 [Grove](https://github.com/ai-dynamo/grove) (Kubernetes gang scheduling).
 

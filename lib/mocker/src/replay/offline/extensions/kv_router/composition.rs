@@ -3,7 +3,7 @@
 
 //! Dynamo-owned Router/Planner composition for the shared AISimulate Replayer.
 
-use aisimulate_core::replay::{
+use aisim_core::replay::{
     AggregatedRoundRobinPlacement, NoEngineEvents, NoReplayMetadata, PoolRoundRobinPlacement,
     ReplayComposition, ReplayDeterminism, ReplayScalingPolicy, ReplaySpec, WorkerTopology,
 };
@@ -43,16 +43,16 @@ impl ReplayComposition for RoundRobinReplayComposition {
     type AggregatedPlacement = AggregatedRoundRobinPlacement<()>;
     type DisaggregatedPlacement = PoolRoundRobinPlacement<()>;
 
-    fn validate_spec(&self, spec: &ReplaySpec) -> aisimulate_core::replay::ReplayResult<()> {
+    fn validate_spec(&self, spec: &ReplaySpec) -> aisim_core::replay::ReplayResult<()> {
         if spec.adapters.placement.provider != "round_robin" {
-            return Err(aisimulate_core::replay::ReplayError::InvalidSpec(format!(
+            return Err(aisim_core::replay::ReplayError::InvalidSpec(format!(
                 "round-robin composition received placement provider {:?}",
                 spec.adapters.placement.provider
             )));
         }
         validate_adapter_descriptors(spec, "round_robin", self.scaling_enabled)?;
         if self.affinity_enabled {
-            return Err(aisimulate_core::replay::ReplayError::InvalidSpec(
+            return Err(aisim_core::replay::ReplayError::InvalidSpec(
                 "conversation affinity requires the Dynamo KV router".into(),
             ));
         }
@@ -187,16 +187,16 @@ impl ReplayComposition for KvReplayComposition {
     type AggregatedPlacement = KvRouterPlacement;
     type DisaggregatedPlacement = KvRouterPlacement;
 
-    fn validate_spec(&self, spec: &ReplaySpec) -> aisimulate_core::replay::ReplayResult<()> {
+    fn validate_spec(&self, spec: &ReplaySpec) -> aisim_core::replay::ReplayResult<()> {
         if spec.adapters.placement.provider != "dynamo_kv_router" {
-            return Err(aisimulate_core::replay::ReplayError::InvalidSpec(format!(
+            return Err(aisim_core::replay::ReplayError::InvalidSpec(format!(
                 "Dynamo KV composition received placement provider {:?}",
                 spec.adapters.placement.provider
             )));
         }
         validate_adapter_descriptors(spec, "dynamo_kv_router", self.scaling_enabled)?;
         if self.conversation_affinity.is_some() && self.scaling_enabled {
-            return Err(aisimulate_core::replay::ReplayError::InvalidSpec(
+            return Err(aisim_core::replay::ReplayError::InvalidSpec(
                 "conversation affinity requires static worker pools".into(),
             ));
         }
@@ -291,7 +291,7 @@ impl ReplayComposition for KvReplayComposition {
     fn set_determinism(
         &mut self,
         determinism: ReplayDeterminism,
-    ) -> aisimulate_core::replay::ReplayResult<()> {
+    ) -> aisim_core::replay::ReplayResult<()> {
         self.determinism = determinism;
         Ok(())
     }
@@ -301,15 +301,15 @@ fn validate_adapter_descriptors(
     spec: &ReplaySpec,
     expected_placement: &str,
     scaling_enabled: bool,
-) -> aisimulate_core::replay::ReplayResult<()> {
+) -> aisim_core::replay::ReplayResult<()> {
     if spec.adapters.placement.provider != expected_placement {
-        return Err(aisimulate_core::replay::ReplayError::InvalidSpec(format!(
+        return Err(aisim_core::replay::ReplayError::InvalidSpec(format!(
             "composition requires placement provider {expected_placement:?}, got {:?}",
             spec.adapters.placement.provider
         )));
     }
     if !spec.adapters.placement.config.is_null() {
-        return Err(aisimulate_core::replay::ReplayError::InvalidSpec(format!(
+        return Err(aisim_core::replay::ReplayError::InvalidSpec(format!(
             "placement provider {expected_placement:?} received an unused config descriptor"
         )));
     }
@@ -320,13 +320,13 @@ fn validate_adapter_descriptors(
         "none"
     };
     if spec.adapters.scaling.provider != expected_scaling {
-        return Err(aisimulate_core::replay::ReplayError::InvalidSpec(format!(
+        return Err(aisim_core::replay::ReplayError::InvalidSpec(format!(
             "composition requires scaling provider {expected_scaling:?}, got {:?}",
             spec.adapters.scaling.provider
         )));
     }
     if !spec.adapters.scaling.config.is_null() {
-        return Err(aisimulate_core::replay::ReplayError::InvalidSpec(format!(
+        return Err(aisim_core::replay::ReplayError::InvalidSpec(format!(
             "scaling provider {expected_scaling:?} received an unused config descriptor"
         )));
     }
@@ -413,7 +413,7 @@ pub(in crate::replay) fn derive_decode_router_config(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aisimulate_core::replay::{ProviderSpec, ReplayAdapters, ReplayTopology, WorkerPoolSpec};
+    use aisim_core::replay::{ProviderSpec, ReplayAdapters, ReplayTopology, WorkerPoolSpec};
 
     use crate::common::protocols::DirectRequest;
     use crate::replay::ReplayRouterMode;
@@ -848,7 +848,7 @@ mod tests {
 
         assert_eq!(
             composition.determinism.selector_seed(),
-            Some(aisimulate_core::replay::CANONICAL_SELECTOR_SEED)
+            Some(aisim_core::replay::CANONICAL_SELECTOR_SEED)
         );
     }
 }

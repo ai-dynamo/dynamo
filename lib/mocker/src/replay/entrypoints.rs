@@ -2546,11 +2546,11 @@ mod tests {
     use crate::common::protocols::{EngineType, NativeHostOffloadConfig, WorkerType};
     use crate::loadgen::{SessionTrace, TurnTrace};
     use crate::replay::ReplayRuntimeObservers;
-    use aisimulate_core::replay::{
+    use aisim_core::replay::{
         ForwardPassSnapshot, ReplayRequestPool, ReplayScalingDecision, ReplayScalingPolicy,
         ReplayScalingSnapshot,
     };
-    use aisimulate_core::replay::{PerRequestRecord, PerRequestRoutingRecord};
+    use aisim_core::replay::{PerRequestRecord, PerRequestRoutingRecord};
     use rstest::rstest;
     use std::cell::RefCell;
     use std::collections::BTreeSet;
@@ -2989,8 +2989,8 @@ mod tests {
         let assert_invalid_spec = |error: anyhow::Error, message: &str| {
             assert!(
                 matches!(
-                    error.downcast_ref::<aisimulate_core::replay::ReplayError>(),
-                    Some(aisimulate_core::replay::ReplayError::InvalidSpec(_))
+                    error.downcast_ref::<aisim_core::replay::ReplayError>(),
+                    Some(aisim_core::replay::ReplayError::InvalidSpec(_))
                 ),
                 "expected native AISimulate validation, got {error:#}"
             );
@@ -3072,6 +3072,11 @@ mod tests {
         }
     }
 
+    /// The smallest pool in which an SGLang destination accepts the 8-token prompt of the
+    /// handoff conformance fixture: its 2 blocks plus 128 blocks for the 512 decode tokens
+    /// SGLang reserves per handoff by default.
+    const HANDOFF_CONFORMANCE_POOL_BLOCKS: usize = 130;
+
     #[rstest]
     fn offline_handoff_conformance_supports_native_backends(
         #[values(EngineType::Vllm, EngineType::Sglang, EngineType::Trtllm)] engine_type: EngineType,
@@ -3081,10 +3086,45 @@ mod tests {
         )]
         transfer_timing: crate::common::protocols::KvTransferTimingMode,
     ) {
-        crate::replay::run_offline_handoff_conformance(engine_type, transfer_timing)
-            .unwrap()
-            .validate()
-            .unwrap();
+        crate::replay::run_offline_handoff_conformance(
+            engine_type,
+            transfer_timing,
+            HANDOFF_CONFORMANCE_POOL_BLOCKS,
+        )
+        .unwrap()
+        .validate()
+        .unwrap();
+    }
+
+    #[rstest]
+    fn offline_handoff_conformance_runs_the_default_sglang_decode_reservation(
+        #[values(
+            crate::common::protocols::KvTransferTimingMode::FullPrompt,
+            crate::common::protocols::KvTransferTimingMode::DestinationMissing
+        )]
+        transfer_timing: crate::common::protocols::KvTransferTimingMode,
+    ) {
+        // One block below the fixture's pool the prompt and the 512 reserved decode tokens
+        // no longer fit. An SGLang destination then refuses the handoff, unless the
+        // fixture lowers the reservation.
+        let one_block_short = HANDOFF_CONFORMANCE_POOL_BLOCKS - 1;
+        assert!(
+            crate::replay::run_offline_handoff_conformance(
+                EngineType::Sglang,
+                transfer_timing,
+                one_block_short,
+            )
+            .is_err()
+        );
+        // vLLM reserves nothing, so the smaller pool alone does not stop a handoff.
+        crate::replay::run_offline_handoff_conformance(
+            EngineType::Vllm,
+            transfer_timing,
+            one_block_short,
+        )
+        .unwrap()
+        .validate()
+        .unwrap();
     }
 
     const PREFILL_DP_SIZE: u32 = 2;
@@ -3103,7 +3143,8 @@ mod tests {
                     "backend": engine_type,
                     "worker_type": worker_type,
                     "block_size": 4,
-                    "num_gpu_blocks": 64,
+                    // Large enough for the 512 decode tokens SGLang reserves per handoff.
+                    "num_gpu_blocks": 256,
                     "speedup_ratio": 1000.0
                 }
             }))
@@ -3277,6 +3318,103 @@ mod tests {
         assert_eq!(repeat_route.reported_overlap_tokens, Some(8));
     }
 
+    /// Six one-second-apart copies of one 10-token prompt (two complete
+    /// 4-token blocks), in the cache namespaces `a, a, b, none, none, c`.
+    fn cache_salt_requests() -> Vec<DirectRequest> {
+        [Some("a"), Some("a"), Some("b"), None, None, Some("c")]
+            .into_iter()
+            .enumerate()
+            .map(|(index, cache_salt)| DirectRequest {
+                cache_salt: cache_salt.map(str::to_owned),
+                ..prompt_request(index as u128 + 1, 1, index as f64 * 1_000.0, 1)
+            })
+            .collect()
+    }
+
+    fn cache_salt_args(worker_type: WorkerType) -> MockerConfig {
+        MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "backend": EngineType::Sglang,
+                "worker_type": worker_type,
+                "block_size": 4,
+                "num_gpu_blocks": 512,
+                "speedup_ratio": 1000.0
+            }
+        }))
+        .unwrap()
+    }
+
+    /// Asserts, for each of `cache_salt_requests`, the best and the selected
+    /// overlap in blocks that the KV router of `pool` saw, and the prompt
+    /// tokens the engine reused at admission.
+    fn assert_cache_salt_namespaces(report: &TraceSimulationReport, pool: ReplayRequestPool) {
+        assert_eq!(report.request_counts.completed_requests, 6);
+        let observed = (1..=6)
+            .map(|id| {
+                let record = record(report, id);
+                let route = record
+                    .routing_history
+                    .iter()
+                    .find(|route| route.pool == pool)
+                    .expect("request was routed in the pool");
+                (
+                    route.best_available_overlap_blocks,
+                    route.selected_overlap_blocks,
+                    record.first_admission_reused_input_tokens,
+                )
+            })
+            .collect::<Vec<_>>();
+        let cold = (Some(0), Some(0), 0);
+        let warm = (Some(2), Some(2), 8);
+        assert_eq!(
+            observed,
+            [
+                cold, // a: first use of the namespace
+                warm, // a: same salt
+                cold, // b: a's blocks are another namespace
+                cold, // unsalted: no salted block is visible
+                warm, // unsalted: as before cache salts existed
+                cold, // c: the unsalted blocks are another namespace
+            ]
+        );
+    }
+
+    /// The SGLang engine hashes a salted prompt in its own cache namespace and
+    /// publishes those hashes. A request list reaches the KV router without
+    /// precomputed hashes, so the router has to derive the same identities.
+    #[test]
+    fn offline_kv_router_sees_engine_cache_salt_namespaces() {
+        let report = replay_with_records(
+            cache_salt_args(WorkerType::Aggregated),
+            cache_salt_requests(),
+            1,
+        );
+        assert_cache_salt_namespaces(&report, ReplayRequestPool::Agg);
+    }
+
+    /// The prefill pool's router indexes its engines' KV events the same way.
+    #[test]
+    fn offline_disagg_prefill_router_sees_engine_cache_salt_namespaces() {
+        let report = simulate_trace_requests_disagg_with_router_mode_and_runtime_observers(
+            OfflineDisaggReplayConfig {
+                prefill_args: cache_salt_args(WorkerType::Prefill),
+                decode_args: cache_salt_args(WorkerType::Decode),
+                num_prefill_workers: 1,
+                num_decode_workers: 1,
+            },
+            None,
+            None,
+            cache_salt_requests(),
+            1.0,
+            ReplayRouterMode::KvRouter,
+            true,
+            SlaThresholds::default(),
+            ReplayRuntimeObservers::default(),
+        )
+        .unwrap();
+        assert_cache_salt_namespaces(&report, ReplayRequestPool::Prefill);
+    }
+
     fn attention_dp_requests(count: u32, spacing_ms: f64) -> Vec<DirectRequest> {
         (0..count)
             .map(|index| DirectRequest {
@@ -3352,8 +3490,8 @@ mod tests {
             // reject it earlier using a second backend support matrix.
             let error = result.unwrap_err();
             assert!(matches!(
-                error.downcast_ref::<aisimulate_core::replay::ReplayError>(),
-                Some(aisimulate_core::replay::ReplayError::Invariant(_))
+                error.downcast_ref::<aisim_core::replay::ReplayError>(),
+                Some(aisim_core::replay::ReplayError::Invariant(_))
             ));
             assert!(error.to_string().contains("matching backend engine types"));
             return;
@@ -3495,7 +3633,49 @@ mod tests {
     }
 
     #[test]
-    fn one_worker_sglang_impossible_request_returns_dead_end_error() {
+    fn disagg_sglang_fails_a_handoff_into_a_pool_smaller_than_its_decode_reservation() {
+        // 131 blocks of 4 tokens: one block short of a 16-token prompt plus the
+        // 512 decode tokens that an SGLang destination reserves for each handoff
+        // by default.
+        let role_args = |worker_type: WorkerType| {
+            MockerConfig::from_value(serde_json::json!({
+                "engine": {
+                    "backend": EngineType::Sglang,
+                    "worker_type": worker_type,
+                    "block_size": 4,
+                    "num_gpu_blocks": 131,
+                    "speedup_ratio": 1000.0
+                }
+            }))
+            .unwrap()
+        };
+        let report = simulate_trace_requests_disagg_with_router_mode_and_runtime_observers(
+            OfflineDisaggReplayConfig {
+                prefill_args: role_args(WorkerType::Prefill),
+                decode_args: role_args(WorkerType::Decode),
+                num_prefill_workers: 1,
+                num_decode_workers: 1,
+            },
+            None,
+            None,
+            attention_dp_requests(2, 10.0),
+            1.0,
+            ReplayRouterMode::RoundRobin,
+            true,
+            SlaThresholds::default(),
+            ReplayRuntimeObservers::default(),
+        )
+        .unwrap();
+
+        assert_eq!(report.request_counts.completed_requests, 0);
+        assert_eq!(report.per_request.len(), 2);
+        assert!(report.per_request.iter().all(|record| {
+            record.terminal_status == aisim_core::replay::ReplayTerminalStatus::Failed
+        }));
+    }
+
+    #[test]
+    fn one_worker_sglang_rejects_a_request_that_cannot_fit() {
         let args = MockerConfig::from_value(serde_json::json!({
             "engine": {
                 "backend": EngineType::Sglang,
@@ -3518,7 +3698,9 @@ mod tests {
             ..Default::default()
         };
 
-        let err = simulate_trace_requests_with_router_mode(
+        // SGLang refuses the request at admission, so the replay ends instead
+        // of stalling on a request that can never run.
+        let report = simulate_trace_requests_with_router_mode_and_runtime_observers(
             args,
             None,
             None,
@@ -3526,13 +3708,18 @@ mod tests {
             1,
             1.0,
             ReplayRouterMode::RoundRobin,
+            true,
             SlaThresholds::default(),
+            ReplayRuntimeObservers::default(),
         )
-        .unwrap_err();
+        .unwrap();
 
+        assert_eq!(report.request_counts.num_requests, 1);
+        assert_eq!(report.request_counts.completed_requests, 0);
+        assert_eq!(report.per_request.len(), 1);
         assert_eq!(
-            err.to_string(),
-            "replay invariant violated: offline replay detected an effect-free zero-duration pass with 1 in-flight requests remaining"
+            report.per_request[0].terminal_status,
+            aisim_core::replay::ReplayTerminalStatus::Rejected
         );
     }
 

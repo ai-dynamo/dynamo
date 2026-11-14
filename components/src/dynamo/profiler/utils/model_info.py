@@ -13,7 +13,7 @@ from pydantic import BaseModel
 from transformers import AutoConfig
 
 try:
-    from aisimulate_core.sdk.utils import (
+    from aisim_core.sdk.utils import (
         HuggingFaceDownloadError,
         _load_model_config_from_model_path,
     )

@@ -23,7 +23,7 @@ vLLM-shaped core with a different capacity policy.
 | Scheduler model | Waiting and running queues with a shared token budget | Cache-aware waiting and running queues | vLLM-shaped core with capacity-first admission |
 | KV representation | Native block pool | Token pool and radix cache | Native block pool |
 | Memory pressure | LIFO or FIFO recompute preemption | Decode retraction with cached-prefix preservation | `GUARANTEED_NO_EVICT`; reserves prompt plus maximum output at admission |
-| Prefix reuse | Block-hash matching when prefix caching is enabled | Radix-prefix matching | Block-hash matching when prefix caching is enabled |
+| Prefix reuse | Block-hash matching when prefix caching is enabled | Radix-prefix matching; off on decode workers by default | Block-hash matching when prefix caching is enabled |
 | Default block or page size | 64 tokens | 1 token, or `sglang.page_size` | 32 tokens |
 | Aggregated simulation | Supported | Supported | Supported |
 | Prefill/decode disaggregation | Supported | Supported | Not supported |

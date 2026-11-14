@@ -33,15 +33,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "aisimulate-core"
-version = "0.13.0-dev.202610290000000087"
+name = "aisim-core"
+version = "0.15.0-dev.202611130000000104"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eb823782e806dd74cba719906a6b828b86f415aad54c6d5016c29ff278e89319"
+checksum = "9832a713d36793d2573ca3310f42cf03eb2976451674fc3a31fb274d9292a0f6"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
  "blake3",
- "ddsketchy",
  "derive_builder",
  "fixedbitset",
  "flate2",
@@ -1860,12 +1859,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a4ae5f15dda3c708c0ade84bfee31ccab44a3da4f88015ed22f63732abe300c8"
 
 [[package]]
-name = "ddsketchy"
-version = "0.1.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "724389b6953e2cef5558663e625e64220f473443132a7c64477742a0caeff621"
-
-[[package]]
 name = "defmac"
 version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2483,7 +2476,7 @@ dependencies = [
 name = "dynamo-mocker"
 version = "1.7.0"
 dependencies = [
- "aisimulate-core",
+ "aisim-core",
  "anyhow",
  "blake3",
  "bytes",
@@ -2625,7 +2618,7 @@ dependencies = [
 name = "dynamo-py3"
 version = "1.7.0"
 dependencies = [
- "aisimulate-core",
+ "aisim-core",
  "anyhow",
  "async-stream",
  "async-trait",

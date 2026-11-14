@@ -23,7 +23,7 @@ import pytest
 import yaml
 
 pytest.importorskip(
-    "aisimulate.config.cli",
+    "aisim.config.cli",
     reason="AISimulate is an optional Dynamo simulation dependency",
 )
 
@@ -137,7 +137,7 @@ def _predict(tmp_path: Path, config: dict) -> subprocess.CompletedProcess[str]:
         [
             sys.executable,
             "-m",
-            "aisimulate",
+            "aisim",
             "predict",
             "--stack",
             "dynamo",

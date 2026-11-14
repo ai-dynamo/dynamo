@@ -9,7 +9,7 @@ subtitle: Runs the AIConfigurator-driven profiling pipeline that turns a model, 
 
 The Dynamo Profiler analyzes model inference performance and generates optimized deployment configurations (DynamoGraphDeployments). Given a model, hardware, and SLA targets, it determines the best parallelization strategy, selects optimal prefill and decode engine configurations, and produces a ready-to-deploy DGD YAML.
 
-The profiler accepts a `DynamoGraphDeploymentRequestSpec` (DGDR) as input and uses [AIConfigurator (AIC)](../../../additional-resources/aiconfigurator-reference.md) compatibility APIs from the `aisimulate` wheel for performance simulation, candidate enumeration, and configuration picking. When the Planner is enabled, the profiler also emits the canonical AIS configuration under `ais_perf_model.roles` and can generate optional engine interpolation curves used to bootstrap runtime autoscaling.
+The profiler accepts a `DynamoGraphDeploymentRequestSpec` (DGDR) as input and uses [AIConfigurator (AIC)](../../../additional-resources/aiconfigurator-reference.md) compatibility APIs from the `aisim` wheel for performance simulation, candidate enumeration, and configuration picking. When the Planner is enabled, the profiler also emits the canonical AIS configuration under `ais_perf_model.roles` and can generate optional engine interpolation curves used to bootstrap runtime autoscaling.
 
 ## Workflow
 

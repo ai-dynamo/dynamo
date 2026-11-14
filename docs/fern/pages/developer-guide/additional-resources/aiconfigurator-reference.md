@@ -6,10 +6,10 @@ subtitle: Compare aggregated and disaggregated layouts before deployment
 ---
 
 This page is the full reference for the `aiconfigurator` compatibility command shipped in the
-[AISimulate](https://pypi.org/project/aisimulate/) Python distribution: sizing aggregated and
+[AISimulate](https://pypi.org/project/aisim/) Python distribution: sizing aggregated and
 disaggregated Dynamo deployments, generating deployment artifacts, and validating them. Dynamo does
 not depend on the separate `aiconfigurator` or `aiconfigurator-core` distributions. The AISimulate
-wheel exposes the `aisimulate` and `aisimulate_core` Python namespaces and retains the
+wheel exposes the `aisim` and `aisim_core` Python namespaces and retains the
 `aiconfigurator` command for CLI compatibility.
 
 If you only need a parallelism layout for a DGD
@@ -552,7 +552,7 @@ AIConfigurator's default predictions assume no cached prefix.
 
 ### Backends and Versions
 
-For a comprehensive breakdown of which model/system/backend/version combinations are supported in both aggregated and disaggregated modes, refer to the [**support matrix**](https://ai-dynamo.github.io/aiconfigurator/support-matrix/). The wheel packages its generated and tested per-system CSV data under `aisimulate_core/systems/support_matrix`.
+For a comprehensive breakdown of which model/system/backend/version combinations are supported in both aggregated and disaggregated modes, refer to the [**support matrix**](https://ai-dynamo.github.io/aiconfigurator/support-matrix/). The wheel packages its generated and tested per-system CSV data under `aisim_core/systems/support_matrix`.
 
 You can also check if a system / framework version is supported via the `aiconfigurator cli support` command. For example:
 ```bash
@@ -674,7 +674,7 @@ For balanced workloads (ISL/OSL ratio between 2:1 and 10:1), aggregated is often
 
 ## Learn More
 
-- [AISimulate package](https://pypi.org/project/aisimulate/)
+- [AISimulate package](https://pypi.org/project/aisim/)
 - [AIConfigurator compatibility support matrix](https://ai-dynamo.github.io/aiconfigurator/support-matrix/)
 - [Dynamo Installation Guide](../../kubernetes/installation/install-dynamo.md)
 - [Benchmarking Guide](../../recipes/feature-benchmarks/benchmarking-guide.md)

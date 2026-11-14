@@ -20,7 +20,7 @@ aisimulate recommend --stack dynamo --config recommendation.yaml
 | `-c`, `--config` | Required | Recommendation YAML |
 | `--stack` | `engine` | Set to `dynamo` to load the Dynamo runner and adapters |
 | `--set PATH=YAML_VALUE` | None | Override a configuration path after loading YAML; repeatable |
-| `--output-dir` | `./aisimulate-output` | Recommendation output directory |
+| `--output-dir` | `./aisim-output` | Recommendation output directory |
 | `--overwrite` | `false` | Replace known AISimulate output files while preserving unrelated files |
 | `--format` | `table` | Standard-output format: `table` or `json` |
 
@@ -142,7 +142,7 @@ topology branch must receive at least one trial.
 Recommendation writes:
 
 ```text
-aisimulate-output/
+aisim-output/
 └── recommendations/
     ├── 0001.yaml
     ├── 0002.yaml
@@ -155,7 +155,7 @@ Each numbered YAML contains one concrete prediction configuration with no `optim
 ```bash
 aisimulate predict \
   --stack dynamo \
-  --config aisimulate-output/recommendations/0001.yaml
+  --config aisim-output/recommendations/0001.yaml
 ```
 
 Scalar objectives write all feasible candidates in deterministic best-to-worst order. Pareto writes

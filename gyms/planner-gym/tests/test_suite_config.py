@@ -175,7 +175,7 @@ import runpy
 import sys
 original_import = builtins.__import__
 def guarded_import(name, *args, **kwargs):
-    if name == 'dynamo' or name.startswith(('dynamo.', 'aisimulate')):
+    if name == 'dynamo' or name.startswith(('dynamo.', 'aisim')):
         raise AssertionError('unexpected native import: ' + name)
     return original_import(name, *args, **kwargs)
 builtins.__import__ = guarded_import

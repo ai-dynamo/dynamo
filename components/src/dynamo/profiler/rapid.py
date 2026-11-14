@@ -19,11 +19,11 @@ import logging
 
 import pandas as pd
 import yaml
-from aisimulate.generator.api import generate_backend_artifacts
-from aisimulate.generator.module_bridge import task_config_to_generator_config
-from aisimulate.generator.naive import build_naive_generator_params
-from aisimulate.legacy_cli.main import _execute_tasks, build_default_tasks
-from aisimulate.sdk.task_v2 import Task
+from aisim.generator.api import generate_backend_artifacts
+from aisim.generator.module_bridge import task_config_to_generator_config
+from aisim.generator.naive import build_naive_generator_params
+from aisim.legacy_cli.main import _execute_tasks, build_default_tasks
+from aisim.sdk.task_v2 import Task
 
 from dynamo.profiler.utils.config import clamp_total_gpus_to_budget
 from dynamo.profiler.utils.dgdr_v1beta1_types import DynamoGraphDeploymentRequestSpec

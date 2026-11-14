@@ -12,16 +12,13 @@ from copy import deepcopy
 import pytest
 
 pytest.importorskip(
-    "aisimulate.sweeper",
+    "aisim.sweeper",
     reason="AI Simulate is an optional Dynamo simulation dependency",
 )
 
-from aisimulate.config_adapter import (
-    PredictionAdapterContext,
-    RecommendationAdapterContext,
-)
-from aisimulate.sweeper.provider import CandidateContext, SweepContext
-from aisimulate.sweeper.replay import BackendDeploymentSpec
+from aisim.config_adapter import PredictionAdapterContext, RecommendationAdapterContext
+from aisim.sweeper.provider import CandidateContext, SweepContext
+from aisim.sweeper.replay import BackendDeploymentSpec
 
 import dynamo.router.simulation.provider as router_provider_module
 from dynamo.router.simulation import create_provider
@@ -287,7 +284,7 @@ def test_public_router_ais_load_model_reaches_runtime_config() -> None:
 
     hook_config = replay_spec.runtime_hooks[0].config
     assert hook_config["router_config"]["router_prefill_load_model"] == "ais"
-    from aisimulate_core.sdk import ForwardPassPerfModelConfig
+    from aisim_core.sdk import ForwardPassPerfModelConfig
 
     assert (
         hook_config["ais_perf_config"]

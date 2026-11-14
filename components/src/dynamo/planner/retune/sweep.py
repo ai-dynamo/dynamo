@@ -48,7 +48,7 @@ from multiprocessing.process import BaseProcess
 from pathlib import Path
 from typing import Any, Literal, NamedTuple
 
-from aisimulate.sweeper import OptimizationTarget, objective_value
+from aisim.sweeper import OptimizationTarget, objective_value
 
 from dynamo.planner.config.planner_config import (
     PlannerConfig,

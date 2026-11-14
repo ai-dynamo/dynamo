@@ -55,7 +55,7 @@ def _resolve_quant_mode(field: str, value: str | None):
     normalized = _normalize_quant_mode(value)
     if normalized is None:
         return None
-    from aisimulate_core.sdk import common
+    from aisim_core.sdk import common
 
     enum_cls = {
         "gemm": common.GEMMQuantMode,
@@ -120,7 +120,7 @@ class AisSession:
     """
 
     def __init__(self, config, *, worker_type: str | None = None):
-        from aisimulate_core.sdk import RustForwardPassPerfModel
+        from aisim_core.sdk import RustForwardPassPerfModel
 
         if os.environ.get("DYNAMO_AIS_DISABLE_COMPILED_ENGINE"):
             raise ValueError(
@@ -204,7 +204,7 @@ def create_session(config, *, worker_type: str | None = None) -> AisSession:
 
 def estimate_canonical_num_gpu_blocks(config, **scheduler_options) -> int:
     """Estimate capacity from the exact resolved canonical estimator identity."""
-    from aisimulate.capacity import materialize_aic_num_gpu_blocks
+    from aisim.capacity import materialize_aic_num_gpu_blocks
 
     payload = config.to_dict() if hasattr(config, "to_dict") else dict(config)
     payload.setdefault("estimation_mode", "auto")

@@ -3,7 +3,7 @@
 
 //! Canonical AISimulate model construction and pure Rust scheduler adapters.
 #[cfg(feature = "ais-forward-pass")]
-use aisimulate_core::{
+use aisim_core::{
     ForwardPassMetrics, ForwardPassPerfModel, ForwardPassPerfModelConfig, ForwardPassPerfReadiness,
     ScheduledRequestMetrics,
 };
@@ -106,7 +106,7 @@ impl AisCallback for RustAisCallback {
         // Legacy API returns a trajectory sum. Mocker uses osl=2, i.e. one
         // generation step at isl+1; preserve this exact context convention.
         let mut total = 0.0;
-        let stride = aisimulate_core::perfmodel::engine::DEFAULT_STATIC_STRIDE as usize;
+        let stride = aisim_core::perfmodel::engine::DEFAULT_STATIC_STRIDE as usize;
         for step in (1..osl).step_by(stride) {
             let context = isl
                 .checked_add(step)
@@ -166,7 +166,7 @@ fn build_model(config: &serde_json::Value) -> PyResult<RustAisCallback> {
     }
     if nextn > 0
         && model.provenance().is_some_and(|p| {
-            p.selected_estimation_mode == aisimulate_core::EstimationMode::FpmInterpolation
+            p.selected_estimation_mode == aisim_core::EstimationMode::FpmInterpolation
         })
     {
         return Err(pyo3::exceptions::PyValueError::new_err(

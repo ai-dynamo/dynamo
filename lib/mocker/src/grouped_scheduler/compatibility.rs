@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use aisimulate_core::engine::{
+use aisim_core::engine::{
     Admission, HandoffId as EngineHandoffId, LifecycleEvent, Output, Request,
     TransferTimingMode as EngineTransferTimingMode,
 };
@@ -75,6 +75,10 @@ impl CompatibilityState {
                 .and_then(|context| context.session_id().map(str::to_owned)),
             images: Vec::new(),
             kv_hint: None,
+            // The engine publishes a salted prompt's KV blocks under AISim's
+            // salted hashes. A router fed by those events must look the
+            // request up by `ReplayRequestHashes::from_tokens_with_cache_salt`.
+            cache_salt: request.cache_salt,
         })
     }
 
@@ -415,7 +419,7 @@ mod tests {
         let error = state
             .lifecycle_event(LifecycleEvent::TtftMilestone {
                 request_id: Uuid::from_u128(12),
-                stage: aisimulate_core::engine::TtftMilestone::Received,
+                stage: aisim_core::engine::TtftMilestone::Received,
                 at_ms: 0.0,
             })
             .unwrap_err();
@@ -423,10 +427,22 @@ mod tests {
     }
 
     #[test]
+    fn native_request_carries_the_cache_salt() {
+        let state = CompatibilityState::new(MockerConfig::default());
+        let native = state
+            .native_request(DirectRequest {
+                cache_salt: Some("tenant".to_owned()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(native.cache_salt.as_deref(), Some("tenant"));
+    }
+
+    #[test]
     fn unhandled_request_fields_do_not_mutate_compatibility_state() {
         let state = CompatibilityState::new(MockerConfig::default());
         let mut request = DirectRequest {
-            kv_hints: Some(aisimulate_core::replay::AuthoredKvHints {
+            kv_hints: Some(aisim_core::replay::AuthoredKvHints {
                 source_worker: 0,
                 source_dp_rank: 0,
             }),
@@ -441,11 +457,11 @@ mod tests {
         );
         assert!(state.request_accounting.lock().is_empty());
         request.kv_hints = None;
-        request.images.push(aisimulate_core::engine::ImageSpec {
+        request.images.push(aisim_core::engine::ImageSpec {
             identity: 1,
             token_start: 0,
             token_end: 1,
-            encoder: aisimulate_core::engine::EncoderShape {
+            encoder: aisim_core::engine::EncoderShape {
                 sequences: 1,
                 patch_tokens: 1,
                 transformer_tokens: 1,

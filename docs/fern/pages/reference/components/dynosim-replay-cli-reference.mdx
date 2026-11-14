@@ -42,7 +42,7 @@ aisimulate predict --stack dynamo --config prediction.yaml
   not supported.
 </ParamField>
 
-<ParamField path="--output-dir" type="path" default="./aisimulate-output">
+<ParamField path="--output-dir" type="path" default="./aisim-output">
   Directory for `prediction.json` and optional per-request output.
 </ParamField>
 
@@ -222,14 +222,22 @@ Use `json.dumps` and `json.loads` to save and restore configuration mappings. Ke
 `num_gpu_blocks_is_explicit` when saving a normalized configuration: `false` preserves automatic
 AISimulate capacity estimation. Providing `engine.num_gpu_blocks` without that marker selects an
 explicit capacity. Set `engine.max_num_seqs` or `engine.max_num_batched_tokens` to `null` (`None` in Python)
-for an unlimited scheduler limit; omit the field to use the engine default.
+for an unlimited scheduler limit; omit the field to use the engine default. With the SGLang
+backend, a `null` `engine.max_num_seqs` is not unlimited: the engine derives the limit from the KV
+capacity and the context length.
+
+A vLLM engine models async scheduling by default, except with MTP and native host offload: a
+request that arrives while the engine is busy is admitted later than with synchronous scheduling,
+one pass later in offline replay and up to two passes later in online replay. Set
+`engine.async_scheduling` to `false` (`False` in Python) to model synchronous scheduling. SGLang
+and TensorRT-LLM engines reject the field.
 
 ### Typed agentic replay through the Dynamo API
 
 AISimulate owns public Weka ingestion, validation, and lowering into the canonical
 `ValidatedAgenticGraph`. The lower-level
 `dynamo.replay.run_trace_replay(...)` API keeps `trace_format="weka"` as a compatibility adapter,
-but delegates graph construction directly to `aisimulate-core` before Dynamo composes its Router
+but delegates graph construction directly to `aisim-core` before Dynamo composes its Router
 and Mocker runtime behavior.
 
 Use `weka_nested_timestamp_basis="absolute"` or `"relative"` to override nested timestamp
@@ -345,7 +353,7 @@ hardware offload recipe.
   configuration. Default KV block sizes are 64 for vLLM, 1 for SGLang, and 32 for TensorRT-LLM.
 - Scheduler defaults are 8,192 batched tokens for every role and 256 sequences for aggregated and
   decode workers. Prefill workers default to one sequence.
-- `timing.type: default` uses the AIConfigurator forward-pass model shipped in the `aisimulate`
+- `timing.type: default` uses the AIConfigurator forward-pass model shipped in the `aisim`
   wheel. `fixed` requires both `prefill_ms` and `decode_ms`; `polynomial` selects the built-in
   polynomial model.
 - `router.policy: kv_router` supports one or more routable workers. Set
@@ -411,7 +419,7 @@ configuration shape, such as `traffic.source`.
 The output directory contains:
 
 ```text
-aisimulate-output/
+aisim-output/
 ├── prediction.json
 ├── requests.jsonl
 ├── resource-runtime.json
