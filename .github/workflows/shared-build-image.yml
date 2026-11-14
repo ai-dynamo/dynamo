@@ -549,34 +549,7 @@ jobs:
           # Container artifact prefix: lets the main-baseline walk look up
           # compliance-<sha>-<prefix> availability per commit.
           DIFF_ARTIFACT_PREFIX: ${{ steps.calculate-target-tag.outputs.target_tag_plain }}
-        run: |
-          # The build checkout is shallow with no tags. Make the refs each
-          # baseline rule needs reachable (all best-effort; a miss just yields an
-          # empty base_sha and a baseline_unavailable diff). Depth 30 gives the
-          # first-parent baseline walks enough history to find an artifact. Fetch
-          # HEAD by SHA with an explicit depth; `--deepen` is far slower here.
-          git fetch --no-tags --depth=31 origin "$(git rev-parse HEAD)" --quiet || true # HEAD~N (main post-merge walk)
-          # Only the release rule reads tags. With no refspec, this fetch also
-          # downloads every branch on origin, so run it only for release builds.
-          if [[ "${DIFF_BASE_BRANCH}" == release/* || "${DIFF_CURRENT_BRANCH}" == release/* ]]; then
-            git fetch --tags --quiet || true                                        # vX.Y.Z tags (release branch)
-          fi
-          if [ "${DIFF_BASE_BRANCH}" = "main" ] \
-            && [ -n "${DIFF_MERGE_BASE_SHA}" ]; then
-            git fetch --no-tags --depth=30 origin "${DIFF_MERGE_BASE_SHA}" --quiet || true # stable PR fork-point walk
-          fi
-          CURRENT_VERSION=$(grep -m1 -E '^version[[:space:]]*=' pyproject.toml | sed -E 's/.*"([^"]+)".*/\1/' || true)
-          python3 container/compliance/resolve_diff_base.py \
-            --event-context "${DIFF_EVENT_CONTEXT}" \
-            --current-branch "${DIFF_CURRENT_BRANCH}" \
-            --base-branch "${DIFF_BASE_BRANCH}" \
-            --merge-base-sha "${DIFF_MERGE_BASE_SHA}" \
-            --current-sha "${DIFF_CURRENT_SHA}" \
-            --current-version "${CURRENT_VERSION}" \
-            --artifact-prefix "${DIFF_ARTIFACT_PREFIX}" \
-            --repo "${DIFF_REPO}" \
-            --current-run-id "${DIFF_RUN_ID}" \
-            >> "$GITHUB_OUTPUT"
+        run: bash container/compliance/resolve_diff_base.sh
 
       # builder's pinned to specific pods and the pool can scale down mid-job.
       # re-route first or the extract just dies on buildx's 20s connect timeout.

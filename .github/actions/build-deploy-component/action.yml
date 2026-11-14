@@ -283,37 +283,11 @@ runs:
         DIFF_RUN_ID: ${{ github.run_id }}
         IMAGE_TAG: ${{ inputs.artifact_tag != '' && inputs.artifact_tag || inputs.image_tag }}
       run: |
-        # The build checkout is shallow with no tags. Make the refs each baseline
-        # rule needs reachable (all best-effort; a miss just yields an empty
-        # base_sha and a baseline_unavailable diff). Depth 30 gives the
-        # first-parent baseline walks enough history to find an artifact. Fetch
-        # HEAD by SHA with an explicit depth; `--deepen` is far slower here.
-        git fetch --no-tags --depth=31 origin "$(git rev-parse HEAD)" --quiet || true # HEAD~N (main post-merge walk)
-        # Only the release rule reads tags. With no refspec, this fetch also
-        # downloads every branch on origin, so run it only for release builds.
-        if [[ "${DIFF_BASE_BRANCH}" == release/* || "${DIFF_CURRENT_BRANCH}" == release/* ]]; then
-          git fetch --tags --quiet || true                                        # vX.Y.Z tags (release branch)
-        fi
-        if [ "${DIFF_BASE_BRANCH}" = "main" ] && [ -n "${DIFF_MERGE_BASE_SHA}" ]; then
-          git fetch --no-tags --depth=30 origin "${DIFF_MERGE_BASE_SHA}" --quiet || true # stable PR fork-point walk
-        fi
-        CURRENT_VERSION=$(grep -m1 -E '^version[[:space:]]*=' pyproject.toml | sed -E 's/.*"([^"]+)".*/\1/' || true)
         # The compliance artifact is compliance-<image_tag>, and image_tag is
         # <github.sha>-<suffix> (e.g. -operator), so the baseline lookup
         # targets compliance-<baseSHA>-<suffix>. Derive the suffix from
         # image_tag by stripping the leading <sha>- (the SHA carries no dash).
-        ARTIFACT_PREFIX="${IMAGE_TAG#*-}"
-        python3 container/compliance/resolve_diff_base.py \
-          --event-context "${DIFF_EVENT_CONTEXT}" \
-          --current-branch "${DIFF_CURRENT_BRANCH}" \
-          --base-branch "${DIFF_BASE_BRANCH}" \
-          --merge-base-sha "${DIFF_MERGE_BASE_SHA}" \
-          --current-sha "${DIFF_CURRENT_SHA}" \
-          --current-version "${CURRENT_VERSION}" \
-          --artifact-prefix "${ARTIFACT_PREFIX}" \
-          --repo "${DIFF_REPO}" \
-          --current-run-id "${DIFF_RUN_ID}" \
-          >> "$GITHUB_OUTPUT"
+        DIFF_ARTIFACT_PREFIX="${IMAGE_TAG#*-}" bash container/compliance/resolve_diff_base.sh
 
     # Download the resolved baseline's compliance artifact so the diff has
     # something to compare against. Any miss (expired retention, never built, no
