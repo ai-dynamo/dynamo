@@ -149,7 +149,9 @@ RUN dnf -y --setopt=tsflags=nocontexts install 'ca-certificates >= 2026.2.92_v9.
 # --setopt=tsflags=nocontexts: skip SELinux file-context labeling. The manylinux
 # image lacks the SELinux policy store that some compute nodes expect; without
 # this flag, dnf fails with "ValueError: SELinux policy is not managed".
+# Clear a stale dnf lock (a killed PID-1 dnf leaves "1" in the cache); trailing `true` keeps dnf off PID 1.
 RUN --mount=type=cache,target=/var/cache/dnf,sharing=locked \
+    rm -f /var/cache/dnf/metadata_lock.pid && \
     dnf install -y --setopt=tsflags=nocontexts almalinux-release-synergy && \
     dnf config-manager --set-enabled powertools && \
     dnf install -y --setopt=tsflags=nocontexts \
@@ -188,7 +190,8 @@ RUN --mount=type=cache,target=/var/cache/dnf,sharing=locked \
         libcurl-devel \
         openssl-devel \
         libuuid-devel \
-        zlib-devel
+        zlib-devel && \
+    true
 
 # Default comes from context.yaml; keep it in sync with upstream NIXL's
 # contrib/Dockerfile.manylinux. NIXL v1.0.x needs newer hwloc than RHEL8 ships.
