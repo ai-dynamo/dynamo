@@ -28,6 +28,10 @@ impl WorkerInputs {
     /// the host rejects a policy that declares it without [`Self::CACHE`], because the counts
     /// come from the indexer that `CACHE` starts.
     pub const RESIDENT_BLOCKS: Self = Self(1 << 3);
+    /// Request sums over each worker's active prefills, read through the worker-selection
+    /// stage's `WorkerCandidate::active_prefill_sums`. Filters and scorers only: a picker that
+    /// declares it receives nothing.
+    pub const ACTIVE_PREFILL_SUMS: Self = Self(1 << 4);
     /// Request each row's active request count, read through the worker-selection stage's
     /// `WorkerInputView::active_requests`. Picker only: filters and scorers that declare it
     /// receive nothing.
@@ -44,6 +48,7 @@ impl WorkerInputs {
     /// | Group | Filters | Scorers | Pickers | Hint policies |
     /// | --- | --- | --- | --- | --- |
     /// | `CACHE`, `LOAD`, `PREFERRED_TAINT` | Yes | Yes | Yes | Rejected |
+    /// | `ACTIVE_PREFILL_SUMS` | Yes | Yes | No | Rejected |
     /// | `ACTIVE_REQUESTS` | No | No | Yes | Rejected |
     /// | `KV_COPY` | No | Yes | No | The booked worker's copy source |
     ///

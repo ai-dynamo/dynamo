@@ -201,6 +201,7 @@ fn input_names(inputs: WorkerInputs) -> String {
         (WorkerInputs::CACHE, "CACHE"),
         (WorkerInputs::LOAD, "LOAD"),
         (WorkerInputs::PREFERRED_TAINT, "PREFERRED_TAINT"),
+        (WorkerInputs::ACTIVE_PREFILL_SUMS, "ACTIVE_PREFILL_SUMS"),
         (WorkerInputs::ACTIVE_REQUESTS, "ACTIVE_REQUESTS"),
     ]
     .into_iter()

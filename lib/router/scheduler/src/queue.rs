@@ -50,7 +50,9 @@ use dynamo_slot_tracker::{
     ActiveSequencesMultiWorker, SequenceError, SequencePublisher, SequenceRequest,
     WorkerLoadProjection, WorkerLoadReader,
 };
-use dynamo_worker_selection::{RuntimePolicyConfig, RuntimePolicyError, RuntimePolicyUpdate};
+use dynamo_worker_selection::{
+    ActivePrefillSums, RuntimePolicyConfig, RuntimePolicyError, RuntimePolicyUpdate,
+};
 use dynamo_worker_selection::{SelectionTrace, SelectionTraceSpec};
 use dynamo_worker_selection::{WorkerCapacity, WorkerInputRows, WorkerLoadInput};
 
@@ -984,6 +986,9 @@ struct SchedulerQueueActor<
     /// Rows prepared for the request enqueued this turn, dropped when the turn ends.
     turn_prepared: Option<Box<PreparedAdmission>>,
     projected_loads: FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
+    /// Every rank's active prefill sums, refilled by `with_projected_loads` only for a selector
+    /// that declares `WorkerInputs::ACTIVE_PREFILL_SUMS`, and empty otherwise.
+    projected_prefill_sums: FxHashMap<WorkerWithDpRank, ActivePrefillSums>,
     /// Ranks the current request's load projection found past the host's reject thresholds,
     /// counted per worker. Refilled by `with_projected_loads`; empty while nothing is full.
     full_ranks: FullRankCounts,
@@ -1224,6 +1229,7 @@ impl<
             turn: 0,
             turn_prepared: None,
             projected_loads: FxHashMap::default(),
+            projected_prefill_sums: FxHashMap::default(),
             full_ranks: FullRankCounts::default(),
             gate_full_ranks: FullRankCounts::default(),
             write_log: ActorWriteLog::new(Arc::clone(&actor_writes)),
@@ -2756,6 +2762,16 @@ impl<
                 );
             }
         }
+        if self
+            .selector
+            .required_worker_inputs()
+            .contains(WorkerInputs::ACTIVE_PREFILL_SUMS)
+        {
+            self.slots
+                .project_active_prefill_sums_into(&mut self.projected_prefill_sums);
+        } else if !self.projected_prefill_sums.is_empty() {
+            self.projected_prefill_sums.clear();
+        }
         let result = handle(self, &mut request, prepared);
         let loads = std::mem::take(&mut request.worker_loads);
         match adopted {
@@ -2852,7 +2868,11 @@ impl<
                             eligibility,
                             self.block_size,
                         )
-                        .with_resident_blocks(resident_blocks.as_deref().map(|counts| &**counts)),
+                        .with_resident_blocks(resident_blocks.as_deref().map(|counts| &**counts))
+                        .with_active_prefill_sums(
+                            (!self.projected_prefill_sums.is_empty())
+                                .then_some(&self.projected_prefill_sums),
+                        ),
                         prepared,
                         trace,
                     )
@@ -3215,6 +3235,7 @@ impl<
         Some(PrefillLoadHint {
             initial_effective_prefill_tokens: effective_isl,
             expected_prefill_duration,
+            cached_tokens: prefix,
         })
     }
 
@@ -5260,6 +5281,7 @@ mod tests {
             turn: 0,
             turn_prepared: None,
             projected_loads: FxHashMap::with_capacity_and_hasher(8, Default::default()),
+            projected_prefill_sums: FxHashMap::default(),
             full_ranks: FullRankCounts::default(),
             gate_full_ranks: FullRankCounts::default(),
             write_log: ActorWriteLog::new(Arc::clone(&queue.actor_writes)),
@@ -5927,6 +5949,65 @@ mod tests {
                 .is_err(),
             "a filtering selector's affinity pin must not report a non-max-overlap selection"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn queue_supplies_active_prefill_sums_only_to_declaring_selectors() {
+        struct RecordingSelector {
+            inputs: WorkerInputs,
+            seen: Arc<std::sync::Mutex<Vec<Option<ActivePrefillSums>>>>,
+        }
+
+        impl WorkerSelector<SimpleWorkerConfig> for RecordingSelector {
+            fn required_worker_inputs(&self) -> WorkerInputs {
+                self.inputs
+            }
+
+            fn select_worker(
+                &self,
+                input: WorkerSelectionInput<'_, SimpleWorkerConfig>,
+            ) -> Result<WorkerSelectionResult, KvSchedulerError> {
+                self.seen.lock().unwrap().push(
+                    input
+                        .active_prefill_sums()
+                        .map(|sums| sums[&WorkerWithDpRank::new(0, 0)]),
+                );
+                DefaultWorkerSelector::new(None, "test").select_worker(input)
+            }
+        }
+
+        let worker = WorkerWithDpRank::new(0, 0);
+        for (inputs, expected) in [
+            (
+                WorkerInputs::ACTIVE_PREFILL_SUMS,
+                // The first selection sees the idle worker; the second sees the first booking.
+                vec![
+                    Some(ActivePrefillSums::default()),
+                    Some(ActivePrefillSums::for_testing(16, 256, 768)),
+                ],
+            ),
+            (WorkerInputs::NONE, vec![None, None]),
+        ] {
+            let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let (queue, slots) = make_queue_with_selector_and_availability(
+                PolicyProfile::synthetic(None, RouterQueuePolicy::Fcfs),
+                RecordingSelector {
+                    inputs,
+                    seen: Arc::clone(&seen),
+                },
+                Arc::new(|_| None),
+            );
+            for request_id in ["first", "second"] {
+                let (mut request, response_rx) = make_request(request_id, 64);
+                request.overlap.effective_cached_tokens.insert(worker, 48);
+                queue.enqueue(request).await;
+                response_rx.await.unwrap().unwrap();
+            }
+            assert_eq!(*seen.lock().unwrap(), expected);
+            for request_id in ["first", "second"] {
+                slots.free(&request_id.to_string(), decay_now()).unwrap();
+            }
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -7756,6 +7837,7 @@ mod tests {
                     prefill_load_hint: Some(PrefillLoadHint {
                         initial_effective_prefill_tokens: isl,
                         expected_prefill_duration: None,
+                        cached_tokens: 0,
                     }),
                     worker,
                     lora_name: None,

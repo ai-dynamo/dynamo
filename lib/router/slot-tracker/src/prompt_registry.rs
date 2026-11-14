@@ -13,12 +13,12 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::time::Instant;
 
-use super::PrefillTokenDeltas;
 use super::prefill_tracker::{PrefillLoadSnapshot, PrefillTimeLoadError};
 use super::prompt_membership_trie::PromptMembershipTrie;
 use super::sharded_lock::ShardedRwLock;
 use super::single::PromptMembershipDelta;
 use super::topology::WorkerTopologyChange;
+use super::{ActivePrefillSums, PrefillTokenDeltas};
 use crate::busy::FullRankCounts;
 use crate::prelude::WorkerWithDpRank;
 use dynamo_router_protocol::worker::WorkerCapacity;
@@ -94,6 +94,26 @@ impl WorkerLoadSnapshot {
     }
 }
 
+/// One worker's load as `ActiveSequences` publishes it after a mutation. The registry stores
+/// `prefill_sums` apart from `load`, which the per-request projection scans, and reads the sums
+/// only for selectors that declare `ACTIVE_PREFILL_SUMS`.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct WorkerLoadUpdate {
+    pub(super) load: WorkerLoadSnapshot,
+    pub(super) prefill_sums: ActivePrefillSums,
+}
+
+// Production publishers must pass the sums with the load; only fixtures may omit them.
+#[cfg(test)]
+impl From<WorkerLoadSnapshot> for WorkerLoadUpdate {
+    fn from(load: WorkerLoadSnapshot) -> Self {
+        Self {
+            load,
+            prefill_sums: ActivePrefillSums::default(),
+        }
+    }
+}
+
 #[derive(Debug)]
 struct WorkerLoadSlot {
     // SeqLock gives the hot projection path a lock-free read of the latest
@@ -142,6 +162,9 @@ struct WorkerLoadTable {
     // slot so the per-request scan streams the same bytes as before and reads capacity only
     // when a pass judges busy thresholds.
     capacities: Vec<WorkerCapacity>,
+    // Each entry's active prefill sums, parallel to `entries` by index and kept out of the
+    // load slot for the same reason. Read only for selectors that declare them.
+    prefill_sums: Vec<SeqLock<ActivePrefillSums>>,
     /// Changes whenever a rank is added or removed.
     version: u64,
 }
@@ -191,24 +214,32 @@ impl WorkerLoadTable {
             .or_insert_with(|| WorkerLoadSlot::new(WorkerLoadSnapshot::default()));
         if self.entries.len() > before {
             self.capacities.push(WorkerCapacity::default());
+            self.prefill_sums
+                .push(SeqLock::new(ActivePrefillSums::default()));
             self.version += 1;
         }
     }
 
-    fn update(&self, worker: WorkerWithDpRank, load: WorkerLoadSnapshot) -> bool {
-        let Some(slot) = self.entries.get(&worker) else {
+    fn update(&self, worker: WorkerWithDpRank, update: WorkerLoadUpdate) -> bool {
+        let Some((index, _, slot)) = self.entries.get_full(&worker) else {
             return false;
         };
-        slot.replace(load);
+        slot.replace(update.load);
+        // Most updates, such as output growth or freeing a decoded request, leave the sums
+        // unchanged. The worker's sequence lock serializes its updates, so reading first is safe.
+        let sums = &self.prefill_sums[index];
+        if sums.read() != update.prefill_sums {
+            *sums.lock_write() = update.prefill_sums;
+        }
         true
     }
 
-    fn upsert(&mut self, worker: WorkerWithDpRank, load: WorkerLoadSnapshot) {
-        if let Some(slot) = self.entries.get(&worker) {
-            slot.replace(load);
-        } else {
-            self.entries.insert(worker, WorkerLoadSlot::new(load));
+    fn upsert(&mut self, worker: WorkerWithDpRank, update: WorkerLoadUpdate) {
+        if !self.update(worker, update) {
+            self.entries
+                .insert(worker, WorkerLoadSlot::new(update.load));
             self.capacities.push(WorkerCapacity::default());
+            self.prefill_sums.push(SeqLock::new(update.prefill_sums));
             self.version += 1;
         }
     }
@@ -217,8 +248,18 @@ impl WorkerLoadTable {
         // `swap_remove` moves the last entry into the hole; mirror it so indices stay aligned.
         if let Some((index, _, _)) = self.entries.swap_remove_full(&worker) {
             self.capacities.swap_remove(index);
+            self.prefill_sums.swap_remove(index);
             self.version += 1;
         }
+    }
+
+    fn iter_prefill_sums(
+        &self,
+    ) -> impl Iterator<Item = (WorkerWithDpRank, ActivePrefillSums)> + '_ {
+        self.entries
+            .keys()
+            .zip(&self.prefill_sums)
+            .map(|(&worker, sums)| (worker, sums.read()))
     }
 }
 
@@ -270,16 +311,16 @@ impl PromptRegistry {
     pub(super) fn replace_worker_load_state(
         &self,
         worker: WorkerWithDpRank,
-        load: WorkerLoadSnapshot,
+        load: impl Into<WorkerLoadUpdate>,
     ) {
-        self.upsert_worker_load(worker, load);
+        self.upsert_worker_load(worker, load.into());
     }
 
     pub(super) fn apply_membership_delta_and_load(
         &self,
         worker: WorkerWithDpRank,
         delta: PromptMembershipDelta,
-        load: WorkerLoadSnapshot,
+        load: impl Into<WorkerLoadUpdate>,
     ) {
         self.apply_membership_delta_and_load_without_cleanup(worker, delta, load);
         self.maybe_cleanup();
@@ -295,7 +336,7 @@ impl PromptRegistry {
         &self,
         worker: WorkerWithDpRank,
         delta: PromptMembershipDelta,
-        load: WorkerLoadSnapshot,
+        load: impl Into<WorkerLoadUpdate>,
     ) {
         for remove in delta.removes {
             self.membership
@@ -305,14 +346,24 @@ impl PromptRegistry {
             self.membership
                 .store_path(worker, &store.path, store.new_suffix_start);
         }
-        self.upsert_worker_load(worker, load);
+        self.upsert_worker_load(worker, load.into());
     }
 
-    fn upsert_worker_load(&self, worker: WorkerWithDpRank, load: WorkerLoadSnapshot) {
-        if self.loads.read().update(worker, load) {
+    fn upsert_worker_load(&self, worker: WorkerWithDpRank, update: WorkerLoadUpdate) {
+        if self.loads.read().update(worker, update) {
             return;
         }
-        self.loads.write().upsert(worker, load);
+        self.loads.write().upsert(worker, update);
+    }
+
+    /// Replace `sums` with every registered rank's active prefill sums.
+    pub(super) fn project_active_prefill_sums_into(
+        &self,
+        sums: &mut FxHashMap<WorkerWithDpRank, ActivePrefillSums>,
+    ) {
+        let loads = self.loads.read();
+        sums.clear();
+        sums.extend(loads.iter_prefill_sums());
     }
 
     pub(super) fn maybe_cleanup(&self) {

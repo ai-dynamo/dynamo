@@ -166,6 +166,7 @@ async fn active_sequences_replay_matches_sequential_direct_oracle() -> anyhow::R
             prefill_load_hint: Some(PrefillLoadHint {
                 initial_effective_prefill_tokens: 256,
                 expected_prefill_duration: None,
+                cached_tokens: 0,
             }),
             worker: WorkerWithDpRank::from_worker_id(0),
             lora_name: None,

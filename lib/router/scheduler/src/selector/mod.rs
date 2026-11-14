@@ -36,8 +36,8 @@ use crate::kv_hints::{
     KvTransferScope, KvTransferSourceChoice, KvTransferSourceSummary, resolve_transfer_sources,
 };
 use dynamo_worker_selection::{
-    CacheSnapshot, CandidateData, ResidentBlockSource, WorkerCacheData, WorkerCapacity,
-    WorkerCopyInput, WorkerInputRows,
+    ActivePrefillSums, CacheSnapshot, CandidateData, ResidentBlockSource, WorkerCacheData,
+    WorkerCapacity, WorkerCopyInput, WorkerInputRows,
 };
 pub use dynamo_worker_selection::{
     CandidatePreparer, CandidateRank, CandidateRowSource, PreparedRows, RankVisitor, RowPick,
@@ -137,6 +137,9 @@ pub enum WorkerSelectionInput<'a, C: WorkerConfigLike> {
         /// The partition's live resident block counts, lent by the host for a policy that
         /// declared [`WorkerInputs::RESIDENT_BLOCKS`]; `None` otherwise.
         resident_blocks: Option<&'a ResidentBlockCounts>,
+        /// Every worker's active prefill sums, supplied only for a selector that declares
+        /// [`WorkerInputs::ACTIVE_PREFILL_SUMS`].
+        active_prefill_sums: Option<&'a FxHashMap<WorkerWithDpRank, ActivePrefillSums>>,
     },
 }
 
@@ -160,6 +163,7 @@ impl<'a, C: WorkerConfigLike> WorkerSelectionInput<'a, C> {
             eligibility,
             block_size,
             resident_blocks: None,
+            active_prefill_sums: None,
         }
     }
 
@@ -172,6 +176,7 @@ impl<'a, C: WorkerConfigLike> WorkerSelectionInput<'a, C> {
             request,
             eligibility,
             block_size,
+            active_prefill_sums,
             ..
         } = self;
         Self::Configured {
@@ -180,6 +185,7 @@ impl<'a, C: WorkerConfigLike> WorkerSelectionInput<'a, C> {
             eligibility,
             block_size,
             resident_blocks,
+            active_prefill_sums,
         }
     }
 
@@ -189,6 +195,31 @@ impl<'a, C: WorkerConfigLike> WorkerSelectionInput<'a, C> {
             resident_blocks, ..
         } = self;
         *resident_blocks
+    }
+
+    /// Supply every worker's active prefill sums for components that declare
+    /// [`WorkerInputs::ACTIVE_PREFILL_SUMS`].
+    pub(crate) fn with_active_prefill_sums(
+        mut self,
+        sums: Option<&'a FxHashMap<WorkerWithDpRank, ActivePrefillSums>>,
+    ) -> Self {
+        let Self::Configured {
+            active_prefill_sums,
+            ..
+        } = &mut self;
+        *active_prefill_sums = sums;
+        self
+    }
+
+    /// The active prefill sums the host supplied for this selection, if any.
+    pub(crate) fn active_prefill_sums(
+        &self,
+    ) -> Option<&'a FxHashMap<WorkerWithDpRank, ActivePrefillSums>> {
+        let Self::Configured {
+            active_prefill_sums,
+            ..
+        } = self;
+        *active_prefill_sums
     }
 
     pub fn into_configured(self) -> ConfiguredSelectionInputs<'a, C> {
@@ -275,6 +306,8 @@ pub(super) struct SelectionRowSource<'a, C: WorkerConfigLike> {
     pub(super) block_size: u32,
     /// The partition's live resident block counts, when the host lent them for this selection.
     resident_blocks: Option<&'a ResidentBlockCounts>,
+    /// Every rank's active prefill sums, when the host supplied them for this selection.
+    active_prefill_sums: Option<&'a FxHashMap<WorkerWithDpRank, ActivePrefillSums>>,
     /// Only tracked requests report cache reuse, so only their rows carry raw cached tokens.
     tracked: bool,
     pub(super) kv_transfer_sources: OnceCell<KvTransferSourceSummary>,
@@ -296,6 +329,7 @@ impl<'a, C: WorkerConfigLike> SelectionRowSource<'a, C> {
             eligibility,
             block_size,
             resident_blocks: None,
+            active_prefill_sums: None,
             tracked: request.mode.is_tracked(),
             kv_transfer_sources: OnceCell::new(),
             #[cfg(any(test, feature = "testing", feature = "bench"))]
@@ -306,6 +340,7 @@ impl<'a, C: WorkerConfigLike> SelectionRowSource<'a, C> {
     /// The source for a host's selection input, once its pinned worker is validated.
     fn from_input(input: WorkerSelectionInput<'a, C>) -> Result<Self, KvSchedulerError> {
         let resident_blocks = input.resident_blocks();
+        let active_prefill_sums = input.active_prefill_sums();
         let (workers, request, eligibility, block_size) = input.into_configured();
         eligibility.validate_pinned_worker_allowed()?;
         if let Some(worker) = eligibility.pinned_worker() {
@@ -321,6 +356,7 @@ impl<'a, C: WorkerConfigLike> SelectionRowSource<'a, C> {
         }
         let mut source = Self::new(request, workers, eligibility, block_size);
         source.resident_blocks = resident_blocks;
+        source.active_prefill_sums = active_prefill_sums;
         Ok(source)
     }
 
@@ -334,6 +370,7 @@ impl<'a, C: WorkerConfigLike> SelectionRowSource<'a, C> {
                     .is_some()
                     .then_some(self as &dyn ResidentBlockSource),
             )
+            .with_active_prefill_sums(self.active_prefill_sums)
     }
 
     /// The request's fetch sources for the targets in `scope`, built on the
@@ -577,8 +614,9 @@ fn cache_snapshot(request: &SchedulingRequest) -> CacheSnapshot<'_> {
     CacheSnapshot {
         shared_hits: request.shared_cache_hits.as_ref(),
         has_tier_matches: request.has_tier_matches(),
-        // Classifier rows never carry counts; only worker selection reads them.
+        // Classifier rows never carry counts or sums; only worker selection reads them.
         resident_blocks: None,
+        active_prefill_sums: None,
     }
 }
 

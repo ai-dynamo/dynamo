@@ -223,12 +223,13 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                         prefill_load_hint,
                         decay_now,
                     );
-                    let load = seq.worker_load_snapshot();
+                    let update = seq.worker_load_update();
+                    let load = update.load;
                     self.prompt_registry
                         .apply_membership_delta_and_load_without_cleanup(
                             event_worker,
                             outcome.membership_delta,
-                            load,
+                            update,
                         );
                     (outcome.expired_request_ids, load)
                 };
@@ -263,12 +264,13 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                     let Some(delta) = seq.free(&request_id, decay_now) else {
                         return;
                     };
-                    let load = seq.worker_load_snapshot();
+                    let update = seq.worker_load_update();
+                    let load = update.load;
                     self.prompt_registry
                         .apply_membership_delta_and_load_without_cleanup(
                             current.worker,
                             delta,
-                            load,
+                            update,
                         );
                     load
                 };
@@ -307,9 +309,10 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                     if completion == PrefillCompletion::Unchanged {
                         return;
                     }
-                    let load = seq.worker_load_snapshot();
+                    let update = seq.worker_load_update();
+                    let load = update.load;
                     self.prompt_registry
-                        .replace_worker_load_state(current.worker, load);
+                        .replace_worker_load_state(current.worker, update);
                     (completion, load)
                 };
                 drop(table);

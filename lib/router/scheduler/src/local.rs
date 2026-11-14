@@ -1033,6 +1033,7 @@ mod tests {
                     prefill_load_hint: Some(dynamo_slot_tracker::wire::PrefillLoadHint {
                         initial_effective_prefill_tokens: 64,
                         expected_prefill_duration: None,
+                        cached_tokens: 0,
                     }),
                     worker,
                     lora_name: None,
@@ -1593,6 +1594,7 @@ mod tests {
                 prefill_load_hint: Some(dynamo_slot_tracker::wire::PrefillLoadHint {
                     initial_effective_prefill_tokens: 64,
                     expected_prefill_duration: None,
+                    cached_tokens: 0,
                 }),
                 worker: busy,
                 lora_name: None,

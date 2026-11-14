@@ -28,7 +28,7 @@ use rustc_hash::FxHashSet;
 
 use super::block_tracker::{BlockTracker, RequestBlockChain};
 use super::prefill_tracker::{PrefillLoadState, PrefillLoadTracker};
-use super::prompt_registry::WorkerLoadSnapshot;
+use super::prompt_registry::{WorkerLoadSnapshot, WorkerLoadUpdate};
 use crate::prelude::PrefillLoadHint;
 
 /// Shared active-request liveness duration (5 minutes).
@@ -233,6 +233,7 @@ impl ActiveSequences {
                 (hint.initial_effective_prefill_tokens > 0).then_some(PrefillLoadState {
                     initial_effective_prefill_tokens: hint.initial_effective_prefill_tokens,
                     expected_prefill_duration: hint.expected_prefill_duration,
+                    cached_tokens: hint.cached_tokens,
                 })
             })
         } else {
@@ -378,6 +379,15 @@ impl ActiveSequences {
         outcome
     }
 
+    /// This worker's load and active prefill sums, as the prompt registry stores them after
+    /// a mutation.
+    pub(super) fn worker_load_update(&self) -> WorkerLoadUpdate {
+        WorkerLoadUpdate {
+            load: self.worker_load_snapshot(),
+            prefill_sums: self.prefill.active_prefill_sums(),
+        }
+    }
+
     pub(super) fn worker_load_snapshot(&self) -> WorkerLoadSnapshot {
         WorkerLoadSnapshot {
             active_blocks: self.active_blocks(),
@@ -410,6 +420,7 @@ mod tests {
         PrefillLoadHint {
             initial_effective_prefill_tokens: tokens,
             expected_prefill_duration: Some(Duration::from_secs(duration_secs)),
+            cached_tokens: 0,
         }
     }
 
@@ -417,6 +428,7 @@ mod tests {
         (tokens > 0).then_some(PrefillLoadHint {
             initial_effective_prefill_tokens: tokens,
             expected_prefill_duration: None,
+            cached_tokens: 0,
         })
     }
 

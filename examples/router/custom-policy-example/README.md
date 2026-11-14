@@ -34,6 +34,7 @@ Declare `plugins::worker_selection::experimental::resident_blocks::RESIDENT_BLOC
 | `simple-filter-score-pick` | One filter, one scorer, and one picker show the complete policy flow |
 | `disagg-filter-score-pick` | Prefill and decode workers each need the complete policy flow |
 | `simple-stacked-score-pick` | Multiple scorer costs compose before one picker runs |
+| `prefill-cost-score-pick` | Prefill cost depends on both uncached and cached prompt tokens, as with long cached prefixes |
 
 The `simple-filter-score-pick` policy filters on minimum device overlap and scores active requests above the least-loaded worker. Its picker normally selects the lowest cost. Tool-result turns select the worker with the most device overlap through `session_context().input_trigger()`.
 
@@ -46,6 +47,8 @@ The `disagg-filter-score-pick` policy applies the overlap filter to both worker 
 The embedded frontend supplies `WorkerType::Prefill` or `WorkerType::Decode` after discovery scopes the worker pool. This disaggregated policy rejects the standalone EPP's `WorkerType::Aggregated` pool because it cannot apply separate prefill and decode behavior. Other unsupported roles also stop instead of silently using the prefill policy.
 
 The `simple-stacked-score-pick` policy has no custom filter. It adds active-request and uncached-request costs before its picker selects the lowest total.
+
+The `prefill-cost-score-pick` policy prices prefill work as `uncached_squared * q * q + uncached_times_cached * q * c + uncached * q`, where `q` is a request's uncached prompt tokens and `c` its cached prompt tokens; set the three coefficients, fitted for your model and GPU, as its YAML `parameters`. Its scorer declares `WorkerInputs::ACTIVE_PREFILL_SUMS` and adds each worker's active prefill cost to the incoming request's cost on that worker. Its picker selects the lowest cost.
 
 ## 1. Create the Policy Crate
 
@@ -201,6 +204,7 @@ cargo test \
   -p dynamo-custom-policy-example-simple-filter-score-pick \
   -p dynamo-custom-policy-example-disagg-filter-score-pick \
   -p dynamo-custom-policy-example-simple-stacked-score-pick \
+  -p dynamo-custom-policy-example-prefill-cost-score-pick \
   -p dynamo-custom-policy-example-catalog
 cargo build -p dynamo-custom-policy-example-epp
 ```

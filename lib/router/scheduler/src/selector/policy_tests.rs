@@ -130,6 +130,97 @@ fn custom_picker_counts_tracked_blocks_without_worker_projection() {
         .unwrap();
 }
 
+/// A scorer prices each worker's active prefills with a quadratic cost from their sums:
+/// `cost(q, c) = 1e-7·q² + 2e-7·q·c + 0.02·q` milliseconds.
+#[test]
+fn custom_scorer_prices_active_prefills_from_their_sums() {
+    struct QuadraticPrefillScorer;
+
+    impl WorkerScorer for QuadraticPrefillScorer {
+        fn required_worker_inputs(&self) -> WorkerInputs {
+            WorkerInputs::ACTIVE_PREFILL_SUMS
+        }
+
+        fn score(
+            &self,
+            _context: &WorkerSelectionContext<'_>,
+            candidates: WorkerCandidates<'_>,
+            costs: &mut [f64],
+        ) -> Result<(), WorkerSelectionPolicyError> {
+            for (candidate, cost) in candidates.iter().zip(costs) {
+                let sums = candidate.active_prefill_sums().ok_or_else(|| {
+                    WorkerSelectionPolicyError::failed("active prefill sums unavailable")
+                })?;
+                *cost = 1e-7 * sums.uncached_tokens_squared() as f64
+                    + 2e-7 * sums.uncached_times_cached_tokens() as f64
+                    + 0.02 * sums.uncached_tokens() as f64;
+            }
+            Ok(())
+        }
+    }
+
+    struct LowestCostPicker;
+
+    impl WorkerPicker for LowestCostPicker {
+        fn pick(
+            &self,
+            _context: &WorkerSelectionContext<'_>,
+            input: WorkerInputView<'_>,
+        ) -> Result<usize, WorkerSelectionPolicyError> {
+            Ok(input
+                .candidates()
+                .iter()
+                .enumerate()
+                .min_by(|a, b| a.1.cost().total_cmp(&b.1.cost()))
+                .map(|(row, _)| row)
+                .unwrap())
+        }
+    }
+
+    let workers = HashMap::from([
+        (0, TaintedWorkerConfig::default()),
+        (1, TaintedWorkerConfig::default()),
+    ]);
+    // Worker 0 runs 2,000 new tokens on a 100,000-token cached prefix (80.4 ms); worker 1
+    // runs a fresh 3,000-token prompt (60.9 ms). Token counts alone favor worker 0.
+    let sums = FxHashMap::from_iter([
+        (
+            WorkerWithDpRank::from_worker_id(0),
+            ActivePrefillSums::for_testing(2_000, 2_000 * 2_000, 2_000 * 100_000),
+        ),
+        (
+            WorkerWithDpRank::from_worker_id(1),
+            ActivePrefillSums::for_testing(3_000, 3_000 * 3_000, 0),
+        ),
+    ]);
+    let request = base_request(4_000);
+    let policy = WorkerSelectionPolicy::new(
+        SelectionConfig::default(),
+        "test",
+        vec![Box::new(QuadraticPrefillScorer)],
+        Box::new(LowestCostPicker),
+    );
+    let selected = policy
+        .select_worker(
+            WorkerSelectionInput::configured(&workers, &request, request.eligibility(), 16)
+                .with_active_prefill_sums(Some(&sums)),
+        )
+        .unwrap();
+    assert_eq!(selected.worker, WorkerWithDpRank::from_worker_id(1));
+
+    // Without supplied sums, the declaring scorer reads None rather than zeros.
+    assert!(
+        policy
+            .select_worker(WorkerSelectionInput::configured(
+                &workers,
+                &request,
+                request.eligibility(),
+                16,
+            ))
+            .is_err()
+    );
+}
+
 #[test]
 fn selection_trace_is_captured_only_when_requested() {
     struct DecodeLoadScorer;
