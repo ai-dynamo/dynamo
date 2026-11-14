@@ -1,7 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Picks the lowest cost at temperature 0, otherwise samples with probability falling as cost rises.
+//! Picks the lowest cost at temperature 0, at random among exact ties as the default picker does;
+//! otherwise samples with probability falling as cost rises.
 //! The loop moves only the cost weights, so the temperature is the baseline one unless the request
 //! overrides it with `router_temperature_override`.
 //!
@@ -77,11 +78,12 @@ impl WorkerPicker for AdaptivePicker {
 ///
 /// Matches the default selector's softmax: costs are normalized by their range before the
 /// temperature applies, so the probabilities depend only on the relative gaps between workers.
-/// A temperature that is not a finite positive number, or costs that make the softmax undefined
-/// (NaN or infinite), fall back to the deterministic argmin.
+/// A temperature that is not a finite positive number picks the lowest cost, using `u` to choose
+/// among exact ties. Costs that make the softmax undefined (NaN or infinite) fall back to the
+/// deterministic argmin.
 pub fn choose(costs: &[f64], temperature: f64, u: f64) -> usize {
     if costs.len() < 2 || !(temperature.is_finite() && temperature > 0.0) {
-        return argmin(costs);
+        return argmin_breaking_ties(costs, u);
     }
     let (min, max) = costs
         .iter()
@@ -124,6 +126,23 @@ pub fn choose(costs: &[f64], temperature: f64, u: f64) -> usize {
     n - 1
 }
 
+/// Lowest-cost row; `u` picks uniformly among rows with exactly that cost. On an idle pool every
+/// worker ties, and always taking the first row would send each new request to the same worker.
+fn argmin_breaking_ties(costs: &[f64], u: f64) -> usize {
+    let best = argmin(costs);
+    let Some(&min) = costs.get(best) else {
+        return best;
+    };
+    let ties = costs.iter().filter(|c| c.total_cmp(&min).is_eq()).count();
+    let k = ((u * ties as f64) as usize).min(ties.saturating_sub(1));
+    costs
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.total_cmp(&min).is_eq())
+        .nth(k)
+        .map_or(best, |(i, _)| i)
+}
+
 fn argmin(costs: &[f64]) -> usize {
     costs
         .iter()
@@ -154,6 +173,15 @@ mod tests {
     fn temperature_zero_is_argmin() {
         assert_eq!(choose(&[19.0, 56.0, 65.0, 46.5], 0.0, 0.99), 0);
         assert_eq!(choose(&[384.0, 324.0, 320.0, 326.0], 0.0, 0.01), 2);
+    }
+
+    #[test]
+    fn temperature_zero_picks_uniformly_among_exact_ties() {
+        let costs = [5.0, 3.0, 3.0, 7.0, 3.0];
+        let picks: Vec<usize> = (0..6)
+            .map(|i| choose(&costs, 0.0, (i as f64 + 0.5) / 6.0))
+            .collect();
+        assert_eq!(picks, vec![1, 1, 2, 2, 4, 4]);
     }
 
     #[test]
