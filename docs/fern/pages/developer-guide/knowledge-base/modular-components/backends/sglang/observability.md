@@ -22,6 +22,7 @@ For a visualization walkthrough, see [Metrics and Dashboards](../../../../../cli
 | Variable | Description | Default | Example |
 |----------|-------------|---------|---------|
 | `DYN_SYSTEM_PORT` | System metrics/health port | `-1` (disabled) | `8081` |
+| `DYN_EXTRA_METRIC_PREFIXES` | Comma-separated metric-name prefixes to expose in addition to the built-in allowlist (`sglang:`). See [Exposing Custom Component Metrics](../vllm/observability.md#exposing-custom-component-metrics). | unset | `myconnector_` |
 
 ### Getting Started Quickly
 

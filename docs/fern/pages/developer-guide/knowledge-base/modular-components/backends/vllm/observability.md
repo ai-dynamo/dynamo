@@ -23,6 +23,44 @@ For a visualization walkthrough, see [Metrics and Dashboards](../../../../../cli
 | Variable | Description | Default | Example |
 |----------|-------------|---------|---------|
 | `DYN_SYSTEM_PORT` | System metrics/health port. Required to expose `/metrics` endpoint. | `-1` (disabled) | `8081` |
+| `DYN_EXTRA_METRIC_PREFIXES` | Comma-separated metric-name prefixes to expose in addition to the built-in allowlist (`vllm:`, `lmcache:`). See [Exposing Custom Component Metrics](#exposing-custom-component-metrics). Only effective when `disable_log_stats` is false (the default). | unset | `myconnector_` |
+
+### Exposing Custom Component Metrics
+
+The worker exposes only engine metrics whose names start with a built-in allowlist (`vllm:` and `lmcache:` on vLLM; `sglang:` and `trtllm_` on the other backends). Metrics emitted by custom components loaded into the engine process — for example a custom KV connector — are silently dropped. Set `DYN_EXTRA_METRIC_PREFIXES` to append your own prefixes:
+
+```bash
+# Start the worker with the extra prefix
+DYN_SYSTEM_PORT=8081 DYN_EXTRA_METRIC_PREFIXES=myconnector_ python -m dynamo.vllm --model <model_name>
+
+# Before (variable unset): no output — the series are filtered out
+# After: the connector's series appear alongside the vllm: series
+curl -s localhost:8081/metrics | grep "^myconnector_"
+```
+
+Notes:
+
+- Matching is a literal prefix match: include the trailing separator — `myconnector` would also match `myconnectorfoo_*`. Whitespace around commas is trimmed and empty segments are ignored.
+- Extra series get the standard `dynamo_namespace`, `dynamo_component`, `dynamo_endpoint`, and `worker_id` labels injected, so they aggregate in Prometheus like native engine series.
+- The variable is read by the worker process at metrics-setup time, not by the frontend. On Kubernetes, set it in the worker container's environment:
+
+```yaml
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-custom-metrics
+spec:
+  services:
+    Worker:
+      componentType: worker
+      extraPodSpec:
+        mainContainer:
+          env:
+            - name: DYN_EXTRA_METRIC_PREFIXES
+              value: "myconnector_"
+```
+
+- On vLLM this only takes effect when `disable_log_stats` is false (the default); otherwise the engine-metrics path is not registered at all.
 
 ## Getting Started Quickly
 
