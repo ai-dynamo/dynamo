@@ -351,6 +351,7 @@ STUB_MODULES = [
     "aisimulate_core.sdk.perf_database",
     "aisimulate_core.sdk.utils",
     "aisimulate_core.sdk.rust_engine_step",
+    "aisimulate_core.sdk.speculation",
     "plotly",
     "plotly.graph_objects",
     "plotly.subplots",
@@ -375,6 +376,7 @@ FORCE_STUB_MODULES = {
     "aisimulate_core.sdk.memory",
     "aisimulate_core.sdk.perf_database",
     "aisimulate_core.sdk.rust_engine_step",
+    "aisimulate_core.sdk.speculation",
 }
 
 # Project paths for local imports

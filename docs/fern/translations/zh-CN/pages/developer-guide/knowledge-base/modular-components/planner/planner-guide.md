@@ -91,6 +91,10 @@ SLA 模式通过唯一构造接口 `aisimulate_core.sdk.RustForwardPassPerfModel
 
 各角色可传入完整上游配置，包括有序 `systems_paths`、`database_mode`、`transfer_policy`、量化和推测解码参数，以及嵌套 `estimator_config`。显式 estimator 设置覆盖 Planner 的采样默认值；`fpm_sample_bucket_size: 16` 对应 `[4, 4]`，regression 和 correction 可以分别配置网格。未知字段及角色身份冲突会报错。
 
+使用投机解码的 `op_level` 估算时，在对应的 `ais_perf_model.roles` 中配置投机参数，并发布 worker 的 token 上限。对于 vLLM，三个 draft token 会为每条 decode 请求在每个 attention-DP rank 上预留四个验证位置。估算使用配置的完整轮次，不涵盖部分轮次或额外 drafting 槽。
+
+每个 Planner 角色应对应稳定的 worker 执行身份。验证宽度变化会清除所有 estimator 模式的时长反馈：regression 需要重新预热，interpolation 会丢失已学习的校准。宽度不变时，limit 或 estimator 的变化保留反馈。当前 FPM 没有实际验证宽度，包含投机 decode 的轮次无法校准 OP；纯 prefill 校准仍然可用。
+
 通过 `ais_perf_model.roles` 配置模型身份和 estimator 参数。旧 `aic_perf_model` 字段及 `hf_id` / parallel-pick 格式不再支持，使用时会报错。
 
 启动时，planner 总会先尝试从 `get_perf_metrics` Dynamo 端点获取自基准测试结果。如果不可用，则在配置存在时回退到 rapid 模式 AIC interpolation 数据或 `profile_results_dir` 中 profiler 生成的数据（npz 或 JSON）。这些数据都会转换为 ForwardPassMetrics，并用于调优或启动性能模型。当 `pre_deployment_sweeping_mode: none` 时，planner 仍然可以启动；吞吐量决策会在原生 AISimulate 可用或在线 FPM 足够之前报告 `model_not_ready`。

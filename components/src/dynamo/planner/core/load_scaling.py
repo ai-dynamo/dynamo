@@ -14,6 +14,7 @@ import logging
 from typing import TYPE_CHECKING, Literal, Optional
 
 from dynamo.planner.config.planner_config import resolve_min_endpoint
+from dynamo.planner.core.perf_model.engine_query import EngineLoadStatus
 from dynamo.planner.core.types import FpmObservations, ScalingDecision
 
 if TYPE_CHECKING:
@@ -590,6 +591,7 @@ class LoadScalingMixin:
         consolidation = num_workers / (num_workers - 1) if num_workers > 1 else 1.0
 
         estimates: list[float] = []
+        saturated_workers = 0
         # Consolidation-aware scale-down: re-predict TTFT with the queue
         # scaled by N/(N-1) and check the *queue-induced* portion against
         # ``(SLA - T_own) * sensitivity``. The new request's own forward-pass
@@ -604,7 +606,11 @@ class LoadScalingMixin:
                 max_num_batched_tokens=max_tokens,
                 kv_hit_rate=kv_hit_rate,
             )
-            if est is not None:
+            if est is EngineLoadStatus.SATURATED:
+                saturated_workers += 1
+                can_scale_down = False
+                consolidation_refused = True
+            elif est is not None:
                 est_ms = est * 1000
                 estimates.append(est_ms)
                 logger.info(
@@ -621,6 +627,10 @@ class LoadScalingMixin:
                     kv_hit_rate=kv_hit_rate,
                     queue_scale=0.0,
                 )
+                if t_own_s is EngineLoadStatus.SATURATED:
+                    can_scale_down = False
+                    consolidation_refused = True
+                    continue
                 if t_own_s is None:
                     can_scale_down = False
                     continue
@@ -636,7 +646,10 @@ class LoadScalingMixin:
                     kv_hit_rate=kv_hit_rate,
                     queue_scale=consolidation,
                 )
-                if post_est is None:
+                if post_est is EngineLoadStatus.SATURATED:
+                    can_scale_down = False
+                    consolidation_refused = True
+                elif post_est is None:
                     can_scale_down = False
                 else:
                     queue_induced_ms = post_est * 1000 - t_own_ms
@@ -644,7 +657,7 @@ class LoadScalingMixin:
                         can_scale_down = False
                         consolidation_refused = True
 
-        if estimates:
+        if estimates and not saturated_workers:
             self._diag_estimated_ttft_ms = max(estimates)
 
         decision = self._scale_decision(
@@ -654,6 +667,7 @@ class LoadScalingMixin:
             "prefill TTFT",
             resolve_min_endpoint(self._config, "prefill"),
             can_scale_down=can_scale_down,
+            saturated_workers=saturated_workers,
         )
         if decision is None and consolidation_refused:
             self._diag_load_reason = "scale_down_refused_consolidation"
@@ -690,6 +704,7 @@ class LoadScalingMixin:
         accept_length = self._current_decode_accept_length()
 
         estimates: list[float] = []
+        saturated_workers = 0
         # Consolidation-aware scale-down. Two safety checks per worker:
         #  1. Hard cache-feasibility: post-consolidation KV must fit within
         #     ``max_kv_tokens``. Exceeding the cache forces request queueing
@@ -707,7 +722,11 @@ class LoadScalingMixin:
                 group,
                 include_queued_decode=True,
             )
-            if est is not None:
+            if est is EngineLoadStatus.SATURATED:
+                saturated_workers += 1
+                can_scale_down = False
+                consolidation_refused = True
+            elif est is not None:
                 est_ms = est * 1000 / accept_length
                 estimates.append(est_ms)
                 logger.info(
@@ -729,7 +748,10 @@ class LoadScalingMixin:
                     decode_scale=consolidation,
                     include_queued_decode=True,
                 )
-                if post_itl is None:
+                if post_itl is EngineLoadStatus.SATURATED:
+                    can_scale_down = False
+                    consolidation_refused = True
+                elif post_itl is None:
                     can_scale_down = False
                 elif (
                     post_itl * 1000 / accept_length >= self._config.itl_ms * sensitivity
@@ -737,7 +759,7 @@ class LoadScalingMixin:
                     can_scale_down = False
                     consolidation_refused = True
 
-        if estimates:
+        if estimates and not saturated_workers:
             self._diag_estimated_itl_ms = max(estimates)
 
         decision = self._scale_decision(
@@ -747,6 +769,7 @@ class LoadScalingMixin:
             "decode ITL",
             resolve_min_endpoint(self._config, "decode"),
             can_scale_down=can_scale_down,
+            saturated_workers=saturated_workers,
         )
         if decision is None and consolidation_refused:
             self._diag_load_reason = "scale_down_refused_consolidation"
@@ -763,6 +786,7 @@ class LoadScalingMixin:
         consolidation = num_workers / (num_workers - 1) if num_workers > 1 else 1.0
 
         estimates: list[float] = []
+        saturated_workers = 0
         # Agg-prefill consolidation: queued prefill and decode KV are both
         # absorbed by the survivor (scale both by N/(N-1)). Sensitivity is
         # applied only to the queue-induced portion of TTFT -- ``T_own`` (a
@@ -778,7 +802,11 @@ class LoadScalingMixin:
                 max_num_batched_tokens=max_tokens,
                 kv_hit_rate=kv_hit_rate,
             )
-            if est is not None:
+            if est is EngineLoadStatus.SATURATED:
+                saturated_workers += 1
+                can_scale_down = False
+                consolidation_refused = True
+            elif est is not None:
                 estimates.append(est * 1000)
 
             if can_scale_down:
@@ -803,7 +831,13 @@ class LoadScalingMixin:
                     decode_scale=consolidation,
                     include_queued_decode=True,
                 )
-                if t_own_post is None or post_est is None:
+                if (
+                    t_own_post is EngineLoadStatus.SATURATED
+                    or post_est is EngineLoadStatus.SATURATED
+                ):
+                    can_scale_down = False
+                    consolidation_refused = True
+                elif t_own_post is None or post_est is None:
                     can_scale_down = False
                 else:
                     t_own_ms = t_own_post * 1000
@@ -813,7 +847,7 @@ class LoadScalingMixin:
                         can_scale_down = False
                         consolidation_refused = True
 
-        if estimates:
+        if estimates and not saturated_workers:
             self._diag_estimated_ttft_ms = max(estimates)
 
         decision = self._scale_decision(
@@ -823,6 +857,7 @@ class LoadScalingMixin:
             "agg TTFT",
             resolve_min_endpoint(self._config, "decode"),
             can_scale_down=can_scale_down,
+            saturated_workers=saturated_workers,
         )
         if decision is None and consolidation_refused:
             self._diag_load_reason = "scale_down_refused_consolidation"
@@ -844,6 +879,7 @@ class LoadScalingMixin:
         accept_length = self._current_decode_accept_length()
 
         estimates: list[float] = []
+        saturated_workers = 0
         # Agg-decode consolidation. Combined cache pressure (sched_decode_kv
         # + queued_decode_kv + queued_prefill_tokens, since queued prefill
         # eventually becomes decode KV) scaled by N/(N-1). Two safety checks:
@@ -863,7 +899,11 @@ class LoadScalingMixin:
                 group,
                 include_queued_decode=True,
             )
-            if est is not None:
+            if est is EngineLoadStatus.SATURATED:
+                saturated_workers += 1
+                can_scale_down = False
+                consolidation_refused = True
+            elif est is not None:
                 estimates.append(est * 1000 / accept_length)
 
             if can_scale_down:
@@ -882,7 +922,10 @@ class LoadScalingMixin:
                     include_queued_decode=True,
                     include_queued_prefill_as_kv=True,
                 )
-                if post_itl is None:
+                if post_itl is EngineLoadStatus.SATURATED:
+                    can_scale_down = False
+                    consolidation_refused = True
+                elif post_itl is None:
                     can_scale_down = False
                 elif (
                     post_itl * 1000 / accept_length >= self._config.itl_ms * sensitivity
@@ -890,7 +933,7 @@ class LoadScalingMixin:
                     can_scale_down = False
                     consolidation_refused = True
 
-        if estimates:
+        if estimates and not saturated_workers:
             self._diag_estimated_itl_ms = max(estimates)
 
         decision = self._scale_decision(
@@ -900,6 +943,7 @@ class LoadScalingMixin:
             "agg ITL",
             resolve_min_endpoint(self._config, "decode"),
             can_scale_down=can_scale_down,
+            saturated_workers=saturated_workers,
         )
         if decision is None and consolidation_refused:
             self._diag_load_reason = "scale_down_refused_consolidation"
@@ -1219,6 +1263,7 @@ class LoadScalingMixin:
         min_endpoint: int,
         *,
         can_scale_down: bool,
+        saturated_workers: int = 0,
     ) -> Optional[int]:
         """Combine scale-up (latency > SLA on every worker) with the
         caller-precomputed ``can_scale_down`` signal.
@@ -1237,13 +1282,14 @@ class LoadScalingMixin:
         oscillation where flat-fraction thresholds let scale-down through but
         the survivor immediately violates SLA.
         """
-        if not estimates:
+        if not estimates and not saturated_workers:
             self._diag_load_reason = "insufficient_data"
             return None
 
         logger.info(
             f"Load-based {label}: workers={num_workers}, sla={sla:.1f}ms, "
-            f"estimates={[f'{t:.1f}' for t in estimates]}"
+            f"estimates={[f'{t:.1f}' for t in estimates]}, "
+            f"verification_budget_saturated={saturated_workers}"
         )
 
         if all(t > sla for t in estimates):
@@ -1252,7 +1298,7 @@ class LoadScalingMixin:
             )
             return num_workers + 1
 
-        if can_scale_down:
+        if can_scale_down and not saturated_workers:
             desired = max(num_workers - 1, min_endpoint)
             logger.info(
                 f"Load-based {label}: post-consolidation prediction within "
