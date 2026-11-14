@@ -1062,6 +1062,16 @@ navigation:
                 slug: beam-1-0-501b
           # recipe-nav:end
 
+      # ==================== Cloud Fabrics ====================
+      # Per-cloud network fabric changes a recipe needs (for example, AWS EFA).
+      - section: Cloud Fabrics
+        icon: network-wired
+        contents:
+          - page: Overview
+            path: pages/recipes/cloud-fabrics/overview.mdx
+          - page: AWS EFA
+            path: pages/recipes/cloud-fabrics/aws-efa.mdx
+
       # ==================== Kubernetes Templates ====================
       - section: Kubernetes Templates
         icon: fa-brands fa-kubernetes
