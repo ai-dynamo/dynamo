@@ -1106,9 +1106,18 @@ def build_sampling_params_openai(
             if hasattr(sampling_params, param_key):
                 setattr(sampling_params, param_key, request[req_key])
 
-    # Handle max_tokens
-    if "max_tokens" in request and request["max_tokens"] is not None:
-        sampling_params.max_tokens = request["max_tokens"]
+    # Chat clients send max_completion_tokens (max_tokens is its deprecated
+    # alias); it takes precedence, as in the frontend and vLLM's own server.
+    max_tokens = request.get("max_completion_tokens")
+    if max_tokens is None:
+        max_tokens = request.get("max_tokens")
+    if max_tokens is not None:
+        sampling_params.max_tokens = max_tokens
+    elif "messages" in request and default_sampling_params.get("max_tokens") is None:
+        # Like the token path and vLLM's chat server, an omitted chat limit
+        # means the remaining context, not SamplingParams' default of 16.
+        # vLLM resolves None against the prompt length at admission.
+        sampling_params.max_tokens = None
 
     # Handle stop sequences
     if "stop" in request and request["stop"] is not None:
