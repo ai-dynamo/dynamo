@@ -66,14 +66,15 @@ kind: DynamoGraphDeployment
 metadata:
   name: frontend-example
 spec:
-  graphs:
-    - name: frontend
+  services:
+    Frontend:
+      componentType: frontend
       replicas: 1
-      services:
-        - name: Frontend
-          image: nvcr.io/nvidia/dynamo/dynamo-vllm:latest
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0
           command:
-            - python
+            - python3
             - -m
             - dynamo.frontend
             - --http-port

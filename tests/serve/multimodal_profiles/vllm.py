@@ -9,6 +9,7 @@ from dynamo.common.multimodal.nvdec_decoder import nvdec_available
 from dynamo.common.utils.install_media_decoders import VALIDATED_SPECS
 from dynamo.common.utils.paths import WORKSPACE_DIR
 from tests.serve.conftest import MULTIMODAL_VIDEO_EXPECTED
+from tests.utils.gpu_args import pynvvideocodec_reserved_bytes
 from tests.utils.multimodal import (
     MmCase,
     MultimodalModelProfile,
@@ -98,6 +99,9 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 # TODO: re-enable GPU-parallel scheduling with
                 # profiled_vram_gib=9.6 once this has a bounded --kv-bytes profile.
                 timeout_s=220,
+                # agg_multimodal.sh's default, made explicit so the video
+                # decoder reservation below is added on top of it.
+                requested_vllm_kv_cache_bytes=922_354_000,
                 tests=[
                     # Vanilla / baseline single-GPU multimodal smoke
                     # (HTTP-URL image, no frontend decoding).
@@ -143,6 +147,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                     "DYN_TEST_ONLY_PIP_INSTALL": VALIDATED_SPECS[
                         "opencv-python-headless"
                     ],
+                    "VLLM_VIDEO_LOADER_BACKEND": "opencv",
                     # Frontend decoding fetches the VP9 fixture from the local
                     # image server and samples four frames in the Rust decoder.
                     "DYN_MM_ALLOW_INTERNAL": "1",
@@ -310,6 +315,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                     "DYN_TEST_ONLY_PIP_INSTALL": VALIDATED_SPECS[
                         "opencv-python-headless"
                     ],
+                    "VLLM_VIDEO_LOADER_BACKEND": "opencv",
                 },
                 tests=[
                     MmCase(
@@ -760,3 +766,35 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
         },
     ),
 ]
+
+
+# Engines per topology that may run vLLM's video decoder; encode workers never do.
+_VIDEO_DECODING_ENGINES = {"e_pd": 1, "epd": 2, "epd_video": 2, "p_d": 2}
+
+
+def _reserve_for_pynvvideocodec(profiles: list[MultimodalModelProfile]) -> None:
+    """Add vLLM's PyNvVideoCodec decoder reservation back to each topology.
+
+    When the image selects the PyNvVideoCodec video loader, vLLM subtracts the
+    reservation from the requested KV cache. Topologies that select another
+    loader are left unchanged.
+    """
+    reserved = pynvvideocodec_reserved_bytes()
+    if not reserved:
+        return
+    for profile in profiles:
+        for key, topo in profile.topologies.items():
+            if topo.env.get("VLLM_VIDEO_LOADER_BACKEND", "pynvvideocodec") != (
+                "pynvvideocodec"
+            ):
+                continue
+            engines = _VIDEO_DECODING_ENGINES.get(key, 1)
+            if topo.requested_vllm_kv_cache_bytes:
+                topo.requested_vllm_kv_cache_bytes += reserved
+            if topo.profiled_vram_gib is not None:
+                topo.profiled_vram_gib = round(
+                    topo.profiled_vram_gib + engines * reserved / 1024**3, 1
+                )
+
+
+_reserve_for_pynvvideocodec(VLLM_MULTIMODAL_PROFILES)

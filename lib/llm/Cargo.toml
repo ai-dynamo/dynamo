@@ -33,7 +33,7 @@ bench = ["dynamo-kv-router/bench"]
 # is enabled by normal `dynamo-llm` builds and must not retain diagnostic hot-path work.
 ckf-diagnostics = []
 kv-router-stress = ["dep:clap", "dep:indicatif", "bench"]
-mm-routing = ["dep:llm-multimodal", "dep:llm-tokenizer"]
+mm-routing = ["dep:dynamo-multimodal", "dep:llm-multimodal", "dep:llm-tokenizer"]
 request-trace-bench = []
 # S3 destination for the request-trace sink, reusing the existing object_store client.
 request-trace-s3 = []
@@ -74,10 +74,20 @@ required-features = ["media-ffmpeg"]
 dynamo-router-policies = { workspace = true }
 # repo
 dynamo-global-discovery-client = { workspace = true }
+dynamo-admission = { workspace = true }
 dynamo-global-common = { workspace = true, features = ["grpc"] }
 dynamo-global-view-broadcaster = { path = "../global-view-broadcaster" }
-dynamo-kv-router = { workspace = true, features = ["metrics", "runtime-protocols", "standalone-selection"] }
+dynamo-kv-events = { workspace = true }
+dynamo-kv-hashing = { workspace = true }
+dynamo-kv-hints = { workspace = true }
+dynamo-kv-indexer = { workspace = true, features = ["export"] }
+dynamo-kv-router = { workspace = true, features = ["metrics"] }
 dynamo-lora = { workspace = true }
+dynamo-router-protocol = { workspace = true }
+dynamo-scheduler = { workspace = true }
+dynamo-session-affinity = { workspace = true }
+dynamo-slot-tracker = { workspace = true }
+dynamo-worker-selection = { workspace = true }
 dynamo-memory = { workspace = true }
 dynamo-mocker = { workspace = true, features = ["zmq-events"] }
 dynamo-rl = { workspace = true }
@@ -105,6 +115,7 @@ futures = { workspace = true }
 futures-util = { workspace = true }
 half = { version = "2", features = ["serde", "num-traits"] }
 hf-hub = { workspace = true, features = ["tokio", "rustls-tls", "ureq"] }
+http-body = "1"
 http-body-util = "0.1"
 ipnet = { workspace = true }
 libc = { workspace = true }
@@ -190,7 +201,7 @@ tonic-reflection = { version = "0.13.1" }
 prost = { version = "0.13.5" }
 
 # tokenizers
-tokenizers = { version = "0.21.4", default-features = false, features = [
+tokenizers = { version = "0.23.2", default-features = false, features = [
   "onig",
   "esaxx_fast",
   "rustls-tls",
@@ -234,6 +245,8 @@ rmp-serde = "1.3"
 # reviewed step paired with re-running our golden cross-check against
 # `transformers`.
 llm-multimodal = { version = "=1.9.0", optional = true }
+# GLM's metadata-only planner; no parallel pixel processing is needed for routing.
+dynamo-multimodal = { version = "=0.2.2", default-features = false, optional = true }
 # Companion to llm-multimodal: provides `HuggingFaceTokenizer` so the
 # model_dir's `tokenizer.json` can be passed to the
 # `ModelRegistry::lookup` for image-placeholder token-id resolution.
