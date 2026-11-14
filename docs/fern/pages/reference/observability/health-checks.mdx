@@ -146,9 +146,20 @@ code. After startup, both paths return `200 OK` with status `ready`:
 }
 ```
 
-`DYN_SYSTEM_STARTING_HEALTH_STATUS` controls the initial status. The legacy
-`DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS` variable is deprecated and no longer controls endpoint
-selection in the current runtime.
+The worker `/health` and `/live` status is decided in this order:
+
+1. While any endpoint holds back its readiness, the status is not ready, even when every other
+   check passes.
+2. When `DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS` holds a nonempty JSON list of endpoint names, the
+   status is ready only when every listed endpoint is ready. The list replaces the endpoints that
+   register health check payloads. The operator sets it to `["generate"]` on worker, prefill, and
+   decode pods.
+3. With no list, the status is ready when every endpoint that registered a health check payload is
+   ready.
+4. With no list and no registered payloads, but with `DYN_HEALTH_CHECK_ENABLED=true`, the status
+   is ready when every known endpoint is ready.
+5. Otherwise, the process-wide status decides. `DYN_SYSTEM_STARTING_HEALTH_STATUS` sets its
+   initial value.
 
 ## Active Canary Configuration
 

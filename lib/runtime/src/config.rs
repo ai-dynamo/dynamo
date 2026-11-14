@@ -410,12 +410,13 @@ impl RuntimeConfig {
     pub fn from_settings() -> Result<RuntimeConfig> {
         use environment_names::runtime::system as env_system;
         Self::validate_parser_environment()?;
-        // Check for deprecated environment variables
+        // The endpoint list overrides health check payload targets; make that visible.
         if std::env::var(env_system::DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS).is_ok() {
             tracing::warn!(
-                "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS is deprecated and no longer used. \
-                System health is now determined by endpoints that register with health check payloads. \
-                Please update your configuration to register health check payloads directly on endpoints."
+                "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS is set. A nonempty JSON list overrides \
+                endpoints that register health check payloads: system /health reports ready only \
+                when every listed endpoint is ready. Set it to [] to let registered health check \
+                payloads decide readiness; unsetting it keeps any list set in runtime.toml."
             );
         }
 
