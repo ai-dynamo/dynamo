@@ -2383,6 +2383,7 @@ name = "dynamo-custom-policy-example-catalog"
 version = "1.7.0"
 dependencies = [
  "dynamo-custom-policy-example-disagg-filter-score-pick",
+ "dynamo-custom-policy-example-hotspot-progress",
  "dynamo-custom-policy-example-simple-filter-score-pick",
  "dynamo-custom-policy-example-simple-stacked-score-pick",
  "dynamo-custom-policy-example-soft-pin-repin",
@@ -2406,6 +2407,20 @@ dependencies = [
  "dynamo-custom-policy-example-catalog",
  "dynamo-ext-proc",
  "dynamo-kv-router",
+ "tokio",
+]
+
+[[package]]
+name = "dynamo-custom-policy-example-hotspot-progress"
+version = "1.7.0"
+dependencies = [
+ "criterion",
+ "dynamo-kv-router",
+ "dynamo-router-policies",
+ "dynamo-scheduler",
+ "dynamo-slot-tracker",
+ "serde",
+ "tempfile",
  "tokio",
 ]
 

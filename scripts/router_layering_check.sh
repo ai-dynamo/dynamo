@@ -68,10 +68,11 @@ PLUGIN_TABLE=(
   "dynamo-router-policies | dynamo-kv-router"
   "dynamo-worker-selection-policy-catalog | dynamo-kv-router"
   "dynamo-custom-policy-example-soft-pin-repin | dynamo-kv-router"
+  "dynamo-custom-policy-example-hotspot-progress | dynamo-kv-router"
   "dynamo-custom-policy-example-simple-filter-score-pick | dynamo-kv-router"
   "dynamo-custom-policy-example-disagg-filter-score-pick | dynamo-kv-router"
   "dynamo-custom-policy-example-simple-stacked-score-pick | dynamo-kv-router"
-  "dynamo-custom-policy-example-catalog | dynamo-kv-router dynamo-custom-policy-example-soft-pin-repin dynamo-custom-policy-example-simple-filter-score-pick dynamo-custom-policy-example-disagg-filter-score-pick dynamo-custom-policy-example-simple-stacked-score-pick"
+  "dynamo-custom-policy-example-catalog | dynamo-kv-router dynamo-custom-policy-example-soft-pin-repin dynamo-custom-policy-example-simple-filter-score-pick dynamo-custom-policy-example-disagg-filter-score-pick dynamo-custom-policy-example-simple-stacked-score-pick dynamo-custom-policy-example-hotspot-progress"
   "dynamo-custom-policy-example-epp | dynamo-kv-router dynamo-custom-policy-example-catalog dynamo-ext-proc"
 )
 

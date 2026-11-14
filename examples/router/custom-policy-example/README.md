@@ -57,6 +57,7 @@ for lifetime, collection cost, and missing-data behavior.
 | Crate | Use it for |
 |---|---|
 | [`soft-pin-repin`](soft-pin-repin/README.md) | Retain a soft session-affinity target until its active-request load exceeds a threshold, then repin |
+| [`hotspot-progress`](hotspot-progress/README.md) | Use live remaining output budgets in a calibrated two-worker sibling hotspot policy |
 | `simple-filter-score-pick` | One filter, one scorer, and one picker show the complete policy flow |
 | `disagg-filter-score-pick` | Prefill and decode workers each need the complete policy flow |
 | `simple-stacked-score-pick` | Multiple scorer costs compose before one picker runs |
