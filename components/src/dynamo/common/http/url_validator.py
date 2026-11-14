@@ -128,14 +128,21 @@ _BLOCKED_HOSTS: frozenset[str] = frozenset(
 SOURCE_LABEL_LIMIT: Final = 120
 
 
-def describe_media_source(source: str, limit: int = SOURCE_LABEL_LIMIT) -> str:
+def describe_media_source(
+    source: str,
+    limit: int = SOURCE_LABEL_LIMIT,
+    *,
+    redact_non_http_urls: bool = False,
+) -> str:
     """Render ``source`` as a bounded label safe to put in an error or log.
 
     A ``data:`` URI carries the whole media payload inline, so echoing one into
     an error message serializes megabytes of base64 -- to the client, and to
     every log sink that records the failure. Describe those by media type and
     size instead, never by content. HTTP credentials, queries and fragments
-    are omitted, and other sources are truncated.
+    are omitted, and other sources are truncated. ``redact_non_http_urls``
+    also removes credentials from other URLs with an authority, except
+    ``file:`` sources. Local paths and the default behavior stay unchanged.
 
     Lives here rather than in ``multimodal.media_source`` so the validators
     below can bound their own messages: importing that package pulls in torch.
@@ -156,7 +163,9 @@ def describe_media_source(source: str, limit: int = SOURCE_LABEL_LIMIT) -> str:
         if len(media_type) > limit:
             media_type = f"{media_type[:limit]}... ({len(media_type)} chars)"
         return f"data:{media_type} ({len(source)} chars, payload elided)"
-    if parsed.scheme in ("http", "https"):
+    if parsed.scheme in ("http", "https") or (
+        redact_non_http_urls and parsed.scheme not in ("", "file") and parsed.netloc
+    ):
         source = parsed._replace(
             netloc=parsed.netloc.rsplit("@", 1)[-1], query="", fragment=""
         ).geturl()
