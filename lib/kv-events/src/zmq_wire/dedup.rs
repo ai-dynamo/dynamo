@@ -1,20 +1,21 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 
-use dynamo_kv_events::event::{KvCacheRemoveData, KvCacheStoreData};
-use dynamo_kv_events::residency::{ResidencyDomain, StorageTier};
 use dynamo_kv_hashing::ExternalSequenceBlockHash;
+use rustc_hash::FxHashMap;
+
+use crate::event::{KvCacheRemoveData, KvCacheStoreData};
+use crate::residency::{ResidencyDomain, StorageTier};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum EventDedupPolicy {
+pub enum EventDedupPolicy {
     RefCounted,
     SetLike,
 }
 
-/// Policy-driven deduplication filter for publisher KV cache events.
+/// Policy-driven deduplication filter for KV cache events.
 ///
 /// vLLM can emit multiple store/remove events for the same block hash.
 /// Refcounts are tracked **per DP rank** because identical block hashes
@@ -24,23 +25,22 @@ pub(super) enum EventDedupPolicy {
 /// reaches zero. `SetLike` events bypass bookkeeping when their producer
 /// guarantees at most one logical residency per owner, tier, and block hash.
 /// Clears reset refcounts for the emitting rank across storage tiers.
-pub(super) struct EventDedupFilter {
+#[derive(Default)]
+pub struct EventDedupFilter {
     /// Per-(dp_rank, storage_tier, residency_domain) refcounts.
     per_rank_tier:
-        HashMap<(u32, StorageTier, ResidencyDomain), HashMap<ExternalSequenceBlockHash, usize>>,
+        FxHashMap<(u32, StorageTier, ResidencyDomain), FxHashMap<ExternalSequenceBlockHash, usize>>,
 }
 
 impl EventDedupFilter {
-    pub(super) fn new() -> Self {
-        Self {
-            per_rank_tier: HashMap::new(),
-        }
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Track a store event. Increments refcount for each block hash on the
     /// given (DP rank, storage tier). Stores always pass through — this only
     /// updates bookkeeping.
-    pub(super) fn track_store_in_domain(
+    pub fn track_store_in_domain(
         &mut self,
         dp_rank: u32,
         storage_tier: StorageTier,
@@ -63,7 +63,7 @@ impl EventDedupFilter {
     /// Filter a remove event. Retains only block hashes whose refcount on the
     /// given (DP rank, storage tier) decrements to 0 (removing them from the
     /// map). Returns `None` if no hashes survive filtering.
-    pub(super) fn filter_remove_in_domain(
+    pub fn filter_remove_in_domain(
         &mut self,
         dp_rank: u32,
         storage_tier: StorageTier,
@@ -102,7 +102,7 @@ impl EventDedupFilter {
     }
 
     /// Clear refcounts for one DP rank and residency domain across storage tiers.
-    pub(super) fn clear_rank_domain(
+    pub fn clear_rank_domain(
         &mut self,
         dp_rank: u32,
         domain: ResidencyDomain,

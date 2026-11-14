@@ -8,7 +8,11 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use dynamo_kv_events::cursor::{CursorObservation, CursorState};
-use dynamo_kv_events::zmq_wire::{ZmqEventNormalizer, decode_event_batch};
+use dynamo_kv_events::event::KvCacheEventData;
+use dynamo_kv_events::placement::PlacementEvent;
+use dynamo_kv_events::zmq_wire::{
+    EventDedupFilter, EventDedupPolicy, ZmqEventNormalizer, decode_event_batch,
+};
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 
 use super::backend::Indexer;
@@ -143,6 +147,35 @@ impl ReplayRecoveryProgress {
     }
 }
 
+/// vLLM reports each cached copy of a block, so one eviction must not unindex it.
+/// Returns `None` when a removal has no block left to report.
+fn apply_block_refcounts(
+    dedup: &mut EventDedupFilter,
+    mut placement_event: PlacementEvent,
+) -> Option<PlacementEvent> {
+    // The ZMQ normalizer builds only `Placement::local_worker` placements (the `Worker`
+    // domain), so every event here is refcounted. If it ever emits `CacheOwner` events,
+    // pick the policy per domain, as the dynamo-llm publisher's state agent does.
+    let policy = EventDedupPolicy::RefCounted;
+    let tier = placement_event.placement.tier;
+    let domain = placement_event.placement.residency_domain;
+    let dp_rank = placement_event.event.dp_rank;
+    placement_event.event.data = match placement_event.event.data {
+        KvCacheEventData::Stored(data) => {
+            dedup.track_store_in_domain(dp_rank, tier, domain, policy, &data);
+            KvCacheEventData::Stored(data)
+        }
+        KvCacheEventData::Removed(data) => KvCacheEventData::Removed(
+            dedup.filter_remove_in_domain(dp_rank, tier, domain, policy, data)?,
+        ),
+        KvCacheEventData::Cleared => {
+            dedup.clear_rank_domain(dp_rank, domain, policy);
+            KvCacheEventData::Cleared
+        }
+    };
+    Some(placement_event)
+}
+
 struct ListenerLoop {
     worker_id: WorkerId,
     dp_rank: u32,
@@ -154,6 +187,7 @@ struct ListenerLoop {
     replay_endpoint: Option<String>,
     watermark: Arc<AtomicU64>,
     normalizer: ZmqEventNormalizer,
+    dedup: EventDedupFilter,
     messages_processed: u64,
 }
 
@@ -180,6 +214,7 @@ impl ListenerLoop {
             watermark,
             normalizer: ZmqEventNormalizer::new(block_size)
                 .with_engine_owned_mm_identity(engine_owned_mm_identity),
+            dedup: EventDedupFilter::new(),
             messages_processed: 0,
         }
     }
@@ -292,6 +327,10 @@ impl ListenerLoop {
                 ) else {
                     continue;
                 };
+                let Some(placement_event) = apply_block_refcounts(&mut self.dedup, placement_event)
+                else {
+                    continue;
+                };
                 let router_event = placement_event
                     .into_router_event()
                     .expect("local worker placement must convert to router event");
@@ -366,6 +405,10 @@ impl ListenerLoop {
                 seq,
                 WorkerWithDpRank::new(self.worker_id, effective_dp_rank),
             ) else {
+                continue;
+            };
+            let Some(placement_event) = apply_block_refcounts(&mut self.dedup, placement_event)
+            else {
                 continue;
             };
             let router_event = placement_event
@@ -546,12 +589,20 @@ mod tests {
     use dynamo_kv_hashing::routing::compute_block_hash_for_seq;
     use std::time::Duration;
 
-    #[rstest::rstest]
-    #[case::sglang(false)]
-    #[case::vllm(true)]
-    #[tokio::test]
-    async fn replay_accepts_engine_framing(#[case] include_topic: bool) {
-        let context = zmq::Context::new();
+    fn batch<T: serde::Serialize>(event: T) -> Vec<u8> {
+        rmp_serde::to_vec(&(0.0_f64, vec![event], Some(0_i32))).unwrap()
+    }
+
+    /// Answers one replay request with `batches`, numbered from 0, then the end marker.
+    fn spawn_replay_server(
+        context: &zmq::Context,
+        batches: Vec<Vec<u8>>,
+        include_topic: bool,
+    ) -> (
+        String,
+        std::sync::mpsc::Sender<()>,
+        tokio::task::JoinHandle<()>,
+    ) {
         let router = context.socket(zmq::ROUTER).unwrap();
         router.set_linger(0).unwrap();
         router.set_rcvtimeo(5000).unwrap();
@@ -559,39 +610,52 @@ mod tests {
         router.bind("tcp://127.0.0.1:*").unwrap();
         let endpoint = router.get_last_endpoint().unwrap().unwrap();
         let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
-        let publisher = context.socket(zmq::PUB).unwrap();
-        publisher.bind("tcp://127.0.0.1:*").unwrap();
-        let live_socket =
-            connect_sub_socket(&publisher.get_last_endpoint().unwrap().unwrap()).unwrap();
-
         let server = tokio::task::spawn_blocking(move || {
             let request = router.recv_multipart(0).unwrap();
             assert_eq!(&request[1..], &[vec![], 0_u64.to_be_bytes().to_vec()]);
-            for seq in 0_u64..=2 {
+            let replies = batches
+                .into_iter()
+                .enumerate()
+                .map(|(seq, payload)| ((seq as u64).to_be_bytes().to_vec(), payload))
+                .chain([(u64::MAX.to_be_bytes().to_vec(), vec![])]);
+            for (seq, payload) in replies {
                 let mut frames = vec![request[0].clone(), vec![]];
                 if include_topic {
                     frames.push(b"kv-events".to_vec());
                 }
-                if seq == 2 {
-                    frames.extend([u64::MAX.to_be_bytes().to_vec(), vec![]]);
-                } else {
-                    let event = (
-                        "BlockStored",
-                        vec![seq + 100],
-                        if seq == 0 { None } else { Some(100_u64) },
-                        vec![1_u32 + seq as u32; 4],
-                        4_usize,
-                        Option::<u64>::None,
-                        "GPU",
-                    );
-                    let payload = rmp_serde::to_vec(&(0.0_f64, vec![event], Some(0_i32))).unwrap();
-                    frames.extend([seq.to_be_bytes().to_vec(), payload]);
-                }
+                frames.extend([seq, payload]);
                 router.send_multipart(frames, 0).unwrap();
             }
             // Keep the socket open until the client consumes the queued replies.
             done_rx.recv().unwrap();
         });
+        (endpoint, done_tx, server)
+    }
+
+    #[rstest::rstest]
+    #[case::sglang(false)]
+    #[case::vllm(true)]
+    #[tokio::test]
+    async fn replay_accepts_engine_framing(#[case] include_topic: bool) {
+        let context = zmq::Context::new();
+        let batches = (0_u64..2)
+            .map(|seq| {
+                batch((
+                    "BlockStored",
+                    vec![seq + 100],
+                    if seq == 0 { None } else { Some(100_u64) },
+                    vec![1_u32 + seq as u32; 4],
+                    4_usize,
+                    Option::<u64>::None,
+                    "GPU",
+                ))
+            })
+            .collect();
+        let (endpoint, done_tx, server) = spawn_replay_server(&context, batches, include_topic);
+        let publisher = context.socket(zmq::PUB).unwrap();
+        publisher.bind("tcp://127.0.0.1:*").unwrap();
+        let live_socket =
+            connect_sub_socket(&publisher.get_last_endpoint().unwrap().unwrap()).unwrap();
         let indexer = create_indexer(4, 1);
         let watermark = Arc::new(AtomicU64::new(WATERMARK_UNSET));
         let cancel = CancellationToken::new();
@@ -619,5 +683,89 @@ mod tests {
         let matches = indexer.find_matches(hashes).await.unwrap();
         assert_eq!(matches.scores.get(&WorkerWithDpRank::new(1, 0)), Some(&2));
         cancel.cancel();
+    }
+
+    fn test_listener(
+        context: &zmq::Context,
+        indexer: Indexer,
+        replay_endpoint: Option<String>,
+    ) -> (ListenerLoop, zmq::Socket) {
+        let publisher = context.socket(zmq::PUB).unwrap();
+        publisher.bind("tcp://127.0.0.1:*").unwrap();
+        let live_socket =
+            connect_sub_socket(&publisher.get_last_endpoint().unwrap().unwrap()).unwrap();
+        let listener = ListenerLoop::new(
+            1,
+            0,
+            4,
+            false,
+            indexer,
+            CancellationToken::new(),
+            live_socket,
+            replay_endpoint,
+            Arc::new(AtomicU64::new(WATERMARK_UNSET)),
+        );
+        (listener, publisher)
+    }
+
+    fn store_block() -> Vec<u8> {
+        batch((
+            "BlockStored",
+            vec![100_u64],
+            Option::<u64>::None,
+            vec![1_u32; 4],
+            4_usize,
+            Option::<u64>::None,
+            "GPU",
+        ))
+    }
+
+    fn remove_block() -> Vec<u8> {
+        batch(("BlockRemoved", vec![100_u64], "GPU"))
+    }
+
+    async fn indexed_blocks(indexer: &Indexer) -> Option<u32> {
+        indexer.dump_events().await.expect("flush indexer");
+        let hashes = compute_block_hash_for_seq(&[1, 1, 1, 1], 4, Default::default());
+        let matches = indexer.find_matches(hashes).await.unwrap();
+        matches.scores.get(&WorkerWithDpRank::new(1, 0)).copied()
+    }
+
+    #[tokio::test]
+    async fn block_stays_indexed_until_its_last_copy_is_removed() {
+        let context = zmq::Context::new();
+        let indexer = create_indexer(4, 1);
+        let (mut listener, _publisher) = test_listener(&context, indexer.clone(), None);
+
+        let batches = [store_block(), store_block(), remove_block()];
+        for (seq, payload) in batches.iter().enumerate() {
+            listener
+                .apply_live_batch(seq as u64, payload)
+                .await
+                .unwrap();
+        }
+        assert_eq!(indexed_blocks(&indexer).await, Some(1));
+
+        listener.apply_live_batch(3, &remove_block()).await.unwrap();
+        assert_eq!(indexed_blocks(&indexer).await, None);
+    }
+
+    #[tokio::test]
+    async fn replayed_copies_are_counted_like_live_ones() {
+        let context = zmq::Context::new();
+        let batches = vec![store_block(), store_block(), remove_block()];
+        let (endpoint, done_tx, server) = spawn_replay_server(&context, batches, false);
+        let indexer = create_indexer(4, 1);
+        let (mut listener, _publisher) = test_listener(&context, indexer.clone(), Some(endpoint));
+
+        let replayed = tokio::time::timeout(Duration::from_secs(5), listener.replay_gap(0, 3))
+            .await
+            .expect("replay completion marker")
+            .unwrap();
+        done_tx.send(()).unwrap();
+        server.await.unwrap();
+
+        assert_eq!(replayed, 3);
+        assert_eq!(indexed_blocks(&indexer).await, Some(1));
     }
 }

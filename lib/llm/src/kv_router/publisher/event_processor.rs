@@ -8,13 +8,13 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use dynamo_kv_events::event::{KvCacheEvent, KvCacheEventData, RouterEvent};
+use dynamo_kv_events::zmq_wire::{EventDedupFilter, EventDedupPolicy};
 use dynamo_kv_indexer::host::LocalKvIndexer;
 
 use crate::kv_router::metrics::kv_publisher_metrics;
 
 use super::DEFAULT_MAX_BATCH_BLOCKS;
 use super::batching::BatchingState;
-use super::dedup::{EventDedupFilter, EventDedupPolicy};
 use super::sinks::{RouterEventBatchSink, emit};
 
 pub(super) async fn run_event_processor_loop<P: RouterEventBatchSink + 'static>(

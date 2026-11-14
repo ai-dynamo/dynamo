@@ -34,7 +34,9 @@ use anyhow::{Context, Result};
 use dynamo_kv_events::event::{KvCacheEvent, KvCacheEventData, RouterEvent};
 use dynamo_kv_events::placement::PlacementEvent;
 use dynamo_kv_events::residency::{ResidencyDomain, ResidencyOwner, StorageTier};
-use dynamo_kv_events::zmq_wire::{KvEventOwnership, ZmqEventFilterReason, ZmqEventNormalizer};
+use dynamo_kv_events::zmq_wire::{
+    EventDedupFilter, EventDedupPolicy, KvEventOwnership, ZmqEventFilterReason, ZmqEventNormalizer,
+};
 use dynamo_kv_indexer::host::{
     CanonicalIdentityMaterial, ExplicitIdentityMap, KvIndexerMetrics, KvStateAgentIdentity,
     KvStateAgentStatus, KvStateAttachmentStatus, KvStateProtocolVersion, LocalKvIndexer,
@@ -71,7 +73,6 @@ use crate::{
 use super::{
     DEFAULT_MAX_BATCH_BLOCKS,
     batching::PlacementEventCoalescer,
-    dedup::{EventDedupFilter, EventDedupPolicy},
     sinks::{EventPlanePublisher, RouterEventBatchSink, admit_local_event},
     zmq_listener::{DecodedZmqKvBatch, decode_zmq_kv_batch},
 };

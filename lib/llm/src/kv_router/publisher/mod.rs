@@ -42,7 +42,6 @@ use crate::kv_router::{
 
 mod attachment_owner;
 mod batching;
-mod dedup;
 mod event_processor;
 mod multimodal_embedding_cache;
 mod sinks;
@@ -58,8 +57,6 @@ pub use zmq_recovery::{KvStreamCommand, KvStreamStatus, ZmqRecoveryConfig};
 pub use attachment_owner::{KvStateAttachmentDescriptor, KvStateAttachmentOwner};
 
 pub use crate::discovery::kv_state_agent::KvStateIngressProtocol;
-#[cfg(test)]
-use dedup::{EventDedupFilter, EventDedupPolicy};
 #[cfg(test)]
 use event_processor::run_event_processor_loop;
 use event_processor::start_event_processor;
