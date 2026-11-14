@@ -11,12 +11,22 @@ use std::sync::Arc;
 /// Whether to use write-combined pinned allocations.
 ///
 /// Probed once at first use: returns `false` if `DYN_KVBM_DISABLE_WRITE_COMBINED`
-/// is set, or if a test allocation reveals the hardware does not support it
-/// (e.g. Grace Hopper / Blackwell with NVLink-C2C). Must be accessed only after
-/// a CUDA context has been bound to the current thread.
+/// is set, if a visible device cannot access write-combined memory through its
+/// host address (e.g. WSL2), or if a test allocation reveals the hardware does not
+/// support it (e.g. Grace Hopper / Blackwell with NVLink-C2C). Must be accessed only
+/// after a CUDA context has been bound to the current thread.
 static USE_WRITE_COMBINED: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
     if crate::env_is_truthy("DYN_KVBM_DISABLE_WRITE_COMBINED") {
         tracing::debug!("DYN_KVBM_DISABLE_WRITE_COMBINED set; write-combined disabled");
+        return false;
+    }
+    let host_ptr_usable = is_wc_host_ptr_usable();
+    if !matches!(host_ptr_usable, Ok(true)) {
+        tracing::debug!(
+            ?host_ptr_usable,
+            "Write-combined memory may not be device-addressable through its host \
+             pointer on this system; will use regular pinned memory"
+        );
         return false;
     }
     // Probe hardware support with a 1-byte test allocation.
@@ -40,6 +50,25 @@ static USE_WRITE_COMBINED: std::sync::LazyLock<bool> = std::sync::LazyLock::new(
         }
     }
 });
+
+/// Whether every visible device can access write-combined memory through its host address.
+///
+/// Copy kernels use a pinned block's host address as its device address. Under unified
+/// addressing, `cuMemHostAlloc` guarantees that for all its memory except write-combined
+/// memory, which a device can access through its host address only if it has
+/// `CAN_USE_HOST_POINTER_FOR_REGISTERED_MEM` (see `cuMemHostGetDevicePointer`). The choice
+/// is process-wide, so every device that may run a copy must have it.
+fn is_wc_host_ptr_usable() -> std::result::Result<bool, cudarc::driver::DriverError> {
+    use cudarc::driver::{result::device, sys::CUdevice_attribute};
+    let attr = CUdevice_attribute::CU_DEVICE_ATTRIBUTE_CAN_USE_HOST_POINTER_FOR_REGISTERED_MEM;
+    for ordinal in 0..device::get_count()? {
+        // SAFETY: the device handle comes from `device::get`.
+        if unsafe { device::get_attribute(device::get(ordinal)?, attr) }? == 0 {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
 
 /// Allocates pinned host memory, using write-combined if [`USE_WRITE_COMBINED`]
 /// allows it, otherwise falling back to `CU_MEMHOSTALLOC_DEVICEMAP`.
