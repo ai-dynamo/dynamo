@@ -5,13 +5,13 @@ SPDX-License-Identifier: Apache-2.0
 
 # GBuild geometry contract fixtures
 
-These deployment contracts exercise GBuild topology resolution, manifest construction,
-and Cap'n Proto serialization through Dynamo's offline acquisition, normalization,
-LPX Request projection, and runtime partition mapping. `fixtures.json` records each
-payload's SHA-256, source geometry, compiler partition IDs, and selected chain.
+These synthetic deployment contracts exercise Dynamo's offline acquisition,
+unit-based LPX Request projection, and runtime partition mapping. `fixtures.json`
+records each payload's SHA-256, partition facts, compiler partition IDs, and unit
+membership.
 
 The fixtures use synthetic runtime inputs and the existing `opaque-v3-topology` test
-label. Geometry comes from explicit topology metadata, independently of that label.
+label. Placement comes from explicit unit reservations, independently of that label.
 The associated execution and report roots are encoded but omitted here: Dynamo reads
 only the deployment root on this path. These files contain no compiled programs or
 weights and prove artifact compatibility, not runtime execution or physical placement.
@@ -23,9 +23,10 @@ weights and prove artifact compatibility, not runtime execution or physical plac
 | `rack256` | 256; `[16,8,2,1]` | Same shape; 16 |
 | `connected_chain` | IDs 7 then 8; 32 then 16 chips | 3; connector devices 16–31 → 0–15 |
 
-The Go expectations are independent of the projection code. The tests preserve the
-original artifact bytes and verify stable source snapshot identity through acquisition
-and projection.
+The Go expectations are independent of the projection code.
+`TestGBuildGeometryContract` checks the frozen payload hashes, retained partition
+facts, reservation extents, Agent counts, NodeLocal mappings, and connector device
+pairs and lane order. Acquisition and projection retain the same source identity.
 
 ## Updating the fixtures
 

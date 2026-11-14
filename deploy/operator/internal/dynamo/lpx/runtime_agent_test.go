@@ -11,8 +11,10 @@ import (
 	"testing"
 
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 func TestRuntimePreservesAuthoredStartup(t *testing.T) {
@@ -20,14 +22,14 @@ func TestRuntimePreservesAuthoredStartup(t *testing.T) {
 
 	for _, role := range []struct {
 		name           string
-		family         BuildFamily
+		family         lpuArchitecture
 		devicesPerNode int
 		conductor      bool
 	}{
-		{name: "XT conductor", family: BuildFamilyXT, conductor: true},
-		{name: "HX conductor", family: BuildFamilyHX, conductor: true},
-		{name: "XT worker", family: BuildFamilyXT, devicesPerNode: 8},
-		{name: "HX worker", family: BuildFamilyHX, devicesPerNode: 16},
+		{name: "XT conductor", family: lp20, conductor: true},
+		{name: "HX conductor", family: lp30, conductor: true},
+		{name: "XT worker", family: lp20, devicesPerNode: 8},
+		{name: "HX worker", family: lp30, devicesPerNode: 16},
 	} {
 		for _, startup := range []struct {
 			name    string
@@ -172,16 +174,16 @@ func TestAllocationPrecedesAuthoredReferences(t *testing.T) {
 func TestModelPathsPrecedeAuthoredReferences(t *testing.T) {
 	for _, test := range []struct {
 		name     string
-		family   BuildFamily
+		family   lpuArchitecture
 		pipeline Pipeline
 		local    bool
 	}{
-		{name: "XT Single GCS", family: BuildFamilyXT, pipeline: PipelineSingle},
-		{name: "HX Single local", family: BuildFamilyHX, pipeline: PipelineSingle, local: true},
-		{name: "XT hybrid local", family: BuildFamilyXT, pipeline: PipelineHybrid, local: true},
-		{name: "HX hybrid GCS", family: BuildFamilyHX, pipeline: PipelineHybrid},
-		{name: "XT multiple drafts local", family: BuildFamilyXT, pipeline: PipelineSpecDecode, local: true},
-		{name: "HX multiple drafts GCS", family: BuildFamilyHX, pipeline: PipelineSpecDecode},
+		{name: "XT Single GCS", family: lp20, pipeline: PipelineSingle},
+		{name: "HX Single local", family: lp30, pipeline: PipelineSingle, local: true},
+		{name: "XT hybrid local", family: lp20, pipeline: PipelineHybrid, local: true},
+		{name: "HX hybrid GCS", family: lp30, pipeline: PipelineHybrid},
+		{name: "XT multiple drafts local", family: lp20, pipeline: PipelineSpecDecode, local: true},
+		{name: "HX multiple drafts GCS", family: lp30, pipeline: PipelineSpecDecode},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Log("Resolve each model from the registry reference and the runtime's custom mount")
@@ -200,7 +202,7 @@ func TestModelPathsPrecedeAuthoredReferences(t *testing.T) {
 				}
 				projections[index] = &ModelProjection{
 					pipeline: test.pipeline, runtimeBuildRef: buildID,
-					configuredBuild: Build{family: test.family, path: path},
+					configuredBuild: Build{architecture: test.family, path: path},
 				}
 			}
 			want := []corev1.EnvVar{}
@@ -280,6 +282,101 @@ func TestModelPathsRejectInvalidReferences(t *testing.T) {
 			require.ErrorContains(t, err, "resolve "+test.name)
 			require.ErrorContains(t, err, "bad path segment")
 			require.Equal(t, before, containerLists)
+		})
+	}
+}
+
+func TestAgentSchedulingUsesManifestDeviceCountAndPreservesAuthoredResources(t *testing.T) {
+	t.Parallel()
+
+	t.Log("Construct a mixed-resource PodSpec spanning every container resource location")
+	lpuResources := corev1.ResourceList{
+		v2LPUResourceName: resource.MustParse("8"),
+		corev1.ResourceName("lpu.nvidia.com/devices"): resource.MustParse("1"),
+		v3LPUResourceName:                     resource.MustParse("16"),
+		corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("1"),
+		corev1.ResourceCPU:                    resource.MustParse("2"),
+	}
+	base := corev1.PodSpec{
+		Affinity: &corev1.Affinity{NodeAffinity: &corev1.NodeAffinity{
+			RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+				NodeSelectorTerms: []corev1.NodeSelectorTerm{{MatchExpressions: []corev1.NodeSelectorRequirement{{
+					Key: corev1.LabelHostname, Operator: corev1.NodeSelectorOpIn, Values: []string{"lpu-node-a"},
+				}}}},
+			},
+		}},
+		InitContainers: []corev1.Container{{
+			Name: "init", Resources: corev1.ResourceRequirements{
+				Limits: lpuResources.DeepCopy(), Requests: lpuResources.DeepCopy(),
+			},
+		}},
+		Containers: []corev1.Container{
+			{
+				Name: "sidecar", Image: "helper",
+				Resources: corev1.ResourceRequirements{
+					Limits: lpuResources.DeepCopy(), Requests: lpuResources.DeepCopy(),
+				},
+			},
+			{
+				Name: "main", Image: "runtime",
+				Resources: corev1.ResourceRequirements{
+					Limits: lpuResources.DeepCopy(), Requests: lpuResources.DeepCopy(),
+				},
+			},
+		},
+		EphemeralContainers: []corev1.EphemeralContainer{{
+			Name: "debug", Resources: corev1.ResourceRequirements{Limits: lpuResources.DeepCopy()},
+		}},
+		Resources: &corev1.ResourceRequirements{
+			Limits: lpuResources.DeepCopy(), Requests: lpuResources.DeepCopy(),
+		},
+	}
+
+	t.Log("Vary the supplied device count independently of family selection, including initially absent resource maps")
+	tests := []struct {
+		name             string
+		family           lpuArchitecture
+		devicesPerNode   int
+		emptyResources   bool
+		expectedResource corev1.ResourceName
+		expectedQuantity resource.Quantity
+	}{
+		{
+			name: "XT supplied count", family: lp20, devicesPerNode: 4,
+			expectedResource: v2LPUResourceName, expectedQuantity: resource.MustParse("4"),
+		},
+		{
+			name: "HX supplied count", family: lp30, devicesPerNode: 32,
+			expectedResource: v3LPUResourceName, expectedQuantity: resource.MustParse("32"),
+		},
+		{
+			name: "XT absent resource maps", family: lp20, devicesPerNode: 8, emptyResources: true,
+			expectedResource: v2LPUResourceName, expectedQuantity: resource.MustParse("8"),
+		},
+		{
+			name: "HX absent resource maps", family: lp30, devicesPerNode: 16, emptyResources: true,
+			expectedResource: v3LPUResourceName, expectedQuantity: resource.MustParse("16"),
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("Expect only the selected resource on main to change")
+			agent := base.DeepCopy()
+			if test.emptyResources {
+				agent.Containers[1].Resources = corev1.ResourceRequirements{}
+			}
+			want := base.DeepCopy()
+			if test.emptyResources {
+				want.Containers[1].Resources = corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{}, Limits: corev1.ResourceList{},
+				}
+			}
+			want.Containers[1].Resources.Requests[test.expectedResource] = test.expectedQuantity
+			want.Containers[1].Resources.Limits[test.expectedResource] = test.expectedQuantity
+
+			t.Log("Bind the supplied count and retain placement and every other authored resource")
+			configureAgentScheduling(agent, test.family, test.devicesPerNode)
+			require.Empty(t, cmp.Diff(want, agent))
 		})
 	}
 }

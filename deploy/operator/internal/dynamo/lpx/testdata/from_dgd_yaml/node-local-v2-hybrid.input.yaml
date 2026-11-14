@@ -41,19 +41,12 @@ spec:
                 mountPath: /run/openengine
             containers:
             - name: main
-              image: example.invalid/gpu-runtime:test
-              command:
-              - /usr/local/bin/cyborg-entrypoint
-              - --expand-hosts
-              - --
-              - /opt/gpu-runtime
-              args:
-              - serve
+              image: example.invalid/cyborg:test
               env:
+              - name: MODEL_PATH
+                value: $(LPX_MODEL_PATH)
               - name: RDMA_PORT
                 value: '19877'
-              - name: SERVER_HOSTS_FILE
-                value: /tmp/lpu_servers
               - name: CYBORG_FPGA_GPI_REPLICA_INDEX
                 valueFrom:
                   fieldRef:
@@ -80,8 +73,6 @@ spec:
                 periodSeconds: 5
                 timeoutSeconds: 4
               volumeMounts:
-              - name: config
-                mountPath: /configs
               - name: infiniband
                 mountPath: /dev/infiniband
               - name: model-storage
@@ -109,11 +100,7 @@ spec:
           spec:
             containers:
             - name: main
-              image: example.invalid/lpu-runtime:test
-              command:
-              - /opt/dynamo-lpu
-              args:
-              - serve
+              image: example.invalid/hydra:test
               resources:
                 limits:
                   lpu.nvidia.com/devices: '1'
@@ -140,7 +127,7 @@ spec:
                 successThreshold: 1
                 timeoutSeconds: 1
               env:
-              - name: GAS_DIR
+              - name: MODEL_PATH
                 value: $(LPX_MODEL_PATH)
               - name: GLUE_RDMA_PATH_MTU
                 value: '1024'
@@ -159,8 +146,6 @@ spec:
               volumeMounts:
               - mountPath: /nfs
                 name: model-storage
-              - name: config
-                mountPath: /configs
               - name: hugepages
                 mountPath: /dev/hugepages
               - name: host-sys
