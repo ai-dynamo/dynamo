@@ -940,11 +940,20 @@ pub fn chat_completion_to_anthropic_response(
             (text, refusal) => text.or(refusal),
         };
         if let Some(text) = text {
-            // Text goes after thinking block (if any)
-            content.push(AnthropicResponseContentBlock::Text {
-                text,
-                citations: None,
-            });
+            // Text goes after any thinking block and before the tool_use blocks, as
+            // when the same turn is streamed. A chat message does not record where
+            // text fell among its tool calls.
+            let index = content
+                .iter()
+                .position(|block| matches!(block, AnthropicResponseContentBlock::ToolUse { .. }))
+                .unwrap_or(content.len());
+            content.insert(
+                index,
+                AnthropicResponseContentBlock::Text {
+                    text,
+                    citations: None,
+                },
+            );
         }
     }
 
@@ -3002,6 +3011,68 @@ mod tests {
 #[cfg(test)]
 mod anthropic_types_tests {
     use super::*;
+
+    /// A chat message does not record where its text fell among its tool calls,
+    /// so the text goes first, as it does when the same turn is streamed.
+    #[test]
+    #[allow(deprecated)]
+    fn non_streaming_response_orders_thinking_text_then_tool_use() {
+        let chat_resp = NvCreateChatCompletionResponse {
+            response_events: Vec::new(),
+            inner: dynamo_protocols::types::CreateChatCompletionResponse {
+                id: "chatcmpl-order".into(),
+                choices: vec![dynamo_protocols::types::ChatChoice {
+                    index: 0,
+                    message: dynamo_protocols::types::ChatCompletionResponseMessage {
+                        content: Some(dynamo_protocols::types::ChatCompletionMessageContent::Text(
+                            "Checking the weather.".into(),
+                        )),
+                        refusal: None,
+                        tool_calls: Some(vec![
+                            dynamo_protocols::types::ChatCompletionMessageToolCall {
+                                custom: None,
+                                id: "call_1".into(),
+                                r#type: dynamo_protocols::types::FunctionType::Function,
+                                function: dynamo_protocols::types::FunctionCall {
+                                    name: "get_weather".into(),
+                                    arguments: "{}".into(),
+                                },
+                            },
+                        ]),
+                        role: dynamo_protocols::types::Role::Assistant,
+                        function_call: None,
+                        audio: None,
+                        reasoning_content: Some("The user wants the weather.".into()),
+                    },
+                    finish_reason: Some(dynamo_protocols::types::FinishReason::ToolCalls),
+                    logprobs: None,
+                }],
+                created: 1726000000,
+                model: "test-model".into(),
+                service_tier: None,
+                system_fingerprint: None,
+                object: "chat.completion".into(),
+                usage: None,
+            },
+            prompt_logprobs: None,
+            nvext: None,
+        };
+
+        let response = chat_completion_to_anthropic_response(chat_resp, "test-model", None);
+
+        assert!(
+            matches!(
+                response.content.as_slice(),
+                [
+                    AnthropicResponseContentBlock::Thinking { .. },
+                    AnthropicResponseContentBlock::Text { .. },
+                    AnthropicResponseContentBlock::ToolUse { .. },
+                ]
+            ),
+            "unexpected block order: {:?}",
+            response.content
+        );
+    }
 
     #[test]
     fn tool_use_ids_derive_from_chat_and_backend_ids() {
