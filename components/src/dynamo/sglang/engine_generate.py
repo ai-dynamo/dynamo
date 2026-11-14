@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator, Iterator, Mapping
 from typing import Any
 from uuid import uuid4
@@ -22,6 +23,7 @@ DISAGG_PREFILL_CANCEL_ANYTIME_V1 = "disagg_prefill_cancel_anytime_v1"
 _PAYLOAD_KEY = "sglang_tito"
 _GENERATE_REQUEST_ADAPTER = TypeAdapter(GenerateReqInput)
 _MEDIA_FIELDS = ("image_data", "audio_data", "video_data")
+logger = logging.getLogger(__name__)
 
 
 def new_sglang_request_id() -> str:
@@ -155,9 +157,23 @@ async def native_generate_stream(
     engine: Any, request: GenerateReqInput
 ) -> AsyncIterator[dict[str, Any]]:
     """Dispatch exactly as SGLang native ``/generate`` handler does."""
-    async for response in engine.tokenizer_manager.generate_request(request, None):
-        # The router counts output from token_ids; clients get the opaque response.
-        yield {
-            "token_ids": response.get("output_ids") or [],
-            "engine_data": {"sglang_response": response},
-        }
+    responses = engine.tokenizer_manager.generate_request(request, None)
+    primary_error = None
+    try:
+        async for response in responses:
+            # The router counts output from token_ids; clients get the opaque response.
+            yield {
+                "token_ids": response.get("output_ids") or [],
+                "engine_data": {"sglang_response": response},
+            }
+    except BaseException as error:
+        primary_error = error
+        raise
+    finally:
+        try:
+            await responses.aclose()
+        except Exception:
+            if primary_error is None or isinstance(primary_error, GeneratorExit):
+                raise
+            # Cleanup must not replace the engine error or cancellation.
+            logger.exception("Failed to close the native SGLang response iterator")
