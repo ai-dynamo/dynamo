@@ -1543,6 +1543,24 @@ class VllmProcessor:
                         pending_terminals[output_idx] = dynamo_out
                     else:
                         envelope["data"] = dynamo_out
+                elif (
+                    request.get("stream", False)
+                    and not raw_finish_reason
+                    and output_request_id not in locally_stopped_requests
+                ):
+                    # The parser holds the output back (a tool call is emitted only
+                    # once complete). Keep the running count on the wire for
+                    # `continuous_usage_stats`, so a cut stream still reports it.
+                    usage_out: dict[str, Any] = {
+                        "id": request_id,
+                        "choices": [],
+                        "created": int(time.time()),
+                        "model": request["model"],
+                        "object": "chat.completion.chunk",
+                    }
+                    attach_usage(usage_out, finished=False)
+                    if "usage" in usage_out:
+                        envelope["data"] = usage_out
 
                 metrics = {
                     "input_tokens": input_tokens,
