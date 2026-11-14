@@ -268,23 +268,47 @@ SERVED_MODEL="<served-model-name>"
 SMOKE_DIR="${DEPLOY_ROOT}/smoke"
 mkdir -p "${SMOKE_DIR}"
 
-kubectl --context "${KUBE_CONTEXT}" port-forward svc/<frontend-service> 8000:8000 -n "${NAMESPACE}" &
+PF_LOG="$(mktemp "${SMOKE_DIR}/port-forward.XXXXXX")"
+kubectl --context "${KUBE_CONTEXT}" port-forward svc/<frontend-service> :8000 \
+  --address 127.0.0.1 -n "${NAMESPACE}" >"${PF_LOG}" 2>&1 &
 PF_PID=$!
-trap 'kill "${PF_PID}" 2>/dev/null' EXIT
+cleanup() {
+  status=$?
+  trap - EXIT
+  kill "${PF_PID}" 2>/dev/null || true
+  wait "${PF_PID}" 2>/dev/null || true
+  exit "${status}"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
-ready=0
+# Read only this invocation's bind announcement, not an unrelated HTTP listener.
+PF_PORT=""
 for _ in $(seq 1 30); do
-  code="$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8000/v1/models || true)"
-  [ "${code}" -ge 100 ] && { ready=1; break; }  # any HTTP response = port forwards; smoke gates judge health
+  if ! kill -0 "${PF_PID}" 2>/dev/null; then
+    cat "${PF_LOG}" >&2
+    echo "port-forward exited before binding" >&2
+    exit 1
+  fi
+  PF_PORT="$(sed -nE 's/^Forwarding from 127\.0\.0\.1:([0-9]+) -> 8000$/\1/p' "${PF_LOG}")"
+  [ -n "${PF_PORT}" ] && break
   sleep 2
 done
-[ "${ready}" = "1" ] || { echo "port-forward never became reachable"; exit 1; }
+[ -n "${PF_PORT}" ] || { cat "${PF_LOG}" >&2; echo "port-forward never bound" >&2; exit 1; }
+BASE_URL="http://127.0.0.1:${PF_PORT}"
 
 # Worker registration lags pod readiness (the frontend lists a model only after the
 # worker's generate endpoint registers with discovery); wait bounded, don't fail on the first poll.
 listed=0
-for _ in $(seq 1 30); do  # 5 min bound
-  models_code="$(curl -sS -o "${SMOKE_DIR}/models_body.json" -w '%{http_code}' http://127.0.0.1:8000/v1/models || true)"
+for _ in $(seq 1 30); do  # 30 bounded requests, 10 seconds between attempts
+  if ! kill -0 "${PF_PID}" 2>/dev/null; then
+    cat "${PF_LOG}" >&2
+    echo "port-forward exited during smoke test" >&2
+    exit 1
+  fi
+  models_code="$(curl -sS --connect-timeout 5 --max-time 5 \
+    -o "${SMOKE_DIR}/models_body.json" -w '%{http_code}' "${BASE_URL}/v1/models" || true)"
   if [ "${models_code}" -ge 200 ] && [ "${models_code}" -lt 300 ] && \
      jq -e --arg model "${SERVED_MODEL}" 'any(.data[]?; .id == $model)' "${SMOKE_DIR}/models_body.json" >/dev/null; then
     listed=1; break
@@ -299,7 +323,8 @@ api_request="$(jq -nc --arg model "${SERVED_MODEL}" '{
   max_tokens: 100,
   temperature: 0
 }')"
-api_code="$(curl -sS -o "${SMOKE_DIR}/api_body.json" -w '%{http_code}' http://127.0.0.1:8000/v1/chat/completions \
+api_code="$(curl -sS --connect-timeout 5 --max-time 120 \
+  -o "${SMOKE_DIR}/api_body.json" -w '%{http_code}' "${BASE_URL}/v1/chat/completions" \
   -H 'Content-Type: application/json' \
   -d "${api_request}")"
 [ "${api_code}" -ge 200 ] && [ "${api_code}" -lt 300 ] || { echo "chat endpoint ${api_code}"; exit 1; }
