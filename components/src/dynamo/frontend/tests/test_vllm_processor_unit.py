@@ -24,6 +24,7 @@ from _tool_guidance_parity import (
     tool_choice_value,
 )
 from transformers import AutoTokenizer
+from vllm.reasoning import ReasoningParserManager
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.tool_parsers import ToolParser, ToolParserManager
 
@@ -33,6 +34,7 @@ from dynamo.frontend.prepost import (
     StreamingPostProcessor,
     _prepare_request,
     build_tool_call_guided_decoding,
+    is_gemma4_parser_pair,
 )
 from dynamo.llm.exceptions import HttpError, InvalidArgument, WorkerUnavailable
 
@@ -3554,6 +3556,291 @@ class TestControlMarkerStrip:
         )
         assert post.reasoning_parser is None
         assert self._content(post, "<|im_end|>408<|im_end|>") == "408"
+
+
+class _Gemma4ChannelTokenizer:
+    """The Qwen3 fixture plus Gemma 4's channel special tokens.
+
+    Ids match google/gemma-4-E2B-it: `<|channel>`=100, `<channel|>`=101, and
+    `thought\n` encodes to [45518, 107]. Keeps the file on its one model.
+    """
+
+    OPEN_ID = 100
+    CLOSE_ID = 101
+    LABEL_IDS = (45518, 107)
+
+    def __init__(self, base):
+        self._base = base
+
+    def __getattr__(self, name):
+        return getattr(self._base, name)
+
+    @property
+    def all_special_tokens(self):
+        return [*self._base.all_special_tokens, "<|channel>", "<channel|>"]
+
+    def convert_tokens_to_ids(self, token):
+        ids = {"<|channel>": self.OPEN_ID, "<channel|>": self.CLOSE_ID}
+        if token in ids:
+            return ids[token]
+        return self._base.convert_tokens_to_ids(token)
+
+    def encode(self, text, add_special_tokens=True):
+        if text == "thought\n" and not add_special_tokens:
+            return list(self.LABEL_IDS)
+        return self._base.encode(text, add_special_tokens=add_special_tokens)
+
+
+_G4 = _Gemma4ChannelTokenizer
+# (text, id) per generated token, as the engine detokenizes them.
+_G4_LABEL_EMPTY = [
+    ("", _G4.OPEN_ID),
+    ("thought", _G4.LABEL_IDS[0]),
+    ("\n", _G4.LABEL_IDS[1]),
+    ("", _G4.CLOSE_ID),
+    ("final", 7),
+    (" answer", 8),
+]
+_G4_RAW_EMPTY = [
+    ("<|channel>", _G4.OPEN_ID),
+    ("thought", _G4.LABEL_IDS[0]),
+    ("\n", _G4.LABEL_IDS[1]),
+    ("<channel|>", _G4.CLOSE_ID),
+    ("final", 7),
+    (" answer", 8),
+]
+_G4_LABEL_NON_EMPTY = [
+    ("", _G4.OPEN_ID),
+    ("thought", _G4.LABEL_IDS[0]),
+    ("\n", _G4.LABEL_IDS[1]),
+    ("private", 9),
+    ("", _G4.CLOSE_ID),
+    ("final", 7),
+    (" answer", 8),
+]
+_G4_LABEL_WITHOUT_CHANNEL = [
+    ("thought", _G4.LABEL_IDS[0]),
+    ("\n", _G4.LABEL_IDS[1]),
+    ("final", 7),
+    (" answer", 8),
+]
+
+
+def _gemma4_parser_classes():
+    return (
+        ToolParserManager.get_tool_parser("gemma4"),
+        ReasoningParserManager.get_reasoning_parser("gemma4"),
+    )
+
+
+class TestGemma4EmptyThoughtChannel:
+    """A leading empty Gemma 4 thought channel must not reach content.
+
+    With the Gemma 4 parser pair configured, enable_thinking=false, and no
+    tools, no parser runs, so the special tokens are removed but the plain
+    `thought\n` label would leak. Mirrors the no-tool cases of
+    assert_gemma4_without_enable_thinking in
+    lib/llm/tests/postprocessor_parsing_stream.rs: every split point across
+    two deltas plus a final empty chunk.
+    """
+
+    @staticmethod
+    def _post(
+        tokenizer,
+        *,
+        gemma4_parser_pair=True,
+        chat_template_kwargs=None,
+        response_reasoning_ended=None,
+    ):
+        request = json.loads(json.dumps(TOOL_REQUEST))
+        request.pop("tools", None)
+        request, _, _, _, _ = _prepare_request(
+            request, tokenizer=tokenizer, tool_parser_class=None
+        )
+        _, reasoning_parser_class = _gemma4_parser_classes()
+        return StreamingPostProcessor(
+            tokenizer=_Gemma4ChannelTokenizer(tokenizer),
+            request_for_sampling=request,
+            sampling_params=SamplingParams(),
+            prompt_token_ids=[],
+            tool_parser=None,
+            reasoning_parser_class=reasoning_parser_class,
+            chat_template_kwargs=(
+                {"enable_thinking": False}
+                if chat_template_kwargs is None
+                else chat_template_kwargs
+            ),
+            response_reasoning_ended=response_reasoning_ended,
+            stream_response=True,
+            gemma4_parser_pair=gemma4_parser_pair,
+        )
+
+    @staticmethod
+    def _stream(post, deltas):
+        """Feed (text, token_ids) deltas plus a final empty stop chunk."""
+        pieces = []
+        chunks = [*deltas, ("", [])]
+        for i, (text, token_ids) in enumerate(chunks):
+            last = i == len(chunks) - 1
+            choice = post.process_output(
+                SimpleNamespace(
+                    index=0,
+                    text=text,
+                    token_ids=list(token_ids),
+                    finish_reason="stop" if last else None,
+                    logprobs=None,
+                )
+            )
+            if last:
+                assert choice is not None and choice["finish_reason"] == "stop"
+            if choice is not None and choice["delta"].get("content"):
+                pieces.append(choice["delta"]["content"])
+        return "".join(pieces)
+
+    @staticmethod
+    def _text_splits(text):
+        """Every char split into two text-only deltas (no token ids)."""
+        return [[(text[:k], []), (text[k:], [])] for k in range(len(text) + 1)]
+
+    @staticmethod
+    def _token_splits(tokens):
+        """Every token-boundary split into two deltas carrying their ids."""
+        splits = []
+        for k in range(len(tokens) + 1):
+            deltas = []
+            for part in (tokens[:k], tokens[k:]):
+                deltas.append(
+                    ("".join(t for t, _ in part), [token_id for _, token_id in part])
+                )
+            splits.append(deltas)
+        return splits
+
+    def _assert_all_splits(self, tokenizer, splits, expected, **post_kwargs):
+        for deltas in splits:
+            post = self._post(tokenizer, **post_kwargs)
+            assert self._stream(post, deltas) == expected, deltas
+
+    def test_pair_detected_from_parser_classes(self):
+        tool_parser_class, reasoning_parser_class = _gemma4_parser_classes()
+        assert is_gemma4_parser_pair(tool_parser_class, reasoning_parser_class)
+        assert not is_gemma4_parser_pair(None, reasoning_parser_class)
+        assert not is_gemma4_parser_pair(tool_parser_class, None)
+        assert not is_gemma4_parser_pair(
+            ToolParserManager.get_tool_parser("hermes"), reasoning_parser_class
+        )
+
+    def test_raw_empty_channel_text_is_stripped(self, tokenizer):
+        self._assert_all_splits(
+            tokenizer,
+            self._text_splits("<|channel>thought\n<channel|>final answer"),
+            "final answer",
+        )
+
+    def test_raw_empty_channel_tokens_are_stripped(self, tokenizer):
+        self._assert_all_splits(
+            tokenizer, self._token_splits(_G4_RAW_EMPTY), "final answer"
+        )
+
+    def test_bare_label_after_channel_token_is_stripped(self, tokenizer):
+        """skip_special_tokens=true leaves only `thought\n`; the ids prove it."""
+        self._assert_all_splits(
+            tokenizer, self._token_splits(_G4_LABEL_EMPTY), "final answer"
+        )
+
+    def test_one_token_per_chunk_is_stripped(self, tokenizer):
+        post = self._post(tokenizer)
+        deltas = [(text, [token_id]) for text, token_id in _G4_LABEL_EMPTY]
+        assert self._stream(post, deltas) == "final answer"
+
+    def test_text_lagging_ids_is_stripped(self, tokenizer):
+        """A request `stop` makes vLLM's detokenizer hold text back, so the
+        channel ids can be complete while the text is still `thought`."""
+        post = self._post(tokenizer)
+        deltas = [
+            ("", [100]),
+            ("thought", [45518]),
+            ("", [107]),
+            ("", [101]),
+            ("\nfinal", [7]),
+            (" answer", [8]),
+        ]
+        assert self._stream(post, deltas) == "final answer"
+
+    def test_plain_answer_is_unchanged(self, tokenizer):
+        self._assert_all_splits(
+            tokenizer, self._text_splits("final answer"), "final answer"
+        )
+
+    @pytest.mark.parametrize(
+        "splits",
+        [
+            pytest.param(
+                lambda cls: cls._token_splits(_G4_LABEL_WITHOUT_CHANNEL),
+                id="token-ids",
+            ),
+            pytest.param(
+                lambda cls: cls._text_splits("thought\nfinal answer"),
+                id="no-token-ids",
+            ),
+        ],
+    )
+    def test_answer_starting_with_thought_label_is_unchanged(self, tokenizer, splits):
+        """Without the channel token ids the label is ordinary answer text."""
+        self._assert_all_splits(
+            tokenizer,
+            splits(TestGemma4EmptyThoughtChannel),
+            "thought\nfinal answer",
+        )
+
+    def test_non_empty_channel_is_not_stripped(self, tokenizer):
+        """Only the empty channel is removed; the markers still are."""
+        self._assert_all_splits(
+            tokenizer,
+            self._token_splits(_G4_LABEL_NON_EMPTY),
+            "thought\nprivatefinal answer",
+        )
+        raw_text = {_G4.OPEN_ID: "<|channel>", _G4.CLOSE_ID: "<channel|>"}
+        raw_non_empty = [
+            (raw_text.get(token_id, text), token_id)
+            for text, token_id in _G4_LABEL_NON_EMPTY
+        ]
+        self._assert_all_splits(
+            tokenizer, self._token_splits(raw_non_empty), "thought\nprivatefinal answer"
+        )
+
+    @pytest.mark.parametrize(
+        "deltas, expected",
+        [
+            ([("<|chan", [])], "<|chan"),
+            ([("thou", [])], "thou"),
+            ([("", [_G4.OPEN_ID]), ("thought", [_G4.LABEL_IDS[0]])], "thought"),
+            ([("  ", [])], "  "),
+            ([("<|channel>thought\n<channel|>", [])], None),
+        ],
+        ids=["raw-prefix", "label-prefix", "label-with-ids", "whitespace", "full"],
+    )
+    def test_undecided_buffer_is_flushed_at_eof(self, tokenizer, deltas, expected):
+        post = self._post(tokenizer)
+        content = self._stream(post, deltas)
+        assert content == (expected or "")
+
+    @pytest.mark.parametrize(
+        "post_kwargs",
+        [
+            {"gemma4_parser_pair": False},
+            {"chat_template_kwargs": {}, "response_reasoning_ended": True},
+            {
+                "chat_template_kwargs": {"enable_thinking": True},
+                "response_reasoning_ended": True,
+            },
+        ],
+        ids=["parser-pair-not-configured", "thinking-unset", "thinking-enabled"],
+    )
+    def test_cleanup_needs_pair_and_disabled_thinking(self, tokenizer, post_kwargs):
+        post = self._post(tokenizer, **post_kwargs)
+        assert post._fast_plain_text and not post._empty_thought_pending
+        deltas = [(text, [token_id]) for text, token_id in _G4_LABEL_EMPTY]
+        assert self._stream(post, deltas) == "thought\nfinal answer"
 
 
 class TestToolCallGuidedDecoding:

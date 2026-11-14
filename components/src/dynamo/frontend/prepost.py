@@ -1002,6 +1002,38 @@ def _compile_marker_strip_re(strippable: tuple[str, ...]) -> "re.Pattern[str] | 
     return re.compile("|".join(re.escape(m) for m in ordered))
 
 
+_GEMMA4_CHANNEL_OPEN = "<|channel>"
+_GEMMA4_CHANNEL_CLOSE = "<channel|>"
+_GEMMA4_THOUGHT_LABEL = "thought\n"
+# Same marker as GEMMA4_EMPTY_THOUGHT_CHANNEL in lib/llm/src/preprocessor.rs.
+_GEMMA4_EMPTY_THOUGHT_CHANNEL = (
+    f"{_GEMMA4_CHANNEL_OPEN}{_GEMMA4_THOUGHT_LABEL}{_GEMMA4_CHANNEL_CLOSE}"
+)
+
+
+def is_gemma4_parser_pair(
+    tool_parser_class: type[ToolParser] | None,
+    reasoning_parser_class: type[ReasoningParser] | None,
+) -> bool:
+    """Whether the deployment pairs vLLM's Gemma 4 tool and reasoning parsers.
+
+    Keyed on parser identity, not model name, like is_gemma4_tool_parser in
+    lib/llm/src/preprocessor.rs.
+    """
+    if tool_parser_class is None or reasoning_parser_class is None:
+        return False
+    try:
+        from vllm.parser.engine.registered_adapters import (
+            Gemma4ParserReasoningAdapter,
+            Gemma4ParserToolAdapter,
+        )
+    except ImportError:
+        return False
+    return issubclass(tool_parser_class, Gemma4ParserToolAdapter) and issubclass(
+        reasoning_parser_class, Gemma4ParserReasoningAdapter
+    )
+
+
 class StreamingPostProcessor:
     def __init__(
         self,
@@ -1017,6 +1049,7 @@ class StreamingPostProcessor:
         response_reasoning_ended: bool | None = None,
         stream_response: bool = True,
         uses_dynamo_json_tool_call_fallback: bool = False,
+        gemma4_parser_pair: bool = False,
     ) -> None:
         self.tokenizer = tokenizer
         self.request_for_sampling = request_for_sampling
@@ -1065,6 +1098,26 @@ class StreamingPostProcessor:
         )
         self._reasoning_parser_streaming_started = False
         self._tool_parser_streaming_started = False
+
+        # Gemma 4 with thinking off may write an empty thought channel itself; strip
+        # only that leading channel, like disabled_reasoning_start in preprocessor.rs.
+        self._empty_thought_pending = (
+            gemma4_parser_pair
+            and self._fast_plain_text
+            and chat_template_kwargs.get("enable_thinking") is False
+        )
+        self._empty_thought_text = ""
+        self._empty_thought_ids: list[int] = []
+        self._empty_thought_channel_ids: list[int] | None = None
+        if self._empty_thought_pending and {
+            _GEMMA4_CHANNEL_OPEN,
+            _GEMMA4_CHANNEL_CLOSE,
+        } <= set(getattr(tokenizer, "all_special_tokens", ())):
+            self._empty_thought_channel_ids = [
+                tokenizer.convert_tokens_to_ids(_GEMMA4_CHANNEL_OPEN),
+                *tokenizer.encode(_GEMMA4_THOUGHT_LABEL, add_special_tokens=False),
+                tokenizer.convert_tokens_to_ids(_GEMMA4_CHANNEL_CLOSE),
+            ]
 
         # Every ORIGINAL generated token id for this choice, in order (NVBug
         # 6678449b). The count is delegated to the pinned vLLM parser's own
@@ -1521,6 +1574,53 @@ class StreamingPostProcessor:
             delta = {}
         return self._build_choice(output, delta)
 
+    def _strip_leading_empty_thought(self, output: Any, delta_text: str) -> str | None:
+        """Drop a leading empty Gemma 4 thought channel from the fast path.
+
+        Returns None while the buffered text could still become the channel,
+        otherwise the text to emit. Follows strip_leading_reasoning_start_from_stream
+        in lib/llm/src/preprocessor.rs: leading whitespace is ignored for
+        matching, a full match is removed, and a mismatch or the end of the
+        stream flushes the buffer unchanged.
+        """
+        self._empty_thought_text += delta_text
+        self._empty_thought_ids.extend(output.token_ids or [])
+        buffered = self._empty_thought_text
+        trimmed = buffered.lstrip()
+        # The ids decide the bare-label form; once markers were removed the text
+        # alone cannot tell an empty channel from an answer starting "thought\n".
+        channel_ids = self._empty_thought_channel_ids
+        ids = self._empty_thought_ids
+        ids_complete = (
+            channel_ids is not None and ids[: len(channel_ids)] == channel_ids
+        )
+        ids_partial = (
+            channel_ids is not None
+            and len(ids) < len(channel_ids)
+            and ids == channel_ids[: len(ids)]
+        )
+
+        remainder: str | None = None
+        if trimmed.startswith(_GEMMA4_EMPTY_THOUGHT_CHANNEL):
+            remainder = trimmed[len(_GEMMA4_EMPTY_THOUGHT_CHANNEL) :]
+        elif ids_complete and trimmed.startswith(_GEMMA4_THOUGHT_LABEL):
+            remainder = trimmed[len(_GEMMA4_THOUGHT_LABEL) :]
+        elif not output.finish_reason and (
+            _GEMMA4_EMPTY_THOUGHT_CHANNEL.startswith(trimmed)
+            # Also hold after the ids are complete: a request `stop` makes
+            # vLLM's detokenizer hold text back, so text can lag the ids.
+            or (
+                (ids_partial or ids_complete)
+                and _GEMMA4_THOUGHT_LABEL.startswith(trimmed)
+            )
+        ):
+            return None
+
+        self._empty_thought_pending = False
+        self._empty_thought_text = ""
+        self._empty_thought_ids = []
+        return buffered if remainder is None else remainder
+
     def process_output(self, output: Any) -> dict[str, Any] | None:
         # BEFORE any branch below: every path must feed the ledger, including
         # the ones that emit nothing for this chunk.
@@ -1539,6 +1639,11 @@ class StreamingPostProcessor:
         delta_text = output.text or ""
         delta: dict[str, Any] = {}
         if self._fast_plain_text:
+            if self._empty_thought_pending:
+                held = self._strip_leading_empty_thought(output, delta_text)
+                if held is None:
+                    return None
+                delta_text = held
             if delta_text:
                 delta = {
                     "role": "assistant",
