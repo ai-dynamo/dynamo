@@ -22,6 +22,7 @@ pub mod prompt;
 pub mod speculative_prefill;
 pub(crate) mod structural_tag;
 pub use structural_tag::structural_tag_parser_names;
+pub(crate) mod guided_output;
 pub(crate) mod tool_choice;
 pub mod tools;
 use anyhow::Context;
@@ -242,6 +243,7 @@ fn validate_legacy_jail_nvext_choice_count(
 pub struct PromptReasoningPrefill {
     legacy: bool,
     unified: bool,
+    guided_output_plan: Option<crate::protocols::common::guided_output::GuidedOutputPlan>,
     unified_starting_state: Option<dynamo_parsers_v2::UnifiedParserStartingState>,
     prefix: Option<Arc<str>>,
     /// Whether the rendered generation prompt closed reasoning. MiniMax M3
@@ -321,6 +323,7 @@ impl From<bool> for PromptReasoningPrefill {
         Self {
             legacy: value,
             unified: value,
+            guided_output_plan: None,
             unified_starting_state: None,
             prefix: None,
             reasoning_closed_by_prompt: None,
@@ -2548,9 +2551,17 @@ impl OpenAIPreprocessor {
         reasoning_parser: Option<&str>,
         chat_template_args: Option<&std::collections::HashMap<String, serde_json::Value>>,
     ) -> bool {
+        Self::known_reasoning_enabled(reasoning_parser, chat_template_args).unwrap_or(false)
+    }
+
+    /// Known model policies; an absent entry does not establish a non-thinking default.
+    fn known_reasoning_enabled(
+        reasoning_parser: Option<&str>,
+        chat_template_args: Option<&std::collections::HashMap<String, serde_json::Value>>,
+    ) -> Option<bool> {
         let thinking_enabled = dynamo_renderer::thinking_bool_from_args(chat_template_args);
 
-        match reasoning_parser {
+        Some(match reasoning_parser {
             // These SGLang reasoners are enabled unless the request opts out.
             Some("qwen3" | "glm45" | "nemotron_nano" | "nemotron3" | "nemotron_v3") => {
                 thinking_enabled != Some(false)
@@ -2586,8 +2597,8 @@ impl OpenAIPreprocessor {
 
             // These SGLang reasoners do not expose a per-request off mode.
             Some("deepseek_r1" | "step3" | "gpt_oss" | "kimi") => true,
-            _ => false,
-        }
+            _ => return None,
+        })
     }
 
     /// Mirror dynamo-renderer's DeepSeek reasoning-toggle precedence.
@@ -3567,7 +3578,8 @@ impl OpenAIPreprocessor {
         preprocessed.require_reasoning |=
             Self::is_minimax_m3_reasoning_parser(self.runtime_config.reasoning_parser.as_deref())
                 && prompt_injected_reasoning.legacy
-                && tool_choice::has_explicit_guided_decoding_ext(request);
+                && (tool_choice::has_explicit_guided_decoding_ext(request)
+                    || Self::has_structured_response_format(request));
         let glm_reasoning_ended =
             prompt_injected_reasoning
                 .reasoning_closed_by_prompt
@@ -5866,17 +5878,50 @@ impl OpenAIPreprocessor {
     where
         S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
     {
+        let mut normalized;
+        let request = if request.common.guided_json.is_some() {
+            normalized = request.clone();
+            guided_output::normalize_guided_json(&mut normalized)?;
+            &normalized
+        } else {
+            request
+        };
+        let prompt_injected_reasoning = prompt_injected_reasoning.into();
         let guided_tool_constraint = crate::preprocessor::tool_choice::guided_tool_constraint(
             request,
             self.tool_call_parser.as_deref(),
             self.runtime_config.reasoning_parser.as_deref(),
             uses_tool_call_structural_tag,
         )?;
-        let tool_processing_route = self.tool_processing_route(request, &guided_tool_constraint)?;
+        let forced_json_tool = request.get_guided_json().is_some()
+            && matches!(
+                request.inner.tool_choice,
+                Some(
+                    ChatCompletionToolChoiceOption::Required
+                        | ChatCompletionToolChoiceOption::Named(_)
+                )
+            );
+        if guided_output::FinalAnswerConstraint::from_request(request).is_some()
+            && !forced_json_tool
+            && prompt_injected_reasoning.guided_output_plan.is_none()
+        {
+            return Err(invalid_argument_error(
+                "Text-only guided output reconstruction requires the resolved output plan and token-derived boundary information",
+            ));
+        }
+        let tool_processing_route = if prompt_injected_reasoning
+            .guided_output_plan
+            .as_ref()
+            .is_some_and(|plan| plan.projects_answer())
+        {
+            ToolProcessingRoute::PassThrough
+        } else {
+            self.tool_processing_route(request, &guided_tool_constraint)?
+        };
         self.postprocessor_parsing_stream_with_constraint(
             stream,
             request,
-            prompt_injected_reasoning.into(),
+            prompt_injected_reasoning,
             guided_tool_constraint,
             tool_processing_route,
         )
@@ -5890,13 +5935,23 @@ impl OpenAIPreprocessor {
         guided_tool_constraint: crate::protocols::openai::GuidedToolConstraint,
         tool_processing_route: ToolProcessingRoute,
     ) -> anyhow::Result<
-        impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
+        impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static + use<S>,
     >
     where
         S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
     {
         use crate::protocols::openai::chat_completions::unified_parser;
         let prompt_prefill = prompt_injected_reasoning;
+        if prompt_prefill
+            .guided_output_plan
+            .as_ref()
+            .is_some_and(|plan| plan.projects_answer())
+        {
+            let stream: Pin<
+                Box<dyn Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>,
+            > = Box::pin(stream);
+            return Ok(stream);
+        }
         let prompt_injected_reasoning = prompt_prefill.for_route(&tool_processing_route);
         let uses_tool_call_structural_tag = guided_tool_constraint.uses_structural_tag();
         let defer_reasoning_for_nonempty_content =
@@ -5927,7 +5982,8 @@ impl OpenAIPreprocessor {
                 && crate::preprocessor::tool_choice::has_explicit_guided_decoding(request);
         let is_guided_output =
             is_guided_tool_choice || is_structured_response || is_minimax_m3_explicit_guided_output;
-        let is_minimax_m3_guided_reasoning = is_minimax_m3_explicit_guided_output
+        let is_minimax_m3_guided_reasoning = (is_minimax_m3_explicit_guided_output
+            || is_structured_response)
             && Self::is_minimax_m3_reasoning_parser(reasoning_parser)
             && prompt_injected_reasoning;
 
@@ -7590,6 +7646,7 @@ impl OpenAIPreprocessor {
         let response =
             beam_channel == Some(dynamo_parsers_v2::UnifiedParserStartingState::Response);
         PromptReasoningPrefill {
+            guided_output_plan: None,
             legacy,
             unified: unified || family == Some("gemma4") && prefix.is_some(),
             // A bare None state synthesizes an unfinished assistant header in ChoiceState.
@@ -8648,6 +8705,7 @@ impl
 
         // Set stream=true for internal processing (after request payload capture)
         request.inner.stream = Some(true);
+        guided_output::normalize_guided_json(&mut request)?;
         self.apply_preserve_thinking(&mut request)?;
         // Apply the deployment default before parser-specific normalization so
         // it can override an implicit model default (for example Kimi K2.5),
@@ -8679,7 +8737,7 @@ impl
         };
 
         // convert the chat completion request to a common completion request
-        let (mut common_request, annotations, prompt_injected_reasoning, image_tokens) = self
+        let (mut common_request, annotations, mut prompt_injected_reasoning, image_tokens) = self
             .preprocess_request_with_options(
                 &request,
                 tracker.as_deref(),
@@ -8702,8 +8760,29 @@ impl
             &mut common_request,
             prompt_injected_reasoning.clone(),
         )?;
-        let tool_processing_route =
-            self.tool_processing_route(&request, &guided_tool_constraint)?;
+        let guided_plan = self.resolve_guided_output_plan(
+            &request,
+            &mut common_request,
+            &prompt_injected_reasoning,
+            &guided_tool_constraint,
+        )?;
+        let projected = guided_plan
+            .as_ref()
+            .is_some_and(|plan| plan.projects_answer());
+        let tool_processing_route = if projected {
+            ToolProcessingRoute::PassThrough
+        } else {
+            self.tool_processing_route(&request, &guided_tool_constraint)?
+        };
+        prompt_injected_reasoning.guided_output_plan = guided_plan;
+        if let Some(options) = context
+            .get_optional::<ParsingOptions>(REQUEST_PARSING_OPTIONS_CONTEXT_KEY)
+            .ok()
+            .flatten()
+            && let Some(state) = &options.guided_answer_projected
+        {
+            state.store(projected, std::sync::atomic::Ordering::Release);
+        }
         let payload_parsing_options = payload_handle.as_ref().map(|_| {
             context
                 .get_optional::<ParsingOptions>(REQUEST_PARSING_OPTIONS_CONTEXT_KEY)
@@ -8715,6 +8794,8 @@ impl
                         self.tool_call_parser.clone(),
                         self.runtime_config.reasoning_parser.clone(),
                     );
+                    options.guided_answer_projected =
+                        Some(Arc::new(std::sync::atomic::AtomicBool::new(projected)));
                     options.tool_choice = request.inner.tool_choice.clone();
                     options.guided_tool_constraint = guided_tool_constraint.clone();
                     options.parallel_tool_calls = request.inner.parallel_tool_calls;
@@ -17991,8 +18072,27 @@ responses_tools: None,
         if matches!(end, MiniMaxM3StreamEnd::Error) {
             backend.push(Annotated::from_error("backend failed"));
         }
+        // These fixtures exercise the retained legacy M3 parser in isolation.
+        // Production guided answers must resolve a plan and classify raw IDs first;
+        // the public text-only reconstruction API rejects these unresolved inputs.
+        let constraint = crate::preprocessor::tool_choice::guided_tool_constraint(
+            &request,
+            Some("minimax_m3"),
+            Some("minimax_m3"),
+            false,
+        )
+        .unwrap();
+        let route = preprocessor
+            .tool_processing_route(&request, &constraint)
+            .unwrap();
         preprocessor
-            .postprocessor_parsing_stream(stream::iter(backend), &request, prefill, false)
+            .postprocessor_parsing_stream_with_constraint(
+                stream::iter(backend),
+                &request,
+                prefill,
+                constraint,
+                route,
+            )
             .unwrap()
             .collect()
             .await
@@ -21053,128 +21153,38 @@ mod beam_route_tests {
         assert_eq!(output.output_options.retain_model_stop_token_text, None);
     }
 
-    /// An explicit `guided_*` constraint without `response_format` makes Beam's output
-    /// bare text the engine's grammar owns (no turn grammar, no channel framing). The
-    /// stream must be read as the final answer: under `None` the bytes were dropped as
-    /// debris between messages. Whole and one-byte delivery, then the aggregated reply.
+    /// Text prefixes cannot establish the engine's reasoning boundary.
     #[tokio::test]
-    async fn beam_bare_explicit_guidance_streams_as_visible_text() {
+    async fn guided_output_text_reconstruction_requires_a_resolved_plan() {
         use crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
         let preprocessor = OpenAIPreprocessor::new(mock_card(Some("beam"))).unwrap();
-        let base = || -> NvCreateChatCompletionRequest {
-            serde_json::from_value(serde_json::json!({
-                "model": "test",
-                "messages": [{"role": "user", "content": "yes or no?"}],
-            }))
-            .unwrap()
-        };
-        let mut guided: Vec<(&str, NvCreateChatCompletionRequest, &str)> = Vec::new();
-        let mut request = base();
-        request.common.guided_regex = Some("yes|no".to_string());
-        guided.push(("guided_regex", request, "yes"));
-        let mut request = base();
-        request.common.guided_choice = Some(vec!["yes".to_string(), "no".to_string()]);
-        guided.push(("guided_choice", request, "yes"));
-        let mut request = base();
-        request.common.guided_json = Some(serde_json::json!({
-            "type": "object", "properties": {"ok": {"type": "boolean"}}, "required": ["ok"]
-        }));
-        guided.push(("guided_json", request, "{\"ok\":true}"));
-        let mut request = base();
-        request.common.guided_grammar = Some("root ::= \"yes\" | \"no\"".to_string());
-        guided.push(("guided_grammar", request, "yes"));
-
-        let chunk =
-            |choices: serde_json::Value| -> Annotated<NvCreateChatCompletionStreamResponse> {
-                Annotated::from_data(
-                    serde_json::from_value(serde_json::json!({"id": "test",
-                    "object": "chat.completion.chunk", "created": 0, "model": "test",
-                    "choices": choices}))
-                    .unwrap(),
-                )
-            };
-        for (field, request, answer) in guided {
-            assert!(
-                preprocessor.beam_output_is_bare_guidance(&request),
-                "{field}"
+        for fields in [
+            serde_json::json!({"guided_regex":"yes|no"}),
+            serde_json::json!({"guided_choice":["yes","no"]}),
+            serde_json::json!({"guided_grammar":"root ::= \"yes\""}),
+            serde_json::json!({"guided_json":{"type":"boolean"}}),
+        ] {
+            let mut body =
+                serde_json::json!({"model":"test","messages":[{"role":"user","content":"test"}]});
+            body.as_object_mut()
+                .unwrap()
+                .extend(fields.as_object().unwrap().clone());
+            let request: NvCreateChatCompletionRequest = serde_json::from_value(body).unwrap();
+            let result = preprocessor.postprocessor_parsing_stream(
+                stream::empty::<Annotated<NvCreateChatCompletionStreamResponse>>(),
+                &request,
+                false,
+                false,
             );
-            let deliveries: Vec<Vec<String>> = vec![
-                vec![answer.to_string()],
-                answer.chars().map(String::from).collect(),
-            ];
-            for pieces in deliveries {
-                let mut backend: Vec<_> = pieces
-                    .iter()
-                    .enumerate()
-                    .map(|(i, text)| {
-                        let delta = if i == 0 {
-                            serde_json::json!({"role": "assistant", "content": text})
-                        } else {
-                            serde_json::json!({"content": text})
-                        };
-                        chunk(serde_json::json!([{"index": 0, "delta": delta, "finish_reason": null}]))
-                    })
-                    .collect();
-                backend.push(chunk(serde_json::json!(
-                    [{"index": 0, "delta": {}, "finish_reason": "stop"}]
-                )));
-                let prefill = OpenAIPreprocessor::prompt_reasoning_prefill_for_parsers(
-                    Some("beam"),
-                    Some("beam"),
-                    None,
-                );
-                let output: Vec<Annotated<NvCreateChatCompletionStreamResponse>> = preprocessor
-                    .postprocessor_parsing_stream(stream::iter(backend), &request, prefill, false)
-                    .unwrap()
-                    .collect()
-                    .await;
-                let streamed: String = output
-                    .iter()
-                    .filter_map(|annotated| annotated.data.as_ref())
-                    .flat_map(|response| response.inner.choices.iter())
-                    .filter_map(|choice| match choice.delta.content.as_ref() {
-                        Some(ChatCompletionMessageContent::Text(text)) => Some(text.clone()),
-                        _ => None,
-                    })
-                    .collect();
-                assert_eq!(
-                    streamed,
-                    answer,
-                    "{field}: streamed ({} chunk(s))",
-                    pieces.len()
-                );
-                let response =
-                    crate::protocols::openai::chat_completions::aggregator::DeltaAggregator::apply(
-                        stream::iter(output),
-                        crate::protocols::openai::ParsingOptions::new(
-                            Some("beam".to_string()),
-                            Some("beam".to_string()),
-                        ),
-                    )
-                    .await
-                    .unwrap();
-                let message = &response.inner.choices[0].message;
-                let aggregated = match message.content.as_ref() {
-                    Some(ChatCompletionMessageContent::Text(text)) => text.clone(),
-                    other => panic!("{field}: unexpected content {other:?}"),
-                };
-                assert_eq!(aggregated, answer, "{field}: aggregated");
-                assert!(message.tool_calls.is_none(), "{field}");
-            }
+            let error = match result {
+                Ok(_) => panic!("unresolved text-only guidance was accepted"),
+                Err(error) => error,
+            };
+            assert!(
+                error.to_string().contains("resolved output plan"),
+                "{error}"
+            );
         }
-        // `response_format` and a forced tool choice are not bare guidance: the first is
-        // the structured-response document path, the second generates native calls.
-        let mut structured = base();
-        structured.common.guided_json = Some(serde_json::json!({"type": "object"}));
-        structured.inner.response_format =
-            Some(serde_json::from_value(serde_json::json!({"type": "json_object"})).unwrap());
-        assert!(!preprocessor.beam_output_is_bare_guidance(&structured));
-        let mut forced = weather_request();
-        forced.common.guided_regex = Some("yes".to_string());
-        forced.inner.tool_choice =
-            Some(serde_json::from_value(serde_json::json!("required")).unwrap());
-        assert!(!preprocessor.beam_output_is_bare_guidance(&forced));
-        assert!(!preprocessor.beam_output_is_bare_guidance(&base()));
     }
 
     #[test]

@@ -132,6 +132,9 @@ pub type TopLogprobs = Vec<Vec<TopLogprob>>; // num_tokens x top_logprobs
 /// fields that are `None` on the default path are boxed.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct BackendOutput {
+    /// Frontend-local channel projection; never serialized to workers or clients.
+    #[serde(skip)]
+    pub guided_output: Option<Box<super::guided_output::GuidedOutputDelta>>,
     /// New token_ids generated from the LLM Engine
     pub token_ids: Vec<TokenIdType>,
 
@@ -223,6 +226,9 @@ pub struct BackendOutput {
 /// value it holds, so the wire is unchanged.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
 pub struct LLMEngineOutput {
+    /// Populated only by the frontend decoder after receiving engine output.
+    #[serde(skip)]
+    pub guided_output: Option<Box<super::guided_output::GuidedOutputDelta>>,
     // new token_ids
     pub token_ids: Vec<TokenIdType>,
 
@@ -315,6 +321,7 @@ pub struct LLMEngineOutput {
 impl LLMEngineOutput {
     pub fn cancelled() -> Self {
         LLMEngineOutput {
+            guided_output: None,
             token_ids: vec![],
             tokens: None,
             text: None,
@@ -339,6 +346,7 @@ impl LLMEngineOutput {
 
     pub fn stop() -> Self {
         LLMEngineOutput {
+            guided_output: None,
             token_ids: vec![],
             tokens: None,
             text: None,
@@ -363,6 +371,7 @@ impl LLMEngineOutput {
 
     pub fn length() -> Self {
         LLMEngineOutput {
+            guided_output: None,
             token_ids: vec![],
             tokens: None,
             text: None,
@@ -387,6 +396,7 @@ impl LLMEngineOutput {
 
     pub fn error(err_msg: String) -> Self {
         LLMEngineOutput {
+            guided_output: None,
             token_ids: vec![],
             tokens: None,
             text: None,
@@ -425,6 +435,7 @@ impl LLMEngineOutput {
     /// same `encoder_result`.
     pub fn encode_terminal(encoder_result: serde_json::Map<String, serde_json::Value>) -> Self {
         LLMEngineOutput {
+            guided_output: None,
             token_ids: vec![],
             tokens: None,
             text: None,
@@ -506,6 +517,7 @@ mod tests {
 
     fn checkpoint_output(checkpoint: Option<DecoderCheckpoint>) -> BackendOutput {
         BackendOutput {
+            guided_output: None,
             token_ids: vec![],
             tokens: vec![],
             text: None,
@@ -585,13 +597,15 @@ mod tests {
 
     /// The outputs are stream items, moved several times per token: their size is a cost
     /// per item. `disaggregated_params`, `encoder_result`, `worker_trace_link`, `extra_args`,
-    /// `engine_data` and `routing_data` are held in a `Box`. Raise these limits only with a
-    /// measured reason.
+    /// `engine_data`, `routing_data` and frontend-only `guided_output` are held in a `Box`.
+    /// Raise these limits only with a measured reason.
     #[cfg(target_pointer_width = "64")]
     #[test]
     fn engine_and_backend_outputs_stay_small() {
-        assert!(std::mem::size_of::<LLMEngineOutput>() <= 456);
-        assert!(std::mem::size_of::<BackendOutput>() <= 416);
+        let engine_size = std::mem::size_of::<LLMEngineOutput>();
+        let backend_size = std::mem::size_of::<BackendOutput>();
+        assert!(engine_size <= 464, "LLMEngineOutput: {engine_size} bytes");
+        assert!(backend_size <= 424, "BackendOutput: {backend_size} bytes");
     }
 
     /// Decoder checkpoints retain the legacy optional-string wire shape while keeping
@@ -728,6 +742,7 @@ mod tests {
     #[test]
     fn token_chunk_omits_defaults_on_the_wire() {
         let chunk = LLMEngineOutput {
+            guided_output: None,
             token_ids: vec![42],
             ..Default::default()
         };

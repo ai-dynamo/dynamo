@@ -594,6 +594,7 @@ mod tests {
 
     fn final_backend_output() -> BackendOutput {
         BackendOutput {
+            guided_output: None,
             token_ids: vec![1],
             tokens: vec![Some("hello".to_string())],
             text: Some("hello".to_string()),
@@ -693,6 +694,7 @@ mod tests {
 
     fn make_backend_output_with_engine_data() -> BackendOutput {
         BackendOutput {
+            guided_output: None,
             token_ids: vec![42],
             tokens: vec![Some("hello".to_string())],
             text: Some("hello".to_string()),
@@ -1109,6 +1111,7 @@ mod tests {
         let mut generator = request.response_generator("req-engine-4".to_string());
 
         let backend_output = BackendOutput {
+            guided_output: None,
             token_ids: vec![42],
             tokens: vec![Some("hello".to_string())],
             text: Some("hello".to_string()),

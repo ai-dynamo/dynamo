@@ -101,6 +101,7 @@ fn create_mock_backend_stream(
 fn build_backend_outputs_with_cached_tokens(cached_tokens: Option<u32>) -> Vec<BackendOutput> {
     vec![
         BackendOutput {
+            guided_output: None,
             token_ids: vec![15339],
             tokens: vec![Some("Hello".to_string())],
             text: Some("Hello".to_string()),
@@ -119,6 +120,7 @@ fn build_backend_outputs_with_cached_tokens(cached_tokens: Option<u32>) -> Vec<B
             jailed_text: None,
         },
         BackendOutput {
+            guided_output: None,
             token_ids: vec![1917],
             tokens: vec![Some(" world".to_string())],
             text: Some(" world".to_string()),
@@ -137,6 +139,7 @@ fn build_backend_outputs_with_cached_tokens(cached_tokens: Option<u32>) -> Vec<B
             jailed_text: None,
         },
         BackendOutput {
+            guided_output: None,
             token_ids: vec![0],
             tokens: vec![Some("!".to_string())],
             text: Some("!".to_string()),
