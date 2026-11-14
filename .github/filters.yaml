@@ -521,6 +521,8 @@ rust:
   # changes.
   - 'lib/bindings/python/codegen/templates/prometheus_names.py.template'
   - 'lib/bindings/python/src/dynamo/prometheus_names.py'
+  # Pinned protoc installer used by rust-tests and rust-clippy.
+  - '.github/actions/setup-protoc/**'
   # The rust-clippy job runs the router crate layering check.
   - 'scripts/router_layering_check.sh'
   # Router crate files. Their markdown docs do not need the Rust jobs.
