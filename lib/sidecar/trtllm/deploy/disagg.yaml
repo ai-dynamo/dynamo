@@ -27,7 +27,7 @@
 #     `rdma/ib: "1"` to each engine's resource limits and requests. Configure
 #     memory-lock limits and other capabilities as that deployment requires.
 #   - The frontend, operator, and Dynamo runtime images must use compatible
-#     versions; the pinned nightlies below were validated together.
+#     versions; the pinned 1.7.0 images below were validated together.
 
 apiVersion: v1
 kind: ConfigMap
@@ -65,7 +65,7 @@ spec:
   - name: Frontend
     type: frontend
     replicas: 1
-    runtimeVersionOverride: "1.6.0"
+    runtimeVersionOverride: "1.7.0"
     podTemplate:
       spec:
         containers:
@@ -73,12 +73,12 @@ spec:
         - name: main
           # 1.4.0 or newer: the 1.3.0 router fails a disaggregated request
           # whose one-token prefill stops on EOS or a stop match.
-          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend-nightly:20261013-2210b07
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.7.0
 
   - name: TRTLLMPrefillWorker
     type: prefill
     replicas: 1
-    runtimeVersionOverride: "1.6.0"
+    runtimeVersionOverride: "1.7.0"
     podTemplate:
       spec:
         volumes:
@@ -191,9 +191,8 @@ spec:
           - /config/config.yaml
         initContainers:
         # Dynamo runtime starts first and receives discovery env and probes.
-        # Replace this nightly image with a matching release when available.
         - name: runtime
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime-nightly:20261013-2210b07
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.7.0
           restartPolicy: Always
           command:
           - python3
@@ -216,7 +215,7 @@ spec:
   - name: TRTLLMDecodeWorker
     type: decode
     replicas: 1
-    runtimeVersionOverride: "1.6.0"
+    runtimeVersionOverride: "1.7.0"
     podTemplate:
       spec:
         volumes:
@@ -291,7 +290,7 @@ spec:
           - /config/config.yaml
         initContainers:
         - name: runtime
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime-nightly:20261013-2210b07
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.7.0
           restartPolicy: Always
           command:
           - python3

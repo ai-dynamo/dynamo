@@ -31,17 +31,17 @@ spec:
   - name: Frontend
     type: frontend
     replicas: 1
-    runtimeVersionOverride: "1.6.0"
+    runtimeVersionOverride: "1.7.0"
     podTemplate:
       spec:
         containers:
         # Dynamo frontend; operator adds the command.
         - name: main
-          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend-nightly:20261013-2210b07
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.7.0
   - name: TRTLLMWorker
     type: worker
     replicas: 1
-    runtimeVersionOverride: "1.6.0"
+    runtimeVersionOverride: "1.7.0"
     podTemplate:
       spec:
         containers:
@@ -143,9 +143,8 @@ spec:
             mountPath: /config
         initContainers:
         # Dynamo runtime starts first and receives discovery env and probes.
-        # Replace this nightly image with a matching release when available.
         - name: runtime
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime-nightly:20261013-2210b07
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.7.0
           restartPolicy: Always
           command:
           - python3

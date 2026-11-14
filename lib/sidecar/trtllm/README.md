@@ -108,8 +108,8 @@ preserves explicit engine settings, including `guided_decoding_backend: null`.
 
 ## Deploy on Kubernetes
 
-The manifests pin compatible Dynamo frontend and TensorRT-LLM runtime nightlies
-with `runtimeVersionOverride: "1.6.0"`. Use an operator that supports the
+The manifests pin compatible Dynamo 1.7.0 frontend and runtime images
+with `runtimeVersionOverride: "1.7.0"`. Use an operator that supports the
 engine-primary native-sidecar layout. If you change the images, keep the
 frontend, runtime, and operator versions compatible. Create the
 `hf-token-secret` Secret that the manifests read before applying them.
@@ -123,7 +123,7 @@ kubectl apply -f lib/sidecar/trtllm/deploy/agg.yaml -n <namespace>
 kubectl port-forward -n <namespace> svc/trtllm-sidecar-agg-frontend 8000:8000
 ```
 
-For KV routing, use `deploy/agg_kv_router.yaml` or `deploy/disagg_kv_router.yaml`. These examples pin matching Dynamo frontend and sidecar nightlies (`20261023-75d0686`) and `nvcr.io/nvidia/tensorrt-llm/release:1.4.0rc4.dev202611130009` for the engine.
+For KV routing, use `deploy/agg_kv_router.yaml` or `deploy/disagg_kv_router.yaml`. These examples pin matching Dynamo 1.7.0 frontend and sidecar images and `nvcr.io/nvidia/tensorrt-llm/release:1.4.0rc4.dev202611130009` for the engine.
 
 Multinode deployments use complete `leader` and `worker` role PodTemplates. See
 [`multinode_tp.yaml`](deploy/multinode_tp.yaml), [`multinode_dp.yaml`](deploy/multinode_dp.yaml),
