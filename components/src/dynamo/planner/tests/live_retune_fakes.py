@@ -190,9 +190,17 @@ def lower_request_input(
 
     spec = request.get("spec") or {}
     max_candidates = int(nested_get(spec, "recommendation", "maxCandidates", default=1))
-    underlay: dict[str, Any] = {
-        "engine": {"workers": {"aggregated": {}, "prefill": {}, "decode": {}}}
-    }
+    # A single-mode engine.mode (or choices) in inputOverrides gets only its roles.
+    mode = nested_get(spec, "aisim", "inputOverrides", "engine", "mode")
+    choices = mode.get("choices") if isinstance(mode, Mapping) else [mode]
+    modes = set(choices) if isinstance(choices, list) else set()
+    if modes == {"aggregated"}:
+        workers: dict[str, Any] = {"aggregated": {}}
+    elif modes == {"disaggregated"}:
+        workers = {"prefill": {}, "decode": {}}
+    else:
+        workers = {"aggregated": {}, "prefill": {}, "decode": {}}
+    underlay: dict[str, Any] = {"engine": {"workers": workers}}
     underlay = merge_patch(
         underlay, {"dgdr_run": {"name": run_name, "max_candidates": max_candidates}}
     )

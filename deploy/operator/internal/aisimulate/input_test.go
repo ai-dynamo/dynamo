@@ -437,6 +437,63 @@ func TestLowerIncludesPublicEngineRoleUnderlay(t *testing.T) {
 	}
 }
 
+// TestLowerEngineRolesFollowConcreteMode: a concrete engine.mode keeps only its active
+// roles, whether or not the stored Request kept the caller's null deletions.
+func TestLowerEngineRolesFollowConcreteMode(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		overrides string
+		want      string
+	}{
+		{
+			name:      "aggregated without nulls",
+			overrides: `{"engine":{"mode":"aggregated","workers":{"aggregated":{"kv_cache":{"block_size":64}}}}}`,
+			want:      `{"aggregated":{"kv_cache":{"block_size":64}}}`,
+		},
+		{
+			name:      "aggregated with null deletions",
+			overrides: `{"engine":{"mode":"aggregated","workers":{"aggregated":{"kv_cache":{"block_size":64}},"prefill":null,"decode":null}}}`,
+			want:      `{"aggregated":{"kv_cache":{"block_size":64}}}`,
+		},
+		{
+			name:      "disaggregated",
+			overrides: `{"engine":{"mode":"disaggregated"}}`,
+			want:      `{"decode":{},"prefill":{}}`,
+		},
+		{
+			name:      "aggregated keeps a role the caller names",
+			overrides: `{"engine":{"mode":"aggregated","workers":{"prefill":{"kv_cache":{"block_size":32}}}}}`,
+			want:      `{"aggregated":{},"prefill":{"kv_cache":{"block_size":32}}}`,
+		},
+		{
+			name:      "single aggregated choice",
+			overrides: `{"engine":{"mode":{"choices":["aggregated"]}}}`,
+			want:      `{"aggregated":{}}`,
+		},
+		{
+			name:      "several choices keep every role",
+			overrides: `{"engine":{"mode":{"choices":["aggregated","disaggregated"]}}}`,
+			want:      `{"aggregated":{},"decode":{},"prefill":{}}`,
+		},
+		{
+			name:      "afd keeps every role",
+			overrides: `{"engine":{"mode":"afd"}}`,
+			want:      `{"aggregated":{},"decode":{},"prefill":{}}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			input := lower(t, withInputOverrides(defaultedSpec(), tc.overrides))
+			got, err := json.Marshal(nested(t, input, engineWorkers...))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got) != tc.want {
+				t.Fatalf("engine.workers = %s, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestInputOverridesMustBeAnObject(t *testing.T) {
 	for _, overrides := range []string{`[1]`, `"x"`, `3`, `{`} {
 		spec := withInputOverrides(defaultedSpec(), overrides)

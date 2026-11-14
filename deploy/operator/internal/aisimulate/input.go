@@ -51,7 +51,7 @@ func LowerWithUnderlay(spec *v1beta2.NativeSearchInput, staticUnderlay map[strin
 	if err != nil {
 		return nil, err
 	}
-	underlay := publicUnderlay()
+	underlay := publicUnderlay(overrides)
 	underlay, _ = mergePatch(underlay, staticUnderlay).(map[string]any)
 	underlay, _ = mergePatch(underlay, typedUnderlay).(map[string]any)
 	if underlay, err = normalize(underlay); err != nil {
