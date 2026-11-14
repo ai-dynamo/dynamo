@@ -937,6 +937,29 @@ fn checked_file_uri(
             if source.starts_with("ngc://") {
                 return Ok(None);
             }
+            // A worker started from a local directory publishes that path as its
+            // source. It is not an HF repo ID, so falling back to hf:// would only
+            // surface as a misleading 404 from huggingface.co. A bare relative
+            // source (`models/qwen`) is spelled like a repo ID, but the worker's
+            // files then sit under a directory ending in it; HF-cache snapshots
+            // (`models--org--name/snapshots/<sha>/`) never do.
+            let is_local_source = Path::new(source).is_absolute()
+                || source.starts_with("./")
+                || source.starts_with("../")
+                || path.parent().is_some_and(|dir| dir.ends_with(source));
+            if is_local_source {
+                anyhow::bail!(
+                    "file {filename} not reachable on this host \
+                     (worker path {} missing, no --model-path overlay); \
+                     the worker registered the local path {source}, which is \
+                     not a Hugging Face repo ID. Mount the model directory at \
+                     the same path on this host, pass --model-path pointing at \
+                     a local copy, or let the worker serve its metadata \
+                     (DYN_SELF_HOST_METADATA, on by default, needs \
+                     DYN_SYSTEM_PORT set on the worker)",
+                    path.display()
+                );
+            }
             Ok(Some(format!("hf://{source}/{filename}")))
         }
         _ => Ok(Some(url.to_string())),
@@ -3220,9 +3243,10 @@ mod tests {
     }
 
     /// Rung 4: when worker path is missing and `--model-path` doesn't
-    /// supply the basename, synthesize hf://; if `is_custom`, error
-    /// with a clear operator-action message instead (HF doesn't host
-    /// custom slots).
+    /// supply the basename, synthesize hf://. Error with a clear
+    /// operator-action message instead when the slot is custom (HF
+    /// doesn't host custom slots) or the source is a local path (not an
+    /// HF repo ID).
     #[test]
     fn checked_file_uri_rung_4_hf_fallback_or_custom_error() {
         let cf = cf_for("/nonexistent/worker/path/template.jinja");
@@ -3247,6 +3271,27 @@ mod tests {
                 .is_none()
         );
         assert!(super::checked_file_uri(&cf, source, None, true).is_err());
+
+        let bare_cf = cf_for("/worker/cwd/models/qwen/template.jinja");
+        for (cf, local_source) in [
+            (&cf, "/models/Qwen/Qwen3.6-35B-A3B/current"),
+            (&cf, "./models/qwen"),
+            (&cf, "../models/qwen"),
+            (&bare_cf, "models/qwen"),
+        ] {
+            let err = super::checked_file_uri(cf, local_source, None, false)
+                .expect_err("local-path source must error instead of falling back to HF");
+            let msg = err.to_string();
+            assert!(msg.contains("template.jinja"), "wrong error: {msg}");
+            assert!(msg.contains(local_source), "wrong error: {msg}");
+            assert!(msg.contains("--model-path"), "wrong error: {msg}");
+            assert!(msg.contains("DYN_SELF_HOST_METADATA"), "wrong error: {msg}");
+        }
+
+        // A repo ID whose files came from an HF-cache snapshot still falls back.
+        let snap_cf = cf_for("/cache/models--Qwen--Qwen3-0.6B/snapshots/abc/template.jinja");
+        let got = super::checked_file_uri(&snap_cf, "Qwen/Qwen3-0.6B", None, false).unwrap();
+        assert_eq!(got.as_deref(), Some("hf://Qwen/Qwen3-0.6B/template.jinja"));
     }
 
     /// Dropping `stage_and_rename`'s future mid-await (caller cancellation)
