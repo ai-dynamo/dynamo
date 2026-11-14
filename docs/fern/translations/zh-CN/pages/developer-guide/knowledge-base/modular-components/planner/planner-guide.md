@@ -87,7 +87,7 @@ advisory 模式仅提供建议。Planner 会计算建议副本数、记录日志
 
 SLA 模式通过唯一构造接口 `aisimulate_core.sdk.RustForwardPassPerfModel.best_available(config)` 为每个 worker 角色创建模型。`ais_perf_model.roles` 中，分离式部署配置 `prefill` 和 `decode`，聚合式部署配置 `aggregated`；角色键必须与 `worker_type` 一致。
 
-新配置默认使用 `estimation_mode: auto` 和 `fallback_policy: deny`。Auto 依次查找 `op_level`、`fpm_interpolation`、`fpm_regression`；`deny` 只禁止显式指定模式后的回退。没有配置 `ais_perf_model` 时，Planner 创建未训练的 `fpm_regression` 模型，并用自基准测试或在线 FPM 训练。
+新配置默认使用 `estimation_mode: auto` 和 `fallback_policy: deny`。Auto 依次查找 `op_level`、`fpm_interpolation`、`fpm_regression`；`deny` 只禁止显式指定模式后的回退。没有配置 `ais_perf_model` 时，Planner 创建未训练的 `fpm_regression` 模型，并用自基准测试或在线 FPM 训练。该模型的身份记录 worker 上报的信息：模型、后端、KV block 大小和 MTP 深度，以及作为 `deployment_limits` 记录的每个 worker 的 GPU 数、调度上限、KV 容量和上下文长度。Planner 无法观测的信息记为 `"unknown"`：硬件、后端版本、量化、attention backend，以及多 GPU worker 的并行拆分方式。由此保存的 state snapshot 可以为 AISimulate 推荐中的一个角色计时；已知信息被固定，其余取自推荐配置中的 engine。
 
 各角色可传入完整上游配置，包括有序 `systems_paths`、`database_mode`、`transfer_policy`、量化和推测解码参数，以及嵌套 `estimator_config`。显式 estimator 设置覆盖 Planner 的采样默认值；`fpm_sample_bucket_size: 16` 对应 `[4, 4]`，regression 和 correction 可以分别配置网格。未知字段及角色身份冲突会报错。
 
