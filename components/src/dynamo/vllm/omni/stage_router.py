@@ -113,11 +113,13 @@ class OmniStageRouter:
         request: dict,
         context,  # noqa: ARG002 — context unused; router generates its own request_id
     ) -> AsyncGenerator[dict, None]:
+        """Run the request through each stage and format the final output."""
         request_id = str(uuid.uuid4())
         parsed_request, request_type = parse_request_type(
             request, self.config.output_modalities
         )
         image_output_format = None
+        image_num_inference_steps = None
         if request_type == RequestType.IMAGE_GENERATION:
             if not isinstance(parsed_request, NvCreateImageRequest):
                 raise InvalidArgument("Invalid image-generation request")
@@ -125,6 +127,10 @@ class OmniStageRouter:
                 raise InvalidArgument(
                     "Image edits are not supported by the Omni stage router"
                 )
+            # Report the requested step count, as the aggregated handler does;
+            # None (model default) keeps it out of nvext.usage.
+            if parsed_request.nvext is not None:
+                image_num_inference_steps = parsed_request.nvext.num_inference_steps
             try:
                 image_output_format = _normalize_image_output_options(
                     parsed_request.output_format,
@@ -199,6 +205,8 @@ class OmniStageRouter:
             fmt_ctx["fps"] = nvext["fps"]
         if nvext.get("speed") is not None:
             fmt_ctx["speed"] = nvext["speed"]
+        if image_num_inference_steps is not None:
+            fmt_ctx["num_inference_steps"] = image_num_inference_steps
         # If the request type is AUDIO_GENERATION,
         # we need to normalize the data_source and response_format to
         # align with other modalities.

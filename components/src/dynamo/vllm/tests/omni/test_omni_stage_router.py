@@ -21,6 +21,7 @@ except ImportError:
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.vllm,
+    pytest.mark.multimodal,
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
     pytest.mark.profiled_vram_gib(0),
@@ -328,6 +329,36 @@ async def test_generate_delegates_formatting_to_output_formatter():
         response_format="b64_json",
         output_format="jpeg",
     )
+
+
+@pytest.mark.asyncio
+async def test_generate_passes_requested_num_inference_steps_to_formatter():
+    """The requested step count reaches the formatter."""
+    fake_result = SimpleNamespace(final_output_type="image")
+    mock_formatter = AsyncMock()
+    mock_formatter.format.return_value = {"data": [{"b64_json": "abc"}]}
+
+    async def stage0_handler(request):
+        return {"shm_meta": {"some": "meta"}, "finished": True}
+
+    router = _make_router(
+        stage_configs=[_make_stage_cfg(0)],
+        stage_clients={"stage0": _StageClient(stage0_handler)},
+        formatter=mock_formatter,
+    )
+
+    request = {"prompt": "x", "nvext": {"num_inference_steps": 4}}
+    with patch.object(stage_router, "shm_deserialize", return_value=fake_result):
+        with patch(
+            "dynamo.vllm.omni.stage_router.parse_request_type",
+            return_value=(
+                NvCreateImageRequest(**request),
+                RequestType.IMAGE_GENERATION,
+            ),
+        ):
+            [c async for c in router.generate(request, context=None)]
+
+    assert mock_formatter.format.await_args.kwargs["num_inference_steps"] == 4
 
 
 @pytest.mark.asyncio
