@@ -57,6 +57,7 @@ def _make_request_output(
     output.text = text
     output.finish_reason = finish_reason
     output.token_ids = [1, 2, 3]  # 3 completion tokens
+    output.cumulative_token_ids = None  # plain vLLM output, not vLLM-Omni
     ro = MagicMock()
     ro.outputs = [output]
     ro.prompt_token_ids = [
@@ -1579,9 +1580,10 @@ class TestOutputFormatter:
         from dynamo.vllm.omni.output_formatter import OutputFormatter
 
         f = OutputFormatter(model_name="test-model")
-        stage = MagicMock()
-        stage.final_output_type = "text"
-        stage.request_output = _make_request_output("hello world")
+        stage = SimpleNamespace(
+            final_output_type="text",
+            outputs=_make_request_output("hello world").outputs,
+        )
         chunk = await f.format(
             stage, "req-1", request_type=RequestType.CHAT_COMPLETION, **self._FULL_CTX
         )
@@ -1633,15 +1635,55 @@ class TestOutputFormatter:
         assert result is None
 
     @pytest.mark.asyncio
-    async def test_text_without_request_output_returns_none(self):
+    async def test_text_without_outputs_returns_none(self):
         from dynamo.vllm.omni.output_formatter import OutputFormatter
 
         f = OutputFormatter(model_name="test-model")
-        stage = MagicMock()
-        stage.final_output_type = "text"
-        stage.request_output = None
+        stage = SimpleNamespace(final_output_type="text", outputs=[])
         result = await f.format(stage, "req-1")
         assert result is None
+
+
+class TestOutputFormatterRealOmniText:
+    """Text formatting against the real vLLM-Omni output class.
+
+    Since vLLM-Omni 0.28, ``OmniRequestOutput`` carries ``outputs`` directly and
+    has no ``request_output``. This is the single cumulative final object the
+    disaggregated stage router formats.
+    """
+
+    @pytest.mark.asyncio
+    async def test_final_cumulative_output(self):
+        omni_outputs = pytest.importorskip("vllm_omni.outputs")
+        from vllm.outputs import CompletionOutput
+
+        real = omni_outputs.OmniRequestOutput(
+            request_id="req-1",
+            final_output_type="text",
+            prompt_token_ids=[10, 20, 30, 40, 50],
+            outputs=[
+                CompletionOutput(
+                    index=0,
+                    text="Hello world",
+                    token_ids=[1, 2, 3],
+                    cumulative_logprob=None,
+                    logprobs=None,
+                    finish_reason="stop",
+                )
+            ],
+        )
+
+        chunk = await OutputFormatter(model_name="test-model").format(
+            real, "req-1", request_type=RequestType.CHAT_COMPLETION
+        )
+
+        assert chunk is not None
+        choice = chunk["choices"][0]
+        assert choice["delta"]["content"] == real.outputs[0].text
+        assert choice["finish_reason"] == "stop"
+        assert chunk["usage"]["prompt_tokens"] == len(real.prompt_token_ids)
+        assert chunk["usage"]["completion_tokens"] == len(real.outputs[0].token_ids)
+        assert chunk["usage"]["total_tokens"] == 8
 
 
 # ── AudioFormatter — output_format field (new branch behavior) ──────────────

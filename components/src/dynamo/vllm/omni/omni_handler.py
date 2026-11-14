@@ -431,7 +431,6 @@ class OmniHandler(BaseOmniHandler):
         if inputs.lora_request is not None and inputs.sampling_params_list is None:
             generate_kwargs["lora_request"] = inputs.lora_request
 
-        previous_text = ""
         audio_stream_state = AudioStreamState() if inputs.stream_audio else None
         # Read the coerced params, not the request's: the coercion above is what
         # decides whether the engine emits disjoint deltas or whole-waveform
@@ -446,20 +445,9 @@ class OmniHandler(BaseOmniHandler):
             else None
         )
 
-        def update_previous_text(stage_output: Any, current: str) -> str:
-            if getattr(stage_output, "final_output_type", None) == "text" and getattr(
-                stage_output, "request_output", None
-            ):
-                outputs = stage_output.request_output.outputs
-                if outputs:
-                    return outputs[0].text
-            return current
-
         async def create_generator(
             admitted_lora_request: LoRARequest | None,
         ) -> AsyncIterator[Dict[str, Any]]:
-            nonlocal previous_text
-
             per_request_kwargs = dict(generate_kwargs)
             # Critical: Apply the re-resolved adapter under the admission lock.
             # This ensures that if a hot-swap occurred between build time and lock
@@ -486,14 +474,14 @@ class OmniHandler(BaseOmniHandler):
                     fps=inputs.fps,
                     response_format=inputs.response_format,
                     output_format=inputs.output_format,
-                    previous_text=previous_text,
+                    # No previous_text: with no sampling_params_list the text stage
+                    # streams as DELTA, so each outputs[0].text is new text to emit.
                     speed=inputs.speed,
                     audio_stream_state=audio_stream_state,
                     audio_aggregate_state=audio_aggregate_state,
                     input_images=inputs.input_images,
                     num_inference_steps=inputs.num_inference_steps,
                 )
-                previous_text = update_previous_text(stage_output, previous_text)
                 yield {"stage_output": stage_output, "formatted_chunk": chunk}
 
             if audio_aggregate_state is not None:
