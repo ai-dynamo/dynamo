@@ -154,12 +154,15 @@ RUN --mount=type=cache,id=uv-dynamo-{{ context.dynamo.uv_version }},target=/home
 # Frontend needs tritonclient and its grpcio/protobuf constraints for gRPC serving,
 # plus AIC core for the experimental router-side prefill-load model.
 # Test and dev dependencies are NOT installed here — they go in the test and dev images.
+# --only-binary python-rapidjson (from tritonclient): this stage has no C++ compiler on
+# purpose, so take the newest release that has a wheel rather than building an sdist.
 RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tmp/requirements.common.txt \
     --mount=type=bind,source=./container/deps/requirements.frontend.txt,target=/tmp/requirements.frontend.txt \
     --mount=type=bind,source=./container/deps/overrides.frontend.txt,target=/tmp/overrides.frontend.txt \
     --mount=type=cache,id=uv-dynamo-{{ context.dynamo.uv_version }},target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     uv pip install \
+        --only-binary python-rapidjson \
         --overrides /tmp/overrides.frontend.txt \
         --requirement /tmp/requirements.common.txt \
         --requirement /tmp/requirements.frontend.txt

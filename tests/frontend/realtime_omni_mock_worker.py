@@ -77,7 +77,12 @@ class _MockAsyncOmni:
 
 
 async def main() -> None:
-    runtime = DistributedRuntime(asyncio.get_running_loop(), "file", "tcp")
+    """Register and serve the mock realtime worker with an explicit ZMQ event plane."""
+    # Pass event_plane explicitly: DYN_EVENT_PLANE alone does not stop an ambient
+    # NATS_SERVER from forcing a NATS connection that retries for up to 120s.
+    runtime = DistributedRuntime(
+        asyncio.get_running_loop(), "file", "tcp", event_plane="zmq"
+    )
     endpoint = runtime.endpoint(ENDPOINT_PATH)
     handler = RealtimeOmniHandler(
         engine_client=_MockAsyncOmni(),

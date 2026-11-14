@@ -34,13 +34,13 @@ Added by `create_metric()` in `lib/runtime/src/metrics.rs` for every metric regi
 </ParamField>
 
 <ParamField path="dynamo_endpoint" type="string">
-  `[Shared]` The RPC within that component. See [Endpoint names](#endpoint-names) for the enumeration of values. Example: `generate`, `clear_kv_blocks`, `worker_kv_indexer_query_dp0`.
+  `[Shared]` The RPC within that component. See [Endpoint names](#endpoint-names) for the enumeration of values. Example: `generate`, `clear_kv_blocks`, `worker_kv_query_source_1f3a9c2e7b4d`.
 </ParamField>
 
 <ParamField path="worker_id" type="string">
   `[Shared]` Hex-encoded discovery instance ID of the endpoint, providing a stable per-worker identity that does not depend on Kubernetes. Injected only when the endpoint hierarchy has a connection ID. Example: `1a2b3c4d`.
 
-  On the per-worker frontend gauges (`dynamo_frontend_worker_*`) this label carries the worker's etcd lease ID instead. Example: `7890`.
+  On the per-worker frontend gauges (`dynamo_frontend_worker_*`), this label carries the routed worker's discovery instance ID in decimal instead: a worker whose own metrics carry `worker_id="1a2b3c4d"` appears there as `worker_id="439041101"`.
 </ParamField>
 
 ## Registration-time labels
@@ -48,11 +48,11 @@ Added by `create_metric()` in `lib/runtime/src/metrics.rs` for every metric regi
 Passed via `metrics_labels=` when the worker calls `serve_endpoint()`. Not auto-injected, so presence depends on the backend.
 
 <ParamField path="model" type="string">
-  `[Shared]` The model being served (OpenAI-style label). Added by vLLM, SGLang, and TRT-LLM workers on inference endpoints; absent on internal endpoints like `worker_kv_indexer_query_dp{N}`. Example: `Qwen/Qwen3-0.6B`.
+  `[Shared]` The model being served (OpenAI-style label). Added on inference endpoints by vLLM workers, and by SGLang and TensorRT-LLM workers other than image and video diffusion workers; TensorRT-LLM workers add it only with `--publish-kv-events`, `--publish-metrics`, or forward-pass metrics. Internal endpoints, such as `worker_kv_query_source_*`, do not carry it. [Component Metrics](metrics-catalog.mdx#component-metrics) lists the labels each backend adds. Example: `Qwen/Qwen3-0.6B`.
 </ParamField>
 
 <ParamField path="model_name" type="string">
-  `[Shared]` Same model identifier under a second label name, retained for engine-native and dashboard back-compat. Added by vLLM and TRT-LLM workers; **not** added by SGLang. Example: `Qwen/Qwen3-0.6B`.
+  `[Shared]` Same model identifier under a second label name, retained for engine-native and dashboard back-compat. Added together with `model` by TensorRT-LLM workers, by SGLang multimodal encode workers, and by vLLM workers other than embedding, classify, and multimodal encode workers. Other SGLang workers add only `model`. Example: `Qwen/Qwen3-0.6B`.
 </ParamField>
 
 ## Metric-specific labels
@@ -90,9 +90,9 @@ Added by an individual metric family. Each label appears only on the metrics not
 </ParamField>
 
 <ParamField path="worker_type" type="string">
-  `[Shared]` On `dynamo_frontend_worker_*` and `dynamo_frontend_router_queue_*` — the worker role. In disaggregated mode both values appear; in aggregated mode all workers report as `decode`.
+  `[Shared]` On `dynamo_frontend_worker_*`, `dynamo_frontend_router_queue_*`, the router worker inventory gauges (`dynamo_frontend_router_workers` and `dynamo_frontend_router_worker_state`), and the KV router metrics whose [Metrics Catalog](metrics-catalog.mdx) rows list it — the worker role. Prefill workers report as `prefill`; decode and aggregated workers report as `decode`. Encode workers report as `encode` on the worker inventory gauges, but an Encode worker that serves Chat or Completions reports its `dynamo_frontend_worker_*` samples as `decode`.
 
-  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>prefill</Badge> <Badge intent="note" minimal>decode</Badge></span>
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>prefill</Badge> <Badge intent="note" minimal>decode</Badge> <Badge intent="note" minimal>encode</Badge></span>
 </ParamField>
 
 <ParamField path="dp_rank" type="integer">
@@ -216,8 +216,8 @@ Values you will see in the `dynamo_endpoint` label on backend workers.
 | Value | Meaning |
 |-------|---------|
 | `generate` | Main inference RPC; one increment per request received. On a prefill worker this counts prefill-stage `generate` calls; on a decode worker this counts decode-stage `generate` calls. |
-| `clear_kv_blocks` | vLLM distributed admin RPC to flush the worker KV cache. |
-| `worker_kv_indexer_query_dp{N}` | KV-router queries to the worker's local KV indexer about its cached prefix blocks. One endpoint per data-parallel rank (`_dp0`, `_dp1`, …). Appears on the worker that owns the prefix caches the router consults — in disaggregated serving that is the prefill worker. |
+| `clear_kv_blocks` | Admin RPC that flushes the worker's KV cache. Served by vLLM and SGLang prefill, decode, and aggregated workers. |
+| `worker_kv_query_source_{id}` | The router's queries to the worker's local KV indexer, used to recover the worker's KV index. One endpoint per KV event publisher; `{id}` is the publisher's event-plane ID in hex. Appears on workers that publish KV events. |
 
 ### Component error types
 
@@ -227,8 +227,9 @@ The `dynamo_component_errors_total` counter is labeled with `error_type`, identi
 |--------------|-------|---------|
 | `deserialization` | Ingress | Could not parse the incoming request payload. |
 | `invalid_message` | Ingress | Wire-format violation in the incoming message. |
-| `response_stream` | Pre-generate | The worker received the request but could not open the response stream back to the frontend (transport problem before `generate` was called). |
+| `response_stream` | Stream setup | Before calling `generate`, the worker could not open the response stream back to the frontend. Also counted when the input stream of a bidirectional streaming request cannot be opened and, on the `quic` and `velo` response planes, when the stream's first message cannot be sent after `generate` returns. |
 | `generate` | Engine | The engine's `generate()` itself returned an error. This is the counter that reflects engine/inference failures. |
+| `serialization` | Streaming | The worker could not encode a response chunk for the frontend. The stream ends without the final stream-complete marker. |
 | `publish_response` | Streaming | The engine produced response chunks but the worker could not push one back to the frontend. **Also fires on client cancellation** — the frontend disconnecting before the stream finishes — so this counter can be inflated by user-aborted requests. |
 | `publish_final` | Teardown | All response chunks were sent, but the worker could not deliver the final stream-complete marker. The connection died right at the end. |
 
