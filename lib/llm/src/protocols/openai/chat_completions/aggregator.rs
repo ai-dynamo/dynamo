@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use futures::{Stream, StreamExt, TryStreamExt};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use dynamo_parsers::tool_calling::try_tool_call_parse_aggregate_finalize;
@@ -197,6 +197,8 @@ struct DeltaChoice {
     // which required id/name/arguments to all be set on the same chunk.
     tool_call_chunks: BTreeMap<u32, dynamo_protocols::types::ChatCompletionMessageToolCallChunk>,
     parser_call_completion: HashMap<u32, bool>,
+    // Mistral keeps parser-confirmed calls as streamed, including malformed JSON.
+    parser_confirmed_call_ids: HashSet<String>,
     // Optional tool calls for the chat choice, populated *after* fold either
     // by finalizing `tool_call_chunks` above, or by
     // `try_tool_call_parse_aggregate_finalize` running against `text` for producers
@@ -253,11 +255,11 @@ fn drop_incomplete_length_tool_calls(choice: &mut DeltaChoice, unified: bool) {
     }
 }
 
-/// A stop or EOF can follow a streamed call whose last argument fragment is not
-/// valid JSON. The adapter can normalize that stop to `ToolCalls` before aggregation,
-/// so validate that terminal state too before exposing an executable final response.
-/// An empty argument string remains valid when the upstream explicitly completed a
-/// parameterless call with `ToolCalls`.
+/// A stop or EOF can follow a streamed backend call whose last argument fragment is
+/// not valid JSON. The adapter can normalize that stop to `ToolCalls` before
+/// aggregation, so validate the arguments here. An empty argument string remains
+/// valid when the upstream explicitly completed a parameterless call with
+/// `ToolCalls`. Mistral's parser-confirmed calls keep their streamed raw arguments.
 fn drop_malformed_terminal_tool_calls(
     choice: &mut DeltaChoice,
     require_explicit_tool_terminal: bool,
@@ -280,12 +282,14 @@ fn drop_malformed_terminal_tool_calls(
 
     let explicit_parameterless_call =
         choice.finish_reason == Some(dynamo_protocols::types::FinishReason::ToolCalls);
+    let confirmed = &choice.parser_confirmed_call_ids;
     let Some(tool_calls) = choice.tool_calls.as_mut() else {
         return;
     };
     tool_calls.retain(|tool_call| {
         let arguments = &tool_call.function.arguments;
-        (explicit_parameterless_call && arguments.is_empty())
+        confirmed.contains(&tool_call.id)
+            || (explicit_parameterless_call && arguments.is_empty())
             || serde_json::from_str::<serde_json::Value>(arguments).is_ok()
     });
     if tool_calls.is_empty() {
@@ -461,13 +465,14 @@ impl DeltaAggregator {
     ) -> Result<NvCreateChatCompletionResponse, DynamoError> {
         // V4.1 is default-on independently of this experiment. Its flag-off
         // backend-supplied arguments keep the established aggregation contract.
-        let require_explicit_tool_terminal = super::unified_parser::selected_request_family(
-            parsing_options.tool_call_parser.as_deref(),
-            parsing_options.reasoning_parser.as_deref(),
-            parsing_options.tool_choice.as_ref(),
-            &parsing_options.guided_tool_constraint,
-        )
-        .is_some()
+        let require_explicit_tool_terminal = parsing_options
+            .supported_unified_family(super::unified_parser::selected_request_family(
+                parsing_options.tool_call_parser.as_deref(),
+                parsing_options.reasoning_parser.as_deref(),
+                parsing_options.tool_choice.as_ref(),
+                &parsing_options.guided_tool_constraint,
+            ))
+            .is_some()
             && super::unified_parser::parsers_v2_selected();
         Self::apply_with_tool_terminal_policy(
             stream,
@@ -586,6 +591,7 @@ impl DeltaAggregator {
                                     logprobs: None,
                                     tool_call_chunks: BTreeMap::new(),
                                     parser_call_completion: HashMap::new(),
+                                    parser_confirmed_call_ids: HashSet::new(),
                                     tool_calls: None,
                                     reasoning_content: None,
                                     refusal: None,
@@ -690,16 +696,28 @@ impl DeltaAggregator {
         // whole stream are dropped here (they're not a valid tool call in the
         // final schema), but chunks missing only `arguments` get defaulted to
         // "" — the old code dropped those entirely.
+        let is_mistral = parsing_options.resolved_unified_family()
+            == Some(super::unified_parser::MISTRAL_UNIFIED_FAMILY);
         for choice in aggregator.choices.values_mut() {
             if choice.tool_call_chunks.is_empty() {
                 continue;
             }
             let finalized: Vec<_> = std::mem::take(&mut choice.tool_call_chunks)
                 .into_iter()
-                // Explicit parser evidence owns provisional calls. Backend chunks have
-                // no completion bit; the shared argument validation below handles them.
-                .filter(|(index, _)| choice.parser_call_completion.get(index) != Some(&false))
-                .filter_map(|(_, chunk)| finalize_merged_tool_chunk(chunk))
+                // Explicit parser evidence owns provisional and confirmed calls.
+                // Backend chunks have no completion bit; the terminal argument
+                // validation below handles them.
+                .filter_map(|(index, chunk)| {
+                    let complete = choice.parser_call_completion.get(&index).copied();
+                    if complete == Some(false) {
+                        return None;
+                    }
+                    let call = finalize_merged_tool_chunk(chunk)?;
+                    if is_mistral && complete == Some(true) {
+                        choice.parser_confirmed_call_ids.insert(call.id.clone());
+                    }
+                    Some(call)
+                })
                 .collect();
             // choice.tool_calls is always None at this point: or_insert
             // initializes it to None, try_tool_call_parse_aggregate_finalize
@@ -722,10 +740,7 @@ impl DeltaAggregator {
 
         // One configured unified family owns raw batch output before legacy parsing.
         // Worker-parsed choices already carry tool calls and skip this safety net.
-        let selected_unified_family = super::unified_parser::selected_batch_family(
-            parsing_options.tool_call_parser.as_deref(),
-            parsing_options.reasoning_parser.as_deref(),
-        );
+        let selected_unified_family = parsing_options.resolved_unified_family();
         if selected_unified_family.is_none() {
             let version = super::tool_parser_v2::selected_version().map_err(|error| {
                 DynamoError::builder()
@@ -2912,6 +2927,214 @@ mod tests {
         assert!(response.inner.choices[0].message.tool_calls.is_none());
     }
 
+    /// A pre-v11 Mistral model writes a `[TOOL_CALLS]` JSON array that only the v1
+    /// parser reads. When the model's tokenizer rules out `mistral_4`, raw batch
+    /// output keeps that parser, as the preprocessor's stream path does.
+    #[tokio::test]
+    async fn pre_v11_mistral_batch_output_keeps_the_v1_parser() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::pre_v11_mistral_batch_output_keeps_the_v1_parser"
+            ),
+            &[],
+        ) {
+            return;
+        }
+        let raw = r#"[TOOL_CALLS] [{"name": "get_weather", "arguments": {"city": "Paris"}}]"#;
+        let aggregate = |unsupported: Option<&str>| {
+            let mut options =
+                ParsingOptions::new(Some("mistral".to_string()), Some("mistral".to_string()));
+            options.unsupported_unified_family = unsupported.map(str::to_string);
+            let delta = create_test_delta(
+                0,
+                raw,
+                Some(dynamo_protocols::types::Role::Assistant),
+                Some(dynamo_protocols::types::FinishReason::Stop),
+                None,
+                None,
+            );
+            DeltaAggregator::apply_with_tool_terminal_policy(
+                stream::iter(vec![delta]),
+                options,
+                false,
+            )
+        };
+        let call_names = |response: NvCreateChatCompletionResponse| -> Vec<String> {
+            response.inner.choices[0]
+                .message
+                .tool_calls
+                .iter()
+                .flatten()
+                .map(|call| call.function.name.clone())
+                .collect()
+        };
+
+        let unsupported = super::super::unified_parser::MISTRAL_UNIFIED_FAMILY;
+        let kept = aggregate(Some(unsupported)).await.unwrap();
+        assert_eq!(call_names(kept), ["get_weather"]);
+        // The v11+ grammar has no array form, so `mistral_4` would drop the call.
+        let unified = aggregate(None).await.unwrap();
+        assert!(call_names(unified).is_empty());
+    }
+
+    /// A Mistral call whose closed body is not valid JSON streams to the client as a
+    /// tool call. The non-streaming response must return the same calls: neither the
+    /// malformed call nor its valid sibling may be dropped.
+    #[tokio::test]
+    async fn mistral_parser_confirmed_call_with_invalid_json_survives_aggregation() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::mistral_parser_confirmed_call_with_invalid_json_survives_aggregation"
+            ),
+            &[(
+                dynamo_runtime::config::environment_names::llm::DYN_PARSER_VERSION,
+                "2",
+            )],
+        ) {
+            return;
+        }
+        let tool = |name: &str, parameter: &str| dynamo_parsers::tool_calling::ToolDefinition {
+            name: name.to_string(),
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {parameter: {"type": "string"}},
+                "required": [parameter]
+            })),
+            strict: None,
+        };
+        let tools = vec![tool("cd", "folder"), tool("mkdir", "dir_name")];
+        let raw = create_test_delta(
+            0,
+            r#"[TOOL_CALLS]cd[ARGS]{"workspace"}[TOOL_CALLS]mkdir[ARGS]{"dir_name": "Projects"}"#,
+            Some(dynamo_protocols::types::Role::Assistant),
+            Some(dynamo_protocols::types::FinishReason::Stop),
+            None,
+            None,
+        );
+        let adapted = super::super::unified_parser::apply_stream(
+            stream::iter(vec![raw]),
+            Some(tools),
+            None,
+            false,
+            dynamo_parsers_v2::UnifiedParserStartingState::Response,
+            super::super::unified_parser::MISTRAL_UNIFIED_FAMILY,
+        );
+
+        let response = DeltaAggregator::apply_with_tool_terminal_policy(
+            adapted,
+            ParsingOptions::new(Some("mistral".to_string()), Some("mistral".to_string())),
+            true,
+        )
+        .await
+        .expect("aggregation should succeed");
+
+        let choice = &response.inner.choices[0];
+        assert_eq!(
+            choice.finish_reason,
+            Some(dynamo_protocols::types::FinishReason::ToolCalls)
+        );
+        let calls = choice
+            .message
+            .tool_calls
+            .as_ref()
+            .expect("the streamed calls must not be dropped");
+        let calls: Vec<_> = calls
+            .iter()
+            .map(|call| {
+                (
+                    call.function.name.as_str(),
+                    call.function.arguments.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            calls,
+            [
+                ("cd", r#"{"workspace"}"#),
+                ("mkdir", r#"{"dir_name": "Projects"}"#)
+            ]
+        );
+        assert!(choice.message.content.is_none());
+    }
+
+    #[tokio::test]
+    async fn mistral_completed_call_exemption_does_not_apply_to_kimi_k2() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::mistral_completed_call_exemption_does_not_apply_to_kimi_k2"
+            ),
+            &[(
+                dynamo_runtime::config::environment_names::llm::DYN_PARSER_VERSION,
+                "2",
+            )],
+        ) {
+            return;
+        }
+        let raw = create_test_delta(
+            0,
+            concat!(
+                "<|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0",
+                "<|tool_call_argument_begin|>not-json-at-all",
+                "<|tool_call_end|><|tool_calls_section_end|>"
+            ),
+            Some(dynamo_protocols::types::Role::Assistant),
+            Some(dynamo_protocols::types::FinishReason::Stop),
+            None,
+            None,
+        );
+        let adapted = super::super::unified_parser::apply_stream(
+            stream::iter(vec![raw]),
+            Some(vec![dynamo_parsers::tool_calling::ToolDefinition {
+                name: "get_weather".into(),
+                parameters: Some(serde_json::json!({
+                    "type": "object", "properties": {"city": {"type": "string"}}
+                })),
+                strict: None,
+            }]),
+            None,
+            false,
+            dynamo_parsers_v2::UnifiedParserStartingState::Response,
+            super::super::unified_parser::KIMI_K2_UNIFIED_FAMILY,
+        )
+        .collect::<Vec<_>>()
+        .await;
+        assert!(
+            adapted
+                .iter()
+                .filter_map(|item| item.data.as_ref())
+                .flat_map(|data| &data.tool_call_completion)
+                .any(|evidence| evidence.choice_index == 0
+                    && evidence.tool_index == 0
+                    && evidence.complete),
+            "the parser must have confirmed the malformed call"
+        );
+        let arguments: String = adapted
+            .iter()
+            .filter_map(|item| item.data.as_ref())
+            .flat_map(|data| &data.inner.choices)
+            .flat_map(|choice| choice.delta.tool_calls.iter().flatten())
+            .filter_map(|call| call.function.as_ref()?.arguments.as_deref())
+            .collect();
+        assert_eq!(arguments, "not-json-at-all");
+
+        let response = NvCreateChatCompletionResponse::from_annotated_stream(
+            stream::iter(adapted),
+            ParsingOptions::new(Some("kimi_k2".into()), Some("kimi_k2".into())),
+        )
+        .await
+        .expect("aggregation should succeed");
+        let choice = &response.inner.choices[0];
+        assert!(choice.message.tool_calls.is_none());
+        assert!(choice.message.content.is_none());
+        assert_eq!(
+            choice.finish_reason,
+            Some(dynamo_protocols::types::FinishReason::Stop)
+        );
+    }
+
     #[tokio::test]
     async fn test_length_drops_incomplete_structured_tool_call_without_leaking_content() {
         let mut annotated_delta = create_test_delta(
@@ -3914,6 +4137,7 @@ mod tests {
             tool_call_chunks: BTreeMap::new(),
             parser_call_completion: HashMap::new(),
             model_eos: false,
+            parser_confirmed_call_ids: HashSet::new(),
             tool_calls: None,
             reasoning_content: Some("Analyzing the question.".to_string()),
             refusal: None,

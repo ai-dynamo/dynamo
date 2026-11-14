@@ -64,11 +64,7 @@ fn apply_request_tool_call_parsing_options(
     mut parsing_options: ParsingOptions,
     request: &NvCreateChatCompletionRequest,
 ) -> Result<ParsingOptions, DynamoError> {
-    let unified_family =
-        crate::protocols::openai::chat_completions::unified_parser::selected_batch_family(
-            parsing_options.tool_call_parser.as_deref(),
-            parsing_options.reasoning_parser.as_deref(),
-        );
+    let unified_family = parsing_options.resolved_unified_family();
     parsing_options.reasoning_disabled = OpenAIPreprocessor::request_disables_reasoning_with_family(
         request,
         parsing_options.tool_call_parser.as_deref(),
@@ -112,6 +108,7 @@ fn apply_request_tool_call_parsing_options(
             request,
             parsing_options.tool_call_parser.as_deref(),
             parsing_options.reasoning_parser.as_deref(),
+            unified_family,
             uses_structural_tag,
             effective_tools.as_ref(),
         )?;
@@ -272,6 +269,7 @@ mod tests {
                             // Spark's template has no reasoning-off mode; keep parsing
                             // its private channel even when thinking=false is requested.
                             "muse_spark" => false,
+                            "mistral_4" => false,
                             _ => thinking == Some(false),
                         },
                         "{selector} {tool:?} {reasoning:?} {thinking:?}"
@@ -279,6 +277,55 @@ mod tests {
                 }
             }
         }
+    }
+
+    // A non-streaming forced choice on the Unified mistral_4 family must re-read
+    // the aggregated native output, not hand it to the guided-JSON reader.
+    #[tokio::test]
+    async fn unified_mistral_forced_choices_batch_native_calls() {
+        use crate::protocols::openai::chat_completions::aggregator::DeltaAggregator;
+        use dynamo_runtime::protocols::annotated::Annotated;
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::unified_mistral_forced_choices_batch_native_calls"
+            ),
+            &[],
+        ) {
+            return;
+        }
+        let raw =
+            r#"[THINK]need the weather[/THINK][TOOL_CALLS]get_weather[ARGS]{"location":"Paris"}"#;
+        let options = apply_request_tool_call_parsing_options(
+            ParsingOptions::new(Some("mistral".into()), Some("mistral".into())),
+            &request(json!({"type": "function", "function": {"name": "get_weather"}})),
+        )
+        .unwrap();
+        assert_eq!(options.guided_tool_constraint, GuidedToolConstraint::None);
+        let chunk = serde_json::from_value(json!({"id":"test", "object":"chat.completion.chunk",
+            "created":0, "model":"test", "choices":[{"index":0,
+            "delta":{"content":raw}, "finish_reason":"stop"}]}))
+        .unwrap();
+
+        let result = DeltaAggregator::apply(
+            futures::stream::iter([Annotated::from_data(chunk)]),
+            options,
+        )
+        .await
+        .unwrap();
+
+        let choice = &result.inner.choices[0];
+        assert_eq!(
+            choice.message.reasoning_content.as_deref(),
+            Some("need the weather")
+        );
+        let calls = choice.message.tool_calls.as_ref().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "get_weather");
+        assert_eq!(
+            serde_json::from_str::<Value>(&calls[0].function.arguments).unwrap(),
+            json!({"location": "Paris"})
+        );
     }
 
     #[test]
