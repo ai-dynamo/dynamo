@@ -73,8 +73,8 @@ dynamo:
   nixl_gdrcopy_ref: v2.5.2
   nixl_libfabric_repo: https://github.com/ofiwg/libfabric.git
   # >= v2.5 for NIXL 1.5.0 (fi_mr_attr.device.rocr). <= the libfabric of
-  # efa_version (2.6.0): the TRT-LLM EFA image runs NIXL against that copy,
-  # which lacks the FABRIC_1.10 symbols that v2.7.0 links to.
+  # efa_version (2.7.0 in EFA 1.51.0): the TRT-LLM EFA image runs NIXL against
+  # that copy, so a newer ref can link to symbols that copy lacks.
   nixl_libfabric_ref: v2.6.0
   # Keep in sync with upstream NIXL's contrib/Dockerfile.manylinux.
   hwloc_version: 2.12.2
@@ -90,7 +90,7 @@ dynamo:
   nv_codec_headers_ref: "n13.0.19.0"
   libvpx_ref: "v1.14.1"
   sccache_version: "v0.14.0"
-  efa_version: 1.50.0
+  efa_version: 1.51.0
 
 vllm:
   cuda13.0:
@@ -110,6 +110,18 @@ vllm:
     # -${TARGETARCH}.cdx.json. (GPL media codecs from vllm-openai are purged in
     # the runtime image — see the codec-purge follow-up.)
     baseline_sbom: cuda@2ab6381d
+  # Opt-in runtime variants (render.py --variant <name>). Each entry overlays the
+  # matching device block above; keys not set here keep the default values.
+  variants:
+    # NIM vLLM enterprise base: vllm/vllm-openai plus the NIM server stack.
+    # Not shipped from this repo; built by enterprise-ci.yml. The
+    # self-baseline subtracts the whole base so compliance only attributes what
+    # the Dynamo build adds.
+    enterprise:
+      cuda13.0:
+        runtime_image: nvcr.io/nvidia/vllm-base-enterprise-nightly
+        runtime_image_tag: 20261110-90f0ff8
+        baseline_sbom: vllm-base-enterprise-nightly@6622ab1d
   xpu:
     base_image: vllm/vllm-openai-xpu
     runtime_image: vllm/vllm-openai-xpu
@@ -127,7 +139,7 @@ vllm:
     nixl_ref: v1.5.0
     nixl_ucx_ref: v1.23.0-rc1
   vllm_omni_ref: "v0.32.0rc1"
-  nixl_ref: v1.4.1
+  nixl_ref: v1.5.0
   max_jobs: "10"
   enable_media_ffmpeg: "true"
   enable_gpu_memory_service: "true"
@@ -154,26 +166,21 @@ sglang:
     # same codec-limited build for frontend video decoding.
     baseline_sbom: cuda@0230b7f2
   xpu:
-    # oneAPI 2026.0 is required by the SGLang XPU pins below: torch 2.13.0+xpu
-    # links intel-sycl-rt 2026.0.0 (libsycl.so.9), and sgl-kernel-xpu's SYCL
-    # kernels must be compiled by the matching icpx. The 2025.3 base ships
-    # libsycl.so.8, so its icpx produces a kernel .so that torch cannot load.
-    base_image: intel/deep-learning-essentials
-    base_image_tag: 2026.0.0-devel-ubuntu24.04
-    runtime_image: intel/deep-learning-essentials
-    runtime_image_tag: 2026.0.0-devel-ubuntu24.04
-    sglang_ref: v0.5.19
-    sglang_git_url: https://github.com/sgl-project/sglang.git
-    sglang_kernel_ref: v0.2.0
-    sglang_kernel_git_url: https://github.com/sgl-project/sgl-kernel-xpu.git
-    # XPU SGLang requires a newer NIXL than the framework default; scoped here
+    base_image: lmsysorg/sglang
+    base_image_tag: v0.5.23-xpu
+    runtime_image: lmsysorg/sglang
+    runtime_image_tag: v0.5.23-xpu
+    baseline_sbom: sglang@f5627c5e
+    # The NIXL versions in the XPU and CUDA base images are sometimes out of sync,
+    # so Dynamo builds and installs its own at this ref, scoped here
     # to avoid affecting sglang-cuda or other frameworks.
-    nixl_ref: v1.1.0
+    nixl_ref: v1.5.0
+    nixl_ucx_ref: v1.23.0-rc1
   # Builds the NIXL C++ SDK in wheel_builder so the dev stage can link nixl-sys
   # (see templates/dev.Dockerfile). Runtime stays on the upstream lmsysorg/sglang
   # NIXL Python stack — its wheel COPY is narrowed to ai_dynamo*.whl so the SDK
   # build doesn't leak into the runtime image.
-  nixl_ref: v1.5.0
+  nixl_ref: v1.5.2
   enable_media_ffmpeg: "true"
   enable_gpu_memory_service: "true"
   enable_modelexpress: "true"
@@ -187,7 +194,8 @@ trtllm:
     runtime_image_tag: 1.4.0rc2
     # Per-arch baseline stem (re-captured against tensorrt-llm/release, both arches).
     baseline_sbom: release@93a3eaf1
-  nixl_ref: v1.3.1
+  # EFA adds the API-compatible LIBFABRIC plugin, including its CUDA-context fix.
+  nixl_ref: v1.5.2
   enable_media_ffmpeg: "false"
   enable_gpu_memory_service: "true"
 

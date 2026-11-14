@@ -3,10 +3,7 @@
 
 //! Quadratic prefill-cost scorer for the `prefill-cost-score-pick` policy.
 
-use dynamo_kv_router::WorkerSelectionPolicyError;
-use dynamo_kv_router::plugins::worker_selection::{
-    ActivePrefillSums, WorkerCandidates, WorkerInputs, WorkerScorer, WorkerSelectionContext,
-};
+use dynamo_kv_router::plugins::prelude::*;
 
 /// `cost(q, c) = uncached_squared * q * q + uncached_times_cached * q * c + uncached * q`.
 #[derive(Clone, Copy)]

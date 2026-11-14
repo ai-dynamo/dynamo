@@ -3,10 +3,7 @@
 
 //! Lowest-cost picker for the `prefill-cost-score-pick` policy.
 
-use dynamo_kv_router::WorkerSelectionPolicyError;
-use dynamo_kv_router::plugins::worker_selection::{
-    WorkerInputView, WorkerPicker, WorkerSelectionContext,
-};
+use dynamo_kv_router::plugins::prelude::*;
 
 pub(crate) struct LowestCostPicker;
 

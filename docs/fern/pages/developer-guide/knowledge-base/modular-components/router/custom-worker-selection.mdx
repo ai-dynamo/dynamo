@@ -24,7 +24,7 @@ flowchart LR
     Validate --> Reserve["Accounting and reservation"]
 ```
 
-For multiple compile-checked policies, see the [custom policy examples](https://github.com/ai-dynamo/dynamo/tree/main/examples/router/custom-policy-example). Repository contributors who use a coding agent must also provide the [worker-selection API rules](https://github.com/ai-dynamo/dynamo/blob/main/lib/kv-router/src/scheduling/CLAUDE.md).
+For multiple compile-checked policies, see the [custom policy examples](https://github.com/ai-dynamo/dynamo/tree/main/examples/router/custom-policy-example). Repository contributors who use a coding agent must also provide the [worker-selection API rules](https://github.com/ai-dynamo/dynamo/blob/main/lib/router/worker-selection/README.md).
 
 ## Use a Built-In Policy First
 
@@ -53,6 +53,7 @@ Use `dynamo_kv_router::plugins` for plugin registration and these modules for pl
 |---|---|
 | `plugins::worker_selection` | `WorkerFilter`, `WorkerScorer`, `WorkerPicker`, `WorkerSelectionPolicy`, request context, worker signal accessors, configuration, and factories |
 | `plugins` | `RouterPluginRegistry` and the resolved `RouterPlugins` bundle |
+| `plugins::worker_selection::experimental` | Unstable extensions, such as the [resident block counts](#experimental-resident-block-counts). No compatibility guarantee |
 
 Dynamo owns scheduler queues, eligibility checks, reservations, lifecycle synchronization, and the default selector implementation. Low-level host interfaces such as `WorkerSelector` are used to connect Dynamo components; external plugins use `WorkerSelectionPolicy`.
 
@@ -81,7 +82,7 @@ Add `dynamo-kv-router` from the same checkout that builds the frontend or EPP:
 # Add the worker-selection API to the policy crate.
 cargo add \
   --manifest-path "$POLICY_DIR/policy/Cargo.toml" \
-  --path "$DYNAMO_DIR/lib/kv-router" \
+  --path "$DYNAMO_DIR/lib/router/kv-router" \
   dynamo-kv-router
 
 # Add parameter deserialization to the policy crate.
@@ -98,7 +99,7 @@ cargo add \
 # Add the registry API to the catalog.
 cargo add \
   --manifest-path "$POLICY_DIR/catalog/Cargo.toml" \
-  --path "$DYNAMO_DIR/lib/kv-router" \
+  --path "$DYNAMO_DIR/lib/router/kv-router" \
   dynamo-kv-router
 ```
 
@@ -294,28 +295,29 @@ pub fn register(
 
 Choose a stable, unique type name. Unknown types, duplicate registrations, and invalid parameters stop startup.
 
-### Configure an Instance
+### Configure Each Role
 
 Create `$POLICY_DIR/worker-selection.yaml`:
 
 ```yaml
 worker_selection:
-  aggregated: least-busy
-  prefill: prefill-least-busy
-  decode: least-busy
-  encode: least-busy
-  instances:
-    - name: least-busy
-      type: least-busy
-      parameters:
-        min_device_overlap_blocks: 0
-    - name: prefill-least-busy
-      type: least-busy
-      parameters:
-        min_device_overlap_blocks: 1
+  aggregated:
+    type: least-busy
+    parameters:
+      min_device_overlap_blocks: 0
+  prefill:
+    type: least-busy
+    parameters:
+      min_device_overlap_blocks: 1
+  decode:
+    type: least-busy
+    parameters:
+      min_device_overlap_blocks: 0
 ```
 
-The `type` selects a registered provider. The `name` identifies one configured instance. `worker_selection.aggregated`, `worker_selection.prefill`, `worker_selection.decode`, and `worker_selection.encode` select the matching worker pools. An omitted role uses Dynamo's built-in policy; one role does not fall back to another role's selection.
+`worker_selection.aggregated`, `worker_selection.prefill`, `worker_selection.decode`, and `worker_selection.encode` each select the policy for the matching worker pool. `type` selects a registered provider and `parameters` is the mapping that provider validates. A role may also be a bare type name when the provider accepts an empty `parameters` mapping. An omitted role uses Dynamo's built-in policy; one role does not fall back to another role's selection.
+
+The pre-v1.7 form, a `worker_selection.instances` list of named `{type, parameters}` entries referenced by name from each role, still loads with a deprecation warning and is scheduled for removal in v1.8.
 
 `worker_selection.encode` applies only to a surface-carrying encode worker set that constructs the standard KV chooser. It does not configure the surface-less multimodal encoder hop: `EncoderRouter` selects those workers independently with round-robin routing.
 
@@ -370,7 +372,7 @@ Each worker policy is constructed once per routing partition. An empty bundle re
 
 Worker identity and ordinary request metadata are always available. Dynamo calculates optional per-worker signals only for groups that a filter, scorer, or picker requests.
 
-Routing cache resources start only if a component requests `CACHE` or a scorer requests `KV_TRANSFER`. `serve_indexer` and `enable_session_prefix_index` require `CACHE`.
+Routing cache resources start only if a component requests `CACHE` or a scorer requests `KV_COPY`. `serve_indexer`, `enable_session_prefix_index`, and the experimental `RESIDENT_BLOCKS` input require `CACHE`.
 
 ### Request Context
 
@@ -452,9 +454,9 @@ If a component needs no optional worker data, return `WorkerInputs::NONE`. Combi
 | `LOAD` | `active_requests()` | Requests currently active on the worker |
 | `PREFERRED_TAINT` | `preferred_taint_multiplier()` | Optional cost multiplier from matching preferred routing taints |
 | `ACTIVE_REQUESTS` | `WorkerInputView::active_requests(row)` | Picker only. Requests in flight on the row's worker; `None` only when the picker did not declare the group or the row is out of range |
-| `KV_TRANSFER` | `kv_transfer()` | `None` if the host has no transfer data for this request: no worker in the partition consumes router hints, or the indexer cannot retain the matched block chain |
 | `ACTIVE_PREFILL_SUMS` | `active_prefill_sums()` | Filter and scorer only. Sums of `q`, `q * q`, and `q * c` over the worker's active prefills, where `q` and `c` are each request's uncached and cached prompt tokens at booking; see [Active Prefill Sums](#active-prefill-sums) |
-| `KV_TRANSFER` | `source_prefix_blocks()` | Prefix blocks held by the source this worker would fetch from, and so held by the worker after the fetch; `None` when no eligible source holds more than the worker's device-resident plus host-pinned prefix |
+| `KV_COPY` | `kv_copy()` | The worker's copy offer. `None` if the host has no copy data for this request: no worker in the partition advertises `router_hint`, or the indexer cannot retain the matched block chain |
+| `KV_COPY` | `source_prefix_blocks()` | Prefix blocks held by the source this worker would copy from, and so held by the worker after the copy; `None` when no eligible source holds more than the worker's device-resident plus host-pinned prefix |
 
 The GPU, CPU, and disk overlap accessors return raw tier counts. A missing tier or worker entry is zero; Dynamo does not substitute its weighted effective-overlap estimate. Each custom scorer chooses how to combine the raw counts.
 
@@ -464,9 +466,11 @@ A filter or scorer reads groups through `WorkerCandidate::cache()` or `load()`. 
 
 Declare `ACTIVE_REQUESTS` instead of `LOAD` when a request count is all the picker needs. It is cheaper, and `LOAD` needs the KV scheduler, which tracks each worker's active tokens and blocks.
 
-A scorer reads `KV_TRANSFER` through `WorkerCandidate::kv_transfer()`. Filters and pickers do not receive it, and declaring it there has no effect. The host picks each worker's source with the [KV fetch hint](topology-aware-kv-transfer.md#kv-fetch-hints) rules, including topology islands, and booking a worker attaches a fetch hint for that same source. Fetches are best effort: the source may no longer hold the blocks when the request runs.
+A scorer reads `KV_COPY` through `WorkerCandidate::kv_copy()`. Filters and pickers do not receive it, and declaring it there has no effect. The host picks each worker's copy offer with the [KV fetch hint](topology-aware-kv-transfer.md#kv-fetch-hints) rules, including topology islands.
 
-This scorer charges each worker for the prompt blocks it can neither reuse nor fetch. A worker without transfer data still counts its own cache:
+A policy whose scorer reads `KV_COPY` commits the selected worker to its offer, so the worker's role must run a [hint policy](hint-policies.md) that sends it, such as `kv_fetch`.
+
+This scorer charges each worker for the prompt blocks it can neither reuse nor copy. A worker without copy data still counts its own cache:
 
 ```rust
 use dynamo_kv_router::plugins::worker_selection::{
@@ -477,7 +481,7 @@ struct UncoveredPromptScorer;
 
 impl WorkerScorer for UncoveredPromptScorer {
     fn required_worker_inputs(&self) -> WorkerInputs {
-        WorkerInputs::CACHE | WorkerInputs::KV_TRANSFER
+        WorkerInputs::CACHE | WorkerInputs::KV_COPY
     }
 
     fn score(
@@ -492,11 +496,11 @@ impl WorkerScorer for UncoveredPromptScorer {
                     + cache.host_overlap_blocks()
                     + cache.disk_overlap_blocks()
             });
-            let fetchable = candidate
-                .kv_transfer()
-                .and_then(|transfer| transfer.source_prefix_blocks())
+            let copyable = candidate
+                .kv_copy()
+                .and_then(|copy| copy.source_prefix_blocks())
                 .map_or(0.0, f64::from);
-            *cost = (context.request_blocks() as f64 - cached.max(fetchable)).max(0.0);
+            *cost = (context.request_blocks() as f64 - cached.max(copyable)).max(0.0);
         }
         Ok(())
     }
@@ -588,7 +592,7 @@ cargo add --manifest-path "$POLICY_DIR/epp/Cargo.toml" tokio@=1.48.0 --features 
 
 # Add the policy catalog and worker-selection API.
 cargo add --manifest-path "$POLICY_DIR/epp/Cargo.toml" --path "$POLICY_DIR/catalog" acme-routing-catalog
-cargo add --manifest-path "$POLICY_DIR/epp/Cargo.toml" --path "$DYNAMO_DIR/lib/kv-router" --features standalone-selection dynamo-kv-router
+cargo add --manifest-path "$POLICY_DIR/epp/Cargo.toml" --path "$DYNAMO_DIR/lib/router/kv-router" --features http,ingest-zmq,replica-sync-zmq,peer-recovery dynamo-kv-router
 
 # Add the standard EPP runner.
 cargo add --manifest-path "$POLICY_DIR/epp/Cargo.toml" --path "$DYNAMO_DIR/deploy/inference-gateway/ext-proc" dynamo-ext-proc
@@ -651,6 +655,45 @@ impl RequestClassifier for InspectPrefixes {
 }
 ```
 
+## Experimental Resident Block Counts
+
+A policy can read how many blocks the router's indexer holds for each worker rank, including cached blocks no running request uses, and charge a placement for the cache it would evict; use `LOAD` for work in flight. The API lives in `plugins::worker_selection::experimental`, whose items have no compatibility guarantee and may change or be removed in any release. Declare `resident_blocks::RESIDENT_BLOCKS` together with `WorkerInputs::CACHE`, then import the `ResidentBlocks` trait to read `candidate.resident_blocks()` in a filter or scorer, or `ResidentBlocksByRow` to read `input.resident_blocks(row)` in a picker:
+
+```rust
+use dynamo_kv_router::plugins::worker_selection::experimental::resident_blocks::{
+    RESIDENT_BLOCKS, ResidentBlocks,
+};
+
+/// Charges one unit per block a placement could evict.
+struct EvictionPressure;
+
+impl WorkerScorer for EvictionPressure {
+    fn required_worker_inputs(&self) -> WorkerInputs {
+        WorkerInputs::CACHE | RESIDENT_BLOCKS
+    }
+
+    fn score(
+        &self,
+        _context: &WorkerSelectionContext<'_>,
+        candidates: WorkerCandidates<'_>,
+        costs: &mut [f64],
+    ) -> Result<(), WorkerSelectionPolicyError> {
+        for (candidate, cost) in candidates.iter().zip(costs) {
+            // None means the host has no count for this rank; treat it as neutral.
+            *cost = candidate.resident_blocks().unwrap_or(0) as f64;
+        }
+        Ok(())
+    }
+}
+```
+
+The count is unweighted, not clamped to `total_kv_blocks`, and measures occupancy rather than reusable cache: blocks that prefix matching can no longer reach, such as descendants of an evicted block, count until their own remove events arrive, and a lost remove event inflates the count until the rank is removed. A count is current as of the last event its indexer thread applied, the same freshness as the `CACHE` overlap scores, so it can trail queued events and change between two reads in one selection. A rank reads `None` until its indexer thread has reached the policy's request and holds a block for it, `0` after a clear, and `None` again once the rank or its worker is removed. A component also reads `None` when it did not declare `RESIDENT_BLOCKS`, with a remote indexer, or after an indexer thread stops, so a worker whose KV events never arrive never looks empty. Only filters, scorers, and pickers receive counts: a request classifier that declares `RESIDENT_BLOCKS` reads `None`. A policy that declares `RESIDENT_BLOCKS` must also declare `CACHE`, because the counts come from the indexer that `CACHE` starts. The router checks this for every policy it builds for a routing partition: the frontend fails to start, and the standalone selection service marks the partition's workers unschedulable with the reason.
+
+What the count contains, and whether router replicas agree on it, depends on the routing mode:
+
+- **KV events:** the device-tier blocks the indexer currently tracks from engine events. Every router replica sees the same counts.
+- **Approximate routing:** the blocks routed to the rank within the TTL, or the distinct full blocks the LRU cache policy retains, which leaves out its partial tail blocks and duplicate copies. Each replica counts only the requests it routed, except a replica that serves its indexer (`serve_indexer`), whose counts also include the routing decisions other replicas send it.
+
 ## Policy Contract
 
 - Return `true` from a filter to keep a worker and `false` to reject it.
@@ -673,20 +716,18 @@ To give a worker role its own default-policy settings, select `dynamo-default-co
 
 ```yaml
 worker_selection:
-  aggregated: tuned-default
-  instances:
-    - name: tuned-default
-      type: dynamo-default-cost-fn
-      parameters:
-        overlap_score_credit: 1.0
-        prefill_load_scale: 1.0
-        router_temperature: 0.0
+  aggregated:
+    type: dynamo-default-cost-fn
+    parameters:
+      overlap_score_credit: 1.0
+      prefill_load_scale: 1.0
+      router_temperature: 0.0
 ```
 
 The provider also accepts `overlap_score_credit_decay`, `decode_active_request_weight`,
-`host_cache_hit_weight`, `disk_cache_hit_weight`, and `shared_cache_multiplier`. The multiplier
-also credits blocks a worker can fetch through a KV fetch hint, so set it to enable that credit
-without shared cache. Values must be finite and non-negative. Per-request score and temperature
+`host_cache_hit_weight`, `disk_cache_hit_weight`, and `shared_cache_multiplier`. The `kvcr`
+policy takes the same parameters and also credits blocks a worker can copy from a peer at that
+multiplier. Values must be finite and non-negative. Per-request score and temperature
 overrides do not apply to this policy.
 
 Omitted parameters normally inherit router configuration. When the resolved
@@ -699,8 +740,7 @@ nonzero host, disk, or shared-cache weight therefore enables cache inputs even w
 `overlap_score_credit: 0`. This changes startup behavior for existing policy YAML that
 previously used zero device credit to suppress all cache inputs despite explicit nonzero tier
 weights. Set all four cache-scoring weights to zero to keep such a policy load-only. Plain
-disaggregated decode always resolves all four weights to zero and skips cache inputs. A nonzero
-shared-cache multiplier also requires `KV_TRANSFER` inputs.
+disaggregated decode always resolves all four weights to zero and skips cache inputs.
 
 ## Runtime Configuration
 

@@ -16,8 +16,8 @@ use active_sequences_open_loop::{
 };
 use active_sequences_shared::{SequenceTrace, SequenceTraceEntry, generate_sequence_events};
 use dynamo_bench::kv_router_common::replay::{NoopSequencePublisher, process_mooncake_trace};
-use dynamo_kv_router::protocols::{PrefillLoadHint, WorkerWithDpRank};
-use dynamo_kv_router::{ActiveSequencesMultiWorker, SequenceRequest};
+use dynamo_router_protocol::worker::WorkerWithDpRank;
+use dynamo_slot_tracker::host::{ActiveSequencesMultiWorker, PrefillLoadHint, SequenceRequest};
 
 const BLOCK_SIZE: u32 = 128;
 // mooncake_trace_1000.jsonl records one hash per 512-token trace block.
@@ -29,7 +29,7 @@ const NUM_UNIQUE_INFERENCE_WORKERS: usize = 10;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn active_sequences_trace_replays_without_warnings_or_leaks() -> anyhow::Result<()> {
-    let warning_count = support::warning_counter(&["dynamo_kv_router::sequences", "dynamo_mocker"]);
+    let warning_count = support::warning_counter(&["dynamo_slot_tracker", "dynamo_mocker"]);
     support::reset_warning_count(&warning_count);
 
     let fixture = support::fixture_path("mooncake_trace_1000.jsonl")?;
@@ -96,7 +96,7 @@ async fn active_sequences_trace_replays_without_warnings_or_leaks() -> anyhow::R
     assert_eq!(
         warning_count.load(std::sync::atomic::Ordering::Relaxed),
         0,
-        "sequence replay emitted warn/error logs from dynamo_kv_router::sequences or dynamo_mocker"
+        "sequence replay emitted warn/error logs from dynamo_slot_tracker or dynamo_mocker"
     );
 
     Ok(())

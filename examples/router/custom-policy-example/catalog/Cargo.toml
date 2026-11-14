@@ -17,4 +17,4 @@ simple-filter-score-pick-policy = { package = "dynamo-custom-policy-example-simp
 disagg-filter-score-pick-policy = { package = "dynamo-custom-policy-example-disagg-filter-score-pick", path = "../disagg-filter-score-pick" }
 simple-stacked-score-pick-policy = { package = "dynamo-custom-policy-example-simple-stacked-score-pick", path = "../simple-stacked-score-pick" }
 prefill-cost-score-pick-policy = { package = "dynamo-custom-policy-example-prefill-cost-score-pick", path = "../prefill-cost-score-pick" }
-dynamo-kv-router = { workspace = true, features = ["standalone-selection"] }
+dynamo-kv-router = { workspace = true }

@@ -14,6 +14,7 @@ use dynamo_global_common::PoolKey;
 use dynamo_global_frontend::{Metrics, PoolSnapshot};
 use dynamo_global_router::{
     InFlightTracker, Pool, PoolSelector, PoolTarget, RoundRobinSelector, RoutingRequest,
+    SelectionCorePolicy, SelectionCoreSelector,
 };
 use dynamo_llm::endpoint_type::EndpointType;
 use dynamo_llm::engines::{StreamingEngineAdapter, make_echo_engine};
@@ -167,15 +168,43 @@ async fn global_frontend_with(
     in_flight: Arc<InFlightTracker>,
 ) -> GlobalFrontend {
     let (sender, receiver) = watch::channel(Arc::new(PoolSnapshot::new(pools)));
-    let (listener, url) = bind().await;
-    let cancel = CancellationToken::new();
     let metrics = Metrics::new(Some(REGION.to_owned()), in_flight.clone());
     let app = dynamo_global_frontend::app(receiver, selector, in_flight, client(), metrics);
+    serve_app(app, sender).await
+}
+
+/// A Global Frontend that routes round robin through the router core.
+async fn frontend_with_selection_core(pools: Vec<Pool>) -> GlobalFrontend {
+    let in_flight = Arc::new(InFlightTracker::new());
+    let selection_core =
+        SelectionCoreSelector::new(SelectionCorePolicy::RoundRobin, in_flight.clone())
+            .await
+            .unwrap();
+    let selection_core = Arc::new(selection_core);
+    let (sender, receiver) = watch::channel(Arc::new(PoolSnapshot::new(pools)));
+    let (mut applied, reconcile) =
+        selection_core.reconcile_catalog(receiver, CancellationToken::new());
+    tokio::spawn(reconcile);
+    applied.changed().await.unwrap();
+    let metrics = Metrics::new(Some(REGION.to_owned()), in_flight.clone());
+    let app = dynamo_global_frontend::app_with_selection_core(
+        applied,
+        selection_core,
+        in_flight,
+        client(),
+        metrics,
+    );
+    serve_app(app, sender).await
+}
+
+async fn serve_app(app: axum::Router, pools: watch::Sender<Arc<PoolSnapshot>>) -> GlobalFrontend {
+    let (listener, url) = bind().await;
+    let cancel = CancellationToken::new();
     tokio::spawn(dynamo_global_frontend::serve(listener, app, cancel.clone()));
     wait_until_ok(&url.join("live").unwrap()).await;
     GlobalFrontend {
         server: Server { url, cancel },
-        pools: sender,
+        pools,
     }
 }
 
@@ -276,8 +305,20 @@ fn streamed_text(body: &str) -> String {
 #[tokio::test]
 async fn forwards_each_route_to_the_pool() {
     let pool_frontend = echo_pool_frontend().await;
-    let global = global_frontend(vec![pool("blue", MODEL, &pool_frontend.url)]).await;
+    let pools = vec![pool("blue", MODEL, &pool_frontend.url)];
+    forwards_each_route(&global_frontend(pools.clone()).await).await;
+}
 
+/// The same requests, through the router core: the same responses.
+#[tokio::test]
+async fn forwards_each_route_to_the_pool_through_the_core() {
+    let pool_frontend = echo_pool_frontend().await;
+    let pools = vec![pool("blue", MODEL, &pool_frontend.url)];
+    forwards_each_route(&frontend_with_selection_core(pools).await).await;
+}
+
+/// Each route through `global`: answered, timed once, nothing left in flight.
+async fn forwards_each_route(global: &GlobalFrontend) {
     // Each case's route and request, and how to read the echoed text from
     // the pool's response body.
     type EchoedText = fn(&str) -> String;
@@ -323,6 +364,13 @@ async fn forwards_each_route_to_the_pool() {
         assert_eq!(status, StatusCode::OK, "{route}: {body}");
         assert_eq!(text(&body), "hello", "{route}: {body}");
     }
+    let selections = "dynamo_global_frontend_overhead_selection_ms_count";
+    let in_flight = "dynamo_global_frontend_inflight_requests";
+    metrics_when(&global.server.url, |metrics| {
+        sample(metrics, selections, &[]) == Some(4.0)
+            && sample(metrics, in_flight, &[("pool", "ohio/dynamo/blue")]) == Some(0.0)
+    })
+    .await;
 }
 
 #[tokio::test]

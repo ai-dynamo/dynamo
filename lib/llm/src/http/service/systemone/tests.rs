@@ -365,7 +365,7 @@ fn started_branch(
 
 fn terminal_output(label_ids: &[u32]) -> Annotated<LLMEngineOutput> {
     Annotated::from_data(LLMEngineOutput {
-        engine_data: Some(json!({
+        engine_data: Some(Box::new(json!({
             "sglang_response": {
                 "output_ids": [],
                 "meta_info": {
@@ -378,7 +378,7 @@ fn terminal_output(label_ids: &[u32]) -> Annotated<LLMEngineOutput> {
                     ]]
                 }
             }
-        })),
+        }))),
         ..Default::default()
     })
 }
@@ -628,14 +628,14 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                     self.sibling_started.notified().await;
                 }
                 let abort = Annotated::from_data(LLMEngineOutput {
-                    engine_data: Some(json!({"sglang_response": {
+                    engine_data: Some(Box::new(json!({"sglang_response": {
                         "output_ids": [],
                         "meta_info": {"finish_reason": {
                             "type": "abort",
                             "status_code": status,
                             "message": "private worker detail"
                         }}
-                    }})),
+                    }}))),
                     ..Default::default()
                 });
                 if branch == 0 {

@@ -106,6 +106,8 @@ class DynamoReplayRunnerFactory:
             ),
             supported_agentic_backends=engine_capabilities.supported_agentic_backends,
             agentic_qualification="functional_only",
+            # The AIS model config carries these to replay timing and capacity.
+            supported_engine_model_controls=("gemm_quant_mode", "kvcache_quant_mode"),
         )
 
     def create(self, worker_id: int) -> DynamoReplayRunner:
@@ -566,6 +568,11 @@ class DynamoReplayRunner:
             ),
             "inter_turn_delay_ms": _float_value(
                 workload.get("inter_turn_delay_ms", 0.0), "inter_turn_delay_ms"
+            ),
+            # Session sources author each turn's new input; replay prefixes it
+            # with the earlier turns, as AISimulate's engine stack does.
+            "accumulate_session_deltas": (
+                workload.get("source_type") == "synthetic-session"
             ),
         }
 

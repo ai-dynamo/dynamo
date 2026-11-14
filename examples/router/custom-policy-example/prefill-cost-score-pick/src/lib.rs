@@ -13,12 +13,7 @@ mod scorer;
 
 use std::sync::Arc;
 
-use dynamo_kv_router::KvRouterConfig;
-use dynamo_kv_router::plugins::RouterPluginRegistry;
-use dynamo_kv_router::plugins::worker_selection::{
-    WorkerSelectionPolicy, WorkerSelectionPolicyFactory, WorkerSelectionPolicyParameters,
-    WorkerSelectionPolicyProviderError, WorkerSelectionPolicyRegistryError,
-};
+use dynamo_kv_router::plugins::prelude::*;
 use picker::LowestCostPicker;
 use scorer::{PrefillCostModel, PrefillCostScorer};
 
@@ -66,7 +61,7 @@ fn provider(
     let model = cost_model(parameters.deserialize()?)?;
 
     Ok(Arc::new(
-        move |config: &KvRouterConfig, worker_type, _partition| {
+        move |config: &SelectionConfig, worker_type, _partition| {
             WorkerSelectionPolicy::new(
                 config.clone(),
                 worker_type.as_str(),
