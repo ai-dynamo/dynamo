@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use rmp_serde::{from_slice, to_vec, to_vec_named};
 use serde::Serialize;
+use serde_bytes::ByteBuf;
 
 use crate::event::KvCacheEventData;
 use crate::placement::{PlacementEvent, PlacementOwner};
@@ -1923,4 +1924,97 @@ fn test_unrecognized_media_do_not_pollute_cache_namespace_state() {
         panic!("expected BlockStored");
     };
     assert_eq!(cache_namespace.as_deref(), Some("tenant-a"));
+}
+
+#[derive(Serialize)]
+struct BinaryKeyStored {
+    #[serde(rename = "type")]
+    event_type: &'static str,
+    block_hashes: Vec<u64>,
+    parent_block_hash: Option<u64>,
+    token_ids: Vec<u32>,
+    block_size: usize,
+    extra_keys: Vec<Option<Vec<ByteBuf>>>,
+}
+
+fn binary_key_stored(hash: u64, parent: Option<u64>, key: Option<Vec<u8>>) -> BinaryKeyStored {
+    BinaryKeyStored {
+        event_type: "BlockStored",
+        block_hashes: vec![hash],
+        parent_block_hash: parent,
+        token_ids: vec![0, 0],
+        block_size: 2,
+        extra_keys: vec![key.map(|key| vec![ByteBuf::from(key)])],
+    }
+}
+
+// vLLM publishes a prompt-embeds block's key as a raw SHA-256 digest.
+fn prompt_embeds_digest() -> Vec<u8> {
+    let digest = vec![0xFF_u8; 32];
+    assert!(std::str::from_utf8(&digest).is_err());
+    digest
+}
+
+// A raw key can also be valid UTF-8; on the wire it is still `bin`.
+fn utf8_raw_key() -> Vec<u8> {
+    let key = vec![b'a'; 32];
+    assert!(std::str::from_utf8(&key).is_ok());
+    key
+}
+
+#[test]
+fn non_utf8_extra_key_does_not_fail_the_batch() {
+    let events = [
+        binary_key_stored(11, None, Some(prompt_embeds_digest())),
+        binary_key_stored(12, None, None),
+    ];
+
+    let payload = to_vec_named(&(0.0_f64, events, Some(0_i32))).unwrap();
+    let batch = decode_event_batch(&payload).expect("a binary key must not fail the batch");
+    assert_eq!(batch.events.len(), 2);
+    assert!(
+        batch
+            .events
+            .iter()
+            .all(|event| matches!(event, RawKvEvent::BlockStored { .. }))
+    );
+}
+
+#[test]
+fn binary_extra_key_keeps_block_and_children_out_of_the_index() {
+    for key in [prompt_embeds_digest(), utf8_raw_key()] {
+        let events = [
+            binary_key_stored(11, None, Some(key.clone())),
+            binary_key_stored(12, Some(11), None),
+            binary_key_stored(21, None, None),
+        ];
+        let payload = to_vec_named(&(0.0_f64, events, Some(0_i32))).unwrap();
+        let batch = decode_event_batch(&payload).unwrap();
+
+        let mut normalizer = ZmqEventNormalizer::new(2);
+        let indexed: Vec<Vec<u64>> = batch
+            .events
+            .into_iter()
+            .enumerate()
+            .map(|(event_id, event)| {
+                let placement = normalizer
+                    .normalize(event, event_id as u64, WorkerWithDpRank::new(7, 0))
+                    .unwrap();
+                match placement.event.data {
+                    KvCacheEventData::Stored(store) => store
+                        .blocks
+                        .iter()
+                        .map(|block| block.block_hash.0)
+                        .collect(),
+                    KvCacheEventData::Removed(removed) => {
+                        assert!(removed.block_hashes.is_empty());
+                        Vec::new()
+                    }
+                    KvCacheEventData::Cleared => panic!("no clear was sent"),
+                }
+            })
+            .collect();
+
+        assert_eq!(indexed, vec![vec![], vec![], vec![21]], "raw key {key:?}");
+    }
 }
