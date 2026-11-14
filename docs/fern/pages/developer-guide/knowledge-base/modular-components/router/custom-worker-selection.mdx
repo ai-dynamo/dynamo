@@ -59,6 +59,34 @@ Dynamo owns scheduler queues, eligibility checks, reservations, lifecycle synchr
 
 Version 1.7 removed the compatibility import paths for these contracts, such as `dynamo_kv_router::WorkerFilter` and `dynamo_kv_router::scheduling::RequestClassifier`, along with the `WorkerSelectionPolicyRegistry` alias, the worker-only `RouterPluginRegistry::register` method, and the frontend `worker_selection_policy_factory` setter. Import from `plugins::worker_selection` and `plugins::request_classifier`, use `RouterPluginRegistry`, and register worker policies with `register_worker_selection`. The types and traits are unchanged.
 
+## Experimental Decode Progress
+
+A picker can declare `experimental::decode_progress::DECODE_PROGRESS` and import
+`DecodeProgressByRow` to read `input.decode_progress(row)`. This enables collection
+for the routing partition's supported aggregated requests. Output-block accounting
+keeps its own configuration; no environment switch is required.
+
+Each read looks up only that candidate's live native slot tracker. The summary
+contains the observed request count, the sum of remaining declared output budgets
+in raw tokens, and the age of the oldest nonempty token observation. The budget is
+an upper bound, not a prediction of GPU completion time. Use `observed_age()` to
+apply a policy-specific freshness limit; a missing age requires fallback.
+
+A summary is absent unless every active request on the rank has left prefill and
+has valid observations. Supported requests have one choice, a positive explicit
+output limit, `ignore_eos=true`, and no other stop conditions. Missing host support,
+incomplete observations, invalid updates, and idle ranks return `None`. Collection
+is bounded to 4096 observations per rank. Filters, scorers, request classifiers,
+and hosts without native streamed-output tracking, including the standalone EPP,
+receive no progress.
+
+Observations share the existing request/worker/attempt booking fence and retire
+with the booking. They stay local to this frontend; replica synchronization does
+not carry them. Enabled collection adds a per-owner observation and a per-worker
+timestamp index with O(log N) updates. Reading progress allocates no candidate
+snapshot. LOAD and progress are separate advisory reads; concurrent membership
+changes can make them differ. Prepared rows retain no progress.
+
 ## Build the Policy
 
 ### Create the Policy and Catalog Crates

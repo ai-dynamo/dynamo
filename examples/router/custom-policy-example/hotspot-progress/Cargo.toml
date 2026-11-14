@@ -1,0 +1,28 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "dynamo-custom-policy-example-hotspot-progress"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Calibrated decode-progress hotspot policy example for Dynamo"
+
+[dependencies]
+dynamo-kv-router = { workspace = true }
+serde.workspace = true
+
+[dev-dependencies]
+dynamo-scheduler = { workspace = true, features = ["testing"] }
+dynamo-slot-tracker = { workspace = true, features = ["testing"] }
+dynamo-router-policies = { workspace = true }
+tempfile = "3"
+tokio = { workspace = true, features = ["rt", "macros", "time", "test-util"] }
+criterion = "0.5"
+
+[[bench]]
+name = "selection"
+harness = false

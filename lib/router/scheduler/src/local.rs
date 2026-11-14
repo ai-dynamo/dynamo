@@ -901,10 +901,8 @@ where
         num_blocks: usize,
         decay_fraction: Option<f64>,
     ) -> Result<(), KvSchedulerError> {
-        self.queue.ensure_running()?;
-        self.add_output_blocks_if_booking_sync(booking, num_blocks, decay_fraction)
-            .map(|_| ())
-            .map_err(|error| KvSchedulerError::BookingFailed(error.to_string()))
+        self.update_output_if_booking(booking, num_blocks, decay_fraction, None)
+            .await
     }
 
     /// Apply output updates directly without checking queue shutdown.
@@ -924,6 +922,30 @@ where
             num_blocks,
             decay_fraction,
         )
+    }
+
+    /// Extend the native output path with explicitly supported raw progress.
+    /// Metadata-only updates do not allocate output blocks or publish replica/shared load.
+    /// The native booking owns retirement on free, retry, expiry and worker removal.
+    pub async fn update_output_if_booking(
+        &self,
+        booking: &SchedulerBookingDescriptor,
+        num_blocks: usize,
+        decay_fraction: Option<f64>,
+        progress: Option<dynamo_slot_tracker::host::DecodeProgressUpdate>,
+    ) -> Result<(), KvSchedulerError> {
+        self.queue.ensure_running()?;
+        self.slots
+            .update_output_if_booking(
+                &booking.request_id,
+                booking.worker,
+                booking.attempt_id,
+                num_blocks,
+                decay_fraction,
+                progress,
+            )
+            .map(|_| ())
+            .map_err(|error| KvSchedulerError::BookingFailed(error.to_string()))
     }
 
     pub fn get_potential_loads(

@@ -415,6 +415,7 @@ pub struct WorkerInputView<'a> {
     load: Option<&'a [WorkerLoadInput]>,
     // Set only on the KV path, for a picker that declared RESIDENT_BLOCKS.
     resident_blocks: Option<&'a dyn ResidentBlockSource>,
+    decode_progress: Option<&'a crate::host::DecodeProgressSource<'a>>,
 }
 
 /// Where a picker's rows come from.
@@ -637,6 +638,7 @@ impl<'a> WorkerInputView<'a> {
             cache,
             load,
             resident_blocks,
+            decode_progress: None,
         }
     }
 
@@ -656,7 +658,27 @@ impl<'a> WorkerInputView<'a> {
             cache: None,
             load: None,
             resident_blocks: None,
+            decode_progress: None,
         }
+    }
+
+    pub(crate) fn with_decode_progress(
+        mut self,
+        progress: Option<&'a crate::host::DecodeProgressSource<'a>>,
+    ) -> Self {
+        self.decode_progress = progress;
+        self
+    }
+
+    pub(crate) fn decode_progress_for_row(
+        self,
+        row: usize,
+    ) -> Option<dynamo_slot_tracker::host::DecodeProgress> {
+        let lookup = self.decode_progress?;
+        let PickerRows::Materialized { candidates, .. } = self.rows else {
+            return None;
+        };
+        lookup(candidates.get(row)?.worker)
     }
 
     /// Number of rows, equal to the length of [`Self::candidates`].
