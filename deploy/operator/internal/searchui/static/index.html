@@ -1,0 +1,569 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dynamo Search</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: fixed top bar, DGDR-grouped run tree on the left, one scrolling detail pane. */
+:root {
+  --bg: #0f1117; --surface: #181d27; --surface2: #1f2535; --border: #2a3245;
+  --fg: #e2e8f0; --fg-dim: #8a9bb3; --fg-dimmer: #55637a;
+  --accent: #76b900; --ok: #22c55e; --warn: #f59e0b; --err: #ef4444; --info: #38bdf8; --pareto: #c084fc;
+  --font-ui: 'Inter', system-ui, -apple-system, sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  color-scheme: dark;
+}
+:root[data-theme="light"] {
+  --bg: #f4f6f9; --surface: #ffffff; --surface2: #eef1f6; --border: #d4dbe6;
+  --fg: #1a2232; --fg-dim: #4f5d75; --fg-dimmer: #8191a8; --accent: #5a8f00;
+  color-scheme: light;
+}
+*, *::before, *::after { box-sizing: border-box; }
+html, body { height: 100%; }
+body { margin: 0; font: 14px/1.5 var(--font-ui); background: var(--bg); color: var(--fg); }
+a { color: inherit; text-decoration: none; }
+button { font: inherit; }
+code, pre, .mono { font-family: var(--font-mono); }
+[hidden] { display: none !important; }
+
+.app { display: flex; flex-direction: column; height: 100%; }
+.topbar {
+  display: flex; align-items: center; gap: 12px; padding: 0 16px; height: 48px; flex-shrink: 0;
+  background: var(--surface); border-bottom: 1px solid var(--border);
+}
+.logo { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 15px; color: var(--accent); }
+.sep { width: 1px; height: 20px; background: var(--border); }
+.topbar label { font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--fg-dimmer); }
+select, input[type=text] {
+  font: 13px var(--font-mono); color: var(--fg); background: var(--surface2);
+  border: 1px solid var(--border); border-radius: 6px; padding: 5px 8px; outline: none;
+}
+select:focus, input:focus { border-color: var(--accent); }
+.status { margin-left: auto; display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--fg-dimmer); }
+.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--fg-dimmer); }
+.dot.live { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 25%, transparent); }
+.btn { display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; border-radius: 6px; border: 1px solid var(--border);
+  background: var(--surface2); color: var(--fg); cursor: pointer; font-size: 13px; font-weight: 500; }
+.btn:hover { border-color: var(--fg-dimmer); }
+.btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #0b1200; }
+.btn.small { padding: 3px 8px; font-size: 12px; }
+.btn:disabled { opacity: .5; cursor: default; }
+
+.main { display: flex; flex: 1; min-height: 0; }
+.sidebar { width: 300px; flex-shrink: 0; border-right: 1px solid var(--border); overflow-y: auto; background: var(--surface); }
+.side-head { padding: 12px 16px 8px; font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--fg-dimmer);
+  display: flex; justify-content: space-between; position: sticky; top: 0; background: var(--surface); border-bottom: 1px solid var(--border); }
+.req { border-bottom: 1px solid var(--border); }
+.req-head { padding: 10px 16px 4px; display: flex; align-items: baseline; gap: 8px; }
+.req-name { font-weight: 600; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.req-ns { font-size: 11px; color: var(--fg-dimmer); font-family: var(--font-mono); }
+.run-item { display: flex; align-items: center; gap: 8px; padding: 7px 16px 7px 28px; border-left: 2px solid transparent; }
+.run-item:hover { background: var(--surface2); }
+.run-item.active { background: color-mix(in srgb, var(--accent) 10%, transparent); border-left-color: var(--accent); }
+.run-item .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+
+.content { flex: 1; min-width: 0; overflow-y: auto; }
+.inner { max-width: 1040px; margin: 0 auto; padding: 20px 24px 60px; }
+.crumb { font-size: 12px; color: var(--fg-dimmer); margin-bottom: 6px; }
+.crumb a { color: var(--fg-dim); }
+.crumb a:hover { color: var(--fg); }
+.title { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 16px; }
+.title h1 { font: 500 18px var(--font-mono); margin: 0; word-break: break-all; }
+.sub { font-size: 13px; color: var(--fg-dim); margin: -10px 0 16px; }
+
+.chip { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 500; white-space: nowrap; }
+.chip.Running, .chip.info { background: color-mix(in srgb, var(--info) 15%, transparent); color: var(--info); }
+.chip.Succeeded, .chip.ok { background: color-mix(in srgb, var(--ok) 15%, transparent); color: var(--ok); }
+.chip.Failed, .chip.err { background: color-mix(in srgb, var(--err) 15%, transparent); color: var(--err); }
+.chip.Pending, .chip.warn { background: color-mix(in srgb, var(--warn) 15%, transparent); color: var(--warn); }
+.chip.pareto { background: color-mix(in srgb, var(--pareto) 15%, transparent); color: var(--pareto); }
+.chip.scalar { background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent); }
+.chip.muted { background: color-mix(in srgb, var(--fg-dimmer) 20%, transparent); color: var(--fg-dim); }
+
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin-bottom: 20px; }
+.stat { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; min-width: 0; }
+.stat .k { font-size: 11px; color: var(--fg-dimmer); margin-bottom: 2px; }
+.stat .v { font: 500 18px var(--font-mono); font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.stat .v small { font-size: 12px; color: var(--fg-dimmer); }
+.stat .v.text { font-size: 13px; }
+
+.tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--border); margin-bottom: 18px; overflow-x: auto; }
+.tab { padding: 8px 14px; font-size: 13px; font-weight: 500; color: var(--fg-dim); border-bottom: 2px solid transparent; cursor: pointer; white-space: nowrap; }
+.tab:hover { color: var(--fg); }
+.tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+.tab .n { font: 11px var(--font-mono); color: var(--fg-dimmer); margin-left: 4px; }
+
+.h { font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--fg-dimmer); margin: 22px 0 10px; display: flex; align-items: center; gap: 10px; }
+.h:first-child { margin-top: 0; }
+.h .right { margin-left: auto; display: flex; gap: 8px; align-items: center; text-transform: none; letter-spacing: 0; font-weight: 400; }
+.note { font-size: 12px; color: var(--fg-dimmer); }
+.panel { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
+.empty { padding: 40px 20px; text-align: center; color: var(--fg-dimmer); }
+.empty b { display: block; color: var(--fg-dim); font-weight: 500; margin-bottom: 4px; }
+
+.bar { height: 6px; border-radius: 3px; background: var(--surface2); overflow: hidden; }
+.bar i { display: block; height: 100%; background: var(--accent); }
+.bar-row { display: grid; grid-template-columns: 140px 1fr 90px; gap: 10px; align-items: center; font-size: 12px; margin-bottom: 8px; }
+.bar-row .mono { text-align: right; color: var(--fg-dim); }
+.counts { display: flex; flex-wrap: wrap; gap: 14px; font-size: 12px; color: var(--fg-dim); margin-top: 8px; }
+
+.conds { display: flex; flex-direction: column; gap: 6px; }
+.cond { display: grid; grid-template-columns: 110px 1fr; gap: 10px; padding: 8px 12px; background: var(--surface2); border-radius: 8px; font-size: 12px; }
+.cond .t { font-weight: 600; }
+.cond .m { color: var(--fg-dimmer); }
+
+table.grid { width: 100%; border-collapse: collapse; font-size: 13px; }
+table.grid th { text-align: left; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--fg-dimmer); padding: 8px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+table.grid td { padding: 9px 10px; border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent); vertical-align: middle; }
+table.grid tr.row { cursor: pointer; }
+table.grid tr.row:hover { background: var(--surface2); }
+table.grid tr.row.sel { background: color-mix(in srgb, var(--pareto) 10%, transparent); }
+table.grid td.num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+table.grid th.num { text-align: right; }
+.wrap { overflow-x: auto; }
+.kv { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; font-size: 13px; }
+.kv .k { color: var(--fg-dimmer); }
+.kv .v { font-family: var(--font-mono); word-break: break-all; }
+
+.code { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; overflow: auto; max-height: 520px; }
+.code pre { margin: 0; padding: 12px 14px; font: 12px/1.6 var(--font-mono); color: var(--fg-dim); }
+.code .k { color: var(--info); } .code .s { color: var(--ok); } .code .n { color: var(--warn); } .code .b { color: var(--pareto); } .code .c { color: var(--fg-dimmer); }
+.log { background: #0a0c12; color: #cfd8e3; border: 1px solid var(--border); border-radius: 8px; height: 460px; overflow: auto; padding: 10px 12px; font: 12px/1.55 var(--font-mono); white-space: pre-wrap; word-break: break-all; }
+:root[data-theme="light"] .log { background: #1a2232; }
+
+.chart { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; margin-bottom: 12px; }
+.chart .cap { display: flex; justify-content: space-between; align-items: center; font-size: 12px; color: var(--fg-dim); margin-bottom: 6px; flex-wrap: wrap; gap: 8px; }
+.chart svg { width: 100%; height: auto; display: block; font-family: var(--font-mono); }
+.chart svg text { fill: var(--fg-dim); font-size: 10px; }
+.chart svg .axis { stroke: var(--border); }
+.pc-line { fill: none; stroke-width: 1.6; cursor: pointer; }
+.pc-line:hover { stroke-width: 3; opacity: 1 !important; }
+.pt { cursor: pointer; }
+.legend { display: flex; gap: 14px; font-size: 11px; color: var(--fg-dim); flex-wrap: wrap; }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 50%; vertical-align: -1px; margin-right: 4px; }
+
+.form { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.form label { display: block; font-size: 12px; color: var(--fg-dim); margin-bottom: 4px; }
+.form input { width: 100%; }
+.notice { display: flex; gap: 10px; padding: 10px 12px; border-radius: 8px; background: color-mix(in srgb, var(--warn) 10%, transparent); color: var(--fg); font-size: 12px; margin: 12px 0; }
+.notice b { color: var(--warn); }
+.result { font-size: 13px; margin-top: 10px; white-space: pre-wrap; }
+.result.ok { color: var(--ok); } .result.err { color: var(--err); }
+.toast { position: fixed; bottom: 16px; right: 16px; background: var(--surface2); border: 1px solid var(--border); padding: 8px 12px; border-radius: 8px; font-size: 12px; opacity: 0; transition: opacity .2s; }
+.toast.show { opacity: 1; }
+.spin { width: 16px; height: 16px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin .7s linear infinite; display: inline-block; vertical-align: middle; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spin { animation: none; } }
+@media (max-width: 760px) {
+  .main { flex-direction: column; }
+  .sidebar { width: 100%; max-height: 220px; border-right: none; border-bottom: 1px solid var(--border); }
+  .inner { padding: 14px 16px 40px; }
+  .form { grid-template-columns: 1fr; }
+  .bar-row { grid-template-columns: 100px 1fr 70px; }
+}
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="topbar">
+    <a class="logo" href="#runs" aria-label="Dynamo Search home">
+      <svg width="20" height="20" viewBox="0 0 20 20" aria-hidden="true"><rect x="2" y="9" width="4" height="9" rx="1" fill="currentColor"/><rect x="8" y="5" width="4" height="13" rx="1" fill="currentColor" opacity=".8"/><rect x="14" y="1" width="4" height="17" rx="1" fill="currentColor" opacity=".55"/></svg>
+      Dynamo Search
+    </a>
+    <div class="sep"></div>
+    <label for="ns">namespace</label>
+    <select id="ns" aria-label="Namespace"><option value="">all</option></select>
+    <div class="status">
+      <span class="dot" id="dot"></span><span id="dot-label">connecting</span>
+      <button class="btn small" id="theme" type="button" aria-label="Toggle theme">theme</button>
+    </div>
+  </header>
+  <div class="main">
+    <nav class="sidebar" aria-label="Requests and runs">
+      <div class="side-head"><span>DGDR / runs</span><span class="mono" id="side-count"></span></div>
+      <div id="side"></div>
+    </nav>
+    <main class="content"><div class="inner" id="content"><div class="empty"><span class="spin"></span></div></div></main>
+  </div>
+</div>
+<div class="toast" id="toast" role="status"></div>
+
+<script>
+'use strict';
+// ---------- state ----------
+const S = { ns: '', requests: [], route: null, runDetail: null, cand: null, tab: 'overview', selected: null, logSource: null, logFollow: true };
+const DIMS = ['deployment_mode','strategy','tp','pp','attention_dp','moe_tp','moe_ep','prefill_tp','decode_tp','replicas','prefill_replicas','decode_replicas','agg_max_num_seqs','agg_max_num_batched_tokens','prefill_max_num_seqs','decode_max_num_seqs','concurrency','used_gpus','hardware_sku','backend'];
+const DIM_LABEL = { deployment_mode:'mode', attention_dp:'attn DP', moe_tp:'MoE TP', moe_ep:'MoE EP', prefill_tp:'prefill TP', decode_tp:'decode TP', prefill_replicas:'prefill ×', decode_replicas:'decode ×', agg_max_num_seqs:'max seqs', agg_max_num_batched_tokens:'max batched tok', prefill_max_num_seqs:'prefill max seqs', decode_max_num_seqs:'decode max seqs', used_gpus:'GPUs', hardware_sku:'SKU', replicas:'replicas' };
+const OBJ_LABEL = { throughput_per_gpu:'throughput / GPU', throughput_per_user:'throughput / user', goodput_per_gpu:'goodput / GPU', mean_e2e_latency_ms:'mean E2E (ms)' };
+
+// ---------- utilities ----------
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fmt = (v, d = 1) => v == null || v === '' ? '—' : typeof v === 'number' ? (Number.isInteger(v) ? v.toLocaleString() : v.toFixed(d)) : String(v);
+const fmtMs = v => v == null ? '—' : v >= 10000 ? (v/1000).toFixed(1)+' s' : Math.round(v).toLocaleString()+' ms';
+const shortName = n => n.replace(/^.*?-evaluated-point-/, 'point-');
+const label = k => DIM_LABEL[k] || OBJ_LABEL[k] || k.replace(/_/g, ' ');
+const chip = (text, cls) => `<span class="chip ${cls}">${esc(text)}</span>`;
+const phaseChip = p => chip(p || 'Pending', p || 'Pending');
+const modeChip = m => m === 'Pareto' ? chip('Pareto', 'pareto') : chip(m || 'Scalar', 'scalar');
+const validChip = c => c.valid === 'True' ? chip('Valid', 'ok') : c.valid === 'False' ? chip('Invalid · ' + (c.validReason || ''), 'err') : chip('Not validated', 'muted');
+const stateChip = c => c.retired ? chip(c.retiredReason === 'run deleted' ? 'retained' : 'superseded', 'muted') : c.rank ? chip('published', 'ok') : chip('observed', 'muted');
+function toast(msg) { const t = $('toast'); t.textContent = msg; t.classList.add('show'); setTimeout(() => t.classList.remove('show'), 1800); }
+async function copyText(text) { try { await navigator.clipboard.writeText(text); toast('Copied'); } catch { toast('Copy failed; select the text instead'); } }
+function ago(iso) { if (!iso) return '—'; const s = (Date.now() - new Date(iso)) / 1000; if (s < 90) return Math.round(s)+'s ago'; if (s < 5400) return Math.round(s/60)+'m ago'; if (s < 172800) return Math.round(s/3600)+'h ago'; return Math.round(s/86400)+'d ago'; }
+
+// Minimal YAML emitter for the DGD and AISimulate input views.
+function yaml(v, ind = 0) {
+  const pad = '  '.repeat(ind);
+  if (v === null || v === undefined) return 'null';
+  if (typeof v === 'boolean' || typeof v === 'number') return String(v);
+  if (typeof v === 'string') {
+    if (v.includes('\n')) return '|\n' + v.split('\n').map(l => pad + '  ' + l).join('\n');
+    return /^[A-Za-z0-9_./-][A-Za-z0-9_.:/ -]*$/.test(v) && !/^(true|false|null|yes|no|on|off|~)$/i.test(v) && !/^[-\d.]/.test(v) ? v : JSON.stringify(v);
+  }
+  if (Array.isArray(v)) {
+    if (!v.length) return '[]';
+    return v.map(item => {
+      const s = yaml(item, ind + 1);
+      if (item && typeof item === 'object' && !Array.isArray(item) && Object.keys(item).length) return pad + '- ' + s.replace(/^\s+/, '');
+      return pad + '- ' + s;
+    }).join('\n');
+  }
+  const keys = Object.keys(v);
+  if (!keys.length) return '{}';
+  return keys.map(k => {
+    const val = v[k];
+    const key = /^[A-Za-z0-9_.-]+$/.test(k) ? k : JSON.stringify(k);
+    if (val && typeof val === 'object' && (Array.isArray(val) ? val.length : Object.keys(val).length)) return pad + key + ':\n' + yaml(val, ind + 1);
+    return pad + key + ': ' + yaml(val, ind + 1);
+  }).join('\n');
+}
+function hl(text) {
+  return esc(text).split('\n').map(line => line
+    .replace(/^(\s*-?\s*)([A-Za-z0-9_."'-]+)(:)(\s|$)/, '$1<span class="k">$2</span>$3$4')
+    .replace(/(:\s|-\s)(&quot;.*&quot;|&#39;.*&#39;)$/, '$1<span class="s">$2</span>')
+    .replace(/(:\s|-\s)(-?\d+(?:\.\d+)?(?:e[-+]?\d+)?)$/, '$1<span class="n">$2</span>')
+    .replace(/(:\s|-\s)(true|false|null)$/, '$1<span class="b">$2</span>')
+    .replace(/(#.*)$/, '<span class="c">$1</span>')).join('\n');
+}
+const codeBlock = (obj, id) => `<div class="code" id="${id || ''}"><pre>${hl(yaml(obj))}</pre></div>`;
+
+// ---------- data ----------
+async function api(path) { const r = await fetch(path); if (!r.ok) throw new Error(await r.text() || r.status); return r.json(); }
+async function loadRequests() {
+  S.requests = await api('/api/v1/requests' + (S.ns ? '?namespace=' + encodeURIComponent(S.ns) : ''));
+  renderSidebar();
+}
+async function loadNamespaces() {
+  const list = await api('/api/v1/namespaces');
+  const sel = $('ns'); const cur = sel.value;
+  sel.innerHTML = '<option value="">all</option>' + list.map(n => `<option value="${esc(n)}">${esc(n)}</option>`).join('');
+  sel.value = list.includes(cur) ? cur : '';
+  S.ns = sel.value;
+}
+
+// ---------- routing ----------
+function parseHash() {
+  const h = location.hash.slice(1) || 'runs';
+  const p = h.split('/');
+  if (p[0] === 'run' && p.length >= 3) return { view: 'run', ns: p[1], name: p[2], tab: p[3] || S.tab };
+  if (p[0] === 'candidate' && p.length >= 3) return { view: 'candidate', ns: p[1], name: p[2] };
+  return { view: 'runs' };
+}
+async function route() {
+  S.route = parseHash();
+  stopLog();
+  try {
+    if (S.route.view === 'run') { S.tab = S.route.tab || 'overview'; await renderRun(); }
+    else if (S.route.view === 'candidate') await renderCandidate();
+    else renderOverview();
+  } catch (e) { $('content').innerHTML = `<div class="empty"><b>Could not load</b>${esc(e.message)}</div>`; }
+  renderSidebar();
+}
+window.addEventListener('hashchange', route);
+let refreshTimer = null;
+function refresh() { clearTimeout(refreshTimer); refreshTimer = setTimeout(async () => { await loadNamespaces(); await loadRequests(); if (S.route?.view !== 'runs' || true) route(); }, 300); }
+
+// ---------- live updates ----------
+function connect() {
+  const es = new EventSource('/api/v1/events');
+  es.addEventListener('hello', () => { $('dot').className = 'dot live'; $('dot-label').textContent = 'live'; });
+  es.addEventListener('update', refresh);
+  es.onerror = () => { $('dot').className = 'dot'; $('dot-label').textContent = 'reconnecting'; es.close(); setTimeout(connect, 3000); };
+}
+
+// ---------- sidebar ----------
+function renderSidebar() {
+  const side = $('side');
+  const runs = S.requests.reduce((n, r) => n + r.runs.length, 0);
+  $('side-count').textContent = runs ? runs + ' runs' : '';
+  if (!S.requests.length) { side.innerHTML = '<div class="empty" style="padding:24px 16px"><b>No requests</b>Create a DynamoGraphDeploymentRequest to start a search.</div>'; return; }
+  side.innerHTML = S.requests.map(req => `
+    <div class="req">
+      <div class="req-head"><span class="req-name" title="${esc(req.name)}">${esc(req.name)}</span><span class="req-ns">${esc(req.namespace)}</span>${req.live ? '' : chip('retained', 'muted')}</div>
+      ${req.runs.map(r => {
+        const active = S.route?.view === 'run' && S.route.ns === r.namespace && S.route.name === r.name
+          || S.route?.view === 'candidate' && S.runDetail && S.runDetail.name === r.name && S.runDetail.namespace === r.namespace;
+        return `<a class="run-item${active ? ' active' : ''}" href="#run/${esc(r.namespace)}/${esc(r.name)}"><span class="name" title="${esc(r.name)}">${esc(r.name)}</span>${r.retained ? chip('retained','muted') : ''}${phaseChip(r.phase)}</a>`;
+      }).join('')}
+    </div>`).join('');
+}
+
+// ---------- overview ----------
+function renderOverview() {
+  const rows = S.requests.flatMap(req => req.runs.map(r => ({ req, r })));
+  $('content').innerHTML = `
+    <div class="title"><h1 style="font-family:var(--font-ui)">Runs</h1>${S.ns ? chip(S.ns, 'muted') : ''}</div>
+    ${rows.length ? `<div class="panel wrap" style="padding:0"><table class="grid">
+      <tr><th>Request / run</th><th>Model</th><th>Objective</th><th class="num">Candidates</th><th>Phase</th><th class="num">Started</th><th class="num">Duration</th></tr>
+      ${rows.map(({req, r}) => `<tr class="row" onclick="location.hash='run/${esc(r.namespace)}/${esc(r.name)}'">
+        <td><div class="mono" style="font-size:12px">${esc(r.name)}</div><div class="note">${esc(req.name)} · ${esc(r.namespace)}</div></td>
+        <td class="mono" style="font-size:12px">${esc(r.model || '—')}</td>
+        <td>${modeChip(r.mode)}${r.metric ? ' <span class="note">' + esc(r.metric) + '</span>' : ''}</td>
+        <td class="num">${r.published}${r.maxCandidates ? '<small style="color:var(--fg-dimmer)">/' + r.maxCandidates + '</small>' : ''}</td>
+        <td>${phaseChip(r.phase)}${r.retained ? ' ' + chip('retained','muted') : ''}</td>
+        <td class="num note">${ago(r.startTime)}</td><td class="num note">${esc(r.duration || '—')}</td></tr>`).join('')}
+    </table></div>` : '<div class="empty"><b>No runs yet</b>Runs appear here as soon as a Request is accepted.</div>'}`;
+}
+
+// ---------- run detail ----------
+async function renderRun() {
+  const { ns, name } = S.route;
+  const c = $('content');
+  if (!S.runDetail || S.runDetail.name !== name || S.runDetail.namespace !== ns) c.innerHTML = '<div class="empty"><span class="spin"></span></div>';
+  const r = await api(`/api/v1/runs/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`);
+  S.runDetail = r;
+  const ev = r.evaluations;
+  const evDone = ev ? ev.feasible + ev.infeasible + ev.failed + ev.unsupported : 0;
+  const tabs = [['overview','Overview'],['candidates','Candidates',r.candidates.length],['input','AISimulate input'],['log','Log'],['timeline','Timeline',r.samples?.length||0]];
+  c.innerHTML = `
+    <div class="crumb"><a href="#runs">Runs</a> / ${esc(r.namespace)} / ${esc(r.request || '—')}</div>
+    <div class="title"><h1>${esc(r.name)}</h1>${phaseChip(r.phase)}${modeChip(r.mode)}${r.retained ? chip('retained · deleted ' + ago(r.deletedAt), 'muted') : ''}</div>
+    <div class="sub">${esc(r.model || '')}${r.hardwareSku ? ' · ' + esc(r.hardwareSku) : ''}${r.backends?.length ? ' · ' + esc(r.backends.join(', ')) : ''}${r.metric ? ' · optimize ' + esc(r.metric) : ''}</div>
+    <div class="stats">
+      <div class="stat"><div class="k">Candidates</div><div class="v">${r.published}<small>${r.maxCandidates ? ' / ' + r.maxCandidates : ''}</small></div></div>
+      ${r.mode === 'Pareto' ? `<div class="stat"><div class="k">Pareto front</div><div class="v">${r.paretoFront || 0}</div></div>` : ''}
+      <div class="stat"><div class="k">Evaluations</div><div class="v">${ev ? evDone + '<small> / ' + ev.scheduled + '</small>' : '<small>not reported</small>'}</div></div>
+      ${r.rounds?.length ? `<div class="stat"><div class="k">Rounds</div><div class="v">${r.rounds.reduce((a,b)=>a+b.completed,0)}<small> / ${r.rounds.reduce((a,b)=>a+b.total,0)}</small></div></div>` : ''}
+      <div class="stat"><div class="k">Duration</div><div class="v text">${esc(r.duration || '—')}</div></div>
+      <div class="stat"><div class="k">${r.completionTime ? 'Completed' : 'Last progress'}</div><div class="v text">${ago(r.completionTime || r.lastProgressTime)}</div></div>
+    </div>
+    <div class="tabs">${tabs.map(([id, t, n]) => `<a class="tab${S.tab===id?' active':''}" href="#run/${esc(ns)}/${esc(name)}/${id}">${t}${n != null ? '<span class="n">' + n + '</span>' : ''}</a>`).join('')}</div>
+    <div id="tab"></div>`;
+  renderTab();
+}
+function renderTab() {
+  const r = S.runDetail, el = $('tab');
+  if (S.tab === 'candidates') el.innerHTML = candidateTable(r);
+  else if (S.tab === 'input') el.innerHTML = r.aisimInput ? `<div class="h">Effective AISimulate input<span class="right"><button class="btn small" onclick="copyText(yaml(S.runDetail.aisimInput))">Copy YAML</button></span></div>${codeBlock(r.aisimInput)}` : '<div class="empty">The Run has not recorded its effective input yet.</div>';
+  else if (S.tab === 'log') renderLogTab();
+  else if (S.tab === 'timeline') el.innerHTML = timeline(r);
+  else el.innerHTML = overviewTab(r);
+}
+function overviewTab(r) {
+  const ev = r.evaluations;
+  let progress = '';
+  if (r.rounds?.length) progress += r.rounds.map(b => `<div class="bar-row"><span>${esc(b.name || 'rounds')}</span><div class="bar"><i style="width:${b.total ? 100*b.completed/b.total : 0}%"></i></div><span class="mono">${b.completed} / ${b.total}</span></div>`).join('');
+  if (ev) {
+    const done = ev.feasible + ev.infeasible + ev.failed + ev.unsupported;
+    progress += `<div class="bar-row"><span>evaluations</span><div class="bar"><i style="width:${ev.scheduled ? 100*done/ev.scheduled : 0}%"></i></div><span class="mono">${done} / ${ev.scheduled}</span></div>
+      <div class="counts"><span style="color:var(--ok)">● ${ev.feasible} feasible</span><span style="color:var(--warn)">● ${ev.infeasible} infeasible</span><span style="color:var(--err)">● ${ev.failed} failed</span>${ev.unsupported ? `<span>● ${ev.unsupported} unsupported</span>` : ''}${ev.running ? `<span style="color:var(--info)">● ${ev.running} running</span>` : ''}${ev.cacheHits ? `<span>● ${ev.cacheHits} cache hits</span>` : ''}</div>`;
+  }
+  if (!progress) progress = `<div class="note">This publisher version reports candidate publication only (${r.published} published${r.mode === 'Pareto' ? ', ' + (r.paretoFront||0) + ' on the front' : ''}); round and evaluation counters are not in the Run status.</div>`;
+  return `
+    <div class="h">Progress</div><div class="panel">${progress}</div>
+    ${r.conditions?.length ? `<div class="h">Conditions</div><div class="conds">${r.conditions.map(cond).join('')}</div>` : ''}
+    <div class="h">Search space <span class="note">${r.candidates.length} published point${r.candidates.length===1?'':'s'}, including superseded ones</span></div>
+    ${parallelCoords(r)}
+    ${r.mode === 'Pareto' ? `<div class="h">Pareto front</div>${paretoChart(r)}` : `<div class="h">Ranking</div>${leaderboard(r)}`}`;
+}
+const cond = c => `<div class="cond"><span class="t" style="color:${c.status==='True'?'var(--ok)':c.status==='False'?'var(--err)':'var(--warn)'}">${esc(c.type)}</span><span><span>${esc(c.reason||'')}</span>${c.message ? ' <span class="m">' + esc(c.message) + '</span>' : ''}</span></div>`;
+
+function objectiveKeys(r) { const s = new Set(); r.candidates.forEach(c => Object.keys(c.objectives || {}).forEach(k => s.add(k))); return [...s].sort(); }
+function candidateTable(r) {
+  if (!r.candidates.length) return '<div class="empty"><b>No candidates published</b>They appear when the publisher materializes the first evaluated point.</div>';
+  const objs = objectiveKeys(r);
+  const cols = objs.length ? objs : ['score'];
+  return `<div class="panel wrap" style="padding:0"><table class="grid">
+    <tr><th class="num">#</th><th>Candidate</th><th>Topology</th><th class="num">GPUs</th>${cols.map(k => `<th class="num">${esc(label(k))}</th>`).join('')}<th class="num">mean E2E</th><th>Validity</th><th>State</th></tr>
+    ${r.candidates.map(c => `<tr class="row${S.selected===c.name?' sel':''}" onclick="location.hash='candidate/${esc(c.namespace)}/${esc(c.name)}'">
+      <td class="num">${c.rank ?? '—'}</td>
+      <td><div class="mono" style="font-size:12px" title="${esc(c.name)}">${esc(shortName(c.name))}</div><div class="note">${esc(c.backend||'')}</div></td>
+      <td class="mono" style="font-size:12px">${esc(c.topology || '—')}</td>
+      <td class="num">${fmt(c.usedGpus)}</td>
+      ${cols.map(k => `<td class="num">${fmt(k === 'score' ? c.score : c.objectives?.[k])}</td>`).join('')}
+      <td class="num">${fmtMs(c.summary?.mean_e2e_latency_ms)}</td>
+      <td>${validChip(c)}</td><td>${stateChip(c)}</td></tr>`).join('')}
+  </table></div>`;
+}
+function leaderboard(r) {
+  const ranked = r.candidates.filter(c => c.score != null);
+  if (!ranked.length) return '<div class="note">No scores recorded.</div>';
+  const max = Math.max(...ranked.map(c => c.score));
+  return `<div class="panel">${ranked.map(c => `<div class="bar-row" style="cursor:pointer" onclick="location.hash='candidate/${esc(c.namespace)}/${esc(c.name)}'"><span class="mono" style="font-size:12px;overflow:hidden;text-overflow:ellipsis">${c.rank ? '#'+c.rank+' ' : ''}${esc(shortName(c.name))}</span><div class="bar"><i style="width:${100*c.score/max}%;background:${c.retired?'var(--fg-dimmer)':'var(--accent)'}"></i></div><span class="mono">${fmt(c.score)}</span></div>`).join('')}</div>`;
+}
+
+// Parallel coordinates over the evaluation parameters. Every axis is ordinal: the sorted
+// distinct values of that parameter, so TP 1/2/4/8 and agg/disagg read the same way.
+function parallelCoords(r) {
+  const cands = r.candidates.filter(c => c.parameters);
+  if (!cands.length) return '<div class="note">No evaluation parameters recorded on these candidates.</div>';
+  let dims = DIMS.filter(d => cands.some(c => c.parameters[d] != null));
+  const varying = dims.filter(d => new Set(cands.map(c => String(c.parameters[d]))).size > 1);
+  if (dims.length > 9) dims = varying.length >= 3 ? varying.slice(0, 11) : dims.slice(0, 9);
+  if (!dims.length) return '<div class="note">Nothing to plot.</div>';
+  const values = {};
+  dims.forEach(d => {
+    const set = [...new Set(cands.map(c => c.parameters[d]).filter(v => v != null).map(v => typeof v === 'number' ? v : String(v)))];
+    set.sort((a, b) => typeof a === 'number' && typeof b === 'number' ? a - b : String(a).localeCompare(String(b)));
+    values[d] = set.map(String);
+  });
+  const W = 920, H = 230, top = 28, bottom = 36, left = 50, right = 50;
+  const x = i => left + i * (W - left - right) / Math.max(dims.length - 1, 1);
+  const y = (d, v) => { const n = values[d].length; const i = values[d].indexOf(String(v)); return n === 1 ? (top + H - bottom) / 2 : top + (H - top - bottom) * (1 - i / (n - 1)); };
+  const scores = cands.map(c => c.score).filter(v => v != null);
+  const lo = Math.min(...scores), hi = Math.max(...scores);
+  const alpha = c => c.score == null || hi === lo ? .8 : .3 + .7 * (c.score - lo) / (hi - lo);
+  const color = c => c.valid === 'False' ? 'var(--err)' : c.retired ? 'var(--fg-dimmer)' : r.mode === 'Pareto' ? 'var(--pareto)' : 'var(--accent)';
+  const lines = cands.map(c => {
+    const pts = dims.map((d, i) => c.parameters[d] == null ? null : `${x(i)},${y(d, c.parameters[d])}`).filter(Boolean);
+    return `<polyline class="pc-line" points="${pts.join(' ')}" stroke="${color(c)}" opacity="${alpha(c).toFixed(2)}" ${c.retired?'stroke-dasharray="4 3"':''} onclick="location.hash='candidate/${esc(c.namespace)}/${esc(c.name)}'"><title>${esc(shortName(c.name))}${c.score!=null?' · score '+fmt(c.score):''}</title></polyline>`;
+  }).join('');
+  const axes = dims.map((d, i) => `<line class="axis" x1="${x(i)}" x2="${x(i)}" y1="${top}" y2="${H-bottom}"/>
+    <text x="${x(i)}" y="${H-bottom+16}" text-anchor="middle" style="font-weight:600">${esc(label(d))}</text>
+    ${values[d].map(v => `<text x="${x(i)}" y="${y(d, v) - 5}" text-anchor="middle" style="fill:var(--fg-dimmer)">${esc(v.length > 9 ? v.slice(0, 8) + '…' : v)}</text>`).join('')}`).join('');
+  return `<div class="chart"><div class="cap"><span>Each line is one published evaluated point · colour is state · opacity is objective score</span>
+    <span class="legend"><span><i style="background:${r.mode==='Pareto'?'var(--pareto)':'var(--accent)'}"></i>published</span><span><i style="background:var(--fg-dimmer)"></i>superseded</span><span><i style="background:var(--err)"></i>invalid</span></span></div>
+    <svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Search-space exploration">${axes}${lines}</svg></div>`;
+}
+function paretoChart(r) {
+  const keys = objectiveKeys(r);
+  const pts = r.candidates.filter(c => c.objectives && keys.length >= 2);
+  if (keys.length < 2 || !pts.length) return '<div class="note">Candidates carry fewer than two objectives; nothing to plot.</div>';
+  const kx = S.px && keys.includes(S.px) ? S.px : keys[1], ky = S.py && keys.includes(S.py) ? S.py : keys[0];
+  const xs = pts.map(c => c.objectives[kx]), ys = pts.map(c => c.objectives[ky]);
+  const W = 920, H = 280, L = 70, R = 20, T = 16, B = 44;
+  const xmin = 0, xmax = Math.max(...xs) * 1.1 || 1, ymin = 0, ymax = Math.max(...ys) * 1.1 || 1;
+  const X = v => L + (v - xmin) / (xmax - xmin) * (W - L - R), Y = v => T + (H - T - B) * (1 - (v - ymin) / (ymax - ymin));
+  const live = pts.filter(c => !c.retired && c.valid !== 'False').sort((a, b) => a.objectives[kx] - b.objectives[kx]);
+  const ticks = n => [0, .25, .5, .75, 1].map(t => `<line class="axis" x1="${X(xmin+t*(xmax-xmin))}" x2="${X(xmin+t*(xmax-xmin))}" y1="${H-B}" y2="${H-B+4}"/><text x="${X(xmin+t*(xmax-xmin))}" y="${H-B+16}" text-anchor="middle">${fmt(xmin+t*(xmax-xmin),0)}</text>
+    <line class="axis" x1="${L-4}" x2="${L}" y1="${Y(ymin+t*(ymax-ymin))}" y2="${Y(ymin+t*(ymax-ymin))}"/><text x="${L-8}" y="${Y(ymin+t*(ymax-ymin))+3}" text-anchor="end">${fmt(ymin+t*(ymax-ymin),0)}</text>`).join('');
+  const opts = k => keys.map(o => `<option value="${esc(o)}"${o===k?' selected':''}>${esc(label(o))}</option>`).join('');
+  return `<div class="chart"><div class="cap"><span>Published points; the dashed line joins the live projection</span>
+    <span>y <select onchange="S.py=this.value;renderTab()">${opts(ky)}</select> &nbsp; x <select onchange="S.px=this.value;renderTab()">${opts(kx)}</select></span></div>
+    <svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Pareto front">
+      <line class="axis" x1="${L}" x2="${L}" y1="${T}" y2="${H-B}"/><line class="axis" x1="${L}" x2="${W-R}" y1="${H-B}" y2="${H-B}"/>${ticks()}
+      <text x="${(L+W-R)/2}" y="${H-4}" text-anchor="middle">${esc(label(kx))} →</text>
+      <text transform="translate(14 ${(T+H-B)/2}) rotate(-90)" text-anchor="middle">${esc(label(ky))} →</text>
+      <polyline fill="none" stroke="var(--pareto)" stroke-dasharray="5 4" opacity=".6" points="${live.map(c => X(c.objectives[kx])+','+Y(c.objectives[ky])).join(' ')}"/>
+      ${pts.map(c => `<circle class="pt" cx="${X(c.objectives[kx])}" cy="${Y(c.objectives[ky])}" r="${S.selected===c.name?8:6}" fill="${c.retired?'none':c.valid==='False'?'var(--err)':'var(--pareto)'}" stroke="${c.retired?'var(--fg-dimmer)':'var(--surface)'}" stroke-width="2" onclick="location.hash='candidate/${esc(c.namespace)}/${esc(c.name)}'"><title>${esc(shortName(c.name))}\n${esc(label(ky))} ${fmt(c.objectives[ky])}\n${esc(label(kx))} ${fmt(c.objectives[kx])}${c.rank?'\nrank '+c.rank:''}</title></circle>`).join('')}
+    </svg></div>`;
+}
+function timeline(r) {
+  if (!r.samples?.length) return '<div class="empty"><b>No history yet</b>Status samples are recorded from the moment the UI first observes a Run; configure a history backend to keep them across restarts.</div>';
+  const max = Math.max(1, ...r.samples.map(s => s.published));
+  const W = 920, H = 80;
+  const pts = r.samples.map((s, i) => `${20 + i * (W - 40) / Math.max(r.samples.length - 1, 1)},${H - 10 - (H - 20) * s.published / max}`);
+  return `<div class="chart"><div class="cap"><span>Published candidates over observed status changes</span></div><svg viewBox="0 0 ${W} ${H}"><polyline fill="none" stroke="var(--accent)" stroke-width="2" points="${pts.join(' ')}"/>${pts.map(p => `<circle cx="${p.split(',')[0]}" cy="${p.split(',')[1]}" r="3" fill="var(--accent)"/>`).join('')}</svg></div>
+    <div class="panel wrap" style="padding:0"><table class="grid"><tr><th>Observed</th><th>Phase</th><th class="num">Published</th>${r.mode==='Pareto'?'<th class="num">Pareto front</th>':''}</tr>
+    ${[...r.samples].reverse().map(s => `<tr><td class="mono" style="font-size:12px">${esc(s.time.replace('T',' ').replace('Z',' UTC'))}</td><td>${phaseChip(s.phase)}</td><td class="num">${s.published}</td>${r.mode==='Pareto'?`<td class="num">${s.paretoFront||0}</td>`:''}</tr>`).join('')}</table></div>`;
+}
+
+// ---------- logs ----------
+function renderLogTab() {
+  const r = S.runDetail;
+  $('tab').innerHTML = `<div class="h">Container log
+      <span class="right"><select id="log-c"><option value="sweeper">sweeper</option><option value="publisher">publisher</option></select>
+      <label style="font-size:12px;color:var(--fg-dim);display:flex;gap:4px;align-items:center"><input type="checkbox" id="log-follow" ${S.logFollow?'checked':''}> follow</label>
+      <span class="note" id="log-state"></span></span></div>
+    <div class="log" id="log" aria-live="polite"></div>`;
+  $('log-c').onchange = startLog; $('log-follow').onchange = e => { S.logFollow = e.target.checked; };
+  startLog();
+}
+function startLog() {
+  stopLog();
+  const r = S.runDetail, box = $('log'), state = $('log-state'), container = $('log-c').value;
+  box.textContent = ''; state.textContent = 'opening';
+  const es = new EventSource(`/api/v1/runs/${encodeURIComponent(r.namespace)}/${encodeURIComponent(r.name)}/logs/stream?container=${container}`);
+  S.logSource = es;
+  es.addEventListener('chunk', e => { box.textContent += JSON.parse(e.data); state.textContent = 'live'; if (S.logFollow) box.scrollTop = box.scrollHeight; });
+  es.addEventListener('end', e => { state.textContent = JSON.parse(e.data) === 'retained' ? (box.textContent ? 'retained' : 'no retained log; the Job pod was gone before the UI observed it') : 'stream ended'; es.close(); });
+  es.onerror = () => { state.textContent = 'disconnected'; es.close(); };
+}
+function stopLog() { if (S.logSource) { S.logSource.close(); S.logSource = null; } }
+
+// ---------- candidate detail ----------
+async function renderCandidate() {
+  const { ns, name } = S.route;
+  const c = await api(`/api/v1/candidates/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`);
+  S.cand = c; S.selected = c.name;
+  if (!S.runDetail || S.runDetail.uid !== c.runUID) { try { S.runDetail = await api(`/api/v1/runs/${encodeURIComponent(ns)}/${encodeURIComponent(c.runName)}`); } catch { S.runDetail = null; } }
+  const objs = Object.entries(c.objectives || {});
+  const dgd = { apiVersion: 'nvidia.com/v1beta1', kind: 'DynamoGraphDeployment', metadata: { name: '<new-name>', namespace: c.namespace }, spec: c.spec || {} };
+  const params = Object.entries(c.parameters || {});
+  const sum = Object.entries(c.summary || {});
+  const promotable = c.valid !== 'False' && c.spec;
+  $('content').innerHTML = `
+    <div class="crumb"><a href="#runs">Runs</a> / ${esc(ns)} / <a href="#run/${esc(ns)}/${esc(c.runName)}/candidates">${esc(c.runName || 'run')}</a></div>
+    <div class="title"><h1>${esc(shortName(c.name))}</h1>${c.rank ? chip('rank ' + c.rank, S.runDetail?.mode === 'Pareto' ? 'pareto' : 'scalar') : ''}${validChip(c)}${stateChip(c)}</div>
+    <div class="sub mono" style="font-size:12px">${esc(c.name)}</div>
+    <div class="stats">
+      <div class="stat"><div class="k">Topology</div><div class="v text">${esc(c.topology || '—')}</div></div>
+      <div class="stat"><div class="k">Backend</div><div class="v text">${esc(c.backend || '—')}</div></div>
+      <div class="stat"><div class="k">GPUs</div><div class="v">${fmt(c.usedGpus)}</div></div>
+      ${objs.map(([k, v]) => `<div class="stat"><div class="k">${esc(label(k))}</div><div class="v">${fmt(v)}</div></div>`).join('')}
+      ${c.score != null && !objs.length ? `<div class="stat"><div class="k">Score</div><div class="v">${fmt(c.score)}</div></div>` : ''}
+      ${c.summary?.mean_e2e_latency_ms != null ? `<div class="stat"><div class="k">mean E2E</div><div class="v">${fmtMs(c.summary.mean_e2e_latency_ms)}</div></div>` : ''}
+    </div>
+    <div class="h">Deployable DGD <span class="note">spec copied from the Candidate; evaluation parameters are omitted</span>
+      <span class="right"><button class="btn small" onclick="copyText(yaml(dgdPreview()))">Copy YAML</button>
+      ${promotable ? `<button class="btn small primary" onclick="$('promote').hidden=false;$('dgd-name').focus()">Create DGD…</button>` : `<span class="note">${c.valid === 'False' ? 'Invalid candidates cannot be promoted' : 'no DGD spec'}</span>`}</span></div>
+    ${codeBlock(dgd)}
+    <div class="panel" id="promote" hidden style="margin-top:12px">
+      <div style="font-weight:600;margin-bottom:10px">Create an independent DGD</div>
+      <div class="form">
+        <div><label for="dgd-name">New DGD name</label><input type="text" id="dgd-name" value="${esc((c.runName || 'dgd').replace(/-\d+$/, ''))}-rank${c.rank || 'x'}" spellcheck="false"></div>
+        <div><label for="dgd-ns">Namespace</label><input type="text" id="dgd-ns" value="${esc(c.namespace)}" spellcheck="false"></div>
+      </div>
+      <div class="notice"><b>!</b><span><b>Traffic routing is unchanged.</b> Creating the DGD does not update an Ingress, LoadBalancer or HTTPRoute, and does not touch the Candidate or its Run. Route traffic once the new DGD reports Ready. The request fails if a DGD with this name already exists.${c.valid === 'NotEvaluated' ? ' This Candidate predates publisher validation, so the API server dry run below is the only check.' : ''}</span></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn" onclick="submitDGD(true)">Validate (dry run)</button><button class="btn primary" onclick="submitDGD(false)">Create DGD</button><button class="btn" onclick="$('promote').hidden=true">Cancel</button></div>
+      <div class="result" id="dgd-result"></div>
+    </div>
+    ${params.length ? `<div class="h">Evaluation parameters</div><div class="panel kv">${params.map(([k, v]) => `<span class="k">${esc(label(k))}</span><span class="v">${esc(fmt(v))}</span>`).join('')}</div>` : ''}
+    ${sum.length ? `<div class="h">Key metrics</div><div class="panel kv">${sum.map(([k, v]) => `<span class="k">${esc(k.replace(/_/g,' '))}</span><span class="v">${k.endsWith('_ms') ? fmtMs(v) : fmt(v, 2)}</span></div>`).join('')}</div>` : ''}
+    ${c.conditions?.length ? `<div class="h">Conditions</div><div class="conds">${c.conditions.map(cond).join('')}</div>` : ''}
+    ${c.metrics ? `<div class="h">All metrics<span class="right"><button class="btn small" onclick="copyText(yaml(S.cand.metrics))">Copy</button></span></div>${codeBlock(c.metrics)}` : ''}
+    ${c.allParameters ? `<div class="h">All parameters<span class="right"><button class="btn small" onclick="copyText(yaml(S.cand.allParameters))">Copy</button></span></div>${codeBlock(c.allParameters)}` : ''}`;
+}
+function dgdPreview() {
+  const c = S.cand;
+  return { apiVersion: 'nvidia.com/v1beta1', kind: 'DynamoGraphDeployment', metadata: { name: $('dgd-name')?.value || '<new-name>', namespace: $('dgd-ns')?.value || c.namespace }, spec: c.spec || {} };
+}
+async function submitDGD(dryRun) {
+  const out = $('dgd-result'); out.className = 'result'; out.textContent = dryRun ? 'Validating…' : 'Creating…';
+  try {
+    const res = await fetch('/api/v1/dgd', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ candidateNamespace: S.cand.namespace, candidateName: S.cand.name, namespace: $('dgd-ns').value.trim(), dgdName: $('dgd-name').value.trim(), dryRun }) });
+    const text = await res.text();
+    if (!res.ok) { out.className = 'result err'; out.textContent = `${res.status}: ${text.trim()}`; return; }
+    const j = JSON.parse(text);
+    out.className = 'result ok';
+    out.textContent = dryRun ? `OK — ${j.validation}. kubectl get dgd ${j.name} -n ${j.namespace} will exist after Create.` : `Created DynamoGraphDeployment ${j.namespace}/${j.name} (${j.validation}). Watch it with: kubectl get dgd ${j.name} -n ${j.namespace} -w`;
+  } catch (e) { out.className = 'result err'; out.textContent = e.message; }
+}
+
+// ---------- boot ----------
+(function boot() {
+  try { const t = localStorage.getItem('theme'); if (t) document.documentElement.setAttribute('data-theme', t); } catch {}
+  $('theme').onclick = () => { const next = document.documentElement.getAttribute('data-theme') === 'light' ? 'dark' : 'light'; document.documentElement.setAttribute('data-theme', next); try { localStorage.setItem('theme', next); } catch {} };
+  $('ns').onchange = async e => { S.ns = e.target.value; await loadRequests(); if (S.route?.view === 'runs') renderOverview(); else renderSidebar(); };
+  loadNamespaces().then(loadRequests).then(route).catch(e => { $('content').innerHTML = `<div class="empty"><b>Cannot reach the server</b>${esc(e.message)}</div>`; });
+  connect();
+})();
+</script>
+</body>
+</html>

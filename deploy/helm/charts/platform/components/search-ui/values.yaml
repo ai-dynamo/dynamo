@@ -1,0 +1,56 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# -- Image for the search-ui Deployment.
+image:
+  repository: nvcr.io/nvidia/ai-dynamo/dynamo-search-ui
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# -- HTTP port the search-ui listens on inside the container.
+port: 8080
+
+# -- Namespace to watch. Empty watches all namespaces (cluster-scoped RBAC).
+watchNamespace: ""
+
+# -- Durable UI-local history: everything the UI observed, kept after the operator
+# garbage-collects Runs and the publisher removes superseded Candidates.
+history:
+  # -- Backend: `none` (in-memory only), `local` (a volume under history.local.path) or
+  # `azblob` (an Azure Blob Storage container, authenticated with Workload Identity).
+  backend: none
+  local:
+    path: /var/lib/dynamo-search-ui
+    # -- Existing PersistentVolumeClaim to mount at `path`. Empty uses an emptyDir, which
+    # does not survive pod restarts.
+    existingClaim: ""
+  azblob:
+    # -- Blob service endpoint, for example https://myaccount.blob.core.windows.net
+    accountUrl: ""
+    # -- Container that holds the history.
+    container: ""
+    # -- Client ID of the user-assigned managed identity federated with the
+    # dynamo-search-ui ServiceAccount (azure.workload.identity/client-id).
+    workloadIdentityClientId: ""
+
+# -- Allow POST /api/v1/dgd, which creates a DynamoGraphDeployment from a Candidate. When
+# false the UI is read-only and the DGD create permission is not granted.
+dgdCreate:
+  enabled: true
+
+replicaCount: 1
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+  limits:
+    cpu: "1"
+    memory: 512Mi
+
+imagePullSecrets: []
+commonLabels: {}
+podAnnotations: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
