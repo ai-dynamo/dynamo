@@ -17,11 +17,13 @@ from dynamo.common.snapshot.constants import (
     SNAPSHOT_CONTROL_DIR,
     SNAPSHOT_CONTROL_DIR_ENV,
     SNAPSHOT_RESTORE_CONTEXT_FILE,
+    SNAPSHOT_RESTORE_PROXY_BINARY,
     SNAPSHOT_RESTORE_STANDBY_ENV,
 )
 
 logger = logging.getLogger(__name__)
 ConfigT = TypeVar("ConfigT")
+_PROC_ROOT = Path("/proc")
 
 _RESTORE_RUNTIME_CONFIG_FIELDS = (
     "namespace",
@@ -44,12 +46,11 @@ async def refresh_snapshot_restore_config(
 ) -> ConfigT:
     """Apply restore env, then rebuild backend config through normal parsing.
 
-    The restore-context file is created by the restore standby process in the
-    new Pod before CRIU resumes the snapshotted process. Once resumed, apply
-    that env first and then re-run the runtime parser so fields derived from env
-    (namespace, discovery backend, request plane, event plane, etc.) follow the
-    same CLI/env precedence as a cold start. This avoids brittle ad hoc patches
-    to an already-parsed config object.
+    Read destination env from ``snapshot-restore-proxy`` or a legacy standby
+    context file. Apply that env first and then re-run the runtime parser so
+    fields derived from env (namespace, discovery backend, request plane, event
+    plane, etc.) follow the same CLI/env precedence as a cold start. This avoids
+    brittle ad hoc patches to an already-parsed config object.
 
     Args:
         parse_config: Zero-argument callable that returns a config object after
@@ -114,11 +115,15 @@ def parse_snapshot_restore_runtime_config(argv: list[str] | None) -> object:
 
 
 def apply_snapshot_restore_env() -> dict[str, str | None]:
-    """Load restore-context JSON and apply its runtime env to ``os.environ``."""
+    """Apply destination env from the proxy or legacy context to ``os.environ``."""
 
-    # Load the restore-context JSON captured by the restore standby process. It
-    # contains the target container's actual restore-time env after Kubernetes
-    # resolved literals, Downward API values, ConfigMaps, and Secrets.
+    proxy_env = _read_restore_proxy_env()
+    if proxy_env is not None:
+        # Include absent settings so capture-time values are cleared too.
+        return _apply_restore_env(
+            {name: proxy_env.get(name) for name in _SUPPORTED_RESTORE_ENV_NAMES},
+            source="snapshot-restore-proxy",
+        )
     control_dir = os.environ.get(SNAPSHOT_CONTROL_DIR_ENV, SNAPSHOT_CONTROL_DIR)
     context_path = Path(control_dir) / SNAPSHOT_RESTORE_CONTEXT_FILE
     if not context_path.is_file():
@@ -138,6 +143,67 @@ def apply_snapshot_restore_env() -> dict[str, str | None]:
     if not isinstance(env_config, dict):
         raise RuntimeError("snapshot restore context requires an object env field")
     return _apply_restore_env(env_config, source=source)
+
+
+def _read_restore_proxy_env() -> dict[str, str] | None:
+    """Read destination env from the ancestor ``snapshot-restore-proxy``.
+
+    Snapshot makes the restored root process a child of the proxy, including
+    in shared PID namespaces where PID 1 is the Pod's pause process. The worker
+    may sit below that root, for example when a shell script launches it.
+    """
+    proxy_proc = _find_restore_proxy()
+    if proxy_proc is None:
+        return None
+    try:
+        environment = (proxy_proc / "environ").read_bytes()
+    except PermissionError as exc:
+        raise RuntimeError(
+            f"Cannot read destination environment from {proxy_proc / 'environ'}: "
+            "ptrace-read access to snapshot-restore-proxy is required"
+        ) from exc
+
+    destination_env: dict[str, str] = {}
+    for entry in environment.split(b"\0"):
+        key, _, value = entry.partition(b"=")
+        name = os.fsdecode(key)
+        if name in _SUPPORTED_RESTORE_ENV_NAMES:
+            destination_env[name] = os.fsdecode(value)
+    return destination_env
+
+
+def _find_restore_proxy() -> Path | None:
+    """Return the procfs directory of the nearest proxy ancestor, if any."""
+    pid = os.getppid()
+    visited: set[int] = set()
+    # PID 0 means the parent is outside this PID namespace.
+    while pid > 0 and pid not in visited:
+        visited.add(pid)
+        proc = _PROC_ROOT / str(pid)
+        try:
+            command = (proc / "cmdline").read_bytes()
+            if _is_restore_proxy_command(command):
+                return proc
+            stat = (proc / "stat").read_bytes()
+        except FileNotFoundError:
+            # No procfs, or the ancestor exited; keep legacy context loading.
+            return None
+        if pid == 1:
+            return None
+        # The command name in parentheses may contain spaces; ppid follows it.
+        pid = int(stat.rpartition(b")")[2].split()[1])
+    return None
+
+
+def _is_restore_proxy_command(command: bytes) -> bool:
+    """Return whether ``command`` is a lone absolute ``snapshot-restore-proxy`` path."""
+    if not command.endswith(b"\0") or b"\0" in command[:-1]:
+        return False
+    proxy_binary = Path(os.fsdecode(command[:-1]))
+    return (
+        proxy_binary.is_absolute()
+        and proxy_binary.name == SNAPSHOT_RESTORE_PROXY_BINARY
+    )
 
 
 def write_snapshot_restore_context(control_dir: str | None = None) -> None:
