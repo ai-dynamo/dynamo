@@ -319,6 +319,8 @@ STUB_MODULES = [
     "vllm.v1.request",
     "vllm.v1.sample",
     "vllm.v1.sample.logits_processor",
+    "vllm.v1.structured_output",
+    "vllm.v1.structured_output.backend_xgrammar",
     "msgspec",
     "msgspec.structs",
     "mistral_common",
