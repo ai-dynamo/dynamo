@@ -160,6 +160,13 @@ class TestMatchPathPattern:
 
 
 class TestResolveOwners:
+    def test_ownerless_rule_clears_inherited_owners(self) -> None:
+        rules = parse_codeowners(
+            "* @root\n/lib/ @runtime\n/lib/Cargo.lock # intentional exemption\n"
+        )
+        assert resolve_owners(rules, "lib/Cargo.lock") == []
+        assert resolve_owners(rules, "lib/Cargo.toml") == ["@runtime"]
+
     def test_last_match_wins(self) -> None:
         rules = [
             ("*", ["@root"]),
@@ -177,6 +184,79 @@ class TestResolveOwners:
     def test_multi_owner_passthrough(self) -> None:
         rules = [("*", ["@a"]), ("/shared/", ["@b", "@c"])]
         assert resolve_owners(rules, "shared/x") == ["@b", "@c"]
+
+
+class TestExemptions:
+    @pytest.mark.parametrize("group", [True, False])
+    def test_emitted_exemption_follows_final_owner_rule(self, group) -> None:
+        spec = {
+            "meta": {"catch_all": "@root"},
+            "areas": [
+                {"label": "runtime", "github_team": "@runtime", "path_globs": ["lib/"]},
+                {"label": "kvbm", "github_team": "@kvbm", "path_globs": ["lib/kvbm/"]},
+            ],
+            "classify": {
+                "filetype_rules": [{"pattern": "Cargo.lock", "coowner": "runtime"}]
+            },
+            "exemptions": {"lib/kvbm/Cargo.lock": "Dependency updates cross areas."},
+        }
+        model = compute_resolution(spec)
+        lines, _ = _render_codeowners(model, group=group)
+        parent = "/lib/kvbm/" if group else "Cargo.lock"
+        index = next(i for i, line in enumerate(lines) if line.split()[:1] == [parent])
+        assert lines[index + 1 : index + 3] == [
+            "# Dependency updates cross areas.",
+            "/lib/kvbm/Cargo.lock",
+        ]
+        rules = parse_codeowners("\n".join(lines))
+        assert resolve_owners(rules, "lib/kvbm/Cargo.lock") == []
+        assert resolve_owners(rules, "lib/kvbm/Cargo.toml") == ["@kvbm"]
+        assert resolve_owners(rules, "lib/other/Cargo.lock") == ["@runtime"]
+
+    def test_exemption_is_explicit_coverage_and_stale_checked(self) -> None:
+        model = compute_resolution(
+            {
+                "meta": {"catch_all": "@root"},
+                "exemptions": {"Cargo.lock": "Dependency updates."},
+            }
+        )
+        assert model.unmatched_paths(["Cargo.lock", "other.txt"]) == ["other.txt"]
+        assert _dead_patterns(model, ["Cargo.lock"]) == []
+        assert _dead_patterns(model, ["other.txt"]) == ["/Cargo.lock"]
+
+    def test_exemption_cannot_bypass_required_owners(self) -> None:
+        model = compute_resolution(
+            {
+                "meta": {"catch_all": "@root"},
+                "exemptions": {"Cargo.lock": "Dependency updates."},
+                "required_owners": [{"glob": "Cargo.lock", "owners": ["@root"]}],
+            }
+        )
+        assert len(ownership_contract_violations(model, ["Cargo.lock"])) == 1
+
+    def test_exemption_without_a_rule_to_override_is_rejected(self) -> None:
+        model = compute_resolution(
+            {"exemptions": {"Cargo.lock": "Dependency updates."}}
+        )
+        with pytest.raises(SystemExit, match="no rule to override"):
+            _render_codeowners(model, group=True)
+
+    @pytest.mark.parametrize(
+        "exemptions",
+        [
+            [],
+            {"*.lock": "Reason"},
+            {"../Cargo.lock": "Reason"},
+            {"/Cargo.lock": "Reason"},
+            {"lib/": "Reason"},
+            {"Cargo.lock": ""},
+            {"Cargo.lock": "Reason\n/Cargo.toml"},
+            {"Cargo.lock": None},
+        ],
+    )
+    def test_invalid_exemptions_are_rejected(self, exemptions) -> None:
+        with pytest.raises(SystemExit, match="exemptions"):
+            compute_resolution({"exemptions": exemptions})
 
 
 # ------------------------------------------------------------------

@@ -46,7 +46,12 @@ from pathlib import Path
 import yaml
 
 sys.path.insert(0, str(Path(__file__).parent))
-from codeowners_match import ResolvedModel, anchor, compute_resolution  # noqa: E402
+from codeowners_match import (  # noqa: E402
+    ResolvedModel,
+    anchor,
+    compute_resolution,
+    match,
+)
 
 
 def _owners_str(label_to_team: dict[str, str], owners: list[str]) -> str:
@@ -356,12 +361,24 @@ def _render_codeowners(
         ]
         lines += [fmt(p, deco(t)) for p, t in shared_rules]
 
+    # Put each exemption immediately after the last rule that would own it.
+    # This preserves last-match precedence and keeps the exception by its owner.
+    for path, comment in model.exemptions.items():
+        for index in range(len(lines) - 1, -1, -1):
+            tokens = lines[index].split("#", 1)[0].split()
+            if tokens and match(tokens[0], path):
+                lines[index + 1 : index + 1] = [f"# {comment}", anchor(path)]
+                break
+        else:
+            raise SystemExit(f"areas.yaml: exemption {path!r} has no rule to override")
+
     stats = {
         "base": len(base_rules),
         "shared": len(shared_rules),
         "filetype": len(ft_rules),
         "overrides": len(overrides),
         "teams": len(teams),
+        "exemptions": len(model.exemptions),
     }
     return lines, stats
 
@@ -413,11 +430,13 @@ def main() -> int:
         stats["base"]
         + stats["shared"]
         + stats["filetype"]
+        + stats["exemptions"]
         + (1 if model.catch_all else 0)
     )
     print(
         f"wrote {args.out} | rules: {total} (base {stats['base']} | "
-        f"shared {stats['shared']} | file-type {stats['filetype']}) | "
+        f"shared {stats['shared']} | file-type {stats['filetype']} | "
+        f"exemptions {stats['exemptions']}) | "
         f"overrides pulled out: {stats['overrides']} | "
         f"teams referenced: {stats['teams']}"
     )
