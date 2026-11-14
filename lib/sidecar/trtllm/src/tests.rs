@@ -46,6 +46,9 @@ struct FakeTrtllm {
     /// Simulates a server that has not yet accepted the request, so the RPC
     /// itself is still in flight.
     hang_before_stream: Arc<AtomicBool>,
+    /// Simulates a server that has sent response headers but never sends a
+    /// token.
+    hold_before_first_token: Arc<AtomicBool>,
     /// Simulates a server whose Control service is not implemented.
     no_control: Arc<AtomicBool>,
     /// Simulates a server that answers GetModelInfo without a context length.
@@ -124,6 +127,7 @@ impl pb::inference_server::Inference for FakeTrtllm {
         let wants_logprobs = wants_logprobs(&request);
         let context_only = is_context_only(&request);
         let hang = self.hang.load(Ordering::SeqCst);
+        let hold_before_first_token = self.hold_before_first_token.load(Ordering::SeqCst);
         if self.hang_before_stream.load(Ordering::SeqCst) {
             std::future::pending::<()>().await;
         }
@@ -137,6 +141,9 @@ impl pb::inference_server::Inference for FakeTrtllm {
         let matched_stop = if stops_on_42 { 42 } else { 2 };
 
         let stream = async_stream::try_stream! {
+            if hold_before_first_token {
+                std::future::pending::<()>().await;
+            }
             let tokens = if !returns_42 {
                 Vec::new()
             } else if wants_logprobs {
@@ -835,6 +842,102 @@ async fn a_cancelled_decode_request_survives_only_until_the_transfer_lands() {
         .unwrap()
         .unwrap();
     assert_eq!(terminal.finish_reason, Some(FinishReason::Cancelled));
+}
+
+/// A live engine that never answers must not hold a cancelled handoff decode
+/// request forever: once the drain deadline passes, the sidecar aborts it, then
+/// releases the dispatch or stream. A decode request without a handoff has
+/// nothing to drain and cancels at once.
+#[tokio::test]
+async fn a_cancelled_decode_request_is_aborted_when_the_engine_stays_silent() {
+    for withholds_headers in [true, false] {
+        check_decode_drain_deadline(withholds_headers).await;
+    }
+
+    let service = FakeTrtllm::default();
+    service
+        .hold_before_first_token
+        .store(true, Ordering::SeqCst);
+    let server = FakeServer::start(service).await;
+    // The default deadline, so waiting it out would fail the timeout below.
+    let engine = engine_in_mode(&server.endpoint, 1, DisaggregationMode::Decode);
+    engine.start(0).await.expect("start");
+    let context = dynamo_backend_common::testing::mock_context();
+    let mut stream = engine
+        .generate(request(), GenerateContext::new(context.clone(), None))
+        .await
+        .expect("generate");
+    context.stop_generating();
+    let terminal = tokio::time::timeout(Duration::from_secs(2), stream.next())
+        .await
+        .expect("a decode request without a handoff does not defer")
+        .unwrap()
+        .unwrap();
+    assert_eq!(terminal.finish_reason, Some(FinishReason::Cancelled));
+    assert!(server.service.aborts.lock().await.is_empty());
+}
+
+async fn check_decode_drain_deadline(withholds_headers: bool) {
+    const DRAIN_TIMEOUT: Duration = Duration::from_millis(150);
+    let service = FakeTrtllm::default();
+    service
+        .hang_before_stream
+        .store(withholds_headers, Ordering::SeqCst);
+    service
+        .hold_before_first_token
+        .store(true, Ordering::SeqCst);
+    let server = FakeServer::start(service).await;
+    let engine = engine_in_mode(&server.endpoint, 1, DisaggregationMode::Decode)
+        .with_decode_cancel_drain_timeout(DRAIN_TIMEOUT);
+    engine.start(0).await.expect("start");
+
+    let mut req = request();
+    req.prefill_result = Some(dynamo_backend_common::PrefillResult {
+        disaggregated_params: crate::disagg::session_to_json(fake_session()).expect("handoff"),
+        prompt_tokens_details: None,
+    });
+    let context = dynamo_backend_common::testing::mock_context();
+    let request_id = context.id().to_string();
+    let generate = engine.generate(req, GenerateContext::new(context.clone(), None));
+    tokio::pin!(generate);
+    let cancelled_at;
+    let mut stream = if withholds_headers {
+        tokio::select! {
+            _ = &mut generate => panic!("decode returned before response headers"),
+            _ = async {
+                while server.service.requests.lock().await.is_empty() {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            } => {}
+        }
+        cancelled_at = tokio::time::Instant::now();
+        context.stop_generating();
+        tokio::time::timeout(Duration::from_secs(5), &mut generate)
+            .await
+            .expect("drain deadline released the pending dispatch")
+            .expect("generate")
+    } else {
+        let stream = tokio::time::timeout(Duration::from_secs(2), &mut generate)
+            .await
+            .expect("decode response headers")
+            .expect("generate");
+        cancelled_at = tokio::time::Instant::now();
+        context.stop_generating();
+        stream
+    };
+    let terminal = tokio::time::timeout(Duration::from_secs(5), stream.next())
+        .await
+        .expect("drain deadline released the decode stream")
+        .expect("a terminal item")
+        .expect("terminal");
+    assert_eq!(terminal.finish_reason, Some(FinishReason::Cancelled));
+    assert!(
+        cancelled_at.elapsed() >= DRAIN_TIMEOUT,
+        "decode cancellation ended before the drain deadline"
+    );
+    // The abort is sent before the terminal, so the engine hears it before the
+    // stream goes away.
+    assert_eq!(server.service.aborts.lock().await.as_slice(), [request_id]);
 }
 
 #[tokio::test]

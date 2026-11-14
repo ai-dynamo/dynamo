@@ -19,7 +19,7 @@ use dynamo_sidecar_common::{
 use futures::stream::BoxStream;
 use tokio::sync::OnceCell;
 use tokio::task::JoinHandle;
-use tokio::time::timeout;
+use tokio::time::{Instant, timeout};
 use tokio_util::sync::CancellationToken;
 
 use crate::args::Args;
@@ -83,6 +83,33 @@ fn cancelled(state: &ResponseState) -> LLMEngineOutput {
     LLMEngineOutput::cancelled().with_usage(usage(state.prompt_tokens(), state.completion_tokens()))
 }
 
+/// Resolves at `deadline`, or never when there is none.
+async fn drain_expired(deadline: Option<Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Abort a cancelled handoff decode request that TensorRT-LLM accepted but
+/// never answered. The adapter sends no abort for a decode request that ends
+/// before its first token, so this is the only one the engine gets.
+async fn abort_undrained_decode(client: &TrtllmClient, request_id: &str, timeout: Duration) {
+    tracing::warn!(
+        request_id,
+        ?timeout,
+        "Cancelled TensorRT-LLM decode request produced no first token before the drain deadline; forcing abort"
+    );
+    if let Err(error) = client.abort(request_id.to_string()).await {
+        // Escaped: the message embeds the engine's gRPC status text.
+        tracing::warn!(
+            request_id,
+            error = %error.to_string().escape_debug(),
+            "TensorRT-LLM Control.Abort failed"
+        );
+    }
+}
+
 pub struct TrtllmSidecarEngine {
     endpoint: GrpcEndpoint,
     transport: GrpcTransportConfig,
@@ -103,6 +130,9 @@ pub struct TrtllmSidecarEngine {
     /// Cancelled once TensorRT-LLM stops serving after `start`, with the reason set first.
     lost: CancellationToken,
     lost_reason: Arc<std::sync::OnceLock<String>>,
+    /// How long a cancelled handoff decode request waits for headers and its
+    /// first token before the sidecar aborts it.
+    decode_cancel_drain_timeout: Duration,
 }
 
 impl TrtllmSidecarEngine {
@@ -128,7 +158,16 @@ impl TrtllmSidecarEngine {
             load_failed: CancellationToken::new(),
             lost: CancellationToken::new(),
             lost_reason: Arc::default(),
+            decode_cancel_drain_timeout: Duration::from_secs(
+                crate::args::DEFAULT_DECODE_CANCEL_DRAIN_TIMEOUT_SECS,
+            ),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_decode_cancel_drain_timeout(mut self, timeout: Duration) -> Self {
+        self.decode_cancel_drain_timeout = timeout;
+        self
     }
 
     /// Shorten supervision so failure-path tests do not wait out production limits.
@@ -254,6 +293,8 @@ impl TrtllmSidecarEngine {
         let mut engine = Self::new(endpoint, transport, model.clone(), mode);
         engine.subagent_affinity_auth_key = args.subagent_affinity_auth_key;
         engine.allow_remote_media_urls = allow_remote_media_urls;
+        engine.decode_cancel_drain_timeout =
+            Duration::from_secs(args.decode_cancel_drain_timeout_secs);
         // Off by default: TensorRT-LLM's xgrammar rejects several tag formats (NVIDIA/TensorRT-LLM#19913).
         let structural_tag = args.sidecar.common.structural_tag(false);
         let config = WorkerConfig {
@@ -555,11 +596,17 @@ impl LLMEngine for TrtllmSidecarEngine {
         // the dispatch entirely, leaving the prefill worker's blocks with no
         // decode leg to claim them. Both strand exactly what the deferral
         // exists to protect. Shutdown still wins -- the process is going away.
-        let stream = tokio::select! {
-            biased;
-            _ = &mut request_cancellation, if !needs_cancellation_deferral => None,
-            _ = &mut shutdown_cancellation => None,
-            result = async {
+        //
+        // The deferral is bounded: the deadline is set once, when a deferred
+        // cancellation is first seen, and carried into the stream so the
+        // header and first-token waits share it. An engine that stays silent
+        // past it gets `Control.Abort` before the dispatch or stream is
+        // dropped.
+        let drain_timeout = self.decode_cancel_drain_timeout;
+        let mut drain_deadline: Option<Instant> = None;
+        // Scoped so the dispatch, and its borrow of `request_id`, ends here.
+        let stream = {
+            let dispatch = async {
                 validate_remote_media_urls(&request, self.allow_remote_media_urls)?;
                 let proto_request = build_generate_request_with_routing(
                     request,
@@ -569,28 +616,67 @@ impl LLMEngine for TrtllmSidecarEngine {
                     self.mode,
                     use_dp_targeting,
                 )?;
-                client.generate(
-                    proto_request,
-                    target_dp_rank,
-                    parent_affinity.as_deref().zip(self.subagent_affinity_auth_key.as_deref()),
-                ).await
-            } => Some(result?),
+                client
+                    .generate(
+                        proto_request,
+                        target_dp_rank,
+                        parent_affinity
+                            .as_deref()
+                            .zip(self.subagent_affinity_auth_key.as_deref()),
+                    )
+                    .await
+            };
+            tokio::pin!(dispatch);
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = &mut request_cancellation, if drain_deadline.is_none() => {
+                        if !needs_cancellation_deferral {
+                            break None;
+                        }
+                        drain_deadline = Some(Instant::now() + drain_timeout);
+                    }
+                    _ = &mut shutdown_cancellation => break None,
+                    _ = drain_expired(drain_deadline) => {
+                        abort_undrained_decode(client, &request_id, drain_timeout).await;
+                        break None;
+                    }
+                    result = &mut dispatch => break Some(result?),
+                }
+            }
         };
         let Some(mut stream) = stream else {
             let output = cancelled(&state);
             return Ok(Box::pin(futures::stream::once(async move { Ok(output) })));
         };
+        let abort_client = needs_cancellation_deferral.then(|| client.clone());
 
         Ok(Box::pin(async_stream::stream! {
             let mut is_transfer_settled = false;
             loop {
+                if drain_deadline.is_some() && is_transfer_settled {
+                    // The transfer landed, so the deferred cancellation applies.
+                    yield Ok(cancelled(&state));
+                    break;
+                }
                 tokio::select! {
                     biased;
-                    _ = &mut request_cancellation, if !needs_cancellation_deferral || is_transfer_settled => {
+                    _ = &mut request_cancellation, if drain_deadline.is_none() => {
+                        if needs_cancellation_deferral && !is_transfer_settled {
+                            drain_deadline = Some(Instant::now() + drain_timeout);
+                            continue;
+                        }
                         yield Ok(cancelled(&state));
                         break;
                     }
                     _ = &mut shutdown_cancellation => {
+                        yield Ok(cancelled(&state));
+                        break;
+                    }
+                    _ = drain_expired(drain_deadline), if drain_deadline.is_some() => {
+                        if let Some(client) = &abort_client {
+                            abort_undrained_decode(client, &request_id, drain_timeout).await;
+                        }
                         yield Ok(cancelled(&state));
                         break;
                     }
