@@ -919,3 +919,72 @@ func envToMap(envs []corev1.EnvVar) map[string]string {
 	}
 	return m
 }
+
+func TestBuildFailoverEnginePair_SystemPorts(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		env         *corev1.EnvVar
+		hostNetwork bool
+		wantBase    int
+		wantError   bool
+	}{
+		{name: "default", env: &corev1.EnvVar{Name: "DYN_SYSTEM_PORT", Value: "9090"}, wantBase: 9090},
+		{name: "unset", wantBase: 9090},
+		{name: "custom-host-network", env: &corev1.EnvVar{Name: "DYN_SYSTEM_PORT", Value: "12345"}, hostNetwork: true, wantBase: 12345},
+		{name: "custom-pod-network", env: &corev1.EnvVar{Name: "DYN_SYSTEM_PORT", Value: "12345"}, wantBase: 12345},
+		{name: "highest-base", env: &corev1.EnvVar{Name: "DYN_SYSTEM_PORT", Value: "32766"}, hostNetwork: true, wantBase: 32766},
+		{name: "hexadecimal", env: &corev1.EnvVar{Name: "DYN_SYSTEM_PORT", Value: "0x3039"}, wantBase: 12345},
+		{name: "leading-zero-decimal", env: &corev1.EnvVar{Name: "DYN_SYSTEM_PORT", Value: "012345"}, wantBase: 12345},
+		{name: "whitespace", env: &corev1.EnvVar{Name: "DYN_SYSTEM_PORT", Value: " 12345 "}, wantBase: 12345},
+		{name: "overflow", env: &corev1.EnvVar{Name: "DYN_SYSTEM_PORT", Value: "32767"}, wantError: true},
+		{name: "ephemeral", env: &corev1.EnvVar{Name: "DYN_SYSTEM_PORT", Value: "0"}, wantError: true},
+		{name: "disabled", env: &corev1.EnvVar{Name: "DYN_SYSTEM_PORT", Value: "-1"}, wantError: true},
+		{name: "empty", env: &corev1.EnvVar{Name: "DYN_SYSTEM_PORT"}, wantError: true},
+		{name: "invalid", env: &corev1.EnvVar{Name: "DYN_SYSTEM_PORT", Value: "not-a-port"}, wantError: true},
+		{name: "expanded", env: &corev1.EnvVar{Name: "DYN_SYSTEM_PORT", Value: "$(PORT)"}, wantError: true},
+		{name: "value-from", env: &corev1.EnvVar{Name: "DYN_SYSTEM_PORT", ValueFrom: &corev1.EnvVarSource{ConfigMapKeyRef: &corev1.ConfigMapKeySelector{Name: "ports", Key: "system"}}}, wantError: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Configure the failover base before engine cloning")
+			ps := intraPodFailoverPodSpec()
+			ps.HostNetwork = tt.hostNetwork
+			// The rendered environment is authoritative, even if the inherited port is still the default.
+			ps.Containers[0].Env = ps.Containers[0].Env[1:]
+			if tt.env != nil {
+				ps.Containers[0].Env = append(ps.Containers[0].Env, *tt.env)
+			}
+			original := ps.DeepCopy()
+
+			t.Log("Allocate both engine listeners without reverting the override")
+			err := buildFailoverEnginePair(&ps)
+			if tt.wantError {
+				require.ErrorContains(t, err, "DYN_SYSTEM_PORT")
+				assert.Equal(t, original, &ps)
+				return
+			}
+			require.NoError(t, err)
+			require.Len(t, ps.Containers, 3)
+
+			t.Log("Keep environment, declared ports and named HTTP probes aligned")
+			for i := range failoverEngineCount {
+				engine := ps.Containers[i]
+				port := int32(tt.wantBase + i)
+				name := fmt.Sprintf("system-%d", i)
+				assert.Equal(t, strconv.Itoa(int(port)), envToMap(engine.Env)["DYN_SYSTEM_PORT"])
+				require.Len(t, engine.Ports, 1)
+				assert.Equal(t, port, engine.Ports[0].ContainerPort)
+				assert.Equal(t, name, engine.Ports[0].Name)
+				if tt.hostNetwork {
+					assert.Equal(t, port, engine.Ports[0].HostPort)
+				} else {
+					assert.Zero(t, engine.Ports[0].HostPort)
+				}
+				for _, probe := range []*corev1.Probe{engine.StartupProbe, engine.ReadinessProbe, engine.LivenessProbe} {
+					require.NotNil(t, probe)
+					assert.Equal(t, intstr.FromString(name), probe.HTTPGet.Port)
+				}
+			}
+			assert.Equal(t, original.Containers[1], ps.Containers[2])
+		})
+	}
+}
