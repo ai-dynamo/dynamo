@@ -23,6 +23,7 @@ from dynamo.sglang.protocol import (
 from dynamo.sglang.request_handlers.embedding.embedding_handler import (
     EmbeddingWorkerHandler,
 )
+from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 from dynamo.sglang.request_handlers.llm.decode_handler import DecodeWorkerHandler
 from dynamo.sglang.request_handlers.llm.diffusion_handler import DiffusionWorkerHandler
 from dynamo.sglang.request_handlers.llm.prefill_handler import PrefillWorkerHandler
@@ -316,6 +317,95 @@ def test_native_batch_rejects_malformed_inner_lists(token_ids, message):
 
     with pytest.raises(HttpError, match=message):
         handler._get_input_param(_native_request(token_ids))
+
+
+class _TokenId(int):
+    """An int subclass, which only the per-token loop accepts."""
+
+
+# (token_ids, allowed_oov_ids) pairs, valid and invalid, single and batched.
+_VALIDATION_CORPUS = [
+    ([], frozenset()),
+    ([0], frozenset()),
+    ([0, 1, MAX_TOKEN_ID], frozenset()),
+    ([[1, 2], [3, MAX_TOKEN_ID]], frozenset()),
+    ([[1, 2], []], frozenset()),
+    ([1, MAX_TOKEN_ID + 1], frozenset()),
+    ([1, OUT_OF_RANGE], frozenset()),
+    ([1, 2**70], frozenset()),
+    ([1, -1], frozenset()),
+    ([1, -(2**70)], frozenset()),
+    # The negative ID comes before the bool, so the loop reports index 1.
+    ([1, -1, True], frozenset()),
+    ([1, True], frozenset()),
+    ([False], frozenset()),
+    ([1, 2.0], frozenset()),
+    ([1, "2"], frozenset()),
+    ([1, None], frozenset()),
+    ([1, [2]], frozenset()),
+    ([1, _TokenId(2)], frozenset()),
+    ([1, _TokenId(MAX_TOKEN_ID + 1)], frozenset()),
+    ([[1], 2], frozenset()),
+    ([[1, True]], frozenset()),
+    ([[1], [MAX_TOKEN_ID + 1]], frozenset()),
+    ([[[1]]], frozenset()),
+    ((1, 2), frozenset()),
+    ([1, MAX_TOKEN_ID + 1], frozenset({MAX_TOKEN_ID + 1})),
+    ([1, MAX_TOKEN_ID + 2], frozenset({MAX_TOKEN_ID + 1})),
+    ([MAX_TOKEN_ID + 1, 2, MAX_TOKEN_ID + 2], frozenset({MAX_TOKEN_ID + 1})),
+    ([[1, MAX_TOKEN_ID + 1], [2]], frozenset({MAX_TOKEN_ID + 1})),
+    ([MAX_TOKEN_ID + 1, -1], frozenset({MAX_TOKEN_ID + 1})),
+]
+
+
+def _validation_outcome(handler, token_ids, allowed_oov_ids):
+    try:
+        handler._validate_token_ids(token_ids, allowed_oov_ids)
+    except HttpError as error:
+        return error.code, error.message
+    return None
+
+
+@pytest.mark.parametrize("max_token_id", [MAX_TOKEN_ID, None])
+@pytest.mark.parametrize(("token_ids", "allowed_oov_ids"), _VALIDATION_CORPUS)
+def test_fast_path_matches_the_per_token_loop(
+    monkeypatch, max_token_id, token_ids, allowed_oov_ids
+):
+    handler = _decode_handler(max_token_id=max_token_id)
+    with_fast_path = _validation_outcome(handler, token_ids, allowed_oov_ids)
+
+    monkeypatch.setattr(
+        BaseWorkerHandler,
+        "_token_ids_in_vocabulary",
+        staticmethod(lambda *args: False),
+    )
+
+    assert _validation_outcome(handler, token_ids, allowed_oov_ids) == with_fast_path
+
+
+@pytest.mark.parametrize(
+    ("token_ids", "max_token_id", "allowed_oov_ids"),
+    [
+        ([0, 1, MAX_TOKEN_ID], MAX_TOKEN_ID, frozenset()),
+        ([0, OUT_OF_RANGE], None, frozenset()),
+        ([0, MAX_TOKEN_ID + 1], MAX_TOKEN_ID, frozenset({MAX_TOKEN_ID + 1})),
+    ],
+)
+def test_fast_path_accepts_plain_in_range_ids(token_ids, max_token_id, allowed_oov_ids):
+    assert BaseWorkerHandler._token_ids_in_vocabulary(
+        token_ids, max_token_id, allowed_oov_ids
+    )
+
+
+def test_validation_skips_the_loop_when_the_fast_path_accepts(monkeypatch):
+    monkeypatch.setattr(
+        BaseWorkerHandler,
+        "_token_ids_in_vocabulary",
+        staticmethod(lambda *args: True),
+    )
+
+    # Only the per-token loop rejects a negative ID.
+    _decode_handler()._validate_token_ids([1, -1])
 
 
 class _ChatTokenizer:

@@ -1091,6 +1091,33 @@ class BaseWorkerHandler(
 
         return frozenset(token_ids)
 
+    @staticmethod
+    def _token_ids_in_vocabulary(
+        token_ids: list[Any],
+        max_input_token_id: Optional[int],
+        allowed_oov_ids: frozenset[int],
+    ) -> bool:
+        """Accept a list of plain in-vocabulary ints without a per-token loop.
+
+        Validation runs on the worker's event loop, which also streams every
+        response on the worker, so a Python loop over a long prompt stalls all of
+        them. This makes C-level passes only, and never rejects: on False the
+        caller's loop finds the first bad ID, so errors are unchanged.
+        """
+        if (
+            type(token_ids) is not list
+            or set(map(type, token_ids)) != {int}
+            or min(token_ids) < 0
+        ):
+            return False
+        if max_input_token_id is None or max(token_ids) <= max_input_token_id:
+            return True
+        # Media placeholder IDs may sit above the text vocabulary.
+        return (
+            bool(allowed_oov_ids)
+            and set(filter(max_input_token_id.__lt__, token_ids)) <= allowed_oov_ids
+        )
+
     def _validate_token_ids(
         self,
         token_ids: Any,
@@ -1112,6 +1139,11 @@ class BaseWorkerHandler(
             prompt_label = f"{label}[{prompt_index}]" if batched else label
             if not isinstance(prompt_ids, list):
                 raise HttpError(400, f"{prompt_label} must be a token ID list")
+            if self._token_ids_in_vocabulary(
+                prompt_ids, max_input_token_id, allowed_oov_ids
+            ):
+                continue
+            # Slow path: bools, int subclasses and every rejection.
             for index, token_id in enumerate(prompt_ids):
                 if isinstance(token_id, bool) or not isinstance(token_id, int):
                     raise HttpError(
