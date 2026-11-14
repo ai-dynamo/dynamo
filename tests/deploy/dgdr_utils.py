@@ -45,6 +45,8 @@ _MAX_DGDR_NAME_LENGTH = (
 )
 _MAX_LABEL_VALUE_LENGTH = 63
 _NAME_DIGEST_LENGTH = 6
+# About twice the longest vCluster port-forward outage seen in CI (64 s).
+_VCLUSTER_POLL_OUTAGE_BUDGET_SECONDS = 120
 _RetryParams = ParamSpec("_RetryParams")
 _RetryResult = TypeVar("_RetryResult")
 PHASE_ORDER = {
@@ -489,9 +491,9 @@ class ManagedDGDR:
         timeout = timeout or self.config.profiling_timeout
         deadline = time.monotonic() + timeout
         last_phase: str | None = None
+        outage_started: float | None = None
         while time.monotonic() < deadline:
-            # Connection retries can outlast the phase timeout, so stop them at
-            # the deadline and report the phase timeout instead.
+            read_started = time.monotonic()
             try:
                 result = await asyncio.wait_for(
                     self._retry_vcluster_api(
@@ -506,6 +508,34 @@ class ManagedDGDR:
                 if time.monotonic() < deadline:
                     raise
                 break
+            except (
+                aiohttp.ClientConnectionError,
+                aiohttp.ClientPayloadError,
+            ) as error:
+                # The tunnel watchdog can outlast the per-call retries, so keep
+                # polling through a bounded outage instead of ending the wait.
+                if outage_started is None:
+                    outage_started = read_started
+                now = time.monotonic()
+                outage = now - outage_started
+                if (
+                    outage >= _VCLUSTER_POLL_OUTAGE_BUDGET_SECONDS
+                    or now + VCLUSTER_CONNECTION_RETRY_DELAY_SECONDS >= deadline
+                ):
+                    raise
+                logger.warning(
+                    "vCluster API unreachable for %.0fs while waiting for DGDR %s/%s "
+                    "to reach %s; polling again in %ss: %s",
+                    outage,
+                    self.config.namespace,
+                    name,
+                    target,
+                    VCLUSTER_CONNECTION_RETRY_DELAY_SECONDS,
+                    error,
+                )
+                await asyncio.sleep(VCLUSTER_CONNECTION_RETRY_DELAY_SECONDS)
+                continue
+            outage_started = None
             phase = result.get("status", {}).get("phase") if result else None
             if phase != last_phase:
                 logger.info("DGDR %s/%s phase: %s", self.config.namespace, name, phase)
@@ -619,7 +649,11 @@ class ManagedDGDR:
         )
 
     async def ensure_absent(self, name: str) -> None:
-        current = await self.get(name)
+        current = await self._retry_vcluster_api(
+            f"reading DGDR {self.config.namespace}/{name} before create",
+            self.get,
+            name,
+        )
         if current is None:
             return
         await self._cleanup_name(name, failed=False)
