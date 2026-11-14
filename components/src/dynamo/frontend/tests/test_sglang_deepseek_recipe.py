@@ -3,15 +3,31 @@
 
 """Recipe encoding against SGLang's real adapter, without loading a model."""
 
+import asyncio
 import copy
 import importlib.util
 import json
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
 if importlib.util.find_spec("sglang") is None:
     pytest.skip("SGLang is not installed", allow_module_level=True)
+from _routed_engine_fakes import FakeRoutedEngine  # noqa: E402
+from sglang.srt.function_call.function_call_parser import (  # noqa: E402
+    FunctionCallParser,
+)
+
 from dynamo.frontend import sglang_deepseek  # noqa: E402 -- optional SGLang guard
+from dynamo.frontend import sglang_processor as module  # noqa: E402
+from dynamo.frontend.sglang_prepost import (  # noqa: E402
+    build_tool_call_guided_decoding,
+    convert_tools,
+    create_parsers,
+)
+from dynamo.frontend.sglang_processor import SglangProcessor  # noqa: E402
+from dynamo.frontend.sglang_prompt_renderer import DeepSeekPromptRenderer  # noqa: E402
+from dynamo.frontend.utils import PreprocessError  # noqa: E402
 
 pytestmark = [
     pytest.mark.unit,
@@ -24,6 +40,7 @@ pytestmark = [
 
 @pytest.fixture
 def tokenizer():
+    # Marker-only collection stubs SGLang without installing recipe dependencies.
     import deepseek_recipe as recipe
     import tokenizers
 
@@ -48,6 +65,9 @@ def tokenizer():
     class ServedTokenizer:
         backend_tokenizer = backend
 
+        def decode(self, ids, *, skip_special_tokens=False):
+            return backend.decode(ids, skip_special_tokens=skip_special_tokens)
+
     return ServedTokenizer()
 
 
@@ -60,6 +80,454 @@ def render(request, tokenizer, *, spec="dsv4", images=None):
         spec=spec,
         image_urls=images or [],
     )
+
+
+def output_processor(
+    tokenizer,
+    request,
+    spec="dsv4",
+    default_thinking_mode=None,
+    tool_parser_enabled=True,
+):
+    suffix = "v41" if spec == "dsv41" else "v4"
+    tool_name, reasoning_name = f"deepseek{suffix}", f"deepseek-{suffix}"
+    if not tool_parser_enabled:
+        tool_name = None
+    guided = build_tool_call_guided_decoding(
+        request,
+        tool_call_parser_name=tool_name,
+        tokenizer=tokenizer,
+        sglang_tools=convert_tools(request.get("tools")),
+        native_recipe=True,
+        reasoning_parser_name=reasoning_name,
+    )
+    tool_parser, reasoning_parser = create_parsers(
+        request,
+        tool_call_parser_name=tool_name,
+        reasoning_parser_name=reasoning_name,
+        tokenizer=tokenizer,
+        guided_decoding=guided,
+    )
+    processor = SglangProcessor(
+        tokenizer,
+        None,
+        tool_name,
+        reasoning_name,
+        [tokenizer.backend_tokenizer.token_to_id("<｜end▁of▁sentence｜>")],
+        deepseek_spec=spec,
+        default_thinking_mode=default_thinking_mode,
+    )
+    return processor._build_postprocessor(
+        request,
+        {"sampling_options": {"guided_decoding": guided}, "require_reasoning": False},
+        tool_call_parser=tool_parser,
+        reasoning_parser=reasoning_parser,
+        named_zero_arg_tool=None,
+        prompt_token_ids=[],
+    )
+
+
+@pytest.mark.parametrize("spec", ["dsv4", "dsv41"])
+@pytest.mark.parametrize("thinking,chunk_size", [(False, 1), (True, 4096)])
+def test_recipe_output_preserves_tool_arguments(tokenizer, spec, thinking, chunk_size):
+    request = {
+        "tools": [{"type": "function", "function": {"name": "echo"}}],
+        "chat_template_kwargs": {"thinking": thinking},
+    }
+    text = (
+        ("check</think>" if thinking else "")
+        + '<｜DSML｜tool_calls><｜DSML｜invoke name="echo">'
+        '<｜DSML｜parameter name="text" string="true">  <think>literal</think>  </｜DSML｜parameter>'
+        '<｜DSML｜parameter name="large" string="false">9007199254740993.0</｜DSML｜parameter>'
+        '<｜DSML｜parameter name="tiny" string="false">1e-400</｜DSML｜parameter>'
+        "</｜DSML｜invoke></｜DSML｜tool_calls>"
+    )
+    post = output_processor(tokenizer, request, spec)
+    ids = tokenizer.backend_tokenizer.encode(text, add_special_tokens=False).ids
+    arguments, reasoning, names = [], [], []
+    for start in range(0, len(ids), chunk_size):
+        choice = post.process_output(
+            {
+                "token_ids": ids[start : start + chunk_size],
+                "finish_reason": "stop" if start + chunk_size >= len(ids) else None,
+            }
+        )
+        if choice is None:
+            continue
+        delta = choice["delta"]
+        reasoning.append(delta.get("reasoning_content", ""))
+        for call in delta.get("tool_calls", []):
+            arguments.append(call["function"]["arguments"])
+            if "name" in call["function"]:
+                names.append(call["function"]["name"])
+    assert names == ["echo"]
+    assert "".join(arguments) == (
+        '{"text": "  <think>literal</think>  ", "large": 9007199254740993.0, "tiny": 1e-400}'
+    )
+    assert "".join(reasoning) == ("check" if thinking else "")
+    assert choice["finish_reason"] == "tool_calls"
+
+
+@pytest.mark.parametrize("chunk_size", [1, 4096])
+def test_recipe_output_local_stop_and_logprobs(tokenizer, chunk_size):
+    post = output_processor(tokenizer, {"stop": "STOP"})
+    ids = tokenizer.backend_tokenizer.encode("answerSTOPignored").ids
+    choices = []
+    for start in range(0, len(ids), chunk_size):
+        batch = ids[start : start + chunk_size]
+        choice = post.process_output(
+            {"token_ids": batch, "log_probs": [-0.1] * len(batch)}
+        )
+        if choice is not None:
+            choices.append(choice)
+        if post.locally_finished:
+            break
+    assert "".join(c["delta"].get("content", "") for c in choices) == "answer"
+    assert choices[-1]["finish_reason"] == "stop"
+    assert post.local_stop_reason == "STOP"
+    assert post.post_stop_token_count() == (len("ignored") if chunk_size > 1 else 0)
+    assert (
+        "".join(
+            entry["token"]
+            for c in choices
+            if c["logprobs"]
+            for entry in c["logprobs"]["content"]
+        )
+        == "answer"
+    )
+
+
+@pytest.mark.parametrize("stop_field", ["stop", "stop_token_ids"])
+def test_recipe_output_token_stop(tokenizer, stop_field):
+    ids = tokenizer.backend_tokenizer.encode("answer!").ids
+    stop_id = tokenizer.backend_tokenizer.encode("!").ids[0]
+    post = output_processor(tokenizer, {stop_field: [stop_id]})
+    output = post.process_output(
+        {"token_ids": ids, "finish_reason": "stop", "stop_reason": stop_id}
+    )
+    assert output["delta"]["content"] == "answer"
+    assert output["finish_reason"] == "stop"
+
+
+def test_recipe_output_waits_for_utf8_before_local_stop(tokenizer):
+    post = output_processor(tokenizer, {"stop": "STOP"})
+    ids = tokenizer.backend_tokenizer.encode("answerSTOP🐈ignored").ids
+    split = len(tokenizer.backend_tokenizer.encode("answerSTOP").ids) + 1
+    assert post.process_output({"token_ids": ids[:split]}) is None
+    output = post.process_output({"token_ids": ids[split:]})
+    assert output["delta"]["content"] == "answer"
+    assert output["finish_reason"] == "stop"
+    assert post.post_stop_token_count() == len(ids) - len("answerSTOP")
+
+
+def test_recipe_output_json_and_eos_without_tool_parsing(tokenizer):
+    post = output_processor(
+        tokenizer,
+        {
+            "tools": [{"type": "function", "function": {"name": "echo"}}],
+            "tool_choice": "none",
+            "response_format": {"type": "json_object"},
+        },
+    )
+    ids = tokenizer.backend_tokenizer.encode('{"value":1}<｜end▁of▁sentence｜>').ids
+    output = post.process_output({"token_ids": ids, "finish_reason": "stop"})
+    assert output["delta"]["content"] == '{"value":1}'
+    assert "tool_calls" not in output["delta"]
+    assert output["finish_reason"] == "stop"
+
+
+@pytest.mark.parametrize("use_pool", [False, True])
+@pytest.mark.parametrize(
+    "tool_choice", [None, "required", "named_zero_args", "legacy_json"]
+)
+def test_recipe_output_generator_inline_and_pool(
+    tokenizer, monkeypatch, use_pool, tool_choice
+):
+    request = {"model": "deepseek", "messages": [{"role": "user", "content": "Hello"}]}
+    answer = "answer"
+    if tool_choice == "legacy_json":
+        request["guided_json"] = {"type": "object"}
+        answer = json.dumps({"literal": "<think>data</think><｜DSML｜tool_calls>"})
+    elif tool_choice:
+        request["tools"] = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "echo",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {},
+                        "additionalProperties": False,
+                    },
+                },
+            }
+        ]
+        request["tool_choice"] = (
+            {"type": "function", "function": {"name": "echo"}}
+            if tool_choice == "named_zero_args"
+            else tool_choice
+        )
+        answer = '<｜DSML｜tool_calls><｜DSML｜invoke name="echo"></｜DSML｜invoke></｜DSML｜tool_calls>'
+    renderer = DeepSeekPromptRenderer(
+        tokenizer,
+        "dsv4",
+        tool_call_parser_name="deepseekv4",
+        reasoning_parser_name="deepseek-v4",
+    )
+    for key, value in {
+        "_w_tokenizer": tokenizer,
+        "_w_prompt_renderer": renderer,
+        "_w_tool_call_parser_name": "deepseekv4",
+        "_w_reasoning_parser_name": "deepseek-v4",
+        "_w_default_thinking_mode": "enabled",
+    }.items():
+        monkeypatch.setattr(module, key, value)
+    engine = FakeRoutedEngine(
+        items=[
+            {
+                "token_ids": tokenizer.backend_tokenizer.encode(
+                    answer if tool_choice == "legacy_json" else "check</think>" + answer
+                ).ids,
+                "finish_reason": "stop",
+            }
+        ]
+    )
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        processor = module.SglangProcessor(
+            tokenizer,
+            engine,
+            "deepseekv4",
+            "deepseek-v4",
+            [],
+            deepseek_spec="dsv4",
+            prompt_renderer=renderer,
+            default_thinking_mode="enabled",
+            preprocess_pool=pool if use_pool else None,
+            preprocess_workers=1,
+        )
+
+        async def collect():
+            return [item async for item in processor.generator(request)]
+
+        choices = [
+            choice
+            for item in asyncio.run(collect())
+            for choice in item["data"]["choices"]
+        ]
+    assert "".join(c["delta"].get("reasoning_content", "") for c in choices) == (
+        "" if tool_choice == "legacy_json" else "check"
+    )
+    if tool_choice in ("required", "named_zero_args"):
+        calls = [call for c in choices for call in c["delta"].get("tool_calls", [])]
+        assert (
+            next(
+                call["function"]["name"]
+                for call in calls
+                if call["function"].get("name")
+            )
+            == "echo"
+        )
+        assert "".join(call["function"]["arguments"] for call in calls) == "{}"
+        assert choices[-1]["finish_reason"] == "tool_calls"
+        guidance = engine.requests[0]["sampling_options"]["guided_decoding"]
+        assert "structural_tag" in guidance
+        assert "DSML" in json.dumps(guidance)
+    else:
+        assert "".join(c["delta"].get("content", "") for c in choices) == answer
+        assert choices[-1]["finish_reason"] == "stop"
+        if tool_choice == "legacy_json":
+            assert engine.requests[0]["sampling_options"]["guided_decoding"] == {
+                "json": request["guided_json"]
+            }
+            assert engine.requests[0]["require_reasoning"] is False
+
+
+@pytest.mark.parametrize(
+    "separate,stream", [(True, True), (False, True), (True, False)]
+)
+def test_recipe_output_uses_deployment_thinking_and_reasoning_controls(
+    tokenizer, separate, stream
+):
+    post = output_processor(
+        tokenizer,
+        {
+            "separate_reasoning": separate,
+            "stream_reasoning": stream,
+        },
+        default_thinking_mode="enabled",
+    )
+    ids = tokenizer.backend_tokenizer.encode("check").ids
+    first = post.process_output({"token_ids": ids})
+    answer = post.process_output(
+        {"token_ids": tokenizer.backend_tokenizer.encode("</think>answer").ids}
+    )
+    final = post.process_output({"token_ids": [], "finish_reason": "length"})
+    deltas = [c["delta"] for c in (first, answer, final) if c is not None]
+    assert "".join(d.get("reasoning_content", "") for d in deltas) == (
+        "check" if separate else ""
+    )
+    assert "".join(d.get("content", "") for d in deltas) == (
+        "answer" if separate else "checkanswer"
+    )
+    assert final["finish_reason"] == "length"
+    if separate and not stream:
+        assert first is None or "reasoning_content" not in first["delta"]
+
+
+@pytest.mark.parametrize(
+    "choice", ["required", {"type": "function", "function": {"name": "echo"}}]
+)
+@pytest.mark.parametrize("wire_format", ["native", "json_array"])
+def test_recipe_output_forced_tools_use_native_parser(tokenizer, choice, wire_format):
+    post = output_processor(
+        tokenizer,
+        {
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "echo",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"value": {"type": "string"}},
+                        },
+                    },
+                }
+            ],
+            "tool_choice": choice,
+        },
+    )
+    text = (
+        '<｜DSML｜tool_calls><｜DSML｜invoke name="echo">'
+        '<｜DSML｜parameter name="value" string="true">ok</｜DSML｜parameter>'
+        "</｜DSML｜invoke></｜DSML｜tool_calls>"
+        if wire_format == "native"
+        else '[{"name":"echo","parameters":{"value":"ok"}}]'
+    )
+    ids = tokenizer.backend_tokenizer.encode(text).ids
+    output = post.process_output({"token_ids": ids, "finish_reason": "stop"})
+    if wire_format == "native":
+        calls = output["delta"]["tool_calls"]
+        assert (
+            next(
+                call["function"]["name"]
+                for call in calls
+                if call["function"].get("name")
+            )
+            == "echo"
+        )
+        assert (
+            "".join(call["function"]["arguments"] for call in calls)
+            == '{"value": "ok"}'
+        )
+        assert output["finish_reason"] == "tool_calls"
+    else:
+        assert output["delta"]["content"] == text
+        assert "tool_calls" not in output["delta"]
+        assert output["finish_reason"] == "stop"
+
+
+def test_recipe_output_reasoning_only_forced_choice(tokenizer):
+    post = output_processor(
+        tokenizer,
+        {
+            "tools": [{"type": "function", "function": {"name": "echo"}}],
+            "tool_choice": "required",
+        },
+        tool_parser_enabled=False,
+    )
+    text = '[{"name":"echo","parameters":{}}]'
+    output = post.process_output(
+        {
+            "token_ids": tokenizer.backend_tokenizer.encode(text).ids,
+            "finish_reason": "stop",
+        }
+    )
+    assert output["delta"]["content"] == text
+    assert "tool_calls" not in output["delta"]
+
+
+@pytest.mark.parametrize("failure", [None, MemoryError, OSError])
+def test_recipe_forced_constraint_preserves_failure_kind(
+    tokenizer, monkeypatch, failure
+):
+    def build(*args, **kwargs):
+        if failure is not None:
+            raise failure("constraint construction failed")
+        return None
+
+    monkeypatch.setattr(
+        FunctionCallParser.ToolCallParserEnum["deepseekv4"],
+        "get_structural_tag",
+        build,
+    )
+    message = "constraint construction failed" if failure else "native structural tag"
+    with pytest.raises(failure or PreprocessError, match=message):
+        output_processor(
+            tokenizer,
+            {
+                "tools": [{"type": "function", "function": {"name": "echo"}}],
+                "tool_choice": "required",
+            },
+        )
+
+
+@pytest.mark.parametrize(
+    "mode,schema,request_strict,named,expected",
+    [
+        ("on", "auto", None, True, True),
+        ("on", "strict", False, False, True),
+        ("on", "auto", False, False, False),
+        ("off", "strict", False, False, False),
+        ("off", "auto", None, False, False),
+    ],
+)
+def test_recipe_forced_constraint_respects_schema_policy(
+    tokenizer, monkeypatch, mode, schema, request_strict, named, expected
+):
+    function = {
+        "name": "target",
+        "parameters": {
+            "type": "object",
+            "properties": {"value": {"type": "integer"}},
+            "required": ["value"],
+        },
+    }
+    if request_strict is not None:
+        function["strict"] = request_strict
+    tools = [
+        {"type": "function", "function": {"name": "other", "strict": False}},
+        {"type": "function", "function": function},
+    ]
+    original = copy.deepcopy(tools)
+    seen = []
+    detector_class = FunctionCallParser.ToolCallParserEnum["deepseekv4"]
+    build = detector_class.get_structural_tag
+
+    def capture(detector, *, tools, **kwargs):
+        seen.extend((tool.function.name, tool.function.strict) for tool in tools)
+        return build(detector, tools=tools, **kwargs)
+
+    monkeypatch.setattr(detector_class, "get_structural_tag", capture)
+    guided = build_tool_call_guided_decoding(
+        {
+            "tools": tools,
+            "tool_choice": {"type": "function", "function": {"name": "target"}}
+            if named
+            else "required",
+        },
+        tool_call_parser_name="deepseekv4",
+        tokenizer=tokenizer,
+        sglang_tools=convert_tools(tools),
+        native_recipe=True,
+        structural_tag_mode=mode,
+        structural_tag_schema=schema,
+        reasoning_parser_name="deepseek-v4",
+    )
+    assert "structural_tag" in guided
+    assert dict(seen)["target"] is expected
+    assert [name for name, _ in seen] == (["target"] if named else ["other", "target"])
+    assert tools == original
 
 
 @pytest.mark.parametrize("spec,effort", [("dsv4", "max"), ("dsv41", 37)])

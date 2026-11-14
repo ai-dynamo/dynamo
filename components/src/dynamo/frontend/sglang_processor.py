@@ -27,6 +27,7 @@ from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine
 from dynamo.llm.exceptions import InvalidArgument, Unknown, WorkerUnavailable
 
 from .responses_history import responses_tools_request
+from .sglang_deepseek import create_recipe_output_parser, resolve_deepseek_spec
 from .sglang_prepost import (
     ReasoningParser,
     SglangStreamingPostProcessor,
@@ -34,6 +35,7 @@ from .sglang_prepost import (
     _client_wants_separate_reasoning,
     _get_history_tool_calls_count,
     _guided_output_requires_reasoning,
+    _with_thinking_template_kwargs,
     convert_tools,
     create_parsers,
     detect_force_reasoning_from_template,
@@ -609,6 +611,7 @@ class SglangProcessor:
         structural_tag_scope: str = "auto",
         structural_tag_schema: str = "auto",
         prompt_renderer: PromptRenderer | None = None,
+        deepseek_spec: str | None = None,
     ):
         self.tokenizer = tokenizer
         # Detect force_reasoning once from the chat template, matching
@@ -637,6 +640,7 @@ class SglangProcessor:
         self.structural_tag_scope = structural_tag_scope
         self.structural_tag_schema = structural_tag_schema
         self.prompt_renderer = prompt_renderer
+        self.deepseek_spec = deepseek_spec
         self.preprocess_pool = preprocess_pool
         if preprocess_pool is not None:
             self._worker_semaphore: asyncio.Semaphore | None = asyncio.Semaphore(
@@ -702,6 +706,26 @@ class SglangProcessor:
         """Parsers are passed in because the pool path must recreate them in the
         main process; they are not picklable.
         """
+        recipe_parser = None
+        if self.deepseek_spec is not None:
+            recipe_request = _with_thinking_template_kwargs(
+                request, self.default_thinking_mode
+            )
+            recipe_request["separate_reasoning"] = _client_wants_separate_reasoning(
+                request
+            )
+            recipe_parser = create_recipe_output_parser(
+                recipe_request,
+                tokenizer=self.tokenizer,
+                spec=self.deepseek_spec,
+                reasoning_parser_name=self.reasoning_parser_name,
+                tool_call_parser_name=self.tool_call_parser_name,
+                parse_tool_calls=bool(self.tool_call_parser_name)
+                and tool_call_parser is not None,
+                json_content=_guided_json_is_content(dynamo_preproc),
+            )
+            if recipe_parser is not None and not self.tool_call_parser_name:
+                tool_call_parser = None
         return SglangStreamingPostProcessor(
             tokenizer=self.tokenizer,
             tool_call_parser=tool_call_parser,
@@ -718,6 +742,7 @@ class SglangProcessor:
             stop_strings=_request_stop_strings(request),
             skip_special_tokens=request.get("skip_special_tokens"),
             stop_token_ids=set(_request_stop_token_ids(request)),
+            recipe_parser=recipe_parser,
         )
 
     async def _generator_inner(
@@ -1362,6 +1387,9 @@ class SglangEngineFactory:
             structural_tag_scope=structural_tag_scope,
             structural_tag_schema=structural_tag_schema,
             prompt_renderer=prompt_renderer,
+            deepseek_spec=(
+                resolve_deepseek_spec(local_dir) if chat_template is None else None
+            ),
         )
         gen.exclude_tools_when_tool_choice_none = (
             self.config.exclude_tools_when_tool_choice_none

@@ -30,7 +30,9 @@ from dynamo.common.utils.guided_json import admits_only_empty_object
 from dynamo.llm.exceptions import InvalidArgument
 
 from .responses_history import responses_history_recipients, responses_tools_request
+from .sglang_deepseek import DeepSeekRecipeOutputParser, supports_recipe_output
 from .sglang_prompt_renderer import (
+    DeepSeekPromptRenderer,
     KimiK3PromptRenderer,
     PromptRenderer,
     build_prompt_renderer,
@@ -557,6 +559,8 @@ def build_tool_call_guided_decoding(
     structural_tag_mode: str = "off",
     structural_tag_scope: str = "auto",
     structural_tag_schema: str = "auto",
+    native_recipe: bool = False,
+    reasoning_parser_name: str | None = None,
 ) -> dict[str, Any] | None:
     """Build native-SGLang-like tool call constraints for guided decoding."""
     if not sglang_tools:
@@ -608,6 +612,54 @@ def build_tool_call_guided_decoding(
             "parallel_tool_calls" in request and parallel_tool_calls is False
         ),
     )
+    if native_recipe and is_forced_choice and tool_call_parser_name:
+        # Native recipe output consumes DSML, so a JSON-array fallback would
+        # generate a different format than the output parser expects.
+        native_tools = (
+            convert_tools(raw_tools, structural_tag_schema=structural_tag_schema)
+            if attempt_structural_tag
+            else sglang_tools
+        )
+        if native_tools is None:
+            raise PreprocessError("DeepSeek recipe tool choice requires native tools")
+        if is_named_choice:
+            native_tools = [
+                tool
+                for tool in native_tools
+                if tool.function.name == sglang_tool_choice.function.name
+            ]
+        try:
+            parser = FunctionCallParser(
+                tools=native_tools,
+                tool_call_parser=tool_call_parser_name,
+                **_parser_tokenizer_kwargs(FunctionCallParser, tokenizer),
+            )
+            tag = parser.detector.get_structural_tag(
+                tools=parser.structural_tag_tools(),
+                tool_choice=sglang_tool_choice,
+                parallel_tool_calls=parallel_tool_calls,
+                thinking_mode=reasoning_parser_name is None
+                and bool(
+                    (
+                        request.get("chat_template_kwargs")
+                        or request.get("chat_template_args")
+                        or {}
+                    ).get("thinking")
+                ),
+            )
+            constraint = ("structural_tag", tag) if tag is not None else None
+        except (AttributeError, NotImplementedError, TypeError, ValueError) as exc:
+            raise PreprocessError(
+                "DeepSeek recipe tool choice requires a native tool constraint"
+            ) from exc
+        guidance = _serialize_tool_constraint(
+            constraint, stop_after_first=parallel_tool_calls is False
+        )
+        if guidance is None or "structural_tag" not in guidance:
+            raise PreprocessError(
+                "DeepSeek recipe tool choice requires a native structural tag"
+            )
+        return guidance
 
     if attempt_structural_tag and tool_call_parser_name:
         guidance_tools = convert_tools(
@@ -892,6 +944,13 @@ def preprocess_chat_request(
         structural_tag_scope=structural_tag_scope,
         structural_tag_schema=structural_tag_schema,
         tokenizer=tokenizer,
+        native_recipe=isinstance(prompt_renderer, DeepSeekPromptRenderer)
+        and supports_recipe_output(
+            spec=prompt_renderer.recipe_spec,
+            reasoning_parser_name=reasoning_parser_name,
+            tool_call_parser_name=tool_call_parser_name,
+        ),
+        reasoning_parser_name=reasoning_parser_name,
     )
     # This path also never reads the legacy guided_json / guided_regex /
     # guided_grammar / guided_choice fields at all, so those are dropped silently
@@ -1089,8 +1148,11 @@ class SglangStreamingPostProcessor:
         stop_token_ids: set[int] | None = None,
         skip_special_tokens: bool | None = None,
         guided_json_is_content: bool = False,
+        recipe_parser: DeepSeekRecipeOutputParser | None = None,
     ) -> None:
         self.tokenizer = tokenizer
+        self._recipe_parser = recipe_parser
+        self._recipe_pending_ids: list[int] = []
         self.tool_call_parser = tool_call_parser
         self.reasoning_parser = reasoning_parser
         self.history_tool_calls_count = history_tool_calls_count
@@ -1105,6 +1167,8 @@ class SglangStreamingPostProcessor:
         self._skip_special_tokens = resolve_skip_special_tokens(
             skip_special_tokens, has_parser=not self._fast_plain_text
         )
+        if recipe_parser is not None:
+            self._skip_special_tokens = False
         # Bare answer JSON is already structured by generation. Keep the original
         # decoding policy, and retain the parser for forced tool-call JSON arrays.
         if guided_json_is_content and not isinstance(tool_call_parser, JsonArrayParser):
@@ -1583,7 +1647,8 @@ class SglangStreamingPostProcessor:
         held_ids = list(self._pending_decode_ids)
         decoded_text = (
             self._incremental_decode(token_ids, flush=finish_reason is not None)
-            if token_ids or finish_reason is not None
+            if (self._recipe_parser is None or self._stop_strings)
+            and (token_ids or finish_reason is not None)
             else ""
         )
         # A hidden stop token is generated output: score it, but do not display it.
@@ -1614,6 +1679,21 @@ class SglangStreamingPostProcessor:
                 decoded_text[:stop_end],
                 len(generated_ids) - len(token_ids),
             )
+
+        if self._recipe_parser is not None:
+            # Stop discovery and logprobs remain host-owned. Feed original IDs,
+            # retaining the native parser's bounded stop lookbehind across chunks.
+            self._recipe_pending_ids.extend(token_ids)
+            if self._pending_decode_ids and finish_reason is None and stop_end is None:
+                return None
+            recipe_ids, self._recipe_pending_ids = self._recipe_pending_ids, []
+            if stop_end is not None:
+                dropped = self.post_stop_token_count() - (
+                    len(generated_ids) - len(token_ids)
+                )
+                recipe_ids = recipe_ids[: len(recipe_ids) - dropped]
+                stop_reason = self._local_stop_reason
+            return self._process_recipe_output(recipe_ids, finish_reason, stop_reason)
 
         if self._fast_plain_text:
             if delta_text:
@@ -1880,3 +1960,53 @@ class SglangStreamingPostProcessor:
             }
 
         return None
+
+    def _process_recipe_output(
+        self, token_ids: list[int], finish_reason: str | None, stop_reason: Any
+    ) -> dict[str, Any] | None:
+        assert self._recipe_parser is not None
+        if finish_reason is None:
+            piece = self._recipe_parser.feed(token_ids)
+        else:
+            # Token-stop suffixes have already been removed above; string stops
+            # must be cut in the native parser before it interprets their IDs.
+            piece = self._recipe_parser.finish(
+                token_ids,
+                {
+                    "type": finish_reason,
+                    "matched": stop_reason if isinstance(stop_reason, str) else None,
+                },
+                keep_matched_stop=self._no_stop_trim
+                or (
+                    isinstance(stop_reason, str)
+                    and stop_reason in self._tool_close_literals
+                ),
+            )
+        delta: dict[str, Any] = {}
+        if piece.content:
+            delta["content"] = piece.content
+        if piece.reasoning:
+            delta["reasoning_content"] = piece.reasoning
+        calls = []
+        for call in piece.tool_calls:
+            function = {"arguments": call.arguments}
+            item: dict[str, Any] = {"index": call.index, "function": function}
+            if call.name is not None:
+                self._tool_call_names[call.index] = call.name
+                item.update(
+                    id=self._tool_call_id(call.name, call.index), type="function"
+                )
+                function["name"] = call.name
+            calls.append(item)
+        if calls:
+            delta["tool_calls"] = calls
+        if finish_reason == "stop" and self._tool_call_names:
+            finish_reason = "tool_calls"
+        if not delta and finish_reason is None:
+            return None
+        return {
+            "index": 0,
+            "delta": self._with_initial_role(delta),
+            "finish_reason": finish_reason,
+            "logprobs": self._take_pending_logprobs(),
+        }
