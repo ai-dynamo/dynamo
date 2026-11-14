@@ -157,6 +157,7 @@ def test_linker_registration_uses_state_agent(monkeypatch):
     config.dynamo_args.use_sglang_tokenizer = False
     config.dynamo_args.model_source_uri = None
     config.dynamo_args.custom_jinja_template = None
+    config.dynamo_args.systemone_serial = False
     values = {}
     runtime = SimpleNamespace(
         set_engine_specific=lambda key, value: values.update({key: json.loads(value)})
