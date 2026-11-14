@@ -55,7 +55,7 @@ impl AdaptiveScorer {
 
 impl WorkerScorer for AdaptiveScorer {
     fn required_worker_inputs(&self) -> WorkerInputs {
-        WorkerInputs::CACHE | WorkerInputs::LOAD
+        WorkerInputs::CACHE | WorkerInputs::LOAD | WorkerInputs::PREFERRED_TAINT
     }
 
     fn score(
@@ -92,6 +92,7 @@ impl WorkerScorer for AdaptiveScorer {
             } else {
                 (isl_tokens, 0)
             };
+            // Preferred routing constraints scale the cost as in the default selector.
             *cost = cost_for(
                 weights.set,
                 request_tokens as f64 / block_size,
@@ -100,7 +101,7 @@ impl WorkerScorer for AdaptiveScorer {
                 cache.device_overlap_blocks(),
                 load.decode_cost_blocks(),
                 active_requests,
-            );
+            ) * candidate.preferred_taint_multiplier().unwrap_or(1.0);
         }
 
         // The loop reads this; publishing here needs no new router hook and costs one Arc store per interval.
