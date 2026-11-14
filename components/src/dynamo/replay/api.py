@@ -402,7 +402,8 @@ def _retune_inputs(
 
 def _read_planner_config(planner_config) -> "PlannerConfig":
     """Read a planner config given as a dict, a file path or inline JSON."""
-    # Lazy import, as in ``_planner_replay_adapter``.
+    # Imported on first use: ``dynamo.mocker`` imports this module, and the
+    # Planner package needs AISimulate.
     from dynamo.planner.config.planner_config import PlannerConfig
 
     if isinstance(planner_config, dict):
@@ -420,7 +421,8 @@ def _warn_old_planner_config(config: "PlannerConfig") -> None:
     """
     if _PLANNER_CONFIG_WARNED.get():
         return
-    # Lazy import, as in ``_planner_replay_adapter``.
+    # Imported on first use: ``dynamo.mocker`` imports this module, and the
+    # Planner package needs AISimulate.
     from dynamo.planner.config.planner_config import (
         AIS_PERF_MODEL_NEW_FORM,
         ais_perf_model_old_form_names,
