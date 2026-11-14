@@ -1712,10 +1712,12 @@ fn map_output_logprobs(
                     logprob: normalize_logprob(output.logprobs[index]),
                     bytes: None,
                 });
+                // vLLM's top-N row can repeat the sampled token; list it once, as vLLM does.
                 entries.extend(
                     output.candidate_tokens[index]
                         .tokens
                         .iter()
+                        .filter(|candidate| candidate.id != *token_id)
                         .map(|candidate| TopLogprob {
                             rank: candidate.rank,
                             token_id: candidate.id,

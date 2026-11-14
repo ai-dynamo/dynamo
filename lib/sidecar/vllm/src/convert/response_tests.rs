@@ -367,6 +367,31 @@ fn output_logprobs_preserve_native_ranks_and_token_metadata() {
     );
 }
 
+// vLLM's top-N row includes the sampled token when it ranks in the top N; list it once.
+#[test]
+fn output_top_logprobs_list_the_sampled_token_once() {
+    let mut request = request();
+    request.output_options.logprobs = Some(2);
+    let mut state = ResponseState::new(&request, DisaggregationMode::Aggregated);
+    let mut response = sequence_response(true, true, None);
+    response.outputs.as_mut().unwrap().candidate_tokens[0]
+        .tokens
+        .insert(
+            0,
+            pb::candidate_token_info::TokenInfo {
+                id: 42,
+                logprob: -0.25,
+                rank: 1,
+            },
+        );
+    let result = state.convert(response).unwrap().unwrap();
+    let ids: Vec<_> = result.top_logprobs.unwrap()[0]
+        .iter()
+        .map(|entry| entry.token_id)
+        .collect();
+    assert_eq!(ids, [42, 43]);
+}
+
 #[test]
 fn nonfinite_and_underflowing_logprobs_keep_associations() {
     for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -10000.0] {
