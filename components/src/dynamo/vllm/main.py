@@ -185,6 +185,52 @@ def configure_muse_structural_tag_reasoning(
         vllm_config.structured_outputs_config.enable_in_reasoning = True
 
 
+def configure_engine_reasoning_parser_for_structured_outputs(
+    config: Config, vllm_config: VllmConfig
+) -> None:
+    """Let vLLM's structured outputs wait for the end of reasoning.
+
+    With ``--dyn-reasoning-parser`` the reasoning block is parsed in the Dynamo
+    frontend, but vLLM's grammar backend only knows where reasoning ends through
+    ``structured_outputs_config.reasoning_parser``. Left empty, a
+    ``response_format`` / forced-tool grammar is applied from the first generated
+    token: the model is made to write the JSON inside the reasoning block, the
+    frontend returns it as ``reasoning_content`` and ``content`` is null.
+
+    When the engine-side parser is unset and vLLM has a reasoning parser with the
+    same name, use it. An explicit ``--structured-outputs-config`` (or
+    ``--reasoning-parser``) always wins; ``enable_in_reasoning`` is left alone.
+    """
+    if not config.dyn_reasoning_parser:
+        return
+    structured_outputs_config = vllm_config.structured_outputs_config
+    if structured_outputs_config.reasoning_parser:
+        return
+    name = config.dyn_reasoning_parser
+    try:
+        from vllm.reasoning import ReasoningParserManager
+
+        known = name in ReasoningParserManager.list_registered()
+    except Exception:  # pragma: no cover - registry import is version dependent
+        known = False
+    if not known:
+        logger.warning(
+            "--dyn-reasoning-parser=%s has no vLLM reasoning parser of the same "
+            "name: structured outputs (response_format, required/named tool_choice) "
+            "will be constrained from the first token, including the reasoning "
+            "block. Pass --structured-outputs-config "
+            '\'{"reasoning_parser": "<vllm parser>"}\' to fix it.',
+            name,
+        )
+        return
+    structured_outputs_config.reasoning_parser = name
+    logger.info(
+        "Structured outputs start after reasoning: engine reasoning_parser=%s "
+        "(from --dyn-reasoning-parser)",
+        name,
+    )
+
+
 def should_register_model_ignore_weights(config: Config) -> bool:
     return uses_modelexpress_load_format(config)
 
@@ -761,6 +807,7 @@ def setup_vllm_engine(
     usage_context = UsageContext.OPENAI_API_SERVER
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
     configure_muse_structural_tag_reasoning(config, vllm_config)
+    configure_engine_reasoning_parser_for_structured_outputs(config, vllm_config)
     disable_hybrid_kv_cache_manager_for_incompatible_pd_connector(vllm_config)
     default_sampling_params = vllm_config.model_config.get_diff_sampling_param()
 

@@ -613,6 +613,37 @@ def test_muse_grammar_owns_reasoning_before_engine_launch(
 
 
 @pytest.mark.parametrize(
+    "dyn_parser,engine_parser,registered,expected",
+    [
+        # Frontend-only parser: the engine learns where reasoning ends.
+        ("deepseek_r1", "", ["deepseek_r1", "qwen3"], "deepseek_r1"),
+        # An explicit engine-side parser always wins.
+        ("deepseek_r1", "qwen3", ["deepseek_r1", "qwen3"], "qwen3"),
+        # No vLLM parser of that name: leave the engine config unchanged.
+        ("dynamo_only", "", ["deepseek_r1"], ""),
+        # No reasoning parser at all: nothing to do.
+        (None, "", ["deepseek_r1"], ""),
+    ],
+)
+def test_engine_reasoning_parser_defaults_from_dyn_reasoning_parser(
+    monkeypatch, dyn_parser, engine_parser, registered, expected
+):
+    vllm_main = _load_vllm_main()
+    from vllm.reasoning import ReasoningParserManager
+
+    monkeypatch.setattr(
+        ReasoningParserManager, "list_registered", classmethod(lambda cls: registered)
+    )
+    config = SimpleNamespace(dyn_reasoning_parser=dyn_parser)
+    outputs = SimpleNamespace(reasoning_parser=engine_parser, enable_in_reasoning=False)
+    vllm_main.configure_engine_reasoning_parser_for_structured_outputs(
+        config, SimpleNamespace(structured_outputs_config=outputs)
+    )
+    assert outputs.reasoning_parser == expected
+    assert outputs.enable_in_reasoning is False
+
+
+@pytest.mark.parametrize(
     ("hf_config", "expected"),
     [
         (SimpleNamespace(video_token_id=101, video_token_index=202), 101),
