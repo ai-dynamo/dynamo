@@ -76,7 +76,7 @@ RUST_LOG=info \
 
 ## Request-path cost
 
-This policy is an exception to the rule of keeping shared state out of `score` and `pick`: the scorer and the picker each take one lock-free `arc-swap` guard read of the current weights per request (the picker skips it when the request overrides the temperature). For requests with at least two observed workers, no pinned worker and no preview, the scorer also reads the clock once; at most once per `interval_ms` one of them wins a compare-and-swap and stores a new load sample (one `Vec` and one `Arc` allocation). The picker holds a short lock on its PRNG and a reused cost buffer while it picks, as the default picker does with its softmax scratch. The request path does not allocate otherwise.
+This policy is an exception to the rule of keeping shared state out of `score` and `pick`: the scorer takes one lock-free `arc-swap` guard read of the current weights per request. For requests with at least two observed workers, no pinned worker and no preview, the scorer also reads the clock once; at most once per `interval_ms` one of them wins a compare-and-swap and stores a new load sample (one `Vec` and one `Arc` allocation). The picker holds a short lock on its PRNG and a reused cost buffer while it picks, as the default picker does with its softmax scratch. The request path does not allocate otherwise.
 
 ## Observability
 

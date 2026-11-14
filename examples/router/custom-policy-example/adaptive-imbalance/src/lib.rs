@@ -275,7 +275,7 @@ pub fn register(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
 
     use dynamo_kv_router::plugins::prelude::*;
     use dynamo_scheduler::RouterConfigOverride;
@@ -547,6 +547,66 @@ mod tests {
             vec![0.0, 2.0],
             "the scorer feeds the loop's load sample"
         );
+    }
+
+    struct TaintedWorker(HashSet<String>);
+
+    impl WorkerConfigLike for TaintedWorker {
+        fn data_parallel_start_rank(&self) -> u32 {
+            0
+        }
+
+        fn data_parallel_size(&self) -> u32 {
+            1
+        }
+
+        fn max_num_batched_tokens(&self) -> Option<u64> {
+            None
+        }
+
+        fn total_kv_blocks(&self) -> Option<u64> {
+            Some(1024)
+        }
+
+        fn taints(&self) -> &HashSet<String> {
+            &self.0
+        }
+    }
+
+    #[test]
+    fn preferred_taint_scales_the_cost_as_in_the_default_policy() {
+        let (_, policy) = adaptive_policy(
+            SelectionConfig {
+                decode_active_request_weight: 1.0,
+                router_temperature: 0.0,
+                ..SelectionConfig::default()
+            },
+            Parameters::default().interval(),
+        );
+
+        let workers = HashMap::from([
+            (41, TaintedWorker(HashSet::new())),
+            (29, TaintedWorker(HashSet::from(["fast".to_string()]))),
+        ]);
+        let idle = WorkerWithDpRank::from_worker_id(41);
+        let preferred = WorkerWithDpRank::from_worker_id(29);
+        // Costs 1 (prefill) for the idle worker and 1 + 1 (prefill + one active request) for the
+        // preferred one; the preference multiplies the latter by exp(-tanh(1)) ≈ 0.47, so it wins.
+        let mut request = request_with_loads(&[(idle, 0), (preferred, 1)]);
+        request
+            .routing_constraints
+            .preferred_taints
+            .insert("fast".into(), 1.0);
+
+        let selected = policy
+            .select_worker(WorkerSelectionInput::configured(
+                &workers,
+                &request,
+                request.eligibility(),
+                16,
+            ))
+            .unwrap();
+        assert_eq!(selected.worker, preferred);
     }
 
     #[test]
