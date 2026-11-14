@@ -105,7 +105,8 @@ impl PrefillTask {
 
     /// Observe prefill failures both during decode dispatch and while streaming.
     /// Successful decode terminals wait only for required prefill metadata.
-    /// After success, drain decode and await prefill cleanup; late failures are logged.
+    /// After success, drain decode and end the stream at decode EOF; prefill completion
+    /// is observed in a detached task and late failures are logged, not yielded.
     /// `output` sends prefill's output into the stream as soon as prefill
     /// finishes (`BeforeLast`), or before any decode output (`BeforeFirst`).
     pub(super) async fn forward_decode(
@@ -250,8 +251,18 @@ impl PrefillTask {
                                 yield output;
                             }
                             if !emit {
-                                // Success is delivered; the prefill task logs late failures.
-                                let _ = completion.await;
+                                // Success is delivered; do not hold the stream end (and the
+                                // HTTP [DONE]/usage) for the prefill reply, which the prefill
+                                // worker may send only after its current forward pass. The
+                                // prefill task keeps running (dropping a JoinHandle never
+                                // aborts it) and logs its own failures; this detached
+                                // observer only keeps wait()'s JoinError warning.
+                                tokio::spawn(
+                                    async move {
+                                        let _ = completion.await;
+                                    }
+                                    .instrument(tracing::Span::current()),
+                                );
                             }
                             return;
                         }
@@ -379,7 +390,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tokens_flow_while_prefill_is_pending_but_close_waits() {
+    async fn stream_ends_at_decode_eof_while_prefill_is_pending() {
         let (tx, task) = pending_prefill();
         let context = Arc::new(Controller::default());
         let token = LLMEngineOutput {
@@ -407,20 +418,23 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.next().await.unwrap().data.unwrap().token_ids, [42]);
+        // The terminal is delivered while prefill is still pending.
         let terminal = response.next().now_or_never().flatten().unwrap();
         assert_eq!(
             terminal.data.unwrap().finish_reason,
             Some(FinishReason::Length)
         );
+        // Items the worker sends after the terminal are still drained.
         assert!(response.next().now_or_never().is_none());
-        tx.send(Ok(None)).unwrap();
         decode_tx
             .unbounded_send(Annotated::from_data(token))
             .unwrap();
         assert_eq!(response.next().await.unwrap().data.unwrap().token_ids, [42]);
-        assert!(response.next().now_or_never().is_none());
+        // Decode EOF ends the response without waiting for the prefill reply.
         drop(decode_tx);
-        assert!(response.next().await.is_none());
+        assert!(matches!(response.next().now_or_never(), Some(None)));
+        // The prefill task is still alive and accepts its late reply.
+        assert!(tx.send(Ok(None)).is_ok());
         assert!(!context.is_stopped());
     }
 
@@ -437,7 +451,7 @@ mod tests {
         let mut response = task
             .forward_decode(
                 async { Ok(decode) },
-                context,
+                context.clone(),
                 PrefillNeed::None,
                 Arc::new(Controller::default()),
             )
@@ -448,9 +462,71 @@ mod tests {
             terminal.data.unwrap().finish_reason,
             Some(FinishReason::Length)
         );
-        assert!(response.next().now_or_never().is_none());
-        tx.send(failure()).unwrap();
+        // The stream ends at decode EOF, before prefill replies.
+        assert!(matches!(response.next().now_or_never(), Some(None)));
+        assert!(tx.send(failure()).is_ok());
+        // Let the prefill task and its detached observer handle the failure.
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        // The late failure is neither yielded nor turned into a cancellation.
         assert!(response.next().await.is_none());
+        assert!(!context.is_stopped());
+    }
+
+    /// Ending the response at decode EOF must not abort prefill or its observer:
+    /// both still run to completion after the response is gone.
+    #[tokio::test]
+    async fn detached_prefill_completion_runs_after_stream_ends() {
+        let metrics = tokio::runtime::Handle::current().metrics();
+        let (release_tx, release_rx) = oneshot::channel();
+        let (finished_tx, finished_rx) = oneshot::channel();
+        let task = PrefillTask::spawn(
+            async move {
+                release_rx.await.unwrap();
+                finished_tx.send(()).unwrap();
+                Ok(None)
+            },
+            Arc::new(Controller::default()),
+        );
+        let context = Arc::new(Controller::default());
+        let decode: ManyOut<Annotated<LLMEngineOutput>> = ResponseStream::new(
+            Box::pin(stream::iter([Annotated::from_data(
+                LLMEngineOutput::length(),
+            )])),
+            context.clone(),
+        );
+        let mut response = task
+            .forward_decode(
+                async { Ok(decode) },
+                context.clone(),
+                PrefillNeed::None,
+                Arc::new(Controller::default()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.next().await.unwrap().data.unwrap().finish_reason,
+            Some(FinishReason::Length)
+        );
+        assert!(response.next().await.is_none());
+        drop(response);
+        // The prefill task and the detached completion observer are both alive.
+        assert_eq!(metrics.num_alive_tasks(), 2);
+        release_tx.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), finished_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        // The observer then sees the prefill result and exits.
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while metrics.num_alive_tasks() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!context.is_stopped());
     }
 
     #[tokio::test]
