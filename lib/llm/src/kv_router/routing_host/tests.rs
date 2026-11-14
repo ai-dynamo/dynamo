@@ -398,6 +398,7 @@ async fn builtin_direct_uses_bound_soft_affinity_as_exact_target() {
 struct CompletedBuiltinDispatch {
     worker_ids: Mutex<Vec<u64>>,
     dp_ranks: Mutex<Vec<Option<u32>>>,
+    elapsed_since_arrival_ms: Mutex<Vec<Option<f64>>>,
     fails: AtomicBool,
     unfinished: AtomicBool,
 }
@@ -416,6 +417,10 @@ impl StreamingDispatch<PreprocessedRequest, Annotated<LLMEngineOutput>>
             .lock()
             .unwrap()
             .push(content.routing.as_ref().and_then(|routing| routing.dp_rank));
+        self.elapsed_since_arrival_ms
+            .lock()
+            .unwrap()
+            .push(content.elapsed_since_arrival_ms);
         self.worker_ids
             .lock()
             .unwrap()
@@ -2308,6 +2313,7 @@ async fn aggregated_prompt_logprobs_deny_cache_credit_in_selection_and_booking()
 #[derive(Default)]
 struct PendingThenCompletedDispatch {
     worker_ids: Mutex<Vec<u64>>,
+    elapsed_since_arrival_ms: Mutex<Vec<Option<f64>>>,
 }
 
 #[async_trait]
@@ -2320,7 +2326,11 @@ impl StreamingDispatch<PreprocessedRequest, Annotated<LLMEngineOutput>>
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
         tokio::task::yield_now().await;
         let (addressed, context) = request.transfer(());
-        let (_, _, instance) = addressed.into_parts();
+        let (content, _, instance) = addressed.into_parts();
+        self.elapsed_since_arrival_ms
+            .lock()
+            .unwrap()
+            .push(content.elapsed_since_arrival_ms);
         self.worker_ids
             .lock()
             .unwrap()
@@ -2371,6 +2381,37 @@ async fn kv_rejects_partial_runtime_metadata_before_dispatch() {
         serde_json::from_value(serde_json::to_value(input).unwrap()).unwrap();
     assert!(router.generate(Context::new(input)).await.is_err());
     assert!(dispatch.worker_ids.lock().unwrap().is_empty());
+    drop(router);
+    runtime.shutdown();
+}
+
+/// The router stamps how long the frontend has held a request as it dispatches it, so a backend
+/// can order admission by the original arrival. A request without a tracker, one this process
+/// did not receive from a client, keeps the stamp it arrived with.
+#[tokio::test]
+#[serial_test::serial]
+async fn kv_dispatch_stamps_elapsed_since_arrival() {
+    let (router, dispatch, _, runtime) =
+        router_with_recorded_dispatch("kv-elapsed-since-arrival").await;
+    let tracker = Arc::new(RequestTracker::new());
+    let mut received = request();
+    received.tracker = Some(Arc::clone(&tracker));
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    let mut forwarded = request();
+    forwarded.elapsed_since_arrival_ms = Some(1234.5);
+    for input in [received, forwarded] {
+        let mut stream = router.generate(Context::new(input)).await.unwrap();
+        while stream.next().await.is_some() {}
+    }
+    let age_ms = tracker.elapsed_since_received().as_secs_f64() * 1000.0;
+
+    let stamps = dispatch.elapsed_since_arrival_ms.lock().unwrap().clone();
+    assert_eq!(stamps.len(), 2, "{stamps:?}");
+    assert!(
+        stamps[0].is_some_and(|ms| (5.0..=age_ms).contains(&ms)),
+        "{stamps:?}, tracker age {age_ms} ms"
+    );
+    assert_eq!(stamps[1], Some(1234.5));
     drop(router);
     runtime.shutdown();
 }
@@ -5185,6 +5226,50 @@ async fn unknown_explicit_workers_are_rejected_before_builtin_dispatch() {
     assert_eq!(
         dispatch.worker_ids.lock().unwrap().as_slice(),
         &[live_worker]
+    );
+    drop(host);
+    runtime.shutdown();
+}
+
+/// The non-KV modes stamp the request's time since arrival as they dispatch it too.
+#[tokio::test]
+#[serial_test::serial]
+async fn builtin_dispatch_stamps_elapsed_since_arrival() {
+    let runtime = Runtime::from_current().unwrap();
+    let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+        .await
+        .unwrap();
+    let endpoint = distributed
+        .namespace("builtin-elapsed-since-arrival")
+        .unwrap()
+        .component("workers")
+        .unwrap()
+        .endpoint("generate");
+    let client = endpoint.client().await.unwrap();
+    let load_context = test_load_context(&client).await;
+    endpoint.register_endpoint_instance().await.unwrap();
+    client.wait_for_instances().await.unwrap();
+    let dispatch = Arc::new(CompletedBuiltinDispatch::default());
+    let host = RoutingHost::builder(client, RouterMode::RoundRobin)
+        .load_context(load_context)
+        .dispatch(Arc::clone(&dispatch) as Arc<dyn StreamingDispatch<_, _>>)
+        .build()
+        .await
+        .unwrap();
+    let tracker = Arc::new(RequestTracker::new());
+    let mut input = request();
+    input.tracker = Some(Arc::clone(&tracker));
+    tokio::time::sleep(Duration::from_millis(5)).await;
+
+    let mut stream = host.generate(Context::new(input)).await.unwrap();
+    while stream.next().await.is_some() {}
+    let age_ms = tracker.elapsed_since_received().as_secs_f64() * 1000.0;
+
+    let stamps = dispatch.elapsed_since_arrival_ms.lock().unwrap().clone();
+    assert_eq!(stamps.len(), 1, "{stamps:?}");
+    assert!(
+        stamps[0].is_some_and(|ms| (5.0..=age_ms).contains(&ms)),
+        "{stamps:?}, tracker age {age_ms} ms"
     );
     drop(host);
     runtime.shutdown();
