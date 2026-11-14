@@ -3678,6 +3678,46 @@ class TestToolCallGuidedDecoding:
         assert guided["json"]["type"] == "array"
         assert "maxItems" not in guided["json"]
 
+    @staticmethod
+    def _function_tool(name, parameters):
+        return {
+            "type": "function",
+            "function": {"name": name, "parameters": parameters},
+        }
+
+    def test_required_choice_preserves_local_references(self, tokenizer):
+        parameters = {
+            "type": "object",
+            "properties": {"value": {"$ref": "#/definitions/value"}},
+            "definitions": {"value": {"type": "string", "enum": ["a", "b"]}},
+        }
+        request = self._request(
+            tokenizer,
+            tools=[self._function_tool("lookup", parameters)],
+            tool_choice="required",
+        )
+
+        guided = build_tool_call_guided_decoding(request, tool_parser=None)
+
+        assert guided is not None
+        schema = guided["json"]
+        entry = schema["items"]["anyOf"][0]
+        assert entry["properties"]["parameters"] == {"$ref": "#/$defs/tool_0"}
+        assert schema["$defs"]["tool_0"]["properties"]["value"]["$ref"] == (
+            "#/$defs/tool_0/definitions/value"
+        )
+        assert request.tools[0].function.parameters == parameters
+
+    def test_required_choice_rejects_non_object_defs(self, tokenizer):
+        request = self._request(
+            tokenizer,
+            tools=[self._function_tool("lookup", {"type": "object", "$defs": []})],
+            tool_choice="required",
+        )
+
+        with pytest.raises(InvalidArgument, match=r"tool 'lookup' must be an"):
+            build_tool_call_guided_decoding(request, tool_parser=None)
+
     # Parsers that require native tool syntax must not get a forced JSON schema.
     @pytest.mark.parametrize(
         "tool_choice",
