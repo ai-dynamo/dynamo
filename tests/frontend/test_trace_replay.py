@@ -38,7 +38,8 @@ def test_deepseek_v41_five_captures_through_real_frontend(tmp_path: Path) -> Non
             corpus=corpus, model_dir=Path(configured), output_dir=tmp_path / "replay"
         )
     )
+    expected_executions = 5 * len(RunOptions.modes) * len(RunOptions.schedules)
     assert summary["coverage"]["selected_cases"] == 5
-    assert summary["coverage"]["executions_completed"] == 20
+    assert summary["coverage"]["executions_completed"] == expected_executions
     assert code == 0, summary
-    assert summary["counts"]["pass"] == 20
+    assert summary["counts"]["pass"] == expected_executions

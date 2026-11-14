@@ -26,6 +26,7 @@ from tests.utils.port_utils import allocate_port, deallocate_port
 
 from .assets import ensure_assets
 from .contract import (
+    SCHEDULES,
     Case,
     Corpus,
     ReplayError,
@@ -45,7 +46,6 @@ from .contract import (
 
 ANNOTATION_PREFIX = "frontend_replay:"
 MODES = ("unary", "sse")
-SCHEDULES = ("whole", "one_token", "fixed32", "recorded")
 REPLAY_ENVIRONMENT = (
     "PYTHONPATH",
     "PYTHONNOUSERSITE",
@@ -295,7 +295,7 @@ class RunOptions:
     model_dir: Path
     output_dir: Path
     limit: int | None = None
-    schedules: tuple[str, ...] = ("whole", "one_token")
+    schedules: tuple[str, ...] = ("whole", "one_token", "interval4")
     modes: tuple[str, ...] = MODES
     concurrency: int = 4
     baseline: Path | None = None

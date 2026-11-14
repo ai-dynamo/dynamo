@@ -24,6 +24,7 @@ SOURCE_KINDS = frozenset(
 ASSET_NAMES = frozenset(
     {"config.json", "generation_config.json", "tokenizer.json", "tokenizer_config.json"}
 )
+SCHEDULES = ("whole", "one_token", "interval4", "fixed32", "recorded")
 MISSING = object()
 
 
@@ -442,17 +443,24 @@ def verify_assets(corpus: Corpus, model_dir: Path) -> dict[str, str]:
 
 
 def scheduled_events(case: Case, schedule: str) -> list[dict[str, Any]]:
+    if schedule not in SCHEDULES:
+        raise ReplayError(f"unsupported schedule: {schedule}")
     if schedule == "recorded":
         return [dict(event) for event in case.worker_events]
-    widths = {"whole": None, "one_token": 1, "fixed32": 32}
-    if schedule not in widths:
-        raise ReplayError(f"unsupported schedule: {schedule}")
+    widths = {"whole": None, "one_token": 1, "interval4": 4, "fixed32": 32}
     for event in case.worker_events:
         if event.get("log_probs") is not None or event.get("top_logprobs") is not None:
             raise ReplayError("logprob-bearing frames require the recorded schedule")
     ids = [token for event in case.worker_events for token in event["token_ids"]]
     width = widths[schedule] or max(1, len(ids))
-    groups = [ids[start : start + width] for start in range(0, len(ids), width)] or [[]]
+    if schedule == "interval4":
+        groups = [ids[:1]] + [
+            ids[start : start + width] for start in range(1, len(ids), width)
+        ]
+    else:
+        groups = [
+            ids[start : start + width] for start in range(0, len(ids), width)
+        ] or [[]]
     result = []
     for index, group in enumerate(groups):
         final = index == len(groups) - 1

@@ -5,7 +5,7 @@
 
 Replay recorded requests through the installed `dynamo.frontend`, observe the actual `PreprocessedRequest` at a registered CPU token worker, and inject recorded raw worker output before frontend decoding and parsing. This exercises the real HTTP, renderer, tokenizer, stop filter, reasoning/tool parser and response aggregation paths without model weights, GPUs or an inference engine. The public corpus contains five independently reviewed DeepSeek V4.1 Flash BFCL captures.
 
-The checks establish the covered frontend contracts, not model quality or backend correctness. They do not exercise real sampling, engine grammar enforcement, GPU kernels, multimodal processing or distributed KV transfer. Whole-output and one-token schedules are synthetic regroupings of real generated IDs; they make no timing claim.
+The checks establish the covered frontend contracts, not model quality or backend correctness. They do not exercise real sampling, engine grammar enforcement, GPU kernels, multimodal processing or distributed KV transfer. The synthetic schedules regroup real generated IDs; they make no timing claim.
 
 ## Run
 
@@ -20,7 +20,7 @@ python -m tests.frontend.trace_replay run \
   --corpus tests/frontend/trace_replay/fixtures/deepseek_v41 \
   --model-dir /tmp/replay-model \
   --output-dir /tmp/replay-results-unique \
-  --modes unary,sse --schedules whole,one_token --concurrency 4
+  --modes unary,sse --schedules whole,one_token,interval4 --concurrency 4
 ```
 
 Choose unique absolute model/output paths for real runs. `prepare-assets` downloads only the exact, hash-verified model files declared at the manifest's immutable revision: tokenizer/config files and, when shipped, generation config. V4 requires all four files; V4.1 permits its native three-file bundle without generation config. It uses `HF_TOKEN` from the environment when supplied. `run` performs no downloads and verifies every file again. The frontend and worker use file discovery, loopback TCP and ZMQ, so they require neither etcd nor NATS. The source HF model may be large, but no weight file is requested or loaded.
@@ -29,7 +29,13 @@ The target environment needs its installed `ai-dynamo`/`ai-dynamo-runtime` and f
 
 The subprocess environment drops inherited `DYN_*` controls and supplies only the replay's discovery/transport settings. Frontend migration is explicitly disabled with `--migration-limit 0`. The report's `build.execution` records both commands and the runner-owned environment values; inherited credentials are excluded. CI metadata is read separately from the parent environment.
 
-The default public run performs five cases × two modes × two schedules = 20 executions. `--limit N` selects the first N corpus records, while still validating all shard hashes, records and declared counts. Omit the limit for the complete corpus. Supported schedules are `whole`, `one_token`, `fixed32` and `recorded`; `recorded` preserves the supplied worker frames. A corpus argument can be a manifest or a directory containing `manifest.json`; `.jsonl.gz` shards are read transparently and their compressed bytes are hashed.
+The default public run performs five cases × two modes × three schedules = 30 executions. `--limit N` selects the first N corpus records, while still validating all shard hashes, records and declared counts. Omit the limit for the complete corpus. A corpus argument can be a manifest or a directory containing `manifest.json`; `.jsonl.gz` shards are read transparently and their compressed bytes are hashed.
+
+The default schedules are `whole`, `one_token` and `interval4`. `whole` sends all IDs in one worker frame; `one_token` sends one ID per frame. `interval4` sends the first token immediately, then batches four tokens, flushing any remainder on completion. Six output IDs therefore arrive in groups of 1, 4 and 1, with terminal metadata only on the final group. Each schedule preserves the token sequence, including terminal EOS.
+
+`interval4` represents ordinary token-at-a-time generation with interval buffering, as supported by stock vLLM and stock SGLang. It does not reproduce engine scheduling, speculative bursts, stop-prefix buffering or elapsed time, and it does not test forwarding an engine's `--stream-interval` option. The runner exercises the Rust chat processor; the Python chat processors' additional buffering controls are outside this coverage.
+
+Optional schedules are `fixed32` (groups of at most 32 IDs) and `recorded` (the supplied worker frames unchanged). The capture command currently uses unary HTTP and does not capture real streaming frame boundaries. Changing schedules or harness code makes prior baselines `baseline_not_comparable`.
 
 ## Build a corpus with one command
 
@@ -64,7 +70,7 @@ corpus/
 
 The root manifest is published only after capture is complete and preparation succeeds. Raw captures and frozen inputs remain available for inspection and offline preparation. An incomplete capture skips preparation; failures retain any available evidence. The command requires a fresh output and does not resume or overwrite another run.
 
-New responses remain unjudged by default. Optional `--reviewed-corpus <approved-corpus>` delegates the existing exact approval bindings; it does not approve fresh responses. `--timeout` and `--concurrency` retain capture defaults of 600 seconds and two requests. Whole-output/single-token schedules and unary/SSE modes are selected later during replay.
+New responses remain unjudged by default. Optional `--reviewed-corpus <approved-corpus>` delegates the existing exact approval bindings; it does not approve fresh responses. `--timeout` and `--concurrency` retain capture defaults of 600 seconds and two requests. Worker-frame schedules and unary/SSE modes are selected later during replay.
 
 On success the command prints a complete replay command using the cached assets and a fresh `corpus/replay-results` directory. Run that command with the target image's installed Python and the printed checkout/corpus/cache paths available there. The isolated build environment provides preparation tools; the target environment provides `dynamo.frontend`.
 

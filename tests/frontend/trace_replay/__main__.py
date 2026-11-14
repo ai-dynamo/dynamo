@@ -28,7 +28,7 @@ def main(argv: list[str] | None = None) -> int:
     execute.add_argument("--model-dir", type=Path, required=True)
     execute.add_argument("--output-dir", type=Path, required=True)
     execute.add_argument("--limit", type=int)
-    execute.add_argument("--schedules", default="whole,one_token")
+    execute.add_argument("--schedules", default=",".join(RunOptions.schedules))
     execute.add_argument("--modes", default="unary,sse")
     execute.add_argument("--concurrency", type=int, default=4)
     execute.add_argument("--baseline", type=Path)

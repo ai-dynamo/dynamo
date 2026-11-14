@@ -10,16 +10,19 @@ import gzip
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import pytest
 import requests
 
+from tests.frontend.trace_replay import __main__ as cli
 from tests.frontend.trace_replay import runner
 from tests.frontend.trace_replay.__main__ import main
 from tests.frontend.trace_replay.contract import (
     MISSING,
+    SCHEDULES,
     ReplayError,
     digest,
     dumps,
@@ -239,7 +242,7 @@ def test_rechunking_preserves_terminal_eos_and_exact_generated_ids() -> None:
         recorded = [
             token for event in case.worker_events for token in event["token_ids"]
         ]
-        for schedule in ("whole", "one_token", "fixed32", "recorded"):
+        for schedule in SCHEDULES:
             events = scheduled_events(case, schedule)
             assert [
                 token for event in events for token in event["token_ids"]
@@ -247,6 +250,92 @@ def test_rechunking_preserves_terminal_eos_and_exact_generated_ids() -> None:
             assert recorded[-1] == 1
             assert [event.get("finish_reason") for event in events].count("stop") == 1
             assert events[-1]["finish_reason"] == "stop"
+
+
+@pytest.mark.parametrize(
+    "count,lengths",
+    [
+        (0, [0]),
+        (1, [1]),
+        (2, [1, 1]),
+        (4, [1, 3]),
+        (5, [1, 4]),
+        (6, [1, 4, 1]),
+        (9, [1, 4, 4]),
+        (10, [1, 4, 4, 1]),
+    ],
+)
+@pytest.mark.parametrize("finish", ["stop", "length"])
+def test_interval4_first_token_batches_and_final_flush(
+    count: int, lengths: list[int], finish: str
+) -> None:
+    ids = list(range(2, count + 1)) + [1] if count else []
+    terminal = {
+        "index": 0,
+        "token_ids": ids[2:],
+        "finish_reason": finish,
+        "stop_reason": 1 if finish == "stop" else None,
+        "tokens": None,
+        "text": None,
+    }
+    case = replace(
+        load_corpus(FIXTURES, 1).cases[0],
+        worker_events=({"token_ids": ids[:2], "index": 0}, terminal),
+    )
+    before = copy.deepcopy(case.worker_events)
+    frames = scheduled_events(case, "interval4")
+    assert [len(frame["token_ids"]) for frame in frames] == lengths
+    assert [token for frame in frames for token in frame["token_ids"]] == ids
+    assert all(frame.get("finish_reason") is None for frame in frames[:-1])
+    assert all(frame.get("stop_reason") is None for frame in frames[:-1])
+    assert frames[-1] == {**terminal, "token_ids": frames[-1]["token_ids"]}
+    assert all(frame["tokens"] is None and frame["text"] is None for frame in frames)
+    assert case.worker_events == before
+
+
+@pytest.mark.parametrize("schedule", [name for name in SCHEDULES if name != "recorded"])
+def test_synthetic_schedules_require_recorded_for_logprobs(schedule: str) -> None:
+    case = copy.deepcopy(load_corpus(FIXTURES, 1).cases[0])
+    case.worker_events[0]["log_probs"] = []
+    with pytest.raises(ReplayError, match="logprob-bearing"):
+        scheduled_events(case, schedule)
+    assert scheduled_events(case, "recorded") == list(case.worker_events)
+
+
+def test_cli_and_runner_default_to_all_three_delivery_patterns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    received: list[RunOptions] = []
+
+    def capture_options(options: RunOptions) -> tuple[int, dict[str, Any]]:
+        received.append(options)
+        return 0, {}
+
+    monkeypatch.setattr(cli, "run", capture_options)
+    assert (
+        main(
+            [
+                "run",
+                "--corpus",
+                str(FIXTURES),
+                "--model-dir",
+                str(tmp_path / "model"),
+                "--output-dir",
+                str(tmp_path / "output"),
+            ]
+        )
+        == 0
+    )
+    assert (
+        received[0].schedules
+        == RunOptions.schedules
+        == (
+            "whole",
+            "one_token",
+            "interval4",
+        )
+    )
+    assert set(RunOptions.schedules) <= set(SCHEDULES)
 
 
 def _stream(chunks: list[dict], done: bool = True) -> list[str]:
@@ -537,7 +626,7 @@ def test_complete_baseline_is_comparable(tmp_path: Path) -> None:
     assert status == "compared" and rows[key]["status"] == "pass"
 
 
-@pytest.mark.parametrize("failure", ["options", "corpus", "assets"])
+@pytest.mark.parametrize("failure", ["options", "schedule", "corpus", "assets"])
 def test_cli_preflight_failure_writes_summary_and_junit(
     tmp_path: Path, failure: str
 ) -> None:
@@ -553,6 +642,8 @@ def test_cli_preflight_failure_writes_summary_and_junit(
     ]
     if failure == "options":
         args += ["--concurrency", "0"]
+    elif failure == "schedule":
+        args += ["--schedules", "interval0"]
     assert main(args) == 2
     assert loads((output / "summary.json").read_bytes())["status"] == "infra_error"
     suite = ET.parse(output / "junit.xml").getroot()

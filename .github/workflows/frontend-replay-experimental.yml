@@ -110,7 +110,7 @@ jobs:
             --env "DYN_REPLAY_HARNESS_REVISION=${HARNESS_SHA}" \
             --env "DYN_REPLAY_IMAGE_DIGEST=${IMAGE}" \
             "${IMAGE}" -c \
-            '/opt/dynamo/venv/bin/python3 -m tests.frontend.trace_replay run --corpus "$CORPUS" --model-dir /assets --output-dir /output --modes unary,sse --schedules whole,one_token --concurrency 1'
+            '/opt/dynamo/venv/bin/python3 -m tests.frontend.trace_replay run --corpus "$CORPUS" --model-dir /assets --output-dir /output --modes unary,sse --concurrency 1'
 
       - name: Preserve incomplete execution as an infrastructure result
         if: always()
