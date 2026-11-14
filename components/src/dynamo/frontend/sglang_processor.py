@@ -722,6 +722,7 @@ class SglangProcessor:
                 tool_call_parser_name=self.tool_call_parser_name,
                 parse_tool_calls=bool(self.tool_call_parser_name)
                 and tool_call_parser is not None,
+                json_content=_guided_json_is_content(dynamo_preproc),
             )
             if recipe_parser is not None and not self.tool_call_parser_name:
                 tool_call_parser = None

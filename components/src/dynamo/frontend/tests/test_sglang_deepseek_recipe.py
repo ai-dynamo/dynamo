@@ -14,6 +14,9 @@ import pytest
 if importlib.util.find_spec("sglang") is None:
     pytest.skip("SGLang is not installed", allow_module_level=True)
 from _routed_engine_fakes import FakeRoutedEngine  # noqa: E402
+from sglang.srt.function_call.function_call_parser import (  # noqa: E402
+    FunctionCallParser,
+)
 
 from dynamo.frontend import sglang_deepseek  # noqa: E402 -- optional SGLang guard
 from dynamo.frontend import sglang_processor as module  # noqa: E402
@@ -234,13 +237,18 @@ def test_recipe_output_json_and_eos_without_tool_parsing(tokenizer):
 
 
 @pytest.mark.parametrize("use_pool", [False, True])
-@pytest.mark.parametrize("tool_choice", [None, "required", "named_zero_args"])
+@pytest.mark.parametrize(
+    "tool_choice", [None, "required", "named_zero_args", "legacy_json"]
+)
 def test_recipe_output_generator_inline_and_pool(
     tokenizer, monkeypatch, use_pool, tool_choice
 ):
     request = {"model": "deepseek", "messages": [{"role": "user", "content": "Hello"}]}
     answer = "answer"
-    if tool_choice:
+    if tool_choice == "legacy_json":
+        request["guided_json"] = {"type": "object"}
+        answer = json.dumps({"literal": "<think>data</think><｜DSML｜tool_calls>"})
+    elif tool_choice:
         request["tools"] = [
             {
                 "type": "function",
@@ -278,7 +286,7 @@ def test_recipe_output_generator_inline_and_pool(
         items=[
             {
                 "token_ids": tokenizer.backend_tokenizer.encode(
-                    "check</think>" + answer
+                    answer if tool_choice == "legacy_json" else "check</think>" + answer
                 ).ids,
                 "finish_reason": "stop",
             }
@@ -306,8 +314,10 @@ def test_recipe_output_generator_inline_and_pool(
             for item in asyncio.run(collect())
             for choice in item["data"]["choices"]
         ]
-    assert "".join(c["delta"].get("reasoning_content", "") for c in choices) == "check"
-    if tool_choice:
+    assert "".join(c["delta"].get("reasoning_content", "") for c in choices) == (
+        "" if tool_choice == "legacy_json" else "check"
+    )
+    if tool_choice in ("required", "named_zero_args"):
         calls = [call for c in choices for call in c["delta"].get("tool_calls", [])]
         assert (
             next(
@@ -323,8 +333,13 @@ def test_recipe_output_generator_inline_and_pool(
         assert "structural_tag" in guidance
         assert "DSML" in json.dumps(guidance)
     else:
-        assert "".join(c["delta"].get("content", "") for c in choices) == "answer"
+        assert "".join(c["delta"].get("content", "") for c in choices) == answer
         assert choices[-1]["finish_reason"] == "stop"
+        if tool_choice == "legacy_json":
+            assert engine.requests[0]["sampling_options"]["guided_decoding"] == {
+                "json": request["guided_json"]
+            }
+            assert engine.requests[0]["require_reasoning"] is False
 
 
 @pytest.mark.parametrize(
@@ -445,6 +460,63 @@ def test_recipe_forced_choice_rejects_missing_native_constraint(tokenizer, monke
                 "tool_choice": "required",
             },
         )
+
+
+@pytest.mark.parametrize(
+    "mode,schema,request_strict,named,expected",
+    [
+        ("on", "auto", None, True, True),
+        ("on", "strict", False, False, True),
+        ("on", "auto", False, False, False),
+        ("off", "strict", False, False, False),
+        ("off", "auto", None, False, False),
+    ],
+)
+def test_recipe_forced_constraint_respects_schema_policy(
+    tokenizer, monkeypatch, mode, schema, request_strict, named, expected
+):
+    function = {
+        "name": "target",
+        "parameters": {
+            "type": "object",
+            "properties": {"value": {"type": "integer"}},
+            "required": ["value"],
+        },
+    }
+    if request_strict is not None:
+        function["strict"] = request_strict
+    tools = [
+        {"type": "function", "function": {"name": "other", "strict": False}},
+        {"type": "function", "function": function},
+    ]
+    original = copy.deepcopy(tools)
+    seen = []
+    build = FunctionCallParser.get_structure_constraint
+
+    def capture(parser, *args, **kwargs):
+        seen.extend((tool.function.name, tool.function.strict) for tool in parser.tools)
+        return build(parser, *args, **kwargs)
+
+    monkeypatch.setattr(FunctionCallParser, "get_structure_constraint", capture)
+    guided = build_tool_call_guided_decoding(
+        {
+            "tools": tools,
+            "tool_choice": {"type": "function", "function": {"name": "target"}}
+            if named
+            else "required",
+        },
+        tool_call_parser_name="deepseekv4",
+        tokenizer=tokenizer,
+        sglang_tools=convert_tools(tools),
+        native_recipe=True,
+        structural_tag_mode=mode,
+        structural_tag_schema=schema,
+        reasoning_parser_name="deepseek-v4",
+    )
+    assert "structural_tag" in guided
+    assert dict(seen)["target"] is expected
+    assert [name for name, _ in seen] == (["target"] if named else ["other", "target"])
+    assert tools == original
 
 
 @pytest.mark.parametrize("spec,effort", [("dsv4", "max"), ("dsv41", 37)])

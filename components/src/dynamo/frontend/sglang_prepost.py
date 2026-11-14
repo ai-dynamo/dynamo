@@ -600,14 +600,30 @@ def build_tool_call_guided_decoding(
         else "other"
     )
     raw_tools = request.get("tools") or []
+    attempt_structural_tag = should_attempt_structural_tag(
+        mode=structural_tag_mode,
+        scope=structural_tag_scope,
+        tool_choice_kind=tool_choice_kind,
+        has_tools=bool(raw_tools),
+        any_explicit_strict=any(
+            tool.get("function", {}).get("strict") is True for tool in raw_tools
+        ),
+        parallel_tool_calls_explicitly_false=(
+            "parallel_tool_calls" in request and parallel_tool_calls is False
+        ),
+    )
     if native_recipe and is_forced_choice and tool_call_parser_name:
         # Native recipe output consumes DSML, so a JSON-array fallback would
         # generate a different format than the output parser expects.
-        native_tools = sglang_tools
+        native_tools = (
+            convert_tools(raw_tools, structural_tag_schema=structural_tag_schema)
+            if attempt_structural_tag
+            else sglang_tools
+        )
         if is_named_choice:
             native_tools = [
                 tool
-                for tool in sglang_tools
+                for tool in native_tools
                 if tool.function.name == sglang_tool_choice.function.name
             ]
         try:
@@ -641,18 +657,6 @@ def build_tool_call_guided_decoding(
                 "DeepSeek recipe tool choice requires a native structural tag"
             )
         return guidance
-    attempt_structural_tag = should_attempt_structural_tag(
-        mode=structural_tag_mode,
-        scope=structural_tag_scope,
-        tool_choice_kind=tool_choice_kind,
-        has_tools=bool(raw_tools),
-        any_explicit_strict=any(
-            tool.get("function", {}).get("strict") is True for tool in raw_tools
-        ),
-        parallel_tool_calls_explicitly_false=(
-            "parallel_tool_calls" in request and parallel_tool_calls is False
-        ),
-    )
 
     if attempt_structural_tag and tool_call_parser_name:
         guidance_tools = convert_tools(

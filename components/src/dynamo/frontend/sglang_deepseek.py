@@ -83,6 +83,7 @@ def create_recipe_output_parser(
     reasoning_parser_name: str | None,
     tool_call_parser_name: str | None,
     parse_tool_calls: bool,
+    json_content: bool = False,
 ):
     if not supports_recipe_output(
         spec=spec,
@@ -105,11 +106,14 @@ def create_recipe_output_parser(
     stop = request.get("stop") or []
     return DeepSeekRecipeOutputParser(
         encoder,
-        thinking_stage=encoder.parse_start(
+        thinking_stage=None
+        if json_content
+        else encoder.parse_start(
             thinking=bool(kwargs.get("thinking")), continued=continued
         ),
-        parse_tool_calls=parse_tool_calls,
-        parse_json_output=(request.get("response_format") or {}).get("type")
+        parse_tool_calls=parse_tool_calls and not json_content,
+        parse_json_output=json_content
+        or (request.get("response_format") or {}).get("type")
         in ("json_object", "json_schema"),
         separate_reasoning=reasoning_parser_name is not None
         and request.get("separate_reasoning", True),
