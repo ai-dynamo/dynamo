@@ -87,12 +87,19 @@ pub struct PruneManager<K: Clone + Hash + Eq + Ord> {
 impl<K: Clone + Hash + Eq + Ord> PruneManager<K> {
     /// Creates a new, empty PruneManager.
     pub fn new(prune_config: PruneConfig) -> Self {
-        let ttl = prune_config.ttl;
+        Self::with_bucket_origin(prune_config, Instant::now())
+    }
+
+    /// Creates a new, empty PruneManager whose expiry buckets start at
+    /// `bucket_origin`. A caller that drives its own clock, such as offline
+    /// replay's virtual time, passes that clock's epoch so expiries do not
+    /// depend on when the manager was created.
+    pub fn with_bucket_origin(prune_config: PruneConfig, bucket_origin: Instant) -> Self {
         PruneManager {
             timers: FxHashMap::default(),
             expirations: BTreeMap::new(),
-            ttl,
-            bucket_origin: Instant::now(),
+            ttl: prune_config.ttl,
+            bucket_origin,
         }
     }
 

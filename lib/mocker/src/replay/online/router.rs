@@ -263,6 +263,11 @@ impl KvReplayRouter {
         num_workers: usize,
     ) -> Result<Self> {
         let config = replay_router_config(args, router_config);
+        // Only offline replay models the approximate index of a router without KV events.
+        anyhow::ensure!(
+            config.use_kv_events,
+            "online replay requires use_kv_events=true; use offline replay"
+        );
         let tracking_hash = tracking_hash_context(&config)?;
         let indexer =
             create_replay_indexer(args.block_size as u32, config.router_event_threads as usize);
