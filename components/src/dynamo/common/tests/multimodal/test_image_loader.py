@@ -1042,6 +1042,13 @@ async def test_corrupt_http_image_raises_400(
         assert exc_info.value.status == 400
         assert exc_info.value.message == "Invalid or truncated image data"
 
+    with pytest.raises(HttpStatusError) as exc_info:
+        await loader.load_image(
+            "data:image/png;base64," + base64.b64encode(content).decode()
+        )
+    assert exc_info.value.status == 400
+    assert exc_info.value.message == "Invalid or truncated image data"
+
 
 async def test_cache_is_lru_not_fifo(loader: ImageLoader) -> None:
     """Accessing a cached entry should protect it from eviction (LRU, not FIFO)."""

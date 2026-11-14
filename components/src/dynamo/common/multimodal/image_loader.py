@@ -542,7 +542,7 @@ class ImageLoader:
                 source = describe_media_source(image_url)
                 logger.error("%s decoding image: '%s': %s", type(e).__name__, source, e)
                 raise ValueError(f"Failed to decoding image: '{source}': {e}") from e
-            except OSError as e:
+            except (OSError, SyntaxError) as e:
                 logger.error(
                     "Invalid or truncated image data: '%s'",
                     describe_media_source(image_url),
