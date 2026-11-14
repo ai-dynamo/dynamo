@@ -223,11 +223,6 @@ class DiagnosticsRecorder:
 
         This method has no side effects (no file I/O, no snapshot clearing).
         """
-        # TODO: link x-axes across all subplots (e.g. ``fig.update_xaxes(
-        # matches="x")`` or shared_xaxes=True in make_subplots) so zooming
-        # into a time range on one chart also zooms the others.  Currently
-        # a user has to zoom each subplot independently to narrow down on a
-        # specific time window.
         ts = [s.timestamp_s for s in snaps]
         labels = [
             datetime.fromtimestamp(t, tz=timezone.utc).strftime("%H:%M:%S") for t in ts
@@ -789,6 +784,8 @@ class DiagnosticsRecorder:
             template="plotly_white",
             margin=dict(t=100),
         )
+
+        fig.update_xaxes(matches="x")
 
         return fig.to_html(include_plotlyjs=True, full_html=True)
 
