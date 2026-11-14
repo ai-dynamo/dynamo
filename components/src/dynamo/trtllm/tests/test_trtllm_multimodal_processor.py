@@ -107,7 +107,9 @@ async def test_audio_is_forwarded_to_trtllm_processor(
         ]
     else:
         urls = ["https://example.com/first.wav", "https://example.com/second.wav"]
-        monkeypatch.setattr(trt_audio, "validate_media_url", AsyncMock(side_effect=urls))
+        monkeypatch.setattr(
+            trt_audio, "validate_media_url", AsyncMock(side_effect=urls)
+        )
         fetch = AsyncMock(side_effect=audio_bytes)
         monkeypatch.setattr(trt_audio, "fetch_bytes", fetch)
 
