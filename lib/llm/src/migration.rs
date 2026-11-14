@@ -34,7 +34,10 @@ use dynamo_runtime::metrics::prometheus_names::frontend_service;
 use dynamo_runtime::pipeline::{
     AsyncEngineContext, AsyncEngineContextProvider, Context, ManyOut, Operator, PipelineOperator,
     ResponseStream, ServerStreamingEngine, SingleIn, async_trait, attach_first_response_guard,
-    network::egress::route_span::{RouteTraceContext, attach_route_trace_context, error_type_name},
+    network::egress::{
+        dispatch_observer::attach_dispatch_observer,
+        route_span::{RouteTraceContext, attach_route_trace_context, error_type_name},
+    },
 };
 use dynamo_runtime::protocols::annotated::Annotated;
 
@@ -483,6 +486,8 @@ where
 #[derive(Debug, Clone, Copy)]
 struct MigrationCause {
     reason: ErrorType,
+    /// `migration_type` label for the replacement dispatch: which kind of failure caused it.
+    migration_type: &'static str,
     from_worker_id: Option<u64>,
     /// The attempt that *failed*, not the retry it may schedule. `attempts.next()`
     /// has already been incremented past this by the time a failure surfaces,
@@ -642,6 +647,7 @@ where
             let route_trace = self.active_route_trace.clone();
             self.record_migration_exhausted(MigrationCause {
                 reason: migration_error.error_type(),
+                migration_type: frontend_service::migration_type::ONGOING_REQUEST,
                 from_worker_id: route_trace
                     .as_deref()
                     .and_then(RouteTraceContext::selected_worker_id),
@@ -656,11 +662,11 @@ where
         } else {
             self.queue_migration(
                 migration_error.error_type(),
+                frontend_service::migration_type::ONGOING_REQUEST,
                 self.active_route_trace.clone(),
             );
         }
         tracing::warn!(error = %err, "Stream disconnected, recreating stream");
-        self.metrics.inc_migration_ongoing_request(&self.model_name);
         let migration_event =
             MigrationEvent::new(frontend_service::migration_type::ONGOING_REQUEST);
         // NOTE: Delegate exhaustion to new_stream so retry accounting has one owner.
@@ -684,6 +690,7 @@ where
         }
     }
 
+    /// Dispatch the initial request or a replacement and record the migration outcome.
     async fn new_stream(&mut self, mut migration_event: Option<MigrationEvent>) -> Result<()> {
         if !self.attempts.has_remaining() {
             if let Some(cause) = self.pending_migration.take() {
@@ -787,6 +794,13 @@ where
             {
                 release.release().await;
             }
+            if let Some(cause) = migration {
+                let metrics = self.metrics.clone();
+                let model_name = self.model_name.clone();
+                attach_dispatch_observer(&mut request, move || {
+                    metrics.inc_migration(&model_name, cause.migration_type);
+                });
+            }
             let response_stream = self.next_generate.generate(request).await;
             match response_stream {
                 Ok(next_stream) => {
@@ -819,11 +833,10 @@ where
                             frontend_service::migration_type::NEW_REQUEST,
                         ));
                     }
-                    // Preserve the existing per-attempt metric contract.
-                    self.metrics.inc_migration_new_request(&self.model_name);
                     if !self.attempts.has_remaining() {
                         let cause = MigrationCause {
                             reason,
+                            migration_type: frontend_service::migration_type::NEW_REQUEST,
                             from_worker_id: route_trace.selected_worker_id(),
                             attempt: route_trace.attempt(),
                         };
@@ -835,7 +848,11 @@ where
                         self.abort_request_lifecycle(err.as_ref());
                         return Err(err);
                     }
-                    self.queue_migration(reason, Some(route_trace));
+                    self.queue_migration(
+                        reason,
+                        frontend_service::migration_type::NEW_REQUEST,
+                        Some(route_trace),
+                    );
                     tracing::warn!(error = %err, "Creating new stream, retrying");
                 }
                 Err(err) => {
@@ -866,12 +883,19 @@ where
         route_trace.map_or_else(|| self.attempts.last(), RouteTraceContext::attempt)
     }
 
-    fn queue_migration(&mut self, reason: ErrorType, route_trace: Option<Arc<RouteTraceContext>>) {
+    /// Save the failed attempt and its metric label for the next replacement dispatch.
+    fn queue_migration(
+        &mut self,
+        reason: ErrorType,
+        migration_type: &'static str,
+        route_trace: Option<Arc<RouteTraceContext>>,
+    ) {
         let from_worker_id = route_trace
             .as_deref()
             .and_then(RouteTraceContext::selected_worker_id);
         self.pending_migration = Some(MigrationCause {
             reason,
+            migration_type,
             from_worker_id,
             attempt: self.failed_attempt(route_trace.as_deref()),
         });
@@ -1493,6 +1517,9 @@ mod tests {
             &self,
             request: SingleIn<PreprocessedRequest>,
         ) -> Result<ManyOut<Annotated<BackendOutput>>> {
+            dynamo_runtime::pipeline::network::egress::dispatch_observer::notify_dispatch(
+                &request,
+            )?;
             let call_num = self.call_count.fetch_add(1, Ordering::SeqCst);
             if matches!(self.behavior, MockBehavior::FailThenSuccessWithAffinity) {
                 let actual = request
@@ -1959,6 +1986,119 @@ mod tests {
             }
         }
 
+        assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 0);
+        assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 0);
+    }
+
+    /// With migration limit 0 a mid-stream failure reaches the client and no
+    /// replacement is dispatched, so the migration counter must not move.
+    #[tokio::test]
+    async fn test_retry_manager_no_migration_limit_zero_mid_stream_failure() {
+        dynamo_runtime::logging::init();
+        let context_id = uuid::Uuid::new_v4().to_string();
+        let mock_engine = Arc::new(MockEngine::new(
+            MockBehavior::MidStreamFailAlwaysStreamError { fail_after: 3 },
+            10,
+            100,
+            context_id.clone(),
+        ));
+        let calls = mock_engine.call_count.clone();
+        let metrics = Arc::new(Metrics::new());
+        let mut retry_manager = RetryManager::build(
+            Arc::new(Controller::new(context_id)),
+            BTreeMap::new(),
+            create_mock_request(10),
+            mock_engine,
+            0,
+            None,
+            Arc::new(TEST_MODEL.to_string()),
+            metrics.clone(),
+            None,
+        )
+        .await
+        .expect("Failed to build RetryManager");
+
+        let mut responses = Vec::new();
+        while let Some(response) = retry_manager.next().await {
+            responses.push(response);
+        }
+
+        assert_eq!(responses.len(), 4);
+        let err = responses[3].err().expect("expected error response");
+        assert_eq!(err.error_type(), ErrorType::Disconnected);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 0);
+        assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 0);
+    }
+
+    /// With migration limit 0 a failed first dispatch fails the request and no
+    /// replacement is dispatched, so the migration counter must not move.
+    #[tokio::test]
+    async fn test_retry_manager_no_migration_limit_zero_dispatch_failure() {
+        dynamo_runtime::logging::init();
+        let context_id = uuid::Uuid::new_v4().to_string();
+        let mock_engine = Arc::new(MockEngine::new(
+            MockBehavior::AlwaysFail,
+            10,
+            100,
+            context_id.clone(),
+        ));
+        let calls = mock_engine.call_count.clone();
+        let metrics = Arc::new(Metrics::new());
+        let result = RetryManager::build(
+            Arc::new(Controller::new(context_id)),
+            BTreeMap::new(),
+            create_mock_request(10),
+            mock_engine,
+            0,
+            None,
+            Arc::new(TEST_MODEL.to_string()),
+            metrics.clone(),
+            None,
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 0);
+        assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 0);
+    }
+
+    #[tokio::test]
+    async fn retry_rejected_before_dispatch_does_not_count_migration() {
+        struct NoWorkers;
+
+        #[async_trait]
+        impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, Error>
+            for NoWorkers
+        {
+            async fn generate(
+                &self,
+                _request: SingleIn<PreprocessedRequest>,
+            ) -> Result<ManyOut<Annotated<BackendOutput>>> {
+                Err(DynamoError::builder()
+                    .error_type(ErrorType::CannotConnect)
+                    .message("no replacement workers available")
+                    .build()
+                    .into())
+            }
+        }
+
+        let metrics = Arc::new(Metrics::new());
+        let result = RetryManager::build(
+            Arc::new(Controller::new("no-workers".to_string())),
+            BTreeMap::new(),
+            create_mock_request(10),
+            Arc::new(NoWorkers),
+            3,
+            None,
+            Arc::new(TEST_MODEL.to_string()),
+            metrics.clone(),
+            None,
+        )
+        .await;
+
+        assert!(result.is_err());
         assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 0);
         assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 0);
     }
@@ -2507,7 +2647,8 @@ mod tests {
             assert!(error.to_string().contains("no responders"));
         }
 
-        assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 4);
+        // 3 replacement dispatches; the 4th failure has no budget left.
+        assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 3);
         assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 0);
         assert_eq!(
             migration_duration_count(
@@ -2576,7 +2717,8 @@ mod tests {
         let err = error_response.err().expect("expected error response");
         assert_eq!(err.error_type(), ErrorType::Disconnected);
 
-        assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 3);
+        // One replacement after the mid-stream failure, two after failed dispatches.
+        assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 2);
         assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 1);
         assert_eq!(
             migration_duration_count(
@@ -2646,7 +2788,7 @@ mod tests {
         assert_eq!(err.error_type(), ErrorType::Disconnected);
 
         assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 0);
-        assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 4); // 3 retries + 1 final failure
+        assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 3); // 3 replacement dispatches
         assert_eq!(
             migration_duration_count(
                 &metrics,
@@ -2725,6 +2867,7 @@ mod tests {
         assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 0);
     }
 
+    /// Cancellation before replacement dispatch leaves the counter at zero.
     #[tokio::test]
     async fn test_retry_manager_cancelled_during_migration() {
         dynamo_runtime::logging::init();
@@ -2764,7 +2907,7 @@ mod tests {
             .downcast_ref::<DynamoError>()
             .expect("error should be a DynamoError");
         assert_eq!(dynamo_error.error_type(), ErrorType::Cancelled);
-        assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 1);
+        assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 0);
         assert_eq!(
             migration_duration_count(
                 &metrics,
@@ -3120,10 +3263,9 @@ mod tests {
             .expect("Last response should be Disconnected error");
         assert_eq!(err.error_type(), ErrorType::Disconnected);
 
-        // Migration was attempted but blocked because max_seq_len disabled further attempts.
-        // The ongoing metric is still incremented (it counts attempts, not successes).
+        // max_seq_len disabled further attempts, so no replacement was dispatched.
         assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 0);
-        assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 1);
+        assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 0);
         // max_seq_len limit was triggered once (at token 103).
         assert_eq!(
             metrics.get_migration_max_seq_len_exceeded_count(TEST_MODEL),
@@ -3263,8 +3405,8 @@ mod tests {
             metrics.get_migration_max_seq_len_exceeded_count(TEST_MODEL),
             1
         );
-        // Migration was attempted but blocked because no attempts remained.
-        assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 1);
+        // No attempts remained, so no replacement was dispatched.
+        assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 0);
     }
 
     /// Smoke test for the byo-preprocessor response shape.
@@ -3730,6 +3872,9 @@ mod tests {
                 &self,
                 request: SingleIn<PreprocessedRequest>,
             ) -> Result<ManyOut<Annotated<BackendOutput>>> {
+                dynamo_runtime::pipeline::network::egress::dispatch_observer::notify_dispatch(
+                    &request,
+                )?;
                 let call_num = self.call_count.fetch_add(1, Ordering::SeqCst) as usize;
                 let route_trace = get_route_trace_context(&request)
                     .expect("migration wrapper must attach route trace context");

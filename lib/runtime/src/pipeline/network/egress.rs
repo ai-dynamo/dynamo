@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 pub mod addressed_router;
+pub mod dispatch_observer;
 pub mod nats_client;
 pub mod push_router;
 pub mod route_span;

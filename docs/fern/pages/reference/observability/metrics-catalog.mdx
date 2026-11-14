@@ -132,7 +132,7 @@ Metrics for [request migration](../../kubernetes/fault-tolerance/request-migrati
 
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
-| `dynamo_frontend_model_migration_total` | counter | [`migration_type`](metric-labels.mdx#metric-specific-labels) | Migratable worker failures, one per failed attempt: `new_request` when a response stream cannot be established, `ongoing_request` when an established stream fails. The last failure is counted even when no retry remains, including with the default `--migration-limit 0`, so this is not the number of migrations performed. | |
+| `dynamo_frontend_model_migration_total` | counter | [`migration_type`](metric-labels.mdx#metric-specific-labels) | Requests sent to a replacement worker after a worker failure. Failures that do not reach a replacement send are not counted. `migration_type` names the failure that caused the replacement: `new_request` for a failed connection, `ongoing_request` for a mid-stream disconnection. | |
 | `dynamo_frontend_model_migration_duration_seconds` | histogram | [`migration_type`](metric-labels.mdx#metric-specific-labels), [`outcome`](metric-labels.mdx#metric-specific-labels) | Time from detecting a migratable worker failure until the replacement response stream is established, migration ends without recovery, or the request is cancelled. | |
 | `dynamo_frontend_model_migration_max_seq_len_exceeded_total` | counter | — | Times migration was disabled for a request because its sequence length exceeded `--migration-max-seq-len`. A rising value may indicate the limit needs adjustment. | |
 
@@ -226,7 +226,7 @@ Scope these queries to the target frontend and deployment. Evaluate each Fronten
 
 ### Model Metrics
 
-All `dynamo_frontend_model_*` gauges carry a `model` label. The gauges other than `dynamo_frontend_model_ready` are populated from worker backend registration. Each time a worker group for the model is committed or rebuilt, its configuration overwrites these values, so with several groups, such as prefill and decode, they show the most recently committed one. A worker that joins an existing group does not change them. `dynamo_frontend_model_total_kv_blocks`, `dynamo_frontend_model_max_num_seqs`, and `dynamo_frontend_model_max_num_batched_tokens` change only when the committed configuration reports a value: a group that omits one keeps the previous value, and the series is absent until some group reports it.
+All `dynamo_frontend_model_*` gauges carry a `model` label. The gauges other than `dynamo_frontend_model_ready` and `dynamo_frontend_model_migration_limit` are populated from worker backend registration. Each time a worker group for the model is committed or rebuilt, its configuration overwrites these values, so with several groups, such as prefill and decode, they show the most recently committed one. A worker that joins an existing group does not change them. `dynamo_frontend_model_total_kv_blocks`, `dynamo_frontend_model_max_num_seqs`, and `dynamo_frontend_model_max_num_batched_tokens` change only when the committed configuration reports a value: a group that omits one keeps the previous value, and the series is absent until some group reports it.
 
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
@@ -236,7 +236,7 @@ All `dynamo_frontend_model_*` gauges carry a `model` label. The gauges other tha
 | `dynamo_frontend_model_max_num_batched_tokens` | gauge | — | Maximum number of batched tokens for a worker serving the model. | |
 | `dynamo_frontend_model_context_length` | gauge | — | Maximum context length for a worker serving the model, from the Model Deployment Card. | |
 | `dynamo_frontend_model_kv_cache_block_size` | gauge | — | KV cache block size for a worker serving the model, from the Model Deployment Card. | |
-| `dynamo_frontend_model_migration_limit` | gauge | — | Migration limit in the worker's Model Deployment Card. Dynamo's workers always set it to `0`; the limit the frontend applies is its own `--migration-limit`, which no metric reports. | |
+| `dynamo_frontend_model_migration_limit` | gauge | — | Maximum number of migrations the frontend allows for a request to the model, from its own `--migration-limit`. | |
 
 The frontend evaluates `dynamo_frontend_model_ready` from its live routing catalog at scrape time, so worker registration and removal are reflected in the next scrape. Unlike request-populated metrics, the series appears when the model registers, without requiring an inference request. The series is absent while the model is not registered, and the entire family is absent when no models are registered. Detect this state with `absent(dynamo_frontend_model_ready{model="<model>"})`; a `== 0` comparison does not match an absent series. Aliases get no series of their own: a deployment served under several names emits one series, labeled with its primary name, so query an alias through its primary. `/v1/models` still lists alias names, but only the primary has a readiness series. A LoRA adapter is a distinct model rather than a second name for one, and keeps its own series.
 

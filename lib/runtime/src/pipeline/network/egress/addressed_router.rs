@@ -906,6 +906,7 @@ impl AddressedPushRouter {
         REQUEST_PLANE_QUEUE_SECONDS.observe(queue_start.elapsed().as_secs_f64());
 
         let tx_start = Instant::now();
+        super::dispatch_observer::notify_dispatch(context)?;
         let request_plane_response = self.dispatch_buffer(address, buffer, context.id()).await?;
         REQUEST_PLANE_SEND_SECONDS.observe(tx_start.elapsed().as_secs_f64());
 
@@ -1247,6 +1248,9 @@ where
     U: Data + for<'de> Deserialize<'de> + MaybeError,
 {
     /// Unary final hop: typed request in, typed response stream out.
+    /// Implementations bypassing AddressedPushRouter should call
+    /// [`super::dispatch_observer::notify_dispatch`] after local admission and
+    /// serialization, immediately before sending the request to the worker.
     async fn generate(&self, request: SingleIn<AddressedRequest<T>>) -> Result<ManyOut<U>, Error>;
 
     /// Bidirectional final hop (streaming input).
@@ -1442,7 +1446,46 @@ mod tests {
                 callbacks,
                 responses,
             );
-            let request = SingleIn::new(AddressedRequest::new(42_u64, "test".to_string()));
+            let dispatches = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let removed = Instance {
+                component: "worker".to_string(),
+                endpoint: "generate".to_string(),
+                namespace: "default".to_string(),
+                instance_id: 42,
+                transport: TransportType::Nats("worker.generate".to_string()),
+                device_type: None,
+                request_plane_codec: None,
+            };
+            router
+                .cancel_instance_streams(&removed.endpoint_instance_id())
+                .await;
+            let mut rejected = SingleIn::new(AddressedRequest::with_instance(
+                42_u64,
+                "test".to_string(),
+                removed,
+            ));
+            let observed = dispatches.clone();
+            super::super::dispatch_observer::attach_dispatch_observer(&mut rejected, move || {
+                observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            });
+            let result: anyhow::Result<ManyOut<Annotated<u64>>> = router.generate(rejected).await;
+            let error = result.expect_err("tombstoned worker must reject before sending");
+            assert!(match_error_chain(
+                error.as_ref(),
+                &[ErrorType::Disconnected],
+                &[]
+            ));
+            assert_eq!(dispatches.load(std::sync::atomic::Ordering::SeqCst), 0);
+            assert!(matches!(
+                request_rx.try_recv(),
+                Err(mpsc::error::TryRecvError::Empty)
+            ));
+
+            let mut request = SingleIn::new(AddressedRequest::new(42_u64, "test".to_string()));
+            let observed = dispatches.clone();
+            super::super::dispatch_observer::attach_dispatch_observer(&mut request, move || {
+                observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            });
             let pool = quic_response::QuicResponseClientPool::from_env().unwrap();
             let (response, (mut sender, payload_codec)) =
                 tokio::join!(router.generate(request), async {
@@ -1456,6 +1499,8 @@ mod tests {
                     sender.send_prologue(None).await.unwrap();
                     (sender, control.payload_codec)
                 });
+
+            assert_eq!(dispatches.load(std::sync::atomic::Ordering::SeqCst), 1);
 
             // Send data only after generate() returns through wait(), so cleanup on
             // success cannot be hidden by data buffered before the handshake finishes.
