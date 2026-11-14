@@ -132,12 +132,13 @@ pub enum Stage {
     /// gateway sending the body to the sidecar, and the sidecar reading it
     /// and answering with its headers. Streamed 2xx responses only.
     ResponseHeaders,
-    /// Routing decision ready until the first non-empty response body
-    /// chunk: the gateway, sidecar and worker producing the first token.
+    /// Routing decision ready until the first response body chunk that
+    /// carries engine output (not a Responses lifecycle event or an SSE
+    /// comment): the gateway, sidecar and worker producing the first token.
     /// Streamed 2xx responses only.
     FirstResponse,
-    /// Request headers received until the first non-empty response body
-    /// chunk: the time to first token as the EPP sees it. Client time to
+    /// Request headers received until the first response body chunk that
+    /// carries engine output: the time to first token as the EPP sees it. Client time to
     /// first token minus this is the time spent outside the EPP's view,
     /// without comparing clocks across nodes. Streamed 2xx responses only.
     EppTtft,
