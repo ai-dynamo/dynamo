@@ -10,6 +10,15 @@ import time
 import pytest
 import requests
 
+DECISION_EXECUTION_PROFILES = ("sglang_serial", "vllm_causal", "clef_flash")
+
+
+def _expected_output_tokens(execution_profile):
+    if execution_profile not in DECISION_EXECUTION_PROFILES:
+        raise ValueError(f"Unknown decision execution profile: {execution_profile}")
+    # This fixture has three questions; causal vLLM reads one generated token each.
+    return 3 if execution_profile == "vllm_causal" else 0
+
 
 def post_with_capacity_retry(url, payload):
     for attempt in range(3):
@@ -33,13 +42,18 @@ def _is_capacity_rejection(response):
     return isinstance(error, dict) and error.get("code") == "rate_limit_exceeded"
 
 
-def decision_payload(model, dialect="oai"):
+def decision_payload(model, dialect="oai", *, execution_profile="sglang_serial"):
+    _expected_output_tokens(execution_profile)
     state = "A customer was charged twice and requests a refund today."
     if dialect == "systemone":
         return {
             "model": model,
             "state": state,
-            "chat_template_kwargs": {"enable_thinking": False},
+            **(
+                {"chat_template_kwargs": {"enable_thinking": False}}
+                if execution_profile != "clef_flash"
+                else {}
+            ),
             "questions": {
                 "route": {
                     "type": "choice",
@@ -90,7 +104,8 @@ def assert_distribution(values):
     assert sum(values) == pytest.approx(1.0, abs=1e-9)
 
 
-def assert_decision_body(body, model, dialect):
+def assert_decision_body(body, model, dialect, *, execution_profile="sglang_serial"):
+    expected_output_tokens = _expected_output_tokens(execution_profile)
     assert dialect in ("oai", "systemone")
     assert body["model"] == model
     if dialect == "oai":
@@ -123,12 +138,9 @@ def assert_decision_body(body, model, dialect):
             0 <= usage["input_tokens_details"]["cached_tokens"] <= usage["input_tokens"]
         )
         assert usage["input_tokens_details"]["cache_write_tokens"] == 0
-        assert (
-            usage["output_tokens"]
-            == usage["output_tokens_details"]["reasoning_tokens"]
-            == 0
-        )
-        assert usage["total_tokens"] == usage["input_tokens"]
+        assert usage["output_tokens"] == expected_output_tokens
+        assert usage["output_tokens_details"]["reasoning_tokens"] == 0
+        assert usage["total_tokens"] == usage["input_tokens"] + expected_output_tokens
     else:
         assert list(body["answers"]) == ["route", "urgent", "severity"]
         route, urgent, severity = body["answers"].values()
@@ -144,7 +156,7 @@ def assert_decision_body(body, model, dialect):
             assert severity["type"] == "score"
             assert severity["legend"] == {"0": "Low", "1": "Moderate", "2": "High"}
             assert body["usage"]["input_tokens"] > 0
-            assert body["usage"]["output_tokens"] == 0
+            assert body["usage"]["output_tokens"] == expected_output_tokens
             for answer in (route, urgent, severity):
                 if "x_label_mass" in answer:
                     assert (

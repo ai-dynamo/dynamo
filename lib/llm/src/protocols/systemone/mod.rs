@@ -3,6 +3,7 @@
 
 //! Native SGLang transport used by the reusable decision API core.
 
+pub(crate) mod head;
 mod native;
 pub mod vllm;
 
