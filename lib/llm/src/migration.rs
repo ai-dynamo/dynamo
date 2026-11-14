@@ -62,7 +62,7 @@ impl HasTokenIds for BackendOutput {
         self.worker_trace_link.as_deref()
     }
     fn decoder_checkpoint(&self) -> Option<&DecoderCheckpoint> {
-        self.jailed_text.as_ref()
+        self.jailed_text.as_deref()
     }
     fn completion_usage_mut(&mut self) -> Option<&mut CompletionUsage> {
         self.completion_usage.as_mut()
@@ -77,7 +77,7 @@ impl HasTokenIds for LLMEngineOutput {
         self.worker_trace_link.as_deref()
     }
     fn decoder_checkpoint(&self) -> Option<&DecoderCheckpoint> {
-        self.jailed_text.as_ref()
+        self.jailed_text.as_deref()
     }
     fn completion_usage_mut(&mut self) -> Option<&mut CompletionUsage> {
         self.completion_usage.as_mut()
@@ -3381,7 +3381,7 @@ mod tests {
                     );
                     let responses = stream::iter(vec![
                         Annotated::from_data(BackendOutput {
-                            jailed_text: Some("STOP".to_string().into()),
+                            jailed_text: Some(Box::new("STOP".to_string().into())),
                             ..create_mock_output(10).data.unwrap()
                         }),
                         Annotated::from_err(
