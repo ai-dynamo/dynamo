@@ -459,6 +459,7 @@ fn a_prefill_terminal_that_ran_out_of_budget_is_rejected() {
 #[test]
 fn held_hidden_stop_token_is_released_unless_it_ended_the_sequence() {
     let mut req = request();
+    req.stop_conditions.stop = None;
     req.stop_conditions.stop_token_ids_visible = Some(vec![9]);
     let mut state = ResponseState::new(&req, AGG);
     let mut token_ids = |tokens: Vec<pb::TokenInfo>| {
@@ -497,6 +498,47 @@ fn held_hidden_stop_token_is_released_unless_it_ended_the_sequence() {
         .expect("terminal");
     assert!(terminal.token_ids.is_empty());
     assert_eq!(terminal.completion_usage.unwrap().completion_tokens, 4);
+}
+
+#[test]
+fn ordinary_stop_after_earlier_output_is_kept_only_when_the_frontend_keeps_it() {
+    let stop_after = |no_stop_trim| {
+        let mut req = request();
+        req.stop_conditions.stop = None;
+        req.stop_conditions.stop_token_ids = Some(vec![7]);
+        req.output_options.no_stop_trim = no_stop_trim;
+        let mut state = ResponseState::new(&req, AGG);
+        let delta = state
+            .convert(token_response(vec![
+                logprob_token(5, -0.1),
+                logprob_token(7, -0.2),
+            ]))
+            .expect("convert token")
+            .expect("delta");
+        assert_eq!(delta.token_ids, [5], "the stop waits for terminal usage");
+        let terminal = state
+            .convert(pb::GenerateResponse {
+                request_id: "r".to_string(),
+                event: Some(pb::generate_response::Event::Finished(
+                    pb::GenerationFinished {
+                        output_index: Some(0),
+                        reason: pb::FinishReason::Stop as i32,
+                        message: String::new(),
+                        stop_match: Some(pb::StopMatch {
+                            r#match: Some(pb::stop_match::Match::StopTokenId(7)),
+                        }),
+                    },
+                )),
+                usage: None,
+            })
+            .expect("convert finished")
+            .expect("terminal");
+        assert_eq!(terminal.completion_usage.unwrap().completion_tokens, 2);
+        terminal.token_ids
+    };
+
+    assert_eq!(stop_after(Some(true)), [7]);
+    assert!(stop_after(None).is_empty());
 }
 
 #[test]
@@ -549,6 +591,7 @@ fn hidden_stop_waits_for_terminal_cache_usage_without_visible_stops() {
 #[test]
 fn visible_stop_token_arrives_with_the_terminal_usage() {
     let mut req = request();
+    req.stop_conditions.stop = None;
     req.stop_conditions.stop_token_ids_visible = Some(vec![9]);
     let mut state = ResponseState::new(&req, AGG);
     let delta = state
@@ -594,4 +637,116 @@ fn visible_stop_token_arrives_with_the_terminal_usage() {
             .and_then(|details| details.cached_tokens),
         Some(2)
     );
+}
+
+/// The frontend must see the tokens completing a stop string in the same
+/// chunk as the engine's authoritative usage, even across token events.
+#[test]
+fn returned_stop_string_waits_for_terminal_usage() {
+    for (no_stop_trim, retain_model_stop_token_text, visible) in [
+        (Some(true), None, None),
+        (None, Some(true), None),
+        (None, None, Some(vec![9])),
+    ] {
+        let mut req = request();
+        req.output_options.no_stop_trim = no_stop_trim;
+        req.output_options.retain_model_stop_token_text = retain_model_stop_token_text;
+        req.stop_conditions.stop_token_ids_visible = visible;
+        let mut state = ResponseState::new(&req, AGG);
+        let mut first = vec![logprob_token(5, -0.1), logprob_token(6, -0.2)];
+        first[0].token = "prefix ".to_string();
+        first[1].token = "do".to_string();
+        assert!(state.convert(token_response(first)).unwrap().is_none());
+        let mut last = vec![logprob_token(7, -0.3), logprob_token(8, -0.4)];
+        last[0].token = "n".to_string();
+        last[1].token = "e".to_string();
+        let delta = state.convert(token_response(last)).unwrap().unwrap();
+        assert_eq!(delta.token_ids, [5, 6]);
+        assert!(delta.finish_reason.is_none());
+        // Empty text-only events must not release the final token event.
+        assert!(state.convert(token_response(Vec::new())).unwrap().is_none());
+        let terminal = state
+            .convert(pb::GenerateResponse {
+                event: Some(pb::generate_response::Event::Finished(
+                    pb::GenerationFinished {
+                        output_index: Some(0),
+                        reason: pb::FinishReason::Stop as i32,
+                        stop_match: Some(pb::StopMatch {
+                            r#match: Some(pb::stop_match::Match::StopText("done".to_string())),
+                        }),
+                        ..Default::default()
+                    },
+                )),
+                usage: Some(pb::Usage {
+                    prompt_tokens: 218,
+                    completion_tokens: 4,
+                    total_tokens: 222,
+                    cached_prompt_tokens: Some(217),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(terminal.token_ids, [7, 8]);
+        assert_eq!(terminal.log_probs.as_deref(), Some(&[-0.3, -0.4][..]));
+        assert_eq!(terminal.finish_reason, Some(FinishReason::Stop));
+        assert_eq!(
+            terminal.stop_reason,
+            Some(StopReason::String("done".to_string()))
+        );
+        let usage = terminal.completion_usage.unwrap();
+        assert_eq!((usage.prompt_tokens, usage.completion_tokens), (218, 4));
+        assert_eq!(
+            usage.prompt_tokens_details.unwrap().cached_tokens,
+            Some(217)
+        );
+    }
+}
+
+/// Model stop text is retained, but a user stop must still trim when the
+/// engine stops before the frontend's minimum token count.
+#[test]
+fn retaining_model_stop_text_still_trims_user_stops_below_min_tokens() {
+    for (user_stop, no_stop_trim, expected) in [
+        (false, None, vec![7]),
+        (true, None, Vec::new()),
+        (true, Some(true), vec![7]),
+    ] {
+        let mut req = request();
+        req.stop_conditions.stop = None;
+        req.stop_conditions.min_tokens = Some(8);
+        req.stop_conditions.stop_token_ids_hidden = Some(vec![7]);
+        req.stop_conditions.stop_token_ids = user_stop.then_some(vec![7]);
+        req.output_options.retain_model_stop_token_text = Some(true);
+        req.output_options.no_stop_trim = no_stop_trim;
+        let mut state = ResponseState::new(&req, AGG);
+        let delta = state
+            .convert(token_response(vec![
+                logprob_token(5, -0.1),
+                logprob_token(6, -0.2),
+                logprob_token(7, -0.3),
+            ]))
+            .unwrap()
+            .unwrap();
+        assert_eq!(delta.token_ids, [5, 6]);
+        let terminal = state
+            .convert(pb::GenerateResponse {
+                event: Some(pb::generate_response::Event::Finished(
+                    pb::GenerationFinished {
+                        output_index: Some(0),
+                        reason: pb::FinishReason::Stop as i32,
+                        stop_match: Some(pb::StopMatch {
+                            r#match: Some(pb::stop_match::Match::StopTokenId(7)),
+                        }),
+                        ..Default::default()
+                    },
+                )),
+                ..Default::default()
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(terminal.token_ids, expected);
+        assert_eq!(terminal.completion_usage.unwrap().completion_tokens, 3);
+    }
 }
