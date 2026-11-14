@@ -3172,21 +3172,33 @@ fn split_logprobs_by_token_spans(
             _ => None,
         })
         .collect();
-    let evidence: Vec<Vec<String>> = choices
+    let evidence: Vec<Vec<Vec<String>>> = choices
         .iter()
         .map(|choice| {
             if has_text(choice) {
                 Vec::new()
             } else {
-                hidden_source_evidence(choice)
+                hidden_source_evidence(choice, true)
             }
         })
         .collect();
     // Without a placement that gives every hidden choice its source (an argument
-    // value the source spells differently, say), the first occurrences stand, as
-    // they did before the evidence was checked.
+    // value the source spells in a way neither alternative matches, say), the
+    // tool-call evidence is dropped and reasoning, which appears verbatim, still
+    // holds; failing that too, the first occurrences stand.
+    let reasoning_only: Vec<Vec<Vec<String>>> = choices
+        .iter()
+        .map(|choice| {
+            if has_text(choice) {
+                Vec::new()
+            } else {
+                hidden_source_evidence(choice, false)
+            }
+        })
+        .collect();
     let no_evidence = vec![Vec::new(); choices.len()];
     let Some(text_spans) = locate_text_spans(raw, &texts, &evidence)
+        .or_else(|| locate_text_spans(raw, &texts, &reasoning_only))
         .or_else(|| locate_text_spans(raw, &texts, &no_evidence))
     else {
         return Err(logprobs);
@@ -3272,21 +3284,25 @@ fn split_logprobs_by_token_spans(
     Ok(())
 }
 
-/// What a hidden choice's source text must contain: reasoning appears verbatim,
-/// and a tool call's source carries its function name and its scalar argument
-/// values (a custom tool's name and input). A chunk that holds only an argument
-/// fragment yields nothing, so it constrains nothing.
-fn hidden_source_evidence(choice: &ChatChoiceStream) -> Vec<String> {
+/// What a hidden choice's source text must contain, each item as the spellings
+/// that satisfy it: reasoning appears verbatim; with `tools`, a tool call's
+/// source carries its function name and its scalar argument values, decoded or
+/// JSON-escaped (a custom tool's name and input). A chunk that holds only an
+/// argument fragment yields nothing, so it constrains nothing.
+fn hidden_source_evidence(choice: &ChatChoiceStream, tools: bool) -> Vec<Vec<String>> {
     let mut evidence = Vec::new();
     if let Some(reasoning) = choice.delta.reasoning_content.as_deref()
         && !reasoning.is_empty()
     {
-        evidence.push(reasoning.to_string());
+        evidence.push(vec![reasoning.to_string()]);
+    }
+    if !tools {
+        return evidence;
     }
     for call in choice.delta.tool_calls.iter().flatten() {
         if let Some(function) = call.function.as_ref() {
             if let Some(name) = function.name.as_deref().filter(|name| !name.is_empty()) {
-                evidence.push(name.to_string());
+                evidence.push(vec![name.to_string()]);
             }
             if let Some(serde_json::Value::Object(arguments)) = function
                 .arguments
@@ -3296,10 +3312,16 @@ fn hidden_source_evidence(choice: &ChatChoiceStream) -> Vec<String> {
                 for value in arguments.values() {
                     match value {
                         serde_json::Value::String(text) if !text.is_empty() => {
-                            evidence.push(text.clone())
+                            let escaped = serde_json::to_string(text).unwrap_or_default();
+                            let escaped = escaped[1..escaped.len() - 1].to_string();
+                            let mut spellings = vec![text.clone()];
+                            if escaped != *text {
+                                spellings.push(escaped);
+                            }
+                            evidence.push(spellings);
                         }
                         serde_json::Value::Number(_) | serde_json::Value::Bool(_) => {
-                            evidence.push(value.to_string())
+                            evidence.push(vec![value.to_string()])
                         }
                         _ => {}
                     }
@@ -3308,10 +3330,10 @@ fn hidden_source_evidence(choice: &ChatChoiceStream) -> Vec<String> {
         }
         if let Some(custom) = call.custom.as_ref() {
             if let Some(name) = custom.name.as_deref().filter(|name| !name.is_empty()) {
-                evidence.push(name.to_string());
+                evidence.push(vec![name.to_string()]);
             }
             if let Some(input) = custom.input.as_deref().filter(|input| !input.is_empty()) {
-                evidence.push(input.to_string());
+                evidence.push(vec![input.to_string()]);
             }
         }
     }
@@ -3322,32 +3344,42 @@ fn hidden_source_evidence(choice: &ChatChoiceStream) -> Vec<String> {
 /// that leaves the choices between it and the previous text a source containing
 /// their `evidence`; the choices after the last text must fit in the tail.
 /// Returns `(choice index, start, end)` per text, or `None` when no placement
-/// exists.
+/// exists. A `(texts left, cursor)` state that failed once is not searched
+/// again, so the work is bounded by the number of texts times the length of
+/// `raw`.
 fn locate_text_spans(
     raw: &str,
     texts: &[(usize, &str)],
-    evidence: &[Vec<String>],
+    evidence: &[Vec<Vec<String>>],
 ) -> Option<Vec<(usize, usize, usize)>> {
     fn source_holds(
         source: &str,
         choices: std::ops::Range<usize>,
-        evidence: &[Vec<String>],
+        evidence: &[Vec<Vec<String>>],
     ) -> bool {
-        evidence[choices]
-            .iter()
-            .all(|items| items.iter().all(|item| source.contains(item.as_str())))
+        evidence[choices].iter().all(|items| {
+            items.iter().all(|spellings| {
+                spellings
+                    .iter()
+                    .any(|spelling| source.contains(spelling.as_str()))
+            })
+        })
     }
     fn place(
         raw: &str,
         texts: &[(usize, &str)],
-        evidence: &[Vec<String>],
+        evidence: &[Vec<Vec<String>>],
         cursor: usize,
         first_choice: usize,
         spans: &mut Vec<(usize, usize, usize)>,
+        failed: &mut HashSet<(usize, usize)>,
     ) -> bool {
         let Some(&(index, text)) = texts.first() else {
             return source_holds(&raw[cursor..], first_choice..evidence.len(), evidence);
         };
+        if failed.contains(&(texts.len(), cursor)) {
+            return false;
+        }
         for (offset, _) in raw[cursor..].match_indices(text) {
             let start = cursor + offset;
             if !source_holds(&raw[cursor..start], first_choice..index, evidence) {
@@ -3355,15 +3387,17 @@ fn locate_text_spans(
             }
             let end = start + text.len();
             spans.push((index, start, end));
-            if place(raw, &texts[1..], evidence, end, index + 1, spans) {
+            if place(raw, &texts[1..], evidence, end, index + 1, spans, failed) {
                 return true;
             }
             spans.pop();
         }
+        failed.insert((texts.len(), cursor));
         false
     }
     let mut spans = Vec::with_capacity(texts.len());
-    place(raw, texts, evidence, 0, 0, &mut spans).then_some(spans)
+    let mut failed = HashSet::new();
+    place(raw, texts, evidence, 0, 0, &mut spans, &mut failed).then_some(spans)
 }
 
 fn extend_logprobs(held: &mut ChatChoiceLogprobs, later: ChatChoiceLogprobs) {
@@ -11824,6 +11858,10 @@ pub(crate) mod tests {
     }
 
     fn tool_choice() -> ChatChoiceStream {
+        tool_choice_with("{\"city\":\"Paris\"}")
+    }
+
+    fn tool_choice_with(arguments: &str) -> ChatChoiceStream {
         let mut choice = empty_choice(0);
         choice.delta.tool_calls = Some(vec![ChatCompletionMessageToolCallChunk {
             custom: None,
@@ -11832,7 +11870,7 @@ pub(crate) mod tests {
             r#type: Some(FunctionType::Function),
             function: Some(FunctionCallStream {
                 name: Some("get_weather".into()),
-                arguments: Some("{\"city\":\"Paris\"}".into()),
+                arguments: Some(arguments.into()),
             }),
         }]);
         choice
@@ -11953,6 +11991,50 @@ pub(crate) mod tests {
         split_choices(&tokens.concat(), &tokens, &mut choices).unwrap();
         assert_eq!(choice_tokens(&choices[0]), tokens[..7].to_vec());
         assert_eq!(choice_tokens(&choices[1]), ["Done."]);
+    }
+
+    /// A JSON source spells a string argument escaped; either spelling satisfies
+    /// the tool call, so the visible text is still placed after it.
+    #[test]
+    fn split_accepts_json_escaped_argument_values() {
+        let tokens = [
+            "<tool_call>",
+            "{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Par\\nis\"}}",
+            "</tool_call>",
+            "Par\nis",
+        ];
+        let mut choices = vec![
+            tool_choice_with("{\"city\":\"Par\\nis\"}"),
+            text_choice("Par\nis"),
+        ];
+        split_choices(&tokens.concat(), &tokens, &mut choices).unwrap();
+        assert_eq!(choice_tokens(&choices[0]), tokens[..3].to_vec());
+        assert_eq!(choice_tokens(&choices[1]), ["Par\nis"]);
+    }
+
+    /// When the tool-call evidence cannot be matched, reasoning still has to
+    /// precede the visible text: the fallback does not hand the reasoning's copy
+    /// of the text to the visible choice.
+    #[test]
+    fn split_keeps_reasoning_before_text_when_tool_evidence_fails() {
+        let tokens = [
+            "<think>",
+            "same",
+            "</think>",
+            "same",
+            "<tool_call>",
+            "<function=get_weather>",
+            "<parameter=city>",
+            "PARIS",
+            "</parameter>",
+            "</function>",
+            "</tool_call>",
+        ];
+        let mut choices = vec![reasoning_choice("same"), text_choice("same"), tool_choice()];
+        split_choices(&tokens.concat(), &tokens, &mut choices).unwrap();
+        assert_eq!(choice_tokens(&choices[0]), ["<think>", "same", "</think>"]);
+        assert_eq!(choice_tokens(&choices[1]), ["same"]);
+        assert_eq!(choice_tokens(&choices[2]), tokens[4..].to_vec());
     }
 
     /// A prefix control token with no hidden owner before the text would have to
