@@ -436,6 +436,48 @@ RUN chmod 755 /opt/dynamo/.launch_screen && \
     else echo "WARNING: no bundled nsys found under /opt/nvidia/nsight-compute"; fi
 {% endif %}
 
+{% if device == "cuda" and target == "runtime" %}
+# SGLang's optional benchmark plotter handles this package being absent.
+# Do not ship it in serving images or remove it if a new runtime dependency needs it.
+RUN python3 - <<'PYTHON'
+import importlib.metadata as metadata
+import subprocess
+import sys
+
+from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
+
+removed = "termplotlib"
+distributions = list(metadata.distributions())
+for dist in distributions:
+    name = dist.metadata["Name"]
+    if canonicalize_name(name) == removed:
+        continue
+    for requirement in map(Requirement, dist.requires or ()):
+        if canonicalize_name(requirement.name) == removed and (
+            requirement.marker is None or requirement.marker.evaluate({"extra": ""})
+        ):
+            raise SystemExit(f"Cannot remove {removed}: {name} requires {requirement}")
+if any(canonicalize_name(d.metadata["Name"]) == removed for d in distributions):
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "uninstall",
+            "--yes",
+            "--break-system-packages",
+            removed,
+        ],
+        check=True,
+    )
+if any(
+    canonicalize_name(d.metadata["Name"]) == removed for d in metadata.distributions()
+):
+    raise SystemExit(f"{removed} remains installed")
+PYTHON
+{% endif %}
+
 {%- if device != "xpu" %}
 # Precompile Python bytecode into the image while still root. CI runs tests as
 # the non-root `dynamo` user, which cannot write .pyc back to site-packages, and
