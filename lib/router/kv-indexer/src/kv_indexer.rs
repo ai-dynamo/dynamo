@@ -15,13 +15,18 @@ use super::{
     ApproximateLruLease, ApproximateLruStats, ApproximateLruTask, ApproximateRetentionConfig,
     ContainsWorkerBlockRequest, DumpRequest, EventKind, FlushRequest, GetWorkersRequest,
     KvIndexerInterface, KvIndexerMetrics, KvRouterError, MatchDetails, MatchDetailsRequest,
-    MatchRequest, PreBoundEventCounters, RadixTree, ResidentBlockCountsHandle,
+    MatchObserver, MatchRequest, PreBoundEventCounters, RadixTree, ResidentBlockCountsHandle,
     RoutingDecisionRequest, panic_payload_message,
 };
 use crate::prelude::*;
 use crate::pruning::{BlockEntry, PruneConfig, WorkerPruneManager};
 use dynamo_router_protocol::attempt::AttemptId;
 use dynamo_tokens::SequenceHash;
+
+enum MatchDetailsTask {
+    Request(MatchDetailsRequest),
+    Observed(Box<dyn FnOnce(&RadixTree) + Send>),
+}
 
 fn apply_event_with_counters(
     trie: &mut RadixTree,
@@ -348,7 +353,7 @@ pub struct KvIndexer {
     /// A sender for `MatchRequest`s.
     match_tx: mpsc::Sender<MatchRequest>,
     /// A sender for `MatchDetailsRequest`s.
-    match_details_tx: mpsc::Sender<MatchDetailsRequest>,
+    match_details_tx: mpsc::Sender<MatchDetailsTask>,
     /// A sender for exact worker/block residency checks.
     contains_worker_block_tx: mpsc::Sender<ContainsWorkerBlockRequest>,
     /// A sender for get workers requests.
@@ -444,7 +449,7 @@ impl KvIndexer {
 
         let (mutation_tx, mutation_rx) = mpsc::channel::<MutationRequest>(16384);
         let (match_tx, match_rx) = mpsc::channel::<MatchRequest>(128);
-        let (match_details_tx, match_details_rx) = mpsc::channel::<MatchDetailsRequest>(128);
+        let (match_details_tx, match_details_rx) = mpsc::channel::<MatchDetailsTask>(128);
         let (contains_worker_block_tx, contains_worker_block_rx) =
             mpsc::channel::<ContainsWorkerBlockRequest>(128);
         let (get_workers_tx, get_workers_rx) = mpsc::channel::<GetWorkersRequest>(16);
@@ -535,13 +540,18 @@ impl KvIndexer {
                                 let _ = req.resp.send(matches);
                             }
 
-                            Some(req) = match_details_rx.recv() => {
-                                let matches = trie.find_match_details_with_options(
-                                    req.sequence,
-                                    req.early_exit,
-                                    req.retain_kv_transfer_chain,
-                                );
-                                let _ = req.resp.send(matches);
+                            Some(task) = match_details_rx.recv() => {
+                                match task {
+                                    MatchDetailsTask::Request(req) => {
+                                        let matches = trie.find_match_details_with_options(
+                                            req.sequence,
+                                            req.early_exit,
+                                            req.retain_kv_transfer_chain,
+                                        );
+                                        let _ = req.resp.send(matches);
+                                    }
+                                    MatchDetailsTask::Observed(query) => query(&trie),
+                                }
                             }
 
                             Some(req) = contains_worker_block_rx.recv() => {
@@ -747,15 +757,40 @@ impl KvIndexer {
     ) -> Result<MatchDetails, KvRouterError> {
         let (resp_tx, resp_rx) = oneshot::channel();
         self.match_details_tx
-            .send(MatchDetailsRequest::new(
+            .send(MatchDetailsTask::Request(MatchDetailsRequest::new(
                 sequence,
                 false,
                 retain_kv_transfer_chain,
                 resp_tx,
-            ))
+            )))
             .await
             .map_err(|_| KvRouterError::IndexerOffline)?;
 
+        resp_rx
+            .await
+            .map_err(|_| KvRouterError::IndexerDroppedRequest)
+    }
+
+    /// Run an owned evidence collector on the indexer thread and return it with the matches.
+    pub async fn find_match_details_with_observer<O: MatchObserver + 'static>(
+        &self,
+        sequence: Vec<LocalBlockHash>,
+        retain_kv_transfer_chain: bool,
+        mut observer: O,
+    ) -> Result<(MatchDetails, O), KvRouterError> {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        self.match_details_tx
+            .send(MatchDetailsTask::Observed(Box::new(move |trie| {
+                let details = trie.find_match_details_with_observer(
+                    sequence,
+                    false,
+                    retain_kv_transfer_chain,
+                    &mut observer,
+                );
+                let _ = resp_tx.send((details, observer));
+            })))
+            .await
+            .map_err(|_| KvRouterError::IndexerOffline)?;
         resp_rx
             .await
             .map_err(|_| KvRouterError::IndexerDroppedRequest)

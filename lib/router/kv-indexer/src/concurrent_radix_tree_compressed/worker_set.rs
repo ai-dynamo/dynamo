@@ -19,6 +19,12 @@ pub(super) struct WorkerSet {
 }
 
 impl WorkerSet {
+    /// Consume a query-owned set without cloning its allocation. Node sets
+    /// remain behind their state guards and are never moved through this API.
+    pub(super) fn into_workers(self) -> FxHashSet<WorkerWithDpRank> {
+        self.workers
+    }
+
     pub(super) fn insert(&mut self, worker: WorkerWithDpRank) -> bool {
         let inserted = self.workers.insert(worker);
         if inserted {

@@ -314,6 +314,7 @@ impl SyncReplayIndexer {
             &device,
             LowerTierQueryOptions {
                 retain_kv_transfer_chain: retain,
+                max_reusable_blocks: None,
             },
         );
         TieredMatchDetails { device, lower_tier }

@@ -362,3 +362,36 @@ pub fn assert_overlap_scores_eq(left: &OverlapScores, right: &OverlapScores, ctx
         left.frequencies, right.frequencies
     );
 }
+
+pub fn recurrent_store(
+    worker: WorkerWithDpRank,
+    tier: crate::prelude::StorageTier,
+    hash: u64,
+    group: u32,
+    count: u32,
+) -> RouterEvent {
+    use crate::prelude::{KvCacheGroupKind, KvCacheGroupTag};
+    RouterEvent::with_storage_tier(
+        worker.worker_id,
+        KvCacheEvent {
+            event_id: 10,
+            dp_rank: worker.dp_rank,
+            data: KvCacheEventData::Stored(KvCacheStoreData {
+                parent_hash: None,
+                start_position: None,
+                blocks: vec![KvCacheStoredBlockData {
+                    block_hash: ExternalSequenceBlockHash(hash),
+                    tokens_hash: LocalBlockHash(0),
+                    mm_extra_info: None,
+                }],
+            }),
+        },
+        tier,
+    )
+    .with_kv_cache_group(KvCacheGroupTag {
+        group_idx: group,
+        kind: KvCacheGroupKind::Mamba,
+        expected_group_count: Some(count),
+        alignment_blocks: Some(1),
+    })
+}

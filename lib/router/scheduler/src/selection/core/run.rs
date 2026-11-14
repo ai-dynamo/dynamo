@@ -782,6 +782,9 @@ impl SelectionCore {
                         &normalized.block_hashes,
                         LowerTierQueryOptions {
                             retain_kv_transfer_chain,
+                            max_reusable_blocks: Some(
+                                normalized.isl_tokens.saturating_sub(1) / entry.block_size as usize,
+                            ),
                         },
                     )
                     .instrument(tracing::info_span!("kv_router.find_matches"))

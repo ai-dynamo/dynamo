@@ -14,9 +14,10 @@
 //! Recurrent events update per-owner checkpoint membership, never attention edges.
 //! Complete layouts include groups with no resident checkpoints and survive dumps.
 
+use std::ops::Deref;
 use std::sync::{
-    Arc,
-    atomic::{AtomicBool, AtomicU64, Ordering},
+    Arc, OnceLock,
+    atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
 };
 
 use arc_swap::{ArcSwap, Guard};
@@ -34,22 +35,105 @@ use crate::prelude::{
 type GroupPresence = FxHashMap<u32, FxHashMap<u64, u8>>;
 type OwnerAlignments = FxHashMap<ResidencyOwner, usize>;
 
+/// An independently owned set with the same equal-set shortcut as CRTC's
+/// `WorkerSet`: compare length and a 64-bit XOR fingerprint. Unequal sets can
+/// collide (about 2^-64 per comparison), which can overestimate a worker's
+/// resumable checkpoint. This deliberately adopts CRTC's probabilistic
+/// equality contract; the members themselves are never shared between hashes.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct CheckpointWorkerSet {
+    workers: FxHashSet<WorkerWithDpRank>,
+    fingerprint: u64,
+}
+
+impl CheckpointWorkerSet {
+    fn insert(&mut self, worker: WorkerWithDpRank) -> bool {
+        let inserted = self.workers.insert(worker);
+        if inserted {
+            self.fingerprint ^= checkpoint_worker_fingerprint(worker);
+        }
+        inserted
+    }
+
+    fn remove(&mut self, worker: &WorkerWithDpRank) -> bool {
+        let removed = self.workers.remove(worker);
+        if removed {
+            self.fingerprint ^= checkpoint_worker_fingerprint(*worker);
+        }
+        removed
+    }
+
+    /// Constant-time comparison, subject to the documented collision risk.
+    #[cfg(test)]
+    fn same_members(&self, other: &Self) -> bool {
+        self.workers.len() == other.workers.len() && self.fingerprint == other.fingerprint
+    }
+
+    /// Size and fingerprint. Equal signatures mean equal members, subject to
+    /// the documented collision risk.
+    pub(crate) fn signature(&self) -> (usize, u64) {
+        (self.workers.len(), self.fingerprint)
+    }
+}
+
+impl Deref for CheckpointWorkerSet {
+    type Target = FxHashSet<WorkerWithDpRank>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.workers
+    }
+}
+
+#[cfg(test)]
+impl FromIterator<WorkerWithDpRank> for CheckpointWorkerSet {
+    fn from_iter<T: IntoIterator<Item = WorkerWithDpRank>>(workers: T) -> Self {
+        let mut set = Self::default();
+        for worker in workers {
+            set.insert(worker);
+        }
+        set
+    }
+}
+
+// Keep the same worker-id/DP-rank mixing as
+// concurrent_radix_tree_compressed::worker_set::mix_worker, without exposing or
+// changing that tree's private worker-set implementation.
+#[inline]
+fn checkpoint_worker_fingerprint(worker: WorkerWithDpRank) -> u64 {
+    #[inline]
+    fn mix(value: u64) -> u64 {
+        let mut value = value.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        value ^ (value >> 31)
+    }
+    mix(mix(worker.worker_id) ^ u64::from(worker.dp_rank))
+}
+
 /// One current checkpoint record. Group completeness is resolved on the write
 /// side; readers need neither owner-layout joins nor publication certificates.
 #[derive(Debug, Default)]
 struct CheckpointPresence {
     owners: [OwnerAlignments; 4],
-    device_workers: Arc<FxHashSet<WorkerWithDpRank>>,
+    // Each hash owns its workers, even when another hash has identical members.
+    device_workers: CheckpointWorkerSet,
+}
+
+/// How one record update changed the owner's Device worker-set membership.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeviceMembership {
+    Unchanged,
+    Joined,
+    Left,
 }
 
 impl CheckpointPresence {
-    fn update(
-        &mut self,
-        owner: ResidencyOwner,
-        mask: u8,
-        alignment: usize,
-        shared_workers: &mut Option<Arc<FxHashSet<WorkerWithDpRank>>>,
-    ) {
+    fn update(&mut self, owner: ResidencyOwner, mask: u8, alignment: usize) -> DeviceMembership {
+        if self.owners.iter().enumerate().all(|(index, owners)| {
+            owners.get(&owner).copied() == (mask & (1 << index) != 0).then_some(alignment)
+        }) {
+            return DeviceMembership::Unchanged;
+        }
         for (index, owners) in self.owners.iter_mut().enumerate() {
             if mask & (1 << index) != 0 {
                 owners.insert(owner, alignment);
@@ -58,25 +142,15 @@ impl CheckpointPresence {
             }
         }
         if let Some(worker) = owner.as_worker() {
-            let include = mask & 1 != 0 && alignment == 1;
-            if self.device_workers.contains(&worker) != include {
-                let workers = Arc::make_mut(&mut self.device_workers);
-                if include {
-                    workers.insert(worker);
-                } else {
-                    workers.remove(&worker);
+            if mask & 1 != 0 && alignment == 1 {
+                if self.device_workers.insert(worker) {
+                    return DeviceMembership::Joined;
                 }
-                // Reuse an equal set only inside this event's update batch.
-                // There is no persistent cohort cache or validity object.
-                if let Some(shared) = shared_workers.as_ref()
-                    && shared.as_ref() == self.device_workers.as_ref()
-                {
-                    self.device_workers = shared.clone();
-                } else {
-                    *shared_workers = Some(self.device_workers.clone());
-                }
+            } else if self.device_workers.remove(&worker) {
+                return DeviceMembership::Left;
             }
         }
+        DeviceMembership::Unchanged
     }
 
     fn is_empty(&self) -> bool {
@@ -84,45 +158,238 @@ impl CheckpointPresence {
     }
 }
 
+/// Slots in the Device filter: a power of two, sixteen bytes each.
+const DEVICE_FILTER_SLOTS: usize = 1 << 18;
+const DEVICE_FILTER_SHIFT: u32 = u64::BITS - DEVICE_FILTER_SLOTS.trailing_zeros();
+
+/// One Device filter slot. Queries load `workers` and nothing else.
+#[derive(Default)]
+struct DeviceFilterSlot {
+    /// Union of the filter bits of the workers in every Device set that maps
+    /// here. Bits are cleared only when the last such set empties.
+    workers: AtomicU64,
+    /// Number of nonempty Device sets that map here. The top bit serializes
+    /// this slot's writers, which hold it for a few instructions.
+    records: AtomicU64,
+}
+
+impl DeviceFilterSlot {
+    const BUSY: u64 = 1 << 63;
+
+    /// Returns the record count once no other writer is in this slot.
+    fn lock(&self) -> u64 {
+        loop {
+            let records = self.records.load(Ordering::Relaxed) & !Self::BUSY;
+            if self
+                .records
+                .compare_exchange_weak(
+                    records,
+                    records | Self::BUSY,
+                    Ordering::Acquire,
+                    Ordering::Relaxed,
+                )
+                .is_ok()
+            {
+                return records;
+            }
+            std::hint::spin_loop();
+        }
+    }
+
+    /// A worker joined a Device set that maps here; `first` when the set was
+    /// empty before.
+    fn joined(&self, bit: u64, first: bool) {
+        // A set that was already nonempty keeps this slot from being cleared
+        // while its shard guard is held, so a bit seen here stays.
+        if !first && self.workers.load(Ordering::Relaxed) & bit != 0 {
+            return;
+        }
+        let records = self.lock();
+        self.workers.fetch_or(bit, Ordering::Release);
+        self.records
+            .store(records + u64::from(first), Ordering::Release);
+    }
+
+    /// A Device set that maps here lost its last worker.
+    fn emptied(&self) {
+        let records = self.lock().saturating_sub(1);
+        if records == 0 {
+            self.workers.store(0, Ordering::Release);
+        }
+        self.records.store(records, Ordering::Release);
+    }
+}
+
+/// A fixed table that tells a query, without touching the directory, that no
+/// record at a hash can hold the workers it is looking for.
+///
+/// Every registered worker has one of 64 filter bits. A slot's bits are a
+/// superset of the workers held by the Device sets that map to it, so a clear
+/// answer is exact and a set bit only means "read the record". Writers update
+/// a slot under the record's shard guard, before the change is visible.
+struct DeviceFilter {
+    slots: Box<[DeviceFilterSlot]>,
+}
+
+impl std::fmt::Debug for DeviceFilter {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("DeviceFilter")
+            .field("slots", &self.slots.len())
+            .finish()
+    }
+}
+
+impl DeviceFilter {
+    fn new() -> Self {
+        Self {
+            slots: (0..DEVICE_FILTER_SLOTS)
+                .map(|_| DeviceFilterSlot::default())
+                .collect(),
+        }
+    }
+
+    /// One multiply keeps the slot independent of the directory's buckets.
+    fn index(hash: u64) -> usize {
+        (hash.wrapping_mul(0x9e37_79b9_7f4a_7c15) >> DEVICE_FILTER_SHIFT) as usize
+    }
+
+    fn slot(&self, hash: u64) -> &DeviceFilterSlot {
+        &self.slots[Self::index(hash)]
+    }
+
+    /// Whether a Device set at `hash` may hold a worker with one of `bits`.
+    fn may_hold(&self, hash: u64, bits: u64) -> bool {
+        self.slot(hash).workers.load(Ordering::Acquire) & bits != 0
+    }
+}
+
+/// The directory's shard guard protects record reads, publication, and removal.
+/// A box keeps each hash-table value small without a per-record lock or shared
+/// reference count. Queries release the guard before matching or callbacks.
 #[derive(Debug, Default)]
 struct CheckpointDirectory {
-    entries: DashMap<u64, Arc<RwLock<CheckpointPresence>>, FxBuildHasher>,
+    entries: DashMap<u64, Box<CheckpointPresence>, FxBuildHasher>,
+    /// Built on the first Device join; a deployment without one never pays
+    /// for it.
+    filter: OnceLock<DeviceFilter>,
 }
 
 impl CheckpointDirectory {
-    fn record(&self, hash: ExternalSequenceBlockHash) -> Option<Arc<RwLock<CheckpointPresence>>> {
-        // Drop the directory's shard guard before waiting for the record lock.
-        self.entries
-            .get(&hash.0)
-            .map(|record| record.value().clone())
+    #[cfg(test)]
+    fn is_empty(&self) -> bool {
+        self.entries.is_empty()
     }
 
+    /// Directory-only publication for tests that do not read the owner count.
+    #[cfg(test)]
     fn publish(&self, owner: ResidencyOwner, updates: Vec<(u64, u8)>, alignment: usize) {
-        let mut shared_workers = None;
+        self.publish_counted(owner, updates, alignment, &AtomicUsize::new(0), 1);
+    }
+
+    /// `device_checkpoints` counts the records whose Device worker set holds
+    /// this owner. It is raised before any record can gain the owner and
+    /// lowered only after records lose it, so a reader that sees zero knows
+    /// no record credits the owner; a nonzero value may be briefly stale-high.
+    /// `filter_bit` is the owner's bit in the Device filter.
+    fn publish_counted(
+        &self,
+        owner: ResidencyOwner,
+        updates: Vec<(u64, u8)>,
+        alignment: usize,
+        device_checkpoints: &AtomicUsize,
+        filter_bit: u64,
+    ) {
+        let may_join = if owner.as_worker().is_some() && alignment == 1 {
+            updates.iter().filter(|(_, mask)| mask & 1 != 0).count()
+        } else {
+            0
+        };
+        if may_join > 0 {
+            device_checkpoints.fetch_add(may_join, Ordering::Relaxed);
+        }
+        let mut joined = 0;
+        let mut left = 0;
         for (hash, mask) in updates {
-            // Writers keep one directory entry guard through a single record
-            // update. This serializes removal with other writers and prevents
-            // writes into a detached record. No reader holds a directory guard
-            // while taking a record lock, and no record reader acquires an owner
-            // lock. Empty records are reclaimed immediately.
-            match self.entries.entry(hash) {
-                Entry::Occupied(entry) => {
-                    let empty = {
-                        let mut record = entry.get().write();
-                        record.update(owner, mask, alignment, &mut shared_workers);
-                        record.is_empty()
+            // Update and remove under one entry guard so concurrent writers
+            // cannot publish into a detached record. No owner lock is acquired
+            // while holding this guard, and each iteration releases it.
+            let change = match self.entries.entry(hash) {
+                Entry::Occupied(mut entry) => {
+                    let (change, empty) = {
+                        let record = entry.get_mut();
+                        let change = record.update(owner, mask, alignment);
+                        let holders = record.device_workers.len();
+                        self.track_filter(hash, filter_bit, change, holders);
+                        (change, record.is_empty())
                     };
                     if empty {
                         entry.remove();
                     }
+                    change
                 }
                 Entry::Vacant(entry) if mask != 0 => {
                     let mut record = CheckpointPresence::default();
-                    record.update(owner, mask, alignment, &mut shared_workers);
-                    entry.insert(Arc::new(RwLock::new(record)));
+                    let change = record.update(owner, mask, alignment);
+                    let holders = record.device_workers.len();
+                    self.track_filter(hash, filter_bit, change, holders);
+                    entry.insert(Box::new(record));
+                    change
                 }
-                Entry::Vacant(_) => {}
+                Entry::Vacant(_) => DeviceMembership::Unchanged,
+            };
+            match change {
+                DeviceMembership::Joined => joined += 1,
+                DeviceMembership::Left => left += 1,
+                DeviceMembership::Unchanged => {}
             }
+        }
+        // Every join was pre-counted, so `may_join >= joined`.
+        let surplus = may_join - joined + left;
+        if surplus > 0 {
+            device_checkpoints.fetch_sub(surplus, Ordering::Relaxed);
+        }
+    }
+
+    /// Mirror one record's Device membership change into the filter. Runs
+    /// under the record's shard guard, with `holders` the set's new size.
+    fn track_filter(&self, hash: u64, bit: u64, change: DeviceMembership, holders: usize) {
+        match change {
+            DeviceMembership::Joined => self
+                .filter
+                .get_or_init(DeviceFilter::new)
+                .slot(hash)
+                .joined(bit, holders == 1),
+            DeviceMembership::Left if holders == 0 => {
+                if let Some(filter) = self.filter.get() {
+                    filter.slot(hash).emptied();
+                }
+            }
+            DeviceMembership::Left | DeviceMembership::Unchanged => {}
+        }
+    }
+
+    /// Run `visit` on this hash's nonempty Device worker set under the shard
+    /// read guard. `bits` are the filter bits of the workers the caller is
+    /// looking for; the directory is not touched when the filter rules all of
+    /// them out. The visitor must only touch query-local state.
+    fn visit_device_workers(
+        &self,
+        hash: ExternalSequenceBlockHash,
+        bits: u64,
+        visit: impl FnOnce(&CheckpointWorkerSet),
+    ) {
+        if !self
+            .filter
+            .get()
+            .is_some_and(|filter| filter.may_hold(hash.0, bits))
+        {
+            return;
+        }
+        if let Some(record) = self.entries.get(&hash.0)
+            && !record.device_workers.is_empty()
+        {
+            visit(&record.device_workers);
         }
     }
 
@@ -132,15 +399,17 @@ impl CheckpointDirectory {
         tier: StorageTier,
         visit: impl FnOnce(&OwnerAlignments),
     ) -> bool {
-        let Some(record) = self.record(hash) else {
-            return false;
+        let owners = {
+            let Some(record) = self.entries.get(&hash.0) else {
+                return false;
+            };
+            let owners = &record.owners[tier_index(tier)];
+            if owners.is_empty() {
+                return false;
+            }
+            owners.clone()
         };
-        let record = record.read();
-        let owners = &record.owners[tier_index(tier)];
-        if owners.is_empty() {
-            return false;
-        }
-        visit(owners);
+        visit(&owners);
         true
     }
 }
@@ -177,6 +446,12 @@ struct OwnerPresence {
     alignment_blocks: usize,
     retired: bool,
     published_general_device_eval: bool,
+    /// Shared with the registry snapshot so queries can read it without
+    /// taking this owner's lock. See [`CheckpointDirectory::publish_counted`].
+    device_checkpoints: Arc<AtomicUsize>,
+    /// This owner's bit in the Device filter; zero for a cache owner, which
+    /// never joins a Device set.
+    filter_bit: u64,
 }
 
 impl OwnerPresence {
@@ -308,20 +583,45 @@ pub struct CheckpointLayout {
 struct OwnerRegistry {
     owners: FxHashMap<ResidencyOwner, Arc<RwLock<OwnerPresence>>>,
     cache_owners: FxHashMap<ResidencyOwnerKey, ResidencyOwner>,
+    /// What queries read about each registered worker, keyed like `owners`.
+    workers: FxHashMap<WorkerWithDpRank, WorkerSummary>,
+    /// Workers registered so far; the next one takes filter bit `n % 64`.
+    filter_bits_assigned: u32,
+}
+
+/// What a query reads about one registered worker without taking its lock.
+#[derive(Debug, Clone)]
+struct WorkerSummary {
+    /// See [`CheckpointDirectory::publish_counted`].
+    device_checkpoints: Arc<AtomicUsize>,
+    /// The worker's bit in the Device filter.
+    filter_bit: u64,
 }
 
 #[derive(Debug)]
-#[allow(dead_code)]
 pub(crate) struct KnownWorkerRead {
     registry: Guard<Arc<OwnerRegistry>>,
 }
 
-#[allow(dead_code)]
 impl KnownWorkerRead {
+    #[cfg(test)]
     pub(crate) fn is_known_worker(&self, worker: WorkerWithDpRank) -> bool {
         self.registry
             .owners
             .contains_key(&ResidencyOwner::worker(worker))
+    }
+
+    /// How many checkpoint records currently credit this worker on Device,
+    /// and the worker's Device filter bit; `None` for a worker that was
+    /// unknown when this view was captured. A zero count is exact; a nonzero
+    /// one may be briefly stale-high.
+    pub(crate) fn device_summary(&self, worker: WorkerWithDpRank) -> Option<(usize, u64)> {
+        self.registry.workers.get(&worker).map(|summary| {
+            (
+                summary.device_checkpoints.load(Ordering::Relaxed),
+                summary.filter_bit,
+            )
+        })
     }
 }
 
@@ -369,9 +669,9 @@ impl CheckpointReadView {
         Some(owner)
     }
 
-    /// The callback receives current complete owners and their alignment from
-    /// one record read. It must not acquire owner locks or recursively enter the
-    /// directory while holding this record read.
+    /// The callback receives a copy of the current complete owners and their
+    /// alignment. All guards are released before invoking the callback;
+    /// separate calls may see newer versions.
     pub fn with_owners(
         &self,
         hash: ExternalSequenceBlockHash,
@@ -423,6 +723,15 @@ impl CheckpointReadView {
     }
 }
 
+/// A query keeps its own worker set. Matching size and fingerprint reuse that
+/// query-local set; otherwise return an independent copy of this hash's workers.
+#[cfg(test)]
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum CheckpointWorkers {
+    Unchanged,
+    Changed(CheckpointWorkerSet),
+}
+
 #[derive(Debug, Default)]
 pub struct KvCacheGroupResidency {
     registry: ArcSwap<OwnerRegistry>,
@@ -441,34 +750,76 @@ impl KvCacheGroupResidency {
         self.active.load(Ordering::Relaxed)
     }
 
-    #[allow(dead_code)]
     pub(crate) fn requires_general_device_eval(&self) -> bool {
         self.general_device_eval_layouts.load(Ordering::Acquire) != 0
     }
 
-    #[allow(dead_code)]
     pub(crate) fn known_worker_read(&self) -> KnownWorkerRead {
         KnownWorkerRead {
             registry: self.registry.load(),
         }
     }
 
-    /// Visit the current complete, alignment-one Device workers for this hash.
-    /// Only one record is read; there is no query-time layout join or validity fence.
-    #[allow(dead_code)]
-    pub(crate) fn with_checkpoint_workers(
+    /// Read this hash's complete, alignment-one Device workers. Each record owns
+    /// its set independently. Compare size and fingerprint with the query's
+    /// current set under the shard read guard, copying when they differ. This
+    /// uses the probabilistic equality contract of `CheckpointWorkerSet`.
+    /// The returned set owns its storage; matching runs after all guards drop.
+    #[cfg(test)]
+    pub(crate) fn checkpoint_workers_since(
         &self,
         hash: ExternalSequenceBlockHash,
-        visit: impl FnOnce(&Arc<FxHashSet<WorkerWithDpRank>>),
+        previous: Option<&CheckpointWorkerSet>,
+    ) -> Option<CheckpointWorkers> {
+        let record = self.checkpoints.entries.get(&hash.0)?;
+        let workers = &record.device_workers;
+        if workers.is_empty() {
+            return None;
+        }
+        if let Some(previous) = previous
+            && previous.same_members(workers)
+        {
+            debug_assert_eq!(previous.workers, workers.workers);
+            return Some(CheckpointWorkers::Unchanged);
+        }
+        Some(CheckpointWorkers::Changed(workers.clone()))
+    }
+
+    /// Visit this hash's complete, alignment-one Device workers in place.
+    /// `bits` are the Device filter bits of the workers the caller is looking
+    /// for; a record that cannot hold any of them is skipped without a
+    /// directory read. The visitor runs under the directory shard read guard,
+    /// so it must be short and touch only query-local state.
+    pub(crate) fn visit_checkpoint_workers(
+        &self,
+        hash: ExternalSequenceBlockHash,
+        bits: u64,
+        visit: impl FnOnce(&CheckpointWorkerSet),
+    ) {
+        self.checkpoints.visit_device_workers(hash, bits, visit);
+    }
+
+    #[cfg(test)]
+    fn checkpoint_workers(
+        &self,
+        hash: ExternalSequenceBlockHash,
+    ) -> Option<FxHashSet<WorkerWithDpRank>> {
+        match self.checkpoint_workers_since(hash, None)? {
+            CheckpointWorkers::Changed(workers) => Some(workers.workers),
+            CheckpointWorkers::Unchanged => unreachable!("no prior query set was supplied"),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_checkpoint_workers(
+        &self,
+        hash: ExternalSequenceBlockHash,
+        visit: impl FnOnce(&FxHashSet<WorkerWithDpRank>),
     ) -> bool {
-        let Some(record) = self.checkpoints.record(hash) else {
+        let Some(workers) = self.checkpoint_workers(hash) else {
             return false;
         };
-        let record = record.read();
-        if record.device_workers.is_empty() {
-            return false;
-        }
-        visit(&record.device_workers);
+        visit(&workers);
         true
     }
 
@@ -501,8 +852,13 @@ impl KvCacheGroupResidency {
                 .filter(|hash| !state.complete_checkpoints.contains_key(hash))
                 .map(|hash| (hash, 0)),
         );
-        self.checkpoints
-            .publish(owner, updates, state.alignment_blocks.max(1));
+        self.checkpoints.publish_counted(
+            owner,
+            updates,
+            state.alignment_blocks.max(1),
+            &state.device_checkpoints,
+            state.filter_bit,
+        );
     }
 
     fn clear_owner(&self, owner: ResidencyOwner, state: &mut OwnerPresence) {
@@ -524,7 +880,19 @@ impl KvCacheGroupResidency {
             return state.clone();
         }
         let mut next = (*current).clone();
-        let state = Arc::new(RwLock::new(OwnerPresence::default()));
+        let mut presence = OwnerPresence::default();
+        if let Some(worker) = owner.as_worker() {
+            presence.filter_bit = 1u64 << (next.filter_bits_assigned % u64::BITS);
+            next.filter_bits_assigned = next.filter_bits_assigned.wrapping_add(1);
+            next.workers.insert(
+                worker,
+                WorkerSummary {
+                    device_checkpoints: presence.device_checkpoints.clone(),
+                    filter_bit: presence.filter_bit,
+                },
+            );
+        }
+        let state = Arc::new(RwLock::new(presence));
         next.owners.insert(owner, state.clone());
         if matches!(owner, ResidencyOwner::CacheOwner(_)) {
             next.cache_owners.insert(owner.compact_key(), owner);
@@ -657,8 +1025,13 @@ impl KvCacheGroupResidency {
                     state.refresh_general_requirement(&self.general_device_eval_layouts);
                     self.publish_reset(owner, previous, &state);
                 } else {
-                    self.checkpoints
-                        .publish(owner, updates, state.alignment_blocks.max(1));
+                    self.checkpoints.publish_counted(
+                        owner,
+                        updates,
+                        state.alignment_blocks.max(1),
+                        &state.device_checkpoints,
+                        state.filter_bit,
+                    );
                 }
             }
             KvCacheEventData::Removed(data) => {
@@ -684,8 +1057,13 @@ impl KvCacheGroupResidency {
                             updates.push((hash.0, new));
                         }
                     }
-                    self.checkpoints
-                        .publish(owner, updates, state.alignment_blocks.max(1));
+                    self.checkpoints.publish_counted(
+                        owner,
+                        updates,
+                        state.alignment_blocks.max(1),
+                        &state.device_checkpoints,
+                        state.filter_bit,
+                    );
                 }
             }
             KvCacheEventData::Cleared => self.clear_event(event),
@@ -746,6 +1124,9 @@ impl KvCacheGroupResidency {
                 true
             }
         });
+        let owners = &next.owners;
+        next.workers
+            .retain(|worker, _| owners.contains_key(&ResidencyOwner::worker(*worker)));
         self.active
             .store(!next.owners.is_empty(), Ordering::Relaxed);
         self.registry.store(Arc::new(next));
@@ -1328,6 +1709,404 @@ mod tests {
     }
 
     #[test]
+    fn checkpoint_fingerprint_tracks_insert_remove_and_duplicate_updates() {
+        let mut workers = CheckpointWorkerSet::default();
+        let mut rng = fastrand::Rng::with_seed(7);
+        for _ in 0..10_000 {
+            let worker = WorkerWithDpRank::new(rng.u64(..32), rng.u32(..4));
+            if rng.bool() {
+                workers.insert(worker);
+                let fingerprint = workers.fingerprint;
+                assert!(!workers.insert(worker));
+                assert_eq!(workers.fingerprint, fingerprint);
+            } else {
+                workers.remove(&worker);
+                let fingerprint = workers.fingerprint;
+                assert!(!workers.remove(&worker));
+                assert_eq!(workers.fingerprint, fingerprint);
+            }
+            let rebuilt = workers
+                .iter()
+                .copied()
+                .map(checkpoint_worker_fingerprint)
+                .fold(0, |fingerprint, member| fingerprint ^ member);
+            assert_eq!(workers.fingerprint, rebuilt);
+        }
+        let members = workers.iter().copied().collect::<Vec<_>>();
+        for worker in members {
+            assert!(workers.remove(&worker));
+        }
+        assert!(workers.is_empty());
+        assert_eq!(workers.fingerprint, 0);
+    }
+
+    #[test]
+    fn checkpoint_fingerprint_follows_tiers_alignment_and_owner_removal() {
+        let first = WorkerWithDpRank::new(7, 0);
+        let other_rank = WorkerWithDpRank::new(7, 1);
+        let first_owner = ResidencyOwner::worker(first);
+        let other_owner = ResidencyOwner::worker(other_rank);
+        let mut record = CheckpointPresence::default();
+        record.update(first_owner, 1, 1);
+        record.update(other_owner, 1, 1);
+        let both = CheckpointWorkerSet::from_iter([other_rank, first]);
+        assert_eq!(record.device_workers, both);
+
+        // An idempotent publish and a non-device tier change must preserve the
+        // device fingerprint. Alignment changes do change device eligibility.
+        record.update(first_owner, 1, 1);
+        record.update(first_owner, 3, 1);
+        assert_eq!(record.device_workers, both);
+        record.update(first_owner, 3, 2);
+        assert_eq!(
+            record.device_workers,
+            CheckpointWorkerSet::from_iter([other_rank])
+        );
+        record.update(first_owner, 1, 1);
+        assert_eq!(record.device_workers, both);
+        record.update(other_owner, 2, 1);
+        assert_eq!(
+            record.device_workers,
+            CheckpointWorkerSet::from_iter([first])
+        );
+        record.update(first_owner, 0, 1);
+        record.update(other_owner, 0, 1);
+        assert!(record.is_empty());
+        assert_eq!(record.device_workers, CheckpointWorkerSet::default());
+    }
+
+    #[test]
+    fn checkpoint_worker_changes_distinguish_equal_counts_and_dp_ranks() {
+        let table = KvCacheGroupResidency::new();
+        let first = WorkerWithDpRank::new(7, 0);
+        let other_rank = WorkerWithDpRank::new(7, 1);
+        let hash = ExternalSequenceBlockHash(11);
+        let previous = CheckpointWorkerSet::from_iter([first]);
+        assert_eq!(table.checkpoint_workers_since(hash, Some(&previous)), None);
+
+        table.apply(&checkpoint(first, StorageTier::Device, 0, hash.0, Some(1)));
+        assert_eq!(
+            table.checkpoint_workers_since(hash, Some(&previous)),
+            Some(CheckpointWorkers::Unchanged)
+        );
+        let same_size_different_members = CheckpointWorkerSet::from_iter([other_rank]);
+        assert_eq!(
+            table.checkpoint_workers_since(hash, Some(&same_size_different_members)),
+            Some(CheckpointWorkers::Changed(previous.clone()))
+        );
+
+        table.clear_worker(first);
+        assert_eq!(table.checkpoint_workers_since(hash, Some(&previous)), None);
+        table.apply(&checkpoint(
+            other_rank,
+            StorageTier::Device,
+            0,
+            hash.0,
+            Some(1),
+        ));
+        assert_eq!(
+            table.checkpoint_workers_since(hash, Some(&previous)),
+            Some(CheckpointWorkers::Changed(same_size_different_members))
+        );
+        assert_eq!(previous.workers, FxHashSet::from_iter([first]));
+    }
+
+    #[test]
+    fn equal_checkpoint_records_and_query_sets_mutate_independently() {
+        let table = KvCacheGroupResidency::new();
+        let first = WorkerWithDpRank::new(7, 0);
+        let second = WorkerWithDpRank::new(8, 0);
+        let first_hash = ExternalSequenceBlockHash(11);
+        let second_hash = ExternalSequenceBlockHash(22);
+        for worker in [first, second] {
+            table.checkpoints.publish(
+                ResidencyOwner::worker(worker),
+                vec![(first_hash.0, 1), (second_hash.0, 1)],
+                1,
+            );
+        }
+        let mut captured =
+            CheckpointWorkerSet::from_iter(table.checkpoint_workers(first_hash).unwrap());
+        assert_eq!(
+            table.checkpoint_workers_since(second_hash, Some(&captured)),
+            Some(CheckpointWorkers::Unchanged)
+        );
+
+        table
+            .checkpoints
+            .publish(ResidencyOwner::worker(second), vec![(first_hash.0, 0)], 1);
+        assert_eq!(
+            table.checkpoint_workers_since(first_hash, Some(&captured)),
+            Some(CheckpointWorkers::Changed(CheckpointWorkerSet::from_iter(
+                [first]
+            )))
+        );
+        assert_eq!(
+            table.checkpoint_workers_since(second_hash, Some(&captured)),
+            Some(CheckpointWorkers::Unchanged)
+        );
+
+        // Query-local mutation cannot alter either record's independently owned set.
+        captured.remove(&first);
+        assert_eq!(
+            table.checkpoint_workers(first_hash).unwrap(),
+            FxHashSet::from_iter([first])
+        );
+        assert_eq!(
+            table.checkpoint_workers(second_hash).unwrap(),
+            FxHashSet::from_iter([first, second])
+        );
+    }
+
+    #[test]
+    fn device_filter_is_a_superset_and_clears_when_the_slot_empties() {
+        let directory = CheckpointDirectory::default();
+        let first = ResidencyOwner::worker(WorkerWithDpRank::new(7, 0));
+        let second = ResidencyOwner::worker(WorkerWithDpRank::new(8, 0));
+        let count = AtomicUsize::new(0);
+        let may_hold = |hash, bits| {
+            directory
+                .filter
+                .get()
+                .is_some_and(|filter| filter.may_hold(hash, bits))
+        };
+        // No Device set anywhere: nothing can hold anyone.
+        assert!(!may_hold(11, u64::MAX));
+        directory.publish_counted(first, vec![(11, 1)], 1, &count, 0b01);
+        assert!(may_hold(11, 0b01));
+        assert!(!may_hold(11, 0b10));
+        directory.publish_counted(second, vec![(11, 1)], 1, &count, 0b10);
+        assert!(may_hold(11, 0b10));
+        // A departed worker's bit may linger, but a holder's bit never drops.
+        directory.publish_counted(first, vec![(11, 0)], 1, &count, 0b01);
+        assert!(may_hold(11, 0b10));
+        // Other tiers and coarser alignments never enter the filter.
+        assert_ne!(DeviceFilter::index(11), DeviceFilter::index(12));
+        assert_ne!(DeviceFilter::index(11), DeviceFilter::index(13));
+        directory.publish_counted(first, vec![(12, 2)], 1, &count, 0b01);
+        directory.publish_counted(first, vec![(13, 1)], 2, &count, 0b01);
+        assert!(!may_hold(12, u64::MAX));
+        assert!(!may_hold(13, u64::MAX));
+        // The last Device set leaving the slot clears every bit.
+        directory.publish_counted(second, vec![(11, 0)], 1, &count, 0b10);
+        assert!(!may_hold(11, u64::MAX));
+        assert_eq!(count.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn device_filter_keeps_a_held_bit_through_concurrent_slot_clears() {
+        let directory = CheckpointDirectory::default();
+        // Two hashes that share a filter slot but not a record.
+        let first_hash = 1u64;
+        let second_hash = (2u64..)
+            .find(|&hash| DeviceFilter::index(hash) == DeviceFilter::index(first_hash))
+            .unwrap();
+        let first = ResidencyOwner::worker(WorkerWithDpRank::new(7, 0));
+        let second = ResidencyOwner::worker(WorkerWithDpRank::new(8, 0));
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let count = AtomicUsize::new(0);
+                for _ in 0..50_000 {
+                    directory.publish_counted(first, vec![(first_hash, 1)], 1, &count, 0b01);
+                    directory.publish_counted(first, vec![(first_hash, 0)], 1, &count, 0b01);
+                }
+            });
+            scope.spawn(|| {
+                let count = AtomicUsize::new(0);
+                for _ in 0..50_000 {
+                    directory.publish_counted(second, vec![(second_hash, 1)], 1, &count, 0b10);
+                    // The record holds the worker, so its bit must be visible.
+                    assert!(directory.filter.get().unwrap().may_hold(second_hash, 0b10));
+                    directory.publish_counted(second, vec![(second_hash, 0)], 1, &count, 0b10);
+                }
+            });
+        });
+        assert!(directory.is_empty());
+        let filter = directory.filter.get().unwrap();
+        assert!(!filter.may_hold(first_hash, u64::MAX));
+        assert_eq!(filter.slot(first_hash).records.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn checkpoint_removal_preserves_other_owners_and_reclaims_empty_records() {
+        let directory = CheckpointDirectory::default();
+        let first = ResidencyOwner::worker(WorkerWithDpRank::new(7, 0));
+        let second = ResidencyOwner::worker(WorkerWithDpRank::new(8, 0));
+        directory.publish(first, vec![(11, 0)], 1);
+        assert!(directory.is_empty());
+        directory.publish(first, vec![(11, 1)], 1);
+        directory.publish(second, vec![(11, 2)], 1);
+        directory.publish(first, vec![(11, 0)], 1);
+        {
+            let entry = directory.entries.get(&11).unwrap();
+            let record = entry.value();
+            assert!(record.device_workers.is_empty());
+            assert!(record.owners[0].is_empty());
+            assert_eq!(record.owners[1], FxHashMap::from_iter([(second, 1)]));
+        }
+        directory.publish(second, vec![(11, 0)], 1);
+        assert!(directory.is_empty());
+        directory.publish(first, vec![(11, 1)], 2);
+        assert!(
+            directory
+                .entries
+                .get(&11)
+                .unwrap()
+                .device_workers
+                .is_empty()
+        );
+        directory.publish(first, vec![(11, 1)], 1);
+        assert_eq!(
+            directory.entries.get(&11).unwrap().device_workers.workers,
+            FxHashSet::from_iter([WorkerWithDpRank::new(7, 0)])
+        );
+    }
+
+    #[test]
+    fn checkpoint_snapshot_readers_share_the_shard_lock() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let table = Arc::new(KvCacheGroupResidency::new());
+        let worker = WorkerWithDpRank::new(7, 0);
+        let owner = ResidencyOwner::worker(worker);
+        let hash = ExternalSequenceBlockHash(11);
+        table.apply(&checkpoint(worker, StorageTier::Device, 0, hash.0, Some(1)));
+        let reader = table.checkpoints.entries.get(&hash.0).unwrap();
+        let (send, receive) = mpsc::channel();
+        let shared = table.clone();
+        let thread = std::thread::spawn(move || {
+            assert_eq!(
+                shared.checkpoint_workers(hash).unwrap(),
+                FxHashSet::from_iter([worker])
+            );
+            let found = shared
+                .checkpoints
+                .with_owners(hash, StorageTier::Device, |owners| {
+                    assert_eq!(owners.len(), 1);
+                    assert!(owners.contains_key(&owner));
+                });
+            send.send(found).unwrap();
+        });
+        let result = receive.recv_timeout(Duration::from_secs(5));
+        drop(reader);
+        thread.join().unwrap();
+        assert!(result.expect("snapshot readers of the same shard must coexist"));
+    }
+
+    #[test]
+    fn held_workers_snapshot_does_not_block_updates_or_change_its_contents() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let table = Arc::new(KvCacheGroupResidency::new());
+        let first = WorkerWithDpRank::new(7, 0);
+        let second = WorkerWithDpRank::new(8, 0);
+        let hash = ExternalSequenceBlockHash(11);
+        table.apply(&checkpoint(first, StorageTier::Device, 0, 11, Some(1)));
+        let captured = table.checkpoint_workers(hash).unwrap();
+        let (send, receive) = mpsc::channel();
+        let shared = table.clone();
+        let thread = std::thread::spawn(move || {
+            shared.apply(&checkpoint(second, StorageTier::Device, 0, 11, Some(1)));
+            send.send(()).unwrap();
+        });
+        let result = receive.recv_timeout(Duration::from_secs(5));
+        thread.join().unwrap();
+        result.expect("retaining a worker snapshot must not block its writer");
+        assert_eq!(captured, FxHashSet::from_iter([first]));
+        assert_eq!(
+            table.checkpoint_workers(hash).unwrap(),
+            FxHashSet::from_iter([first, second])
+        );
+    }
+
+    #[test]
+    fn owner_and_worker_snapshot_callbacks_run_after_unlocking() {
+        let table = KvCacheGroupResidency::new();
+        let first = WorkerWithDpRank::new(7, 0);
+        let second = WorkerWithDpRank::new(8, 0);
+        let hash = ExternalSequenceBlockHash(11);
+        table.apply(&checkpoint(first, StorageTier::Device, 0, 11, Some(1)));
+        assert!(table.with_checkpoint_workers(hash, |workers| {
+            assert!(matches!(
+                table.checkpoints.entries.try_get_mut(&hash.0),
+                dashmap::try_result::TryResult::Present(_)
+            ));
+            table.apply(&checkpoint(second, StorageTier::Device, 0, 11, Some(1)));
+            assert_eq!(workers, &FxHashSet::from_iter([first]));
+        }));
+        assert!(
+            table
+                .read_view()
+                .with_owners(hash, StorageTier::Device, |owners| {
+                    assert!(matches!(
+                        table.checkpoints.entries.try_get_mut(&hash.0),
+                        dashmap::try_result::TryResult::Present(_)
+                    ));
+                    assert_eq!(owners.len(), 2);
+                    table.clear_worker(first);
+                    assert_eq!(owners.len(), 2);
+                    assert!(owners.contains_key(&ResidencyOwner::worker(first)));
+                })
+        );
+        assert_eq!(
+            table.checkpoint_workers(hash).unwrap(),
+            FxHashSet::from_iter([second])
+        );
+    }
+
+    #[test]
+    fn concurrent_delete_readd_preserves_shared_and_independent_memberships() {
+        use std::sync::Barrier;
+        let directory = Arc::new(CheckpointDirectory::default());
+        let barrier = Arc::new(Barrier::new(8));
+        std::thread::scope(|scope| {
+            for id in 0..8 {
+                let directory = directory.clone();
+                let barrier = barrier.clone();
+                scope.spawn(move || {
+                    let owner = ResidencyOwner::worker(WorkerWithDpRank::new(id, 0));
+                    let updates = (0..256)
+                        .map(|offset| (id * 256 + offset, 1))
+                        .chain([(u64::MAX, 1)])
+                        .collect::<Vec<_>>();
+                    barrier.wait();
+                    for _ in 0..3 {
+                        directory.publish(owner, updates.clone(), 1);
+                        directory.publish(
+                            owner,
+                            updates.iter().map(|&(hash, _)| (hash, 0)).collect(),
+                            1,
+                        );
+                    }
+                    directory.publish(owner, updates, 1);
+                });
+            }
+        });
+        assert_eq!(directory.entries.len(), 2049);
+        for hash in 0..2048 {
+            let entry = directory.entries.get(&hash).unwrap();
+            let record = entry.value();
+            let worker = WorkerWithDpRank::new(hash / 256, 0);
+            assert_eq!(
+                record.owners[0],
+                FxHashMap::from_iter([(ResidencyOwner::worker(worker), 1)])
+            );
+            assert_eq!(
+                record.device_workers.workers,
+                FxHashSet::from_iter([worker])
+            );
+        }
+        let entry = directory.entries.get(&u64::MAX).unwrap();
+        let shared = entry.value();
+        assert_eq!(shared.owners[0].len(), 8);
+        assert_eq!(
+            shared.device_workers.workers,
+            (0..8).map(|id| WorkerWithDpRank::new(id, 0)).collect()
+        );
+    }
+
+    #[test]
     fn current_records_observe_remove_readd_and_reclaim_empty_entries() {
         let table = KvCacheGroupResidency::new();
         let worker = WorkerWithDpRank::new(7, 0);
@@ -1340,7 +2119,7 @@ mod tests {
         table.with_checkpoint_workers(hash, |workers| retained_workers = Some(workers.clone()));
         table.clear_worker(worker);
         assert!(view.owners_at(hash, StorageTier::Device).next().is_none());
-        assert!(table.checkpoints.entries.is_empty());
+        assert!(table.checkpoints.is_empty());
         assert!(retained_workers.unwrap().contains(&worker));
         table.apply(&checkpoint(worker, StorageTier::Device, 0, 11, Some(1)));
         assert_eq!(
@@ -1427,7 +2206,7 @@ mod tests {
             writer.join().unwrap();
         }
         assert!(!table.is_active());
-        assert!(table.checkpoints.entries.is_empty());
+        assert!(table.checkpoints.is_empty());
     }
 
     #[test]
@@ -1463,7 +2242,7 @@ mod tests {
                 .is_none()
         );
         table.remove_worker(7);
-        assert!(table.checkpoints.entries.is_empty());
+        assert!(table.checkpoints.is_empty());
     }
 
     #[test]
@@ -1512,7 +2291,7 @@ mod tests {
         });
         table.remove_worker_rank(worker);
         assert!(!table.is_active());
-        assert!(table.checkpoints.entries.is_empty());
+        assert!(table.checkpoints.is_empty());
     }
 
     #[test]

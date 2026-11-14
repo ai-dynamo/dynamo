@@ -85,6 +85,10 @@ impl LowerTierIndexers {
         self.set_residency_routing_snapshot(ResidencyRoutingSnapshot::from_projection(projection));
     }
 
+    pub(crate) fn routing_snapshot(&self) -> Arc<ResidencyRoutingSnapshot> {
+        self.routing_snapshot.load_full()
+    }
+
     pub fn set_residency_routing_snapshot(&self, snapshot: ResidencyRoutingSnapshot) {
         self.routing_snapshot.store(Arc::new(snapshot));
     }
@@ -131,7 +135,7 @@ impl LowerTierIndexers {
             .collect()
     }
 
-    fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.indexers.read().unwrap().is_empty()
     }
 
@@ -177,6 +181,12 @@ impl From<&TieredMatchDetails> for WireTieredMatchDetails {
     fn from(d: &TieredMatchDetails) -> Self {
         Self {
             device: d.device.overlap_scores.clone().into(),
+            hybrid_resume_caps: d
+                .device
+                .hybrid_resume_caps
+                .iter()
+                .map(|(worker, cap)| (*worker, *cap))
+                .collect(),
             lower_tier: d
                 .lower_tier
                 .iter()
@@ -202,6 +212,7 @@ impl From<WireTieredMatchDetails> for TieredMatchDetails {
         Self {
             device: MatchDetails {
                 overlap_scores: w.device.into(),
+                hybrid_resume_caps: w.hybrid_resume_caps.into_iter().collect(),
                 ..Default::default()
             },
             lower_tier,
@@ -222,6 +233,8 @@ pub fn lower_tier_query_order() -> [StorageTier; 3] {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct LowerTierQueryOptions {
     pub retain_kv_transfer_chain: bool,
+    /// Engine prefix lookup excludes the final prompt token.
+    pub max_reusable_blocks: Option<usize>,
 }
 
 #[async_trait]
@@ -336,6 +349,38 @@ pub fn query_lower_tiers_with_options_and_snapshot(
     options: LowerTierQueryOptions,
     snapshot: Arc<ResidencyRoutingSnapshot>,
 ) -> HashMap<StorageTier, LowerTierMatchDetails> {
+    query_lower_tiers_inner(indexers, sequence, device_matches, options, snapshot, None)
+}
+
+pub(crate) fn query_lower_tiers_with_hybrid(
+    indexers: &LowerTierIndexers,
+    sequence: &[LocalBlockHash],
+    device_matches: &MatchDetails,
+    options: LowerTierQueryOptions,
+    snapshot: Arc<ResidencyRoutingSnapshot>,
+    evaluator: &mut super::hybrid_prefix::HybridPrefixEvaluator,
+) -> HashMap<StorageTier, LowerTierMatchDetails> {
+    if indexers.is_empty() {
+        return HashMap::new();
+    }
+    query_lower_tiers_inner(
+        indexers,
+        sequence,
+        device_matches,
+        options,
+        snapshot,
+        Some(evaluator),
+    )
+}
+
+fn query_lower_tiers_inner(
+    indexers: &LowerTierIndexers,
+    sequence: &[LocalBlockHash],
+    device_matches: &MatchDetails,
+    options: LowerTierQueryOptions,
+    snapshot: Arc<ResidencyRoutingSnapshot>,
+    mut evaluator: Option<&mut super::hybrid_prefix::HybridPrefixEvaluator>,
+) -> HashMap<StorageTier, LowerTierMatchDetails> {
     let projection = snapshot.projection();
     let mut continuations = LowerTierMatchDetails::default().next_continuations;
     for (worker, matched_blocks) in &device_matches.overlap_scores.scores {
@@ -369,17 +414,22 @@ pub fn query_lower_tiers_with_options_and_snapshot(
             }
         }
 
-        let retain_kv_transfer_chain =
+        let merge_hint_chain =
             options.retain_kv_transfer_chain && storage_tier == StorageTier::HostPinned;
-        let mut tier_matches = indexer
-            .backend()
-            .query_match_details_with_options_and_snapshot(
-                sequence,
-                &continuations,
-                retain_kv_transfer_chain,
-                &snapshot,
-            );
-        if retain_kv_transfer_chain {
+        let retain_extensions = merge_hint_chain;
+        if let Some(evaluator) = evaluator.as_mut() {
+            evaluator.on_tier(storage_tier);
+        }
+        let mut tier_matches = indexer.backend().query_match_details_observed(
+            sequence,
+            &continuations,
+            retain_extensions,
+            &snapshot,
+            evaluator
+                .as_deref_mut()
+                .map(|e| e as &mut dyn super::MatchObserver),
+        );
+        if merge_hint_chain {
             tier_matches.kv_transfer_candidates = merge_kv_transfer_tier_candidates(
                 device_matches.kv_transfer_candidates.as_ref(),
                 &mut tier_matches,
@@ -394,15 +444,24 @@ pub fn query_lower_tiers_with_options_and_snapshot(
             "Queried lower-tier indexer"
         );
         continuations = tier_matches.next_continuations.clone();
+        if !merge_hint_chain && evaluator.is_none() {
+            tier_matches.kv_transfer_extensions = None;
+        }
         lower_tier_matches.insert(storage_tier, tier_matches);
     }
 
+    for (tier, details) in &mut lower_tier_matches {
+        if *tier != StorageTier::HostPinned || !options.retain_kv_transfer_chain {
+            details.kv_transfer_extensions = None;
+        }
+    }
     lower_tier_matches
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::HybridResumeCaps;
     use crate::KvIndexerInterface;
     use crate::prelude::{
         ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
@@ -413,6 +472,43 @@ mod tests {
         CacheOwnerId, CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId,
         RoutingScopeId, StableDpSlotId,
     };
+
+    #[test]
+    fn tiered_wire_caps_preserve_explicit_zero_for_both_native_representations() {
+        let first = WorkerWithDpRank::new(7, 0);
+        let zero = WorkerWithDpRank::new(7, 1);
+        for caps in [
+            HybridResumeCaps::from_iter([(first, 3), (zero, 0)]),
+            HybridResumeCaps::UniformConfirmed {
+                workers: [first, zero].into_iter().collect(),
+                cap: 0,
+            },
+        ] {
+            let mut native = TieredMatchDetails::default();
+            native.device.overlap_scores.scores.insert(first, 3);
+            native.device.hybrid_resume_caps = caps;
+            let wire = WireTieredMatchDetails::from(&native);
+            assert_eq!(wire.hybrid_resume_caps.len(), 2);
+            assert!(wire.hybrid_resume_caps.contains(&(zero, 0)));
+            let value = serde_json::to_value(&wire).unwrap();
+            assert!(value["hybrid_resume_caps"].is_array());
+            let decoded = serde_json::from_value::<WireTieredMatchDetails>(value).unwrap();
+            let restored = TieredMatchDetails::from(decoded);
+            assert_eq!(
+                restored.device.hybrid_resume_caps,
+                native.device.hybrid_resume_caps
+            );
+            assert_eq!(restored.device.hybrid_resume_caps.get(&zero), Some(&0));
+            assert!(matches!(
+                restored.device.hybrid_resume_caps,
+                HybridResumeCaps::Explicit(_)
+            ));
+            assert_eq!(
+                restored.device.overlap_scores.scores,
+                native.device.overlap_scores.scores
+            );
+        }
+    }
 
     #[test]
     fn tiered_matches_json_round_trip_preserves_device_and_lower_tier_scores() {
@@ -566,6 +662,7 @@ mod tests {
             overlap_scores,
             last_matched_hashes: Default::default(),
             kv_transfer_candidates: None,
+            hybrid_resume_caps: Default::default(),
         };
 
         let sequence = vec![LocalBlockHash(1), LocalBlockHash(2)];
@@ -595,6 +692,7 @@ mod tests {
         let device_matches = MatchDetails {
             overlap_scores,
             last_matched_hashes,
+            hybrid_resume_caps: Default::default(),
             kv_transfer_candidates: Some(KvTransferCandidates {
                 block_hashes: vec![ExternalSequenceBlockHash(101)],
                 owner_prefix_blocks: vec![(worker.into(), 1)],
@@ -610,6 +708,7 @@ mod tests {
             &device_matches,
             LowerTierQueryOptions {
                 retain_kv_transfer_chain: true,
+                max_reusable_blocks: None,
             },
         );
         let candidates = result
@@ -650,6 +749,7 @@ mod tests {
         let device_matches = MatchDetails {
             overlap_scores,
             last_matched_hashes,
+            hybrid_resume_caps: Default::default(),
             kv_transfer_candidates: Some(KvTransferCandidates {
                 block_hashes: vec![ExternalSequenceBlockHash(101)],
                 owner_prefix_blocks: vec![(worker_1.into(), 1), (worker_2.into(), 1)],
@@ -665,6 +765,7 @@ mod tests {
             &device_matches,
             LowerTierQueryOptions {
                 retain_kv_transfer_chain: true,
+                max_reusable_blocks: None,
             },
         );
         let candidates = result
@@ -701,6 +802,7 @@ mod tests {
             &MatchDetails::default(),
             LowerTierQueryOptions {
                 retain_kv_transfer_chain: true,
+                max_reusable_blocks: None,
             },
         );
         let candidates = result
@@ -766,6 +868,7 @@ mod tests {
                 &device,
                 LowerTierQueryOptions {
                     retain_kv_transfer_chain: true,
+                    max_reusable_blocks: None,
                 },
             );
             let candidates = result[&StorageTier::HostPinned]
@@ -881,6 +984,7 @@ mod tests {
                 &device,
                 LowerTierQueryOptions {
                     retain_kv_transfer_chain: true,
+                    max_reusable_blocks: None,
                 },
                 snapshot,
             );
@@ -1011,6 +1115,7 @@ mod tests {
                 &device,
                 LowerTierQueryOptions {
                     retain_kv_transfer_chain,
+                    max_reusable_blocks: None,
                 },
                 snapshot.clone(),
             )

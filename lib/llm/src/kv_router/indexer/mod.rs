@@ -123,6 +123,7 @@ pub(crate) async fn build(
             cancellation_token.child_token(),
         );
         return Ok(Indexer::Remote {
+            recurrent_layouts: Arc::new(dynamo_kv_indexer::KvCacheGroupResidency::new()),
             primary: Arc::new(remote),
             approx,
             primary_records_routing_decisions: !kv_router_config.use_kv_events,

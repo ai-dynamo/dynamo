@@ -863,6 +863,7 @@ fn overlap_scores_response_includes_raw_tier_fields() {
             overlap_scores: device_scores,
             last_matched_hashes: Default::default(),
             kv_transfer_candidates: None,
+            hybrid_resume_caps: Default::default(),
         },
         lower_tier: Default::default(),
     };

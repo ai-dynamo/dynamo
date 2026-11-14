@@ -62,7 +62,9 @@ pub mod concurrent_radix_tree_compressed;
 pub mod config;
 pub mod cuckoo;
 pub mod delegate;
+pub(crate) mod forward_prefix;
 pub mod host;
+pub(crate) mod hybrid_prefix;
 pub mod identity;
 mod kv_cache_groups;
 pub mod kv_hints;
@@ -71,6 +73,7 @@ mod local;
 pub mod lookup;
 mod lower_tier;
 mod lower_tier_indexers;
+mod match_observer;
 pub mod metrics;
 #[cfg(test)]
 mod mm_exclusion_tests;
@@ -135,6 +138,7 @@ pub use kv_indexer::*;
 pub use local::*;
 pub use lower_tier::*;
 pub use lower_tier_indexers::*;
+pub use match_observer::{MatchEdge, MatchFirstEdge, MatchObserver};
 pub use metrics::*;
 #[cfg(feature = "bench")]
 pub use observation::*;

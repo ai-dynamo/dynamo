@@ -75,6 +75,12 @@ impl SelectionCore {
     ) -> Result<OverlapScoresResponse, SelectionError> {
         let key = RoutingPartitionId::new(req.model_name.clone(), req.routing_group.clone());
         let entry = self.ready_entry(&key)?;
+        let prompt = req.prompt.view();
+        let max_reusable_blocks = prompt
+            .routing_tokens_and_mm_infos()
+            .map(|(tokens, _)| tokens.len())
+            .or(prompt.isl_tokens)
+            .map(|tokens| tokens.saturating_sub(1) / entry.block_size as usize);
         let block_hashes = req
             .prompt
             .view()
@@ -82,7 +88,13 @@ impl SelectionCore {
         let num_blocks = block_hashes.len();
         let tiered = entry
             .indexer
-            .find_tiered_matches(block_hashes)
+            .find_tiered_matches_with_options(
+                block_hashes,
+                LowerTierQueryOptions {
+                    retain_kv_transfer_chain: false,
+                    max_reusable_blocks,
+                },
+            )
             .await
             .map_err(|error| SelectionError::Internal(error.to_string()))?;
         let schedulable_workers = self.schedulable_worker_ranks(&key);

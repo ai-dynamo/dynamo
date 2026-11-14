@@ -477,6 +477,7 @@ async fn unreachable_remote_indexer_is_reported_not_ready() {
     impl KvEventIngress for OfflineIngress {
         fn open(&self, _: &IndexRegistry, _: &RoutingPartitionId, _: u32) -> Indexer {
             Indexer::Remote {
+                recurrent_layouts: Default::default(),
                 primary: Arc::new(OfflineRemote),
                 approx: None,
                 primary_records_routing_decisions: false,
@@ -1192,6 +1193,7 @@ struct ReadyIngress;
 impl KvEventIngress for ReadyIngress {
     fn open(&self, _: &IndexRegistry, _: &RoutingPartitionId, _: u32) -> Indexer {
         Indexer::Remote {
+            recurrent_layouts: Default::default(),
             primary: Arc::new(ReadyIndexer),
             approx: None,
             primary_records_routing_decisions: false,
@@ -2119,6 +2121,7 @@ async fn shutdown_interrupts_indexer_waits(
     impl KvEventIngress for PausedIngress {
         fn open(&self, _: &IndexRegistry, _: &RoutingPartitionId, _: u32) -> Indexer {
             Indexer::Remote {
+                recurrent_layouts: Default::default(),
                 primary: self.0.clone(),
                 approx: None,
                 primary_records_routing_decisions: true,
@@ -2238,6 +2241,7 @@ async fn dropped_book_selection_during_routing_record_frees_booking_and_claim() 
     impl KvEventIngress for PausedRecordIngress {
         fn open(&self, _: &IndexRegistry, _: &RoutingPartitionId, _: u32) -> Indexer {
             Indexer::Remote {
+                recurrent_layouts: Default::default(),
                 primary: self.0.clone(),
                 approx: None,
                 primary_records_routing_decisions: true,

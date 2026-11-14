@@ -2626,6 +2626,7 @@ impl<
                 self.overlap_refresh_after,
                 queued.block_hashes.as_deref(),
                 queued.request.retain_kv_transfer_chain,
+                Some(queued.request.isl_tokens.saturating_sub(1) / self.block_size as usize),
                 queued.enqueue_at,
                 decay_now,
             ),

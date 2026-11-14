@@ -7,6 +7,7 @@ use rustc_hash::FxHashMap;
 
 use super::node::Node;
 use super::worker_set::WorkerSet;
+use crate::MatchObserver;
 use crate::prelude::*;
 
 /// Thread-safe shared reference to a Node.
@@ -110,6 +111,7 @@ pub(super) struct FindStepInput<'a, S: HashSequence> {
     pub(super) last_matched_hashes:
         Option<&'a mut FxHashMap<WorkerWithDpRank, ExternalSequenceBlockHash>>,
     pub(super) kv_transfer_chain: Option<&'a mut Vec<ExternalSequenceBlockHash>>,
+    pub(super) observer: Option<&'a mut dyn MatchObserver>,
 }
 
 pub(super) struct FindStepOutcome {

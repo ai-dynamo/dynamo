@@ -205,6 +205,8 @@ pub struct IndexerQueryRequest {
     /// `false`, preserving the full tiered response.
     #[serde(default)]
     pub device_only: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_reusable_blocks: Option<usize>,
 }
 
 /// Response from a served KV indexer query.

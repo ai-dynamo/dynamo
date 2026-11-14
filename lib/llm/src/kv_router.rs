@@ -3236,6 +3236,7 @@ mod tests {
             release: tokio::sync::Notify::new(),
         });
         router.indexer = Indexer::Remote {
+            recurrent_layouts: Arc::new(dynamo_kv_indexer::KvCacheGroupResidency::new()),
             primary: record.clone(),
             approx: None,
             primary_records_routing_decisions: true,
